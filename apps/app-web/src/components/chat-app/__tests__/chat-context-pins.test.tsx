@@ -6,10 +6,11 @@
  * for the static contract here: the persistent collapsed rail, resizable
  * expanded split-pane section, compact graphic hierarchy, inline Add menu,
  * and durable file-drop-to-pin path. Pointer resizing and live pin fan-in
- * remain browser QA.
+ * remain browser QA. Deferred-promise DOM tests below also cover room identity,
+ * editor resets, and overlapping pin refreshes without a parent-provided key.
  */
 
-import { act } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
@@ -21,6 +22,8 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 
 const listSessionPins = vi.fn().mockResolvedValue([]);
 const addSessionPin = vi.fn().mockResolvedValue(undefined);
+const removeSessionPin = vi.fn().mockResolvedValue(undefined);
+const listViews = vi.fn().mockResolvedValue([]);
 const storeFiles = vi.fn().mockResolvedValue([]);
 const reingestStoredFile = vi.fn().mockResolvedValue({ status: "queued", jobId: "job-1" });
 const confirmDialog = vi.fn().mockResolvedValue(true);
@@ -35,7 +38,7 @@ const fetchWorkerRunSummary = vi.fn().mockResolvedValue({
 vi.mock("@/lib/api/session-pins", () => ({
   listSessionPins: (...args: unknown[]) => listSessionPins(...args),
   addSessionPin: (...args: unknown[]) => addSessionPin(...args),
-  removeSessionPin: vi.fn(),
+  removeSessionPin: (...args: unknown[]) => removeSessionPin(...args),
 }));
 vi.mock("@/lib/api/ingest", () => ({
   MAX_INGEST_FILE_BYTES: 30 * 1024 * 1024,
@@ -48,7 +51,7 @@ vi.mock("@/components/ui/confirm-dialog", () => ({
   confirmDialog: (...args: unknown[]) => confirmDialog(...args),
 }));
 vi.mock("@/lib/api/views", () => ({
-  listViews: vi.fn().mockResolvedValue([]),
+  listViews: (...args: unknown[]) => listViews(...args),
 }));
 vi.mock("@/lib/api/tasks", () => ({
   fetchWorkspaceTasks: vi.fn().mockResolvedValue([]),
@@ -901,5 +904,245 @@ describe("[COMP:app-web/work-bench-stop] Live card stop control", () => {
     );
 
     expect(html).not.toContain("No progress");
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+const isolationPin = (label: string, id = label) => ({
+  id, kind: "task", refId: id, label, url: null, text: null,
+  position: 0, addedByUserId: null, addedByAssistantId: null,
+  addedByName: null, createdAt: "2026-01-01T00:00:00Z",
+});
+
+// Deliberately rerender the public component WITHOUT a parent key.
+async function isolationBench() {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const render = async (sessionId = "A", props: Partial<ComponentProps<typeof ChatContextPins>> = {}) => {
+    await act(async () => root.render(
+      <I18nProvider locale="en" dict={dict}>
+        <ChatContextPins sessionId={sessionId} workspaceId="workspace-1"
+          refreshKey={0} startedByName={null} expanded onExpandedChange={() => {}}
+          {...props} />
+      </I18nProvider>,
+    ));
+  };
+  const click = async (selector: string) => {
+    const button = container.querySelector<HTMLButtonElement>(selector);
+    expect(button).toBeTruthy();
+    await act(async () => button!.click());
+  };
+  const input = async (selector: string, value: string) => {
+    const element = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
+    expect(element).toBeTruthy();
+    const prototype = element.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(element, value);
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+  const open = () => click('button[aria-controls="chat-work-bench-add-menu"]');
+  const drop = async (file: File) => {
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", { value: { files: [file], types: ["Files"] } });
+    await act(async () => { container.querySelector('section[aria-label="Pinned context"]')!.dispatchEvent(event); });
+  };
+  await render();
+  return { container, render, click, input, open, drop, dispose: () => { act(() => root.unmount()); container.remove(); } };
+}
+
+describe("[COMP:app-web/chat-context-pins] session and request isolation", () => {
+  beforeEach(() => {
+    listSessionPins.mockReset().mockResolvedValue([]);
+    addSessionPin.mockReset().mockResolvedValue(undefined);
+    removeSessionPin.mockReset().mockResolvedValue(undefined);
+    listViews.mockReset().mockResolvedValue([]);
+    storeFiles.mockReset().mockResolvedValue([]);
+    confirmDialog.mockReset().mockResolvedValue(true);
+    reingestStoredFile.mockReset().mockResolvedValue({ status: "queued" });
+    fetchWorkerRunSummary.mockReset().mockResolvedValue({ total: 0, running: 0, completed: 0, failed: 0, stopped: 0, active: [] });
+  });
+
+  it("ignores old reads across A -> B -> A, and clears visible rows immediately", async () => {
+    const old = deferred<unknown[]>();
+    listSessionPins.mockResolvedValueOnce([isolationPin("Initial A")]).mockReturnValueOnce(old.promise);
+    const bench = await isolationBench();
+    try {
+      expect(bench.container.textContent).toContain("Initial A");
+      await bench.render("A", { refreshKey: 1 });
+      await bench.render("B");
+      expect(bench.container.textContent).not.toContain("Initial A");
+      listSessionPins.mockResolvedValueOnce([isolationPin("New A")]);
+      await bench.render("A");
+      await act(async () => old.resolve([isolationPin("Obsolete A")]));
+      expect(bench.container.textContent).toContain("New A");
+      expect(bench.container.textContent).not.toContain("Obsolete A");
+    } finally { bench.dispose(); }
+  });
+
+  it("keeps the newest same-session refresh, including mutation-triggered reads", async () => {
+    const old = deferred<unknown[]>();
+    listSessionPins.mockResolvedValueOnce([isolationPin("Remove me")]).mockReturnValueOnce(old.promise);
+    const bench = await isolationBench();
+    try {
+      await bench.render("A", { refreshKey: 1 });
+      listSessionPins.mockResolvedValueOnce([isolationPin("Fresh result")]);
+      await bench.click('button[aria-label="Unpin: Remove me"]');
+      expect(removeSessionPin).toHaveBeenCalledWith("A", "Remove me");
+      await act(async () => old.resolve([isolationPin("Stale result")]));
+      expect(bench.container.textContent).toContain("Fresh result");
+      expect(bench.container.textContent).not.toContain("Stale result");
+      listSessionPins.mockRejectedValueOnce(new Error("offline"));
+      await bench.render("A", { refreshKey: 2 });
+      expect(bench.container.textContent).toContain("Fresh result");
+    } finally { bench.dispose(); }
+  });
+
+  it.each(["session", "workspace"])("resets drafts, picker and filter on a %s switch", async (identity) => {
+    listSessionPins.mockResolvedValue(Array.from({ length: 8 }, (_, i) => isolationPin(`Pin ${i}`)));
+    const bench = await isolationBench();
+    try {
+      await bench.input('input[aria-label="Search pins"]', "Pin 7");
+      await bench.open();
+      await bench.click('button[aria-label="Link"]');
+      await bench.input('input[type="url"]', "https://private.example");
+      await bench.click('button[aria-label="Instruction"]');
+      await bench.input("textarea", "Private instructions");
+      await bench.render(identity === "session" ? "B" : "A", identity === "workspace" ? { workspaceId: "workspace-2" } : {});
+      expect(bench.container.querySelector("#chat-work-bench-add-menu")).toBeNull();
+      expect(bench.container.querySelector<HTMLInputElement>('input[aria-label="Search pins"]')!.value).toBe("");
+      await bench.open();
+      expect(bench.container.querySelector('button[aria-label="File"]')!.getAttribute("aria-pressed")).toBe("true");
+      await bench.click('button[aria-label="Link"]');
+      expect(bench.container.querySelector<HTMLInputElement>('input[type="url"]')!.value).toBe("");
+      await bench.click('button[aria-label="Instruction"]');
+      expect(bench.container.querySelector("textarea")!.value).toBe("");
+    } finally { bench.dispose(); }
+  });
+
+  it.each(["resolve", "reject"] as const)("isolates a pending add's %s from the new editor", async (outcome) => {
+    const old = deferred<void>();
+    addSessionPin.mockReturnValueOnce(old.promise);
+    const bench = await isolationBench();
+    try {
+      await bench.open();
+      await bench.click('button[aria-label="Link"]');
+      await bench.input('input[type="url"]', "https://a.example");
+      await bench.click('input[type="url"] + button');
+      expect(addSessionPin).toHaveBeenCalledWith("A", { kind: "url", url: "https://a.example" });
+      await bench.render("B");
+      await bench.open();
+      await bench.click('button[aria-label="Link"]');
+      await bench.input('input[type="url"]', "https://b.example");
+      await act(async () => { if (outcome === "resolve") old.resolve(); else old.reject(new Error("failed")); });
+      expect(bench.container.querySelector<HTMLInputElement>('input[type="url"]')!.value).toBe("https://b.example");
+      expect(bench.container.textContent).not.toContain(en.chatApp.pins.addFailed);
+      expect(listSessionPins).toHaveBeenCalledTimes(2);
+      await bench.click('input[type="url"] + button');
+      expect(addSessionPin).toHaveBeenLastCalledWith("B", { kind: "url", url: "https://b.example" });
+    } finally { bench.dispose(); }
+  });
+
+  it("does not start storage after a stale large-file confirmation", async () => {
+    const confirmation = deferred<boolean>();
+    confirmDialog.mockReturnValueOnce(confirmation.promise);
+    const bench = await isolationBench();
+    try {
+      const file = new File(["data"], "large.txt", { type: "text/plain" });
+      Object.defineProperty(file, "size", { value: 101 * 1024 * 1024 });
+      await bench.drop(file);
+      expect(confirmDialog).toHaveBeenCalledTimes(1);
+      await bench.render("B");
+      await act(async () => confirmation.resolve(true));
+      expect(storeFiles).not.toHaveBeenCalled();
+      expect(bench.container.textContent).not.toContain("large.txt");
+    } finally { bench.dispose(); }
+  });
+
+  it("ignores stale upload progress/results and does not pin into either room", async () => {
+    const upload = deferred<unknown[]>();
+    storeFiles.mockReturnValueOnce(upload.promise);
+    const bench = await isolationBench();
+    try {
+      const file = new File(["data"], "old.txt", { type: "text/plain" });
+      await bench.drop(file);
+      const { onProgress } = storeFiles.mock.calls[0][2];
+      await bench.render("B");
+      await act(async () => {
+        onProgress(file, 3, 4);
+        upload.resolve([{ ok: true, fileId: "old-file", fileName: file.name }]);
+      });
+      expect(bench.container.textContent).not.toContain("old.txt");
+      expect(addSessionPin).not.toHaveBeenCalled();
+      expect(reingestStoredFile).not.toHaveBeenCalled();
+      await bench.drop(new File(["new"], "new.txt", { type: "text/plain" }));
+      expect(storeFiles).toHaveBeenCalledTimes(2);
+    } finally { bench.dispose(); }
+  });
+
+  it.each(["resolve", "reject"] as const)("isolates an old unpin's %s", async (outcome) => {
+    const removal = deferred<void>();
+    removeSessionPin.mockReturnValueOnce(removal.promise);
+    listSessionPins.mockResolvedValueOnce([isolationPin("Old pin")]);
+    const bench = await isolationBench();
+    try {
+      await bench.click('button[aria-label="Unpin: Old pin"]');
+      listSessionPins.mockResolvedValueOnce([isolationPin("New pin")]);
+      await bench.render("B");
+      await act(async () => {
+        if (outcome === "resolve") removal.resolve();
+        else removal.reject(new Error("old failure"));
+      });
+      expect(listSessionPins).toHaveBeenCalledTimes(2);
+      expect(bench.container.textContent).toContain("New pin");
+      expect(bench.container.textContent).not.toContain(en.chatApp.pins.removeFailed);
+    } finally { bench.dispose(); }
+  });
+
+  it("resets stopping on switch and ignores the old stop completion", async () => {
+    const oldStop = deferred<void>();
+    const newStop = deferred<void>();
+    const bench = await isolationBench();
+    try {
+      await bench.render("A", { assistant: { id: "lead", name: "Brian" }, turnActive: true, onStopTurn: () => oldStop.promise });
+      const selector = `button[title="${en.chatApp.liveWorkStopTitle}"]`;
+      await bench.click(selector);
+      expect(bench.container.querySelector<HTMLButtonElement>(selector)!.disabled).toBe(true);
+      await bench.render("B", { assistant: { id: "lead", name: "Brian" }, turnActive: true, onStopTurn: () => newStop.promise });
+      expect(bench.container.querySelector<HTMLButtonElement>(selector)!.disabled).toBe(false);
+      await bench.click(selector);
+      await act(async () => oldStop.resolve());
+      expect(bench.container.querySelector<HTMLButtonElement>(selector)!.disabled).toBe(true);
+      await act(async () => newStop.resolve());
+      expect(bench.container.querySelector<HTMLButtonElement>(selector)!.disabled).toBe(false);
+    } finally { bench.dispose(); }
+  });
+
+  it("drops pending candidate and worker results on navigation", async () => {
+    const candidates = deferred<unknown[]>();
+    const workers = deferred<unknown>();
+    listViews.mockReturnValueOnce(candidates.promise);
+    fetchWorkerRunSummary.mockReturnValueOnce(workers.promise);
+    const bench = await isolationBench();
+    try {
+      await bench.open();
+      await bench.click('button[aria-label="Page"]');
+      await bench.render("B");
+      await bench.open();
+      await bench.click('button[aria-label="Page"]');
+      await act(async () => {
+        candidates.resolve([{ id: "private-page", name: "A private page" }]);
+        workers.resolve({ total: 1, running: 1, active: [{ workerId: "worker_1", description: "A private task" }] });
+      });
+      expect(bench.container.textContent).not.toContain("A private page");
+      expect(bench.container.textContent).not.toContain("A private task");
+    } finally { bench.dispose(); }
   });
 });

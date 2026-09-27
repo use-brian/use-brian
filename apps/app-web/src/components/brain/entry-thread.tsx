@@ -390,6 +390,7 @@ export function EntryThread({
     reasoningRef.current = "";
     failedRef.current = null;
 
+    let owningSessionId = sessionRef.current?.sessionId;
     try {
       const [session, explain] = await Promise.all([
         ensureSession(),
@@ -403,6 +404,7 @@ export function EntryThread({
         return;
       }
 
+      owningSessionId = session.sessionId;
       const messageBody = isFirst
         ? buildEntryPreamble(entrySummary, entryDetail, {
             createdAt: entryCreatedAt,
@@ -473,7 +475,7 @@ export function EntryThread({
               const inputId =
                 typeof payload.inputId === "string" ? payload.inputId : null;
               if (!inputId) break;
-              const queuedEntry = midTurn.take(inputId);
+              const queuedEntry = midTurn.take(inputId, session.sessionId);
               if (!queuedEntry) break;
               setTurns((prev) => [
                 ...prev,
@@ -523,11 +525,11 @@ export function EntryThread({
       // first, the user hit Stop, or the delivery was lost) — ask it as an
       // ordinary follow-up. Deferred so `sendRef` picks up the closure where
       // `busy` is already false.
-      const stillWaiting = midTurn.drain();
-      if (stillWaiting.length > 0) {
-        const joined = joinQueuedInputs(stillWaiting);
-        setTimeout(() => void sendRef.current?.(joined), 0);
-      }
+      setTimeout(() => {
+        if (!owningSessionId || sessionRef.current?.sessionId !== owningSessionId) return;
+        const stillWaiting = midTurn.drain(owningSessionId);
+        if (stillWaiting.length > 0) void sendRef.current?.(joinQueuedInputs(stillWaiting));
+      }, 0);
     }
   }
 
