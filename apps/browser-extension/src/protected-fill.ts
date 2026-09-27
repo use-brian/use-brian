@@ -167,7 +167,7 @@ export class ProtectedFill {
       })
     } catch { throw denied() }
   }
-  async fill(args: Record<string, unknown>, tabIds: () => number[], prepare: (r: FillRequest) => Promise<(items: Array<{ref:string;value:string}>) => Promise<void>>): Promise<unknown> {
+  async fill(args: Record<string, unknown>, tabIds: () => number[], prepare: (r: FillRequest) => Promise<(items: Array<{ref:string;value:string}>) => Promise<void>>, check: () => void = () => {}): Promise<unknown> {
     try {
       const request = validateFill(args)
       const config = await this.storage.get(['protectedApiBase','sessionToken'])
@@ -185,13 +185,16 @@ export class ProtectedFill {
         try { lock.browserSessionId = await this.ensureBrowserSession() } catch { /* fail closed below */ }
         await this.storage.set({[LOCK_KEY]:lock})
       })
+      check() // Keep the reservation lock even when Stop raced its creation.
       await this.requireBrowserSession(lock)
+      check()
       if (!apiBase) {
         await chrome.windows.create({url:chrome.runtime.getURL('popup.html'), type:'popup', width:420, height:700})
         throw denied()
       }
       checkIdentity(config.sessionToken, request)
       const assign = await prepare(request)
+      check()
       // Consent may have added a root tab. Merge, never overwrite popup tracking.
       await this.exclusive(async () => {
         const current = await this.readLock()
@@ -199,16 +202,20 @@ export class ProtectedFill {
         current.tabIds = [...new Set([...current.tabIds, ...tabIds()])]
         await this.storage.set({[LOCK_KEY]:current})
       })
+      check() // Stop before pending approval exists must prevent a late popup.
       const approved = await new Promise<boolean>(resolve => {
         const timer = setTimeout(() => { this.pending = null; resolve(false) }, 90_000)
         this.pending = {request, finish: answer => { clearTimeout(timer); this.pending = null; resolve(answer) }}
         void chrome.action.setBadgeText({text:'FILL'})
         void chrome.windows.create({url:chrome.runtime.getURL('popup.html'), type:'popup', width:420, height:700}).catch(() => this.approve(false))
       })
+      check()
       if (!approved) throw denied()
       await assign([])
+      check()
       checkIdentity(config.sessionToken, request)
       await this.requireBrowserSession(lock)
+      check()
       const response = await this.post(lock, 'resolve', request)
       if (!response.ok) throw denied()
       const data = await response.json()
@@ -218,7 +225,9 @@ export class ProtectedFill {
           typeof data.items[i].value !== 'string' || data.items[i].value.length > 16_384) throw denied()
       }
       await this.requireBrowserSession(lock)
+      check() // A resolver response arriving after Stop is never assigned.
       await assign(data.items)
+      check()
       return {status:'filled', filledCount:request.items.length, requiresHumanCompletion:true}
     } catch { throw denied() }
     finally { void chrome.action.setBadgeText({text:await this.locked() ? 'LOCK' : ''}) }

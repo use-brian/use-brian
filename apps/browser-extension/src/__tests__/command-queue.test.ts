@@ -52,6 +52,25 @@ describe('browser command queue', () => {
     await expect(queue.run(async () => 'fresh command')).resolves.toBe('fresh command')
   })
 
+  it('immediately rejects waiting work and frees its slots without overlapping the active barrier', async () => {
+    const queue = new CommandQueue(2)
+    const frame = deferred()
+    const active = queue.run(() => frame.promise)
+    await Promise.resolve()
+    const obsolete = vi.fn(async () => {})
+    const rejected = expect(queue.run(obsolete)).rejects.toMatchObject({code:'stopped'})
+    queue.cancel()
+    await rejected // no need to release the active command to acknowledge cancellation
+    const fresh = vi.fn(async () => 'fresh')
+    const next = queue.run(fresh)
+    await Promise.resolve()
+    expect(fresh).not.toHaveBeenCalled()
+    frame.resolve()
+    await active
+    await expect(next).resolves.toBe('fresh')
+    expect(obsolete).not.toHaveBeenCalled()
+  })
+
   it('bounds outstanding work and frees capacity after completion', async () => {
     const queue = new CommandQueue(2)
     const frame = deferred()

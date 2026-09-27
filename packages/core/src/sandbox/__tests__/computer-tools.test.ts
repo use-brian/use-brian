@@ -956,7 +956,12 @@ describe('protected browser fill tool', () => {
     })
     await run(tools.browserNavigate, { url: 'https://example.com' })
     const traceBefore = tools.getSessionTrace('sess-1')
-    const result = await run(tools.browserFillReference, input)
+    const latest = await run(tools.browserSnapshot, {})
+    const refs = [...String(latest.data).matchAll(/(@e\d+) /g)].map(match => match[1]!)
+    expect(refs.slice(0, 2)).toEqual(['@e4', '@e5'])
+    const result = await run(tools.browserFillReference, {
+      ...input, items: input.items.map((item, index) => ({ ...item, ref: refs[index] })),
+    })
     expect(result.isError).not.toBe(true)
     expect(fills).toBe(1)
     expect(tools.getSessionTrace('sess-1')).toEqual(traceBefore)
@@ -965,6 +970,7 @@ describe('protected browser fill tool', () => {
       [tools.browserSnapshot, {}], [tools.browserCurrentUrl, {}], [tools.browserListTabs, {}],
       [tools.browserNavigate, { url: 'https://example.com' }], [tools.browserType, { ref: '@e1', text: 'raw' }],
       [tools.browserClick, { ref: '@e1' }], [tools.browserFillReference, input],
+      [tools.browserFillForm, { fields: [{ action: 'fill', ref: '@e1', value: 'raw' }] }],
     ] as [Tool, Record<string, unknown>][]) expect((await run(tool, args)).isError).toBe(true)
     expect(local.calls.length).toBe(calls)
   })

@@ -1181,10 +1181,13 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           scope.destinationOrigin !== input.destinationOrigin || !scope.taskId) {
           return { data: 'Protected fill unavailable', isError: true }
         }
-        // This operation is deliberately absent from LocalTraceStep/recordings.
+        // The protected path uses the same public-to-provider ref mapping,
+        // but must never record values or observe the page after disclosure.
+        const items = input.items.map(item => ({ ...item, ref: state.observations.resolve(item.ref) }))
+        state.observations.reset()
         state.refLabels.clear()
         state.lastTyped = null
-        await opts.local.fillReference(scope, input.items)
+        await opts.local.fillReference(scope, items)
         return { data: 'Protected fields filled. The user must finish in the browser and complete cleanup in the extension. Browser observations and actions are blocked.' }
       } catch { return { data: 'Protected fill unavailable. Complete cleanup in the browser extension before continuing.', isError: true } }
     },

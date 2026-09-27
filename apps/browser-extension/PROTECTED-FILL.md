@@ -112,3 +112,28 @@ lock. An existing local lock still requires successful tab cleanup; if the brows
 session also changed, it requires the broad recovery confirmation. Completion is
 idempotent after API restart or a lost completion response only AFTER extension
 cleanup. Manual clearing of extension storage is not a supported recovery method.
+
+
+## Command scheduling and Stop
+
+Relay actions, screenshots, protected fill, and trusted popup recovery/completion
+share one bounded, cancellable queue. Screenshots have no parallel/priority path:
+an active capture finishes before disclosure begins, and queued captures check the
+persisted lock when they execute. Batch field animations are local-page feedback;
+relay captures wait for the batch, with no per-field presentation delay.
+
+Stop bypasses that queue: it immediately denies pending approval, invalidates
+waiting jobs, and detaches control. Waiting commands cannot re-enter a fresh queue
+generation or trigger another consent prompt. The active job retains the queue
+barrier until it exits; protected-fill checkpoints prevent a late preflight,
+approval, or resolver response from assigning values after cancellation. Already
+issued browser/network operations cannot be undone, and cancellation never clears
+the disclosure lock. Cleanup still requires the existing trusted human procedure.
+Tab helpers check cancellation after asynchronous tab lookups/updates and before
+attachment or gate mutations. A tab created after Stop collected its cleanup list
+is closed by its cancelled creator; an existing switch/close target is never
+closed merely because its command was cancelled.
+
+Approval replies are immediate signals to the active fill (queuing one behind its
+own approval wait would deadlock). Recovery and completion are queued operations,
+not observation bypasses, and pending recovery/completion jobs are canceled by Stop.
