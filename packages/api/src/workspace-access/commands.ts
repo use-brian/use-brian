@@ -51,3 +51,10 @@ export const organizationCommandIntentSchema=z.object({command:organizationComma
 export const organizationCommandApplySchema=z.object({type:z.literal('org.command.apply'),reviewId:uuid,payloadHash:z.string().regex(/^[a-f0-9]{64}$/)}).strict()
 
 export const workspaceAccessHistoryQuerySchema=z.object({after:z.string().uuid().optional(),expectedPolicyRevision:z.string().regex(/^[1-9][0-9]*$/).optional()}).strict().refine(value=>Boolean(value.after)===Boolean(value.expectedPolicyRevision));
+
+
+export const workspaceAccessExplanationQuerySchema = z.object({
+  memberId:uuid.optional(),assistantId:uuid.optional(),contextTeamId:uuid.optional(),contextProjectId:uuid.optional(),
+  targetTeamId:uuid.optional(),action:z.enum(['read','edit']).optional(),sensitivity:z.enum(['public','internal','confidential']).optional(),
+  expectedPolicyRevision:version.optional(),
+}).strict()

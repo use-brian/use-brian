@@ -1,3 +1,4 @@
+import {explainWorkspaceAccess,getWorkspaceAccessEvents} from '../workspace-access/access-inspection.js'
 import {prepareOrganizationCommand,applyOrganizationCommand} from '../workspace-access/organization-command-review.js'
 import { Router } from 'express'
 import { z } from 'zod'
@@ -25,6 +26,10 @@ export function workspaceAccessRoutes(): Router {
     try { res.json(await getWorkspaceAccess(String(req.params.workspaceId),req.userId!)) }
     catch(error) { if (error instanceof WorkspaceAccessError) res.status(error.status).json({error:error.code}); else next(error) }
   })
+  for(const [suffix,read] of [['explain',explainWorkspaceAccess],['events',getWorkspaceAccessEvents]] as const)router.get(`/workspaces/:workspaceId/access/${suffix}`,async(req,res,next)=>{
+    try{res.json(await read(String(req.params.workspaceId),req.userId!,req.query))}
+    catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code});else next(error)}
+  });
   for(const kind of ['requests','grants'] as const)router.get(`/workspaces/:workspaceId/access/${kind}`,async(req,res,next)=>{
     try{
       const parsed=workspaceAccessHistoryQuerySchema.safeParse(req.query);

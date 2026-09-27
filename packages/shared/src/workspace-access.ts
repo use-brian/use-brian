@@ -134,3 +134,24 @@ export type WorkspaceAccessHistory = {
   kind:'requests'|'grants';workspaceId:string;policyRevision:string;validForMs:number;nextCursor:string|null
   requests:DepartmentAccessRequest[];grants:DepartmentReadGrant[]
 }
+
+
+export type WorkspaceAccessExplanationQuery = {
+  memberId?:string;assistantId?:string;contextTeamId?:string;contextProjectId?:string
+  targetTeamId?:string;action?:'read'|'edit';sensitivity?:'public'|'internal'|'confidential'
+  expectedPolicyRevision?:string
+}
+export type WorkspaceAccessExplanation = {
+  workspaceId:string;policyRevision:string;validForMs:number
+  memberId:string;assistantId:string|null;contextTeamId:string|null;contextProjectId:string|null
+  clearance:'public'|'internal'|'confidential'
+  readTeamIds:string[]|null;mutationTeamIds:string[]|null
+  projectIds:string[]|null
+  paths:Array<{kind:'trusted_role'|'legacy'|'membership'|'read_grant'|'team_read_grant';sourceTeamId:string|null;targetTeamIds:string[]|null;grantId:string|null;expiresAt:string|null}>
+  management:Array<{teamId:string;canManageMembers:boolean;canApprove:boolean}>
+  example:{targetTeamId:string|null;action:'read'|'edit';sensitivity:'public'|'internal'|'confidential';matchesScope:boolean;resourceAuthorizationRequired:true}
+}
+export type WorkspaceAccessEvents = {
+  workspaceId:string;policyRevision:string;validForMs:number;nextCursor:string|null
+  events:Array<{id:string;kind:string;createdAt:string;policyRevision:string;actor:{id:string;name:string}|null;subjectId:string|null}>
+}

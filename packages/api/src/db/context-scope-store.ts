@@ -147,9 +147,10 @@ export type ContextScopeStore = {
 }
 
 export function createDbContextScopeStore(transactionClient?: pg.PoolClient): ContextScopeStore {
+  const systemQuery:typeof query=transactionClient?(sql,values)=>transactionClient.query(sql,values):query
   return {
     async resolveMemberTeamPrincipalSystem(userId, workspaceId) {
-      const member = await query<{
+      const member = await systemQuery<{
         role: MemberTeamPrincipal['role']
         mode: MemberTeamPrincipal['mode']
         compartments: string[] | null
@@ -167,7 +168,7 @@ export function createDbContextScopeStore(transactionClient?: pg.PoolClient): Co
       if (row.mode === 'legacy') {
         return { role: row.role, mode: row.mode, grant: canonicalScopeGrant(row.compartments) }
       }
-      const grants = await query<GroupGrantRow>(
+      const grants = await systemQuery<GroupGrantRow>(
         `SELECT g.read_all AS "readAll",
                 g.compartment_key AS "ownCompartmentKey",
                 gcg.compartment_key AS "compartmentKey"
@@ -192,7 +193,7 @@ export function createDbContextScopeStore(transactionClient?: pg.PoolClient): Co
     },
 
     async resolveAssistantPrincipalSystem(assistantId, workspaceId) {
-      const assistant = await query<{
+      const assistant = await systemQuery<{
         teamMode: AssistantContextPrincipal['teamMode']
         compartments: string[] | null
         projectMode: AssistantContextPrincipal['projectMode']
@@ -216,7 +217,7 @@ export function createDbContextScopeStore(transactionClient?: pg.PoolClient): Co
       } else if (row.teamMode === 'legacy') {
         teamGrant = canonicalScopeGrant(row.compartments)
       } else {
-        const teamRows = await query<GroupGrantRow>(
+        const teamRows = await systemQuery<GroupGrantRow>(
           `SELECT g.read_all AS "readAll",
                   g.compartment_key AS "ownCompartmentKey",
                   gcg.compartment_key AS "compartmentKey"
@@ -238,7 +239,7 @@ export function createDbContextScopeStore(transactionClient?: pg.PoolClient): Co
 
       let projectGrant: ScopeGrant = null
       if (row.projectMode === 'assigned') {
-        const projectRows = await query<{ id: string }>(
+        const projectRows = await systemQuery<{ id: string }>(
           `SELECT p.id
              FROM assistant_project_grants apg
              JOIN workspace_projects p ON p.id = apg.project_id
@@ -258,7 +259,7 @@ export function createDbContextScopeStore(transactionClient?: pg.PoolClient): Co
     },
 
     async getTeamSystem(workspaceId, groupId) {
-      const result = await query<{
+      const result = await systemQuery<{
         id: string
         workspaceId: string
         name: string
@@ -302,7 +303,7 @@ export function createDbContextScopeStore(transactionClient?: pg.PoolClient): Co
     },
 
     async getProjectSystem(workspaceId, projectId) {
-      const result = await query<Parameters<typeof mapProject>[0]>(
+      const result = await systemQuery<Parameters<typeof mapProject>[0]>(
         `SELECT id, workspace_id AS "workspaceId", name,
                 normalized_name AS "normalizedName", description, icon, status,
                 entity_id AS "entityId", created_by AS "createdBy",

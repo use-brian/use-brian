@@ -11,9 +11,9 @@ export class OrganizationError extends Error {
   constructor(readonly code: 'not_found' | 'admin_required' | 'invalid_command' | 'organization_conflict', readonly status: number) { super(code) }
 }
 
-async function authority(client: PoolClient, workspaceId: string, userId: string): Promise<boolean> {
+async function authority(client: PoolClient, workspaceId: string, userId: string, lockMembership = true): Promise<boolean> {
   const result = await client.query<{ role: string }>(
-    `SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE`,[workspaceId,userId])
+    `SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2${lockMembership?' FOR SHARE':''}`,[workspaceId,userId])
   if (!result.rows.length) throw new OrganizationError('not_found',404)
   return ['owner','admin'].includes(result.rows[0].role)
 }
@@ -72,10 +72,7 @@ export async function getOrganizationChart(workspaceId: string, userId: string):
   const client = await getPool().connect()
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-    // A repeatable snapshot keeps membership and directory projection coherent.
-    const member = await client.query<{role:string}>('SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,userId])
-    if (!member.rows.length) throw new OrganizationError('not_found',404)
-    const result = await chart(client,workspaceId,userId,['owner','admin'].includes(member.rows[0].role))
+    const result = await getOrganizationChartInTransaction(client,workspaceId,userId,false)
     await client.query('COMMIT')
     return result
   } catch(error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
@@ -136,8 +133,8 @@ async function initializeSubject(client: PoolClient, workspaceId: string,
     isPrimary:true,reportsToUserId:null,accountableUserId:null})
 }
 
-export async function getOrganizationChartInTransaction(client:PoolClient,workspaceId:string,userId:string):Promise<OrganizationChart> {
-  return chart(client,workspaceId,userId,await authority(client,workspaceId,userId))
+export async function getOrganizationChartInTransaction(client:PoolClient,workspaceId:string,userId:string,lockMembership=true):Promise<OrganizationChart> {
+  return chart(client,workspaceId,userId,await authority(client,workspaceId,userId,lockMembership))
 }
 
 /** Caller owns transaction, notifications and receipt settlement. */

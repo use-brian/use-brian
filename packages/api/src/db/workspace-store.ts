@@ -667,6 +667,7 @@ export async function resolveOperationCeilingsSystem(
   assistantClearance: Sensitivity,
   assistantCompartments: string[] | null,
   requireMembership = false,
+  authorityQuery: typeof query = query,
 ): Promise<{ clearance: Sensitivity; compartments: string[] | null; mutationCompartments: string[] | null }> {
   if (!workspaceId) return {
     clearance: assistantClearance, compartments: assistantCompartments,
@@ -674,7 +675,7 @@ export async function resolveOperationCeilingsSystem(
   }
   // Authority resolution cannot depend on the content RLS policies it authorizes.
   // One statement sees read grants and ordinary membership at the same snapshot.
-  const member = (await query<{
+  const member = (await authorityQuery<{
     role: 'owner' | 'admin' | 'member'; clearance: Sensitivity;
     readCompartments: string[] | null; mutationCompartments: string[] | null;
   }>(`SELECT role,clearance,
