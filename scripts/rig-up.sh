@@ -42,6 +42,7 @@ DOC_SYNC_PORT=8080
 READY_TIMEOUT="${BRIAN_RIG_TIMEOUT:-300}"
 CORE_ONLY=1
 FRESH=0
+ADMIN_ONLY=0
 
 say() { printf '[rig] %s\n' "$*"; }
 warn() { printf '[rig] warning: %s\n' "$*" >&2; }
@@ -51,6 +52,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/rig-up.sh [options]
 
+  --admin-only       isolated administrative fixture, no paid providers/workers
   --full             also start the channel connectors + browser relay
                      (default: core only — brain, api, doc-sync, app-web)
   --fresh            re-create the database from empty before booting
@@ -66,6 +68,7 @@ USAGE
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --admin-only) ADMIN_ONLY=1 ;;
     --full) CORE_ONLY=0 ;;
     --fresh) FRESH=1 ;;
     --timeout) shift; [ $# -gt 0 ] || die "--timeout needs a value"; READY_TIMEOUT="$1" ;;
@@ -76,7 +79,32 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+if [ "$ADMIN_ONLY" = 1 ]; then
+  [ "$CORE_ONLY" = 1 ] && [ "$FRESH" = 0 ] || die "--admin-only cannot be combined with --full or --fresh"
+  STATE="$ROOT/.rig/admin"
+  LOG="$STATE/stack.log"
+  MIGRATE_LOG="$STATE/migrate.log"
+  PIDFILE="$STATE/stack.pid"
+  SESSION_FILE="$STATE/session.json"
+  API_PORT_FILE="$STATE/api-port"
+  CONTAINER=usebrian-admin-test
+  VOLUME=usebrian-admin-test-data
+  RIG_LABEL="com.usebrian.rig=admin-test"
+  IMAGE=pgvector/pgvector:pg18
+  export USEBRIAN_ADMIN_ONLY=1
+  export USEBRIAN_API_PORT="${USEBRIAN_API_PORT:-4100}"
+fi
 mkdir -p "$STATE"
+if [ "$ADMIN_ONLY" = 1 ] && [ -f "$PIDFILE" ]; then
+  previous_pid="$(cat "$PIDFILE")"
+  if kill -0 "$previous_pid" 2>/dev/null; then
+    previous_command="$(ps -p "$previous_pid" -o command= 2>/dev/null || true)"
+    case "$previous_command" in
+      *"$ROOT/scripts/launch.mjs --admin-only"*) ;;
+      *) die "recorded pid is not this admin launcher; leaving it untouched" ;;
+    esac
+  fi
+fi
 
 # ── preflight ───────────────────────────────────────────────────────────────
 command -v docker >/dev/null 2>&1 || die "docker not found. Install Docker Desktop, Colima, or Podman."
@@ -90,7 +118,7 @@ API_PORT="$(node "$ROOT/scripts/launch-ports.mjs" "$API_PORT_FILE")" || die "inv
 # persisted provider choice. Under nohup that prompt is an invisible hang, which
 # is the single most expensive way this script could fail — so refuse up front,
 # with the fix.
-if ! node -e '
+if [ "$ADMIN_ONLY" != 1 ] && ! node -e '
   const { existsSync, readFileSync } = require("node:fs")
   const { join } = require("node:path")
   const cfgPath = join(process.env.HOME, ".usebrian", "config.json")
@@ -139,7 +167,9 @@ else
   mint_only=0
   if pid="$(rig_pid)"; then
     say "stopping the rig's previous stack (pid $pid) ..."
-    "$ROOT/scripts/rig-down.sh" --keep-db >/dev/null
+    down_args=(--keep-db)
+    [ "$ADMIN_ONLY" = 1 ] && down_args+=(--admin-only)
+    "$ROOT/scripts/rig-down.sh" "${down_args[@]}" >/dev/null
   fi
   for p in "$API_PORT" "$WEB_PORT" "$DOC_SYNC_PORT"; do
     pids="$(port_pids "$p")"
@@ -155,6 +185,19 @@ else
 fi
 
 if [ "$mint_only" = "0" ]; then
+  # An admin fixture may never adopt a normal or unlabelled database/volume.
+  if [ "$ADMIN_ONLY" = 1 ]; then
+    if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+      label="$(docker container inspect -f '{{index .Config.Labels "com.usebrian.rig"}}' "$CONTAINER")"
+      [ "$label" = admin-test ] || die "admin fixture container has the wrong ownership label"
+    fi
+    if docker volume inspect "$VOLUME" >/dev/null 2>&1; then
+      label="$(docker volume inspect -f '{{index .Labels "com.usebrian.rig"}}' "$VOLUME")"
+      [ "$label" = admin-test ] || die "admin fixture volume has the wrong ownership label"
+    else
+      docker volume create --label "$RIG_LABEL" "$VOLUME" >/dev/null
+    fi
+  fi
   # ── Postgres in Docker ────────────────────────────────────────────────────
   if [ "$FRESH" = "1" ]; then
     say "--fresh: removing the rig database ..."
@@ -250,6 +293,23 @@ if [ "$mint_only" = "0" ]; then
   applied="$(grep -c '^  apply: ' "$MIGRATE_LOG" || true)"
   say "migrations ok (${applied:-0} newly applied; log: ${MIGRATE_LOG#"$ROOT/"})"
 
+  if [ "$ADMIN_ONLY" = 1 ]; then
+    docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q <<'SQL'
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'admin_fixture_app') THEN
+    CREATE ROLE admin_fixture_app LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+  END IF;
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'admin_fixture_app' AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls)) THEN
+    RAISE EXCEPTION 'Administrative fixture app role has unsafe privileges';
+  END IF;
+END $$;
+GRANT USAGE ON SCHEMA public TO admin_fixture_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO admin_fixture_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO admin_fixture_app;
+ALTER ROLE admin_fixture_app SET app.current_user_id = '00000000-0000-0000-0000-000000000000';
+SQL
+  fi
+
   # ── the stack (the maintained launcher, headless) ─────────────────────────
   say "starting the stack ($([ "$CORE_ONLY" = 1 ] && echo 'core only' || echo 'full')) ..."
   : >"$LOG"
@@ -261,8 +321,10 @@ if [ "$mint_only" = "0" ]; then
   )
   [ "$CORE_ONLY" = 1 ] && launch_env+=(USEBRIAN_CORE_ONLY=1)
   printf '%s\n' "$API_PORT" >"$API_PORT_FILE"
+  launch_args=()
+  [ "$ADMIN_ONLY" = 1 ] && launch_args+=(--admin-only)
   nohup env "${launch_env[@]}" \
-    node "$ROOT/scripts/launch.mjs" >>"$LOG" 2>&1 </dev/null &
+    node "$ROOT/scripts/launch.mjs" "${launch_args[@]}" >>"$LOG" 2>&1 </dev/null &
   echo $! >"$PIDFILE"
   launcher_pid="$(cat "$PIDFILE")"
   say "launcher pid $launcher_pid (log: ${LOG#"$ROOT/"})"
@@ -342,12 +404,12 @@ cat <<SUMMARY
   logs       ${LOG#"$ROOT/"}
 
   authenticated call:
-    TOKEN=\$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(".rig/session.json","utf8")).accessToken)')
+    TOKEN=\$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("${SESSION_FILE#"$ROOT/"}","utf8")).accessToken)')
     curl -s -H "Authorization: Bearer \$TOKEN" http://127.0.0.1:$API_PORT/api/assistants | head -c 400
 
   psql:      docker exec -it $CONTAINER psql -U $RIG_DB_USER -d $RIG_DB_NAME
   follow:    tail -f ${LOG#"$ROOT/"}
-  teardown:  scripts/rig-down.sh        (add --wipe to delete the database)
+  teardown:  scripts/rig-down.sh$([ "$ADMIN_ONLY" = 1 ] && echo " --admin-only" || echo " (add --wipe to delete the database)")
 
 SUMMARY
 

@@ -31,9 +31,10 @@ import { createBrowserSkillGrantStore } from '@use-brian/api/db/browser-skill-gr
 import { createOssUsageStore } from '@use-brian/api/db/oss-usage-store.js'
 import { createSandboxTaskStore } from '@use-brian/api/db/sandbox-task-store.js'
 import { parseStrictBoolean } from '@use-brian/api/auth/outpost-auth-config.js'
-import { resolveApiJwtSecret, shouldRunApiWorkers } from './runtime.js'
+import { resolveApiJwtSecret, shouldRunApiWorkers, isAdministrativeTestMode } from './runtime.js'
 
-dotenv.config()
+const adminOnly = isAdministrativeTestMode(process.argv)
+if (!adminOnly) dotenv.config()
 
 // API-key providers are optional in OSS. With none configured, boot still
 // starts the isolated Codex runtime and the authenticated local Settings route
@@ -43,7 +44,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const VERTEX_PROJECT_ID = process.env.VERTEX_PROJECT_ID
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY
 const USEBRIAN_PREFERRED_PROVIDER =
-  process.env.USEBRIAN_PREFERRED_PROVIDER || (await loadLocalProviderPreference()) || undefined
+  adminOnly ? undefined : process.env.USEBRIAN_PREFERRED_PROVIDER || (await loadLocalProviderPreference()) || undefined
 
 // JWT_SECRET is auto-generated + persisted by the launcher; for a bare boot we
 // fall back to a process-local random one (sessions don't survive a restart,
@@ -191,6 +192,7 @@ const browserCredentialEncryptionKey = process.env.BROWSER_CREDENTIAL_ENCRYPTION
 const { start } = await bootOpenApi({
   env,
   runWorkers: shouldRunApiWorkers(process.argv),
+  startLocalSubscriptionProvider: !adminOnly,
   ports: {
     usageStore: createOssUsageStore(),
     buildEpisodeIngestors,

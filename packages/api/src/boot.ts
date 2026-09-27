@@ -1177,6 +1177,8 @@ export interface BootOpenApiOptions {
   ports?: OpenApiPorts
   /** Default true; gates the background workers (consolidation, pollers, …). */
   runWorkers?: boolean
+  /** Default true. False only for a credential-free local administrative fixture. */
+  startLocalSubscriptionProvider?: boolean
 }
 
 /**
@@ -1911,7 +1913,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     )
     configuredProviders.setStaticProvider(dashscopeProviderId, true)
   }
-  if (isSelfHostedOssEnv()) {
+  if (isSelfHostedOssEnv() && opts.startLocalSubscriptionProvider !== false) {
     try {
       codexProviderManager = await startCodexProviderManager({
         availability: configuredProviders,

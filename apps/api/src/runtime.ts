@@ -10,5 +10,10 @@ export function resolveApiJwtSecret(
 }
 
 export function shouldRunApiWorkers(argv: readonly string[]): boolean {
-  return !argv.includes('--no-workers')
+  return !argv.includes('--no-workers') && !argv.includes('--admin-only')
+}
+
+/** A local administrative fixture never loads a personal provider or starts workers. */
+export function isAdministrativeTestMode(argv: readonly string[]): boolean {
+  return argv.includes('--admin-only')
 }

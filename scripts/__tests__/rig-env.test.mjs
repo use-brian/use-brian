@@ -8,6 +8,17 @@ const dotenv = (body) => (path) => (path === `${root}/.env` ? body : null)
 const none = () => null
 
 describe('[COMP:platform/local-rig] local rig database resolution', () => {
+  test('administrative mode cannot inherit a real database or dotenv URL', () => {
+    const db = resolveRigDatabase({ root,
+      env: { USEBRIAN_ADMIN_ONLY: '1', DATABASE_URL: 'postgres://remote.example/real' },
+      readText: () => { throw new Error('must not read dotenv for admin database') },
+    })
+    assert.equal(db.source, 'admin-fixture')
+    assert.equal(db.database, 'usebrian_admin_test')
+    assert.equal(db.port, '5443')
+    assert.equal(db.host, '127.0.0.1')
+  })
+
   test('the shell environment wins over .env', () => {
     const db = resolveRigDatabase({
       root,
