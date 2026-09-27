@@ -44,10 +44,10 @@ import { OfficeHistoryControls } from "./office-history-controls";
 import { OfficeHistory } from "./history/office-history";
 import { OfficeSharing } from "./sharing/office-sharing";
 import { ReclassifyContextButton } from "@/components/context/reclassify-context-dialog";
-import { invalidateSurfaceCache, loadSurfaceCache, mutateSurfaceCache, readSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
 import { invalidateOfficeList, officeArtifactCacheKey, officeSnapshotCacheKey, officePanelCacheKey, officePanelCachePrefix } from "@/lib/surface-prefetch";
-import { officeArtifactFromListCache, useOfficeCacheRevalidation, useOfficeMetadataResource } from "@/lib/office/surface-cache";
-import { officeMetadataRemaining } from "@/lib/office/metadata";
+import { officeArtifactFromListCache, useOfficeMetadataResource } from "@/lib/office/surface-cache";
+import { officeMetadataRemaining, inheritOfficeMetadata } from "@/lib/office/metadata";
 import { isPhoneViewport } from "@/lib/viewport";
 
 const EMPTY_COMMENTS: OfficeCommentThread[] = [];
@@ -86,16 +86,22 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   // An authoritative 401 / 403 / 404 evicts and stops both hooks (key null);
   // it never falls back to a cached or offline copy (N2).
   const [denied, setDenied] = useState(false);
-  const artifactEntry = useCachedResource<OfficeArtifact>(denied || !viewerId ? null : artifactKey, () => getOfficeArtifact(artifactId));
-  const snapshotEntry = useCachedResource<OfficeLiveSnapshot>(denied || !viewerId ? null : snapshotKey, () => getOfficeSnapshot(artifactId));
-  useOfficeCacheRevalidation([artifactKey, snapshotKey]);
+  const [rowHint] = useState(() => officeArtifactFromListCache(workspaceId, artifactId, viewerId) ?? undefined);
+  const artifactEntry = useOfficeMetadataResource(denied || !viewerId ? null : artifactKey, viewerId, () => getOfficeArtifact(artifactId), rowHint, true);
+  const snapshotEntry = useOfficeMetadataResource(denied || !viewerId ? null : snapshotKey, viewerId, () => getOfficeSnapshot(artifactId));
+  const onlineSeen = useRef(false);
+  const fullReadSeen = useRef(false);
+  if (artifactEntry.data || snapshotEntry.data) onlineSeen.current = true;
+  const onlineReady = Boolean(artifactEntry.data && snapshotEntry.data);
+  if (onlineReady) fullReadSeen.current = true;
+  const lifetime = useRef<symbol | null>(null);
+  useLayoutEffect(() => {lifetime.current = Symbol();return () => {lifetime.current = null;};}, []);
   // Full offline mode: the network failed and a pinned package took over.
   const [offline, setOffline] = useState<LoadedOfficeOfflinePackage | null>(null);
   const [offlineLookup, setOfflineLookup] = useState<"idle" | "missing">("idle");
   // Cold seed: the package painted while the network is still in flight.
   const [seed, setSeed] = useState<LoadedOfficeOfflinePackage | null>(null);
-  const [liveLocal, setLiveLocal] = useState<OfficeLiveSnapshot | null>(null);
-  const [listRow] = useState(() => officeArtifactFromListCache(workspaceId, artifactId));
+  const [liveLocal, setLiveLocal] = useState<{value: OfficeLiveSnapshot; source: OfficeLiveSnapshot} | null>(null);
   const [targets, setTargets] = useState<string[]>([]);
   const [commentAnchor, setCommentAnchor] = useState<DocumentCommentAnchor | null>(null);
   const [suggestionRange, setSuggestionRange] = useState<DocumentSuggestionRange | null>(null);
@@ -117,6 +123,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
   const editorRootRef = useRef<HTMLElement | null>(null);
   const historyRef = useRef<ReturnType<typeof createOfficeUndoManager> | null>(null);
+  const currentHistoryRead = useRef<() => boolean>(() => false);
   const offlineUndoneCommands = useRef(new Map<string, Extract<OfflineJournalEntry, { kind: "command" }>>());
   const offlineHistoryQueue = useRef<Promise<void>>(Promise.resolve());
   const reconcileHistoryRef = useRef<(action: "undo" | "redo", before: Set<string>, after: Set<string>) => void>(() => undefined);
@@ -124,18 +131,59 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
 
   const artifactRow = artifactEntry.data;
   const artifactFailed = !denied && artifactRow === undefined && artifactEntry.error !== undefined && !artifactEntry.revalidating && offlineLookup === "missing";
-  // Paint order: the offline copy (network gone) > the fetched row > the cold
-  // seed > the list row the home just painted. `undefined` means nothing is
-  // known yet, `null` means denied or unrecoverable.
-  const artifact: OfficeArtifact | null | undefined = denied || artifactFailed ? null : offline?.payload.artifact ?? artifactRow ?? seed?.payload.artifact ?? listRow ?? undefined;
-  const offlineLive = useMemo(() => (offline ? packageLive(offline) : null), [offline]);
-  const seedLive = useMemo(() => (seed ? packageLive(seed) : null), [seed]);
-  const live: OfficeLiveSnapshot | null = liveLocal ?? offlineLive ?? snapshotEntry.data ?? seedLive;
+  const readDenied = [artifactEntry.error, snapshotEntry.error].some(error => error instanceof OfficeApiError && [401,403,404].includes(error.status));
+  const allowDeviceSeed = !onlineSeen.current && !readDenied && !denied;
+  const artifact: OfficeArtifact | null | undefined = denied || readDenied || artifactFailed ? null : artifactRow ?? (allowDeviceSeed ? offline?.payload.artifact ?? seed?.payload.artifact : undefined);
+  const offlineLive = useMemo(() => allowDeviceSeed && offline ? packageLive(offline) : null, [allowDeviceSeed, offline]);
+  const seedLive = useMemo(() => allowDeviceSeed && seed ? packageLive(seed) : null, [allowDeviceSeed, seed]);
+  const workingSource = snapshotEntry.data ?? offlineLive ?? seedLive;
+  const localCurrent = liveLocal?.source === workingSource && (allowDeviceSeed || officeMetadataRemaining(liveLocal?.value, viewerId) > 0);
+  const live: OfficeLiveSnapshot | null = onlineReady || allowDeviceSeed ? localCurrent ? liveLocal!.value : workingSource ?? null : null;
   const liveRef = useRef<OfficeLiveSnapshot | null>(live);
   liveRef.current = live;
-  const snapshotPending = !denied && !offline && snapshotEntry.data === undefined && snapshotEntry.error === undefined;
-  const offlineCopyAt = offline?.savedAt ?? null;
+  const snapshotPending = !denied && !readDenied && snapshotEntry.data === undefined && snapshotEntry.error === undefined;
+  const offlineCopyAt = allowDeviceSeed ? offline?.savedAt ?? null : null;
   const collab = useCollabProvider(artifact && live && artifact.lifecycleState === "active" && !isOfficeStartFailed(artifact) ? `office:${artifactId}` : null);
+  const accessLost = (onlineSeen.current && !artifactEntry.data) || (fullReadSeen.current && !snapshotEntry.data) || readDenied;
+  useLayoutEffect(() => {
+    if (!accessLost) return;
+    setLiveLocal(null);setSeed(null);setOffline(null);setCachedUpdate(null);setCachedComments(null);
+    setTargets([]);setCommentAnchor(null);setSuggestionRange(null);setPresentOpen(false);setQueuedCommentThreads(EMPTY_COMMENTS);
+    setHistoryState({canUndo:false,canRedo:false});offlineUndoneCommands.current.clear();
+  }, [accessLost]);
+  function currentRead(needSnapshot = true) {
+    if (!lifetime.current || getUserInfo()?.id !== viewerId) return false;
+    if (allowDeviceSeed && !onlineSeen.current) return Boolean(offlineLive || seedLive);
+    return officeMetadataRemaining(readSurfaceCache(artifactKey).data, viewerId) > 0 && (!needSnapshot || officeMetadataRemaining(readSurfaceCache(snapshotKey).data, viewerId) > 0);
+  }
+  function captureRead(needSnapshot = true, write: false | "edit" | "comment" = false) {
+    const owner = lifetime.current;
+    const startingArtifact = artifactEntry.data, startingSnapshot = snapshotEntry.data;
+    const legacyDevice = allowDeviceSeed && !onlineSeen.current;
+    return () => {
+      const currentArtifact = legacyDevice ? artifact : readSurfaceCache<OfficeArtifact>(artifactKey).data;
+      const canWrite = !write || (currentArtifact?.lifecycleState === "active" && (write === "edit" ? currentArtifact.role === "edit" : ["edit", "comment"].includes(currentArtifact.role)));
+      return canWrite && owner === lifetime.current && currentRead(needSnapshot) && (legacyDevice ? !onlineSeen.current : officeMetadataRemaining(startingArtifact, viewerId) > 0 && (!needSnapshot || officeMetadataRemaining(startingSnapshot, viewerId) > 0));
+    };
+  }
+  currentHistoryRead.current = () => captureRead(true, "edit")();
+  async function readback(current: () => boolean, includeArtifact = true) {
+    if (!current()) return;
+    const pendingReads = [];
+    if (readSurfaceCache(snapshotKey).revalidating) pendingReads.push(snapshotEntry.refresh());
+    if (includeArtifact && readSurfaceCache(artifactKey).revalidating) pendingReads.push(artifactEntry.refresh());
+    if (pendingReads.length) {await Promise.all(pendingReads);if (!current()) return;}
+    await Promise.all([snapshotEntry.refresh(), ...(includeArtifact ? [artifactEntry.refresh()] : [])]);
+  }
+  useLayoutEffect(() => {
+    if (liveLocal && liveLocal.source !== workingSource) setLiveLocal(null);
+  }, [liveLocal, workingSource]);
+  useEffect(() => {
+    if (!readDenied) return;
+    setDenied(true);
+    invalidateSurfaceCache(artifactKey);invalidateSurfaceCache(snapshotKey);
+    void removeOfflinePackage(artifactId, offlineOwner).catch(() => undefined);
+  }, [readDenied, artifactKey, snapshotKey, artifactId, offlineOwner]);
   const offlineDiscussion = collab.status === "disconnected" || Boolean(offlineCopyAt);
   const discussionPrefix = viewerId && artifact?.family === "document" && !offlineCopyAt ? officePanelCachePrefix(workspaceId, viewerId) : null;
   const commentsKey = officePanelCacheKey(discussionPrefix, "comments", artifactId);
@@ -157,9 +205,9 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   // package (if the user saved one) paints the editor while the network
   // answers. Paint only - it never enters offline mode by itself.
   useEffect(() => {
-    if (readSurfaceCache<OfficeLiveSnapshot>(snapshotKey).data !== undefined) return;
+    if (onlineSeen.current || readSurfaceCache<OfficeLiveSnapshot>(snapshotKey).data !== undefined) return;
     let active = true;
-    void loadOfflinePackage(artifactId, offlineOwner).then((pkg) => { if (active && pkg) setSeed(pkg); }).catch(() => undefined);
+    void loadOfflinePackage(artifactId, offlineOwner).then((pkg) => { if (active && pkg && !onlineSeen.current) setSeed(pkg); }).catch(() => undefined);
     return () => { active = false; };
   }, [artifactId, snapshotKey, offlineOwner]);
 
@@ -191,9 +239,10 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
       void removeOfflinePackage(artifactId, offlineOwner).catch(() => undefined);
       return;
     }
+    if (onlineSeen.current) {setOfflineLookup("missing");return;}
     let active = true;
     void loadOfflinePackage(artifactId, offlineOwner).catch(() => null).then((cached) => {
-      if (!active) return;
+      if (!active || onlineSeen.current) return;
       if (!cached) { setOfflineLookup("missing"); return; }
       setOffline(cached);
       setCachedComments(cached.payload.comments);
@@ -204,7 +253,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   }, [artifactEntry.error, artifactEntry.revalidating, artifactId, artifactKey, artifactRow, denied, snapshotKey, offlineOwner]);
 
   // Snapshot fetch failed: an uninitialized template draft is initialized
-  // into the same cache slot; a still-running generation / import job polls
+  // through a fresh bounded read; a still-running generation / import job polls
   // both keys until the snapshot exists.
   useEffect(() => {
     const error = snapshotEntry.error;
@@ -212,9 +261,11 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     const uninitializedTemplate = artifactRow.mode === "template" && templateId && error instanceof OfficeApiError && error.status === 409 && error.message === "artifact_not_ready";
     if (uninitializedTemplate && !templateInitRef.current) {
       templateInitRef.current = true;
-      void loadSurfaceCache(snapshotKey, () => initializeOfficeTemplateDraft({ templateId, workspaceId, draftArtifactId: artifactId })).then((initialized) => {
-        if (initialized === undefined) setTemplateDraftFailed(true);
-      });
+      const current = captureRead(false, "edit");
+      if (!current()) return;
+      void initializeOfficeTemplateDraft({templateId, workspaceId, draftArtifactId: artifactId}).then(async () => {
+        await readback(current);
+      }).catch(() => {if (current()) setTemplateDraftFailed(true);});
       return;
     }
     if (!artifactRow.job || ["failed", "cancelled"].includes(artifactRow.job.status)) return;
@@ -228,21 +279,19 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     return () => window.removeEventListener("online", reconnect);
   }, [artifactEntry.refresh, snapshotEntry.refresh]);
   useEffect(() => {
-    if (!cachedUpdate || !collab.doc) return;
+    if (!cachedUpdate || !collab.doc || !allowDeviceSeed || !currentRead()) return;
     applyOfficeUpdate(collab.doc, cachedUpdate);
     setCachedUpdate(null);
-  }, [cachedUpdate, collab.doc]);
+  }, [cachedUpdate, collab.doc, allowDeviceSeed]);
   useEffect(() => {
     const doc = collab.doc;
-    if (!doc || (!collab.synced && !offlineCopyAt)) return;
+    if (!doc || (!collab.synced && !offlineCopyAt) || !workingSource || !currentRead()) return;
     const refresh = () => {
       try {
+        if (!currentRead()) return;
         const snapshot = yDocToSnapshot(doc);
-        setLiveLocal({
-          snapshot,
-          seq: liveRef.current?.seq ?? 0,
-          baseVersion: liveRef.current?.baseVersion ?? 1,
-        });
+        const value = {snapshot, seq: liveRef.current?.seq ?? 0, baseVersion: liveRef.current?.baseVersion ?? 1};
+        setLiveLocal({source: workingSource, value: allowDeviceSeed ? value : inheritOfficeMetadata(value, workingSource, viewerId)});
       } catch {
         // A newly created artifact can connect before its first snapshot is
         // initialized. The generation/import poll above remains the fallback.
@@ -251,12 +300,13 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     refresh();
     doc.on("update", refresh);
     return () => doc.off("update", refresh);
-  }, [collab.doc, collab.synced, offlineCopyAt]);
+  }, [collab.doc, collab.synced, offlineCopyAt, workingSource, onlineReady, allowDeviceSeed, viewerId]);
   useEffect(() => {
     if (!commentsKey || !commentsReady || !artifact || artifact.family !== "document" || artifact.role !== "edit" || artifact.lifecycleState !== "active" || offlineCopyAt || !live) return;
     let active = true;
     const startingRead = readSurfaceCache<OfficeCommentThread[]>(commentsKey).data;
-    const current = () => active && getUserInfo()?.id === viewerId && officeMetadataRemaining(startingRead, viewerId) > 0 && officeMetadataRemaining(readSurfaceCache(commentsKey).data, viewerId) > 0;
+    const ownsArtifact = captureRead(true, "edit");
+    const current = () => active && ownsArtifact() && getUserInfo()?.id === viewerId && officeMetadataRemaining(startingRead, viewerId) > 0 && officeMetadataRemaining(readSurfaceCache(commentsKey).data, viewerId) > 0;
     const timeout = window.setTimeout(() => {
       if (!current()) return;
       void detachMissingOfficeComments(artifactId).then(async detached => {
@@ -277,9 +327,10 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     }
   }, [artifact?.family, artifact?.mode, templateId]);
   useEffect(() => {
-    if (collab.status !== "connected" || !collab.synced) return;
+    if (collab.status !== "connected" || !collab.synced || !onlineReady) return;
     let active = true;
-    const current = () => active && getUserInfo()?.id === viewerId;
+    const ownsRead = captureRead(true, "edit");
+    const current = () => active && ownsRead();
     void listOfflineJournal(artifactId, offlineOwner).then(async (entries) => {
       if (!current()) return;
       const commands = entries.filter((entry): entry is Extract<(typeof entries)[number], { kind: "command" }> => entry.kind === "command");
@@ -303,18 +354,19 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
       for (const entry of suggestions) {
         if (!current()) return;
         await submitOfficeCommand(artifactId, entry.expectedSeq, entry.command, "suggest");
+        if (!current()) return;
         await removeOfflineJournalEntry(entry, offlineOwner);
       }
     }).catch(() => undefined);
     return () => {active = false;};
-  }, [artifactId, artifactKey, collab.status, collab.synced, snapshotKey, offlineOwner, viewerId]);
+  }, [artifactId, artifactKey, collab.status, collab.synced, snapshotKey, offlineOwner, viewerId, onlineReady]);
   useEffect(() => {
     const doc = collab.doc;
-    if (!doc || artifact?.lifecycleState !== "active" || artifact.role !== "edit" || suggestMode) return;
+    if (!doc || !currentRead() || artifact?.lifecycleState !== "active" || artifact.role !== "edit" || suggestMode) return;
     let history: ReturnType<typeof createOfficeUndoManager> | null = null;
     let stopObserving: (() => void) | null = null;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!history) return;
+      if (!history || !currentHistoryRead.current()) return;
       const before = new Set(officeCommandIds(doc));
       const action = handleOfficeHistoryShortcut(event, history, editorRootRef.current);
       if (!action) return;
@@ -322,6 +374,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
       reconcileHistoryRef.current(action, before, after);
     };
     const stopWaiting = observeOfficeHistoryReadiness(doc, () => {
+      if (!currentHistoryRead.current()) return;
       history = createOfficeUndoManager(doc);
       historyRef.current = history;
       stopObserving = observeOfficeHistory(history, setHistoryState);
@@ -335,16 +388,19 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
       stopObserving?.();
       history?.destroy();
     };
-  }, [artifact?.lifecycleState, artifact?.role, artifactId, collab.doc, suggestMode]);
+  }, [artifact?.lifecycleState, artifact?.role, artifactId, collab.doc, suggestMode, onlineReady, allowDeviceSeed]);
 
   reconcileHistoryRef.current = (action, before, after) => {
     const changedIds = action === "undo" ? [...before].filter((id) => !after.has(id)) : [...after].filter((id) => !before.has(id));
-    if (changedIds.length === 0) return;
+    const current = captureRead(true, "edit");
+    if (changedIds.length === 0 || !current()) return;
     offlineHistoryQueue.current = offlineHistoryQueue.current.then(async () => {
+      if (!current()) return;
       if (action === "undo") {
         const changedSet = new Set(changedIds);
         const entries = await listOfflineJournal(artifactId, offlineOwner);
         for (const entry of entries) {
+          if (!current()) return;
           if (entry.kind !== "command" || !changedSet.has(entry.command.commandId)) continue;
           offlineUndoneCommands.current.set(entry.command.commandId, entry);
           await removeOfflineJournalEntry(entry, offlineOwner);
@@ -352,9 +408,11 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
         return;
       }
       for (const commandId of changedIds) {
+        if (!current()) return;
         const entry = offlineUndoneCommands.current.get(commandId);
         if (!entry) continue;
         await appendOfflineCommand(entry, offlineOwner);
+        if (!current()) return;
         offlineUndoneCommands.current.delete(commandId);
       }
     }).catch(() => undefined);
@@ -363,7 +421,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   function runHistory(action: "undo" | "redo") {
     const history = historyRef.current;
     const doc = collab.doc;
-    if (!history || !doc) return;
+    if (!history || !doc || !captureRead(true, "edit")()) return;
     const before = new Set(officeCommandIds(doc));
     const changed = action === "undo" ? history.undo() : history.redo();
     if (!changed) return;
@@ -374,38 +432,45 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   // geometry-matched skeleton under the bare topbar, never a sentence (N4).
   if (artifact === undefined) return <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-office-shell-state="loading" aria-busy="true"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[]} /><OfficeEditorSkeleton /></div>;
   if (artifact === null) return <div className="flex flex-1 flex-col" data-office-shell-state="failed"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: t.editorFailed }]} /><p className="m-auto text-sm text-destructive">{t.editorFailed}</p></div>;
+  if (fullReadSeen.current && !onlineReady) return <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-office-shell-state="loading" aria-busy="true"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{label: artifact.title}]} /><OfficeEditorSkeleton family={artifact.family}/></div>;
   const Icon = artifact.family === "document" ? FileText : artifact.family === "presentation" ? Presentation : FileSpreadsheet;
   if (templateDraftFailed) return <div className="flex flex-1 flex-col" data-office-shell-state="failed"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: artifact.title }]} /><p className="m-auto text-sm text-destructive">{t.editorFailed}</p></div>;
   if (isOfficeStartFailed(artifact)) return <OfficeStartRecovery workspaceId={workspaceId} title={artifact.title} family={artifact.family} canTrash={artifact.role === "edit"} state={recoveryState} onTrash={() => {
     setRecoveryState("moving");
-    void transitionOfficeLifecycle(artifactId, "trash", "Office creation did not start").then(() => { invalidateOfficeList(workspaceId); invalidateSurfaceCache(artifactKey); router.push(`/w/${workspaceId}/office`); }).catch(() => setRecoveryState("failed"));
+    const current = captureRead(false, "edit");
+    if (!current()) return;
+    void transitionOfficeLifecycle(artifactId, "trash", "Office creation did not start").then(() => {if (!current()) return; invalidateOfficeList(workspaceId); invalidateSurfaceCache(artifactKey); router.push(`/w/${workspaceId}/office`); }).catch(() => {if (current()) setRecoveryState("failed");});
   }} />;
   async function apply(command: OfficeCommand) {
-    if (!live) return;
+    const current = captureRead(true, suggestMode || artifact?.role === "comment" ? "comment" : "edit");
+    if (!live || !current()) return;
     if (artifact!.lifecycleState !== "active") return;
     if (!suggestMode && artifact!.role === "edit" && collab.doc && (collab.synced || offlineCopyAt)) {
       if (collab.status === "disconnected" || offlineCopyAt) {
         const offlineCommand = { ...command, origin: "offline" as const };
         await appendOfflineCommand({ artifactId, seq: Date.now() * 1_000 + Math.floor(Math.random() * 1_000), kind: "command", expectedSeq: live.seq, command: offlineCommand, createdAt: new Date().toISOString() }, offlineOwner);
-        appendOfficeCommand(collab.doc, offlineCommand);
+        if (current()) appendOfficeCommand(collab.doc, offlineCommand);
       } else appendOfficeCommand(collab.doc, command);
       return;
     }
-    const result = await submitOfficeCommand(artifactId, live.seq, command, suggestMode || artifact!.role === "comment" ? "suggest" : "apply");
-    if ("snapshot" in result) setLiveLocal(result);
+    await submitOfficeCommand(artifactId, live.seq, command, suggestMode || artifact!.role === "comment" ? "suggest" : "apply");
+    await readback(current);
   }
   async function refreshArtifact() {
-    await Promise.all([artifactEntry.refresh(), snapshotEntry.refresh()]);
-    // The server's snapshot is the truth after a revision / restore; the
-    // collab doc re-derives the working copy on its next update.
-    setLiveLocal(null);
+    const current = captureRead();
+    await readback(current);
+    if (current()) setLiveLocal(null);
   }
-  function onLifecycle(next: OfficeArtifact) {
-    mutateSurfaceCache<OfficeArtifact>(artifactKey, () => next);
+  function onLifecycle(_next: OfficeArtifact) {
+    const current = captureRead(false);
+    if (!current()) return;
     invalidateOfficeList(workspaceId);
+    invalidateSurfaceCache(artifactKey);
+    void artifactEntry.refresh();
   }
   async function requestBrianRevision(instruction: string, requestedTargetIds = targets, anchorOverride?: OfficeCommentThread["anchor"]) {
-    if (!artifact || !live || artifact.lifecycleState !== "active" || artifact.role === "view" || offlineCopyAt || collab.status === "disconnected" || requestedTargetIds.length === 0) return null;
+    const current = captureRead(true, "comment");
+    if (!current() || !artifact || !live || artifact.lifecycleState !== "active" || artifact.role === "view" || offlineCopyAt || collab.status === "disconnected" || requestedTargetIds.length === 0) return null;
     const targetSet = new Set(requestedTargetIds);
     const anchor: OfficeCommentThread["anchor"] = anchorOverride ?? (artifact.family === "document" && commentAnchor
       ? commentAnchor
@@ -415,27 +480,32 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
           ? { kind: "object", targetIds: requestedTargetIds }
           : { kind: artifact.family === "spreadsheet" ? "table_cell" : "block", targetIds: requestedTargetIds });
     const created = await createOfficeComment({ artifactId, anchor, body: `@Brian ${instruction.trim()}`, invokeBrian: { assistantId: APP_LEVEL_ASSISTANT_ID, expectedVersion: artifact.version, idempotencyKey: crypto.randomUUID() } });
-    return created.revision ?? null;
+    return current() ? created.revision ?? null : null;
   }
   async function editSpreadsheetImageWithBrian(imageId: string, instruction: string) {
-    if (!artifact || !live) return;
+    const current = captureRead(true, "comment");
+    if (!artifact || !live || !current()) return;
     const revision = await requestBrianRevision(instruction, [imageId], { kind: "object", targetIds: [imageId] });
+    if (!current()) return;
     setPanel("activity");
     setPanelOpen(true);
     if (!revision || revision === "version_conflict") throw new Error("Worksheet image revision could not start");
-    const job = await waitForOfficeJob(revision.jobId);
+    const job = await waitForOfficeJob(revision.jobId, 180_000, current);
     if (job.status !== "completed") throw new Error("Worksheet image revision did not complete");
     await refreshArtifact();
   }
   async function publishTemplate() {
-    if (!templateId) return;
+    const current = captureRead(true, "edit");
+    if (!templateId || !current()) return;
     setTemplateCompileState("queued");
     try {
       const queued = await compileOfficeTemplateDraft({ templateId, workspaceId, draftArtifactId: artifactId });
-      const job = await waitForOfficeJob(queued.jobId);
+      if (!current()) return;
+      const job = await waitForOfficeJob(queued.jobId, 180_000, current);
+      if (!current()) return;
       setTemplateCompileState(job.status === "completed" ? "idle" : "failed");
     } catch {
-      setTemplateCompileState("failed");
+      if (current()) setTemplateCompileState("failed");
     }
   }
   const editorRole = artifact.lifecycleState === "active" ? artifact.role : "view" as const;

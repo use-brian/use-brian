@@ -19,3 +19,12 @@ export function officeMetadataRemaining(value: unknown, viewerId?: string): numb
   const remaining = Math.min(deadline.wall - Date.now(), deadline.monotonic - performance.now());
   return Number.isFinite(remaining) ? Math.max(0, remaining) : 0;
 }
+
+
+/** A derived view inherits the exact deadline; copying data cannot renew access. */
+export function inheritOfficeMetadata<T extends object>(value: T, source: unknown, viewerId: string): OfficeMetadata<T> {
+  if (officeMetadataRemaining(source, viewerId) <= 0) throw new Error('office_projection_expired');
+  const deadline = (source as OfficeMetadata<object>)[lifetime];
+  Object.defineProperty(value, lifetime, {value: deadline});
+  return value as OfficeMetadata<T>;
+}

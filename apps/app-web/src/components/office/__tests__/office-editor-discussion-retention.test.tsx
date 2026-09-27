@@ -70,7 +70,7 @@ describe('[COMP:app-web/office-editor-shell] bounded discussion decorations',()=
     setup('6000');await render();await click(en.office.comments);expect(commentReads()).toHaveLength(1);await click(en.office.suggestions);expect(state.fetch.mock.calls.filter(([url])=>url.endsWith('/suggestions'))).toHaveLength(1);await click(en.office.collapseAssistantPanel);expect(comments()).toContain('Protected server comment');expect(suggestionsText()).toContain('protected-suggestion');
   });
   it.each([401,403,404,409])('drops decorations on an authoritative %s renewal',async status=>{
-    setup('6000');await render();state.fetch.mockImplementation(async()=>response({error:status===409?'office_projection_changed':'denied'},'0',status));await act(async()=>vi.advanceTimersByTime(3001));expect(comments()).toBe('');expect(suggestionsText()).toBe('');
+    setup('6000');await render();state.fetch.mockImplementation(async()=>response({error:status===409?'office_projection_changed':'denied'},'0',status));await act(async()=>vi.advanceTimersByTime(3001));expect(host.textContent).not.toContain('Protected server comment');expect(host.textContent).not.toContain('protected-suggestion');
   });
   it.each(['viewer','workspace'] as const)('purges previous keys and refuses late collections after changing %s',async identity=>{
     setup('6000');await render();const prefix=officePanelCachePrefix(state.workspace,state.viewer);let finish!:(response:Response)=>void;

@@ -2,7 +2,7 @@
 import {act} from 'react';
 import {createRoot,type Root} from 'react-dom/client';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
-import {attachOfficeMetadata,officeMetadataRemaining} from '../metadata';
+import {attachOfficeMetadata,inheritOfficeMetadata,officeMetadataRemaining} from '../metadata';
 import {useOfficeMetadataResource} from '../surface-cache';
 import * as api from '../api';
 import {OfficeHome} from '@/components/office/office-home';
@@ -38,6 +38,17 @@ beforeEach(()=>{
 afterEach(()=>{act(()=>root.unmount());host.remove();resetSurfaceCache();vi.useRealTimers();});
 
 describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
+  it('inherits both original deadlines without renewing or serializing them',()=>{
+    const source=attachOfficeMetadata([row],2000,performance.now(),state.viewer);
+    vi.advanceTimersByTime(700);
+    const derived=inheritOfficeMetadata({...row},source,state.viewer);
+    expect(officeMetadataRemaining(derived,state.viewer)).toBe(1300);
+    expect(officeMetadataRemaining(JSON.parse(JSON.stringify(derived)),state.viewer)).toBe(0);
+    expect(()=>inheritOfficeMetadata({...row},source,'viewer-b')).toThrow('office_projection_expired');
+    vi.setSystemTime(Date.now()-60_000);vi.advanceTimersByTime(1301);
+    expect(officeMetadataRemaining(derived,state.viewer)).toBe(0);
+    expect(()=>inheritOfficeMetadata({...row},derived,state.viewer)).toThrow('office_projection_expired');
+  });
   it.each([
     ['artifacts',()=>api.listOfficeArtifacts('workspace-a'),{artifacts:[row]}],
     ['artifact',()=>api.getOfficeArtifact('artifact-a'),{artifact:row}],

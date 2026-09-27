@@ -1,22 +1,23 @@
 /**
  * Office readers share the ONE surface cache. Collection, preview and panel reads carry
- * viewer-bound deadlines and hard invalidation. Legacy editor helpers below
- * retain their existing interface until the editor-retention adapter lands.
+ * viewer-bound deadlines and hard invalidation. First-paint list hints inherit
+ * their collection lifetime without suppressing the editor's parallel reads.
  * Spec: docs/architecture/features/perceived-performance.md.
  * [COMP:app-web/office-surface-cache]
  */
 
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { OfficeApiError, type OfficeArtifact } from "@/lib/office/api";
-import { invalidateSurfaceCache, loadSurfaceCache, useCachedResource, SurfaceCacheEvictionError, markSurfaceCacheStale, readSurfaceCache } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, seedSurfaceCache, useCachedResource, SurfaceCacheEvictionError, markSurfaceCacheStale, readSurfaceCache } from "@/lib/surface-cache";
 import { officePanelCachePrefix, officeListCacheKey, type OfficeListView } from "@/lib/surface-prefetch";
 
 /** Every lifecycle view the home lists, in the order a tap most likely came from. */
 import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
-import { officeMetadataRemaining } from './metadata';
+import { officeMetadataRemaining, inheritOfficeMetadata } from './metadata';
+import { getUserInfo } from '@/lib/user';
 
 /** Bounded Office reads reuse the shared cache's generation and expiry ownership. */
-export function useOfficeMetadataResource<T>(key: string | null, viewerId: string, fetcher: () => Promise<T>, seed?: T) {
+export function useOfficeMetadataResource<T>(key: string | null, viewerId: string, fetcher: () => Promise<T>, seed?: T, seedIsHint = false) {
   // A seed enters cache ownership once. Invalidation must never resurrect it
   // merely because a parent still holds the original initial-data prop.
   const seedOwner = useRef({key, unused: true});
@@ -25,8 +26,8 @@ export function useOfficeMetadataResource<T>(key: string | null, viewerId: strin
     if (seedOwner.current.key !== key || !seedOwner.current.unused) return;
     seedOwner.current.unused = false;
     if (key && initialSeed && readSurfaceCache(key).data === undefined && readSurfaceCache(key).error === undefined)
-      void loadSurfaceCache(key, async () => initialSeed, {expiresInMs: value => officeMetadataRemaining(value, viewerId)});
-  }, [key, initialSeed, viewerId]);
+      seedSurfaceCache(key, initialSeed, {expiresInMs: value => officeMetadataRemaining(value, viewerId)}, seedIsHint);
+  }, [key, initialSeed, viewerId, seedIsHint]);
   const previous = useRef(key);
   useLayoutEffect(() => {
     if (previous.current && previous.current !== key) invalidateSurfaceCache(previous.current);
@@ -70,11 +71,11 @@ const OFFICE_LIST_VIEWS: readonly OfficeListView[] = ["active", "archived", "tra
  * the shell can paint title / family / role from it; it is never used to
  * decide anything the snapshot decides.
  */
-export function officeArtifactFromListCache(workspaceId: string, artifactId: string): OfficeArtifact | null {
+export function officeArtifactFromListCache(workspaceId: string, artifactId: string, viewerId = getUserInfo()?.id ?? ""): OfficeArtifact | null {
   for (const view of OFFICE_LIST_VIEWS) {
-    const rows = readSurfaceCache<OfficeArtifact[]>(officeListCacheKey(workspaceId, view)).data;
+    const rows = readSurfaceCache<OfficeArtifact[]>(officeListCacheKey(workspaceId, view, viewerId)).data;
     const row = rows?.find((candidate) => candidate.artifactId === artifactId);
-    if (row) return row;
+    if (row && officeMetadataRemaining(rows, viewerId) > 0) return inheritOfficeMetadata({...row}, rows, viewerId);
   }
   return null;
 }

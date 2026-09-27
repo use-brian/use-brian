@@ -197,6 +197,24 @@ export function loadSurfaceCache<T>(
   return request;
 }
 
+/** Install a missing seed without replacing a value/error or cancelling its fetch.
+ * Protected callers provide the same expiry/disposal contract as fetched reads. */
+export function seedSurfaceCache<T>(key: string, data: T, lifecycle?: CacheLifecycle<T>, stale = false): boolean {
+  if (!isBrowser()) return false;
+  const entry = readSurfaceCache<T>(key);
+  if (entry.data !== undefined || entry.error !== undefined) return false;
+  const ttl = lifecycle?.expiresInMs?.(data);
+  if (ttl !== undefined && (!Number.isFinite(ttl) || ttl <= 0)) return false;
+  disposeEntry(key);
+  const timer = ttl === undefined ? undefined : setTimeout(() => invalidateSurfaceCache(key), Math.ceil(ttl));
+  if (timer !== undefined || lifecycle?.dispose) disposals.set(key, () => {
+    if (timer !== undefined) clearTimeout(timer);
+    lifecycle?.dispose?.(data);
+  });
+  put(key, {data, updatedAt: stale ? Number.NEGATIVE_INFINITY : Date.now(), attemptedAt: stale ? Number.NEGATIVE_INFINITY : Date.now()});
+  return true;
+}
+
 /**
  * Fire-and-forget warm - what intent-prefetch calls on hover. No-ops when the
  * key is already fresh or already loading, so hovering a rail of links a dozen

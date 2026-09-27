@@ -27,12 +27,48 @@ import {
   mutateSurfaceCache,
   readSurfaceCache,
   resetSurfaceCache,
+  seedSurfaceCache,
   useCachedResource,
   warmSurfaceCache,
 } from "@/lib/surface-cache";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
+
+describe('[COMP:app-web/surface-cache] bounded first-paint seeds', () => {
+  beforeEach(() => {vi.useFakeTimers();resetSurfaceCache();});
+  afterEach(() => {resetSurfaceCache();vi.useRealTimers();});
+  it('preserves an in-flight request and replaces the stale seed when it completes', async () => {
+    let finish!: (value: string) => void;
+    const disposal=vi.fn();
+    const request=loadSurfaceCache('seed',()=>new Promise<string>(resolve=>{finish=resolve;}));
+    expect(seedSurfaceCache('seed','hint',{expiresInMs:()=>400,dispose:disposal},true)).toBe(true);
+    expect(readSurfaceCache('seed')).toMatchObject({data:'hint',revalidating:true});
+    expect(isSurfaceCacheStale('seed')).toBe(true);
+    expect(loadSurfaceCache('seed',async()=> 'wrong')).toBe(request);
+    finish('fresh');await request;
+    expect(disposal).toHaveBeenCalledExactlyOnceWith('hint');
+    vi.advanceTimersByTime(401);expect(readSurfaceCache('seed').data).toBe('fresh');
+  });
+  it('expires an unmounted seed and discards the response of its detached request',async()=>{
+    let finish!:(value:string)=>void;
+    const request=loadSurfaceCache('seed',()=>new Promise<string>(resolve=>{finish=resolve;}));
+    const disposal=vi.fn();
+    seedSurfaceCache('seed','hint',{expiresInMs:()=>400,dispose:disposal});
+    vi.advanceTimersByTime(401);finish('obsolete');await request;
+    expect(readSurfaceCache('seed').data).toBeUndefined();expect(disposal).toHaveBeenCalledExactlyOnceWith('hint');
+  });
+  it('cannot replace a fetched value or denial, and rejects an expired seed',async()=>{
+    await loadSurfaceCache('current',async()=>'current');
+    await loadSurfaceCache('denied',async()=>{throw new SurfaceCacheEvictionError(new Error('denied'));});
+    expect(seedSurfaceCache('current','hint')).toBe(false);
+    expect(seedSurfaceCache('denied','hint')).toBe(false);
+    expect(seedSurfaceCache('expired','hint',{expiresInMs:()=>0})).toBe(false);
+    expect(readSurfaceCache('current').data).toBe('current');
+    expect(readSurfaceCache('denied').data).toBeUndefined();
+    expect(readSurfaceCache('denied').error).toMatchObject({message:'denied'});
+  });
+});
 
 /** Drain the microtask + macrotask queue so an in-flight load has settled. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
