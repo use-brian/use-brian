@@ -21,6 +21,7 @@ export type OfficeAccessProjection = {
   visibilityUserIds: string[]
   requiredCompartments: string[]
   sourcesEligible: boolean
+  mutationScopeEligible: boolean
   defaultWorkspaceRole: OfficeRole
   lifecycleState: OfficeLifecycleState
   memberRole: WorkspaceRole
@@ -75,18 +76,19 @@ export function resolveOfficeAccessProjection(
     role = projection.defaultWorkspaceRole
   }
 
-  const mutable = projection.lifecycleState === 'active'
+  const mutationAllowed = projection.mutationScopeEligible === true
+  const mutable = mutationAllowed && projection.lifecycleState === 'active'
   return {
     artifactId: projection.artifactId,
     workspaceId: projection.workspaceId,
-    role,
+    role: mutationAllowed ? role : 'view',
     workspaceRole: projection.memberRole,
     lifecycleState: projection.lifecycleState,
     canView: true,
     canComment: mutable && (role === 'comment' || role === 'edit'),
     canEdit: mutable && role === 'edit',
-    canRestore: (projection.lifecycleState === 'archived' || projection.lifecycleState === 'trash' || projection.lifecycleState === 'retained') && (role === 'edit' || projection.memberRole === 'owner' || projection.memberRole === 'admin'),
-    canDeletePermanently: (projection.ownerUserId === userId || projection.memberRole === 'owner' || projection.memberRole === 'admin') && (projection.lifecycleState === 'trash' || projection.lifecycleState === 'retained'),
+    canRestore: mutationAllowed && (projection.lifecycleState === 'archived' || projection.lifecycleState === 'trash' || projection.lifecycleState === 'retained') && (role === 'edit' || projection.memberRole === 'owner' || projection.memberRole === 'admin'),
+    canDeletePermanently: mutationAllowed && (projection.ownerUserId === userId || projection.memberRole === 'owner' || projection.memberRole === 'admin') && (projection.lifecycleState === 'trash' || projection.lifecycleState === 'retained'),
     canElevate: mutable && (projection.memberRole === 'owner' || projection.memberRole === 'admin') && role !== 'edit',
     canManageSharing: mutable && (projection.memberRole === 'owner' || projection.memberRole === 'admin'),
   }
@@ -100,12 +102,13 @@ export const OFFICE_ACCESS_SQL = `
          a.sensitivity                AS sensitivity,
          a.visibility_user_ids        AS "visibilityUserIds",
          a.compartments               AS "requiredCompartments",
-         COALESCE(src.eligible, TRUE) AS "sourcesEligible",
+         public.office_sources_scope_allows(a.id,a.workspace_id,false) AS "sourcesEligible",
+         public.office_artifact_scope_allows(a.id,a.workspace_id,true) AS "mutationScopeEligible",
          a.default_workspace_role     AS "defaultWorkspaceRole",
          a.lifecycle_state            AS "lifecycleState",
          wm.role                      AS "memberRole",
-         wm.clearance                 AS "memberClearance",
-         public.effective_member_team_compartments(wm.user_id, wm.workspace_id)
+         CASE WHEN wm.role IN ('owner','admin') THEN 'confidential' ELSE wm.clearance END AS "memberClearance",
+         public.effective_member_read_compartments(wm.user_id, wm.workspace_id)
                                       AS "memberCompartments",
          g.role                       AS "explicitRole",
          g.revoked_at                 AS "grantRevokedAt"
@@ -114,20 +117,6 @@ export const OFFICE_ACCESS_SQL = `
       ON wm.workspace_id = a.workspace_id AND wm.user_id = $2
     LEFT JOIN office_artifact_grants g
       ON g.artifact_id = a.id AND g.user_id = $2
-    LEFT JOIN LATERAL (
-      SELECT bool_and(
-        CASE s.sensitivity WHEN 'public' THEN 0 WHEN 'internal' THEN 1 WHEN 'confidential' THEN 2 ELSE 3 END
-          <= CASE wm.clearance WHEN 'public' THEN 0 WHEN 'internal' THEN 1 ELSE 2 END
-        AND (cardinality(s.visibility_user_ids)=0 OR $2=ANY(s.visibility_user_ids))
-        AND (
-          public.effective_member_team_compartments(wm.user_id, wm.workspace_id) IS NULL
-          OR s.required_compartments <@
-             public.effective_member_team_compartments(wm.user_id, wm.workspace_id)
-        )
-      ) AS eligible
-      FROM office_artifact_sources s
-      WHERE s.artifact_id=a.id AND s.retracted_at IS NULL
-    ) src ON TRUE
    WHERE a.id = $1
    LIMIT 1
 `

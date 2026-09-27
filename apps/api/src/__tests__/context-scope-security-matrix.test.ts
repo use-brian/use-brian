@@ -461,4 +461,48 @@ describe('[COMP:api/context-scope-security-matrix] temporary preview upgrade',()
       assert.deepEqual((await previous.query('DELETE FROM file_cache WHERE id=$1 RETURNING id',[fileId])).rows,[])
     } finally {await previous.close()}
   })
+  it('upgrades 595 Office records through 596 without changing content and binds child access to current membership',async()=>{
+    const previous=new PGlite({extensions:{vector,pg_trgm}})
+    const directory=fileURLToPath(new URL('../../../../packages/api/migrations',import.meta.url))
+    const artifact='50000000-0000-4000-8000-000000000001'
+    const version='50000000-0000-4000-8000-000000000002'
+    const file='50000000-0000-4000-8000-000000000003'
+    try {
+      await previous.waitReady
+      await migratePglite(previous,directory,{through:'595_file_cache_preview_scope.sql'})
+      await previous.query('INSERT INTO users(id,auth_provider_id) VALUES($1,$2)',[USER_ID,'office-upgrade-fixture'])
+      await previous.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Office upgrade fixture',$2)",[WORKSPACE_ID,USER_ID])
+      await previous.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[WORKSPACE_ID,USER_ID])
+      await previous.query("INSERT INTO office_artifacts(id,workspace_id,family,title,creator_user_id,owner_user_id,capability_version,sensitivity) VALUES($1,$2,'document','Preserved Office title',$3,$3,1,'internal')",[artifact,WORKSPACE_ID,USER_ID])
+      await previous.query("INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri) VALUES($1,$2,'/office.json','office.json','fixture://office')",[file,WORKSPACE_ID])
+      await previous.query("INSERT INTO office_artifact_versions(id,artifact_id,workspace_id,version,snapshot_file_id,snapshot_hash,operation_clock,schema_version,capability_version,author_type,origin) VALUES($1,$2,$3,1,$4,$5,'',1,1,'user','manual')",[version,artifact,WORKSPACE_ID,file,'a'.repeat(64)])
+      await previous.query("INSERT INTO office_offline_packages(artifact_id,artifact_version_id,workspace_id,user_id,device_id,package_file_id,manifest,manifest_hash,signature,state_vector,complete) VALUES($1,$2,$3,$4,'upgrade-fixture',$5,'{}',$6,'fixture','',true)",[artifact,version,WORKSPACE_ID,USER_ID,file,'a'.repeat(64)])
+      const before=(await previous.query('SELECT * FROM office_artifact_versions WHERE id=$1',[version])).rows
+      assert.equal(await migratePglite(previous,directory,{through:'596_office_operation_scope.sql'}),1)
+      assert.equal(await migratePglite(previous,directory,{through:'596_office_operation_scope.sql'}),0)
+      assert.deepEqual((await previous.query('SELECT * FROM office_artifact_versions WHERE id=$1',[version])).rows,before)
+      await previous.exec('SET row_security=on; CREATE ROLE office_scope_fixture NOSUPERUSER NOBYPASSRLS; GRANT USAGE ON SCHEMA public TO office_scope_fixture; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO office_scope_fixture; SET ROLE office_scope_fixture')
+      await previous.query("SELECT set_config('app.current_user_id',$1,false)",[USER_ID])
+      assert.deepEqual((await previous.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows,[{rolsuper:false,rolbypassrls:false}])
+      assert.equal((await previous.query('SELECT id FROM office_artifact_versions WHERE id=$1',[version])).rows.length,1)
+      const result=await previous.query(`WITH thread AS (
+        INSERT INTO office_comment_threads(artifact_id,workspace_id,artifact_version_id,anchor_kind,anchor,created_by)
+        VALUES($1,$2,$3,'block','{}',$4) RETURNING id
+      ) INSERT INTO office_comment_messages(thread_id,workspace_id,author_type,author_user_id,body)
+        SELECT id,$2,'user',$4,'Preserved discussion' FROM thread RETURNING id`,[artifact,WORKSPACE_ID,version,USER_ID])
+      assert.equal(result.rows.length,1)
+      await previous.query("UPDATE office_artifacts SET lifecycle_state='trash',trashed_at=now() WHERE id=$1",[artifact])
+      assert.deepEqual((await previous.query('SELECT complete,revoked_at IS NOT NULL AS revoked FROM office_offline_packages WHERE artifact_id=$1',[artifact])).rows,[{complete:false,revoked:true}])
+      await previous.exec('RESET ROLE')
+      await previous.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[WORKSPACE_ID,USER_ID])
+      await previous.exec('SET ROLE office_scope_fixture')
+      for(const table of ['office_artifacts','office_artifact_versions','office_comment_threads','office_comment_messages']) {
+        assert.deepEqual((await previous.query(`SELECT * FROM ${table} WHERE workspace_id=$1`,[WORKSPACE_ID])).rows,[])
+        assert.deepEqual((await previous.query(`DELETE FROM ${table} WHERE workspace_id=$1 RETURNING *`,[WORKSPACE_ID])).rows,[])
+      }
+      await previous.exec('RESET ROLE')
+      assert.deepEqual((await previous.query('SELECT body FROM office_comment_messages WHERE workspace_id=$1',[WORKSPACE_ID])).rows,[{body:'Preserved discussion'}])
+    } finally {await previous.close()}
+  })
+
 })
