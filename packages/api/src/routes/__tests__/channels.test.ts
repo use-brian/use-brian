@@ -1748,6 +1748,15 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     ])
   })
 
+  it('keeps discussion destinations and resolves their base group without treating the root as a topic', async () => {
+    mockRows([destRow({ channelId: '-10020:discussion:30' })])
+    const getChat = vi.fn().mockResolvedValue({ id: -10020, type: 'supergroup', title: 'Comments' })
+    vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
+    const res = await request(buildApp({ telegramBotToken: 'default-token' })).get('/api/workspaces/ws-1/channel-destinations')
+    expect(res.status).toBe(200)
+    expect(res.body.destinations[0]).toMatchObject({ channelId: '-10020:discussion:30', title: 'Comments › discussion #30' })
+  })
+
   it('resolves a topic group by its base chat id and falls back to the topic number', async () => {
     mockRows([destRow({ channelId: '-100555:topic:42' })])
     const getChat = vi.fn().mockResolvedValue({ id: -100555, type: 'supergroup', title: 'Project Forum' })

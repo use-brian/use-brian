@@ -182,7 +182,7 @@ export function pickRoutingForSurface(
   return rows.find((r) => r.externalSurfaceId === null) ?? null
 }
 
-/** Telegram routing adds forum inheritance: exact topic → base chat → default. */
+/** Telegram inheritance: exact topic/discussion → base chat → default. */
 export function pickTelegramRoutingForSurface(
   rows: ChannelAssistant[],
   externalSurfaceId: string | null,
@@ -191,7 +191,7 @@ export function pickTelegramRoutingForSurface(
     const surfaceMatch = rows.find((r) => r.externalSurfaceId === externalSurfaceId)
     if (surfaceMatch) return surfaceMatch
     const parsed = parseTopicChannelId(externalSurfaceId)
-    if (parsed.messageThreadId != null) {
+    if ((parsed.messageThreadId ?? parsed.discussionRootId) != null) {
       const baseChatMatch = rows.find((r) => r.externalSurfaceId === parsed.chatId)
       if (baseChatMatch) return baseChatMatch
     }

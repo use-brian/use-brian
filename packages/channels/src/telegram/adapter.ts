@@ -5,11 +5,13 @@ import { markdownToTelegramHTML, stripMarkdown } from './markdown.js'
 
 // ── Telegram webhook types ─────────────────────────────────────
 
-type TelegramUser = { id: number; first_name: string; username?: string }
+type TelegramUser = { id: number; first_name: string; username?: string; is_bot?: boolean }
 
 type TelegramMessage = {
   message_id: number
   from?: TelegramUser
+  sender_chat?: { id: number; title?: string; username?: string }
+  is_automatic_forward?: boolean
   chat: { id: number; type: string; title?: string; is_forum?: boolean }
   date: number
   text?: string
@@ -22,7 +24,7 @@ type TelegramMessage = {
   audio?: { file_id: string; mime_type?: string; file_name?: string; duration?: number; performer?: string; title?: string; file_size?: number }
   video?: { file_id: string; mime_type?: string; duration?: number; file_size?: number }
   media_group_id?: string
-  reply_to_message?: { message_id: number; from?: { id: number; is_bot?: boolean; username?: string }; text?: string }
+  reply_to_message?: { message_id: number; from?: { id: number; is_bot?: boolean; username?: string }; text?: string; is_automatic_forward?: boolean }
   message_thread_id?: number
   is_topic_message?: boolean
   forum_topic_created?: { name: string; icon_color?: number; icon_custom_emoji_id?: string }
@@ -33,25 +35,30 @@ type TelegramMessage = {
   caption_entities?: Array<{ type: string; offset: number; length: number }>
 }
 
-// ── Forum-topic encoding ───────────────────────────────────────
+// ── Telegram conversation encoding ───────────────────────────────────────
 //
 // Forum-enabled supergroups partition messages into topics identified by
 // `message_thread_id`. To make each topic its own conversation (own session,
 // memory scope, chat lock), we embed the topic id into `channelId` as
-// `"<chatId>:topic:<topicId>"` on inbound. Outbound calls parse it back.
+// `"<chatId>:topic:<topicId>"` on inbound. Linked discussion threads instead
+// use `"<chatId>:discussion:<rootMessageId>"`; outbound replies target that
+// root message, NOT message_thread_id (which is forum-only on sends).
 
 const TELEGRAM_GENERAL_TOPIC_ID = 1
 const TOPIC_CHANNEL_ID_PATTERN = /^(-?\d+):topic:(\d+)$/
 
 /**
- * Unpack a topic-qualified channelId into the real Telegram chat id and
- * the topic thread id. Returns `{ chatId, messageThreadId }`. When the
- * channelId is bare (no topic suffix), `messageThreadId` is undefined.
+ * Unpack a Telegram destination. Kept under its original public name for
+ * compatibility. Forum topics return messageThreadId; discussion destinations
+ * return discussionRootId instead. Bare chats return neither.
  */
 export function parseTopicChannelId(channelId: string): {
   chatId: string
   messageThreadId: number | undefined
+  discussionRootId?: number
 } {
+  const discussion = channelId.match(/^(-?\d+):discussion:([1-9]\d*)$/)
+  if (discussion) return { chatId: discussion[1], messageThreadId: undefined, discussionRootId: Number(discussion[2]) }
   const m = channelId.match(TOPIC_CHANNEL_ID_PATTERN)
   if (!m) return { chatId: channelId, messageThreadId: undefined }
   return { chatId: m[1], messageThreadId: Number(m[2]) }
@@ -108,6 +115,7 @@ type TelegramChatMemberUpdated = {
 type TelegramUpdate = {
   update_id: number
   message?: TelegramMessage
+  channel_post?: TelegramMessage
   callback_query?: {
     id: string
     from: TelegramUser
@@ -219,6 +227,8 @@ export type RequireMentionConfig =
     }
 
 export type TelegramAdapterConfig = {
+  /** Verified linked supergroups (getChat.linked_chat_id), not forum topics. */
+  discussionChatIds?: string[]
   requireMention?: RequireMentionConfig // default: true — respond when @mentioned or replied to in groups
   ackReaction?: string                  // default: '' — no reaction
 }
@@ -379,7 +389,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
   }
 
   function isGroupChat(msg: TelegramMessage): boolean {
-    return msg.chat.type === 'group' || msg.chat.type === 'supergroup'
+    return msg.chat.type === 'group' || msg.chat.type === 'supergroup' || msg.chat.type === 'channel'
   }
 
   /**
@@ -422,7 +432,26 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     return matched ? !base : base
   }
 
+  function conversationId(msg: TelegramMessage): string {
+    if (msg.chat.is_forum && msg.message_thread_id != null) {
+      return `${msg.chat.id}:topic:${msg.message_thread_id}`
+    }
+    if (msg.chat.type === 'supergroup' && !msg.chat.is_forum) {
+      // Direct replies prove the root without history/cache. For nested replies,
+      // getChat proves this is a linked discussion group, even after restart.
+      const root = msg.reply_to_message?.is_automatic_forward
+        ? msg.reply_to_message.message_id
+        : options.config?.discussionChatIds?.includes(String(msg.chat.id))
+          ? msg.message_thread_id : undefined
+      if (root != null) return `${msg.chat.id}:discussion:${root}`
+    }
+    return String(msg.chat.id)
+  }
+
   function parseMessage(msg: TelegramMessage): IncomingMessage | null {
+    // Auto-forwards are a second delivery of a channel post, never a user turn.
+    if (msg.is_automatic_forward || (msg.from?.is_bot && (!msg.sender_chat || msg.chat.type === 'channel'))) return null
+
     const text = msg.text ?? msg.caption ?? ''
     const isGroup = isGroupChat(msg)
     const mentioned = isBotMentioned(msg)
@@ -435,6 +464,9 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       ? msg.message_thread_id
       : undefined
     const requireMention = resolveRequireMention(chatIdStr, topicId)
+    // Broadcast posts have no trustworthy human author. Require explicit
+    // addressing even in answer-all mode; never capture an unaddressed post.
+    if (msg.chat.type === 'channel' && !mentioned && !invokedByCommand) return null
 
     // Skip service messages
     if (msg.new_chat_members || msg.left_chat_member) return null
@@ -535,17 +567,12 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       cleanText = cleanText.replace(new RegExp(`@${options.botUsername}\\b`, 'gi'), '').trim()
     }
 
-    // Forum-topic channel id: embed `message_thread_id` when the chat is a
-    // forum supergroup so sessions / locks / group-chat context partition per
-    // topic. Non-forum supergroups ignore `message_thread_id` (Telegram uses
-    // it for reply chains in regular groups, which we don't treat as topics).
-    const channelId = topicId != null
-      ? `${msg.chat.id}:topic:${topicId}`
-      : String(msg.chat.id)
+    const channelId = conversationId(msg)
+    const senderChat = msg.sender_chat ?? (msg.chat.type === 'channel' ? msg.chat : undefined)
 
     return {
-      userId: String(msg.from?.id ?? msg.chat.id),
-      senderDisplay: msg.from?.first_name ?? msg.from?.username,
+      userId: senderChat ? `chat:${senderChat.id}` : String(msg.from?.id ?? msg.chat.id),
+      senderDisplay: senderChat ? senderChat.title : msg.from?.first_name ?? msg.from?.username,
       channelId,
       messageId: String(msg.message_id),
       text: cleanText,
@@ -565,7 +592,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
   }
 
   function handleMediaGroup(msg: TelegramMessage): void {
-    const groupId = msg.media_group_id!
+    const groupId = `${conversationId(msg)}:${msg.sender_chat?.id ?? msg.from?.id}:${msg.media_group_id}`
     const existing = mediaGroups.get(groupId)
 
     if (existing) {
@@ -662,10 +689,10 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     return null
   }
 
-  // Buffer key: partition by chat AND topic so fragments posted in different
-  // topics of the same forum aren't incorrectly merged.
+  // Partition fragments by conversation AND sender: anonymous/chat senders
+  // and parallel discussion threads must never be merged into a human turn.
   function fragmentKey(msg: TelegramMessage): string {
-    return `${msg.chat.id}:${msg.message_thread_id ?? 0}`
+    return `${conversationId(msg)}:${msg.message_thread_id ?? 0}:${msg.sender_chat?.id ?? msg.from?.id}`
   }
 
   function handleTextFragment(msg: TelegramMessage): void {
@@ -798,7 +825,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
 
     parseIncoming(webhookPayload: unknown): IncomingMessage | null {
       const update = webhookPayload as TelegramUpdate
-      const msg = update.message
+      const msg = update.message ?? update.channel_post
       if (!msg) return null
       return parseMessage(msg)
     },
@@ -851,9 +878,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
         let chatId: string
         if (cq.message) {
           const m = cq.message
-          const isForum = m.chat.is_forum === true
-          const topic = isForum && m.message_thread_id != null ? m.message_thread_id : undefined
-          chatId = topic != null ? `${m.chat.id}:topic:${topic}` : String(m.chat.id)
+          chatId = conversationId(m)
         } else {
           chatId = String(cq.from.id)
         }
@@ -867,7 +892,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
         return
       }
 
-      const msg = update.message
+      const msg = update.message ?? update.channel_post
       if (!msg) return
 
       // Chat observation: every inbound message in a group/supergroup/channel
@@ -919,7 +944,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     },
 
     async sendMessage(channelId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<string> {
-      const { chatId, messageThreadId } = parseTopicChannelId(channelId)
+      const { chatId, messageThreadId, discussionRootId } = parseTopicChannelId(channelId)
       const topicId = outboundThreadId(messageThreadId)
       // Telegram rejects empty text with a 400 — a documents-only send
       // skips the text loop entirely and returns the first document's id.
@@ -927,7 +952,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
         ? chunkText(response.text, TELEGRAM_MAX_MESSAGE_LENGTH)
         : []
       let lastMessageId = 0
-      const replyToId = opts?.threadTs ? Number(opts.threadTs) : undefined
+      const replyToId = discussionRootId ?? (opts?.threadTs ? Number(opts.threadTs) : undefined)
 
       for (let i = 0; i < chunks.length; i++) {
         const isLast = i === chunks.length - 1
@@ -942,7 +967,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
             chatId,
             chunks[i],
             response.format,
-            i === 0 ? replyToId : undefined,
+            discussionRootId ?? (i === 0 ? replyToId : undefined),
             topicId,
           )
         } catch (err) {
@@ -984,7 +1009,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
           try {
             let docResult: { message_id: number }
             try {
-              docResult = await api.sendDocument(chatId, doc, { messageThreadId: topicId })
+              docResult = await api.sendDocument(chatId, doc, { messageThreadId: topicId, replyToMessageId: discussionRootId })
             } catch (err) {
               if (topicId != null && isTelegramThreadNotFoundError(err)) {
                 docResult = await api.sendDocument(chatId, doc, {})
@@ -1002,6 +1027,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
             )
             await sendMessageWithThreadFallback(api, chatId, `Could not attach ${doc.filename}.`, {
               messageThreadId: topicId,
+              replyToMessageId: discussionRootId,
             }).catch(() => {})
           }
         }
@@ -1042,8 +1068,8 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     },
 
     async sendStatus(channelId: string, status: string, opts?: { threadTs?: string; messageId?: string }): Promise<string> {
-      const { chatId, messageThreadId } = parseTopicChannelId(channelId)
-      const replyToId = opts?.threadTs ? Number(opts.threadTs) : undefined
+      const { chatId, messageThreadId, discussionRootId } = parseTopicChannelId(channelId)
+      const replyToId = discussionRootId ?? (opts?.threadTs ? Number(opts.threadTs) : undefined)
       const result = await sendMessageWithThreadFallback(api, chatId, status, {
         replyToMessageId: replyToId,
         messageThreadId: outboundThreadId(messageThreadId),
