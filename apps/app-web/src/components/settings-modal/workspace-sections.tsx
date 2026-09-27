@@ -1274,7 +1274,7 @@ function TypeToConfirmDialog({
 
 // ── ws-members ──────────────────────────────────────────────
 
-export function WorkspaceMembersSection({memberTarget,clearMember,managementEnabled=true}:{memberTarget?:SettingsMemberTarget;clearMember?:()=>void;managementEnabled?:boolean}={}) {
+export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,managementEnabled=true}:{memberTarget?:SettingsMemberTarget;clearMember?:()=>void;selectMember?:(memberId:string)=>void;managementEnabled?:boolean}={}) {
   const t = useT();
   const ctx = useWorkspaceContext();
   const { data, loading, refetch } = useWorkspaceDetail(ctx.workspaceId);
@@ -1459,7 +1459,7 @@ export function WorkspaceMembersSection({memberTarget,clearMember,managementEnab
   return (
     <div className="space-y-6">
       <h2 className="text-lg font-semibold">{memberTarget?t.organization.memberDetails:t.chrome.settingsModal.workspace.members}</h2>
-      {memberTarget?<><Button className="min-h-11" variant="outline" onClick={managementEnabled?clearMember:()=>openWorkspaceSettings('ws-organization')}>{managementEnabled?t.organization.showAllMembers:t.workspaceAccess.organization}</Button>{shownMembers.length===0?<p role="status" className="text-sm">{t.organization.memberUnavailable}</p>:null}</>:null}
+      {memberTarget?<><Button className="min-h-11" variant="outline" onClick={clearMember??(()=>openWorkspaceSettings('ws-organization'))}>{clearMember?t.organization.showAllMembers:t.workspaceAccess.organization}</Button>{shownMembers.length===0?<p role="status" className="text-sm">{t.organization.memberUnavailable}</p>:null}</>:null}
 
       {/* Invite panel — the primary action; the "Invite members" chrome
           button deep-links straight here. */}
@@ -1629,7 +1629,7 @@ export function WorkspaceMembersSection({memberTarget,clearMember,managementEnab
                 </div>
                 <div className="min-w-0">
                   <div className="text-[13px] font-medium truncate">
-                    {m.userName ?? m.email ?? t.organization.unnamedPerson}
+                    {selectMember&&!memberTarget?<button type="button" className="min-h-11 max-w-full truncate text-left hover:underline focus-visible:underline" onClick={()=>selectMember(m.userId)}>{m.userName ?? m.email ?? t.organization.unnamedPerson}</button>:m.userName ?? m.email ?? t.organization.unnamedPerson}
                     {m.email === currentUser?.email && (
                       <span className="text-muted-foreground ml-1">{t.workspaceDetailInline.you}</span>
                     )}

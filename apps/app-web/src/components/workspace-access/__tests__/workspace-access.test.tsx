@@ -26,11 +26,30 @@ vi.mock('../scope-review',()=>({ScopeReviewPanel:({close}:{close:()=>void})=><bu
 let root:Root,host:HTMLDivElement;
 const t=en.workspaceAccess;
 function fixture():ProtectedProjection<WorkspaceAccessOverview>{return{readiness:{ready:true,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:[]},validForMs:30_000,projectionDeadline:Date.now()+30_000,projectionMonotonicDeadline:performance.now()+30_000,workspaceId:'workspace-fixture',policyRevision:'15',classificationMode:'legacy',canAdminister:false,people:[{id:'member-fixture',name:'Riley',role:'member'}],teams:[{id:'research',name:'Research',directoryVisibility:'workspace',requestable:true,canManageMembers:false,canApprove:false,expandedPackage:false,memberIds:[],assistantIds:[],managerIds:[],managers:[]}],requests:[],grants:[]};}
-async function render(){await act(async()=>root.render(<I18nProvider locale="en" dict={en}><WorkspaceAccessView/></I18nProvider>));}
+async function render(props:Parameters<typeof WorkspaceAccessView>[0]={}){await act(async()=>root.render(<I18nProvider locale="en" dict={en}><WorkspaceAccessView {...props}/></I18nProvider>));}
 async function click(label:string){const button=[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent?.trim()===label);expect(button).toBeDefined();await act(async()=>button!.click());}
 beforeEach(()=>{mocks.history.mockReset();mocks.viewer.me.id='member-fixture';mocks.fetch.mockReset().mockResolvedValue(fixture());mocks.save.mockReset().mockResolvedValue(fixture());mocks.prepare.mockReset().mockImplementation(async(_workspaceId,command)=>({id:'review-fixture',payloadHash:'a'.repeat(64),command,changes:[],expiresAt:'2030-01-01T00:00:00Z',validForMs:30000,policyRevision:'15'}));mocks.confirm.mockReset().mockResolvedValue(true);mocks.settings.mockReset();invalidateSurfaceCache('workspace-access:');host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('workspace-access:');});
 describe('[COMP:app-web/workspace-access] request and administration paths',()=>{
+  it('keeps person access scoped to the selected profile and clears it on selection changes',async()=>{
+    const data=fixture();data.canAdminister=true;
+    const access={clearance:'internal' as const,effectiveClearance:'internal' as const,teamScopeMode:'assigned' as const,readTeamIds:['research'],membershipTeamIds:[],hasUnlistedReadScope:false,hasUnlistedMembershipScope:false};
+    data.people=[{id:'member-fixture',name:'Riley',role:'member',access},{id:'other',name:'Casey',role:'member',access}];mocks.fetch.mockResolvedValue(data);
+    await render({selection:{kind:'person',id:'member-fixture'}});
+    expect(host.textContent).toContain('Riley');expect(host.textContent).not.toContain('Casey');expect(host.textContent).not.toContain(t.accessAudit);
+    await click(t.editPerson);expect(host.querySelector('form')).not.toBeNull();
+    await render({selection:{kind:'person',id:'other'}});expect(host.querySelector('form')).toBeNull();expect(host.textContent).toContain('Casey');expect(host.textContent).not.toContain('Riley');
+    await render({selection:{kind:'person',id:'unavailable'}});expect(host.textContent).not.toContain('Casey');expect(host.textContent).not.toContain(t.editPerson);
+  });
+  it('offers configuration only for the selected department while requests retain their workflow',async()=>{
+    const data=fixture();data.canAdminister=true;data.teams.push({...data.teams[0],id:'operations',name:'Operations'});mocks.fetch.mockResolvedValue(data);
+    await render({selection:{kind:'department',id:'research'}});expect(host.textContent).toContain('Research');expect(host.textContent).not.toContain('Operations');
+    expect([...host.querySelectorAll('button')].some(b=>b.textContent===t.requestAccess)).toBe(false);
+    await click(t.edit);expect(host.textContent).toContain(t.manager);
+    await render({selection:{kind:'department',id:'operations'}});expect(host.textContent).not.toContain(t.manager);expect(host.textContent).toContain('Operations');
+    await render({selection:{kind:'requests'}});expect(host.textContent).toContain(t.requestAccess);expect(host.textContent).toContain(t.accessAudit);expect(host.textContent).toContain(t.emptyGrants);
+    expect([...host.querySelectorAll('button')].some(b=>b.textContent===t.edit)).toBe(false);
+  });
   it('renews through a separately confirmed request and leaves the existing grant unchanged',async()=>{
     const data=fixture();data.grants=[{id:'original-grant',requestId:'original-request',targetTeamId:'research',targetTeamName:'Research',beneficiaryKind:'member',beneficiaryId:'member-fixture',beneficiaryName:'Riley',startsAt:'2026-01-01',expiresAt:'2026-01-31',revokedAt:null,approvedBy:'independent-approver',canRevoke:true,status:'expired'}];
     const original=structuredClone(data.grants);mocks.fetch.mockResolvedValue(data);await render();await click(t.requestRenewal);

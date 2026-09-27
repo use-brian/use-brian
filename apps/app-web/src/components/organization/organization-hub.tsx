@@ -34,12 +34,14 @@ export function OrganizationHub() {
       </nav>
     </header>
     <div key={`${workspaceId}:${me.id}:${section}`} className="min-h-0 min-w-0 flex-1 overflow-y-auto">
-      {section === 'structure' ? <OrganizationChartView /> : section === 'access' ? <WorkspaceAccessView /> :
+      {section === 'structure' ? <OrganizationChartView /> : section === 'access' ? <WorkspaceAccessView selection={{kind:'requests'}} /> :
         <div className="mx-auto max-w-6xl p-4 md:p-6">
-          {section === 'departments' ? <TeamsContextSection /> : <WorkspaceMembersSection
+          {section === 'departments' ? <TeamsContextSection renderAccessSettings={id=><WorkspaceAccessView selection={{kind:'department',id}}/>} /> : <><WorkspaceMembersSection
             memberTarget={memberId ? { workspaceId, memberId } : undefined}
             clearMember={() => router.push(organizationHref(workspaceId, 'people'))}
-            managementEnabled={deploymentCapabilities().teammateManagement} />}
+            selectMember={id=>router.push(organizationHref(workspaceId,'people',id))}
+            managementEnabled={deploymentCapabilities().teammateManagement} />
+            {memberId?<WorkspaceAccessView selection={{kind:'person',id:memberId}}/>:null}</>}
         </div>}
     </div>
   </div>;

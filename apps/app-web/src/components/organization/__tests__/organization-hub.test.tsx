@@ -39,8 +39,8 @@ vi.mock("@/lib/auth-fetch", () => ({
 const navigation = vi.hoisted(() => ({ query: '', push: vi.fn() }));
 vi.mock('next/navigation', () => ({ useSearchParams: () => new URLSearchParams(navigation.query), useRouter: () => ({ push: navigation.push }) }));
 vi.mock('../organization-chart', () => ({ OrganizationChartView: () => <h2>Structure fixture</h2> }));
-vi.mock('@/components/workspace-access/workspace-access', () => ({ WorkspaceAccessView: () => <h2>Access fixture</h2> }));
-vi.mock('@/components/settings-modal/sections/context-scopes-section', () => ({ TeamsContextSection: () => <h2>Departments fixture</h2> }));
+vi.mock('@/components/workspace-access/workspace-access', () => ({ WorkspaceAccessView: ({selection}:{selection:{kind:string;id?:string}}) => <div data-access-kind={selection.kind} data-access-id={selection.id}>{selection.kind==='requests'?'Access fixture':'Scoped access fixture'}</div> }));
+vi.mock('@/components/settings-modal/sections/context-scopes-section', () => ({ TeamsContextSection: ({renderAccessSettings}:{renderAccessSettings:(id:string)=>React.ReactNode}) => <><h2>Departments fixture</h2>{renderAccessSettings('department-fixture')}</> }));
 let root: Root;
 let host: HTMLDivElement;
 beforeEach(() => { edition.teammateManagement = true; resetSurfaceCache(); navigation.query = 'section=people'; navigation.push.mockReset(); host = document.createElement('div'); document.body.append(host); root = createRoot(host); });
@@ -59,6 +59,19 @@ describe('[COMP:app-web/organization-chart] unified organization home', () => {
     expect(host.textContent?.includes('Access fixture')).toBe(section === 'access');
     expect(host.textContent?.includes('Departments fixture')).toBe(section === 'departments');
     expect(host.textContent?.includes('Casey')).toBe(section === 'people');
+  });
+  it('opens a roster person and embeds only their scoped access controls',async()=>{
+    await render();
+    const person=[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent==='Casey')!;
+    expect(person).toBeDefined();await act(async()=>person.click());
+    expect(navigation.push).toHaveBeenCalledWith('/w/workspace-1/organization?section=people&member=user-2');
+    await render('user-2');expect(host.querySelector('[data-access-kind="person"]')?.getAttribute('data-access-id')).toBe('user-2');
+    await render('user-1');expect(host.querySelector('[data-access-kind="person"]')?.getAttribute('data-access-id')).toBe('user-1');
+    await render();expect(host.querySelector('[data-access-kind]')).toBeNull();
+  });
+  it('embeds selected department controls and keeps Access on requests',async()=>{
+    navigation.query='section=departments';await redraw();expect(host.querySelector('[data-access-kind="department"]')?.getAttribute('data-access-id')).toBe('department-fixture');
+    navigation.query='section=access';await redraw();expect(host.querySelector('[data-access-kind="requests"]')).not.toBeNull();expect(host.querySelector('[data-access-kind="department"]')).toBeNull();
   });
   it('falls back to Structure for an unknown section', async () => {
     navigation.query = 'section=unknown'; await redraw(); expect(host.textContent).toContain('Structure fixture');

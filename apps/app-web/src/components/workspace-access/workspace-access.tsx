@@ -26,11 +26,15 @@ function Picker({label,value,onChange,items,disabled=false}:{label:string;value:
   const t=useT().workspaceAccess;
   return <label className="grid gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} value={value} onValueChange={onChange} items={items} disabled={disabled} className="min-h-11" searchPlaceholder={t.search} emptyMessage={t.noResults}/></label>;
 }
-export function WorkspaceAccessView() {
+type AccessSelection = {kind:'person';id:string}|{kind:'department';id:string}|{kind:'requests'};
+export function WorkspaceAccessView({selection}:{selection?:AccessSelection}={}) {
   const {workspaceId,me}=useWorkspaceContext();
-  return <WorkspaceAccessPanel key={`${workspaceId}:${me.id}`}/>;
+  return <WorkspaceAccessPanel key={`${workspaceId}:${me.id}:${selection?.kind??'all'}:${selection&&'id' in selection?selection.id:''}`} selection={selection}/>;
 }
-function WorkspaceAccessPanel() {
+function WorkspaceAccessPanel({selection}:{selection?:AccessSelection}) {
+  const peopleVisible=!selection||selection.kind==='person';
+  const departmentsVisible=!selection||selection.kind!=='person';
+  const historyVisible=!selection||selection.kind==='requests';
   const {workspaceId,me}=useWorkspaceContext(),t=useT().workspaceAccess;
   const key=workspaceAccessCacheKey(workspaceId,me.id);
   const resource=useCachedResource(key,()=>fetchWorkspaceAccess(workspaceId));
@@ -51,21 +55,21 @@ function WorkspaceAccessPanel() {
     return()=>{window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};
   },[workspaceId]);
   const save:Save=async(command,description)=>data?Boolean(await change.save(command,description,data.policyRevision)):false;
-  const header=<header className="space-y-2"><h2 className="text-lg font-semibold">{t.title}</h2><p className="text-sm text-muted-foreground">{t.description}</p><p className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.boundaryHint}{data?.canAdminister?` ${t.adminHint}`:''}</p></header>;
+  const header=<header className="space-y-2"><h2 className="text-lg font-semibold">{selection&&selection.kind!=='requests'?t.accessSettings:t.title}</h2>{historyVisible?<p className="text-sm text-muted-foreground">{t.description}</p>:null}<p className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.boundaryHint}{data?.canAdminister?` ${t.adminHint}`:''}</p></header>;
   // Review owns its independently expiring administrator projection. A refresh
   // of the parent must not discard an in-progress saved-review selection.
   if(reviewOpen)return <ScopeReviewPanel teams={data?.canAdminister?data.teams:[]} close={()=>setReviewOpen(false)}/>;
   if(!data) return resource.error?<main className="space-y-4 p-4">{header}<p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></main>:<SurfaceSkeletonFor surface="organization"/>;
-  return <main className="min-w-0 space-y-6 p-4 md:p-6">{header}
+  return <main className={historyVisible?'min-w-0 space-y-6 p-4 md:p-6':'min-w-0 space-y-4 pt-6'}>{header}
     {data.readiness?.ready!==true?<p role="status" className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.notReady}</p>:null}
-    {data.canAdminister?<Button variant="outline" className="min-h-11" onClick={()=>setReviewOpen(true)}>{t.reviewData}</Button>:null}
-    <nav className="flex flex-wrap gap-2">{data.canAdminister?<Link className="flex min-h-11 items-center rounded-lg border border-border px-3 text-sm" href={organizationHref(workspaceId,'departments')}>{t.configureTeams}</Link>:null}<Button variant="ghost" className="min-h-11" onClick={()=>{change.clearError();invalidateSurfaceCache(key);}}>{t.reload}</Button></nav>
-    <Button variant="outline" className="min-h-11" onClick={()=>setInspection('events')}>{t.accessAudit}</Button>
+    {data.canAdminister&&selection?.kind!=='person'?<Button variant="outline" className="min-h-11" onClick={()=>setReviewOpen(true)}>{t.reviewData}</Button>:null}
+    <nav className="flex flex-wrap gap-2">{data.canAdminister&&historyVisible?<Link className="flex min-h-11 items-center rounded-lg border border-border px-3 text-sm" href={organizationHref(workspaceId,'departments')}>{t.configureTeams}</Link>:null}<Button variant="ghost" className="min-h-11" onClick={()=>{change.clearError();invalidateSurfaceCache(key);}}>{t.reload}</Button></nav>
+    {historyVisible?<Button variant="outline" className="min-h-11" onClick={()=>setInspection('events')}>{t.accessAudit}</Button>:<nav className="flex flex-wrap gap-3"><Link className="flex min-h-11 items-center text-sm underline" href={organizationHref(workspaceId,'access')}>{t.requests} / {t.grants}</Link><Link className="flex min-h-11 items-center text-sm underline" href={organizationHref(workspaceId)}>{t.organization}</Link></nav>}
     {inspection==='events'?<AccessEventsPanel key={data.policyRevision} data={data} close={()=>setInspection(null)}/>:inspection?<AccessExplanationPanel key={`${inspection.memberId}:${data.policyRevision}`} data={data} memberId={inspection.memberId} close={()=>setInspection(null)}/>:null}
     {error||resource.error?<p role="alert" className="text-sm text-destructive">{error||t.loadError}</p>:null}
     {retryAvailable?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>void change.retry()}>{t.retryChange}</Button>:null}
-    <section className="space-y-3"><h2 className="font-semibold">{t.people}</h2><p className="text-sm text-muted-foreground">{t.peopleHint}</p>
-      {data.people.filter(person=>person.access).map(person=><article key={person.id} className="min-w-0 space-y-3 rounded-xl border border-border p-4">
+    {peopleVisible?<section className="space-y-3">{!selection?<><h2 className="font-semibold">{t.people}</h2><p className="text-sm text-muted-foreground">{t.peopleHint}</p></>:null}
+      {data.people.filter(person=>person.access&&(selection?.kind!=='person'||person.id===selection.id)).map(person=><article key={person.id} className="min-w-0 space-y-3 rounded-xl border border-border p-4">
         <h3 className="break-words font-medium">{person.name||t.unnamed}</h3>
         <p className="text-sm">{t.workspaceRole}: {person.role==='member'?t.memberRole:t[person.role]}</p>
         <p className="text-sm">{t.clearance}: {t[person.access!.effectiveClearance]}</p>
@@ -78,17 +82,17 @@ function WorkspaceAccessPanel() {
         {data.canAdminister&&person.role==='member'?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>setEditPerson(person.id)}>{t.editPerson}</Button>:null}
         {data.canAdminister&&editPerson===person.id?<PersonAccessEditor key={`${person.id}:${data.policyRevision}`} data={data} person={person} busy={busy} save={save} close={()=>setEditPerson(null)}/>:null}
       </article>)}
-    </section>
-    <section className="space-y-3"><h2 className="font-semibold">{t.departments}</h2>
+    </section>:null}
+    {departmentsVisible?<section className="space-y-3">{historyVisible?<h2 className="font-semibold">{t.departments}</h2>:null}
       {!data.teams.length?<p className="text-sm text-muted-foreground">{t.emptyTeams}</p>:null}
-      {data.teams.map(team=><article key={team.id} className="min-w-0 space-y-3 rounded-xl border border-border p-4"><h3 className="break-words font-medium">{team.name}</h3>
+      {data.teams.filter(team=>selection?.kind!=='department'||team.id===selection.id).map(team=><article key={team.id} className="min-w-0 space-y-3 rounded-xl border border-border p-4"><h3 className="break-words font-medium">{team.name}</h3>
         {team.expandedPackage?<p className="text-sm text-muted-foreground">{t.expanded}</p>:null}
-        <div className="flex flex-wrap gap-2">{team.requestable||data.canAdminister?<Button className="min-h-11" disabled={busy||data.readiness?.ready!==true} onClick={()=>{setRequestTeam(team.id);setEditTeam(null);}}>{t.requestAccess}</Button>:null}{data.canAdminister||team.canManageMembers?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>{setEditTeam(team.id);setRequestTeam(null);}}>{t.edit}</Button>:null}</div>
+        <div className="flex flex-wrap gap-2">{historyVisible&&(team.requestable||data.canAdminister)?<Button className="min-h-11" disabled={busy||data.readiness?.ready!==true} onClick={()=>{setRequestTeam(team.id);setEditTeam(null);}}>{t.requestAccess}</Button>:null}{selection?.kind!=='requests'&&(data.canAdminister||team.canManageMembers)?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>{setEditTeam(team.id);setRequestTeam(null);}}>{t.edit}</Button>:null}</div>
         {requestTeam===team.id&&data.readiness?.ready===true?<AccessRequestForm data={data} team={team} viewerId={me.id} busy={busy} save={save} close={()=>setRequestTeam(null)}/>:null}
         {editTeam===team.id?<DepartmentEditor key={`${team.id}:${data.policyRevision}`} data={data} team={team} busy={busy} save={save} close={()=>setEditTeam(null)}/>:null}
       </article>)}
-    </section>
-    {(['requests','grants'] as const).map(kind=><AccessHistorySection key={`${kind}:${data.policyRevision}`} kind={kind} data={data} busy={busy} save={save}/>)}
+    </section>:null}
+    {historyVisible?(['requests','grants'] as const).map(kind=><AccessHistorySection key={`${kind}:${data.policyRevision}`} kind={kind} data={data} busy={busy} save={save}/>):null}
   </main>;
 }
 function Interval({starts,expires}:{starts:string;expires:string|null}) {

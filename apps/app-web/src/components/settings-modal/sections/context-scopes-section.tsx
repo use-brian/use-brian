@@ -3,7 +3,7 @@
 
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /** Workspace Team/Project registry and readiness UI. [COMP:app-web/context-scope] */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Archive, Check, Info, Plus, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -37,7 +37,7 @@ function stableKey(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 39);
 }
 
-export function TeamsContextSection() {
+export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings?:(teamId:string)=>ReactNode}={}) {
   const { workspaceId, role } = useWorkspaceContext();
   const t = useT().contextScope;
   const [teams, setTeams] = useState<ContextTeam[]>([]);
@@ -278,6 +278,7 @@ export function TeamsContextSection() {
                 </div>
               </div>
               {canManage ? <Button size="sm" className="min-h-11" disabled={change.busy} onClick={() => void saveGrants()}><Check className="size-4" />{t.saveAccess}</Button> : null}
+              {renderAccessSettings?.(selected.id)}
               {canManage && selected.status === "active" ? <Button variant="ghost" size="sm" className="min-h-11" disabled={change.busy} onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button> : null}
             </div>
           ) : null}

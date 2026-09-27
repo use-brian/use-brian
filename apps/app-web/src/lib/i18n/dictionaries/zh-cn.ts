@@ -162,6 +162,7 @@ export const zhCN: Dictionary = {
     scopeDenied: "此示例不在所选范围内。",
     resourceCheckRequired: "范围相符不代表可以操作特定资源。仍须符合私人可见性、资源权限及发布检查。",
     currentPreviewHint: "此预览依据当前权限。现有对话的访问范围可能更窄。",
+    accessSettings: "访问设置",
     assistantCeiling: "助手权限上限",
     contextDepartment: "部门上下文",
     contextProject: "项目上下文",
