@@ -24,15 +24,22 @@ import { z } from 'zod'
  * refs.
  */
 export const BrowserSnapshotNodeSchema = z.object({
+  /** Backend DOM identity, meaningful only within the snapshot documentId. */
+  nodeId: z.string().min(1).optional(),
   ref: z.string().min(1).optional(),
   role: z.string(),
   name: z.string(),
   value: z.string().optional(),
   disabled: z.boolean().optional(),
+  checked: z.union([z.boolean(), z.literal('mixed')]).optional(),
+  required: z.boolean().optional(),
+  invalid: z.string().optional(),
 })
 export type BrowserSnapshotNode = z.infer<typeof BrowserSnapshotNodeSchema>
 
 export const BrowserSnapshotSchema = z.object({
+  /** Actual document identity, scoped to a browser attachment; not a URL. */
+  documentId: z.string().min(1).optional(),
   url: z.string(),
   title: z.string(),
   nodes: z.array(BrowserSnapshotNodeSchema),
@@ -75,6 +82,30 @@ export const BrowserTabCloseResultSchema = z.object({
   activeTabId: z.string().nullable(),
 })
 export type BrowserTabCloseResult = z.infer<typeof BrowserTabCloseResultSchema>
+
+/** Ordered batch operations, at most 50 fields. No arbitrary clicks or submits:
+ * native click is permitted only to change a validated checkbox/radio state.
+ * Select prefers an exact option value, then a unique enabled label/text match.
+ * A checked radio cannot be directly unchecked; select a different radio instead.
+ */
+export const BrowserFormFieldSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('fill'), ref: z.string().min(1), value: z.string().max(20000) }).strict(),
+  z.object({ action: z.literal('select'), ref: z.string().min(1), value: z.string().max(20000) }).strict(),
+  z.object({ action: z.literal('check'), ref: z.string().min(1), checked: z.boolean() }).strict(),
+])
+export const BrowserFormFieldsSchema = z.array(BrowserFormFieldSchema).min(1).max(50).refine(
+  fields => new Set(fields.map(field => field.ref)).size === fields.length,
+  { message: 'Duplicate form refs are not allowed.' },
+)
+export type BrowserFormField = z.infer<typeof BrowserFormFieldSchema>
+export const BrowserFillFormResultSchema = z.object({
+  fields: z.array(z.object({
+    ref: z.string(),
+    status: z.enum(['success', 'failed', 'skipped']),
+    error: z.string().optional(),
+  })).max(50),
+})
+export type BrowserFillFormResult = z.infer<typeof BrowserFillFormResultSchema>
 
 // ── Call context ───────────────────────────────────────────────
 
@@ -177,6 +208,13 @@ export interface BrowserProvider {
   snapshot(ctx: BrowserCallContext, options?: BrowserSnapshotOptions): Promise<BrowserSnapshot>
   click(ctx: BrowserCallContext, ref: string): Promise<void>
   type(ctx: BrowserCallContext, ref: string, text: string): Promise<void>
+  /** Ordered results correspond to the request. A failed field may have been mutated;
+   * skipped fields were not attempted. Writes are not rolled back; completed
+   * fields are reverified at the end and reported failed if later events undo them.
+   * Preflight failures skip all other fields. Unsupported backends omit this method
+   * or explicitly reject; callers must never fall back to clicks/typing loops.
+   */
+  fillForm?(ctx: BrowserCallContext, fields: BrowserFormField[]): Promise<BrowserFillFormResult>
   currentUrl(ctx: BrowserCallContext): Promise<BrowserUrlResult>
   /** Local multi-tab operations. Cloud providers intentionally omit them. */
   openTab?(ctx: BrowserCallContext, url: string): Promise<BrowserTabSelectionResult>

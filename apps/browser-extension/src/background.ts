@@ -4,6 +4,7 @@
  * governed backend: it executes one discrete relay command at a time in the
  * profile-scoped tab set the user allowed, and the Stop button always wins.
  */
+import { CommandQueue } from './command-queue.js'
 import { RelayClient } from './relay-client.js'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach } from './executor.js'
 import {
@@ -29,6 +30,7 @@ import { ProtectedFill, denied } from './protected-fill.js'
 const protectedFill = new ProtectedFill(chrome.storage.local)
 let commandQueue: Promise<unknown> = Promise.resolve()
 const executor = new TabExecutor()
+const commands = new CommandQueue()
 
 // ── Consent prompt: a small extension window with Allow / Deny ──
 
@@ -86,6 +88,7 @@ async function stopTask(): Promise<void> {
 }
 
 async function clearTask(createdTabIds: number[]): Promise<void> {
+  commands.cancel()
   await executor.detach()
   if (createdTabIds.length > 0) {
     await chrome.tabs.remove(createdTabIds).catch(() => undefined)
@@ -163,7 +166,10 @@ async function handleCommand(cmd: {
   controlMode: LocalControlMode
 }): Promise<void> {
   try {
-    const data = await executeOp(cmd.op, cmd.args, cmd.controlMode)
+    // Stop bypasses the queue and invalidates work submitted before it.
+    const data = cmd.op === 'stop'
+      ? await executeOp(cmd.op, cmd.args, cmd.controlMode)
+      : await commands.run(check => executeOp(cmd.op, cmd.args, cmd.controlMode, check))
     client.sendResult({ id: cmd.id, ok: true, data })
   } catch (err) {
     if (cmd.op === 'browserFillReference' || await protectedFill.locked()) {
@@ -187,6 +193,7 @@ async function executeOp(
   op: string,
   args: Record<string, unknown>,
   controlMode: LocalControlMode,
+  check: () => void = () => {},
 ): Promise<unknown> {
   if (op === 'stop') {
     await stopTask()
@@ -194,14 +201,15 @@ async function executeOp(
   }
   if (await protectedFill.locked()) throw denied()
   try {
-    return await dispatch(op, args, controlMode)
+    return await dispatch(op, args, controlMode, check)
   } catch (err) {
     // Chrome can drop the CDP session mid-command. Re-attaching costs one
     // round trip and the gate still governs it (a revoked consent re-prompts),
     // so recover once rather than handing the model a dead browser — but only
     // for ops that cannot double-fire. See `retryableAfterReattach`.
+    check()
     if (!isDetachedError(err) || !retryableAfterReattach(op)) throw err
-    return await dispatch(op, args, controlMode)
+    return await dispatch(op, args, controlMode, check)
   }
 }
 
@@ -239,6 +247,7 @@ async function dispatch(
   op: string,
   args: Record<string, unknown>,
   controlMode: LocalControlMode,
+  check: () => void = () => {},
 ): Promise<unknown> {
   if (op === 'browserFillReference') {
     return protectedFill.fill(args, () => gate.entries(controlMode).map(t => t.tabId), async request => {
@@ -257,12 +266,15 @@ async function dispatch(
       'no_browser_permission',
     )
   }
+  check()
   const tabId = await gate.requireTab(controlMode)
+  check()
   if (op === 'openTab') return openTab(args, controlMode)
   if (op === 'listTabs') return listTabs(controlMode)
   if (op === 'switchTab') return switchTab(args, controlMode)
   if (op === 'closeTab') return closeTab(args, controlMode)
   await attachToEligibleTab(tabId)
+  check()
   switch (op) {
     case 'navigate':
       return executor.navigate(String(args.url ?? ''))
@@ -271,6 +283,8 @@ async function dispatch(
     case 'click':
       await executor.click(String(args.ref ?? ''))
       return { clicked: true }
+    case 'fillForm':
+      return executor.fillForm(args)
     case 'type':
       await executor.type(String(args.ref ?? ''), String(args.text ?? ''))
       return { typed: true }

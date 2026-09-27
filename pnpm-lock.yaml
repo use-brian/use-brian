@@ -327,6 +327,9 @@ importers:
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.43
+      jsdom:
+        specifier: ^29.1.1
+        version: 29.1.1(@noble/hashes@1.8.0)
       typescript:
         specifier: ^5.7
         version: 5.9.3

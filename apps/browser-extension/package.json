@@ -12,6 +12,7 @@
   "devDependencies": {
     "@types/chrome": "^0.0.287",
     "@types/node": "^20.19.39",
+    "jsdom": "^29.1.1",
     "typescript": "^5.7",
     "vitest": "^3"
   }

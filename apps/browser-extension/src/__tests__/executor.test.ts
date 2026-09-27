@@ -137,7 +137,7 @@ describe('[COMP:ext/agent] CDP attachment lifecycle', () => {
   it('drops the snapshot on detach so stale refs cannot resolve', async () => {
     const executor = new TabExecutor()
     await executor.attach(42)
-    dbg.sendCommand.mockResolvedValueOnce({
+    dbg.sendCommand.mockResolvedValueOnce({}).mockResolvedValueOnce({ root: { backendNodeId: 1 } }).mockResolvedValueOnce({
       nodes: [
         {
           nodeId: '1',
@@ -421,7 +421,7 @@ describe('[COMP:sandbox/action-cursor] Chromium My Browser action cursor', () =>
     await executor.type(ref, 'hello')
 
     const calls = dbg.sendCommand.mock.calls
-    const cursorCalls = calls.filter((call) => call[1] === 'Runtime.evaluate')
+    const cursorCalls = calls.filter((call) => call[1] === 'Runtime.evaluate' && String(call[2]?.expression).includes(ACTION_CURSOR_MARKER))
     expect(cursorCalls).toHaveLength(2)
     expect(cursorCalls[0]?.[2]?.expression).toContain(ACTION_CURSOR_MARKER)
     expect(cursorCalls[0]?.[2]?.expression).toContain('("pointer")')

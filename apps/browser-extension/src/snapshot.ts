@@ -17,11 +17,15 @@ export type CdpAXNode = {
 }
 
 type SnapshotNode = {
+  nodeId?: string
   ref?: string
   role: string
   name: string
   value?: string
   disabled?: boolean
+  checked?: boolean | 'mixed'
+  required?: boolean
+  invalid?: string
 }
 
 export type BuiltSnapshot = {
@@ -85,6 +89,27 @@ function propTrue(node: CdpAXNode, name: string): boolean {
   )
 }
 
+/** Preserve false as a real state, not as missing metadata. */
+function booleanProperty(value: unknown): boolean | undefined {
+  if (value === true || value === 'true') return true
+  if (value === false || value === 'false') return false
+  return undefined
+}
+
+function formState(node: CdpAXNode): Pick<SnapshotNode, 'checked' | 'required' | 'invalid'> {
+  const property = (name: string) => node.properties?.find(p => p.name === name)?.value?.value
+  const rawChecked = property('checked')
+  const checked = rawChecked === 'mixed' ? 'mixed' : booleanProperty(rawChecked)
+  const required = booleanProperty(property('required'))
+  const rawInvalid = property('invalid')
+  const invalid = rawInvalid === true ? 'true' : typeof rawInvalid === 'string' && rawInvalid !== 'false' && rawInvalid !== '' ? rawInvalid : undefined
+  return {
+    ...(checked !== undefined ? { checked } : {}),
+    ...(required !== undefined ? { required } : {}),
+    ...(invalid !== undefined ? { invalid } : {}),
+  }
+}
+
 /**
  * Build the interactive-node list. Includes nodes whose role is interactive,
  * plus focusable nodes that carry a name (covers contenteditable message
@@ -112,11 +137,13 @@ export function buildSnapshot(axNodes: CdpAXNode[], mode: 'interactive' | 'full'
     const ref = interactive ? `@e${++counter}` : undefined
     const value = asString(ax.value?.value)
     const node: SnapshotNode = {
+      ...(typeof ax.backendDOMNodeId === 'number' ? { nodeId: String(ax.backendDOMNodeId) } : {}),
       role: role || 'node',
       name,
       ...(ref ? { ref } : {}),
       ...(value ? { value } : {}),
       ...(propTrue(ax, 'disabled') ? { disabled: true } : {}),
+      ...formState(ax),
     }
     nodes.push(node)
     if (ref && typeof ax.backendDOMNodeId === 'number') {

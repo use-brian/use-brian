@@ -118,6 +118,9 @@ async function executeOp(op: string, args: Record<string, unknown>): Promise<unk
     boundTabId = null
     return native.request('stop')
   }
+  if (op === 'fillForm') {
+    throw new FirefoxNativeError('Batch form filling is not implemented in Firefox.', 'unsupported_browser')
+  }
   if (op === 'openTab' || op === 'listTabs' || op === 'switchTab' || op === 'closeTab') {
     throw new FirefoxNativeError(
       'Multi-tab control is currently available in the Chrome and Edge extension only.',
