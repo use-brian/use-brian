@@ -2859,7 +2859,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
     getArtifact: officeArtifactStore.get,
     raiseScope: officeArtifactStore.raiseScope,
-    resolveAccess: resolveDurableOfficeAccess,
+    resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
     getSnapshot: officeLiveStore.get,

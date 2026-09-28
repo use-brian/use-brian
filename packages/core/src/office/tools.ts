@@ -13,10 +13,11 @@ import { resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '..
 
 export type OfficeArtifactToolProjection = {
   artifactId: string
-  family: 'document' | 'presentation' | 'spreadsheet'
-  mode?: 'artifact' | 'template'
+  family: 'document' | 'presentation' | 'spreadsheet' | 'pdf'
+  mode?: 'artifact' | 'template' | 'session'
   title: string
   version: number
+  expiresAt?: string
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained'
   role: 'view' | 'comment' | 'edit'
   targets?: Array<{ id: string; kind: string; label: string; parentId?: string; locked?: boolean }>

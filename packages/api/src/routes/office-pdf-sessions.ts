@@ -76,7 +76,13 @@ export function officePdfSessionRoutes(deps: { service: PdfSessionService }): Ro
     const owner = userId(req)
     if (!owner) return void res.status(401).json({ error: 'Unauthorized' })
     try {
-      const source = await deps.service.readSource(owner, String(req.params.artifactId))
+      const artifactId = String(req.params.artifactId)
+      const [{ session }, source] = await Promise.all([
+        deps.service.get(owner, artifactId),
+        deps.service.readSource(owner, artifactId),
+      ])
+      res.setHeader('X-Brian-Media-Valid-For-Ms', String(Math.max(1, Math.min(30_000, session.expiresAt.getTime() - Date.now()))))
+      res.append('Access-Control-Expose-Headers', 'X-Brian-Media-Valid-For-Ms')
       res.type('application/pdf').send(Buffer.from(source.bytes))
     } catch (error) { sendError(res, error) }
   })

@@ -45,9 +45,12 @@ describe('[COMP:api/office-pdf-routes] PDF session routes', () => {
 
   it('serves protected source bytes with no-store and no browser execution context', async () => {
     const readSource = vi.fn(async () => ({ bytes: new Uint8Array([37, 80, 68, 70]), file: {} }))
-    const response = await request(server({ readSource })).get(`/api/office/artifacts/${ARTIFACT}/pdf/source`).expect(200)
+    const get = vi.fn(async () => ({ session: { expiresAt: new Date(Date.now() + 20_000) } }))
+    const response = await request(server({ readSource, get })).get(`/api/office/artifacts/${ARTIFACT}/pdf/source`).expect(200)
     expect(response.headers['content-type']).toMatch(/^application\/pdf/)
     expect(response.headers['cache-control']).toBe('private, no-store')
     expect(response.headers['content-security-policy']).toContain("default-src 'none'")
+    expect(Number(response.headers['x-brian-media-valid-for-ms'])).toBeGreaterThan(0)
+    expect(Number(response.headers['x-brian-media-valid-for-ms'])).toBeLessThanOrEqual(20_000)
   })
 })

@@ -140,9 +140,9 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
 
     async get(params) {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
-      if (!artifact || !isDurableOfficeArtifact(artifact) || !access || !artifactWithinTurnScope(artifact, params)) return null
+      if (!artifact || !access || !artifactWithinTurnScope(artifact, params)) return null
       const [job, live] = await Promise.all([deps.latestJob(params.userId, params.artifactId), deps.getSnapshot(params.userId, params.artifactId)])
-      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode } : undefined }
+      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, ...(artifact.expiresAt ? { expiresAt: artifact.expiresAt.toISOString() } : {}), scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode } : undefined }
     },
 
     async revise(params) {

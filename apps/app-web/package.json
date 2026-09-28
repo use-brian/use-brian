@@ -51,6 +51,7 @@
     "jose": "^6.2.3",
     "lucide-react": "^1.7.0",
     "next": "16.4.0-canary.25",
+    "pdfjs-dist": "~5.6.205",
     "qrcode.react": "^4.2.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",

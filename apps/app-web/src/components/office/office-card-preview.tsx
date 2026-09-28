@@ -53,6 +53,7 @@ export function canLoadOfficeCardPreview(artifact: OfficeArtifact): boolean {
 }
 
 export function OfficeCardPreviewCanvas({ snapshot }: { snapshot: OfficeArtifactSnapshot }) {
+  if (snapshot.family === "pdf") return null;
   if (snapshot.family === "presentation") {
     const slide = snapshot.slides[0];
     return (
