@@ -91,6 +91,51 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     requestBrowserControl.mockResolvedValue("prompted");
   });
 
+  it("labels the desktop connection as in-app rather than Chrome", async () => {
+    window.usebrianDesktop = { browserControl: vi.fn(), signIn: vi.fn() };
+    try {
+      getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: false });
+      const { el, root } = await mount();
+      expect(labelOf(el)).toBe(en.computer.connectBrowser.desktop.connect);
+      await click(el);
+      expect(pairViaExtension).toHaveBeenCalled();
+      await act(async () => root.unmount());
+      el.remove();
+    } finally {
+      delete window.usebrianDesktop;
+    }
+  });
+
+  it.each(["other browser", "other workspace", "missing fields", "rejected", "local connected"])(
+    "uses local workspace pairing for desktop sidebar: %s",
+    async (scenario) => {
+      window.usebrianDesktop = {
+        signIn: vi.fn(),
+        browserControl: vi.fn(async () => {
+          if (scenario === "rejected") throw new Error("IPC unavailable");
+          if (scenario === "missing fields") return { ok: true, hasControl: true };
+          return { ok: true, hasControl: true, connected: scenario !== "other browser",
+            workspaceId: scenario === "other workspace" ? "ws-2" : "ws-1" };
+        }),
+      };
+      getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: true });
+      const { el, root } = await mount();
+      try {
+        const connected = scenario === "local connected";
+        expect(labelOf(el)).toBe(connected ? en.computer.connectBrowser.desktop.manage : en.computer.connectBrowser.desktop.connect);
+        expect(dotOf(el)).toBe(connected ? "primary" : null);
+        expect(extensionHasControl).not.toHaveBeenCalled();
+        await click(el);
+        if (connected) expect(routerPush).toHaveBeenCalled();
+        else expect(pairViaExtension).toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        el.remove();
+        delete window.usebrianDesktop;
+      }
+    },
+  );
+
   it("renders nothing where the deployment has no relay configured", async () => {
     getBrowserExtensionStatus.mockResolvedValue({ configured: false, connected: false });
     const { el } = await mount();

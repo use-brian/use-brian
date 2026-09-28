@@ -10786,6 +10786,18 @@ export const ja: Dictionary = {
       unnamed: "ブラウザセッション",
     },
     connectBrowser: {
+      desktop: {
+        title: "アプリ内ブラウザー",
+        description: "Use Brian 内蔵のブラウザーに接続します。拡張機能は不要です。",
+        connect: "アプリ内ブラウザーに接続",
+        connected: "アプリ内ブラウザーに接続済み",
+        disconnected: "アプリ内ブラウザーは未接続です",
+        failed: "アプリ内ブラウザーに接続できませんでした。もう一度お試しください。",
+        manage: "アプリ内ブラウザーの接続を管理",
+        allow: "Use Brian にアプリ内ブラウザーの操作を許可",
+        gatedBody: "プランをアップグレードしてアプリ内ブラウザーを使用します。",
+        staleBuildWarning: "Use Brian を再起動してアプリ内ブラウザーを更新してください。",
+      },
       title: "マイブラウザ",
       description:
         "このUse Brianプロフィールを、ログイン情報とネットワークを提供するChromeプロフィールに接続します。別々のChromeプロフィールをペアリングすると、複数のアシスタント身元を同時に実行できます。各接続は許可したタブでのみ動作します。",

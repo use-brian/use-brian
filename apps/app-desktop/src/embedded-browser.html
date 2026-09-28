@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brian Browser</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f4f6fa; color: #172033; font: 14px system-ui, sans-serif; overflow: hidden; }
+    header { height: 144px; padding: 8px 12px; border-bottom: 2px solid #94a3b8; display: flex; flex-direction: column; gap: 7px; }
+    .row { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+    button, input { font: inherit; border: 1px solid #94a3b8; border-radius: 5px; padding: 6px 10px; background: white; color: inherit; }
+    button { cursor: pointer; white-space: nowrap; }
+    button:disabled { opacity: .5; cursor: default; }
+    button:focus-visible, input:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
+    #stop { background: #b91c1c; border-color: #991b1b; color: white; font-weight: 750; }
+    #status { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    #address { flex: 1; min-width: 80px; }
+    #tabs { display: flex; gap: 5px; overflow-x: auto; flex: 1; }
+    .tab { display: flex; flex-shrink: 0; }
+    .tab button:first-child { max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+    .tab [aria-selected="true"] { background: #dbeafe; border-color: #2563eb; }
+    main { padding: 32px; color: #64748b; text-align: center; }
+  </style>
+</head>
+<body>
+  <header aria-label="Trusted browser controls">
+    <div class="row"><strong>Brian Browser</strong><span id="status" role="status">Manual browsing ready</span><button id="approve" disabled>Allow Brian on this tab</button><button id="stop">Stop Brian</button></div>
+    <form id="navigation" class="row">
+      <button type="button" id="back" aria-label="Back">←</button>
+      <button type="button" id="forward" aria-label="Forward">→</button>
+      <button type="button" id="reload" aria-label="Reload">↻</button>
+      <input id="address" aria-label="Website address" placeholder="https://example.com" autocomplete="off" spellcheck="false">
+      <button type="submit">Go</button>
+    </form>
+    <div class="row"><div id="tabs" aria-label="Tabs"></div><button id="new">+ New tab</button></div>
+  </header>
+  <main>Open a new tab or enter an HTTP(S) address to browse.</main>
+</body>
+</html>

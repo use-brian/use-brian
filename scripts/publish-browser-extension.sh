@@ -191,6 +191,9 @@ if [[ "$SOURCE_BUILD" != "$EXPECTED_BUILD" ]]; then
   exit 1
 fi
 
+echo "==> Building shared browser control..."
+pnpm --dir "$REPO_ROOT" --filter @use-brian/browser-control build
+
 echo "==> Running browser-extension tests..."
 pnpm --dir "$REPO_ROOT" --filter @use-brian/browser-extension test
 echo "==> Typechecking browser extension..."
