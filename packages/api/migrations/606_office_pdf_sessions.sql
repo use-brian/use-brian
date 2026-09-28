@@ -21,7 +21,8 @@ ALTER TABLE office_artifacts
   CHECK (default_workspace_role IN ('view', 'comment', 'edit', 'deny'));
 
 ALTER TABLE office_artifacts
-  ADD COLUMN expires_at TIMESTAMPTZ;
+  ADD COLUMN expires_at TIMESTAMPTZ,
+  ADD COLUMN pdf_session_idempotency_key TEXT;
 
 ALTER TABLE office_artifacts
   ADD CONSTRAINT office_pdf_session_shape_check CHECK (
@@ -35,8 +36,14 @@ ALTER TABLE office_artifacts
       AND template_version_id IS NULL
       AND legal_hold = FALSE
       AND default_workspace_role = 'deny'
+      AND length(pdf_session_idempotency_key) BETWEEN 8 AND 255
     )
+    AND (mode = 'session' OR pdf_session_idempotency_key IS NULL)
   );
+
+CREATE UNIQUE INDEX idx_office_pdf_session_idempotency
+  ON office_artifacts (workspace_id, owner_user_id, pdf_session_idempotency_key)
+  WHERE mode = 'session';
 
 CREATE TABLE office_pdf_session_assets (
   artifact_id           UUID NOT NULL REFERENCES office_artifacts(id) ON DELETE CASCADE,
@@ -57,7 +64,7 @@ CREATE TABLE office_pdf_purge_objects (
   owner_user_id         UUID NOT NULL,
   file_id               UUID NOT NULL,
   role                  TEXT NOT NULL CHECK (role IN ('source','signature','snapshot','preview','release')),
-  storage_uri           TEXT NOT NULL CHECK (length(storage_uri) BETWEEN 1 AND 4096),
+  storage_uri           TEXT CHECK (storage_uri IS NULL OR length(storage_uri) BETWEEN 1 AND 4096),
   content_sha256        TEXT NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
   attempts              INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   lease_token           UUID,

@@ -1,5 +1,6 @@
 export * from './errors.js'
 export * from './fonts.js'
 export * from './parse.js'
+export * from './signature.js'
 export * from './validate.js'
 export * from './writer.js'

@@ -114,6 +114,7 @@ import {
   createFileTools,
   createBrandTools,
   createOfficeTools,
+  createPdfWriterPort,
   type FileToolPolicy,
   type OfficeToolPolicy,
   createFindPageTool,
@@ -548,12 +549,16 @@ import { createOfficeTemplateStore } from './db/office-templates.js'
 import { createOfficeGenerationStore } from './db/office-generation.js'
 import { createOfficeCommentStore } from './db/office-comments.js'
 import { createOfficeLiveStore } from './db/office-live.js'
+import { createOfficePdfSessionStore } from './db/office-pdf-sessions.js'
 import { createOfficeReleaseStore } from './db/office-release.js'
 import { createOfficeService } from './office/service.js'
 import { deriveOfficeSnapshot } from './office/release.js'
-import { createOfficeLifecycleWorker } from './office/lifecycle-worker.js'
-import { resolveDurableOfficeAccess } from './office/access.js'
+import { createOfficeLifecycleWorker, purgeExpiredPdfSessions, runPdfPurgeBlobWorker } from './office/lifecycle-worker.js'
+import { resolveDurableOfficeAccess, resolveOfficeAccess } from './office/access.js'
+import { createPdfSessionService } from './office/pdf-session-service.js'
+import { PDF_SESSION_FILE_METADATA } from './office/pdf-session-assets.js'
 import { officeArtifactRoutes } from './routes/office-artifacts.js'
+import { officePdfSessionRoutes } from './routes/office-pdf-sessions.js'
 import { officeJobRoutes } from './routes/office-jobs.js'
 import { officeTemplateRoutes } from './routes/office-templates.js'
 import { officeCollaborationRoutes } from './routes/office-collaboration.js'
@@ -2824,15 +2829,28 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const officeGenerationStore = createOfficeGenerationStore()
   const officeCommentStore = createOfficeCommentStore()
   const officeLiveStore = createOfficeLiveStore()
+  const officePdfSessionStore = createOfficePdfSessionStore()
   let structuredDocumentRuntime: ReturnType<typeof createStructuredDocumentRuntime> | null = null
   const officeReleaseStore = createOfficeReleaseStore()
   const officeLifecycleWorker = createOfficeLifecycleWorker({
     async sweep() {
       const result = await query<{ advanced: number }>(OFFICE_LIFECYCLE_SWEEP_SQL)
-      return Number(result.rows[0]?.advanced ?? 0)
+      const client = await getPool().connect()
+      try {
+        const purged = await purgeExpiredPdfSessions(client)
+        if (filesResolver) {
+          await runPdfPurgeBlobWorker({
+            client,
+            async deleteObject(storageUri, storageKey) {
+              const storage = await filesResolver!.forUri(storageKey.split('/')[0]!, storageUri)
+              await storage.deleteBlob(storageKey)
+            },
+          })
+        }
+        return Number(result.rows[0]?.advanced ?? 0) + purged
+      } finally { client.release() }
     },
   })
-  if (runWorkers) officeLifecycleWorker.start()
   let wakeOfficeGeneration: ((userId: string) => void) | null = null
   const officeGenerationAvailable = (_family?: 'document' | 'presentation' | 'spreadsheet') => wakeOfficeGeneration !== null
   const officeService = createOfficeService({
@@ -4463,6 +4481,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })
     }
   }
+
+  if (runWorkers) officeLifecycleWorker.start()
 
   // ── Computer use (browser tool surface) ──
   // docs/architecture/engine/computer-use.md §3-§4: five discrete browser
@@ -6661,6 +6681,86 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (!saved.ok) throw new Error(`Office output save failed: ${saved.error.kind}`)
     return saved.value.id
   } : null
+  const pdfSessionFiles = filesApi
+  const pdfSessionAssets = pdfSessionFiles && saveClassifiedOfficeFile ? {
+    async write(params: Parameters<import('./office/pdf-session-assets.js').PdfSessionAssetPort['write']>[0]) {
+      const membership = await getWorkspaceMembershipWithClearanceSystem(params.userId, params.workspaceId)
+      if (!membership) throw new Error('PDF session membership unavailable')
+      const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
+      const saved = await pdfSessionFiles.writeBytes({
+        workspaceId: params.workspaceId,
+        userId: params.userId,
+        assistantKind: 'standard',
+        clearance,
+        writeSensitivity: params.sensitivity,
+        writeCompartments: params.compartments,
+        writeProjectIds: params.projectIds,
+      }, {
+        path: params.path,
+        bytes: params.bytes,
+        mime: params.mime,
+        sensitivity: params.sensitivity,
+        sessionOwned: true,
+      })
+      if (!saved.ok) throw new Error(`PDF session asset save failed: ${saved.error.kind}`)
+      return { id: saved.value.id, path: saved.value.path, storageUri: saved.value.storageUri, mime: saved.value.mime, sha256: createHash('sha256').update(params.bytes).digest('hex') }
+    },
+    async read(params: Parameters<import('./office/pdf-session-assets.js').PdfSessionAssetPort['read']>[0]) {
+      const membership = await getWorkspaceMembershipWithClearanceSystem(params.userId, params.workspaceId)
+      if (!membership) return null
+      const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
+      const result = await pdfSessionFiles.readBytes({ workspaceId: params.workspaceId, userId: params.userId, assistantKind: 'standard', clearance }, params.fileId)
+      if (!result.ok || !result.value.file.path.startsWith('/office/sessions/')
+        || result.value.file.metadata.officeSession !== true || result.value.file.metadata.noIndex !== true) return null
+      return { bytes: result.value.bytes, file: { id: result.value.file.id, path: result.value.file.path, storageUri: result.value.file.storageUri, mime: result.value.file.mime, sha256: createHash('sha256').update(result.value.bytes).digest('hex') } }
+    },
+    async delete(params: Parameters<import('./office/pdf-session-assets.js').PdfSessionAssetPort['delete']>[0]) {
+      const membership = await getWorkspaceMembershipWithClearanceSystem(params.userId, params.workspaceId)
+      if (!membership) return
+      const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
+      await pdfSessionFiles.delete({ workspaceId: params.workspaceId, userId: params.userId, assistantKind: 'standard', clearance }, params.fileId)
+    },
+    async saveDurable(params: Parameters<import('./office/pdf-session-assets.js').PdfSessionAssetPort['saveDurable']>[0]) {
+      const id = await saveClassifiedOfficeFile({
+        userId: params.userId,
+        workspaceId: params.workspaceId,
+        path: params.path,
+        bytes: params.bytes,
+        mime: params.mime,
+        hash: createHash('sha256').update(params.bytes).digest('hex'),
+        scope: { sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds },
+      })
+      return { id }
+    },
+  } satisfies import('./office/pdf-session-assets.js').PdfSessionAssetPort : null
+  const pdfSessionService = pdfSessionAssets ? createPdfSessionService({
+    sessions: officePdfSessionStore,
+    live: officeLiveStore,
+    assets: pdfSessionAssets,
+    async assertWorkspaceMember({ userId, workspaceId }) {
+      return Boolean(await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId))
+    },
+    async resolveSource({ userId, workspaceId, source }) {
+      const membership = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+      if (!membership) return null
+      const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
+      if (source.kind === 'workspace_file') {
+        const result = await pdfSessionFiles!.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance }, source.id)
+        if (!result.ok || result.value.file.workspaceId !== workspaceId || result.value.file.path.startsWith('/office/sessions/')) return null
+        return { bytes: result.value.bytes, mime: result.value.file.mime, fileName: result.value.file.name,
+          sensitivity: result.value.file.sensitivity, compartments: result.value.file.compartments ?? [], projectIds: result.value.file.projectIds ?? [] }
+      }
+      const access = { workspaceId, userId, assistantId: APP_LEVEL_ASSISTANT_ID, assistantKind: 'standard' as const, clearance }
+      const cached = await fileStore.get(source.id, access)
+      if (!cached) return null
+      const encoded = await fileStore.getOriginalContent?.(source.id, access) ?? cached.content
+      const match = encoded.match(/^data:([^;]+);base64,([A-Za-z0-9+/=\r\n]+)$/)
+      if (!match || match[1] !== cached.mimeType) return null
+      return { bytes: Buffer.from(match[2]!, 'base64'), mime: cached.mimeType, fileName: cached.fileName,
+        sensitivity: cached.sensitivity ?? 'internal', compartments: cached.compartments ?? [], projectIds: cached.projectIds ?? [] }
+    },
+  }) : null
+  if (pdfSessionService) app.use('/api/office', requireAuth(env.JWT_SECRET), officePdfSessionRoutes({ service: pdfSessionService }))
   const officeImportWorker = filesApi ? createOfficeImportWorker({
     store: officeGenerationStore,
     async readSource({ userId, workspaceId, assistantId, fileId }) {
@@ -7042,7 +7142,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeCollaborationRoutes({
     getArtifact: officeArtifactStore.get,
-    resolveAccess: resolveDurableOfficeAccess,
+    resolveAccess: resolveOfficeAccess,
+    resolveCollaborationAccess: resolveDurableOfficeAccess,
     getSnapshot: officeLiveStore.get,
     appendCommand: officeLiveStore.appendCommand,
     listThreads: officeCommentStore.listThreads,
@@ -7079,9 +7180,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     sharedSecret: process.env.DOC_SYNC_SECRET,
     async checkpoint(artifactId, expectedVersion, canonicalHash) {
       if (!filesApi) return 'not_found'
-      const raw = await query<{ id: string; workspaceId: string; ownerUserId: string; headVersion: number; headSnapshotHash: string | null; compartments: string[]; projectIds: string[] }>(`
+      const raw = await query<{ id: string; workspaceId: string; ownerUserId: string; mode: 'artifact' | 'template' | 'session'; headVersion: number; headSnapshotHash: string | null; compartments: string[]; projectIds: string[] }>(`
         SELECT a.id,a.workspace_id AS "workspaceId",a.owner_user_id AS "ownerUserId",
-               a.head_version::int AS "headVersion",v.snapshot_hash AS "headSnapshotHash",
+               a.mode,a.head_version::int AS "headVersion",v.snapshot_hash AS "headSnapshotHash",
                a.compartments, a.project_ids AS "projectIds"
           FROM office_artifacts a
           LEFT JOIN office_artifact_versions v ON v.id=a.head_version_id
@@ -7110,8 +7211,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const casVersion = artifact.headVersion === expectedVersion ? expectedVersion : live.baseVersion === artifact.headVersion ? artifact.headVersion : null
       if (casVersion === null) return 'conflict'
       const fileContext = { workspaceId: artifact.workspaceId, userId: artifact.ownerUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const, writeCompartments: artifact.compartments, writeProjectIds: artifact.projectIds }
-      const saved = await filesApi.writeBytes(fileContext, { path: `/office/artifacts/${artifactId}/versions/${casVersion + 1}-${canonicalHash}.json`, bytes, mime: 'application/json', sensitivity: 'confidential' })
+      const session = artifact.mode === 'session'
+      const saved = await filesApi.writeBytes(fileContext, { path: session
+        ? `/office/sessions/${artifactId}/snapshot/${casVersion + 1}-${canonicalHash}.json`
+        : `/office/artifacts/${artifactId}/versions/${casVersion + 1}-${canonicalHash}.json`,
+        bytes, mime: 'application/json', sensitivity: 'confidential', ...(session ? { sessionOwned: true as const } : {}) })
       if (!saved.ok) throw new Error(`Office checkpoint save failed: ${saved.error.kind}`)
+      if (session && !await officePdfSessionStore.trackAsset({ userId: artifact.ownerUserId, artifactId, fileId: saved.value.id, role: 'snapshot', contentSha256: canonicalHash })) {
+        throw new Error('PDF session checkpoint tracking failed')
+      }
       const version = await officeArtifactStore.commitVersion({ userId: artifact.ownerUserId, artifactId, snapshotTitle: live.snapshot.title, expectedVersion: casVersion, snapshotFileId: saved.value.id, snapshotHash: canonicalHash, operationClock: live.stateVector, schemaVersion: live.snapshot.schemaVersion, capabilityVersion: live.snapshot.capabilityVersion, origin: 'manual', authorType: 'system', summary: 'Collaborative editing checkpoint' })
       if (!version) {
         await filesApi.delete(fileContext, saved.value.id).catch(() => undefined)
@@ -7158,7 +7266,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     readResource: readOfficeResource,
   }))
   const loadOfficeReleaseContext = async (userId: string, artifactId: string) => {
-    const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveDurableOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
+    const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
     if (!artifact || !access || !live) return null
     const [claims, media] = artifact.headVersionId ? await Promise.all([officeReleaseStore.listClaims(userId, artifactId, artifact.headVersionId), officeReleaseStore.listMedia(userId, artifactId, artifact.headVersionId)]) : [[], []]
     // The brand's APPROVED claims register (docs/architecture/features/brand.md
@@ -7182,7 +7290,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }): Promise<{ scope: OfficeOutputScope; validForMs: number } | null> => {
     const current = await loadOfficeReleaseContext(params.userId, params.expected.artifact.id)
     if (!current || officeReleaseContextRevision(current) !== officeReleaseContextRevision(params.expected)) return null
+    const session = current.artifact.mode === 'session'
     const resourceReads = await Promise.all(current.snapshot.resources.map(async (ref) => {
+      if (session && pdfSessionAssets) {
+        const resource = await pdfSessionAssets.read({ userId: params.userId, workspaceId: current.artifact.workspaceId, fileId: ref.id })
+        return resource && resource.file.mime === ref.mime && resource.file.sha256 === ref.hash ? resource : null
+      }
       const resource = await readOfficeResource(params.userId, current.artifact.workspaceId, ref.id)
       return resource && resource.hash === ref.hash && resource.mime === ref.mime ? resource : null
     }))
@@ -7191,8 +7304,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       sensitivity: current.artifact.sensitivity,
       compartments: current.artifact.compartments,
       projectIds: current.artifact.projectIds,
-    }, ...resourceReads.map((resource) => resource!.binding))
-    let validForMs = resourceReads.reduce((ttl, resource) => Math.min(ttl, resource!.validForMs), 30_000)
+    }, ...resourceReads.flatMap((resource) => resource && 'binding' in resource ? [resource.binding] : []))
+    let validForMs = session && current.artifact.expiresAt
+      ? Math.min(30_000, current.artifact.expiresAt.getTime() - Date.now())
+      : resourceReads.reduce((ttl, resource) => Math.min(ttl, resource && 'validForMs' in resource ? resource.validForMs : ttl), 30_000)
     if (params.releasedFileId) {
       const output = await readBoundOfficeFile!({ userId: params.userId, workspaceId: current.artifact.workspaceId, fileId: params.releasedFileId })
       if (!output || output.binding.hash !== params.releasedHash || output.binding.mime !== params.releasedMime ||
@@ -7205,9 +7320,28 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     load: loadOfficeReleaseContext,
     resolveResource: (userId, workspaceId) => async (resourceId) => readOfficeResource(userId, workspaceId, resourceId),
     revalidate: revalidateOfficeRelease,
-    async saveReleasedFile({ userId, workspaceId, artifactId, version, action, extension, mime, bytes, hash, scope }) {
+    async saveReleasedFile({ userId, workspaceId, artifactId, version, action, extension, mime, bytes, hash, scope, session }) {
+      if (session && pdfSessionAssets) {
+        return (await pdfSessionAssets.write({ userId, workspaceId,
+          path: `/office/sessions/${artifactId}/release/v${version}-${action}-${randomUUID()}.${extension}`,
+          bytes, mime, sensitivity: scope.sensitivity, compartments: scope.compartments, projectIds: scope.projectIds,
+          metadata: PDF_SESSION_FILE_METADATA })).id
+      }
       return saveClassifiedOfficeFile!({ userId, workspaceId, path: `/office/releases/${artifactId}/v${version}-${action}-${randomUUID()}.${extension}`, bytes, mime, hash, scope })
     },
+    async loadPdf({ userId, context }) {
+      if (!pdfSessionService || !pdfSessionAssets || context.snapshot.family !== 'pdf') return null
+      const source = await pdfSessionService.readSource(userId, context.artifact.id)
+      const assets = await officePdfSessionStore.listAssets(userId, context.artifact.id)
+      return { sourceBytes: source.bytes, writer: createPdfWriterPort({ resolveResource: async resourceId => {
+        const tracked = assets.find(asset => asset.fileId === resourceId && asset.role === 'signature')
+        if (!tracked) return null
+        const value = await pdfSessionAssets.read({ userId, workspaceId: context.artifact.workspaceId, fileId: resourceId })
+        if (!value || (value.file.mime !== 'image/png' && value.file.mime !== 'image/jpeg')) return null
+        return { bytes: value.bytes, mime: value.file.mime, sha256: tracked.contentSha256 }
+      } }) }
+    },
+    trackPdfRelease: ({ userId, artifactId, fileId, sha256 }) => officePdfSessionStore.trackAsset({ userId, artifactId, fileId, role: 'release', contentSha256: sha256 }),
     createRecord: officeReleaseStore.createRelease,
     async createDerivative({ userId, source, title, sensitivity, selectedObjectIds, visibilityUserIds }) {
       if (!isDurableOfficeArtifact(source.artifact)) throw new Error('PDF sessions cannot create Office derivatives')
