@@ -18,16 +18,23 @@ import {
   type DecisionUsage,
   type JsonValue,
 } from '@use-brian/core'
-import { bracketFor, modelRates, registryRow } from '@use-brian/shared/model-registry'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import {
+  bracketFor,
+  isDecisionModelRow,
+  modelRates,
+  registryRow,
+} from '@use-brian/shared/model-registry'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { z } from 'zod'
 
 export type DecisionEvalValue = string | number | boolean
 
 export type DecisionEvalFixture = {
   id: string
   evidence: 'synthetic' | 'recorded'
+  evaluationSegment: string
   operation: DecisionOperationRef
   state: JsonValue
   questions: DecisionQuestion[]
@@ -44,6 +51,7 @@ export type DecisionEvaluationMode = 'offline' | 'estimate' | 'live'
 
 export type DecisionOperationMetrics = {
   operation: DecisionOperationRef
+  evaluationSegment: string
   samples: number
   labels: number
   answered: number
@@ -70,6 +78,7 @@ export type DecisionEvaluationReport = {
     operationVersion: string
     stateVersion: string
     questionVersion: string
+    evaluationSegment: string
   }>
   aggregate: Omit<DecisionOperationMetrics, 'operation'>
   operations: DecisionOperationMetrics[]
@@ -90,7 +99,10 @@ export type DecisionEvaluationEstimate = {
 
 export type PromotionValidation = { eligible: boolean; issues: string[] }
 
-const MODEL = { catalogId: 'typesafe-jev-1.13', wireId: 'jev-1.13.0' } as const
+export const DEFAULT_DECISION_EVALUATION_MODEL = {
+  catalogId: 'typesafe-jev-1.13',
+  wireId: 'jev-1.13.0',
+} as const
 const V1 = { version: '1', stateVersion: '1', questionVersion: '1' } as const
 
 function booleanFixture(
@@ -104,6 +116,7 @@ function booleanFixture(
   return {
     id,
     evidence: 'synthetic',
+    evaluationSegment: 'global',
     operation: { id: operationId, ...V1 },
     state: { text: `Fictional fixture ${id}` },
     questions: [{ id: 'decision', kind: 'boolean', prompt }],
@@ -135,6 +148,125 @@ export const DECISION_EVAL_FIXTURES: readonly DecisionEvalFixture[] = [
   booleanFixture('feed-safety-observation', 'feed.draft-safety', 'Is this draft safe?', false, false),
 ] as const
 
+const evaluationJsonSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
+  z.string(),
+  z.number().finite(),
+  z.boolean(),
+  z.null(),
+  z.array(evaluationJsonSchema),
+  z.record(evaluationJsonSchema),
+]))
+
+const evaluationValueSchema = z.union([z.string(), z.number().finite(), z.boolean()])
+const evaluationQuestionSchema = z.discriminatedUnion('kind', [
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal('choice'),
+    prompt: z.string().min(1),
+    options: z.array(z.object({
+      value: z.string().min(1),
+      description: z.string().min(1).optional(),
+    }).strict()).min(1),
+  }).strict(),
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal('boolean'),
+    prompt: z.string().min(1),
+    criteria: z.object({
+      true: z.string().min(1).optional(),
+      false: z.string().min(1).optional(),
+    }).strict().optional(),
+  }).strict(),
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal('score'),
+    prompt: z.string().min(1),
+    rubric: z.array(z.object({
+      value: z.number().finite(),
+      description: z.string().min(1),
+    }).strict()).min(1),
+  }).strict(),
+])
+
+const decisionEvalFixtureSchema = z.object({
+  id: z.string().min(1),
+  evidence: z.enum(['synthetic', 'recorded']),
+  evaluationSegment: z.string().min(1),
+  operation: z.object({
+    id: z.string().min(1),
+    version: z.string().min(1),
+    stateVersion: z.string().min(1),
+    questionVersion: z.string().min(1),
+  }).strict(),
+  state: evaluationJsonSchema,
+  questions: z.array(evaluationQuestionSchema).min(1),
+  expected: z.record(evaluationValueSchema),
+  recorded: z.object({
+    answers: z.record(evaluationValueSchema),
+    path: z.enum([
+      'primary_complete',
+      'generation',
+      'uncertainty_review',
+      'operational_failover',
+      'safe_default',
+    ]),
+    latencyMs: z.number().finite().nonnegative(),
+    usage: z.object({
+      inputTokens: z.number().int().nonnegative(),
+      outputTokens: z.number().int().nonnegative(),
+      costUsd: z.number().finite().nonnegative().optional(),
+    }).strict().optional(),
+  }).strict(),
+}).strict()
+
+function valueMatchesQuestion(
+  value: DecisionEvalValue,
+  question: DecisionQuestion,
+): boolean {
+  if (question.kind === 'boolean') return typeof value === 'boolean'
+  if (question.kind === 'choice') {
+    return typeof value === 'string' && question.options.some((option) => option.value === value)
+  }
+  return typeof value === 'number' && question.rubric.some((level) => level.value === value)
+}
+
+export function parseDecisionEvaluationFixtures(value: unknown): DecisionEvalFixture[] {
+  const fixtures = z.array(decisionEvalFixtureSchema).min(1).parse(value) as DecisionEvalFixture[]
+  const fixtureIds = new Set<string>()
+  for (const fixture of fixtures) {
+    if (fixtureIds.has(fixture.id)) throw new Error(`duplicate decision evaluation fixture id: ${fixture.id}`)
+    fixtureIds.add(fixture.id)
+    const questions = new Map<string, DecisionQuestion>()
+    for (const question of fixture.questions) {
+      if (questions.has(question.id)) {
+        throw new Error(`fixture '${fixture.id}' has duplicate question '${question.id}'`)
+      }
+      questions.set(question.id, question)
+    }
+    for (const question of fixture.questions) {
+      const expected = fixture.expected[question.id]
+      if (expected === undefined || !valueMatchesQuestion(expected, question)) {
+        throw new Error(`fixture '${fixture.id}' has invalid expected value for '${question.id}'`)
+      }
+      const recorded = fixture.recorded.answers[question.id]
+      if (recorded === undefined || !valueMatchesQuestion(recorded, question)) {
+        throw new Error(`fixture '${fixture.id}' has invalid recorded value for '${question.id}'`)
+      }
+    }
+    for (const questionId of [...Object.keys(fixture.expected), ...Object.keys(fixture.recorded.answers)]) {
+      if (!questions.has(questionId)) {
+        throw new Error(`fixture '${fixture.id}' contains unknown answer '${questionId}'`)
+      }
+    }
+  }
+  return fixtures
+}
+
+export function loadDecisionEvaluationFixtures(path: string): DecisionEvalFixture[] {
+  const parsed = JSON.parse(readFileSync(resolve(path), 'utf8')) as unknown
+  return parseDecisionEvaluationFixtures(parsed)
+}
+
 const PROMOTION_POLICY = {
   promotion: {
     minSamples: 1,
@@ -156,8 +288,9 @@ export const SYNTHETIC_EVALUATION_PROFILES: readonly DecisionEvaluationProfile[]
     operationVersion: fixture.operation.version,
     stateVersion: fixture.operation.stateVersion,
     questionVersion: fixture.operation.questionVersion,
-    modelCatalogId: MODEL.catalogId,
-    modelWireId: MODEL.wireId,
+    modelCatalogId: DEFAULT_DECISION_EVALUATION_MODEL.catalogId,
+    modelWireId: DEFAULT_DECISION_EVALUATION_MODEL.wireId,
+    evaluationSegment: fixture.evaluationSegment,
     status: 'evaluation',
     evidence: 'synthetic',
     totalTimeoutMs: 2_000,
@@ -187,10 +320,19 @@ function pricedCost(modelId: string, usage: DecisionUsage | undefined): number |
   return (usage.inputTokens * rate.inPerMTok + usage.outputTokens * rate.outPerMTok) / 1_000_000
 }
 
+function pricedModelCost(
+  model: { catalogId: string; wireId: string },
+  usage: DecisionUsage | undefined,
+): number | undefined {
+  return pricedCost(model.catalogId, usage) ?? pricedCost(model.wireId, usage)
+}
+
 function metricsFor(
   fixtures: readonly DecisionEvalFixture[],
   results: ReadonlyArray<DecisionEvalFixture['recorded']>,
   operation: DecisionOperationRef,
+  evaluationSegment: string,
+  model: { catalogId: string; wireId: string },
 ): DecisionOperationMetrics {
   let labels = 0
   let answered = 0
@@ -213,7 +355,7 @@ function metricsFor(
     }
     outcomes[result.path] = (outcomes[result.path] ?? 0) + 1
     latencies.push(result.latencyMs)
-    const cost = pricedCost(MODEL.catalogId, result.usage)
+    const cost = pricedModelCost(model, result.usage)
     if (cost === undefined) unknownSamples += 1
     else {
       knownUsd += cost
@@ -222,6 +364,7 @@ function metricsFor(
   }
   return {
     operation,
+    evaluationSegment,
     samples: fixtures.length,
     labels,
     answered,
@@ -246,23 +389,55 @@ function buildReport(params: {
   mode: 'offline' | 'live'
   fixtures: readonly DecisionEvalFixture[]
   results: ReadonlyArray<DecisionEvalFixture['recorded']>
+  model: { catalogId: string; wireId: string }
   now: () => Date
 }): DecisionEvaluationReport {
-  const groups = new Map<string, { ref: DecisionOperationRef; fixtures: DecisionEvalFixture[]; results: Array<DecisionEvalFixture['recorded']> }>()
+  const groups = new Map<string, {
+    ref: DecisionOperationRef
+    evaluationSegment: string
+    fixtures: DecisionEvalFixture[]
+    results: Array<DecisionEvalFixture['recorded']>
+  }>()
   params.fixtures.forEach((fixture, index) => {
-    const group = groups.get(fixture.operation.id) ?? { ref: fixture.operation, fixtures: [], results: [] }
+    const key = [
+      fixture.operation.id,
+      fixture.operation.version,
+      fixture.operation.stateVersion,
+      fixture.operation.questionVersion,
+      fixture.evaluationSegment,
+    ].join('\u0000')
+    const group = groups.get(key) ?? {
+      ref: fixture.operation,
+      evaluationSegment: fixture.evaluationSegment,
+      fixtures: [],
+      results: [],
+    }
     group.fixtures.push(fixture)
     group.results.push(params.results[index]!)
-    groups.set(fixture.operation.id, group)
+    groups.set(key, group)
   })
-  const operations = [...groups.values()].map((group) => metricsFor(group.fixtures, group.results, group.ref))
+  const operations = [...groups.values()].map((group) => (
+    metricsFor(
+      group.fixtures,
+      group.results,
+      group.ref,
+      group.evaluationSegment,
+      params.model,
+    )
+  ))
   const aggregateOperation: DecisionOperationRef = {
     id: 'aggregate',
     version: '1',
     stateVersion: '1',
     questionVersion: '1',
   }
-  const aggregate = metricsFor(params.fixtures, params.results, aggregateOperation)
+  const aggregate = metricsFor(
+    params.fixtures,
+    params.results,
+    aggregateOperation,
+    'aggregate',
+    params.model,
+  )
   const { operation: _operation, ...aggregateWithoutOperation } = aggregate
   const evidence = params.fixtures.every((fixture) => fixture.evidence === 'recorded')
     ? 'recorded'
@@ -272,20 +447,19 @@ function buildReport(params: {
     schemaVersion: '1',
     generatedAt: params.now().toISOString(),
     mode: params.mode,
-    model: MODEL,
+    model: params.model,
     evidence,
     mockedData,
     productionPromotionEvidence: params.mode === 'live' && !mockedData,
-    profiles: SYNTHETIC_EVALUATION_PROFILES
-      .filter((profile) => groups.has(profile.operationId))
-      .map((profile) => ({
-        id: profile.id,
-        version: profile.version,
-        operationId: profile.operationId,
-        operationVersion: profile.operationVersion,
-        stateVersion: profile.stateVersion,
-        questionVersion: profile.questionVersion,
-      })),
+    profiles: [...groups.values()].map(({ ref, evaluationSegment }) => ({
+      id: `evaluated-${ref.id.replace(/[^a-z0-9]+/gi, '-')}`,
+      version: '1',
+      operationId: ref.id,
+      operationVersion: ref.version,
+      stateVersion: ref.stateVersion,
+      questionVersion: ref.questionVersion,
+      evaluationSegment,
+    })),
     aggregate: aggregateWithoutOperation,
     operations,
   }
@@ -298,7 +472,7 @@ function estimatedInputTokens(fixture: DecisionEvalFixture): number {
 export function estimateDecisionEvaluation(
   fixtures: readonly DecisionEvalFixture[] = DECISION_EVAL_FIXTURES,
   now: () => Date = () => new Date(),
-  model: { catalogId: string; wireId: string } = MODEL,
+  model: { catalogId: string; wireId: string } = DEFAULT_DECISION_EVALUATION_MODEL,
 ): DecisionEvaluationEstimate {
   const inputTokens = fixtures.reduce((sum, fixture) => sum + estimatedInputTokens(fixture), 0)
   const rates = modelRates(model.catalogId) ?? modelRates(model.wireId)
@@ -330,15 +504,23 @@ export async function runDecisionEvaluation(options: {
   mode?: 'offline' | 'live'
   fixtures?: readonly DecisionEvalFixture[]
   provider?: DecisionProvider
+  model?: { catalogId: string; wireId: string }
   maxCalls?: number
   maxCostUsd?: number
   now?: () => Date
 } = {}): Promise<DecisionEvaluationReport> {
   const mode = options.mode ?? 'offline'
   const fixtures = options.fixtures ?? DECISION_EVAL_FIXTURES
+  const model = options.model ?? DEFAULT_DECISION_EVALUATION_MODEL
   const now = options.now ?? (() => new Date())
   if (mode === 'offline') {
-    return buildReport({ mode, fixtures, results: fixtures.map((fixture) => fixture.recorded), now })
+    return buildReport({
+      mode,
+      fixtures,
+      results: fixtures.map((fixture) => fixture.recorded),
+      model,
+      now,
+    })
   }
   if (!options.provider) throw new Error('live decision evaluation requires an injected provider')
   if (!Number.isInteger(options.maxCalls) || (options.maxCalls ?? 0) <= 0) {
@@ -350,7 +532,7 @@ export async function runDecisionEvaluation(options: {
   if (options.maxCalls! < fixtures.length) {
     throw new Error(`live call cap ${options.maxCalls} is below the ${fixtures.length} planned calls`)
   }
-  const estimate = estimateDecisionEvaluation(fixtures, now)
+  const estimate = estimateDecisionEvaluation(fixtures, now, model)
   if (estimate.estimatedCostUsd === null) {
     throw new Error('live decision evaluation refuses unknown model pricing')
   }
@@ -365,13 +547,14 @@ export async function runDecisionEvaluation(options: {
     const response = await options.provider.evaluate({
       runId: `decision-eval-${fixture.id}`,
       operation: fixture.operation,
-      model: MODEL,
+      model,
+      evaluationSegment: fixture.evaluationSegment,
       state: fixture.state,
       questions: fixture.questions,
     })
     const usage = response.usage
     if (!usage) throw new Error('live decision evaluation requires provider usage attribution')
-    const cost = pricedCost(MODEL.catalogId, usage)
+    const cost = pricedModelCost(model, usage)
     if (cost === undefined) throw new Error('live decision evaluation received usage with unknown cost')
     spent += cost
     if (spent > options.maxCostUsd!) {
@@ -384,7 +567,7 @@ export async function runDecisionEvaluation(options: {
       usage: { ...usage, costUsd: cost },
     })
   }
-  return buildReport({ mode, fixtures, results, now })
+  return buildReport({ mode, fixtures, results, model, now })
 }
 
 function promotionThresholds(profile: DecisionEvaluationProfile): {
@@ -418,7 +601,18 @@ export function validateDecisionPromotion(
   if (profile.modelCatalogId !== report.model.catalogId || profile.modelWireId !== report.model.wireId) {
     issues.push('report model does not match profile model')
   }
-  const metrics = report.operations.find((entry) => entry.operation.id === profile.operationId)
+  const reportProfile = report.profiles.find((entry) => (
+    entry.operationId === profile.operationId
+    && entry.operationVersion === profile.operationVersion
+    && entry.stateVersion === profile.stateVersion
+    && entry.questionVersion === profile.questionVersion
+    && entry.evaluationSegment === profile.evaluationSegment
+  ))
+  if (!reportProfile) issues.push('report profile metadata does not match profile operation identity')
+  const metrics = report.operations.find((entry) => (
+    entry.operation.id === profile.operationId
+    && entry.evaluationSegment === profile.evaluationSegment
+  ))
   if (!metrics) issues.push('report does not contain the profile operation')
   else if (
     metrics.operation.version !== profile.operationVersion ||
@@ -444,6 +638,8 @@ export function validateDecisionPromotion(
 
 export type DecisionEvaluationCliOptions = {
   mode: DecisionEvaluationMode
+  modelAlias?: string
+  fixtures?: string
   maxCalls?: number
   maxCostUsd?: number
   output?: string
@@ -451,6 +647,8 @@ export type DecisionEvaluationCliOptions = {
 
 export function parseDecisionEvaluationArgs(args: readonly string[]): DecisionEvaluationCliOptions {
   let mode: DecisionEvaluationMode = 'offline'
+  let modelAlias: string | undefined
+  let fixtures: string | undefined
   let maxCalls: number | undefined
   let maxCostUsd: number | undefined
   let output: string | undefined
@@ -465,6 +663,10 @@ export function parseDecisionEvaluationArgs(args: readonly string[]): DecisionEv
       maxCalls = Number(arg.slice('--max-calls='.length))
     } else if (arg.startsWith('--max-cost-usd=')) {
       maxCostUsd = Number(arg.slice('--max-cost-usd='.length))
+    } else if (arg.startsWith('--model=')) {
+      modelAlias = arg.slice('--model='.length)
+    } else if (arg.startsWith('--fixtures=')) {
+      fixtures = arg.slice('--fixtures='.length)
     } else if (arg.startsWith('--output=')) {
       output = arg.slice('--output='.length)
     } else {
@@ -473,6 +675,8 @@ export function parseDecisionEvaluationArgs(args: readonly string[]): DecisionEv
   }
   return {
     mode,
+    ...(modelAlias ? { modelAlias } : {}),
+    ...(fixtures ? { fixtures } : {}),
     ...(maxCalls !== undefined ? { maxCalls } : {}),
     ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
     ...(output ? { output } : {}),
@@ -482,23 +686,37 @@ export function parseDecisionEvaluationArgs(args: readonly string[]): DecisionEv
 export async function runDecisionEvaluationCli(args: readonly string[] = process.argv.slice(2)): Promise<number> {
   const cli = parseDecisionEvaluationArgs(args)
   const now = () => new Date()
+  const fixtures = cli.fixtures
+    ? loadDecisionEvaluationFixtures(cli.fixtures)
+    : [...DECISION_EVAL_FIXTURES]
+  const row = registryRow(cli.modelAlias ?? DEFAULT_DECISION_EVALUATION_MODEL.catalogId)
+  if (!row || row.status !== 'active' || !isDecisionModelRow(row)) {
+    throw new Error('configured evaluation model is not an active decision model')
+  }
+  const model = {
+    catalogId: row.alias,
+    wireId: row.decisionCapabilities.wireModelId,
+  }
   let output: DecisionEvaluationReport | DecisionEvaluationEstimate
   if (cli.mode === 'estimate') {
-    output = estimateDecisionEvaluation(DECISION_EVAL_FIXTURES, now)
+    output = estimateDecisionEvaluation(fixtures, now, model)
   } else if (cli.mode === 'live') {
+    if (row.decisionCapabilities.adapterId !== 'typesafe') {
+      throw new Error(`live CLI has no configured adapter factory for '${row.decisionCapabilities.adapterId}'`)
+    }
     const apiKey = process.env.TYPESAFE_API_KEY?.trim()
     if (!apiKey) throw new Error('live decision evaluation requires TYPESAFE_API_KEY')
-    const row = registryRow(MODEL.catalogId)
-    if (!row || row.inference !== 'decision') throw new Error('configured evaluation model is not a decision model')
     output = await runDecisionEvaluation({
       mode: 'live',
+      fixtures,
       provider: createTypeSafeDecisionProvider({ apiKey }),
+      model,
       maxCalls: cli.maxCalls,
       maxCostUsd: cli.maxCostUsd,
       now,
     })
   } else {
-    output = await runDecisionEvaluation({ mode: 'offline', now })
+    output = await runDecisionEvaluation({ mode: 'offline', fixtures, model, now })
   }
   const defaultPath = join(
     dirname(fileURLToPath(import.meta.url)),

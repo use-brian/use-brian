@@ -52,6 +52,9 @@ export type DecisionRouteConfig = {
 
 export type DecisionRouteContext = {
   workspaceId?: string
+  /** Observation callers can collect evidence but never receive authority. */
+  kind: 'execution' | 'observation'
+  evaluationSegment: string
   operation: DecisionRequest['operation']
   questionKinds: DecisionRequest['questions'][number]['kind'][]
 }
@@ -177,6 +180,8 @@ export function createDecisionRuntime(
     async observe<T>(runOptions: DecisionObservationRunOptions<T>): Promise<DecisionObservationResult<T>> {
       const routeContext: DecisionRouteContext = {
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
+        kind: 'observation',
+        evaluationSegment: runOptions.request.evaluationSegment ?? 'global',
         operation: runOptions.request.operation,
         questionKinds: runOptions.request.questions.map((question) => question.kind),
       }
@@ -215,6 +220,8 @@ export function createDecisionRuntime(
     async run<T>(runOptions: DecisionRuntimeRunOptions<T>): Promise<DecisionCascadeResult<T>> {
       const routeContext: DecisionRouteContext = {
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
+        kind: 'execution',
+        evaluationSegment: runOptions.request.evaluationSegment ?? 'global',
         operation: runOptions.request.operation,
         questionKinds: runOptions.request.questions.map((question) => question.kind),
       }

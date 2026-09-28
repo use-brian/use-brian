@@ -43,10 +43,11 @@ describe('[COMP:app-web/workspace-access] request and administration paths',()=>
   });
   it('offers configuration only for the selected department while requests retain their workflow',async()=>{
     const data=fixture();data.canAdminister=true;data.teams.push({...data.teams[0],id:'operations',name:'Operations'});mocks.fetch.mockResolvedValue(data);
-    await render({selection:{kind:'department',id:'research'}});expect(host.textContent).toContain('Research');expect(host.textContent).not.toContain('Operations');
+    await render({selection:{kind:'department',id:'research'},embedded:true});expect(host.textContent).toContain('Research');expect(host.textContent).not.toContain('Operations');
+    expect(host.textContent).toContain(t.departmentPolicyTitle);expect(host.textContent).not.toContain(t.reviewData);
     expect([...host.querySelectorAll('button')].some(b=>b.textContent===t.requestAccess)).toBe(false);
     await click(t.edit);expect(host.textContent).toContain(t.manager);
-    await render({selection:{kind:'department',id:'operations'}});expect(host.textContent).not.toContain(t.manager);expect(host.textContent).toContain('Operations');
+    await render({selection:{kind:'department',id:'operations'},embedded:true});expect(host.textContent).not.toContain(t.manager);expect(host.textContent).toContain('Operations');
     await render({selection:{kind:'requests'}});expect(host.textContent).toContain(t.requestAccess);expect(host.textContent).toContain(t.accessAudit);expect(host.textContent).toContain(t.emptyGrants);
     expect([...host.querySelectorAll('button')].some(b=>b.textContent===t.edit)).toBe(false);
   });

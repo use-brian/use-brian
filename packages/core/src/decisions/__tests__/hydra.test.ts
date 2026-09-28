@@ -56,6 +56,7 @@ function profile(mode: 'shadow' | 'hybrid' = 'hybrid'): DecisionEvaluationProfil
     questionVersion: request.operation.questionVersion,
     modelCatalogId: request.model.catalogId,
     modelWireId: request.model.wireId,
+    evaluationSegment: request.evaluationSegment ?? 'global',
     status: mode === 'hybrid' ? 'approved' : 'evaluation',
     evidence: 'synthetic',
     totalTimeoutMs: 100,
@@ -308,6 +309,9 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
     expect(() => validateDecisionRoute(request, {
       mode: 'hybrid', primary, profile: { ...profile(), questionVersion: 'wrong' }, allowSyntheticProfile: true,
     })).toThrow(/versions/)
+    expect(() => validateDecisionRoute(request, {
+      mode: 'hybrid', primary, profile: { ...profile(), evaluationSegment: 'ja' }, allowSyntheticProfile: true,
+    })).toThrow(/segment/)
     expect(() => validateDecisionRoute(request, {
       mode: 'hybrid', primary, profile: { ...profile(), primaryTimeoutMs: 100 }, allowSyntheticProfile: true,
     })).toThrow(/primary < total/)

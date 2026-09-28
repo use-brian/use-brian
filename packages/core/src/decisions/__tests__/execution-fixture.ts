@@ -34,6 +34,7 @@ export function executionFixture(options: {
       questionVersion: request.operation.questionVersion,
       modelCatalogId: request.model.catalogId,
       modelWireId: request.model.wireId,
+      evaluationSegment: request.evaluationSegment ?? 'global',
       status: mode === 'hybrid' ? 'approved' : 'evaluation',
       evidence: 'synthetic',
       totalTimeoutMs: 100,

@@ -135,6 +135,7 @@ import {
   type CompanionState,
 } from "./desktop-chat.js";
 import {
+  captureSourceSnapshot,
   isTrustedCaptureOrigin,
   selectPrimaryDisplaySource,
 } from "./system-audio-policy.js";
@@ -4159,17 +4160,18 @@ if (!gotLock) {
 
   // Screen-capture source picker: the renderer lists shareable windows and
   // points the NEXT display-media grant at the picked one (null reverts to
-  // the primary-display default). Name + id only — thumbnails stay in main.
+  // the primary-display default). The bounded thumbnail is a static chooser
+  // snapshot, not a live capture stream.
   ipcMain.handle("Use Brian:list-capture-sources", async (_event, kind: unknown) => {
     const type = kind === "screen" ? "screen" : "window";
     const sources = await desktopCapturer.getSources({
       types: [type],
-      thumbnailSize: { width: 0, height: 0 },
+      thumbnailSize: { width: 320, height: 180 },
       fetchWindowIcons: false,
     });
     return sources
       .filter((source) => source.name.trim().length > 0)
-      .map((source) => ({ id: source.id, name: source.name }));
+      .map(captureSourceSnapshot);
   });
   ipcMain.on("Use Brian:set-capture-source", (_event, id: unknown) => {
     requestedCaptureSourceId = typeof id === "string" && id.length > 0 ? id : null;

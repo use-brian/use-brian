@@ -1,8 +1,9 @@
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the model selection surfaces (model-registry.md L10/L15):
- * per-class menus, metered profiles CRUD, and the metered pre-flight
- * estimate. Thin typed wrappers over `packages/api/src/routes/model-menu.ts`;
+ * per-class menus, workspace decision routing, metered profiles CRUD, and the
+ * metered pre-flight estimate. Thin typed wrappers over
+ * `packages/api/src/routes/model-menu.ts`;
  * all calls go through `authFetch`.
  *
  * [COMP:app-web/models-sdk]
@@ -51,6 +52,28 @@ export type WorkspaceModelRoute = {
   updatedAt: string;
 };
 
+type DecisionModel = {
+  alias: string;
+  displayName: string;
+  provider: string;
+  adapterId: string;
+  hybridOperations: Array<{
+    operationId: string;
+    operationVersion: string;
+    evaluationSegment: string;
+    profileId: string;
+    profileVersion: string;
+  }>;
+};
+
+export type WorkspaceDecisionRouting = {
+  mode: "llm_only" | "shadow" | "hybrid";
+  modelAlias: string | null;
+  updatedAt: string | null;
+  shadowSampleRate: number;
+  models: DecisionModel[];
+};
+
 export type ModelMenu = {
   classes: Record<string, MenuModel[]>;
   profiles: MeteredProfile[];
@@ -73,6 +96,7 @@ export type ModelMenu = {
     updatedAt: string;
   }>;
   modelRoutes: WorkspaceModelRoute[];
+  decisionRouting: WorkspaceDecisionRouting;
   meteredBillingAvailable: boolean;
 };
 
@@ -114,6 +138,26 @@ export async function clearWorkspaceModelRoute(
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`model route clear failed (${res.status})`);
+}
+
+export async function setWorkspaceDecisionRouting(
+  workspaceId: string,
+  target:
+    | { mode: "llm_only" }
+    | { mode: "shadow" | "hybrid"; modelAlias: string },
+): Promise<Omit<WorkspaceDecisionRouting, "shadowSampleRate" | "models">> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/decision-routing`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(target),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `decision route update failed (${res.status})`);
+  }
+  return ((await res.json()) as {
+    decisionRouting: Omit<WorkspaceDecisionRouting, "shadowSampleRate" | "models">;
+  }).decisionRouting;
 }
 
 export async function fetchMeteredEstimate(

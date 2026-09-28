@@ -29,6 +29,12 @@ export function getUserInfo(): UserInfo | null {
     cachedUser = native;
     return native;
   }
+  if (bridge?.getAccessToken) {
+    // Older bundled shells expose only the active ID. They have no user
+    // cookie; retain a refreshed profile only for that native account.
+    if (!cachedUser?.id || cachedUser.id !== bridge.getUserId?.()) cachedUser = null;
+    return cachedUser;
+  }
   if (typeof document === "undefined") return cachedUser;
   const info = selectActiveUser(document.cookie);
   if (info) cachedUser = info;

@@ -30,6 +30,7 @@ export type DecisionEvaluationProfile = {
   questionVersion: string
   modelCatalogId: string
   modelWireId: string
+  evaluationSegment: string
   status: 'evaluation' | 'approved'
   evidence: 'recorded' | 'synthetic'
   totalTimeoutMs: number
@@ -237,6 +238,9 @@ export function validateDecisionRoute(
     profile.modelCatalogId !== request.model.catalogId ||
     profile.modelWireId !== request.model.wireId
   ) configError('evaluation profile does not match the pinned decision model')
+  if (profile.evaluationSegment !== (request.evaluationSegment ?? 'global')) {
+    configError('evaluation profile does not match the request evidence segment')
+  }
   if (
     !Number.isFinite(profile.totalTimeoutMs) || profile.totalTimeoutMs <= 0 ||
     !Number.isFinite(profile.primaryTimeoutMs) || profile.primaryTimeoutMs <= 0 ||

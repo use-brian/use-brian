@@ -39,7 +39,7 @@ vi.mock("@/lib/auth-fetch", () => ({
 const navigation = vi.hoisted(() => ({ query: '', push: vi.fn() }));
 vi.mock('next/navigation', () => ({ useSearchParams: () => new URLSearchParams(navigation.query), useRouter: () => ({ push: navigation.push }) }));
 vi.mock('../organization-chart', () => ({ OrganizationChartView: () => <h2>Structure fixture</h2> }));
-vi.mock('@/components/workspace-access/workspace-access', () => ({ WorkspaceAccessView: ({selection}:{selection:{kind:string;id?:string}}) => <div data-access-kind={selection.kind} data-access-id={selection.id}>{selection.kind==='requests'?'Access fixture':'Scoped access fixture'}</div> }));
+vi.mock('@/components/workspace-access/workspace-access', () => ({ WorkspaceAccessView: ({selection,embedded}:{selection:{kind:string;id?:string};embedded?:boolean}) => <div data-access-kind={selection.kind} data-access-id={selection.id} data-embedded={embedded?'true':'false'}>{selection.kind==='requests'?'Access fixture':'Scoped access fixture'}</div> }));
 vi.mock('@/components/settings-modal/sections/context-scopes-section', () => ({ TeamsContextSection: ({renderAccessSettings}:{renderAccessSettings:(id:string)=>React.ReactNode}) => <><h2>Departments fixture</h2>{renderAccessSettings('department-fixture')}</> }));
 let root: Root;
 let host: HTMLDivElement;
@@ -55,6 +55,10 @@ describe('[COMP:app-web/organization-chart] unified organization home', () => {
     navigation.query = `section=${section}`; await redraw();
     expect(host.querySelector('nav [aria-current="page"]')?.getAttribute('href')).toBe(`/w/workspace-1/organization${section === 'structure' ? '' : `?section=${section}`}`);
     expect(host.querySelectorAll('nav a')).toHaveLength(4);
+    expect(host.textContent).toContain(en.organization.structureSummary);
+    expect(host.textContent).toContain(en.organization.peopleSummary);
+    expect(host.textContent).toContain(en.organization.departmentsSummary);
+    expect(host.textContent).toContain(en.organization.accessSummary);
     expect(host.textContent?.includes('Structure fixture')).toBe(section === 'structure');
     expect(host.textContent?.includes('Access fixture')).toBe(section === 'access');
     expect(host.textContent?.includes('Departments fixture')).toBe(section === 'departments');
@@ -66,12 +70,14 @@ describe('[COMP:app-web/organization-chart] unified organization home', () => {
     expect(person).toBeDefined();await act(async()=>person.click());
     expect(navigation.push).toHaveBeenCalledWith('/w/workspace-1/organization?section=people&member=user-2');
     await render('user-2');expect(host.querySelector('[data-access-kind="person"]')?.getAttribute('data-access-id')).toBe('user-2');
+    expect(host.querySelector('[data-access-kind="person"]')?.getAttribute('data-embedded')).toBe('true');
     await render('user-1');expect(host.querySelector('[data-access-kind="person"]')?.getAttribute('data-access-id')).toBe('user-1');
     await render();expect(host.querySelector('[data-access-kind]')).toBeNull();
   });
   it('embeds selected department controls and keeps Access on requests',async()=>{
     navigation.query='section=departments';await redraw();expect(host.querySelector('[data-access-kind="department"]')?.getAttribute('data-access-id')).toBe('department-fixture');
-    navigation.query='section=access';await redraw();expect(host.querySelector('[data-access-kind="requests"]')).not.toBeNull();expect(host.querySelector('[data-access-kind="department"]')).toBeNull();
+    expect(host.querySelector('[data-access-kind="department"]')?.getAttribute('data-embedded')).toBe('true');
+    navigation.query='section=access';await redraw();expect(host.querySelector('[data-access-kind="requests"]')).not.toBeNull();expect(host.querySelector('[data-access-kind="requests"]')?.getAttribute('data-embedded')).toBe('false');expect(host.querySelector('[data-access-kind="department"]')).toBeNull();
   });
   it('falls back to Structure for an unknown section', async () => {
     navigation.query = 'section=unknown'; await redraw(); expect(host.textContent).toContain('Structure fixture');

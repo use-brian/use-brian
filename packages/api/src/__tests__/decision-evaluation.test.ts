@@ -5,6 +5,7 @@ import {
   SYNTHETIC_EVALUATION_PROFILES,
   estimateDecisionEvaluation,
   parseDecisionEvaluationArgs,
+  parseDecisionEvaluationFixtures,
   runDecisionEvaluation,
   validateDecisionPromotion,
   type DecisionEvaluationReport,
@@ -127,6 +128,43 @@ describe('[COMP:decisions/evaluation] decision evaluation runner', () => {
     })
   })
 
+  it('binds reports and provider requests to an injected decision model', async () => {
+    const fixture = { ...DECISION_EVAL_FIXTURES[0]!, evidence: 'recorded' as const }
+    const model = { catalogId: 'typesafe-jev-1.13', wireId: 'fictional-wire-v2' }
+    const evaluate = vi.fn<DecisionProvider['evaluate']>(async (request) => ({
+      providerId: 'fixture-live-decision',
+      model: request.model,
+      answers: [{
+        questionId: 'decision',
+        kind: 'boolean',
+        value: fixture.expected.decision as boolean,
+        evidence: { source: 'native_distribution', confidence: 0.99 },
+      }],
+      usage: { inputTokens: 20, outputTokens: 0, costUsd: 0.0001 },
+    }))
+
+    const report = await runDecisionEvaluation({
+      mode: 'live',
+      fixtures: [fixture],
+      provider: provider(evaluate),
+      model,
+      maxCalls: 1,
+      maxCostUsd: 0.01,
+    })
+
+    expect(evaluate).toHaveBeenCalledWith(expect.objectContaining({ model }))
+    expect(report.model).toEqual(model)
+  })
+
+  it('validates operator fixture shape, labels, and answer vocabulary', () => {
+    const fixture = { ...DECISION_EVAL_FIXTURES[0]!, evidence: 'recorded' as const }
+    expect(parseDecisionEvaluationFixtures([fixture])).toEqual([fixture])
+    expect(() => parseDecisionEvaluationFixtures([
+      { ...fixture, expected: { decision: 'not-a-boolean' } },
+    ])).toThrow(/invalid expected value/)
+    expect(() => parseDecisionEvaluationFixtures([fixture, fixture])).toThrow(/duplicate/)
+  })
+
   it('keeps live calls over synthetic fixtures ineligible for production promotion', async () => {
     const fixtures = DECISION_EVAL_FIXTURES.slice(0, 1)
     const evaluate = vi.fn<DecisionProvider['evaluate']>(async (request) => ({
@@ -185,8 +223,16 @@ describe('[COMP:decisions/evaluation] decision evaluation runner', () => {
     expect(parseDecisionEvaluationArgs([])).toEqual({ mode: 'offline' })
     expect(parseDecisionEvaluationArgs(['--estimate'])).toEqual({ mode: 'estimate' })
     expect(parseDecisionEvaluationArgs([
-      '--live', '--max-calls=14', '--max-cost-usd=0.25', '--output=/tmp/report.json',
-    ])).toEqual({ mode: 'live', maxCalls: 14, maxCostUsd: 0.25, output: '/tmp/report.json' })
+      '--live', '--model=typesafe-jev-1.13', '--fixtures=/tmp/fixtures.json',
+      '--max-calls=14', '--max-cost-usd=0.25', '--output=/tmp/report.json',
+    ])).toEqual({
+      mode: 'live',
+      modelAlias: 'typesafe-jev-1.13',
+      fixtures: '/tmp/fixtures.json',
+      maxCalls: 14,
+      maxCostUsd: 0.25,
+      output: '/tmp/report.json',
+    })
     expect(() => parseDecisionEvaluationArgs(['--estimate', '--live'])).toThrow(/mutually exclusive/)
     expect(() => parseDecisionEvaluationArgs(['--mystery'])).toThrow(/unknown/)
   })

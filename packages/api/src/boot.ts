@@ -234,6 +234,8 @@ import { createSaveChatMediaTool } from './chat-archive/save-media-tool.js'
 import { resolveIngestPlaceholders } from './ingest/placeholder-resolver.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createWorkspaceModelDefaultsStore } from './db/workspace-model-defaults-store.js'
+import { createWorkspaceDecisionRoutingStore } from './db/workspace-decision-routing.js'
+import { createDecisionEvaluationProfileStore } from './db/decision-evaluation-profiles.js'
 import { createSessionResumeReplay } from './routes/session-resume-replay.js'
 import {
   startCodexProviderManager,
@@ -717,11 +719,13 @@ import type { InjectExtraTools, ResolveAppSoul } from './tool-injection-port.js'
 import type { CreditBudgetGate } from './routes/route-helpers.js'
 import {
   createDecisionRuntime,
+  type CreateDecisionRuntimeOptions,
   type DecisionRouteResolver,
   type DecisionRuntime,
   type DecisionRuntimeAttempt,
   type DecisionRuntimeOutcome,
 } from './decision-runtime.js'
+import { createWorkspaceDecisionRouteResolver } from './workspace-decision-routing.js'
 
 // ════════════════════════════════════════════════════════════════════
 // Public types
@@ -987,6 +991,8 @@ export interface OpenApiPorts {
   usageStore?: UsageStore
   /** Workspace-aware decision policy. Absent defaults every operation to LLM-only. */
   resolveDecisionRoute?: DecisionRouteResolver
+  /** Register additional decision transports; registry rows make them appear in settings automatically. */
+  configureDecisionAdapters?: NonNullable<CreateDecisionRuntimeOptions['configureAdapters']>
   /** Optional edition-local attempt attribution/usage sink. */
   recordDecisionAttempt?: (attempt: DecisionRuntimeAttempt) => void | Promise<void>
   /** Optional edition-local final-path analytics sink. */
@@ -2061,11 +2067,28 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
 
-  const decisionRuntime = createDecisionRuntime({
+  const workspaceDecisionRoutingStore = createWorkspaceDecisionRoutingStore()
+  const decisionEvaluationProfileStore = createDecisionEvaluationProfileStore()
+  let decisionRuntime!: DecisionRuntime
+  const workspaceDecisionRouteResolver = createWorkspaceDecisionRouteResolver({
+    store: workspaceDecisionRoutingStore,
+    profileStore: decisionEvaluationProfileStore,
+    configuredAdapterIds: () => decisionRuntime.configuredAdapterIds(),
+    fallback: ports.resolveDecisionRoute,
+    onError: (error, context) => {
+      console.warn('[decision-routing] route resolution degraded safely', {
+        workspaceId: context.workspaceId,
+        operationId: context.operation.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    },
+  })
+  decisionRuntime = createDecisionRuntime({
     llmProvider: provider,
     defaultLlmModel: () => backgroundModelFor(configuredProviders),
     typesafeApiKey: env.TYPESAFE_API_KEY,
-    resolveRoute: ports.resolveDecisionRoute,
+    configureAdapters: ports.configureDecisionAdapters,
+    resolveRoute: workspaceDecisionRouteResolver,
     onAttempt: ports.recordDecisionAttempt,
     onOutcome: ports.recordDecisionOutcome,
   })
@@ -6131,6 +6154,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     meteredProfileStore,
     modelDefaultsStore,
     customLlmEndpointStore,
+    decisionRoutingStore: workspaceDecisionRoutingStore,
+    decisionEvaluationProfileStore,
+    configuredDecisionAdapters: new Set(decisionRuntime.configuredAdapterIds()),
     configuredProviders,
     estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
   }))

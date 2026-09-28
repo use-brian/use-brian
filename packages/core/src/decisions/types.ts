@@ -103,6 +103,8 @@ export type DecisionRequest = {
   runId: string
   operation: DecisionOperationRef
   model: DecisionModelRef
+  /** Evidence cohort key, for example `global`, `en`, or a data-domain slug. */
+  evaluationSegment?: string
   state: JsonValue
   questions: DecisionQuestion[]
   signal?: AbortSignal

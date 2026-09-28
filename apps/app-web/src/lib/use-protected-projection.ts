@@ -13,12 +13,12 @@ export function protectProjection<T extends {validForMs:number}>(data:T,requestS
   return {...data,projectionDeadline:Date.now()+remaining,projectionMonotonicDeadline:now+remaining};
 }
 
-function remaining(data:ProtectedProjection<unknown>):number {
+export function projectionRemainingMs(data:ProtectedProjection<unknown>):number {
   return Math.min(data.projectionDeadline-Date.now(),data.projectionMonotonicDeadline-performance.now());
 }
 
 /** Expired cached data is hidden on the first render, before the refresh effect. */
-export function useProtectedProjection<T>(key:string,data:ProtectedProjection<T>|undefined,onPurge:()=>void,refresh?:()=>Promise<unknown>):ProtectedProjection<T>|undefined {
+export function useProtectedProjection<T>(key:string|null,data:ProtectedProjection<T>|undefined,onPurge:()=>void,refresh?:()=>Promise<unknown>):ProtectedProjection<T>|undefined {
   const purgeRef=useRef(onPurge);
   purgeRef.current=onPurge;
   const refreshRef=useRef(refresh);refreshRef.current=refresh;
@@ -34,6 +34,7 @@ export function useProtectedProjection<T>(key:string,data:ProtectedProjection<T>
     setAccepted(identity);
   },[accepted,identity]);
   useEffect(()=>{
+    if (!key) return;
     const purge=()=>{purgeRef.current();invalidateSurfaceCache(key);};
     const visible=()=>{if(document.visibilityState==='visible')purge();};
     window.addEventListener('focus',purge);
@@ -41,8 +42,8 @@ export function useProtectedProjection<T>(key:string,data:ProtectedProjection<T>
     return()=>{window.removeEventListener('focus',purge);document.removeEventListener('visibilitychange',visible);};
   },[key]);
   useEffect(()=>{
-    if(!data)return;
-    const ttl=remaining(data);
+    if(!key||!data)return;
+    const ttl=projectionRemainingMs(data);
     if(!Number.isFinite(ttl)||ttl<=0){purgeRef.current();invalidateSurfaceCache(key);return;}
     const renew=refreshRef.current&&ttl>1_000?setTimeout(()=>{
       void refreshRef.current?.().catch(()=>{});
@@ -50,5 +51,5 @@ export function useProtectedProjection<T>(key:string,data:ProtectedProjection<T>
     const timeout=setTimeout(()=>{purgeRef.current();invalidateSurfaceCache(key);},Math.ceil(ttl));
     return()=>{clearTimeout(timeout);if(renew!==undefined)clearTimeout(renew);};
   },[key,data]);
-  return data&&remaining(data)>0&&accepted===identity?data:undefined;
+  return key&&data&&projectionRemainingMs(data)>0&&accepted===identity?data:undefined;
 }

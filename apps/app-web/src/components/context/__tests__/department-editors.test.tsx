@@ -44,6 +44,10 @@ function expectApplied(){expect(mocks.save).toHaveBeenCalledWith('workspace',{ty
 function Harness(){const change=useDepartmentChange('workspace');return <><button onClick={()=>void change.save({type:'department.archive',teamId:'team'},'Research')}>Change</button><button onClick={()=>void change.save({type:'department.archive',teamId:'other'},'Other')}>Other</button><DepartmentChangeFeedback change={change}/></>;}
 
 describe('[COMP:app-web/context-scope] reviewed Team and assistant editors',()=>{
+  it('separates department identity, membership, read scope and lifecycle into named panels',async()=>{
+    await render(<TeamsContextSection/>);
+    for(const heading of [t.departmentPickerLabel,t.createTeamTitle,t.departmentDetailsTitle,t.membershipTitle,t.readAccessTitle,t.departmentLifecycleTitle])expect(host.textContent).toContain(heading);
+  });
   it('uses current registry capabilities and shows only the authorized related units',async()=>{
     mocks.registry.mockImplementation(async()=>({...registry(),canAdminister:false}));await render(<TeamsContextSection/>);
     expect(host.textContent).toContain('Published unit');expect(host.textContent).toContain('90');expect(host.textContent).not.toContain(t.createTeam);

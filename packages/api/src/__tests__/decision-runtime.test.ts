@@ -108,6 +108,7 @@ function profile() {
     questionVersion: operationRef.questionVersion,
     modelCatalogId: 'typesafe-jev-1.13',
     modelWireId: 'jev-1.13.0',
+    evaluationSegment: 'global',
     status: 'approved' as const,
     evidence: 'synthetic' as const,
     totalTimeoutMs: 100,

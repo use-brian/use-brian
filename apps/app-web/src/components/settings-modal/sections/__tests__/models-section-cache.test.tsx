@@ -34,6 +34,7 @@ vi.mock("@/lib/api/models", () => ({
   fetchMeteredEstimate: vi.fn(),
   fetchModelMenu,
   setWorkspaceModelDefault: vi.fn(),
+  setWorkspaceDecisionRouting: vi.fn(),
   setWorkspaceModelRoute: vi.fn(),
   updateMeteredProfile: vi.fn(),
 }));
@@ -96,6 +97,13 @@ const menu = {
   defaults: [],
   profiles: [],
   modelRoutes: [],
+  decisionRouting: {
+    mode: "llm_only",
+    modelAlias: null,
+    updatedAt: null,
+    shadowSampleRate: 0.1,
+    models: [],
+  },
   meteredBillingAvailable: false,
 };
 const bundle = (endpointName: string) => ({

@@ -175,11 +175,14 @@ export function GenerationPlaceholder(props: { slot: FeedPlaceholderAttrs; segme
   return <Dialog.Root open={open} onOpenChange={setOpen}>
     <section data-feed-slot={props.slot.id} className="my-3 flex min-w-0 flex-wrap items-center gap-x-2 rounded-lg bg-muted/40 px-3 py-1" onPointerDown={props.onSelect} onFocusCapture={props.onSelect}>
       {pendingImage ? <div className="relative order-first min-h-11 w-full pt-2">
-        <button type="button" aria-label={t.openDetails} onClick={() => setOpen(true)} className="w-full" data-feed-pending-image><FeedGenerationImage workspaceId={c.workspaceId} fileId={pendingImage.attrs.fileId} alt={pendingImage.attrs.alt ?? ''} className="max-h-48 w-full rounded-lg object-contain" /></button>
+        <Dialog.Trigger aria-label={t.openDetails} className="w-full" data-feed-pending-image><FeedGenerationImage workspaceId={c.workspaceId} fileId={pendingImage.attrs.fileId} alt={pendingImage.attrs.alt ?? ''} className="max-h-48 w-full rounded-lg object-contain" /></Dialog.Trigger>
         {imageCandidates.length > 1 ? <>
           <Button variant="secondary" size="icon" className="absolute left-2 top-1/2 size-11 -translate-y-1/2 rounded-full shadow-sm" aria-label={t.previousImage} disabled={selectedImageIndex === 0} onClick={() => selectImageIndex(selectedImageIndex - 1)}><ChevronLeft className="size-5" aria-hidden /></Button>
           <Button variant="secondary" size="icon" className="absolute right-2 top-1/2 size-11 -translate-y-1/2 rounded-full shadow-sm" aria-label={t.nextImage} disabled={selectedImageIndex === imageCandidates.length - 1} onClick={() => selectImageIndex(selectedImageIndex + 1)}><ChevronRight className="size-5" aria-hidden /></Button>
-          <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-background/85 px-2 py-1 text-xs text-muted-foreground shadow-sm" aria-live="polite">{format(t.imageOptionPosition, { current: selectedImageIndex + 1, total: imageCandidates.length })}</span>
+          {/* Status provides implicit polite announcements, without an explicit
+              aria-live region that modal masking preserves inside ProseMirror.
+              Such preservation mutates sibling blocks and destroys node views. */}
+          <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-background/85 px-2 py-1 text-xs text-muted-foreground shadow-sm" role="status">{format(t.imageOptionPosition, { current: selectedImageIndex + 1, total: imageCandidates.length })}</span>
         </> : null}
       </div> : null}
       <span className="flex shrink-0 items-center gap-2 text-sm font-medium text-muted-foreground"><Icon className="size-4" aria-hidden />{label}</span>

@@ -140,31 +140,35 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
   }
 
   if(!data)return resource.error?<div className="space-y-3"><p role="alert">{t.loadFailed}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{accessCopy.reload}</Button></div>:<SurfaceSkeletonFor surface="organization"/>;
+  const createDepartment=canManage?<section className="space-y-3 rounded-xl border border-border bg-muted/20 p-4">
+    <h3 className="font-medium">{t.createTeamTitle}</h3>
+    <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t.teamNamePlaceholder}
+      aria-label={t.teamNameLabel} className="min-h-11 w-full min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] outline-none focus-visible:border-ring md:text-sm" />
+    <Button className="min-h-11 w-full" onClick={() => void create()} disabled={change.busy || !name.trim()}><Plus className="size-4" />{t.createTeam}</Button>
+  </section>:null;
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold">{t.teamsTitle}</h2>
         <p className="mt-1 text-sm text-muted-foreground">{t.teamsDescription}</p>
       </div>
-      {canManage ? (
-        <div className="flex flex-wrap gap-2">
-          <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t.teamNamePlaceholder}
-            aria-label={t.teamNameLabel} className="min-h-11 min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-[16px] outline-none focus-visible:border-ring md:text-sm" />
-          <Button className="min-h-11" onClick={() => void create()} disabled={change.busy || !name.trim()}><Plus className="size-4" />{t.createTeam}</Button>
-        </div>
-      ) : null}
       <DepartmentChangeFeedback change={change}/>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      {teams.length === 0 ? <p className="text-sm text-muted-foreground">{t.noTeams}</p> : (
-        <div className="space-y-4">
-          <SearchableSelect value={selectedId} disabled={change.busy} onValueChange={setSelectedId}
-            items={teams.map((team) => ({ value: team.id, label: team.name }))}
-            searchPlaceholder={t.searchTeams} emptyMessage={t.noTeams} />
-          {selected ? (
-            <div className="rounded-xl border border-border p-4 space-y-4">
-              <div><h3 className="font-medium">{selected.name}</h3><p className="text-xs text-muted-foreground">{t.flatGrantHint}</p></div>
-              {canManage ? (
-                <div className="grid gap-3 sm:grid-cols-2">
+      {teams.length === 0 ? <div className="grid gap-4 lg:max-w-sm">{createDepartment}<p className="text-sm text-muted-foreground">{t.noTeams}</p></div> : (
+        <div className="grid items-start gap-6 lg:grid-cols-[minmax(15rem,19rem)_minmax(0,1fr)]">
+          <aside className="space-y-4 lg:sticky lg:top-4">
+            <section className="space-y-3 rounded-xl border border-border bg-background p-4">
+              <h3 className="font-medium">{t.departmentPickerLabel}</h3>
+              <SearchableSelect aria-label={t.departmentPickerLabel} value={selectedId} disabled={change.busy} onValueChange={setSelectedId}
+                items={teams.map((team) => ({ value: team.id, label: team.name }))}
+                searchPlaceholder={t.searchTeams} emptyMessage={t.noTeams} />
+            </section>
+            {createDepartment}
+          </aside>
+          {selected ? <div className="min-w-0 space-y-4">
+            <section className="space-y-4 rounded-xl border border-border bg-background p-4 md:p-5">
+              <div><h3 className="font-semibold">{t.departmentDetailsTitle}</h3><p className="mt-1 text-sm text-muted-foreground">{selected.name}</p></div>
+              {canManage ? <div className="grid gap-3 sm:grid-cols-2">
                   <label className="grid gap-1 text-xs text-muted-foreground">
                     {t.teamNameLabel}
                     <input value={editName} onChange={(event) => setEditName(event.target.value)}
@@ -183,8 +187,41 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
                   <Button size="sm" variant="outline" className="min-h-11 self-start" onClick={() => void saveTeamDetails()} disabled={change.busy || !editName.trim()}>
                     <Check className="size-4" />{t.saveTeamDetails}
                   </Button>
+                </div> : <p className="text-sm text-muted-foreground">{selected.description || t.flatGrantHint}</p>}
+              <p className="text-xs text-muted-foreground">{t.flatGrantHint}</p>
+            </section>
+            <section className="space-y-4 rounded-xl border border-border bg-background p-4 md:p-5">
+              <h3 className="font-semibold">{t.membershipTitle}</h3>
+              <div className="grid gap-5 md:grid-cols-2">
+                <div>
+                  <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.teamMembersTitle}</h4>
+                  <p className="mb-3 text-xs text-muted-foreground">{t.membershipModeHint}</p>
+                  <div className="space-y-2">
+                    {members.map((member) => (
+                      <label key={member.userId} className="flex min-h-11 items-center gap-2 rounded-lg border border-border/70 px-3 py-2 text-sm">
+                        <Checkbox checked={selected.memberIds.includes(member.userId)} disabled={!canManage || change.busy}
+                          onCheckedChange={(value) => void setMember(member.userId, Boolean(value))} />
+                        {member.userName || dictionary.workspaceAccess.unnamed}
+                      </label>
+                    ))}
+                  </div>
                 </div>
-              ) : null}
+                <div>
+                  <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.teamAssistantsTitle}</h4>
+                  <div className="space-y-2">
+                    {assistants.map((assistant) => (
+                      <label key={assistant.id} className="flex min-h-11 items-center gap-2 rounded-lg border border-border/70 px-3 py-2 text-sm">
+                        <Checkbox checked={selected.assistantIds.includes(assistant.id)} disabled={!canManage || change.busy}
+                          onCheckedChange={(value) => void setAssistant(assistant.id, Boolean(value))} />
+                        {assistant.name}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </section>
+            <section className="space-y-4 rounded-xl border border-border bg-background p-4 md:p-5">
+              <h3 className="font-semibold">{t.readAccessTitle}</h3>
               <label className="flex items-center gap-2 text-sm">
                 <Checkbox checked={readAll} onCheckedChange={(value) => setReadAll(Boolean(value))} disabled={!canManage || change.busy} />
                 {t.readAllTeams}
@@ -210,44 +247,11 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
                 {selected.orgUnits.length?<ul>{selected.orgUnits.map(unit=><li key={unit.id}><Link className="flex min-h-11 items-center underline" href={organizationHref(workspaceId)}>{unit.name}</Link></li>)}</ul>:<p className="text-muted-foreground">{accessCopy.noVisibleOrgUnits}</p>}
                 <p className="text-muted-foreground">{format(accessCopy.requestPolicyHint,{defaultDays:data.requestPolicy.defaultDays,maxDays:data.requestPolicy.maxDays})}</p>
               </div>
-              <div className="grid gap-4 md:grid-cols-2">
-                <div>
-                  <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.teamMembersTitle}</h4>
-                  <p className="mb-3 text-xs text-muted-foreground">{t.membershipModeHint}</p>
-                  <div className="space-y-2">
-                    {members.map((member) => (
-                      <label key={member.userId} className="flex items-center gap-2 text-sm">
-                        <Checkbox
-                          checked={selected.memberIds.includes(member.userId)}
-                          disabled={!canManage || change.busy}
-                          onCheckedChange={(value) => void setMember(member.userId, Boolean(value))}
-                        />
-                        {member.userName || dictionary.workspaceAccess.unnamed}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.teamAssistantsTitle}</h4>
-                  <div className="space-y-2">
-                    {assistants.map((assistant) => (
-                      <label key={assistant.id} className="flex items-center gap-2 text-sm">
-                        <Checkbox
-                          checked={selected.assistantIds.includes(assistant.id)}
-                          disabled={!canManage || change.busy}
-                          onCheckedChange={(value) => void setAssistant(assistant.id, Boolean(value))}
-                        />
-                        {assistant.name}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              </div>
               {canManage ? <Button size="sm" className="min-h-11" disabled={change.busy} onClick={() => void saveGrants()}><Check className="size-4" />{t.saveAccess}</Button> : null}
-              {renderAccessSettings?.(selected.id)}
-              {canManage && selected.status === "active" ? <Button variant="ghost" size="sm" className="min-h-11" disabled={change.busy} onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button> : null}
-            </div>
-          ) : null}
+            </section>
+            {renderAccessSettings?<section className="rounded-xl border border-border bg-background p-4 md:p-5">{renderAccessSettings(selected.id)}</section>:null}
+            {canManage && selected.status === "active" ? <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-muted/20 p-4"><h3 className="font-medium">{t.departmentLifecycleTitle}</h3><Button variant="ghost" size="sm" className="min-h-11 text-destructive hover:text-destructive" disabled={change.busy} onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button></section> : null}
+          </div> : null}
         </div>
       )}
     </div>
