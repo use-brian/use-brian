@@ -54,7 +54,7 @@ import {
 import electronUpdater from "electron-updater";
 import { EmbeddedBrowser, browserPairing } from "./embedded-browser.js";
 
-const embeddedBrowser = new EmbeddedBrowser();
+const embeddedBrowser = new EmbeddedBrowser({ getDockWindow: () => ensureWindow() });
 let browserIdentityChanging = false;
 
 import { DeploymentAccounts, TargetOperations, deploymentKey, deploymentAccountKey, type AccountTarget, type SavedDeploymentAccount } from "./deployment-accounts.js";
@@ -727,7 +727,8 @@ function createWindow(initialLoad: { useBrian?: boolean; route?: string; linkReq
   // clicks" (the post-login symptom). This is the durable counterpart to the
   // explicit focusWindow() calls. See focusWindow.
   win.on("focus", () => {
-    if (!win.webContents.isDestroyed()) win.webContents.focus();
+    // A docked website or its address bar is a legitimate focus target too.
+    if (!win.webContents.isDestroyed() && !embeddedBrowser.isDockedFocused()) win.webContents.focus();
   });
 
   // Re-apply the chrome safety net (see DESKTOP_CHROME_SAFETY_CSS) on every
@@ -831,7 +832,12 @@ function createWindow(initialLoad: { useBrian?: boolean; route?: string; linkReq
     void loadApp(win, initialLoad);
   }
   win.on("closed", () => {
-    if (mainWindow === win) mainWindow = null;
+    if (mainWindow === win) {
+      mainWindow = null;
+      // Also cancel consent/pairing before a host exists; never reopen a window
+      // from a late relay ready after the user closed the app window.
+      embeddedBrowser.dispose();
+    }
     // The capture lives in this window's renderer — with it gone the overlay
     // has nothing to mirror or control.
     destroyRecorderOverlay();

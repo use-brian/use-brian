@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { BrowserWindow, WebContentsView, ipcMain, session, type WebContents, type IpcMainEvent, type Session } from "electron";
+import { BaseWindow, type BrowserWindow, WebContentsView, ipcMain, session, type WebContents, type IpcMainEvent, type Session, type View } from "electron";
 
 const COMMAND = "embedded-browser:command";
 const STATE = "embedded-browser:state";
-const TOOLBAR_HEIGHT = 144;
+const TOOLBAR_HEIGHT = 176;
 const DEFAULT_URL = "https://www.google.com/";
 const toolbarPath = fileURLToPath(new URL("./embedded-browser.html", import.meta.url));
 const toolbarUrl = pathToFileURL(toolbarPath).href;
@@ -24,14 +24,27 @@ type Tab = { id: number; handle: string; taskOwned: boolean; contents: WebConten
 
 /** Owns an exclusive persistent browsing partition; never use an app deployment partition. */
 export class EmbeddedBrowserHost {
-  private readonly window: BrowserWindow;
+  private readonly toolbar: WebContentsView;
+  private readonly dockWindow: BrowserWindow | null;
+  // Retain event emitters: reading native BrowserWindow properties from its
+  // closed callback is unsafe after Electron has destroyed the window.
+  private readonly dockContents: WebContents | null;
+  private readonly dockContentView: View | null;
+  private detachedWindow: BaseWindow | null = null;
+  private owner!: BaseWindow;
+  private docked: boolean;
+  private userCollapsed = false;
+  private collapsed = false;
+  private preferredWidth = 480;
+  private panelWidth = 480;
+  private maxWidth = 480;
   private readonly browsingSession: Session;
   private readonly entries = new Map<number, Tab>();
   private selected: number | null = null;
   private status = "Manual browsing ready";
   private disposed = false;
 
-  constructor(partition: string, private readonly callbacks: Callbacks) {
+  constructor(partition: string, private readonly callbacks: Callbacks, options: { dockWindow?: BrowserWindow | null } = {}) {
     if (!partition.startsWith("persist:") || partition.length <= 8 || partition.startsWith("persist:deployment-")) {
       throw new Error("Embedded browser requires a dedicated persistent partition (not an app deployment partition)");
     }
@@ -54,9 +67,11 @@ export class EmbeddedBrowserHost {
       reply({ cancel: !allowed });
     });
     this.browsingSession.on("will-download", this.onDownload);
-    this.window = new BrowserWindow({
-      width: 1200, height: 850, minWidth: 640, minHeight: 360, show: false,
-      title: "Brian Browser", autoHideMenuBar: true,
+    this.dockWindow = options.dockWindow && !options.dockWindow.isDestroyed() ? options.dockWindow : null;
+    this.docked = !!this.dockWindow;
+    this.dockContents = this.dockWindow?.webContents ?? null;
+    this.dockContentView = this.dockWindow?.contentView ?? null;
+    this.toolbar = new WebContentsView({
       webPreferences: {
         preload: fileURLToPath(new URL("./embedded-browser-preload.cjs", import.meta.url)),
         partition: `embedded-toolbar-${randomUUID()}`,
@@ -64,7 +79,20 @@ export class EmbeddedBrowserHost {
         webviewTag: false, navigateOnDragDrop: false,
       },
     });
-    const toolbar = this.window.webContents;
+    const toolbar = this.toolbar.webContents;
+    toolbar.setZoomFactor(1);
+    void toolbar.setVisualZoomLevelLimits(1, 1).catch(() => {});
+    toolbar.on("zoom-changed", () => toolbar.setZoomFactor(1));
+    toolbar.session.on("will-download", this.onDownload);
+    this.owner = this.dockWindow ?? this.getDetachedWindow();
+    this.owner.contentView.addChildView(this.toolbar);
+    this.dockWindow?.on("resize", this.onLayout);
+    // Native content bounds also change on programmatic resize/menu/fullscreen
+    // transitions that do not consistently emit window resize on every platform.
+    this.dockContentView?.on("bounds-changed", this.onLayout);
+    this.dockWindow?.on("closed", this.onMainClosed);
+    this.dockContents?.on("did-finish-load", this.onLayout);
+    this.dockContents?.on("dom-ready", this.onLayout);
     toolbar.session.setPermissionRequestHandler((_wc, _permission, reply) => reply(false));
     toolbar.session.setPermissionCheckHandler(() => false);
     toolbar.session.setDevicePermissionHandler(() => false);
@@ -74,13 +102,8 @@ export class EmbeddedBrowserHost {
     toolbar.on("will-redirect", event => event.preventDefault());
     toolbar.on("did-finish-load", () => this.publish());
     ipcMain.on(COMMAND, this.onCommand);
-    this.window.on("resize", () => this.layout());
-    this.window.on("closed", () => {
-      if (this.disposed) return;
-      this.cleanup();
-      this.notify(() => this.callbacks.closed());
-    });
-    void this.window.loadFile(toolbarPath).catch(() => this.setStatus("Browser toolbar failed to load"));
+    this.layout();
+    void toolbar.loadFile(toolbarPath).catch(() => this.setStatus("Browser toolbar failed to load"));
   }
 
   async createTab(url: string, taskOwned: boolean): Promise<number> {
@@ -127,11 +150,11 @@ export class EmbeddedBrowserHost {
     contents.on("before-input-event", (event, input) => {
       if ((input.control || input.meta) && input.key.toLowerCase() === "l") {
         event.preventDefault();
-        this.window.webContents.focus();
-        this.window.webContents.send("embedded-browser:focus-address");
+        this.toolbar.webContents.focus();
+        this.toolbar.webContents.send("embedded-browser:focus-address");
       }
     });
-    this.window.contentView.addChildView(view);
+    this.owner.contentView.addChildView(view);
     this.selectTab(id);
     await this.load(tab, target);
     return id;
@@ -140,9 +163,8 @@ export class EmbeddedBrowserHost {
   selectTab(id: number): void {
     if (this.disposed || !this.entries.has(id)) return;
     this.selected = id;
-    for (const tab of this.entries.values()) tab.view.setVisible(tab.id === id);
     this.layout();
-    this.entries.get(id)?.contents.focus();
+    if (!this.collapsed) this.entries.get(id)?.contents.focus();
     this.publish();
   }
 
@@ -165,12 +187,28 @@ export class EmbeddedBrowserHost {
     return [...this.entries.values()].map(({ id, handle, taskOwned, contents }) => ({ id, handle, taskOwned, contents }));
   }
   selectedId(): number | null { return this.selected; }
-  show(): void { if (!this.disposed) { this.window.show(); this.window.focus(); } }
+  show(): void {
+    if (this.disposed) return;
+    this.userCollapsed = false;
+    this.layout();
+    this.owner.show();
+    this.focusBrowser();
+  }
+  focusBrowser(): void {
+    if (this.disposed) return;
+    this.owner.focus();
+    const tab = this.selected === null ? undefined : this.entries.get(this.selected);
+    if (!this.collapsed && tab) tab.contents.focus();
+    else this.toolbar.webContents.focus();
+  }
+  isDockedFocused(): boolean {
+    return !this.disposed && this.docked && (this.toolbar.webContents.isFocused() ||
+      (!this.collapsed && [...this.entries.values()].some(tab => tab.id === this.selected && !tab.contents.isDestroyed() && tab.contents.isFocused())));
+  }
   setStatus(status: string): void { this.status = status; this.publish(); }
   destroy(): void {
     if (this.disposed) return;
     this.cleanup();
-    this.window.destroy();
   }
 
   private readonly onDownload = (event: Electron.Event): void => {
@@ -179,11 +217,23 @@ export class EmbeddedBrowserHost {
   };
 
   private readonly onCommand = (event: IpcMainEvent, command: unknown, value: unknown): void => {
-    if (this.disposed || event.sender !== this.window.webContents ||
-        event.senderFrame !== this.window.webContents.mainFrame || event.senderFrame.url !== toolbarUrl) return;
+    if (this.disposed || event.sender !== this.toolbar.webContents ||
+        event.senderFrame !== this.toolbar.webContents.mainFrame || event.senderFrame.url !== toolbarUrl) return;
     const tab = this.selected === null ? undefined : this.entries.get(this.selected);
     try {
       switch (command) {
+        case "detach": this.move(false); break;
+        case "dock": this.move(true); break;
+        case "collapse": this.userCollapsed = true; this.layout(); break;
+        case "expand": this.userCollapsed = false; this.layout(); break;
+        case "resize":
+          if (this.docked && value && typeof value === "object" &&
+              Object.keys(value).length === 1 && "width" in value &&
+              typeof value.width === "number" && Number.isFinite(value.width)) {
+            this.preferredWidth = Math.round(Math.max(360, Math.min(this.maxWidth, value.width)));
+            this.layout();
+          }
+          break;
         case "ready": this.publish(); break;
         case "approve":
           // A toolbar click only requests consent; it never grants ownership.
@@ -216,15 +266,77 @@ export class EmbeddedBrowserHost {
     try { await tab.contents.loadURL(url); }
     catch { if (this.entries.has(tab.id)) this.setStatus("Page could not be loaded (or navigation was cancelled)"); }
   }
+  private readonly onLayout = (): void => this.layout();
+  private readonly onMainClosed = (): void => {
+    if (this.disposed) return;
+    this.cleanup();
+    this.notify(() => this.callbacks.closed());
+  };
+  private readonly onDetachedClose = (event: Electron.Event): void => {
+    if (this.disposed) return;
+    if (this.dockWindow && !this.dockWindow.isDestroyed()) {
+      event.preventDefault();
+      this.move(true);
+    } else {
+      this.cleanup();
+      this.notify(() => this.callbacks.closed());
+    }
+  };
+  private getDetachedWindow(): BaseWindow {
+    if (!this.detachedWindow) {
+      this.detachedWindow = new BaseWindow({ width: 480, height: 850, minWidth: 360,
+        minHeight: 240, show: false, title: "Brian Browser", autoHideMenuBar: true });
+      this.detachedWindow.on("resize", this.onLayout);
+      this.detachedWindow.contentView.on("bounds-changed", this.onLayout);
+      this.detachedWindow.on("close", this.onDetachedClose);
+    }
+    return this.detachedWindow;
+  }
+  private move(docked: boolean): void {
+    if (this.disposed || docked === this.docked || (docked && (!this.dockWindow || this.dockWindow.isDestroyed()))) return;
+    const next = docked ? this.dockWindow! : this.getDetachedWindow();
+    for (const view of [this.toolbar, ...[...this.entries.values()].map(tab => tab.view)]) {
+      this.owner.contentView.removeChildView(view);
+      next.contentView.addChildView(view);
+    }
+    this.owner = next;
+    this.docked = docked;
+    if (docked) this.detachedWindow?.hide();
+    this.layout();
+    this.owner.show();
+    this.focusBrowser();
+  }
+  public publishDockLayout(): void {
+    if (!this.dockWindow || this.dockWindow.isDestroyed() || this.dockWindow.webContents.isDestroyed()) return;
+    const [contentWidth] = this.dockWindow.getContentSize();
+    this.dockWindow.webContents.send("embedded-browser:dock-layout", {
+      reservedWidth: !this.disposed && this.docked ? this.panelWidth : 0, contentWidth,
+    });
+  }
   private layout(): void {
     if (this.disposed) return;
-    const [width, height] = this.window.getContentSize();
-    for (const tab of this.entries.values()) tab.view.setBounds({ x: 0, y: TOOLBAR_HEIGHT, width, height: Math.max(0, height - TOOLBAR_HEIGHT) });
+    const [width, height] = this.owner.getContentSize();
+    this.maxWidth = this.docked ? Math.max(360, width - 640) : width;
+    this.collapsed = this.docked && (this.userCollapsed || width < 1000);
+    this.panelWidth = this.docked ? (this.collapsed ? 56 : Math.min(this.maxWidth, this.preferredWidth)) : width;
+    const x = this.docked ? Math.max(0, width - this.panelWidth) : 0;
+    this.toolbar.setBounds({ x, y: 0, width: this.panelWidth, height });
+    for (const tab of this.entries.values()) {
+      tab.view.setVisible(!this.collapsed && tab.id === this.selected);
+      // Collapsing hides the view, not its page layout. Keep a usable viewport
+      // for background automation instead of squeezing the site into the rail.
+      const pageWidth = this.collapsed ? Math.min(this.maxWidth, this.preferredWidth) : this.panelWidth;
+      tab.view.setBounds({ x: x + 8, y: TOOLBAR_HEIGHT, width: Math.max(0, pageWidth - 8), height: Math.max(0, height - TOOLBAR_HEIGHT) });
+    }
+    this.publishDockLayout();
+    this.publish();
   }
   private publish(): void {
-    if (this.disposed || this.window.webContents.isDestroyed()) return;
-    this.window.webContents.send(STATE, {
+    if (this.disposed || this.toolbar.webContents.isDestroyed()) return;
+    this.toolbar.webContents.send(STATE, {
       status: this.status, selected: this.selected,
+      presentation: { mode: this.docked ? "docked" : "detached", collapsed: this.collapsed,
+        panelWidth: this.panelWidth, minWidth: 360, maxWidth: this.maxWidth },
       tabs: [...this.entries.values()].filter(tab => !tab.contents.isDestroyed()).map(tab => ({
         id: tab.id, title: tab.contents.getTitle() || "New tab", url: tab.contents.getURL(),
         taskOwned: tab.taskOwned, back: tab.contents.navigationHistory.canGoBack(),
@@ -236,7 +348,7 @@ export class EmbeddedBrowserHost {
     const tab = this.entries.get(id);
     if (!tab) return;
     this.entries.delete(id);
-    if (!this.window.isDestroyed()) this.window.contentView.removeChildView(tab.view);
+    if (!this.owner.isDestroyed()) this.owner.contentView.removeChildView(tab.view);
     if (this.selected === id) {
       this.selected = null;
       const next = this.entries.keys().next().value;
@@ -252,6 +364,24 @@ export class EmbeddedBrowserHost {
   }
   private cleanup(): void {
     this.disposed = true;
+    this.publishDockLayout();
+    this.dockWindow?.removeListener("resize", this.onLayout);
+    this.dockContentView?.removeListener("bounds-changed", this.onLayout);
+    this.dockWindow?.removeListener("closed", this.onMainClosed);
+    this.dockContents?.removeListener("did-finish-load", this.onLayout);
+    this.dockContents?.removeListener("dom-ready", this.onLayout);
+    this.toolbar.webContents.session.removeListener("will-download", this.onDownload);
+    if (!this.owner.isDestroyed()) {
+      this.owner.contentView.removeChildView(this.toolbar);
+      for (const tab of this.entries.values()) this.owner.contentView.removeChildView(tab.view);
+    }
+    if (!this.toolbar.webContents.isDestroyed()) this.toolbar.webContents.close({ waitForBeforeUnload: false });
+    if (this.detachedWindow) {
+      this.detachedWindow.removeListener("resize", this.onLayout);
+      this.detachedWindow.contentView.removeListener("bounds-changed", this.onLayout);
+      this.detachedWindow.removeListener("close", this.onDetachedClose);
+      if (!this.detachedWindow.isDestroyed()) this.detachedWindow.destroy();
+    }
     ipcMain.removeListener(COMMAND, this.onCommand);
     this.browsingSession.removeListener("will-download", this.onDownload);
     // Retain deny-by-default session policy even after the window closes.

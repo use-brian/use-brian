@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { dialog } from "electron";
+import { dialog, type BrowserWindow } from "electron";
 import { TabExecutor, ExecutorError, type ExecutorPlatform, type ExecutorTabUpdatedListener } from "@use-brian/browser-control/executor.js";
 import { RelayClient, type WebSocketLike } from "@use-brian/browser-control/relay-client.js";
 import type { LocalControlMode } from "@use-brian/browser-control/protocol.js";
@@ -51,6 +51,10 @@ export class EmbeddedBrowser {
   private cancelReady: (() => void) | null = null;
   private identity: { workspaceId: string; browserProfileId: string } | null = null;
   private approvingTab = false;
+
+  constructor(private readonly options: { getDockWindow?: () => BrowserWindow | null } = {}) {}
+
+  isDockedFocused(): boolean { return this.host?.isDockedFocused() ?? false; }
 
   status(): { connected: boolean; workspaceId?: string; browserProfileId?: string } {
     return this.active && this.relay?.getState() === "ready"
@@ -104,7 +108,7 @@ export class EmbeddedBrowser {
         detached: id => {
           if (this.executor?.onDetached(id)) this.stop();
         },
-      });
+      }, { dockWindow: this.options.getDockWindow?.() });
       this.active = true;
       this.identity = { workspaceId: pair.workspaceId, browserProfileId: pair.browserProfileId };
       this.executor = new TabExecutor(this.platform(generation));

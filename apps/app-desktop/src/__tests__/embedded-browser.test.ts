@@ -1,3 +1,4 @@
+import type { BrowserWindow } from 'electron';
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,7 +9,8 @@ vi.mock('../embedded-browser-host.js', () => ({
     entries: any[] = [];
     selected: number | null = null;
     show = vi.fn(); destroy = vi.fn(); setStatus = vi.fn();
-    constructor(public partition: string, public callbacks: any) { mocks.hosts.push(this); }
+    isDockedFocused = vi.fn(() => false);
+    constructor(public partition: string, public callbacks: any, public options?: { dockWindow?: BrowserWindow | null }) { mocks.hosts.push(this); }
     approveTab = vi.fn((id: number) => { const tab = this.entries.find(t => t.id === id); if (tab) tab.taskOwned = true; });
     tabs() { return this.entries; }
     selectedId() { return this.selected; }
@@ -112,6 +114,59 @@ describe('native pairing lifecycle with the real RelayClient', () => {
     socket().message({ type: 'ready' }); expect(await pending).toBe(true);
     expect(host().partition).toBe(browserPairing(input(), 'account').partition);
     expect(host().show).toHaveBeenCalledOnce();
+  });
+  it('resolves the injected dock window only after consent and relay ready', async () => {
+    const dockWindow = {} as BrowserWindow;
+    const getDockWindow = vi.fn(() => dockWindow);
+    browser = new EmbeddedBrowser({ getDockWindow });
+    const consent = deferred<{ response: number }>();
+    mocks.consent.mockReturnValueOnce(consent.promise);
+    const pending = browser.pair(input(), 'account');
+    await flush();
+    expect(getDockWindow).not.toHaveBeenCalled();
+    expect(Socket.all).toHaveLength(0);
+    expect(mocks.hosts).toHaveLength(0);
+    consent.resolve({ response: 1 });
+    await flush(); socket().open(); await flush();
+    expect(getDockWindow).not.toHaveBeenCalled();
+    expect(mocks.hosts).toHaveLength(0);
+    socket().message({ type: 'ready' });
+    expect(await pending).toBe(true);
+    expect(getDockWindow).toHaveBeenCalledExactlyOnceWith();
+    expect(host().options?.dockWindow).toBe(dockWindow);
+    expect(host().show).toHaveBeenCalledOnce();
+  });
+  it('delegates dock focus to the live host and returns false without one', async () => {
+    expect(browser.isDockedFocused()).toBe(false);
+    await connect();
+    const current = host();
+    expect(browser.isDockedFocused()).toBe(false);
+    current.isDockedFocused.mockReturnValue(true);
+    expect(browser.isDockedFocused()).toBe(true);
+    expect(current.isDockedFocused).toHaveBeenCalledTimes(2);
+    browser.dispose();
+    expect(browser.isDockedFocused()).toBe(false);
+    expect(current.isDockedFocused).toHaveBeenCalledTimes(2);
+  });
+  it.each(['stop', 'dispose'] as const)('%s during pending consent or ready never resolves a dock or creates a late host', async action => {
+    const getDockWindow = vi.fn(() => ({} as BrowserWindow));
+    browser = new EmbeddedBrowser({ getDockWindow });
+    const consent = deferred<{ response: number }>();
+    mocks.consent.mockReturnValueOnce(consent.promise);
+    const consenting = browser.pair(input(), 'account');
+    browser[action](); consent.resolve({ response: 1 });
+    expect(await consenting).toBe(false);
+    expect(Socket.all).toHaveLength(0);
+    const pending = browser.pair(input(), 'account');
+    await flush(); socket().open();
+    const oldSocket = socket();
+    browser[action]();
+    expect(await pending).toBe(false);
+    oldSocket.message({ type: 'ready' }); await flush();
+    expect(oldSocket.close).toHaveBeenCalled();
+    expect(getDockWindow).not.toHaveBeenCalled();
+    expect(mocks.hosts).toHaveLength(0);
+    expect(browser.status()).toEqual({ connected: false });
   });
   it('reports identity only for the active ready pairing', async () => {
     expect(browser.status()).toEqual({ connected: false });
