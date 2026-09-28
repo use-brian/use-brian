@@ -3,7 +3,7 @@ import type { Pool, PoolClient } from 'pg'
 import { AssociationError, MembershipCatalogueDocumentSchema, membershipPublicationIssues, resolveMembershipCatalogue,
   type MembershipCatalogueDocument, type MembershipSite, type AssociationActor } from '@use-brian/core'
 import { getPool } from './client.js'
-import { saveCrmEntitlementPlanRecord } from './association-store.js'
+import { saveCrmEntitlementPlanRecord } from './crm-catalog-records.js'
 import { lockAssociationModule, requireAssociationAdmission } from '../association/workspace-module.js'
 
 type State = { draft_version: number; draft: MembershipCatalogueDocument | null; published_revision: number; observations: Record<string, { revision: number; observedAt: string }> }

@@ -266,6 +266,7 @@ import { createCrmImportFileCleanupWorker } from './crm-operations/import-file-c
 import { createCrmEntitlementWorker } from './crm-operations/entitlement-worker.js'
 import { createAssociationLifecycleWorker } from './association/lifecycle-worker.js'
 import { createProviderInboxWorker } from './association/provider-inbox-worker.js'
+import { createProviderEntitlementService } from './association/provider-entitlement-service.js'
 import { createCrmRetentionWorker } from './crm-operations/retention-worker.js'
 import {
   crmWorkflowAdmission,
@@ -1797,8 +1798,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     oneClickEnabled: Boolean(campaignDkim),
   })
   const crmOperationsService = createCrmOperationsService(createDbCrmOperationsStore(), { deliveries: crmDeliveries })
-  const associationStore = createAssociationStore(undefined, undefined, {
+  const providerEntitlements = createProviderEntitlementService({
+    pool: getPool(),
+    operationsForTransaction: (client) => createCrmOperationsService(createDbCrmOperationsStore(getPool(), client)),
+  })
+  const associationStore = createAssociationStore(getPool(), undefined, {
     promotionHmacKey: env.ASSOCIATION_PROMOTION_HMAC_KEY,
+    providerEntitlements,
   })
   const workspaceModulesStore = createAssociationWorkspaceModulesStore()
   // Late-bound: the files API and media store are created further down.
@@ -7600,7 +7606,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if(runWorkers) crmEntitlementWorker.start()
   const associationLifecycleWorker=createAssociationLifecycleWorker({onError:()=>console.warn('[association-lifecycle] A lifecycle operation failed; a later scan will retry.')})
   if(runWorkers) associationLifecycleWorker.start()
-  const providerInboxWorker = createProviderInboxWorker({ onError: () => console.warn('[provider-inbox] A receipt did not apply; inspect its retry or reconciliation state.') })
+  const providerInboxWorker = createProviderInboxWorker({
+    process: (workspaceId, receiptId) => associationStore.retryProviderEventReceipt(workspaceId, receiptId),
+    onError: () => console.warn('[provider-inbox] A receipt did not apply; inspect its retry or reconciliation state.'),
+  })
   if (runWorkers) providerInboxWorker.start()
   const crmFileCleanupWorker = filesResolver ? createCrmImportFileCleanupWorker({resolver:filesResolver,onError:()=>console.warn('[crm-file-cleanup] Cleanup failed; inspect the workspace receipt.')}) : null
   if (runWorkers) crmFileCleanupWorker?.start()

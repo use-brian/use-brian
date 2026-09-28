@@ -1,17 +1,16 @@
 /** Bounded durable provider recovery under OSS runWorkers. [COMP:crm/provider-inbox] */
 import { query } from '../db/client.js'
-import { createAssociationStore } from '../db/association-store.js'
 export function createProviderInboxWorker(options: {
   due?: (after: string | null, limit: number) => Promise<Array<{ id: string; workspaceId: string }>>
-  process?: (workspaceId: string, receiptId: string) => Promise<unknown>
+  process: (workspaceId: string, receiptId: string) => Promise<unknown>
   onError?: () => void
   intervalMs?: number
-} = {}) {
+}) {
   const due = options.due ?? (async (after, limit) => (await query<{ id: string; workspaceId: string }>(`SELECT id,workspace_id AS "workspaceId"
     FROM association_integration_events WHERE ($1::uuid IS NULL OR id>$1) AND (
       (state IN('pending','retry') AND next_attempt_at<=clock_timestamp()) OR (state='processing' AND lease_expires_at<=clock_timestamp()))
     ORDER BY id LIMIT $2`, [after, limit])).rows)
-  const process = options.process ?? ((workspaceId, receiptId) => createAssociationStore().retryProviderEventReceipt(workspaceId, receiptId))
+  const process = options.process
   let cursor: string | null = null, timer: ReturnType<typeof setInterval> | null = null, running: Promise<number> | null = null
   async function perform() {
     let count = 0
