@@ -715,6 +715,13 @@ import type { ChatEpisodeIngestor, BrainEpisodeIngestor, ChatEpisodeInput } from
 import type { BuildConnectorActionAudit } from './connector-action-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from './tool-injection-port.js'
 import type { CreditBudgetGate } from './routes/route-helpers.js'
+import {
+  createDecisionRuntime,
+  type DecisionRouteResolver,
+  type DecisionRuntime,
+  type DecisionRuntimeAttempt,
+  type DecisionRuntimeOutcome,
+} from './decision-runtime.js'
 
 // ════════════════════════════════════════════════════════════════════
 // Public types
@@ -732,6 +739,8 @@ export interface OpenApiEnv {
   // Studio developer API (e.g. Hong Kong) has no such key; the open entry
   // requires GEMINI_API_KEY *or* VERTEX_PROJECT_ID.
   GEMINI_API_KEY?: string
+  /** Optional TypeSafe System One credential. Absence keeps decisions LLM-only. */
+  TYPESAFE_API_KEY?: string
   // Vertex AI backing for the `gemini` provider. When VERTEX_PROJECT_ID is set,
   // boot builds the gemini transport against Vertex (regional host + OAuth)
   // instead of AI Studio. Credentials come from the metadata server (ADC)
@@ -975,6 +984,12 @@ export interface OpenApiPorts {
   checkCreditBudget?: CreditBudgetGate
   /** Edition-local DB usage recorder; default no-op for bespoke compositions. */
   usageStore?: UsageStore
+  /** Workspace-aware decision policy. Absent defaults every operation to LLM-only. */
+  resolveDecisionRoute?: DecisionRouteResolver
+  /** Optional edition-local attempt attribution/usage sink. */
+  recordDecisionAttempt?: (attempt: DecisionRuntimeAttempt) => void | Promise<void>
+  /** Optional edition-local final-path analytics sink. */
+  recordDecisionOutcome?: (outcome: DecisionRuntimeOutcome) => void | Promise<void>
   /** Hosted priority pool for spend-bearing provider keys. Open default uses env directly. */
   externalCredentialPool?: ExternalCredentialPool
   /**
@@ -1215,6 +1230,8 @@ export interface ChannelHostHooks {
 export interface BootContext {
   app: Express
   provider: LLMProvider
+  /** Shared provider-neutral classifier cascade for open and hosted callers. */
+  decisionRuntime: DecisionRuntime
   /** Workspace-owned text/tool runtime resolver for closed route consumers. */
   resolveWorkspaceCustomLlm: import('./custom-llm-runtime.js').WorkspaceCustomLlmResolver
   /**
@@ -2034,6 +2051,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         })
       },
     },
+  })
+
+  const decisionRuntime = createDecisionRuntime({
+    llmProvider: provider,
+    defaultLlmModel: () => backgroundModelFor(configuredProviders),
+    typesafeApiKey: env.TYPESAFE_API_KEY,
+    resolveRoute: ports.resolveDecisionRoute,
+    onAttempt: ports.recordDecisionAttempt,
+    onOutcome: ports.recordDecisionOutcome,
   })
 
   // ── Media backend, final rung ──
@@ -8553,6 +8579,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const ctx: BootContext = {
     app,
     provider,
+    decisionRuntime,
     resolveWorkspaceCustomLlm,
     publishSessionEvent,
     resolveBackgroundRuntime,
