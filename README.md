@@ -155,6 +155,12 @@ to a Brian-hosted service.
 | ChatGPT / Codex subscription | **Beta** | Sign in with ChatGPT; no API key |
 | Claude outage fallback | Optional | `ANTHROPIC_API_KEY` |
 
+TypeSafe Jev is an optional classifier for small typed decisions, not a chat
+backend. `TYPESAFE_API_KEY` registers its transport, but all operations remain
+LLM-only until the deployment supplies an operation-specific, version-matched
+recorded evaluation profile and explicitly selects bounded shadow or hybrid
+routing. The key alone changes no production decision path.
+
 The ChatGPT lane uses Codex-managed OAuth and live model discovery (design:
 [`docs/plans/chatgpt-codex-oauth.md`](./docs/plans/chatgpt-codex-oauth.md)).
 It stays Beta until release validation passes on the supported OS matrix.
