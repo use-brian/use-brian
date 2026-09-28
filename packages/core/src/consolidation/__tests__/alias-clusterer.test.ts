@@ -85,4 +85,30 @@ describe('[COMP:brain/alias-clusterer] classifier cascade', () => {
     expect(result[0]).toMatchObject({ canonicalEntityId: 'e1', aliasEntityIds: ['e2'] })
     expect(llm.stream).toHaveBeenCalledTimes(1)
   })
+
+  it('preserves organization-to-project aliases in the LLM-only compatibility lane', async () => {
+    const llm = providerFor(JSON.stringify({
+      clusters: [{
+        canonical_id: 'company-1',
+        alias_ids: ['project-1'],
+        reasoning: 'The project record is the company shortform.',
+        confidence: 0.95,
+      }],
+    }))
+
+    const result = await clusterEntityAliases({
+      entities: [
+        entity('company-1', 'Example Company', 'company'),
+        entity('project-1', 'Example Co', 'project'),
+      ],
+      provider: llm,
+      model: 'mock',
+    })
+
+    expect(result).toHaveLength(1)
+    expect(result[0]).toMatchObject({
+      canonicalEntityId: 'company-1',
+      aliasEntityIds: ['project-1'],
+    })
+  })
 })

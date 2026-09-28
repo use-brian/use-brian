@@ -30,6 +30,17 @@ import type { EntityKind, EntityRecord } from '../entities/types.js'
 import type { DecisionExecutionPort } from '../decisions/index.js'
 
 const MAX_ENTITIES_IN_PROMPT = 200
+const CROSS_KIND_ALIAS_FAMILY = new Set<EntityKind>([
+  'company',
+  'project',
+  'product',
+  'repository',
+])
+
+function compatibleAliasKinds(canonical: EntityKind, alias: EntityKind): boolean {
+  return canonical === alias
+    || (CROSS_KIND_ALIAS_FAMILY.has(canonical) && CROSS_KIND_ALIAS_FAMILY.has(alias))
+}
 
 const clusterSchema = z.object({
   canonical_id: z.string(),
@@ -176,7 +187,7 @@ async function clusterEntityAliasesWithLlm(
     for (const aid of c.alias_ids) {
       if (aid === c.canonical_id || localIds.has(aid) || usedEntityIds.has(aid)) continue
       const e = byId.get(aid)
-      if (e && e.kind === canonical.kind) {
+      if (e && compatibleAliasKinds(canonical.kind, e.kind)) {
         aliases.push(e)
         localIds.add(aid)
       }
@@ -200,7 +211,7 @@ async function clusterEntityAliasesWithLlm(
 /**
  * Provider-neutral alias gate. A terminal false returns no clusters. A
  * positive/uncertain answer receives one LLM completion that must produce a
- * globally consistent, same-kind cluster set with reasoning text.
+ * globally consistent, identity-compatible cluster set with reasoning text.
  */
 export async function clusterEntityAliases(
   deps: AliasClustererDeps,
@@ -232,7 +243,7 @@ export async function clusterEntityAliases(
         questions: [{
           kind: 'boolean',
           id: 'has_alias_clusters',
-          prompt: 'Does this supplied entity set contain at least one same-kind group that clearly refers to the same real-world identity?',
+          prompt: 'Does this supplied entity set contain at least one identity-compatible group that clearly refers to the same real-world identity?',
           criteria: {
             true: 'At least one identity group exists and needs canonical selection and reasoning',
             false: 'No safe same-identity group exists',
