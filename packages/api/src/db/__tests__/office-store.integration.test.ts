@@ -101,20 +101,37 @@ describe('[COMP:api/office-store] Office stores', () => {
     expect(db.calls[0]?.params[8]).toBe('Restored agreement')
   })
 
+  it('publishes a copied artifact, first version, live state and source in one statement',async()=>{
+    const db=fakeDb({'WITH artifact':[{id:'v1',version:1}]})
+    const copied=await createOfficeArtifactStore(db.query).createCopiedArtifact({
+      userId:'u1',artifactId:'a2',versionId:'v1',workspaceId:'w1',family:'document',title:'Copy',templateVersionId:null,
+      capabilityVersion:1,sensitivity:'internal',compartments:['team:ops'],projectIds:[],snapshotFileId:'f1',snapshotHash:'a'.repeat(64),
+      operationClock:new Uint8Array([1]),schemaVersion:1,snapshotCapabilityVersion:1,liveUpdate:new Uint8Array([2]),liveStateVector:new Uint8Array([3]),
+      sourceArtifactId:'a1',sourceVersionId:'source-v1',
+    })
+    expect(copied).toEqual({id:'v1',version:1});expect(db.calls).toHaveLength(1)
+    expect(db.calls[0]?.sql).toContain('INSERT INTO office_artifact_versions')
+    expect(db.calls[0]?.sql).toContain('INSERT INTO office_collab_documents')
+    expect(db.calls[0]?.sql).toContain('INSERT INTO office_artifact_sources')
+    expect(db.calls[0]?.sql).toContain('template_version_id,head_version_id,head_version')
+  })
+
   it('names versions and manages explicit and inherited sharing roles', async () => {
     const db = fakeDb({
       'UPDATE office_artifact_versions': [{ id: 'v1' }],
+      'INSERT INTO office_artifact_grants': [{ artifactId: 'a1' }],
       'FROM office_artifact_grants': [{ userId: 'u2', role: 'comment', revokedAt: null }],
       'UPDATE office_artifact_grants': [{ artifactId: 'a1' }],
       'UPDATE office_artifacts SET default_workspace_role': [{ id: 'a1' }],
     })
     const store = createOfficeArtifactStore(db.query)
     await expect(store.nameVersion({ userId: 'u1', artifactId: 'a1', versionId: 'v1', summary: 'Approved draft' })).resolves.toBe(true)
-    await store.setGrant({ userId: 'u1', artifactId: 'a1', workspaceId: 'w1', targetUserId: 'u2', role: 'comment' })
+    await expect(store.setGrant({ userId: 'u1', artifactId: 'a1', workspaceId: 'w1', targetUserId: 'u2', role: 'comment' })).resolves.toBe(true)
     await expect(store.listGrants('u1', 'a1')).resolves.toEqual([{ userId: 'u2', role: 'comment', revokedAt: null }])
     await expect(store.revokeGrant({ userId: 'u1', artifactId: 'a1', targetUserId: 'u2' })).resolves.toBe(true)
     await expect(store.setDefaultWorkspaceRole({ userId: 'u1', artifactId: 'a1', role: 'view' })).resolves.toBe(true)
     expect(db.calls[0]?.sql).toContain("checkpoint_kind='named'")
+    expect(db.calls[1]?.sql).toContain('JOIN workspace_members target')
     expect(db.calls[1]?.sql).toContain('ON CONFLICT (artifact_id, user_id) DO UPDATE')
     expect(db.calls[4]?.params).toEqual(['a1', 'view'])
   })

@@ -56,6 +56,8 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     ['comments',()=>api.listOfficeComments('artifact-a'),{threads:[{id:'thread-a'}]}],
     ['suggestions',()=>api.listOfficeSuggestions('artifact-a'),{suggestions:[{id:'suggestion-a'}]}],
     ['versions',()=>api.listOfficeVersions('artifact-a'),{versions:[{id:'version-a'}]}],
+    ['version preview',()=>api.previewOfficeVersion('artifact-a','version-a'),{snapshot:{artifactId:'artifact-a'}}],
+    ['sharing',()=>api.getOfficeSharing('artifact-a'),{defaultWorkspaceRole:'comment',canManage:true,grants:[],members:[]}],
     ['templates',()=>api.listOfficeTemplates('workspace-a'),{templates:[{id:'template-a'}]}],
     ['routing',()=>api.getOfficeTemplateRouting('template-a'),{routing:{fields:[]}}],
     ['job',()=>api.getOfficeJob('job-a'),{job:{id:'job-a'}}],
@@ -66,6 +68,18 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     expect(officeMetadataRemaining(result,'other-viewer')).toBe(0);
     expect(JSON.stringify(result)).not.toMatch(/Deadline|monotonic|viewerId/);
     expect(state.fetch).toHaveBeenCalledWith(expect.any(String),{cache:'no-store'});
+  });
+  it.each([
+    ['name',()=>api.nameOfficeVersion('artifact-a','version-a','Named'),{versions:[{id:'version-a'}]},'PATCH'],
+    ['copy',()=>api.copyOfficeVersion('artifact-a','version-a','Copy'),{artifactId:'copy-a',version:1,artifact:{artifactId:'copy-a'}},'POST'],
+    ['restore',()=>api.restoreOfficeVersion('artifact-a','version-a',1,'Restore'),{version:{id:'version-b',version:2},versions:[{id:'version-b'}]},'POST'],
+    ['grant',()=>api.setOfficeGrant('artifact-a','member-a','edit'),{defaultWorkspaceRole:'comment',canManage:true,grants:[],members:[]},'PUT'],
+    ['revoke',()=>api.revokeOfficeGrant('artifact-a','member-a'),{defaultWorkspaceRole:'comment',canManage:true,grants:[],members:[]},'DELETE'],
+    ['default role',()=>api.setOfficeDefaultRole('artifact-a','view'),{defaultWorkspaceRole:'view',canManage:true,grants:[],members:[]},'PATCH'],
+  ] as const)('requires bounded metadata on %s mutation publication',async(_name,write,body,method)=>{
+    state.fetch.mockResolvedValue(response(body));const result=await write();
+    expect(officeMetadataRemaining(result,state.viewer)).toBeGreaterThan(0)
+    expect(state.fetch).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({method,cache:'no-store'}))
   });
   it.each([null,'','0','-1','Infinity','nonsense'])('rejects missing or invalid lifetime %s',async ttl=>{
     state.fetch.mockResolvedValue(response({artifacts:[row]},ttl));

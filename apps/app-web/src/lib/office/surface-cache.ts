@@ -62,6 +62,13 @@ export function useOfficeMetadataResource<T>(key: string | null, viewerId: strin
   return {...cache, data: officeMetadataRemaining(retained, viewerId) > 0 ? retained : undefined};
 }
 
+/** Replace a protected Office slot only with a current server publication. */
+export function publishOfficeMetadataResource<T>(key:string|null,value:T,viewerId:string):boolean{
+  if(!key||officeMetadataRemaining(value,viewerId)<=0)return false
+  invalidateSurfaceCache(key)
+  return seedSurfaceCache(key,value,{expiresInMs:data=>officeMetadataRemaining(data,viewerId)})
+}
+
 const OFFICE_LIST_VIEWS: readonly OfficeListView[] = ["active", "archived", "trash", "retained"];
 
 /**

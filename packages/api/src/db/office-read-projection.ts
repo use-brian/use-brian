@@ -44,7 +44,7 @@ export async function readOfficeProjection(userId:string,read:()=>Promise<Office
       if(JSON.stringify(current.rows)!==statement.rows)return {status:409,body:{error:'office_projection_changed'}}
     }
     const lifetime=await client.query<{ttl:number}>('SELECT department_media_valid_for_ms($1) AS ttl',[reply.workspaceId])
-    const validForMs=Math.floor(Math.min(30_000,lifetime.rows[0]?.ttl??0)-(performance.now()-started))
+    const validForMs=Math.floor(Math.min(30_000,lifetime.rows[0]?.ttl??0,reply.validForMs??Number.POSITIVE_INFINITY)-(performance.now()-started))
     if(!Number.isFinite(validForMs)||validForMs<=0)return {status:404,body:{error:'Office metadata unavailable'}}
     await client.query('COMMIT')
     return {...reply,validForMs}

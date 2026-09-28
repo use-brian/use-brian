@@ -101,9 +101,9 @@ async function json<T>(response: Response, fallback: string): Promise<T> {
 }
 
 /** SQL GET metadata is bounded independently of the HTTP cache. */
-async function metadata<T extends object, B = T>(path: string, fallback: string, select: (body: B) => T = value => value as unknown as T): Promise<OfficeMetadata<T>> {
+async function metadata<T extends object, B = T>(path: string, fallback: string, select: (body: B) => T = value => value as unknown as T,init?:RequestInit): Promise<OfficeMetadata<T>> {
   const started = performance.now(), viewerId = getUserInfo()?.id;
-  const response = await authFetch(`${API_URL}/api/office/${path}`, {cache: "no-store"});
+  const response = await authFetch(`${API_URL}/api/office/${path}`, {...init,cache:"no-store"});
   const body = await json<B>(response, fallback);
   const header = response.headers.get("X-Brian-Projection-Valid-For-Ms");
   try {
@@ -229,37 +229,41 @@ export async function listOfficeVersions(artifactId: string): Promise<OfficeVers
 }
 
 export async function previewOfficeVersion(artifactId: string, versionId: string): Promise<OfficeArtifactSnapshot> {
-  const body = await json<{ snapshot: OfficeArtifactSnapshot }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/preview`), "office_version_preview_failed");
-  return body.snapshot;
+  return metadata<OfficeArtifactSnapshot,{snapshot:OfficeArtifactSnapshot}>(`artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/preview`,"office_version_preview_failed",body=>body.snapshot)
 }
 
-export async function nameOfficeVersion(artifactId: string, versionId: string, summary: string): Promise<void> {
-  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ summary }) }), "office_version_name_failed");
+export async function nameOfficeVersion(artifactId: string, versionId: string, summary: string): Promise<OfficeVersion[]> {
+  return metadata<OfficeVersion[],{versions:OfficeVersion[]}>(`artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}`,"office_version_name_failed",body=>body.versions,{
+    method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({summary})
+  })
 }
 
-export async function copyOfficeVersion(artifactId: string, versionId: string, title: string): Promise<{ artifactId: string; version: number }> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) }), "office_version_copy_failed");
+export async function copyOfficeVersion(artifactId: string, versionId: string, title: string): Promise<{ artifactId: string; version: number; artifact: OfficeArtifact }> {
+  return metadata<{artifactId:string;version:number;artifact:OfficeArtifact}>(`artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/copy`,"office_version_copy_failed",value=>value,{
+    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title})
+  })
 }
 
-export async function restoreOfficeVersion(artifactId: string, targetVersionId: string, expectedVersion: number, summary: string): Promise<{ id: string; version: number }> {
-  const body = await json<{ version: { id: string; version: number } }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/restore`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetVersionId, expectedVersion, summary }) }), "office_version_restore_failed");
-  return body.version;
+export async function restoreOfficeVersion(artifactId: string, targetVersionId: string, expectedVersion: number, summary: string): Promise<OfficeVersion[]> {
+  return metadata<OfficeVersion[],{version:{id:string;version:number};versions:OfficeVersion[]}>(`artifacts/${encodeURIComponent(artifactId)}/restore`,"office_version_restore_failed",body=>body.versions,{
+    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({targetVersionId,expectedVersion,summary})
+  })
 }
 
 export async function getOfficeSharing(artifactId: string): Promise<OfficeSharing> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing`), "office_sharing_failed");
+  return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing`,"office_sharing_failed")
 }
 
-export async function setOfficeGrant(artifactId: string, userId: string, role: "view" | "comment" | "edit"): Promise<void> {
-  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) }), "office_sharing_update_failed");
+export async function setOfficeGrant(artifactId: string, userId: string, role: "view" | "comment" | "edit"): Promise<OfficeSharing> {
+  return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`,"office_sharing_update_failed",value=>value,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({role})})
 }
 
-export async function revokeOfficeGrant(artifactId: string, userId: string): Promise<void> {
-  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`, { method: "DELETE" }), "office_sharing_revoke_failed");
+export async function revokeOfficeGrant(artifactId: string, userId: string): Promise<OfficeSharing> {
+  return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`,"office_sharing_revoke_failed",value=>value,{method:"DELETE"})
 }
 
-export async function setOfficeDefaultRole(artifactId: string, defaultWorkspaceRole: "view" | "comment" | "edit"): Promise<void> {
-  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ defaultWorkspaceRole }) }), "office_sharing_default_failed");
+export async function setOfficeDefaultRole(artifactId: string, defaultWorkspaceRole: "view" | "comment" | "edit"): Promise<OfficeSharing> {
+  return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing`,"office_sharing_default_failed",value=>value,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({defaultWorkspaceRole})})
 }
 
 export async function getOfficeJob(jobId: string): Promise<OfficeJob> {

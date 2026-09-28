@@ -530,6 +530,7 @@ import { workspaceAccessRoutes } from './routes/workspace-access.js'
 import { createOrganizationTools, createWorkspaceAccessTools } from './workspace-access/tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
+import { readWorkspaceMemberDirectory } from './db/workspace-member-directory.js'
 import { OFFICE_LIFECYCLE_SWEEP_SQL } from './db/office-lifecycle.js'
 import { getBrandStore } from './db/brand-store.js'
 import { buildBrandVoiceFragment } from '@use-brian/core'
@@ -6333,35 +6334,36 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         readOfficeVersionSnapshot(userId, artifactId, versionId),
       ])
       if (!artifact || !loaded) return null
-      const shell = await officeArtifactStore.createShell({ userId, workspaceId: artifact.workspaceId, family: artifact.family, title, templateVersionId: artifact.templateVersionId, capabilityVersion: artifact.capabilityVersion, sensitivity: artifact.sensitivity, requiredCompartments: artifact.compartments, projectIds: artifact.projectIds })
-      const snapshot = deriveOfficeSnapshot({ source: loaded.snapshot, artifactId: shell.id, title })
+      const copiedArtifactId=randomUUID(),copiedVersionId=randomUUID()
+      const snapshot = deriveOfficeSnapshot({ source: loaded.snapshot, artifactId: copiedArtifactId, title })
       const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
       const hash = createHash('sha256').update(bytes).digest('hex')
-      const saved = await filesApi.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', writeCompartments: shell.compartments, writeProjectIds: shell.projectIds }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity: shell.sensitivity })
+      const saved = await filesApi.writeBytes({ workspaceId: artifact.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', writeCompartments: artifact.compartments, writeProjectIds: artifact.projectIds }, { path: `/office/artifacts/${copiedArtifactId}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity: artifact.sensitivity })
       if (!saved.ok) throw new Error(`Office version copy save failed: ${saved.error.kind}`)
       const doc = snapshotToYDoc(snapshot)
-      const version = await officeArtifactStore.commitVersion({ userId, artifactId: shell.id, snapshotTitle: snapshot.title, expectedVersion: 0, snapshotFileId: saved.value.id, snapshotHash: hash, operationClock: officeStateVector(doc), schemaVersion: snapshot.schemaVersion, capabilityVersion: snapshot.capabilityVersion, origin: 'manual', authorType: 'user', authorUserId: userId, summary: `Copied from version ${versionId}`, checkpointKind: 'named' })
-      if (!version) throw new Error('Office version copy conflict')
-      await Promise.all([
-        officeLiveStore.initialize({ userId, artifactId: shell.id, snapshot }),
-        officeArtifactStore.addSource({ userId, artifactId: shell.id, artifactVersionId: version.id, workspaceId: shell.workspaceId, sourceArtifactId: artifactId, sourceVersion: versionId, sensitivity: artifact.sensitivity }),
-      ])
-      return { artifactId: shell.id, version: version.version }
+      const version=await officeArtifactStore.createCopiedArtifact({userId,artifactId:copiedArtifactId,versionId:copiedVersionId,workspaceId:artifact.workspaceId,family:artifact.family,title,
+        templateVersionId:artifact.templateVersionId,capabilityVersion:artifact.capabilityVersion,sensitivity:artifact.sensitivity,
+        compartments:artifact.compartments,projectIds:artifact.projectIds,snapshotFileId:saved.value.id,snapshotHash:hash,
+        operationClock:officeStateVector(doc),schemaVersion:snapshot.schemaVersion,snapshotCapabilityVersion:snapshot.capabilityVersion,
+        liveUpdate:encodeOfficeState(doc),liveStateVector:officeStateVector(doc),sourceArtifactId:artifactId,sourceVersionId:versionId})
+      if(!version)throw new Error('Office version copy publication failed')
+      return { artifactId: copiedArtifactId, version: version.version }
     },
     async listSharing(userId, artifactId) {
       const artifact = await officeArtifactStore.get(userId, artifactId)
-      if (!artifact) return null
-      const [grants, members] = await Promise.all([officeArtifactStore.listGrants(userId, artifactId), workspaceStore.listMembers(userId, artifact.workspaceId)])
-      return { defaultWorkspaceRole: artifact.defaultWorkspaceRole, grants, members: members.map(({ userId: memberUserId, userName, email }) => ({ userId: memberUserId, userName, email, isOwner: artifact.ownerUserId === memberUserId })) }
+      if (!artifact) return {status:'unavailable' as const}
+      const [grants,directory]=await Promise.all([officeArtifactStore.listGrants(userId,artifactId),readWorkspaceMemberDirectory(userId,artifact.workspaceId)])
+      if(directory.status===409)return {status:'changed' as const}
+      if(directory.status!==200)return {status:'unavailable' as const}
+      return {status:'ok' as const,workspaceId:artifact.workspaceId,validForMs:directory.body.validForMs,
+        defaultWorkspaceRole:artifact.defaultWorkspaceRole,grants,
+        members:directory.body.members.map(({userId:memberUserId,name,email})=>({userId:memberUserId,userName:name,email,isOwner:artifact.ownerUserId===memberUserId}))}
     },
     async setGrant({ userId, artifactId, targetUserId, role, reason }) {
       const artifact = await officeArtifactStore.get(userId, artifactId)
       if (!artifact) return false
       if (artifact.ownerUserId === targetUserId) return false
-      const members = await workspaceStore.listMembers(userId, artifact.workspaceId)
-      if (!members.some((member) => member.userId === targetUserId)) return false
-      await officeArtifactStore.setGrant({ userId, artifactId, workspaceId: artifact.workspaceId, targetUserId, role, reason })
-      return true
+      return officeArtifactStore.setGrant({ userId, artifactId, workspaceId: artifact.workspaceId, targetUserId, role, reason })
     },
     async revokeGrant({ userId, artifactId, targetUserId }) {
       const artifact = await officeArtifactStore.get(userId, artifactId)

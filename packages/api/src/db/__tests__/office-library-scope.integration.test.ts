@@ -26,6 +26,7 @@ import {officeJobRoutes} from '../../routes/office-jobs.js'
 import {createOfficeTemplateStore} from '../office-templates.js'
 import {createDbWorkspaceGroupStore} from '../workspace-group-store.js'
 import {runWithAgentAccess} from '../agent-access-context.js'
+import {readWorkspaceMemberDirectory} from '../workspace-member-directory.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -87,6 +88,21 @@ describe('[COMP:api/office-access] current Office library scopes (PG18)',()=>{
     expect(version.version).toBe(2)
     expect((await queryWithRLS(f.editor,'SELECT resource_id FROM office_template_resource_refs WHERE template_version_id=$1',[version.id])).rows).toEqual([{resource_id:f.resource.id}])
     expect((await templates.list(f.editor,f.workspaceId))[0]).toMatchObject({currentVersionId:version.id})
+  })
+  it('publishes a copied artifact and every required child atomically, while read-only grants leave no shell',async()=>{
+    const f=await fixture(),copiedId=randomUUID()
+    const input={artifactId:copiedId,versionId:randomUUID(),workspaceId:f.workspaceId,family:'document' as const,title:'Copied department document',templateVersionId:null,
+      capabilityVersion:1,sensitivity:'internal' as const,compartments:[f.team.compartmentKey!],projectIds:[],snapshotFileId:f.bundleFileId,
+      snapshotHash:hash,operationClock:new Uint8Array([1]),schemaVersion:1,snapshotCapabilityVersion:1,liveUpdate:new Uint8Array([2]),
+      liveStateVector:new Uint8Array([3]),sourceArtifactId:f.artifact.id,sourceVersionId:String(f.version.id)}
+    await expect(artifacts.createCopiedArtifact({userId:f.owner,...input})).resolves.toMatchObject({version:1})
+    expect((await pool.query('SELECT head_version FROM office_artifacts WHERE id=$1',[copiedId])).rows).toEqual([{head_version:'1'}])
+    expect((await pool.query('SELECT artifact_id FROM office_artifact_versions WHERE artifact_id=$1',[copiedId])).rows).toHaveLength(1)
+    expect((await pool.query('SELECT artifact_id FROM office_collab_documents WHERE artifact_id=$1',[copiedId])).rows).toHaveLength(1)
+    expect((await pool.query('SELECT artifact_id FROM office_artifact_sources WHERE artifact_id=$1',[copiedId])).rows).toHaveLength(1)
+    const refusedId=randomUUID()
+    await expect(artifacts.createCopiedArtifact({userId:f.reader,...input,artifactId:refusedId,versionId:randomUUID()})).rejects.toMatchObject({code:'42501'})
+    expect((await pool.query('SELECT id FROM office_artifacts WHERE id=$1',[refusedId])).rows).toHaveLength(0)
   })
   it('rechecks revocation for all metadata and preserves independent live authority',async()=>{
     const f=await fixture(),other=await f.grant();await f.revoke()
@@ -261,11 +277,14 @@ describe('[COMP:api/office-resources] real current resource delivery (PG18)',()=
 // application pool. The only injection schedules a concurrent fixture change.
 async function metadataFixture() {
   const f=await resourceDeliveryFixture(),comments=createOfficeCommentStore(),jobs=createOfficeGenerationStore()
+  const snapshotBytes=Buffer.from(JSON.stringify(f.snapshot)),snapshotHash=createHash('sha256').update(snapshotBytes).digest('hex')
+  await pool.query("UPDATE workspace_files SET storage_uri=$2,mime='application/json' WHERE id=$1",[f.bundleFileId,`gs://fixture-bucket/${f.workspaceId}/${f.bundleFileId}`])
+  const readBlob=f.gcs.readBlob.bind(f.gcs);f.gcs.readBlob=async key=>key.includes(f.bundleFileId)?{bytes:snapshotBytes,mime:'application/json',metadata:{workspaceId:f.workspaceId,mime:'application/json'}}:readBlob(key)
   // Ordinary artifact collections deliberately exclude template-mode drafts.
   const listedArtifact=await artifacts.createShell({userId:f.owner,workspaceId:f.workspaceId,family:'document',title:'Listed department document',
     templateVersionId:null,capabilityVersion:1,sensitivity:'internal',requiredCompartments:[f.team.compartmentKey!]})
   const version=await artifacts.commitVersion({userId:f.owner,artifactId:f.artifact.id,snapshotTitle:f.snapshot.title,expectedVersion:0,
-    snapshotFileId:f.bundleFileId,snapshotHash:hash,operationClock:new Uint8Array(),schemaVersion:1,capabilityVersion:1,
+    snapshotFileId:f.bundleFileId,snapshotHash,operationClock:new Uint8Array(),schemaVersion:1,capabilityVersion:1,
     origin:'manual',authorType:'user',authorUserId:f.owner,summary:'Metadata fixture version'})
   const thread=await comments.createThread({userId:f.owner,workspaceId:f.workspaceId,artifactId:f.artifact.id,artifactVersionId:version!.id,
     anchor:{kind:'block',targetIds:[f.snapshot.sections[0]!.nodes[0]!.id]},body:'Department comment'})
@@ -285,7 +304,23 @@ async function metadataFixture() {
       const rows=await artifacts.list(userId,workspaceId,view)
       const projections=await Promise.all(rows.map(row=>service.get({userId,artifactId:row.id})))
       return after(Promise.resolve(projections.filter((row):row is NonNullable<typeof row>=>row!==null)))
-    },getArtifact:artifacts.get,resolveAccess:resolveOfficeAccess,listVersions:(...args)=>after(artifacts.listVersions(...args))} as OfficeArtifactsRouteDeps))
+    },getArtifact:artifacts.get,resolveAccess:resolveOfficeAccess,listVersions:(...args)=>after(artifacts.listVersions(...args)),
+    previewVersion:async({userId,artifactId,versionId})=>{
+      const source=await artifacts.getVersionSource(userId,artifactId,versionId);if(!source)return null
+      const read=await f.api.readBytes({workspaceId:source.workspaceId,userId,assistantKind:'standard',clearance:'confidential'},source.snapshotFileId)
+      if(!read.ok)throw new Error('snapshot unavailable')
+      if(createHash('sha256').update(read.value.bytes).digest('hex')!==source.snapshotHash)throw new Error('snapshot hash mismatch')
+      return after(Promise.resolve(JSON.parse(new TextDecoder().decode(read.value.bytes))))
+    },
+    listSharing:async(userId,artifactId)=>{
+      const artifact=await artifacts.get(userId,artifactId)
+      if(!artifact)return {status:'unavailable' as const}
+      const [grants,directory]=await Promise.all([artifacts.listGrants(userId,artifactId),readWorkspaceMemberDirectory(userId,artifact.workspaceId)])
+      if(directory.status===409)return {status:'changed' as const}
+      if(directory.status!==200)return {status:'unavailable' as const}
+      return after(Promise.resolve({status:'ok' as const,workspaceId:artifact.workspaceId,validForMs:directory.body.validForMs,defaultWorkspaceRole:artifact.defaultWorkspaceRole,grants,
+        members:directory.body.members.map(member=>({userId:member.userId,userName:member.name,email:member.email,isOwner:member.userId===artifact.ownerUserId}))}))
+    }} as OfficeArtifactsRouteDeps))
   router.use(officeCollaborationRoutes({getArtifact:artifacts.get,resolveAccess:resolveOfficeAccess,
     getSnapshot:(...args)=>after(f.live.get(...args)),listThreads:(...args)=>after(comments.listThreads(...args)),
     listSuggestions:(...args)=>after(comments.listSuggestions(...args))} as OfficeCollaborationRouteDeps))
@@ -295,12 +330,13 @@ async function metadataFixture() {
   const paths={
     artifacts:`/artifacts?workspaceId=${f.workspaceId}`,artifact:`/artifacts/${f.artifact.id}`,versions:`/artifacts/${f.artifact.id}/versions`,
     snapshot:`/artifacts/${f.artifact.id}/snapshot`,comments:`/artifacts/${f.artifact.id}/comments`,suggestions:`/artifacts/${f.artifact.id}/suggestions`,
+    preview:`/artifacts/${f.artifact.id}/versions/${version!.id}/preview`,sharing:`/artifacts/${f.artifact.id}/sharing`,
     templates:`/templates?workspaceId=${f.workspaceId}`,routing:`/templates/${f.template.id}/routing`,job:`/jobs/${job.id}`,events:`/jobs/${job.id}/events`,
   }
   return {...f,listedArtifact,comments,jobs,job,thread,suggestion,version,paths,change:(fn:()=>Promise<unknown>)=>{change=fn},
     metadataApp:(userId:string|undefined=f.reader)=>createTestApp('/api/office',router,{userId})}
 }
-const metadataPaths=['artifacts','artifact','versions','snapshot','comments','suggestions','templates','routing','job','events'] as const
+const metadataPaths=['artifacts','artifact','versions','preview','sharing','snapshot','comments','suggestions','templates','routing','job','events'] as const
 
 describe('[COMP:api/office-routes] real bounded Office metadata publication (PG18)',()=>{
   it('serves every SQL metadata surface with bounded no-store responses and no conditional 304',async()=>{
@@ -318,6 +354,9 @@ describe('[COMP:api/office-routes] real bounded Office metadata publication (PG1
     expect(bodies.artifacts.artifacts[0].artifactId).toBe(f.listedArtifact.id)
     expect(bodies.artifact.artifact).toMatchObject({artifactId:f.artifact.id,role:'view'})
     expect(bodies.versions.versions).toHaveLength(1)
+    expect(bodies.preview.snapshot).toMatchObject({artifactId:f.artifact.id,title:f.snapshot.title})
+    expect(bodies.sharing).toMatchObject({defaultWorkspaceRole:'comment',canManage:false})
+    expect(bodies.sharing.members).toHaveLength(3)
     expect(bodies.snapshot.snapshot).toMatchObject({artifactId:f.artifact.id,title:f.snapshot.title})
     expect(bodies.comments.threads[0].messages[0].body).toBe('Department comment')
     expect(bodies.suggestions.suggestions[0].id).toBe(f.suggestion.id)
@@ -351,6 +390,11 @@ describe('[COMP:api/office-routes] real bounded Office metadata publication (PG1
       :pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[f.bundleFileId]))
     const res=await request(f.metadataApp()).get('/api/office'+(change==='file'?f.paths.templates:f.paths.artifact)).expect(409)
     expect(res.body).toEqual({error:'office_projection_changed'})
+  })
+  it('withholds a file-backed preview when its exact snapshot file loses authority before publication',async()=>{
+    const f=await metadataFixture();f.change(()=>pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[f.bundleFileId]))
+    const response=await request(f.metadataApp()).get('/api/office'+f.paths.preview).expect(409)
+    expect(response.body).toEqual({error:'office_projection_changed'});expect(response.text).not.toContain(f.snapshot.title)
   })
   it('uses a consistent initial snapshot, detects a changed live document, and allows the next fresh read',async()=>{
     const f=await metadataFixture()
@@ -393,6 +437,11 @@ describe('[COMP:api/office-routes] real bounded Office metadata publication (PG1
       return {workspaceId:f.workspaceId,body}
     })
     expect(expired).toEqual({status:409,body:{error:'office_projection_changed'}})
+  })
+  it('uses the shorter lifetime when a protected dependency supplies its own deadline',async()=>{
+    const f=await fixture()
+    const reply=await readOfficeProjection(f.reader,async()=>({workspaceId:f.workspaceId,validForMs:750,body:await artifacts.get(f.reader,f.artifact.id)}))
+    expect(reply.validForMs).toBeGreaterThan(0);expect(reply.validForMs).toBeLessThanOrEqual(750)
   })
   it('rejects writes, nested reads, a different actor/ceiling, missing SQL and retained context use; releases on error',async()=>{
     const f=await fixture()

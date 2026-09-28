@@ -16,7 +16,9 @@ import { OfficeArtifactSnapshotSchema, preflightOfficeCandidate } from '@use-bri
 // Transport fixtures only; real transaction/RLS proof lives in office-library-scope.integration.
 vi.mock('../../db/office-read-projection.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../db/office-read-projection.js')>(),
-  readOfficeProjection: async (_user: string, read: () => Promise<import('../../db/office-read-projection.js').OfficeMetadataReply>) => ({...await read(), validForMs: 30_000}),
+  readOfficeProjection: async (_user: string, read: () => Promise<import('../../db/office-read-projection.js').OfficeMetadataReply>) => {
+    const reply=await read();return (reply.status??200)>=400?reply:{...reply,validForMs:30_000}
+  },
 }))
 
 const USER = '20000000-0000-4000-8000-000000000001'
@@ -33,7 +35,7 @@ function app() {
   const projection = { artifactId: ARTIFACT, family: 'document' as const, title: 'Report', version: 0, lifecycleState: 'active' as const, role: 'edit' as const, job: { id: JOB, status: 'queued', stage: 'queued', errorCode: null } }
   const service = {
     create: vi.fn(async () => ({ artifactId: ARTIFACT, jobId: JOB })),
-    get: vi.fn(async () => projection),
+    get: vi.fn(async ({artifactId}:{artifactId:string}) => ({...projection,artifactId})),
     revise: vi.fn(async () => ({ jobId: JOB, mode: 'direct' as const })),
   }
   const job = { id: JOB, workspaceId: WORKSPACE, artifactId: ARTIFACT, initiatedByUserId: USER, assistantId: ASSISTANT, jobKind: 'create' as const, status: 'running' as const, stage: 'grounding', brief: {}, authorityProjection: {}, templateVersionId: null, baseArtifactVersion: 0, checkpoint: {}, checkpointVersion: 2, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() }
@@ -48,7 +50,7 @@ function app() {
     previewVersion: vi.fn(async () => ({ artifactId: ARTIFACT, family: 'document' } as never)),
     nameVersion: vi.fn(async () => true),
     copyVersion: vi.fn(async () => ({ artifactId: JOB, version: 1 })),
-    listSharing: vi.fn(async () => ({ defaultWorkspaceRole: 'comment' as const, grants: [], members: [{ userId: ASSISTANT, userName: 'Ari Example', email: 'ari@example.com', isOwner: false }] })),
+    listSharing: vi.fn(async () => ({status:'ok' as const,workspaceId:WORKSPACE,validForMs:25_000,defaultWorkspaceRole: 'comment' as const, grants: [], members: [{ userId: ASSISTANT, userName: 'Ari Example', email: 'ari@example.com', isOwner: false }] })),
     setGrant: vi.fn(async () => true),
     revokeGrant: vi.fn(async () => true),
     setDefaultWorkspaceRole: vi.fn(async () => true),
@@ -90,16 +92,25 @@ describe('[COMP:api/office-routes] Office API routes', () => {
   it('lets an active editor restore an earlier artifact version', async () => {
     const test = app()
     const response = await request(test.server).post(`/api/office/artifacts/${ARTIFACT}/restore`).send({ targetVersionId: RESOURCE, expectedVersion: 1, summary: 'Restore the previous revision' }).expect(200)
-    expect(response.body).toEqual({ version: { id: 'v2', version: 2 } })
+    expect(response.body).toEqual({ version: { id: 'v2', version: 2 },versions:[] })
+    expect(response.headers['cache-control']).toBe('private, no-store')
+    expect(response.headers.etag).toBeUndefined()
+    expect(Number(response.headers['x-brian-projection-valid-for-ms'])).toBeGreaterThan(0)
     expect(test.artifacts.canRestoreVersion).toHaveBeenCalledWith(USER, ARTIFACT)
     expect(test.artifacts.restoreVersion).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, targetVersionId: RESOURCE, expectedVersion: 1, summary: 'Restore the previous revision' })
   })
 
   it('previews, names and copies immutable versions', async () => {
     const test = app()
-    await request(test.server).get(`/api/office/artifacts/${ARTIFACT}/versions/${RESOURCE}/preview`).expect(200)
-    await request(test.server).patch(`/api/office/artifacts/${ARTIFACT}/versions/${RESOURCE}`).send({ summary: 'Board-approved draft' }).expect(200)
-    await request(test.server).post(`/api/office/artifacts/${ARTIFACT}/versions/${RESOURCE}/copy`).send({ title: 'Board report copy' }).expect(201, { artifactId: JOB, version: 1 })
+    const preview=await request(test.server).get(`/api/office/artifacts/${ARTIFACT}/versions/${RESOURCE}/preview`).expect(200)
+    const named=await request(test.server).patch(`/api/office/artifacts/${ARTIFACT}/versions/${RESOURCE}`).send({ summary: 'Board-approved draft' }).expect(200,{versions:[]})
+    const copied=await request(test.server).post(`/api/office/artifacts/${ARTIFACT}/versions/${RESOURCE}/copy`).send({ title: 'Board report copy' }).expect(201)
+    expect(copied.body).toMatchObject({artifactId:JOB,version:1,artifact:{artifactId:JOB}})
+    for(const response of [preview,named,copied]){
+      expect(response.headers['cache-control']).toBe('private, no-store')
+      expect(response.headers.etag).toBeUndefined()
+      expect(Number(response.headers['x-brian-projection-valid-for-ms'])).toBeGreaterThan(0)
+    }
     expect(test.artifacts.nameVersion).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, versionId: RESOURCE, summary: 'Board-approved draft' })
     expect(test.artifacts.copyVersion).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, versionId: RESOURCE, title: 'Board report copy' })
   })
@@ -108,13 +119,25 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     const test = app()
     const sharing = await request(test.server).get(`/api/office/artifacts/${ARTIFACT}/sharing`).expect(200)
     expect(sharing.body).toMatchObject({ defaultWorkspaceRole: 'comment', canManage: true })
-    await request(test.server).put(`/api/office/artifacts/${ARTIFACT}/sharing/${ASSISTANT}`).send({ role: 'edit', reason: 'Document owner approved' }).expect(200)
-    await request(test.server).delete(`/api/office/artifacts/${ARTIFACT}/sharing/${ASSISTANT}`).expect(200)
-    await request(test.server).patch(`/api/office/artifacts/${ARTIFACT}/sharing`).send({ defaultWorkspaceRole: 'view' }).expect(200)
+    for(const response of [
+      await request(test.server).put(`/api/office/artifacts/${ARTIFACT}/sharing/${ASSISTANT}`).send({ role: 'edit', reason: 'Document owner approved' }).expect(200),
+      await request(test.server).delete(`/api/office/artifacts/${ARTIFACT}/sharing/${ASSISTANT}`).expect(200),
+      await request(test.server).patch(`/api/office/artifacts/${ARTIFACT}/sharing`).send({ defaultWorkspaceRole: 'view' }).expect(200),
+    ]){
+      expect(response.body).toMatchObject({defaultWorkspaceRole:'comment',canManage:true})
+      expect(response.headers['cache-control']).toBe('private, no-store')
+      expect(Number(response.headers['x-brian-projection-valid-for-ms'])).toBeGreaterThan(0)
+    }
     expect(test.artifacts.setGrant).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, targetUserId: ASSISTANT, role: 'edit', reason: 'Document owner approved' })
     expect(test.artifacts.setDefaultWorkspaceRole).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, role: 'view' })
     test.artifacts.resolveAccess.mockResolvedValue({ canEdit: true, canManageSharing: false } as never)
     await request(test.server).patch(`/api/office/artifacts/${ARTIFACT}/sharing`).send({ defaultWorkspaceRole: 'edit' }).expect(404)
+  })
+  it('withholds sharing when the bounded member directory changes',async()=>{
+    const test=app();test.artifacts.listSharing.mockResolvedValue({status:'changed'} as never)
+    const response=await request(test.server).get(`/api/office/artifacts/${ARTIFACT}/sharing`).expect(409,{error:'member_directory_changed'})
+    expect(response.headers['x-brian-projection-valid-for-ms']).toBeUndefined()
+    expect(response.headers['cache-control']).toBe('private, no-store')
   })
   })
 

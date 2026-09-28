@@ -996,7 +996,7 @@ export function officePanelCachePrefix(workspaceId: string, viewerId: string): s
   return `office-panel:${workspaceId}:${viewerId}:`;
 }
 
-export function officePanelCacheKey(prefix: string | null, kind: "job" | "job-events" | "versions" | "comments" | "suggestions", id: string | undefined): string | null {
+export function officePanelCacheKey(prefix: string | null, kind: "job" | "job-events" | "versions" | "version-preview" | "sharing" | "comments" | "suggestions", id: string | undefined): string | null {
   return prefix && id ? `${prefix}${kind}:${id}` : null;
 }
 
