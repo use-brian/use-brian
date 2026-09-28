@@ -204,7 +204,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build test dependencies
-        run: pnpm exec turbo run build --filter="@use-brian/api^..." --filter="app-web^..."
+        run: pnpm exec turbo run build --filter="@use-brian/api-open^..." --filter="app-web^..."
 
       - name: Run no-credential acceptance
         run: >-
