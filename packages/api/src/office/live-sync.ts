@@ -6,6 +6,7 @@ import { resolveDocSyncHttp, type DocGatewayOptions } from '../doc/doc-gateway.j
 
 export async function replaceLiveOfficeSnapshot(
   snapshot: OfficeArtifactSnapshot,
+  binding: { expectedVersion: number; canonicalHash: string },
   options: DocGatewayOptions = {},
 ): Promise<'disabled' | 'replaced'> {
   const resolved = resolveDocSyncHttp(options)
@@ -22,7 +23,7 @@ export async function replaceLiveOfficeSnapshot(
           'content-type': 'application/json',
           'x-doc-sync-secret': syncSecret,
         },
-        body: JSON.stringify({ artifactId: snapshot.artifactId, snapshot }),
+        body: JSON.stringify({ artifactId: snapshot.artifactId, snapshot, ...binding }),
         signal: controller.signal,
       })
       if (response.ok) return 'replaced'
@@ -38,6 +39,7 @@ export async function replaceLiveOfficeSnapshot(
 
 /** Apply one stored suggestion inside doc-sync's authoritative Y.Doc. */
 export async function applyLiveOfficeSuggestion(
+  userId: string,
   artifactId: string,
   suggestionId: string,
   command: OfficeCommand,
@@ -52,7 +54,7 @@ export async function applyLiveOfficeSuggestion(
     const response = await doFetch(`${httpBase}/internal/office/suggestion`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-doc-sync-secret': syncSecret },
-      body: JSON.stringify({ artifactId, suggestionId, command }),
+      body: JSON.stringify({ userId, artifactId, suggestionId, command }),
       signal: controller.signal,
     })
     if (response.ok) return 'applied'
@@ -65,11 +67,12 @@ export async function applyLiveOfficeSuggestion(
 
 /** Read-only retry repair: failure/disabled never authorizes an acceptance. */
 export async function officeSuggestionApplied(
+  userId: string,
   artifactId: string,
   suggestionId: string,
   options: DocGatewayOptions = {},
 ): Promise<boolean> {
-  if (!OfficeUuidSchema.safeParse(artifactId).success || !OfficeUuidSchema.safeParse(suggestionId).success) return false
+  if (!OfficeUuidSchema.safeParse(userId).success || !OfficeUuidSchema.safeParse(artifactId).success || !OfficeUuidSchema.safeParse(suggestionId).success) return false
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     const resolved = resolveDocSyncHttp(options)
@@ -80,7 +83,7 @@ export async function officeSuggestionApplied(
     const response = await doFetch(`${httpBase}/internal/office/suggestion-status`, {
       method: 'POST', redirect: 'error',
       headers: { 'content-type': 'application/json', 'x-doc-sync-secret': syncSecret },
-      body: JSON.stringify({ artifactId, suggestionId }), signal: controller.signal,
+      body: JSON.stringify({ userId, artifactId, suggestionId }), signal: controller.signal,
     })
     if (!response.ok) return false
     const result: unknown = await response.json()

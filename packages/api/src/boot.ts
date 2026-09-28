@@ -6319,7 +6319,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         liveStateVector: officeStateVector(doc),
         liveCanonicalHash: loaded.source.snapshotHash,
       })
-      if (restored) await replaceLiveOfficeSnapshot(loaded.snapshot)
+      if (restored) await replaceLiveOfficeSnapshot(loaded.snapshot, { expectedVersion: restored.version, canonicalHash: loaded.source.snapshotHash })
       return restored
     },
     getArtifact: officeArtifactStore.get,
@@ -6584,8 +6584,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       await filesApi.delete(fileContext, saved.value.id).catch(() => undefined)
       throw new Error('Office snapshot version conflict')
     }
-    await officeLiveStore.initialize({ userId: params.job.initiatedByUserId, artifactId: params.job.artifactId, snapshot: params.snapshot })
-    await replaceLiveOfficeSnapshot(params.snapshot)
+    const liveResult = await replaceLiveOfficeSnapshot(params.snapshot, { expectedVersion: committed.version, canonicalHash: hash })
+    if (liveResult === 'disabled') {
+      await officeLiveStore.initialize({ userId: params.job.initiatedByUserId, artifactId: params.job.artifactId, snapshot: params.snapshot })
+    }
     return committed
   }
   const readOfficeTemplateBundle = async (userId: string, workspaceId: string, versionId: string) => {
@@ -6842,11 +6844,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     getSuggestion: officeCommentStore.getSuggestion,
     verifyEvidenceSuggestion: async (userId, suggestionId, command) =>
       await structuredDocumentRuntime?.verifySuggestion(userId, suggestionId, command) ?? false,
-    suggestionAlreadyApplied: (artifactId, suggestionId) => officeSuggestionApplied(artifactId, suggestionId),
+    suggestionAlreadyApplied: (userId, artifactId, suggestionId) => officeSuggestionApplied(userId, artifactId, suggestionId),
     createSuggestion: officeCommentStore.createSuggestion,
     decideSuggestion: officeCommentStore.decideSuggestion,
-    async applySuggestion({ artifactId, suggestionId, command }) {
-      const result = await applyLiveOfficeSuggestion(artifactId, suggestionId, command)
+    async applySuggestion({ userId, artifactId, suggestionId, command }) {
+      const result = await applyLiveOfficeSuggestion(userId, artifactId, suggestionId, command)
       if (result === 'disabled') throw new Error('Office suggestion application requires doc-sync')
       return result
     },

@@ -277,7 +277,7 @@ describe('[COMP:api/office-suggestions] Office comment and suggestion workflow',
     const listed = await request(test.server).get(`/api/office/artifacts/${ARTIFACT}/suggestions`).expect(200)
     expect(listed.body.suggestions).toHaveLength(1)
     await request(test.server).post(`/api/office/suggestions/${RESOURCE}/decision`).send({ decision: 'accepted' }).expect(200, { ok: true })
-    expect(test.deps.applySuggestion).toHaveBeenCalledWith({ artifactId: ARTIFACT, suggestionId: RESOURCE, command: test.suggestion.commandBatch })
+    expect(test.deps.applySuggestion).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, suggestionId: RESOURCE, command: test.suggestion.commandBatch })
     expect(test.deps.decideSuggestion).toHaveBeenCalledWith({ userId: USER, suggestionId: RESOURCE, decision: 'accepted', expectedStatus: 'open' })
   })
 

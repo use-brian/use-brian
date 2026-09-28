@@ -11,16 +11,16 @@ import {en} from '@/lib/i18n/dictionaries/en';
 import {loadSurfaceCache,readSurfaceCache,resetSurfaceCache,markSurfaceCacheStale,invalidateSurfaceCache} from '@/lib/surface-cache';
 import {officeArtifactCacheKey,officeSnapshotCacheKey,officeListCacheKey} from '@/lib/surface-prefetch';
 import {attachOfficeMetadata} from '@/lib/office/metadata';
-import {loadOfflinePackage,removeOfflineJournalEntry} from '@/lib/office/offline';
+import {loadOfflinePackage,quarantineOfflineWork,removeOfflineJournalEntry} from '@/lib/office/offline';
 import type {LoadedOfficeOfflinePackage} from '@/lib/office/offline';
-const state=vi.hoisted(()=>({viewer:'viewer-a',workspace:'workspace-a',search:'',doc:null as Doc|null,fetch:vi.fn(),command:null as ((command:OfficeCommand)=>void)|null,collabTarget:null as string|null}));
+const state=vi.hoisted(()=>({viewer:'viewer-a',workspace:'workspace-a',search:'',doc:null as Doc|null,fetch:vi.fn(),command:null as ((command:OfficeCommand)=>void)|null,collabTarget:null as string|null,accessDenied:false}));
 vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer})}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:(...args:unknown[])=>state.fetch(...args)}));
 vi.mock('@/lib/workspace-context',()=>({useOptionalWorkspaceContext:()=>({workspaceId:state.workspace,me:{id:state.viewer}})}));
 vi.mock('next/navigation',()=>({useRouter:()=>({push:vi.fn(),replace:vi.fn(),back:vi.fn(),forward:vi.fn(),prefetch:vi.fn()}),usePathname:()=>'/office',useSearchParams:()=>new URLSearchParams(state.search)}));
 vi.mock('next/link',()=>({default:({children,href}:{children:React.ReactNode;href:string})=><a href={href}>{children}</a>}));
 vi.mock('@/components/doc/doc-sidebar-data',()=>({useSidebarData:()=>({sidebarCollapsed:false,setSidebarCollapsed:vi.fn()})}));
-vi.mock('@/lib/collab/use-collab-provider',()=>({useCollabProvider:(target:string|null)=>{state.collabTarget=target;return {doc:target?state.doc:null,provider:null,status:'connected',synced:Boolean(target&&state.doc)};}}));
+vi.mock('@/lib/collab/use-collab-provider',()=>({useCollabProvider:(target:string|null)=>{state.collabTarget=target;return {doc:target?state.doc:null,provider:null,status:'connected',synced:Boolean(target&&state.doc),accessDenied:state.accessDenied};}}));
 vi.mock('@/lib/collab/use-presence',()=>({usePresence:()=>[],usePublishPresenceIdentity:vi.fn(),usePublishPresenceActivity:vi.fn()}));
 vi.mock('@/components/doc/presence-avatars',()=>({PresenceAvatars:()=>null}));
 vi.mock('@/components/context/reclassify-context-dialog',()=>({ReclassifyContextButton:()=>null}));
@@ -47,7 +47,7 @@ const artifactKey=()=>officeArtifactCacheKey(state.workspace,uid(1),state.viewer
 const snapshotKey=()=>officeSnapshotCacheKey(state.workspace,uid(1),state.viewer);
 const reads=(suffix:string)=>state.fetch.mock.calls.filter(([url,init])=>url.endsWith(suffix)&&!init?.method);
 let root:Root,host:HTMLDivElement;
-beforeEach(()=>{vi.useFakeTimers();resetSurfaceCache();vi.clearAllMocks();vi.mocked(loadOfflinePackage).mockResolvedValue(null);state.viewer=uid(99);state.workspace=uid(2);state.search='';state.doc=null;state.command=null;state.collabTarget=null;host=document.createElement('div');document.body.append(host);root=createRoot(host);});
+beforeEach(()=>{vi.useFakeTimers();resetSurfaceCache();vi.clearAllMocks();vi.mocked(loadOfflinePackage).mockResolvedValue(null);state.viewer=uid(99);state.workspace=uid(2);state.search='';state.doc=null;state.command=null;state.collabTarget=null;state.accessDenied=false;host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(()=>{act(()=>root.unmount());state.doc?.destroy();host.remove();resetSurfaceCache();vi.useRealTimers();});
 function setup(artifactTtl='6000',snapshotTtl=artifactTtl){state.fetch.mockImplementation(async(url:string)=>{
   if(url.endsWith('/snapshot'))return response(live(),snapshotTtl);
@@ -111,6 +111,13 @@ describe('[COMP:app-web/office-editor-shell] bounded online editor reads',()=>{
   it('rejects obsolete responses after switching viewers',async()=>{
     let finish!:(value:Response)=>void;setup();await render();state.fetch.mockImplementation(url=>url.endsWith('/snapshot')?new Promise(resolve=>{finish=resolve;}):pending());await act(async()=>markSurfaceCacheStale(snapshotKey()));const oldKey=snapshotKey();state.viewer='viewer-b';state.fetch.mockImplementation(pending);await render();await act(async()=>finish(response(live('Old viewer text'))));
     expect(host.textContent).not.toContain('Old viewer text');expect(readSurfaceCache(oldKey).data).toBeUndefined();
+  });
+  it('purges the live projection and quarantines explicit offline work on typed socket revocation',async()=>{
+    state.doc=snapshotToYDoc(snapshot());setup();await render();expect(host.querySelector('[data-editor]')).not.toBeNull();expect(state.collabTarget).toBe(`office:${uid(1)}`);
+    state.accessDenied=true;await render();
+    expect(host.querySelector('[data-editor]')).toBeNull();expect(state.collabTarget).toBeNull();
+    expect(readSurfaceCache(artifactKey()).data).toBeUndefined();expect(readSurfaceCache(snapshotKey()).data).toBeUndefined();
+    expect(vi.mocked(quarantineOfflineWork)).toHaveBeenCalledWith(uid(1),{workspaceId:state.workspace,userId:state.viewer});
   });
 });
 

@@ -153,6 +153,15 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     setTargets([]);setCommentAnchor(null);setSuggestionRange(null);setPresentOpen(false);setQueuedCommentThreads(EMPTY_COMMENTS);
     setHistoryState({canUndo:false,canRedo:false});offlineUndoneCommands.current.clear();
   }, [accessLost]);
+  useEffect(() => {
+    if (!collab.accessDenied) return;
+    setDenied(true);
+    invalidateSurfaceCache(artifactKey);invalidateSurfaceCache(snapshotKey);
+    setLiveLocal(null);setSeed(null);setOffline(null);setCachedUpdate(null);setCachedComments(null);
+    setTargets([]);setCommentAnchor(null);setSuggestionRange(null);setPresentOpen(false);setQueuedCommentThreads(EMPTY_COMMENTS);
+    setHistoryState({canUndo:false,canRedo:false});offlineUndoneCommands.current.clear();
+    void quarantineOfflineWork(artifactId, offlineOwner).catch(() => undefined);
+  }, [collab.accessDenied, artifactId, artifactKey, snapshotKey, offlineOwner]);
   function currentRead(needSnapshot = true) {
     if (!lifetime.current || getUserInfo()?.id !== viewerId) return false;
     if (allowDeviceSeed && !onlineSeen.current) return Boolean(offlineLive || seedLive);

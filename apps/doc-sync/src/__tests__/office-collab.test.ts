@@ -3,7 +3,7 @@ import * as Y from 'yjs'
 import type { DocumentSnapshot } from '@use-brian/office-model'
 import { applyOfficeSuggestion, officeSnapshotPreconditionHash, SpreadsheetSnapshotSchema, documentSuggestionWasApplied, getDocumentFragment, yDocToSnapshot } from '@use-brian/office-model'
 import { parseSyncDocumentName } from '../document-router.js'
-import { loadOfficeUpdate, readOfficeSuggestionStatus, officeSnapshotUpdate, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from '../office-collab.js'
+import { loadOfficeUpdate, officeCanonicalSnapshotHash, readOfficeSuggestionStatus, officeSnapshotUpdate, replaceLiveOfficeSnapshot, storeOfficeSnapshot, verifyOfficeCommittedHead } from '../office-collab.js'
 import type { SysQuery } from '../persistence.js'
 
 const id = (suffix: number): string => `00000000-0000-4000-8000-${suffix.toString().padStart(12, '0')}`
@@ -67,7 +67,7 @@ describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', (
     expect(await readOfficeSuggestionStatus({ artifactId: id(1), suggestionId: id(34), liveDocument: () => doc, query })).toBe(true)
     expect(updates).not.toHaveBeenCalled()
     expect(Y.encodeStateAsUpdate(doc)).toEqual(accepted)
-    const durable: SysQuery = async (sql) => { expect(sql).toMatch(/^SELECT /); return [{ ydoc: Buffer.from(accepted) }] as never[] }
+    const durable: SysQuery = async (sql) => { expect(sql).toMatch(/^SELECT /); return [{ ydoc: Buffer.from(accepted), baseVersion: 4 }] as never[] }
     expect(await readOfficeSuggestionStatus({ artifactId: id(1), suggestionId: id(34), liveDocument: () => undefined, query: durable })).toBe(true)
     expect(Y.encodeStateAsUpdate(doc)).toEqual(accepted)
   })
@@ -81,8 +81,8 @@ describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', (
 
   it('loads stored Office state as Yjs update bytes', async () => {
     const bytes = Buffer.from(officeSnapshotUpdate(snapshot))
-    const query: SysQuery = async () => [{ ydoc: bytes }] as never[]
-    expect(await loadOfficeUpdate({ artifactId: snapshot.artifactId, query })).toEqual(new Uint8Array(bytes))
+    const query: SysQuery = async () => [{ ydoc: bytes, baseVersion: 4 }] as never[]
+    expect(await loadOfficeUpdate({ artifactId: snapshot.artifactId, query })).toEqual({ update: new Uint8Array(bytes), baseVersion: 4 })
   })
 
   it('persists one deterministic canonical hash and state vector', async () => {
@@ -98,8 +98,10 @@ describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', (
     expect(receipt.hash).toMatch(/^[a-f0-9]{64}$/)
     expect(receipt.baseVersion).toBe(4)
     expect(calls).toHaveLength(1)
-    expect(calls[0].sql).toContain('office_collab_documents.seq + 1')
-    expect(calls[0].sql).toContain('a.head_version')
+    expect(calls[0].sql).toContain('office_collab_documents.canonical_hash = EXCLUDED.canonical_hash')
+    expect(calls[0].sql).toContain('office_collab_documents.base_version = $6')
+    expect(calls[0].sql).toContain('version.snapshot_hash = $8')
+    expect(calls[0].sql).toContain('a.head_version = $6')
     expect(calls[0].params[2]).toBeInstanceOf(Buffer)
     expect(calls[0].params[3]).toBeInstanceOf(Buffer)
   })
@@ -159,6 +161,24 @@ describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', (
     Y.applyUpdate(doc, officeSnapshotUpdate(snapshot))
     const query: SysQuery = async () => [] as never[]
     await expect(storeOfficeSnapshot({ artifactId: id(99), ydoc: doc, query })).rejects.toThrow(/artifact mismatch/)
+  })
+
+  it('fails a stale-base settle instead of adopting a newer immutable head', async () => {
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, officeSnapshotUpdate(snapshot))
+    const query: SysQuery = async (_sql, params) => {
+      expect(params[5]).toBe(3)
+      return [] as never[]
+    }
+    await expect(storeOfficeSnapshot({ artifactId: snapshot.artifactId, ydoc: doc, query, expectedBaseVersion: 3 })).rejects.toThrow(/base no longer matches/)
+  })
+
+  it('authorizes replacement only against the exact active immutable head', async () => {
+    const hash = officeCanonicalSnapshotHash(snapshot)
+    const matching: SysQuery = async () => [{ headVersion: 5, snapshotHash: hash }] as never[]
+    await expect(verifyOfficeCommittedHead({ artifactId: snapshot.artifactId, expectedVersion: 5, canonicalHash: hash, query: matching })).resolves.toBe(true)
+    await expect(verifyOfficeCommittedHead({ artifactId: snapshot.artifactId, expectedVersion: 4, canonicalHash: hash, query: matching })).resolves.toBe(false)
+    await expect(verifyOfficeCommittedHead({ artifactId: snapshot.artifactId, expectedVersion: 5, canonicalHash: 'b'.repeat(64), query: matching })).resolves.toBe(false)
   })
 
   it('replaces the authoritative live document without merging stale base content', () => {

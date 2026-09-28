@@ -46,8 +46,9 @@ import {
 import { bridgeConnection } from './ws-bridge.js'
 import { createRunRegistry, type RunRegistry } from './run-registry.js'
 import { parseSyncDocumentName } from './document-router.js'
-import { loadOfficeUpdate, readOfficeSuggestionStatus, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from './office-collab.js'
+import { loadOfficeUpdate, officeCanonicalSnapshotHash, officeSnapshotUpdate, readOfficeSuggestionStatus, replaceLiveOfficeSnapshot, storeOfficeSnapshot, verifyOfficeCommittedHead } from './office-collab.js'
 import { OfficeArtifactSnapshotSchema, OfficeUuidSchema, OfficeCommandSchema, applyOfficeSuggestion } from '@use-brian/office-model'
+import { revalidateOfficeRoom, sweepOfficeRooms, type OfficeAuthorityDeps, type OfficeRoomDocument } from './office-authority.js'
 
 // Local dev: load the monorepo-root .env (the service runs from
 // apps/doc-sync, so the default cwd .env isn't where the shared
@@ -96,12 +97,18 @@ const rlsQuery: RlsQuery = (userId, sql, params) =>
   queryWithRLS(userId, sql, params as unknown[]).then((r) => r.rows as never[])
 const sysQuery: SysQuery = (sql, params) =>
   query(sql, params as unknown[]).then((r) => r.rows as never[])
+const officeAuthorityDeps: OfficeAuthorityDeps = {
+  validateSession: claims => authSessionStore.validateAccess(claims),
+  resolveAccess: resolveOfficeAccess,
+}
 
 // Forward declaration so the `connected` hook (defined inside the Hocuspocus
 // config) can reach the run registry, which is created *after* the instance
 // because its publisher needs `hocuspocus`. No connection can fire before the
 // server starts listening at the bottom of this file, so it's always assigned.
 let runRegistry: RunRegistry
+const officeDocumentBaseVersions = new WeakMap<Y.Doc, number>()
+const officeReplacementSettleHashes = new WeakMap<Y.Doc, string>()
 
 const hocuspocus = new Hocuspocus({
   name: 'doc-sync',
@@ -128,11 +135,17 @@ const hocuspocus = new Hocuspocus({
       syncSecret: DOC_SYNC_SECRET,
     })
     if (auth.kind === 'reject') throw new Error(`unauthorized: ${auth.reason}`)
-    if (auth.kind === 'service') return { service: true as const }
+    const target = parseSyncDocumentName(data.documentName)
+    // Internal Office mutations use the secret-gated HTTP endpoints, where
+    // their durable suggestion/head binding is verified. A service WebSocket
+    // would otherwise become an unbounded read/write capability.
+    if (auth.kind === 'service') {
+      if (target.kind === 'office') throw new Error('unauthorized: office_service_socket_denied')
+      return { service: true as const }
+    }
     if (!(await authSessionStore.validateAccess(auth))) {
       throw new Error('unauthorized: revoked_session')
     }
-    const target = parseSyncDocumentName(data.documentName)
     if (target.kind === 'office') {
       const access = await resolveOfficeAccess(auth.userId, target.id)
       if (!access) throw new Error('unauthorized: office_access_denied')
@@ -195,8 +208,14 @@ const hocuspocus = new Hocuspocus({
       await recheckPageConnection({ userId: context?.userId, pageId: target.id, query: rlsQuery, connection: data.connection })
       return
     }
-    const access = context?.userId ? await resolveOfficeAccess(context.userId, target.id) : null
-    data.connection.readOnly = !access?.canEdit
+    const results = await revalidateOfficeRoom({
+      artifactId: target.id,
+      document: data.document as unknown as OfficeRoomDocument,
+      deps: officeAuthorityDeps,
+    })
+    if (results.get(data.connection as never) === 'denied') {
+      throw new Error('unauthorized: office_access_denied')
+    }
   },
 
   async beforeSync(data) {
@@ -208,8 +227,12 @@ const hocuspocus = new Hocuspocus({
   async onLoadDocument(data) {
     const target = parseSyncDocumentName(data.documentName)
     if (target.kind === 'office') {
-      const update = await loadOfficeUpdate({ artifactId: target.id, query: sysQuery })
-      if (update) Y.applyUpdate(data.document as unknown as Y.Doc, update)
+      const loaded = await loadOfficeUpdate({ artifactId: target.id, query: sysQuery })
+      if (loaded) {
+        const doc = data.document as unknown as Y.Doc
+        Y.applyUpdate(doc, loaded.update)
+        officeDocumentBaseVersions.set(doc, loaded.baseVersion)
+      }
       return data.document
     }
     const loaded = await loadPageUpdate({ pageId: target.id, query: sysQuery })
@@ -248,12 +271,23 @@ const hocuspocus = new Hocuspocus({
   async onStoreDocument(data) {
     const target = parseSyncDocumentName(data.documentName)
     if (target.kind === 'office') {
+      const doc = data.document as unknown as Y.Doc
       const stored = await storeOfficeSnapshot({
         artifactId: target.id,
-        ydoc: data.document as unknown as Y.Doc,
+        ydoc: doc,
         query: sysQuery,
+        expectedBaseVersion: officeDocumentBaseVersions.get(doc),
       })
-      if (API_INTERNAL_URL && DOC_SYNC_SECRET) void notifyOfficeCheckpoint({ artifactId: target.id, expectedVersion: stored.baseVersion, canonicalHash: stored.hash, config: { apiBaseUrl: API_INTERNAL_URL, syncSecret: DOC_SYNC_SECRET } })
+      officeDocumentBaseVersions.set(doc, stored.baseVersion)
+      const replacementHash = officeReplacementSettleHashes.get(doc)
+      if (replacementHash !== undefined) {
+        officeReplacementSettleHashes.delete(doc)
+        if (replacementHash === stored.hash) return
+      }
+      if (API_INTERNAL_URL && DOC_SYNC_SECRET) {
+        const checkpoint = await notifyOfficeCheckpoint({ artifactId: target.id, expectedVersion: stored.baseVersion, canonicalHash: stored.hash, config: { apiBaseUrl: API_INTERNAL_URL, syncSecret: DOC_SYNC_SECRET } })
+        if (checkpoint.status === 'checkpointed') officeDocumentBaseVersions.set(doc, checkpoint.version)
+      }
       return
     }
     const pageId = target.id
@@ -320,6 +354,21 @@ const runSweepTimer = setInterval(() => {
   }
 }, 30_000)
 runSweepTimer.unref()
+
+// Current Office access is a delivery condition, not a one-time socket grant.
+// Active paths also audit immediately before each broadcast; this bounded
+// sweep closes a passive revoked peer while its room is otherwise idle.
+let officeSweepRunning = false
+const officeAccessSweepTimer = setInterval(() => {
+  if (officeSweepRunning) return
+  officeSweepRunning = true
+  void sweepOfficeRooms({
+    documents: hocuspocus.documents as unknown as ReadonlyMap<string, OfficeRoomDocument>,
+    deps: officeAuthorityDeps,
+  }).catch(error => console.error('[doc-sync] Office access sweep error', error))
+    .finally(() => { officeSweepRunning = false })
+}, 1_000)
+officeAccessSweepTimer.unref()
 
 /**
  * Internal apply endpoint — the server-side AI write path. The chat route's
@@ -426,7 +475,7 @@ async function handleInternalOfficeReplace(
     res.end()
     return
   }
-  let payload: { artifactId?: unknown; snapshot?: unknown }
+  let payload: { artifactId?: unknown; snapshot?: unknown; expectedVersion?: unknown; canonicalHash?: unknown }
   try {
     payload = (await readJsonBody(req)) as typeof payload
   } catch {
@@ -434,19 +483,61 @@ async function handleInternalOfficeReplace(
     res.end(JSON.stringify({ error: 'invalid json' }))
     return
   }
-  if (typeof payload.artifactId !== 'string') {
+  if (typeof payload.artifactId !== 'string' || !Number.isInteger(payload.expectedVersion) || typeof payload.canonicalHash !== 'string' || !/^[a-f0-9]{64}$/.test(payload.canonicalHash)) {
     res.writeHead(400, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'artifactId required' }))
+    res.end(JSON.stringify({ error: 'artifactId, expectedVersion and canonicalHash required' }))
     return
   }
   const parsed = OfficeArtifactSnapshotSchema.safeParse(payload.snapshot)
-  if (!parsed.success || parsed.data.artifactId !== payload.artifactId) {
+  if (!parsed.success || parsed.data.artifactId !== payload.artifactId || officeCanonicalSnapshotHash(parsed.data) !== payload.canonicalHash) {
     res.writeHead(400, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'invalid Office snapshot' }))
     return
   }
-  const connection = await hocuspocus.openDirectConnection(`office:${payload.artifactId}`, { service: true })
+  const binding = { artifactId: payload.artifactId, expectedVersion: payload.expectedVersion as number, canonicalHash: payload.canonicalHash, query: sysQuery }
+  if (!await verifyOfficeCommittedHead(binding)) {
+    res.writeHead(409, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'office_head_conflict' }))
+    return
+  }
+  const staged = new Y.Doc()
+  let stagedHash = ''
   try {
+    Y.applyUpdate(staged, officeSnapshotUpdate(parsed.data))
+    const stored = await storeOfficeSnapshot({
+      artifactId: payload.artifactId,
+      ydoc: staged,
+      query: sysQuery,
+      committedHead: { version: payload.expectedVersion as number, snapshotHash: payload.canonicalHash },
+    })
+    stagedHash = stored.hash
+  } catch {
+    res.writeHead(409, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'office_head_conflict' }))
+    return
+  } finally {
+    staged.destroy()
+  }
+  if (!await verifyOfficeCommittedHead(binding)) {
+    res.writeHead(409, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'office_head_conflict' }))
+    return
+  }
+  const roomName = `office:${payload.artifactId}`
+  const existing = hocuspocus.documents.get(roomName)
+  if (existing) await revalidateOfficeRoom({ artifactId: payload.artifactId, document: existing as unknown as OfficeRoomDocument, deps: officeAuthorityDeps })
+  const connection = await hocuspocus.openDirectConnection(roomName, { service: true })
+  try {
+    if (!await verifyOfficeCommittedHead(binding)) {
+      res.writeHead(409, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'office_head_conflict' }))
+      return
+    }
+    if (connection.document) {
+      await revalidateOfficeRoom({ artifactId: payload.artifactId, document: connection.document as unknown as OfficeRoomDocument, deps: officeAuthorityDeps })
+      officeDocumentBaseVersions.set(connection.document as unknown as Y.Doc, payload.expectedVersion as number)
+      officeReplacementSettleHashes.set(connection.document as unknown as Y.Doc, stagedHash)
+    }
     await connection.transact((doc) => {
       replaceLiveOfficeSnapshot(doc as unknown as Y.Doc, parsed.data)
     })
@@ -460,13 +551,18 @@ async function handleInternalOfficeReplace(
 /** Apply an accepted Document suggestion exactly once in the authoritative room. */
 async function handleInternalOfficeSuggestionStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (!isInternalAuthorized(req)) { res.writeHead(401); res.end(); return }
-  let payload: { artifactId?: unknown; suggestionId?: unknown }
+  let payload: { userId?: unknown; artifactId?: unknown; suggestionId?: unknown }
   try { payload = await readJsonBody(req) as typeof payload } catch {
     res.writeHead(400); res.end(); return
   }
+  const userId = OfficeUuidSchema.safeParse(payload?.userId)
   const artifactId = OfficeUuidSchema.safeParse(payload?.artifactId)
   const suggestionId = OfficeUuidSchema.safeParse(payload?.suggestionId)
-  if (!artifactId.success || !suggestionId.success) { res.writeHead(400); res.end(); return }
+  if (!userId.success || !artifactId.success || !suggestionId.success) { res.writeHead(400); res.end(); return }
+  const access = await resolveOfficeAccess(userId.data, artifactId.data)
+  if (!access?.canEdit) { res.writeHead(403); res.end(); return }
+  const suggestion = await sysQuery<{ artifactId: string }>('SELECT artifact_id AS "artifactId" FROM office_suggestions WHERE id=$1 AND artifact_id=$2', [suggestionId.data, artifactId.data])
+  if (!suggestion[0]) { res.writeHead(404); res.end(); return }
   const applied = await readOfficeSuggestionStatus({
     artifactId: artifactId.data, suggestionId: suggestionId.data, query: sysQuery,
     liveDocument: () => hocuspocus.documents.get(`office:${artifactId.data}`) as Y.Doc | undefined,
@@ -477,19 +573,34 @@ async function handleInternalOfficeSuggestionStatus(req: IncomingMessage, res: S
 
 async function handleInternalOfficeSuggestion(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (!isInternalAuthorized(req)) { res.writeHead(401); res.end(); return }
-  let payload: { artifactId?: unknown; suggestionId?: unknown; command?: unknown }
+  let payload: { userId?: unknown; artifactId?: unknown; suggestionId?: unknown; command?: unknown }
   try { payload = (await readJsonBody(req)) as typeof payload } catch {
     res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid json' })); return
   }
+  const userId = OfficeUuidSchema.safeParse(payload.userId)
+  const artifactId = OfficeUuidSchema.safeParse(payload.artifactId)
+  const suggestionId = OfficeUuidSchema.safeParse(payload.suggestionId)
   const command = OfficeCommandSchema.safeParse(payload.command)
-  if (typeof payload.artifactId !== 'string' || typeof payload.suggestionId !== 'string' || !command.success || command.data.artifactId !== payload.artifactId) {
+  if (!userId.success || !artifactId.success || !suggestionId.success || !command.success || command.data.artifactId !== artifactId.data) {
     res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid Office suggestion' })); return
   }
-  const connection = await hocuspocus.openDirectConnection(`office:${payload.artifactId}`, { service: true })
+  const access = await resolveOfficeAccess(userId.data, artifactId.data)
+  if (!access?.canEdit) { res.writeHead(403); res.end(); return }
+  const rows = await sysQuery<{ commandBatch: unknown; status: string }>(
+    'SELECT command_batch AS "commandBatch", status FROM office_suggestions WHERE id=$1 AND artifact_id=$2',
+    [suggestionId.data, artifactId.data],
+  )
+  const stored = rows[0]
+  const storedCommand = stored ? OfficeCommandSchema.safeParse(stored.commandBatch) : null
+  if (!stored || (stored.status !== 'open' && stored.status !== 'conflicted') || !storedCommand?.success || JSON.stringify(storedCommand.data) !== JSON.stringify(command.data)) {
+    res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'suggestion_conflict' })); return
+  }
+  const connection = await hocuspocus.openDirectConnection(`office:${artifactId.data}`, { service: true })
   try {
+    if (connection.document) await revalidateOfficeRoom({ artifactId: artifactId.data, document: connection.document as unknown as OfficeRoomDocument, deps: officeAuthorityDeps })
     try {
       await connection.transact((doc) => {
-        applyOfficeSuggestion(doc as unknown as Y.Doc, command.data, payload.suggestionId as string)
+        applyOfficeSuggestion(doc as unknown as Y.Doc, command.data, suggestionId.data)
       })
     } catch {
       res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'suggestion_conflict' })); return
@@ -667,6 +778,7 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return
   shuttingDown = true
   clearInterval(runSweepTimer)
+  clearInterval(officeAccessSweepTimer)
   console.log(`[doc-sync] ${signal} — flushing pending document stores`)
   try {
     hocuspocus.flushPendingStores()
