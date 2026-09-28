@@ -21,6 +21,28 @@ export {
 export { useChatSession, type UseChatSessionResult } from './useChatSession.js'
 
 export {
+  chatRunReducer,
+  initialChatRunState,
+  sameChatControllerIdentity,
+  type ChatConnectionState,
+  type ChatControllerIdentity,
+  type ChatRunAction,
+  type ChatRunPhase,
+  type ChatRunState,
+} from './run-controller.js'
+
+export {
+  chatInteractionReducer,
+  initialChatInteractionState,
+  type ChatInteraction,
+  type ChatInteractionAction,
+  type ChatInteractionKind,
+  type ChatInteractionSource,
+  type ChatInteractionState,
+  type ChatInteractionStatus,
+} from './interaction-controller.js'
+
+export {
   useMessageStream,
   runStream,
   TERMINAL_STREAM_EVENTS,

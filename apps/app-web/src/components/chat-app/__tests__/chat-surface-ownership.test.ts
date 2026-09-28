@@ -45,8 +45,26 @@ function deferred<T>() {
 function base() {
   const sessionIdRef = { current: "A" as string | null };
   const sessionEpochRef = { current: 1 };
+  const chatController = {
+    capture: vi.fn(() => ({ sessionId: sessionIdRef.current, generation: sessionEpochRef.current })),
+    isCurrent: vi.fn(() => true),
+    adoptSession: vi.fn(() => true),
+    presentInteraction: vi.fn(() => true),
+    beginResponse: vi.fn(() => true),
+    responseFailed: vi.fn(() => true),
+    resolveInteraction: vi.fn(() => true),
+    suspend: vi.fn(() => true),
+    disconnect: vi.fn(() => true),
+    reconnect: vi.fn(() => true),
+    connected: vi.fn(() => true),
+    complete: vi.fn(() => true),
+    cancel: vi.fn(() => true),
+    fail: vi.fn(() => true),
+    claimExit: vi.fn(() => true),
+    registerCleanup: vi.fn(() => vi.fn()),
+  };
   return {
-    sessionIdRef, sessionEpochRef,
+    sessionIdRef, sessionEpochRef, chatController,
     switchTo(id: string | null) { sessionEpochRef.current++; sessionIdRef.current = id; },
   };
 }
@@ -180,6 +198,7 @@ function directStream(initialSession: string | null = "A") {
   const handlers = evaluate<Record<string, (...args: any[]) => any>>(`(() => {
     const sendEpoch = sessionEpochRef.current;
     let owningSessionId = sessionIdRef.current;
+    const controllerRun = chatController.capture();
     const ownsSend = ${declaration("ownsSend").initializer!.getText(tree)};
     let turnFailed = false;
     let turnDisconnected = false;
@@ -270,6 +289,8 @@ describe("[COMP:app-web/chat-sessions-cache] follow-stream ownership", () => {
     };
     const onEvent = evaluate(`(() => {
       const ownsFollow = ${declaration("ownsFollow").initializer!.getText(tree)};
+      const reconnectWanted = true;
+      const controllerRun = chatController.capture();
       let sawDone = false;
       let sawRunning = true;
       let sawTurnCompleted = false;
