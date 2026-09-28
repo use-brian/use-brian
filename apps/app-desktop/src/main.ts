@@ -58,6 +58,7 @@ const embeddedBrowser = new EmbeddedBrowser();
 let browserIdentityChanging = false;
 
 import { DeploymentAccounts, TargetOperations, deploymentKey, deploymentAccountKey, type AccountTarget, type SavedDeploymentAccount } from "./deployment-accounts.js";
+import { validateGatewayTarget } from "./gateway-target.js";
 import { bundledDefaultForRuntime, resolveConfig } from "./config.js";
 import {
   AWAKE_BRIAN_FILE_NAME,
@@ -361,8 +362,9 @@ let requestedCaptureSourceId: string | null = null;
 let gatewayWindow: BrowserWindow | null = null;
 /** One gateway login at a time; concurrent challenged requests wait for this result. */
 let gatewayAuthInFlight: Promise<boolean> | null = null;
-/** Origin currently being authenticated; another origin queues behind it. */
+/** Origin and partition being authenticated; other contexts queue behind it. */
 let gatewayAuthOrigin: string | null = null;
+let gatewayAuthSession: ReturnType<typeof targetSession> | null = null;
 /** Protected target currently being validated from the local-target chooser. */
 let pendingLocalGatewayUrl: string | null = null;
 /** The edge grant stays main-process-only; the renderer never receives it. */
@@ -397,6 +399,17 @@ function authenticatedSessionFetch(input: string, init: RequestInit): Promise<Re
   const headers = new Headers(init.headers);
   if (authorization) headers.set("Authorization", authorization);
   return targetSession().fetch(input, { ...init, headers, credentials: "include" });
+}
+
+type GatewayContext = { session: ReturnType<typeof targetSession>; fetch: GatewayProbeFetch };
+function gatewayContext(target = accountTarget(), grant: CloudflareAccessGrant | null = activeAccessGrant): GatewayContext {
+  const jar = targetSession(target);
+  return { session: jar, fetch: (input, init) => {
+    const headers = new Headers(init.headers);
+    const authorization = accessAuthorizationForUrl(grant, input);
+    if (authorization) headers.set("Authorization", authorization);
+    return jar.fetch(input, { ...init, headers, credentials: "include" });
+  } };
 }
 
 const gatewayProbeFetch: GatewayProbeFetch = authenticatedSessionFetch;
@@ -539,15 +552,17 @@ function refreshSessionForTarget(target: AccountTarget, refreshToken: string, pr
 function authenticateGateway(
   protectedUrl: string,
   validate: () => Promise<boolean>,
+  context: GatewayContext,
 ): Promise<boolean> {
   const protectedOrigin = new URL(protectedUrl).origin;
   console.log(`[gateway-auth] opening authentication for ${protectedOrigin}`);
   if (gatewayAuthInFlight) {
-    if (gatewayAuthOrigin === protectedOrigin) return gatewayAuthInFlight;
+    if (gatewayAuthOrigin === protectedOrigin && gatewayAuthSession === context.session) return gatewayAuthInFlight;
     const pending = gatewayAuthInFlight;
-    return pending.then(() => authenticateGateway(protectedUrl, validate));
+    return pending.then(() => authenticateGateway(protectedUrl, validate, context));
   }
   gatewayAuthOrigin = protectedOrigin;
+  gatewayAuthSession = context.session;
 
   const run = new Promise<boolean>((resolveAuth) => {
     const win = new BrowserWindow({
@@ -557,7 +572,7 @@ function authenticateGateway(
       show: false,
       autoHideMenuBar: true,
       webPreferences: {
-        session: targetSession(),
+        session: context.session,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -631,6 +646,7 @@ function authenticateGateway(
     if (gatewayAuthInFlight === run) {
       gatewayAuthInFlight = null;
       gatewayAuthOrigin = null;
+      gatewayAuthSession = null;
     }
   });
   return run;
@@ -1284,7 +1300,7 @@ function handleRedirect(event: Event, url: string): void {
   // than consulting cfg.target and accidentally starting cloud PKCE.
   if (pendingLocalGatewayUrl && isAllowedGatewayNavigation(url, pendingLocalGatewayUrl)) {
     event.preventDefault();
-    void recoverPendingLocalGatewayRedirect(pendingLocalGatewayUrl);
+    // Destination validation owns gateway authentication; do not probe the active jar.
     return;
   }
   const action = decideRedirectAction(url, {
@@ -1303,17 +1319,6 @@ function handleRedirect(event: Event, url: string): void {
     return;
   }
   handleNavigation(event, url);
-}
-
-async function recoverPendingLocalGatewayRedirect(protectedUrl: string): Promise<void> {
-  return targetOperations.run(async () => {
-    const result = await probeWithGatewayAuthentication(
-      desktopConfigUrl(protectedUrl),
-      () => probeDesktopConfig(protectedUrl),
-    );
-    if (result.kind !== "ready") return;
-
-  });
 }
 
 async function recoverAppGatewayRedirect(redirectUrl: string): Promise<void> {
@@ -1469,8 +1474,8 @@ type LocalProbeResult<T> =
   | { kind: "cancelled" };
 
 /** Probe `/health`, requiring the API's JSON contract rather than any HTTP 2xx. */
-async function probeLocalBrain(apiUrl: string): Promise<LocalProbeResult<undefined>> {
-  const result = await probeExpectedJson(healthUrl(apiUrl), { fetchImpl: gatewayProbeFetch });
+async function probeLocalBrain(apiUrl: string, fetchImpl = gatewayProbeFetch): Promise<LocalProbeResult<undefined>> {
+  const result = await probeExpectedJson(healthUrl(apiUrl), { fetchImpl });
   if (result.kind === "authentication-required") return result;
   if (result.kind === "ok" && isHealthyDocument(result.body)) {
     return { kind: "ready", value: undefined };
@@ -1490,10 +1495,11 @@ async function probeLocalBrain(apiUrl: string): Promise<LocalProbeResult<undefin
  */
 async function probeDesktopConfig(
   appUrl: string,
+  fetchImpl = gatewayProbeFetch,
 ): Promise<LocalProbeResult<DeclaredDesktopConfig | null>> {
   const result = await probeExpectedJson(desktopConfigUrl(appUrl), {
     allowNotFound: true,
-    fetchImpl: gatewayProbeFetch,
+    fetchImpl,
   });
   if (result.kind === "authentication-required") return result;
   if (result.kind === "missing") return { kind: "ready", value: null };
@@ -1580,6 +1586,7 @@ async function fetchDeclaredApiUrl(
 async function probeWithGatewayAuthentication<T>(
   protectedUrl: string,
   probe: () => Promise<LocalProbeResult<T>>,
+  context = gatewayContext(),
 ): Promise<LocalProbeResult<T>> {
   const first = await probe();
   if (first.kind !== "authentication-required") return first;
@@ -1587,7 +1594,7 @@ async function probeWithGatewayAuthentication<T>(
   const authenticated = await authenticateGateway(protectedUrl, async () => {
     const result = await probe();
     return result.kind === "ready";
-  });
+  }, context);
   if (!authenticated) return { kind: "cancelled" };
   return probe();
 }
@@ -1603,6 +1610,7 @@ async function probeWithVisibleGatewayFallback<T>(
   protectedUrl: string,
   probe: () => Promise<LocalProbeResult<T>>,
   interactiveUrl = protectedUrl,
+  context = gatewayContext(),
 ): Promise<LocalProbeResult<T>> {
   const first = await probe();
   if (first.kind === "ready") return first;
@@ -1612,15 +1620,15 @@ async function probeWithVisibleGatewayFallback<T>(
   const authenticated = await authenticateGateway(interactiveUrl, async () => {
     const result = await probe();
     return result.kind === "ready";
-  });
+  }, context);
   if (!authenticated) return { kind: "cancelled" };
   return probe();
 }
 
 /** Validate both protected origins before loading or adopting a local target. */
 async function validateLocalTarget(
-  appUrl: string,
-  fallbackApiUrl: string,
+  initial: AccountTarget,
+  grant: CloudflareAccessGrant | null = activeAccessGrant,
 ): Promise<LocalProbeResult<{
   apiUrl: string
   declaredApiUrl: string | null
@@ -1628,42 +1636,39 @@ async function validateLocalTarget(
   publicConfig: DesktopPublicConfig | null
 }>> {
   return targetOperations.run(async () => {
-    console.log(`[gateway-auth] validating app ${appUrl}`);
-    const config = await probeWithVisibleGatewayFallback(
-      desktopConfigUrl(appUrl),
-      () => probeDesktopConfig(appUrl),
-    );
-    if (config.kind !== "ready") {
-      console.warn(`[gateway-auth] app validation ended: ${config.kind}`);
-      return config;
-    }
-
-    const target = localTarget(
-      appUrl,
-      config.value?.apiUrl,
-      config.value?.auth ?? "local-session",
-      config.value?.publicConfig,
-    ) ?? localTarget(appUrl);
-    const apiUrl = target?.apiUrl ?? fallbackApiUrl;
-    const health = await probeWithVisibleGatewayFallback(
-      healthUrl(apiUrl),
-      () => probeLocalBrain(apiUrl),
-    );
-    if (health.kind !== "ready") {
-      console.warn(`[gateway-auth] API validation ended: ${health.kind} (${apiUrl})`);
-      return health;
-    }
-    console.log(`[gateway-auth] target ready: app=${appUrl} api=${apiUrl}`);
-    return {
-      kind: "ready",
-      value: {
-        apiUrl,
-        declaredApiUrl: config.value?.apiUrl ?? null,
-        auth: target?.auth ?? "local-session",
-        publicConfig: config.value?.publicConfig ?? null,
+    let declaredApiUrl: string | null = null;
+    const result = await validateGatewayTarget(initial,
+      (target) => gatewayContext(target, grant),
+      async (target, context) => {
+        console.log(`[gateway-auth] validating app ${target.appUrl} api=${target.apiUrl}`);
+        const config = await probeWithVisibleGatewayFallback(
+          desktopConfigUrl(target.appUrl),
+          () => probeDesktopConfig(target.appUrl, context.fetch),
+          desktopConfigUrl(target.appUrl), context,
+        );
+        if (config.kind !== "ready") return config;
+        declaredApiUrl = config.value?.apiUrl ?? null;
+        return { kind: "ready", value: {
+          ...target,
+          apiUrl: config.value?.apiUrl ?? target.apiUrl,
+          auth: config.value?.auth ?? target.auth,
+          publicConfig: config.value?.publicConfig ?? target.publicConfig,
+        } };
       },
-    };
-
+      (target, context) => probeWithVisibleGatewayFallback(
+        healthUrl(target.apiUrl), () => probeLocalBrain(target.apiUrl, context.fetch),
+        healthUrl(target.apiUrl), context,
+      ),
+    );
+    if (result.kind !== "ready") {
+      console.warn(`[gateway-auth] target validation ended: ${result.kind}`);
+      return result;
+    }
+    console.log(`[gateway-auth] target ready: app=${result.value.appUrl} api=${result.value.apiUrl}`);
+    return { kind: "ready", value: {
+      apiUrl: result.value.apiUrl, declaredApiUrl,
+      auth: result.value.auth, publicConfig: result.value.publicConfig ?? null,
+    } };
   });
 }
 
@@ -1799,7 +1804,7 @@ function ensureBundledLocalSession(win: BrowserWindow): Promise<boolean> {
       }
       lastLocalMintAt = now;
       try {
-        const target = await validateLocalTarget(cfg.appUrl, cfg.apiUrl);
+        const target = await validateLocalTarget(accountTarget());
         if (target.kind !== "ready") {
           showLocalDown(win, target.kind === "cancelled" ? "gateway-auth" : "unreachable");
           return false;
@@ -2010,7 +2015,7 @@ async function loadApp(
       return;
     }
     if (cfg.target === "local") {
-      const target = await validateLocalTarget(cfg.appUrl, cfg.apiUrl);
+      const target = await validateLocalTarget(accountTarget());
       if (target.kind !== "ready") {
         showLocalDown(win, target.kind === "cancelled" ? "gateway-auth" : "unreachable");
         return;
@@ -4310,7 +4315,7 @@ if (!gotLock) {
         declaredConfig?.publicConfig,
       ) ?? normalized;
       pendingLocalGatewayUrl = target.appUrl;
-      const validation = await validateLocalTarget(target.appUrl, target.apiUrl).finally(() => {
+      const validation = await validateLocalTarget({ ...target, kind: "local" }, grant).finally(() => {
         pendingLocalGatewayUrl = null;
       });
       if (validation.kind !== "ready") {
@@ -4320,7 +4325,7 @@ if (!gotLock) {
           url: target.appUrl,
         };
       }
-      const resolvedDeclaredApiUrl = validation.value.declaredApiUrl ?? declaredApiUrl;
+      const resolvedDeclaredApiUrl = validation.value.apiUrl;
       const resolvedTarget = localTarget(
         target.appUrl,
         resolvedDeclaredApiUrl,

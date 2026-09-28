@@ -61,6 +61,7 @@ vi.mock("electron", async () => {
       });
       state.windows.push(this);
     }
+    destroy() { this.destroyed = true; this.emit("closed"); }
     isDestroyed() { return this.destroyed; }
     isMinimized() { return false; }
     getBounds() { return this.bounds; }
@@ -259,7 +260,7 @@ function sessionJwt(seconds: number, suffix: string) {
 const ownerTarget = { ...local, auth: "local-session" as const };
 
 /** Model actual Chromium behavior: cookie events precede response/redirect. */
-async function mockAppBridge(options: { status?: number; error?: string; pause?: Promise<void>; omitCookies?: boolean; location?: string } = {}) {
+async function mockAppBridge(options: { status?: number; error?: string; pause?: Promise<void>; omitCookies?: boolean; location?: string; appUrl?: string } = {}) {
   const { EventEmitter } = await import("node:events");
   const pair = { accessToken: sessionJwt(3600, "fresh-access"), refreshToken: sessionJwt(2592000, "fresh-refresh") };
   state.request.mockImplementation((requestOptions: any) => {
@@ -270,7 +271,7 @@ async function mockAppBridge(options: { status?: number; error?: string; pause?:
         if ((status === 200 || status === 307) && !options.omitCookies) {
           for (const [name, value] of Object.entries({ access_token: pair.accessToken, refresh_token: pair.refreshToken,
             user: encodeURIComponent(JSON.stringify({ id: "same-user", name: "You", email: "owner@local" })) })) {
-            await requestOptions.session.cookies.set({ url: ownerTarget.appUrl, name, value });
+            await requestOptions.session.cookies.set({ url: options.appUrl ?? ownerTarget.appUrl, name, value });
           }
         }
         if (options.location) {
@@ -459,4 +460,58 @@ describe("[COMP:app-desktop/main] add self-hosted account in place", () => {
     expect(store.current(ownerTarget)).toBeNull();
   });
 
+});
+
+
+describe("[COMP:app-desktop/main] destination gateway validation", () => {
+  it.each([false, true])("uses the final destination jar for login, probes and owner exchange (discovered API: %s)", async (differentApi) => {
+    const { localTarget } = await import("../target-store.js");
+    const appUrl = "https://brain.example.com";
+    const guessed = { ...localTarget(appUrl)!, kind: "local" as const };
+    const destination = { ...guessed, apiUrl: differentApi ? "https://service.example.com" : guessed.apiUrl };
+    const active = targetJar(local);
+    const activeCalls = active.fetch.mock.calls.length;
+    const activeCookies = await active.cookies.get({});
+    const persisted = state.files.get("/tmp/desktop-switch-test/target.json")!.toString();
+    const pair = await mockAppBridge({ appUrl, status: 307, location: appUrl + "/" });
+    for (const target of [guessed, destination]) {
+      const jar = targetJar(target);
+      jar.fetch.mockImplementation(async (url: string) => {
+        const authenticated = (await jar.cookies.get({ name: "CF_Authorization" })).length > 0;
+        return authenticated
+          ? new Response(JSON.stringify(url.endsWith("/health") ? { status: "ok" } : { apiUrl: destination.apiUrl, edition: "oss" }))
+          : new Response("gateway login", { status: 403 });
+      });
+    }
+    const event = sender();
+    const connecting = state.handlers.get("Use Brian:run-local")!(event, appUrl);
+    for (const target of differentApi ? [guessed, destination] : [destination]) {
+      const jar = targetJar(target);
+      await vi.waitFor(() => expect(state.windows.some((win) => !win.destroyed && win.options.title === "Authenticate to Local Brain" && win.options.webPreferences.session === jar)).toBe(true));
+      const login = state.windows.find((win) => !win.destroyed && win.options.title === "Authenticate to Local Brain" && win.options.webPreferences.session === jar);
+      expect(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).toBe(persisted);
+      await jar.cookies.set({ url: appUrl, name: "CF_Authorization", value: "destination-only", httpOnly: true });
+      login.webContents.emit("did-navigate", {}, appUrl, 200);
+    }
+    expect(await connecting).toEqual({ ok: true, url: appUrl });
+    expect(state.request.mock.calls[0][0].session).toBe(targetJar(destination));
+    expect(store.current(destination)?.accessToken).toBe(pair.accessToken);
+    expect(active.fetch.mock.calls.length).toBe(activeCalls);
+    expect(await active.cookies.get({})).toEqual(activeCookies);
+    expect(await targetJar(destination).cookies.get({ name: "CF_Authorization" })).toHaveLength(1);
+  });
+
+  it("cancelling destination gateway login leaves the current deployment unchanged", async () => {
+    const { localTarget } = await import("../target-store.js");
+    const target = { ...localTarget("https://cancel.example.com")!, kind: "local" as const };
+    targetJar(target).fetch.mockResolvedValue(new Response("login", { status: 403 }));
+    const persisted = state.files.get("/tmp/desktop-switch-test/target.json")!.toString();
+    const connecting = state.handlers.get("Use Brian:run-local")!(sender(), target.appUrl);
+    await vi.waitFor(() => expect(state.windows.at(-1).options.title).toBe("Authenticate to Local Brain"));
+    state.windows.at(-1).close();
+    expect(await connecting).toMatchObject({ ok: false, error: "gateway-auth" });
+    expect(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).toBe(persisted);
+    expect(state.request).not.toHaveBeenCalled();
+    expect(store.current(local)?.accessToken).toBe("local-access");
+  });
 });
