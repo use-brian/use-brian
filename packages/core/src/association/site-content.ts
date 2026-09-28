@@ -9,7 +9,7 @@
 import { z } from 'zod'
 import { MembershipSiteSchema } from './membership-catalogue.js'
 
-export const SITE_CONTENT_COLLECTIONS = ['people', 'partners', 'settings', 'news', 'home-oasa', 'home-sea'] as const
+export const SITE_CONTENT_COLLECTIONS = ['people', 'partners', 'settings', 'news', 'home-oasa', 'home-sea', 'event-pages'] as const
 export const SiteContentCollectionSchema = z.enum(SITE_CONTENT_COLLECTIONS)
 export type SiteContentCollection = z.infer<typeof SiteContentCollectionSchema>
 export type SiteContentSite = z.infer<typeof MembershipSiteSchema>
@@ -68,6 +68,10 @@ export const PartnersDocumentSchema = z.object({
 
 // ── settings ───────────────────────────────────────────────────────────────
 export const SiteSettingsSchema = z.object({
+  /** How staff tools name this website; code never hard-codes a site name. */
+  name: LocalizedShortSchema.optional(),
+  /** The site's public address; the console opens its draft preview page there (http only on loopback). */
+  websiteUrl: z.string().max(200).regex(/^(https:\/\/[a-z0-9.-]+(:\d+)?|http:\/\/(localhost|127\.0\.0\.1)(:\d+)?)$/, 'Use the site address, e.g. https://www.example.org').optional(),
   contact: z.object({
     email: z.string().email().max(200), phone: short.default(''), address: LocalizedTextSchema, hours: LocalizedShortSchema.optional(),
   }).strict(),
@@ -134,9 +138,43 @@ export const SeaHomeDocumentSchema = z.object({
   membership: z.object({ eyebrow: LocalizedShortSchema, title: LocalizedShortSchema, body: LocalizedTextSchema, actions: z.array(SiteLinkSchema).max(3) }).strict(),
 }).strict()
 
+// ── event pages ────────────────────────────────────────────────────────────
+/** An event's public page: cover, summary and an ordered list of typed sections staff build like a site builder.
+ * Keyed by the event slug; the event row (dates, venue, tickets, status) stays in the event catalogue. */
+const eventSlug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,99}$/, 'Use the event reference')
+const sectionId = z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/)
+const heading = LocalizedShortSchema.optional()
+const section = { id: sectionId, hidden: z.boolean().default(false) }
+export const EventSectionSchema = z.discriminatedUnion('kind', [
+  z.object({ ...section, kind: z.literal('text'), heading, body: LocalizedTextSchema }).strict(),
+  z.object({ ...section, kind: z.literal('image'), image: SiteImageSchema, caption: LocalizedShortSchema.optional() }).strict(),
+  z.object({ ...section, kind: z.literal('gallery'), heading, images: z.array(SiteImageSchema).min(1).max(40) }).strict(),
+  z.object({ ...section, kind: z.literal('speakers'), heading, people: z.array(z.object({
+    name: short, title: LocalizedShortSchema.optional(), bio: LocalizedTextSchema.optional(), photo: SiteImageSchema.optional(),
+  }).strict()).max(40) }).strict(),
+  z.object({ ...section, kind: z.literal('partners'), heading, partners: z.array(z.object({
+    name: short, logo: SiteImageSchema.optional(), href: href.optional(),
+  }).strict()).max(60) }).strict(),
+  z.object({ ...section, kind: z.literal('agenda'), heading, items: z.array(z.object({
+    time: short, title: LocalizedShortSchema, detail: LocalizedTextSchema.optional(),
+  }).strict()).max(60) }).strict(),
+  z.object({ ...section, kind: z.literal('faq'), heading, items: z.array(z.object({
+    question: LocalizedShortSchema, answer: LocalizedTextSchema,
+  }).strict()).max(40) }).strict(),
+])
+export type EventSection = z.infer<typeof EventSectionSchema>
+export const EventPagesDocumentSchema = z.object({
+  schemaVersion: z.literal(1),
+  pages: z.array(z.object({
+    event: eventSlug, cover: SiteImageSchema.optional(), summary: LocalizedTextSchema.optional(),
+    sections: z.array(EventSectionSchema).max(40),
+  }).strict()).max(2000),
+}).strict()
+
 const DOCUMENTS = {
   people: PeopleDocumentSchema, partners: PartnersDocumentSchema, settings: SettingsDocumentSchema,
   news: NewsDocumentSchema, 'home-oasa': OasaHomeDocumentSchema, 'home-sea': SeaHomeDocumentSchema,
+  'event-pages': EventPagesDocumentSchema,
 } as const
 export type SiteContentDocuments = { [K in SiteContentCollection]: z.infer<(typeof DOCUMENTS)[K]> }
 export type SiteContentDocument = SiteContentDocuments[SiteContentCollection]
@@ -144,6 +182,8 @@ export type SiteContentDocument = SiteContentDocuments[SiteContentCollection]
 /** Which sites read a collection at all; a home page belongs to one site. */
 export const SITE_CONTENT_READERS: Record<SiteContentCollection, readonly SiteContentSite[]> = {
   people: ['oasa', 'sea'], partners: ['oasa', 'sea'], settings: ['oasa', 'sea'], news: ['oasa', 'sea'], 'home-oasa': ['oasa'], 'home-sea': ['sea'],
+  // Every site may list events; each site shows the pages for the events it hosts.
+  'event-pages': MembershipSiteSchema.options,
 }
 
 export function siteContentSchema<K extends SiteContentCollection>(collection: K): z.ZodType<SiteContentDocuments[K]> {
@@ -159,63 +199,80 @@ export function parseSiteContent<K extends SiteContentCollection>(collection: K,
 const duplicates = (values: string[]) => [...new Set(values.filter((value, index) => values.indexOf(value) !== index))]
 const blank = (value: LocalizedText | undefined) => !value || !value.en.trim()
 
-/** Human-readable reasons a draft cannot be published. Empty means publishable. */
-export function siteContentPublicationIssues(collection: SiteContentCollection, document: SiteContentDocument): string[] {
-  const issues: string[] = []
+/** A reason a draft cannot be published: a stable code and parameters the UI translates, plus the English message tools show. */
+export type SiteContentIssue = { code: string; params: Record<string, string>; message: string }
+
+export function siteContentPublicationIssueDetails(collection: SiteContentCollection, document: SiteContentDocument): SiteContentIssue[] {
+  const issues: SiteContentIssue[] = []
+  const add = (code: string, params: Record<string, string>, message: string) => { issues.push({ code, params, message }) }
   switch (collection) {
     case 'people': {
       const doc = document as SiteContentDocuments['people']
-      for (const key of duplicates(doc.groups.map(group => group.key))) issues.push(`Group key ${key} is used twice`)
+      for (const key of duplicates(doc.groups.map(group => group.key))) add('duplicate_group', { group: key }, `Group key ${key} is used twice`)
       for (const group of doc.groups) {
-        if (blank(group.title)) issues.push(`Group ${group.key} needs an English title`)
-        for (const person of duplicates(group.members.map(member => member.id))) issues.push(`${group.key}: person ${person} is listed twice`)
-        for (const member of group.members) if (!member.name.trim()) issues.push(`${group.key}: person ${member.id} needs a name`)
+        if (blank(group.title)) add('group_needs_title', { group: group.key }, `Group ${group.key} needs an English title`)
+        for (const person of duplicates(group.members.map(member => member.id))) add('duplicate_person', { group: group.key, person }, `${group.key}: person ${person} is listed twice`)
+        for (const member of group.members) if (!member.name.trim()) add('person_needs_name', { group: group.key, person: member.id }, `${group.key}: person ${member.id} needs a name`)
       }
       break
     }
     case 'partners': {
       const doc = document as SiteContentDocuments['partners']
-      for (const key of duplicates(doc.partners.map(partner => partner.id))) issues.push(`Partner ${key} is listed twice`)
-      for (const partner of doc.partners) if (!partner.name.trim()) issues.push(`Partner ${partner.id} needs a name`)
+      for (const key of duplicates(doc.partners.map(partner => partner.id))) add('duplicate_partner', { partner: key }, `Partner ${key} is listed twice`)
+      for (const partner of doc.partners) if (!partner.name.trim()) add('partner_needs_name', { partner: partner.id }, `Partner ${partner.id} needs a name`)
       break
     }
     case 'settings': {
       const doc = document as SiteContentDocuments['settings']
-      if (!doc.sites.oasa && !doc.sites.sea) issues.push('Add settings for at least one site')
+      if (!Object.values(doc.sites).some(Boolean)) add('settings_need_site', {}, 'Add settings for at least one site')
       for (const [site, settings] of Object.entries(doc.sites)) {
         if (!settings) continue
-        if (blank(settings.contact.address)) issues.push(`${site.toUpperCase()}: add the contact address`)
-        if (blank(settings.legalLine)) issues.push(`${site.toUpperCase()}: add the legal line`)
-        for (const key of duplicates(settings.directory.map(entry => entry.id))) issues.push(`${site.toUpperCase()}: directory entry ${key} is listed twice`)
+        if (blank(settings.contact.address)) add('site_needs_address', { site }, `${site.toUpperCase()}: add the contact address`)
+        if (blank(settings.legalLine)) add('site_needs_legal_line', { site }, `${site.toUpperCase()}: add the legal line`)
+        for (const key of duplicates(settings.directory.map(entry => entry.id))) add('duplicate_directory_entry', { site, entry: key }, `${site.toUpperCase()}: directory entry ${key} is listed twice`)
       }
       break
     }
     case 'news': {
       const doc = document as SiteContentDocuments['news']
-      for (const key of duplicates(doc.items.map(item => item.id))) issues.push(`News item ${key} is listed twice`)
+      for (const key of duplicates(doc.items.map(item => item.id))) add('duplicate_news', { item: key }, `News item ${key} is listed twice`)
       for (const item of doc.items) {
         for (const locale of item.locales) {
-          if (!item.title[locale]?.trim() && !item.title.en.trim()) issues.push(`News item ${item.id} needs a title for ${locale}`)
+          if (!item.title[locale]?.trim() && !item.title.en.trim()) add('news_needs_title', { item: item.id, locale }, `News item ${item.id} needs a title for ${locale}`)
         }
-        if (item.href && item.fileId) issues.push(`News item ${item.id}: choose a link or a file, not both`)
+        if (item.href && item.fileId) add('news_link_or_file', { item: item.id }, `News item ${item.id}: choose a link or a file, not both`)
       }
       break
     }
     case 'home-oasa': {
       const doc = document as SiteContentDocuments['home-oasa']
-      if (blank(doc.hero.title)) issues.push('Add the hero title')
-      for (const key of duplicates(doc.audiences.map(audience => audience.key))) issues.push(`Audience ${key} is listed twice`)
-      for (const key of duplicates(doc.programmes.map(programme => programme.slug))) issues.push(`Programme ${key} is featured twice`)
+      if (blank(doc.hero.title)) add('hero_needs_title', {}, 'Add the hero title')
+      for (const key of duplicates(doc.audiences.map(audience => audience.key))) add('duplicate_audience', { audience: key }, `Audience ${key} is listed twice`)
+      for (const key of duplicates(doc.programmes.map(programme => programme.slug))) add('duplicate_featured_programme', { programme: key }, `Programme ${key} is featured twice`)
+      break
+    }
+    case 'event-pages': {
+      const doc = document as SiteContentDocuments['event-pages']
+      for (const key of duplicates(doc.pages.map(page => page.event))) add('duplicate_event_page', { event: key }, `Event ${key} has two pages`)
+      for (const page of doc.pages) {
+        for (const key of duplicates(page.sections.map(item => item.id))) add('duplicate_section', { event: page.event, section: key }, `${page.event}: section ${key} is used twice`)
+        for (const item of page.sections) if (item.kind === 'text' && !item.body.en.trim()) add('section_needs_text', { event: page.event }, `${page.event}: a text section needs English text`)
+      }
       break
     }
     case 'home-sea': {
       const doc = document as SiteContentDocuments['home-sea']
-      if (blank(doc.hero.title)) issues.push('Add the hero title')
-      if (!doc.chairman.paragraphs.length) issues.push("Add the chairman's message")
+      if (blank(doc.hero.title)) add('hero_needs_title', {}, 'Add the hero title')
+      if (!doc.chairman.paragraphs.length) add('chairman_message_needed', {}, "Add the chairman's message")
       break
     }
   }
   return issues
+}
+
+/** Human-readable reasons a draft cannot be published. Empty means publishable. */
+export function siteContentPublicationIssues(collection: SiteContentCollection, document: SiteContentDocument): string[] {
+  return siteContentPublicationIssueDetails(collection, document).map(issue => issue.message)
 }
 
 /** Published projection for one site: entries addressed to other sites are removed. */

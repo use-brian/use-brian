@@ -14,7 +14,7 @@ export type Field =
   | { kind: "sites"; key: string; label: FieldLabel }
   | { kind: "image"; key: string; label: FieldLabel; optional?: boolean }
   | { kind: "media"; key: string; label: FieldLabel; optional?: boolean }
-  | { kind: "object"; key: string; label: FieldLabel; fields: Field[]; optional?: boolean }
+  | { kind: "object"; key: string; label: FieldLabel; fields: Field[]; optional?: boolean; siteLabel?: boolean }
   | { kind: "list"; key: string; label: FieldLabel; item: Field[]; itemTitle: (item: Record<string, unknown>) => string; blank: () => Record<string, unknown> }
   | { kind: "localizedList"; key: string; label: FieldLabel };
 
@@ -33,6 +33,7 @@ const person: Field[] = [
   { kind: "image", key: "image", label: "image", optional: true }, { kind: "localized", key: "bio", label: "bio", optional: true, multiline: true },
 ];
 const siteSettings: Field[] = [
+  { kind: "localized", key: "name", label: "siteName", optional: true },
   { kind: "object", key: "contact", label: "contact", fields: [
     { kind: "text", key: "email", label: "email", type: "email" }, { kind: "text", key: "phone", label: "phone", optional: true },
     { kind: "localized", key: "address", label: "address", multiline: true }, { kind: "localized", key: "hours", label: "hours", optional: true },
@@ -48,21 +49,20 @@ const siteSettings: Field[] = [
 ];
 const blankSettings = () => ({ contact: { email: "", phone: "", address: L() }, legalLine: L(), social: [], responseDays: 3, directory: [] });
 
-export const COLLECTION_FIELDS: Record<SiteContentCollection, Field[]> = {
-  people: [{ kind: "list", key: "groups", label: "groups", itemTitle: item => en(item.title), blank: () => ({ key: "", sites: ["oasa"], title: L(), term: "", order: 0, members: [] }), item: [
+const COLLECTION_FIELDS: Record<SiteContentCollection, Field[]> = {
+  // Event pages are built in Events → an event → Event page (sections, uploads, live preview), not in this generic editor.
+  "event-pages": [],
+  people: [{ kind: "list", key: "groups", label: "groups", itemTitle: item => en(item.title), blank: () => ({ key: "", sites: [], title: L(), term: "", order: 0, members: [] }), item: [
     { kind: "text", key: "key", label: "key" }, { kind: "sites", key: "sites", label: "sites" }, { kind: "localized", key: "title", label: "title" },
     { kind: "localized", key: "intro", label: "intro", optional: true, multiline: true }, { kind: "text", key: "term", label: "term", optional: true }, order(),
     { kind: "list", key: "members", label: "members", item: person, itemTitle: item => `${item.honorific ? `${item.honorific} ` : ""}${item.name ?? ""}`, blank: () => ({ id: "", name: "", honorific: "" }) },
   ] }],
-  partners: [{ kind: "list", key: "partners", label: "partners", itemTitle: item => String(item.name ?? ""), blank: () => ({ id: "", name: "", logo: { alt: L() }, sites: ["oasa"], active: true, order: 0 }), item: [
+  partners: [{ kind: "list", key: "partners", label: "partners", itemTitle: item => String(item.name ?? ""), blank: () => ({ id: "", name: "", logo: { alt: L() }, sites: [], active: true, order: 0 }), item: [
     { kind: "text", key: "id", label: "id" }, { kind: "text", key: "name", label: "name" }, { kind: "image", key: "logo", label: "logo" },
     { kind: "text", key: "href", label: "href", optional: true }, { kind: "sites", key: "sites", label: "sites" }, { kind: "boolean", key: "active", label: "active" }, order(),
   ] }],
-  settings: [{ kind: "object", key: "sites", label: "sites", fields: [
-    { kind: "object", key: "oasa", label: "oasa", optional: true, fields: siteSettings },
-    { kind: "object", key: "sea", label: "sea", optional: true, fields: siteSettings },
-  ] }],
-  news: [{ kind: "list", key: "items", label: "items", itemTitle: item => `${item.date ?? ""} · ${en(item.title)}`, blank: () => ({ id: "", sites: ["oasa"], kind: "newsletter", date: "", locales: ["en", "zh-Hant", "zh-Hans"], title: L() }), item: [
+  settings: [],
+  news: [{ kind: "list", key: "items", label: "items", itemTitle: item => `${item.date ?? ""} · ${en(item.title)}`, blank: () => ({ id: "", sites: [], kind: "newsletter", date: "", locales: ["en", "zh-Hant", "zh-Hans"], title: L() }), item: [
     { kind: "text", key: "id", label: "id" }, { kind: "sites", key: "sites", label: "sites" }, { kind: "select", key: "kind", label: "kind", values: ["newsletter", "press", "article", "publication"] },
     { kind: "text", key: "date", label: "date", type: "date" }, { kind: "locales", key: "locales", label: "locales" }, { kind: "localized", key: "title", label: "title", anyLanguage: true }, { kind: "localized", key: "summary", label: "summary", optional: true, multiline: true, anyLanguage: true },
     { kind: "localized", key: "category", label: "category", optional: true },
@@ -116,12 +116,19 @@ export const COLLECTION_FIELDS: Record<SiteContentCollection, Field[]> = {
   ],
 };
 
+/** Fields for a collection; site settings get one section per website that reads them (site keys come from the server, never from code). */
+export function collectionFields(collection: SiteContentCollection, sites: readonly string[]): Field[] {
+  if (collection !== "settings") return COLLECTION_FIELDS[collection];
+  return [{ kind: "object", key: "sites", label: "sites", fields: sites.map(site => ({ kind: "object", key: site, label: site, siteLabel: true, optional: true, fields: siteSettings })) }];
+}
+
 /** A valid starting document for an empty collection. */
-export function blankDocument(collection: SiteContentCollection): SiteContentDocument {
+export function blankDocument(collection: SiteContentCollection, sites: readonly string[] = []): SiteContentDocument {
   switch (collection) {
+    case "event-pages": return { schemaVersion: 1, pages: [] };
     case "people": return { schemaVersion: 1, groups: [] };
     case "partners": return { schemaVersion: 1, partners: [] };
-    case "settings": return { schemaVersion: 1, sites: { oasa: blankSettings() } };
+    case "settings": return { schemaVersion: 1, sites: sites[0] ? { [sites[0]]: blankSettings() } : {} };
     case "news": return { schemaVersion: 1, items: [] };
     case "home-oasa": return { schemaVersion: 1, hero: { kicker: L(), title: L(), body: L() }, stats: [], about: { heading: L(), lead: L() }, principles: [], audiences: [], programmes: [], testimonials: [], newsletter: { heading: L(), body: L() }, footer: { heading: L() } };
     case "home-sea": return { schemaVersion: 1, hero: { eyebrow: L(), title: L(), mission: L(), image: { alt: L() } }, foundation: { eyebrow: L(), title: L(), body: L() }, stats: [],
@@ -140,7 +147,7 @@ export function blankFor(field: Field): unknown {
     case "number": return field.min ?? 0;
     case "boolean": return false;
     case "select": return field.values[0];
-    case "sites": return ["oasa"];
+    case "sites": return [];
     case "locales": return ["en", "zh-Hant", "zh-Hans"];
     default: return "";
   }

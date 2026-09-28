@@ -93,7 +93,7 @@ export type AssociationSponsorshipInvitation={id:string;allocationId:string;nomi
   redeemedAt:string|null;revocationReason:string|null;revokedAt:string|null;redemptionToken?:string|null;createdAt:string;updatedAt:string};
 type Rows = {retentionRuns:Record<string,unknown>&{id:string;status:string;createdAt:string};credentials:import("./crm-administration").CrmManagedCredential;plans:AssociationPlan;memberships:AssociationMembership;rescues:AssociationMembershipRescue;allocations:AssociationSponsorshipAllocation;invitations:AssociationSponsorshipInvitation;events:AssociationEvent;tickets:AssociationTicket;promotions:AssociationPromotion;registrations:AssociationRegistration;waitlist:AssociationWaitlistRow;receipts:AssociationProviderReceipt;audit:import("./crm").CrmOperationsAuditEntry;deliveries:import("./crm").CrmEventDeliveryEntry};
 export type AssociationResource = keyof Rows;
-export type AssociationListQuery = {cursor?:string;eventId?:string;planId?:string;contactId?:string;sponsorContactId?:string;allocationId?:string;nomineeContactId?:string;status?:string;includeClosed?:boolean;activeOnly?:boolean};
+export type AssociationListQuery = {cursor?:string;eventId?:string;planId?:string;contactId?:string;sponsorContactId?:string;allocationId?:string;nomineeContactId?:string;status?:string;includeClosed?:boolean;activeOnly?:boolean;when?:"upcoming"|"past";id?:string};
 export async function listAssociationPage<K extends keyof Rows>(workspaceId:string,resource:K,query:AssociationListQuery={}):Promise<{items:Rows[K][];nextCursor:string|null}> {
   const base=`/api/crm/${encodeURIComponent(workspaceId)}`;
   const event=encodeURIComponent(query.eventId ?? "");
@@ -300,22 +300,73 @@ export async function deleteWebsiteMedia(workspaceId: string, id: string): Promi
 }
 
 /** Website content collections (people, partners, settings, news, home pages): draft → preview → publish. */
-export const SITE_CONTENT_COLLECTIONS = ["people", "partners", "settings", "news", "home-oasa", "home-sea"] as const;
+export const SITE_CONTENT_COLLECTIONS = ["people", "partners", "settings", "news", "home-oasa", "home-sea", "event-pages"] as const;
 export type SiteContentCollection = (typeof SITE_CONTENT_COLLECTIONS)[number];
 export type SiteContentDocument = Record<string, unknown>;
 export type SiteContentDraft = {
   collection: SiteContentCollection; version: number; document: SiteContentDocument | null; publishedRevision: number;
   published: SiteContentDocument | null; observations: Partial<Record<MembershipSite, { revision: number; observedAt: string }>>;
-  readers: MembershipSite[]; issues: string[];
+  readers: MembershipSite[]; issues: string[]; issueDetails?: WebsiteIssue[];
 };
+/** A coded publication issue the console translates; `message` is the English fallback. */
+export type WebsiteIssue = { code: string; params: Record<string, string>; message: string };
 const contentBase = (workspaceId: string, collection: SiteContentCollection) =>
   `/api/crm/${encodeURIComponent(workspaceId)}/association/site-content/${collection}`;
+/**
+ * Request bodies are NFKC-normalized server-side, which would rewrite compatibility characters staff mean to keep
+ * (full-width CJK punctuation, non-breaking hyphens). Such characters travel as `\u{hex}` escapes (and `\` as `\\`);
+ * website readers restore them. The console restores on read and escapes on save so staff only ever see the real text.
+ */
+export function restoreCompatText<T>(value: T): T {
+  if (typeof value === "string") return value.replace(/\\(\\|u\{([0-9a-fA-F]{1,6})\})/g, (_match, kind: string, hex?: string) => kind === "\\" ? "\\" : String.fromCodePoint(Number.parseInt(hex ?? "0", 16))) as T;
+  if (Array.isArray(value)) return value.map(restoreCompatText) as T;
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, restoreCompatText(entry)])) as T;
+  return value;
+}
+export function preserveCompatText<T>(value: T): T {
+  if (typeof value === "string") return value.replace(/\\/g, "\\\\").replace(/[\s\S]/gu, char => char.normalize("NFKC") === char ? char : `\\u{${char.codePointAt(0)!.toString(16)}}`) as T;
+  if (Array.isArray(value)) return value.map(preserveCompatText) as T;
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, preserveCompatText(entry)])) as T;
+  return value;
+}
 export async function getSiteContentDraft(workspaceId: string, collection: SiteContentCollection): Promise<SiteContentDraft> {
-  return (await request<{ content: SiteContentDraft }>(`${contentBase(workspaceId, collection)}/draft`)).content;
+  const content = (await request<{ content: SiteContentDraft }>(`${contentBase(workspaceId, collection)}/draft`)).content;
+  return { ...content, document: restoreCompatText(content.document), published: restoreCompatText(content.published) };
 }
 export function saveSiteContentDraft(workspaceId: string, collection: SiteContentCollection, expectedVersion: number, document: SiteContentDocument) {
-  return request(`${contentBase(workspaceId, collection)}/draft`, { expectedVersion, document });
+  return request(`${contentBase(workspaceId, collection)}/draft`, { expectedVersion, document: preserveCompatText(document) });
 }
 export function publishSiteContent(workspaceId: string, collection: SiteContentCollection, expectedVersion: number) {
   return request(`${contentBase(workspaceId, collection)}/publish`, { expectedVersion });
 }
+
+/** Publication summaries (no document bodies) for Home and Website → Pages & sections; readable by every workspace member. */
+export type WebsitePublicationSummary = { version: number; publishedRevision: number; publishedAt: string | null; updatedAt: string | null;
+  observations: Partial<Record<string, { revision: number; observedAt: string }>>; issueCount: number };
+export type WebsiteStatus = {
+  collections: Array<WebsitePublicationSummary & { collection: SiteContentCollection; readers: MembershipSite[] }>;
+  programmes: WebsitePublicationSummary; membership: WebsitePublicationSummary;
+};
+export async function getWebsiteStatus(workspaceId: string): Promise<WebsiteStatus> {
+  return (await request<{ status: WebsiteStatus }>(`/api/crm/${encodeURIComponent(workspaceId)}/association/website-status`)).status;
+}
+/** The site name staff see: the published settings name when present, else the site key upper-cased (never a name written in code). */
+export function websiteSiteLabel(site: string, names?: Partial<Record<string, string>>): string {
+  return names?.[site]?.trim() || site.toUpperCase();
+}
+
+/** Event pages (website content collection `event-pages`): one page per event slug, sections in display order. */
+export type LocalizedCopy = { en: string; "zh-Hant"?: string; "zh-Hans"?: string };
+export type WebsiteImage = { mediaId?: string; src?: string; alt: LocalizedCopy };
+export type EventSection = { id: string; hidden: boolean } & (
+  | { kind: "text"; heading?: LocalizedCopy; body: LocalizedCopy }
+  | { kind: "image"; image: WebsiteImage; caption?: LocalizedCopy }
+  | { kind: "gallery"; heading?: LocalizedCopy; images: WebsiteImage[] }
+  | { kind: "speakers"; heading?: LocalizedCopy; people: { name: string; title?: LocalizedCopy; bio?: LocalizedCopy; photo?: WebsiteImage }[] }
+  | { kind: "partners"; heading?: LocalizedCopy; partners: { name: string; logo?: WebsiteImage; href?: string }[] }
+  | { kind: "agenda"; heading?: LocalizedCopy; items: { time: string; title: LocalizedCopy; detail?: LocalizedCopy }[] }
+  | { kind: "faq"; heading?: LocalizedCopy; items: { question: LocalizedCopy; answer: LocalizedCopy }[] });
+export type EventSectionKind = EventSection["kind"];
+export const EVENT_SECTION_KINDS: readonly EventSectionKind[] = ["text", "image", "gallery", "speakers", "partners", "agenda", "faq"];
+export type EventPageContent = { event: string; cover?: WebsiteImage; summary?: LocalizedCopy; sections: EventSection[] };
+export type EventPagesDocument = { schemaVersion: 1; pages: EventPageContent[] };

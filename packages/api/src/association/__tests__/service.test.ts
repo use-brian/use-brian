@@ -56,6 +56,10 @@ function integration(): AssociationContext {
 }
 
 describe('[COMP:crm/association-service] Canonical authority and adapters', () => {
+  it('keeps the website status summary a workspace member read', async () => {
+    const f=fixture();
+    await expect(f.service.execute(integration(),command({kind:'website_status'}))).rejects.toMatchObject({code:'not_authorized'});
+  })
   it('restricts catalogue drafts and publication to configuration authority', async () => {
     const f=fixture();
     for(const context of [member,{...member,authority:{...member.authority,canConfigure:true}},integration()]) {

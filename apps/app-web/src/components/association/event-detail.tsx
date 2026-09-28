@@ -17,8 +17,9 @@ import { AssociationField,useAssociationPage,AssociationListState,useAssociation
 import { AssociationTicketForm } from "./catalog-forms";
 import { AssociationEditor, associationMoney } from "./workspace-ui";
 import { AssociationReservationForm } from "./reservation-form";
-import { associationHref } from "./association-surface";
+import { associationHref } from "./navigation";
 import { eventWhere } from "./events-panel";
+import { EventPageEditor } from "./events/event-page-editor";
 import { EmptyState, InlineNotice, PageHeader, ResponsiveTable, Segmented, StatusPill, TechnicalDetails, associationDate } from "./ui";
 
 function downloadCsv(name:string,csv:string) {
@@ -92,8 +93,12 @@ function Tickets({workspaceId,event,enabled,currencies}:{workspaceId:string;even
 
 export function AssociationEventDetail({workspaceId,event,enabled,canManage,loadFailed,onBack,onEdit,onChanged}:{workspaceId:string;event:AssociationEvent;enabled:boolean;canManage:boolean;loadFailed:boolean;onBack:()=>void;onEdit:()=>void;onChanged:()=>void}) {
   const t=useT().associationPage,u=t.ux,m=t.manage,action=useAssociationAction(workspaceId);
-  const [tab,setTab]=useState<"tickets"|"guests"|"details">("tickets");
+  // Owners/admins land on the page builder (the website side); members, who cannot edit it, on tickets.
+  const [tab,setTab]=useState<"page"|"tickets"|"guests"|"details">(canManage?"page":"tickets");
   const plans=useAssociationPage(workspaceId,"plans");
+  // Without a ticket the website shows registration as closed; say so where staff can fix it.
+  const tickets=useAssociationPage(workspaceId,"tickets",{eventId:event.id});
+  const noTickets=canManage&&tickets.data?.items.length===0&&(event.status==="draft"||event.status==="published")&&Date.parse(event.endsAt)>=Date.now();
   const currencies=[...new Set((plans.data?.items ?? []).map(plan=>plan.currency))];
   const changeStatus=(status:AssociationEvent["status"],review:{description:string;destructive?:boolean}|false)=>void action.run(status==="published"?u.publish:status==="completed"?u.markCompleted:u.cancelEvent,async()=>{const {id:_id,...body}=event;await saveAssociationEvent(workspaceId,{...body,status});onChanged();},review);
   const transitions=[...(event.status==="draft"?[{status:"published" as const,label:u.publish}]:[]),...(event.status==="published"?[{status:"completed" as const,label:u.markCompleted}]:[]),...(event.status!=="cancelled"&&event.status!=="completed"?[{status:"cancelled" as const,label:u.cancelEvent}]:[])];
@@ -104,9 +109,11 @@ export function AssociationEventDetail({workspaceId,event,enabled,canManage,load
         {canManage&&transitions.length?<DropdownMenu><DropdownMenuTrigger disabled={loadFailed||action.pending} className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-sm hover:bg-accent disabled:opacity-50 md:min-h-9">{u.changeStatus}<ChevronDown aria-hidden className="size-4 text-muted-foreground"/></DropdownMenuTrigger>
           <DropdownMenuContent align="end">{transitions.map(item=><DropdownMenuItem key={item.status} className="min-h-11 sm:min-h-0" variant={item.status==="cancelled"?"destructive":"default"} onClick={()=>changeStatus(item.status,item.status==="cancelled"?{description:u.cancelEventConfirm,destructive:true}:false)}>{item.label}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>:null}
         <Link href={associationHref(workspaceId,"orders",{eventId:event.id})} className={buttonVariants({variant:"ghost",className:"min-h-11 md:min-h-9"})}>{t.eventOrders}</Link></>}>
-      <Segmented label={u.goTo} value={tab} onChange={setTab} options={[{value:"tickets",label:m.tickets},{value:"guests",label:u.guests},{value:"details",label:u.detailsTab}]}/>
+      <Segmented label={u.goTo} value={tab} onChange={setTab} options={[...(canManage?[{value:"page" as const,label:t.eventPage.pageTab}]:[]),{value:"tickets" as const,label:m.tickets},{value:"guests" as const,label:u.guests},{value:"details" as const,label:u.detailsTab}]}/>
     </PageHeader>
     {action.feedback}
+    {noTickets?<InlineNotice tone="warning" title={u.noTicketsTitle} action={tab!=="tickets"?<Button type="button" size="sm" variant="outline" className="min-h-11 md:min-h-8" onClick={()=>setTab("tickets")}>{m.newTicket}</Button>:undefined}>{u.noTicketsBody}</InlineNotice>:null}
+    {tab==="page"&&canManage?<EventPageEditor workspaceId={workspaceId} event={event}/>:null}
     {tab==="tickets"?<Tickets workspaceId={workspaceId} event={event} enabled={enabled} currencies={currencies}/>:null}
     {tab==="guests"?<Guests workspaceId={workspaceId} eventId={event.id} canManage={canManage}/>:null}
     {tab==="details"?<section className="space-y-4 rounded-2xl border border-border bg-background p-5" data-event-details>

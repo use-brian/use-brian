@@ -11,7 +11,7 @@ import type { CrmLookupRow } from "@/lib/api/crm";
 import { Button } from "@/components/ui/button";
 import { format } from "@/lib/i18n/format";
 import { AssociationContactPicker,AssociationField,AssociationIntentNotice,useAssociationAction,useAssociationIntent } from "./operator-controls";
-import { associationHref } from "./association-surface";
+import { associationHref } from "./navigation";
 import { FormFooter, FormSection, InlineNotice, SwitchField } from "./ui";
 
 type Attendee={key:string;name:string;email:string;contactId?:string};

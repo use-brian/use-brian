@@ -186,6 +186,12 @@ export function createAssociationService(options: {
           requireCrmIntegrationOperation(integration, 'association.read')
           return { ...output, record: await siteContent().observe(workspaceId, command.collection, command.site, command.revision) }
         }
+        case 'website_status': {
+          // Publication summaries only (no document bodies), readable by every workspace member for the console Home.
+          if (context.actor.kind !== 'user') throw new CrmOperationsError('not_authorized', 'Website status is a workspace member read.')
+          const [collections, programmes, membership] = await Promise.all([siteContent().status(workspaceId), programmeCatalogue().status(workspaceId), membershipCatalogue().status(workspaceId)])
+          return { ...output, record: { collections, programmes, membership } }
+        }
         case 'module_status': return { ...output, record: { ...(await modules().get(workspaceId, ASSOCIATION_MODULE_KEY)) } }
         case 'module_action': {
           if (context.actor.kind !== 'user' || !authority.canConfigure || !['owner', 'admin'].includes(authority.role)) {
