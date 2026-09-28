@@ -54,13 +54,19 @@ window.addEventListener("DOMContentLoaded", () => {
     presentation = state.presentation;
     if (presentation) {
       if (presentation.collapsed || presentation.mode !== "docked") endDrag();
+      // Keep keyboard focus on a visible control when the panel changes shape.
+      const active = document.activeElement;
+      const focusExpand = presentation.collapsed && active && element("controls").contains(active);
+      const focusCollapse = !presentation.collapsed && active && element("rail").contains(active);
       element("rail").hidden = !presentation.collapsed;
       element("controls").hidden = presentation.collapsed;
       element("empty").hidden = presentation.collapsed || state.tabs.length > 0;
       element("detach").hidden = presentation.mode !== "docked";
       element("dock").hidden = presentation.mode === "docked";
       element("collapse").hidden = presentation.mode !== "docked";
-      separator.hidden = presentation.mode !== "docked";
+      separator.hidden = presentation.mode !== "docked" || presentation.collapsed;
+      if (focusExpand) element("expand").focus();
+      if (focusCollapse) element(presentation.mode === "docked" ? "collapse" : "dock").focus();
       separator.setAttribute("aria-valuemin", String(presentation.minWidth));
       separator.setAttribute("aria-valuemax", String(presentation.maxWidth));
       separator.setAttribute("aria-valuenow", String(presentation.panelWidth));
