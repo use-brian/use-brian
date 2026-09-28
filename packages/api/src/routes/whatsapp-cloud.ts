@@ -1,3 +1,4 @@
+import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 /** Official Meta WhatsApp Cloud API webhook route. */
 import { Router } from 'express'
 import type { Request } from 'express'
@@ -9,10 +10,9 @@ import {
   whatsappCloudMediaId,
 } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
-import { interpretConfirmationEvent, parseFileContent } from '@use-brian/core'
+import { parseFileContent } from '@use-brian/core'
 import type {
   AnalyticsLogger,
-  ConfirmationResolver,
   ContentBlock,
   LLMProvider,
   McpSettingsStore,
@@ -21,7 +21,6 @@ import type {
   UsageStore,
   WorkflowEventDispatcher,
 } from '@use-brian/core'
-import { formatConfirmationInput, getToolDisplayName } from '@use-brian/shared'
 import type {
   ChannelIntegrationConfig,
   ChannelIntegrationStore,
@@ -34,6 +33,7 @@ import { withChatLock } from '../db/chat-lock.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { processChannelMessage } from './channel-pipeline.js'
+import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 import {
@@ -50,6 +50,7 @@ export { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024
 
 export type WhatsAppCloudRouteOptions = {
+  questionStore?: ChannelQuestionStore
   backgroundModel?: string
   decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   provider: LLMProvider
@@ -166,7 +167,6 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
 export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router {
   const router = Router()
   const managedGroups = options.whatsappCloudManagedGroupStore ?? whatsappCloudManagedGroupStore
-  const pending = new Map<string, { resolver: ConfirmationResolver; toolCallId: string }>()
   const seen = new Map<string, number>()
 
   // Meta webhook subscription verification.
@@ -309,25 +309,18 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       }
 
       const conversationKey = `${channelId}:${incoming.channelId}`
-      const confirmKey = `${conversationKey}:${incoming.userId}`
-      const parked = pending.get(confirmKey)
-      if (parked) {
-        const confirmation = interpretConfirmationEvent(
-          { kind: 'text', text: incoming.text },
-          parked.toolCallId,
-        )
-        pending.delete(confirmKey)
-        if (confirmation.status === 'decision') {
-          parked.resolver.resolve(parked.toolCallId, confirmation.decision)
-          if (confirmation.consume) return
-        }
+      // Resolve before acquiring the conversation lock held by the suspended turn.
+      const scope: ChannelInteractionScope = {
+        channelType: 'whatsapp', integrationId: channelId,
+        conversationId: incoming.channelId, senderId: incoming.userId,
       }
+      if (channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
 
       await withChatLock(`whatsapp-cloud:${conversationKey}`, () => processMessage({
         credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
         channelIntegrationId,
         externalConnectorToolsAllowed: whatsappCloudExternalConnectorToolsAllowed(config, isIdentified, incoming.userId),
-        routing, confirmKey,
+        routing, scope, questionIntegrationId: channelIntegrationId,
       }))
     } finally {
       if (options.workflowEventDispatcher) {
@@ -353,11 +346,12 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
     channelIntegrationId: string
     externalConnectorToolsAllowed: boolean
     routing: { modelAlias: string }
-    confirmKey: string
+    scope: ChannelInteractionScope
+    questionIntegrationId: string
   }): Promise<void> {
     const {
       credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
-      externalConnectorToolsAllowed, routing, confirmKey,
+      externalConnectorToolsAllowed, routing,
     } = params
     const apiOptions = {
       accessToken: credentials.access_token,
@@ -405,6 +399,10 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
 
     const abortController = new AbortController()
     await processChannelMessage({
+      interactionScope: params.scope,
+      incomingMessage: incoming,
+      questionIntegrationId: params.questionIntegrationId,
+      questionStore: options.questionStore,
       backgroundModel: options.backgroundModel,
       decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
@@ -464,19 +462,15 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
         async onGoalAccepted(message) {
           await adapter.sendMessage(incoming.channelId, { text: message })
         },
-        async onConfirmationRequired(request, resolver) {
-          pending.set(confirmKey, { resolver, toolCallId: request.toolCallId })
-          const lines = request.displayLines?.length ? request.displayLines : formatConfirmationInput(request.input)
-          const summary = lines.length ? `\n${lines.join('\n')}` : ''
-          const choices = request.allowPersistentApproval ? 'allow / deny / always / never' : 'allow / deny'
-          await adapter.sendMessage(incoming.channelId, {
-            text: `*${getToolDisplayName(request.toolName)}*${summary}\n\nAllow this action?\nReply: *${choices}*`,
-          })
+        async onConfirmationRequired(req) {
+          await adapter.sendMessage(incoming.channelId, confirmationMessage(req))
         },
-        async sendResponse(text) {
+        async sendResponse(text, documents, _question, actions) {
           const messageId = await adapter.sendMessage(incoming.channelId, {
-            text: text.trim() || 'Please try again.',
+            text: text.trim() || (documents?.length ? '' : 'Please try again.'),
             format: 'markdown',
+            documents,
+            actions,
           })
           return messageId ? { channelMessageId: messageId } : undefined
         },

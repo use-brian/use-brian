@@ -1,3 +1,6 @@
+import { channelQuestionActions, resolveChannelQuestion } from '../channel-questions.js'
+import { channelConfirmations, type ChannelInteractionScope } from '../channel-interactions.js'
+import type { IncomingMessage, OutgoingAction } from '@use-brian/channels'
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
@@ -41,6 +44,7 @@ vi.mock('../../telegram-discussion-context.js', async (importOriginal) => ({
 
 // Capture adapter.leaveChat calls for the group add-protection tests.
 const leaveChatCalls: string[] = []
+const confirmationOrder: string[] = []
 
 // Capture createTelegramApi().setWebhook calls so the legacy-URL self-heal
 // path can be asserted without touching api.telegram.org.
@@ -99,7 +103,7 @@ vi.mock('@use-brian/channels', async () => {
           adapterSendCalls.push({ channelId, text: message.text, documents: message.documents, actions: message.actions })
           return 'msg_stub'
         }),
-        answerCallbackQuery: vi.fn(async () => {}),
+        answerCallbackQuery: vi.fn(async () => { confirmationOrder.push('ack') }),
         sendStatus: vi.fn(async () => 'status_stub'),
         sendTypingIndicator: vi.fn(async () => {}),
         editMessage: vi.fn(async () => {}),
@@ -154,6 +158,12 @@ vi.mock('../../db/chat-lock.js', () => ({
 // verify the adapter is called with a topic-qualified channel id on reply.
 const pipelineCalls: Array<{
   channelId: string
+  interactionScope?: ChannelInteractionScope
+  incomingMessage?: IncomingMessage
+  questionIntegrationId?: string
+  conversationalAnswer?: boolean
+  workflowCallback?: { data: string; messageId: string }
+  questionStore?: unknown
   userId: string
   actorChannelId?: string | null
   isIdentified: boolean
@@ -177,6 +187,13 @@ beforeAll(async () => {
 
 vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
+    interactionScope?: ChannelInteractionScope
+    incomingMessage?: IncomingMessage
+    questionIntegrationId?: string
+    conversationalAnswer?: boolean
+  workflowCallback?: { data: string; messageId: string }
+    questionStore?: unknown
+    assistant: { id: string }
     channelId: string
     userId: string
     actorChannelId?: string | null
@@ -189,11 +206,23 @@ vi.mock('../channel-pipeline.js', () => ({
     messageText?: string
     userContentBlocks?: Array<{ type: string; mimeType?: string }>
     hooks: {
-      sendResponse: (text: string, documents?: OutgoingTestDocument[], question?: { question: string; options?: string[] }) => Promise<void>
+      sendResponse: (text: string, documents?: OutgoingTestDocument[], question?: { question: string; options?: string[] }, actions?: OutgoingAction[]) => Promise<void>
       sendError?: (err: Error) => Promise<void>
     }
   }) => {
+    const binding = params.interactionScope && params.incomingMessage ? {
+      integrationId: params.interactionScope.integrationId, assistantId: params.assistant.id,
+      userId: params.userId, incoming: params.incomingMessage,
+    } : undefined
+    // The real central pipeline owns typed-answer resolution and action registration.
+    if (binding && !params.workflowCallback) resolveChannelQuestion(binding)
     pipelineCalls.push({
+      interactionScope: params.interactionScope,
+      incomingMessage: params.incomingMessage,
+      questionIntegrationId: params.questionIntegrationId,
+      conversationalAnswer: params.conversationalAnswer,
+      workflowCallback: params.workflowCallback,
+      questionStore: params.questionStore,
       channelId: params.channelId,
       userId: params.userId,
       actorChannelId: params.actorChannelId,
@@ -209,7 +238,9 @@ vi.mock('../channel-pipeline.js', () => ({
     if (pipelineError) {
       await params.hooks.sendError?.(pipelineError)
     } else {
-      await deliverChannelResponse(params.hooks, 'ok', pipelineDocuments, pipelineQuestion)
+      await deliverChannelResponse({ ...params.hooks, sendResponse: (text, documents, question) =>
+        params.hooks.sendResponse(text, documents, question, binding ? channelQuestionActions(binding, question) : undefined),
+      }, 'ok', pipelineDocuments, pipelineQuestion)
     }
   }),
 }))
@@ -286,7 +317,7 @@ vi.mock('../../db/channel-user-store.js', async () => {
 })
 
 // Capture outbound sendMessage invocations so we can assert the channel id.
-type OutgoingTestDocument = { filename: string; mime: string; data: Buffer; caption?: string }
+type OutgoingTestDocument = { filename: string; mime: string; data: Uint8Array; caption?: string }
 const adapterSendCalls: Array<{ channelId: string; text: string; documents?: OutgoingTestDocument[]; actions?: Array<{ data: string; label: string }> }> = []
 // Set by a test to make the mocked pipeline hand documents to `sendResponse`
 // (the second argument the real pipeline passes at turn_complete).
@@ -2644,6 +2675,40 @@ describe('[COMP:api/telegram-byo-route] question buttons', () => {
     return actions!
   }
 
+  it('ACKs shared confirmation buttons before resolving, with sender isolation', async () => {
+    const app = makeApp()
+    confirmationOrder.length = 0
+    const resolve = vi.fn(() => { confirmationOrder.push('resolve') })
+    const dispose = channelConfirmations.register({
+      channelType: 'telegram', integrationId: 'channel_1', conversationId: '-100:topic:7', senderId: '42',
+    }, { toolCallId: 'tool-click', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' }, { resolve } as never)
+    try {
+      await postUpdate(app, callback('mcp_confirm:tool-click:allow', 43))
+      await settle()
+      expect(resolve).not.toHaveBeenCalled()
+      confirmationOrder.length = 0
+      await postUpdate(app, callback('mcp_confirm:tool-click:allow'))
+      await settle()
+      expect(resolve).toHaveBeenCalledOnce()
+      expect(confirmationOrder).toEqual(['ack', 'resolve'])
+    } finally { dispose() }
+  })
+
+  it('intercepts shared text confirmations before acquiring the chat lock', async () => {
+    const app = makeApp()
+    const resolve = vi.fn()
+    const dispose = channelConfirmations.register({
+      channelType: 'telegram', integrationId: 'channel_1', conversationId: '-100:topic:7', senderId: '42',
+    }, { toolCallId: 'tool-text', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' }, { resolve } as never)
+    try {
+      await postUpdate(app, message('@testbot yes'))
+      await settle()
+      expect(resolve).toHaveBeenCalledOnce()
+      expect(chatLockCalls).toHaveLength(0)
+      expect(pipelineCalls).toHaveLength(0)
+    } finally { dispose() }
+  })
+
   it('routes a button label as ordinary text through the same sender, topic and lock, once', async () => {
     const app = makeApp()
     const actions = await ask(app)
@@ -2651,10 +2716,23 @@ describe('[COMP:api/telegram-byo-route] question buttons', () => {
     await settle()
     expect(pipelineCalls).toHaveLength(2)
     expect(pipelineCalls[1]).toMatchObject({ userId: pipelineCalls[0]!.userId, channelId: '-100:topic:7', messageText: '/connect' })
+    expect(pipelineCalls[1]?.conversationalAnswer).toBe(true)
     expect(chatLockCalls.at(-1)).toBe('tg-byo:-100:topic:7')
     await postUpdate(app, callback(actions[1]!.data))
     await settle()
     expect(pipelineCalls).toHaveLength(2)
+  })
+
+  it('marks approval-shaped native labels as conversational answers', async () => {
+    const app = makeApp()
+    pipelineQuestion = { question: 'Choose', options: ['approve abc123'] }
+    await postUpdate(app, message())
+    await settle()
+    const action = adapterSendCalls.at(-1)!.actions![0]!
+    pipelineQuestion = undefined
+    await postUpdate(app, callback(action.data))
+    await settle()
+    expect(pipelineCalls.at(-1)).toMatchObject({ messageText: 'approve abc123', conversationalAnswer: true })
   })
 
   it('rejects other group members, cross-chat and cross-topic clicks without consuming the valid answer', async () => {
@@ -2727,60 +2805,34 @@ describe('[COMP:api/telegram-byo-route] question buttons', () => {
 
 })
 
-const workflowReplyTools = new Map<string, import('@use-brian/core').Tool>()
-vi.mock('../../workflow/mcp-bridge.js', () => ({ buildWorkflowToolRegistry: vi.fn(async () => workflowReplyTools) }))
-vi.mock('../../context-scope/resolve-turn-scope.js', () => ({ resolveTurnScopeSystem: vi.fn(async () => ({
-  access: { clearance: 'internal' }, effectiveCompartments: [], effectiveProjectIds: [], writeCompartments: [], writeProjectIds: [],
-})) }))
-
-describe('[COMP:api/telegram-byo-route] durable workflow reply interception', () => {
-  it.each(['click', 'typed', 'ask'] as const)('routes %s without entering the chat pipeline or calling submit_change', async (kind) => {
-    const { findAssistantById } = await import('../../db/users.js')
-    const { buildTool } = await import('@use-brian/core')
-    const { z } = await import('zod')
-    const execute = vi.fn(async () => ({ data: 'private backend result' }))
-    const submit = vi.fn()
-    workflowReplyTools.clear()
-    workflowReplyTools.set('answer_action', buildTool({ name: 'answer_action', description: '',
-      inputSchema: z.object({ action_id: z.string(), version: z.number(), answer: z.string() }),
-      isConcurrencySafe: false, isReadOnly: false, requiresConfirmation: kind === 'ask', execute }))
-    workflowReplyTools.set('submit_change', buildTool({ name: 'submit_change', description: '', inputSchema: z.object({}), execute: submit }))
-    vi.mocked(findAssistantById).mockResolvedValueOnce({ id: 'assistant_1', name: 'Test', ownerUserId: 'owner_1',
-      workspaceId: 'ws_1', kind: 'standard', clearance: 'internal', compartments: null, defaultModelAlias: 'standard' } as never)
-    teamRoleResponse = 'member'
-    const binding = { token: 'a'.repeat(24), integrationId: 'int_1', workspaceId: 'ws_1', assistantId: 'assistant_1',
-      userId: 'owner_1', channelId: '-100:topic:7', messageId: '42', question: { question: 'Which?', options: ['dev', 'prod'], allowCustom: true,
-        actionId: 'external-action', version: 3, context: 'Authored context' },
-      response: { toolName: 'answer_action', arguments: { action_id: 'external-action', version: 3 }, answerField: 'answer' } }
-    const store = { create: vi.fn(), attach: vi.fn(), find: vi.fn(async () => [binding]),
-      consume: vi.fn(async () => true), isQuestionMessage: vi.fn(async () => true) }
+describe('[COMP:api/telegram-byo-route] durable workflow pipeline handoff', () => {
+  it.each(['click', 'typed', 'persistent'] as const)('preserves authenticated %s context for central interception', async (kind) => {
+    const store = { create: vi.fn(), attach: vi.fn(), find: vi.fn(), consume: vi.fn(), isQuestionMessage: vi.fn() }
     const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
       provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
       integrationStore: makeIntegrationStore() as never, questionStore: store,
       linkedAccountStore: { findByProvider: vi.fn(async () => ({ userId: 'owner_1', assistantId: 'assistant_1' })) } as never,
-      channelUserStore: {} as never, connectorStore: {} as never, mcpSettingsStore: {} as never,
-      capabilityStore: {} as never, apiUrl: 'http://test',
+      channelUserStore: {} as never, capabilityStore: {} as never, apiUrl: 'http://test',
     }))
     const chat = { id: -100, type: 'supergroup', is_forum: true }
     const from = { id: 42, first_name: 'Casey', username: 'casey' }
-    await postUpdate(app, kind === 'click' ? {
-      update_id: 5001, callback_query: { id: 'workflow-click', from, data: `wq:${binding.token}:0`,
+    const data = kind === 'persistent' ? 'mcp_confirm:stale:always' : `wq:${'a'.repeat(24)}:0`
+    await postUpdate(app, kind !== 'typed' ? {
+      update_id: 5001, callback_query: { id: 'workflow-click', from, data,
         message: { message_id: 42, chat, message_thread_id: 7 } },
     } : {
       update_id: 5002, message: { message_id: 43, from, chat, message_thread_id: 7, text: 'test', date: 12345,
         reply_to_message: { message_id: 42, from: { id: 1, is_bot: true, username: 'testbot' }, text: 'Which?' } },
     })
     await flushMicrotasks(); await flushMicrotasks()
-    expect(pipelineCalls).toHaveLength(0)
-    expect(submit).not.toHaveBeenCalled()
-    expect(store.find).toHaveBeenCalledWith(expect.objectContaining({ channelId: '-100:topic:7', userId: 'owner_1', workspaceId: 'ws_1' }), expect.any(Object))
-    if (kind === 'ask') {
-      expect(execute).not.toHaveBeenCalled()
-      expect(store.consume).not.toHaveBeenCalled()
-      expect(adapterSendCalls.at(-1)?.text).toContain('question remains open')
-    } else {
-      expect(execute).toHaveBeenCalledWith({ action_id: 'external-action', version: 3, answer: kind === 'click' ? 'dev' : 'test' }, expect.objectContaining({ channelId: '-100:topic:7' }))
-      expect(adapterSendCalls.at(-1)?.text).toBe('Your answer was sent.')
-    }
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      questionIntegrationId: 'integ_1', questionStore: store,
+      interactionScope: { channelType: 'telegram', integrationId: 'channel_1', conversationId: '-100:topic:7', senderId: '42' },
+      incomingMessage: { channelId: '-100:topic:7', userId: '42' },
+    })
+    if (kind === 'typed') expect(pipelineCalls[0]?.incomingMessage?.replyToMessageId).toBe('42')
+    else expect(pipelineCalls[0]?.workflowCallback).toEqual({ data, messageId: '42' })
+    expect(store.find).not.toHaveBeenCalled() // route does not own workflow interpretation
   })
 })

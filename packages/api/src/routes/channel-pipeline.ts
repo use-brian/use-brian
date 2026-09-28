@@ -38,7 +38,12 @@ import {
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
-import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
+import type { IncomingMessage, OutgoingDocument, OutgoingAction } from '@use-brian/channels'
+import type { ChannelInteractionScope } from '@use-brian/core'
+import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
+import { channelConfirmations } from './channel-interactions.js'
+import { channelQuestionActions } from './channel-questions.js'
+import { resolveChannelAnswerContext } from './channel-answer-context.js'
 import { parseFollowUps, resolveCharter } from '@use-brian/shared'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -158,11 +163,14 @@ export function deliverChannelResponse(
   documents?: OutgoingDocument[],
   question?: ChannelQuestion,
   notice?: string | null,
+  actions?: OutgoingAction[],
 ) {
   // Some hooks ignore the structured third argument. Always include every option
   // in text; capable adapters may additionally render buttons.
   const body = question ? formatAssistantQuestion(question) : text
-  return hooks.sendResponse(notice ? `${notice}\n\n${body}` : body, documents, question)
+  const message = notice ? `${notice}\n\n${body}` : body
+  return actions === undefined ? hooks.sendResponse(message, documents, question)
+    : hooks.sendResponse(message, documents, question, actions)
 }
 
 /**
@@ -267,8 +275,8 @@ export type ChannelHooks = {
 
   /**
    * Called on `tool_confirmation_required`. The channel must render the
-   * confirmation prompt and stash the resolver so the route-level handler
-   * can call resolver.resolve() when the user responds.
+   * confirmation prompt. The shared interaction registry owns the resolver
+   * and handles normalized text/buttons before a route acquires the chat lock.
    *
    * `displayLines` carries human-readable prompt rows when the tool
    * pre-formatted them (e.g. `deleteMemory` resolves ids → summaries).
@@ -309,7 +317,7 @@ export type ChannelHooks = {
    * reacted to. Channels that don't have a stable platform id
    * (web streaming, scheduled-job executor) return `void`.
    */
-  sendResponse(text: string, documents?: OutgoingDocument[], question?: ChannelQuestion): Promise<{ channelMessageId?: string } | void>
+  sendResponse(text: string, documents?: OutgoingDocument[], question?: ChannelQuestion, actions?: OutgoingAction[]): Promise<{ channelMessageId?: string } | void>
 
   /**
    * Called the FIRST time a session observes the budget-downgraded state.
@@ -425,6 +433,16 @@ export type ChannelPipelineParams = {
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
+  /** Authenticated transport scope used for pre-lock interaction handling. */
+  interactionScope?: ChannelInteractionScope
+  incomingMessage?: IncomingMessage
+  /** Database integration UUID used by durable workflow deliveries. */
+  questionIntegrationId?: string
+  /** Set only after a provider route authenticates and resolves a native ask
+   * binding. Its label is conversation content, never a workflow command. */
+  conversationalAnswer?: boolean
+  workflowCallback?: { data: string; messageId: string }
+  questionStore?: ChannelQuestionStore
   channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom' | 'feishu'
   /** Physical provider destination used for delivery and connector actions. */
   channelId: string
@@ -922,6 +940,21 @@ export function recordChannelToolResults(input: {
 }
 
 export async function processChannelMessage(params: ChannelPipelineParams): Promise<void> {
+  const messageId = params.incomingMessage?.messageId ?? params.incomingChannelMessageId
+  const unregister = params.interactionScope ? channelConfirmations.registerTurn(
+    params.interactionScope, params.abortController, {
+      messageId: messageId == null ? undefined : String(messageId),
+      onAbort: () => params.hooks.sendResponse('Stopped.'),
+    },
+  ) : undefined
+  try {
+    await processChannelMessageTurn(params)
+  } finally {
+    unregister?.()
+  }
+}
+
+async function processChannelMessageTurn(params: ChannelPipelineParams): Promise<void> {
   const {
     userId, ownerId, assistant, isIdentified,
     channelType, channelId, actorChannelId, mediaEpisodeId, isGroupChat,
@@ -937,6 +970,15 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     hooks,
     capabilityStore,
   } = params
+  const incoming = params.incomingMessage ?? params.archiveIncoming
+  const questionBinding = params.interactionScope && incoming ? {
+    integrationId: params.interactionScope.integrationId,
+    assistantId: assistant.id, userId, incoming,
+    sessionId: params.interactionScope.sessionId,
+  } : undefined
+  const answerContext = await resolveChannelAnswerContext(params, questionBinding)
+  if (answerContext.kind === 'handled') { await hooks.sendResponse(answerContext.reply); return }
+  const questionAnswer = answerContext.questionAnswer
   const externalGuest = params.externalGuest === true
   const publishSessionEvent = params.publishSessionEvent ?? noopPublishSessionEvent
   const sessionChannelId = params.sessionChannelId ?? channelId
@@ -967,8 +1009,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // `messageText` + `userContentBlocks` are `let` — the large-paste intercept
   // below may rewrite them to a manifest + head excerpt before anything reads
   // them (classifier, persist, query loop).
-  let messageText = params.messageText
-  let userContentBlocks = params.userContentBlocks
+  let messageText = questionAnswer ?? params.messageText
+  let userContentBlocks = questionAnswer === undefined ? params.userContentBlocks
+    : params.userContentBlocks.map(block => block.type === 'text' ? { ...block, text: questionAnswer! } : block)
 
   // ── Session ──
   const session = await findOrCreateSession({
@@ -2207,7 +2250,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     if (endpointNotice) endpointFallbackAnnounced = true
     const pendingNotice = imageFallbackNotice ?? endpointNotice
     imageFallbackNotice = null
-    const result = await deliverChannelResponse(hooks, text, documents, terminalQuestion, pendingNotice)
+    const actions = questionBinding ? channelQuestionActions(questionBinding, terminalQuestion) : undefined
+    const result = await deliverChannelResponse(hooks, text, documents, terminalQuestion, pendingNotice, actions)
     const channelMessageId = result && typeof result === 'object'
       ? result.channelMessageId
       : undefined
@@ -2512,6 +2556,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           }
           break
         case 'tool_confirmation_required':
+          if (params.interactionScope) {
+            channelConfirmations.register(params.interactionScope, event.request, confirmationResolver, abortController.signal)
+          }
           await hooks.onConfirmationRequired(event.request, confirmationResolver)
           break
         case 'assistant_turn':
@@ -2954,6 +3001,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       await hooks.sendError(err instanceof Error ? err : new Error(String(err)))
     }
   } finally {
+    channelConfirmations.clear(confirmationResolver)
     await hooks.onCleanup?.()
     // Watch viewers clear their "Working" card on the terminal bus event —
     // published in the finally, not on the paths we happened to think of.

@@ -27,8 +27,12 @@ vi.mock('../../db/channels-store.js', () => ({
 vi.mock('../../db/channel-user-store.js', () => ({ resolveChannelUser: vi.fn() }))
 vi.mock('../../db/chat-lock.js', () => ({ withChatLock: vi.fn(async (_key: string, fn: () => Promise<void>) => fn()) }))
 vi.mock('../../billing-party.js', () => ({ billingPartyForAssistant: vi.fn(async () => 'owner') }))
-vi.mock('@use-brian/core', () => ({ parseFileContent: vi.fn(async () => ({ text: '' })) }))
-vi.mock('@use-brian/shared', () => ({
+vi.mock('@use-brian/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core')>()),
+  parseFileContent: vi.fn(async () => ({ text: '' })),
+}))
+vi.mock('@use-brian/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/shared')>()),
   getToolDisplayName: vi.fn(() => 'Tool'),
   humanizeToolName: vi.fn(() => 'Tool'),
   describeToolInput: vi.fn(() => null),
@@ -38,6 +42,8 @@ vi.mock('@use-brian/shared', () => ({
 import { msteamsRoutes, msteamsUserAllowed } from '../msteams.js'
 import * as channels from '@use-brian/channels'
 import { processChannelMessage } from '../channel-pipeline.js'
+import { channelConfirmations } from '../channel-interactions.js'
+import { withChatLock } from '../../db/chat-lock.js'
 import { getChannelForWebhook, resolveRoutingForSurface, resolveAssistantForSurface } from '../../db/channels-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveChannelUser } from '../../db/channel-user-store.js'
@@ -111,6 +117,52 @@ describe('[COMP:api/msteams-route] webhook', () => {
     const arg = vi.mocked(processChannelMessage).mock.calls[0][0]
     expect(arg.channelType).toBe('msteams')
     expect(arg.channelId).toBe('conv-1')
+    expect(arg.questionIntegrationId).toBe('int-1')
+    expect(arg.incomingMessage).toMatchObject({ userId: '29:user', channelId: 'conv-1', messageId: 'a1', text: 'hello' })
+    expect(arg.interactionScope).toEqual({ channelType: 'msteams', integrationId: 'ch-1', conversationId: 'conv-1', senderId: '29:user' })
+  })
+
+  it.each(['missing', 'failed'])('does not identify an owner-fallback sender when resolution is %s', async mode => {
+    const options = baseOptions(makeIntegrationStore())
+    if (mode === 'missing') options.channelUserStore = undefined as never
+    else vi.mocked(resolveChannelUser).mockRejectedValueOnce(new Error('resolution failed'))
+    const app = createTestApp('/webhook/msteams', msteamsRoutes(options))
+    await request(app).post('/webhook/msteams/ch-1').set('Authorization', 'Bearer good.jwt.token').send(ACTIVITY)
+    await flush()
+    expect(processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner', isIdentified: false }))
+  })
+
+  it('resolves only the bound sender before acquiring the conversation lock', async () => {
+    const resolver = { resolve: vi.fn() }
+    const dispose = channelConfirmations.register({
+      channelType: 'msteams', integrationId: 'ch-1', conversationId: 'conv-1', senderId: '29:user',
+    }, { toolCallId: 'teams-confirm', toolName: 'sendEmail', input: {}, allowPersistentApproval: false } as never, resolver as never)
+    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
+    try {
+      mocks.parseIncoming.mockReturnValue({ userId: 'wrong', channelId: 'conv-1', text: 'approve', isGroupChat: false })
+      await request(app).post('/webhook/msteams/ch-1').set('Authorization', 'Bearer good.jwt.token').send(ACTIVITY)
+      await flush()
+      expect(resolver.resolve).not.toHaveBeenCalled()
+      vi.mocked(withChatLock).mockClear()
+      vi.mocked(processChannelMessage).mockClear()
+      mocks.parseIncoming.mockReturnValue({ userId: '29:user', channelId: 'conv-1', text: 'approve', isGroupChat: false })
+      await request(app).post('/webhook/msteams/ch-1').set('Authorization', 'Bearer good.jwt.token').send(ACTIVITY)
+      await flush()
+      expect(resolver.resolve).toHaveBeenCalledWith('teams-confirm', 'allow', undefined)
+      expect(withChatLock).not.toHaveBeenCalled()
+      expect(processChannelMessage).not.toHaveBeenCalled()
+    } finally { dispose() }
+  })
+
+  it('forwards response actions and documents to the adapter', async () => {
+    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
+    await request(app).post('/webhook/msteams/ch-1').set('Authorization', 'Bearer good.jwt.token').send(ACTIVITY)
+    await flush()
+    const hooks = vi.mocked(processChannelMessage).mock.calls[0]![0].hooks
+    const actions = [{ id: '0', label: 'Alpha', data: 'ask:token:0', replyText: 'Alpha' }]
+    const documents = [{ filename: 'a.txt', mime: 'text/plain', data: new Uint8Array([65]) }]
+    await hooks.sendResponse('Choose', documents, undefined, actions)
+    expect(mocks.sendMessage).toHaveBeenLastCalledWith('conv-1', { text: 'Choose', format: 'markdown', documents, actions })
   })
 
   it('rejects an invalid JWT with 401 and never processes', async () => {
