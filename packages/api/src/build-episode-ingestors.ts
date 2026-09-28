@@ -87,6 +87,7 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
     providerKeySource: llm?.providerKeySource,
     inputTokenLimit: llm?.inputTokenLimit,
     maxTokens: llm?.maxTokens,
+    decisionRuntime: deps.decisionRuntime,
     crm: deps.crmStore,
     entities: deps.entitiesStore,
     entityLinks: deps.entityLinksStore,

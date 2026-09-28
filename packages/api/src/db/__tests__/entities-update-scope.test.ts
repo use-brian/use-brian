@@ -75,17 +75,18 @@ describe('[COMP:crm/update] updateEntity write-path access scoping', () => {
     expect(q.text).toContain('workspace_id IS NULL OR workspace_id = $3')
     expect(q.text).toContain('user_id IS NULL OR user_id = $4')
     expect(q.text).toContain('assistant_id IS NULL OR assistant_id = $5')
-    expect(q.values).toEqual(['New', 'e-1', 'ws-1', 'u-viewer', 'a-1'])
+    expect(q.values).toEqual(['New', 'e-1', 'ws-1', 'u-viewer', 'a-1', 'u-viewer'])
   })
 
-  it('falls back to the user-axis projection when access is absent', async () => {
+  it('checks the current member when assistant access is absent', async () => {
     rlsRows = [entityRow()]
     await updateEntity('u-viewer', 'e-1', { displayName: 'New' })
 
     const q = rlsQueries[0]!
     expect(q.text).toContain('WHERE id = $2')
-    expect(q.text).toContain('(user_id IS NULL OR user_id = $3)')
-    // Fallback guard is user-axis only — no workspace/assistant clauses.
+    expect(q.text).toContain('(entities.user_id IS NULL OR entities.user_id=$3)')
+    expect(q.text).toContain('effective_member_team_compartments($3,entities.workspace_id)')
+    expect(q.text).toContain('sensitivity_rank(member_floor.clearance)')
     expect(q.text).not.toContain('workspace_id IS NULL')
     expect(q.text).not.toContain('assistant_id IS NULL')
     expect(q.values).toEqual(['New', 'e-1', 'u-viewer'])

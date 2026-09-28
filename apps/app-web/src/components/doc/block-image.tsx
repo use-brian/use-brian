@@ -20,18 +20,9 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * transient `file_cache` chat-attachment store (7-day TTL) — a doc
  * *page* is durable, so its backing image must be too. The stored ref is
  * `{ bucket: 'workspace_files', path: <fileId>, mimeType, sizeBytes, name }`.
- * `resolveFileRefUrl()` (`doc-file-url.ts`) resolves a `workspace_files` ref
- * through the authenticated `GET /api/doc-files/:workspaceId/:id?redirect=0`
- * mint to a short-lived signed storage URL for the `<img src>` (the route is
- * Bearer-only, so its own URL 401s as a plain src; the signed URL never
- * lands in the doc). The `file_cache` branch is kept only as a legacy
- * fallback for any pre-existing refs, and resolves through the signed
- * preview-URL mint (WS3 #8).
- *
- * Per the agent brief, this component intentionally accepts the
- * richer `(block, blockId, readOnly, onChange, onAction)` prop set
- * even though page-renderer.tsx only forwards `block` today — P2G
- * threads the rest in when wiring the new variants.
+ * Durable refs use the protected media hook: authenticated bytes, a bounded
+ * display lifetime and cache-owned object URLs. Legacy file_cache previews
+ * remain a separately audited transport.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -39,9 +30,9 @@ import { useT, format } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 import { hasPendingMediaUpload, takeMediaUpload } from "./doc-media-uploads";
 import {
-  resolveFileRefUrl,
   type FileRef,
 } from "./doc-file-url";
+import { useFileRefSrc } from "@/lib/use-doc-media";
 import { UploadSpinner } from "./upload-spinner";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
@@ -72,27 +63,7 @@ export function BlockImage({ block, workspaceId, readOnly, onChange }: Props) {
   const [uploading, setUploading] = useState(() => hasPendingMediaUpload(block.id));
   const [uploadingName, setUploadingName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Resolved `<img src>`. Both ref kinds resolve through an authenticated
-  // mint round-trip (`resolveFileRefUrl`): durable `workspace_files` refs
-  // yield the short-lived signed storage URL — the read route is Bearer-only,
-  // so its URL can never be used as a plain `<img src>` (no Authorization
-  // header → 401) — and legacy `file_cache` refs yield the signed preview
-  // URL. Guarded against out-of-order settles + unmount.
-  const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!block.ref) {
-      setResolvedUrl(null);
-      return;
-    }
-    let cancelled = false;
-    void resolveFileRefUrl(block.ref, workspaceId).then((url) => {
-      if (!cancelled) setResolvedUrl(url);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [block.ref, workspaceId]);
+  const resolvedUrl = useFileRefSrc(block.ref, workspaceId);
 
   // Drag-drop / paste hand-off: `doc-media-paste.ts` inserts this empty block
   // and stashes the dropped file under `block.id`. Claim it on mount and run
@@ -142,8 +113,8 @@ export function BlockImage({ block, workspaceId, readOnly, onChange }: Props) {
         throw new Error(first?.error ?? t.mediaBlock.uploadFailed);
       }
       // The /api/doc-files route writes to the permanent `workspace_files`
-      // GCS-backed store; encode that sink in `bucket` so `resolveFileRefUrl()`
-      // resolves it through the signed-read endpoint.
+      // GCS-backed store; encode that sink in `bucket` so `useFileRefSrc()`
+      // resolves it through the protected byte projection.
       onChange?.({
         ref: {
           bucket: "workspace_files",

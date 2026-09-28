@@ -24,6 +24,7 @@ import { buildTool, type Tool } from '../tools/types.js'
 import { computeNextRun, type StructuredSchedule } from '../scheduling/schedule.js'
 import type { JobStore, ScheduledJob, ScheduledJobMode } from '../scheduling/types.js'
 import type { WorkflowStore } from './types.js'
+import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
 
 const scheduleSchema = z.discriminatedUnion('type', [
   z.object({
@@ -287,6 +288,7 @@ export function createScheduleWorkflowTool(deps: ScheduleWorkflowToolDeps): Tool
       // even though it is genuinely scheduled (the bug this fixes).
       await deps.workflowStore.update(context.userId, workflow.id, {
         trigger: { kind: 'schedule', schedule: input.schedule, timezone },
+        authoringAuthority: pinToolAuthoringAuthority(context),
       })
 
       return {

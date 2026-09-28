@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { classifyTopic } from '../topic-classifier.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 /**
  * Build a minimal mock provider whose stream emits the given JSON as a
@@ -19,6 +20,70 @@ function mockProvider(response: string): LLMProvider {
 }
 
 describe('[COMP:memory/topic-classifier] classifyTopic', () => {
+  it('accepts a terminal exact known-label decision without an LLM call', async () => {
+    let llmCalls = 0
+    const llm = mockProvider('{"topic_label":"wrong","state":"shift","confidence":1}')
+    const originalStream = llm.stream.bind(llm)
+    llm.stream = ((...args: Parameters<LLMProvider['stream']>) => {
+      llmCalls++
+      return originalStream(...args)
+    }) as LLMProvider['stream']
+    const decisionRuntime = executionFixture({
+      llm,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [
+          { questionId: 'state', kind: 'choice', value: 'resume', evidence: { source: 'native_distribution', confidence: 0.94 } },
+          { questionId: 'topic', kind: 'choice', value: 'pricing review', evidence: { source: 'native_distribution', confidence: 0.91 } },
+        ],
+      })),
+    })
+    const result = await classifyTopic({
+      provider: llm,
+      model: 'mock',
+      recentUserTurns: [{ text: 'Earlier pricing discussion', topicLabel: 'pricing review' }],
+      replyToText: null,
+      currentMessage: 'Back to that pricing point',
+      knownTopicsThisSession: ['pricing review'],
+      decisionRuntime,
+    })
+    expect(result).toMatchObject({ topic_label: 'pricing review', state: 'resume', confidence: 0.91 })
+    expect(llmCalls).toBe(0)
+  })
+
+  it('uses one LLM completion to generate a new topic label', async () => {
+    let llmCalls = 0
+    const base = mockProvider('{"topic_label":"launch planning","state":"shift","confidence":0.8}')
+    const originalStream = base.stream.bind(base)
+    base.stream = ((...args: Parameters<LLMProvider['stream']>) => {
+      llmCalls++
+      return originalStream(...args)
+    }) as LLMProvider['stream']
+    const decisionRuntime = executionFixture({
+      llm: base,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [
+          { questionId: 'state', kind: 'choice', value: 'shift', evidence: { source: 'native_distribution', confidence: 0.9 } },
+          { questionId: 'topic', kind: 'choice', value: '__new_topic__', evidence: { source: 'native_distribution', confidence: 0.9 } },
+        ],
+      })),
+    })
+    const result = await classifyTopic({
+      provider: base,
+      model: 'mock',
+      recentUserTurns: [],
+      replyToText: null,
+      currentMessage: 'Plan our product launch',
+      knownTopicsThisSession: [],
+      decisionRuntime,
+    })
+    expect(result).toMatchObject({ topic_label: 'launch planning', state: 'shift' })
+    expect(llmCalls).toBe(1)
+  })
+
   it('parses a continue classification', async () => {
     const result = await classifyTopic({
       provider: mockProvider('{"topic_label":"brian cheng research","state":"continue","confidence":0.9}'),

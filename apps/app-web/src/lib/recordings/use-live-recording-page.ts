@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   LIVE_NEW_ROOT,
+  LIVE_MEETING_NOTES,
   LiveRecordingPicker,
   liveNewUnder,
   liveUseExisting,
@@ -30,10 +31,11 @@ export type LiveWindow = {
 };
 
 export function decodeLiveDestination(value: string): {
-  destination: "new" | "existing";
+  destination: "new" | "existing" | "meeting-notes";
   pageId?: string;
   parentPageId?: string | null;
 } {
+  if (value === LIVE_MEETING_NOTES) return { destination: "meeting-notes" };
   if (value.startsWith("existing:")) {
     return { destination: "existing", pageId: value.slice("existing:".length) };
   }
@@ -51,6 +53,7 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
   const prepare = useCallback(async (): Promise<LiveRecordingPage | null> => {
     const pages = await listViews({ workspaceId, state: "saved" }).catch(() => []);
     const items: SearchableSelectItem[] = [
+      { value: LIVE_MEETING_NOTES, label: t.liveMeetingNotesFolder },
       { value: LIVE_NEW_ROOT, label: t.liveNewRoot },
       ...pages.map((page) => ({
         value: liveNewUnder(page.id),
@@ -61,7 +64,7 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
         label: t.liveUseExisting.replace("{page}", page.name),
       })),
     ];
-    let choice = LIVE_NEW_ROOT;
+    let choice = LIVE_MEETING_NOTES;
     const confirmed = await confirmDialog({
       title: t.liveConfirmTitle,
       description: t.liveConfirmBody,
@@ -78,6 +81,7 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
     const page = await startLiveRecordingPage({
       workspaceId,
       ...decodeLiveDestination(choice),
+      ...(choice === LIVE_MEETING_NOTES ? { folderName: t.meetingNotesFolderName } : {}),
     });
     failedWindowsRef.current.set(page, 0);
     // The sidebar lists only refetch on their own mutation handlers plus this

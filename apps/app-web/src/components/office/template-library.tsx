@@ -10,9 +10,10 @@ import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { createOfficeTemplate, getOfficeJob, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeArtifact, type OfficeFamily, type OfficeTemplate } from "@/lib/office/api";
-import { invalidateSurfaceCache, markSurfaceCacheStale, useCachedResource } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, markSurfaceCacheStale } from "@/lib/surface-cache";
 import { invalidateOfficeList, officeArtifactCacheKey, officeSnapshotCacheKey, officeTemplateListCacheKey } from "@/lib/surface-prefetch";
-import { useOfficeCacheRevalidation } from "@/lib/office/surface-cache";
+import { useOfficeMetadataResource } from "@/lib/office/surface-cache";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 import { GridSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
@@ -47,7 +48,20 @@ async function waitForTemplateImport(jobId: string): Promise<void> {
   throw new Error("office_template_import_timeout");
 }
 
-export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId: string; templateId?: string }) {
+export function OfficeTemplateLibrary(props: { workspaceId: string; templateId?: string }) {
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.me.id ?? '';
+  const previous = useRef({workspaceId: props.workspaceId, viewerId});
+  useLayoutEffect(() => {
+    const old = previous.current;
+    if (old.workspaceId !== props.workspaceId || old.viewerId !== viewerId)
+      invalidateSurfaceCache(officeTemplateListCacheKey(old.workspaceId, old.viewerId));
+    previous.current = {workspaceId: props.workspaceId, viewerId};
+  }, [props.workspaceId, viewerId]);
+  return <OfficeTemplateLibraryForViewer key={`${props.workspaceId}:${workspace?.me.id ?? ''}`} {...props} />;
+}
+
+function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspaceId: string; templateId?: string }) {
   const copy = useT();
   const t = copy.office;
   const router = useRouter();
@@ -56,12 +70,14 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
   const routeSearch = searchParams.toString();
   const starterTemplate = readOfficeStarterTemplate(searchParams);
   const choosingForArtifact = searchParams.get("intent") === "use";
-  const cacheKey = officeTemplateListCacheKey(workspaceId);
-  const list = useCachedResource(cacheKey, () => listOfficeTemplates(workspaceId));
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.workspaceId === workspaceId ? workspace.me.id : '';
+  const cacheKey = officeTemplateListCacheKey(workspaceId, viewerId);
+  const list = useOfficeMetadataResource(viewerId ? cacheKey : null, viewerId, () => listOfficeTemplates(workspaceId));
   const templates = list.data ?? null;
-  useOfficeCacheRevalidation([cacheKey]);
   const mutationLock = useRef(false);
   const mutationScope = useRef<object | null>(null);
+  const creationScope = useRef<object | null>(null);
   const [mutationPending, setMutationPending] = useState(false);
   const [mutationFailed, setMutationFailed] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(starterTemplate !== null);
@@ -100,12 +116,24 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
   // Layout cleanup revokes UI ownership before a late promise can navigate.
   useLayoutEffect(() => {
     mutationScope.current = {};
+    creationScope.current = {};
     mutationLock.current = false;
     setMutationPending(false);
     setPurgeConfirmation("");
     setMutationFailed(false);
-    return () => { mutationScope.current = null; };
-  }, [workspaceId, templateId, pathname, routeSearch]);
+    return () => { mutationScope.current = null; creationScope.current = null; };
+  }, [workspaceId, viewerId, templateId, pathname, routeSearch]);
+
+  const hasProjection = templates !== null;
+  useLayoutEffect(() => {
+    if (!hasProjection) {
+      mutationScope.current = null;
+      mutationLock.current = false;
+      setMutationPending(false);
+      setPurgeConfirmation("");
+      setMutationFailed(false);
+    } else if (!mutationScope.current) mutationScope.current = {};
+  }, [hasProjection]);
 
   async function transition(action: "deprecate" | "restore" | "trash" | "purge", reason: string) {
     const scope = mutationScope.current;
@@ -119,8 +147,8 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
       invalidateOfficeList(workspaceId);
       const draftId = templates?.find((template) => template.id === templateId)?.draftArtifactId;
       if (draftId) {
-        invalidateSurfaceCache(officeArtifactCacheKey(draftId));
-        invalidateSurfaceCache(officeSnapshotCacheKey(draftId));
+        invalidateSurfaceCache(officeArtifactCacheKey(workspaceId, draftId, viewerId));
+        invalidateSurfaceCache(officeSnapshotCacheKey(workspaceId, draftId, viewerId));
       }
       if (mutationScope.current !== scope) return;
       setPurgeConfirmation("");
@@ -181,6 +209,8 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
 
   async function submitGuidedTemplate(event: React.FormEvent) {
     event.preventDefault();
+    const scope = creationScope.current;
+    if (!scope) return;
     setGenerateState("working");
     try {
       const created = await createOfficeTemplate({
@@ -192,10 +222,11 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
         canonicalWebsite: noWebsite ? undefined : website,
         companyHasNoWebsite: noWebsite,
       });
+      if (creationScope.current !== scope) return;
       setGenerateOpen(false);
       router.push(`/w/${workspaceId}/office/${created.draftArtifactId}?templateId=${created.id}`);
     } catch {
-      setGenerateState("failed");
+      if (creationScope.current === scope) setGenerateState("failed");
     }
   }
 
@@ -215,17 +246,22 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
 
   async function submitTemplateUpload(event: React.FormEvent) {
     event.preventDefault();
-    if (!uploadFile) return;
+    const scope = creationScope.current;
+    if (!uploadFile || !scope) return;
     setUploadState("working");
     try {
       const source = await uploadOfficeSource(workspaceId, uploadFile);
+      if (creationScope.current !== scope) return;
       const created = await createOfficeTemplate({ workspaceId, family: source.family, name: uploadName, description: uploadGuidance, creationMethod: "upload" });
+      if (creationScope.current !== scope) return;
       const job = await importOfficeTemplateDraft({ templateId: created.id, workspaceId, draftArtifactId: created.draftArtifactId, fileId: source.fileId });
+      if (creationScope.current !== scope) return;
       await waitForTemplateImport(job.jobId);
+      if (creationScope.current !== scope) return;
       setUploadOpen(false);
       router.push(`/w/${workspaceId}/office/${created.draftArtifactId}?templateId=${created.id}`);
     } catch {
-      setUploadState("failed");
+      if (creationScope.current === scope) setUploadState("failed");
     }
   }
 
@@ -374,7 +410,7 @@ export function OfficeTemplateCard({ workspaceId, template }: { workspaceId: str
   return (
     <article data-office-template-card={template.family} className="group overflow-hidden rounded-xl border bg-card transition-colors hover:border-foreground/30">
       <Link href={`/w/${workspaceId}/office/templates/${template.id}`} aria-label={template.name}>
-        <div className="relative"><OfficeCardPreview artifact={previewArtifact} /><span data-office-template-family={template.family} className={document ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm" : presentation ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm" : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2 py-1 text-xs font-semibold text-white shadow-sm"}><Icon className="size-3.5" aria-hidden /><span>{familyLabel(t, template.family)}</span></span></div>
+        <div className="relative"><OfficeCardPreview workspaceId={workspaceId} artifact={previewArtifact} /><span data-office-template-family={template.family} className={document ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm" : presentation ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm" : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2 py-1 text-xs font-semibold text-white shadow-sm"}><Icon className="size-3.5" aria-hidden /><span>{familyLabel(t, template.family)}</span></span></div>
         <div className="px-4 pt-4"><h2 className="line-clamp-2 font-medium group-hover:underline">{template.name}</h2><p className="mt-2 line-clamp-2 min-h-10 text-sm text-muted-foreground">{template.description}</p></div>
       </Link>
       <div className="p-4 pt-3">

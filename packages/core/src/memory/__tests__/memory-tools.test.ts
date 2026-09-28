@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createMemoryTools, type MemoryToolEvent } from '../tools.js'
 import { jsonSchemaFromZod } from '../../engine/query-loop.js'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
 import type { MemoryStore } from '../types.js'
 import type {
   EntityKind,
@@ -679,17 +680,12 @@ describe('[COMP:memory/tools] getMemory', () => {
     expect(data).toContain('Do NOT retry this exact id')
   })
 
-  it('warns that saveMemory\'s own echoed id is the PRE-edit one', async () => {
-    // `MemoryStore.update` supersedes: the old row is tombstoned and a new
-    // uuid is minted. saveMemory's success line echoes the id the caller
-    // PASSED, not the new one — so the generic "reuse the id from that
-    // result" advice would send the model straight back to a dead id. The
-    // copy has to say so explicitly.
+  it('points to the successor returned by the latest update', async () => {
     const store = makeFakeStore()
     const { getMemory } = createMemoryTools(store)
     const result = await getMemory.execute({ id: 'mem_stale' }, ctx)
-    expect(String(result.data)).toContain('the id echoed back by a previous saveMemory update is the pre-edit one')
-    expect(String(result.data)).not.toContain('reuse the id from that result')
+    expect(String(result.data)).toContain('Use the successor id returned by the latest saveMemory update')
+    expect(String(result.data)).not.toContain('is the pre-edit one')
   })
 
   it('errors with the same not-found shape when an update targets a dead id', async () => {
@@ -1030,6 +1026,36 @@ const PERSON_ID = '11111111-1111-1111-1111-111111111111'
 const PROJECT_ID = '22222222-2222-2222-2222-222222222222'
 
 describe('[COMP:crm/notes-via-memory] saveMemory CRM-note anchoring', () => {
+  it.each([false, true])('retains the anchor floor with a turn accumulator: %s', async withAccumulator => {
+    const store = makeFakeStore(), create = vi.spyOn(store, 'create')
+    const entityStore = makeFakeEntityStore([{ id: PERSON_ID, kind: 'person', displayName: 'Fictional contact' }])
+    const entity = (await entityStore.getById({ ...teamCtx, assistantKind: 'standard' }, PERSON_ID))!
+    entity.sensitivity = 'confidential'
+    entity.compartments = ['finance']
+    entity.projectIds = ['fixture-project']
+    const links = makeFakeEntityLinksStore()
+    const result = await createMemoryTools(store, { entityStore, entityLinksStore: links }).saveMemory.execute({
+      summary: 'A protected contact note', entityId: PERSON_ID, scope: 'user',
+    }, { ...teamCtx, scopeAccumulator: withAccumulator ? new ContextScopeAccumulator() : undefined })
+    expect(result.isError).not.toBe(true)
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential', compartments: ['finance'], projectIds: ['fixture-project'] }))
+    expect(links.links[0].sensitivity).toBe('confidential')
+  })
+
+  it('refuses a workspace note when a later anchor lookup raises sensitivity', async () => {
+    const store = makeFakeStore()
+    const entityStore = makeFakeEntityStore([{ id: PERSON_ID, kind: 'person', displayName: 'Fictional contact' }])
+    const entity = (await entityStore.getById({ ...teamCtx, assistantKind: 'standard' }, PERSON_ID))!
+    entity.sensitivity = 'confidential'
+    const links = makeFakeEntityLinksStore()
+    const result = await createMemoryTools(store, { entityStore, entityLinksStore: links }).saveMemory.execute({
+      summary: 'A protected contact note', entityId: PERSON_ID, scope: 'team',
+    }, teamCtx)
+    expect(result.isError).toBe(true)
+    expect(store.rows).toHaveLength(0)
+    expect(links.links).toHaveLength(0)
+  })
+
   it('creates a memory tagged "note" and a memory→entity link when entityId is provided', async () => {
     const store = makeFakeStore()
     const entityStore = makeFakeEntityStore([

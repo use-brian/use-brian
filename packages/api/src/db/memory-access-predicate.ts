@@ -12,6 +12,7 @@
 import type { AccessContext } from '@use-brian/core'
 import {
   buildAccessPredicate,
+  buildExecutionVisibilityPredicate,
   type AccessPredicate,
   type AccessPredicateOptions,
 } from './access-predicate.js'
@@ -23,8 +24,9 @@ export function buildMemoryAccessPredicate(
   options?: AccessPredicateOptions,
 ): AccessPredicate {
   const ordinary = buildAccessPredicate(ctx, options)
+  const holding = `${options?.alias ? `${options.alias}.` : ''}scope_held = false`
   const self = ctx.clientSelfMemory
-  if (!self) return ordinary
+  if (!self) return { ...ordinary, sql: `(${ordinary.sql}) AND ${holding}` }
   if (!self.compartment.startsWith('client:')) {
     throw new Error('buildMemoryAccessPredicate: client self compartment must use the client: namespace')
   }
@@ -42,8 +44,9 @@ export function buildMemoryAccessPredicate(
     ` AND sensitivity_rank(${p}sensitivity) <= sensitivity_rank($${i + 3})` +
     ` AND ${p}compartments = ARRAY[$${i + 4}]::text[]`
 
+  const visibility=buildExecutionVisibilityPredicate(ctx,{...options,startIdx:i+5})
   return {
-    sql: `((${ordinary.sql}) OR (${selfSql}))`,
+    sql: `((${ordinary.sql}) OR (${selfSql}${visibility.sql==='TRUE'?'':` AND ${visibility.sql}`})) AND ${holding}`,
     params: [
       ...ordinary.params,
       ctx.workspaceId,
@@ -51,7 +54,8 @@ export function buildMemoryAccessPredicate(
       ctx.assistantId,
       'internal',
       self.compartment,
+      ...visibility.params,
     ],
-    nextIdx: i + 5,
+    nextIdx: visibility.nextIdx,
   }
 }

@@ -24,6 +24,8 @@ type BatchRow = {
   episode_sensitivity: 'public' | 'internal' | 'confidential' | null
   compartments: string[]
   project_ids: string[]
+  scope_binding_origin: 'legacy' | 'explicit' | 'reviewed' | 'held'
+  scope_held: boolean
 }
 
 function rowToBatch(row: BatchRow): PendingBatch {
@@ -40,6 +42,8 @@ function rowToBatch(row: BatchRow): PendingBatch {
     episodeSensitivity: row.episode_sensitivity,
     compartments: row.compartments ?? [],
     projectIds: row.project_ids ?? [],
+    scopeBindingOrigin: row.scope_binding_origin,
+    scopeHeld: row.scope_held,
   }
 }
 
@@ -52,10 +56,11 @@ export function createDbBatchStore(): BatchStore {
         const result = await client.query<BatchRow>(
           `SELECT id, workspace_id, rule_id, assistant_id, partition_key,
                   source, fires_at, events,
-                  created_at, episode_sensitivity, compartments, project_ids
+                  created_at, episode_sensitivity, compartments, project_ids,
+                  scope_binding_origin, scope_held
              FROM pending_ingest_batches
              WHERE fires_at < now() AND processed_at IS NULL
-               AND source <> 'programmatic'
+               AND source <> 'programmatic' AND NOT scope_held
              FOR UPDATE SKIP LOCKED
              LIMIT $1`,
           [limit],
@@ -93,10 +98,11 @@ export function createDbProgrammaticBatchStore(
         const result = await client.query<BatchRow>(
           `SELECT id, workspace_id, rule_id, assistant_id, partition_key,
                   source, fires_at, events,
-                  created_at, episode_sensitivity, compartments, project_ids
+                  created_at, episode_sensitivity, compartments, project_ids,
+                  scope_binding_origin, scope_held
              FROM pending_ingest_batches
             WHERE fires_at < now() AND processed_at IS NULL
-              AND source = 'programmatic'
+              AND source = 'programmatic' AND NOT scope_held
             FOR UPDATE SKIP LOCKED
             LIMIT $1`,
           [limit],
@@ -290,6 +296,8 @@ export async function appendProgrammaticBatchEvent(input: {
   episodeSensitivity: 'public' | 'internal' | 'confidential'
   compartments: string[]
   projectIds: string[]
+  scopeBindingOrigin?: 'legacy' | 'explicit' | 'reviewed' | 'held'
+  scopeHeld?: boolean
 }, pool: TransactionalPool = getPool()): Promise<ProgrammaticReceiptResult> {
   const client = await pool.connect()
   try {
@@ -322,9 +330,10 @@ export async function appendProgrammaticBatchEvent(input: {
     const batch = await client.query<{ id: string; firesAt: Date; chars: number | string }>(
       `INSERT INTO pending_ingest_batches
          (workspace_id, rule_id, assistant_id, partition_key, source, fires_at,
-          events, episode_sensitivity, compartments, project_ids)
-       VALUES ($1, $2, $3, $4, 'programmatic', $5, $6::jsonb, $7, $8, $9)
-       ON CONFLICT (rule_id, assistant_id, partition_key, fires_at)
+          events, episode_sensitivity, compartments, project_ids,
+          scope_binding_origin, scope_held)
+       VALUES ($1, $2, $3, $4, 'programmatic', $5, $6::jsonb, $7, $8, $9, $10, $11)
+       ON CONFLICT (rule_id, assistant_id, partition_key, fires_at, scope_binding_origin, scope_held)
          WHERE source = 'programmatic' AND processed_at IS NULL
        DO UPDATE SET
          events = pending_ingest_batches.events || EXCLUDED.events,
@@ -354,6 +363,8 @@ export async function appendProgrammaticBatchEvent(input: {
         input.episodeSensitivity,
         input.compartments,
         input.projectIds,
+        input.scopeBindingOrigin ?? 'explicit',
+        input.scopeHeld ?? false,
       ],
     )
     const row = batch.rows[0]!
@@ -417,14 +428,28 @@ export async function appendBatchEvent(
     episodeSensitivity?: 'public' | 'internal' | 'confidential' | null
     compartments?: string[]
     projectIds?: string[]
+    scopeBindingOrigin?: 'legacy' | 'explicit' | 'reviewed' | 'held'
+    scopeHeld?: boolean
   },
   pool: QueryablePool = getPool(),
 ): Promise<void> {
+  const binding = await pool.query<{ origin: 'legacy' | 'explicit' | 'reviewed' | 'held'; strict: boolean }>(
+    `SELECT coalesce(r.scope_binding_origin,'explicit') AS origin,
+            coalesce(p.classification_mode='strict',false) AS strict
+       FROM (SELECT $1::uuid AS workspace_id) requested
+       LEFT JOIN workspace_access_policies p ON p.workspace_id=requested.workspace_id
+       LEFT JOIN ingest_rules r ON r.id=$2
+      LIMIT 1`,
+    [input.workspaceId,input.ruleId],
+  )
+  const origin=input.scopeBindingOrigin??binding.rows[0]?.origin??'explicit'
+  const scopeHeld=input.scopeHeld??(binding.rows[0]?.strict===true&&!['explicit','reviewed'].includes(origin))
   const existing = await pool.query<{ id: string }>(
     `SELECT id FROM pending_ingest_batches
        WHERE rule_id = $1 AND fires_at = $2 AND processed_at IS NULL
+         AND scope_binding_origin=$3 AND scope_held=$4
        LIMIT 1`,
-    [input.ruleId, input.firesAt],
+    [input.ruleId, input.firesAt,origin,scopeHeld],
   )
   const eventJson = JSON.stringify([input.event])
   let batchId: string
@@ -449,7 +474,7 @@ export async function appendBatchEvent(
     const inserted = await pool.query<{ id: string; chars: number | string }>(
       `INSERT INTO pending_ingest_batches
          (workspace_id, rule_id, source, fires_at, events, episode_sensitivity,
-          compartments, project_ids)
+          compartments, project_ids, scope_binding_origin, scope_held)
        VALUES (
          $1, $2, $3, $4, $5::jsonb, $6,
          COALESCE($7::text[],
@@ -457,7 +482,8 @@ export async function appendBatchEvent(
            ARRAY[]::text[]),
          COALESCE($8::uuid[],
            (SELECT r.project_ids FROM ingest_rules r WHERE r.id = $2),
-           ARRAY[]::uuid[])
+           ARRAY[]::uuid[]),
+         $9,$10
        )
        RETURNING id, length(events::text) AS chars`,
       [
@@ -469,6 +495,8 @@ export async function appendBatchEvent(
         input.episodeSensitivity ?? null,
         input.compartments,
         input.projectIds,
+        origin,
+        scopeHeld,
       ],
     )
     batchId = inserted.rows[0]!.id

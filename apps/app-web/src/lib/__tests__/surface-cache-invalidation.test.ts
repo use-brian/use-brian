@@ -256,3 +256,31 @@ describe("[COMP:app-web/surface-cache-invalidation] goal primitive and brain det
     expect(brain).not.toContain("brain-skill:w1:");
   });
 });
+
+
+it('[COMP:app-web/surface-cache-invalidation] purges only the changed workspace media',async()=>{
+  await loadSurfaceCache('doc-media:w1:viewer:file',async()=>'restricted');
+  await loadSurfaceCache('doc-media:w2:viewer:file',async()=>'other');
+  applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,{workspaceId:'w1'},'w1');
+  expect(readSurfaceCache('doc-media:w1:viewer:file').data).toBeUndefined();
+  expect(readSurfaceCache('doc-media:w2:viewer:file').data).toBe('other');
+});
+
+it('[COMP:app-web/surface-cache-invalidation] purges the bounded member directory on authority and profile signals',async()=>{
+  await loadSurfaceCache('workspace-member-directory:w1:viewer',async()=>'restricted');
+  await loadSurfaceCache('workspace-member-directory:w2:viewer',async()=>'other');
+  applySpineEventToSurfaceCache(BRAIN_REFRESH_EVENT,{workspaceId:'w1'},'w1');
+  expect(readSurfaceCache('workspace-member-directory:w1:viewer').data).toBeUndefined();
+  expect(readSurfaceCache('workspace-member-directory:w2:viewer').data).toBe('other');
+  await loadSurfaceCache('workspace-member-directory:w1:viewer',async()=>'renewed');
+  applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,{workspaceId:'w1'},'w1');
+  expect(readSurfaceCache('workspace-member-directory:w1:viewer').data).toBeUndefined();
+});
+
+it('[COMP:app-web/surface-cache-invalidation] purges only the changed workspace page directory on authority signals',async()=>{
+  await loadSurfaceCache('page-directory:w1:viewer',async()=>'restricted');
+  await loadSurfaceCache('page-directory:w2:viewer',async()=>'other');
+  applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,{workspaceId:'w1'},'w1');
+  expect(readSurfaceCache('page-directory:w1:viewer').data).toBeUndefined();
+  expect(readSurfaceCache('page-directory:w2:viewer').data).toBe('other');
+});

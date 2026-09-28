@@ -114,6 +114,7 @@ type TelegramByoRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -1201,6 +1202,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         questions.invalidate(boundIntegration.id, incoming)
         return processMessage({
           backgroundModel: options.backgroundModel,
+          decisionRuntime: options.decisionRuntime,
           adapter,
           incoming,
           assistant: routedAssistant,
@@ -1329,8 +1331,10 @@ type ProcessMessageParams = {
   discussionStore: TelegramDiscussionStore
   questions: TelegramQuestions
   integrationId: string
+  integrationStore: ChannelIntegrationStore
   /** Servable background-lane model, threaded from the route options. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   adapter: ReturnType<typeof createTelegramAdapter>
   incoming: IncomingMessage
   assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
@@ -1821,6 +1825,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     ? { ...rawReply, reply_to_message: undefined } : incoming.raw
   await processChannelMessage({
     backgroundModel: params.backgroundModel,
+    decisionRuntime: params.decisionRuntime,
     userId: channelUserId,
     ownerId,
     assistant: { ...assistant, ownerUserId: ownerId },
@@ -1829,6 +1834,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     externalGuestConnectorTools,
     channelType: 'telegram',
     channelId: incoming.channelId,
+    channelIntegrationId: params.integrationId,
+    channelIntegrationStore: params.integrationStore,
     actorChannelId: byoUsername ? `@${byoUsername}` : null,
     messageText: combinedText,
     userContentBlocks,

@@ -29,7 +29,7 @@
  */
 
 import { Router } from 'express'
-import type { WorkerRunsStore, WorkerStatus } from '@use-brian/core'
+import { CONFIGURE_CAPABILITY, type CapabilityStore, type WorkerRunsStore, type WorkerStatus } from '@use-brian/core'
 import {
   findSessionById,
   findSessionTurnLeaseState,
@@ -42,6 +42,12 @@ import {
   enqueueToolInvocationResume,
   type ToolInvocationResumeDeps,
 } from '../workflow/approval.js'
+import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
+import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
+import {
+  connectorAuthorizationEntry,
+  connectorAuthorizationPath,
+} from '../agent-surface/connector-authorization.js'
 
 export type SessionQuestionRouteOptions = {
   approvalsStore: PendingApprovalsStore
@@ -59,6 +65,9 @@ export type SessionQuestionRouteOptions = {
    * summary (legacy behavior — no worker persistence).
    */
   workerRunsStore?: WorkerRunsStore
+  capabilityStore?: CapabilityStore
+  connectorInstanceStore?: Pick<ConnectorInstanceStore, 'get'>
+  connectorGrantStore?: Pick<ConnectorGrantStore, 'create'>
 }
 
 /** Cap on workers surfaced by description in the live summary. Keeps
@@ -214,6 +223,15 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
             (r.expiresAt === null || r.expiresAt.getTime() > now),
         )
       : undefined
+    const connectorEntry = question
+      ? connectorAuthorizationEntry(question.approvalPayload.actionId)
+      : null
+    const connectorActionAllowed = Boolean(
+      connectorEntry &&
+      question?.originatingAssistantId &&
+      opts.capabilityStore &&
+      (await opts.capabilityStore.listActive(question.originatingAssistantId)).includes(CONFIGURE_CAPABILITY),
+    )
     res.json({
       pending: question
         ? {
@@ -224,6 +242,19 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
                 : null,
             expiresAt: question.expiresAt,
             createdAt: question.createdAt,
+            action: connectorActionAllowed && connectorEntry
+              ? {
+                  kind: 'connector_authorization',
+                  provider: connectorEntry.id,
+                  label: connectorEntry.name,
+                  connectPath: connectorAuthorizationPath({
+                    workspaceId: wsId,
+                    provider: connectorEntry.id,
+                    sessionId,
+                    approvalId: question.id,
+                  }),
+                }
+              : null,
           }
         : null,
       toolConfirmation: toolConfirmation
@@ -247,6 +278,104 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
           }
         : null,
     })
+  })
+
+  // POST /api/sessions/:sessionId/connector-authorization/:approvalId/complete
+  // OAuth callbacks use this after credentials are stored. The browser's
+  // success claim is not authority: re-resolve every binding before resuming.
+  router.post('/:sessionId/connector-authorization/:approvalId/complete', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    if (!opts.capabilityStore || !opts.connectorInstanceStore || !opts.connectorGrantStore) {
+      res.status(503).json({ error: 'Connector authorization resume is unavailable' })
+      return
+    }
+    const { sessionId, approvalId } = req.params
+    const body = (req.body ?? {}) as { provider?: unknown; connectorInstanceId?: unknown }
+    if (typeof body.provider !== 'string' || typeof body.connectorInstanceId !== 'string') {
+      res.status(400).json({ error: 'provider and connectorInstanceId are required' })
+      return
+    }
+    const { approval, sessionAuthorized } = await resolveQuestionApproval(
+      opts, userId, approvalId, sessionId,
+    )
+    if (!approval) {
+      res.status(404).json({ error: 'Approval not found' })
+      return
+    }
+    const actionEntry = connectorAuthorizationEntry(approval.approvalPayload.actionId)
+    if (!actionEntry || actionEntry.id !== body.provider) {
+      res.status(400).json({ error: 'Question is not for this connector authorization' })
+      return
+    }
+    if (approval.kind !== 'question' || approval.blockingSessionId !== sessionId) {
+      res.status(400).json({ error: 'Question does not belong to this session' })
+      return
+    }
+    if (approval.approverUserId !== userId && !sessionAuthorized) {
+      res.status(403).json({ error: 'Only the asked user can resolve this question' })
+      return
+    }
+    if (approval.status !== 'pending') {
+      if (approval.status === 'approved') {
+        res.json({ status: approval.status, idempotent: true, resume: null })
+      } else {
+        res.status(409).json({ error: 'Question already resolved', status: approval.status, idempotent: true })
+      }
+      return
+    }
+    const session = await findSessionById(sessionId)
+    const assistant = session ? await findAssistantById(session.assistantId) : null
+    if (
+      !session ||
+      !assistant?.workspaceId ||
+      assistant.workspaceId !== approval.workspaceId ||
+      approval.originatingAssistantId !== assistant.id
+    ) {
+      res.status(409).json({ error: 'Session authorization context changed' })
+      return
+    }
+    const capabilities = await opts.capabilityStore.listActive(assistant.id)
+    if (!capabilities.includes(CONFIGURE_CAPABILITY)) {
+      res.status(403).json({ error: 'Agent configuration is no longer enabled for this assistant' })
+      return
+    }
+    const instance = await opts.connectorInstanceStore.get(userId, body.connectorInstanceId)
+    if (!instance || !instance.connected || instance.provider !== actionEntry.id) {
+      res.status(409).json({ error: 'Connected connector instance was not verified' })
+      return
+    }
+    if (instance.scope === 'workspace') {
+      if (instance.workspaceId !== assistant.workspaceId) {
+        res.status(403).json({ error: 'Connector instance belongs to another workspace' })
+        return
+      }
+    } else {
+      if (instance.userId !== userId) {
+        res.status(403).json({ error: 'Only the connector owner can expose this instance' })
+        return
+      }
+      await opts.connectorGrantStore.create({
+        actingUserId: userId,
+        connectorInstanceId: instance.id,
+        targetType: 'workspace',
+        targetId: assistant.workspaceId,
+      })
+    }
+    const answer = `${actionEntry.name} connected and verified for this workspace. Continue the original task.`
+    const updated = await opts.approvalsStore.recordAnswer(approvalId, answer, userId)
+    if (!updated) {
+      res.json({ status: 'approved', idempotent: true, resume: null })
+      return
+    }
+    const resume = await enqueueToolInvocationResume(opts.resumeDeps, {
+      approval: updated,
+      decision: 'approved',
+    })
+    res.json({ status: updated.status, idempotent: false, resume })
   })
 
   // POST /api/sessions/:sessionId/answer/:approvalId — submit answer.

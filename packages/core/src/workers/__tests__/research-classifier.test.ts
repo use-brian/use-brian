@@ -16,6 +16,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { classifyResearchIntent, detectOperateSiteIntent } from '../research-classifier.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 function makeProvider(rawText: string, responseModel = 'gemini-3.1-flash-lite'): LLMProvider {
   async function* stream(): AsyncIterable<StreamChunk> {
@@ -86,6 +87,67 @@ describe('[COMP:workers/research-classifier] detectOperateSiteIntent', () => {
 })
 
 describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
+  it('accepts a terminal injected decision without calling the LLM', async () => {
+    const llm = makeProvider('{"research":false}')
+    const decisionRuntime = executionFixture({
+      llm,
+      profilePolicy: { reviewBelow: 0.7 },
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{
+          kind: 'choice',
+          questionId: 'intent',
+          value: 'research',
+          evidence: {
+            source: 'native_distribution',
+            probabilities: { ordinary: 0.04, research: 0.94, operate_site: 0.02 },
+          },
+        }],
+      })),
+    })
+
+    const result = await classifyResearchIntent({
+      provider: llm,
+      message: 'do an in-depth competitive scan of the APAC events platforms market',
+      decisionRuntime,
+      workspaceId: 'workspace-fictional',
+    })
+
+    expect(result).toMatchObject({ research: true, operateSite: false, reason: 'research_classifier' })
+    expect(llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('sends uncertain primary evidence to one independent LLM review', async () => {
+    const llm = makeProvider('{"research":false}')
+    const decisionRuntime = executionFixture({
+      llm,
+      profilePolicy: { reviewBelow: 0.7 },
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{
+          kind: 'choice',
+          questionId: 'intent',
+          value: 'research',
+          evidence: {
+            source: 'native_distribution',
+            probabilities: { ordinary: 0.4, research: 0.35, operate_site: 0.25 },
+          },
+        }],
+      })),
+    })
+
+    const result = await classifyResearchIntent({
+      provider: llm,
+      message: 'do an in-depth competitive scan of the APAC events platforms market',
+      decisionRuntime,
+    })
+
+    expect(result.research).toBe(false)
+    expect(llm.stream).toHaveBeenCalledOnce()
+  })
+
   it('fast-paths an operate-site message without calling the LLM', async () => {
     const provider = makeProvider('{"research":true}')
     const result = await classifyResearchIntent({

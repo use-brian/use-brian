@@ -7,6 +7,10 @@ import {
   classifySensitivity,
   type SensitivityClassifierInput,
 } from '../sensitivity-classifier.js'
+import {
+  executionFixture,
+  fixtureDecisionProvider,
+} from '../../decisions/__tests__/execution-fixture.js'
 
 /**
  * Mock provider whose stream emits the given JSON as a single text_delta
@@ -278,5 +282,36 @@ describe('[COMP:brain/sensitivity-classifier] classifySensitivity', () => {
 
     expect(events).toHaveLength(1)
     expect(events[0].assistantId).toBeUndefined()
+  })
+
+  it('keeps the mandatory LLM authoritative when observation disagrees', async () => {
+    const llm = mockProvider(
+      '{"inferred_sensitivity":"confidential","brief_reason":"security incident"}',
+    )
+    const stream = vi.spyOn(llm, 'stream')
+    const decisionRuntime = executionFixture({
+      mode: 'shadow',
+      llm,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{
+          questionId: 'sensitivity',
+          kind: 'choice',
+          value: 'public',
+          evidence: { source: 'native_distribution', confidence: 0.99 },
+        }],
+      })),
+    })
+
+    const result = await classifySensitivity({
+      provider: llm,
+      model: 'mock',
+      decisionRuntime,
+      input: baseInput({ channelSensitivity: 'internal' }),
+    })
+
+    expect(result).toMatchObject({ inferredSensitivity: 'confidential', drifted: true })
+    expect(stream).toHaveBeenCalledOnce()
   })
 })

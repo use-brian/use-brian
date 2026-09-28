@@ -16,7 +16,7 @@ import {
   type SpreadsheetWorksheet,
 } from "@use-brian/office-model";
 import { addWorksheetCommand, deleteCommand, deleteWorksheetCommand, renameWorksheetCommand, reorderWorksheetCommand, setSpreadsheetCellCommand, setSpreadsheetDimensionCommand, updateSpreadsheetImageCommand } from "@/lib/office/editor-commands";
-import { getOfficeResourceObjectUrl } from "@/lib/office/api";
+import { useOfficeResourceMedia } from "@/lib/use-doc-media";
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -623,8 +623,7 @@ function WorksheetCell({ address, cell, conditionalStyle, selected, active, merg
 
 function WorksheetImage({ imageId, artifactId, resourceId, alt, decorative, selected, onSelect, left, top, width, height }: { imageId: string; artifactId: string; resourceId: string; alt: string; decorative: boolean; selected: boolean; onSelect(imageId: string): void; left: number; top: number; width: number; height: number }) {
   const t = useT().office;
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => { let active = true; void getOfficeResourceObjectUrl(artifactId, resourceId).then((url) => { if (active) setSrc(url); }).catch(() => undefined); return () => { active = false; }; }, [artifactId, resourceId]);
+  const {url:src} = useOfficeResourceMedia(artifactId,resourceId);
   const name = alt.trim() || t.image;
   return <button type="button" aria-label={t.selectWorksheetImage.replace("{name}", name)} aria-pressed={selected} data-worksheet-image={imageId} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onSelect(imageId); }} className={cn("absolute z-20 flex items-center justify-center bg-transparent p-0 outline-none", selected ? "ring-2 ring-[#2684ff] ring-offset-1" : "focus-visible:ring-2 focus-visible:ring-[#2684ff]")} style={{ left, top, width, height }}>
     {src ? <img src={src} alt={decorative ? "" : alt} className="pointer-events-none size-full object-contain" /> : <span className="pointer-events-none flex size-full items-center justify-center bg-muted/60"><FileSpreadsheet className="size-5 text-muted-foreground/40" /></span>}

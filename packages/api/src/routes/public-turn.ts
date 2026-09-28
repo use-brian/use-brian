@@ -37,6 +37,7 @@ import {
   buildWorkspaceFilesContext,
   buildSessionStateBlock,
   ContextScopeAccumulator,
+  pinAccessCeiling,
 } from '@use-brian/core'
 import type {
   LLMProvider,
@@ -78,7 +79,17 @@ import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
   resolveTurnScopeSystem,
+  sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
+import {
+  createSessionAuthorityLease,
+  isAuthorityChangedError,
+} from '../context-scope/authority-lease.js'
+import {
+  createDeliveryAudienceAuthorizer,
+  DeliveryAudienceUnverifiedError,
+  isDeliveryAudienceUnverifiedError,
+} from '../context-scope/delivery-authority.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { isExternalPrincipal } from '../db/external-principal.js'
 import { accrueClientPrincipal } from './client-accrual.js'
@@ -96,6 +107,7 @@ import {
   findOrCreateSession,
   findSessionByChannel,
   addSessionMessage,
+  readSessionMessageScopeSource,
   getSessionMessages,
   truncateMessagesFrom,
 } from '../db/sessions.js'
@@ -303,6 +315,8 @@ export type PublicTurnInput = {
   delivery?: 'json' | 'sse'
   /** Extra analytics metadata (api_key_id / chat_link_id …). */
   analyticsMeta?: Record<string, unknown>
+  /** Re-read the presented API key/share-link state throughout the turn. */
+  credentialCurrent?: () => Promise<boolean>
 }
 
 export type PublicApiError =
@@ -316,6 +330,8 @@ export type PublicApiError =
   | 'context_not_available'
   | 'message_not_found'
   | 'budget_exhausted'
+  | 'authority_changed'
+  | 'delivery_audience_unverified'
   | 'upstream_failed'
   | 'internal'
 
@@ -710,6 +726,38 @@ export async function executePublicTurn(
     compartments: turnScope.writeCompartments,
     projectIds: turnScope.writeProjectIds,
   })
+  const inputMessageScope = sessionMessageInputScope({
+    scope: turnScope,
+    workspaceId: assistant.workspaceId,
+    userId: user.id,
+    assistantId: assistant.id,
+  })
+  const currentTurnDerivation = () => ({
+    producer: 'turn:public-api',
+    sources: scopeAccumulator.evidence.sources ?? [],
+  })
+  const authority = createSessionAuthorityLease({
+    starting: pinAccessCeiling(turnScope.access),
+    session,
+    memberMode: fullScope ? 'assistant' : 'enforce',
+    systemRead: laneReadsSystemSide(input.contextScope) || undefined,
+    credentialCurrent: input.credentialCurrent,
+  })
+  const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
+  const assertDeliveryAudience = async (): Promise<void> => {
+    await authority.assertCurrent()
+    const decision = await authorizeDeliveryAudience({
+      workspaceId: assistant.workspaceId ?? '',
+      assistantId: assistant.id,
+      userId: user.id,
+      channelType: 'api',
+      channelId,
+      sessionId: session.id,
+      recipientType: 'individual',
+      scopeEvidence: scopeAccumulator.evidence,
+    })
+    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
+  }
 
   // ── 5b. Retry/edit — destroy-and-regenerate ─────────────
   // Look up the target message FIRST and verify it lives in this
@@ -809,7 +857,13 @@ export async function executePublicTurn(
     sessionId: session.id,
     role: 'user',
     content: userContent,
+    scope: inputMessageScope,
   })
+  const storedUserSource = await readSessionMessageScopeSource(
+    assistant.workspaceId,
+    storedUserMsg.id,
+  )
+  if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
 
   // ── 8. Tools — mirror web chat ───────────────────────────
   // Same shape as `chat.ts`: capability filter → MCP injection (which
@@ -960,9 +1014,9 @@ export async function executePublicTurn(
   // is the substance of what the link is meant to expose.
   let memoryContext = ''
   if (isIdentified || fullScope) {
-    const [soul, identityMemories, memoryIndex, workspaceIdentityMemories, teamMemoryIndex] =
+    const [soulContext, identityMemories, memoryIndex, workspaceIdentityMemories, teamMemoryIndex] =
       await Promise.all([
-        deps.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
+        (deps.memoryStore.getSoulContext?.(memoryViewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
         deps.memoryStore.getIdentity(memoryViewerCtx),
         deps.memoryStore.getIndex(memoryViewerCtx),
         // Team memory is what makes a full-scope link useful, and what makes
@@ -975,6 +1029,8 @@ export async function executePublicTurn(
           ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx)
           : Promise.resolve([]),
       ])
+    const soul = soulContext.content
+    scopeAccumulator.note(soulContext.evidence)
     noteAutomaticScopeEvidence(scopeAccumulator, [
       ...identityMemories,
       ...memoryIndex,
@@ -1017,6 +1073,7 @@ export async function executePublicTurn(
             assistantKind: assistant.kind,
             clearance: readClearance,
             compartments: readCompartments,
+            mutationCompartments: turnScope.access.mutationCompartments,
             projectIds: turnScope.effectiveProjectIds,
             systemRead: laneReadsSystemSide(input.contextScope) || undefined,
           },
@@ -1219,6 +1276,8 @@ export async function executePublicTurn(
   const dbMessages = await getSessionMessages(session.id, {
     fromSequence: session.compactBoundarySequence,
   })
+  noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
+  await assertDeliveryAudience()
   const compactionResult = await runProactiveCompaction({
     sessionMessages: dbMessages,
     timezone: owner.timezone ?? 'UTC',
@@ -1244,6 +1303,7 @@ export async function executePublicTurn(
     userMessageId: storedUserMsg.id,
     compartments: turnScope.writeCompartments,
     projectIds: turnScope.writeProjectIds,
+    authority,
   })
   // Gate on the serving provider (the `model` resolved above) — the strip
   // is Gemini-only and would erase a Qwen turn's tool calls. See tool-pairing.ts.
@@ -1292,8 +1352,7 @@ export async function executePublicTurn(
   const abortController = new AbortController()
   req.on('close', () => abortController.abort())
   const timeout = setTimeout(() => abortController.abort(), 180_000)
-  const sendEvent = input.delivery === 'sse' ? openPublicTurnSse(res) : null
-  sendEvent?.('session', { sessionId: channelId })
+  let sendEvent: PublicTurnSseSender | null = null
 
   let responseText = ''
   let totalUsage: TokenUsage | null = null
@@ -1301,9 +1360,13 @@ export async function executePublicTurn(
   let assistantMessageId: string | null = null
 
   try {
+    await assertDeliveryAudience()
+    sendEvent = input.delivery === 'sse' ? openPublicTurnSse(res) : null
+    sendEvent?.('session', { sessionId: channelId })
     const scopedTools = bindToolsToAgentAccess(baseTools, {
       clearance: readClearance,
       compartments: turnScope.effectiveCompartments,
+      mutationCompartments: turnScope.access.mutationCompartments,
       projectIds: turnScope.effectiveProjectIds,
     })
     for await (const event of queryLoop({
@@ -1332,6 +1395,7 @@ export async function executePublicTurn(
         // assistant's own clearance (incident 2026-06-01).
         clearance: readClearance,
         compartments: readCompartments,
+        mutationCompartments: turnScope.access.mutationCompartments,
         projectIds: turnScope.effectiveProjectIds,
         activeGroupId: turnScope.activeGroupId,
         activeProjectId: turnScope.activeProjectId,
@@ -1385,6 +1449,7 @@ export async function executePublicTurn(
         abortSignal: abortController.signal,
         sessionStateStore: deps.sessionStateStore,
         activeCapabilities,
+        authority,
       },
       channelType: 'api',
       // Reactive compaction on context-overflow errors —
@@ -1393,6 +1458,7 @@ export async function executePublicTurn(
       maxTurns,
     })) {
       if (event.type === 'text_delta') {
+        await assertDeliveryAudience()
         responseText += event.text
         sendEvent?.('text_delta', { text: event.text })
       } else if (event.type === 'tool_result') {
@@ -1407,6 +1473,7 @@ export async function executePublicTurn(
           )
         }
       } else if (event.type === 'turn_complete') {
+        await assertDeliveryAudience()
         totalUsage = event.totalUsage ?? null
         responseModel = event.response.model
         // Skip persisting fully empty assistant turns — same posture
@@ -1419,6 +1486,7 @@ export async function executePublicTurn(
             sessionId: session.id,
             role: 'assistant',
             content: event.response.content,
+            derivation: currentTurnDerivation(),
           })
           assistantMessageId = stored.id
         }
@@ -1435,6 +1503,18 @@ export async function executePublicTurn(
     }
   } catch (err) {
     console.error('[public-turn] query loop threw:', err)
+    if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) {
+      const error = isAuthorityChangedError(err)
+        ? 'authority_changed'
+        : 'delivery_audience_unverified'
+      if (sendEvent) {
+        sendEvent('error', { error })
+        sendEvent('done', {})
+        res.end()
+        return
+      }
+      return fail(res, 409, error)
+    }
     if (sendEvent) {
       sendEvent('error', { error: 'upstream_failed', detail: (err as Error).message })
       sendEvent('done', {})
@@ -1509,6 +1589,21 @@ export async function executePublicTurn(
 
   const finalMessageId = assistantMessageId ?? randomUUID()
   const finalModel = responseModel ?? model
+  try {
+    await assertDeliveryAudience()
+  } catch (err) {
+    if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
+    const error = isAuthorityChangedError(err)
+      ? 'authority_changed'
+      : 'delivery_audience_unverified'
+    if (sendEvent) {
+      sendEvent('error', { error })
+      sendEvent('done', {})
+      res.end()
+      return
+    }
+    return fail(res, 409, error)
+  }
   if (sendEvent) {
     sendEvent('turn_complete', {
       sessionId: channelId,

@@ -13,6 +13,7 @@
 import { getPool, query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { appendDecisionEvent } from './decision-event-store.js'
+import type { DerivedWriteEvidence } from '@use-brian/core'
 
 export type PendingApprovalStatus =
   | 'pending'
@@ -41,6 +42,7 @@ export type ApprovalDeliveryChannel = 'web' | 'telegram' | 'slack' | 'whatsapp' 
  * without a migration. This union is the canonical source.
  */
 export type ApprovalKind =
+  | 'department_access'
   | 'workflow_step'
   | 'tool_invocation'
   | 'staged_write'
@@ -242,6 +244,7 @@ export type CreateStagedSkillUpdateParams = {
   approverUserId: string
   /** Originating assistant from the worker context. */
   originatingAssistantId: string | null
+  derivation?: DerivedWriteEvidence
 }
 
 /**
@@ -289,6 +292,7 @@ export type CreateStagedSkillCreationParams = {
    * absent, the card lets the approver pick a step. Rides `approval_payload`.
    */
   attachTo?: { workflowId: string; stepId?: string }
+  derivation?: DerivedWriteEvidence
 }
 
 /**
@@ -359,6 +363,11 @@ export type CreateQuestionParams = {
    *  synthesizes a tool_result keyed by this id so the queryLoop pairing
    *  invariant holds when it re-enters at `session_resume_points.loop_step_index`. */
   toolUseId: string
+  actionId?: string
+  version?: string | number
+  context?: string
+  allowCustom?: boolean
+  options?: string[]
   deliveryChannelType: ApprovalDeliveryChannel
   deliveryChannelId?: string | null
   /** Optional. Default policy: now + 24h (chat-route-side). NULL = never expire. */
@@ -779,6 +788,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           JSON.stringify({
             targetSkillId: params.targetSkillId,
             patch: params.proposedPatch,
+            derivation: params.derivation,
           }),
           JSON.stringify({
             kind: 'staged_skill_update',
@@ -807,7 +817,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
         [
           params.workspaceId,
           params.approverUserId,
-          JSON.stringify({ umbrella: params.proposedUmbrella }),
+          JSON.stringify({ umbrella: params.proposedUmbrella, derivation: params.derivation }),
           JSON.stringify({
             kind: 'staged_skill_creation',
             originatingAssistantId: params.originatingAssistantId,
@@ -1112,6 +1122,11 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       const payload = {
         question: params.question,
         toolUseId: params.toolUseId,
+        ...(params.actionId !== undefined ? { actionId: params.actionId } : {}),
+        ...(params.version !== undefined ? { version: params.version } : {}),
+        ...(params.context !== undefined ? { context: params.context } : {}),
+        ...(params.allowCustom !== undefined ? { allowCustom: params.allowCustom } : {}),
+        ...(params.options !== undefined ? { options: params.options } : {}),
       }
       const result = await query(
         `INSERT INTO pending_approvals (
@@ -1295,7 +1310,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
                responded_at = now(),
                responded_by = $3,
                reject_reason = $4
-           WHERE id = $1 AND status = 'pending'
+           WHERE id = $1 AND status = 'pending' AND kind <> 'department_access'
            RETURNING ${COLS}`,
           [id, decision, responderUserId, rejectReason ?? null],
         )

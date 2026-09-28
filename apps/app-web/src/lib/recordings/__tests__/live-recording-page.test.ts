@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { decodeLiveDestination } from "../use-live-recording-page";
 
 describe("[COMP:app-web/live-recording-page] destination encoding", () => {
+  it("selects the default folder without confusing it with an explicit parent", () => {
+    expect(decodeLiveDestination("meeting-notes")).toEqual({ destination: "meeting-notes" });
+  });
   it("distinguishes a root page, a nested page, and an existing page", () => {
     expect(decodeLiveDestination("new:root")).toEqual({
       destination: "new",

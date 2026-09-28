@@ -11,6 +11,7 @@
  * `packages/api/src/db/goals-store.ts` and the host adapters are injected.
  */
 import type { DoneWhenNode } from './done-when.js'
+import type { AuthoringAuthority } from '../security/access-ceiling.js'
 
 export const GOAL_STATUSES = [
   'active',
@@ -106,6 +107,8 @@ export type GoalRecord = {
   /** Stable Team/Project context inherited by every acting-loop successor. */
   contextGroupId: string | null
   contextProjectId: string | null
+  /** Mig 600. Attended creator/confirming principal; null only for drafts/legacy. */
+  authoringAuthority?: AuthoringAuthority | null
   /** The acting user — host write-back actor + escalation/delivery default
    *  (the goal speaks as the workspace primary to this user). */
   createdByUserId: string | null
@@ -152,6 +155,8 @@ export type GoalCreateParams = {
   /** Context selected on the creating turn; immutable for the goal's loop. */
   contextGroupId?: string | null
   contextProjectId?: string | null
+  /** Required for confirmed goals; omitted only for unconfirmed drafts. */
+  authoringAuthority?: AuthoringAuthority | null
   /** Default `true` (an explicitly-created goal is confirmed). The auto-draft
    *  hook passes `false` to mint a draft (`confirmed_at` NULL) — see
    *  `task-goal-autopilot.md` §4. */

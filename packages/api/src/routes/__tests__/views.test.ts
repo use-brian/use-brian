@@ -12,6 +12,7 @@ vi.mock('../../db/client.js', () => ({
   queryWithRLS: vi.fn(),
   getPool: vi.fn(),
 }))
+vi.mock('../../db/page-directory.js', () => ({ readWorkspacePageDirectory: vi.fn() }))
 
 // Linking a recording (migration 339) validates it via getRecording under the
 // caller's RLS — so a recording the user cannot see returns null and the link
@@ -22,11 +23,13 @@ vi.mock('../../db/recordings-store.js', () => ({
 }))
 
 import { viewsRoutes } from '../views.js'
+import { readWorkspacePageDirectory } from '../../db/page-directory.js'
 import type { CrmStore, SavedView, SavedViewStore, SoftDeleteRepository, TaskStore, WorkflowRunStore } from '@use-brian/core'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000010'
 const USER_ID = '00000000-0000-0000-0000-000000000020'
+const pageDirectory = vi.mocked(readWorkspacePageDirectory)
 
 function fakeSavedViewStore(): Mocked<SavedViewStore> {
   return {
@@ -226,6 +229,37 @@ describe('[COMP:api/views-routes] auth', () => {
     const { app } = makeApp({ userId: USER_ID, role: null })
     const res = await request(app).get(`/api/workspaces/${WORKSPACE_ID}/saved-views`)
     expect(res.status).toBe(403)
+  })
+})
+
+describe('[COMP:api/page-directory] GET /workspaces/:workspaceId/page-directory', () => {
+  it('requires authentication and hides malformed workspace identities', async () => {
+    expect((await request(makeApp({ userId: null }).app).get(`/api/workspaces/${WORKSPACE_ID}/page-directory`)).status).toBe(401)
+    expect((await request(makeApp({ userId: USER_ID }).app).get('/api/workspaces/not-a-uuid/page-directory')).status).toBe(404)
+    expect(pageDirectory).not.toHaveBeenCalled()
+  })
+
+  it('publishes the bounded reader response without HTTP caching', async () => {
+    pageDirectory.mockResolvedValueOnce({
+      status: 200,
+      body: { workspaceId: WORKSPACE_ID, viewerId: USER_ID, validForMs: 9_000, pages: [{ id: 'page-1', title: 'Plan' }] },
+    })
+    const res = await request(makeApp({ userId: USER_ID }).app).get(`/api/workspaces/${WORKSPACE_ID}/page-directory`)
+    expect(res.status).toBe(200)
+    expect(res.headers['cache-control']).toBe('private, no-store')
+    expect(res.headers.etag).toBeUndefined()
+    expect(res.body).toMatchObject({ workspaceId: WORKSPACE_ID, viewerId: USER_ID, validForMs: 9_000 })
+    expect(pageDirectory).toHaveBeenCalledWith(USER_ID, WORKSPACE_ID)
+  })
+
+  it.each([
+    { status: 404 as const, body: { error: 'page_directory_unavailable' as const } },
+    { status: 409 as const, body: { error: 'page_directory_changed' as const } },
+  ])('forwards a generic $status refusal', async (reply) => {
+    pageDirectory.mockResolvedValueOnce(reply)
+    const res = await request(makeApp({ userId: USER_ID }).app).get(`/api/workspaces/${WORKSPACE_ID}/page-directory`)
+    expect(res.status).toBe(reply.status)
+    expect(res.body).toEqual(reply.body)
   })
 })
 

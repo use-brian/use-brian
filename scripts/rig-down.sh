@@ -29,6 +29,7 @@ VOLUME="${BRIAN_RIG_VOLUME:-usebrian-brain-data}"
 
 WIPE=0
 KEEP_DB=0
+ADMIN_ONLY=0
 
 say() { printf '[rig] %s\n' "$*"; }
 warn() { printf '[rig] warning: %s\n' "$*" >&2; }
@@ -38,6 +39,7 @@ usage() {
 Usage: scripts/rig-down.sh [options]
 
   (default)     stop the stack + stop the database container, keeping its data
+  --admin-only  stop only the isolated administrative fixture
   --wipe        also DELETE the database (removes the rig container + volume)
   --keep-db     stop the stack only; leave the database container running
   -h, --help    this help
@@ -46,6 +48,7 @@ USAGE
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --admin-only) ADMIN_ONLY=1 ;;
     --wipe) WIPE=1 ;;
     --keep-db) KEEP_DB=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -57,6 +60,15 @@ done
 if [ "$WIPE" = 1 ] && [ "$KEEP_DB" = 1 ]; then
   printf '[rig] error: --wipe and --keep-db contradict each other.\n' >&2
   exit 1
+fi
+
+if [ "$ADMIN_ONLY" = 1 ]; then
+  [ "$WIPE" = 0 ] || { printf '[rig] error: --admin-only does not support --wipe\n' >&2; exit 1; }
+  STATE="$ROOT/.rig/admin"
+  PIDFILE="$STATE/stack.pid"
+  SESSION_FILE="$STATE/session.json"
+  CONTAINER=usebrian-admin-test
+  VOLUME=usebrian-admin-test-data
 fi
 
 # ── the stack ───────────────────────────────────────────────────────────────
@@ -78,11 +90,29 @@ stop_pid() {
 if [ -f "$PIDFILE" ]; then
   pid="$(cat "$PIDFILE" 2>/dev/null || true)"
   if [ -n "$pid" ]; then
+    if [ "$ADMIN_ONLY" = 1 ]; then
+      command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+      if kill -0 "$pid" 2>/dev/null; then
+        case "$command" in
+          *"$ROOT/scripts/launch.mjs --admin-only"*) ;;
+          *) warn "recorded pid is not this admin launcher; leaving it untouched"; exit 1 ;;
+        esac
+      fi
+    fi
     stop_pid "$pid" 'the launcher'
   fi
   rm -f "$PIDFILE"
 else
-  say "no launcher pid recorded — sweeping the rig ports anyway."
+  if [ "$ADMIN_ONLY" = 1 ]; then
+    say "no launcher pid recorded; checking persisted administrative runtime ownership."
+  else
+    say "no launcher pid recorded — sweeping the rig ports anyway."
+  fi
+fi
+
+if [ "$ADMIN_ONLY" = 1 ]; then
+  node "$ROOT/scripts/rig-admin.mjs" --stop-owned "$ROOT"
+  sleep 1
 fi
 
 # The launcher SIGTERMs its own children, but it spawns them through pnpm, which
@@ -98,6 +128,7 @@ pid_cwd() {
 }
 
 swept=0
+if [ "$ADMIN_ONLY" = 0 ]; then
 for port in "${RIG_PORTS[@]}"; do
   for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true); do
     cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
@@ -116,6 +147,7 @@ for port in "${RIG_PORTS[@]}"; do
     esac
   done
 done
+fi
 [ "$swept" = 0 ] || sleep 2
 
 rm -f "$SESSION_FILE"
@@ -128,6 +160,10 @@ container_present=0
 if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
   container_present=1
   container_label="$(docker container inspect -f "{{index .Config.Labels \"$RIG_LABEL_KEY\"}}" "$CONTAINER" 2>/dev/null | tr -d '[:space:]')"
+fi
+if [ "$ADMIN_ONLY" = 1 ] && [ "$container_present" = 1 ] && [ "$container_label" != admin-test ]; then
+  warn "admin fixture container has the wrong label; leaving it untouched"
+  exit 1
 fi
 container_exists=0
 [ -n "$container_label" ] && container_exists=1

@@ -20,6 +20,11 @@ const columns = [
   ['brain_keys', 'context_project_id'], ['connector_instance', 'project_ids'],
   ['connector_grant', 'project_ids'], ['ingest_rules', 'project_ids'],
   ['pending_ingest_batches', 'project_ids'],
+  ['assistants','context_binding_origin'],['sessions','context_binding_origin'],
+  ['brain_keys','context_binding_origin'],['connector_instance','context_binding_origin'],
+  ['connector_grant','context_binding_origin'],['ingest_rules','scope_binding_origin'],
+  ['ingest_rules','scope_binding_mode'],['pending_ingest_batches','scope_binding_origin'],
+  ['pending_ingest_batches','scope_held'],['workspace_scope_review_items','content_snapshot'],
 ] as const
 
 const triggers = [
@@ -31,7 +36,14 @@ const triggers = [
   'file_segments_context_scope_inherit',
 ]
 
-function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string } = {}): ReadinessQuery {
+const functions = [
+  'advance_canonical_scope_version','hold_scope_descendants','agent_read_scope_allows',
+  'agent_mutation_scope_allows','member_operation_scope_allows',
+  'effective_member_read_compartments','validate_workspace_organization',
+  'read_scope_review_source','scope_review_registry_revision',
+]
+
+function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string; withoutFunction?: string } = {}): ReadinessQuery {
   return async <T extends Record<string, unknown>>(sql: string) => {
     if (sql.includes('information_schema.columns')) {
       return {
@@ -47,6 +59,11 @@ function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string 
           .map((name) => ({ name })) as unknown as T[],
       }
     }
+    if (sql.includes('pg_proc')) {
+      return {rows:functions.filter(name=>name!==opts.withoutFunction).map(name=>({name})) as unknown as T[]}
+    }
+    if(sql.includes('reviewed_inventory_revision'))return {rows:[{revision:'1'}] as unknown as T[]}
+    if(sql.includes(' AS total')||sql.includes(' total,'))return {rows:[{total:'0',unresolved:'0',held:'0'}] as unknown as T[]}
     return { rows: [{ count: '3' }] as unknown as T[] }
   }
 }
@@ -55,6 +72,8 @@ describe('[COMP:api/context-scope-routes] activation readiness', () => {
   it('allows activation when every blocking capability is proven', async () => {
     const result = await getContextReadinessSystem('workspace', readinessQuery())
     expect(result.readyForActivation).toBe(true)
+    expect(result.enforcementVersion).toBe(2)
+    expect(result.checks.filter(check=>check.blocking)).toHaveLength(15)
     expect(result.legacyGeneral.memories).toBe(3)
     expect(result.checks.find((check) => check.id === 'legacy_data')).toMatchObject({
       ready: true,
@@ -86,5 +105,11 @@ describe('[COMP:api/context-scope-routes] activation readiness', () => {
       ready: false,
       missing: ['session_messages_lock_context'],
     })
+  })
+
+  it('blocks a missing v2 operation-separation function independently',async()=>{
+    const result=await getContextReadinessSystem('workspace',readinessQuery({withoutFunction:'member_operation_scope_allows'}))
+    expect(result.checks.find(check=>check.id==='operation_separation')).toMatchObject({ready:false,missing:['member_operation_scope_allows']})
+    expect(result.readyForActivation).toBe(false)
   })
 })

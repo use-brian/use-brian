@@ -6,7 +6,6 @@ import { Skeleton } from "@/components/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { format, useT } from "@/lib/i18n/client";
-import { getOfficeTemplateRouting, saveOfficeTemplateRouting } from "@/lib/office/api";
 import { cn } from "@/lib/utils";
 import type { TemplateRoutingInspectorState } from "./template-routing-inspector";
 import { reconcileTokenRouting, tokenTargetLocations } from "./token-template-routing";
@@ -15,33 +14,20 @@ const TYPES: OfficeTemplateField["type"][] = ["plainText", "number", "date"];
 const inputClass = "min-h-11 w-full rounded border bg-background px-2 text-base md:text-sm";
 
 /** Literal DOCX/XLSX fields. The live snapshot is the binding authority. */
-export function TokenTemplateRoutingInspector({ templateId, snapshot, selectedTargetIds, initialRouting, onStateChange }: {
-  templateId: string;
+export function TokenTemplateRoutingInspector({ snapshot, selectedTargetIds, initialRouting, onStateChange, saveRouting, saveConfirmed }: {
+  saveConfirmed: boolean;
+  saveRouting: (draft: OfficeTemplateRoutingDraft) => Promise<OfficeTemplateRoutingDraft>;
   snapshot: DocumentSnapshot | SpreadsheetSnapshot;
   selectedTargetIds: string[];
-  initialRouting?: OfficeTemplateRoutingDraft;
+  initialRouting: OfficeTemplateRoutingDraft;
   onStateChange?: (state: TemplateRoutingInspectorState) => void;
 }) {
   const t = useT().office;
   const [routing, setRouting] = useState<OfficeTemplateRoutingDraft | null>(initialRouting ?? null);
   const [saved, setSaved] = useState(initialRouting ? JSON.stringify(initialRouting) : "");
   const [status, setStatus] = useState<"loading" | "ready" | "saving" | "saved" | "loadFailed" | "saveFailed">(initialRouting ? "ready" : "loading");
-  const [retry, setRetry] = useState(0);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-
-  useEffect(() => {
-    if (initialRouting) return;
-    let active = true;
-    setStatus("loading");
-    void getOfficeTemplateRouting(templateId).then((value) => {
-      if (!active) return;
-      setRouting(value);
-      setSaved(JSON.stringify(value));
-      setStatus("ready");
-    }).catch(() => { if (active) setStatus("loadFailed"); });
-    return () => { active = false; };
-  }, [initialRouting, templateId, retry]);
 
   // Snapshot updates are the collaboration signal, including edits from peers.
   // Metadata follows names; renames get fresh optional defaults, never mappings
@@ -51,6 +37,7 @@ export function TokenTemplateRoutingInspector({ templateId, snapshot, selectedTa
   }, [snapshot, routing, t.routingTokenDefaultInstruction]);
 
   const dirty = Boolean(routing && JSON.stringify(routing) !== saved);
+  useEffect(() => { if (saveConfirmed && !dirty && status === "ready") setStatus("saved"); }, [saveConfirmed, dirty, status]);
   const locked = useMemo(() => officeTemplateLockedTokenNames(snapshot, routing?.fields), [snapshot, routing]);
   const valid = Boolean(routing && OfficeTemplateRoutingDraftSchema.safeParse(routing).success && !officeTemplateTokenDiagnostics(snapshot, routing.fields).length && routing.fields.every((field) => field.label.trim() && field.aiInstruction.trim()));
   useEffect(() => {
@@ -67,7 +54,7 @@ export function TokenTemplateRoutingInspector({ templateId, snapshot, selectedTa
     const submitted = routing;
     setStatus("saving");
     try {
-      const response = await saveOfficeTemplateRouting(templateId, submitted);
+      const response = await saveRouting(submitted);
       if (!alive.current) return;
       // Content may change while PUT is in flight. Never overwrite newer bindings
       // or mark them saved just because the old request completed successfully.
@@ -80,7 +67,7 @@ export function TokenTemplateRoutingInspector({ templateId, snapshot, selectedTa
   }
 
   if (status === "loading") return <div data-template-routing="loading" aria-busy="true" aria-label={t.routingLoading} className="space-y-3 p-3"><Skeleton className="h-8 w-2/3" /><Skeleton className="h-24 w-full" /><Skeleton className="h-48 w-full" /></div>;
-  if (!routing || status === "loadFailed") return <div className="space-y-3 p-3" data-template-routing="failed"><p role="alert" className="text-sm text-destructive">{t.routingLoadFailed}</p><button type="button" className="min-h-11 rounded border px-3 text-sm" onClick={() => setRetry((value) => value + 1)}>{t.routingRetry}</button></div>;
+  if (!routing || status === "loadFailed") return <div className="space-y-3 p-3" data-template-routing="failed"><p role="alert" className="text-sm text-destructive">{t.routingLoadFailed}</p></div>;
 
   return <div data-template-routing="ready" className="space-y-4 p-3 text-sm">
     <h2 className="font-semibold">{t.routingTokenTitle}</h2>

@@ -2,7 +2,7 @@
 
 /** Record-scoped relationship timeline plus existing reviewed-email approvals. */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownLeft, ArrowUpRight, ChevronRight, Clock3, Mail, MessageSquarePlus, RefreshCw, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -21,19 +21,19 @@ import { linkedContactsForEmailApproval, matchingEmailApprovals, type CrmApprova
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 
-export function CrmActivityTimeline({
-  workspaceId,
-  record,
-  data,
-  onOpenContact,
-  onReviewEmail,
-}: {
+type ActivityProps = {
   workspaceId: string;
   record: CrmApprovalRecord;
   data: CrmData;
   onOpenContact: (contact: CrmContactRow) => void;
   onReviewEmail: (approvalId: string) => void;
-}) {
+};
+
+export function CrmActivityTimeline(props: ActivityProps) {
+  return <ActivityPanel key={JSON.stringify([props.workspaceId, props.record.kind, props.record.row.id])} {...props} />;
+}
+
+function ActivityPanel({ workspaceId, record, data, onOpenContact, onReviewEmail }: ActivityProps) {
   const t = useT().crmPage.r2;
   const [activities, setActivities] = useState<CrmActivity[]>([]);
   const [approvals, setApprovals] = useState<PendingApprovalRow[]>([]);
@@ -49,7 +49,20 @@ export function CrmActivityTimeline({
   const [occurredAt, setOccurredAt] = useState("");
   const [saving, setSaving] = useState(false);
 
+  const requestGeneration = useRef(0);
+  const clearProjection = useCallback(() => {
+    setActivities([]);
+    setApprovals([]);
+    setParticipants([]);
+    setComposerOpen(false);
+    setSubject("");
+    setSummary("");
+    setOccurredAt("");
+  }, []);
+
   const reload = useCallback(async () => {
+    const generation = ++requestGeneration.current;
+    clearProjection();
     setLoading(true);
     setActivityError(false);
     setApprovalError(false);
@@ -60,20 +73,28 @@ export function CrmActivityTimeline({
         ? listCrmDealParticipants(workspaceId, record.row.id)
         : Promise.resolve([]),
     ]);
-    if (timeline.status === "fulfilled") setActivities(timeline.value);
-    else setActivityError(true);
-    if (pending.status === "fulfilled") setApprovals(pending.value);
-    else setApprovalError(true);
-    if (participants.status === "fulfilled") {
+    if (generation !== requestGeneration.current) return;
+    if (timeline.status !== "fulfilled") {
+      clearProjection();
+      setActivityError(true);
+      setLoading(false);
+      return;
+    }
+    setActivities(timeline.value);
+    if (pending.status === "fulfilled" && participants.status === "fulfilled") {
+      setApprovals(pending.value);
       setParticipants(participants.value);
     } else {
+      setApprovals([]);
+      setParticipants([]);
       setApprovalError(true);
     }
     setLoading(false);
-  }, [workspaceId, record.row.id]);
+  }, [workspaceId, record.row.id, record.kind, clearProjection]);
 
   useEffect(() => {
     void reload();
+    return () => { requestGeneration.current += 1; };
   }, [reload]);
 
   const emailApprovals = useMemo(
@@ -87,24 +108,27 @@ export function CrmActivityTimeline({
   );
 
   async function saveActivity() {
-    if (!summary.trim() || saving) return;
+    if (!summary.trim() || saving || loading || activityError) return;
+    const generation = requestGeneration.current;
     setSaving(true);
     setActivityError(false);
     try {
-      const activity = await createCrmActivity(workspaceId, record.row.id, {
+      await createCrmActivity(workspaceId, record.row.id, {
         activityType,
         direction,
         subject: subject.trim() || undefined,
         occurredAt: occurredAt ? new Date(occurredAt).toISOString() : undefined,
         summary: summary.trim(),
       });
-      setActivities((current) => [activity, ...current]);
-      setComposerOpen(false);
-      setSubject("");
-      setSummary("");
-      setOccurredAt("");
+      if (generation !== requestGeneration.current) return;
+      await reload();
     } catch {
+      if (generation !== requestGeneration.current) return;
+      requestGeneration.current += 1;
+      clearProjection();
+      setApprovalError(false);
       setActivityError(true);
+      setLoading(false);
     } finally {
       setSaving(false);
     }
@@ -117,13 +141,13 @@ export function CrmActivityTimeline({
           <Clock3 className="size-3.5" aria-hidden />
           {t.activityTitle}
         </div>
-        <Button size="xs" variant="ghost" onClick={() => setComposerOpen((open) => !open)}>
+        <Button size="xs" variant="ghost" disabled={loading || activityError || saving} onClick={() => setComposerOpen((open) => !open)}>
           <MessageSquarePlus aria-hidden />
           {t.logActivity}
         </Button>
       </div>
 
-      {composerOpen && (
+      {composerOpen && !loading && !activityError && (
         <div className="mb-3 space-y-2 rounded-xl border border-border bg-muted/20 p-3">
           <div className="grid gap-2 sm:grid-cols-2">
             <Select value={activityType} onValueChange={(value) => setActivityType(value as typeof activityType)}>
@@ -172,7 +196,7 @@ export function CrmActivityTimeline({
         </div>
       )}
 
-      {emailApprovals.length > 0 && (
+      {!loading && !activityError && !approvalError && emailApprovals.length > 0 && (
         <div className="mb-3 space-y-2">
           <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
             <Mail className="size-3.5" aria-hidden />

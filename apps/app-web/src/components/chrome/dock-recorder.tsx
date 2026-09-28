@@ -76,7 +76,11 @@ function LevelMeter({ level }: { level: () => number }) {
 }
 
 type DesktopCaptureKind = Exclude<RecorderCaptureSource, "mic">;
-type DesktopCaptureSource = { id: string; name: string };
+type DesktopCaptureSource = {
+  id: string;
+  name: string;
+  thumbnailDataUrl?: string | null;
+};
 
 export type DesktopCaptureSelection = {
   source: DesktopCaptureKind;
@@ -170,14 +174,23 @@ function CaptureSourcePicker({
                   onChange({ source: kind, id: source.id });
                 }}
                 className={cn(
-                  "relative flex min-h-24 min-w-0 flex-col items-center justify-center gap-2 rounded-xl border p-3 text-center transition-colors",
+                  "relative flex min-w-0 flex-col gap-2 rounded-xl border p-2 text-center transition-colors",
                   active
                     ? "border-primary bg-primary/5 text-foreground ring-1 ring-primary"
                     : "border-border text-muted-foreground hover:border-foreground/30 hover:bg-accent hover:text-foreground",
                 )}
               >
-                <span className="flex size-9 items-center justify-center rounded-lg bg-muted">
-                  <Icon className="size-5" aria-hidden />
+                <span className="flex aspect-video w-full items-center justify-center overflow-hidden rounded-lg bg-muted">
+                  {source.thumbnailDataUrl ? (
+                    <img
+                      src={source.thumbnailDataUrl}
+                      alt=""
+                      draggable={false}
+                      className="size-full object-contain"
+                    />
+                  ) : (
+                    <Icon className="size-5" aria-hidden />
+                  )}
                 </span>
                 <span className="w-full truncate text-xs font-medium" title={source.name}>
                   {source.name}
@@ -204,8 +217,8 @@ function CaptureSourcePicker({
  * Desktop display pick: list the shell's shareable screens and windows and
  * require an explicit selection before the capture arms. Resolves the picked
  * desktopCapturer source id + kind, or null on cancel / no picker / no sources.
- * Source ids and names are the whole renderer boundary: the shell deliberately
- * does not send live thumbnails of every open window.
+ * Each source includes one bounded snapshot from the moment the dialog opens;
+ * there is no live preview stream or refresh loop.
  * The body copy is deliberately honest about audio scope: Chromium/Electron
  * loopback is whole-system output, so a window pick still records ALL
  * computer audio, never only that app's (per-application audio isolation is

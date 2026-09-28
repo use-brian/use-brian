@@ -36,6 +36,7 @@ import {
   bornActivated,
   bornVerified,
 } from '@use-brian/core'
+import { bindWorkspaceSkillRevision } from './skill-derived-store.js'
 
 // ── Inputs ─────────────────────────────────────────────────────────
 
@@ -332,6 +333,8 @@ export type WorkspaceSkillStore = {
   // ── Workspace-scoped CRUD ────────────────────────────────────────
   /** All visible skills (bi-temporally alive) in the workspace. */
   listForWorkspace(workspaceId: string, opts?: { actingUserId?: string }): Promise<WorkspaceSkill[]>
+  /** Canonical scoped rows only, each bound to its immutable revision receipt. */
+  listScopedForWorkspace(workspaceId: string): Promise<WorkspaceSkill[]>
   create(userId: string, workspaceId: string, input: CreateSkillInput): Promise<WorkspaceSkill>
   update(
     userId: string,
@@ -564,6 +567,41 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
         [workspaceId],
       )
       return result.rows.map(rowToWorkspaceSkill)
+    },
+
+    async listScopedForWorkspace(workspaceId) {
+      const result = await query<WorkspaceSkillRow & {
+        scopeReceiptId: string
+        scopeUserId: string | null
+        scopeAssistantId: string | null
+        scopeSensitivity: 'public' | 'internal' | 'confidential'
+        scopeCompartments: string[]
+        scopeProjectIds: string[]
+        scopeVersion: string
+        scopeHeld: boolean
+      }>(
+        `SELECT s.*,sr.id AS "scopeReceiptId",sr.user_id AS "scopeUserId",
+                sr.assistant_id AS "scopeAssistantId",sr.sensitivity AS "scopeSensitivity",
+                sr.compartments AS "scopeCompartments",sr.project_ids AS "scopeProjectIds",
+                sr.scope_version::text AS "scopeVersion",sr.scope_held AS "scopeHeld"
+           FROM workspace_skills s
+           JOIN workspace_skill_scope_revisions sr ON sr.id=s.scope_revision_id
+          WHERE s.workspace_id=$1 AND s.valid_to IS NULL AND NOT sr.scope_held
+          ORDER BY s.created_at DESC`,
+        [workspaceId],
+      )
+      return result.rows.map((row) => bindWorkspaceSkillRevision(rowToWorkspaceSkill(row), {
+        id: row.scopeReceiptId,
+        skillId: row.id,
+        workspaceId: row.workspace_id,
+        userId: row.scopeUserId,
+        assistantId: row.scopeAssistantId,
+        sensitivity: row.scopeSensitivity,
+        compartments: row.scopeCompartments,
+        projectIds: row.scopeProjectIds,
+        scopeVersion: row.scopeVersion,
+        scopeHeld: row.scopeHeld,
+      }))
     },
 
     async create(userId, workspaceId, input) {
@@ -1001,17 +1039,43 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
     },
 
     async listCuratorEligible(workspaceId) {
-      const result = await query<WorkspaceSkillRow>(
-        `SELECT ${COLS_ALL} FROM workspace_skills
-         WHERE workspace_id = $1
-           AND write_origin = 'background_review'
-           AND pinned = false
-           AND state IN ('active', 'stale')
-           AND valid_to IS NULL
-         ORDER BY last_invoked_at NULLS FIRST, created_at ASC`,
+      const result = await query<WorkspaceSkillRow & {
+        scopeReceiptId: string
+        scopeUserId: string | null
+        scopeAssistantId: string | null
+        scopeSensitivity: 'public' | 'internal' | 'confidential'
+        scopeCompartments: string[]
+        scopeProjectIds: string[]
+        scopeVersion: string
+        scopeHeld: boolean
+      }>(
+        `SELECT s.*,sr.id AS "scopeReceiptId",sr.user_id AS "scopeUserId",
+                sr.assistant_id AS "scopeAssistantId",sr.sensitivity AS "scopeSensitivity",
+                sr.compartments AS "scopeCompartments",sr.project_ids AS "scopeProjectIds",
+                sr.scope_version::text AS "scopeVersion",sr.scope_held AS "scopeHeld"
+           FROM workspace_skills s
+           JOIN workspace_skill_scope_revisions sr ON sr.id=s.scope_revision_id
+          WHERE s.workspace_id = $1
+           AND s.write_origin = 'background_review'
+           AND s.pinned = false
+           AND s.state IN ('active', 'stale')
+           AND s.valid_to IS NULL
+           AND NOT sr.scope_held
+         ORDER BY s.last_invoked_at NULLS FIRST, s.created_at ASC`,
         [workspaceId],
       )
-      return result.rows.map(rowToWorkspaceSkill)
+      return result.rows.map((row) => bindWorkspaceSkillRevision(rowToWorkspaceSkill(row), {
+        id: row.scopeReceiptId,
+        skillId: row.id,
+        workspaceId: row.workspace_id,
+        userId: row.scopeUserId,
+        assistantId: row.scopeAssistantId,
+        sensitivity: row.scopeSensitivity,
+        compartments: row.scopeCompartments,
+        projectIds: row.scopeProjectIds,
+        scopeVersion: row.scopeVersion,
+        scopeHeld: row.scopeHeld,
+      }))
     },
 
     // ── V2 — absorption (S15) ────────────────────────────────────────

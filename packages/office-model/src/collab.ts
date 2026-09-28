@@ -47,15 +47,19 @@ export function hasOfficeBaseSnapshot(doc: Y.Doc): boolean {
 export function appendOfficeCommand(doc: Y.Doc, input: OfficeCommand): void {
   const command = OfficeCommandSchema.parse(input)
   const base = baseSnapshot(doc)
+  const commands = doc.getMap<string>(COMMANDS)
+  if (commands.has(command.commandId)) return
   if (base.family === 'document') {
     applyDocumentCommand(doc, command, command.origin)
+    doc.transact(() => {
+      commands.set(command.commandId, JSON.stringify(withoutSnapshotFence(command)))
+      doc.getArray<string>(COMMAND_ORDER).push([command.commandId])
+    }, command.origin)
     return
   }
-  if (doc.getMap<string>(COMMANDS).has(command.commandId)) return
   if (command.kind === 'batch' && command.expectedSnapshotHash) applyOfficeCommand(yDocToSnapshot(doc), command)
   const admitted = withoutSnapshotFence(command)
   doc.transact(() => {
-    const commands = doc.getMap<string>(COMMANDS)
     if (commands.has(command.commandId)) return
     commands.set(command.commandId, JSON.stringify(admitted))
     doc.getArray<string>(COMMAND_ORDER).push([command.commandId])
@@ -109,6 +113,12 @@ export function observeOfficeHistory(history: Y.UndoManager, listener: (state: O
 /** Stable command identities let the offline journal follow undo/redo. */
 export function officeCommandIds(doc: Y.Doc): string[] {
   return orderedCommandIds(doc)
+}
+
+/** A retry identity is valid only for the exact admitted command payload. */
+export function officeCommandMatches(doc: Y.Doc, input: OfficeCommand): boolean {
+  const command = OfficeCommandSchema.parse(input)
+  return doc.getMap<string>(COMMANDS).get(command.commandId) === JSON.stringify(withoutSnapshotFence(command))
 }
 
 /** Replace the materialized base inside the existing shared Y.Doc.

@@ -23,7 +23,11 @@
  * [COMP:api/skill-categorize]
  */
 
-import { collectStream, type LLMProvider } from '@use-brian/core'
+import {
+  collectStream,
+  type DecisionExecutionPort,
+  type LLMProvider,
+} from '@use-brian/core'
 import {
   BUILTIN_SKILL_GROUPS,
   UNSORTED_SKILL_GROUP,
@@ -271,13 +275,20 @@ export function parseCategorySuggestions(
 /** Ask the model to group a batch. Returns `[]` rather than throwing when the
  *  answer is unusable — an empty review list is a fine outcome, an exception
  *  on the user's "Suggest" click is not. */
-export async function suggestSkillCategories(params: {
+export type SuggestSkillCategoriesParams = {
   provider: LLMProvider
   model: string
   skills: CategorizableSkill[]
   /** Groups the library already uses, so the model reuses before inventing. */
   existingGroups?: string[]
-}): Promise<CategorySuggestion[]> {
+  decisionRuntime?: DecisionExecutionPort
+  workspaceId?: string
+  runId?: string
+}
+
+async function suggestSkillCategoriesWithLlm(
+  params: SuggestSkillCategoriesParams,
+): Promise<CategorySuggestion[]> {
   const { provider, model, skills, existingGroups = [] } = params
   if (skills.length === 0) return []
 
@@ -303,4 +314,125 @@ export async function suggestSkillCategories(params: {
     .trim()
 
   return parseCategorySuggestions(text, skills, existingGroups)
+}
+
+/**
+ * Suggest skill groups through the shared decision cascade. Existing groups
+ * can terminate without an LLM; a new taxonomy label or uncertain choice uses
+ * one LLM completion. The apply route remains the only mutation boundary.
+ */
+export async function suggestSkillCategories(
+  params: SuggestSkillCategoriesParams,
+): Promise<CategorySuggestion[]> {
+  const { provider, model, skills, existingGroups = [] } = params
+  if (skills.length === 0) return []
+  if (!params.decisionRuntime) return suggestSkillCategoriesWithLlm(params)
+
+  const knownGroups = distinctSkillGroups([
+    ...BUILTIN_SKILL_GROUPS,
+    ...existingGroups,
+    UNSORTED_SKILL_GROUP,
+  ])
+  // A decision-model route must stay within the published batch/choice
+  // envelope. Oversized libraries retain the one-call legacy behavior.
+  if (skills.length > 64 || knownGroups.length + 1 > 255) {
+    return suggestSkillCategoriesWithLlm(params)
+  }
+
+  try {
+    const result = await params.decisionRuntime.run<CategorySuggestion[]>({
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      llm: { provider, modelId: model },
+      request: {
+        runId: params.runId ?? `skill-categorization-${params.workspaceId ?? 'none'}-${Date.now()}`,
+        operation: {
+          id: 'skill.categorization',
+          version: '1',
+          stateVersion: '1',
+          questionVersion: '1',
+        },
+        state: {
+          skills: skills.map((skill, index) => ({
+            index: index + 1,
+            name: clip(skill.name, 120),
+            description: clip(skill.description, DESCRIPTION_CAP),
+            whenToUse: skill.whenToUse ? clip(skill.whenToUse, WHEN_TO_USE_CAP) : null,
+            current: normalizeSkillGroup(skill.category),
+          })),
+          knownGroups,
+        },
+        questions: skills.map((skill, index) => ({
+          kind: 'choice' as const,
+          id: String(index + 1),
+          prompt: `Choose the best existing group for ${skill.name}, or choose new group when none fits.`,
+          options: [
+            ...knownGroups.map((value) => ({ value })),
+            { value: '__new_group__', description: 'No supplied group fits; generate a restrained new taxonomy label' },
+          ],
+        })),
+      },
+      operation: {
+        decide(response, { profile }) {
+          const answers = new Map(response.answers.map((answer) => [answer.questionId, answer]))
+          const policy = profile?.policy
+          const reviewBelow = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+            && typeof policy.reviewBelow === 'number' ? policy.reviewBelow : undefined
+          const suggestions: CategorySuggestion[] = []
+          for (let index = 0; index < skills.length; index++) {
+            const answer = answers.get(String(index + 1))
+            if (answer?.kind !== 'choice') return { kind: 'unavailable', reason: 'invalid_response' }
+            const selected = answer.evidence.probabilities?.[answer.value] ?? answer.evidence.confidence
+            if (reviewBelow !== undefined && selected !== undefined && selected < reviewBelow) {
+              return { kind: 'follow_up', reason: 'uncertain' }
+            }
+            if (answer.value === '__new_group__') {
+              return { kind: 'follow_up', reason: 'generation_required' }
+            }
+            if (!knownGroups.includes(answer.value)) {
+              return { kind: 'unavailable', reason: 'invalid_response' }
+            }
+            const skill = skills[index]!
+            const current = normalizeSkillGroup(skill.category)
+            if (skillGroupKey(current) !== skillGroupKey(answer.value)) {
+              suggestions.push({
+                skillRowId: skill.rowId,
+                name: skill.name,
+                current,
+                suggested: answer.value,
+              })
+            }
+          }
+          return { kind: 'complete', result: suggestions }
+        },
+        validateResult(suggestions) {
+          const allowed = new Set(skills.map((skill) => skill.rowId))
+          const seen = new Set<string>()
+          for (const suggestion of suggestions) {
+            if (!allowed.has(suggestion.skillRowId) || seen.has(suggestion.skillRowId) || !suggestion.suggested.trim()) {
+              throw new Error('skill categorization returned an invalid suggestion set')
+            }
+            seen.add(suggestion.skillRowId)
+          }
+          return suggestions
+        },
+        safeFailure: () => [],
+        async completeWithLlm(context) {
+          const suggestions = await suggestSkillCategoriesWithLlm({
+            ...params,
+            provider: context.llm.provider,
+            model: context.llm.modelId,
+            decisionRuntime: undefined,
+          })
+          return {
+            result: suggestions,
+            providerId: context.llm.provider.name,
+            model: { catalogId: context.llm.modelId, wireId: context.llm.modelId },
+          }
+        },
+      },
+    })
+    return result.result
+  } catch {
+    return []
+  }
 }

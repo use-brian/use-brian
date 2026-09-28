@@ -1,6 +1,6 @@
 /** Durable unfinished Feed compositions. [COMP:feed/post-working-copies] */
 import { maxSensitivity } from '@use-brian/core'
-import type { CampaignEmailMetadata, FeedComposition } from '@use-brian/shared'
+import type { CampaignEmailMetadata, FeedComposition, FeedLinkedInContext } from '@use-brian/shared'
 import { getPool, query } from './client.js'
 import { seedFirstContentDraftMessage, withPlatformTitlePrefix, type ContentPlanningPlatform, type PostMedia } from './content-planning-store.js'
 
@@ -24,6 +24,7 @@ export type PostWorkingContent = {
   threadSegments: string[]
   article: { sourceUrl: string; title: string; description: string }
   /** Present only for the Email channel; revisioned with the composition. */
+  linkedin?: FeedLinkedInContext
   email?: CampaignEmailMetadata
   media: PostMedia[]
 }

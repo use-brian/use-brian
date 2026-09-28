@@ -23,9 +23,8 @@ vi.mock('../client.js', () => ({
   queryGated: vi.fn(async () => ({ rows: [], rowCount: 0 })),
   // Dedupe lookup finds nothing, so every case takes the fresh-insert branch.
   queryWithRLS: vi.fn(async () => ({ rows: [], rowCount: 0 })),
-  getAppPool: vi.fn(() => {
-    throw new Error('app pool unused in this suite')
-  }),
+  getAppPool: vi.fn(() => ({ connect: async () => ({ query: vi.fn(async () => ({ rows: [] })), release: vi.fn() }) })),
+  applyRLSGucs: vi.fn(),
   rollbackAndRelease: vi.fn(),
 }))
 

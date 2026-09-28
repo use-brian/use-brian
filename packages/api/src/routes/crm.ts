@@ -236,6 +236,12 @@ function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
 }
 
+function respondToScopeRefusal(error: unknown, res: Response): boolean {
+  if ((error as { code?: string })?.code !== 'scope_operation_denied') return false
+  res.status(403).json({ code: 'scope_operation_denied', error: 'This relationship is unavailable for this operation. Ask a workspace administrator to review access.' })
+  return true
+}
+
 export function crmRoutes({
   workspaceStore,
   entityLinks,
@@ -368,6 +374,7 @@ export function crmRoutes({
       const close = nullableText(body.closeDate, 10)
       const record = await createDeal(ctx.userId, {
         workspaceId: ctx.workspaceId,
+        access: ctx,
         contactId: nullableText(body.contactId, 100),
         companyId: nullableText(body.companyId, 100),
         stage: legacyStage,
@@ -404,6 +411,7 @@ export function crmRoutes({
       await updateEntity(ctx.userId, id, { attributes }, ctx)
     }
     await appendCrmActivity({
+      access: ctx,
       userId: ctx.userId,
       workspaceId: ctx.workspaceId,
       entityId: id,
@@ -465,6 +473,7 @@ export function crmRoutes({
         })),
       })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       console.error('[crm] email drafts list failed:', err)
       res.status(500).json({ error: 'Failed to load email drafts' })
     }
@@ -535,6 +544,7 @@ export function crmRoutes({
         companies: records.filter((r) => r.kind === 'company'),
       })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       if (req.query.kind !== undefined && err instanceof Error
         && (err.message.includes('cursor') || err.message.includes('sort'))) {
         res.status(400).json({ error: err.message })
@@ -552,6 +562,7 @@ export function crmRoutes({
       const summary = await getCrmSummary(member.ctx, queryText(req.query.pipeline, 100))
       res.json(summary)
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       console.error('[crm] summary failed:', err)
       res.status(500).json({ error: 'Failed to load CRM summary' })
     }
@@ -579,6 +590,7 @@ export function crmRoutes({
       })
       res.json({ items })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       console.error('[crm] lookup failed:', err)
       res.status(500).json({ error: 'Failed to load CRM lookup' })
     }
@@ -591,6 +603,7 @@ export function crmRoutes({
       const created = await createRecord(member.ctx, (req.body ?? {}) as Record<string, unknown>)
       res.status(201).json({ ok: true, ...created })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       const message = err instanceof Error ? err.message : String(err)
       res.status(400).json({ error: message })
     }
@@ -607,6 +620,7 @@ export function crmRoutes({
       }
       res.json(bundle)
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       console.error('[crm] record read failed:', err)
       res.status(500).json({ error: 'Failed to load CRM record' })
     }
@@ -750,6 +764,7 @@ export function crmRoutes({
       const changedFields = Object.keys(body).filter((field) => !sameValue(beforePublic[field], afterPublic[field]))
       for (const field of changedFields) {
         await appendCrmActivity({
+          access: member.ctx,
           userId: member.ctx.userId,
           workspaceId: member.ctx.workspaceId,
           entityId: before.id,
@@ -764,6 +779,7 @@ export function crmRoutes({
       }
       res.json(bundle)
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
     }
   })
@@ -819,27 +835,32 @@ export function crmRoutes({
     router.post(`/:workspaceId/records/:entityId/${action}`, async (req, res) => {
       const member = await memberContext(req as never, res)
       if (!member) return
-      const updated = await setCrmArchived({
-        ctx: member.ctx,
-        entityId: req.params.entityId,
-        archived: action === 'archive',
-      })
-      if (!updated) {
-        res.status(404).json({ error: 'Record not found' })
-        return
+      try {
+        const updated = await setCrmArchived({
+          ctx: member.ctx,
+          entityId: req.params.entityId,
+          archived: action === 'archive',
+        })
+        if (!updated) {
+          res.status(404).json({ error: 'Record not found' })
+          return
+        }
+        await appendCrmActivity({
+          access: member.ctx,
+          userId: member.ctx.userId,
+          workspaceId: member.ctx.workspaceId,
+          entityId: updated.id,
+          activityType: 'field_change',
+          summary: action === 'archive' ? 'CRM record archived' : 'CRM record restored',
+          metadata: { field: 'crm_archived_at', action },
+        })
+        void notifyBrainInboxChange(member.ctx.workspaceId,
+          updated.kind === 'person' ? 'contact' : updated.kind as 'company' | 'deal',
+          updated.id, 'update')
+        res.json({ ok: true })
+      } catch (error) {
+        if (!respondToScopeRefusal(error, res)) throw error
       }
-      await appendCrmActivity({
-        userId: member.ctx.userId,
-        workspaceId: member.ctx.workspaceId,
-        entityId: updated.id,
-        activityType: 'field_change',
-        summary: action === 'archive' ? 'CRM record archived' : 'CRM record restored',
-        metadata: { field: 'crm_archived_at', action },
-      })
-      void notifyBrainInboxChange(member.ctx.workspaceId,
-        updated.kind === 'person' ? 'contact' : updated.kind as 'company' | 'deal',
-        updated.id, 'update')
-      res.json({ ok: true })
     })
   }
 
@@ -863,6 +884,7 @@ export function crmRoutes({
         return
       }
       await appendCrmActivity({
+        access: member.ctx,
         userId: member.ctx.userId,
         workspaceId: member.ctx.workspaceId,
         entityId: updated.id,
@@ -876,6 +898,7 @@ export function crmRoutes({
       })
       res.json({ ok: true, customFields: updated.attributes.custom_fields ?? {} })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
     }
   })
@@ -926,6 +949,7 @@ export function crmRoutes({
         return
       }
       await appendCrmActivity({
+        access: member.ctx,
         userId: member.ctx.userId,
         workspaceId: member.ctx.workspaceId,
         entityId: changed.entity.id,
@@ -939,6 +963,7 @@ export function crmRoutes({
       })
       res.json({ ok: true, stageId: changed.toStage.id })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       res.status(409).json({ error: err instanceof Error ? err.message : String(err) })
     }
   })
@@ -977,19 +1002,26 @@ export function crmRoutes({
       res.status(400).json({ error: 'occurredAt must be a valid date' })
       return
     }
-    const activity = await appendCrmActivity({
-      userId: member.ctx.userId,
-      workspaceId: member.ctx.workspaceId,
-      entityId: entity.id,
-      activityType,
-      direction: ['inbound', 'outbound', 'internal'].includes(req.body?.direction)
-        ? req.body.direction
-        : 'internal',
-      occurredAt,
-      subject: nullableText(req.body?.subject, 500),
-      summary,
-    })
-    res.status(201).json({ activity })
+    try {
+      const activity = await appendCrmActivity({
+        access: member.ctx,
+        userId: member.ctx.userId,
+        workspaceId: member.ctx.workspaceId,
+        entityId: entity.id,
+        activityType,
+        direction: ['inbound', 'outbound', 'internal'].includes(req.body?.direction)
+          ? req.body.direction
+          : 'internal',
+        occurredAt,
+        subject: nullableText(req.body?.subject, 500),
+        summary,
+      })
+      if (!activity) { res.status(404).json({ error: 'Record not found' }); return }
+      res.status(201).json({ activity })
+    } catch (error) {
+      if (respondToScopeRefusal(error, res)) return
+      throw error
+    }
   })
 
   router.get('/:workspaceId/config', async (req, res) => {
@@ -1143,27 +1175,35 @@ export function crmRoutes({
       res.status(400).json({ error: 'contactId is required' })
       return
     }
-    const ok = await addCrmDealParticipant({
-      ctx: member.ctx,
-      dealId: req.params.entityId,
-      contactId,
-      role: nullableText(req.body?.role, 100),
-      isPrimary: req.body?.isPrimary === true,
-    })
-    if (!ok) res.status(404).json({ error: 'Deal or contact not found' })
-    else res.status(201).json({ ok: true })
+    try {
+      const ok = await addCrmDealParticipant({
+        ctx: member.ctx,
+        dealId: req.params.entityId,
+        contactId,
+        role: nullableText(req.body?.role, 100),
+        isPrimary: req.body?.isPrimary === true,
+      })
+      if (!ok) res.status(404).json({ error: 'Deal or contact not found' })
+      else res.status(201).json({ ok: true })
+    } catch (error) {
+      if (!respondToScopeRefusal(error, res)) throw error
+    }
   })
 
   router.delete('/:workspaceId/records/:entityId/participants/:contactId', async (req, res) => {
     const member = await memberContext(req as never, res)
     if (!member) return
-    const ok = await removeCrmDealParticipant({
-      ctx: member.ctx,
-      dealId: req.params.entityId,
-      contactId: req.params.contactId,
-    })
-    if (!ok) res.status(404).json({ error: 'Participant not found' })
-    else res.json({ ok: true })
+    try {
+      const ok = await removeCrmDealParticipant({
+        ctx: member.ctx,
+        dealId: req.params.entityId,
+        contactId: req.params.contactId,
+      })
+      if (!ok) res.status(404).json({ error: 'Participant not found' })
+      else res.json({ ok: true })
+    } catch (error) {
+      if (!respondToScopeRefusal(error, res)) throw error
+    }
   })
 
   router.get('/:workspaceId/reports', async (req, res) => {
@@ -1195,6 +1235,7 @@ export function crmRoutes({
         }),
       })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       console.error('[crm] duplicate review unavailable:', err instanceof Error ? err.message : String(err))
       res.status(503).json({ error: 'Duplicate review is temporarily unavailable' })
     }
@@ -1206,6 +1247,7 @@ export function crmRoutes({
     try {
       res.json({ separations: await listActiveCrmEntitySeparations(member.ctx.workspaceId) })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       console.error('[crm] separation list unavailable:', err instanceof Error ? err.message : String(err))
       res.status(503).json({ error: 'Kept-separate records are temporarily unavailable' })
     }
@@ -1233,6 +1275,7 @@ export function crmRoutes({
         idempotent: !result.inserted,
       })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       const status = err instanceof EntityMergeError ? 409 : 500
       res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
     }
@@ -1294,6 +1337,7 @@ export function crmRoutes({
         undoUntil: new Date(record.mergedAt.getTime() + 7 * 86_400_000).toISOString(),
       })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       const status = err instanceof EntityMergeError ? 409 : 500
       res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
     }
@@ -1311,6 +1355,7 @@ export function crmRoutes({
       }, { repo: mergeRepo })
       res.json({ ok: true })
     } catch (err) {
+      if (respondToScopeRefusal(err, res)) return
       const status = err instanceof UndoMergeError ? 409 : 500
       res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
     }

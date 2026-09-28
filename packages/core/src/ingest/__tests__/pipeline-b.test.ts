@@ -50,6 +50,7 @@ import {
 } from '../pipeline-b.js'
 import { estimateStringTokens } from '../../compaction/index.js'
 import type { PlatformEngagementMetrics } from '../types.js'
+import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 // ── Mock provider (sequenced responses across multiple stream() calls) ──
 
@@ -694,6 +695,38 @@ function makeDeps(over: Partial<PipelineBDeps> & { provider: LLMProvider }): Pip
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe('[COMP:brain/pipeline-b] processEpisode', () => {
+  it('never skips extraction when the observation says no extraction is needed', async () => {
+    const requests: ProviderRequest[] = []
+    const provider = sequencedProvider([
+      JSON.stringify({ summary: 'Still extracted.', entities: [], edges: [], memories: [], tags: [] }),
+    ], requests)
+    const observe = vi.fn(async (request) => ({
+      providerId: 'fixture-decision',
+      model: request.model,
+      answers: [{
+        questionId: 'needs_extraction',
+        kind: 'boolean' as const,
+        value: false,
+        evidence: { source: 'native_distribution' as const, confidence: 0.99 },
+      }],
+    }))
+    const decisionRuntime = executionFixture({
+      mode: 'shadow',
+      llm: provider,
+      primary: fixtureDecisionProvider(observe),
+    })
+
+    const result = await processEpisode(
+      baseEpisode(),
+      'A deliberately quiet note.',
+      makeDeps({ provider, decisionRuntime, classifierModel: null }),
+    )
+
+    expect(observe).toHaveBeenCalledOnce()
+    expect(requests).toHaveLength(1)
+    expect(result).toMatchObject({ extracted: true, summaryText: 'Still extracted.' })
+  })
+
   it('writes entities (CRM-routed for person/company), edges, memories, then archives the Episode', async () => {
     // Shared world: CRM-create side-effects make the freshly-inserted entity
     // row visible to subsequent EntityStore lookups, mirroring the real
@@ -3211,6 +3244,31 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
       due_iso: null,
       assignee_ref: undefined,
     }))
+
+  it('keeps readiness after extraction and can terminally reject every candidate without an LLM call', async () => {
+    const { provider, requests } = capturingProvider([readinessSlice(2, 0)])
+    const decisionRuntime = executionFixture({
+      llm: provider,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: request.questions.map((question) => ({
+          questionId: question.id,
+          kind: 'choice' as const,
+          value: 'not_a_task',
+          evidence: { source: 'native_distribution' as const, probabilities: { not_a_task: 0.98, ready: 0.01, needs_spec: 0.01 } },
+        })),
+      })),
+    })
+    const assessments = await judgeTaskReadinessBatch(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      sourceFor(2),
+      candidatesFor(2),
+      makeDeps({ provider, decisionRuntime }),
+    )
+    expect(assessments.map((assessment) => assessment.classification)).toEqual(['not_a_task', 'not_a_task'])
+    expect(requests).toHaveLength(0)
+  })
 
   /** `count` ready assessments at LOCAL indices 0..count-1, from `firstTitle`. */
   function readinessSlice(count: number, firstTitle: number): string {

@@ -27,8 +27,20 @@ import { z } from 'zod'
 import { collectStream } from '../providers/accumulator.js'
 import type { LLMProvider } from '../providers/types.js'
 import type { EntityKind, EntityRecord } from '../entities/types.js'
+import type { DecisionExecutionPort } from '../decisions/index.js'
 
 const MAX_ENTITIES_IN_PROMPT = 200
+const CROSS_KIND_ALIAS_FAMILY = new Set<EntityKind>([
+  'company',
+  'project',
+  'product',
+  'repository',
+])
+
+function compatibleAliasKinds(canonical: EntityKind, alias: EntityKind): boolean {
+  return canonical === alias
+    || (CROSS_KIND_ALIAS_FAMILY.has(canonical) && CROSS_KIND_ALIAS_FAMILY.has(alias))
+}
 
 const clusterSchema = z.object({
   canonical_id: z.string(),
@@ -55,6 +67,9 @@ export interface AliasClustererDeps {
   entities: readonly EntityRecord[]
   provider: LLMProvider
   model: string
+  decisionRuntime?: DecisionExecutionPort
+  workspaceId?: string
+  runId?: string
 }
 
 const SYSTEM_PROMPT =
@@ -101,7 +116,7 @@ function buildPrompt(entities: readonly EntityRecord[]): string {
  * model output / network errors produce an empty result with a logged
  * warning. The caller treats empty as "nothing to apply".
  */
-export async function clusterEntityAliases(
+async function clusterEntityAliasesWithLlm(
   deps: AliasClustererDeps,
 ): Promise<AliasCluster[]> {
   if (deps.entities.length < 2) return []
@@ -163,16 +178,23 @@ export async function clusterEntityAliases(
   }
 
   const out: AliasCluster[] = []
+  const usedEntityIds = new Set<string>()
   for (const c of result.data.clusters) {
     const canonical = byId.get(c.canonical_id)
-    if (!canonical) continue
+    if (!canonical || usedEntityIds.has(canonical.id)) continue
     const aliases: EntityRecord[] = []
+    const localIds = new Set<string>()
     for (const aid of c.alias_ids) {
-      if (aid === c.canonical_id) continue
+      if (aid === c.canonical_id || localIds.has(aid) || usedEntityIds.has(aid)) continue
       const e = byId.get(aid)
-      if (e) aliases.push(e)
+      if (e && compatibleAliasKinds(canonical.kind, e.kind)) {
+        aliases.push(e)
+        localIds.add(aid)
+      }
     }
     if (aliases.length === 0) continue
+    usedEntityIds.add(canonical.id)
+    for (const alias of aliases) usedEntityIds.add(alias.id)
     out.push({
       canonicalEntityId: canonical.id,
       canonicalDisplayName: canonical.displayName,
@@ -184,4 +206,105 @@ export async function clusterEntityAliases(
     })
   }
   return out
+}
+
+/**
+ * Provider-neutral alias gate. A terminal false returns no clusters. A
+ * positive/uncertain answer receives one LLM completion that must produce a
+ * globally consistent, identity-compatible cluster set with reasoning text.
+ */
+export async function clusterEntityAliases(
+  deps: AliasClustererDeps,
+): Promise<AliasCluster[]> {
+  if (deps.entities.length < 2) return []
+  if (!deps.decisionRuntime) return clusterEntityAliasesWithLlm(deps)
+
+  const sliced = deps.entities.slice(0, MAX_ENTITIES_IN_PROMPT)
+  try {
+    const result = await deps.decisionRuntime.run<AliasCluster[]>({
+      ...(deps.workspaceId ? { workspaceId: deps.workspaceId } : {}),
+      llm: { provider: deps.provider, modelId: deps.model },
+      request: {
+        runId: deps.runId ?? `alias-clustering-${deps.workspaceId ?? 'none'}-${Date.now()}`,
+        operation: {
+          id: 'entity.alias-clustering',
+          version: '1',
+          stateVersion: '1',
+          questionVersion: '1',
+        },
+        state: {
+          entities: sliced.map((entity) => ({
+            id: entity.id,
+            kind: entity.kind,
+            displayName: entity.displayName,
+            aliases: entity.aliases,
+          })),
+        },
+        questions: [{
+          kind: 'boolean',
+          id: 'has_alias_clusters',
+          prompt: 'Does this supplied entity set contain at least one identity-compatible group that clearly refers to the same real-world identity?',
+          criteria: {
+            true: 'At least one identity group exists and needs canonical selection and reasoning',
+            false: 'No safe same-identity group exists',
+          },
+        }],
+      },
+      operation: {
+        decide(response, { profile }) {
+          const answer = response.answers[0]
+          if (answer?.kind !== 'boolean') return { kind: 'unavailable', reason: 'invalid_response' }
+          const policy = profile?.policy
+          const uncertaintyMin = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+            && typeof policy.uncertaintyMin === 'number' ? policy.uncertaintyMin : undefined
+          const uncertaintyMax = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+            && typeof policy.uncertaintyMax === 'number' ? policy.uncertaintyMax : undefined
+          if (
+            answer.pTrue !== undefined && uncertaintyMin !== undefined && uncertaintyMax !== undefined &&
+            answer.pTrue >= uncertaintyMin && answer.pTrue <= uncertaintyMax
+          ) return { kind: 'follow_up', reason: 'uncertain' }
+          return answer.value
+            ? { kind: 'follow_up', reason: 'generation_required' }
+            : { kind: 'complete', result: [] }
+        },
+        validateResult(clusters) {
+          const allowed = new Set(sliced.map((entity) => entity.id))
+          const used = new Set<string>()
+          for (const cluster of clusters) {
+            if (!allowed.has(cluster.canonicalEntityId) || used.has(cluster.canonicalEntityId) || !cluster.reasoning.trim()) {
+              throw new Error('alias clustering returned an invalid canonical entity')
+            }
+            used.add(cluster.canonicalEntityId)
+            for (const aliasId of cluster.aliasEntityIds) {
+              if (!allowed.has(aliasId) || used.has(aliasId)) {
+                throw new Error('alias clustering returned overlapping or unknown entities')
+              }
+              used.add(aliasId)
+            }
+          }
+          return clusters
+        },
+        safeFailure: () => [],
+        async completeWithLlm(context) {
+          const clusters = await clusterEntityAliasesWithLlm({
+            ...deps,
+            provider: context.llm.provider,
+            model: context.llm.modelId,
+            decisionRuntime: undefined,
+          })
+          return {
+            result: clusters,
+            providerId: context.llm.provider.name,
+            model: { catalogId: context.llm.modelId, wireId: context.llm.modelId },
+          }
+        },
+      },
+    })
+    return result.result
+  } catch (err) {
+    console.warn(
+      `[alias-clusterer] decision cascade failed: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    return []
+  }
 }

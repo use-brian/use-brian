@@ -5,7 +5,7 @@
  * suspends a turn, alongside the `pending_approvals` row. It captures the
  * minimum state needed to re-enter the query loop after a Cloud Run
  * restart: the suspended tool name, the model-proposed input (frozen at
- * suspension), and the loop step index.
+ * suspension), the initiating access ceiling, and the loop step index.
  *
  * Lifecycle:
  *   - INSERT at suspension time (tool executor, WU-6.3 territory).
@@ -22,6 +22,7 @@
  * [COMP:api/session-resume-store]
  */
 
+import { intersectAccessCeilings, type AccessCeiling } from '@use-brian/core'
 import { query } from './client.js'
 
 export type SessionResumePoint = {
@@ -34,6 +35,8 @@ export type SessionResumePoint = {
   selectedTier?: string
   selectedLegacyByo?: boolean
   selectedMeteredModel?: string
+  /** Original authoring/security principal. Absent only on legacy rows. */
+  startingAccessCeiling?: AccessCeiling
   createdAt: Date
 }
 
@@ -47,6 +50,7 @@ export type CreateSessionResumePointParams = {
   selectedTier?: string
   selectedLegacyByo?: boolean
   selectedMeteredModel?: string
+  startingAccessCeiling: AccessCeiling
 }
 
 const COLS = `
@@ -84,16 +88,31 @@ export type SessionResumeStore = {
 
 function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
   const storedInput = row.suspendedToolInput
-  const envelope = storedInput && typeof storedInput === 'object'
-    && (storedInput as Record<string, unknown>).__useBrianResumeVersion === 1
+  const envelopeVersion = storedInput && typeof storedInput === 'object'
+    ? (storedInput as Record<string, unknown>).__useBrianResumeVersion
+    : undefined
+  const envelope = envelopeVersion === 1 || envelopeVersion === 2
     ? storedInput as {
         toolInput?: unknown
         selectedCustomModel?: unknown
         selectedTier?: unknown
         selectedLegacyByo?: unknown
         selectedMeteredModel?: unknown
+        startingAccessCeiling?: unknown
       }
     : null
+  let startingAccessCeiling: AccessCeiling | undefined
+  if (envelopeVersion === 2 && envelope?.startingAccessCeiling) {
+    try {
+      const candidate = envelope.startingAccessCeiling as AccessCeiling
+      if (typeof candidate.workspaceId !== 'string' || !candidate.workspaceId
+        || typeof candidate.userId !== 'string' || !candidate.userId) throw new Error('access_ceiling_missing')
+      startingAccessCeiling = intersectAccessCeilings(candidate, candidate)
+    } catch {
+      // A malformed persisted authority snapshot is indistinguishable from a
+      // missing one. Leave it absent so replay fails closed.
+    }
+  }
   return {
     sessionId: row.sessionId as string,
     approvalId: row.approvalId as string,
@@ -112,6 +131,7 @@ function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
     ...(typeof envelope?.selectedMeteredModel === 'string'
       ? { selectedMeteredModel: envelope.selectedMeteredModel }
       : {}),
+    ...(startingAccessCeiling ? { startingAccessCeiling } : {}),
     createdAt: row.createdAt as Date,
   }
 }
@@ -135,12 +155,16 @@ export function createDbSessionResumeStore(): SessionResumeStore {
           params.approvalId,
           params.suspendedToolName,
           JSON.stringify({
-            __useBrianResumeVersion: 1,
+            __useBrianResumeVersion: 2,
             toolInput: params.suspendedToolInput,
             selectedCustomModel: params.selectedCustomModel,
             selectedTier: params.selectedTier,
             selectedLegacyByo: params.selectedLegacyByo,
             selectedMeteredModel: params.selectedMeteredModel,
+            startingAccessCeiling: intersectAccessCeilings(
+              params.startingAccessCeiling,
+              params.startingAccessCeiling,
+            ),
           }),
           params.loopStepIndex,
         ],

@@ -301,6 +301,61 @@ async function seedWorkflowAndRun(
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
+  it('withholds delivery and step output if authority changes during generation', async () => {
+    let revoked=false
+    const deliverToChannel=vi.fn(async()=>({status:'delivered' as const,channelType:'slack' as const,channelId:'fixture-channel'}))
+    const deps=makeDeps({deliverToChannel,
+      consultTransport:{async send(request){const response=await makeConsultTransport({responseText:'private result'}).send(request);revoked=true;return response}},
+      resolveRunScope:async()=>({assistantClearance:'internal',turnScope:{
+        access:{workspaceId:WORKSPACE_ID,userId:USER_ID,assistantId:PRIMARY_ASSISTANT_ID,assistantKind:'primary',
+          clearance:'internal',compartments:['product'],projectIds:[],visibilityAssistantIds:[]},
+        activeGroupId:null,activeProjectId:null,effectiveCompartments:['product'],effectiveProjectIds:[],
+        writeCompartments:['product'],writeProjectIds:[],
+      }, executeWithAuthority:async <T>(operation:()=>Promise<T>)=>{
+        const assert=()=>{if(revoked)throw Object.assign(new Error('Access changed.'),{reason:'authority_changed'})}
+        assert();const value=await operation();assert();return value
+      }}),
+    })
+    const {run}=await seedWorkflowAndRun(deps,{startStepId:'consult',steps:[{
+      id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Read authorized material',
+      deliver:{channelType:'slack',channelId:'fixture-channel'},
+    }]})
+    expect(await advanceWorkflowRun(deps,run.id)).toMatchObject({kind:'failed',error:{reason:'authority_changed'}})
+    expect(deliverToChannel).not.toHaveBeenCalled()
+    const steps=await deps.runStore.listStepRuns(USER_ID,run.id)
+    expect(steps[0].status).toBe('failed')
+    expect(JSON.stringify(steps[0].output)).not.toContain('private result')
+  })
+  it('threads the server-resolved run ceiling into an unattended consult', async () => {
+    const requests: ConsultRequest[] = []
+    const source = { resourceKind:'crm_event',resourceId:'event-fixture',version:'1',
+      workspaceId:WORKSPACE_ID,userId:null,assistantId:null,sensitivity:'internal' as const,
+      compartments:['product'],projectIds:[] }
+    const resolveRunScope = vi.fn(async () => ({ assistantClearance:'internal' as const, turnScope:{
+      access:{workspaceId:WORKSPACE_ID,userId:USER_ID,assistantId:PRIMARY_ASSISTANT_ID,assistantKind:'primary' as const,
+        clearance:'internal' as const,compartments:['product'],projectIds:[],visibilityAssistantIds:[]},
+      activeGroupId:null,activeProjectId:null,effectiveCompartments:['product'],effectiveProjectIds:[],
+      writeCompartments:['product'],writeProjectIds:[],
+    },inputScopeEvidence:{sources:[source]} }))
+    const deps = makeDeps({resolveRunScope,consultTransport:{async send(request){requests.push(request);return makeConsultTransport().send(request)}}})
+    const {run}=await seedWorkflowAndRun(deps,{startStepId:'consult',steps:[{
+      id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Read the authorized material',
+    }]},'schedule')
+    expect((await advanceWorkflowRun(deps,run.id)).kind).toBe('completed')
+    expect(resolveRunScope).toHaveBeenCalledWith(expect.objectContaining({userId:USER_ID,assistantId:PRIMARY_ASSISTANT_ID,externalClientPrincipal:undefined}))
+    expect(requests[0].callerAccessCeiling).toEqual({workspaceId:WORKSPACE_ID,userId:USER_ID,
+      clearance:'internal',compartments:['product'],mutationCompartments:['product'],projectIds:[],visibilityAssistantIds:[]})
+    expect(requests[0].callerScopeEvidence).toMatchObject({compartments:['product'],projectIds:[],sources:[source]})
+  })
+  it('fails before building tools when the persisted run authority cannot be renewed', async () => {
+    const buildToolRegistry=vi.fn(async()=>new Map())
+    const deps=makeDeps({buildToolRegistry,resolveRunScope:async()=>{throw Object.assign(new Error('Review permissions and start a new run.'),{reason:'workflow_authority_unavailable'})}})
+    const {run}=await seedWorkflowAndRun(deps,{startStepId:'consult',steps:[{
+      id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Do not execute',
+    }]})
+    expect(await advanceWorkflowRun(deps,run.id)).toMatchObject({kind:'failed',error:{reason:'workflow_authority_unavailable'}})
+    expect(buildToolRegistry).not.toHaveBeenCalled()
+  })
   it('[COMP:api/client-principal-runtime] resolves a mapped sender, freezes it, and threads it to the consult', async () => {
     const stores = makeFakeStores()
     const requests: ConsultRequest[] = []

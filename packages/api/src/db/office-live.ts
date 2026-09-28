@@ -5,6 +5,8 @@ import {
   OfficeCommandSchema,
   appendOfficeCommand,
   encodeOfficeState,
+  officeCommandIds,
+  officeCommandMatches,
   officeStateVector,
   preflightOfficeCandidate,
   snapshotToYDoc,
@@ -16,6 +18,8 @@ import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 
 export type OfficeLiveSnapshot = { snapshot: OfficeArtifactSnapshot; seq: number; baseVersion: number; canonicalHash: string }
 
+type OfficeLiveRow = { ydoc: Buffer; seq: number; baseVersion: number; canonicalHash: string }
+
 function decode(bytes: Uint8Array): Y.Doc {
   const doc = new Y.Doc()
   Y.applyUpdate(doc, bytes)
@@ -24,7 +28,7 @@ function decode(bytes: Uint8Array): Y.Doc {
 
 export function createOfficeLiveStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   const get = async (userId: string, artifactId: string): Promise<OfficeLiveSnapshot | null> => {
-    const result = await db<{ ydoc: Buffer; seq: number; baseVersion: number; canonicalHash: string }>(userId, `
+    const result = await db<OfficeLiveRow>(userId, `
       SELECT ydoc, seq::int AS seq, base_version::int AS "baseVersion", canonical_hash AS "canonicalHash"
         FROM office_collab_documents WHERE artifact_id = $1
     `, [artifactId])
@@ -102,6 +106,49 @@ export function createOfficeLiveStore(db: OfficeDbQuery = defaultOfficeDbQuery) 
       `, [params.artifactId, params.expectedSeq, Buffer.from(update), Buffer.from(officeStateVector(doc)), hash])
       const row = saved.rows[0]
       return row ? { snapshot, seq: row.seq, baseVersion: current.baseVersion, canonicalHash: hash } : 'conflict'
+    },
+
+    /** One reconnect batch becomes visible in one sequence-fenced write.
+     * Existing command IDs recover a lost acknowledgement or an older route's
+     * applied prefix; an out-of-order/partial identity match is a conflict. */
+    async appendOfflineCommands(params: { userId: string; artifactId: string; expectedSeq: number; commands: OfficeCommand[] }): Promise<OfficeLiveSnapshot | 'conflict' | null> {
+      const read = async () => (await db<OfficeLiveRow>(params.userId, `
+        SELECT ydoc, seq::int AS seq, base_version::int AS "baseVersion", canonical_hash AS "canonicalHash"
+          FROM office_collab_documents WHERE artifact_id = $1
+      `, [params.artifactId])).rows[0] ?? null
+      const current = await read()
+      if (!current) return null
+      const commands = params.commands.map(command => OfficeCommandSchema.parse(command))
+      if (commands.some(command => command.artifactId !== params.artifactId || command.baseVersion !== current.baseVersion)) return 'conflict'
+      if (new Set(commands.map(command => command.commandId)).size !== commands.length) return 'conflict'
+      if (commands.length === 0) return { snapshot: yDocToSnapshot(decode(current.ydoc)), seq: current.seq, baseVersion: current.baseVersion, canonicalHash: current.canonicalHash }
+      const doc = decode(current.ydoc)
+      const existing = new Set(officeCommandIds(doc))
+      let appliedPrefix = 0
+      while (appliedPrefix < commands.length && existing.has(commands[appliedPrefix]!.commandId) && officeCommandMatches(doc, commands[appliedPrefix]!)) appliedPrefix += 1
+      if (commands.slice(appliedPrefix).some(command => existing.has(command.commandId)) || current.seq !== params.expectedSeq + appliedPrefix) return 'conflict'
+      if (appliedPrefix === commands.length) return { snapshot: yDocToSnapshot(doc), seq: current.seq, baseVersion: current.baseVersion, canonicalHash: current.canonicalHash }
+      for (const command of commands.slice(appliedPrefix)) appendOfficeCommand(doc, command)
+      const snapshot = yDocToSnapshot(doc)
+      const preflight = preflightOfficeCandidate(snapshot)
+      if (!preflight.ok) throw new Error(`Office offline sync failed preflight: ${preflight.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ')}`)
+      const update = encodeOfficeState(doc)
+      const hash = createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')
+      const saved = await db<{ seq: number }>(params.userId, `
+        UPDATE office_collab_documents SET
+          ydoc = $3, state_vector = $4, canonical_hash = $5,
+          seq = seq + $6, updated_at = now()
+         WHERE artifact_id = $1 AND seq = $2
+         RETURNING seq::int AS seq
+      `, [params.artifactId, current.seq, Buffer.from(update), Buffer.from(officeStateVector(doc)), hash, commands.length - appliedPrefix])
+      const row = saved.rows[0]
+      if (row) return { snapshot, seq: row.seq, baseVersion: current.baseVersion, canonicalHash: hash }
+      const raced = await read()
+      if (!raced) return null
+      const racedDoc = decode(raced.ydoc)
+      return commands.every(command => officeCommandMatches(racedDoc, command))
+        ? { snapshot: yDocToSnapshot(racedDoc), seq: raced.seq, baseVersion: raced.baseVersion, canonicalHash: raced.canonicalHash }
+        : 'conflict'
     },
   }
 }

@@ -11,8 +11,8 @@
  * of the same workspace (auto-seeded primary → sibling edges), so a
  * cross-workspace request is rejected with SHARING_BLOCKED before any
  * execution. The destination-side "mode" policy layer (assistant_modes) was
- * retired 2026-07-24 along with the sharing/discovery feature — same-workspace
- * consults run with full workspace trust.
+ * retired 2026-07-24 along with the sharing/discovery feature. Same-workspace
+ * routing does not widen the caller's content-access ceiling.
  *
  * Why a callback rather than a direct `queryLoop` call: this module lives in
  * `@use-brian/core` which has no `pg` / DB / store-construction surface. The

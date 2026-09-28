@@ -1,14 +1,4 @@
-/**
- * [COMP:crm/update] — CRM update-by-id functions thread the viewer
- * projection into `updateEntity` (write-path half of the access-scoped
- * rule in `docs/architecture/features/crm.md`).
- *
- * `entities-store.js` is mocked; each assertion checks (a) the read used
- * to build the attribute merge respects `access` when given, and (b) the
- * `updateEntity` call carries the viewer context — the caller's own
- * `access` when passed, else the primary-reflector fallback derived from
- * the row's workspace.
- */
+/** Typed CRM adapters share the canonical current-member source gate. */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { AccessContext, EntityRecord } from '@use-brian/core'
@@ -73,77 +63,53 @@ function entity(over: Partial<EntityRecord> = {}): EntityRecord {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks()
+  vi.resetAllMocks()
 })
 
-describe('[COMP:crm/update] CRM update-by-id viewer-projection threading', () => {
-  it('updateContact with access: scoped read + access passed to updateEntity', async () => {
-    vi.mocked(getEntityById).mockResolvedValue(entity())
-    vi.mocked(updateEntity).mockResolvedValue(entity({ displayName: 'New' }))
-
+describe('[COMP:crm/update] CRM source authority threading', () => {
+  it('uses the guarded no-op read before a contact patch', async () => {
+    vi.mocked(updateEntity).mockResolvedValueOnce(entity()).mockResolvedValueOnce(entity({ displayName: 'New' }))
     const updated = await updateContact('u-viewer', 'e-1', { name: 'New' }, undefined, CTX)
     expect(updated?.name).toBe('New')
-
-    expect(getEntityById).toHaveBeenCalledWith(CTX, 'e-1')
+    expect(updateEntity).toHaveBeenNthCalledWith(1, 'u-viewer', 'e-1', {}, CTX, undefined)
+    expect(getEntityById).not.toHaveBeenCalled()
     expect(getEntityByIdSystem).not.toHaveBeenCalled()
-    expect(vi.mocked(updateEntity).mock.calls[0]![3]).toBe(CTX)
+    expect(vi.mocked(updateEntity).mock.calls[1]![3]).toBe(CTX)
   })
 
-  it('updateContact without access: system read + primary-reflector fallback', async () => {
-    vi.mocked(getEntityByIdSystem).mockResolvedValue(entity({ workspaceId: 'ws-row' }))
-    vi.mocked(updateEntity).mockResolvedValue(entity())
-
+  it('keeps the authenticated actor on a context-free source read', async () => {
+    vi.mocked(updateEntity).mockResolvedValueOnce(entity({ workspaceId: 'ws-row' })).mockResolvedValueOnce(entity())
     await updateContact('u-viewer', 'e-1', { name: 'New' })
-
-    expect(getEntityByIdSystem).toHaveBeenCalledWith('u-viewer', 'e-1')
-    expect(vi.mocked(updateEntity).mock.calls[0]![3]).toEqual({
-      workspaceId: 'ws-row',
-      userId: 'u-viewer',
-      assistantId: '',
-      assistantKind: 'primary',
-    })
+    expect(updateEntity).toHaveBeenNthCalledWith(1, 'u-viewer', 'e-1', {}, undefined, undefined)
+    expect(getEntityByIdSystem).not.toHaveBeenCalled()
+    expect(vi.mocked(updateEntity).mock.calls[1]![3]).toMatchObject({ workspaceId: 'ws-row', userId: 'u-viewer' })
   })
 
-  it('updateContact returns null when the scoped read cannot see the row', async () => {
-    vi.mocked(getEntityById).mockResolvedValue(null)
-    const updated = await updateContact('u-viewer', 'e-hidden', { name: 'X' }, undefined, CTX)
-    expect(updated).toBeNull()
-    expect(updateEntity).not.toHaveBeenCalled()
-  })
-
-  it('updateCompany propagates a projection-refused write as null', async () => {
-    vi.mocked(getEntityById).mockResolvedValue(entity({ kind: 'company' }))
+  it('does not submit a patch after an inaccessible source read', async () => {
     vi.mocked(updateEntity).mockResolvedValue(null)
-    const updated = await updateCompany('u-viewer', 'e-1', { name: 'X' }, CTX)
-    expect(updated).toBeNull()
-    expect(vi.mocked(updateEntity).mock.calls[0]![3]).toBe(CTX)
+    expect(await updateContact('u-viewer', 'e-hidden', { name: 'X' }, undefined, CTX)).toBeNull()
+    expect(updateEntity).toHaveBeenCalledExactlyOnceWith('u-viewer', 'e-hidden', {}, CTX, undefined)
   })
 
-  it('setDealStage threads access into updateEntity', async () => {
-    vi.mocked(getEntityById).mockResolvedValue(
-      entity({ kind: 'deal', attributes: { stage: 'lead' } }),
-    )
-    vi.mocked(updateEntity).mockResolvedValue(
-      entity({ kind: 'deal', attributes: { stage: 'won' } }),
-    )
-    const updated = await setDealStage('u-viewer', 'e-1', 'won', CTX)
-    expect(updated?.stage).toBe('won')
-    expect(vi.mocked(updateEntity).mock.calls[0]![3]).toBe(CTX)
+  it('propagates a mutation refusal after an authorized source read', async () => {
+    vi.mocked(updateEntity).mockResolvedValueOnce(entity({ kind: 'company' })).mockResolvedValueOnce(null)
+    expect(await updateCompany('u-viewer', 'e-1', { name: 'X' }, CTX)).toBeNull()
+    expect(vi.mocked(updateEntity).mock.calls[1]![3]).toBe(CTX)
   })
 
-  it('uses the shared correction client for both the attribute read and write', async () => {
+  it('threads explicit access through both stage operations', async () => {
+    vi.mocked(updateEntity).mockResolvedValueOnce(entity({ kind: 'deal', attributes: { stage: 'lead' } }))
+      .mockResolvedValueOnce(entity({ kind: 'deal', attributes: { stage: 'won' } }))
+    expect((await setDealStage('u-viewer', 'e-1', 'won', CTX))?.stage).toBe('won')
+    expect(vi.mocked(updateEntity).mock.calls.map(call => call[3])).toEqual([CTX, CTX])
+  })
+
+  it('uses the shared correction client for the source read and write', async () => {
     const client = { query: vi.fn() } as never
-    vi.mocked(getEntityById).mockResolvedValue(
-      entity({ kind: 'deal', attributes: { stage: 'lead', amount: 50000 } }),
-    )
-    vi.mocked(updateEntity).mockResolvedValue(
-      entity({ kind: 'deal', attributes: { stage: 'won', amount: 50000 } }),
-    )
+    vi.mocked(updateEntity).mockResolvedValueOnce(entity({ kind: 'deal', attributes: { stage: 'lead', amount: 50000 } }))
+      .mockResolvedValueOnce(entity({ kind: 'deal', attributes: { stage: 'won', amount: 50000 } }))
     await setDealStage('u-viewer', 'e-1', 'won', CTX, client)
-    expect(getEntityById).toHaveBeenCalledWith(CTX, 'e-1', {}, client)
-    expect(vi.mocked(updateEntity).mock.calls[0]![4]).toBe(client)
-    expect(vi.mocked(updateEntity).mock.calls[0]![2]).toMatchObject({
-      attributes: { stage: 'won', amount: 50000 },
-    })
+    expect(vi.mocked(updateEntity).mock.calls.map(call => call[4])).toEqual([client, client])
+    expect(vi.mocked(updateEntity).mock.calls[1]![2]).toMatchObject({ attributes: { stage: 'won', amount: 50000 } })
   })
 })

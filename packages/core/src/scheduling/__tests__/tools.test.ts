@@ -171,6 +171,7 @@ function makeFakeWorkflowStore(): WorkflowStore & { rows: WorkflowRecord[] } {
         lifecycleReason: null,
         pinned: false,
         managedBy: null,
+        authoringAuthority: params.authoringAuthority ?? null,
         createdAt: new Date(),
         updatedAt: new Date(),
       }
@@ -221,6 +222,12 @@ const ctx = {
   appId: 'Use Brian',
   channelType: 'telegram',
   channelId: 'chat_123',
+  assistantKind: 'primary' as const,
+  clearance: 'confidential' as const,
+  compartments: null,
+  mutationCompartments: null,
+  projectIds: null,
+  visibilityAssistantIds: null,
   preferredChannel: undefined,
   abortSignal: new AbortController().signal,
 }
@@ -228,7 +235,8 @@ const ctx = {
 describe('[COMP:scheduling/tools] createScheduledJob', () => {
   it('creates a daily job and returns the id + next run', async () => {
     const store = makeFakeJobStore()
-    const { createScheduledJob } = createSchedulingTools({ jobStore: store, workflowStore: makeFakeWorkflowStore() })
+    const workflowStore = makeFakeWorkflowStore()
+    const { createScheduledJob } = createSchedulingTools({ jobStore: store, workflowStore })
     const result = await createScheduledJob.execute(
       {
         schedule: { type: 'daily', time: '09:00' },
@@ -242,6 +250,11 @@ describe('[COMP:scheduling/tools] createScheduledJob', () => {
     const data = result.data as { id: string; nextRun: string }
     expect(data.id).toBe('job_1')
     expect(data.nextRun).toBeDefined()
+    expect(workflowStore.rows[0].authoringAuthority).toMatchObject({
+      version: 1,
+      assistantId: 'a1',
+      ceiling: { workspaceId: 'w1', userId: 'u1', clearance: 'confidential' },
+    })
   })
 
   it('uses the workspace runtime for workflow auto-title', async () => {
@@ -571,7 +584,8 @@ describe('[COMP:scheduling/tools] createScheduledJob', () => {
 describe('[COMP:scheduling/tools] updateScheduledJob', () => {
   it('updates instructions on an existing job', async () => {
     const store = makeFakeJobStore()
-    const { createScheduledJob, updateScheduledJob } = createSchedulingTools({ jobStore: store, workflowStore: makeFakeWorkflowStore() })
+    const workflowStore = makeFakeWorkflowStore()
+    const { createScheduledJob, updateScheduledJob } = createSchedulingTools({ jobStore: store, workflowStore })
     await createScheduledJob.execute(
       {
         schedule: { type: 'daily', time: '09:00' },
@@ -586,6 +600,7 @@ describe('[COMP:scheduling/tools] updateScheduledJob', () => {
     )
     expect(result.isError).toBeFalsy()
     expect(store.rows[0].instructions).toBe('New')
+    expect(workflowStore.rows[0].authoringAuthority).toMatchObject({ assistantId: 'a1' })
   })
 
   it('returns an error for unknown job id', async () => {

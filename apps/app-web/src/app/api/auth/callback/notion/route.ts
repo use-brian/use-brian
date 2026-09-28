@@ -7,6 +7,7 @@ import {
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
 import { parseDesktopConnectorState, buildLoopbackForwardUrl } from "@/lib/connector-oauth-desktop";
+import { completeConnectorAuthorizationAfterOAuth } from "@/lib/connector-authorization-completion";
 
 const NOTION_CLIENT_ID =
   process.env.PUBLIC_NOTION_CLIENT_ID ??
@@ -53,7 +54,7 @@ export async function GET(request: Request) {
     return NextResponse.redirect(forward);
   }
 
-  const { connector: intent, createNew, instanceId, workspaceId, nonce } = parseConnectorState(stateRaw);
+  const { connector: intent, createNew, instanceId, workspaceId, nonce, continuation } = parseConnectorState(stateRaw);
   const validIntent = intent === "notion";
 
   if (error || !code || !validIntent) {
@@ -155,6 +156,15 @@ export async function GET(request: Request) {
     const stored = (await storeRes.json().catch(() => ({}))) as {
       connectorInstanceId?: string;
     };
+
+    const resumedPath = await completeConnectorAuthorizationAfterOAuth({
+      accessToken,
+      workspaceId,
+      continuation,
+      provider: "notion",
+      connectorInstanceId: stored.connectorInstanceId,
+    });
+    if (resumedPath) return NextResponse.redirect(new URL(resumedPath, request.url));
 
     return NextResponse.redirect(
       new URL(

@@ -215,13 +215,33 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
 });
 
 describe("[COMP:app-desktop/main] deployment switching", () => {
-  it("keeps the recorder overlay in the active deployment session", () => {
+  it("allows presentation changes only from a current main frame without changing sessions", async () => {
+    const key = deploymentAccountKey({ target: local, tokens: tokens("local") });
+    const update = state.handlers.get("Use Brian:update-account-presentation")!;
+    const move = state.handlers.get("Use Brian:move-account")!;
+    expect(await update({ ...sender(), senderFrame: {} }, key, { displayName: "Studio", icon: "🏡" })).toEqual({ ok: false });
+    expect(await update({ sender: { id: -1 }, senderFrame: {} }, key, { displayName: "Studio", icon: "🏡" })).toEqual({ ok: false });
+    expect(await update(sender(), key, { displayName: "Studio", icon: "🏡" })).toMatchObject({ ok: true });
+    expect(await move(sender(), key, "up")).toMatchObject({ ok: true, accounts: [expect.objectContaining({ key, displayName: "Studio", icon: "🏡" }), expect.anything()] });
+    expect(store.current(local)?.user?.name).toBe("local");
+    expect(state.windows).toHaveLength(1);
+    expect(await move(sender(), key, "sideways")).toEqual({ ok: false });
+  });
+  it.each([true, false])("keeps recorder origin and session aligned (bundled=%s)", async (bundled) => {
+    await setup("pkce", bundled);
     const main = state.windows[0];
     state.handlers.get("Use Brian:recording-state")!({}, true);
     const overlay = state.windows[1];
 
     expect(overlay.options.webPreferences.session).toBe(main.options.webPreferences.session);
-    expect(overlay.webContents.loadURL).toHaveBeenCalledWith(`${local.appUrl}/recorder-overlay`);
+    if (bundled) {
+      expect(overlay.webContents.loadFile).toHaveBeenCalledWith(
+        expect.stringContaining("renderer/index.html"), { hash: "/recorder-overlay" },
+      );
+      expect(overlay.webContents.loadURL).not.toHaveBeenCalled();
+    } else {
+      expect(overlay.webContents.loadURL).toHaveBeenCalledWith(`${local.appUrl}/recorder-overlay`);
+    }
   });
 
   it("switches local to cloud and back without restarting, preserving sessions and isolated caches", async () => {

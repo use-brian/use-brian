@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { jaroWinkler, normalizeName, resolveEntity } from '../resolver.js'
 import type { EntityCandidate } from '../types.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 function mockProvider(response: string): LLMProvider {
   return {
@@ -158,6 +159,54 @@ describe('[COMP:brain/entity-resolution] resolveEntity', () => {
   })
 
   describe('tier 4: LLM disambiguation', () => {
+    it('accepts a terminal candidate-scoped decision without invoking the LLM', async () => {
+      let llmCalls = 0
+      const llm = mockProvider('{"id":"e1"}')
+      const originalStream = llm.stream.bind(llm)
+      llm.stream = ((...args: Parameters<LLMProvider['stream']>) => {
+        llmCalls++
+        return originalStream(...args)
+      }) as LLMProvider['stream']
+      const result = await resolveEntity({
+        mention: { kind: 'company', display_name: 'Acme Inc' },
+        candidates: [acmeInc, acmeCorpDup],
+        llm: { provider: llm, model: 'mock-flash' },
+        decisionRuntime: executionFixture({
+          llm,
+          primary: fixtureDecisionProvider(async (request) => ({
+            providerId: 'fixture-decision',
+            model: request.model,
+            answers: [{
+              questionId: 'entity',
+              kind: 'choice',
+              value: 'e3',
+              evidence: { source: 'native_distribution', probabilities: { e3: 0.93, e1: 0.05, ambiguous: 0.02 } },
+            }],
+          })),
+        }),
+      })
+      expect(result).toMatchObject({ status: 'resolved', entityId: 'e3', tier: 'llm' })
+      expect(llmCalls).toBe(0)
+    })
+
+    it('keeps ambiguity instead of accepting an invented id', async () => {
+      const llm = mockProvider('{"id":"not-a-candidate"}')
+      const result = await resolveEntity({
+        mention: { kind: 'company', display_name: 'Acme Inc' },
+        candidates: [acmeInc, acmeCorpDup],
+        llm: { provider: llm, model: 'mock-flash' },
+        decisionRuntime: executionFixture({
+          llm,
+          primary: fixtureDecisionProvider(async (request) => ({
+            providerId: 'fixture-decision',
+            model: request.model,
+            answers: [{ questionId: 'entity', kind: 'choice', value: 'ambiguous', evidence: { source: 'unavailable' } }],
+          })),
+        }),
+      })
+      expect(result.status).toBe('ambiguous')
+    })
+
     it('promotes tier 1 ambiguous to resolved via LLM', async () => {
       const result = await resolveEntity({
         mention: { kind: 'company', display_name: 'Acme Inc' },

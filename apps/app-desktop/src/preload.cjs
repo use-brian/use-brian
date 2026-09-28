@@ -203,6 +203,8 @@ const bridge = {
   // can show an inline message and clear its per-row spinner. Present in every
   // mode (like signIn/out); bundled mode keeps a deployment-scoped directory.
   addAccount: () => ipcRenderer.send("Use Brian:add-account"),
+  updateAccountPresentation: (key, presentation) => ipcRenderer.invoke("Use Brian:update-account-presentation", key, presentation),
+  moveAccount: (key, direction) => ipcRenderer.invoke("Use Brian:move-account", key, direction),
   listAccounts: () => ipcRenderer.invoke("Use Brian:list-accounts"),
   selectAccount: (key) => ipcRenderer.invoke("Use Brian:select-account", key),
   removeAccount: (key) => ipcRenderer.invoke("Use Brian:remove-account", key),

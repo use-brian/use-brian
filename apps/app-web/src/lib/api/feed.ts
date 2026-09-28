@@ -1,3 +1,4 @@
+import type { FeedLinkedInConnectionSummary } from '@use-brian/shared';
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the Feed surface — thin typed wrappers around the shared
@@ -125,7 +126,7 @@ function apiUrl(path: string, params?: Record<string, string | undefined>): stri
 }
 
 /** One connected platform account (a `distribution_profiles` row + assistant). */
-export type FeedProfile = {
+export type FeedProfile = FeedLinkedInConnectionSummary & {
   assistantId: string;
   platform: FeedPlatform;
   platformHandle: string;
@@ -153,7 +154,8 @@ export type FeedProfile = {
 };
 
 type ProfilesApiResponse = {
-  profiles?: Array<{
+  profiles?: Array<FeedLinkedInConnectionSummary & {
+    canPublishMedia?: boolean;
     assistantId: string;
     platform: FeedPlatform;
     platformHandle: string;
@@ -179,6 +181,7 @@ export async function fetchFeedTeamProfiles(
 ): Promise<FeedProfile[]> {
   const body = await feedCachedJson<ProfilesApiResponse>(`/api/distribution/team/${workspaceId}/profiles`);
   return (body.profiles ?? []).map((p) => ({
+    destinationId: p.destinationId, authorKind: p.authorKind, authorUrn: p.authorUrn, connectionStatus: p.connectionStatus, canPublishAs: p.canPublishAs, capabilities: p.capabilities, canPublishMedia: p.canPublishMedia,
     assistantId: p.assistantId,
     platform: p.platform,
     platformHandle: p.platformHandle,
@@ -319,11 +322,11 @@ async function postFeedApprovalAction(
 export async function approveFeedDraft(
   assistantId: string,
   eventId: string,
-  opts: { text?: string } = {},
+  opts: { text?: string; linkedinPreviewHash?: string } = {},
 ): Promise<FeedApprovalActionResult> {
   return postFeedApprovalAction(
     `${API_URL}/api/distribution/${assistantId}/approvals/${eventId}/approve`,
-    opts.text !== undefined ? { text: opts.text } : {},
+    {...opts},
   );
 }
 
@@ -671,6 +674,7 @@ export type FeedDraftSessionSummary = {
  * (`GET /:assistantId/draft-sessions/:sessionId/saved-drafts`).
  */
 export type FeedSavedDraft = {
+  canonicalRevision?: number;
   id: string;
   /** Images bound to this draft (feed-revamp-depth D32). */
   media?: PostMedia[];

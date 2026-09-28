@@ -37,6 +37,7 @@ export const ACTIONABLE_KINDS: readonly ApprovalKind[] = [
   // Unknown inbound email sender: approve allowlists the address for this
   // inbox; reject dismisses the request and keeps the sender ingest-only.
   "email_sender",
+  "department_access",
 ];
 
 export function isActionable(kind: ApprovalKind): boolean {

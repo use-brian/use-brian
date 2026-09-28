@@ -24,6 +24,7 @@
 
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import type { DecisionAnswer, DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
 
 export type TopicState = 'continue' | 'shift' | 'resume' | 'cross-topic'
 
@@ -64,6 +65,10 @@ export type TopicClassifierOptions = {
   currentMessage: string
   /** Distinct topic labels from the session so far; used to detect resume. */
   knownTopicsThisSession: string[]
+  /** Provider-neutral decision cascade. Omitted preserves the legacy call. */
+  decisionRuntime?: DecisionExecutionPort
+  workspaceId?: string
+  runId?: string
 }
 
 const CLASSIFIER_SYSTEM_PROMPT =
@@ -150,7 +155,7 @@ function normalizeLabel(label: string): string {
  * classification — falls back to `(uncategorized) / continue / 0.0` on
  * any error. Callers should treat confidence === 0 as "no signal".
  */
-export async function classifyTopic(
+async function classifyTopicWithLlm(
   opts: TopicClassifierOptions,
 ): Promise<TopicClassification> {
   let usage: TokenUsage | null = null
@@ -220,5 +225,161 @@ export async function classifyTopic(
   } catch {
     // Call itself threw — no usage to attribute, caller records nothing.
     return { ...FALLBACK, usage, model: usage ? servedModel : undefined }
+  }
+}
+
+const TOPIC_OPERATION = {
+  id: 'memory.topic',
+  version: '1',
+  stateVersion: '1',
+  questionVersion: '1',
+} as const
+
+function answerConfidence(answer: DecisionAnswer): number {
+  if (answer.evidence.confidence !== undefined) return answer.evidence.confidence
+  if (answer.kind === 'boolean' && answer.pTrue !== undefined) {
+    return answer.value ? answer.pTrue : 1 - answer.pTrue
+  }
+  if (answer.kind === 'choice') return answer.evidence.probabilities?.[answer.value] ?? 0
+  return 0
+}
+
+function validateTopicResult(result: TopicClassification): TopicClassification {
+  if (!result.topic_label.trim()) throw new Error('topic classifier returned an empty label')
+  if (!['continue', 'shift', 'resume', 'cross-topic'].includes(result.state)) {
+    throw new Error('topic classifier returned an invalid state')
+  }
+  if (!Number.isFinite(result.confidence) || result.confidence < 0 || result.confidence > 1) {
+    throw new Error('topic classifier returned invalid confidence')
+  }
+  if (result.state === 'cross-topic' && (!result.related_topics || result.related_topics.length === 0)) {
+    throw new Error('cross-topic classification requires related topics')
+  }
+  return result
+}
+
+function decideTopic(
+  response: DecisionResponse,
+  knownTopics: readonly string[],
+  policy: import('../decisions/index.js').JsonValue | undefined,
+) {
+  const state = response.answers.find((answer) => answer.questionId === 'state')
+  const topic = response.answers.find((answer) => answer.questionId === 'topic')
+  if (state?.kind !== 'choice' || topic?.kind !== 'choice') {
+    return { kind: 'unavailable' as const, reason: 'invalid_response' as const }
+  }
+  const reviewBelow = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+    && typeof policy.reviewBelow === 'number'
+    ? policy.reviewBelow
+    : undefined
+  if (
+    reviewBelow !== undefined &&
+    Math.min(answerConfidence(state), answerConfidence(topic)) < reviewBelow
+  ) return { kind: 'follow_up' as const, reason: 'uncertain' as const }
+
+  if (
+    (state.value === 'continue' || state.value === 'resume') &&
+    knownTopics.includes(topic.value)
+  ) {
+    return {
+      kind: 'complete' as const,
+      result: {
+        topic_label: topic.value,
+        state: state.value,
+        confidence: Math.min(answerConfidence(state), answerConfidence(topic)),
+        usage: response.usage
+          ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
+          : null,
+        model: response.model.wireId,
+      } satisfies TopicClassification,
+    }
+  }
+  if (state.value === 'shift' || state.value === 'cross-topic' || topic.value === '__new_topic__') {
+    return { kind: 'follow_up' as const, reason: 'generation_required' as const }
+  }
+  return { kind: 'unavailable' as const, reason: 'invalid_response' as const }
+}
+
+/**
+ * Classify the topic of the current user turn. Always returns a
+ * classification - falls back to `(uncategorized) / continue / 0.0` on any
+ * error. Existing known labels can terminate in the decision provider; new
+ * labels and cross-topic payloads use one LLM completion.
+ */
+export async function classifyTopic(
+  opts: TopicClassifierOptions,
+): Promise<TopicClassification> {
+  if (!opts.decisionRuntime) return classifyTopicWithLlm(opts)
+
+  const knownTopics = [...new Set([
+    ...opts.knownTopicsThisSession,
+    ...opts.recentUserTurns.flatMap((turn) => turn.topicLabel ? [turn.topicLabel] : []),
+  ])].filter((label) => label.trim().length > 0).slice(0, 20)
+
+  try {
+    const cascade = await opts.decisionRuntime.run({
+      ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
+      llm: { provider: opts.provider, modelId: opts.model },
+      request: {
+        runId: opts.runId ?? `memory-topic-${Date.now()}`,
+        operation: TOPIC_OPERATION,
+        state: {
+          recentUserTurns: opts.recentUserTurns.slice(-8),
+          replyToText: opts.replyToText,
+          currentMessage: opts.currentMessage,
+          knownTopics,
+        },
+        questions: [
+          {
+            kind: 'choice',
+            id: 'state',
+            prompt: 'Is this turn continuing, shifting, resuming, or combining known topics?',
+            options: [
+              { value: 'continue' },
+              { value: 'shift' },
+              { value: 'resume' },
+              { value: 'cross-topic' },
+            ],
+          },
+          {
+            kind: 'choice',
+            id: 'topic',
+            prompt: 'Select the exact existing topic label, or choose new topic when none matches.',
+            options: [
+              ...knownTopics.map((value) => ({ value })),
+              { value: '__new_topic__', description: 'No existing topic label matches' },
+              { value: '__uncategorized__', description: 'There is not enough topic signal' },
+            ],
+          },
+        ],
+      },
+      operation: {
+        decide: (response, { profile }) => decideTopic(response, knownTopics, profile?.policy),
+        validateResult: validateTopicResult,
+        safeFailure: () => ({ ...FALLBACK }),
+        async completeWithLlm(context) {
+          const result = await classifyTopicWithLlm({
+            ...opts,
+            provider: context.llm.provider,
+            model: context.llm.modelId,
+            decisionRuntime: undefined,
+          })
+          return {
+            result,
+            providerId: context.llm.provider.name,
+            model: { catalogId: context.llm.modelId, wireId: result.model ?? context.llm.modelId },
+            ...(result.usage ? {
+              usage: {
+                inputTokens: result.usage.inputTokens,
+                outputTokens: result.usage.outputTokens,
+              },
+            } : {}),
+          }
+        },
+      },
+    })
+    return cascade.result
+  } catch {
+    return { ...FALLBACK }
   }
 }

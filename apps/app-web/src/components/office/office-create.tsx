@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog } from "@base-ui/react/dialog";
@@ -11,6 +11,11 @@ import { OfficeTopbar } from "./office-topbar";
 import { OfficeCardPreview } from "./office-card-preview";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
+import { officeMetadataRemaining } from "@/lib/office/metadata";
+import { useOfficeMetadataResource } from "@/lib/office/surface-cache";
+import { officeTemplateListCacheKey } from "@/lib/surface-prefetch";
+import { invalidateSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
 import { createOfficeArtifact, getOfficeCapabilities, listOfficeTemplates, OfficeApiError, type OfficeArtifact, type OfficeTemplate } from "@/lib/office/api";
 
 type UsableOfficeTemplate = OfficeTemplate & { currentVersionId: string };
@@ -54,7 +59,7 @@ export function OfficeTemplatePicker({
             const previewArtifact: OfficeArtifact = { artifactId: template.draftArtifactId ?? "", family: template.family, mode: "template", title: template.name, version: 1, lifecycleState: "active", role: "edit" };
             return (
               <button key={template.id} type="button" data-office-template-choice={template.family} onClick={() => onSelect(template)} className="group overflow-hidden rounded-xl border bg-card text-left transition-all hover:-translate-y-0.5 hover:border-foreground/30 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                <div className="relative pointer-events-none"><OfficeCardPreview artifact={previewArtifact} /><span className={document ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm" : presentation ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm" : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2 py-1 text-xs font-semibold text-white shadow-sm"}><Icon className="size-3.5" aria-hidden /><span>{document ? t.document : presentation ? t.presentation : t.spreadsheet}</span></span></div>
+                <div className="relative pointer-events-none"><OfficeCardPreview workspaceId={workspaceId} artifact={previewArtifact} /><span className={document ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm" : presentation ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm" : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2 py-1 text-xs font-semibold text-white shadow-sm"}><Icon className="size-3.5" aria-hidden /><span>{document ? t.document : presentation ? t.presentation : t.spreadsheet}</span></span></div>
                 <span className="block px-4 pt-4 font-medium group-hover:underline">{template.name}</span>
                 <span className="block min-h-10 px-4 pt-2 text-sm text-muted-foreground">{template.description}</span>
                 <span className="m-4 mt-3 inline-flex h-9 items-center justify-center rounded-md bg-action px-3 text-sm font-medium text-action-foreground">{t.useTemplate}</span>
@@ -73,12 +78,14 @@ function OfficeCreateForm({
   onCancel,
   onChangeTemplate,
   onDirtyChange,
+  canUseTemplate,
 }: {
   workspaceId: string;
   template: OfficeTemplate;
   onCancel: () => void;
   onChangeTemplate: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  canUseTemplate: () => boolean;
 }) {
   const copy = useT();
   const t = copy.office;
@@ -90,6 +97,8 @@ function OfficeCreateForm({
   const [error, setError] = useState<"failed" | "unavailable" | null>(null);
   const [generationAvailable, setGenerationAvailable] = useState<boolean | null>(null);
   const dirty = Boolean(outcome || audience || additionalContext);
+  const alive = useRef(false);
+  useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const fields = [
     { id: "office-create-outcome", label: t.outcome, value: outcome, limit: 4_000, setValue: setOutcome, placeholder: t.outcomePlaceholder, required: true },
     { id: "office-create-audience", label: t.audience, value: audience, limit: 1_000, setValue: setAudience, placeholder: t.audiencePlaceholder, required: true },
@@ -127,7 +136,7 @@ function OfficeCreateForm({
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (busy || generationAvailable !== true || invalidFields) return;
+    if (!alive.current || !canUseTemplate() || busy || generationAvailable !== true || invalidFields) return;
     setBusy(true);
     setError(null);
     try {
@@ -141,8 +150,9 @@ function OfficeCreateForm({
         templateId: String(template.currentVersionId),
         idempotencyKey: crypto.randomUUID(),
       });
-      router.push(`/w/${workspaceId}/office/${created.artifactId}`);
+      if (alive.current && canUseTemplate()) router.push(`/w/${workspaceId}/office/${created.artifactId}`);
     } catch (cause) {
+      if (!alive.current) return;
       setError(cause instanceof OfficeApiError && cause.message === "office_generation_unavailable" ? "unavailable" : "failed");
       setBusy(false);
     }
@@ -175,36 +185,60 @@ function OfficeCreateForm({
   </div>;
 }
 
-function useTemplateChoices(workspaceId: string): { templates: UsableOfficeTemplate[] | null; selected: UsableOfficeTemplate | null; failed: boolean } {
+function useTemplateChoices(workspaceId: string): { templates: UsableOfficeTemplate[] | null; selected: UsableOfficeTemplate | null; failed: boolean; canUseTemplate: (candidate?: OfficeTemplate) => boolean } {
   const searchParams = useSearchParams();
   const templateId = searchParams.get("templateId");
   const templateVersionId = searchParams.get("templateVersionId");
-  const [templates, setTemplates] = useState<UsableOfficeTemplate[] | null>(null);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let active = true;
-    setFailed(false);
-    void listOfficeTemplates(workspaceId).then((rows) => {
-      if (!active) return;
-      setTemplates(usableOfficeTemplates(rows));
-    }).catch(() => {
-      if (active) { setTemplates([]); setFailed(true); }
-    });
-    return () => { active = false; };
-  }, [workspaceId]);
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.workspaceId === workspaceId ? workspace.me.id : "";
+  const read = useOfficeMetadataResource(viewerId ? officeTemplateListCacheKey(workspaceId, viewerId) : null, viewerId, () => listOfficeTemplates(workspaceId));
+  const templates = read.data ? usableOfficeTemplates(read.data) : null;
+  const failed = read.error !== undefined && !read.data;
   const selected = templates?.find((candidate) => candidate.id === templateId && candidate.currentVersionId === templateVersionId) ?? null;
-  return { templates, selected, failed };
+  const canUseTemplate = (candidate: OfficeTemplate | null = selected) => {
+    if (!viewerId || !candidate) return false;
+    const current = readSurfaceCache<OfficeTemplate[]>(officeTemplateListCacheKey(workspaceId, viewerId)).data;
+    return officeMetadataRemaining(current, viewerId) > 0 && Boolean(current?.some(row => JSON.stringify(row) === JSON.stringify(candidate)));
+  };
+  return { templates, selected, failed, canUseTemplate };
+}
+
+function useCreationIdentity(workspaceId: string) {
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.workspaceId === workspaceId ? workspace.me.id : "";
+  const key = officeTemplateListCacheKey(workspaceId, viewerId);
+  const previous = useRef(key);
+  useLayoutEffect(() => {
+    if (previous.current !== key) invalidateSurfaceCache(previous.current);
+    previous.current = key;
+  }, [key]);
+  return key;
+}
+
+function useCreationNavigation(template: UsableOfficeTemplate | null) {
+  const scope = useRef<object | null>(null);
+  const signature = JSON.stringify(template);
+  useLayoutEffect(() => { scope.current = {}; return () => { scope.current = null; }; }, [signature]);
+  return scope;
 }
 
 export function OfficeCreate({ workspaceId }: { workspaceId: string }) {
+  const identity = useCreationIdentity(workspaceId);
+  return <OfficeCreateSurface key={identity} workspaceId={workspaceId}/>;
+}
+
+function OfficeCreateSurface({ workspaceId }: { workspaceId: string }) {
   const copy = useT();
   const t = copy.office;
   const router = useRouter();
   const [dirty, setDirty] = useState(false);
   const base = `/w/${workspaceId}/office`;
-  const { templates, selected: template, failed } = useTemplateChoices(workspaceId);
+  const { templates, selected: template, failed, canUseTemplate } = useTemplateChoices(workspaceId);
+  const navigation = useCreationNavigation(template);
+  useLayoutEffect(() => { if (!template) setDirty(false); }, [template]);
 
   async function close() {
+    const started = navigation.current;
     if (dirty) {
       const discard = await confirmDialog({
         title: t.discardCreate,
@@ -213,16 +247,18 @@ export function OfficeCreate({ workspaceId }: { workspaceId: string }) {
         cancelLabel: copy.common.cancel,
         variant: "destructive",
       });
-      if (!discard) return;
+      if (!discard || !started || started !== navigation.current) return;
     }
     router.push(base);
   }
 
   function selectTemplate(next: UsableOfficeTemplate) {
+    if (!canUseTemplate(next)) return;
     router.replace(createFromTemplateHref(workspaceId, next), { scroll: false });
   }
 
   async function changeTemplate() {
+    const started = navigation.current;
     if (dirty) {
       const discard = await confirmDialog({
         title: t.discardCreate,
@@ -231,7 +267,7 @@ export function OfficeCreate({ workspaceId }: { workspaceId: string }) {
         cancelLabel: copy.common.cancel,
         variant: "destructive",
       });
-      if (!discard) return;
+      if (!discard || !started || started !== navigation.current) return;
     }
     setDirty(false);
     router.replace(`${base}/new`, { scroll: false });
@@ -245,21 +281,29 @@ export function OfficeCreate({ workspaceId }: { workspaceId: string }) {
         right={<button type="button" onClick={() => void close()} className="inline-flex h-8 items-center rounded-md border px-2.5 text-sm font-medium">{t.files}</button>}
       />
       <main className={template ? "mx-auto w-full max-w-2xl p-4 sm:p-8" : "mx-auto w-full max-w-5xl p-4 sm:p-8"}>
-        {template ? <OfficeCreateForm workspaceId={workspaceId} template={template} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}
+        {template ? <OfficeCreateForm key={JSON.stringify(template)} workspaceId={workspaceId} template={template} canUseTemplate={canUseTemplate} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}
       </main>
     </div>
   );
 }
 
 export function OfficeCreateDialog({ workspaceId }: { workspaceId: string }) {
+  const identity = useCreationIdentity(workspaceId);
+  return <OfficeCreateDialogSurface key={identity} workspaceId={workspaceId}/>;
+}
+
+function OfficeCreateDialogSurface({ workspaceId }: { workspaceId: string }) {
   const copy = useT();
   const t = copy.office;
   const router = useRouter();
   const [dirty, setDirty] = useState(false);
   const base = `/w/${workspaceId}/office`;
-  const { templates, selected: template, failed } = useTemplateChoices(workspaceId);
+  const { templates, selected: template, failed, canUseTemplate } = useTemplateChoices(workspaceId);
+  const navigation = useCreationNavigation(template);
+  useLayoutEffect(() => { if (!template) setDirty(false); }, [template]);
 
   async function close() {
+    const started = navigation.current;
     if (dirty) {
       const discard = await confirmDialog({
         title: t.discardCreate,
@@ -268,16 +312,18 @@ export function OfficeCreateDialog({ workspaceId }: { workspaceId: string }) {
         cancelLabel: copy.common.cancel,
         variant: "destructive",
       });
-      if (!discard) return;
+      if (!discard || !started || started !== navigation.current) return;
     }
     router.back();
   }
 
   function selectTemplate(next: UsableOfficeTemplate) {
+    if (!canUseTemplate(next)) return;
     router.replace(createFromTemplateHref(workspaceId, next), { scroll: false });
   }
 
   async function changeTemplate() {
+    const started = navigation.current;
     if (dirty) {
       const discard = await confirmDialog({
         title: t.discardCreate,
@@ -286,7 +332,7 @@ export function OfficeCreateDialog({ workspaceId }: { workspaceId: string }) {
         cancelLabel: copy.common.cancel,
         variant: "destructive",
       });
-      if (!discard) return;
+      if (!discard || !started || started !== navigation.current) return;
     }
     setDirty(false);
     router.replace(`${base}/new`, { scroll: false });
@@ -302,7 +348,7 @@ export function OfficeCreateDialog({ workspaceId }: { workspaceId: string }) {
           <button type="button" onClick={() => void close()} aria-label={t.closeCreateAria} title={t.closeCreateAria} className="absolute right-4 top-4 inline-flex size-11 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground sm:size-8">
             <X className="size-4" aria-hidden />
           </button>
-          {template ? <OfficeCreateForm workspaceId={workspaceId} template={template} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}
+          {template ? <OfficeCreateForm key={JSON.stringify(template)} workspaceId={workspaceId} template={template} canUseTemplate={canUseTemplate} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>

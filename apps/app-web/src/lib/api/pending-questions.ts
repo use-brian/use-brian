@@ -27,6 +27,14 @@ export type PendingQuestion = {
   question: string | null;
   expiresAt: string | null;
   createdAt: string | null;
+  action: PendingQuestionAction | null;
+};
+
+export type PendingQuestionAction = {
+  kind: "connector_authorization";
+  provider: string;
+  label: string;
+  connectPath: string;
 };
 
 export type PendingToolConfirmation = {

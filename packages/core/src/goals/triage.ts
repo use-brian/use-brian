@@ -17,6 +17,7 @@
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
 import type { GoalLlmRuntime, GoalLlmUsageContext } from './clarity.js'
+import type { DecisionExecutionPort } from '../decisions/index.js'
 
 /** A passing verdict: the drafted goal conditions. */
 export type TaskTriageBrief = {
@@ -71,6 +72,7 @@ export function createTaskTriageJudge(deps: {
   /** Optional COGS sink — boot records this under a goal-overhead source. */
   onUsage?: (usage: TokenUsage, context: GoalLlmUsageContext) => void
   resolveLlm: ((workspaceId: string) => Promise<GoalLlmRuntime | null>) | null
+  decisionRuntime?: DecisionExecutionPort
 }): TaskTriageJudge {
   return async ({ title, description, capabilities, userId, workspaceId, assistantId }) => {
     try {
@@ -81,26 +83,103 @@ export function createTaskTriageJudge(deps: {
         'ASSISTANT CAPABILITIES IN THIS WORKSPACE:',
         ...(capabilities.length > 0 ? capabilities.map((c) => `- ${c}`) : ['- (none connected)']),
       ].filter((l): l is string => l !== null)
-      const response = await collectStream(
-        (runtime?.provider ?? deps.provider).stream({
-          model: runtime?.model ?? deps.model,
+      const selectedProvider = runtime?.provider ?? deps.provider
+      const selectedModel = runtime?.model ?? deps.model
+      const completeWithLlm = async (provider: LLMProvider, model: string) => {
+        const response = await collectStream(
+          provider.stream({
+          model,
           systemPrompt: TRIAGE_SYSTEM_PROMPT,
           messages: [{ role: 'user', content: lines.join('\n') }],
           maxTokens: Math.min(700, runtime?.maxTokens ?? 700),
           inputTokenLimit: runtime?.inputTokenLimit,
           temperature: 0.1,
-        }),
-      )
-      if (response.usage) deps.onUsage?.(response.usage, {
-        userId,
-        workspaceId,
-        assistantId,
-        model: response.model || runtime?.model || deps.model,
-        modelTier: runtime?.modelTier ?? deps.modelTier,
-        providerKeySource: runtime?.providerKeySource ?? 'platform',
+          }),
+        )
+        if (response.usage) deps.onUsage?.(response.usage, {
+          userId,
+          workspaceId,
+          assistantId,
+          model: response.model || model,
+          modelTier: runtime?.modelTier ?? deps.modelTier,
+          providerKeySource: runtime?.providerKeySource ?? 'platform',
+        })
+        const text = response.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+        return {
+          brief: parseTriageVerdict(text),
+          usage: response.usage,
+          model: response.model || model,
+        }
+      }
+
+      if (!deps.decisionRuntime) {
+        return (await completeWithLlm(selectedProvider, selectedModel)).brief
+      }
+
+      const result = await deps.decisionRuntime.run<TaskTriageBrief | null>({
+        ...(workspaceId ? { workspaceId } : {}),
+        llm: { provider: selectedProvider, modelId: selectedModel },
+        request: {
+          runId: `task-assistability-${workspaceId ?? 'none'}-${Date.now()}`,
+          operation: {
+            id: 'task.assistability',
+            version: '1',
+            stateVersion: '1',
+            questionVersion: '1',
+          },
+          state: { title, description: description ?? null, capabilities },
+          questions: [{
+            kind: 'boolean',
+            id: 'can_assist',
+            prompt: 'Can this assistant honestly complete or substantially prepare this task using only the listed capabilities?',
+            criteria: {
+              true: 'The assistant can deliver the result or substantial grounded preparation',
+              false: 'The task is essentially human-only or the listed capabilities add no material help',
+            },
+          }],
+        },
+        operation: {
+          decide(response, { profile }) {
+            const answer = response.answers[0]
+            if (answer?.kind !== 'boolean') return { kind: 'unavailable', reason: 'invalid_response' }
+            const policy = profile?.policy
+            const uncertaintyMin = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+              && typeof policy.uncertaintyMin === 'number' ? policy.uncertaintyMin : undefined
+            const uncertaintyMax = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+              && typeof policy.uncertaintyMax === 'number' ? policy.uncertaintyMax : undefined
+            if (
+              answer.pTrue !== undefined && uncertaintyMin !== undefined && uncertaintyMax !== undefined &&
+              answer.pTrue >= uncertaintyMin && answer.pTrue <= uncertaintyMax
+            ) return { kind: 'follow_up', reason: 'uncertain' }
+            return answer.value
+              ? { kind: 'follow_up', reason: 'generation_required' }
+              : { kind: 'complete', result: null }
+          },
+          validateResult(brief) {
+            if (brief === null) return null
+            if (!brief.outcome.trim() || !brief.verification.trim() || !brief.approach.trim() || !brief.judgeReason.trim()) {
+              throw new Error('task triage returned an incomplete brief')
+            }
+            return brief
+          },
+          safeFailure: () => null,
+          async completeWithLlm(context) {
+            const completed = await completeWithLlm(context.llm.provider, context.llm.modelId)
+            return {
+              result: completed.brief,
+              providerId: context.llm.provider.name,
+              model: { catalogId: context.llm.modelId, wireId: completed.model },
+              ...(completed.usage ? {
+                usage: {
+                  inputTokens: completed.usage.inputTokens,
+                  outputTokens: completed.usage.outputTokens,
+                },
+              } : {}),
+            }
+          },
+        },
       })
-      const text = response.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
-      return parseTriageVerdict(text)
+      return result.result
     } catch (err) {
       // Fail-closed — no judge, no draft. Task creation is never blocked.
       console.error('[goal-triage] judge failed; not drafting:', err)

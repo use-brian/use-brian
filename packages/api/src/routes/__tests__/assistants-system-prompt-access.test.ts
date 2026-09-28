@@ -15,6 +15,8 @@ vi.mock('../../db/users.js', () => ({
   resolveAssistantAccess: vi.fn(),
 }))
 
+vi.mock('../../workspace-access/reviewed-route.js',async(importOriginal)=>({...await importOriginal<typeof import('../../workspace-access/reviewed-route.js')>(),executeReviewedDepartmentRoute:vi.fn()}))
+import {executeReviewedDepartmentRoute} from '../../workspace-access/reviewed-route.js'
 import { assistantRoutes } from '../assistants.js'
 import { query, queryWithRLS } from '../../db/client.js'
 import { resolveAssistantAccess } from '../../db/users.js'
@@ -33,6 +35,7 @@ const capabilityStore = {
 }
 
 beforeEach(() => {
+  vi.mocked(executeReviewedDepartmentRoute).mockReset().mockResolvedValue({} as never)
   mockQueryWithRLS.mockReset()
   mockQuery.mockReset()
   capabilityStore.hasActive.mockReset()
@@ -70,6 +73,28 @@ const updatedRow = {
 }
 
 describe('[COMP:routes/assistants-system-prompt-access] PATCH /:assistantId charter edit rights', () => {
+  it('refuses raw workspace clearance writes even from an owner',async()=>{
+    mockAccess.mockResolvedValueOnce({assistant:{id:'a-1',workspaceId:'w-1'},role:'owner'} as never)
+    const res=await request(makeApp({userId:'u-owner'})).patch('/api/assistants/a-1').send({clearance:'public'})
+    expect(res.status).toBe(409);expect(res.body.error).toBe('access_review_required')
+    expect(executeReviewedDepartmentRoute).not.toHaveBeenCalled();expect(mockQueryWithRLS).not.toHaveBeenCalled();expect(mockQuery).not.toHaveBeenCalled()
+  })
+  it('consumes the exact clearance-only review instead of the legacy update',async()=>{
+    mockAccess.mockResolvedValueOnce({assistant:{id:'a-1',workspaceId:'w-1'},role:'owner'} as never)
+    mockQueryWithRLS.mockResolvedValueOnce({rows:[{clearance:'internal'}],rowCount:1} as never)
+    const reviewId='11111111-1111-4111-8111-111111111111',payloadHash='a'.repeat(64)
+    const res=await request(makeApp({userId:'u-owner'})).patch('/api/assistants/a-1').set('X-Brian-Access-Review-Id',reviewId).set('X-Brian-Access-Review-Hash',payloadHash).send({clearance:'public'})
+    expect(res.status).toBe(200)
+    expect(executeReviewedDepartmentRoute).toHaveBeenCalledWith('w-1','u-owner',{type:'assistant.clearance.set',assistantId:'a-1',clearance:'public'},{type:'access.command.apply',reviewId,payloadHash})
+    expect(res.body.clearance).toBe('internal') // A replay reports current state, never the old intent.
+    expect(mockQueryWithRLS).toHaveBeenCalledWith('u-owner','SELECT clearance FROM assistants WHERE id=$1 AND workspace_id=$2',['a-1','w-1']);expect(mockQuery).not.toHaveBeenCalled()
+  })
+  it('rejects bundling an unreviewed setting with a clearance change',async()=>{
+    mockAccess.mockResolvedValueOnce({assistant:{id:'a-1',workspaceId:'w-1'},role:'owner'} as never)
+    const res=await request(makeApp({userId:'u-owner'})).patch('/api/assistants/a-1').send({clearance:'public',name:'Changed fixture'})
+    expect(res.status).toBe(400);expect(res.body.error).toBe('clearance_requires_separate_review')
+    expect(executeReviewedDepartmentRoute).not.toHaveBeenCalled();expect(mockQueryWithRLS).not.toHaveBeenCalled()
+  })
   it('lets a non-owner member edit the instructions (200; merge SELECT + UPDATE write charter, not system_prompt)', async () => {
     mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
     mockQueryWithRLS

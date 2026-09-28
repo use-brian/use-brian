@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { createConsolidationWorker } from '../worker.js'
 import type { MemoryStore, MemoryWithMetrics } from '../../memory/types.js'
 
@@ -92,6 +92,54 @@ describe('[COMP:consolidation/worker] createConsolidationWorker — cadence gati
   beforeEach(() => {
     calls = 0
     callModel = async () => { calls++; return 'NO_SOUL' }
+  })
+
+  it('resolves real reflection authorship once per workspace and respects the primary cadence', async () => {
+    const store=makeFakeStore({users:[],lastPhases:{}})
+    store.listWorkspaceMemoryGroups=async()=>[
+      {assistantId:'department-a',workspaceId:'workspace-fixture'},
+      {assistantId:'department-b',workspaceId:'workspace-fixture'},
+    ]
+    const phases:string[]=[]
+    store.getLastWorkspacePhaseAt=async(assistant,_workspace,phase)=>{
+      if(phase==='reflection') {phases.push(assistant);return null}
+      return new Date()
+    }
+    store.listForReflection=async()=>Array.from({length:3},(_,i)=>({
+      id:`verification-${i}`,action:'edit_summary',primitive:'memory',rowId:'source',rowSummary:null,
+      reason:'Department preference',modelValue:'Before',userValue:'After',at:new Date(),
+      scopeSources:[{workspaceId:'workspace-fixture',userId:'member',assistantId:null,
+        sensitivity:'internal',compartments:['product'],projectIds:[],resourceKind:'memory_verification',resourceId:`verification-${i}`,version:'1'}],
+    }))
+    const saved:Parameters<MemoryStore['create']>[0][]=[]
+    store.create=async params=>{saved.push(params);return{id:'pattern',...params,scope:params.scope??'shared',detail:null,tags:[],confidence:1}}
+    const resolve=vi.fn(async()=>({assistantId:'primary-fixture',userId:'owner-fixture'}))
+    const model=vi.fn(async()=>JSON.stringify([{summary:'Scoped preference'}]))
+    const worker=createConsolidationWorker({store,callModel:model,resolveReflectionPrincipal:resolve,listReflectionWorkspaces:async()=>['workspace-fixture','workspace-fixture']})
+    await worker.tick()
+    expect(resolve).toHaveBeenCalledExactlyOnceWith('workspace-fixture')
+    expect(phases).toEqual(['primary-fixture'])
+    expect(model).toHaveBeenCalledOnce()
+    expect(saved[0]).toMatchObject({assistantId:'primary-fixture',userId:'owner-fixture',createdByUserId:'owner-fixture'})
+    store.listWorkspaceMemoryGroups=async()=>[]
+    store.getLastWorkspacePhaseAt=async()=>null
+    await worker.tick()
+    expect(model).toHaveBeenCalledTimes(2)
+    store.getLastWorkspacePhaseAt=async()=>new Date()
+    await worker.tick()
+    expect(model).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not send correction content to a model without a resolved reflection principal',async()=>{
+    const store=makeFakeStore({users:[],lastPhases:{}})
+    store.listWorkspaceMemoryGroups=async()=>[{assistantId:'department',workspaceId:'workspace-fixture'}]
+    store.getLastWorkspacePhaseAt=async(_a,_w,phase)=>phase==='reflection'?null:new Date()
+    const read=vi.fn(async()=>[])
+    store.listForReflection=read
+    const worker=createConsolidationWorker({store,callModel,resolveReflectionPrincipal:async()=>null})
+    await worker.tick()
+    expect(read).not.toHaveBeenCalled()
+    expect(calls).toBe(0)
   })
 
   it('runs Light + Deep on a fresh user (no prior runs)', async () => {

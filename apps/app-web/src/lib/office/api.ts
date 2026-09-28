@@ -3,8 +3,10 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { authFetch } from "@/lib/auth-fetch";
 import type { OfficeArtifactSnapshot, OfficeCommand, OfficeResourceRef, OfficeTemplateRoutingDraft, OfficeTemplateSlideRole } from "@use-brian/office-model";
 
+import { getUserInfo } from "@/lib/user";
+import { attachOfficeMetadata, type OfficeMetadata } from "./metadata";
+
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
-const officeResourceObjectUrls = new Map<string, Promise<string>>();
 
 export type OfficeFamily = "document" | "presentation" | "spreadsheet";
 export type { OfficeTemplateRoutingDraft, OfficeTemplateSlideRole };
@@ -98,16 +100,34 @@ async function json<T>(response: Response, fallback: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/** SQL GET metadata is bounded independently of the HTTP cache. */
+async function metadata<T extends object, B = T>(path: string, fallback: string, select: (body: B) => T = value => value as unknown as T,init?:RequestInit): Promise<OfficeMetadata<T>> {
+  const started = performance.now(), viewerId = getUserInfo()?.id;
+  const response = await authFetch(`${API_URL}/api/office/${path}`, {...init,cache:"no-store"});
+  const body = await json<B>(response, fallback);
+  const header = response.headers.get("X-Brian-Projection-Valid-For-Ms");
+  try {
+    if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
+    return attachOfficeMetadata(select(body), header === null ? NaN : Number(header), started, viewerId);
+  }
+  catch { throw new OfficeApiError("office_projection_expired", 409); }
+}
+
+async function protectedMediaJson<T extends object, B = T>(response: Response, fallback: string, started: number, viewerId: string | undefined, select: (body: B) => T = value => value as unknown as T): Promise<OfficeMetadata<T>> {
+  const body = await json<B>(response, fallback);
+  const header = response.headers.get("X-Brian-Media-Valid-For-Ms");
+  try {
+    if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
+    return attachOfficeMetadata(select(body), header === null ? NaN : Number(header), started, viewerId);
+  } catch { throw new OfficeApiError("office_projection_expired", 409); }
+}
+
 export async function listOfficeArtifacts(
   workspaceId: string,
   view: "active" | "archived" | "trash" | "retained" = "active",
 ): Promise<OfficeArtifact[]> {
   const query = new URLSearchParams({ workspaceId, view });
-  const body = await json<{ artifacts: OfficeArtifact[] }>(
-    await authFetch(`${API_URL}/api/office/artifacts?${query}`),
-    "office_list_failed",
-  );
-  return body.artifacts;
+  return metadata<OfficeArtifact[], {artifacts: OfficeArtifact[]}>(`artifacts?${query}`, "office_list_failed", body => body.artifacts);
 }
 
 export async function createOfficeArtifact(input: {
@@ -139,35 +159,11 @@ export async function getOfficeCapabilities(): Promise<{ generationAvailable: bo
 }
 
 export async function getOfficeArtifact(artifactId: string): Promise<OfficeArtifact> {
-  const body = await json<{ artifact: OfficeArtifact }>(
-    await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}`),
-    "office_get_failed",
-  );
-  return body.artifact;
+  return metadata<OfficeArtifact, {artifact: OfficeArtifact}>(`artifacts/${encodeURIComponent(artifactId)}`, "office_get_failed", body => body.artifact);
 }
 
 export async function getOfficeSnapshot(artifactId: string): Promise<OfficeLiveSnapshot> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/snapshot`), "office_snapshot_failed");
-}
-
-export function getOfficeResourceObjectUrl(artifactId: string, resourceId: string): Promise<string> {
-  const key = `${artifactId}:${resourceId}`;
-  const cached = officeResourceObjectUrls.get(key);
-  if (cached) return cached;
-  const pending = authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources/${encodeURIComponent(resourceId)}`)
-    .then(async (response) => {
-      if (!response.ok) {
-        const body = await response.clone().json().catch(() => null) as { error?: unknown } | null;
-        throw new OfficeApiError(typeof body?.error === "string" ? body.error : "office_resource_failed", response.status);
-      }
-      return URL.createObjectURL(await response.blob());
-    })
-    .catch((error) => {
-      officeResourceObjectUrls.delete(key);
-      throw error;
-    });
-  officeResourceObjectUrls.set(key, pending);
-  return pending;
+  return metadata<OfficeLiveSnapshot>(`artifacts/${encodeURIComponent(artifactId)}/snapshot`, "office_snapshot_failed");
 }
 
 export async function admitOfficeImageResource(artifactId: string, workspaceId: string, file: File): Promise<{ resource: OfficeResourceRef; widthPx: number; heightPx: number }> {
@@ -177,7 +173,9 @@ export async function admitOfficeImageResource(artifactId: string, workspaceId: 
   const upload = await json<{ files: Array<{ id?: string; error?: string }> }>(await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/upload`, { method: 'POST', body: form }), 'office_image_upload_failed');
   const source = upload.files[0];
   if (!source?.id || source.error) throw new Error(source?.error ?? 'office_image_upload_failed');
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fileId: source.id, kind: 'image' }) }), 'office_image_admission_failed');
+  const started = performance.now(), viewerId = getUserInfo()?.id;
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fileId: source.id, kind: 'image' }) });
+  return protectedMediaJson(response, 'office_image_admission_failed', started, viewerId);
 }
 
 export async function submitOfficeCommand(artifactId: string, expectedSeq: number, command: OfficeCommand, mode: "apply" | "suggest"): Promise<OfficeLiveSnapshot | { mode: "suggestion" }> {
@@ -189,8 +187,7 @@ export async function submitOfficeCommand(artifactId: string, expectedSeq: numbe
 }
 
 export async function listOfficeComments(artifactId: string): Promise<OfficeCommentThread[]> {
-  const body = await json<{ threads: OfficeCommentThread[] }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/comments`), "office_comments_failed");
-  return body.threads;
+  return metadata<OfficeCommentThread[], {threads: OfficeCommentThread[]}>(`artifacts/${encodeURIComponent(artifactId)}/comments`, "office_comments_failed", body => body.threads);
 }
 
 export async function detachMissingOfficeComments(artifactId: string): Promise<number> {
@@ -231,8 +228,7 @@ export async function reactOfficeComment(messageId: string, reaction: "thumbs_up
 }
 
 export async function listOfficeSuggestions(artifactId: string): Promise<OfficeSuggestion[]> {
-  const body = await json<{ suggestions: OfficeSuggestion[] }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/suggestions`), "office_suggestions_failed");
-  return body.suggestions;
+  return metadata<OfficeSuggestion[], {suggestions: OfficeSuggestion[]}>(`artifacts/${encodeURIComponent(artifactId)}/suggestions`, "office_suggestions_failed", body => body.suggestions);
 }
 
 export async function decideOfficeSuggestion(suggestionId: string, decision: "accepted" | "rejected"): Promise<void> {
@@ -240,56 +236,57 @@ export async function decideOfficeSuggestion(suggestionId: string, decision: "ac
 }
 
 export async function listOfficeVersions(artifactId: string): Promise<OfficeVersion[]> {
-  const body = await json<{ versions: OfficeVersion[] }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions`), "office_versions_failed");
-  return body.versions;
+  return metadata<OfficeVersion[], {versions: OfficeVersion[]}>(`artifacts/${encodeURIComponent(artifactId)}/versions`, "office_versions_failed", body => body.versions);
 }
 
 export async function previewOfficeVersion(artifactId: string, versionId: string): Promise<OfficeArtifactSnapshot> {
-  const body = await json<{ snapshot: OfficeArtifactSnapshot }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/preview`), "office_version_preview_failed");
-  return body.snapshot;
+  return metadata<OfficeArtifactSnapshot,{snapshot:OfficeArtifactSnapshot}>(`artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/preview`,"office_version_preview_failed",body=>body.snapshot)
 }
 
-export async function nameOfficeVersion(artifactId: string, versionId: string, summary: string): Promise<void> {
-  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ summary }) }), "office_version_name_failed");
+export async function nameOfficeVersion(artifactId: string, versionId: string, summary: string): Promise<OfficeVersion[]> {
+  return metadata<OfficeVersion[],{versions:OfficeVersion[]}>(`artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}`,"office_version_name_failed",body=>body.versions,{
+    method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({summary})
+  })
 }
 
-export async function copyOfficeVersion(artifactId: string, versionId: string, title: string): Promise<{ artifactId: string; version: number }> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) }), "office_version_copy_failed");
+export async function copyOfficeVersion(artifactId: string, versionId: string, title: string): Promise<{ artifactId: string; version: number; artifact: OfficeArtifact }> {
+  return metadata<{artifactId:string;version:number;artifact:OfficeArtifact}>(`artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/copy`,"office_version_copy_failed",value=>value,{
+    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title})
+  })
 }
 
-export async function restoreOfficeVersion(artifactId: string, targetVersionId: string, expectedVersion: number, summary: string): Promise<{ id: string; version: number }> {
-  const body = await json<{ version: { id: string; version: number } }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/restore`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetVersionId, expectedVersion, summary }) }), "office_version_restore_failed");
-  return body.version;
+export async function restoreOfficeVersion(artifactId: string, targetVersionId: string, expectedVersion: number, summary: string): Promise<OfficeVersion[]> {
+  return metadata<OfficeVersion[],{version:{id:string;version:number};versions:OfficeVersion[]}>(`artifacts/${encodeURIComponent(artifactId)}/restore`,"office_version_restore_failed",body=>body.versions,{
+    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({targetVersionId,expectedVersion,summary})
+  })
 }
 
 export async function getOfficeSharing(artifactId: string): Promise<OfficeSharing> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing`), "office_sharing_failed");
+  return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing`,"office_sharing_failed")
 }
 
-export async function setOfficeGrant(artifactId: string, userId: string, role: "view" | "comment" | "edit"): Promise<void> {
-  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) }), "office_sharing_update_failed");
+export async function setOfficeGrant(artifactId: string, userId: string, role: "view" | "comment" | "edit"): Promise<OfficeSharing> {
+  return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`,"office_sharing_update_failed",value=>value,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({role})})
 }
 
-export async function revokeOfficeGrant(artifactId: string, userId: string): Promise<void> {
-  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`, { method: "DELETE" }), "office_sharing_revoke_failed");
+export async function revokeOfficeGrant(artifactId: string, userId: string): Promise<OfficeSharing> {
+  return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`,"office_sharing_revoke_failed",value=>value,{method:"DELETE"})
 }
 
-export async function setOfficeDefaultRole(artifactId: string, defaultWorkspaceRole: "view" | "comment" | "edit"): Promise<void> {
-  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ defaultWorkspaceRole }) }), "office_sharing_default_failed");
+export async function setOfficeDefaultRole(artifactId: string, defaultWorkspaceRole: "view" | "comment" | "edit"): Promise<OfficeSharing> {
+  return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing`,"office_sharing_default_failed",value=>value,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({defaultWorkspaceRole})})
 }
 
 export async function getOfficeJob(jobId: string): Promise<OfficeJob> {
-  const body = await json<{ job: OfficeJob }>(
-    await authFetch(`${API_URL}/api/office/jobs/${encodeURIComponent(jobId)}`),
-    "office_job_failed",
-  );
-  return body.job;
+  return metadata<OfficeJob, {job: OfficeJob}>(`jobs/${encodeURIComponent(jobId)}`, "office_job_failed", body => body.job);
 }
 
-export async function waitForOfficeJob(jobId: string, timeoutMs = 180_000): Promise<OfficeJob> {
+export async function waitForOfficeJob(jobId: string, timeoutMs = 180_000, isCurrent: () => boolean = () => true): Promise<OfficeJob> {
   const deadline = Date.now() + timeoutMs;
   while (true) {
+    if (!isCurrent()) throw new Error("office_job_owner_expired");
     const job = await getOfficeJob(jobId);
+    if (!isCurrent()) throw new Error("office_job_owner_expired");
     if (["completed", "failed", "cancelled", "needs_input"].includes(job.status)) return job;
     if (Date.now() >= deadline) throw new Error("office_job_timeout");
     await new Promise((resolve) => setTimeout(resolve, 750));
@@ -297,11 +294,7 @@ export async function waitForOfficeJob(jobId: string, timeoutMs = 180_000): Prom
 }
 
 export async function listOfficeJobEvents(jobId: string, afterSeq = 0): Promise<OfficeJobEvent[]> {
-  const body = await json<{ events: OfficeJobEvent[] }>(
-    await authFetch(`${API_URL}/api/office/jobs/${encodeURIComponent(jobId)}/events?afterSeq=${afterSeq}`),
-    "office_events_failed",
-  );
-  return body.events;
+  return metadata<OfficeJobEvent[], {events: OfficeJobEvent[]}>(`jobs/${encodeURIComponent(jobId)}/events?afterSeq=${afterSeq}`, "office_events_failed", body => body.events);
 }
 
 export async function steerOfficeJob(jobId: string, instruction: string): Promise<void> {
@@ -316,11 +309,7 @@ export async function steerOfficeJob(jobId: string, instruction: string): Promis
 }
 
 export async function listOfficeTemplates(workspaceId: string): Promise<OfficeTemplate[]> {
-  const body = await json<{ templates: OfficeTemplate[] }>(
-    await authFetch(`${API_URL}/api/office/templates?workspaceId=${encodeURIComponent(workspaceId)}`),
-    "office_templates_failed",
-  );
-  return body.templates;
+  return metadata<OfficeTemplate[], {templates: OfficeTemplate[]}>(`templates?workspaceId=${encodeURIComponent(workspaceId)}`, "office_templates_failed", body => body.templates);
 }
 
 export async function createOfficeTemplate(input: { workspaceId: string; family: OfficeFamily; name: string; description: string; creationMethod: "guided" | "upload"; canonicalWebsite?: string; companyHasNoWebsite?: boolean }): Promise<{ id: string; draftArtifactId: string }> {
@@ -336,11 +325,7 @@ export async function initializeOfficeTemplateDraft(input: { templateId: string;
 }
 
 export async function getOfficeTemplateRouting(templateId: string): Promise<OfficeTemplateRoutingDraft> {
-  const body = await json<{ routing: OfficeTemplateRoutingDraft }>(
-    await authFetch(`${API_URL}/api/office/templates/${encodeURIComponent(templateId)}/routing`),
-    "office_template_routing_failed",
-  );
-  return body.routing;
+  return metadata<OfficeTemplateRoutingDraft, {routing: OfficeTemplateRoutingDraft}>(`templates/${encodeURIComponent(templateId)}/routing`, "office_template_routing_failed", body => body.routing);
 }
 
 export async function saveOfficeTemplateRouting(templateId: string, routing: OfficeTemplateRoutingDraft): Promise<OfficeTemplateRoutingDraft> {
@@ -392,25 +377,39 @@ export type OfficeReleaseReceipt = { status: "blocked" | "needs_ack" | "ready"; 
 export type OfficeReleaseInput = { expectedVersion: number; action: "export" | "share" | "present" | "send" | "publish"; destination: { sensitivity: "public" | "internal" | "confidential"; external: boolean; disclosureSatisfied?: boolean }; format?: "native" | "pdf"; spreadsheetPdf?: SpreadsheetPdfRequest; acknowledgement?: { version: number; action: "export" | "share" | "present" | "send" | "publish"; codes: string[] } };
 
 export async function reviewOfficeRelease(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseReceipt> {
-  const body = await json<{ receipt: OfficeReleaseReceipt }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases/preflight`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }), "office_release_review_failed");
-  return body.receipt;
+  const started = performance.now(), viewerId = getUserInfo()?.id;
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases/preflight`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  return protectedMediaJson<OfficeReleaseReceipt, { receipt: OfficeReleaseReceipt }>(response, "office_release_review_failed", started, viewerId, body => body.receipt);
 }
 
 export type OfficeReleaseResult = { releaseId?: string; fileId?: string; receipt: OfficeReleaseReceipt };
 
 export async function releaseOfficeArtifact(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseResult> {
+  const started = performance.now(), viewerId = getUserInfo()?.id;
   const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
   if (response.status === 409) {
     const body = await response.clone().json().catch(() => null) as { receipt?: OfficeReleaseReceipt } | null;
-    if (body?.receipt) return { receipt: body.receipt };
+    if (body?.receipt) {
+      const header = response.headers.get("X-Brian-Media-Valid-For-Ms");
+      try {
+        if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
+        return attachOfficeMetadata({ receipt: body.receipt }, header === null ? NaN : Number(header), started, viewerId);
+      } catch { throw new OfficeApiError("office_projection_expired", 409); }
+    }
   }
-  return json(response, "office_release_failed");
+  return protectedMediaJson<OfficeReleaseResult>(response, "office_release_failed", started, viewerId);
 }
 
 export async function readOfficeReleasedFile(workspaceId: string, fileId: string): Promise<Blob> {
+  const started = performance.now(), viewerId = getUserInfo()?.id;
   const response = await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}`);
   if (!response.ok) throw new OfficeApiError("office_release_download_failed", response.status);
-  return response.blob();
+  const blob = await response.blob();
+  const header = response.headers.get("X-Brian-Media-Valid-For-Ms");
+  try {
+    if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
+    return attachOfficeMetadata(blob, header === null ? NaN : Number(header), started, viewerId);
+  } catch { throw new OfficeApiError("office_projection_expired", 409); }
 }
 
 export async function transitionOfficeLifecycle(artifactId: string, action: "archive" | "unarchive" | "trash" | "restore" | "purge", reason: string): Promise<OfficeArtifact> {
@@ -418,13 +417,17 @@ export async function transitionOfficeLifecycle(artifactId: string, action: "arc
   return body.artifact;
 }
 
-export async function syncOfficeOfflineCommands(artifactId: string, expectedSeq: number, commands: OfficeCommand[]): Promise<{ status: string; reason?: string; quarantine?: boolean; seq?: number; snapshot?: OfficeArtifactSnapshot }> {
-  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-sync`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedSeq, commands }) });
-  const body = await response.json() as { status: string; reason?: string; quarantine?: boolean; seq?: number; snapshot?: OfficeArtifactSnapshot };
+export type OfficeOfflineSyncResult = { status: string; reason?: string; quarantine?: boolean; seq?: number; recoveryArtifactId?: string };
+
+export async function syncOfficeOfflineCommands(input: { artifactId: string; expectedSeq: number; commands: OfficeCommand[]; deviceId: string; recoveryTitle: string; recoverySnapshot: OfficeArtifactSnapshot }): Promise<OfficeOfflineSyncResult> {
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(input.artifactId)}/offline-sync`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedSeq: input.expectedSeq, commands: input.commands, deviceId: input.deviceId, recoveryTitle: input.recoveryTitle, recoverySnapshot: input.recoverySnapshot }) });
+  const body = await response.json() as OfficeOfflineSyncResult;
   if (!response.ok && response.status !== 409) throw new Error("office_offline_sync_failed");
   return body;
 }
 
 export async function requestOfficeOfflinePackage(artifactId: string, deviceId: string, expectedVersion: number): Promise<{ manifest: Record<string, unknown>; signature: string; payload: unknown }> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-packages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, pinned: true, expectedVersion }) }), "office_offline_package_failed");
+  const started = performance.now(), viewerId = getUserInfo()?.id;
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-packages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, pinned: true, expectedVersion }) });
+  return protectedMediaJson(response, "office_offline_package_failed", started, viewerId);
 }

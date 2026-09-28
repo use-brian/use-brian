@@ -10,12 +10,12 @@
  * transaction-bound so it reverts to the seeded sentinel at COMMIT/ROLLBACK and
  * never leaks onto the pooled connection.
  *
- * `updateTask` stands in for the whole class (crm.ts ×7, tasks.ts, entities-store,
- * saved-views, doc-entity, workspace-files, compartment-store share the identical
- * head). Even with the poison trigger (an empty userId), it must issue `BEGIN`
+ * `updateTask` covers the canonical task transaction. Even with the poison
+ * trigger (an empty userId), it must issue `BEGIN`
  * first, `SET LOCAL app.current_user_id`, and NEVER any `system_bypass`.
  *
- * Spec: packages/api/CLAUDE.md -> "RLS bypass + connection state".
+ * Complete execution ceilings are exercised by task-mutation-scope.integration.test.ts.
+ * Spec: docs/architecture/features/tasks.md -> "Departmental write isolation".
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -53,8 +53,7 @@ describe('[COMP:api/manual-tx-rls-scope] updateTask scopes RLS with SET LOCAL af
     }
     mockGetAppPool.mockReturnValue({ connect: () => Promise.resolve(client) } as never)
 
-    // Empty userId is the poison trigger; non-empty `fields` forces the
-    // manual-transaction path (empty fields short-circuit via queryWithRLS).
+    // Empty userId is the poison trigger; no resource row is returned.
     const result = await updateTask('', 'task-1', { title: 'x' })
     expect(result).toBeNull()
 

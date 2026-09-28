@@ -210,6 +210,19 @@ function makeHarness(opts?: {
     runStore: runStore as never,
     executorDeps,
     ...(opts?.goalStore === false ? {} : { goalStore: goalStore as never }),
+    resolveGoalAuthoringAuthority: async ({ userId, workspaceId }) => ({
+      version: 1,
+      assistantId: USER,
+      ceiling: {
+        workspaceId,
+        userId,
+        clearance: 'confidential',
+        compartments: null,
+        mutationCompartments: null,
+        projectIds: null,
+        visibilityAssistantIds: null,
+      },
+    }),
   }
 
   const app = createTestApp('/api', pageActionsRoutes(options), { userId: USER })
@@ -260,6 +273,7 @@ describe('[COMP:api/page-actions-route] page-action routes', () => {
         host: { type: 'page', id: PAGE },
         doneWhen: { kind: 'subtasks' },
         createdByUserId: USER,
+        authoringAuthority: expect.objectContaining({ version: 1, assistantId: USER }),
       }),
     )
   })

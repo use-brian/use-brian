@@ -1,29 +1,12 @@
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
-/**
- * Resolve a doc-block `FileRef` to a browser-loadable URL.
- *
- * Two backing stores:
- *
- *   - `workspace_files` (the durable doc-media sink) → the signed-read
- *     endpoint `GET /api/doc-files/:workspaceId/:id`. The route is
- *     Bearer-auth only, so its URL is NEVER usable directly as an
- *     `<img src>` / anchor href (a plain subresource request carries no
- *     Authorization header → 401). Every consumer resolves through the
- *     authenticated `?redirect=0` mint below, which returns the short-lived
- *     signed storage URL — that URL is self-authorizing and loads as a
- *     plain `<img src>` / href / direct fetch.
- *   - `file_cache` (legacy fallback, pre-durable-storage refs) → the transient
- *     chat-attachment preview route. That route is UNAUTHENTICATED but
- *     signature-gated (WS3 #8): a bare id no longer returns bytes. We first
- *     mint a short-lived signed preview URL via the authenticated
- *     `GET /api/files/:id/preview-url` (access-scoped server-side), then hand
- *     the returned `?sig=…` URL to the `<img>` — which loads cross-origin
- *     without the SameSite=Lax cookie.
- *
+/** Resolve doc media through authenticated no-store byte reads.
+ * Temporary file-cache previews use the same protected byte lifetime.
  * [COMP:app-web/doc-file-url]
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import { protectProjection, type ProtectedProjection } from "@/lib/use-protected-projection";
+import { SurfaceCacheEvictionError } from "@/lib/surface-cache";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
@@ -35,98 +18,50 @@ export type FileRef = {
   name: string;
 };
 
-/**
- * The one authenticated read of `GET /api/doc-files/:workspaceId/:id`.
- *
- * Always sends `?redirect=0`: a CORS fetch must NOT follow the route's
- * default 302 to the signed storage URL — redirected across origins
- * (app → api → storage.googleapis.com) it gets a tainted origin, the
- * browser sends `Origin: null` on the storage leg, the bucket CORS config
- * only matches the app origins, and the browser blocks the response. Under
- * `?redirect=0` the route returns the signed URL as `{ url }` JSON instead.
- * The local-disk dev backend has no signed URL and streams the bytes from
- * the route itself; that arrives as a non-JSON response.
- */
-async function mintDocFileRead(
-  workspaceId: string,
-  fileId: string,
-): Promise<{ url: string } | { res: Response }> {
-  const res = await authFetch(
-    `${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}?redirect=0`,
-  );
-  if (!res.ok) throw new Error(`doc file fetch failed: HTTP ${res.status}`);
-  const contentType = res.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json")) {
-    const { url } = (await res.json()) as { url?: string };
-    if (!url) throw new Error("doc file fetch failed: no signed url");
-    return { url };
+/** One admission for bytes and their lifetime, including the body transfer. */
+async function readMedia(url: string) {
+  const started = performance.now();
+  try {
+    const res = await authFetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`doc file fetch failed: HTTP ${res.status}`);
+    const header = res.headers.get('X-Brian-Media-Valid-For-Ms');
+    const validForMs = header === null ? NaN : Number(header);
+    if (!Number.isFinite(validForMs) || validForMs <= 0) throw new Error('media_lifetime_missing_or_expired');
+    const blob = await res.blob();
+    return { blob, ...protectProjection({ validForMs }, started) };
+  } catch (error) {
+    throw error instanceof SurfaceCacheEvictionError ? error : new SurfaceCacheEvictionError(error);
   }
-  return { res };
 }
 
-/**
- * Fetch a durable `workspace_files` doc file's bytes as a Blob, for
- * byte consumers (the `PageIcon` image-icon loader, chat attachment / file
- * block named downloads). The signed URL is fetched directly — a single-hop
- * CORS request carrying the real app origin, which the bucket config allows.
- */
-export async function fetchDocFileBlob(
-  workspaceId: string,
-  fileId: string,
-): Promise<Blob> {
-  const minted = await mintDocFileRead(workspaceId, fileId);
-  if ("res" in minted) return minted.res.blob();
-  const bytes = await fetch(minted.url);
-  if (!bytes.ok) throw new Error(`doc file fetch failed: HTTP ${bytes.status}`);
-  return bytes.blob();
+/** Byte-only validation; display/download consumers use the protected hooks. */
+export async function fetchDocFileBlob(workspaceId: string, fileId: string): Promise<Blob> {
+  return (await readMedia(docMediaUrl(workspaceId, fileId))).blob;
 }
 
-/**
- * Resolve a durable `workspace_files` doc file to a URL loadable by a plain
- * `<img src>` / anchor href: the signed storage URL (short-lived — ~1h — so
- * resolve per mount, don't persist it), or an object-URL of the streamed
- * bytes in local-disk dev.
- */
-export async function resolveDocFileSrc(
-  workspaceId: string,
-  fileId: string,
-): Promise<string> {
-  const minted = await mintDocFileRead(workspaceId, fileId);
-  if ("url" in minted) return minted.url;
-  return URL.createObjectURL(await minted.res.blob());
+export type DocMediaProjection = ProtectedProjection<{ url: string; mimeType: string; validForMs: number }>;
+
+/** Create a cache-owned URL only after the whole byte read is admitted. */
+export async function fetchDocMediaProjection(workspaceId: string, fileId: string): Promise<DocMediaProjection> {
+  const { blob, ...projection } = await readMedia(docMediaUrl(workspaceId, fileId));
+  return { ...projection, mimeType: blob.type, url: URL.createObjectURL(blob) };
 }
 
-/**
- * Resolve any supported `FileRef` to a browser-loadable URL. Both branches
- * are an authenticated mint round-trip; returns null when the ref's bucket
- * is unknown or the mint fails (caller shows "preview unavailable").
- */
-export async function resolveFileRefUrl(
-  ref: FileRef,
-  workspaceId: string,
-): Promise<string | null> {
-  if (ref.bucket === "workspace_files") {
-    try {
-      return await resolveDocFileSrc(workspaceId, ref.path);
-    } catch {
-      return null;
-    }
-  }
+export type CachedMediaRepresentation = 'original' | 'pdf';
 
-  if (ref.bucket === "file_cache") {
-    try {
-      const res = await authFetch(
-        `${API_URL}/api/files/${encodeURIComponent(ref.path)}/preview-url?workspaceId=${encodeURIComponent(workspaceId)}`,
-      );
-      if (!res.ok) return null;
-      const data = (await res.json()) as { url?: string };
-      // The mint route returns a root-relative `/api/files/...` path; make it
-      // absolute against the API origin so it works as a cross-origin src.
-      return data.url ? `${API_URL}${data.url}` : null;
-    } catch {
-      return null;
-    }
-  }
+function docMediaUrl(workspaceId:string,fileId:string):string {
+  return `${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}?redirect=0`;
+}
 
-  return null;
+/** Temporary rows use authenticated bytes, never a signed capability. */
+export async function fetchCachedMediaProjection(workspaceId:string,fileId:string,representation:CachedMediaRepresentation):Promise<DocMediaProjection> {
+  const endpoint=representation==='pdf'?'preview-pdf':'preview';
+  const {blob,...projection}=await readMedia(`${API_URL}/api/files/${encodeURIComponent(fileId)}/${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
+  return {...projection,mimeType:blob.type,url:URL.createObjectURL(blob)};
+}
+
+/** Office references require both the current artifact and durable-file authority. */
+export async function fetchOfficeMediaProjection(workspaceId:string,artifactId:string,resourceId:string):Promise<DocMediaProjection> {
+  const {blob,...projection}=await readMedia(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources/${encodeURIComponent(resourceId)}?workspaceId=${encodeURIComponent(workspaceId)}`);
+  return {...projection,mimeType:blob.type,url:URL.createObjectURL(blob)};
 }

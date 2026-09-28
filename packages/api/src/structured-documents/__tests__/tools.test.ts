@@ -40,11 +40,11 @@ describe('[COMP:files/structured-document-tools] source-reference-only tools', (
       expect(t.isReadOnly).toBe(['readDocumentExtraction', 'listDocumentExtractionConnectors'].includes(t.name))
       expect(t.allowPersistentApproval).toBe(false)
     }
-    expect(f.tool('startDocumentExtraction').requiresConfirmation).toBe(false)
+    expect(f.tool('startDocumentExtraction').requiresConfirmation).toBe(true)
   })
   it('honors allow, ask and block for every tool including start', async () => {
     const f = setup(), ctx = context()
-    for (const t of f.tools) await expect(t.resolveConfirmation!(ctx)).resolves.toBe(false)
+    for (const t of f.tools) await expect(t.resolveConfirmation!(ctx)).resolves.toBe(t.name === 'startDocumentExtraction')
     f.resolvePolicy.mockResolvedValue('ask')
     for (const t of f.tools) await expect(t.resolveConfirmation!(ctx)).resolves.toBe(true)
     f.resolvePolicy.mockResolvedValue('block')
@@ -86,8 +86,9 @@ describe('[COMP:files/structured-document-tools] source-reference-only tools', (
   it('uses only trusted context fields, with absent scopes as empty and explicit null as universe', () => {
     const ctx = context()
     Object.assign(ctx, { writeCompartments: ['invented-write'], assistantCompartments: null, assistantProjectIds: null, systemRead: true })
+    ctx.mutationCompartments = []
     const trusted = trustedToolContext(ctx)
-    expect(trusted).toEqual({ userId: uid(1), workspaceId: uid(2), assistantId: uid(3), assistantKind: 'standard', clearance: 'confidential', compartments: ['team-a'], projectIds: ['project-a'] })
+    expect(trusted).toEqual({ userId: uid(1), workspaceId: uid(2), assistantId: uid(3), assistantKind: 'standard', clearance: 'confidential', compartments: ['team-a'], mutationCompartments: [], projectIds: ['project-a'] })
     delete ctx.compartments; delete ctx.projectIds
     expect(trustedToolContext(ctx)).toMatchObject({ compartments: [], projectIds: [] })
     ctx.compartments = null; ctx.projectIds = null

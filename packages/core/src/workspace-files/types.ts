@@ -40,6 +40,8 @@ export type FileSensitivity = (typeof FILE_SENSITIVITIES)[number]
 export type WorkspaceFileMetadata = Record<string, unknown>
 
 export type WorkspaceFile = {
+  /** Canonical revision used to fence staged content publication. */
+  scopeVersion?: string
   id: string
   workspaceId: string
   path: string
@@ -165,6 +167,8 @@ export type WorkspaceFileMetaPatch = {
  * Optional: metadata patches applied to the successor row.
  */
 export type WorkspaceFileSupersedePatch = {
+  /** Trusted version from the source read; mismatches cannot publish staged bytes. */
+  expectedScopeVersion?: string
   /** Stamped on the successor as `created_by_user_id`. */
   editorUserId: string
   /** Stamped on the successor as `created_by_assistant_id`. */
@@ -202,7 +206,7 @@ export type WorkspaceFilesStore = {
    * decides whether to surface as overwrite (delete + create) or a clear
    * error. Historical versions at the same path never collide.
    */
-  create(userId: string, input: WorkspaceFileCreateInput): Promise<WorkspaceFile>
+  create(userId: string, input: WorkspaceFileCreateInput, access?: AccessContext): Promise<WorkspaceFile>
 
   /** Viewer-projected (WU-4.2b). Returns null when the row is hidden or non-existent. Current-version only (filters `valid_to IS NULL`). */
   getById(ctx: AccessContext, id: string): Promise<WorkspaceFile | null>
@@ -216,19 +220,21 @@ export type WorkspaceFilesStore = {
     workspaceId: string,
     id: string,
     patch: WorkspaceFileMetaPatch,
+    access?: AccessContext,
   ): Promise<WorkspaceFile | null>
 
-  /** Bumps size_bytes after a GCS append. Used by files-api append. Current-row gated. */
+  /** Legacy metadata-only size update. Content append publishes a successor instead. */
   updateSize(
     userId: string,
     workspaceId: string,
     id: string,
     sizeBytes: number,
     scope?: { compartments?: string[]; projectIds?: string[] },
+    access?: AccessContext,
   ): Promise<WorkspaceFile | null>
 
   /** Returns true if a row was deleted. Current-row gated. */
-  delete(userId: string, workspaceId: string, id: string): Promise<boolean>
+  delete(userId: string, workspaceId: string, id: string, access?: AccessContext): Promise<boolean>
 
   /**
    * Hierarchy listing — files whose `parent_path` exactly matches `prefix`
@@ -284,6 +290,7 @@ export type WorkspaceFilesStore = {
     workspaceId: string,
     id: string,
     patch: WorkspaceFileSupersedePatch,
+    access?: AccessContext,
   ): Promise<WorkspaceFile | null>
 
   /**

@@ -33,6 +33,12 @@ import { query } from '../db/client.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import type { SkillCuratorDigestStore } from '../db/skill-curator-digest-store.js'
 import type { WorkspaceCuratorScope } from '@use-brian/core'
+import {
+  applyDerivedSkillPatch,
+  applyDerivedSkillSupportFile,
+  createDerivedWorkspaceSkill,
+  softDeprecateScopedSkill,
+} from '../db/skill-derived-store.js'
 
 export type WorkspaceCuratorScopeDeps = {
   /** Canonical read surface — supplies `listCuratorEligible`. */
@@ -71,17 +77,13 @@ export function buildWorkspaceCuratorScope(
       listCuratorEligible,
 
       async patchUmbrella(skillId, patch) {
-        // In-place content patch + 30-day undo diff. No lease gate — the
-        // weekly pass is the sole writer of this row class during its run.
-        await query(
-          `UPDATE workspace_skills
-           SET content = $1,
-               last_patch_diff = $2,
-               last_patch_diff_at = now(),
-               updated_at = now()
-           WHERE id = $3 AND valid_to IS NULL`,
-          [patch.content, patch.diff, skillId],
-        )
+        await applyDerivedSkillPatch({
+          workspaceId: patch.derivation.sources[0]!.workspaceId,
+          skillId,
+          content: patch.content,
+          diff: patch.diff,
+          evidence: patch.derivation,
+        })
       },
 
       async createUmbrella(workspaceId, draft) {
@@ -92,27 +94,23 @@ export function buildWorkspaceCuratorScope(
         // Confidence + activated_at are left to their column defaults (0.0, NULL) so
         // the umbrella is born SUGGESTED: unlike the approval-admitted `self` path,
         // no human gated this consolidation, so it waits for review before running.
-        const r = await query<{ id: string }>(
-          `INSERT INTO workspace_skills (
-             slug, name, description, when_to_use, content, category,
-             requires_connectors, source, author_id, workspace_id,
-             write_origin, originating_assistant_id, auto_generated_at,
-             induction_source
-           )
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'auto-generated',NULL,$8,'background_review',$9,now(),'self')
-           RETURNING id`,
-          [
-            draft.slug,
-            draft.name,
-            draft.description,
-            draft.whenToUse ?? null,
-            draft.content,
-            draft.category ?? 'custom',
-            draft.requiresConnectors ?? [],
-            workspaceId,
-            draft.originatingAssistantId ?? null,
-          ],
-        )
+        const r = await createDerivedWorkspaceSkill({
+          workspaceId,
+          authorUserId: null,
+          slug: draft.slug,
+          name: draft.name,
+          description: draft.description,
+          whenToUse: draft.whenToUse,
+          content: draft.content,
+          category: draft.category,
+          requiresConnectors: draft.requiresConnectors,
+          source: 'auto-generated',
+          writeOrigin: 'background_review',
+          originatingAssistantId: draft.originatingAssistantId,
+          inductionSource: 'self',
+          humanApproved: false,
+          evidence: draft.derivation,
+        })
         // Seed the proposer's enablement row — the allowlist is the single
         // source of truth for offering scope (mig 264), so without this the
         // new suggested umbrella would be offered to nobody. enabled_by NULL
@@ -123,22 +121,22 @@ export function buildWorkspaceCuratorScope(
                (workspace_skill_id, assistant_id, enabled_by_user_id)
              VALUES ($1, $2, NULL)
              ON CONFLICT (workspace_skill_id, assistant_id) DO NOTHING`,
-            [r.rows[0].id, draft.originatingAssistantId],
+            [r.rowId, draft.originatingAssistantId],
           )
         }
-        return { rowId: r.rows[0].id }
+        return { rowId: r.rowId }
       },
 
       async addSupportFile(params) {
-        await query(
-          `INSERT INTO workspace_skill_files (workspace_skill_id, kind, name, content, description)
-           VALUES ($1,$2,$3,$4,$5)
-           ON CONFLICT (workspace_skill_id, kind, name) DO UPDATE
-             SET content = EXCLUDED.content,
-                 description = EXCLUDED.description,
-                 updated_at = now()`,
-          [params.umbrellaRowId, params.kind, params.name, params.content, params.description ?? null],
-        )
+        await applyDerivedSkillSupportFile({
+          workspaceId: params.derivation.sources[0]!.workspaceId,
+          skillId: params.umbrellaRowId,
+          kind: params.kind,
+          name: params.name,
+          content: params.content,
+          description: params.description,
+          evidence: params.derivation,
+        })
       },
 
       async recordAbsorption(memberRowId, umbrellaRowId) {
@@ -158,16 +156,14 @@ export function buildWorkspaceCuratorScope(
     decayStore: {
       listCuratorEligible,
 
-      async softDeprecate(skillRowId) {
+      async softDeprecate(skillRowId, _reason, source) {
         // Bi-temporal close — idempotent (the WHERE no-ops a row already past
         // valid_to). The decay reason lives in the event stream for V2.
-        await query(
-          `UPDATE workspace_skills
-           SET valid_to = now(),
-               updated_at = now()
-           WHERE id = $1 AND valid_to IS NULL`,
-          [skillRowId],
-        )
+        await softDeprecateScopedSkill({
+          workspaceId: source.workspaceId,
+          skillId: skillRowId,
+          source,
+        })
       },
     },
   }

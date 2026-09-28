@@ -1,0 +1,351 @@
+import request from 'supertest'
+import {readFile} from 'node:fs/promises'
+import {docFilesRoutes} from '../../routes/doc-files.js'
+import {createTestApp} from '../../routes/__tests__/helpers.js'
+import {getWorkspaceMembershipWithClearanceSystem} from '../workspace-store.js'
+import { randomUUID } from 'node:crypto'
+import { afterAll, describe, expect, it, vi } from 'vitest'
+import type { AccessContext, FilesContext } from '@use-brian/core'
+import { getAppPool, getPool, queryWithRLS } from '../client.js'
+import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
+import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
+import { applyBrainCorrection } from '../brain-inbox-store.js'
+import { getWorkspaceFileReadProjection, updateWorkspaceFileMeta } from '../workspace-files.js'
+import { createFilesApi } from '../../files/files-api.js'
+import type { GcsFilesClient } from '../../files/gcs-client.js'
+import { parseStorageKey } from '../../files/gcs-client.js'
+import { runWithAgentAccess } from '../agent-access-context.js'
+
+const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+await assertLocalFixture()
+const pool = getPool()
+
+async function fixture() {
+  const workspaceId = randomUUID(), userId = randomUUID(), assistantId = randomUUID(), projectId = randomUUID()
+  await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [userId])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'File mutation fixture',$2)", [workspaceId, userId])
+  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, userId])
+  await pool.query("UPDATE workspace_members SET clearance='confidential' WHERE workspace_id=$1 AND user_id=$2", [workspaceId,userId])
+  await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind) VALUES($1,'Fixture assistant',$2,$3,'standard')", [assistantId, workspaceId, userId])
+  await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Fixture','fixture',$3)", [projectId, workspaceId, userId])
+  const ctx: FilesContext = { workspaceId, userId, assistantId, assistantKind: 'standard', clearance: 'confidential',
+    compartments: ['product', 'other'], mutationCompartments: ['product', 'other'], projectIds: [projectId],
+    writeCompartments: ['product'], writeProjectIds: [projectId] }
+  const access: AccessContext = { ...ctx, assistantId, assistantKind: 'standard' }
+  const blobs = new Map<string, Buffer>()
+  const gcs = {
+    writeBlob: vi.fn(async (key: string, bytes: Buffer) => { blobs.set(key, Buffer.from(bytes)) }),
+    readBlob: vi.fn(async (key: string) => { const bytes = blobs.get(key); return bytes ? { bytes, mime: 'text/plain', metadata: {} } : null }),
+    deleteBlob: vi.fn(async (key: string) => { blobs.delete(key) }),
+  } as unknown as GcsFilesClient
+  const store = createDbWorkspaceFilesStore()
+  const api = createFilesApi({ gcs, store, auditStore: { append: vi.fn(async () => {}) } as never, bucket: 'fixture-bucket' })
+  const written = await api.write(ctx, { path: '/fixture.txt', content: 'original', sensitivity: 'internal' })
+  if (!written.ok) throw new Error('fixture creation failed')
+  const file = written.value
+  await pool.query(`INSERT INTO file_segments(workspace_id,file_id,segment_index,char_start,char_end,content,created_by_user_id,compartments,project_ids)
+    VALUES($1,$2,0,0,8,'original',$3,$4,$5)`, [workspaceId, file.id, userId, ['product'], [projectId]])
+  const raw = async () => (await pool.query('SELECT id,title,storage_uri,compartments,scope_version::text,valid_to,superseded_by FROM workspace_files WHERE workspace_id=$1 ORDER BY created_at,id', [workspaceId])).rows
+  const patch = { editorUserId: userId, expectedScopeVersion: file.scopeVersion, storageUri: `gs://fixture-bucket/${workspaceId}/${randomUUID()}`, sizeBytes: 9 }
+  return { workspaceId, userId, assistantId, projectId, ctx, access, blobs, gcs, store, api, file, raw, patch }
+}
+
+// Approved fixture records exercise the real grant/RLS boundary without
+// pretending this incomplete binary may activate new workspace delegation.
+async function deliveryFixture(expiresInMs=86_400_000) {
+  const f=await fixture(),member=randomUUID(),requestId=randomUUID()
+  const team=await createDbWorkspaceGroupStore().createTeam(f.userId,f.workspaceId,{name:'Delivery fixture',key:'delivery-fixture'})
+  await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[member])
+  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,team_scope_mode) VALUES($1,$2,'member','assigned')",[f.workspaceId,member])
+  await pool.query('UPDATE workspace_files SET compartments=$2,project_ids=ARRAY[]::uuid[] WHERE id=$1',[f.file.id,[team.compartmentKey!]])
+  await pool.query(`INSERT INTO workspace_access_requests(id,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,reason,starts_at,expires_at,payload_hash,policy_revision,status,decided_by,decided_at)
+    VALUES($1,$2,$3,'member',$3,$4,'Fixture delivery',now()-interval '1 day',now()+$7*interval '1 millisecond',$5,1,'approved',$6,now())`,[requestId,f.workspaceId,member,team.id,'a'.repeat(64),f.userId,expiresInMs])
+  const grant=(await pool.query<{id:string}>(`INSERT INTO workspace_access_grants(workspace_id,request_id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,approved_by)
+    SELECT workspace_id,id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,decided_by FROM workspace_access_requests WHERE id=$1 RETURNING id`,[requestId])).rows[0]
+  const reader:FilesContext={workspaceId:f.workspaceId,userId:member,assistantId:null,clearance:'internal'}
+  const app=createTestApp('/api/doc-files',docFilesRoutes({filesApi:f.api,membership:getWorkspaceMembershipWithClearanceSystem,readProjection:getWorkspaceFileReadProjection}),{userId:member})
+  return {...f,member,grant,reader,app}
+}
+
+describe('[COMP:api/file-mutation-scope] immutable file publication and canonical writers', () => {
+  afterAll(async () => { await getAppPool().end(); await pool.end() })
+
+  it('delivers current read-only grant bytes through the real authenticated route without authorizing edits',async()=>{
+    const f=await deliveryFixture()
+    expect(await f.api.read(f.reader,f.file.id)).toMatchObject({ok:true,value:{content:'original'}})
+    expect(await f.api.readBytes(f.reader,f.file.id)).toMatchObject({ok:true,value:{bytes:Buffer.from('original')}})
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}?redirect=0`)
+    expect(res.status).toBe(200);expect(res.text).toBe('original');expect(res.headers['cache-control']).toBe('private, no-store');expect(res.headers.location).toBeUndefined()
+    expect(await f.store.updateMeta(f.member,f.workspaceId,f.file.id,{title:'Denied'})).toBeNull()
+    expect(await f.raw()).toMatchObject([{title:null,valid_to:null}])
+  })
+
+
+
+  it('keeps raw grant rows private while the caller-bound lifetime admits only a current member',async()=>{
+    const f=await deliveryFixture(),outsider=randomUUID()
+    const raw=await queryWithRLS(f.member,'SELECT id FROM workspace_access_grants WHERE workspace_id=$1',[f.workspaceId])
+    expect(raw.rows).toEqual([])
+    const ttl=async(actor:string,workspace:string)=>Number((await queryWithRLS(actor,'SELECT department_media_valid_for_ms($1) AS ttl',[workspace])).rows[0].ttl)
+    expect(await ttl(f.member,f.workspaceId)).toBeGreaterThan(0)
+    expect(await ttl(outsider,f.workspaceId)).toBe(0)
+    expect(await ttl(f.member,randomUUID())).toBe(0)
+    await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.member])
+    expect(await ttl(f.member,f.workspaceId)).toBe(0)
+  })
+
+  it('adds the lifetime function to the predecessor schema without changing existing data or RLS',async()=>{
+    const f=await deliveryFixture(),before=await f.raw()
+    const sql=await readFile(new URL('../../../migrations/594_department_media_projection_lifetime.sql',import.meta.url),'utf8')
+    await pool.query('DROP FUNCTION department_media_valid_for_ms(uuid)')
+    try{await pool.query(sql)}catch(error){await pool.query('ROLLBACK');throw error}
+    expect(await f.raw()).toEqual(before)
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(res.status).toBe(200);expect(res.text).toBe('original')
+    expect((await queryWithRLS(f.member,'SELECT id FROM workspace_access_grants WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
+  })
+
+  it('bounds display by a current grant expiry and refuses the expired grant',async()=>{
+    const f=await deliveryFixture(2000)
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(res.status).toBe(200);expect(res.text).toBe('original')
+    expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeGreaterThan(0)
+    expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeLessThanOrEqual(2000)
+    await pool.query('SELECT pg_sleep(2.1)')
+    const denied=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(denied.status).toBe(404);expect(denied.text).not.toContain('original')
+  })
+
+  it.each(['revoked','revised'] as const)('refuses a %s source between the byte read and display projection',async change=>{
+    const f=await deliveryFixture(),read=f.api.readBytes.bind(f.api)
+    f.api.readBytes=async(...args)=>{
+      const result=await read(...args)
+      if(change==='revoked')await pool.query('UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1',[f.grant.id,f.userId])
+      else await pool.query("UPDATE workspace_files SET sensitivity='public' WHERE id=$1",[f.file.id])
+      return result
+    }
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(res.status).toBe(404);expect(res.text).not.toContain('original')
+    expect(res.headers['x-brian-media-valid-for-ms']).toBeUndefined()
+  })
+
+  it('preserves authorized media after one of two independent grants is revoked',async()=>{
+    const f=await deliveryFixture(),requestId=randomUUID()
+    await pool.query(`INSERT INTO workspace_access_requests(id,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,reason,starts_at,expires_at,payload_hash,policy_revision,status,decided_by,decided_at)
+      SELECT $2,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,'Independent fixture',starts_at,expires_at,repeat('b',64),policy_revision,status,decided_by,decided_at FROM workspace_access_requests WHERE id=(SELECT request_id FROM workspace_access_grants WHERE id=$1)`,[f.grant.id,requestId])
+    await pool.query(`INSERT INTO workspace_access_grants(workspace_id,request_id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,approved_by)
+      SELECT workspace_id,id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,decided_by FROM workspace_access_requests WHERE id=$1`,[requestId])
+    await pool.query('UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1',[f.grant.id,f.userId])
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(res.status).toBe(200);expect(res.text).toBe('original')
+    expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeGreaterThan(0)
+  })
+
+  it.each(['grant','membership','clearance','private','holding','revision','supersession'] as const)('withholds fetched bytes when %s changes during storage I/O',async change=>{
+    const f=await deliveryFixture(),read=f.gcs.readBlob.bind(f.gcs)
+    f.gcs.readBlob=async key=>{
+      const blob=await read(key)
+      if(change==='grant')await pool.query('UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1',[f.grant.id,f.userId])
+      else if(change==='membership')await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.member])
+      else if(change==='clearance')await pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.member])
+      else if(change==='private')await pool.query('UPDATE workspace_files SET user_id=$2 WHERE id=$1',[f.file.id,f.userId])
+      else if(change==='holding')await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[f.file.id])
+      else if(change==='revision')await pool.query("UPDATE workspace_files SET sensitivity='public' WHERE id=$1",[f.file.id])
+      else await pool.query('UPDATE workspace_files SET valid_to=now() WHERE id=$1',[f.file.id])
+      return blob
+    }
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}?redirect=0`)
+    expect(res.status).toBe(404);expect(res.body).toEqual({error:'File not found'});expect(res.text).not.toContain('original');expect(res.headers.location).toBeUndefined()
+  })
+
+  it.each(['none', 'explicit', 'ambient'] as const)('checks current-member file authority with %s execution context', async mode => {
+    const f = await fixture(), member = randomUUID(), groups = createDbWorkspaceGroupStore()
+    const team = await groups.createTeam(f.userId, f.workspaceId, { name: 'Product fixture', key: 'product-fixture' })
+    const key = team.compartmentKey!
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [member])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,team_scope_mode) VALUES($1,$2,'member','assigned')", [f.workspaceId,member])
+    await pool.query('UPDATE workspace_files SET compartments=$2 WHERE id=$1', [f.file.id,[key]])
+    const ctx = { ...f.access, userId: member, compartments: [key], mutationCompartments: [key] }
+    const access = mode === 'explicit' ? ctx : undefined
+    const client = await pool.connect()
+    const run = <T,>(fn: () => Promise<T>) => mode === 'ambient' ? runWithAgentAccess({ ...ctx, clearance: ctx.clearance },fn) : fn()
+    const replacement = { ...f.patch, editorUserId: member, expectedScopeVersion: undefined }
+    const denied = async () => run(async () => {
+      await client.query('BEGIN')
+      expect(await updateWorkspaceFileMeta(member,f.workspaceId,f.file.id,{title:'Refused'},client,access)).toBeNull()
+      expect(await updateWorkspaceFileMeta(member,f.workspaceId,f.file.id,{},client,access)).toBeNull()
+      await client.query('COMMIT')
+      expect(await f.store.updateSize(member,f.workspaceId,f.file.id,100,{},access)).toBeNull()
+      expect(await f.store.delete(member,f.workspaceId,f.file.id,access)).toBe(false)
+      expect(await f.store.supersede(member,f.workspaceId,f.file.id,replacement,access)).toBeNull()
+    })
+    try {
+      await denied()
+      await groups.addMember(f.userId,team.id,member)
+      await client.query('BEGIN')
+      expect(await run(() => updateWorkspaceFileMeta(member,f.workspaceId,f.file.id,{title:'Authorized'},client,access))).toMatchObject({title:'Authorized'})
+      await client.query('COMMIT')
+      await pool.query("UPDATE workspace_files SET sensitivity='confidential' WHERE id=$1", [f.file.id])
+      await denied()
+      await pool.query("UPDATE workspace_files SET sensitivity='internal',user_id=$2 WHERE id=$1", [f.file.id,f.userId])
+      await denied()
+      await pool.query('UPDATE workspace_files SET user_id=NULL WHERE id=$1', [f.file.id])
+      await pool.query('DELETE FROM workspace_group_members WHERE group_id=$1 AND user_id=$2', [team.id,member])
+      await denied()
+      expect(await f.raw()).toMatchObject([{title:'Authorized',valid_to:null}])
+      expect((await pool.query('SELECT valid_to FROM file_segments WHERE file_id=$1',[f.file.id])).rows).toEqual([{valid_to:null}])
+    } finally { await client.query('ROLLBACK'); client.release() }
+  })
+
+  it.each([false,true])('checks member destination Teams when creating a file with explicit id=%s', async explicitId => {
+    const f=await fixture(), member=randomUUID(), groups=createDbWorkspaceGroupStore()
+    const team=await groups.createTeam(f.userId,f.workspaceId,{name:'Product fixture',key:'product-fixture'})
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[member])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,team_scope_mode) VALUES($1,$2,'member','assigned')",[f.workspaceId,member])
+    const input={...(explicitId?{id:randomUUID()}:{}),workspaceId:f.workspaceId,path:'/member.txt',parentPath:'/',name:'member.txt',mime:'text/plain',sizeBytes:1,storageUri:f.file.storageUri,compartments:[team.compartmentKey!],createdByUserId:member}
+    await expect(f.store.create(member,input)).rejects.toMatchObject({code:'scope_operation_denied'})
+    await groups.addMember(f.userId,team.id,member)
+    const created=await f.store.create(member,input)
+    expect(created).toMatchObject({compartments:[team.compartmentKey!]})
+    const other=await groups.createTeam(f.userId,f.workspaceId,{name:'Research fixture',key:'research-fixture'})
+    expect(await f.store.updateMeta(member,f.workspaceId,created.id,{title:'Refused',inheritCompartments:[other.compartmentKey!]})).toBeNull()
+    expect(await f.store.updateSize(member,f.workspaceId,created.id,100,{compartments:[other.compartmentKey!]})).toBeNull()
+    await expect(f.store.supersede(member,f.workspaceId,created.id,{...f.patch,editorUserId:member,expectedScopeVersion:undefined,compartments:[other.compartmentKey!]})).rejects.toMatchObject({code:'scope_operation_denied'})
+    expect((await pool.query('SELECT title,size_bytes,valid_to FROM workspace_files WHERE id=$1',[created.id])).rows).toEqual([{title:null,size_bytes:'1',valid_to:null}])
+  })
+
+  it('rolls back refused file downgrades without a false correction receipt or lower segment',async()=>{
+    const f=await fixture()
+    await pool.query("UPDATE file_segments SET sensitivity='confidential' WHERE file_id=$1",[f.file.id])
+    await expect(applyBrainCorrection({
+      mutate:client=>updateWorkspaceFileMeta(f.userId,f.workspaceId,f.file.id,{title:'Refused',sensitivity:'public'},client),
+      verifications:()=>[{targetKind:'workspace_file',targetId:f.file.id,workspaceId:f.workspaceId,verifiedByUserId:f.userId,action:'adjust_sensitivity',modelValue:'internal',userValue:'public'}],
+    })).rejects.toMatchObject({code:'scope_declassification_required'})
+    expect((await pool.query('SELECT count(*)::int AS count FROM brain_verifications WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([{count:0}])
+    expect(await f.raw()).toMatchObject([{title:null,valid_to:null}])
+    expect(await f.store.updateMeta(f.userId,f.workspaceId,f.file.id,{sensitivity:'internal'})).toMatchObject({sensitivity:'internal'})
+    expect((await pool.query('SELECT sensitivity FROM file_segments WHERE file_id=$1',[f.file.id])).rows).toEqual([{sensitivity:'confidential'}])
+  })
+
+  it('publishes appended bytes and closes prior segments in one canonical supersession', async () => {
+    const f = await fixture()
+    const result = await f.api.append({ ...f.ctx, writeSensitivity: 'confidential', writeCompartments: ['other'] }, f.file.id, ' new')
+    expect(result).toMatchObject({ ok: true, value: { sensitivity: 'confidential', compartments: ['other', 'product'] } })
+    if (!result.ok) throw new Error('append failed')
+    expect(f.blobs.get(parseStorageKey(f.file.storageUri))!.toString()).toBe('original')
+    expect(f.blobs.get(parseStorageKey(result.value.storageUri))!.toString()).toBe('original new')
+    expect((await f.raw()).find(row => row.id === f.file.id)).toMatchObject({ superseded_by: result.value.id, valid_to: expect.any(Date) })
+    expect((await pool.query('SELECT valid_to FROM file_segments WHERE file_id=$1', [f.file.id])).rows[0].valid_to).toBeInstanceOf(Date)
+    expect(result.value.scopeVersion).toBe('1')
+  })
+
+  it('allows only one concurrent append and never overwrites historical bytes', async () => {
+    const f = await fixture(), write = f.gcs.writeBlob.bind(f.gcs)
+    let arrivals = 0, release!: () => void
+    const both = new Promise<void>(resolve => { release = resolve })
+    f.gcs.writeBlob = async (...args) => { await write(...args); if (++arrivals === 2) release(); await both }
+    const results = await Promise.all([f.api.append(f.ctx, f.file.id, ' A'), f.api.append(f.ctx, f.file.id, ' B')])
+    expect(results.filter(result => result.ok)).toHaveLength(1)
+    expect(results.find(result => !result.ok)).toMatchObject({ error: { kind: 'conflict', reason: 'changed' } })
+    expect((await f.raw()).filter(row => row.valid_to === null)).toHaveLength(1)
+    expect(f.blobs.size).toBe(2)
+    expect(f.blobs.get(parseStorageKey(f.file.storageUri))!.toString()).toBe('original')
+  })
+
+  it('refuses stale publication after source reclassification without touching old bytes', async () => {
+    const f = await fixture(), write = f.gcs.writeBlob.bind(f.gcs)
+    f.gcs.writeBlob = async (...args) => {
+      await write(...args)
+      await pool.query("UPDATE workspace_files SET sensitivity='confidential' WHERE id=$1", [f.file.id])
+    }
+    expect(await f.api.append(f.ctx, f.file.id, ' new')).toMatchObject({ ok: false, error: { kind: 'conflict' } })
+    expect(await f.raw()).toHaveLength(1)
+    expect([...f.blobs.values()].map(bytes => bytes.toString())).toEqual(['original'])
+  })
+
+  it('retains a committed successor after a lost database acknowledgement', async () => {
+    const f = await fixture(), supersede = f.store.supersede.bind(f.store)
+    f.store.supersede = async (...args) => { await supersede(...args); throw new Error('lost acknowledgement') }
+    await expect(f.api.append(f.ctx, f.file.id, ' new')).rejects.toMatchObject({ code: 'file_publication_uncertain', retrySafe: false })
+    expect(await f.api.read(f.ctx, '/fixture.txt')).toMatchObject({ ok: true, value: { content: 'original new' } })
+    expect(f.blobs.size).toBe(2)
+  })
+
+  it('checks read-only reach at the canonical metadata, delete and supersession writers', async () => {
+    const f = await fixture(), readOnly = { ...f.access, mutationCompartments: [] }
+    expect(await f.store.updateMeta(f.userId, f.workspaceId, f.file.id, { title: 'Denied' }, readOnly)).toBeNull()
+    expect(await f.store.delete(f.userId, f.workspaceId, f.file.id, readOnly)).toBe(false)
+    expect(await f.store.supersede(f.userId, f.workspaceId, f.file.id, f.patch, readOnly)).toBeNull()
+    expect(await f.raw()).toMatchObject([{ title: null, valid_to: null }])
+    await runWithAgentAccess({ ...f.ctx, clearance: 'confidential', compartments: f.ctx.compartments, mutationCompartments: [] }, async () => {
+      expect(await f.store.supersede(f.userId, f.workspaceId, f.file.id, f.patch)).toBeNull()
+    })
+  })
+
+  it('checks supplied owner transactions and rolls back metadata plus segments together', async () => {
+    const f = await fixture(), client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      expect(await updateWorkspaceFileMeta(f.userId, f.workspaceId, f.file.id, { title: 'Denied' }, client,
+        { ...f.access, mutationCompartments: [] })).toBeNull()
+      await client.query('ROLLBACK')
+    } finally { client.release() }
+    const name = `fixture_segments_${randomUUID().replaceAll('-', '')}`
+    await pool.query(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.workspace_id='${f.workspaceId}'::uuid THEN RAISE EXCEPTION 'fixture segment refusal'; END IF;
+      RETURN NEW; END $$`)
+    await pool.query(`CREATE TRIGGER ${name} BEFORE UPDATE ON file_segments FOR EACH ROW EXECUTE FUNCTION ${name}()`)
+    try {
+      await expect(f.store.updateMeta(f.userId, f.workspaceId, f.file.id, { title: 'Changed', inheritCompartments: ['other'] }, f.access)).rejects.toThrow('fixture segment refusal')
+      expect(await f.raw()).toMatchObject([{ title: null, compartments: ['product'], scope_version: f.file.scopeVersion }])
+    } finally {
+      await pool.query(`DROP TRIGGER ${name} ON file_segments`)
+      await pool.query(`DROP FUNCTION ${name}()`)
+    }
+    expect(await f.store.updateMeta(f.userId, f.workspaceId, f.file.id, { title: 'Updated', inheritCompartments: ['other'] }, f.access)).toMatchObject({ title: 'Updated', compartments: ['other', 'product'] })
+    expect((await pool.query('SELECT compartments FROM file_segments WHERE file_id=$1', [f.file.id])).rows[0].compartments).toEqual(['other', 'product'])
+  })
+
+  it.each(['held', 'retracted', 'historical'] as const)('refuses the %s source at every mutation entry point', async state => {
+    const f = await fixture()
+    const updates = { held: 'scope_held=true', retracted: 'retracted_at=now()', historical: 'valid_to=now()' }
+    await pool.query(`UPDATE workspace_files SET ${updates[state]} WHERE id=$1`, [f.file.id])
+    expect(await f.store.updateMeta(f.userId, f.workspaceId, f.file.id, { title: 'Changed' }, f.access)).toBeNull()
+    expect(await f.store.delete(f.userId, f.workspaceId, f.file.id, f.access)).toBe(false)
+    expect(await f.store.supersede(f.userId, f.workspaceId, f.file.id, f.patch, f.access)).toBeNull()
+    expect(await f.raw()).toHaveLength(1)
+  })
+
+  it('rejects added destination scope and retains source sensitivity', async () => {
+    const f = await fixture()
+    await expect(f.store.supersede(f.userId, f.workspaceId, f.file.id, { ...f.patch, compartments: ['foreign'] }, f.access)).rejects.toMatchObject({ code: 'scope_operation_denied' })
+    await expect(f.store.updateMeta(f.userId, f.workspaceId, f.file.id, { inheritProjectIds: [randomUUID()] }, f.access)).rejects.toMatchObject({ code: 'scope_operation_denied' })
+    await expect(f.store.supersede(f.userId, f.workspaceId, f.file.id, { ...f.patch, sensitivity: 'public' }, f.access)).rejects.toMatchObject({ code: 'scope_declassification_required' })
+    const result = await f.store.supersede(f.userId, f.workspaceId, f.file.id, f.patch, f.access)
+    expect(result).toMatchObject({ sensitivity: 'internal', compartments: ['product'], projectIds: [f.projectId] })
+  })
+
+  it('keeps metadata sensitivity monotone for scoped edits and propagates the retained floor', async () => {
+    const f = await fixture()
+    await expect(f.store.updateMeta(f.userId, f.workspaceId, f.file.id, { sensitivity: 'public' }, f.access))
+      .rejects.toMatchObject({ code: 'scope_declassification_required' })
+    expect((await pool.query('SELECT sensitivity FROM file_segments WHERE file_id=$1', [f.file.id])).rows[0].sensitivity).toBe('internal')
+  })
+
+  it('guards direct create and legacy size adapters, including explicit actor mismatch', async () => {
+    const f = await fixture(), readOnly = { ...f.access, mutationCompartments: [] }
+    const input = { workspaceId: f.workspaceId, path: '/other.txt', parentPath: '/', name: 'other.txt',
+      mime: 'text/plain', sizeBytes: 1, storageUri: f.file.storageUri, compartments: ['product'], createdByUserId: f.userId }
+    await expect(f.store.create(f.userId, input, readOnly)).rejects.toMatchObject({ code: 'scope_operation_denied' })
+    await expect(f.store.create(f.userId, input, { ...f.access, userId: randomUUID() })).rejects.toMatchObject({ code: 'scope_operation_denied' })
+    expect(await f.store.updateSize(f.userId, f.workspaceId, f.file.id, 100, {}, readOnly)).toBeNull()
+    await expect(f.store.updateSize(f.userId, f.workspaceId, f.file.id, 100, { compartments: ['foreign'] }, f.access))
+      .rejects.toMatchObject({ code: 'scope_operation_denied' })
+    await runWithAgentAccess({ ...f.ctx, clearance: f.ctx.clearance, compartments: f.ctx.compartments, mutationCompartments: [] }, async () => {
+      await expect(f.store.create(f.userId, input)).rejects.toMatchObject({ code: 'scope_operation_denied' })
+      expect(await f.store.updateSize(f.userId, f.workspaceId, f.file.id, 100)).toBeNull()
+    })
+    expect(await f.raw()).toHaveLength(1)
+    expect(await f.store.getById(f.access, f.file.id)).toMatchObject({ sizeBytes: 8 })
+  })
+})

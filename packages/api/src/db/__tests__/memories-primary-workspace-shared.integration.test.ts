@@ -27,32 +27,15 @@ import {
  * `240_primary_memories_workspace_shared.sql` for the existing-row
  * backfill.
  *
- * Requires a local `Use Brian` PostgreSQL database. Skips silently when
- * unavailable (mirrors the other db/__tests__ integration suites).
+ * Requires the token-verified disposable PostgreSQL fixture. Never probes a
+ * developer database or treats missing database coverage as a passing skip.
  */
 
-let pool: pg.Pool | undefined
+const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
+await assertLocalFixture()
+const pool=new pg.Pool({connectionString:process.env.DATABASE_URL,connectionTimeoutMillis:2000})
+const describeIf=describe
 
-async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
-  try {
-    const client = await p.connect()
-    try {
-      await client.query('SELECT workspace_id, user_id, assistant_id FROM memories LIMIT 1')
-      await client.query('SELECT kind FROM assistants LIMIT 1')
-    } finally {
-      client.release()
-    }
-    pool = p
-    return true
-  } catch {
-    await p.end().catch(() => {})
-    return false
-  }
-}
-
-const ok = await canConnect()
-const describeIf = ok ? describe : describe.skip
 
 const PRIMARY_FACT = 'wss-primary-fact ' + 'permcanary'
 const APP_FACT = 'wss-app-fact ' + 'permcanary'
@@ -95,11 +78,11 @@ describeIf('[COMP:api/memory-store] primary memories are workspace_shared', () =
           [userId, ws],
         )
       ).rows[0].id
-      // Workspace-owned doc app assistant (no owner), like prod.
+      // Workspace-owned app assistant (no owner), using a currently supported app type.
       docId = (
         await client.query<{ id: string }>(
           `INSERT INTO assistants (id, name, owner_user_id, workspace_id, kind, app_type, clearance)
-           VALUES (gen_random_uuid(), 'wss-doc', NULL, $1, 'app', 'doc', 'internal')
+           VALUES (gen_random_uuid(), 'wss-doc', NULL, $1, 'app', 'distribution', 'internal')
            RETURNING id`,
           [ws],
         )

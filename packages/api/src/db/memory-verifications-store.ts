@@ -23,7 +23,8 @@
 
 import type pg from 'pg'
 
-import { getPool, query } from './client.js'
+import { applyRLSGucs, getAppPool, getPool, query } from './client.js'
+import { buildAccessPredicate, mutationActorAccess, type AccessContext } from './access-predicate.js'
 import { appendDecisionEvent } from './decision-event-store.js'
 import {
   markVerifiedDirect,
@@ -83,16 +84,23 @@ export async function verifyMemoryDecision(params: {
   memoryId: string
   workspaceId: string
   verifiedBy: string
+  access?: AccessContext
 }): Promise<VerifyMemoryDecisionResult> {
-  const client = await getPool().connect()
+  const actor = mutationActorAccess(params.verifiedBy, params.workspaceId, params.access)
+  const ap = buildAccessPredicate(actor, { operation: 'mutation', startIdx: 3 })
+  const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
+    await applyRLSGucs(client, actor.userId)
     const selected = await client.query<{ verifiedByUserId: string | null }>(
       `SELECT verified_by_user_id AS "verifiedByUserId"
          FROM memories
         WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL
+          AND retracted_at IS NULL AND NOT scope_held
+          AND ${ap.sql}
+          AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
         FOR UPDATE`,
-      [params.memoryId, params.workspaceId],
+      [params.memoryId, params.workspaceId, ...ap.params],
     )
     if (!selected.rows[0]) {
       await client.query('COMMIT')
@@ -135,13 +143,16 @@ export async function adjustMemoryDecision(params: {
   memoryId: string
   workspaceId: string
   verifiedBy: string
+  access?: AccessContext
   updates: MemoryUpdateFields
   verifications: Array<Omit<RecordVerificationParams, 'memoryId' | 'workspaceId' | 'verifiedBy'>>
 }): Promise<Memory | null> {
+  const actor = mutationActorAccess(params.verifiedBy, params.workspaceId, params.access)
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
-    const updated = await updateMemory(params.memoryId, params.updates, undefined, client)
+    await applyRLSGucs(client, actor.userId)
+    const updated = await updateMemory(params.memoryId, params.updates, actor, client)
     if (!updated) {
       await client.query('COMMIT')
       return null

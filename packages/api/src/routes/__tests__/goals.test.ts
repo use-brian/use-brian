@@ -16,6 +16,15 @@ const mockGetGoalById = vi.mocked(getGoalById)
 const mockNarrowGoalContextSystem = vi.mocked(narrowGoalContextSystem)
 const mockUpdateGoalSystem = vi.mocked(updateGoalSystem)
 const mockSetGoalStatusSystem = vi.mocked(setGoalStatusSystem)
+const AUTHORING_AUTHORITY = {
+  version: 1 as const,
+  assistantId: 'a1',
+  ceiling: {
+    workspaceId: 'w1', userId: 'u1', clearance: 'confidential' as const,
+    compartments: null, mutationCompartments: null, projectIds: null,
+    visibilityAssistantIds: null,
+  },
+}
 
 beforeEach(() => vi.clearAllMocks())
 
@@ -50,6 +59,7 @@ function makeApp(opts: {
       assessClarity: opts.assessClarity,
       subscribeActivity: opts.subscribeActivity,
       resolveAssistantId: async () => 'a1',
+      resolveAuthoringAuthority: async () => AUTHORING_AUTHORITY,
       contextStore: contextStore as never,
       getReadiness: async () => ({
         enforcementVersion: 1,
@@ -265,7 +275,7 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm â€” clarity gate (Â
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
     expect(assessClarity).toHaveBeenCalledWith({ outcome: 'Close the Acme deal', userId: 'u1', workspaceId: 'w1', assistantId: 'a1' })
-    expect(mockUpdateGoalSystem).toHaveBeenCalledWith('g1', { confirm: true, outcome: 'Close the Acme deal' })
+    expect(mockUpdateGoalSystem).toHaveBeenCalledWith('g1', { confirm: true, outcome: 'Close the Acme deal', authoringAuthority: AUTHORING_AUTHORITY })
   })
 
   it('assesses and persists Â§8 brief edits (verification / approach) alongside the outcome', async () => {
@@ -296,6 +306,7 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm â€” clarity gate (Â
       confirm: true,
       outcome: undefined,
       brief: { verification: 'At least three vendors compared.', approach: 'old plan', judgeReason: 'fits' },
+      authoringAuthority: AUTHORING_AUTHORITY,
     })
   })
 
@@ -308,7 +319,7 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm â€” clarity gate (Â
 
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
-    expect(mockUpdateGoalSystem).toHaveBeenCalledWith('g1', { confirm: true, outcome: undefined })
+    expect(mockUpdateGoalSystem).toHaveBeenCalledWith('g1', { confirm: true, outcome: undefined, authoringAuthority: AUTHORING_AUTHORITY })
   })
 
   it('404 when the goal is absent / the caller is not a member (before any assessment)', async () => {

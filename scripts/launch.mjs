@@ -46,9 +46,17 @@ import { createInterface } from 'node:readline/promises'
 import { resolveMessageStoreLaunch } from './message-store-launch.mjs'
 import { bridgeEnv } from './bridge-env.mjs'
 import { resolveApiPort } from './launch-ports.mjs'
+import { adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups } from './rig-admin.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const CONFIG_DIR = join(homedir(), '.usebrian')
+const adminOnly = process.argv.includes('--admin-only')
+const adminRunId = adminOnly ? randomBytes(16).toString('hex') : null
+if (adminOnly) {
+  const clean = adminRigEnvironment(ROOT, process.env)
+  for (const key of Object.keys(process.env)) delete process.env[key]
+  Object.assign(process.env, clean, {USEBRIAN_ADMIN_RUN_ID:adminRunId})
+}
+const CONFIG_DIR = adminOnly ? process.env.USEBRIAN_CONFIG_DIR : join(homedir(), '.usebrian')
 const LEGACY_CONFIG_DIR = join(homedir(), '.sidanclaw')
 // Rebrand auto-migration: pre-rebrand installs keep their config, brain data,
 // and connector files under ~/.sidanclaw/. Move the whole dir to ~/.usebrian/
@@ -56,7 +64,7 @@ const LEGACY_CONFIG_DIR = join(homedir(), '.sidanclaw')
 // boot). If BOTH exist, ~/.usebrian wins and the legacy dir is left untouched
 // for the user to inspect — merging blind could clobber a newer config.
 try {
-  if (!existsSync(CONFIG_DIR) && existsSync(LEGACY_CONFIG_DIR)) {
+  if (!adminOnly && !existsSync(CONFIG_DIR) && existsSync(LEGACY_CONFIG_DIR)) {
     renameSync(LEGACY_CONFIG_DIR, CONFIG_DIR)
     console.log(`[launch] migrated ${LEGACY_CONFIG_DIR} -> ${CONFIG_DIR}`)
   }
@@ -95,7 +103,7 @@ function loadDotEnv(path) {
     process.env[key] = val
   }
 }
-loadDotEnv(join(ROOT, '.env'))
+if (!adminOnly) loadDotEnv(join(ROOT, '.env'))
 
 // Hold the selected loopback port until the relay is ready to spawn. This
 // avoids both colliding with an already-running local service and giving
@@ -139,7 +147,7 @@ const PORTS = { pglite: 54329, api: resolveApiPort(process.env.USEBRIAN_API_PORT
 mkdirSync(CONFIG_DIR, { recursive: true })
 // Older launcher versions persisted blob pointers in PGLite but left the bytes
 // in /tmp. Preserve any blobs that still exist before selecting the durable path.
-if (!process.env.LOCAL_FILES_DIR?.trim() && !process.env.GCS_FILES_BUCKET?.trim()) {
+if (!adminOnly && !process.env.LOCAL_FILES_DIR?.trim() && !process.env.GCS_FILES_BUCKET?.trim()) {
   const legacyFilesDir = join(tmpdir(), 'sidanclaw-files')
   if (!existsSync(FILES_DIR) && existsSync(legacyFilesDir)) {
     try {
@@ -155,8 +163,8 @@ const config = existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'u
 // `.env` was already merged into process.env by loadDotEnv() above, and
 // process.env is spread into the child's `env` below — so a Vertex/Alicloud
 // credential set in .env reaches the api without any extra plumbing here.
-let geminiKey = process.env.GEMINI_API_KEY || config.geminiApiKey
-let preferredProvider =
+let geminiKey = adminOnly ? undefined : process.env.GEMINI_API_KEY || config.geminiApiKey
+let preferredProvider = adminOnly ? undefined :
   process.env.USEBRIAN_PREFERRED_PROVIDER ||
   config.preferredProvider
 // Vertex / Alicloud are alternative LLM backends — a deployment in a region
@@ -168,7 +176,7 @@ let hasLlmCredential = Boolean(
 // The single-player owner identity — shown in the app, no login. Local config
 // is the source of truth; prompt once (default the OS username) and persist.
 let ownerName = process.env.USEBRIAN_OWNER_NAME || config.ownerName
-if ((!hasLlmCredential && !preferredProvider) || !ownerName) {
+if (!adminOnly && ((!hasLlmCredential && !preferredProvider) || !ownerName)) {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   if (!hasLlmCredential && !preferredProvider) {
     console.log('Choose a model provider:')
@@ -270,8 +278,8 @@ const env = {
   // DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL) — the child (apps/api) accepts any
   // one and Gemini may be absent. Only GEMINI_API_KEY is overridden here, to
   // carry the config-persisted / just-prompted value when it isn't in .env.
-  GEMINI_API_KEY: geminiKey,
-  USEBRIAN_PREFERRED_PROVIDER: preferredProvider,
+  GEMINI_API_KEY: adminOnly ? '' : geminiKey,
+  USEBRIAN_PREFERRED_PROVIDER: adminOnly ? '' : preferredProvider,
   JWT_SECRET: jwtSecret,
   DATABASE_URL: databaseUrl,
   LOCAL_FILES_DIR: process.env.LOCAL_FILES_DIR?.trim() || FILES_DIR,
@@ -332,9 +340,9 @@ const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'b
 function run(label, cmd, args, extraEnv = {}, cwd = ROOT) {
   const heapMb = Number(process.env.USEBRIAN_HEAP_MB) || HEAP_MB[label]
   const nodeOptions = heapMb
-    ? { NODE_OPTIONS: `${env.NODE_OPTIONS ?? ''} --max-old-space-size=${heapMb}`.trim() }
+    ? { NODE_OPTIONS: `${adminOnly ? adminRuntimeNodeOptions(ROOT) : env.NODE_OPTIONS ?? ''} --max-old-space-size=${heapMb}`.trim() }
     : {}
-  const child = spawn(cmd, args, { cwd, env: { ...env, ...nodeOptions, ...extraEnv }, stdio: ['ignore', 'inherit', 'inherit'] })
+  const child = spawn(cmd, args, { cwd, env: { ...env, ...nodeOptions, ...extraEnv }, detached: adminOnly, stdio: ['ignore', 'inherit', 'inherit'] })
   child.on('error', (err) => {
     if (!shuttingDown) {
       console.error(`[launch] could not start ${label}: ${err.message}`)
@@ -345,6 +353,7 @@ function run(label, cmd, args, extraEnv = {}, cwd = ROOT) {
     if (!shuttingDown && code) { console.error(`[launch] ${label} exited with code ${code}; shutting down.`); shutdown(1) }
   })
   children.push(child)
+  if(adminOnly)recordAdminGroups(ROOT,adminRunId,children.map(item=>item.pid).filter(Boolean))
   return child
 }
 function waitForPort(port, label, timeoutMs = 60_000) {
@@ -465,7 +474,11 @@ let shuttingDown = false
 function shutdown(code = 0) {
   if (shuttingDown) return
   shuttingDown = true
-  for (const c of children) c.kill('SIGTERM')
+  for (const c of children) {
+    if (adminOnly && c.pid) {
+      try { process.kill(-c.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') console.warn('[launch] child group shutdown failed:', error.code) }
+    } else c.kill('SIGTERM')
+  }
   setTimeout(() => process.exit(code), 500)
 }
 process.on('SIGINT', () => shutdown(0))
@@ -544,7 +557,7 @@ if (useLocalBrowserRelay) {
 }
 
 console.log(`[launch] starting api (:${PORTS.api}), doc-sync (:${PORTS.docSync}), app-web (:${PORTS.appWeb}) ...`)
-run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts'])
+run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts', ...(adminOnly ? ['--admin-only', '--no-workers'] : [])])
 run('doc-sync', 'pnpm', ['--filter', '@use-brian/doc-sync', 'exec', 'tsx', 'src/index.ts'],
   { PORT: String(PORTS.docSync) })
 pruneTurbopackCache()

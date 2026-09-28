@@ -17,6 +17,7 @@ function projection(overrides: Partial<OfficeAccessProjection> = {}): OfficeAcce
     visibilityUserIds: [],
     requiredCompartments: [],
     sourcesEligible: true,
+    mutationScopeEligible: true,
     defaultWorkspaceRole: 'comment',
     lifecycleState: 'active',
     memberRole: 'member',
@@ -50,6 +51,16 @@ describe('[COMP:api/office-access] Office access predicate', () => {
     expect(resolveOfficeAccessProjection(USER, projection({ lifecycleState: 'retained' }))).toBeNull()
     expect(resolveOfficeAccessProjection(USER, projection({ lifecycleState: 'retained', memberRole: 'owner' }))).toMatchObject({ canView: true, canEdit: false })
     expect(resolveOfficeAccessProjection(USER, projection({ lifecycleState: 'purged', memberRole: 'owner' }))).toBeNull()
+  })
+
+  it('keeps a read grant read-only despite creator, explicit Edit, or admin capability', () => {
+    for (const overrides of [{creatorUserId: USER}, {explicitRole: 'edit' as const}, {memberRole: 'admin' as const}]) {
+      for (const lifecycleState of ['active', 'archived', 'trash', 'retained'] as const) {
+        const access = resolveOfficeAccessProjection(USER, projection({...overrides, lifecycleState, mutationScopeEligible: false}))
+        if (access) expect(access).toMatchObject({role: 'view', canView: true, canComment: false, canEdit: false,
+          canRestore: false, canDeletePermanently: false, canElevate: false, canManageSharing: false})
+      }
+    }
   })
 
   it('honours a live explicit grant and ignores a revoked grant', () => {

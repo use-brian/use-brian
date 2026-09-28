@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const callTool = vi.fn();
 const askAssistant = vi.fn();
 const authFetch = vi.fn();
-const resolveDocFileSrc = vi.fn();
+const mediaFetch = vi.fn();
 const fetchDocFileBlob = vi.fn();
 vi.mock("@/lib/api/shopify", () => ({
   callTool: (...args: unknown[]) => callTool(...args),
@@ -17,13 +17,16 @@ vi.mock("@/lib/api/shopify", () => ({
   ShopifyCallError: class ShopifyCallError extends Error {},
 }));
 vi.mock("@/lib/auth-fetch", () => ({
-  authFetch: (...args: unknown[]) => authFetch(...args),
+  authFetch: (...args: unknown[]) => String(args[0]).includes("?redirect=0") ? mediaFetch(...args) : authFetch(...args),
 }));
-vi.mock("@/components/doc/doc-file-url", () => ({
-  resolveDocFileSrc: (...args: unknown[]) => resolveDocFileSrc(...args),
+vi.mock("@/components/doc/doc-file-url", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/components/doc/doc-file-url")>(),
   fetchDocFileBlob: (...args: unknown[]) => fetchDocFileBlob(...args),
 }));
 
+import { WorkspaceContextProvider } from "@/lib/workspace-context";
+import { resetSurfaceCache } from "@/lib/surface-cache";
+vi.mock("@/lib/api/workspaces",()=>({updateWorkspacePickerPreferences:vi.fn(async()=>{})}));
 import { I18nProvider } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -59,7 +62,7 @@ async function mount(tools = TOOLS) {
   await act(async () => {
     root!.render(
       <I18nProvider locale="en" dict={dict}>
-        <CampaignTab workspaceId={WORKSPACE} availableTools={tools} />
+        <WorkspaceContextProvider value={{workspaceId:WORKSPACE,name:"Fixture",role:"member",clearance:"internal",me:{id:"viewer"}}}><CampaignTab workspaceId={WORKSPACE} availableTools={tools} /></WorkspaceContextProvider>
       </I18nProvider>,
     );
   });
@@ -152,7 +155,8 @@ async function completeEditableFields() {
 beforeEach(() => {
   vi.clearAllMocks();
   window.localStorage.clear();
-  resolveDocFileSrc.mockResolvedValue("https://signed.example/campaign-photo.jpg");
+  resetSurfaceCache();
+  mediaFetch.mockResolvedValue({ok:true,headers:new Headers({"X-Brian-Media-Valid-For-Ms":"30000"}),blob:async()=>new Blob(["photo"],{type:"image/jpeg"})});
   fetchDocFileBlob.mockResolvedValue(new Blob(["photo"], { type: "image/jpeg" }));
   Object.defineProperty(URL, "createObjectURL", {
     configurable: true,
@@ -168,6 +172,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
+  resetSurfaceCache();
   container = null;
   root = null;
 });
@@ -458,7 +463,7 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
       expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
     );
     const preview = container!.querySelector('[aria-label="Message preview"]')!;
-    expect(preview.querySelector<HTMLImageElement>('img[src="https://signed.example/campaign-photo.jpg"]')?.alt)
+    expect(preview.querySelector<HTMLImageElement>('img[src="blob:download-photo"]')?.alt)
       .toBe("Uploaded campaign photo");
     const raw = window.localStorage.getItem(`shopify:campaign:${WORKSPACE}:test-store.myshopify.com`) ?? "";
     expect(raw).toContain("workspace-file-7");
@@ -473,6 +478,7 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
     const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     await click(button("Download photo"));
     expect(fetchDocFileBlob).toHaveBeenCalledWith(WORKSPACE, "workspace-file-7");
+    expect(mediaFetch).toHaveBeenCalledWith(expect.stringContaining(`/api/doc-files/${WORKSPACE}/workspace-file-7?redirect=0`),{cache:"no-store"});
     expect(anchorClick).toHaveBeenCalledOnce();
     anchorClick.mockRestore();
   });

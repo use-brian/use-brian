@@ -267,6 +267,7 @@ export function createIngestRuleEditorStore(): IngestRuleEditorStore {
         pushSet('compartments', input.patch.compartments)
       if (input.patch.projectIds !== undefined)
         pushSet('project_ids', input.patch.projectIds)
+      if(input.patch.compartments!==undefined||input.patch.projectIds!==undefined)sets.push("scope_binding_origin = 'explicit'")
       if (input.patch.ruleOrder !== undefined) pushSet('rule_order', input.patch.ruleOrder)
 
       if (sets.length === 0) return toSummary(current)

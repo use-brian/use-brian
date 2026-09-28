@@ -16,6 +16,17 @@ describe('[COMP:office/collab-codec] Office Yjs codec', () => {
     expect(yDocToSnapshot(snapshotToYDoc(snapshot))).toEqual(snapshot)
   })
 
+  it('retains document command identities for reconnect idempotency', () => {
+    const snapshot = documentFixture()
+    const doc = snapshotToYDoc(snapshot)
+    const command = { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: 'user' as const, id: id(40) }, origin: 'offline' as const, commandId: id(43), kind: 'setObjectProperty' as const, targetId: id(6), path: ['alignment'], value: 'center' }
+    appendOfficeCommand(doc, command)
+    appendOfficeCommand(doc, command)
+    expect(officeCommandIds(doc)).toEqual([id(43)])
+    const edited = yDocToSnapshot(doc)
+    expect(edited.family === 'document' && edited.sections[0].nodes[0]).toMatchObject({ alignment: 'center' })
+  })
+
   it('merges two independently authored command records idempotently', () => {
     const snapshot = presentationFixture()
     const first = snapshotToYDoc(snapshot)

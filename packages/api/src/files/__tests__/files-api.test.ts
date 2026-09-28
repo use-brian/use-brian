@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto'
+import { runWithAgentAccess } from '../../db/agent-access-context.js'
+import { createAuthorityLease, runWithAuthorityLease } from '../../context-scope/authority-lease.js'
+import { pinAccessCeiling } from '@use-brian/core'
 import { describe, it, expect, vi } from 'vitest'
 import { Writable } from 'node:stream'
 import {
@@ -77,7 +81,7 @@ function makeFakeStore(): WorkspaceFilesStore & { rows: Map<string, WorkspaceFil
     rows,
     async create(_userId, input: WorkspaceFileCreateInput) {
       for (const r of rows.values()) {
-        if (r.workspaceId === input.workspaceId && r.path === input.path) {
+        if (r.workspaceId === input.workspaceId && r.path === input.path && !r.validTo) {
           // Shaped like the real pg error — `code` is what the API classifies
           // on, so a fake that omits it would test a violation that can't happen.
           const dupe = Object.assign(
@@ -91,6 +95,8 @@ function makeFakeStore(): WorkspaceFilesStore & { rows: Map<string, WorkspaceFil
       const now = new Date()
       const row: WorkspaceFile = {
         id,
+        scopeVersion: '1',
+        compartments: input.compartments ?? [], projectIds: input.projectIds ?? [],
         workspaceId: input.workspaceId,
         path: input.path,
         parentPath: input.parentPath,
@@ -126,11 +132,11 @@ function makeFakeStore(): WorkspaceFilesStore & { rows: Map<string, WorkspaceFil
     },
     async getById(ctx, id) {
       const r = rows.get(id)
-      return r && r.workspaceId === ctx.workspaceId ? r : null
+      return r && r.workspaceId === ctx.workspaceId && !r.validTo ? r : null
     },
     async getByPath(ctx, path) {
       for (const r of rows.values()) {
-        if (r.workspaceId === ctx.workspaceId && r.path === path) return r
+        if (r.workspaceId === ctx.workspaceId && r.path === path && !r.validTo) return r
       }
       return null
     },
@@ -168,7 +174,17 @@ function makeFakeStore(): WorkspaceFilesStore & { rows: Map<string, WorkspaceFil
       }
       return sum
     },
-    async supersede() { return null },
+    async supersede(_userId, workspaceId, id, patch) {
+      const old = rows.get(id)
+      if (!old || old.workspaceId !== workspaceId || old.validTo || old.scopeVersion !== patch.expectedScopeVersion) return null
+      const successor = { ...structuredClone(old), id: randomUUID(), storageUri: patch.storageUri,
+        sizeBytes: patch.sizeBytes, scopeVersion: '1', sensitivity: patch.sensitivity ?? old.sensitivity,
+        compartments: [...new Set([...(old.compartments ?? []), ...(patch.compartments ?? [])])],
+        projectIds: [...new Set([...(old.projectIds ?? []), ...(patch.projectIds ?? [])])] }
+      old.validTo = new Date(); old.supersededBy = successor.id
+      rows.set(successor.id, successor)
+      return successor
+    },
     async getHistory() { return [] },
     async retractByStorageBucketSystem(workspaceId, bucket, scheme, _reason) {
       let n = 0
@@ -272,12 +288,12 @@ describe('[COMP:files/api] createFilesApi.write', () => {
     expect(gcs.blobs.size).toBe(0)
   })
 
-  it('rolls back GCS blob on DB insert failure', async () => {
+  it('rolls back a staged object after a definite DB constraint refusal', async () => {
     const gcs = makeFakeGcs()
     const store = makeFakeStore()
     const originalCreate = store.create.bind(store)
     store.create = vi.fn(async () => {
-      throw new Error('simulated DB failure')
+      throw Object.assign(new Error('simulated DB failure'), { code: '23514' })
     }) as typeof store.create
 
     const api = createFilesApi({ gcs, store, auditStore: makeFakeAudit(), bucket: 'b' })
@@ -353,7 +369,7 @@ describe('[COMP:files/api] createFilesApi.writeBytes', () => {
 })
 
 describe('[COMP:files/api] createFilesApi.append', () => {
-  it('grows blob + bumps row size + audits', async () => {
+  it('publishes a successor and preserves historical bytes', async () => {
     const gcs = makeFakeGcs()
     const store = makeFakeStore()
     const audit = makeFakeAudit()
@@ -363,8 +379,10 @@ describe('[COMP:files/api] createFilesApi.append', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.value.sizeBytes).toBe(8)
-    const blob = [...gcs.blobs.values()][0]
-    expect(blob.toString('utf-8')).toBe('one\ntwo\n')
+    expect([...gcs.blobs.values()].map(blob => blob.toString('utf-8'))).toEqual(['one\n', 'one\ntwo\n'])
+    const previous = [...store.rows.values()].find(row => row.validTo)!
+    expect(previous.supersededBy).toBe(result.value.id)
+    expect(previous.id).not.toBe(result.value.id)
     expect(audit.events.find((e) => e.eventType === 'file.appended')).toBeTruthy()
   })
 
@@ -666,5 +684,153 @@ describe('[COMP:files/api] createFilesApi.setMeta', () => {
     const event = audit.events.find((e) => e.eventType === 'file.meta_updated')
     expect(event).toBeTruthy()
     expect(event!.details.fields).toEqual(expect.arrayContaining(['title', 'tags']))
+  })
+})
+
+describe('[COMP:files/api] departmental publication boundaries', () => {
+  function fixture() {
+    const gcs = makeFakeGcs(), store = makeFakeStore(), audit = makeFakeAudit()
+    const api = createFilesApi({ gcs, store, auditStore: audit, bucket: 'fixture-bucket' })
+    return { gcs, store, audit, api }
+  }
+
+  it('retains a committed create object if the acknowledgement is lost', async () => {
+    const f = fixture(), create = f.store.create.bind(f.store)
+    f.store.create = async (...args) => { await create(...args); throw new Error('connection lost') }
+    await expect(f.api.write(ctx, { path: '/uncertain.txt', content: 'visible bytes' }))
+      .rejects.toMatchObject({ code: 'file_publication_uncertain', retrySafe: false })
+    expect(f.gcs.blobs.size).toBe(1)
+    expect(await f.api.read(ctx, '/uncertain.txt')).toMatchObject({ ok: true, value: { content: 'visible bytes' } })
+  })
+
+  it.each(['append', 'setMeta', 'delete'] as const)('refuses read-only %s before bytes or metadata change', async operation => {
+    const f = fixture()
+    await f.api.write({ ...ctx, writeCompartments: ['product'] }, { path: '/protected.txt', content: 'original' })
+    const limited = { ...ctx, compartments: ['product'], mutationCompartments: [] }
+    const mutate = () => operation === 'append' ? f.api.append(limited, '/protected.txt', 'secret')
+      : operation === 'setMeta' ? f.api.setMeta(limited, '/protected.txt', { title: 'Changed' })
+      : f.api.delete(limited, '/protected.txt')
+    expect(await mutate()).toMatchObject({ ok: false, error: { kind: 'read_only' } })
+    expect([...f.gcs.blobs.values()].map(value => value.toString())).toEqual(['original'])
+    expect(f.store.rows.size).toBe(1)
+    expect([...f.store.rows.values()][0].title).toBeNull()
+    expect(f.audit.events.map(event => event.eventType)).toEqual(['file.created'])
+  })
+
+  it('refuses an out-of-scope create and inherited append before blob writes', async () => {
+    const f = fixture()
+    await f.api.write(ctx, { path: '/general.txt', content: 'original' })
+    const limited = { ...ctx, compartments: ['product'], mutationCompartments: [], writeCompartments: ['product'] }
+    expect(await f.api.write(limited, { path: '/denied.txt', content: 'secret' })).toMatchObject({ ok: false, error: { kind: 'read_only' } })
+    expect(await f.api.append(limited, '/general.txt', 'secret')).toMatchObject({ ok: false, error: { kind: 'read_only' } })
+    expect([...f.gcs.blobs.values()].map(value => value.toString())).toEqual(['original'])
+  })
+
+  it('intersects a reconstructed broad Files context with the active caller', async () => {
+    const f = fixture()
+    await f.api.write({ ...ctx, writeCompartments: ['product'] }, { path: '/protected.txt', content: 'original' })
+    await runWithAgentAccess({ ...ctx, clearance: 'confidential', compartments: ['product'], mutationCompartments: [], projectIds: null }, async () => {
+      expect(await f.api.append({ ...ctx, compartments: null, mutationCompartments: null }, '/protected.txt', 'changed'))
+        .toMatchObject({ ok: false, error: { kind: 'read_only' } })
+    })
+    expect([...f.gcs.blobs.values()].map(value => value.toString())).toEqual(['original'])
+  })
+
+  it('refuses a requested downgrade before changing metadata or writing a success audit',async()=>{
+    const f=fixture()
+    await f.api.write(ctx,{path:'/protected.txt',content:'original',sensitivity:'confidential'})
+    expect(await f.api.setMeta(ctx,'/protected.txt',{title:'Refused',sensitivity:'internal'}))
+      .toMatchObject({ok:false,error:{kind:'read_only',reason:'release_required'}})
+    expect(f.audit.events.map(event=>event.eventType)).toEqual(['file.created'])
+    expect(await f.api.stat(ctx,'/protected.txt')).toMatchObject({ok:true,value:{sensitivity:'confidential',title:null}})
+  })
+
+  it('surfaces a release refusal when the source floor changes after its metadata read',async()=>{
+    const f=fixture()
+    await f.api.write(ctx,{path:'/changed.txt',content:'original'})
+    f.store.updateMeta=vi.fn(async()=>{throw Object.assign(new Error('Audited release required'),{code:'scope_declassification_required'})})
+    expect(await f.api.setMeta(ctx,'/changed.txt',{title:'Refused'})).toMatchObject({ok:false,error:{kind:'read_only',reason:'release_required'}})
+    expect(f.audit.events.map(event=>event.eventType)).toEqual(['file.created'])
+  })
+
+  it('explains a canonical creation scope refusal and removes only the unpublished blob',async()=>{
+    const f=fixture()
+    f.store.create=vi.fn(async()=>{throw Object.assign(new Error('Department denied'),{code:'scope_operation_denied'})})
+    expect(await f.api.write(ctx,{path:'/refused.txt',content:'unpublished'})).toMatchObject({ok:false,error:{kind:'read_only',reason:'scope'}})
+    expect(f.gcs.blobs.size).toBe(0)
+    expect(f.audit.events).toEqual([])
+  })
+
+  it('removes only the unpublished candidate after a confirmed version conflict', async () => {
+    const f = fixture()
+    await f.api.write(ctx, { path: '/race.txt', content: 'original' })
+    f.store.supersede = vi.fn(async () => null)
+    expect(await f.api.append(ctx, '/race.txt', 'new')).toMatchObject({ ok: false, error: { kind: 'conflict' } })
+    expect([...f.gcs.blobs.values()].map(value => value.toString())).toEqual(['original'])
+    expect(f.audit.events.map(event => event.eventType)).toEqual(['file.created'])
+  })
+
+  it('retains both objects if a successful supersession loses its acknowledgement', async () => {
+    const f = fixture()
+    await f.api.write(ctx, { path: '/uncertain.txt', content: 'original' })
+    const supersede = f.store.supersede.bind(f.store)
+    f.store.supersede = async (...args) => { await supersede(...args); throw new Error('connection lost') }
+    await expect(f.api.append(ctx, '/uncertain.txt', ' new')).rejects.toMatchObject({ code: 'file_publication_uncertain', retrySafe: false })
+    expect([...f.gcs.blobs.values()].map(value => value.toString())).toEqual(['original', 'original new'])
+    expect(await f.api.read(ctx, '/uncertain.txt')).toMatchObject({ ok: true, value: { content: 'original new' } })
+  })
+
+  it('retains prior bytes when candidate upload fails', async () => {
+    const f = fixture()
+    await f.api.write(ctx, { path: '/failed.txt', content: 'original' })
+    f.gcs.writeBlob = vi.fn(async () => { throw new Error('storage unavailable') })
+    await expect(f.api.append(ctx, '/failed.txt', 'new')).rejects.toThrow('storage unavailable')
+    expect(await f.api.read(ctx, '/failed.txt')).toMatchObject({ ok: true, value: { content: 'original' } })
+    expect(f.store.rows.size).toBe(1)
+  })
+
+  it('rechecks authority after source I/O and before the candidate upload', async () => {
+    const f = fixture()
+    await f.api.write(ctx, { path: '/revoked.txt', content: 'original' })
+    const starting = pinAccessCeiling({ ...ctx, assistantKind: 'primary', clearance: 'confidential', compartments: null, mutationCompartments: null, projectIds: null })
+    let current: typeof starting | null = starting
+    const lease = createAuthorityLease(starting, async () => current)
+    const read = f.gcs.readBlob.bind(f.gcs)
+    f.gcs.readBlob = async key => { const blob = await read(key); current = null; return blob }
+    await expect(runWithAuthorityLease(lease, () => f.api.append(ctx, '/revoked.txt', 'new'))).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect([...f.gcs.blobs.values()].map(value => value.toString())).toEqual(['original'])
+    expect(f.store.rows.size).toBe(1)
+  })
+
+  it('publishes inherited sensitivity and requirements while keeping predecessor bytes', async () => {
+    const f = fixture()
+    await f.api.write(ctx, { path: '/scope.txt', content: 'original', sensitivity: 'public' })
+    const result = await f.api.append({ ...ctx, compartments: ['product'], mutationCompartments: ['product'],
+      writeCompartments: ['product'], writeSensitivity: 'confidential' }, '/scope.txt', ' restricted')
+    expect(result).toMatchObject({ ok: true, value: { sensitivity: 'confidential', compartments: ['product'] } })
+    const old = [...f.store.rows.values()].find(row => row.validTo)!
+    expect(old.sensitivity).toBe('public')
+    expect(old.compartments).toEqual([])
+    expect([...f.gcs.blobs.values()].map(value => value.toString())).toEqual(['original', 'original restricted'])
+  })
+})
+
+
+describe('[COMP:files/api] current authority after storage I/O', () => {
+  it.each(['read','readBytes'] as const)('rechecks the execution lease before returning %s content', async method => {
+    const store=makeFakeStore(),gcs=makeFakeGcs(),api=createFilesApi({store,gcs,bucket:'fixture',auditStore:makeFakeAudit()})
+    await api.write(ctx,{path:'/guarded.txt',content:'restricted'})
+    const starting=pinAccessCeiling({...ctx,assistantKind:'primary',clearance:'confidential',compartments:null,mutationCompartments:null,projectIds:null})
+    let current:typeof starting|null=starting
+    const lease=createAuthorityLease(starting,async()=>current),read=gcs.readBlob.bind(gcs)
+    gcs.readBlob=async key=>{const blob=await read(key);current=null;return blob}
+    await expect(runWithAuthorityLease(lease,()=>api[method](ctx,'/guarded.txt'))).rejects.toMatchObject({reason:'authority_changed'})
+  })
+  it.each(['revision','storage','retraction'] as const)('withholds bytes after a %s change even when an adapter mutates in place', async change => {
+    const store=makeFakeStore(),gcs=makeFakeGcs(),api=createFilesApi({store,gcs,bucket:'fixture',auditStore:makeFakeAudit()})
+    await api.write(ctx,{path:'/guarded.txt',content:'restricted'})
+    const read=gcs.readBlob.bind(gcs)
+    gcs.readBlob=async key=>{const blob=await read(key);const row=[...store.rows.values()][0];if(change==='revision')row.scopeVersion='2';else if(change==='storage')row.storageUri='gs://fixture/replaced';else row.retractedAt=new Date();return blob}
+    expect(await api.readBytes(ctx,'/guarded.txt')).toMatchObject({ok:false,error:{kind:'not_found'}})
   })
 })

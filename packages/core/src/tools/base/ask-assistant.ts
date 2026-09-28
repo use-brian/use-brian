@@ -5,8 +5,8 @@
  * workspace-internal (auto-seeded primary → sibling edges); the wire format
  * is A2A (`ConsultTransport.send()`), and the destination's `runConsult`
  * handles query-loop execution. The destination-side mode/approval policy
- * layer was retired 2026-07-24 — same-workspace consults run with full
- * workspace trust. See:
+ * layer was retired 2026-07-24. Same-workspace routing retains the caller's
+ * content-access ceiling. See:
  * - docs/architecture/integrations/a2a.md
  * - docs/architecture/channels/inter-assistant.md
  */
@@ -16,6 +16,7 @@ import { buildTool, type Tool } from '../types.js'
 import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
 import { toolFailure } from '../tool-failure.js'
 import { INITIAL_BUDGET, type ConsultRequest, type ConsultTransport } from '../../a2a/index.js'
+import { pinAccessCeiling } from '../../security/access-ceiling.js'
 
 // ── Dependency types ───────────────────────────────────────────
 
@@ -176,6 +177,15 @@ If unsure whether to call this, do not call it. Answer with your own tools first
 
         // 3. Build the A2A ConsultRequest. Free-mode (no capabilityId).
         const request: ConsultRequest = {
+          callerScopeEvidence: context.scopeAccumulator?.evidence,
+          callerAccessCeiling: pinAccessCeiling({
+            workspaceId: context.workspaceId ?? '', userId: context.userId,
+            assistantId: context.assistantId, assistantKind: context.assistantKind!,
+            clearance: context.clearance, compartments: context.compartments,
+            mutationCompartments: context.mutationCompartments,
+            projectIds: context.projectIds,
+            visibilityAssistantIds: context.visibilityAssistantIds,
+          }),
           target: {
             workspaceId: target.followingWorkspaceId,
             assistantId: input.targetAssistantId,
@@ -248,6 +258,16 @@ If unsure whether to call this, do not call it. Answer with your own tools first
             }
         }
       } catch (err) {
+        const refusal = err as { reason?: string; operationMayHaveExecuted?: boolean } | null
+        if (refusal?.reason === 'authority_changed' || refusal?.reason === 'caller_authority_changed'
+          || refusal?.reason === 'caller_evidence_unavailable') {
+          return {
+            isError: true,
+            data: refusal.operationMayHaveExecuted
+              ? 'Access changed during the assistant operation. An action may already have executed. Do not retry it automatically. Check its outcome with an authorized user before deciding what to do next.'
+              : 'Access changed and this assistant request was stopped. Do not retry the same request or reuse its context. Start a new request with the current permissions.',
+          }
+        }
         // The ask itself broke (transport, timeout, the callee's loop
         // throwing) — a different cause from an id that never resolved, and
         // it must not read like one.

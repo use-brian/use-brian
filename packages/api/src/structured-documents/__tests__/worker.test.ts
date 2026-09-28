@@ -36,7 +36,7 @@ function setup(status: StructuredExtractionJob['status'] = 'queued') {
     }),
   } as unknown as FilesApi
   const client = {health:vi.fn(),submit:vi.fn(async () => ({id:'a'.repeat(32)})),status:vi.fn(async () => ({status:'completed' as const})),records:vi.fn(async () => raw),image:vi.fn(async () => png)}
-  const authorize = vi.fn(async () => ({userId:'actor',workspaceId:'workspace',clearance:'confidential',compartments:['team'],projectIds:['project']} as FilesContext))
+  const authorize = vi.fn(async () => ({userId:'actor',workspaceId:'workspace',clearance:'confidential',compartments:['team'],mutationCompartments:['team'],projectIds:['project']} as FilesContext))
   const resolveClient = vi.fn(async () => client)
   const worker = createStructuredExtractionWorker({store,files,resolveClient,authorize})
   return {job,store,files,client,resolveClient,authorize,worker,blobs,loseLease:() => {lost=true},restoreLease:() => {lost=false}}
@@ -79,6 +79,28 @@ describe('[COMP:api/structured-documents] single-step leased extraction worker',
   it('rejects changed source before dispatch and before archiving', async () => {
     for (const state of ['queued','archiving'] as const) { const s=setup(state); s.blobs.get('source')!.bytes=Buffer.from('%PDF-changed'); await s.worker.runOnce('actor'); expect(s.job.errorCode).toBe('source_changed'); expect(s.client.submit).not.toHaveBeenCalled(); expect(s.client.records).not.toHaveBeenCalled() }
   })
+  it.each(['submit','status','records','image'] as const)('discards a %s response when source mutation authority is withdrawn during the call', async operation => {
+    const s = setup(operation === 'submit' ? 'queued' : operation === 'status' ? 'running' : 'archiving')
+    if (operation === 'image') await s.worker.runOnce('actor')
+    const writes = vi.mocked(s.files.writeBytes).mock.calls.length
+    let revoked = false
+    s.authorize.mockImplementation(async () => {
+      if (revoked) throw new Error('revoked')
+      return {userId:'actor',workspaceId:'workspace',clearance:'confidential',compartments:['team'],mutationCompartments:['team'],projectIds:['project']} as FilesContext
+    })
+    if (operation === 'submit') s.client.submit.mockImplementationOnce(async () => { revoked = true; return {id:'a'.repeat(32)} })
+    if (operation === 'status') s.client.status.mockImplementationOnce(async () => { revoked = true; return {status:'completed'} as const })
+    if (operation === 'records') s.client.records.mockImplementationOnce(async () => { revoked = true; return raw })
+    if (operation === 'image') s.client.image.mockImplementationOnce(async () => { revoked = true; return png })
+    await s.worker.runOnce('actor')
+    expect(s.job.status).toBe('failed')
+    expect(s.job.errorCode).toBe(operation === 'submit' ? 'uncertain_submission' : 'access_denied')
+    expect(s.files.writeBytes).toHaveBeenCalledTimes(writes)
+    if (operation === 'submit') expect(s.job.remoteJobId).toBeNull()
+    if (operation === 'status') expect(s.job.status).not.toBe('archiving')
+    if (operation === 'records') expect(s.job.recordsFileId).toBeNull()
+    if (operation === 'image') expect(s.job.imageFiles).toHaveLength(0)
+  })
   it('rejects private source partitions before dispatch or any archive side effect', async () => {
     for (const state of ['queued','archiving'] as const) {
       for (const partition of [{userId:'actor'},{assistantId:'assistant'},{userId:undefined}]) {
@@ -94,7 +116,7 @@ describe('[COMP:api/structured-documents] single-step leased extraction worker',
     const s=setup(); s.authorize.mockResolvedValueOnce({userId:'actor',workspaceId:'workspace'}); await s.worker.runOnce('actor'); expect(s.job.errorCode).toBe('access_denied'); expect(s.client.submit).not.toHaveBeenCalled()
   })
   it('accepts explicit universe grants but rejects undefined and inherited grants', async () => {
-    const s=setup(); s.authorize.mockResolvedValueOnce({userId:'actor',workspaceId:'workspace',clearance:'confidential',compartments:null,projectIds:null})
+    const s=setup(); s.authorize.mockResolvedValue({userId:'actor',workspaceId:'workspace',clearance:'confidential',compartments:null,mutationCompartments:null,projectIds:null})
     await s.worker.runOnce('actor'); expect(s.job.status).toBe('running'); expect(s.client.submit).toHaveBeenCalledTimes(1)
     for (const grants of [{compartments:undefined,projectIds:null},Object.create({compartments:null,projectIds:null})]) {
       const t=setup(); const ctx=Object.assign(Object.create(Object.getPrototypeOf(grants)),grants,{userId:'actor',workspaceId:'workspace',clearance:'confidential'})

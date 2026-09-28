@@ -39,7 +39,7 @@ export function createDbTaskStore(
   return {
     async create({ userId, ...params }) {
       // Create idempotency: a retry / double-fire of the same logical create
-      // (identical workspace + title + status + parent within a short window)
+      // (identical content, scope, author and provenance within a short window)
       // returns the EXISTING task instead of inserting a duplicate. Guarding
       // here (not just in `createTask`) is deliberate — it also short-circuits
       // `onTaskCreate`, so a deduped create never mints a second autopilot
@@ -47,12 +47,7 @@ export function createDbTaskStore(
       // exempt (see `findRecentDuplicateTask`). Best-effort by construction:
       // the window is small enough that a false negative just falls through to
       // the insert. See docs/architecture/features/tasks.md → "Create idempotency".
-      const dup = await findRecentDuplicateTask(userId, {
-        workspaceId: params.workspaceId,
-        title: params.title,
-        status: params.status ?? 'todo',
-        parentId: params.parentId ?? null,
-      })
+      const dup = await findRecentDuplicateTask(userId, params)
       if (dup) return dup
       // `linkedEntityIds` is not on the `TaskStore.create` interface
       // yet (a follow-up type widening) — read it via a permissive

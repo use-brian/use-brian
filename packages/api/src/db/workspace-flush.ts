@@ -154,6 +154,7 @@ export const WORKSPACE_FLUSH_TABLES = [
   // Tasks + goals
   'tasks',
   'goals',
+  'goal_crm_event_sources', // after goals and workflow runs; causal receipt cleanup
   'goal_recipes',
   // Knowledge
   'kb_chunks',

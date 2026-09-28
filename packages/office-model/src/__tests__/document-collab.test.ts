@@ -181,11 +181,11 @@ describe('[COMP:office/document-collab] Document fragment collaboration', () => 
     legacyFirst.destroy(); doc.destroy()
   })
 
-  it('keeps legacy updateText as generated compatibility without storing a Document command', () => {
+  it('keeps legacy updateText as generated compatibility with a retry identity', () => {
     const snapshot = documentFixture()
     const doc = snapshotToYDoc(snapshot)
     appendOfficeCommand(doc, { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: 'assistant', id: id(40) }, origin: 'ai', commandId: id(123), kind: 'updateText', targetId: id(6), runs: [{ id: id(124), text: 'Generated', style: { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' } }] })
-    expect(doc.getMap('commands').size).toBe(0)
+    expect(doc.getMap('commands').size).toBe(1)
     const edited = yDocToSnapshot(doc)
     expect(edited.family === 'document' && edited.sections[0].nodes[0].kind === 'paragraph' && edited.sections[0].nodes[0].runs.map((run) => run.text).join('')).toBe('Generated')
   })

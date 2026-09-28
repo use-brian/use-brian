@@ -1,9 +1,11 @@
+import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { describe, expect, it, vi } from 'vitest'
 import type { ContextScopeStore, ContextTeam, WorkspaceProject } from '../../db/context-scope-store.js'
 import {
   ContextNotAvailableError,
   formatActiveWorkspaceContext,
   resolveTurnScopeSystem,
+  resolveLiveAccessCeilingSystem,
   type TurnScopeAssistant,
 } from '../resolve-turn-scope.js'
 
@@ -82,6 +84,20 @@ function store(overrides: Partial<ContextScopeStore> = {}): ContextScopeStore {
 }
 
 describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
+  it('refreshes live authority independently of inherited execution narrowing', async () => {
+    const input = { userId: 'user-1', assistant: { ...assistant, kind: 'primary' as const,
+      teamScopeMode: 'legacy' as const, projectScopeMode: 'all' as const } }
+    const deps = { resolveReadCeilings: vi.fn().mockResolvedValue({ clearance: 'confidential', compartments: null, mutationCompartments: null }) }
+    await runWithAgentAccess({ userId: 'user-1', workspaceId: 'workspace-1',
+      clearance: 'public', compartments: [], projectIds: [], visibilityAssistantIds: [] }, async () => {
+      expect(await resolveLiveAccessCeilingSystem(input, deps)).toMatchObject({
+        clearance: 'confidential', compartments: null, projectIds: null, visibilityAssistantIds: null,
+      })
+      expect((await resolveTurnScopeSystem(input, deps)).access).toMatchObject({
+        clearance: 'public', compartments: [], projectIds: [], visibilityAssistantIds: [],
+      })
+    })
+  })
   it('intersects member, assistant, selected Team, and active Project grants', async () => {
     const resolved = await resolveTurnScopeSystem(
       {
@@ -94,6 +110,7 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
         resolveReadCeilings: vi.fn().mockResolvedValue({
           clearance: 'internal',
           compartments: [`team:${TEAM_ID}`, 'shared', 'member-only'],
+          mutationCompartments: [`team:${TEAM_ID}`, 'shared', 'member-only'],
         }),
       },
     )
@@ -109,6 +126,14 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
     expect(formatActiveWorkspaceContext(resolved)).toContain('Project: Atlas')
   })
 
+  it('bounds nested primary resolution before connector exposure or prompt construction',async()=>{
+    const result=await runWithAgentAccess({workspaceId:'workspace-1',userId:'user-1',clearance:'internal',compartments:['product'],projectIds:[],visibilityAssistantIds:['caller']},()=>resolveTurnScopeSystem({userId:'user-1',assistant:{...assistant,kind:'primary',teamScopeMode:'all',projectScopeMode:'all'}},{resolveReadCeilings:vi.fn().mockResolvedValue({clearance:'confidential',compartments:null,mutationCompartments:null})}))
+    expect(result.access).toMatchObject({clearance:'internal',compartments:['product'],projectIds:[],visibilityAssistantIds:['caller']})
+    expect(result.effectiveCompartments).toEqual(['product']);expect(result.effectiveProjectIds).toEqual([])
+  })
+  it('refuses actor replacement during nested scope resolution',async()=>{
+    await expect(runWithAgentAccess({workspaceId:'workspace-1',userId:'actual-actor',clearance:'internal',compartments:[]},()=>resolveTurnScopeSystem({userId:'owner',assistant:{...assistant,teamScopeMode:'all',projectScopeMode:'all'}},{resolveReadCeilings:vi.fn().mockResolvedValue({clearance:'confidential',compartments:null,mutationCompartments:null})}))).rejects.toThrow('access_actor_mismatch')
+  })
   it('does not apply a newly configured assistant default to an existing NULL-bound session', async () => {
     const resolved = await resolveTurnScopeSystem(
       {
@@ -126,6 +151,7 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
         resolveReadCeilings: vi.fn().mockResolvedValue({
           clearance: 'confidential',
           compartments: null,
+          mutationCompartments: null,
         }),
       },
     )
@@ -147,6 +173,7 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
         resolveReadCeilings: vi.fn().mockResolvedValue({
           clearance: 'internal',
           compartments: ['accounting'],
+          mutationCompartments: ['accounting'],
         }),
       },
     )).rejects.toMatchObject({
@@ -165,6 +192,7 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
       resolveReadCeilings: vi.fn().mockResolvedValue({
         clearance: 'internal' as const,
         compartments: [`team:${TEAM_ID}`],
+        mutationCompartments: [`team:${TEAM_ID}`],
       }),
     }
 
@@ -180,6 +208,11 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
       session: { contextProjectId: PROJECT_ID, contextLockedAt: new Date() },
     }, deps)
     expect(historical.activeProjectId).toBe(PROJECT_ID)
+  })
+
+  it('refuses an injected resolver that omits explicit mutation authority',async()=>{
+    await expect(resolveTurnScopeSystem({userId:'user-1',assistant:{...assistant,teamScopeMode:'all',projectScopeMode:'all'}},
+      {resolveReadCeilings:vi.fn().mockResolvedValue({clearance:'internal',compartments:['finance']})})).rejects.toThrow('authority_unavailable')
   })
 
   it('preserves the published assistant-full lane without a member floor', async () => {

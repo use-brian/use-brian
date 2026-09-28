@@ -1,6 +1,7 @@
 "use client";
 
 import { HOME_APP_TOOL_CONFIG } from "@use-brian/shared";
+import {useDepartmentChange,DepartmentChangeFeedback} from "@/components/workspace-access/use-department-change";
 import { HomeAppToolSettings } from "./home-app-tool-settings";
 
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
@@ -210,11 +211,20 @@ export function AssistantDetail({
   const workspaceRole = detail.data?.workspaceRole ?? null;
   const [clearanceFeedback, setClearanceFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [savingClearance, setSavingClearance] = useState(false);
+  const clearanceChange=useDepartmentChange(assistant?.workspaceId??workspaceId??"",async()=>{await detail.refresh();},id);
 
   async function handleSetClearance(next: Sensitivity) {
     if (!assistant) return;
     const prev = assistant.clearance;
     if (prev === next) return;
+    if(assistant.workspaceId){
+      setSavingClearance(true);setClearanceFeedback(null);
+      try{
+        const applied=await clearanceChange.save({type:'assistant.clearance.set',assistantId:id,clearance:next},`${assistant.name}: ${t.workspaceAccess.clearance}. ${prev?t.manage.sensitivity[prev]:''} → ${t.manage.sensitivity[next]}`);
+        if(applied)setClearanceFeedback({type:'success',message:format(t.assistant.clearanceSelector.saved,{tier:t.manage.sensitivity[next]})});
+      }finally{setSavingClearance(false)}
+      return;
+    }
     setSavingClearance(true);
     patchAssistant({ clearance: next });
     // Optimistically update the sidebar cache so the Studio rail badge
@@ -331,12 +341,12 @@ export function AssistantDetail({
                   <Select
                     value={assistant.clearance}
                     onValueChange={(v) => handleSetClearance(v as Sensitivity)}
-                    disabled={savingClearance}
+                    disabled={savingClearance||clearanceChange.busy}
                   >
                     <SelectTrigger
                       size="sm"
                       aria-label={t.assistant.clearanceSelector.ariaLabel}
-                      className="h-9 w-auto gap-1 border-transparent bg-transparent px-1 py-0 text-[16px] hover:bg-muted/50 sm:h-6 md:text-[11px]"
+                      className="min-h-11 w-auto gap-1 border-transparent bg-transparent px-2 py-0 text-[16px] hover:bg-muted/50 md:text-sm"
                     >
                       <SelectValue>
                         <SensitivityBadge tier={assistant.clearance} size="xs" />
@@ -364,6 +374,8 @@ export function AssistantDetail({
             </div>
           </div>
         </div>
+
+        <DepartmentChangeFeedback change={clearanceChange}/>
 
         {/* Tab nav — scrollable on mobile with arrow indicators */}
         <div className="border-b border-border">
@@ -688,7 +700,7 @@ function MemoryTab({ assistantId, workspaceId }: { assistantId: string; workspac
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ scope: target }),
+          body: JSON.stringify({ scope: target === "team" ? "workspace" : target }),
         }
       );
       if (res.ok) {
@@ -949,7 +961,7 @@ function MemoryTab({ assistantId, workspaceId }: { assistantId: string; workspac
                                   >
                                     {t.assistant.brainTab.edit}
                                   </button>
-                                  {workspaceId && selected.scope !== "team" && (
+                                  {workspaceId && selected.scope !== "workspace" && (
                                     <button
                                       onClick={async (e) => {
                                         e.stopPropagation();
@@ -967,7 +979,7 @@ function MemoryTab({ assistantId, workspaceId }: { assistantId: string; workspac
                                       {scopeChanging ? t.assistant.brainTab.promoting : t.assistant.brainTab.promoteToTeam}
                                     </button>
                                   )}
-                                  {workspaceId && selected.scope === "team" && (
+                                  {workspaceId && selected.scope === "workspace" && (
                                     <button
                                       onClick={async (e) => {
                                         e.stopPropagation();

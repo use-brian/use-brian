@@ -20,6 +20,9 @@
  */
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+import { organizationSettingsHref } from "@/lib/organization-navigation";
 import { createPortal } from "react-dom";
 import {
   Select,
@@ -38,51 +41,20 @@ import { PrivacySection } from "./sections/privacy-section";
 import { BillingSection } from "./sections/billing-section";
 import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
-import { ProjectsContextSection, TeamsContextSection } from "./sections/context-scopes-section";
+import { ProjectsContextSection } from "./sections/context-scopes-section";
 import {
   WorkspaceGeneralSection,
-  WorkspaceMembersSection,
 } from "./workspace-sections";
 
-export type SettingsSection =
-  | "profile"
-  | "preferences"
-  | "privacy"
-  | "notifications"
-  | "ws-general"
-  | "ws-members"
-  | "ws-teams"
-  | "ws-projects"
-  | "ws-llm-key"
-  | "ws-domains"
-  | "ws-plan"
-  | "ws-usage"
-  | "ws-models";
-
-// Cross-component request to open the settings modal at a given section. The
-// modal is owned by `workspace-switcher.tsx` (local state), so surfaces that
-// don't host it — e.g. the sidebar theme picker's "edit" action — ask for it via
-// this window event instead of threading a context. The switcher listens and
-// opens. Window events are the established cross-component seam here (cf.
-// `doc:theme-changed`, `doc:draft-created`).
-export const OPEN_SETTINGS_EVENT = "doc:open-settings";
-export type OpenSettingsDetail = { section: SettingsSection };
-
-/** Dispatch a request to open the settings modal at `section`. No-op on the
- *  server (guards `window`) so it's safe to call from event handlers in SSR'd
- *  client components. */
-export function openWorkspaceSettings(section: SettingsSection): void {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(
-    new CustomEvent<OpenSettingsDetail>(OPEN_SETTINGS_EVENT, {
-      detail: { section },
-    }),
-  );
-}
+import type { SettingsSection } from '@/lib/workspace-settings-events';
+export { OPEN_SETTINGS_EVENT, openWorkspaceSettings } from '@/lib/workspace-settings-events';
+export type { SettingsSection, OpenSettingsDetail } from '@/lib/workspace-settings-events';
+import type { SettingsMemberTarget } from '@/lib/workspace-settings-events';
 
 type Props = {
   open: boolean;
   initialSection?: SettingsSection;
+  initialMemberTarget?:SettingsMemberTarget;
   onClose: () => void;
 };
 
@@ -95,9 +67,8 @@ const ACCOUNT_SECTIONS: SettingsSection[] = [
   "notifications",
 ];
 const WORKSPACE_SECTIONS: SettingsSection[] = [
+  "ws-organization",
   "ws-general",
-  "ws-members",
-  "ws-teams",
   "ws-projects",
   // Provider connections and model routing share the Models section.
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
@@ -111,13 +82,12 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-plan",
 ];
 // The OSS single-player edition has no billing: drop the Plan + Usage sections
-// entirely. Members stays (relabeled "Teammates"), routed to the hosted-upgrade
-// pitch instead of the live members manager. Browser profiles live in the
+// entirely. People and department administration share the Organization shortcut.
+// Browser profiles live in the
 // Browsers mini app in both editions.
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
+  "ws-organization",
   "ws-general",
-  "ws-members",
-  "ws-teams",
   "ws-projects",
   "ws-models",
   "ws-domains",
@@ -132,21 +102,20 @@ export function workspaceSettingsSections(
   return capabilities.billing ? WORKSPACE_SECTIONS : OSS_WORKSPACE_SECTIONS;
 }
 
-export function workspaceMembersSectionKind(
-  capabilities: DeploymentCapabilities,
-): "manage" | "upgrade" {
-  return capabilities.teammateManagement ? "manage" : "upgrade";
-}
-
-export function SettingsModal({ open, initialSection = "profile", onClose }: Props) {
+export function SettingsModal({ open, initialSection = "profile", initialMemberTarget, onClose }: Props) {
   const t = useT();
+  const router = useRouter();
+  const { workspaceId } = useWorkspaceContext();
   const oss = isOssEdition();
   const workspaceSections = workspaceSettingsSections(deploymentCapabilities());
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [memberTarget,setMemberTarget]=useState(initialMemberTarget);
   const activeSection = section === "ws-usage" ? "ws-plan"
     : section === "ws-llm-key" ? "ws-models" : section;
   const labels: Record<SettingsSection, string> = {
+    "ws-organization": t.organization.title,
+    "ws-access": t.workspaceAccess.title,
     "ws-general": t.chrome.settingsModal.workspace.general,
     "ws-members": oss
       ? t.chrome.settingsModal.upgrade.teammatesNav
@@ -173,16 +142,27 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
   // setState-in-effect anti-pattern.
   const [prevOpen, setPrevOpen] = useState(open);
   const [prevInitial, setPrevInitial] = useState(initialSection);
-  if (open !== prevOpen || initialSection !== prevInitial) {
+  const [prevMemberTarget,setPrevMemberTarget]=useState(initialMemberTarget);
+  if (open !== prevOpen || initialSection !== prevInitial || initialMemberTarget!==prevMemberTarget) {
     setPrevOpen(open);
     setPrevInitial(initialSection);
+    setPrevMemberTarget(initialMemberTarget);
     if (open) {
       setSection(initialSection);
+      setMemberTarget(initialMemberTarget);
       setPickerOpen(false);
     }
   }
 
+  const organizationDestination = organizationSettingsHref(workspaceId, section, memberTarget);
+  useEffect(() => {
+    if (!open || !organizationDestination) return;
+    router.push(organizationDestination);
+    onClose();
+  }, [open, organizationDestination, router, onClose]);
+
   const selectSection = (s: SettingsSection) => {
+    setMemberTarget(undefined);
     setSection(s);
     setPickerOpen(false);
   };
@@ -205,7 +185,7 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  if (!open || !mounted) return null;
+  if (!open || !mounted || organizationDestination) return null;
 
   // Portal to <body> so the fixed overlay escapes the sidebar's transformed
   // ancestor (the chrome wrapper carries `md:translate-x-0`, which would
@@ -397,11 +377,11 @@ function SectionBody({
     case "ws-general":
       return <WorkspaceGeneralSection onWorkspaceDeleted={onClose} />;
     case "ws-members":
-      return workspaceMembersSectionKind(deploymentCapabilities()) === "manage"
-        ? <WorkspaceMembersSection />
-        : <HostedUpgradeSection />;
     case "ws-teams":
-      return <TeamsContextSection />;
+    case "ws-access":
+    case "ws-organization":
+      // The modal redirects these compatibility entries to the canonical hub.
+      return null;
     case "ws-projects":
       return <ProjectsContextSection />;
     case "ws-llm-key":

@@ -31,6 +31,14 @@ const endpointStore = {
   setTierDefault: vi.fn(),
   clearTierDefault: vi.fn(),
 }
+const decisionRoutingStore = {
+  get: vi.fn(),
+  getSystem: vi.fn(),
+  set: vi.fn(),
+}
+const decisionEvaluationProfileStore = {
+  listApproved: vi.fn(),
+}
 
 function makeApp(overrides?: Partial<ModelMenuRouteOptions>) {
   const app = express()
@@ -55,6 +63,8 @@ beforeEach(() => {
   endpointStore.list.mockResolvedValue([])
   endpointStore.listTierDefaults.mockResolvedValue([])
   endpointStore.listModelRoutes.mockResolvedValue([])
+  decisionRoutingStore.get.mockResolvedValue(null)
+  decisionEvaluationProfileStore.listApproved.mockResolvedValue([])
 })
 
 describe('[COMP:api/model-menu] GET /models/menu', () => {
@@ -271,5 +281,151 @@ describe('[COMP:api/model-menu] workspace tier routes', () => {
       modelAlias: 'gpt-5.6-sol',
     }))
     expect(res.body.modelRoutes).toHaveLength(1)
+  })
+})
+
+describe('[COMP:decisions/workspace-routing] workspace decision classifier', () => {
+  const WID = '00000000-0000-0000-0000-000000000001'
+
+  it('lists configured decision adapters separately from chat models', async () => {
+    decisionRoutingStore.get.mockResolvedValue({
+      workspaceId: WID,
+      mode: 'shadow',
+      modelAlias: 'typesafe-jev-1.13',
+      updatedAt: 'now',
+    })
+    const res = await request(makeApp({
+      decisionRoutingStore: decisionRoutingStore as never,
+      configuredDecisionAdapters: new Set(['typesafe']),
+    })).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+
+    expect(res.body.decisionRouting).toMatchObject({
+      mode: 'shadow',
+      modelAlias: 'typesafe-jev-1.13',
+      shadowSampleRate: 0.1,
+      models: [{ alias: 'typesafe-jev-1.13', displayName: 'Jev 1.13', adapterId: 'typesafe' }],
+    })
+    expect(Object.values(res.body.classes).flat()).not.toContainEqual(
+      expect.objectContaining({ alias: 'typesafe-jev-1.13' }),
+    )
+  })
+
+  it('lets an admin enable shadow but rejects an unconfigured adapter', async () => {
+    getRole.mockResolvedValue('admin')
+    decisionRoutingStore.set.mockResolvedValue({
+      workspaceId: WID,
+      mode: 'shadow',
+      modelAlias: 'typesafe-jev-1.13',
+      updatedAt: 'now',
+    })
+    await request(makeApp({
+      decisionRoutingStore: decisionRoutingStore as never,
+      configuredDecisionAdapters: new Set(['typesafe']),
+    }))
+      .put(`/api/workspaces/${WID}/decision-routing`)
+      .send({ mode: 'shadow', modelAlias: 'typesafe-jev-1.13' })
+      .expect(200)
+    expect(decisionRoutingStore.set).toHaveBeenCalledWith({
+      actingUserId: 'u1',
+      workspaceId: WID,
+      mode: 'shadow',
+      modelAlias: 'typesafe-jev-1.13',
+    })
+
+    await request(makeApp({
+      decisionRoutingStore: decisionRoutingStore as never,
+      configuredDecisionAdapters: new Set(),
+    }))
+      .put(`/api/workspaces/${WID}/decision-routing`)
+      .send({ mode: 'shadow', modelAlias: 'typesafe-jev-1.13' })
+      .expect(400)
+  })
+
+  it('exposes exact hybrid capability and lets an admin opt in', async () => {
+    getRole.mockResolvedValue('admin')
+    decisionEvaluationProfileStore.listApproved.mockResolvedValue([{
+      id: 'approved-research-intent',
+      version: '1',
+      operationId: 'research.intent',
+      operationVersion: '1',
+      stateVersion: '1',
+      questionVersion: '1',
+      modelCatalogId: 'typesafe-jev-1.13',
+      modelWireId: 'jev-1.13.0',
+      evaluationSegment: 'global',
+      reportSha256: 'a'.repeat(64),
+      approvedAt: '2026-09-29T00:00:00.000Z',
+    }])
+    decisionRoutingStore.set.mockResolvedValue({
+      workspaceId: WID,
+      mode: 'hybrid',
+      modelAlias: 'typesafe-jev-1.13',
+      updatedAt: 'now',
+    })
+    const options = {
+      decisionRoutingStore: decisionRoutingStore as never,
+      decisionEvaluationProfileStore: decisionEvaluationProfileStore as never,
+      configuredDecisionAdapters: new Set(['typesafe']),
+    }
+    const menu = await request(makeApp(options))
+      .get(`/api/models/menu?workspaceId=${WID}`)
+      .expect(200)
+    expect(menu.body.decisionRouting.models[0].hybridOperations).toEqual([{
+      operationId: 'research.intent',
+      operationVersion: '1',
+      evaluationSegment: 'global',
+      profileId: 'approved-research-intent',
+      profileVersion: '1',
+    }])
+
+    await request(makeApp(options))
+      .put(`/api/workspaces/${WID}/decision-routing`)
+      .send({ mode: 'hybrid', modelAlias: 'typesafe-jev-1.13' })
+      .expect(200)
+    expect(decisionRoutingStore.set).toHaveBeenCalledWith({
+      actingUserId: 'u1',
+      workspaceId: WID,
+      mode: 'hybrid',
+      modelAlias: 'typesafe-jev-1.13',
+    })
+  })
+
+  it('rejects hybrid without approved authority-bearing evidence', async () => {
+    getRole.mockResolvedValue('admin')
+    decisionEvaluationProfileStore.listApproved.mockResolvedValue([{
+      id: 'observation-only',
+      version: '1',
+      operationId: 'ingest.sensitivity',
+      operationVersion: '1',
+      stateVersion: '1',
+      questionVersion: '1',
+      modelCatalogId: 'typesafe-jev-1.13',
+      modelWireId: 'jev-1.13.0',
+      evaluationSegment: 'global',
+      reportSha256: 'a'.repeat(64),
+      approvedAt: '2026-09-29T00:00:00.000Z',
+    }])
+    const res = await request(makeApp({
+      decisionRoutingStore: decisionRoutingStore as never,
+      decisionEvaluationProfileStore: decisionEvaluationProfileStore as never,
+      configuredDecisionAdapters: new Set(['typesafe']),
+    }))
+      .put(`/api/workspaces/${WID}/decision-routing`)
+      .send({ mode: 'hybrid', modelAlias: 'typesafe-jev-1.13' })
+      .expect(400)
+    expect(res.body.error).toMatch(/No approved hybrid operation/)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+  })
+
+  it('keeps decision-routing writes owner/admin only', async () => {
+    getRole.mockResolvedValue('member')
+    await request(makeApp({
+      decisionRoutingStore: decisionRoutingStore as never,
+      configuredDecisionAdapters: new Set(['typesafe']),
+    }))
+      .put(`/api/workspaces/${WID}/decision-routing`)
+      .send({ mode: 'llm_only' })
+      .expect(403)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
   })
 })

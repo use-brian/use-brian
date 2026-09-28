@@ -6,9 +6,10 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { OfficeComments } from "../comments/office-comments";
 import { uid } from "./editor-fixtures";
 describe("[COMP:app-web/office-comments] Office comments", () => {
-  it("requires an exact target and explains explicit @Brian invocation", () => {
+  it("does not expose a composer before its authorized collection arrives", () => {
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeComments artifactId={uid(1)} workspaceId={uid(2)} version={2} targetIds={[uid(10)]} canComment /></I18nProvider>);
-    expect(html).toContain(en.office.commentPlaceholder);
-    expect(html).toContain("@Brian");
+    expect(html).toContain(`aria-label="${en.office.comments}"`);
+    expect(html).not.toContain(en.office.commentPlaceholder);
+    expect(html).not.toContain("textarea");
   });
 });

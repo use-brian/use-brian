@@ -3,13 +3,13 @@
 
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
- * Upload and resolve images for a post (feed-revamp-depth D33).
+ * Upload durable images for a post (feed-revamp-depth D33).
  *
  * Rides the EXISTING `/api/doc-files/:workspaceId/upload` rather than a new
  * route: it already writes durable `workspace_files` rows, uuid-prefixes
  * filenames so collisions are impossible, is workspace-membership gated, caps
- * at 20 MB, counts toward the workspace quota, and has a matching signed-read
- * (`resolveDocFileSrc`).
+ * at 20 MB and counts toward the workspace quota. Displays use the shared
+ * protected media hook.
  *
  * `/api/files/upload` is deliberately NOT used: it writes `file_cache` with a
  * 7-day TTL, and a post's image has to outlive the post.
@@ -19,7 +19,6 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authFetch } from "@/lib/auth-fetch";
-import { resolveDocFileSrc } from "@/components/doc/doc-file-url";
 import {
   ACCEPTED_MEDIA_MIME,
   postMediaUploadBatches,
@@ -44,9 +43,6 @@ const apiUrl = (path: string) =>
 
 export function usePostMedia(workspaceId: string) {
   const [uploading, setUploading] = useState(false);
-  // fileId -> object/signed URL, resolved lazily and cached per mount because
-  // the signed URL is short-lived (~1h) and must not be persisted.
-  const [urls, setUrls] = useState<Record<string, string>>({});
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -113,20 +109,5 @@ export function usePostMedia(workspaceId: string) {
     [workspaceId],
   );
 
-  /** Resolve a stored fileId to something an `<img src>` can load. */
-  const resolve = useCallback(
-    async (fileId: string): Promise<string | null> => {
-      if (urls[fileId]) return urls[fileId];
-      try {
-        const url = await resolveDocFileSrc(workspaceId, fileId);
-        if (alive.current) setUrls((prev) => ({ ...prev, [fileId]: url }));
-        return url;
-      } catch {
-        return null;
-      }
-    },
-    [workspaceId, urls],
-  );
-
-  return { upload, resolve, uploading, urls };
+  return { upload, uploading };
 }

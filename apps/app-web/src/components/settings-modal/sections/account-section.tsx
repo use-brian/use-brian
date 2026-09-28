@@ -12,6 +12,7 @@ import {
   getUserInfo,
   getCachedUserInfo,
   setUserInfoCache,
+  subscribeUserInfo,
   type UserInfo,
 } from "@/lib/user";
 import { authFetch } from "@/lib/auth-fetch";
@@ -64,7 +65,9 @@ export function AccountSection() {
   const t = useT();
   const { workspaceId } = useWorkspaceContext();
   const [userInfo, setUserInfo] = useState<UserInfo | null>(getCachedUserInfo);
-  const [name, setName] = useState("");
+  const [name, setName] = useState(() => getCachedUserInfo()?.name ?? "");
+  const profileName = useRef(getCachedUserInfo()?.name ?? "");
+  const [profileLoadFailed, setProfileLoadFailed] = useState(false);
   const [savingName, setSavingName] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -72,19 +75,34 @@ export function AccountSection() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const info = getUserInfo();
-    if (info) {
+    const syncProfile = (info: UserInfo | null) => {
+      const previousName = profileName.current;
+      profileName.current = info?.name ?? "";
       setUserInfo(info);
-      setName(info.name ?? "");
-    }
+      setName((draft) => draft === previousName ? (info?.name ?? "") : draft);
+      if (info) setProfileLoadFailed(false);
+    };
+    const unsubscribe = subscribeUserInfo(syncProfile);
+    const info = getUserInfo();
+    syncProfile(info);
     // Existing packaged sessions predate the native avatar field. One
     // background refresh upgrades that encrypted record and repaints this
     // section without requiring a sign-out/reinstall. `null` means the account
     // intentionally has no photo; `undefined` means the old record never knew.
     if (isDesktopAuth() && (!info || info.avatarUrl === undefined)) {
-      void refreshUserInfo().catch(() => {});
+      void refreshProfile();
     }
+    return unsubscribe;
   }, []);
+
+  async function refreshProfile() {
+    setProfileLoadFailed(false);
+    try {
+      await refreshUserInfo();
+    } catch {
+      setProfileLoadFailed(true);
+    }
+  }
 
   const displayLabel = userInfo?.name || userInfo?.email || "";
 
@@ -97,11 +115,12 @@ export function AccountSection() {
     if (isDesktopAuth()) {
       const outcome = await desktopAuthSource.refresh();
       if (outcome.kind !== "ok") throw new Error("profile_refresh_failed");
-      const info = getUserInfo();
+      // Older native shells return the identity with refresh but have no
+      // getCurrentUser getter. Preserve that response instead of reading cookies.
+      const info = outcome.user ?? getUserInfo();
       if (!info) throw new Error("profile_refresh_failed");
       setUserInfoCache(info);
       setUserInfo(info);
-      setName(info.name ?? "");
       return info;
     }
 
@@ -179,7 +198,8 @@ export function AccountSection() {
     try {
       const ok = await updateDisplayName(trimmed);
       if (!ok) throw new Error("name_failed");
-      await refreshUserInfo();
+      const info = await refreshUserInfo();
+      if (info) setName(info.name ?? "");
       setStatus({ kind: "success", text: t.settings.account.nameUpdated });
     } catch {
       setStatus({ kind: "error", text: t.settings.account.nameError });
@@ -245,6 +265,15 @@ export function AccountSection() {
         </div>
       </div>
 
+      {profileLoadFailed && (
+        <div role="alert" className="flex items-center gap-3">
+          <p className="text-xs text-red-400">{t.settings.account.profileLoadError}</p>
+          <Button type="button" variant="outline" size="sm" onClick={() => void refreshProfile()}>
+            {t.settings.account.retry}
+          </Button>
+        </div>
+      )}
+
       {status && (
         <p
           className={
@@ -291,7 +320,7 @@ export function AccountSection() {
               <label className="text-xs text-muted-foreground block mb-1">{t.settings.account.email}</label>
               <input
                 type="email"
-                defaultValue={userInfo?.email ?? ""}
+                value={userInfo?.email ?? ""}
                 disabled
                 className="w-full text-[16px] md:text-sm bg-muted border border-border rounded-lg px-3 py-2 text-muted-foreground"
               />

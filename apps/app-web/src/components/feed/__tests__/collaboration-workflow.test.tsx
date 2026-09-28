@@ -11,6 +11,18 @@ import { applyFeedEdits, createFeedAnchor, importLegacyFeed, projectFeed, propos
 import { en } from '@/lib/i18n/dictionaries/en';
 const state = vi.hoisted(() => ({ http: vi.fn(), upload: vi.fn(), image: vi.fn(), edition: 'oss', messages: { data: { messages: [] }, loading: false, error: undefined, refresh: vi.fn() } }));
 vi.mock('@/components/doc/doc-file-url', () => ({ fetchDocFileBlob: (...args: unknown[]) => state.image(...args) }));
+// These are editor behavior tests. The real media/cache lifecycle is exercised
+// separately in protected-media-consumers.test.tsx.
+vi.mock('@/lib/use-doc-media', () => ({ useDocMedia: (workspaceId:string,fileId:string) => {
+  const [media,setMedia]=useState<{url:string|null;mimeType:string|null;loading:boolean;error:unknown}>({url:null,mimeType:null,loading:true,error:null});
+  React.useEffect(()=>{let active=true;let url:string|null=null;
+    void Promise.resolve(state.image(workspaceId,fileId)).then((blob:Blob|undefined)=>{
+      if(!active||!blob)return;url=URL.createObjectURL(blob);setMedia({url,mimeType:blob.type,loading:false,error:null});
+    }).catch(error=>{if(active)setMedia({url:null,mimeType:null,loading:false,error});});
+    return()=>{active=false;if(url)URL.revokeObjectURL(url);};
+  },[workspaceId,fileId]);return media;
+} }));
+
 vi.mock('@/lib/runtime-public-config', () => ({ publicRuntimeConfig: () => ({ apiUrl: 'http://localhost:4000', edition: state.edition }) }));
 vi.mock('@/lib/auth-fetch', () => ({ authFetch: (...args: unknown[]) => state.http(...args) }));
 vi.mock('@/lib/use-post-media', () => ({ usePostMedia: () => ({ upload: state.upload, resolve: vi.fn(), uploading: false }) }));

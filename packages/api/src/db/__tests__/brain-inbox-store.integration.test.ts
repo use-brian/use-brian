@@ -10,42 +10,28 @@
  * UI's own Delete button), and it used to leave the relationship row
  * stuck in the review queue pointing at a dead endpoint.
  *
- * Skips when the local `Use Brian` DB (or the brain tables) isn't
- * available, matching the other `.integration.test.ts` suites here.
+ * Runs only through the owned disposable PostgreSQL 18 fixture. It never
+ * falls back to an ambient developer or production database.
  *
  * Spec: docs/architecture/brain/corrections.md → "Dangling-edge
  * auto-prune — soft-delete parity (2026-07-09)".
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import pg from 'pg'
+import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import type pg from 'pg'
 
-let pool: pg.Pool | undefined
+import { getAppPool, getPool } from '../client.js'
+import * as store from '../brain-inbox-store.js'
 
-async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
-  try {
-    const client = await p.connect()
-    try {
-      await client.query('SELECT 1 FROM memories LIMIT 1')
-      await client.query('SELECT 1 FROM entities LIMIT 1')
-      await client.query('SELECT 1 FROM entity_links LIMIT 1')
-    } finally {
-      client.release()
-    }
-    pool = p
-    return true
-  } catch {
-    await p.end().catch(() => {})
-    return false
-  }
-}
-
-const ok = await canConnect()
-const describeIf = ok ? describe : describe.skip
+const { assertLocalFixture } = await import(
+  new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href
+)
+await assertLocalFixture()
+const pool = getPool()
 
 afterAll(async () => {
-  if (pool) await pool.end()
+  await getAppPool().end()
+  await pool.end()
 })
 
 async function makeUser(client: pg.PoolClient): Promise<string> {
@@ -123,22 +109,15 @@ async function makeEdge(
   return r.rows[0].id
 }
 
-describeIf('[COMP:brain/inbox-store] entity_link dangling detection (integration)', () => {
-  let store: typeof import('../brain-inbox-store.js')
-
+describe('[COMP:brain/inbox-store] entity_link dangling detection (integration)', () => {
   let userId: string
   let workspaceId: string
   let memoryId: string
   let entityId: string
   let edgeId: string
 
-  beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
-    store = await import('../brain-inbox-store.js')
-  })
-
   beforeEach(async () => {
-    const client = await pool!.connect()
+    const client = await pool.connect()
     try {
       userId = await makeUser(client)
       workspaceId = await makeWorkspace(client, userId)
@@ -154,13 +133,14 @@ describeIf('[COMP:brain/inbox-store] entity_link dangling detection (integration
   async function edgeIds(): Promise<string[]> {
     const { rows } = await store.listBrainInbox({
       workspaceId,
+      userId,
       primitive: 'entity_link',
     })
     return rows.map((r) => r.id)
   }
 
   async function edgeCount(): Promise<number> {
-    const { byPrimitive } = await store.countBrainInbox(workspaceId)
+    const { byPrimitive } = await store.countBrainInbox({ workspaceId, userId })
     return byPrimitive.entity_link
   }
 
@@ -168,14 +148,14 @@ describeIf('[COMP:brain/inbox-store] entity_link dangling detection (integration
     expect(await edgeIds()).toContain(edgeId)
     expect(await edgeCount()).toBe(1)
 
-    const { rows } = await store.listBrainInbox({ workspaceId, primitive: 'entity_link' })
+    const { rows } = await store.listBrainInbox({ workspaceId, userId, primitive: 'entity_link' })
     const edge = rows.find((r) => r.id === edgeId)
     expect(edge?.body.source_label).toBe('daily research digest')
     expect(edge?.body.target_label).toBe('inbox-test-project')
   })
 
   it('SOFT-deleted endpoint (valid_to — the D.4 default delete) orphans the edge: excluded from list + count, swept by prune', async () => {
-    const client = await pool!.connect()
+    const client = await pool.connect()
     try {
       await client.query(`UPDATE memories SET valid_to = now() WHERE id = $1`, [memoryId])
     } finally {
@@ -186,7 +166,7 @@ describeIf('[COMP:brain/inbox-store] entity_link dangling detection (integration
     expect(await edgeCount()).toBe(0)
 
     expect(await store.pruneDanglingEntityLinks(workspaceId)).toBe(1)
-    const { rows } = await pool!.query(
+    const { rows } = await pool.query(
       `SELECT valid_to FROM entity_links WHERE id = $1`,
       [edgeId],
     )
@@ -196,7 +176,7 @@ describeIf('[COMP:brain/inbox-store] entity_link dangling detection (integration
   })
 
   it('RETRACTED endpoint orphans the edge the same way', async () => {
-    const client = await pool!.connect()
+    const client = await pool.connect()
     try {
       await client.query(
         `UPDATE entities SET retracted_at = now(), retracted_reason = 'test' WHERE id = $1`,
@@ -212,7 +192,7 @@ describeIf('[COMP:brain/inbox-store] entity_link dangling detection (integration
   })
 
   it('HARD-deleted endpoint still orphans the edge (original behavior preserved)', async () => {
-    const client = await pool!.connect()
+    const client = await pool.connect()
     try {
       await client.query(`DELETE FROM entity_links WHERE id = $1`, [edgeId])
       // Re-create the edge AFTER deleting the entity so only the endpoint is gone.

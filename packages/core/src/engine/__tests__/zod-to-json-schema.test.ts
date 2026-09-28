@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
+import { jsonSchemaFromZod as productionJsonSchemaFromZod } from '../query-loop.js'
 
 // The converter functions are not exported, so we test them indirectly
 // through the query loop's tool definition builder. We import the internal
@@ -32,7 +33,7 @@ function jsonSchemaFromZod(schema: { _def: unknown }): {
 
     for (const [key, fieldSchema] of Object.entries(shape)) {
       properties[key] = zodFieldToJsonSchema(fieldSchema) as TP
-      if (fieldSchema._def.typeName !== 'ZodOptional') {
+      if (fieldSchema._def.typeName !== 'ZodOptional' && fieldSchema._def.typeName !== 'ZodDefault') {
         required.push(key)
       }
     }
@@ -55,6 +56,14 @@ function zodFieldToJsonSchema(field: { _def: Record<string, unknown> }): Record<
     case 'ZodBoolean':
       return { type: 'boolean', ...(def.description ? { description: def.description as string } : {}) }
     case 'ZodOptional': {
+      const inner = zodFieldToJsonSchema({ _def: (def.innerType as { _def: Record<string, unknown> })._def })
+      if (def.description && !inner.description) {
+        inner.description = def.description as string
+      }
+      return inner
+    }
+    case 'ZodDefault':
+    case 'ZodNullable': {
       const inner = zodFieldToJsonSchema({ _def: (def.innerType as { _def: Record<string, unknown> })._def })
       if (def.description && !inner.description) {
         inner.description = def.description as string
@@ -220,5 +229,54 @@ describe('[COMP:engine/zod-to-json-schema] Zod to JSON Schema conversion', () =>
     const args = result.properties.args as Record<string, unknown>
     expect(args.type).not.toBe('string')
     expect(args.description).toBe('Arguments matching the tool\'s parameter schema')
+  })
+})
+
+describe('[COMP:engine/zod-to-json-schema] defaulted and nullable fields (production converter)', () => {
+  const tp = (schema: { _def: unknown }) => productionJsonSchemaFromZod(schema) as unknown as { properties: Record<string, Record<string, unknown>>; required?: string[] }
+
+  it('advertises a defaulted field as its real type and not required', () => {
+    // The listCrmEvents failure: `limit` was shown as a required string, so the model sent "10".
+    const result = tp(z.object({
+      limit: z.number().int().max(100).default(50).describe('Page size'),
+      include_archived: z.boolean().default(false),
+      tags: z.array(z.string()).default([]),
+      metadata: z.record(z.unknown()).default({}),
+      name: z.string(),
+    }))
+    expect(result.properties.limit).toEqual({ type: 'number', description: 'Page size' })
+    expect(result.properties.include_archived).toEqual({ type: 'boolean' })
+    expect(result.properties.tags).toEqual({ type: 'array', items: { type: 'string' } })
+    expect(result.properties.metadata).toEqual({ type: 'object' })
+    expect(result.required).toEqual(['name'])
+  })
+
+  it('advertises a nullable field as its real type and keeps its required status', () => {
+    const result = tp(z.object({
+      capacity: z.number().nullable(),
+      note: z.string().nullable().optional().describe('Free text'),
+      venue: z.object({ city: z.string() }).nullable(),
+    }))
+    expect(result.properties.capacity).toEqual({ type: 'number' })
+    expect(result.properties.note).toEqual({ type: 'string', description: 'Free text' })
+    expect(result.properties.venue).toMatchObject({ type: 'object', properties: { city: { type: 'string' } } })
+    expect(result.required).toEqual(['capacity', 'venue'])
+  })
+
+  it('unwraps nested wrappers and keeps the outer description', () => {
+    const result = tp(z.object({
+      count: z.number().nullable().default(null).describe('How many'),
+      flags: z.array(z.object({ on: z.boolean().default(true) })).optional(),
+    }))
+    expect(result.properties.count).toEqual({ type: 'number', description: 'How many' })
+    expect(result.properties.flags).toEqual({ type: 'array', items: { type: 'object', properties: { on: { type: 'boolean' } } } })
+    expect(result.required).toBeUndefined()
+  })
+
+  it('still shows types it cannot express safely for every provider as text', () => {
+    // Unions, unknown values and tuples have no Gemini-safe general form; tools handle them with tolerance.
+    const result = tp(z.object({ value: z.unknown(), level: z.union([z.literal(1), z.literal(2)]) }))
+    expect(result.properties.value).toEqual({ type: 'string' })
+    expect(result.properties.level).toEqual({ type: 'string' })
   })
 })

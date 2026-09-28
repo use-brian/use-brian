@@ -13,16 +13,52 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 
+const { createDerivedMock, rederiveMock } = vi.hoisted(() => ({
+  createDerivedMock: vi.fn(async (_params: unknown) => ({ rowId: 'new-skill-1', slug: 'weekly-investor-update' })),
+  rederiveMock: vi.fn(async (_params: unknown) => undefined),
+}))
+
 vi.mock('../../db/client.js', () => ({
   query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
   queryWithRLS: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
 }))
+vi.mock('../../db/skill-derived-store.js', () => ({
+  createDerivedWorkspaceSkill: (args: unknown) => createDerivedMock(args),
+  recordDerivedSkillRederivation: (args: unknown) => rederiveMock(args),
+  applyDerivedSkillPatch: vi.fn(async () => undefined),
+  applyDerivedSkillSupportFile: vi.fn(async () => undefined),
+}))
 
 import { skillApprovalsRoutes, type SkillApprovalRouteOptions } from '../skill-approvals.js'
+import { bindScopeSource } from '@use-brian/core'
 
 const WS = 'ws-1'
 const APPROVER = 'user-1'
 const ASSISTANT = 'asst-1'
+const DERIVATION = {
+  producer: 'fixture:procedural-review',
+  sources: [{
+    workspaceId: WS,
+    userId: APPROVER,
+    assistantId: ASSISTANT,
+    sensitivity: 'internal' as const,
+    compartments: [],
+    projectIds: [],
+    resourceKind: 'session_message',
+    resourceId: 'message-1',
+    version: '1',
+  }, {
+    workspaceId: WS,
+    userId: APPROVER,
+    assistantId: ASSISTANT,
+    sensitivity: 'internal' as const,
+    compartments: [],
+    projectIds: [],
+    resourceKind: 'workspace_skill_revision',
+    resourceId: 'existing-revision-9',
+    version: '1',
+  }],
+}
 
 function mountApp(opts: SkillApprovalRouteOptions) {
   const app = express()
@@ -49,6 +85,7 @@ function baseOpts(over: Partial<SkillApprovalRouteOptions> = {}): SkillApprovalR
         description: 'Compose the weekly investor update',
         content: 'Step 1. Gather metrics.',
       },
+      derivation: DERIVATION,
     },
   }
   return {
@@ -63,6 +100,7 @@ function baseOpts(over: Partial<SkillApprovalRouteOptions> = {}): SkillApprovalR
     } as any,
     workspaceSkillStore: {
       listForWorkspace: vi.fn().mockResolvedValue([]),
+      listScopedForWorkspace: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue({ rowId: 'new-skill-1' }),
       recordRederivation: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(true),
@@ -96,9 +134,10 @@ describe('[COMP:api/skill-approvals-route] induction governance on approve', () 
     expect(res.body.applied).toBe(true)
 
     // Created (no match) with inductionSource='self'.
-    expect(opts.workspaceSkillStore.create).toHaveBeenCalledTimes(1)
-    const createInput = (opts.workspaceSkillStore.create as ReturnType<typeof vi.fn>).mock.calls[0][2]
+    expect(createDerivedMock).toHaveBeenCalledTimes(1)
+    const createInput = createDerivedMock.mock.calls[0]![0] as Record<string, unknown>
     expect(createInput.inductionSource).toBe('self')
+    expect(createInput.evidence).toEqual(DERIVATION)
     expect(opts.workspaceSkillStore.recordRederivation).not.toHaveBeenCalled()
 
     // learned_from edge → the originating assistant.
@@ -112,6 +151,26 @@ describe('[COMP:api/skill-approvals-route] induction governance on approve', () 
         workspaceId: WS,
       }),
     )
+  })
+
+  it('keeps a legacy proposal pending when its canonical derivation is missing', async () => {
+    const opts = baseOpts()
+    const approval = await opts.approvalsStore.getById(APPROVER, 'appr-1')
+    if (!approval) throw new Error('fixture approval missing')
+    const argumentsWithoutEvidence = { ...approval.arguments }
+    delete argumentsWithoutEvidence.derivation
+    opts.approvalsStore.getById = vi.fn().mockResolvedValue({
+      ...approval,
+      arguments: argumentsWithoutEvidence,
+    })
+    const app = mountApp(opts)
+
+    const res = await request(app).post('/api/skills/approvals/appr-1/approve').send({})
+
+    expect(res.status).toBe(500)
+    expect(res.body.detail).toBe('scope_evidence_missing')
+    expect(createDerivedMock).not.toHaveBeenCalled()
+    expect(opts.approvalsStore.respond).not.toHaveBeenCalled()
   })
 
   it('GET / enriches staged_skill_update rows with a workspace-scoped targetSkill snapshot', async () => {
@@ -177,14 +236,24 @@ describe('[COMP:api/skill-approvals-route] induction governance on approve', () 
   it('matched existing skill → recordRederivation + learned_from edge, NO create', async () => {
     const opts = baseOpts({
       workspaceSkillStore: {
-        listForWorkspace: vi.fn().mockResolvedValue([
-          {
+        listScopedForWorkspace: vi.fn().mockResolvedValue([
+          bindScopeSource({
             rowId: 'existing-skill-9',
             slug: 'weekly-investor-update',
             name: 'Weekly Investor Update',
             whenToUse: undefined,
             state: 'active',
-          },
+          }, {
+            workspaceId: WS,
+            userId: APPROVER,
+            assistantId: ASSISTANT,
+            sensitivity: 'internal',
+            compartments: [],
+            projectIds: [],
+            resourceKind: 'workspace_skill_revision',
+            resourceId: 'existing-revision-9',
+            version: '1',
+          }),
         ]),
         create: vi.fn().mockResolvedValue({ rowId: 'should-not-be-created' }),
         recordRederivation: vi.fn().mockResolvedValue(undefined),
@@ -197,8 +266,12 @@ describe('[COMP:api/skill-approvals-route] induction governance on approve', () 
     const res = await request(app).post('/api/skills/approvals/appr-1/approve').send({})
     expect(res.status).toBe(200)
 
-    // Slug-exact match → re-derivation recorded against the EXISTING skill.
-    expect(opts.workspaceSkillStore.recordRederivation).toHaveBeenCalledWith('existing-skill-9')
+    // Slug-exact match → counter/confidence and revision are one derived transaction.
+    expect(opts.workspaceSkillStore.recordRederivation).not.toHaveBeenCalled()
+    expect(rederiveMock).toHaveBeenCalledWith(expect.objectContaining({
+      skillId: 'existing-skill-9',
+      evidence: DERIVATION,
+    }))
     // No duplicate created.
     expect(opts.workspaceSkillStore.create).not.toHaveBeenCalled()
     // learned_from edge points at the existing skill row (audit trail).
@@ -317,6 +390,7 @@ describe('[COMP:api/skill-approvals-route] attach offer on creation approve', ()
         description: 'Enumerate events past the API page limit',
         content: 'Use per_page + since cursors.',
       },
+      derivation: DERIVATION,
     },
     approvalPayload: {
       kind: 'staged_skill_creation',
@@ -360,7 +434,7 @@ describe('[COMP:api/skill-approvals-route] attach offer on creation approve', ()
       .send({ attach: true })
     expect(res.status).toBe(200)
     expect(res.body.attach).toEqual({ applied: true })
-    expect(opts.workspaceSkillStore.create).toHaveBeenCalledTimes(1)
+    expect(createDerivedMock).toHaveBeenCalledTimes(1)
   })
 
   it('a failed attach never unwinds the approved creation', async () => {
@@ -377,7 +451,7 @@ describe('[COMP:api/skill-approvals-route] attach offer on creation approve', ()
     expect(res.status).toBe(200)
     expect(res.body.status).toBe('approved')
     expect(res.body.attach).toMatchObject({ applied: false })
-    expect(opts.workspaceSkillStore.create).toHaveBeenCalledTimes(1)
+    expect(createDerivedMock).toHaveBeenCalledTimes(1)
     expect(opts.approvalsStore.respond).toHaveBeenCalled()
   })
 

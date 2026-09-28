@@ -39,6 +39,7 @@ import {
   type WorkflowRunStore,
   type WorkflowStore,
   type WorkflowTrigger,
+  type AuthoringAuthority,
 } from '@use-brian/core'
 import { z } from 'zod'
 import type { WorkspaceStore } from '../db/workspace-store.js'
@@ -145,6 +146,13 @@ export type WorkflowsRouteOptions = {
     }>
   >
   getContextReadiness?: (workspaceId: string) => Promise<ContextReadiness>
+  /** Trusted attended-author principal; request bodies never carry this. */
+  resolveAuthoringAuthority: (params: {
+    userId: string
+    workspaceId: string
+    contextGroupId: string | null
+    contextProjectId: string | null
+  }) => Promise<AuthoringAuthority>
 }
 
 export type WorkflowAuditDelta =
@@ -682,6 +690,12 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       researchMode: parsed.data.researchMode,
       contextGroupId: parsed.data.contextGroupId ?? null,
       contextProjectId: parsed.data.contextProjectId ?? null,
+      authoringAuthority: await opts.resolveAuthoringAuthority({
+        userId,
+        workspaceId: parsed.data.workspaceId,
+        contextGroupId: parsed.data.contextGroupId ?? null,
+        contextProjectId: parsed.data.contextProjectId ?? null,
+      }),
     })
 
     // Create the backing firing job for a schedule trigger (closes the gap
@@ -818,6 +832,22 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     } else if (parsed.data.rotateWebhookSecret && existing.trigger.kind === 'webhook') {
       // No trigger change but secret rotation requested.
       fields.webhookSecret = randomBytes(32).toString('hex')
+    }
+
+    const executionAffectingEdit = parsed.data.definition !== undefined
+      || parsed.data.trigger !== undefined || parsed.data.enabled === true
+      || parsed.data.modelAlias !== undefined || parsed.data.maxTurns !== undefined
+      || parsed.data.researchMode !== undefined || parsed.data.contextGroupId !== undefined
+      || parsed.data.contextProjectId !== undefined
+    if (executionAffectingEdit) {
+      fields.authoringAuthority = await opts.resolveAuthoringAuthority({
+        userId,
+        workspaceId: existing.workspaceId,
+        contextGroupId: parsed.data.contextGroupId !== undefined
+          ? parsed.data.contextGroupId : existing.contextGroupId ?? null,
+        contextProjectId: parsed.data.contextProjectId !== undefined
+          ? parsed.data.contextProjectId : existing.contextProjectId ?? null,
+      })
     }
 
     const updated = await opts.workflowStore.update(userId, req.params.id, fields)
@@ -1132,6 +1162,12 @@ export function createValidatedDefinitionEditor(
 
     const updated = await opts.workflowStore.update(params.userId, params.workflowId, {
       definition: definitionParsed.data,
+      authoringAuthority: await opts.resolveAuthoringAuthority({
+        userId: params.userId,
+        workspaceId: params.workspaceId,
+        contextGroupId: existing.contextGroupId ?? null,
+        contextProjectId: existing.contextProjectId ?? null,
+      }),
     })
     if (!updated) return { ok: false, error: 'Workflow update failed' }
     return { ok: true }

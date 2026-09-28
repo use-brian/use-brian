@@ -1,7 +1,6 @@
 "use client";
 
 
-import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Renders a chat/comment message's uploaded attachments as file cards — an
  * image thumbnail (sourced from the base64 the message persists, so it
@@ -28,12 +27,11 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Download, FileAudio, FileImage, FileText, FileVideo, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
-import { authFetch } from "@/lib/auth-fetch";
+import { useFileCacheMedia } from "@/lib/use-doc-media";
 import { hasConvertiblePdfPreview } from "@/lib/convertible-preview";
 import { VisualLightbox } from "./visual-lightbox";
 import type { MessageAttachmentRef } from "@/lib/api/sessions";
 
-const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** "image/png" → "PNG", "application/pdf" → "PDF", "text/markdown" → "MARKDOWN". */
 function typeLabel(mime: string): string {
@@ -51,7 +49,7 @@ function FileGlyph({ mime }: { mime: string }) {
 }
 
 /** What feeds the PDF viewer: bytes the client already holds, or a server render. */
-type PdfSource = { kind: "dataUrl"; dataUrl: string } | { kind: "remote"; url: string };
+type PdfSource = { kind: "dataUrl"; dataUrl: string } | { kind: "remote"; workspaceId: string; fileId: string };
 
 /**
  * In-app PDF viewer. The browser's own PDF plugin renders inside the iframe,
@@ -75,14 +73,18 @@ function PdfPreviewDialog({
   source: PdfSource;
 }) {
   const t = useT().attachments;
-  const [state, setState] = React.useState<
+  const [localState, setState] = React.useState<
     { kind: "idle" } | { kind: "loading" } | { kind: "ready"; src: string } | { kind: "error" }
   >({ kind: "idle" });
 
   // The host builds `source` inline each render, so the effect keys on the
   // stable primitives inside it — depending on the object identity would
   // refetch on every render while open.
-  const sourceKey = source.kind === "dataUrl" ? source.dataUrl : source.url;
+  const sourceKey = source.kind === "dataUrl" ? source.dataUrl : source.workspaceId+':'+source.fileId;
+  const remote = useFileCacheMedia(open&&source.kind==='remote'?source.workspaceId:null,open&&source.kind==='remote'?source.fileId:null,'pdf');
+  const state = source.kind==='remote'
+    ? remote.url?{kind:'ready' as const,src:remote.url}:remote.error?{kind:'error' as const}:{kind:'loading' as const}
+    : localState;
   React.useEffect(() => {
     if (!open) {
       setState({ kind: "idle" });
@@ -104,23 +106,6 @@ function PdfPreviewDialog({
       return () => URL.revokeObjectURL(url);
     }
 
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    setState({ kind: "loading" });
-    authFetch(source.url)
-      .then(async (res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        const blob = await res.blob();
-        objectUrl = URL.createObjectURL(blob);
-        if (!cancelled) setState({ kind: "ready", src: objectUrl });
-      })
-      .catch(() => {
-        if (!cancelled) setState({ kind: "error" });
-      });
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- sourceKey stands in for the unstable `source` object
   }, [open, source.kind, sourceKey]);
 
@@ -265,7 +250,8 @@ function AttachmentCard({
               ? { kind: "dataUrl", dataUrl: attachment.dataUrl! }
               : {
                   kind: "remote",
-                  url: `${API_URL}/api/files/${encodeURIComponent(attachment.id)}/preview-pdf?workspaceId=${encodeURIComponent(workspaceId!)}`,
+                  workspaceId: workspaceId!,
+                  fileId: attachment.id,
                 }
           }
         />

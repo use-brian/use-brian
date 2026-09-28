@@ -1,5 +1,7 @@
 /** Authenticated Office artifact routes. [COMP:api/office-routes] */
 import { Router } from 'express'
+import {officeMetadataRoute,sendOfficeMetadata} from './office-metadata.js'
+import type {OfficeMetadataReply} from '../db/office-read-projection.js'
 import { z } from 'zod'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { OfficeArtifactToolProjection, OfficeToolPort } from '@use-brian/core'
@@ -18,7 +20,11 @@ export type OfficeArtifactsRouteDeps = {
   previewVersion(params: { userId: string; artifactId: string; versionId: string }): Promise<OfficeArtifactSnapshot | null>
   nameVersion(params: { userId: string; artifactId: string; versionId: string; summary: string }): Promise<boolean>
   copyVersion(params: { userId: string; artifactId: string; versionId: string; title: string }): Promise<{ artifactId: string; version: number } | null>
-  listSharing(userId: string, artifactId: string): Promise<{ defaultWorkspaceRole: 'view' | 'comment' | 'edit'; grants: Array<{ userId: string; role: 'view' | 'comment' | 'edit' | 'deny'; revokedAt: Date | null }>; members: Array<{ userId: string; userName?: string | null; email?: string | null; isOwner: boolean }> } | null>
+  listSharing(userId: string, artifactId: string): Promise<
+    | { status: 'ok'; workspaceId: string; validForMs: number; defaultWorkspaceRole: 'view' | 'comment' | 'edit'; grants: Array<{ userId: string; role: 'view' | 'comment' | 'edit' | 'deny'; revokedAt: Date | null }>; members: Array<{ userId: string; userName?: string | null; email?: string | null; isOwner: boolean }> }
+    | { status: 'unavailable' }
+    | { status: 'changed' }
+  >
   setGrant(params: { userId: string; artifactId: string; targetUserId: string; role: 'view' | 'comment' | 'edit'; reason?: string }): Promise<boolean>
   revokeGrant(params: { userId: string; artifactId: string; targetUserId: string }): Promise<boolean>
   setDefaultWorkspaceRole(params: { userId: string; artifactId: string; role: 'view' | 'comment' | 'edit' }): Promise<boolean>
@@ -39,6 +45,20 @@ const CreateSchema = z.object({
 
 export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
   const router = Router()
+  const versionsReply=async(userId:string,artifactId:string):Promise<OfficeMetadataReply>=>{
+    const access=await deps.resolveAccess(userId,artifactId)
+    if(!access)return {status:404,body:{error:'Office artifact not found'}}
+    return {workspaceId:access.workspaceId,body:{versions:await deps.listVersions(userId,artifactId)}}
+  }
+  const sharingReply=async(userId:string,artifactId:string):Promise<OfficeMetadataReply>=>{
+    const access=await deps.resolveAccess(userId,artifactId)
+    if(!access)return {status:404,body:{error:'Office artifact not found'}}
+    const result=await deps.listSharing(userId,artifactId)
+    if(result.status==='changed')return {status:409,body:{error:'member_directory_changed'}}
+    if(result.status==='unavailable')return {status:404,body:{error:'Office artifact not found'}}
+    const {status:_,workspaceId,validForMs,...sharing}=result
+    return {workspaceId,validForMs,body:{...sharing,canManage:access.canManageSharing}}
+  }
   router.get('/capabilities', (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
@@ -46,14 +66,12 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     res.json({ generationAvailable: generationFamilies.length > 0, generationFamilies })
   })
 
-  router.get('/artifacts', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/artifacts', officeMetadataRoute(async (req, userId) => {
     const workspaceId = z.string().uuid().safeParse(req.query.workspaceId)
     const view = z.enum(['active', 'archived', 'trash', 'retained']).catch('active').parse(req.query.view)
-    if (!workspaceId.success) return void res.status(400).json({ error: 'workspaceId must be a UUID' })
-    res.json({ artifacts: await deps.list(userId, workspaceId.data, view) })
-  })
+    if (!workspaceId.success) return {status:400,body:{ error: 'workspaceId must be a UUID' }}
+    return {workspaceId:workspaceId.data,body:{ artifacts: await deps.list(userId, workspaceId.data, view) }}
+  }))
 
   router.post('/artifacts', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -79,31 +97,24 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     }
   })
 
-  router.get('/artifacts/:artifactId', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/artifacts/:artifactId', officeMetadataRoute(async (req, userId) => {
     const artifact = await deps.service.get({ userId, artifactId: String(req.params.artifactId) })
-    if (!artifact) return void res.status(404).json({ error: 'Office artifact not found' })
-    res.json({ artifact })
-  })
+    if (!artifact) return {status:404,body:{ error: 'Office artifact not found' }}
+    const root = await deps.getArtifact(userId, String(req.params.artifactId))
+    if (!root) return {status:404,body:{error:'Office artifact not found'}}
+    return {workspaceId:root.workspaceId,body:{artifact}}
+  }))
 
-  router.get('/artifacts/:artifactId/versions', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
-    const artifactId = String(req.params.artifactId)
-    if (!await deps.resolveAccess(userId, artifactId)) return void res.status(404).json({ error: 'Office artifact not found' })
-    res.json({ versions: await deps.listVersions(userId, artifactId) })
-  })
+  router.get('/artifacts/:artifactId/versions', officeMetadataRoute((req,userId)=>versionsReply(userId,String(req.params.artifactId))))
 
-  router.get('/artifacts/:artifactId/versions/:versionId/preview', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/artifacts/:artifactId/versions/:versionId/preview', officeMetadataRoute(async (req,userId) => {
     const artifactId = String(req.params.artifactId)
-    if (!await deps.resolveAccess(userId, artifactId)) return void res.status(404).json({ error: 'Office artifact not found' })
+    const access=await deps.resolveAccess(userId,artifactId)
+    if(!access)return {status:404,body:{error:'Office artifact not found'}}
     const snapshot = await deps.previewVersion({ userId, artifactId, versionId: String(req.params.versionId) })
-    if (!snapshot) return void res.status(404).json({ error: 'Office version not found' })
-    res.json({ snapshot })
-  })
+    if(!snapshot)return {status:404,body:{error:'Office version not found'}}
+    return {workspaceId:access.workspaceId,body:{snapshot}}
+  }))
 
   router.patch('/artifacts/:artifactId/versions/:versionId', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -113,7 +124,7 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     const artifactId = String(req.params.artifactId)
     if (!(await deps.resolveAccess(userId, artifactId))?.canEdit) return void res.status(404).json({ error: 'Office artifact not found' })
     if (!await deps.nameVersion({ userId, artifactId, versionId: String(req.params.versionId), summary: body.data.summary })) return void res.status(404).json({ error: 'Office version not found' })
-    res.json({ ok: true })
+    await sendOfficeMetadata(res,userId,()=>versionsReply(userId,artifactId))
   })
 
   router.post('/artifacts/:artifactId/versions/:versionId/copy', async (req, res) => {
@@ -125,19 +136,14 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     if (!await deps.resolveAccess(userId, artifactId)) return void res.status(404).json({ error: 'Office artifact not found' })
     const copied = await deps.copyVersion({ userId, artifactId, versionId: String(req.params.versionId), title: body.data.title })
     if (!copied) return void res.status(404).json({ error: 'Office version not found' })
-    res.status(201).json(copied)
+    await sendOfficeMetadata(res,userId,async()=>{
+      const [artifact,root]=await Promise.all([deps.service.get({userId,artifactId:copied.artifactId}),deps.getArtifact(userId,copied.artifactId)])
+      if(!artifact||!root)return {status:404,body:{error:'Office artifact not found'}}
+      return {status:201,workspaceId:root.workspaceId,body:{...copied,artifact}}
+    })
   })
 
-  router.get('/artifacts/:artifactId/sharing', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
-    const artifactId = String(req.params.artifactId)
-    const access = await deps.resolveAccess(userId, artifactId)
-    if (!access) return void res.status(404).json({ error: 'Office artifact not found' })
-    const sharing = await deps.listSharing(userId, artifactId)
-    if (!sharing) return void res.status(404).json({ error: 'Office artifact not found' })
-    res.json({ ...sharing, canManage: access.canManageSharing })
-  })
+  router.get('/artifacts/:artifactId/sharing',officeMetadataRoute((req,userId)=>sharingReply(userId,String(req.params.artifactId))))
 
   router.put('/artifacts/:artifactId/sharing/:targetUserId', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -148,7 +154,7 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     const artifactId = String(req.params.artifactId)
     if (!(await deps.resolveAccess(userId, artifactId))?.canManageSharing) return void res.status(404).json({ error: 'Office artifact not found' })
     if (!await deps.setGrant({ userId, artifactId, targetUserId: targetUserId.data, ...body.data })) return void res.status(404).json({ error: 'Workspace member not found' })
-    res.json({ ok: true })
+    await sendOfficeMetadata(res,userId,()=>sharingReply(userId,artifactId))
   })
 
   router.delete('/artifacts/:artifactId/sharing/:targetUserId', async (req, res) => {
@@ -159,7 +165,7 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     const artifactId = String(req.params.artifactId)
     if (!(await deps.resolveAccess(userId, artifactId))?.canManageSharing) return void res.status(404).json({ error: 'Office artifact not found' })
     if (!await deps.revokeGrant({ userId, artifactId, targetUserId: targetUserId.data })) return void res.status(404).json({ error: 'Workspace member not found' })
-    res.json({ ok: true })
+    await sendOfficeMetadata(res,userId,()=>sharingReply(userId,artifactId))
   })
 
   router.patch('/artifacts/:artifactId/sharing', async (req, res) => {
@@ -170,7 +176,7 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     const artifactId = String(req.params.artifactId)
     if (!(await deps.resolveAccess(userId, artifactId))?.canManageSharing) return void res.status(404).json({ error: 'Office artifact not found' })
     if (!await deps.setDefaultWorkspaceRole({ userId, artifactId, role: body.data.defaultWorkspaceRole })) return void res.status(404).json({ error: 'Office artifact not found' })
-    res.json({ ok: true })
+    await sendOfficeMetadata(res,userId,()=>sharingReply(userId,artifactId))
   })
 
   router.post('/artifacts/:artifactId/restore', async (req, res) => {
@@ -182,7 +188,11 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     if (!await deps.canRestoreVersion(userId, artifactId)) return void res.status(404).json({ error: 'Office artifact not found' })
     const restored = await deps.restoreVersion({ userId, artifactId, ...body.data })
     if (!restored) return void res.status(409).json({ error: 'version_conflict' })
-    res.json({ version: restored })
+    await sendOfficeMetadata(res,userId,async()=>{
+      const reply=await versionsReply(userId,artifactId)
+      if((reply.status??200)>=400)return reply
+      return {...reply,body:{version:restored,...reply.body as {versions:unknown[]}}}
+    })
   })
 
   return router

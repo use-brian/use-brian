@@ -216,6 +216,16 @@ describe('[COMP:crm/operations-tools] canonical CRM operation tools', () => {
       pipelineId, stageId,
     })
   })
+
+  it('preserves a typed scope refusal with recovery instead of leaking source errors', async () => {
+    execute.mockRejectedValueOnce(Object.assign(new Error('Hidden source details'), { code: 'scope_operation_denied' }))
+    const result = await tools.setDealPipelineStage.execute({ deal_id: CONTACT_ID,
+      pipeline_id: '00000000-0000-4000-8000-000000000007', stage_id: '00000000-0000-4000-8000-000000000008' }, context())
+    expect(result).toEqual({ isError: true, data: {
+      error: 'scope_operation_denied', message: expect.stringContaining('administrator'),
+    } })
+    expect(JSON.stringify(result)).not.toContain('Hidden source')
+  })
 })
 
 
@@ -224,9 +234,9 @@ describe('[COMP:crm/operations-tools] Managed delivery adapters',()=>{
   it('keeps native authority out of the schema and preserves the original principal and turn ceiling',async()=>{
     expect(tools.sendCrmMessage.requiresConfirmation).toBe(true)
     expect(tools.sendCrmMessage.inputSchema.safeParse({...input,nativeDelivery:{assistantId:CONTACT_ID}}).success).toBe(false)
-    const ctx=context({activeCapabilities:new Set(['crm','home_app:crm:write']),compartments:[],projectIds:[],programmaticPrincipal:{kind:'brain_key',credentialId:CONTACT_ID}})
+    const ctx=context({activeCapabilities:new Set(['crm','home_app:crm:write']),compartments:['team:product'],mutationCompartments:[],projectIds:[],programmaticPrincipal:{kind:'brain_key',credentialId:CONTACT_ID}})
     await tools.sendCrmMessage.execute(input,ctx)
-    expect(execute).toHaveBeenLastCalledWith(expect.objectContaining({actor:{kind:'brain_key',credentialId:CONTACT_ID},authority:expect.objectContaining({nativeDelivery:{assistantId:ctx.assistantId,compartments:[],projectIds:[]}})}),expect.objectContaining({...input,kind:'send_message',cc:[],bcc:[]}))
+    expect(execute).toHaveBeenLastCalledWith(expect.objectContaining({actor:{kind:'brain_key',credentialId:CONTACT_ID},authority:expect.objectContaining({nativeDelivery:{assistantId:ctx.assistantId,compartments:['team:product'],mutationCompartments:[],projectIds:[]}})}),expect.objectContaining({...input,kind:'send_message',cc:[],bcc:[]}))
   })
   it('refuses a revoked CRM child grant on direct invocation before the command',async()=>{
     expect(await tools.sendCrmMessage.execute(input,context({activeCapabilities:new Set(['crm'])}))).toMatchObject({isError:true,data:{error:'not_authorized'}})

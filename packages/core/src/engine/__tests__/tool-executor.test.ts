@@ -46,6 +46,34 @@ async function drainResults(executor: ReturnType<typeof createToolExecutor>): Pr
 }
 
 describe('[COMP:engine/tool-executor] basic execution', () => {
+  it('withholds an ambiguous result when live authority changes during execution', async () => {
+    const execute = vi.fn(async <T>(operation: () => Promise<T>) => {
+      await operation()
+      throw Object.assign(new Error('authority changed'), {
+        reason: 'authority_changed',
+        retrySafe: false,
+        operationMayHaveExecuted: true,
+      })
+    })
+    const tool = makeTool({ name: 'write', fn: vi.fn(async () => ({ data: 'secret' })) })
+    const executor = createToolExecutor({
+      tools: new Map([['write', tool]]),
+      context: {
+        ...ctx,
+        authority: { assertCurrent: vi.fn(async () => {}), execute },
+      },
+      loopDetector: createLoopDetector(),
+    })
+
+    executor.addTool('call_1', 'write', {})
+    await expect(drainResults(executor)).rejects.toMatchObject({
+      reason: 'authority_changed',
+      retrySafe: false,
+      operationMayHaveExecuted: true,
+    })
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+
   it('executes a single tool and returns its result', async () => {
     const tools = new Map<string, Tool>([
       ['greet', makeTool({ name: 'greet', isConcurrencySafe: true })],

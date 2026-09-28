@@ -148,6 +148,8 @@ export async function finishGoal(
   deps: {
     goalStore: GoalStore
     deliver: GoalDeliver
+    /** Source admission for acting goals, rechecked at each terminal boundary. */
+    assertSourceAuthority?: (goal: GoalRecord) => Promise<void>
     /** Acting-driver ownership guard. When present, this atomically changes a
      * still-running goal to the terminal status. `false` means an explicit
      * cancellation already retired it, so host write-back and delivery must
@@ -159,12 +161,14 @@ export async function finishGoal(
     ) => Promise<boolean>
   },
 ): Promise<void> {
+  await deps.assertSourceAuthority?.(goal)
   if (deps.claimTerminal) {
     if (!(await deps.claimTerminal(goal.id, terminal, reason))) return
   } else {
     await deps.goalStore.setStatusSystem(goal.id, terminal, reason)
   }
   if (goal.host && goal.createdByUserId) {
+    await deps.assertSourceAuthority?.(goal)
     const hostStore = createHostStore({ actorUserId: goal.createdByUserId })
     await hostStore.adapterFor(goal.host.type).setTerminal(goal.host, terminal, reason)
   }
@@ -172,6 +176,7 @@ export async function finishGoal(
   // persisted above, and a delivery failure must never wedge the loop (in the
   // driver's tick it would count as an errored tick and re-arm a goal that is
   // in fact finished).
+  await deps.assertSourceAuthority?.(goal)
   try {
     await deps.deliver(goal, terminal, reason)
   } catch (err) {

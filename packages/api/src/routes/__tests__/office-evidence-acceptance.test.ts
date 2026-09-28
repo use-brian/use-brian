@@ -45,7 +45,7 @@ describe('[COMP:api/structured-documents] Office evidence acceptance', () => {
     const f = fixture()
     expect(await f.accept()).toEqual({ status: 200, body: { ok: true } })
     expect(f.deps.verifyEvidenceSuggestion).toHaveBeenCalledWith(uid(1), uid(3), f.command)
-    expect(f.deps.applySuggestion).toHaveBeenCalledWith({ artifactId: uid(2), suggestionId: uid(3), command: f.command })
+    expect(f.deps.applySuggestion).toHaveBeenCalledWith({ userId: uid(1), artifactId: uid(2), suggestionId: uid(3), command: f.command })
     expect(f.deps.decideSuggestion).toHaveBeenCalledWith({ userId: uid(1), suggestionId: uid(3), decision: 'accepted', expectedStatus: 'open' })
     expect(f.deps.verifyEvidenceSuggestion.mock.invocationCallOrder[0]).toBeLessThan(f.deps.applySuggestion.mock.invocationCallOrder[0]!)
     expect(f.deps.applySuggestion.mock.invocationCallOrder[0]).toBeLessThan(f.deps.decideSuggestion.mock.invocationCallOrder[0]!)
@@ -57,7 +57,7 @@ describe('[COMP:api/structured-documents] Office evidence acceptance', () => {
     f.deps.verifyEvidenceSuggestion.mockResolvedValue(false) // Live snapshot advanced after the successful application.
     f.deps.suggestionAlreadyApplied.mockResolvedValue(true)
     expect(await f.accept()).toEqual({ status: 200, body: { ok: true } })
-    expect(f.deps.suggestionAlreadyApplied).toHaveBeenCalledWith(uid(2), uid(3))
+    expect(f.deps.suggestionAlreadyApplied).toHaveBeenCalledWith(uid(1), uid(2), uid(3))
     expect(f.deps.applySuggestion).toHaveBeenCalledTimes(1)
     expect(f.deps.decideSuggestion).toHaveBeenCalledTimes(2)
   })

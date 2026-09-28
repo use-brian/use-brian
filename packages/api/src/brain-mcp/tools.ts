@@ -1173,8 +1173,10 @@ function buildDocPageTools(
       if ('error' in ctx) return text(ctx.error, true)
       // resolveCtx caches, so the handler's own resolveCtx() re-read is free.
       return runWithAgentAccess({
+        workspaceId:ctx.workspaceId??undefined,userId:ctx.userId,visibilityAssistantIds:ctx.visibilityAssistantIds,
         clearance: ctx.clearance,
         compartments: ctx.compartments,
+        mutationCompartments:ctx.mutationCompartments,
         projectIds: ctx.projectIds,
       }, () => tool.handler(args))
     },
@@ -2279,6 +2281,7 @@ export function makeBrainContextResolver(
       clearance,
       assistantClearance: clearance,
       compartments: turnScope.effectiveCompartments,
+      mutationCompartments: turnScope.access.mutationCompartments,
       projectIds: turnScope.effectiveProjectIds,
       activeGroupId: turnScope.activeGroupId,
       activeProjectId: turnScope.activeProjectId,

@@ -5,7 +5,7 @@ import { createDbCrmIntakeReadStore } from '../crm-intake-store.js'
 import { listCrmOperationsAudit, listCrmEventDelivery } from '../../crm-operations/privacy.js'
 import { createAssociationStore } from '../association-store.js'
 import { createDbCrmSegmentStore } from '../crm-segment-store.js'
-import { getPool } from '../client.js'
+import { getPool, getAppPool } from '../client.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -13,7 +13,7 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
 const reads = createDbCrmIntakeReadStore()
 
 describe('[COMP:crm/operations-pagination] Complete collections in real PostgreSQL', () => {
-  afterAll(async () => { await Promise.all([pool.end(), getPool().end()]) })
+  afterAll(async () => { await Promise.all([pool.end(), getPool().end(), getAppPool().end()]) })
   it('traverses every collection beyond 100 with immutable tuple order and correct named envelopes', async () => {
     const workspaceId = randomUUID(), userId = randomUUID(), contactId = randomUUID()
     await pool.query('INSERT INTO users (id,auth_provider_id) VALUES ($1::uuid,$1::text)', [userId])
@@ -54,8 +54,8 @@ describe('[COMP:crm/operations-pagination] Complete collections in real PostgreS
       ['participation', (cursor) => reads.listParticipation(workspaceId, { limit: 17, cursor })],
       ['pipelines', (cursor) => reads.listPipelines(workspaceId, { limit: 17, cursor })],
       ['credentials', (cursor) => reads.listCredentials(workspaceId, { limit: 17, cursor })],
-      ['entries', (cursor) => listCrmOperationsAudit(workspaceId, { limit: 17, cursor })],
-      ['events', (cursor) => listCrmEventDelivery(workspaceId, { limit: 17, cursor })],
+      ['entries', (cursor) => listCrmOperationsAudit({workspaceId,actor:{kind:'user',userId},authority:{role:'owner',canWrite:true,canConfigure:true,trustedIdentitySources:[]}}, { limit: 17, cursor })],
+      ['events', (cursor) => listCrmEventDelivery({workspaceId,actor:{kind:'user',userId},authority:{role:'owner',canWrite:true,canConfigure:true,trustedIdentitySources:[]}}, { limit: 17, cursor })],
     ]
     for (const [key, read] of cases) {
       const ids: unknown[] = []

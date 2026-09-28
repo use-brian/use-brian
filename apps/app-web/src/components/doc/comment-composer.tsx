@@ -26,13 +26,13 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { fetchMembers } from "@/lib/api/mentions";
+import { isCurrentDirectoryPerson } from "@/lib/api/mentions";
+import { useWorkspaceDirectory } from "@/lib/use-workspace-directory";
 import type { SuggestionKeyDownProps } from "@tiptap/suggestion";
 import {
   MentionPopup,
   type MentionItem,
   type MentionPopupRef,
-  type PersonMentionItem,
 } from "@/components/doc/mentions/mention-popup";
 import { useT } from "@/lib/i18n/client";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
@@ -80,9 +80,9 @@ export function CommentComposer({
   // Caret to restore after a controlled re-render (mention insert / clear).
   const pendingCaretRef = React.useRef<number | null>(null);
 
-  const [people, setPeople] = React.useState<PersonMentionItem[]>([]);
   // The open mention query: `at` is the `@` offset, `anchor` the textarea rect.
   const [mention, setMention] = React.useState<{ at: number; query: string } | null>(null);
+  const people = useWorkspaceDirectory(mention ? workspaceId : null, mention?.query);
 
   // Reset the tracked mentions when the draft is cleared from the outside
   // (send / dismiss). Keeps stale ids from leaking into the next comment.
@@ -100,19 +100,6 @@ export function CommentComposer({
     }
   }, [value, ref]);
 
-  // Fetch member matches as the `@query` changes (fetchMembers is cached per
-  // workspace + query, so this is cheap on repeat).
-  React.useEffect(() => {
-    if (!mention) return;
-    let cancelled = false;
-    void fetchMembers(workspaceId, mention.query).then((rows) => {
-      if (!cancelled) setPeople(rows);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [mention, workspaceId]);
-
   function recompute(next: string) {
     onValueChange(next, presentMentionIds(next, trackedRef.current));
   }
@@ -126,7 +113,7 @@ export function CommentComposer({
   }
 
   function insertMention(item: MentionItem) {
-    if (item.kind !== "person" || !mention || !ref.current) return;
+    if (item.kind !== "person" || !mention || !ref.current || !isCurrentDirectoryPerson(workspaceId, item)) return;
     const token = `@${item.name} `;
     const before = value.slice(0, mention.at);
     // Replace from the `@` up to the current caret with the mention token.

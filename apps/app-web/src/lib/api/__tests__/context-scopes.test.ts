@@ -8,7 +8,6 @@ import {
   getContextExplanation,
   updateConnectorContext,
   updateContextProject,
-  updateContextTeam,
 } from "../context-scopes";
 
 const mockAuthFetch = vi.mocked(authFetch);
@@ -23,17 +22,6 @@ function json(body: unknown, status = 200): Response {
 beforeEach(() => vi.resetAllMocks());
 
 describe("[COMP:app-web/context-scope] registry and binding SDK", () => {
-  it("updates Team metadata through stable Team ids", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({ group: { id: "team-1", name: "Finance" } }));
-    await expect(updateContextTeam("workspace-1", "team-1", {
-      name: "Finance",
-      description: "Close and reporting",
-    })).resolves.toMatchObject({ id: "team-1", name: "Finance" });
-    const [url, init] = mockAuthFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain("/workspaces/workspace-1/groups/team-1");
-    expect(init.method).toBe("PATCH");
-  });
-
   it("updates Project metadata through stable Project ids", async () => {
     mockAuthFetch.mockResolvedValueOnce(json({ project: { id: "project-1", name: "Atlas" } }));
     await updateContextProject("workspace-1", "project-1", { name: "Atlas" });

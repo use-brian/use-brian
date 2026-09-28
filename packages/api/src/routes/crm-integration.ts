@@ -120,10 +120,13 @@ export function crmIntegrationRoutes(options: {
     if (csv === null) { res.status(404).json({ error: 'not_found' }); return }
     res.type('text/csv').attachment('crm-import-results.csv').send(csv)
   }))
-  for (const [path, list] of [['audit', listCrmOperationsAudit], ['event-delivery', listCrmEventDelivery]] as const) {
+  for (const path of ['audit', 'event-delivery'] as const) {
     router.get(`/operations/${path}`, endpoint(async (req, res) => {
       requireCrmIntegrationOperation(principal(res), 'crm.audit.read')
-      res.json(await list(principal(res).workspaceId, CrmPageQuerySchema.parse(req.query)))
+      const actor=principal(res),filters=CrmPageQuerySchema.parse(req.query)
+      res.json(await (path==='event-delivery'
+        ? listCrmEventDelivery(crmIntegrationContext(actor),filters)
+        : listCrmOperationsAudit(crmIntegrationContext(actor),filters)))
     }))
   }
   router.get('/operations/member-profiles/:id', endpoint(async (req, res) => {

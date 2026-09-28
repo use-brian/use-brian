@@ -9,12 +9,13 @@ import type {
   Sensitivity,
   StableExternalIdentity,
 } from '@use-brian/core'
+import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type pg from 'pg'
-import { buildAccessPredicate } from './access-predicate.js'
+import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { query, queryGated, queryWithRLS } from './client.js'
+import { applyRLSGucs, getAppPool, query, queryGated, queryWithRLS } from './client.js'
 import { emitCrmRelationEdge, emitEdgeFireAndForget, superseedCrmRelationEdge } from './edge-hooks.js'
-import { createEntity, getEntityById, getEntityByIdSystem, updateEntity } from './entities-store.js'
+import { createEntity, updateEntity } from './entities-store.js'
 import {
   bindImportedCrmIdentity,
   resolveCrmPersonIdentity,
@@ -26,6 +27,23 @@ export type CrmWriteTransaction = { client: pg.PoolClient; afterCommit(effect: (
 function projectAfterCommit(transaction: CrmWriteTransaction | undefined, effect: () => void): void {
   if (transaction) transaction.afterCommit(effect)
   else effect()
+}
+
+/** Own a standalone CRM commit; a composer supplies its own transaction. */
+export async function runCrmWriteTransaction<T>(
+  userId: string, write: (transaction: CrmWriteTransaction) => Promise<T>,
+): Promise<T> {
+  const client = await getAppPool().connect(), effects: Array<() => void> = []
+  let result: T
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, userId)
+    result = await write({ client, afterCommit: effect => effects.push(effect) })
+    await client.query('COMMIT')
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
+  finally { client.release() }
+  for (const effect of effects) effect()
+  return result
 }
 
 export class CrmPersonIdentityConflictError extends Error {
@@ -79,52 +97,95 @@ function attrStr(a: Record<string, unknown>, key: string): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null
 }
 
-/** Reject a cross-workspace relationship reference (replaces the
- *  `contacts_company_workspace_match_trg` / `deals_links_workspace_match_trg`
- *  triggers). A ref in another workspace throws; a non-existent ref is
- *  left to the caller (the old FK would have rejected it, but v1 CRM
- *  relationships are best-effort). Message keeps the "same workspace" token. */
-async function assertSameWorkspace(
-  refId: string | null | undefined,
-  workspaceId: string,
-  label: string,
-  transactionClient?: pg.PoolClient,
-): Promise<void> {
-  if (!refId) return
-  const r = await (transactionClient ? transactionClient.query.bind(transactionClient) : query)<{ workspaceId: string | null }>(
-    `SELECT workspace_id AS "workspaceId" FROM entities WHERE id = $1 AND valid_to IS NULL`,
-    [refId],
-  )
-  const ws = r.rows[0]?.workspaceId
-  if (ws && ws !== workspaceId) {
-    throw new Error(`${label} must reference a row in the same workspace`)
+/** Reference lookup shares the canonical current-member gate, even on owner clients. */
+export async function readCrmReference(
+  userId: string, workspaceId: string, id: string | null | undefined,
+  kind: 'company' | 'person' | readonly string[], access?: AccessContext, client?: pg.PoolClient,
+): Promise<EntityRecord | null> {
+  if (!id) return null
+  const actor = mutationActorAccess(userId, workspaceId, access)
+  if (client) {
+    const ap = buildAccessPredicate(actor, { startIdx: 2, operation: 'read' })
+    const member = buildCurrentMemberSourcePredicate(userId, { alias: 'entities', startIdx: ap.nextIdx, operation: 'read' })
+    const locked = await client.query<{ id: string }>(
+      `SELECT id FROM entities WHERE id=$1 AND valid_to IS NULL AND retracted_at IS NULL
+        AND NOT scope_held AND ${ap.sql} AND ${member.sql} FOR SHARE`,
+      [id, ...ap.params, ...member.params],
+    )
+    if (!locked.rows[0]) throw Object.assign(new Error('The relationship cannot be used in the current scope.'), { code: 'scope_operation_denied' })
   }
+  const target = await updateEntity(userId, id, {}, actor, client)
+  if (!target) throw Object.assign(new Error('The relationship cannot be used in the current scope.'), { code: 'scope_operation_denied' })
+  const kinds = typeof kind === 'string' ? [kind] : kind
+  if (!kinds.includes(target.kind) || (target.kind === 'person' && target.attributes.self)) {
+    throw new Error(kind === 'person' ? 'contact_id must reference a non-self CRM person'
+      : kind === 'company' ? 'company_id must reference a CRM company' : 'Reference must identify an allowed CRM record')
+  }
+  return target
 }
 
-async function assertCrmContactReference(
-  refId: string | null | undefined,
-  workspaceId: string,
-  label: string,
-  transactionClient?: pg.PoolClient,
-): Promise<void> {
-  if (!refId) return
-  const result = await (transactionClient ? transactionClient.query.bind(transactionClient) : query)<{
-    workspaceId: string | null
-    kind: string
-    isSelf: boolean
-  }>(
-    `SELECT workspace_id AS "workspaceId", kind,
-            COALESCE((attributes->>'self')::boolean, false) AS "isSelf"
-       FROM entities WHERE id = $1 AND valid_to IS NULL`,
-    [refId],
+/** A relationship must not publish a target's audience into a broader source. */
+export function crmReferenceScope(
+  destination: Pick<EntityRecord, 'userId' | 'assistantId' | 'sensitivity' | 'compartments' | 'projectIds'>,
+  references: Array<EntityRecord | null>,
+  inherited?: { sensitivity?: Sensitivity; compartments?: string[]; projectIds?: string[] },
+  fresh = false,
+): { sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; userId: string | null; assistantId: string | null } {
+  let userId = destination.userId, assistantId = destination.assistantId
+  let sensitivity = maxSensitivity(destination.sensitivity, inherited?.sensitivity ?? 'public')
+  let compartments = unionScopeRequirements(destination.compartments, inherited?.compartments)
+  let projectIds = unionScopeRequirements(destination.projectIds, inherited?.projectIds)
+  for (const target of references) {
+    if (!target) continue
+    if (fresh) {
+      userId ??= target.userId
+      assistantId ??= target.assistantId
+    }
+    if ((target.userId !== null && target.userId !== userId)
+      || (target.assistantId !== null && target.assistantId !== assistantId)) {
+      throw Object.assign(new Error('The relationship cannot be published in this scope.'), { code: 'scope_operation_denied' })
+    }
+    sensitivity = maxSensitivity(sensitivity, target.sensitivity)
+    compartments = unionScopeRequirements(compartments, target.compartments)
+    projectIds = unionScopeRequirements(projectIds, target.projectIds)
+  }
+  return { sensitivity, compartments, projectIds, userId, assistantId }
+}
+
+/** Lock and reread a CRM source before assembling a semantic mutation. */
+export async function readCrmMutationSource(
+  ctx: AccessContext, entityId: string, kinds: readonly string[], client: pg.PoolClient,
+): Promise<EntityRecord | null> {
+  const actor = mutationActorAccess(ctx.userId, ctx.workspaceId, ctx)
+  const initial = await updateEntity(ctx.userId, entityId, {}, actor, client)
+  if (!initial || !kinds.includes(initial.kind)) return null
+  assertExecutionResourceScope({ ...initial, compartments: initial.compartments ?? [], projectIds: initial.projectIds ?? [] }, 'mutation', actor)
+  const ap = buildAccessPredicate(actor, { startIdx: 3, operation: 'mutation' })
+  const member = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'entities', startIdx: ap.nextIdx })
+  const locked = await client.query<{ id: string }>(
+    `SELECT id FROM entities WHERE id=$1 AND kind=ANY($2::text[]) AND valid_to IS NULL
+      AND retracted_at IS NULL AND NOT scope_held AND ${ap.sql} AND ${member.sql} FOR UPDATE`,
+    [entityId, [...kinds], ...ap.params, ...member.params],
   )
-  const row = result.rows[0]
-  if (row?.workspaceId && row.workspaceId !== workspaceId) {
-    throw new Error(`${label} must reference a row in the same workspace`)
-  }
-  if (row && (row.kind !== 'person' || row.isSelf)) {
-    throw new Error(`${label} must reference a non-self CRM person`)
-  }
+  if (!locked.rows[0]) return null
+  // Read again after a competing writer, rather than patching the pre-lock snapshot.
+  return updateEntity(ctx.userId, entityId, {}, actor, client)
+}
+
+/** Admit a participant command and keep its source/reference snapshots locked. */
+export async function prepareCrmParticipantMutation(
+  ctx: AccessContext, dealId: string, contactId: string | null, client: pg.PoolClient,
+): Promise<EntityRecord | null> {
+  const actor = mutationActorAccess(ctx.userId, ctx.workspaceId, ctx)
+  const deal = await readCrmMutationSource(actor, dealId, ['deal'], client)
+  if (!deal) return null
+  const contact = await readCrmReference(ctx.userId, ctx.workspaceId, contactId, 'person', actor, client)
+  const inherited = crmReferenceScope(deal, [contact])
+  return updateEntity(ctx.userId, dealId, {
+    sensitivity: inherited.sensitivity,
+    inheritCompartments: inherited.compartments,
+    inheritProjectIds: inherited.projectIds,
+  }, actor, client)
 }
 
 /**
@@ -148,8 +209,7 @@ function dedupeAccessContext(
   workspaceId: string,
   access?: AccessContext,
 ): AccessContext {
-  if (access) return access
-  return { workspaceId, userId, assistantId: '', assistantKind: 'primary' }
+  return mutationActorAccess(userId, workspaceId, access)
 }
 
 /** Db-layer list cap. 500 (not 100) so the CRM operator surface's flat
@@ -180,6 +240,7 @@ function repointGraphEdge(
   params: {
     sourceEntityId: string; targetEntityId: string | null
     edgeType: 'works_at' | 'engagement_of'; workspaceId: string
+    assistantId?: string | null
     compartments?: string[]; projectIds?: string[]
   },
 ): void {
@@ -187,7 +248,7 @@ function repointGraphEdge(
   void superseedCrmRelationEdge(entityLinks, userId, {
     sourceEntityId: params.sourceEntityId, targetEntityId: params.targetEntityId,
     edgeType: params.edgeType, workspaceId: params.workspaceId, source: 'user', userId,
-    compartments: params.compartments, projectIds: params.projectIds,
+    compartments: params.compartments, projectIds: params.projectIds, assistantId: params.assistantId,
   })
 }
 
@@ -285,28 +346,32 @@ export async function createCompany(
   transaction?: CrmWriteTransaction,
 ): Promise<CompanyRecord> {
   assertAuthorshipPresent('createCompany', userId)
+  const access = dedupeAccessContext(userId, params.workspaceId, params.access)
+  assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: null, assistantId: null,
+    sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
 
   // Upsert-by-name: dedupe against a live company entity in the workspace
   // — but only among rows the caller can read (see dedupeAccessContext).
   const ap = buildAccessPredicate(
-    dedupeAccessContext(userId, params.workspaceId, params.access),
-    { startIdx: 3 },
+    access,
+    { startIdx: 3, operation: 'mutation' },
   )
+  const member = buildCurrentMemberSourcePredicate(userId, { alias: 'entities', startIdx: ap.nextIdx })
   if (transaction) await transaction.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [JSON.stringify(['crm-company', params.workspaceId, params.name.toLowerCase()])])
   const run = transaction ? transaction.client.query.bind(transaction.client) : <T extends pg.QueryResultRow>(sql: string, values: unknown[]) => queryWithRLS<T>(userId, sql, values)
   const existing = await run<{ id: string }>(
     `SELECT id FROM entities
       WHERE workspace_id = $1 AND kind = 'company'
         AND lower(display_name) = lower($2)
-        AND valid_to IS NULL AND retracted_at IS NULL
-        AND ${ap.sql}
+        AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+        AND ${ap.sql} AND ${member.sql}
       ORDER BY created_at ASC LIMIT 1`,
-    [params.workspaceId, params.name, ...ap.params],
+    [params.workspaceId, params.name, ...ap.params, ...member.params],
   )
   if (existing.rows[0]) {
     const merged = await mergeCompanyFields(userId, existing.rows[0].id, {
       domain: params.domain ?? null, tags: params.tags, externalRef: params.externalRef,
-    }, { compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, params.access, transaction)
+    }, { compartments: params.compartments ?? [], projectIds: params.projectIds ?? [], sensitivity: params.sensitivity ?? 'internal' }, access, transaction)
     if (merged) return merged
   }
 
@@ -336,13 +401,15 @@ async function mergeCompanyFields(
   userId: string,
   id: string,
   incoming: { domain?: string | null; tags?: string[]; externalRef?: CrmExternalRef },
-  scope: { compartments: string[]; projectIds: string[] },
+  scope: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   access?: AccessContext,
   transaction?: CrmWriteTransaction,
 ): Promise<CompanyRecord | null> {
-  const entity = transaction ? (access ? await getEntityById(access, id, {}, transaction.client) : await getEntityByIdSystem(userId, id, {}, transaction.client)) : null
-  const cur = transaction ? (entity?.kind === 'company' ? companyFromEntity(entity) : null) : await getCompanyByIdSystem(userId, id)
-  if (!cur) return null
+  const entity = await updateEntity(userId, id, {}, access, transaction?.client)
+  if (!entity || entity.kind !== 'company') return null
+  assertExecutionResourceScope({ ...entity, compartments: entity.compartments ?? [], projectIds: entity.projectIds ?? [] }, 'mutation', access)
+  const cur = companyFromEntity(entity)
+  const sensitivity = maxSensitivity(entity.sensitivity, scope.sensitivity ?? 'public')
   const fields: CompanyUpdateFields = {}
   if (incoming.domain && incoming.domain !== cur.domain) fields.domain = incoming.domain
   if (incoming.tags && incoming.tags.length > 0) {
@@ -354,14 +421,8 @@ async function mergeCompanyFields(
   }
   const scopeAdds = scope.compartments.some((value) => !cur.compartments?.includes(value))
     || scope.projectIds.some((value) => !cur.projectIds?.includes(value))
-  if (Object.keys(fields).length === 0 && !scopeAdds) return cur
-  return updateCompany(userId, id, fields, access, transaction?.client, scope)
-}
-
-async function getCompanyByIdSystem(userId: string, id: string): Promise<CompanyRecord | null> {
-  const e = await getEntityByIdSystem(userId, id)
-  if (!e || e.kind !== 'company') return null
-  return companyFromEntity(e)
+  if (Object.keys(fields).length === 0 && !scopeAdds && sensitivity === entity.sensitivity) return cur
+  return updateCompany(userId, id, fields, access, transaction?.client, { ...scope, sensitivity })
 }
 
 export async function getCompanyById(ctx: AccessContext, id: string): Promise<CompanyRecord | null> {
@@ -418,15 +479,11 @@ export async function updateCompany(
   fields: CompanyUpdateFields,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
-  scope?: { compartments: string[]; projectIds: string[] },
+  scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
 ): Promise<CompanyRecord | null> {
-  const old = transactionClient
-    ? access
-      ? await getEntityById(access, id, {}, transactionClient)
-      : await getEntityByIdSystem(userId, id, {}, transactionClient)
-    : access
-      ? await getEntityById(access, id)
-      : await getEntityByIdSystem(userId, id)
+  // The canonical no-op read binds the actor and current member scope even
+  // when this adapter is composed into an owner-pool transaction.
+  const old = await updateEntity(userId, id, {}, access, transactionClient)
   if (!old || old.kind !== 'company') return null
   const a = { ...old.attributes }
   if (fields.domain !== undefined) {
@@ -439,6 +496,7 @@ export async function updateCompany(
     displayName: fields.name,
     canonicalId: fields.domain !== undefined ? (fields.domain ?? null) : undefined,
     attributes: a,
+    sensitivity: scope?.sensitivity === undefined ? undefined : maxSensitivity(old.sensitivity, scope.sensitivity),
     inheritCompartments: scope?.compartments,
     inheritProjectIds: scope?.projectIds,
   }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient)
@@ -505,39 +563,47 @@ export async function createContact(
   transaction?: CrmWriteTransaction,
 ): Promise<ContactRecord> {
   assertAuthorshipPresent('createContact', userId)
-  await assertSameWorkspace(params.companyId, params.workspaceId, 'company_id', transaction?.client)
+  const access = dedupeAccessContext(userId, params.workspaceId, params.access)
+  assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: null, assistantId: null,
+    sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
+  if (!transaction) return runCrmWriteTransaction(userId, tx => createContact(userId, params, entityLinks, tx))
+  const company = await readCrmReference(userId, params.workspaceId, params.companyId, 'company', access, transaction?.client)
+  const destination = crmReferenceScope({ userId: null, assistantId: null,
+    sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments, projectIds: params.projectIds }, [company], undefined, true)
+  params = { ...params, ...destination }
+  assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: destination.userId, assistantId: destination.assistantId,
+    sensitivity: params.sensitivity!, compartments: params.compartments!, projectIds: params.projectIds! }, 'mutation', access)
 
   // Person writes never resolve by name/email/phone/alias/fuzzy evidence.
   // Only an adapter-verified stable provider identity may select an existing
-  // target. A failed binding read degrades to a fresh person, never a weak-key
-  // upsert (duplicates are recoverable; identity corruption is not).
+  // target. Stable-identity lookup and creation share one transaction;
+  // a failed lookup never falls through to an unbound duplicate.
   if (params.stableIdentity) {
-    try {
-      if (transaction) await transaction.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`crm-identity:${params.workspaceId}`])
-      const resolution = transaction
-        ? await resolveCrmPersonIdentity(params.workspaceId, params.stableIdentity, transaction.client)
-        : await resolveCrmPersonIdentity(params.workspaceId, params.stableIdentity)
-      if (resolution.status === 'conflict') {
-        throw new CrmPersonIdentityConflictError(resolution.entityIds)
-      }
-      if (resolution.status === 'resolved') {
-        const merged = await mergeContactFields(userId, resolution.binding.entityId, {
-          email: params.email ?? null,
-          phone: params.phone ?? null,
-          companyId: params.companyId ?? null,
-          tags: params.tags,
-          externalRef: params.externalRef,
-        }, entityLinks, params.access, {
-          compartments: params.compartments ?? [],
-          projectIds: params.projectIds ?? [],
-        }, transaction)
-        if (merged) return merged
-        throw new CrmPersonIdentityConflictError([resolution.binding.entityId])
-      }
-    } catch (err) {
-      if (transaction || err instanceof CrmPersonIdentityConflictError) throw err
-      console.error('[crm] stable person identity lookup unavailable; creating a distinct record')
+    if (transaction) await transaction.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`crm-identity:${params.workspaceId}`])
+    const resolution = transaction
+      ? await resolveCrmPersonIdentity(params.workspaceId, params.stableIdentity, transaction.client)
+      : await resolveCrmPersonIdentity(params.workspaceId, params.stableIdentity)
+    if (resolution.status === 'conflict') {
+      const visible = await Promise.all(resolution.entityIds.map(id => updateEntity(userId, id, {}, access, transaction?.client)))
+      if (visible.some(row => !row)) throw Object.assign(new Error('The identity cannot be used in the current scope.'), { code: 'scope_operation_denied' })
+      throw new CrmPersonIdentityConflictError(resolution.entityIds)
     }
+    if (resolution.status === 'resolved') {
+      const merged = await mergeContactFields(userId, resolution.binding.entityId, {
+        email: params.email ?? null,
+        phone: params.phone ?? null,
+        companyId: params.companyId ?? null,
+        tags: params.tags,
+        externalRef: params.externalRef,
+      }, entityLinks, access, {
+        compartments: params.compartments ?? [],
+        projectIds: params.projectIds ?? [],
+        sensitivity: params.sensitivity ?? 'internal',
+      }, transaction)
+      if (merged) return merged
+      throw Object.assign(new Error('The identity cannot be used in the current scope.'), { code: 'scope_operation_denied' })
+    }
+
   }
 
   const entity = await createEntity({
@@ -547,11 +613,10 @@ export async function createContact(
     attributes: contactAttributes(params),
     sensitivity: params.sensitivity ?? 'internal',
     workspaceId: params.workspaceId,
-    // Workspace-scoped — see the note in `createCompany` and migration 423.
-    // This is the row whose per-principal scoping split one human into four
-    // (`Ken`, `Ken Lau` ×2, `kenlau666`) because the dedupe below could only
-    // see the writer's own copies.
-    userId: null,
+    // Authorship does not determine visibility. Admitted relationship
+    // sources can independently require a private destination.
+    userId: destination.userId,
+    assistantId: destination.assistantId,
     createdByUserId: userId,
     createdByAssistantId: params.createdByAssistantId ?? null,
     source: params.source ?? 'user',
@@ -567,42 +632,20 @@ export async function createContact(
       projectAfterCommit(transaction, () => { void emitCrmRelationEdge(entityLinks, userId, {
         sourceEntityId: entity.id, targetEntityId: companyId,
         edgeType: 'works_at', workspaceId: params.workspaceId, source: 'user', userId,
-        compartments: entity.compartments, projectIds: entity.projectIds,
+        compartments: entity.compartments, projectIds: entity.projectIds, assistantId: entity.assistantId,
       }) })
     }
   }
   if (params.stableIdentity) {
-    try {
-      const binding = await bindImportedCrmIdentity({
-        workspaceId: params.workspaceId,
-        entityId: entity.id,
-        identity: params.stableIdentity,
-        sensitivity: params.sensitivity ?? 'internal',
-      }, transaction?.client)
-      if (binding.status === 'conflict') {
-        // A concurrent writer won the namespace lock after our initial read.
-        // Close the redundant fresh row and return the authoritative target.
-        await (transaction ? transaction.client.query.bind(transaction.client) : query)(
-          `UPDATE entities SET valid_to = now(), superseded_by = $2, updated_at = now()
-            WHERE id = $1 AND workspace_id = $3 AND valid_to IS NULL`,
-          [entity.id, binding.entityId, params.workspaceId],
-        )
-        const authoritative = await mergeContactFields(userId, binding.entityId, {
-          email: params.email ?? null,
-          phone: params.phone ?? null,
-          companyId: params.companyId ?? null,
-          tags: params.tags,
-          externalRef: params.externalRef,
-        }, entityLinks, params.access, {
-          compartments: params.compartments ?? [],
-          projectIds: params.projectIds ?? [],
-        }, transaction)
-        if (authoritative) return authoritative
-        throw new CrmPersonIdentityConflictError([binding.entityId])
-      }
-    } catch (err) {
-      if (transaction || err instanceof CrmPersonIdentityConflictError) throw err
-      console.error('[crm] stable person identity binding unavailable; retained a distinct record')
+    const binding = await bindImportedCrmIdentity({
+      workspaceId: params.workspaceId,
+      entityId: entity.id,
+      identity: params.stableIdentity,
+      sensitivity: params.sensitivity ?? 'internal',
+    }, transaction?.client)
+    if (binding.status === 'conflict') {
+      // Refuse the whole transaction; no speculative retirement or target edit.
+      throw Object.assign(new Error('The identity changed. Start a new request with current access.'), { code: 'scope_operation_denied' })
     }
   }
   return contactFromEntity(entity)
@@ -617,12 +660,14 @@ async function mergeContactFields(
   },
   entityLinks?: EntityLinksStore,
   access?: AccessContext,
-  scope: { compartments: string[]; projectIds: string[] } = { compartments: [], projectIds: [] },
+  scope: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity } = { compartments: [], projectIds: [] },
   transaction?: CrmWriteTransaction,
 ): Promise<ContactRecord | null> {
-  const entity = transaction ? (access ? await getEntityById(access, id, {}, transaction.client) : await getEntityByIdSystem(userId, id, {}, transaction.client)) : null
-  const cur = transaction ? (entity?.kind === 'person' ? contactFromEntity(entity) : null) : access ? await getContactById(access, id) : await getContactByIdSystem(userId, id)
-  if (!cur) return null
+  const entity = await updateEntity(userId, id, {}, access, transaction?.client)
+  if (!entity || entity.kind !== 'person') return null
+  assertExecutionResourceScope({ ...entity, compartments: entity.compartments ?? [], projectIds: entity.projectIds ?? [] }, 'mutation', access)
+  const cur = contactFromEntity(entity)
+  const sensitivity = maxSensitivity(entity.sensitivity, scope.sensitivity ?? 'public')
   const fields: ContactUpdateFields = {}
   if (incoming.email && incoming.email !== cur.email) fields.email = incoming.email
   if (incoming.phone && incoming.phone !== cur.phone) fields.phone = incoming.phone
@@ -636,14 +681,8 @@ async function mergeContactFields(
   }
   const scopeAdds = scope.compartments.some((value) => !cur.compartments?.includes(value))
     || scope.projectIds.some((value) => !cur.projectIds?.includes(value))
-  if (Object.keys(fields).length === 0 && !scopeAdds) return cur
-  return updateContact(userId, id, fields, entityLinks, access, transaction?.client, scope, transaction?.afterCommit)
-}
-
-async function getContactByIdSystem(userId: string, id: string): Promise<ContactRecord | null> {
-  const e = await getEntityByIdSystem(userId, id)
-  if (!e || e.kind !== 'person') return null
-  return contactFromEntity(e)
+  if (Object.keys(fields).length === 0 && !scopeAdds && sensitivity === entity.sensitivity) return cur
+  return updateContact(userId, id, fields, entityLinks, access, transaction?.client, { ...scope, sensitivity }, transaction?.afterCommit)
 }
 
 export async function getContactById(ctx: AccessContext, id: string): Promise<ContactRecord | null> {
@@ -709,20 +748,15 @@ export async function updateContact(
   entityLinks?: EntityLinksStore,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
-  scope?: { compartments: string[]; projectIds: string[] },
+  scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   afterCommit?: CrmWriteTransaction['afterCommit'],
 ): Promise<ContactRecord | null> {
-  const old = transactionClient
-    ? access
-      ? await getEntityById(access, id, {}, transactionClient)
-      : await getEntityByIdSystem(userId, id, {}, transactionClient)
-    : access
-      ? await getEntityById(access, id)
-      : await getEntityByIdSystem(userId, id)
+  // The canonical no-op read binds the actor and current member scope even
+  // when this adapter is composed into an owner-pool transaction.
+  const old = await updateEntity(userId, id, {}, access, transactionClient)
   if (!old || old.kind !== 'person') return null
-  if (fields.companyId !== undefined) {
-    await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id', transactionClient)
-  }
+  const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
+  const inherited = crmReferenceScope(old, [company], scope)
   const a = { ...old.attributes }
   if (fields.email !== undefined) { if (fields.email) a.email = fields.email; else delete a.email }
   if (fields.phone !== undefined) { if (fields.phone) a.phone = fields.phone; else delete a.phone }
@@ -734,15 +768,16 @@ export async function updateContact(
     displayName: fields.name,
     canonicalId: fields.email !== undefined ? (fields.email ?? null) : undefined,
     attributes: a,
-    inheritCompartments: scope?.compartments,
-    inheritProjectIds: scope?.projectIds,
+    sensitivity: inherited.sensitivity,
+    inheritCompartments: inherited.compartments,
+    inheritProjectIds: inherited.projectIds,
   }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient)
   if (!e) return null
   if (fields.companyId !== undefined) {
     const project = () => repointGraphEdge(entityLinks, userId, {
       sourceEntityId: id, targetEntityId: fields.companyId ?? null,
       edgeType: 'works_at', workspaceId: old.workspaceId,
-      compartments: e.compartments, projectIds: e.projectIds,
+      compartments: e.compartments, projectIds: e.projectIds, assistantId: e.assistantId,
     })
     if (afterCommit) afterCommit(project)
     else project()
@@ -793,6 +828,7 @@ export async function createDeal(
   userId: string,
   params: {
     workspaceId: string
+    access?: AccessContext
     contactId?: string | null
     companyId?: string | null
     stage?: DealStage
@@ -816,17 +852,16 @@ export async function createDeal(
   assertAuthorshipPresent('createDeal', userId)
   assertValidStage(params.stage)
   assertNonNegativeAmount(params.amount)
-  await assertCrmContactReference(params.contactId, params.workspaceId, 'contact_id', transaction?.client)
-  await assertSameWorkspace(params.companyId, params.workspaceId, 'company_id', transaction?.client)
-
-  let displayName = 'Deal'
-  if (params.companyId) {
-    const c = await (transaction ? transaction.client.query.bind(transaction.client) : query)<{ name: string }>(
-      `SELECT display_name AS name FROM entities WHERE id = $1 AND valid_to IS NULL`,
-      [params.companyId],
-    )
-    if (c.rows[0]) displayName = `Deal - ${c.rows[0].name}`
-  }
+  const access = mutationActorAccess(userId, params.workspaceId, params.access)
+  if (!transaction) return runCrmWriteTransaction(userId, tx => createDeal(userId, params, entityLinks, tx))
+  const contact = await readCrmReference(userId, params.workspaceId, params.contactId, 'person', access, transaction?.client)
+  const company = await readCrmReference(userId, params.workspaceId, params.companyId, 'company', access, transaction?.client)
+  const destination = crmReferenceScope({ userId: null, assistantId: null,
+    sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments, projectIds: params.projectIds }, [contact, company], undefined, true)
+  params = { ...params, ...destination }
+  assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: destination.userId, assistantId: destination.assistantId,
+    sensitivity: params.sensitivity!, compartments: params.compartments!, projectIds: params.projectIds! }, 'mutation', access)
+  const displayName = company ? `Deal - ${company.displayName}` : 'Deal'
 
   const entity = await createEntity({
     kind: 'deal',
@@ -834,8 +869,9 @@ export async function createDeal(
     attributes: dealAttributes(params),
     sensitivity: params.sensitivity ?? 'internal',
     workspaceId: params.workspaceId,
-    // Workspace-scoped — see the note in `createCompany` and migration 423.
-    userId: null,
+    // Preserve reference privacy independently of authorship.
+    userId: destination.userId,
+    assistantId: destination.assistantId,
     createdByUserId: userId,
     createdByAssistantId: params.createdByAssistantId ?? null,
     source: params.source ?? 'user',
@@ -850,7 +886,7 @@ export async function createDeal(
     projectAfterCommit(transaction, () => { void emitCrmRelationEdge(entityLinks, userId, {
       sourceEntityId: entity.id, targetEntityId: companyId,
       edgeType: 'engagement_of', workspaceId: params.workspaceId, source: 'user', userId,
-      compartments: entity.compartments, projectIds: entity.projectIds,
+      compartments: entity.compartments, projectIds: entity.projectIds, assistantId: entity.assistantId,
     }) })
   }
   if (entityLinks && params.contactId) {
@@ -859,7 +895,7 @@ export async function createDeal(
       sourceKind: 'entity', sourceId: contactId,
       targetKind: 'entity', targetId: entity.id,
       edgeType: 'represents', workspaceId: params.workspaceId, source: 'user', userId,
-      compartments: entity.compartments, projectIds: entity.projectIds,
+      compartments: entity.compartments, projectIds: entity.projectIds, assistantId: entity.assistantId,
     }) })
   }
   return dealFromEntity(entity)
@@ -919,21 +955,16 @@ export async function updateDeal(
   entityLinks?: EntityLinksStore,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
-  scope?: { compartments: string[]; projectIds: string[] },
+  scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
 ): Promise<DealRecord | null> {
   assertNonNegativeAmount(fields.amount)
-  const old = transactionClient
-    ? access
-      ? await getEntityById(access, id, {}, transactionClient)
-      : await getEntityByIdSystem(userId, id, {}, transactionClient)
-    : access
-      ? await getEntityById(access, id)
-      : await getEntityByIdSystem(userId, id)
+  // The canonical no-op read binds the actor and current member scope even
+  // when this adapter is composed into an owner-pool transaction.
+  const old = await updateEntity(userId, id, {}, access, transactionClient)
   if (!old || old.kind !== 'deal') return null
-  if (fields.companyId !== undefined) await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
-  if (fields.contactId !== undefined) {
-    await assertCrmContactReference(fields.contactId, old.workspaceId, 'contact_id')
-  }
+  const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
+  const contact = await readCrmReference(userId, old.workspaceId, fields.contactId, 'person', access, transactionClient)
+  const inherited = crmReferenceScope(old, [company, contact], scope)
 
   const a = { ...old.attributes }
   if (fields.contactId !== undefined) { if (fields.contactId) a.contact_id = fields.contactId; else delete a.contact_id }
@@ -949,8 +980,9 @@ export async function updateDeal(
     id,
     {
       attributes: a,
-      inheritCompartments: scope?.compartments,
-      inheritProjectIds: scope?.projectIds,
+      sensitivity: inherited.sensitivity,
+      inheritCompartments: inherited.compartments,
+      inheritProjectIds: inherited.projectIds,
     },
     dedupeAccessContext(userId, old.workspaceId, access),
     transactionClient,
@@ -961,7 +993,7 @@ export async function updateDeal(
     repointGraphEdge(entityLinks, userId, {
       sourceEntityId: id, targetEntityId: fields.companyId ?? null,
       edgeType: 'engagement_of', workspaceId: old.workspaceId,
-      compartments: e.compartments, projectIds: e.projectIds,
+      compartments: e.compartments, projectIds: e.projectIds, assistantId: e.assistantId,
     })
   }
   if (entityLinks && fields.contactId !== undefined && fields.contactId) {
@@ -971,7 +1003,7 @@ export async function updateDeal(
       sourceKind: 'entity', sourceId: fields.contactId,
       targetKind: 'entity', targetId: id,
       edgeType: 'represents', workspaceId: old.workspaceId, source: 'user', userId,
-      compartments: e.compartments, projectIds: e.projectIds,
+      compartments: e.compartments, projectIds: e.projectIds, assistantId: e.assistantId,
     })
   }
   return dealFromEntity(e)
@@ -984,16 +1016,12 @@ export async function setDealStage(
   stage: DealStage,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
-  scope?: { compartments: string[]; projectIds: string[] },
+  scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
 ): Promise<DealRecord | null> {
   assertValidStage(stage)
-  const old = transactionClient
-    ? access
-      ? await getEntityById(access, id, {}, transactionClient)
-      : await getEntityByIdSystem(userId, id, {}, transactionClient)
-    : access
-      ? await getEntityById(access, id)
-      : await getEntityByIdSystem(userId, id)
+  // The canonical no-op read binds the actor and current member scope even
+  // when this adapter is composed into an owner-pool transaction.
+  const old = await updateEntity(userId, id, {}, access, transactionClient)
   if (!old || old.kind !== 'deal') return null
   const a = { ...old.attributes, stage }
   const e = await updateEntity(
@@ -1001,6 +1029,7 @@ export async function setDealStage(
     id,
     {
       attributes: a,
+      sensitivity: scope?.sensitivity === undefined ? undefined : maxSensitivity(old.sensitivity, scope.sensitivity),
       inheritCompartments: scope?.compartments,
       inheritProjectIds: scope?.projectIds,
     },

@@ -5,6 +5,7 @@ import type { ConnectorInstance } from '../../db/connector-instance-store.js'
 import type { GrantWithInstance } from '../../db/connector-grant-store.js'
 import type { WorkspaceToolPolicyStore } from '../../db/workspace-tool-policy-store.js'
 import type { StructuredOcrClient } from '../client.js'
+import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createStructuredOcrConnectorResolver } from '../connector.js'
 
 const ctx: FilesContext = { userId: 'actor', workspaceId: 'workspace', assistantId: 'assistant', compartments: null, projectIds: null }
@@ -35,6 +36,18 @@ describe('[COMP:api/structured-documents] structured OCR connector resolver', ()
     expect(f.getAuthCredentialsSystem).not.toHaveBeenCalled()
     expect(f.createClient).not.toHaveBeenCalled()
     expect(f.isEnabled).toHaveBeenCalledWith('assistant', 'custom-provider:instance', 'custom-provider')
+  })
+  it('withholds credentials and discovery inside a read-only departmental execution', async () => {
+    const f = fixture()
+    f.instance.compartments = ['team:product']
+    f.instance.projectIds = ['project']
+    await runWithAgentAccess({ clearance: 'internal', compartments: ['team:product'],
+      mutationCompartments: [], projectIds: ['project'] }, async () => {
+      expect(await f.resolver.list(ctx)).toEqual([])
+      await expect(f.resolver.resolve(ctx, 'file', 'instance')).rejects.toMatchObject({ code: 'connector_unavailable' })
+    })
+    expect(f.getAuthCredentialsSystem).not.toHaveBeenCalled()
+    expect(f.createClient).not.toHaveBeenCalled()
   })
   it('pins credentials, endpoint and policies and derives document/actor-specific secret scope', async () => {
     const f = fixture()

@@ -27,6 +27,7 @@ import { z } from 'zod'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
+import { accessCeilingContains, pinToolAuthoringAuthority, type AuthoringAuthority } from '../security/index.js'
 import { NO_TOOL_TIMEOUT } from '../engine/tool-executor.js'
 import { CrmDomainEventTypeSchema } from '../crm/operations-types.js'
 import {
@@ -421,6 +422,7 @@ const createProposalInputSchema = z.object({
   trigger: workflowTriggerReceiptSchema.optional(),
   targetViewId: z.string().uuid().optional(),
   /** Trusted authoring-turn Project, frozen into the opaque receipt. */
+  contextGroupId: z.string().uuid().nullable().optional(),
   contextProjectId: z.string().uuid().nullable().optional(),
 })
 
@@ -436,12 +438,33 @@ const updateProposalInputSchema = z.object({
   confirmDeliveryRemoval: z.boolean().optional(),
 })
 
+const scopeGrantSchema = z.union([z.null(), z.array(z.string().min(1))])
+const authoringAuthoritySchema: z.ZodType<AuthoringAuthority> = z.object({
+  version: z.literal(1),
+  assistantId: z.string().min(1),
+  ceiling: z.object({
+    workspaceId: z.string().min(1), userId: z.string().min(1),
+    clearance: z.enum(['public', 'internal', 'confidential']),
+    compartments: scopeGrantSchema, mutationCompartments: scopeGrantSchema,
+    projectIds: scopeGrantSchema, visibilityAssistantIds: scopeGrantSchema,
+  }).strict(),
+}).strict()
 const workflowProposalReceiptSchema = z.discriminatedUnion('action', [
-  z.object({ version: z.literal(1), action: z.literal('create'), input: createProposalInputSchema }),
-  z.object({ version: z.literal(1), action: z.literal('update'), input: updateProposalInputSchema }),
+  z.object({ version: z.literal(2), action: z.literal('create'), input: createProposalInputSchema, authoringAuthority: authoringAuthoritySchema }),
+  z.object({ version: z.literal(2), action: z.literal('update'), input: updateProposalInputSchema, authoringAuthority: authoringAuthoritySchema }),
 ])
 
 type WorkflowProposalReceipt = z.infer<typeof workflowProposalReceiptSchema>
+
+function receiptAuthorityAvailable(saved: AuthoringAuthority, context: ToolContext): boolean {
+  try {
+    const current = pinToolAuthoringAuthority(context)
+    return current.assistantId === saved.assistantId
+      && accessCeilingContains(current.ceiling, saved.ceiling)
+  } catch {
+    return false
+  }
+}
 
 /** Recover the latest proposal unless a later successful workflow write consumed it. */
 export function latestWorkflowProposalReceipt(messages: readonly { content: unknown }[]): string | undefined {
@@ -2087,11 +2110,18 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       }
 
       const knownRuntimeTools = await runtimeKnownToolNames(definition, context, deps)
+      let authoringAuthority: AuthoringAuthority
+      try {
+        authoringAuthority = pinToolAuthoringAuthority(context)
+      } catch {
+        return { data: 'Workflow authoring permissions are unavailable in this turn. Start a new workspace conversation and propose it again.', isError: true }
+      }
 
       const proposalReceipt = input.workflowId
         ? encodeProposalReceipt({
-            version: 1,
+            version: 2,
             action: 'update',
+            authoringAuthority,
             input: {
               workflowId: input.workflowId,
               name: input.name,
@@ -2104,14 +2134,17 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
             },
           })
         : encodeProposalReceipt({
-            version: 1,
+            version: 2,
             action: 'create',
+            authoringAuthority,
             input: {
               name: input.name,
               description: input.description ?? undefined,
               definition,
               trigger,
               targetViewId: input.targetViewId ?? undefined,
+              contextGroupId:
+                (context as ToolContext & { activeGroupId?: string | null }).activeGroupId ?? null,
               contextProjectId:
                 (context as ToolContext & { activeProjectId?: string | null }).activeProjectId ?? null,
             },
@@ -2186,6 +2219,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       if (gate) return gate
 
       let createInput: z.infer<typeof createProposalInputSchema>
+      let authoringAuthority: AuthoringAuthority
       const pendingReceipt = 'proposalReceipt' in input
         ? input.proposalReceipt
         : context.workflowProposalReceipt
@@ -2195,7 +2229,11 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         if (decoded.receipt.action !== 'create') {
           return { data: 'This receipt is for an existing workflow edit. Apply it with updateWorkflow.', isError: true }
         }
+        if (!receiptAuthorityAvailable(decoded.receipt.authoringAuthority, context)) {
+          return { data: 'Workflow authoring permissions changed after the proposal. Re-propose it from the current workspace context.', isError: true }
+        }
         createInput = decoded.receipt.input
+        authoringAuthority = decoded.receipt.authoringAuthority
       } else {
         if (!deps.allowLegacyDirectWrites) {
           return {
@@ -2210,6 +2248,8 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           return { data: { ok: false, errors: legacy.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`), stepTypes: STEP_TYPE_VALUES }, isError: true }
         }
         createInput = legacy.data
+        try { authoringAuthority = pinToolAuthoringAuthority(context) }
+        catch { return { data: 'Workflow authoring permissions are unavailable in this turn.', isError: true } }
       }
 
       const parsed = WorkflowDefinitionSchema.safeParse(createInput.definition)
@@ -2311,10 +2351,15 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         description: createInput.description ?? null,
         definition,
         trigger,
+        contextGroupId:
+          createInput.contextGroupId !== undefined
+            ? createInput.contextGroupId
+            : (context as ToolContext & { activeGroupId?: string | null }).activeGroupId ?? null,
         contextProjectId:
           createInput.contextProjectId !== undefined
             ? createInput.contextProjectId
             : (context as ToolContext & { activeProjectId?: string | null }).activeProjectId ?? null,
+        authoringAuthority,
       } as Parameters<WorkflowStore['create']>[0])
       context.workflowProposalReceipt = undefined
 
@@ -2380,6 +2425,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       if (gate) return gate
 
       let updateInput: z.infer<typeof updateProposalInputSchema>
+      let authoringAuthority: AuthoringAuthority
       const pendingReceipt = 'proposalReceipt' in input
         ? input.proposalReceipt
         : context.workflowProposalReceipt
@@ -2389,7 +2435,11 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         if (decoded.receipt.action !== 'update') {
           return { data: 'This receipt is for a new workflow. Apply it with createWorkflow.', isError: true }
         }
+        if (!receiptAuthorityAvailable(decoded.receipt.authoringAuthority, context)) {
+          return { data: 'Workflow authoring permissions changed after the proposal. Re-propose it from the current workspace context.', isError: true }
+        }
         updateInput = decoded.receipt.input
+        authoringAuthority = decoded.receipt.authoringAuthority
       } else {
         if (!deps.allowLegacyDirectWrites) {
           return {
@@ -2402,6 +2452,8 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           return { data: { ok: false, errors: legacy.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`), stepTypes: STEP_TYPE_VALUES }, isError: true }
         }
         updateInput = legacy.data
+        try { authoringAuthority = pinToolAuthoringAuthority(context) }
+        catch { return { data: 'Workflow authoring permissions are unavailable in this turn.', isError: true } }
       }
 
       const existing = await deps.workflowStore.getById(context.userId, updateInput.workflowId)
@@ -2541,6 +2593,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         if (depIssues.errors.length > 0) {
           return { data: { ok: false, errors: depIssues.errors }, isError: true }
         }
+      }
+
+      if (updateInput.definition !== undefined || trigger !== undefined || updateInput.enabled === true) {
+        fields.authoringAuthority = authoringAuthority
       }
 
       if (Object.keys(fields).length === 0) {

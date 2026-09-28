@@ -13,6 +13,8 @@
  * prefix is how the doc shell knows a page has a live capture surface.
  */
 
+import { createMeetingTagsService } from '../recordings/meeting-tags-service.js'
+import { meetingTagRoutes } from './meeting-tags.js'
 import { randomUUID } from 'node:crypto'
 import { Router, type NextFunction, type Request, type Response } from 'express'
 import multer from 'multer'
@@ -67,7 +69,7 @@ export type LiveNotesResult = {
 
 export type RecordingLiveRouteDeps = {
   getRole: (userId: string, workspaceId: string) => Promise<string | null>
-  savedViewStore: Pick<SavedViewStore, 'createDraft' | 'getById' | 'getPage' | 'updatePage' | 'update'>
+  savedViewStore: Pick<SavedViewStore, 'createDraft' | 'getById' | 'getPage' | 'updatePage' | 'update' | 'findIdByAnchorKey'>
   docGateway?: DocGateway
   docPageStore?: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
   provider: LLMProvider
@@ -329,6 +331,8 @@ function notesBlocksOf(markdown: string): Block[] {
 
 export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
   const router = Router()
+  const meetingTags = createMeetingTagsService(deps.savedViewStore)
+  router.use(meetingTagRoutes(meetingTags, deps.getRole))
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: LIVE_WINDOW_MAX_BYTES, files: 1 },
@@ -348,14 +352,15 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
     if (!deps.voiceTranscription.enabled) {
       return void res.status(503).json({ error: 'Live transcription is not available' })
     }
-    const { workspaceId, destination, pageId, parentPageId, title } = (req.body ?? {}) as {
+    const { workspaceId, destination, pageId, parentPageId, title, folderName } = (req.body ?? {}) as {
       workspaceId?: string
-      destination?: 'existing' | 'new'
+      destination?: 'existing' | 'new' | 'meeting-notes'
       pageId?: string
       parentPageId?: string | null
       title?: string
+      folderName?: string
     }
-    if (!workspaceId || (destination !== 'existing' && destination !== 'new')) {
+    if (!workspaceId || !['existing', 'new', 'meeting-notes'].includes(destination ?? '')) {
       return void res.status(400).json({ error: 'workspaceId and a valid destination are required' })
     }
     if (!(await deps.getRole(userId, workspaceId))) {
@@ -382,8 +387,32 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
         resolvedPageId = pageId
         resolvedTitle = page.name
       } else {
-        if (parentPageId) {
-          const parent = await deps.savedViewStore.getById(userId, parentPageId)
+        let resolvedParentId = parentPageId ?? null
+        if (destination === 'meeting-notes') {
+          const anchorKey = 'meeting-notes-folder'
+          resolvedParentId = await deps.savedViewStore.findIdByAnchorKey(userId, workspaceId, anchorKey)
+          if (!resolvedParentId) {
+            try {
+              const folder = await deps.savedViewStore.createDraft({
+                userId, workspaceId, anchorKey,
+                name: typeof folderName === 'string' && folderName.trim()
+                  ? folderName.trim().slice(0, 120) : 'Meeting notes',
+                nameOrigin: 'user', icon: '📁',
+                entity: 'tasks', viewType: 'table',
+                binding: { entity: 'tasks', viewType: 'table' },
+                page: { blocks: [] }, state: 'saved', writtenBy: 'user',
+              })
+              resolvedParentId = folder.id
+            } catch (error) {
+              // The workspace anchor's unique index arbitrates concurrent starts.
+              if ((error as { code?: string } | null)?.code !== '23505') throw error
+              resolvedParentId = await deps.savedViewStore.findIdByAnchorKey(userId, workspaceId, anchorKey)
+              if (!resolvedParentId) throw error
+            }
+          }
+        }
+        if (resolvedParentId) {
+          const parent = await deps.savedViewStore.getById(userId, resolvedParentId)
           if (!parent || parent.workspaceId !== workspaceId) {
             return void res.status(404).json({ error: 'Parent page not found' })
           }
@@ -398,13 +427,15 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
           viewType: 'table',
           binding: { entity: 'tasks', viewType: 'table' },
           page: seeded.page,
-          nestParentId: parentPageId ?? null,
+          nestParentId: resolvedParentId,
           state: 'saved',
           writtenBy: 'user',
         })
         resolvedPageId = created.id
       }
 
+      try { await meetingTags.apply(userId, workspaceId, resolvedPageId) }
+      catch (error) { console.error('[recording-live] initial meeting tagging failed:', error) }
       res.status(201).json({
         pageId: resolvedPageId,
         title: resolvedTitle,
@@ -555,6 +586,9 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
       const ops = notesRegionOps(current, notesHeadingId, markerBlockId, notesBlocksOf(notes.text))
       if (ops) await applyPageOps(deps, userId, pageId, ops)
       notesText = notes.text
+      // Tagging failures must not interrupt the lossless capture or its notes.
+      try { await meetingTags.apply(userId, workspaceId, pageId, notes.text) }
+      catch (error) { console.error('[recording-live] meeting tagging failed:', error) }
       void recordUsage(deps, {
         userId, workspaceId, assistantId,
         model: notes.model,

@@ -1,15 +1,18 @@
 /** Durable outcome reads before returning copied content. [COMP:crm/privacy-copies] */
 import type { WorkflowRunOutcome } from '@use-brian/core'
-import { getPool } from '../db/client.js'
+import { getPool, applyRLSGucs } from '../db/client.js'
 import { acquireCrmPrivacyWriterAdmission } from './privacy-admission.js'
 
 export async function readWorkflowOutcomeWithLineage(workflowId:string,runId:string):Promise<WorkflowRunOutcome|null> {
   const client=await getPool().connect()
   try {
     await client.query('BEGIN')
-    const target=(await client.query<{workspace_id:string}>(`SELECT workspace_id FROM workflow_runs
-      WHERE id=$1 AND workflow_id=$2`,[runId,workflowId])).rows[0]
+    const target=(await client.query<{workspace_id:string;actor:string|null}>(`SELECT r.workspace_id,coalesce(r.triggered_by,w.created_by) AS actor
+      FROM workflow_runs r JOIN workflows w ON w.id=r.workflow_id AND w.workspace_id=r.workspace_id
+      WHERE r.id=$1 AND r.workflow_id=$2`,[runId,workflowId])).rows[0]
     if(!target){await client.query('COMMIT');return null}
+    if(!target.actor)throw new Error('Workflow actor unavailable')
+    await applyRLSGucs(client,target.actor)
     await acquireCrmPrivacyWriterAdmission(client,target.workspace_id)
     const live=await client.query(`SELECT id FROM workflow_runs WHERE id=$1 AND workspace_id=$2
       AND workflow_id=$3 AND NOT privacy_erased FOR KEY SHARE`,[runId,target.workspace_id,workflowId])

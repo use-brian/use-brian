@@ -806,6 +806,16 @@ export function DocSidebar(props: Props) {
         )}
       </nav>
 
+      <Link
+        href={`/w/${workspaceId}/organization`}
+        {...intentPrefetch(`/w/${workspaceId}/organization`)}
+        aria-current={surfaceActive("organization") ? "page" : undefined}
+        className={`mx-2 flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm hover:bg-sidebar-accent ${surfaceActive("organization") ? "bg-sidebar-accent font-medium" : "text-muted-foreground"}`}
+      >
+        <Users className="size-4 shrink-0" />
+        {copy.organization.title}
+      </Link>
+
       {/* Operator app-bar — the Home hub's second tier (Page / Tasks / CRM /
           Feed / Browsers / Chat + the workspace's custom apps), between the
           icon row and the surface body. WHICH apps show, and in WHAT ORDER, is

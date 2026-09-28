@@ -63,6 +63,12 @@ const CAMPAIGN_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
 export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
   ...CAMPAIGN_PRIVACY_COVERAGE,
   {
+    domain:'goal_crm_event_sources',columns:['workspace_id','goal_id','event_id','event_binding','created_at'],
+    excludedColumns:['workspace_id','goal_id','event_id','event_binding','created_at'],workspaceWhere:'false',
+    subjectWhere:null,subjectRedactions:{},transforms:{},orderBy:'t.goal_id,t.event_id',
+    reason:'Internal causal permission receipts contain no exportable CRM content. Their event references remain to prevent permission loss through deletion.',
+  },
+  {
     domain:'crm_erasure_journal_targets',columns:['table_name','key_columns','capture_inserts'],
     excludedColumns:['table_name','key_columns','capture_inserts'],workspaceWhere:'false',workspacePredicate:'false',
     subjectWhere:null,subjectRedactions:{},transforms:{},orderBy:'t.table_name',
@@ -148,9 +154,10 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "actor_credential_id",
       "acting_user_id",
       "metadata",
-      "created_at"
+      "created_at",
+      "scope_subject_kind", "scope_sources", "scope_origin", "scope_held", "scope_erased"
     ],
-    "excludedColumns": [],
+    "excludedColumns": ["scope_subject_kind", "scope_sources", "scope_origin", "scope_held", "scope_erased"],
     "orderBy": "t.id",
     "subjectWhere": "(((t.subject_kind IN('person','contact','entity') AND t.subject_id::text=$2::text) OR (t.subject_kind IN('submission','enquiry') AND EXISTS(SELECT 1 FROM association_enquiries q WHERE q.workspace_id=$1 AND (q.id::text=t.subject_id::text AND q.contact_id=$2))) OR (t.subject_kind IN('membership','entitlement') AND EXISTS(SELECT 1 FROM association_memberships m WHERE m.workspace_id=$1 AND (m.id::text=t.subject_id::text AND m.contact_id=$2))) OR (t.subject_kind IN('participation','registration') AND EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.id::text=t.subject_id::text AND r.attendee_contact_id=$2))) OR (t.subject_kind='order' AND EXISTS(SELECT 1 FROM association_orders o WHERE o.workspace_id=$1 AND (o.id::text=t.subject_id::text AND (o.contact_id=$2 OR EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.order_id=o.id AND r.attendee_contact_id=$2))))))) OR t.metadata->>'contactId'=$2::text) OR (t.subject_kind='task' AND t.subject_id IN(SELECT id FROM pg_temp.crm_privacy_copy_tasks))",
     "workspaceWhere": "true",
@@ -775,9 +782,11 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "actor_user_id",
       "actor_assistant_id",
       "metadata",
-      "created_at"
+      "created_at",
+      "user_id", "assistant_id", "sensitivity", "compartments", "project_ids",
+      "source_scope_version", "scope_origin", "scope_held"
     ],
-    "excludedColumns": [],
+    "excludedColumns": ["user_id", "assistant_id", "sensitivity", "compartments", "project_ids", "source_scope_version", "scope_origin", "scope_held"],
     "orderBy": "t.id",
     "subjectWhere": "t.entity_id=$2",
     "workspaceWhere": "EXISTS(SELECT 1 FROM entities e WHERE e.workspace_id=$1 AND (e.id::text=t.entity_id::text AND e.kind IN('person','company','deal')))",
@@ -787,7 +796,7 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "summary": "CASE WHEN t.activity_type='message' THEN NULL ELSE t.summary END"
     },
     "transforms": {},
-    "reason": "Message content and arbitrary activity metadata cannot isolate unrelated participants."
+    "reason": "Message content and arbitrary activity metadata cannot isolate unrelated participants. Saved audience columns are internal security metadata."
   },
   {
     "domain": "crm_address_suppression_tombstones",
@@ -964,12 +973,14 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "created_at",
       "delivered_at",
       "retired_at",
-      "retired_from_status"
+      "retired_from_status",
+      "scope_source", "scope_origin", "scope_held"
     ],
     "excludedColumns": [
       "lease_owner",
       "leased_until",
-      "last_error"
+      "last_error",
+      "scope_source", "scope_origin", "scope_held"
     ],
     "orderBy": "t.id",
     "subjectWhere": "((t.subject_kind IN('person','contact','entity') AND t.subject_id::text=$2::text) OR (t.subject_kind IN('submission','enquiry') AND EXISTS(SELECT 1 FROM association_enquiries q WHERE q.workspace_id=$1 AND (q.id::text=t.subject_id::text AND q.contact_id=$2))) OR (t.subject_kind IN('membership','entitlement') AND EXISTS(SELECT 1 FROM association_memberships m WHERE m.workspace_id=$1 AND (m.id::text=t.subject_id::text AND m.contact_id=$2))) OR (t.subject_kind IN('participation','registration') AND EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.id::text=t.subject_id::text AND r.attendee_contact_id=$2))) OR (t.subject_kind='order' AND EXISTS(SELECT 1 FROM association_orders o WHERE o.workspace_id=$1 AND (o.id::text=t.subject_id::text AND (o.contact_id=$2 OR EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.order_id=o.id AND r.attendee_contact_id=$2))))))) OR t.payload->>'contactId'=$2::text",
@@ -1988,12 +1999,13 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "context_compartments",
       "context_project_ids",
       "crm_event_id",
+      "source_goal_id",
       "privacy_lineage_version",
       "privacy_erased",
       "privacy_erased_at"
     ],
     "excludedColumns": [
-      "webhook_body_sha256"
+      "webhook_body_sha256", "source_goal_id"
     ],
     "workspaceWhere": "t.id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows)",
     "subjectWhere": "t.id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows)",
@@ -2056,9 +2068,10 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "event_type",
       "subject_id",
       "details",
-      "created_at"
+      "created_at",
+      "scope_subject_kind", "scope_sources", "scope_origin", "scope_held", "scope_erased"
     ],
-    "excludedColumns": [],
+    "excludedColumns": ["scope_subject_kind", "scope_sources", "scope_origin", "scope_held", "scope_erased"],
     "orderBy": "t.id",
     "subjectWhere": "(t.subject_id=$2 OR t.details->>'contactId'=$2::text) OR (t.subject_id IN(SELECT id FROM pg_temp.crm_privacy_copy_tasks) AND (t.event_type LIKE 'crm.%' OR t.event_type LIKE 'association.%' OR t.event_type LIKE 'task.%')) OR (t.event_type LIKE 'workflow.%' AND t.subject_id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows))",
     "workspaceWhere": "t.event_type LIKE 'crm.%' OR t.event_type LIKE 'association.%' OR t.event_type LIKE 'workspace.module_%' OR (t.event_type LIKE 'workflow.%' AND t.subject_id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows))",

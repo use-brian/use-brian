@@ -58,6 +58,11 @@ function isUnderHeapPressure(): boolean {
   }
 }
 
+function isAuthorityBoundaryError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { reason?: unknown }).reason === 'authority_changed'
+}
+
 // One-shot boot-time confirmation that the OOM-defense build is loaded. If
 // you see "Reached heap limit Allocation failed" without this banner having
 // been logged at api startup, your dev server is running stale code (tsx
@@ -586,7 +591,14 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
     debugDocumentFlow('tool_availability', { sessionId: options.context.sessionId, phase: 'before_filter', declarations: options.tools.values() })
     const filteredTools = filterToolsByCapabilities(options.tools, toolContext.activeCapabilities ?? new Set())
     debugDocumentFlow('tool_availability', { sessionId: options.context.sessionId, phase: 'after_filter', declarations: filteredTools.values() })
-    yield* withDocumentFlowDebug(options.context.sessionId, queryLoopCore({ ...options, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }))
+    const events = withDocumentFlowDebug(
+      options.context.sessionId,
+      queryLoopCore({ ...options, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }),
+    )
+    for await (const event of events) {
+      await toolContext.authority?.assertCurrent()
+      yield event
+    }
   } finally {
     watchdog?.dispose()
     const results = await Promise.allSettled(
@@ -840,6 +852,7 @@ async function* queryLoopCore(
     let steerInterrupted = false
 
     try {
+      await context.authority?.assertCurrent()
       // Stateless: send full history via provider.stream() (no rawHistory accumulation).
       // Stateful: send only new messages via session.send() (preserves thought signatures).
       const sendOpts: SendOptions | undefined = nextThinkingLevel
@@ -1012,22 +1025,27 @@ async function* queryLoopCore(
       }
     } catch (err) {
       debugDocumentFlow('stream_error', { sessionId: context.sessionId, model, turn, error: true, providerError: stallWatchdog?.error ?? err, timeout: !!stallWatchdog?.error, aborted: context.abortSignal?.aborted })
+      if (isAuthorityBoundaryError(err)) throw err
       // Layer 4: reactive compact on context overflow — compact and retry once
       if (isContextOverflowError(err) && !hasAttemptedReactiveCompact && options.compactModel) {
         hasAttemptedReactiveCompact = true
         yield { type: 'status', message: 'Context too large, compacting...' }
         try {
-          const compactResult = await compactConversation({
+          const compact = () => compactConversation({
             provider,
-            model: options.compactModel,
+            model: options.compactModel!,
             messages: nextMessages,
             systemPrompt: renderSystemContext({ systemPrompt, runtimeSystemContext }),
           })
+          const compactResult = context.authority
+            ? await context.authority.execute(compact)
+            : await compact()
           debugDocumentFlow('compaction', { sessionId: context.sessionId, model, turn, before: nextMessages, messages: [compactResult.boundaryMessage] })
           nextMessages = [compactResult.boundaryMessage]
           if (options.stateless) statelessHistory = [compactResult.boundaryMessage]
           continue // retry the API call with compacted messages
-        } catch {
+        } catch (compactError) {
+          if (isAuthorityBoundaryError(compactError)) throw compactError
           // Compaction itself failed — fall through to error
         }
       }
@@ -1463,9 +1481,17 @@ async function* queryLoopCore(
           (b): b is ContentBlock & { type: 'tool_use' } =>
             b.type === 'tool_use' && b.name === 'askQuestion',
         )
-        const question = askQuestionToolUse
-          ? (askQuestionToolUse.input as { question?: unknown }).question
+        const questionInput = askQuestionToolUse
+          ? (askQuestionToolUse.input as {
+              question?: unknown
+              actionId?: unknown
+              version?: unknown
+              context?: unknown
+              allowCustom?: unknown
+              options?: unknown
+            })
           : undefined
+        const question = questionInput?.question
         if (
           askQuestionToolUse
           && typeof question === 'string'
@@ -1477,6 +1503,19 @@ async function* queryLoopCore(
             const approvalId = await context.createPendingQuestion!({
               question,
               toolUseId: askQuestionToolUse.id,
+              ...(typeof questionInput?.actionId === 'string' ? { actionId: questionInput.actionId } : {}),
+              ...(
+                typeof questionInput?.version === 'string' || typeof questionInput?.version === 'number'
+                  ? { version: questionInput.version }
+                  : {}
+              ),
+              ...(typeof questionInput?.context === 'string' ? { context: questionInput.context } : {}),
+              ...(typeof questionInput?.allowCustom === 'boolean' ? { allowCustom: questionInput.allowCustom } : {}),
+              ...(
+                Array.isArray(questionInput?.options) && questionInput.options.every((option) => typeof option === 'string')
+                  ? { options: questionInput.options as string[] }
+                  : {}
+              ),
               expiresAt,
             })
             console.log(
@@ -2523,7 +2562,8 @@ export function jsonSchemaFromZod(schema: { _def: unknown }): {
         continue
       }
       properties[key] = converted
-      if (fieldSchema._def.typeName !== 'ZodOptional') {
+      // A defaulted field may be omitted (the default fills it), so it is not required.
+      if (fieldSchema._def.typeName !== 'ZodOptional' && fieldSchema._def.typeName !== 'ZodDefault') {
         required.push(key)
       }
     }
@@ -2548,6 +2588,19 @@ function zodFieldToJsonSchema(field: { _def: Record<string, unknown> }): Record<
     case 'ZodOptional': {
       const inner = zodFieldToJsonSchema({ _def: (def.innerType as { _def: Record<string, unknown> })._def })
       // Preserve description from the optional wrapper if the inner type doesn't have one
+      if (def.description && !inner.description) {
+        inner.description = def.description as string
+      }
+      return inner
+    }
+    case 'ZodDefault':
+    case 'ZodNullable': {
+      // `.default(x)` / `.nullable()` — advertise the wrapped type. Without this
+      // branch the default fallback shows a defaulted `limit` or a nullable
+      // `capacity` as `type: 'string'` (and, for defaults, as required), so the
+      // model sends "10" and the number schema rejects it. `null` itself is not
+      // advertised: Gemini's `nullable` keyword is outside `ToolParameter`.
+      const inner = zodFieldToJsonSchema({ _def: (def.innerType as { _def: Record<string, unknown> })._def })
       if (def.description && !inner.description) {
         inner.description = def.description as string
       }

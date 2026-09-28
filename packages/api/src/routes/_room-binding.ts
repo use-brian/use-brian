@@ -14,6 +14,34 @@
  * the package. `chat.ts` re-exports it, so existing importers are unchanged.
  */
 
+import type { AccessCeiling } from '@use-brian/core'
+import type { Session } from '../db/sessions.js'
+
+/**
+ * The immutable audience envelope for one workspace-shared room. Delivery,
+ * roster projection, and read authorization all use these stored fields; a
+ * later assistant/member grant may narrow the room but can never widen it.
+ */
+export function roomAudienceCeiling(
+  workspaceId: string,
+  session: Pick<Session, 'effectiveClearance' | 'contextCompartments' | 'contextProjectId'>,
+): AccessCeiling {
+  return {
+    workspaceId,
+    // A shared room is not a personal audience. Source evidence with a
+    // private user owner therefore cannot cross this boundary.
+    userId: '',
+    clearance: session.effectiveClearance === 'public'
+      || session.effectiveClearance === 'confidential'
+      ? session.effectiveClearance
+      : 'internal',
+    compartments: session.contextCompartments ?? [],
+    mutationCompartments: session.contextCompartments ?? [],
+    projectIds: session.contextProjectId ? [session.contextProjectId] : [],
+    visibilityAssistantIds: null,
+  }
+}
+
 /**
  * May this assistant ANSWER in this room? (Multiplayer chat T9.)
  *

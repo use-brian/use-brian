@@ -43,6 +43,8 @@ function notifyGoalChange(
  * parked on an event. See `goals/driver.ts` (`until:event` resume).
  */
 export type GoalAwaitingEventMarker = {
+  /** Database-overwritten generation used for exact event-resume claims. */
+  revision?: string
   subscriptions: EventSubscription[]
   state?: Record<string, unknown>
 }
@@ -54,6 +56,7 @@ const FULL_SELECT = `
   blocker_reason as "blockerReason", created_by_user_id as "createdByUserId",
   origin_session_id as "originSessionId",
   context_group_id as "contextGroupId", context_project_id as "contextProjectId",
+  authoring_authority as "authoringAuthority",
   confirmed_at as "confirmedAt", completion_claim as "completionClaim",
   brief, created_at as "createdAt", updated_at as "updatedAt"
 `
@@ -78,6 +81,7 @@ type GoalRow = {
   originSessionId: string | null
   contextGroupId: string | null
   contextProjectId: string | null
+  authoringAuthority: GoalRecord['authoringAuthority']
   confirmedAt: Date | null
   completionClaim: GoalCompletionClaim | null
   brief: GoalBrief | null
@@ -105,6 +109,7 @@ function toRecord(row: GoalRow): GoalRecord {
     originSessionId: row.originSessionId,
     contextGroupId: row.contextGroupId,
     contextProjectId: row.contextProjectId,
+    authoringAuthority: row.authoringAuthority,
     confirmedAt: row.confirmedAt,
     completionClaim: row.completionClaim,
     brief: row.brief,
@@ -116,13 +121,16 @@ function toRecord(row: GoalRow): GoalRecord {
 /** Insert a goal (owner pool; the route/engine is the authz gate). */
 export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> {
   const host = params.host ?? null
+  if (params.confirmed !== false && !params.authoringAuthority) {
+    throw Object.assign(new Error('Goal authoring permissions are missing. Confirm the goal from a current workspace turn.'), { reason: 'goal_authority_unavailable' })
+  }
   const result = await query<GoalRow>(
     `INSERT INTO goals (
        workspace_id, parent_goal_id, recipe_id, host_type, host_id,
        outcome, done_when, means, budget, policy, status, created_by_user_id,
-       origin_session_id, context_group_id, context_project_id, confirmed_at, brief
+       origin_session_id, context_group_id, context_project_id, authoring_authority, confirmed_at, brief
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16, $17::jsonb)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb, $17, $18::jsonb)
      RETURNING ${FULL_SELECT}`,
     [
       params.workspaceId,
@@ -140,6 +148,7 @@ export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> 
       params.originSessionId ?? null,
       params.contextGroupId ?? null,
       params.contextProjectId ?? null,
+      params.authoringAuthority ? JSON.stringify(params.authoringAuthority) : null,
       // Explicitly-created goals are confirmed; the judge-draft path passes
       // `confirmed: false` to mint a draft (autopilot §4/§8).
       params.confirmed === false ? null : new Date(),
@@ -154,10 +163,11 @@ export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> 
 /** User-scoped read (RLS by workspace membership). */
 export async function getGoalById(userId: string, id: string, transactionClient?: pg.PoolClient): Promise<GoalRecord | null> {
   // Feed confirmation freezes this existing primitive in its own transaction.
-  // Repeat the workspace-member read policy when using the owner connection.
+  // Repeat membership and causal source policies on the owner connection.
   const result = transactionClient ? await transactionClient.query<GoalRow>(
     `SELECT ${FULL_SELECT} FROM goals WHERE id=$1 AND EXISTS
-      (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=goals.workspace_id AND wm.user_id=$2) FOR SHARE`,
+      (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=goals.workspace_id AND wm.user_id=$2)
+      AND goal_crm_scope_allows(id,$2) FOR SHARE`,
     [id, userId],
   ) : await queryWithRLS<GoalRow>(
     userId,
@@ -395,7 +405,7 @@ export async function transitionRunningGoalStatusSystem(
  *  gate). */
 export async function updateGoalSystem(
   id: string,
-  fields: { outcome?: string; doneWhen?: DoneWhenNode; means?: GoalMeans; budget?: GoalRecord['budget']; brief?: GoalBrief | null; confirm?: boolean; originSessionId?: string },
+  fields: { outcome?: string; doneWhen?: DoneWhenNode; means?: GoalMeans; budget?: GoalRecord['budget']; brief?: GoalBrief | null; confirm?: boolean; originSessionId?: string; authoringAuthority?: NonNullable<GoalRecord['authoringAuthority']> },
 ): Promise<GoalRecord | null> {
   const sets: string[] = []
   const values: unknown[] = []
@@ -412,6 +422,11 @@ export async function updateGoalSystem(
   if (fields.means !== undefined) { sets.push(`means = $${idx++}::jsonb`); values.push(JSON.stringify(fields.means)) }
   if (fields.brief !== undefined) { sets.push(`brief = $${idx++}::jsonb`); values.push(fields.brief ? JSON.stringify(fields.brief) : null) }
   if (fields.confirm) {
+    if (!fields.authoringAuthority) {
+      throw Object.assign(new Error('Goal authoring permissions are missing. Confirm the goal from a current workspace turn.'), { reason: 'goal_authority_unavailable' })
+    }
+    sets.push(`authoring_authority = $${idx++}::jsonb`)
+    values.push(JSON.stringify(fields.authoringAuthority))
     sets.push('confirmed_at = now()')
     // Confirming resolves an "unconfirmed → needs clarification" block: re-arm
     // so the goal can be spun up again. Leaves any other terminal/active state.

@@ -5,12 +5,9 @@
  *
  * Each card soft-references a durable `workspace_files` row
  * (`session_messages.attachments`, migration 273). Clicking downloads
- * through `fetchDocFileBlob` (doc-file-url.ts) — signed-URL mint via
- * `?redirect=0` + direct storage fetch (a CORS fetch can't follow the
- * route's cross-origin 302 — see the helper's comment; local-disk dev
- * streams the bytes) — and the blob is handed to the browser as a named
- * download. A plain `<a href>` can't be used here: the route is
- * `requireAuth` (header-only).
+ * through the protected media hook: a fresh authenticated byte read whose
+ * identity, cache ownership and lifetime are rechecked before download.
+ * The surface cache owns the object URL and its disposal.
  *
  * See docs/architecture/channels/adapter-pattern.md → "Outbound documents"
  * and docs/architecture/features/files.md → "sendFile".
@@ -20,7 +17,7 @@
 import { useState } from "react";
 import type { ChatFileAttachment } from "@use-brian/chat-ui";
 import { Download, FileText, Loader2 } from "lucide-react";
-import { fetchDocFileBlob } from "@/components/doc/doc-file-url";
+import { useDocMediaDownload } from "@/lib/use-doc-media";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 
@@ -32,27 +29,16 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-async function downloadAttachment(att: ChatFileAttachment): Promise<void> {
-  const blob = await fetchDocFileBlob(att.workspaceId, att.fileId);
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = att.name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
 function FileAttachmentCard({ attachment }: { attachment: ChatFileAttachment }) {
   const t = useT().chat.fileAttachments;
+  const download = useDocMediaDownload(attachment.workspaceId);
   const [state, setState] = useState<"idle" | "downloading" | "error">("idle");
 
   async function handleClick(): Promise<void> {
     if (state === "downloading") return;
     setState("downloading");
     try {
-      await downloadAttachment(attachment);
+      await download(attachment.fileId, attachment.name);
       setState("idle");
     } catch (err) {
       console.error("[chat] attachment download failed:", err);

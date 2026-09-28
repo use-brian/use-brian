@@ -118,4 +118,18 @@ describe('[COMP:api/room-ingest] room posts reach the rules engine (P2)', () => 
   it('the default room rule is the hourly always→scheduled digest', () => {
     expect(ROOM_DIGEST_CRON).toBe('0 * * * *')
   })
+
+  it('holds a strict legacy room binding even without a batch worker',async()=>{
+    const ingestor=createRoomIngestor({brainEpisodeIngestor,appendBatchEvent,now:()=>NOW})
+    await ingestor.ingestPost(post({classificationMode:'strict',contextBindingOrigin:'legacy'}))
+    expect(brainEpisodeIngestor).not.toHaveBeenCalled()
+    expect(appendBatchEvent).toHaveBeenCalledWith(expect.objectContaining({scopeBindingOrigin:'legacy',scopeHeld:true,firesAt:NOW}))
+  })
+
+  it('accepts an explicit strict General room binding without widening it',async()=>{
+    const ingestor=createRoomIngestor({brainEpisodeIngestor,appendBatchEvent,now:()=>NOW})
+    await ingestor.ingestPost(post({classificationMode:'strict',contextBindingOrigin:'explicit',compartments:[],projectIds:[]}))
+    expect(appendBatchEvent).not.toHaveBeenCalled()
+    expect(brainEpisodeIngestor).toHaveBeenCalledWith(expect.objectContaining({compartments:[],projectIds:[]}))
+  })
 })

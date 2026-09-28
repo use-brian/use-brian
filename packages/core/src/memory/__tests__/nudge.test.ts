@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import { runMemoryNudge, extractRecalledMemories, extractResponseText, parseVerdicts } from '../nudge.js'
 import type { NudgeTurn } from '../nudge.js'
-import type { ContentBlock } from '../../providers/types.js'
+import type { ContentBlock, LLMProvider } from '../../providers/types.js'
 import type { MemoryStore } from '../types.js'
+import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -64,6 +65,13 @@ function makeFakeStore(): MemoryStore & { outcomes: Array<{ id: string; useful: 
     listOpenCommitments: notImpl as never,
   }
 }
+
+const fixtureLlm = {
+  name: 'fixture-llm',
+  models: ['fixture-llm'],
+  stream: vi.fn(),
+  createSession: vi.fn(),
+} as unknown as LLMProvider
 
 // ── Unit tests ────────────────────────────────────────────────────
 
@@ -186,6 +194,79 @@ describe('[COMP:memory/nudge] parseVerdicts', () => {
 // ── Integration tests ─────────────────────────────────────────────
 
 describe('[COMP:memory/nudge] runMemoryNudge', () => {
+  it('applies terminal decision verdicts only after the cascade returns', async () => {
+    const memoryId = 'aaaaaaaa-1111-2222-3333-444444444444'
+    const store = makeFakeStore()
+    const callModel = vi.fn()
+    const runtime = executionFixture({
+      llm: fixtureLlm,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{
+          kind: 'boolean',
+          questionId: memoryId,
+          value: true,
+          pTrue: 0.93,
+          evidence: { source: 'native_distribution' },
+        }],
+        usage: { inputTokens: 12, outputTokens: 0 },
+      })),
+    })
+
+    const result = await runMemoryNudge({
+      turns: [turn(
+        [textBlock('Vegetarian options follow.')],
+        [toolResult('getMemory', JSON.stringify({ id: memoryId, summary: 'User is vegetarian', tags: [] }))],
+      )],
+      callModel,
+      store,
+      decisionRuntime: runtime,
+    })
+
+    expect(result).toEqual({
+      judged: 1,
+      useful: 1,
+      usage: { inputTokens: 12, outputTokens: 0 },
+      model: 'fixture-decision-v1',
+    })
+    expect(callModel).not.toHaveBeenCalled()
+    expect(store.outcomes).toEqual([{ id: memoryId, useful: true }])
+  })
+
+  it('keeps shadow primary output observational and writes the legacy LLM verdict', async () => {
+    const memoryId = 'aaaaaaaa-1111-2222-3333-444444444444'
+    const store = makeFakeStore()
+    const runtime = executionFixture({
+      mode: 'shadow',
+      llm: fixtureLlm,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{
+          kind: 'boolean',
+          questionId: memoryId,
+          value: true,
+          pTrue: 0.99,
+          evidence: { source: 'native_distribution' },
+        }],
+      })),
+    })
+
+    const result = await runMemoryNudge({
+      turns: [turn(
+        [textBlock('No memory was used.')],
+        [toolResult('getMemory', JSON.stringify({ id: memoryId, summary: 'User is vegetarian', tags: [] }))],
+      )],
+      callModel: async () => 'aaaaaaaa: UNUSED',
+      store,
+      decisionRuntime: runtime,
+    })
+
+    expect(result).toMatchObject({ judged: 1, useful: 0 })
+    expect(store.outcomes).toEqual([{ id: memoryId, useful: false }])
+  })
+
   it('returns early without calling model when no getMemory results', async () => {
     const callModel = vi.fn()
     const store = makeFakeStore()
@@ -242,6 +323,22 @@ describe('[COMP:memory/nudge] runMemoryNudge', () => {
     expect(result).toEqual({ judged: 2, useful: 1, usage: null, model: null })
     expect(store.outcomes).toContainEqual({ id: 'aaaaaaaa-1111-2222-3333-444444444444', useful: true })
     expect(store.outcomes).toContainEqual({ id: 'bbbbbbbb-1111-2222-3333-444444444444', useful: false })
+  })
+
+  it('performs no writes when the LLM omits a recalled memory verdict', async () => {
+    const store = makeFakeStore()
+    await expect(runMemoryNudge({
+      turns: [turn(
+        [textBlock('A response.')],
+        [toolResult('getMemory', JSON.stringify([
+          { id: 'aaaaaaaa-1111-2222-3333-444444444444', summary: 'Memory A', tags: [] },
+          { id: 'bbbbbbbb-1111-2222-3333-444444444444', summary: 'Memory B', tags: [] },
+        ]))],
+      )],
+      callModel: async () => 'aaaaaaaa: USED',
+      store,
+    })).rejects.toThrow(/incomplete verdict set/)
+    expect(store.outcomes).toEqual([])
   })
 
   it('propagates usage and model when callModel returns NudgeModelResult', async () => {

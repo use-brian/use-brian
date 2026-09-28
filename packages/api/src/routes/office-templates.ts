@@ -1,6 +1,7 @@
 /** Office template registry endpoints. [COMP:api/office-routes] */
 import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
+import {officeMetadataRoute} from './office-metadata.js'
 import { z } from 'zod'
 import { inferOfficeTemplateRouting, officeTemplateRoutingDiagnostics } from '@use-brian/core'
 import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot } from '@use-brian/office-model'
@@ -54,14 +55,12 @@ const CreateTemplateSchema = z.object({
 
 export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
   const router = Router()
-  router.get('/templates', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/templates', officeMetadataRoute(async (req, userId) => {
     const workspaceId = z.string().uuid().safeParse(req.query.workspaceId)
     const family = z.enum(['document', 'presentation', 'spreadsheet']).optional().safeParse(req.query.family)
-    if (!workspaceId.success || !family.success) return void res.status(400).json({ error: 'Invalid template query' })
-    res.json({ templates: await deps.list(userId, workspaceId.data, family.data) })
-  })
+    if (!workspaceId.success || !family.success) return {status:400,body:{ error: 'Invalid template query' }}
+    return {workspaceId:workspaceId.data,body:{ templates: await deps.list(userId, workspaceId.data, family.data) }}
+  }))
   router.post('/templates', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
@@ -110,23 +109,17 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
     if (!live) return void res.status(409).json({ error: 'template_draft_not_ready' })
     res.status(created ? 201 : 200).json(live)
   })
-  router.get('/templates/:templateId/routing', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/templates/:templateId/routing', officeMetadataRoute(async (req, userId) => {
     const templateId = String(req.params.templateId)
     const template = await deps.getTemplate(userId, templateId)
-    if (!template?.draftArtifactId || template.lifecycleState !== 'draft') return void res.status(404).json({ error: 'Template draft not found' })
+    if (!template?.draftArtifactId || template.lifecycleState !== 'draft') return {status:404,body:{ error: 'Template draft not found' }}
     const snapshot = await deps.getSnapshot(userId, template.draftArtifactId)
-    if (!snapshot) return void res.status(409).json({ error: 'template_draft_not_ready' })
-    let routing = await deps.getDraftRouting(userId, templateId)
-    if (!routing) {
-      routing = inferOfficeTemplateRouting(snapshot.snapshot)
-      if (!await deps.saveDraftRouting({ userId, templateId, routing })) return void res.status(409).json({ error: 'template_routing_not_saved' })
-    }
+    if (!snapshot) return {status:409,body:{ error: 'template_draft_not_ready' }}
+    const routing = await deps.getDraftRouting(userId, templateId) ?? inferOfficeTemplateRouting(snapshot.snapshot)
     const parsed = OfficeTemplateRoutingDraftSchema.safeParse(routing)
-    if (!parsed.success) return void res.status(409).json({ error: 'template_routing_invalid', issues: parsed.error.issues })
-    res.json({ routing: parsed.data })
-  })
+    if (!parsed.success) return {status:409,body:{ error: 'template_routing_invalid', issues: parsed.error.issues }}
+    return {workspaceId:template.workspaceId,body:{ routing: parsed.data }}
+  }))
   router.put('/templates/:templateId/routing', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })

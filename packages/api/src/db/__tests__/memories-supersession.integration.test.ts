@@ -5,39 +5,15 @@ import pg from 'pg'
  * Integration test for WU-2.2 — memory supersession-on-write,
  * bi-temporal reads, and the D.7 getMemoryHistory chain walker.
  *
- * Requires a local `Use Brian` PostgreSQL database with migration 128
- * applied (the universal column set on memories). Skips silently when
- * the DB is unavailable or the migration hasn't landed.
+ * Requires the token-verified disposable PostgreSQL fixture with all migrations.
+ * Missing fixture evidence fails before database access.
  */
 
-let pool: pg.Pool | undefined
+const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
+await assertLocalFixture()
+const pool=new pg.Pool({connectionString:process.env.DATABASE_URL,connectionTimeoutMillis:2000})
+const describeIf=describe
 
-async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({
-    ...(process.env.DATABASE_URL
-      ? { connectionString: process.env.DATABASE_URL }
-      : { database: 'sidanclaw' }),
-    connectionTimeoutMillis: 2000,
-  })
-  try {
-    const client = await p.connect()
-    try {
-      // Probe for migration 128's columns; abort the test suite if
-      // the migration hasn't been applied to this database.
-      await client.query('SELECT valid_to, superseded_by, created_by_user_id FROM memories LIMIT 1')
-    } finally {
-      client.release()
-    }
-    pool = p
-    return true
-  } catch {
-    await p.end().catch(() => {})
-    return false
-  }
-}
-
-const ok = await canConnect()
-const describeIf = ok ? describe : describe.skip
 
 afterAll(async () => {
   if (pool) await pool.end()

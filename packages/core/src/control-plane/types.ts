@@ -30,14 +30,23 @@ export type ControlPlaneAssistant = {
 export type ControlPlaneConnector = {
   /** Provider slug for built-ins (gcal / gmail / github / ...) or a UUID for custom MCP. */
   provider: string
-  /** The connector_instance row id — the target for configuration calls. */
-  instanceId: string
+  /** Official display name, or the instance label for a custom connector. */
+  name: string
+  /** Registry description when the provider is official. */
+  description: string | null
+  /** The connector_instance row id — null for an unconfigured catalog row. */
+  instanceId: string | null
   label: string
   connected: boolean
+  availability: 'connected' | 'available'
   /** True when connecting requires a browser OAuth consent a human must click. */
   oauthRequired: boolean
+  /** True when Agent configuration can prepare a resumable web consent handoff. */
+  authorizationHandoff: boolean
+  /** Workspace-scoped Studio path; no credential material is embedded. */
+  connectPath: string | null
   authType: 'none' | 'oauth' | 'bearer' | 'custom_header' | 'api_key' | 'gcs' | 's3' | 'imap' | 'local' | 'cli'
-  scope: 'team-native' | 'team-grant'
+  scope: 'team-native' | 'team-grant' | 'available'
   sensitivity: 'public' | 'internal' | 'confidential'
 }
 

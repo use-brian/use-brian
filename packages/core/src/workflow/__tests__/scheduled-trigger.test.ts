@@ -108,6 +108,12 @@ function makeContext(over: Partial<ToolContext> = {}): ToolContext {
     channelType: 'web',
     channelId: 'web',
     workspaceId: WORKSPACE_ID,
+    assistantKind: 'primary',
+    clearance: 'confidential',
+    compartments: null,
+    mutationCompartments: null,
+    projectIds: null,
+    visibilityAssistantIds: null,
     abortSignal: new AbortController().signal,
     ...over,
   }

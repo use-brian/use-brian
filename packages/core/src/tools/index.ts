@@ -1,4 +1,4 @@
-export type { Tool, ToolContext, ToolResult, ToolResultMeta } from './types.js'
+export type { CurrentAuthorityBoundary, Tool, ToolContext, ToolResult, ToolResultMeta } from './types.js'
 export { buildTool } from './types.js'
 export { filterToolsByCapabilities, isAutonomousToolContext, INTERACTIVE_CHANNEL_TYPES } from './capability-gate.js'
 export { createBaseTools, createEngineBaseTools, createUrlReaderTool, createWebSearchTool, createXSearchTool, urlReaderTool, webSearchTool, askQuestionTool, createTaskTool, updateTaskTool, getTimeTool, _getSessionTasksSize } from './base/index.js'

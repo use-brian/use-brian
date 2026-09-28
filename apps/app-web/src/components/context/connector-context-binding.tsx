@@ -81,15 +81,20 @@ export function ConnectorContextBinding({
         <p className="mt-0.5 text-[11px] text-muted-foreground">{t.connectorContextDescription}</p>
       </div>
       {loading ? <p className="text-xs text-muted-foreground">{t.loading}</p> : (
-        <ContextScopePicker
-          teams={teams}
-          projects={projects}
-          teamId={teamId}
-          projectId={projectId}
-          onTeamChange={(value) => { setTeamId(value); setSaved(false); }}
-          onProjectChange={(value) => { setProjectId(value); setSaved(false); }}
-          disabled={saving}
-        />
+        <>
+          <ContextScopePicker
+            teams={teams}
+            projects={projects}
+            teamId={teamId}
+            projectId={projectId}
+            onTeamChange={(value) => { setTeamId(value); setSaved(false); }}
+            onProjectChange={(value) => { setProjectId(value); setSaved(false); }}
+            disabled={saving}
+          />
+          {teamId || projectId ? (
+            <p className="text-xs text-muted-foreground">{t.connectorProviderRootUnavailable}</p>
+          ) : null}
+        </>
       )}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
       <div className="flex items-center justify-end gap-2">

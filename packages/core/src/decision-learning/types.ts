@@ -217,8 +217,12 @@ const feedConfirmationRevokedSchema = z.object({
   payload: z.object({ confirmationId: z.string().uuid(), revision: z.number().int().positive() }).strict(),
 }).strict()
 
+const feedLinkedInManualSchema=z.object({...baseDecisionEventShape,eventKind:z.literal('feed.linkedin_manual_published'),payload:z.object({receiptId:z.string().uuid(),revision:z.number().int().positive(),confirmationId:z.string().uuid()}).strict()}).strict()
+
+const feedLinkedInReconciledSchema=z.object({...baseDecisionEventShape,eventKind:z.literal('feed.linkedin_delivery_reconciled'),payload:z.object({deliveryId:z.string().uuid(),revision:z.number().int().positive(),url:z.string().url()}).strict()}).strict()
+
 export const decisionEventWriteSchema = z.discriminatedUnion('eventKind', [
-  feedDraftRevisedSchema, feedProposalDecidedSchema, feedPostConfirmedSchema, feedConfirmationRevokedSchema,
+  feedLinkedInReconciledSchema, feedLinkedInManualSchema, feedDraftRevisedSchema, feedProposalDecidedSchema, feedPostConfirmedSchema, feedConfirmationRevokedSchema,
   approvalDecidedSchema,
   emailDraftRevisedSchema,
   entitiesMergedSchema,
@@ -237,7 +241,7 @@ export type DecisionEvent = z.output<typeof decisionEventWriteSchema>
 export type DecisionEventKind = DecisionEvent['eventKind']
 
 export const DECISION_EVENT_KINDS = [
-  'feed.draft_revised', 'feed.proposal_decided', 'feed.post_confirmed', 'feed.confirmation_revoked',
+  'feed.linkedin_delivery_reconciled', 'feed.linkedin_manual_published', 'feed.draft_revised', 'feed.proposal_decided', 'feed.post_confirmed', 'feed.confirmation_revoked',
   'approval.decided',
   'email.draft_revised',
   'crm.entities_merged',

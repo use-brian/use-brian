@@ -3,14 +3,14 @@
 /** Constrained Tiptap schema for the canonical Office Document subset. */
 import { Mark, Node, mergeAttributes, type AnyExtension } from "@tiptap/core";
 import { NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, useEditorState, type NodeViewProps } from "@tiptap/react";
-import { createElement, useEffect, useState, type CSSProperties } from "react";
+import { createElement, type CSSProperties } from "react";
 import StarterKit from "@tiptap/starter-kit";
 import { officeTableResolvedColumnWidthsPt, officeNumberingCounter, type OfficeRichTextRun, type OfficeTable, type OfficeEditorJsonNode, type OfficeParagraphFormat } from "@use-brian/office-model";
 import { officeDocumentCellStyles, officeParagraphCss, officeScaleSegments, officeScaledSegmentCss, officeTextAdvance, officeRunFontCss } from "@use-brian/office-renderer";
 import { Extension } from "@tiptap/core";
 import { Plugin } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
-import { getOfficeResourceObjectUrl } from "@/lib/office/api";
+import { useOfficeResourceMedia } from "@/lib/use-doc-media";
 import { DocumentCommentDecorations } from "./comment-decorations";
 import { DocumentPaginationDecorations } from "./pagination-decorations";
 import { findDocumentHeaderImage } from "./header-image-projection";
@@ -36,6 +36,7 @@ const OfficeSection = Node.create({
   }), 0],
 });
 const OfficeHeader = Node.create({
+  addOptions: () => ({artifactId:null as string|null}),
   name: "officeHeader", content: "inline*", group: "block", addAttributes: () => attrs("id"),
   parseHTML: () => [{ tag: "header[data-office-header]" }],
   renderHTML: ({ HTMLAttributes }) => ["header", mergeAttributes(HTMLAttributes, { class: "office-document-header", "data-office-header": "true" }), 0],
@@ -44,21 +45,14 @@ const OfficeHeader = Node.create({
 const OfficeBody = Node.create({ name: "officeBody", content: "officeFlow*", group: "block", addAttributes: () => attrs("id"), parseHTML: () => [{ tag: "main[data-office-body]" }], renderHTML: render("main", "office-document-body") });
 const OfficeFooter = Node.create({ name: "officeFooter", content: "inline*", group: "block", addAttributes: () => attrs("id"), parseHTML: () => [{ tag: "footer[data-office-footer]" }], renderHTML: ({ HTMLAttributes }) => ["footer", mergeAttributes(HTMLAttributes, { class: "office-document-footer", "data-office-footer": "true" }), 0] });
 
-function OfficeHeaderView({ node, editor }: NodeViewProps) {
+function OfficeHeaderView({ node, editor, extension }: NodeViewProps) {
   const sectionId = typeof node.attrs.id === "string" ? node.attrs.id.split(":header")[0] : "";
   const headerImage = useEditorState({
     editor,
     selector: ({ editor: current }) => findDocumentHeaderImage(current, sectionId),
   });
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    let active = true;
-    setSrc(null);
-    const artifactId = document.querySelector<HTMLElement>("[data-office-editor='document']")?.dataset.officeArtifactId;
-    if (!artifactId || !headerImage) return () => { active = false; };
-    void getOfficeResourceObjectUrl(artifactId, headerImage.resourceId).then((url) => { if (active) setSrc(url); }).catch(() => undefined);
-    return () => { active = false; };
-  }, [headerImage?.resourceId]);
+  const artifactId = extension.options.artifactId as string|null;
+  const {url:src} = useOfficeResourceMedia(artifactId,headerImage?.resourceId??null);
   const style = headerImage ? {
     "--office-header-image-width": `${headerImage.displayWidthPt}pt`,
     "--office-header-image-height": `${headerImage.displayHeightPt}pt`,
@@ -246,6 +240,7 @@ function projectionAtom(name: string, label: string, labelAttrs: string[], extra
 }
 
 const OfficeImage = Node.create({
+  addOptions: () => ({artifactId:null as string|null}),
   name: "officeImage", group: "officeFlow", atom: true, selectable: true,
   addAttributes: () => attrs("id", "resourceId", "altText", "decorative", "widthPt", "heightPt", "crop"),
   parseHTML: () => [{ tag: "figure[data-office-image]" }],
@@ -253,15 +248,9 @@ const OfficeImage = Node.create({
   addNodeView: () => ReactNodeViewRenderer(OfficeImageView),
 });
 
-function OfficeImageView({ node }: { node: { attrs: Record<string, unknown> } }) {
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    let active = true;
-    const artifactId = document.querySelector<HTMLElement>("[data-office-editor='document']")?.dataset.officeArtifactId;
-    if (!artifactId || typeof node.attrs.resourceId !== "string") return;
-    void getOfficeResourceObjectUrl(artifactId, node.attrs.resourceId).then((url) => { if (active) setSrc(url); }).catch(() => undefined);
-    return () => { active = false; };
-  }, [node.attrs.resourceId]);
+function OfficeImageView({ node, extension }: NodeViewProps) {
+  const artifactId = extension.options.artifactId as string|null;
+  const {url:src} = useOfficeResourceMedia(artifactId,typeof node.attrs.resourceId==='string'?node.attrs.resourceId:null);
   const alt = node.attrs.decorative ? "" : String(node.attrs.altText ?? "");
   return createElement(NodeViewWrapper, { as: "figure", "data-office-image": "true", className: "office-document-image", style: { width: `${Number(node.attrs.widthPt ?? 240)}pt`, maxWidth: "100%" } },
     src
@@ -293,12 +282,12 @@ const OfficeRun = Mark.create({
   },
 });
 
-export function officeDocumentEditorExtensions(): AnyExtension[] {
+export function officeDocumentEditorExtensions(artifactId:string|null=null): AnyExtension[] {
   return [
-    OfficeDocument, OfficeSection, OfficeHeader, OfficeBody, OfficeFooter,
+    OfficeDocument, OfficeSection, OfficeHeader.configure({artifactId}), OfficeBody, OfficeFooter,
     Paragraph, Heading, OfficeList, OfficeListItem, OfficeTable, OfficeTableRow,
     OfficeTableCell, OfficeTableCellText, OfficeTableFormatting, OfficeParagraphSpacing, OfficeInlineFidelity, OfficeEmptyRun, OfficeRun,
-    OfficeImage,
+    OfficeImage.configure({artifactId}),
     DocumentCommentDecorations,
     projectionAtom("officeChart", "chart", ["altText", "title"], ["chartType", "title", "categories", "series", "altText"]),
     projectionAtom("officeVideo", "video", ["altText", "transcript", "recipientAccessibleUrl"], ["resourceId", "posterResourceId", "altText", "captionsResourceId", "transcript", "recipientAccessibleUrl"]),

@@ -187,9 +187,35 @@ describe('[COMP:api/programmatic-capture] routed producer', () => {
     expect(ingest).toHaveBeenCalledTimes(1)
     expect(db.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }))
   })
+
+  it('persists a strict legacy binding on hold before any extraction',async()=>{
+    const ingest=vi.fn(),strict=target([rule({scopeBindingOrigin:'legacy',scopeBindingMode:'inherit'})])
+    strict.classificationMode='strict';strict.assistantDefaultBindingOrigin='explicit'
+    const route=createProgrammaticCaptureRouter({store:store(strict),ingest,now:()=>new Date('2026-09-03T10:01:00.000Z')})
+    const result=await route(AUTH,{eventId:'held-1',sessionId:'draft-42',content:'Legacy capture evidence'})
+    expect(result.outcome).toBe('queued');expect(ingest).not.toHaveBeenCalled();expect(db.reserve).not.toHaveBeenCalled()
+    expect(db.append).toHaveBeenCalledWith(expect.objectContaining({scopeBindingOrigin:'legacy',scopeHeld:true}))
+  })
+
+  it('treats an explicit empty strict binding as intentional General',async()=>{
+    const ingest=vi.fn(async()=>({} as PipelineBResult))
+    const strict=target([rule({routingMode:'realtime',routingSchedule:null,scopeBindingOrigin:'explicit',scopeBindingMode:'explicit'})])
+    strict.classificationMode='strict';strict.assistantDefaultBindingOrigin='legacy'
+    const route=createProgrammaticCaptureRouter({store:store(strict),ingest})
+    await route(AUTH,{eventId:'general-1',content:'Explicit General evidence'})
+    expect(ingest).toHaveBeenCalledWith(expect.objectContaining({compartments:[],projectIds:[]}))
+    expect(db.append).not.toHaveBeenCalled()
+  })
 })
 
 describe('[COMP:api/programmatic-capture] pooled processor', () => {
+  it('refuses a held batch before resolving or invoking Pipeline B',async()=>{
+    const ingest=vi.fn(),captureStore=store(target([rule()])),process=createProgrammaticBatchProcessor({store:captureStore,ingest})
+    await expect(process({id:'held',workspaceId:AUTH.workspaceId,assistantId:AUTH.captureAssistantId,
+      ruleId:rule().id,source:'programmatic',firesAt:new Date(),createdAt:new Date(),episodeSensitivity:'internal',
+      events:[],scopeBindingOrigin:'legacy',scopeHeld:true})).rejects.toMatchObject({code:'capture_target_unavailable'})
+    expect(captureStore.resolveBatchTargetSystem).not.toHaveBeenCalled();expect(ingest).not.toHaveBeenCalled()
+  })
   it('orders one window and invokes Pipeline B exactly once for the whole batch', async () => {
     const resolved = target([rule()])
     const ingest = vi.fn(async (_input: BrainEpisodeInput) => ({} as PipelineBResult))

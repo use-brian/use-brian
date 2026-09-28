@@ -18,6 +18,7 @@ import { SearchableSelect } from '@/components/ui/searchable-select';
 import { useCachedResource } from '@/lib/surface-cache';
 import { type BrainRow } from '@/lib/api/brain';
 import { feedOwner } from '@/lib/offline/feed-cache';
+import { useDocMedia } from '@/lib/use-doc-media';
 import { fetchDocFileBlob } from '@/components/doc/doc-file-url';
 const inputClass = 'min-h-11 w-full rounded-md border bg-background p-2 text-base';
 export type FeedGenerationControls = { workspaceId: string; assistantId: string; sessionId: string; revision: number; offline: boolean; pending: boolean; readOnly: boolean; article: boolean; snapshot?: FeedCollaborationSnapshot | null; onCommand: (commands: FeedCommand[]) => Promise<boolean>; onRefresh: () => void };
@@ -174,11 +175,14 @@ export function GenerationPlaceholder(props: { slot: FeedPlaceholderAttrs; segme
   return <Dialog.Root open={open} onOpenChange={setOpen}>
     <section data-feed-slot={props.slot.id} className="my-3 flex min-w-0 flex-wrap items-center gap-x-2 rounded-lg bg-muted/40 px-3 py-1" onPointerDown={props.onSelect} onFocusCapture={props.onSelect}>
       {pendingImage ? <div className="relative order-first min-h-11 w-full pt-2">
-        <button type="button" aria-label={t.openDetails} onClick={() => setOpen(true)} className="w-full" data-feed-pending-image><FeedGenerationImage workspaceId={c.workspaceId} fileId={pendingImage.attrs.fileId} alt={pendingImage.attrs.alt ?? ''} className="max-h-48 w-full rounded-lg object-contain" /></button>
+        <Dialog.Trigger aria-label={t.openDetails} className="w-full" data-feed-pending-image><FeedGenerationImage workspaceId={c.workspaceId} fileId={pendingImage.attrs.fileId} alt={pendingImage.attrs.alt ?? ''} className="max-h-48 w-full rounded-lg object-contain" /></Dialog.Trigger>
         {imageCandidates.length > 1 ? <>
           <Button variant="secondary" size="icon" className="absolute left-2 top-1/2 size-11 -translate-y-1/2 rounded-full shadow-sm" aria-label={t.previousImage} disabled={selectedImageIndex === 0} onClick={() => selectImageIndex(selectedImageIndex - 1)}><ChevronLeft className="size-5" aria-hidden /></Button>
           <Button variant="secondary" size="icon" className="absolute right-2 top-1/2 size-11 -translate-y-1/2 rounded-full shadow-sm" aria-label={t.nextImage} disabled={selectedImageIndex === imageCandidates.length - 1} onClick={() => selectImageIndex(selectedImageIndex + 1)}><ChevronRight className="size-5" aria-hidden /></Button>
-          <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-background/85 px-2 py-1 text-xs text-muted-foreground shadow-sm" aria-live="polite">{format(t.imageOptionPosition, { current: selectedImageIndex + 1, total: imageCandidates.length })}</span>
+          {/* Status provides implicit polite announcements, without an explicit
+              aria-live region that modal masking preserves inside ProseMirror.
+              Such preservation mutates sibling blocks and destroys node views. */}
+          <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-background/85 px-2 py-1 text-xs text-muted-foreground shadow-sm" role="status">{format(t.imageOptionPosition, { current: selectedImageIndex + 1, total: imageCandidates.length })}</span>
         </> : null}
       </div> : null}
       <span className="flex shrink-0 items-center gap-2 text-sm font-medium text-muted-foreground"><Icon className="size-4" aria-hidden />{label}</span>
@@ -273,11 +277,10 @@ function FeedImageCandidateCarousel(props: { controls: FeedGenerationControls; r
 }
 const IMAGE_FILE_NAME = /\.(?:avif|gif|jpe?g|png|webp)$/i;
 function FeedGenerationFileChoice({ controls: c, file, index, total, onPick }: { controls: FeedGenerationControls; file: BrainRow; index: number; total: number; onPick: (id: string) => Promise<void> }) {
-  const t = useT().feedGeneration; const imageNamed = IMAGE_FILE_NAME.test(file.name); const [preview, setPreview] = useState<string | null>(null); const [kind, setKind] = useState<'loading' | 'image' | 'file' | 'failed'>('loading');
-  useEffect(() => { let disposed = false; let objectUrl: string | null = null; setPreview(null); setKind('loading');
-    void fetchDocFileBlob(c.workspaceId, file.id).then(blob => { if (disposed) return; if (!blob.type.startsWith('image/')) { setKind('file'); return; } objectUrl = URL.createObjectURL(blob); setPreview(objectUrl); setKind('image'); }).catch(() => { if (!disposed) setKind('failed'); });
-    return () => { disposed = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [c.workspaceId, file.id]);
+  const t = useT().feedGeneration; const imageNamed = IMAGE_FILE_NAME.test(file.name);
+  const media = useDocMedia(c.workspaceId, file.id);
+  const kind = media.mimeType?.startsWith('image/') ? 'image' : media.error ? 'failed' : media.loading ? 'loading' : 'file';
+  const preview = kind === 'image' ? media.url : null;
   const imageLabel = format(t.imageOptionPosition, { current: index + 1, total }); const imageLike = imageNamed || kind === 'image';
   return <button type="button" className="flex min-h-24 min-w-0 items-center justify-center overflow-hidden rounded-md border bg-background p-2 text-left text-sm" aria-label={imageLike ? imageLabel : file.name} onClick={() => void onPick(file.id)}>
     {preview ? <img src={preview} alt="" className="h-24 w-full rounded object-cover" /> : kind === 'loading' ? <span role="status" className="text-muted-foreground">{t.loading}</span> : imageLike ? <span className="text-muted-foreground">{t.imageUnavailable}</span> : <span className="min-w-0 break-words">{file.name}</span>}
@@ -340,10 +343,7 @@ export function FeedDetachedGenerationResults({ controls: c }: { controls: FeedG
 
 /** Authenticated durable bytes; object URLs never become composition content. */
 export function FeedGenerationImage({ workspaceId, fileId, alt, className }: { workspaceId: string; fileId: string; alt: string; className?: string }) {
-  const t = useT().feedGeneration; const [url, setUrl] = useState<string | null>(null); const [failed, setFailed] = useState(false);
-  useEffect(() => { let disposed = false; let objectUrl: string | null = null; setUrl(null); setFailed(false);
-    void fetchDocFileBlob(workspaceId, fileId).then(blob => { if (disposed) return; objectUrl = URL.createObjectURL(blob); setUrl(objectUrl); }).catch(() => { if (!disposed) setFailed(true); });
-    return () => { disposed = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [workspaceId, fileId]);
-  return url ? <img src={url} alt={alt} className={className ?? 'max-h-96 max-w-full rounded-lg object-contain'} /> : <p role="status" className="min-h-11 text-sm">{failed ? t.imageUnavailable : t.loading}{alt ? `: ${alt}` : ''}</p>;
+  const t = useT().feedGeneration;
+  const {url,error} = useDocMedia(workspaceId, fileId);
+  return url ? <img src={url} alt={alt} className={className ?? 'max-h-96 max-w-full rounded-lg object-contain'} /> : <p role="status" className="min-h-11 text-sm">{error ? t.imageUnavailable : t.loading}{alt ? `: ${alt}` : ''}</p>;
 }

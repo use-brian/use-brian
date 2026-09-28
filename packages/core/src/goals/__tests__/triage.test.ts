@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createTaskTriageJudge, parseTriageVerdict } from '../triage.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 /**
  * [COMP:goals/triage-judge] The task-create triage judge (task-goal-autopilot.md
@@ -85,6 +86,39 @@ describe('[COMP:goals/triage-judge] parseTriageVerdict', () => {
 })
 
 describe('[COMP:goals/triage-judge] createTaskTriageJudge', () => {
+  it('terminates a negative assistability decision without drafting', async () => {
+    const seen = { prompts: [] as string[] }
+    const llm = mockProvider(PASS, seen)
+    const decisionRuntime = executionFixture({
+      llm,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{ questionId: 'can_assist', kind: 'boolean', value: false, pTrue: 0.02, evidence: { source: 'native_distribution', probabilities: { true: 0.02, false: 0.98 } } }],
+      })),
+    })
+    const judge = createTaskTriageJudge({ provider: llm, model: 'mock', modelTier: 'standard', resolveLlm: null, decisionRuntime })
+    await expect(judge({ title: 'Sign the paper contract in person', capabilities: [] })).resolves.toBeNull()
+    expect(seen.prompts).toHaveLength(0)
+  })
+
+  it('uses exactly one LLM completion to draft a positive assistability result', async () => {
+    const seen = { prompts: [] as string[] }
+    const llm = mockProvider(PASS, seen)
+    const decisionRuntime = executionFixture({
+      llm,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{ questionId: 'can_assist', kind: 'boolean', value: true, pTrue: 0.96, evidence: { source: 'native_distribution', probabilities: { true: 0.96, false: 0.04 } } }],
+      })),
+    })
+    const judge = createTaskTriageJudge({ provider: llm, model: 'mock', modelTier: 'standard', resolveLlm: null, decisionRuntime })
+    const result = await judge({ title: 'Compare CRM vendors', capabilities: ['Web research'] })
+    expect(result?.outcome).toContain('vendor comparison')
+    expect(seen.prompts).toHaveLength(1)
+  })
+
   it('returns the brief for an assistable task', async () => {
     const judge = createTaskTriageJudge({ provider: mockProvider(PASS), model: 'mock', modelTier: 'standard', resolveLlm: null })
     const v = await judge({ title: 'Compare CRM vendors', capabilities: ['Web research'] })

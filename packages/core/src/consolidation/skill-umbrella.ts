@@ -27,6 +27,12 @@
  */
 
 import { z } from 'zod'
+import {
+  boundScopeSource,
+  resourceScopeKey,
+  type DerivedWriteEvidence,
+  type ScopeSource,
+} from '../security/index.js'
 
 // ── Workspace skill shape — slice of WS-A's WorkspaceSkill ───────
 //
@@ -90,6 +96,7 @@ export type SkillUmbrellaStore = {
   patchUmbrella(skillId: string, patch: {
     content: string
     diff: string
+    derivation: DerivedWriteEvidence
   }): Promise<void>
 
   /** Apply a `CREATE_NEW_UMBRELLA` move: insert a new auto-generated
@@ -104,6 +111,7 @@ export type SkillUmbrellaStore = {
     category?: string
     requiresConnectors?: string[]
     originatingAssistantId?: string | null
+    derivation: DerivedWriteEvidence
   }): Promise<{ rowId: string }>
 
   /** Apply a `DEMOTE_TO_REFERENCES` move: insert a support file under
@@ -114,6 +122,7 @@ export type SkillUmbrellaStore = {
     name: string
     content: string
     description?: string | null
+    derivation: DerivedWriteEvidence
   }): Promise<void>
 
   /** Archive an absorbed member with mandatory `absorbed_into` metadata.
@@ -173,6 +182,7 @@ export type SkillCuratorAction =
         | 'commit_failed'
         | 'recent_undo'
         | 'malformed_llm_output'
+        | 'scope_evidence_missing'
       memberRowIds: string[]
       detail?: string
     }
@@ -526,6 +536,13 @@ async function executeProposal(params: {
 }): Promise<{ action: SkillCuratorAction | null; error?: string }> {
   const { workspaceId: _workspaceId, cluster, proposal, store } = params
   const memberByRowId = new Map(cluster.map((s) => [s.rowId, s]))
+  const sources = cluster
+    .map((skill) => boundScopeSource(skill))
+    .filter((source): source is ScopeSource => source !== undefined)
+  if (sources.length !== cluster.length) {
+    return { action: null, error: 'scope_evidence_missing' }
+  }
+  const derivation: DerivedWriteEvidence = { producer: 'skill:umbrella', sources }
 
   if (proposal.move === 'REJECT') {
     return {
@@ -561,7 +578,11 @@ async function executeProposal(params: {
       }
     }
     const diff = buildPatchDiff(target.content, proposal.patched_content)
-    await store.patchUmbrella(target.rowId, { content: proposal.patched_content, diff })
+    await store.patchUmbrella(target.rowId, {
+      content: proposal.patched_content,
+      diff,
+      derivation,
+    })
     for (const memberId of proposal.absorbed_member_ids) {
       await store.recordAbsorption(memberId, target.rowId)
     }
@@ -599,6 +620,7 @@ async function executeProposal(params: {
       category: proposal.new_skill_draft.category,
       requiresConnectors: proposal.new_skill_draft.requires_connectors,
       originatingAssistantId,
+      derivation,
     })
     for (const memberId of proposal.absorbed_member_ids) {
       await store.recordAbsorption(memberId, created.rowId)
@@ -639,6 +661,7 @@ async function executeProposal(params: {
       name: demote.target_name,
       content: member.content,
       description: member.description,
+      derivation,
     })
     await store.recordAbsorption(memberId, umbrella.rowId)
   }
@@ -761,54 +784,90 @@ export async function runSkillUmbrellaPass(
   )
   eligible = eligible.filter((s) => !protectedIds.has(s.rowId))
 
-  // ── Trigger gate 2: >=20 skills ──────────────────────────────
-  if (eligible.length < minSkillCount) {
+  // Routine consolidation is exact-envelope only. Unscoped legacy rows are
+  // withheld, and similarity never compares skills from different buckets.
+  const scopedBuckets = new Map<string, UmbrellaSkill[]>()
+  const missingScope: string[] = []
+  for (const skill of eligible) {
+    const source = boundScopeSource(skill)
+    if (!source) {
+      missingScope.push(skill.rowId)
+      continue
+    }
+    const key = resourceScopeKey(source)
+    const bucket = scopedBuckets.get(key) ?? []
+    bucket.push(skill)
+    scopedBuckets.set(key, bucket)
+  }
+  if (missingScope.length > 0) {
+    actions.push({
+      kind: 'skipped',
+      reason: 'scope_evidence_missing',
+      memberRowIds: missingScope,
+    })
+  }
+  // A department cannot borrow another department's volume to cross the
+  // curator threshold. Select qualifying exact-envelope buckets before any
+  // embedding/model call.
+  const eligibleBuckets = [...scopedBuckets.values()].filter(
+    (bucket) => bucket.length >= minSkillCount,
+  )
+
+  // ── Trigger gate 2: >=20 skills in at least one exact bucket ─
+  if (eligibleBuckets.length === 0) {
     onEvent?.({ type: 'skill_umbrella_skipped', workspaceId, reason: 'insufficient_skills' })
-    return { workspaceId, clustersProcessed: 0, actions: [] }
+    if (actions.length > 0) await persistDigest(digestStore, workspaceId, currentTime, actions)
+    return { workspaceId, clustersProcessed: 0, actions }
   }
 
   // ── Embeddings ───────────────────────────────────────────────
-  // One vector per skill, source = description. Empty input from the
-  // embedder means embeddings are unavailable for this workspace —
-  // skip the run, surface to operators.
-  const texts = eligible.map((s) => s.description)
-  let vectors: number[][] = []
-  try {
-    vectors = await getEmbeddings(texts)
-  } catch (err) {
-    onEvent?.({ type: 'skill_umbrella_skipped', workspaceId, reason: 'no_embeddings' })
-    actions.push({
-      kind: 'skipped',
-      reason: 'no_embeddings',
-      memberRowIds: eligible.map((s) => s.rowId),
-      detail: (err as Error).message,
-    })
-    await persistDigest(digestStore, workspaceId, currentTime, actions)
-    return { workspaceId, clustersProcessed: 0, actions }
-  }
-  if (vectors.length !== eligible.length) {
-    onEvent?.({ type: 'skill_umbrella_skipped', workspaceId, reason: 'no_embeddings' })
-    actions.push({
-      kind: 'skipped',
-      reason: 'no_embeddings',
-      memberRowIds: eligible.map((s) => s.rowId),
-      detail: `embedder returned ${vectors.length} vectors for ${eligible.length} inputs`,
-    })
-    await persistDigest(digestStore, workspaceId, currentTime, actions)
-    return { workspaceId, clustersProcessed: 0, actions }
-  }
+  // Each embedding batch is one exact scope bucket. Embeddings are model
+  // inputs too, so batching all departments together would violate the same
+  // isolation rule as a mixed synthesis prompt.
   const embeddings = new Map<string, number[]>()
   const tagsByRowId = new Map<string, Set<string>>()
-  for (let i = 0; i < eligible.length; i++) {
-    embeddings.set(eligible[i].rowId, vectors[i])
-    tagsByRowId.set(eligible[i].rowId, deriveTagSet(eligible[i]))
+  const embeddedBuckets: UmbrellaSkill[][] = []
+  for (const bucket of eligibleBuckets) {
+    let vectors: number[][]
+    try {
+      vectors = await getEmbeddings(bucket.map((s) => s.description))
+    } catch (err) {
+      onEvent?.({ type: 'skill_umbrella_skipped', workspaceId, reason: 'no_embeddings' })
+      actions.push({
+        kind: 'skipped',
+        reason: 'no_embeddings',
+        memberRowIds: bucket.map((s) => s.rowId),
+        detail: (err as Error).message,
+      })
+      continue
+    }
+    if (vectors.length !== bucket.length) {
+      onEvent?.({ type: 'skill_umbrella_skipped', workspaceId, reason: 'no_embeddings' })
+      actions.push({
+        kind: 'skipped',
+        reason: 'no_embeddings',
+        memberRowIds: bucket.map((s) => s.rowId),
+        detail: `embedder returned ${vectors.length} vectors for ${bucket.length} inputs`,
+      })
+      continue
+    }
+    for (let i = 0; i < bucket.length; i++) {
+      embeddings.set(bucket[i].rowId, vectors[i])
+      tagsByRowId.set(bucket[i].rowId, deriveTagSet(bucket[i]))
+    }
+    embeddedBuckets.push(bucket)
   }
 
   // ── Cluster ──────────────────────────────────────────────────
-  const clusters = clusterByEmbedding(eligible, embeddings, tagsByRowId, clusterThreshold)
+  const clusters = embeddedBuckets.flatMap((bucket) =>
+    clusterByEmbedding(bucket, embeddings, tagsByRowId, clusterThreshold),
+  )
   if (clusters.length === 0) {
-    onEvent?.({ type: 'skill_umbrella_skipped', workspaceId, reason: 'no_clusters' })
-    return { workspaceId, clustersProcessed: 0, actions: [] }
+    if (embeddedBuckets.length > 0) {
+      onEvent?.({ type: 'skill_umbrella_skipped', workspaceId, reason: 'no_clusters' })
+    }
+    if (actions.length > 0) await persistDigest(digestStore, workspaceId, currentTime, actions)
+    return { workspaceId, clustersProcessed: 0, actions }
   }
 
   // Per-run cap — process the largest clusters first (those have the

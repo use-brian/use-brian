@@ -140,6 +140,7 @@ import {
   type CompanionState,
 } from "./desktop-chat.js";
 import {
+  captureSourceSnapshot,
   isTrustedCaptureOrigin,
   selectPrimaryDisplaySource,
 } from "./system-audio-policy.js";
@@ -1250,14 +1251,21 @@ function showRecorderOverlay(): void {
   // ONE app-origin page and must never become a browsing surface — no child
   // windows, no off-origin navigation.
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  win.webContents.on("will-navigate", (event, url) => {
-    if (!url.startsWith(cfg.appOrigin)) event.preventDefault();
+  win.webContents.on("will-navigate", (event) => {
+    // This recorder-only window never needs document navigation.
+    event.preventDefault();
   });
   win.once("ready-to-show", () => win.show());
   win.on("closed", () => {
     if (recorderOverlay === win) recorderOverlay = null;
   });
-  void win.webContents.loadURL(`${cfg.appUrl}/recorder-overlay`);
+  if (bundledAvailable()) {
+    // BroadcastChannel needs BOTH the same session and origin. Packaged main
+    // windows use file://, so a remote overlay cannot receive their updates.
+    void win.webContents.loadFile(BUNDLE_INDEX, { hash: "/recorder-overlay" });
+  } else {
+    void win.webContents.loadURL(`${cfg.appUrl}/recorder-overlay`);
+  }
   recorderOverlay = win;
 }
 
@@ -4199,17 +4207,18 @@ if (!gotLock) {
 
   // Screen-capture source picker: the renderer lists shareable windows and
   // points the NEXT display-media grant at the picked one (null reverts to
-  // the primary-display default). Name + id only — thumbnails stay in main.
+  // the primary-display default). The bounded thumbnail is a static chooser
+  // snapshot, not a live capture stream.
   ipcMain.handle("Use Brian:list-capture-sources", async (_event, kind: unknown) => {
     const type = kind === "screen" ? "screen" : "window";
     const sources = await desktopCapturer.getSources({
       types: [type],
-      thumbnailSize: { width: 0, height: 0 },
+      thumbnailSize: { width: 320, height: 180 },
       fetchWindowIcons: false,
     });
     return sources
       .filter((source) => source.name.trim().length > 0)
-      .map((source) => ({ id: source.id, name: source.name }));
+      .map(captureSourceSnapshot);
   });
   ipcMain.on("Use Brian:set-capture-source", (_event, id: unknown) => {
     requestedCaptureSourceId = typeof id === "string" && id.length > 0 ? id : null;
@@ -4388,6 +4397,16 @@ if (!gotLock) {
     isCurrentAccountSender(event.sender.id) && event.senderFrame === event.sender.mainFrame && typeof key === "string"
       ? removeDeploymentAccount(key)
       : { ok: false, error: "remove" });
+  for (const action of ["update-account-presentation", "move-account"] as const) {
+    ipcMain.handle(`Use Brian:${action}`, (event, key: unknown, input: unknown) => {
+      if (!isCurrentAccountSender(event.sender.id) || event.senderFrame !== event.sender.mainFrame ||
+        changingTarget || selectingAccount || connectingDeployment || removingAccount || typeof key !== "string") return { ok: false };
+      const ok = action === "move-account"
+        ? deploymentAccounts.move(key, input)
+        : deploymentAccounts.updatePresentation(key, input);
+      return ok ? { ok: true, accounts: deploymentAccounts.rows(accountTarget()) } : { ok: false };
+    });
+  }
   ipcMain.handle("Use Brian:select-cloud", async (event) => {
     const ok = isCurrentAccountSender(event.sender.id) && await useCloud();
     const pendingLink = linkNavigation.state();

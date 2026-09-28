@@ -263,6 +263,7 @@ describe('[COMP:api/telegram-byo-route] External guest connector access', () => 
       projectIds: [projectId],
     }
     expect(connectorExposureAllowed(dataTurnScope, calendarGrant)).toBe(false)
-    expect(connectorExposureAllowed(resolved, calendarGrant)).toBe(true)
+    expect(connectorExposureAllowed(resolved, calendarGrant)).toBe(false)
+    expect(connectorExposureAllowed(resolved, calendarGrant, 'fixed-operation')).toBe(true)
   })
 })

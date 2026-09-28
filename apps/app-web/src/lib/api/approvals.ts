@@ -34,6 +34,7 @@ import { authFetch } from "@/lib/auth-fetch";
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type ApprovalKind =
+  | "department_access"
   | "workflow_step"
   | "tool_invocation"
   | "question"
@@ -75,6 +76,13 @@ export type PendingApprovalRow = {
     /** Drift that voided a grant and re-gated this send (R2-2). */
     drift?: string | null;
     contractSummary?: string;
+    // Departmental review: immutable beneficiary and requested interval.
+    targetTeamName?: string;
+    beneficiaryName?: string | null;
+    beneficiaryKind?: 'member' | 'team';
+    reason?: string;
+    startsAt?: string;
+    expiresAt?: string | null;
     // email_sender: the inbound sender-access request shown in the queue
     inboxAddress?: string;
     channelIntegrationId?: string;

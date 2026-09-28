@@ -112,6 +112,7 @@ const SENSITIVITIES = new Set(['public', 'internal', 'confidential'])
 
 type SkillRouteOptions = {
   skillStore: SkillStore
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   syncNativeSlashCommands?: (userId: string, workspaceId: string) => Promise<void>
   communityRegistry?: SkillContent[]
   /**
@@ -244,6 +245,7 @@ function toMeta(s: SkillContent) {
 
 export function skillRoutes({
   skillStore,
+  decisionRuntime,
   communityRegistry = [],
   workspaceSkillStore,
   workspaceStore,
@@ -1649,6 +1651,9 @@ export function skillRoutes({
         // Derived from the WHOLE library, not just the batch: a group the
         // model should reuse may belong to a skill this pass cannot touch.
         existingGroups: existingGroupsOf(active),
+        decisionRuntime,
+        workspaceId,
+        runId: `skill-categorization-${workspaceId}-${Date.now()}`,
       })
       res.json({ suggestions, considered: candidates.length })
     } catch (err) {

@@ -8,9 +8,9 @@ import { FileSpreadsheet, FileText, Presentation, Plus } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { isOfficeStartFailed, listOfficeArtifacts, officeJobFailureKind, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
-import { useCachedResource } from "@/lib/surface-cache";
-import { officeListCacheFamily, officeListCacheKey, type OfficeListView } from "@/lib/surface-prefetch";
-import { useOfficeCacheRevalidation } from "@/lib/office/surface-cache";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
+import { officeListCacheKey, type OfficeListView } from "@/lib/surface-prefetch";
+import { useOfficeMetadataResource } from "@/lib/office/surface-cache";
 import { GridSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
@@ -26,17 +26,10 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
   const view: View = viewParam === "archived" || viewParam === "trash" || viewParam === "retained" ? viewParam : "active";
   const filter: Filter = familyParam === "document" || familyParam === "presentation" || familyParam === "spreadsheet" ? familyParam : "all";
   const base = `/w/${workspaceId}/office`;
-  // Cache-backed (instant-navigation contract N1 / N2): a revisit paints the
-  // last-known cards on the first frame and revalidates behind them, and the
-  // sidebar hover has usually already warmed this key (`warmTargetFor`).
-  // A server-supplied `initialArtifacts` (tests, SSR shells) short-circuits
-  // the cache for the active view. Office has no spine primitive, so the
-  // refresh triggers are mount and tab-visible; a user's own create / trash
-  // drops the family through `invalidateOfficeList`.
-  const seeded = Boolean(initialArtifacts) && view === "active";
-  const list = useCachedResource<OfficeArtifact[]>(seeded ? null : officeListCacheKey(workspaceId, view), () => listOfficeArtifacts(workspaceId, view));
-  useOfficeCacheRevalidation([officeListCacheFamily(workspaceId)]);
-  const artifacts: OfficeArtifact[] | null = list.data ?? initialArtifacts ?? null;
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.workspaceId === workspaceId ? workspace.me.id : '';
+  const list = useOfficeMetadataResource<OfficeArtifact[]>(viewerId ? officeListCacheKey(workspaceId, view, viewerId) : null, viewerId, () => listOfficeArtifacts(workspaceId, view), initialArtifacts);
+  const artifacts: OfficeArtifact[] | null = list.data ?? null;
   const failed = artifacts === null && list.error !== undefined;
 
   const visible = useMemo(
@@ -100,7 +93,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
                   : null;
               return (
                 <Link key={artifact.artifactId} data-office-file-card={artifact.family} href={`/w/${workspaceId}/office/${artifact.artifactId}`} className="group min-w-0 overflow-hidden rounded-xl border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.03)] transition-[border-color,box-shadow] hover:border-foreground/25 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
-                  <OfficeCardPreview artifact={artifact} />
+                  <OfficeCardPreview workspaceId={workspaceId} artifact={artifact} />
                   <div className="flex min-h-32 flex-col p-3.5">
                     <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
                       <Icon className={artifact.family === "document" ? "size-3.5 text-blue-600 dark:text-blue-400" : artifact.family === "presentation" ? "size-3.5 text-amber-600 dark:text-amber-400" : "size-3.5 text-emerald-600 dark:text-emerald-400"} aria-hidden />

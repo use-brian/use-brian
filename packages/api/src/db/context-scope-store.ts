@@ -5,6 +5,7 @@
  * [COMP:api/context-scope-store]
  */
 
+import type pg from 'pg'
 import { randomUUID } from 'node:crypto'
 import {
   canonicalScopeGrant,
@@ -145,10 +146,11 @@ export type ContextScopeStore = {
   archiveProject(userId: string, projectId: string): Promise<boolean>
 }
 
-export function createDbContextScopeStore(): ContextScopeStore {
+export function createDbContextScopeStore(transactionClient?: pg.PoolClient): ContextScopeStore {
+  const systemQuery:typeof query=transactionClient?(sql,values)=>transactionClient.query(sql,values):query
   return {
     async resolveMemberTeamPrincipalSystem(userId, workspaceId) {
-      const member = await query<{
+      const member = await systemQuery<{
         role: MemberTeamPrincipal['role']
         mode: MemberTeamPrincipal['mode']
         compartments: string[] | null
@@ -166,7 +168,7 @@ export function createDbContextScopeStore(): ContextScopeStore {
       if (row.mode === 'legacy') {
         return { role: row.role, mode: row.mode, grant: canonicalScopeGrant(row.compartments) }
       }
-      const grants = await query<GroupGrantRow>(
+      const grants = await systemQuery<GroupGrantRow>(
         `SELECT g.read_all AS "readAll",
                 g.compartment_key AS "ownCompartmentKey",
                 gcg.compartment_key AS "compartmentKey"
@@ -191,7 +193,7 @@ export function createDbContextScopeStore(): ContextScopeStore {
     },
 
     async resolveAssistantPrincipalSystem(assistantId, workspaceId) {
-      const assistant = await query<{
+      const assistant = await systemQuery<{
         teamMode: AssistantContextPrincipal['teamMode']
         compartments: string[] | null
         projectMode: AssistantContextPrincipal['projectMode']
@@ -215,7 +217,7 @@ export function createDbContextScopeStore(): ContextScopeStore {
       } else if (row.teamMode === 'legacy') {
         teamGrant = canonicalScopeGrant(row.compartments)
       } else {
-        const teamRows = await query<GroupGrantRow>(
+        const teamRows = await systemQuery<GroupGrantRow>(
           `SELECT g.read_all AS "readAll",
                   g.compartment_key AS "ownCompartmentKey",
                   gcg.compartment_key AS "compartmentKey"
@@ -237,7 +239,7 @@ export function createDbContextScopeStore(): ContextScopeStore {
 
       let projectGrant: ScopeGrant = null
       if (row.projectMode === 'assigned') {
-        const projectRows = await query<{ id: string }>(
+        const projectRows = await systemQuery<{ id: string }>(
           `SELECT p.id
              FROM assistant_project_grants apg
              JOIN workspace_projects p ON p.id = apg.project_id
@@ -257,7 +259,7 @@ export function createDbContextScopeStore(): ContextScopeStore {
     },
 
     async getTeamSystem(workspaceId, groupId) {
-      const result = await query<{
+      const result = await systemQuery<{
         id: string
         workspaceId: string
         name: string
@@ -301,7 +303,7 @@ export function createDbContextScopeStore(): ContextScopeStore {
     },
 
     async getProjectSystem(workspaceId, projectId) {
-      const result = await query<Parameters<typeof mapProject>[0]>(
+      const result = await systemQuery<Parameters<typeof mapProject>[0]>(
         `SELECT id, workspace_id AS "workspaceId", name,
                 normalized_name AS "normalizedName", description, icon, status,
                 entity_id AS "entityId", created_by AS "createdBy",
@@ -376,14 +378,15 @@ export function createDbContextScopeStore(): ContextScopeStore {
                 g.compartment_key AS "compartmentKey",
                 g.read_all AS "readAll",
                 COALESCE(array_agg(gcg.compartment_key ORDER BY gcg.compartment_key)
-                  FILTER (WHERE gcg.compartment_key IS NOT NULL), '{}') AS grants
+                  FILTER (WHERE gcg.compartment_key IS NOT NULL AND (public.effective_member_read_compartments($2,$1) IS NULL
+                    OR gcg.compartment_key=ANY(public.effective_member_read_compartments($2,$1)))), '{}') AS grants
           FROM workspace_groups g
           LEFT JOIN workspace_group_compartment_grants gcg ON gcg.group_id = g.id
           WHERE g.workspace_id = $1 AND g.kind = 'team'
             AND (
-              public.effective_member_team_compartments($2, $1) IS NULL
+              public.effective_member_read_compartments($2, $1) IS NULL
               OR ARRAY[g.compartment_key]::text[] <@
-                 public.effective_member_team_compartments($2, $1)
+                 public.effective_member_read_compartments($2, $1)
             )
           GROUP BY g.id
           ORDER BY g.status, g.name`,
@@ -550,9 +553,9 @@ export function createDbContextScopeStore(): ContextScopeStore {
     },
 
     async setAssistantContext(userId, assistantId, input) {
-      const client = await getAppPool().connect()
+      const client = transactionClient ?? await getAppPool().connect()
       try {
-        await client.query('BEGIN')
+        if (!transactionClient) await client.query('BEGIN')
         await applyRLSGucs(client, userId)
         await client.query(
           'DELETE FROM workspace_group_assistants WHERE assistant_id = $1',
@@ -583,7 +586,8 @@ export function createDbContextScopeStore(): ContextScopeStore {
               SET team_scope_mode = $2,
                   default_workspace_group_id = $3,
                   project_scope_mode = $4,
-                  default_project_id = $5
+                  default_project_id = $5,
+                  context_binding_origin = 'explicit'
             WHERE id = $1
             RETURNING id`,
           [
@@ -595,9 +599,9 @@ export function createDbContextScopeStore(): ContextScopeStore {
           ],
         )
         if (!updated.rows[0]) throw new Error('assistant_not_found')
-        await client.query('COMMIT')
+        if (!transactionClient) await client.query('COMMIT')
       } finally {
-        await rollbackAndRelease(client)
+        if (!transactionClient) await rollbackAndRelease(client)
       }
     },
 

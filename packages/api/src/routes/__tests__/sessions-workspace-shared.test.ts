@@ -40,6 +40,11 @@ let membership: { clearance: 'public' | 'internal' | 'confidential' } | null = {
 
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceMembershipWithClearanceSystem: vi.fn(async () => membership),
+  getWorkspaceMembershipWithReadScopeSystem: vi.fn(async () => ({
+    ...membership,
+    compartments: null,
+    projectIds: null,
+  })),
   getWorkspaceRoleSystem: vi.fn(async () => 'member'),
 }))
 

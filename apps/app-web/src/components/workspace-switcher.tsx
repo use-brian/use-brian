@@ -136,6 +136,7 @@ export function WorkspaceSwitcher() {
   const [creating, setCreating] = useState(false);
   // In-doc settings modal (ported from apps/web — opens here, no redirect).
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsMemberTarget,setSettingsMemberTarget]=useState<OpenSettingsDetail['memberTarget']>();
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("ws-general");
   // Multi-account state. `accountsDir` lists every account signed in on this
@@ -173,6 +174,7 @@ export function WorkspaceSwitcher() {
     activeAccountId ? acct.id === activeAccountId : acct.email === user?.email;
 
   function openSettings(section: SettingsSection) {
+    setSettingsMemberTarget(undefined);
     setOpen(false);
     // The modal covers the page, but the drawer it was launched from would
     // still be open behind it when the modal closes (responsive contract M7).
@@ -184,11 +186,13 @@ export function WorkspaceSwitcher() {
   // Open the settings modal when another surface asks for it (e.g. the sidebar
   // theme picker's "edit" pencil → "preferences"). This component owns the modal
   // state; the requester dispatches `OPEN_SETTINGS_EVENT` (see settings-modal).
-  // Only setState setters run here, so an empty dep list is correct.
   useEffect(() => {
     function onOpenSettings(e: Event) {
-      const section = (e as CustomEvent<OpenSettingsDetail>).detail?.section;
+      const detail=(e as CustomEvent<OpenSettingsDetail>).detail;
+      const section = detail?.section;
       if (!section) return;
+      if(detail.memberTarget&&detail.memberTarget.workspaceId!==ctx.workspaceId)return;
+      setSettingsMemberTarget(section==='ws-members'?detail.memberTarget:undefined);
       setOpen(false);
       requestSidebarClose();
       setSettingsSection(section);
@@ -196,7 +200,7 @@ export function WorkspaceSwitcher() {
     }
     window.addEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
     return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
-  }, []);
+  }, [ctx.workspaceId]);
 
   // Keep both the active trigger (through WorkspaceContextProvider) and the
   // shared popover list current after an upload/remove/reroll.
@@ -691,6 +695,7 @@ export function WorkspaceSwitcher() {
     <SettingsModal
       open={settingsOpen}
       initialSection={settingsSection}
+      initialMemberTarget={settingsMemberTarget?.workspaceId===ctx.workspaceId?settingsMemberTarget:undefined}
       onClose={() => setSettingsOpen(false)}
     />
     </>

@@ -18,10 +18,11 @@
  * [COMP:app-web/feed-post-media-tray]
  */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ImagePlus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
+import { useDocMediaSrc } from "@/lib/use-doc-media";
 import { usePostMedia } from "@/lib/use-post-media";
 import { useFileDrop } from "@/lib/use-file-drop";
 import {
@@ -36,26 +37,17 @@ import type { FeedPlatform } from "@/lib/feed-nav";
 
 function Thumb({
   media,
-  resolve,
+  workspaceId,
   onRemove,
   readOnly,
 }: {
   media: PostMedia;
-  resolve: (fileId: string) => Promise<string | null>;
+  workspaceId: string;
   onRemove: () => void;
   readOnly: boolean;
 }) {
   const tm = useT().feedPage.postEditor;
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void resolve(media.fileId).then((url) => {
-      if (!cancelled) setSrc(url);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [media.fileId, resolve]);
+  const src = useDocMediaSrc(workspaceId, media.fileId);
 
   return (
     <div className="group/thumb relative size-16 overflow-hidden rounded-lg border border-border/60 bg-muted">
@@ -99,7 +91,7 @@ export function PostMediaTray({
 }) {
   const tm = useT().feedPage.postEditor;
   const workspace = useFeedWorkspace();
-  const { upload, resolve, uploading } = usePostMedia(workspaceId);
+  const { upload, uploading } = usePostMedia(workspaceId);
   // D34. The platform supporting media and THIS connection carrying the grant
   // are different questions, and only X makes them diverge.
   const connection = workspace.profiles.find((p) => p.platform === platform);
@@ -144,7 +136,7 @@ export function PostMediaTray({
           <Thumb
             key={item.fileId}
             media={item}
-            resolve={resolve}
+            workspaceId={workspaceId}
             readOnly={readOnly}
             onRemove={() => onChange(media.filter((_, k) => k !== i))}
           />

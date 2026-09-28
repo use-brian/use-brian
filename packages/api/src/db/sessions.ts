@@ -1,5 +1,12 @@
 import type pg from 'pg'
-import { query } from './client.js'
+import {
+  bindScopeSource,
+  type DerivedWriteEvidence,
+  type ResourceScope,
+  type ScopeSource,
+} from '@use-brian/core'
+import { getPool, query } from './client.js'
+import { recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 /**
@@ -90,6 +97,8 @@ export type Session = {
   contextProjectId: string | null
   contextCompartments: string[]
   contextLockedAt: Date | null
+  contextBindingOrigin?: 'legacy' | 'explicit' | 'reviewed' | 'held'
+  classificationMode?: 'legacy' | 'review' | 'strict'
   createdAt: Date
   lastActiveAt: Date
 }
@@ -127,6 +136,34 @@ export type SessionMessage = {
    * everything else.
    */
   attachments: SessionMessageAttachment[]
+}
+
+type ScopedSessionMessageRow = SessionMessage & {
+  scopeWorkspaceId: string | null
+  scopeUserId: string | null
+  scopeAssistantId: string | null
+  scopeSensitivity: ResourceScope['sensitivity'] | null
+  scopeCompartments: string[] | null
+  scopeProjectIds: string[] | null
+  scopeVersion: string | null
+  scopeHeld: boolean | null
+}
+
+function bindStoredMessageScope(row: ScopedSessionMessageRow): SessionMessage {
+  const {
+    scopeWorkspaceId, scopeUserId, scopeAssistantId, scopeSensitivity,
+    scopeCompartments, scopeProjectIds, scopeVersion, scopeHeld, ...message
+  } = row
+  if (scopeWorkspaceId && scopeAssistantId && scopeSensitivity && scopeCompartments
+    && scopeProjectIds && scopeVersion && scopeHeld === false) {
+    return bindScopeSource(message, {
+      workspaceId: scopeWorkspaceId, userId: scopeUserId, assistantId: scopeAssistantId,
+      sensitivity: scopeSensitivity, compartments: scopeCompartments,
+      projectIds: scopeProjectIds, resourceKind: 'session_message',
+      resourceId: message.id, version: scopeVersion,
+    })
+  }
+  return message
 }
 
 /** One outbound attachment — mirrors `OutboundAttachment` in @use-brian/core. */
@@ -402,6 +439,9 @@ export async function findSessionByChannel(params: {
             context_project_id as "contextProjectId",
             context_compartments as "contextCompartments",
             context_locked_at as "contextLockedAt",
+            context_binding_origin as "contextBindingOrigin",
+            coalesce((SELECT classification_mode FROM workspace_access_policies
+              WHERE workspace_id=(SELECT workspace_id FROM assistants WHERE id=sessions.assistant_id)),'legacy') as "classificationMode",
             created_at as "createdAt", last_active_at as "lastActiveAt"
      FROM sessions
      WHERE assistant_id = $1 AND user_id = $2 AND channel_type = $3
@@ -544,6 +584,23 @@ export async function findSessionById(id: string): Promise<Session | null> {
   // sweep predicate back onto `last_active_at`.
   await query(`UPDATE sessions SET last_active_at = now() WHERE id = $1`, [id])
   return result.rows[0]
+}
+
+/** Read-only session identity/binding snapshot for per-boundary authority renewal. */
+export async function findSessionAuthorityById(id: string): Promise<Pick<Session,
+  'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
+> | null> {
+  const result = await query<Pick<Session,
+    'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
+  >>(
+    `SELECT id, assistant_id as "assistantId", user_id as "userId",
+            context_group_id as "contextGroupId",
+            context_project_id as "contextProjectId",
+            context_locked_at as "contextLockedAt"
+       FROM sessions WHERE id = $1`,
+    [id],
+  )
+  return result.rows[0] ?? null
 }
 
 /**
@@ -986,7 +1043,7 @@ export async function getSessionMessages(
   const limitClause = opts?.limit ? `LIMIT $${paramIdx}` : ''
   if (opts?.limit) values.push(opts.limit)
 
-  const result = await query<SessionMessage>(
+  const result = await query<ScopedSessionMessageRow>(
     `SELECT id, session_id as "sessionId", role, content,
             sequence_num as "sequenceNum", created_at as "createdAt",
             reply_to_text as "replyToText",
@@ -995,13 +1052,45 @@ export async function getSessionMessages(
             channel_message_id as "channelMessageId",
             sender_user_id as "senderUserId",
             sender_assistant_id as "senderAssistantId",
-            attachments
+            attachments,
+            workspace_id as "scopeWorkspaceId",
+            user_id as "scopeUserId",
+            assistant_id as "scopeAssistantId",
+            sensitivity as "scopeSensitivity",
+            compartments as "scopeCompartments",
+            project_ids as "scopeProjectIds",
+            scope_version::text as "scopeVersion",
+            scope_held as "scopeHeld"
      FROM session_messages WHERE ${conditions.join(' AND ')}
      ORDER BY sequence_num ASC ${limitClause}`,
     values,
   )
 
-  return result.rows
+  return result.rows.map(bindStoredMessageScope)
+}
+
+/** Recent canonical transcript window for background procedural review. */
+export async function getRecentSessionMessages(
+  sessionId: string,
+  limit: number,
+): Promise<SessionMessage[]> {
+  const result = await query<ScopedSessionMessageRow>(
+    `SELECT * FROM (
+       SELECT id,session_id AS "sessionId",role,content,sequence_num AS "sequenceNum",
+              created_at AS "createdAt",reply_to_text AS "replyToText",
+              topic_label AS "topicLabel",topic_confidence AS "topicConfidence",
+              channel_message_id AS "channelMessageId",sender_user_id AS "senderUserId",
+              sender_assistant_id AS "senderAssistantId",attachments,
+              workspace_id AS "scopeWorkspaceId",user_id AS "scopeUserId",
+              assistant_id AS "scopeAssistantId",sensitivity AS "scopeSensitivity",
+              compartments AS "scopeCompartments",project_ids AS "scopeProjectIds",
+              scope_version::text AS "scopeVersion",scope_held AS "scopeHeld"
+         FROM session_messages WHERE session_id=$1
+         ORDER BY sequence_num DESC LIMIT $2
+     ) recent ORDER BY "sequenceNum" ASC`,
+    [sessionId, limit],
+  )
+  return result.rows.map(bindStoredMessageScope)
 }
 
 /** One stored message, by id. */
@@ -1273,14 +1362,23 @@ export async function addSessionMessage(params: {
   senderAssistantId?: string | null
   /** Outbound file attachments (assistant rows only — `sendFile`, migration 273). */
   attachments?: SessionMessageAttachment[]
+  /** Canonical input envelope. Required for new workspace input rows. */
+  scope?: ResourceScope
+  /** Complete trusted inputs for model/tool-derived rows. */
+  derivation?: DerivedWriteEvidence
 }, client?: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> {
+  if (params.scope && params.derivation) {
+    throw new Error('session_message_scope_conflict')
+  }
   const sql =
     `INSERT INTO session_messages
        (session_id, role, content, sequence_num,
-        reply_to_text, topic_label, topic_confidence, channel_message_id, sender_user_id, sender_assistant_id, attachments)
+        reply_to_text, topic_label, topic_confidence, channel_message_id, sender_user_id, sender_assistant_id, attachments,
+        workspace_id, user_id, assistant_id, sensitivity, compartments, project_ids, scope_version, scope_held)
      VALUES ($1, $2, $3,
        COALESCE((SELECT MAX(sequence_num) FROM session_messages WHERE session_id = $1), 0) + 1,
-       $4, $5, $6, $7, $8, $9, $10
+       $4, $5, $6, $7, $8, $9, $10,
+       $11, $12, $13, $14, $15, $16, $17, $18
      )
      RETURNING id, session_id as "sessionId", role, content,
                sequence_num as "sequenceNum", created_at as "createdAt",
@@ -1291,7 +1389,12 @@ export async function addSessionMessage(params: {
                sender_user_id as "senderUserId",
                sender_assistant_id as "senderAssistantId",
                attachments`
-  const values = [
+
+  const write = async (db: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> => {
+    const scope = params.derivation
+      ? await validateDerivedMemoryInputs(db, params.derivation)
+      : params.scope
+    const values = [
       params.sessionId,
       params.role,
       JSON.stringify(params.content),
@@ -1302,12 +1405,68 @@ export async function addSessionMessage(params: {
       params.senderUserId ?? null,
       params.senderAssistantId ?? null,
       JSON.stringify(params.attachments ?? []),
+      scope?.workspaceId ?? null,
+      scope?.userId ?? null,
+      scope?.assistantId ?? null,
+      scope?.sensitivity ?? null,
+      scope?.compartments ?? null,
+      scope?.projectIds ?? null,
+      scope ? 1 : null,
+      scope ? false : null,
     ]
-  const result = client
-    ? await client.query<SessionMessage>(sql, values)
-    : await query<SessionMessage>(sql, values)
+    const result = await db.query<SessionMessage>(sql, values)
+    const stored = result.rows[0]
+    if (!scope) return stored
+    const source: ScopeSource = {
+      ...scope,
+      resourceKind: 'session_message',
+      resourceId: stored.id,
+      version: '1',
+    }
+    if (params.derivation) {
+      await recordDerivedResource(db, params.derivation, source)
+    }
+    return bindScopeSource(stored, source)
+  }
 
-  return result.rows[0]
+  if (client) return write(client)
+  // Legacy/non-workspace callers need no multi-statement transaction. Keep
+  // the existing one-query path for those surfaces and their lightweight
+  // store tests; canonical scoped rows use the transaction below.
+  if (!params.scope && !params.derivation) {
+    // The shared query wrapper implements the text/values overload used by
+    // this legacy single statement; pg's stream overload makes the structural
+    // type wider than the wrapper even though this call shape is identical.
+    return write({ query } as unknown as Pick<pg.ClientBase, 'query'>)
+  }
+  const tx = await getPool().connect()
+  try {
+    await tx.query('BEGIN')
+    const stored = await write(tx)
+    await tx.query('COMMIT')
+    return stored
+  } catch (error) {
+    await tx.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    tx.release()
+  }
+}
+
+/** Trusted source lookup for a persisted workspace message. */
+export async function readSessionMessageScopeSource(
+  workspaceId: string | null | undefined,
+  messageId: string,
+  client?: Pick<pg.ClientBase, 'query'>,
+): Promise<ScopeSource | null> {
+  if (!workspaceId) return null
+  const db = client ?? { query }
+  const result = await db.query<{ source: ScopeSource | null }>(
+    `SELECT read_scope_source($1,'session_message',$2) AS source`,
+    [workspaceId, messageId],
+  )
+  const source = result.rows[0]?.source as (ScopeSource & { held?: boolean }) | null | undefined
+  return source && source.held !== true ? source : null
 }
 
 /**

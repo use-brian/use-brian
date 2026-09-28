@@ -16,7 +16,7 @@
  * [COMP:goals/work-tools]
  */
 import { z } from 'zod'
-import { buildTool, EventSubscriptionSchema, notFoundFailure, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@use-brian/core'
+import { buildTool, EventSubscriptionSchema, notFoundFailure, pinToolAuthoringAuthority, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@use-brian/core'
 import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
 import { goalAcceptedMeta } from './acknowledgement.js'
 
@@ -121,7 +121,11 @@ export function createGoalWorkTools(
           }
         }
       }
-      const goal = await updateGoalSystem(input.goal_id, { confirm: true, outcome: input.outcome })
+      const goal = await updateGoalSystem(input.goal_id, {
+        confirm: true,
+        outcome: input.outcome,
+        authoringAuthority: existing.authoringAuthority ?? pinToolAuthoringAuthority(context),
+      })
       if (!goal) return goalNotFound(input.goal_id, 'The goal was not confirmed and its outcome was not changed.')
       return {
         data: `Confirmed goal [${goal.id}]: ${goal.outcome}. Spin it up with workTask to have me work the task to done.`,

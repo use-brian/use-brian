@@ -6,13 +6,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { SettingsModal, type SettingsSection } from "../settings-modal";
+import type { SettingsMemberTarget } from '@/lib/workspace-settings-events';
+import { resetSurfaceCache } from '@/lib/surface-cache';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const navigation = vi.hoisted(() => ({ push: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => navigation }));
+
+const edition = vi.hoisted(() => ({ teammateManagement: true }));
+
 vi.mock("@/lib/edition", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/edition")>(),
-  isOssEdition: () => false,
-  deploymentCapabilities: () => ({ teammateManagement: true, billing: true }),
+  isOssEdition: () => !edition.teammateManagement,
+  deploymentCapabilities: () => ({ teammateManagement: edition.teammateManagement, billing: edition.teammateManagement }),
 }));
 vi.mock("@/lib/workspace-context", () => ({
   useWorkspaceContext: () => ({ workspaceId: "workspace-1" }),
@@ -26,7 +33,10 @@ vi.mock("@/lib/auth-fetch", () => ({
     ok: true,
     json: async () => url.endsWith("/invitations")
       ? { invitations: [] }
-      : { id: "workspace-1", name: "Example workspace", role: "owner", members: [] },
+      : { id: "workspace-1", name: "Example workspace", role: "owner", members: [
+        {userId:'user-1',userName:'Riley',role:'owner',email:'riley@example.com'},
+        {userId:'user-2',userName:'Casey',role:'member',email:'casey@example.com'},
+      ] },
   })),
 }));
 // Other sections do not participate in invitation loading or navigation.
@@ -46,7 +56,10 @@ let host: HTMLDivElement;
 const onClose = vi.fn();
 
 beforeEach(() => {
+  edition.teammateManagement = true;
+  resetSurfaceCache();
   onClose.mockClear();
+  navigation.push.mockClear();
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -57,12 +70,12 @@ afterEach(async () => {
   host.remove();
 });
 
-async function render(open = true, initialSection: SettingsSection = "ws-members") {
+async function render(open = true, initialSection: SettingsSection = "profile", initialMemberTarget?:SettingsMemberTarget) {
   await act(async () => root.render(
     <I18nProvider locale="en" dict={en}>
       {/* jsdom does not build Tailwind; supply its base phone visibility rule. */}
       <style>{".hidden { display: none; }"}</style>
-      <SettingsModal open={open} initialSection={initialSection} onClose={onClose} />
+      <SettingsModal open={open} initialSection={initialSection} initialMemberTarget={initialMemberTarget} onClose={onClose} />
     </I18nProvider>,
   ));
 }
@@ -85,16 +98,31 @@ async function choose(label: string) {
   const option = [...document.querySelectorAll<HTMLElement>("[role=option]")]
     .find((node) => node.textContent === label);
   expect(option).toBeDefined();
+  // The real Select commits only a highlighted mouse option. Model the hover
+  // before the click instead of invoking an incomplete programmatic gesture.
+  await act(async () => option!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })));
   await act(async () => option!.click());
 }
 
 describe("[COMP:app-web/settings-modal] mobile section navigation", () => {
-  it("shows the invite form immediately when opened at Members", async () => {
-    await render(false);
-    await render();
-    expectVisible(document.querySelector(`textarea[placeholder="${en.workspaceDetailInline.inviteEmailsPlaceholder}"]`));
-    expect(picker().textContent).toContain(en.chrome.settingsModal.workspace.members);
-    expect(picker().getAttribute("aria-expanded")).toBe("false");
+  it.each([
+    ['ws-organization', '/w/workspace-1/organization'],
+    ['ws-teams', '/w/workspace-1/organization?section=departments'],
+    ['ws-access', '/w/workspace-1/organization?section=access'],
+    ['ws-members', '/w/workspace-1/organization?section=people'],
+  ] as const)('redirects %s to its single Organization home', async (section, href) => {
+    await render(true, section); expect(navigation.push).toHaveBeenCalledWith(href); expect(onClose).toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+  it('preserves a selected person only within the originating workspace', async () => {
+    await render(true, 'ws-members', {workspaceId:'workspace-1', memberId:'user-2'});
+    expect(navigation.push).toHaveBeenLastCalledWith('/w/workspace-1/organization?section=people&member=user-2');
+    await render(true, 'ws-members', {workspaceId:'another-workspace', memberId:'user-2'});
+    expect(navigation.push).toHaveBeenLastCalledWith('/w/workspace-1/organization');
+  });
+  it('opens Organization from the compact Settings picker', async () => {
+    await render(); await choose(en.organization.title);
+    expect(navigation.push).toHaveBeenCalledWith('/w/workspace-1/organization'); expect(onClose).toHaveBeenCalled();
   });
 
   it("switches sections through the compact picker and resets on reopening", async () => {
@@ -106,8 +134,8 @@ describe("[COMP:app-web/settings-modal] mobile section navigation", () => {
     expect(onClose).not.toHaveBeenCalled();
     await render(false);
     await render();
-    expectVisible(document.querySelector("textarea"));
-    expect(picker().textContent).toContain(en.chrome.settingsModal.workspace.members);
+    expectVisible(document.querySelector("h2"));
+    expect(picker().textContent).toContain(en.chrome.settingsModal.account.profile);
   });
 
   it("dismisses the open picker with Escape before closing settings", async () => {

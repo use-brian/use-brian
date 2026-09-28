@@ -32,6 +32,7 @@ import {
 } from '../approval.js'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 import type { WorkspaceAuditStore } from '../../db/workspace-audit-store.js'
+import { createAuthorityLease, executeWithCurrentAuthority, runWithAuthorityLease } from '../../context-scope/authority-lease.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
 const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
@@ -334,6 +335,50 @@ function askPolicyTool(name: string, capture?: (i: unknown) => void): Tool {
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
+  it.each(['before','during','terminal','prompt'] as const)('refuses an approved operation when authority changes at %s execution', async timing => {
+    const stores=makeStores(),approvals=fakeApprovalsStore()
+    let revoked=false
+    const execute=vi.fn(()=>{if(timing==='during')revoked=true;return {data:'private result',isError:false}})
+    const tool=askPolicyTool('gmailSendMessage',execute)
+    const deliveries=vi.fn(async()=>{})
+    if(timing==='prompt'){
+      const create=approvals.create.bind(approvals)
+      approvals.create=async params=>{const row=await create(params);revoked=true;return row}
+    }
+    const executorDeps:ExecutorDeps={workflowStore:stores.workflowStore,runStore:stores.runStore,
+      consultTransport:FAKE_TRANSPORT,resolvePrimary:async()=>PRIMARY_ASSISTANT_ID,
+      buildToolRegistry:async()=>new Map([[tool.name,tool]]),
+      resolveRunScope:async()=>{
+        if(revoked)throw Object.assign(new Error('Review permissions and start a new run.'),{reason:'workflow_authority_unavailable'})
+        const ceiling={workspaceId:WORKSPACE_ID,userId:USER_ID,clearance:'internal' as const,compartments:[],mutationCompartments:[],projectIds:[],visibilityAssistantIds:null}
+        const lease=createAuthorityLease(ceiling,async()=>revoked?null:ceiling)
+        return {assistantClearance:'internal',turnScope:{
+          access:{workspaceId:WORKSPACE_ID,userId:USER_ID,assistantId:PRIMARY_ASSISTANT_ID,assistantKind:'primary',clearance:'internal',compartments:[],projectIds:[]},
+          activeGroupId:null,activeProjectId:null,effectiveCompartments:[],effectiveProjectIds:[],writeCompartments:[],writeProjectIds:[],
+        },executeWithAuthority:<T>(operation:()=>Promise<T>)=>runWithAuthorityLease(lease,()=>executeWithCurrentAuthority(operation))}
+      }}
+    const bridge:ApprovalBridgeDeps={approvalsStore:approvals,auditStore:fakeAuditStore(),workflowStore:stores.workflowStore,
+      runStore:stores.runStore,buildToolRegistry:executorDeps.buildToolRegistry,resolvePrimary:executorDeps.resolvePrimary,
+      deliveries,executorDeps}
+    executorDeps.requestApproval=makeRequestApproval(bridge)
+    const workflow=await stores.workflowStore.create({userId:USER_ID,workspaceId:WORKSPACE_ID,name:'Review fixture',definition:{
+      startStepId:'send',steps:[{id:'send',type:'tool_call',toolName:tool.name,arguments:{to:'recipient@example.com',body:'Fixture'},approval:{deliveryChannel:'web'}}],
+    }})
+    const run=await stores.runStore.createRun({workflowId:workflow.id,workspaceId:WORKSPACE_ID,triggeredBy:USER_ID,triggerKind:'manual'})
+    expect((await advanceWorkflowRun(executorDeps,run.id)).kind).toBe(timing==='prompt'?'failed':'paused')
+    if(timing==='prompt'){
+      expect(deliveries).not.toHaveBeenCalled()
+      revoked=false // Restoring access cannot revive the failed run via its card.
+    }
+    if(timing==='terminal')await stores.runStore.updateRun(run.id,{status:'failed'})
+    if(timing==='before')revoked=true
+    const outcome=await resumeFromApproval(bridge,approvals.rows[0].id,'approved',USER_ID)
+    expect(outcome.status).toBe('failed')
+    expect(execute).toHaveBeenCalledTimes(timing==='during'?1:0)
+    expect(stores.runs.get(run.id)?.status).toBe('failed')
+    expect(JSON.stringify(stores.stepRuns)).not.toContain('private result')
+    if(timing==='during')expect(stores.runs.get(run.id)?.error).toMatchObject({reason:'authority_changed'})
+  })
   it.each([
     { requested: 'telegram' as const, target: null, concrete: 'telegram' },
     { requested: 'recent' as const, target: null, concrete: 'web' },

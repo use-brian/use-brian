@@ -308,7 +308,7 @@ export function createFileTools(
     requiresConfirmation: true,
     resolveConfirmation: confirm('fileAppend'),
     description:
-      'Append content to an existing workspace file. Useful for journal-style logs and incremental writes. The append is read-modify-write; concurrent appends are best-effort. Returns the file with its new size.',
+      'Append content to an existing workspace file. Useful for journal-style logs and incremental writes. The append publishes a new version at the same path and returns its new ID and size. Concurrent edits return a conflict: read the current file before a new attempt. If publication is uncertain, inspect the file before retrying.',
     inputSchema: z.object({
       file: idOrPathShape.describe('UUID or absolute workspace path of the file.'),
       content: z.string().describe('Content to append. Caller should include any newline separators.'),

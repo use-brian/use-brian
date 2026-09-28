@@ -97,6 +97,7 @@ export type CrmOperationsActor = z.infer<typeof CrmOperationsActorSchema>
 /** Trusted native adapter ceiling, never command input. */
 export const CrmNativeDeliveryAuthoritySchema = z.object({
   assistantId: CrmOperationsUuidSchema,
+  mutationCompartments: z.array(z.string()).max(1000).nullable().default([]),
   compartments: z.array(z.string()).max(1000).nullable(),
   projectIds: z.array(CrmOperationsUuidSchema).max(1000).nullable(),
 }).strict()

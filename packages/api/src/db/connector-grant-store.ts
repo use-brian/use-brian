@@ -303,7 +303,7 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
       const result = await queryWithRLS(
         actingUserId,
         `UPDATE connector_grant
-            SET compartments = $2, project_ids = $3
+            SET compartments = $2, project_ids = $3, context_binding_origin = 'explicit'
           WHERE id = $1`,
         [grantId, compartments, projectIds],
       )

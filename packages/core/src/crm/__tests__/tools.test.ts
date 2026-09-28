@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { SensitivityAccumulator } from '../../security/sensitivity.js'
 import { createCrmTools, type CrmToolEvent } from '../tools.js'
 import type {
   CompanyRecord, ContactRecord, CrmStore, DealRecord, DealStage,
@@ -264,6 +265,45 @@ const ctx = {
 const ctxNoWorkspace = { ...ctx, workspaceId: null }
 
 // ────────────────────────────────────────────────────────────────────
+
+describe('[COMP:tools/crm-contacts] departmental mutation context',()=>{
+  it.each(['contact','company','deal'] as const)('explains a %s scope refusal without suggesting a bypass or emitting success',async kind=>{
+    const store=makeFakeStore(),events:CrmToolEvent[]=[]
+    const deny=vi.fn(async()=>{throw Object.assign(new Error('Scope refused'),{code:'scope_operation_denied'})})
+    if(kind==='contact') store.createContact=deny
+    if(kind==='company') store.createCompany=deny
+    if(kind==='deal') store.createDeal=deny
+    const tools=createCrmTools(store,{onEvent:event=>events.push(event)})
+    const result=kind==='contact'?await tools.saveContact.execute({name:'Fixture person'},ctx)
+      :kind==='company'?await tools.saveCompany.execute({name:'Fixture company'},ctx)
+      :await tools.saveDeal.execute({company_id:WS_A},ctx)
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('unavailable for this operation under current access')
+    expect(result.data).toContain('Do not change the workspace or omit the relationship')
+    expect(events).toEqual([])
+  })
+
+  it('keeps read-only reach distinct in contact, company and deal creation contexts',async()=>{
+    const store=makeFakeStore(),tools=createCrmTools(store)
+    const company=await store.createCompany({userId:ctx.userId,workspaceId:WS_A,name:'Fixture company'})
+    const createCompany=vi.spyOn(store,'createCompany'),createContact=vi.spyOn(store,'createContact'),createDeal=vi.spyOn(store,'createDeal')
+    const readOnly={...ctx,compartments:['product'],mutationCompartments:[]}
+    await tools.saveContact.execute({name:'Fixture person'},readOnly)
+    await tools.saveCompany.execute({name:'Another fixture company'},readOnly)
+    await tools.saveDeal.execute({company_id:company.id},readOnly)
+    for(const spy of [createCompany,createContact,createDeal]) expect(spy.mock.calls[0][0]).toMatchObject({access:{compartments:['product'],mutationCompartments:[]}})
+  })
+
+  it('passes accumulated sensitivity as a floor with the independent company mutation context',async()=>{
+    const store=makeFakeStore(),tools=createCrmTools(store)
+    const company=await store.createCompany({userId:ctx.userId,workspaceId:WS_A,name:'Fixture company'})
+    const update=vi.spyOn(store,'updateCompany'),sensitivity=new SensitivityAccumulator()
+    sensitivity.note('confidential')
+    await tools.updateCompany.execute({id:company.id,name:'Revised fixture'}, {...ctx,compartments:['product'],mutationCompartments:['product'],sensitivity})
+    expect(update.mock.calls[0][3]).toMatchObject({compartments:['product'],mutationCompartments:['product']})
+    expect(update.mock.calls[0][4]).toMatchObject({sensitivity:'confidential'})
+  })
+})
 
 describe('[COMP:tools/crm-contacts] saveContact / getContact / listContacts / updateContact', () => {
   it('saveContact creates a contact and emits contact_created', async () => {

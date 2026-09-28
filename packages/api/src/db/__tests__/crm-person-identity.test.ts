@@ -17,15 +17,15 @@ const identity = vi.hoisted(() => ({
   resolveCrmPersonIdentity: vi.fn(),
 }))
 
+const transactionClient = vi.hoisted(() => ({ query: vi.fn(async () => ({ rows: [], rowCount: 0 })), release: vi.fn() }))
 vi.mock('../entities-store.js', () => entities)
 vi.mock('../crm-identity-store.js', () => identity)
 vi.mock('../client.js', () => ({
+  getAppPool: vi.fn(() => ({ connect: async () => transactionClient })),
+  applyRLSGucs: vi.fn(),
   query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
   queryGated: vi.fn(async () => ({ rows: [], rowCount: 0 })),
   queryWithRLS: vi.fn(async () => ({ rows: [], rowCount: 0 })),
-}))
-vi.mock('../access-predicate.js', () => ({
-  buildAccessPredicate: vi.fn(() => ({ sql: 'TRUE', params: [], nextIdx: 1 })),
 }))
 vi.mock('../authorship-guard.js', () => ({ assertAuthorshipPresent: vi.fn() }))
 vi.mock('../edge-hooks.js', () => ({
@@ -79,7 +79,7 @@ const BASE = {
 
 describe('[COMP:crm/person-write-identity] createContact', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
+    vi.resetAllMocks()
     let next = 0
     entities.createEntity.mockImplementation(async (input: { displayName: string; canonicalId?: string | null }) => (
       person(`00000000-0000-4000-8000-${String(++next).padStart(12, '0')}`, input.displayName, input.canonicalId ?? null)
@@ -117,7 +117,7 @@ describe('[COMP:crm/person-write-identity] createContact', () => {
       status: 'resolved',
       binding: { entityId: existing.id },
     })
-    entities.getEntityByIdSystem.mockResolvedValue(existing)
+    entities.updateEntity.mockResolvedValue(existing)
 
     const result = await createContact('00000000-0000-4000-8000-000000000002', {
       ...BASE,
@@ -126,10 +126,11 @@ describe('[COMP:crm/person-write-identity] createContact', () => {
 
     expect(result.id).toBe(existing.id)
     expect(entities.createEntity).not.toHaveBeenCalled()
-    expect(identity.resolveCrmPersonIdentity).toHaveBeenCalledWith(BASE.workspaceId, STABLE)
+    expect(identity.resolveCrmPersonIdentity).toHaveBeenCalledWith(BASE.workspaceId, STABLE, transactionClient)
   })
 
   it('returns ambiguity and writes nothing for a conflicting stable binding', async () => {
+    entities.updateEntity.mockImplementation(async (_actor, id) => person(id, 'Visible fixture'))
     identity.resolveCrmPersonIdentity.mockResolvedValue({
       status: 'conflict',
       entityIds: ['00000000-0000-4000-8000-000000000090', '00000000-0000-4000-8000-000000000091'],
@@ -143,20 +144,30 @@ describe('[COMP:crm/person-write-identity] createContact', () => {
     expect(identity.bindImportedCrmIdentity).not.toHaveBeenCalled()
   })
 
-  it('never falls back to weak identity when a binding read fails', async () => {
+  it('rolls back a failed binding lookup instead of creating an unbound duplicate', async () => {
     identity.resolveCrmPersonIdentity.mockRejectedValue(new Error('binding store unavailable'))
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(createContact('00000000-0000-4000-8000-000000000002', { ...BASE, stableIdentity: STABLE }))
+      .rejects.toThrow('binding store unavailable')
+    expect(entities.createEntity).not.toHaveBeenCalled()
+    expect(transactionClient.query).toHaveBeenCalledWith('ROLLBACK')
+    expect(transactionClient.query).not.toHaveBeenCalledWith('COMMIT')
+  })
 
-    const result = await createContact('00000000-0000-4000-8000-000000000002', {
-      ...BASE,
-      stableIdentity: STABLE,
-    })
+  it('does not expose an inaccessible stable identity candidate',async()=>{
+    identity.resolveCrmPersonIdentity.mockResolvedValue({status:'conflict',entityIds:['hidden-id']})
+    entities.updateEntity.mockResolvedValue(null)
+    const result=await createContact('00000000-0000-4000-8000-000000000002',{...BASE,stableIdentity:STABLE}).catch(error=>error)
+    expect(result).toMatchObject({code:'scope_operation_denied'})
+    expect(result.entityIds).toBeUndefined()
+    expect(entities.createEntity).not.toHaveBeenCalled()
+    expect(transactionClient.query).toHaveBeenCalledWith('ROLLBACK')
+  })
 
-    expect(result.id).toBe('00000000-0000-4000-8000-000000000001')
-    expect(entities.createEntity).toHaveBeenCalledOnce()
-    expect(error).toHaveBeenCalledWith(
-      '[crm] stable person identity lookup unavailable; creating a distinct record',
-    )
-    error.mockRestore()
+  it('rolls back a binding race instead of retiring the fresh row towards a hidden id',async()=>{
+    identity.bindImportedCrmIdentity.mockResolvedValue({status:'conflict',entityId:'hidden-id'})
+    await expect(createContact('00000000-0000-4000-8000-000000000002',{...BASE,stableIdentity:STABLE})).rejects.toMatchObject({code:'scope_operation_denied'})
+    expect(transactionClient.query).toHaveBeenCalledWith('ROLLBACK')
+    expect(transactionClient.query).not.toHaveBeenCalledWith('COMMIT')
+    expect(transactionClient.query.mock.calls.flat().join(' ')).not.toContain('UPDATE entities')
   })
 })

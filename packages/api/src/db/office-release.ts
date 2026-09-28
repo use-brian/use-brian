@@ -53,6 +53,16 @@ export function createOfficeReleaseStore(db: OfficeDbQuery = defaultOfficeDbQuer
       return result.rows[0]
     },
 
+    async getOfflinePackage(userId: string, artifactId: string, deviceId: string): Promise<{ artifactVersionId: string; packageFileId: string; manifestHash: string; complete: boolean; revokedAt: Date | null } | null> {
+      const result = await db<{ artifactVersionId: string; packageFileId: string; manifestHash: string; complete: boolean; revokedAt: Date | null }>(userId, `
+        SELECT artifact_version_id AS "artifactVersionId", package_file_id AS "packageFileId",
+               manifest_hash AS "manifestHash", complete, revoked_at AS "revokedAt"
+          FROM office_offline_packages
+         WHERE artifact_id=$1 AND user_id=$2 AND device_id=$3
+      `, [artifactId, userId, deviceId])
+      return result.rows[0] ?? null
+    },
+
     async revokeOfflinePackages(userId: string, artifactId: string): Promise<void> {
       await db(userId, `UPDATE office_offline_packages SET revoked_at=now(),complete=FALSE,updated_at=now() WHERE artifact_id=$1 AND revoked_at IS NULL`, [artifactId])
     },

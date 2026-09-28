@@ -89,6 +89,7 @@ export async function inspectCrmRetention(client:PoolClient,workspaceId:string,b
     await select('events','crm_domain_event_outbox','delete',`SELECT e.id,e.xmin::text version,
       (e.status<>'delivered' OR e.subject_id=ANY($3::uuid[]) OR e.payload->>'contactId'=ANY($3::text[])
         OR EXISTS(SELECT 1 FROM workflow_runs r WHERE r.workspace_id=e.workspace_id AND r.crm_event_id=e.id)
+        OR EXISTS(SELECT 1 FROM goal_crm_event_sources g WHERE g.workspace_id=e.workspace_id AND g.event_id=e.id)
         OR EXISTS(SELECT 1 FROM association_enquiries q WHERE q.workspace_id=e.workspace_id AND q.id=e.subject_id AND q.contact_id=ANY($3::uuid[]))) retained
       FROM crm_domain_event_outbox e WHERE e.workspace_id=$1 AND e.created_at<$2 ORDER BY e.id LIMIT 501`,[workspaceId,delivery,contactHolds])
   }

@@ -80,7 +80,8 @@ describe('[COMP:consolidation/external-principal-isolation] external-principal e
     // memory, which stays fully functional (D7 turns off only the background
     // personal pass, never the client's own `saveMemory` / `getMemory`).
     await memories.getMemoryIndexSystem('a-1', 'u-1')
-    expect(lastSql()).not.toContain('NOT EXISTS')
+    expect(lastSql()).not.toContain('ep_u.auth_provider')
+    expect(lastSql()).toContain('user_id = $2')
   })
 
   it('binds no extra parameters — the prefixes are compile-time constants', async () => {

@@ -67,6 +67,7 @@ export {
 
 export {
   advanceWorkflowRun,
+  resolveExternalClientWorkflowPrincipal,
   WORKFLOW_SCOPE_EVIDENCE_VAR,
   runtimeSuccessors,
   type AdvanceOptions,

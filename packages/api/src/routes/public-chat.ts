@@ -178,6 +178,11 @@ export function publicChatRoutes(options: PublicChatRouteOptions): Router {
           // The keyed `sk_live_*` front door deliberately does NOT set this.
           contextScope: 'assistant-full',
           analyticsMeta: { chat_link_id: link.linkId, surface: 'chat_link' },
+          credentialCurrent: async () => {
+            const current = await options.chatLinkStore.resolveToken(req.params.token)
+            return current?.linkId === link.linkId
+              && current.assistantId === link.assistantId
+          },
         },
         req,
         res,

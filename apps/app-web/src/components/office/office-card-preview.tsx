@@ -5,43 +5,33 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { FileSpreadsheet, FileText, Presentation } from "lucide-react";
 import type { OfficeArtifactSnapshot } from "@use-brian/office-model";
 import { layoutOfficeArtifact, renderOfficePreviewSvg } from "@use-brian/office-renderer";
-import { getOfficeResourceObjectUrl, getOfficeSnapshot, type OfficeArtifact } from "@/lib/office/api";
+import { getOfficeSnapshot, type OfficeArtifact } from "@/lib/office/api";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
+import { useOfficeMetadataResource } from "@/lib/office/surface-cache";
+import { officePreviewCacheKey } from "@/lib/surface-prefetch";
+import { useOfficeResourceUrls } from "@/lib/use-doc-media";
 import { PresentationSlideVisual } from "./presentation-slide-visual";
 
-export function OfficeCardPreview({ artifact }: { artifact: OfficeArtifact }) {
+export function OfficeCardPreview({ artifact, workspaceId }: { artifact: OfficeArtifact; workspaceId?: string }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const [snapshot, setSnapshot] = useState<OfficeArtifactSnapshot | null>(null);
-
+  const workspace = useOptionalWorkspaceContext();
+  const wid = workspaceId ?? workspace?.workspaceId;
+  const viewerId = wid && workspace?.workspaceId === wid ? workspace.me.id : '';
+  const identity = `${wid}:${viewerId}:${artifact.artifactId}:${artifact.version}`;
+  const [visible, setVisible] = useState<string | null>(null);
   useEffect(() => {
     if (!canLoadOfficeCardPreview(artifact)) return;
     const host = hostRef.current;
-    let live = true;
-    let started = false;
-
-    const load = () => {
-      if (started) return;
-      started = true;
-      void getOfficeSnapshot(artifact.artifactId)
-        .then((result) => { if (live) setSnapshot(result.snapshot); })
-        .catch(() => undefined);
-    };
-
-    if (!host || typeof IntersectionObserver === "undefined") {
-      load();
-      return () => { live = false; };
-    }
-
-    const observer = new IntersectionObserver((entries) => {
-      if (!entries.some((entry) => entry.isIntersecting)) return;
-      observer.disconnect();
-      load();
-    }, { rootMargin: "240px" });
+    if (!host || typeof IntersectionObserver === "undefined") {setVisible(identity);return;}
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) {setVisible(identity);observer.disconnect();}
+    }, {rootMargin: "240px"});
     observer.observe(host);
-    return () => {
-      live = false;
-      observer.disconnect();
-    };
-  }, [artifact.artifactId, artifact.family, artifact.mode, artifact.version]);
+    return () => observer.disconnect();
+  }, [identity, artifact.artifactId, artifact.family, artifact.mode, artifact.version]);
+  const key = wid && viewerId && visible === identity && canLoadOfficeCardPreview(artifact) ? officePreviewCacheKey(wid, viewerId, artifact.artifactId, artifact.version) : null;
+  const read = useOfficeMetadataResource(key, viewerId, () => getOfficeSnapshot(artifact.artifactId));
+  const snapshot = read.data?.snapshot;
 
   return (
     <div
@@ -90,25 +80,7 @@ function SpreadsheetCardPreview({ snapshot }: { snapshot: Extract<OfficeArtifact
     return pages.find((candidate) => candidate.id === snapshot.activeSheetId) ?? pages[0];
   }, [snapshot]);
   const resourceIds = useMemo(() => [...new Set(page.primitives.flatMap((primitive) => primitive.kind === "image" && primitive.resourceId ? [primitive.resourceId] : []))], [page]);
-  const [resourceUrls, setResourceUrls] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    let active = true;
-    setResourceUrls({});
-    void Promise.all(resourceIds.map(async (resourceId) => {
-      try {
-        return [resourceId, await getOfficeResourceObjectUrl(snapshot.artifactId, resourceId)] as const;
-      } catch {
-        return null;
-      }
-    })).then((entries) => {
-      if (!active) return;
-      const urls: Record<string, string> = {};
-      for (const entry of entries) if (entry) urls[entry[0]] = entry[1];
-      setResourceUrls(urls);
-    });
-    return () => { active = false; };
-  }, [snapshot.artifactId, resourceIds]);
+  const {urls:resourceUrls} = useOfficeResourceUrls(snapshot.artifactId,resourceIds);
 
   const svg = useMemo(() => renderOfficePreviewSvg(page, { resourceUrls }), [page, resourceUrls]);
   return (
@@ -121,25 +93,7 @@ function SpreadsheetCardPreview({ snapshot }: { snapshot: Extract<OfficeArtifact
 function DocumentCardPreview({ snapshot }: { snapshot: Extract<OfficeArtifactSnapshot, { family: "document" }> }) {
   const page = useMemo(() => layoutOfficeArtifact(snapshot).pages[0], [snapshot]);
   const resourceIds = useMemo(() => [...new Set(page.primitives.flatMap((primitive) => primitive.kind === "image" && primitive.resourceId ? [primitive.resourceId] : []))], [page]);
-  const [resourceUrls, setResourceUrls] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    let active = true;
-    setResourceUrls({});
-    void Promise.all(resourceIds.map(async (resourceId) => {
-      try {
-        return [resourceId, await getOfficeResourceObjectUrl(snapshot.artifactId, resourceId)] as const;
-      } catch {
-        return null;
-      }
-    })).then((entries) => {
-      if (!active) return;
-      const urls: Record<string, string> = {};
-      for (const entry of entries) if (entry) urls[entry[0]] = entry[1];
-      setResourceUrls(urls);
-    });
-    return () => { active = false; };
-  }, [snapshot.artifactId, resourceIds]);
+  const {urls:resourceUrls} = useOfficeResourceUrls(snapshot.artifactId,resourceIds);
 
   const svg = useMemo(() => renderOfficePreviewSvg(page, { resourceUrls }), [page, resourceUrls]);
 

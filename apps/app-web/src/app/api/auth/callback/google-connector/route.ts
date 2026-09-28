@@ -8,6 +8,7 @@ import {
 } from "@/lib/connector-oauth-state";
 import { parseDesktopConnectorState, buildLoopbackForwardUrl } from "@/lib/connector-oauth-desktop";
 import { isOssEdition } from "@/lib/edition";
+import { completeConnectorAuthorizationAfterOAuth } from "@/lib/connector-authorization-completion";
 
 const GOOGLE_CLIENT_ID =
   process.env.PUBLIC_GOOGLE_CLIENT_ID ??
@@ -69,7 +70,7 @@ export async function GET(request: Request) {
     return NextResponse.redirect(forward);
   }
 
-  const { connector, createNew, instanceId, workspaceId, nonce } = parseConnectorState(stateRaw);
+  const { connector, createNew, instanceId, workspaceId, nonce, continuation } = parseConnectorState(stateRaw);
   const isGdriveByo = connector === "gdrive-byo";
 
   if (error || !code || !connector) {
@@ -125,6 +126,14 @@ export async function GET(request: Request) {
       const stored = (await exchangeRes.json().catch(() => ({}))) as {
         connectorInstanceId?: string;
       };
+      const resumedPath = await completeConnectorAuthorizationAfterOAuth({
+        accessToken,
+        workspaceId,
+        continuation,
+        provider: "gdrive",
+        connectorInstanceId: stored.connectorInstanceId,
+      });
+      if (resumedPath) return NextResponse.redirect(new URL(resumedPath, appOrigin));
       return NextResponse.redirect(
         new URL(
           connectorsPath(workspaceId, {
@@ -234,6 +243,15 @@ export async function GET(request: Request) {
     const stored = (await storeRes.json().catch(() => ({}))) as {
       connectorInstanceId?: string;
     };
+
+    const resumedPath = await completeConnectorAuthorizationAfterOAuth({
+      accessToken,
+      workspaceId,
+      continuation,
+      provider: connector,
+      connectorInstanceId: stored.connectorInstanceId,
+    });
+    if (resumedPath) return NextResponse.redirect(new URL(resumedPath, appOrigin));
 
     return NextResponse.redirect(
       new URL(

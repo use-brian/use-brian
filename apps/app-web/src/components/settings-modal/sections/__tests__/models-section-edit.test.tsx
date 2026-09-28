@@ -36,6 +36,7 @@ vi.mock("@/lib/api/models", () => ({
   fetchMeteredEstimate: vi.fn(),
   fetchModelMenu,
   setWorkspaceModelDefault: vi.fn(),
+  setWorkspaceDecisionRouting: vi.fn(),
   setWorkspaceModelRoute: vi.fn(),
   updateMeteredProfile: vi.fn(),
 }));
@@ -108,6 +109,19 @@ beforeEach(() => {
     defaults: [],
     profiles: [],
     modelRoutes: [],
+    decisionRouting: {
+      mode: "llm_only",
+      modelAlias: null,
+      updatedAt: null,
+      shadowSampleRate: 0.1,
+      models: [{
+        alias: "typesafe-jev-1.13",
+        displayName: "Jev 1.13",
+        provider: "typesafe",
+        adapterId: "typesafe",
+        hybridOperations: [],
+      }],
+    },
     meteredBillingAvailable: false,
   });
   getCustomLlmConfiguration.mockResolvedValue({ endpoints: [endpoint], tierDefaults: [] });
@@ -115,6 +129,67 @@ beforeEach(() => {
 });
 
 describe("[COMP:app-web/models-settings] custom profile editing", () => {
+  it("renders the workspace decision classifier separately from tier routing", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={en as unknown as Dictionary}>
+          <ModelsSection />
+        </I18nProvider>,
+      );
+    });
+    expect(container.textContent).toContain(en.chrome.settingsModal.models.decisionRoutingTitle);
+    expect(container.textContent).toContain(en.chrome.settingsModal.models.decisionLlmOnly);
+    expect(container.textContent).toContain(en.chrome.settingsModal.models.decisionHybridGate);
+    await act(async () => root.unmount());
+  });
+
+  it("shows the exact approved-operation count for a hybrid workspace", async () => {
+    fetchModelMenu.mockResolvedValueOnce({
+      classes: {},
+      defaults: [],
+      profiles: [],
+      modelRoutes: [],
+      decisionRouting: {
+        mode: "hybrid",
+        modelAlias: "typesafe-jev-1.13",
+        updatedAt: "now",
+        shadowSampleRate: 0.1,
+        models: [{
+          alias: "typesafe-jev-1.13",
+          displayName: "Jev 1.13",
+          provider: "typesafe",
+          adapterId: "typesafe",
+          hybridOperations: [{
+            operationId: "research.intent",
+            operationVersion: "1",
+            evaluationSegment: "global",
+            profileId: "approved-research-intent",
+            profileVersion: "1",
+          }],
+        }],
+      },
+      meteredBillingAvailable: false,
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={en as unknown as Dictionary}>
+          <ModelsSection />
+        </I18nProvider>,
+      );
+    });
+    expect(container.textContent).toContain(
+      en.chrome.settingsModal.models.decisionHybridAvailable.replace("{count}", "1"),
+    );
+    expect(container.textContent).toContain(
+      en.chrome.settingsModal.models.decisionHybridBadge.replace("{count}", "1"),
+    );
+    await act(async () => root.unmount());
+  });
+
   // A profile verified before the vision probe existed reads `false`, and the
   // only way a workspace admin can learn that (or fix it) is if the row says
   // so: image turns on this endpoint are answered by a built-in model, and

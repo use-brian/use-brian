@@ -21,13 +21,14 @@ function fakeStore(over: Partial<GoalStore> = {}): GoalStore {
     createdByUserId: null,
     originSessionId: null,
     confirmedAt: null,
+    authoringAuthority: null,
     completionClaim: null,
     brief: null,
     createdAt: new Date(0),
     updatedAt: new Date(0),
   })
   return {
-    create: async (p) => ({ ...rec('g1', p.outcome), host: p.host ?? null, doneWhen: p.doneWhen, means: p.means ?? {}, budget: p.budget ?? {} }),
+    create: async (p) => ({ ...rec('g1', p.outcome), host: p.host ?? null, doneWhen: p.doneWhen, means: p.means ?? {}, budget: p.budget ?? {}, authoringAuthority: p.authoringAuthority ?? null }),
     getById: async () => null,
     getByIdSystem: async () => null,
     list: async () => [rec('g1', 'ship it')],
@@ -38,7 +39,31 @@ function fakeStore(over: Partial<GoalStore> = {}): GoalStore {
   }
 }
 
-const CTX = { workspaceId: 'w1', userId: 'u1', assistantId: 'a1', sessionId: 's1', channelType: 'web' }
+const CTX = {
+  workspaceId: 'w1',
+  userId: 'u1',
+  assistantId: 'a1',
+  assistantKind: 'primary' as const,
+  clearance: 'confidential' as const,
+  compartments: null,
+  mutationCompartments: null,
+  projectIds: null,
+  visibilityAssistantIds: null,
+  sessionId: 's1',
+  appId: 'Use Brian',
+  channelType: 'web',
+  channelId: 'web',
+  abortSignal: new AbortController().signal,
+}
+const AUTHORING_AUTHORITY = {
+  version: 1,
+  assistantId: 'a1',
+  ceiling: {
+    workspaceId: 'w1', userId: 'u1', clearance: 'confidential',
+    compartments: null, mutationCompartments: null, projectIds: null,
+    visibilityAssistantIds: null,
+  },
+}
 type Ctx = Parameters<ReturnType<typeof createGoalTools>['setGoal']['execute']>[1]
 
 describe('[COMP:goals/tools] goal chat tools', () => {
@@ -53,7 +78,10 @@ describe('[COMP:goals/tools] goal chat tools', () => {
     expect(res.isError).toBeFalsy()
     expect(res.data).toContain('Set goal [g1]')
     expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceId: 'w1', outcome: 'ship it', host: null, createdByUserId: 'u1' }),
+      expect.objectContaining({
+        workspaceId: 'w1', outcome: 'ship it', host: null, createdByUserId: 'u1',
+        authoringAuthority: AUTHORING_AUTHORITY,
+      }),
     )
     expect(onEvent).toHaveBeenCalledWith({ type: 'goal_created', goalId: 'g1' }, expect.objectContaining({ userId: 'u1' }))
   })

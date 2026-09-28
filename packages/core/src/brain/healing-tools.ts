@@ -76,6 +76,7 @@ import type {
 import type { MemoryStore } from '../memory/types.js'
 import type { LLMProvider } from '../providers/types.js'
 import type { TaskStore } from '../tasks/types.js'
+import type { DecisionExecutionPort } from '../decisions/index.js'
 
 export interface HealingToolsDeps {
   candidates: BrainCandidateStore
@@ -102,6 +103,7 @@ export interface HealingToolsDeps {
   provider: LLMProvider
   /** Model id used by the reclassifier LLM call (Flash-class is fine). */
   reclassifierModel: string
+  decisionRuntime?: DecisionExecutionPort
   resolveLlm?: (workspaceId: string) => Promise<{ provider: LLMProvider; model: string } | null>
   /**
    * Rate limit for `healMemories` — defaults to 5 invocations per user
@@ -752,6 +754,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           candidates: deps.candidates,
           provider: runtime?.provider ?? deps.provider,
           model: runtime?.model ?? deps.reclassifierModel,
+          decisionRuntime: deps.decisionRuntime,
         } satisfies ReclassificationDeps)
 
         return {
@@ -960,6 +963,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
             ? {
                 provider: runtime?.provider ?? deps.provider,
                 model: runtime?.model ?? deps.reclassifierModel,
+                decisionRuntime: deps.decisionRuntime,
               }
             : undefined,
         })

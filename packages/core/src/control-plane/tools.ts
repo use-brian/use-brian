@@ -110,9 +110,10 @@ export function createControlPlaneTools(reader: ControlPlaneReader): ControlPlan
   const listConnectors = buildTool({
     name: 'listConnectors',
     description:
-      'List the connectors configured for this workspace: provider, instance id, label, ' +
-      'connected state, and auth type. `oauthRequired: true` means connecting needs a human ' +
-      'browser consent — an agent can scaffold such a connector but never complete it.',
+      'List connected connector instances plus official connectors available to configure. ' +
+      'Available rows have instanceId=null and connected=false; never treat them as usable. ' +
+      '`authorizationHandoff: true` means requestConnectorAuthorization can prepare the human ' +
+      'browser consent checkpoint when the acting assistant has Agent configuration enabled.',
     inputSchema: z.object({}),
     isReadOnly: true,
     isConcurrencySafe: true,

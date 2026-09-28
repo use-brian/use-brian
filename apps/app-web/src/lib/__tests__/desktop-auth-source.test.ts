@@ -234,7 +234,7 @@ describe("[COMP:app-web/desktop-auth-source] desktopAuthSource", () => {
       json: async () => ({ accessToken: "newA", refreshToken: "newR", user: { id: "u1" } }),
     }) as unknown as typeof fetch;
 
-    expect(await desktopAuthSource.refresh()).toEqual({ kind: "ok", token: "newA" });
+    expect(await desktopAuthSource.refresh()).toEqual({ kind: "ok", token: "newA", user: { id: "u1" } });
     expect(setTokens).toHaveBeenCalledWith({
       accessToken: "newA",
       refreshToken: "newR",

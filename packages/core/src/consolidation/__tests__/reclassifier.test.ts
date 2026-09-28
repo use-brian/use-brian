@@ -26,6 +26,7 @@ import type {
   BrainCandidateCreateParams,
   BrainCandidateStore,
 } from '../../brain/candidates-types.js'
+import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 function makeProvider(rawJson: string): LLMProvider {
   async function* stream(): AsyncIterable<StreamChunk> {
@@ -124,6 +125,59 @@ const baseDeps = (
 })
 
 describe('[COMP:brain/reclassifier] extract decision', () => {
+  it('accepts terminal keep decisions without invoking the LLM or any write port', async () => {
+    const { store, calls } = makeCandidates()
+    const provider = makeProvider('{"decisions":[]}')
+    const memories = [memory('m_1', 'one'), memory('m_2', 'two')]
+    const deps = baseDeps(store, '{"decisions":[]}', memories)
+    deps.provider = provider
+    deps.decisionRuntime = executionFixture({
+      llm: provider,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: request.questions.map((question) => ({
+          questionId: question.id,
+          kind: 'choice' as const,
+          value: 'keep',
+          evidence: { source: 'native_distribution' as const, confidence: 0.97 },
+        })),
+      })),
+    })
+    const result = await runReclassification(deps)
+    expect(result.kept).toBe(2)
+    expect(result.noOpinion).toBe(0)
+    expect(calls).toHaveLength(0)
+    expect(provider.stream).not.toHaveBeenCalled()
+  })
+
+  it('runs one LLM completion for a mutation payload and applies it once', async () => {
+    const { store, calls } = makeCandidates()
+    const raw = JSON.stringify({
+      decisions: [{
+        memory_id: 'm_1',
+        decision: 'extract',
+        extract_targets: [{ kind: 'entity', display_name: 'Example Project', entity_kind: 'project' }],
+        reason: 'The memory contains a distinct project entity.',
+      }],
+    })
+    const provider = makeProvider(raw)
+    const deps = baseDeps(store, raw, [memory('m_1', 'Example Project launched')])
+    deps.provider = provider
+    deps.decisionRuntime = executionFixture({
+      llm: provider,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{ questionId: 'm_1', kind: 'choice', value: 'extract', evidence: { source: 'native_distribution', confidence: 0.94 } }],
+      })),
+    })
+    const result = await runReclassification(deps)
+    expect(result.enqueuedExtract).toBe(1)
+    expect(calls).toHaveLength(1)
+    expect(provider.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('enqueues one candidate per target — multi-entity memory spawns multiple rows', async () => {
     const { store, calls } = makeCandidates()
     const llmJson = JSON.stringify({

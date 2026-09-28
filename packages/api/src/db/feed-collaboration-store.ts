@@ -1,10 +1,11 @@
+import { assertFeedLinkedInDestination } from '../content-planning/linkedin-authority.js'
 import { feedSelectedFiles, readFeedSelectedSources, feedSourceFloor } from '../content-planning/source-authority.js'
 /** Atomic Feed content, discussion and decision history. [COMP:feed/draft-comments] [COMP:feed/draft-suggestions] [COMP:feed/editorial-decisions] */
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import {
   feedCommandRequestSchema, feedMediaSchema, type FeedCommandRequest, type FeedCollaborationReceipt,
-  type FeedComposition, type FeedEdit, type FeedAnchor,
+  type FeedComposition, type FeedEdit, type FeedAnchor, type FeedLinkedInContext,
 } from '@use-brian/shared'
 import { applyFeedEdits, locateFeedNode, canonicalFeedValue, createFeedAnchor, importLegacyFeed, projectFeed, validateFeedComposition, walkFeed, FeedCompositionError } from '@use-brian/doc-model'
 import { getPool } from './client.js'
@@ -56,14 +57,14 @@ async function threads(client: pg.PoolClient, sessionId: string): Promise<FeedTh
   return (await client.query<FeedThread>(`SELECT (SELECT name FROM users WHERE id=author_user_id) AS "authorName",id,transcript_session_id AS "transcriptSessionId",anchor,resolved,author_user_id AS "authorUserId",author_kind AS "authorKind",created_at AS "createdAt" FROM feed_comment_threads WHERE session_id=$1 ORDER BY created_at,id`, [sessionId])).rows
 }
 const SUGGESTION_COLUMNS = 'id,source_run_id AS "sourceRunId",source_proposal AS "sourceProposal",source_revision AS "sourceRevision",edits,rationale,status,thread_id AS "threadId",parent_id AS "parentId",author_user_id AS "authorUserId",author_kind AS "authorKind",acceptance_receipt AS "acceptanceReceipt",application_id AS "applicationId"'
-export async function assertFeedFiles(client: pg.PoolClient, actor: FeedActor, scope: FeedScope, composition: FeedComposition, historicalFileIds: readonly string[] = []): Promise<void> {
-  const ids = feedSelectedFiles(composition)
+export async function assertFeedFiles(client: pg.PoolClient, actor: FeedActor, scope: FeedScope, composition: FeedComposition, historicalFileIds: readonly string[] = [], linkedin?: FeedLinkedInContext): Promise<void> {
+  const ids = feedSelectedFiles(composition, linkedin)
   for (const id of historicalFileIds) if (!ids.has(id)) ids.set(id, null)
   const files = await readFeedSelectedSources(client, actor, scope, 'file', [...ids.keys()])
   if (files.length !== ids.size || files.some(f => ids.get(f.id) !== null && ids.get(f.id) !== f.mime)) throw new FeedCollaborationError(403, 'file_not_available_to_draft')
   if (actor.kind === 'assistant') {
     const copy = await readFeedCopy(client, actor.sessionId)
-    const selected = copy?.content.composition ? feedSelectedFiles(copy.content.composition) : new Map()
+    const selected = copy?.content.composition ? feedSelectedFiles(copy.content.composition, copy.content.linkedin) : new Map()
     const ranks = ['public', 'internal', 'confidential']
     for (const file of files) {
       if (ranks.indexOf(file.sensitivity) <= ranks.indexOf(scope.clearance) || selected.has(file.id)) continue
@@ -118,8 +119,8 @@ export async function executeFeedCommands(actor: FeedActor, raw: FeedCommandRequ
       const structured = requireFeedComposition(content); const projection = projectFeed(structured.composition)
       if (structured.postFormat !== 'thread' && structured.composition.segments.length !== 1) throw new FeedCollaborationError(400, 'format_segment_mismatch')
       content = { ...structured, text: projection.text, threadSegments: projection.threadSegments, media: projection.media }
-      await assertFeedFiles(client, actor, scope, structured.composition)
-      const files = await readFeedSelectedSources(client, actor, scope, 'file', [...feedSelectedFiles(structured.composition).keys()])
+      await assertFeedFiles(client, actor, scope, structured.composition, [], structured.linkedin)
+      const files = await readFeedSelectedSources(client, actor, scope, 'file', [...feedSelectedFiles(structured.composition, structured.linkedin).keys()])
       const memories = await readFeedSelectedSources(client, actor, scope, 'memory', structured.selectedMemoryIds ?? [])
       if (memories.length !== new Set(structured.selectedMemoryIds ?? []).size) throw new FeedCollaborationError(403, 'memory_not_available_to_draft')
       content = { ...content, sourceSensitivity: feedSourceFloor(content.sourceSensitivity, [...files, ...memories]),
@@ -219,7 +220,16 @@ export async function executeFeedCommands(actor: FeedActor, raw: FeedCommandRequ
         await proposalDecision(suggestion, command.outcome, command.reasonThreadId)
       } else if (command.kind === 'undo') {
         const history = (await client.query<{ inverse: FeedEdit[] }>('SELECT inverse_commands AS inverse FROM feed_post_revisions WHERE session_id=$1 AND revision=$2', [actor.sessionId, command.revision])).rows[0]
-        if (!history?.inverse.length) throw new FeedCollaborationError(409, 'revision_not_undoable')
+        if (!history?.inverse.length) {
+          const rows = (await client.query<{ revision: number; content: PostWorkingContent }>('SELECT revision,content FROM feed_post_revisions WHERE session_id=$1 AND revision IN ($2,$3) ORDER BY revision', [actor.sessionId, command.revision - 1, command.revision])).rows
+          const previous = rows[0]?.content; const changed = rows[1]?.content
+          if (!previous || !changed || canonicalFeedValue(previous.linkedin ?? null) === canonicalFeedValue(changed.linkedin ?? null)) throw new FeedCollaborationError(409, 'revision_not_undoable')
+          if (canonicalFeedValue(structured.linkedin ?? null) !== canonicalFeedValue(changed.linkedin ?? null) || structured.postFormat !== changed.postFormat) throw new FeedCollaborationError(409, 'preimage_conflict')
+          if (previous.linkedin?.destinationId) await assertFeedLinkedInDestination(actor, scope, previous.linkedin)
+          content = { ...structured, linkedin: previous.linkedin, postFormat: previous.postFormat }
+          await recordRevision([], [], false)
+          continue
+        }
         await assertUnchangedProposalTargets(client, actor.sessionId, command.revision, structured.composition, history.inverse)
         await editContent(history.inverse, undefined, undefined, true)
         const accepted = (await client.query<FeedSuggestion>(`SELECT ${SUGGESTION_COLUMNS} FROM feed_draft_suggestions WHERE session_id=$1 AND status='accepted' AND (acceptance_receipt->>'revision')::int=$2`, [actor.sessionId, command.revision])).rows
@@ -227,7 +237,7 @@ export async function executeFeedCommands(actor: FeedActor, raw: FeedCommandRequ
       } else if (command.kind === 'release') {
         if (actor.kind !== 'user') throw new FeedCollaborationError(403, 'member_release_required')
         if (input.commands.length !== 1) throw new FeedCollaborationError(400, 'release_requires_exact_revision')
-        await assertFeedFiles(client, actor, scope, structured.composition)
+        await assertFeedFiles(client, actor, scope, structured.composition, [], structured.linkedin)
         await client.query('UPDATE feed_post_working_copies SET public_release=$2 WHERE session_id=$1', [actor.sessionId, JSON.stringify({ revision: currentRevision, audience: 'public', actorUserId: actor.userId, mutationId: input.mutationId })])
         sequence++
       } else if (command.kind === 'context') {
@@ -237,6 +247,10 @@ export async function executeFeedCommands(actor: FeedActor, raw: FeedCommandRequ
         content = { ...structured, ...patch }
         // Context changes are revisioned so a review's frozen goal/month cannot
         // silently describe a different current context. Undo of copy is separate.
+        await recordRevision([], [], false)
+      } else if (command.kind === 'linkedin') {
+        if (command.metadata?.destinationId) await assertFeedLinkedInDestination(actor, scope, command.metadata)
+        content = { ...structured, linkedin: command.metadata ?? undefined, postFormat: command.metadata?.mode === 'post' ? 'post' : command.metadata ? 'article' : structured.postFormat }
         await recordRevision([], [], false)
       } else if (command.kind === 'email') {
         content = { ...structured, email: command.metadata }

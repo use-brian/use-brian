@@ -16,26 +16,33 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
-vi.mock('../../db/users.js', () => ({ getDefaultAssistant: vi.fn() }))
+const clientQuery = vi.fn()
+const release = vi.fn()
+vi.mock('../../db/client.js', () => ({
+  getPool: () => ({ connect: async () => ({ query: clientQuery, release }) }),
+}))
 vi.mock('../../db/memories.js', () => ({ createMemory: vi.fn() }))
+vi.mock('../../db/derived-scope-store.js', () => ({ recordDerivedResource: vi.fn() }))
 
 import { recordFeedback, type RecordFeedbackParams } from '../record.js'
-import { query } from '../../db/client.js'
-import { getDefaultAssistant } from '../../db/users.js'
 import { createMemory } from '../../db/memories.js'
+import { recordDerivedResource } from '../../db/derived-scope-store.js'
+import type { ScopeSource } from '@use-brian/core'
 
-const mockQuery = vi.mocked(query)
-const mockDefaultAssistant = vi.mocked(getDefaultAssistant)
 const mockCreateMemory = vi.mocked(createMemory)
-
-const ASSISTANT = { id: 'a1' } as Awaited<ReturnType<typeof getDefaultAssistant>>
+const mockRecordDerived = vi.mocked(recordDerivedResource)
+const WORKSPACE = '00000000-0000-0000-0000-000000000011'
+const USER = '00000000-0000-0000-0000-000000000012'
+const ASSISTANT = '00000000-0000-0000-0000-000000000013'
+const MESSAGE = '00000000-0000-0000-0000-000000000014'
+const SESSION = '00000000-0000-0000-0000-000000000015'
+let targetSource: ScopeSource | null
 
 function params(over?: Partial<RecordFeedbackParams>): RecordFeedbackParams {
   return {
-    userId: 'u1',
-    messageId: 'msg1',
-    sessionId: 's1',
+    userId: USER,
+    messageId: MESSAGE,
+    sessionId: SESSION,
     kind: 'negative',
     source: 'web',
     ...over,
@@ -45,20 +52,41 @@ function params(over?: Partial<RecordFeedbackParams>): RecordFeedbackParams {
 describe('[COMP:brain/feedback-recorder] recordFeedback', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockQuery.mockResolvedValue({ rows: [{ id: 'evt1' }] } as never)
-    mockDefaultAssistant.mockResolvedValue(ASSISTANT)
+    targetSource = {
+      workspaceId: WORKSPACE,
+      userId: USER,
+      assistantId: ASSISTANT,
+      sensitivity: 'confidential',
+      compartments: ['finance'],
+      projectIds: [],
+      resourceKind: 'session_message',
+      resourceId: MESSAGE,
+      version: '1',
+    }
+    clientQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM session_messages sm')) return { rows: [{
+        workspace_id: WORKSPACE,
+        session_id: SESSION,
+        assistant_id: ASSISTANT,
+        role: 'assistant',
+        source: targetSource,
+      }] }
+      if (sql.includes('FROM workspace_members wm')) return { rows: [{
+        role: 'owner', clearance: 'confidential', compartments: null, projects_allowed: true,
+      }] }
+      if (sql.includes('INSERT INTO analytics_events')) return { rows: [{ id: 'evt1' }] }
+      return { rows: [] }
+    })
     mockCreateMemory.mockResolvedValue({ id: 'mem1' } as never)
   })
 
   it('always writes one analytics_events row, stamping channel_type from source', async () => {
     const res = await recordFeedback(params({ kind: 'positive', source: 'slack' }))
-    expect(mockQuery).toHaveBeenCalledTimes(1)
-    const [sql, values] = mockQuery.mock.calls[0]
+    const insert = clientQuery.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO analytics_events'))!
+    const [sql, values] = insert
     expect(sql).toContain('INSERT INTO analytics_events')
-    // channel_type (last positional) carries the source surface.
     expect(values as unknown[]).toContain('slack')
-    // event name encodes the polarity.
-    expect((values as unknown[])[2]).toBe('feedback_positive')
+    expect((values as unknown[])[3]).toBe('feedback_positive')
     expect(res.analyticsId).toBe('evt1')
   })
 
@@ -92,11 +120,15 @@ describe('[COMP:brain/feedback-recorder] recordFeedback', () => {
     expect(arg.tags).toEqual(expect.arrayContaining(['feedback', 'correction', 'wrong_facts']))
     expect(arg.source).toBe('feedback')
     expect(arg.detail).toContain('The revenue number was off by a year')
+    expect(arg.derivation?.sources).toEqual([
+      expect.objectContaining({ resourceKind: 'feedback_event', resourceId: 'evt1' }),
+    ])
+    expect(mockRecordDerived).toHaveBeenCalledTimes(1)
     expect(res.memoryId).toBe('mem1')
   })
 
-  it('returns analytics-only when the user has no default assistant', async () => {
-    mockDefaultAssistant.mockResolvedValue(null)
+  it('keeps legacy unclassified messages analytics-only', async () => {
+    targetSource = null
     const res = await recordFeedback(params({ kind: 'negative', details: 'ten characters or more here' }))
     expect(mockCreateMemory).not.toHaveBeenCalled()
     expect(res.analyticsId).toBe('evt1')

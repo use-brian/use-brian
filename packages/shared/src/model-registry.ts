@@ -46,6 +46,7 @@ export type ModelProvider =
   | 'anthropic'
   | 'openai-codex'
   | 'xai'
+  | 'typesafe'
   | `openai-compat:${string}`
 
 /**
@@ -137,7 +138,23 @@ export type ModelCapabilities = {
   nativePdf: boolean
 }
 
-export type ModelRegistryRow = {
+export type DecisionPrimitiveCapability = 'choice' | 'boolean' | 'score'
+
+/** Decision-only capability metadata. It is declared per model, never inferred
+ * from the provider name, so narrower future models fail admission honestly. */
+export type DecisionModelCapabilities = {
+  adapterId: string
+  wireModelId: string
+  primitives: readonly DecisionPrimitiveCapability[]
+  batch: boolean
+  maxOptions: number
+  maxQuestions: number
+  maxRubricLevels: number
+  maxInputTokens: number
+  uncertainty: readonly ('native_distribution' | 'self_reported' | 'unavailable')[]
+}
+
+type ModelRegistryBase = {
   /** Canonical selector/recording id. Unique across alias/idAliases/priceAliases. */
   alias: string
   /** Human product name for user-facing pickers ("Gemini 3.1 Pro"). Aliases
@@ -176,13 +193,30 @@ export type ModelRegistryRow = {
   contextWindow: number
   /** Informational until the routing provider consumes it (plan §4.2). */
   maxOutput: number
-  capabilities: ModelCapabilities
   /** Per-provider quirk-wrapper stack override (plan L2; consumed by the
    * routing provider, not yet by boot). */
   wrappers?: readonly string[]
   /** Same-class-only outage fallback (plan L2; consumed by the routing provider). */
   fallbackAlias?: string
 }
+
+export type ChatModelRegistryRow = ModelRegistryBase & {
+  /** Omitted on legacy rows for backward-compatible authored data; omitted means chat. */
+  inference?: 'chat'
+  capabilities: ModelCapabilities
+  decisionCapabilities?: never
+}
+
+export type DecisionModelRegistryRow = ModelRegistryBase & {
+  inference: 'decision'
+  capabilities: ModelCapabilities
+  decisionCapabilities: DecisionModelCapabilities
+  chatTierKey?: never
+  menu?: false
+  fallbackAlias?: never
+}
+
+export type ModelRegistryRow = ChatModelRegistryRow | DecisionModelRegistryRow
 
 // ── Shared rate blobs (one underlying vendor SKU = one blob) ───
 
@@ -337,6 +371,39 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     contextWindow: 1_048_576,
     maxOutput: 65_536,
     capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
+
+  // ── Decision-only models (never eligible for chat routing) ───
+  {
+    alias: 'typesafe-jev-1.13',
+    displayName: 'Jev 1.13',
+    provider: 'typesafe',
+    apiModelId: 'jev-1.13.0',
+    class: 'background',
+    tier: 'other',
+    status: 'active',
+    menu: false,
+    idAliases: ['jev-1.13'],
+    rates: {
+      brackets: [{ upToInputTokens: Infinity, inPerMTok: 0.042, outPerMTok: 0 }],
+      cacheReadPerMTok: 0.042,
+      cacheWritePerMTok: 0.042,
+    },
+    contextWindow: 64_000,
+    maxOutput: 0,
+    capabilities: { tools: false, vision: false, thinking: false, nativePdf: false },
+    inference: 'decision',
+    decisionCapabilities: {
+      adapterId: 'typesafe',
+      wireModelId: 'jev-1.13.0',
+      primitives: ['choice', 'boolean', 'score'],
+      batch: true,
+      maxOptions: 255,
+      maxQuestions: 64,
+      maxRubricLevels: 10,
+      maxInputTokens: 64_000,
+      uncertainty: ['native_distribution'],
+    },
   },
 
   // ── Legacy rows (classification/pricing of historical usage only) ──
@@ -856,6 +923,21 @@ export function registryRowForPricing(id: string): ModelRegistryRow | undefined 
   return byPricingId.get(id)
 }
 
+export function isDecisionModelRow(row: ModelRegistryRow): row is DecisionModelRegistryRow {
+  return row.inference === 'decision'
+}
+
+export function isChatModelRow(row: ModelRegistryRow): row is ChatModelRegistryRow {
+  return row.inference !== 'decision'
+}
+
+/** Active decision-only catalog. Registration is discovery, not activation. */
+export function decisionModelRows(): readonly DecisionModelRegistryRow[] {
+  return MODEL_REGISTRY.filter(
+    (row): row is DecisionModelRegistryRow => row.status === 'active' && isDecisionModelRow(row),
+  )
+}
+
 /** Every id (alias + idAliases) classifying to the given billing tier, in
  * registry order. This IS the derivation of the old `*_TIER_MODELS` sets. */
 export function tierModelIds(tier: ModelTier): ReadonlySet<string> {
@@ -878,7 +960,7 @@ export function tierForModelId(id: string): ModelTier {
 export function chatTierDefaults(): Record<ChatTierKey, string> {
   const map = {} as Record<ChatTierKey, string>
   for (const row of MODEL_REGISTRY) {
-    if (row.chatTierKey) map[row.chatTierKey] = row.alias
+    if (isChatModelRow(row) && row.chatTierKey) map[row.chatTierKey] = row.alias
   }
   return map
 }
@@ -1015,6 +1097,7 @@ export function menuForClass(
   configuredProviders?: ProviderAvailability,
 ): ModelRegistryRow[] {
   return MODEL_REGISTRY.filter((row) =>
+    isChatModelRow(row) &&
     row.class === cls &&
     row.status === 'active' &&
     row.menu === true &&
@@ -1039,6 +1122,7 @@ export function activeForClass(
   configuredProviders?: ProviderAvailability,
 ): ModelRegistryRow[] {
   return MODEL_REGISTRY.filter((row) =>
+    isChatModelRow(row) &&
     row.class === cls &&
     row.status === 'active' &&
     isRegistryModelAvailable(row, configuredProviders),
@@ -1053,7 +1137,7 @@ const CHAT_TIER_KEYS: ReadonlySet<string> = new Set(['standard', 'pro', 'max', '
 export function providerModelIds(provider: ModelProvider): readonly string[] {
   const ids: string[] = []
   for (const row of MODEL_REGISTRY) {
-    if (row.provider !== provider || row.status !== 'active' || row.tier === 'embedding') continue
+    if (!isChatModelRow(row) || row.provider !== provider || row.status !== 'active' || row.tier === 'embedding') continue
     for (const id of [row.alias, ...(row.idAliases ?? [])]) {
       if (!CHAT_TIER_KEYS.has(id)) ids.push(id)
     }

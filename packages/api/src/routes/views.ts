@@ -24,7 +24,9 @@
  * [COMP:api/views-routes]
  */
 
-import { Router } from 'express'
+import { Router,type Request,type Response,type NextFunction } from 'express'
+import { departmentRouteReview, executeReviewedDepartmentRoute } from '../workspace-access/reviewed-route.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import multer from 'multer'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
@@ -98,6 +100,7 @@ import type { WorkspaceGroupStore } from '../db/workspace-group-store.js'
 import { publishPageShareChange } from '../page-share-fanout.js'
 import { renderPublicPage } from './_public-render.js'
 import { runDocAutoTitle } from '../doc/auto-title.js'
+import { readWorkspacePageDirectory } from '../db/page-directory.js'
 
 export type ViewsRouteOptions = {
   savedViewStore: SavedViewStore
@@ -1588,7 +1591,9 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!opts.workspaceGroupStore) return res.status(503).json({ error: 'Groups not configured' })
     const view = await opts.savedViewStore.getById(userId, req.params.id)
     if (!view) return notFound(res, 'View not found')
-    const members = await opts.workspaceGroupStore.listMembers(userId, req.params.groupId)
+    const group=(await opts.workspaceGroupStore.listGroups(userId,view.workspaceId)).find(row=>row.id===req.params.groupId)
+    if(!group)return notFound(res,'Group not found')
+    const members = await opts.workspaceGroupStore.listMembers(userId, group.id)
     res.json({ members })
   })
 
@@ -1605,7 +1610,10 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     }
     const memberUserId = typeof (req.body ?? {}).userId === 'string' ? (req.body as { userId: string }).userId : ''
     if (!memberUserId) return badRequest(res, 'userId is required')
-    await opts.workspaceGroupStore.addMember(userId, req.params.groupId, memberUserId)
+    const group=(await opts.workspaceGroupStore.listGroups(userId,view.workspaceId)).find(row=>row.id===req.params.groupId)
+    if(!group)return notFound(res,'Group not found')
+    if(group.kind==='team')await executeReviewedDepartmentRoute(view.workspaceId,userId,{type:'department.member.set',teamId:group.id,userId:memberUserId,enabled:true},departmentRouteReview(req))
+    else await opts.workspaceGroupStore.addMember(userId, group.id, memberUserId)
     res.status(201).json({ ok: true })
   })
 
@@ -1620,7 +1628,11 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (role !== 'owner' && role !== 'admin') {
       return res.status(403).json({ error: 'Only a workspace owner or admin can manage groups' })
     }
-    const ok = await opts.workspaceGroupStore.removeMember(userId, req.params.groupId, req.params.memberUserId)
+    const group=(await opts.workspaceGroupStore.listGroups(userId,view.workspaceId)).find(row=>row.id===req.params.groupId)
+    if(!group)return notFound(res,'Group not found')
+    const ok=group.kind==='team'
+      ? Boolean(await executeReviewedDepartmentRoute(view.workspaceId,userId,{type:'department.member.set',teamId:group.id,userId:req.params.memberUserId,enabled:false},departmentRouteReview(req)))
+      : await opts.workspaceGroupStore.removeMember(userId, group.id, req.params.memberUserId)
     if (!ok) return notFound(res, 'Group member not found')
     res.json({ ok: true })
   })
@@ -1757,6 +1769,24 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const fresh = await opts.savedViewStore.getById(userId, req.params.id)
     if (!fresh) return notFound(res, 'View not found')
     res.json(viewMetadata(fresh))
+  })
+
+  // Minimal current-authority page names for references and child-page picks.
+  router.get('/workspaces/:workspaceId/page-directory', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
+    const send = (status: number, body: unknown) => res.status(status).type('json').end(JSON.stringify(body))
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { send(401, { error: 'Unauthorized' }); return }
+    if (!z.string().uuid().safeParse(req.params.workspaceId).success) {
+      send(404, { error: 'page_directory_unavailable' }); return
+    }
+    try {
+      const reply = await readWorkspacePageDirectory(userId, req.params.workspaceId)
+      send(reply.status, reply.body)
+    } catch (error) {
+      console.error('[views] page directory failed:', error)
+      send(500, { error: 'page_directory_unavailable' })
+    }
   })
 
   // Version handshake: an older API must not silently ignore offline IDs.
@@ -2516,6 +2546,11 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   router.delete('/contacts/:id', handleRowDelete('contacts', 'contact'))
   router.delete('/companies/:id', handleRowDelete('companies', 'company'))
   router.delete('/deals/:id', handleRowDelete('deals', 'deal'))
+
+  router.use((error:unknown,_req:Request,res:Response,next:NextFunction)=>{
+    if(error instanceof WorkspaceAccessError){res.status(error.status).json({error:error.code});return}
+    next(error)
+  })
 
   return router
 }
