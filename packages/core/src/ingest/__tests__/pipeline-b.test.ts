@@ -50,6 +50,7 @@ import {
 } from '../pipeline-b.js'
 import { estimateStringTokens } from '../../compaction/index.js'
 import type { PlatformEngagementMetrics } from '../types.js'
+import type { PipelineBApplicationPort } from '../pipeline-b-application.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 // ── Mock provider (sequenced responses across multiple stream() calls) ──
@@ -913,13 +914,15 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     const memories = spyMemories()
     const links = spyLinks()
     const episodes = spyEpisodes()
-    const application = { apply: vi.fn(async (input) => ({
+    const application = { apply: vi.fn(async (
+      input: Parameters<PipelineBApplicationPort['apply']>[0],
+    ) => ({
       id: 'run-digest', workspaceId: input.workspaceId, episodeId: input.plan.episodeId,
       attemptKey: input.attemptKey, planHash: input.plan.planHash,
       extractionState: 'succeeded' as const, applicationState: 'complete' as const,
-      errorCode: null, counts: { pending: 0, committed: 5, alreadyApplied: 0, held: 0, rejected: 0, failed: 0 },
+      errorCode: null, counts: { pending: 0, committed: 5, already_applied: 0, held: 0, rejected: 0, failed: 0 },
       items: [],
-    })) }
+    })) } satisfies PipelineBApplicationPort
     const digest: PlatformEngagementMetrics = {
       per_post: [
         { post_episode_id: 'post-ep-1', likes: 10 },
