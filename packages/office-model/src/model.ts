@@ -422,6 +422,7 @@ export const PdfWidgetSchema = z.object({
   id: OfficeUuidSchema,
   pageId: OfficeUuidSchema,
   rect: PdfRectSchema,
+  exportValue: z.string().max(10_000).optional(),
 }).strict()
 export type PdfWidget = z.infer<typeof PdfWidgetSchema>
 
