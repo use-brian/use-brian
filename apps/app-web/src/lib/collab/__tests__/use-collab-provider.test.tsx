@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { DRAWING_PROTOCOL, FRAGMENT_FIELD, pageToYDocUpdate } from "@use-brian/doc-model";
 const state = vi.hoisted(() => ({ local: null as { seed: Uint8Array; registered: boolean } | null, saved: new Map<string, Uint8Array>(), connect: vi.fn(),
-  cleared: vi.fn(), attach: vi.fn(), persisted: [] as string[],
+  cleared: vi.fn(), evicted: vi.fn(), attach: vi.fn(), persisted: [] as string[],
   provider: null as null | { token: () => Promise<string>; onAuthenticated: (data: { scope: string }) => void; onAuthenticationFailed: () => void; onStateless: (data: { payload: string }) => void } }));
-vi.mock("@/lib/offline/offline-pages", () => ({ LOCAL_PAGES_CHANGED: "local-pages", readLocalPage: async () => state.local }));
+vi.mock("@/lib/offline/offline-pages", () => ({ LOCAL_PAGES_CHANGED: "local-pages", readLocalPage: async () => state.local, evictCachedPage: state.evicted }));
 vi.mock("@/lib/auth-fetch", () => ({ getValidAccessToken: async () => "token" }));
 vi.mock("@hocuspocus/provider", () => ({
   HocuspocusProviderWebsocket: class { connect = state.connect; destroy() {} },
@@ -44,6 +44,7 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   state.local = null; state.saved.clear(); state.connect.mockReset().mockResolvedValue(undefined);
   state.cleared.mockReset();
+  state.evicted.mockReset();
   state.attach.mockReset();
   state.persisted = [];
 });
@@ -108,6 +109,21 @@ describe("[COMP:app-web/collab-provider] offline page lifecycle", () => {
     expect(latest.writeDenied).toBe(false);
     await act(async () => state.provider!.onAuthenticationFailed());
     expect(latest.writeDenied).toBe(true);
+  });
+  it('purges page-local content and metadata on typed read-access denial', async () => {
+    await mount();
+    latest.doc!.getMap('fixture').set('secret', 'restricted');
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(state.saved.has('doc-page-page-a')).toBe(true);
+    await act(async () => {
+      state.provider!.onStateless({ payload: 'page-access-denied' });
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    expect(latest.accessDenied).toBe(true);
+    expect(latest.doc).toBeNull();
+    expect(state.cleared).toHaveBeenCalledWith('doc-page-page-a');
+    expect(state.evicted).toHaveBeenCalledWith('page-a');
+    expect(state.saved.has('doc-page-page-a')).toBe(false);
   });
   it('keeps Office rooms out of the generic unencrypted page cache and surfaces typed revocation', async () => {
     root = createRoot(document.createElement('div'));

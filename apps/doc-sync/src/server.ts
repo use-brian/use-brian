@@ -34,7 +34,17 @@ import {
 import { resolveAuth } from './auth-hook.js'
 import { authSessionStore } from '@use-brian/api/db/auth-session-store.js'
 import { assertDrawingProtocol } from './drawing-protocol.js'
-import { assertPageAccess, isReadOnlyRole, recheckPageConnection, type RlsQuery } from './clearance-gate.js'
+import {
+  assertPageAccess,
+  assertPageMutationAccess,
+  isReadOnlyRole,
+  revalidatePageRoom,
+  sweepPageRooms,
+  type PageAuthorityDeps,
+  type PageRoomConnection,
+  type PageRoomDocument,
+  type RlsQuery,
+} from './clearance-gate.js'
 import {
   loadPageUpdate,
   maybeEnqueueBrainIngest,
@@ -101,6 +111,10 @@ const officeAuthorityDeps: OfficeAuthorityDeps = {
   validateSession: claims => authSessionStore.validateAccess(claims),
   resolveAccess: resolveOfficeAccess,
 }
+const pageAuthorityDeps: PageAuthorityDeps = {
+  validateSession: claims => authSessionStore.validateAccess(claims),
+  query: rlsQuery,
+}
 
 // Forward declaration so the `connected` hook (defined inside the Hocuspocus
 // config) can reach the run registry, which is created *after* the instance
@@ -139,10 +153,7 @@ const hocuspocus = new Hocuspocus({
     // Internal Office mutations use the secret-gated HTTP endpoints, where
     // their durable suggestion/head binding is verified. A service WebSocket
     // would otherwise become an unbounded read/write capability.
-    if (auth.kind === 'service') {
-      if (target.kind === 'office') throw new Error('unauthorized: office_service_socket_denied')
-      return { service: true as const }
-    }
+    if (auth.kind === 'service') throw new Error('unauthorized: service_socket_denied')
     if (!(await authSessionStore.validateAccess(auth))) {
       throw new Error('unauthorized: revoked_session')
     }
@@ -205,7 +216,14 @@ const hocuspocus = new Hocuspocus({
       throw new Error('unauthorized: revoked_session')
     }
     if (target.kind === 'page') {
-      await recheckPageConnection({ userId: context?.userId, pageId: target.id, query: rlsQuery, connection: data.connection })
+      const results = await revalidatePageRoom({
+        pageId: target.id,
+        document: data.document as unknown as PageRoomDocument,
+        deps: pageAuthorityDeps,
+      })
+      if (results.get(data.connection as unknown as PageRoomConnection) === 'denied') {
+        throw new Error('unauthorized: page_access_denied')
+      }
       return
     }
     const results = await revalidateOfficeRoom({
@@ -340,7 +358,15 @@ runRegistry = createRunRegistry({
   publish(pageId, state) {
     const doc = hocuspocus.documents.get(pageId)
     if (!doc) return
-    doc.awareness.setLocalStateField('assistantRun', state)
+    // Presence contains protected actor/work metadata too. Keep the registry's
+    // pure synchronous contract, but gate the actual awareness broadcast on a
+    // current audit of every recipient.
+    void revalidatePageRoom({
+      pageId,
+      document: doc as unknown as PageRoomDocument,
+      deps: pageAuthorityDeps,
+    }).then(() => doc.awareness.setLocalStateField('assistantRun', state))
+      .catch(error => console.error('[doc-sync] page presence access audit error', error))
   },
 })
 
@@ -370,10 +396,23 @@ const officeAccessSweepTimer = setInterval(() => {
 }, 1_000)
 officeAccessSweepTimer.unref()
 
+let pageSweepRunning = false
+const pageAccessSweepTimer = setInterval(() => {
+  if (pageSweepRunning) return
+  pageSweepRunning = true
+  void sweepPageRooms({
+    documents: hocuspocus.documents as unknown as ReadonlyMap<string, PageRoomDocument>,
+    deps: pageAuthorityDeps,
+  }).catch(error => console.error('[doc-sync] page access sweep error', error))
+    .finally(() => { pageSweepRunning = false })
+}, 1_000)
+pageAccessSweepTimer.unref()
+
 /**
  * Internal apply endpoint — the server-side AI write path. The chat route's
- * `DocGateway` POSTs `{ pageId, ops }` here (gated by the shared
- * `DOC_SYNC_SECRET`). We open a direct connection to the authoritative
+ * `DocGateway` POSTs `{ userId, pageId, ops }` here (gated by the shared
+ * `DOC_SYNC_SECRET`). The acting user must still hold current Edit authority.
+ * We open a direct connection to the authoritative
  * in-memory doc (loading it if no human is connected), apply the ops via the
  * shared `applyOpsToYDoc`, then Hocuspocus broadcasts the update to every
  * connected human tab and persists the debounced snapshot. This keeps the AI
@@ -394,7 +433,7 @@ async function handleInternalApply(
   }
   let body = ''
   for await (const chunk of req) body += chunk
-  let payload: { pageId?: string; ops?: DocOp[] }
+  let payload: { userId?: unknown; pageId?: unknown; ops?: DocOp[] }
   try {
     payload = JSON.parse(body || '{}')
   } catch {
@@ -402,18 +441,47 @@ async function handleInternalApply(
     res.end(JSON.stringify({ error: 'invalid json' }))
     return
   }
-  const { pageId, ops } = payload
-  if (!pageId || !Array.isArray(ops)) {
+  const userId = OfficeUuidSchema.safeParse(payload.userId)
+  const parsedPageId = OfficeUuidSchema.safeParse(payload.pageId)
+  const { ops } = payload
+  if (!userId.success || !parsedPageId.success || !Array.isArray(ops)) {
     res.writeHead(400, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'pageId and ops[] required' }))
+    res.end(JSON.stringify({ error: 'userId, pageId and ops[] required' }))
     return
   }
+  const pageId = parsedPageId.data
+
+  const currentEdit = async () => {
+    try {
+      await assertPageMutationAccess({ userId: userId.data, pageId, query: rlsQuery })
+      return true
+    } catch { return false }
+  }
+  if (!await currentEdit()) {
+    res.writeHead(403)
+    res.end()
+    return
+  }
+  const loaded = hocuspocus.documents.get(pageId)
+  if (loaded) await revalidatePageRoom({ pageId, document: loaded as unknown as PageRoomDocument, deps: pageAuthorityDeps })
 
   // openDirectConnection bypasses onAuthenticate (this is a trusted service
   // call already gated by the secret) but still runs onLoadDocument, so an
   // unopened page is loaded (or encoded from legacy) before we mutate it.
   const connection = await hocuspocus.openDirectConnection(pageId, { service: true })
   try {
+    if (connection.document) {
+      await revalidatePageRoom({
+        pageId,
+        document: connection.document as unknown as PageRoomDocument,
+        deps: pageAuthorityDeps,
+      })
+    }
+    if (!await currentEdit()) {
+      res.writeHead(403)
+      res.end()
+      return
+    }
     let result: { idMap: Record<string, string>; skipped: { opIndex: number; reason: string }[] } = {
       idMap: {},
       skipped: [],
