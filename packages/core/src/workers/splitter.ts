@@ -149,6 +149,7 @@ export async function classifySplit(options: SplitOptions): Promise<SplitResult>
   if (options.decisionRuntime) {
     const result = await options.decisionRuntime.run({
       ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+      llm: { provider, modelId: model },
       request: {
         runId: options.runId ?? `research-split-${Date.now()}`,
         operation: SPLIT_OPERATION,

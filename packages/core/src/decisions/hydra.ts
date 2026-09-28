@@ -127,6 +127,8 @@ export type DecisionExecutionOperation<T> = Omit<
 
 export type DecisionExecutionRunOptions<T> = {
   workspaceId?: string
+  /** Caller-resolved allowed LLM lane (for BYO/custom-provider parity). */
+  llm?: DecisionCompletionRoute
   request: Omit<DecisionRequest, 'model'>
   operation: DecisionExecutionOperation<T>
 }

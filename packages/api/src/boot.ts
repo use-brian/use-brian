@@ -938,6 +938,7 @@ export interface OpenApiEnv {
  */
 export interface EpisodeIngestorDeps {
   provider: LLMProvider
+  decisionRuntime?: DecisionRuntime
   /** Resolve the workspace-owned Standard lane at episode execution time. */
   resolveWorkspaceLlm?: (workspaceId: string) => Promise<ChatEpisodeInput['llm'] | null>
   /**
@@ -2863,6 +2864,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   //    (open default: no-op chat ingest, undefined brain ingest). ──
   const builtIngestors = ports.buildEpisodeIngestors?.({
     provider, crmStore, entitiesStore, entityLinksStore, memoryStore, taskStore, episodesStore, analytics,
+    decisionRuntime,
     resolveWorkspaceLlm: resolveWorkspaceExtractionLlm,
     usageStore,
     backgroundModel,
@@ -3776,6 +3778,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       entityMerge: { repo: createEntityMergeStore() },
       provider,
       reclassifierModel: 'gemini-flash',
+      decisionRuntime,
       resolveLlm: async (workspaceId) => {
         const runtime = await resolveBackgroundRuntime(workspaceId)
         return runtime ? { provider: runtime.provider, model: runtime.selector } : null
@@ -3993,6 +3996,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     provider,
     model: TRIAGE_MODEL,
     modelTier: 'standard',
+    decisionRuntime,
     resolveLlm: resolveGoalLlm,
     onUsage: recordGoalOverheadUsage('overhead:goal-triage'),
   })
@@ -5760,6 +5764,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   app.use('/api/skills', requireAuth(env.JWT_SECRET), skillRoutes({
     skillStore,
+    decisionRuntime,
     syncNativeSlashCommands,
     communityRegistry: communitySkillRegistry,
     workspaceSkillStore,
@@ -7682,6 +7687,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           candidates: brainCandidateStore,
           provider,
           model: BACKGROUND_MODEL,
+          decisionRuntime,
           resolveLlm: async (workspaceId: string) => {
             const runtime = await resolveBackgroundRuntime(workspaceId)
             return runtime

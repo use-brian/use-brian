@@ -50,6 +50,7 @@ import {
 } from '../pipeline-b.js'
 import { estimateStringTokens } from '../../compaction/index.js'
 import type { PlatformEngagementMetrics } from '../types.js'
+import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 // ── Mock provider (sequenced responses across multiple stream() calls) ──
 
@@ -3211,6 +3212,31 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
       due_iso: null,
       assignee_ref: undefined,
     }))
+
+  it('keeps readiness after extraction and can terminally reject every candidate without an LLM call', async () => {
+    const { provider, requests } = capturingProvider([readinessSlice(2, 0)])
+    const decisionRuntime = executionFixture({
+      llm: provider,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: request.questions.map((question) => ({
+          questionId: question.id,
+          kind: 'choice' as const,
+          value: 'not_a_task',
+          evidence: { source: 'native_distribution' as const, probabilities: { not_a_task: 0.98, ready: 0.01, needs_spec: 0.01 } },
+        })),
+      })),
+    })
+    const assessments = await judgeTaskReadinessBatch(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      sourceFor(2),
+      candidatesFor(2),
+      makeDeps({ provider, decisionRuntime }),
+    )
+    expect(assessments.map((assessment) => assessment.classification)).toEqual(['not_a_task', 'not_a_task'])
+    expect(requests).toHaveLength(0)
+  })
 
   /** `count` ready assessments at LOCAL indices 0..count-1, from `firstTitle`. */
   function readinessSlice(count: number, firstTitle: number): string {

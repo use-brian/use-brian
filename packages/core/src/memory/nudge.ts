@@ -56,6 +56,7 @@ export async function runMemoryNudge(params: {
   ) => Promise<NudgeModelResult | string>
   store: MemoryStore
   decisionRuntime?: DecisionExecutionPort
+  llm?: DecisionCompletionRoute
   workspaceId?: string
   runId?: string
 }): Promise<NudgeResult> {
@@ -66,8 +67,9 @@ export async function runMemoryNudge(params: {
   if (!responseText.trim()) return { judged: 0, useful: 0, usage: null, model: null }
 
   const decision = params.decisionRuntime
-    ? (await params.decisionRuntime.run<MemoryDecision>({
+      ? (await params.decisionRuntime.run<MemoryDecision>({
         ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+        ...(params.llm ? { llm: params.llm } : {}),
         request: {
           runId: params.runId ?? `memory-usefulness-${Date.now()}`,
           operation: {

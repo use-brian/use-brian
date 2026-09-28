@@ -178,7 +178,9 @@ export function createDecisionRuntime(
       }
       const config = await routeResolver(routeContext)
       const primary = configuredPrimary(config, adapters)
-      const llm = config.llm === undefined ? resolveDefaultLlm() : config.llm
+      const llm = config.llm === undefined
+        ? (runOptions.llm ?? resolveDefaultLlm())
+        : config.llm
       if (!llm) policyError('decision route has no permitted LLM completion lane')
 
       const request: DecisionRequest = {

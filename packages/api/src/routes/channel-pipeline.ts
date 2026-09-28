@@ -1368,6 +1368,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       replyToText: replyResolved?.text ?? null,
       currentMessage: messageText,
       knownTopicsThisSession: knownTopics,
+      decisionRuntime: params.decisionRuntime,
+      workspaceId: assistant.workspaceId ?? undefined,
+      runId: `memory-topic-${session.id}-${Date.now()}`,
     })
   } catch (err) {
     console.error(`[${channelType}] topic classifier failed:`, err)
@@ -2858,6 +2861,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         },
         store: memoryStore,
         decisionRuntime: params.decisionRuntime,
+        llm: { provider: backgroundProvider, modelId: backgroundLaneModel },
         workspaceId: assistant.workspaceId ?? undefined,
         runId: `memory-usefulness-${userMessageRow.id}`,
       })

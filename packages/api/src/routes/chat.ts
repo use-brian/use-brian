@@ -3878,6 +3878,9 @@ export function chatRoutes(options: WebChatOptions): Router {
           replyToText: replyResolved?.text ?? null,
           currentMessage: userMessageText,
           knownTopicsThisSession: knownTopics,
+          decisionRuntime: options.decisionRuntime,
+          workspaceId: assistant.workspaceId ?? undefined,
+          runId: `memory-topic-${session.id}-${Date.now()}`,
         })
       } catch (err) {
         console.error('[chat] topic classifier failed:', err)
@@ -8028,6 +8031,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           },
           store: options.memoryStore,
           decisionRuntime: options.decisionRuntime,
+          llm: { provider: backgroundProvider, modelId: nudgeModel },
           workspaceId: assistant.workspaceId ?? undefined,
           runId: `memory-usefulness-${storedUserMsg.id}`,
         })

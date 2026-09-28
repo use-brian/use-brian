@@ -56,6 +56,7 @@ import {
 } from '../entities/types.js'
 import { resolveEntity } from '../entities/resolver.js'
 import { stableExternalIdentityFromCrmRef } from '../decision-learning/types.js'
+import type { DecisionCompletionRoute, DecisionExecutionPort } from '../decisions/index.js'
 import type { MemoryRecord, MemoryStore } from '../memory/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import {
@@ -173,6 +174,8 @@ export type PipelineBDeps = {
   providerKeySource?: 'user' | 'platform'
   inputTokenLimit?: number
   maxTokens?: number
+  /** Shared provider-neutral classifier cascade; absent preserves legacy calls. */
+  decisionRuntime?: DecisionExecutionPort
   crm: CrmStore
   entities: EntityStore
   entityLinks: EntityLinksStore
@@ -1012,6 +1015,113 @@ async function judgeTaskReadinessSlice(
   taskPolicy: string,
   offset: number,
 ): Promise<TaskReadinessAssessment[]> {
+  const fallback = () => tasks.map(() =>
+    unverifiedTaskReadiness('Brian could not independently verify this candidate.'),
+  )
+  if (!deps.decisionRuntime) {
+    return judgeTaskReadinessSliceWithLlm(episode, content, tasks, deps, taskPolicy, offset)
+  }
+
+  try {
+    const result = await deps.decisionRuntime.run<TaskReadinessAssessment[]>({
+      workspaceId: episode.workspaceId,
+      llm: { provider: deps.provider, modelId: deps.model },
+      request: {
+        runId: `task-readiness-${episode.id}-${offset}`,
+        operation: {
+          id: 'task.readiness',
+          version: '1',
+          stateVersion: '1',
+          questionVersion: '1',
+        },
+        state: {
+          source: truncate(content, CONTENT_CHAR_LIMIT),
+          candidates: tasks.map((task, index) => ({ index, text: task.text })),
+          taskPolicy,
+        },
+        questions: tasks.map((task, index) => ({
+          kind: 'choice' as const,
+          id: String(index),
+          prompt: `Classify task candidate ${index}: ${task.text}`,
+          options: [
+            { value: 'ready', description: 'Explicit commitment with sufficient grounded execution facts' },
+            { value: 'needs_spec', description: 'Likely work but required facts are missing' },
+            { value: 'not_a_task', description: 'No actual commitment or not executable work' },
+          ],
+        })),
+      },
+      operation: {
+        decide(response, { profile }) {
+          const answers = new Map(response.answers.map((answer) => [answer.questionId, answer]))
+          const policy = profile?.policy
+          const reviewBelow = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+            && typeof policy.reviewBelow === 'number' ? policy.reviewBelow : undefined
+          for (let index = 0; index < tasks.length; index++) {
+            const answer = answers.get(String(index))
+            if (answer?.kind !== 'choice') return { kind: 'unavailable', reason: 'invalid_response' }
+            const selected = answer.evidence.probabilities?.[answer.value] ?? answer.evidence.confidence
+            if (reviewBelow !== undefined && selected !== undefined && selected < reviewBelow) {
+              return { kind: 'follow_up', reason: 'uncertain' }
+            }
+            if (answer.value !== 'not_a_task') {
+              return { kind: 'follow_up', reason: 'generation_required' }
+            }
+          }
+          return {
+            kind: 'complete',
+            result: tasks.map(() => ({
+              ...unverifiedTaskReadiness('Decision provider classified this candidate as not a task.'),
+              classification: 'not_a_task' as const,
+              missing: [],
+            })),
+          }
+        },
+        validateResult(assessments) {
+          if (
+            assessments.length !== tasks.length ||
+            assessments.some((assessment) => !['ready', 'needs_spec', 'not_a_task'].includes(assessment.classification))
+          ) throw new Error('task readiness returned an invalid assessment batch')
+          return assessments
+        },
+        safeFailure: fallback,
+        async completeWithLlm(context) {
+          const assessments = await judgeTaskReadinessSliceWithLlm(
+            episode,
+            content,
+            tasks,
+            deps,
+            taskPolicy,
+            offset,
+            context.llm,
+          )
+          return {
+            result: assessments,
+            providerId: context.llm.provider.name,
+            model: { catalogId: context.llm.modelId, wireId: context.llm.modelId },
+          }
+        },
+      },
+    })
+    return result.result
+  } catch (err) {
+    console.warn(
+      `[pipeline-b] task readiness cascade failed for episode ${episode.id} candidates ${offset}-${offset + tasks.length - 1}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+    return fallback()
+  }
+}
+
+async function judgeTaskReadinessSliceWithLlm(
+  episode: PipelineBEpisode,
+  content: string,
+  tasks: readonly ExtractedTask[],
+  deps: PipelineBDeps,
+  taskPolicy: string,
+  offset: number,
+  llm?: DecisionCompletionRoute,
+): Promise<TaskReadinessAssessment[]> {
   // Name the slice in every warning: with more than one call per episode, an
   // episode id alone cannot tell you which candidates lost their judgment.
   const where = `episode ${episode.id} candidates ${offset}-${offset + tasks.length - 1}`
@@ -1022,8 +1132,8 @@ async function judgeTaskReadinessSlice(
 
   try {
     const response = await collectStream(
-      deps.provider.stream({
-        model: deps.model,
+      (llm?.provider ?? deps.provider).stream({
+        model: llm?.modelId ?? deps.model,
         systemPrompt: TASK_READINESS_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: buildTaskReadinessPrompt(content, tasks, taskPolicy) }],
         maxTokens:
@@ -1039,7 +1149,7 @@ async function judgeTaskReadinessSlice(
       }),
     )
     await recordExtractionUsage(deps, episode, response.usage, {
-      model: response.model || deps.model,
+      model: response.model || llm?.modelId || deps.model,
       source: 'overhead:classifier',
       triggerKey: 'pipeline_b_task_readiness',
     })
@@ -2569,6 +2679,9 @@ async function writeEntity(
         })),
         fuzzyThreshold: deps.entityResolver.fuzzyThreshold ?? 0.92,
         llm: deps.entityResolver.llm,
+        decisionRuntime: deps.decisionRuntime,
+        workspaceId: episode.workspaceId,
+        runId: `entity-disambiguation-${episode.id}-${ex.kind}-${ex.display_name}`,
       })
       // Meter the resolver's LLM disambiguation spend the moment it's
       // known — `usage`/`model` are only present on the `llm` tier (both

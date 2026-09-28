@@ -285,6 +285,7 @@ export async function classifyResearchIntent(
   if (options.decisionRuntime) {
     const result = await options.decisionRuntime.run({
       ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+      llm: { provider, modelId: model },
       request: {
         runId: options.runId ?? `research-intent-${Date.now()}`,
         operation: RESEARCH_OPERATION,

@@ -43,6 +43,7 @@ import type { TokenUsage } from '../providers/types.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type { TaskStore } from '../tasks/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import type { DecisionExecutionPort } from '../decisions/index.js'
 import { z } from 'zod'
 
 // ── Tunables (match Q5 lock) ─────────────────────────────────────────
@@ -144,6 +145,7 @@ export interface ReclassificationDeps {
   /** LLM. */
   provider: LLMProvider
   model: string
+  decisionRuntime?: DecisionExecutionPort
   onUsage?: (model: string, usage: TokenUsage) => void | Promise<void>
 }
 
@@ -197,22 +199,7 @@ export async function runReclassification(
 
   const entityList = deps.entities.slice(0, ENTITY_CONTEXT_CAP)
   const prompt = buildReclassificationPrompt(deps.memories, entityList)
-
-  let raw: string
-  try {
-    const response = await callLLM(deps.provider, deps.model, prompt)
-    raw = response.text
-    if (response.usage) await deps.onUsage?.(response.model, response.usage)
-  } catch (err) {
-    console.warn(
-      `[reclassifier] LLM call failed for workspace ${deps.workspaceId}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
-    return emptyResult()
-  }
-
-  const parsed = parseDecisions(raw)
+  const parsed = await decideReclassifications(deps, entityList, prompt)
   if (!parsed) return emptyResult()
 
   const entityByName = new Map(
@@ -307,6 +294,126 @@ export async function runReclassification(
   }
 
   return result
+}
+
+async function decideReclassifications(
+  deps: ReclassificationDeps,
+  entities: readonly Pick<EntityRecord, 'id' | 'displayName' | 'kind'>[],
+  prompt: string,
+): Promise<ReclassificationDecision[] | null> {
+  const completeWithLlm = async (provider: LLMProvider, model: string) => {
+    const response = await callLLM(provider, model, prompt)
+    if (response.usage) await deps.onUsage?.(response.model, response.usage)
+    return { decisions: parseDecisions(response.text), usage: response.usage, model: response.model }
+  }
+
+  if (!deps.decisionRuntime) {
+    try {
+      return (await completeWithLlm(deps.provider, deps.model)).decisions
+    } catch (err) {
+      console.warn(
+        `[reclassifier] LLM call failed for workspace ${deps.workspaceId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+      return null
+    }
+  }
+
+  try {
+    const result = await deps.decisionRuntime.run<ReclassificationDecision[] | null>({
+      workspaceId: deps.workspaceId,
+      llm: { provider: deps.provider, modelId: deps.model },
+      request: {
+        runId: `memory-reclassification-${deps.workspaceId}-${Date.now()}`,
+        operation: {
+          id: 'memory.reclassification',
+          version: '1',
+          stateVersion: '1',
+          questionVersion: '1',
+        },
+        state: {
+          memories: deps.memories.map((memory) => ({
+            id: memory.id,
+            summary: memory.summary,
+            detail: memory.detail,
+            tags: memory.tags,
+          })),
+          entities: entities.map((entity) => ({
+            id: entity.id,
+            displayName: entity.displayName,
+            kind: entity.kind,
+          })),
+        },
+        questions: deps.memories.map((memory) => ({
+          kind: 'choice' as const,
+          id: memory.id,
+          prompt: `Choose the best representation for memory: ${memory.summary}`,
+          options: ['keep', 'drop', 'task', 'edge', 'attribute', 'extract'].map((value) => ({ value })),
+        })),
+      },
+      operation: {
+        decide(response, { profile }) {
+          const answers = new Map(response.answers.map((answer) => [answer.questionId, answer]))
+          const policy = profile?.policy
+          const reviewBelow = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+            && typeof policy.reviewBelow === 'number' ? policy.reviewBelow : undefined
+          const decisions: ReclassificationDecision[] = []
+          for (const memory of deps.memories) {
+            const answer = answers.get(memory.id)
+            if (answer?.kind !== 'choice') return { kind: 'unavailable', reason: 'invalid_response' }
+            const selected = answer.evidence.probabilities?.[answer.value] ?? answer.evidence.confidence
+            if (reviewBelow !== undefined && selected !== undefined && selected < reviewBelow) {
+              return { kind: 'follow_up', reason: 'uncertain' }
+            }
+            if (answer.value !== 'keep') return { kind: 'follow_up', reason: 'generation_required' }
+            decisions.push({
+              memory_id: memory.id,
+              decision: 'keep',
+              reason: 'Decision provider found no better representation.',
+              ...(selected !== undefined ? { confidence: selected } : {}),
+            })
+          }
+          return { kind: 'complete', result: decisions }
+        },
+        validateResult(decisions) {
+          if (decisions === null) return null
+          const allowed = new Set(deps.memories.map((memory) => memory.id))
+          const seen = new Set<string>()
+          for (const decision of decisions) {
+            if (!decisionSchema.safeParse(decision).success || !allowed.has(decision.memory_id) || seen.has(decision.memory_id)) {
+              throw new Error('reclassifier returned an invalid decision set')
+            }
+            seen.add(decision.memory_id)
+          }
+          return decisions
+        },
+        safeFailure: () => null,
+        async completeWithLlm(context) {
+          const completed = await completeWithLlm(context.llm.provider, context.llm.modelId)
+          return {
+            result: completed.decisions,
+            providerId: context.llm.provider.name,
+            model: { catalogId: context.llm.modelId, wireId: completed.model },
+            ...(completed.usage ? {
+              usage: {
+                inputTokens: completed.usage.inputTokens,
+                outputTokens: completed.usage.outputTokens,
+              },
+            } : {}),
+          }
+        },
+      },
+    })
+    return result.result
+  } catch (err) {
+    console.warn(
+      `[reclassifier] decision cascade failed for workspace ${deps.workspaceId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+    return null
+  }
 }
 
 // ── Action handlers ──────────────────────────────────────────────────

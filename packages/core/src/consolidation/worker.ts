@@ -163,6 +163,7 @@ export type ReclassificationScope = {
   provider: LLMProvider
   /** Reclassifier model — Flash-class is fine. */
   model: string
+  decisionRuntime?: import('../decisions/index.js').DecisionExecutionPort
   resolveLlm?: (workspaceId: string) => Promise<{
     provider: LLMProvider
     model: string
@@ -612,6 +613,7 @@ async function runPostRemReclassification(
     candidates: scope.candidates,
     provider: llm.provider,
     model: llm.model,
+    decisionRuntime: scope.decisionRuntime,
     onUsage: (model, usage) => scope.onUsage?.({
       workspaceId,
       userId,
