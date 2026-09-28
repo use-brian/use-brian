@@ -19,7 +19,14 @@ export function parseLastCookie(header: string, name: string): string | null {
     const [key, ...rest] = part.trim().split("=");
     if (key === name) found = rest.join("=");
   }
-  return found ? decodeURIComponent(found) : null;
+  if (!found) return null;
+  try {
+    return decodeURIComponent(found);
+  } catch {
+    // Malformed browser cookies are invalid credentials, not server errors.
+    // In particular they must not prevent logout from expiring the cookie.
+    return null;
+  }
 }
 
 export function clearAuthCookies(response: NextResponse): void {

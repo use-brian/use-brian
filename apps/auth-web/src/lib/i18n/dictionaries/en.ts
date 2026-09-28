@@ -55,5 +55,5 @@ export const en = {
     manual: "The server is still unavailable. Check your connection or retry now.",
     retry: "Try again",
   },
-  logout: { title: "Sign out?", body: "You will need to authenticate again before returning to your workspace.", confirm: "Sign out", cancel: "Cancel" },
+  logout: { error: "Sign out could not be completed. Please try again.", title: "Sign out?", body: "You will need to authenticate again before returning to your workspace.", confirm: "Sign out", cancel: "Cancel" },
 };
