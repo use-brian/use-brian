@@ -13,6 +13,13 @@ export type AccessCeiling = {
   visibilityAssistantIds: ScopeGrant
 }
 
+/** Durable consent captured from an attended authoring turn. */
+export type AuthoringAuthority = {
+  version: 1
+  assistantId: string
+  ceiling: AccessCeiling
+}
+
 function grant(value: unknown): ScopeGrant {
   if(value===null)return null
   if(!Array.isArray(value)||value.some(v=>typeof v!=='string'||!v.trim()))throw new Error('access_ceiling_missing')
@@ -33,6 +40,34 @@ export function pinAccessCeiling(context: AccessContext): AccessCeiling {
       context.assistantKind==='primary'?null:[context.assistantId],
       context.visibilityAssistantIds===undefined?null:grant(context.visibilityAssistantIds),
     ),
+  }
+}
+
+export function pinAuthoringAuthority(context: AccessContext): AuthoringAuthority {
+  return { version: 1, assistantId: context.assistantId, ceiling: pinAccessCeiling(context) }
+}
+
+/** Parse persisted JSON without accepting partial or model-authored authority. */
+export function parseAuthoringAuthority(value: unknown): AuthoringAuthority | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as { version?: unknown; assistantId?: unknown; ceiling?: unknown }
+  if (candidate.version !== 1 || typeof candidate.assistantId !== 'string' || !candidate.assistantId) return null
+  if (!candidate.ceiling || typeof candidate.ceiling !== 'object') return null
+  const ceiling = candidate.ceiling as AccessCeiling
+  try {
+    if (!ceiling.workspaceId || !ceiling.userId || !isSensitivity(ceiling.clearance)) return null
+    const normalized: AccessCeiling = {
+      workspaceId: ceiling.workspaceId,
+      userId: ceiling.userId,
+      clearance: ceiling.clearance,
+      compartments: grant(ceiling.compartments),
+      mutationCompartments: grant(ceiling.mutationCompartments),
+      projectIds: grant(ceiling.projectIds),
+      visibilityAssistantIds: grant(ceiling.visibilityAssistantIds),
+    }
+    return { version: 1, assistantId: candidate.assistantId, ceiling: normalized }
+  } catch {
+    return null
   }
 }
 

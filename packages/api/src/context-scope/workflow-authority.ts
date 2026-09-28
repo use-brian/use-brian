@@ -1,4 +1,4 @@
-import { accessCeilingContains, ContextScopeAccumulator, intersectAccessCeilings, pinAccessCeiling, scopeGrantContains, unionScopeRequirements, WORKFLOW_SCOPE_EVIDENCE_VAR, type AccessCeiling, type WorkflowRunRecord } from '@use-brian/core'
+import { accessCeilingContains, ContextScopeAccumulator, intersectAccessCeilings, parseAuthoringAuthority, pinAccessCeiling, pinAuthoringAuthority, scopeGrantContains, unionScopeRequirements, WORKFLOW_SCOPE_EVIDENCE_VAR, type AccessCeiling, type AuthoringAuthority, type GoalRecord, type WorkflowRunRecord } from '@use-brian/core'
 import { query, queryWithRLS, runWithAgentAccess } from '../db/client.js'
 import { findAssistantById } from '../db/users.js'
 import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
@@ -7,10 +7,76 @@ import { createAuthorityLease, executeWithCurrentAuthority, runWithAuthorityLeas
 import { readWorkflowInputEvidence } from './workflow-input-evidence.js'
 import { validateCallerScopeEvidence } from './caller-evidence.js'
 
-type GoalBinding = { id: string; contextGroupId: string | null; contextProjectId: string | null }
-type StoredAuthority = { version: 1; assistantId: string; ceiling: AccessCeiling; sourceGoal?: GoalBinding | null }
+type GoalBinding = { id: string; contextGroupId: string | null; contextProjectId: string | null; authoringAuthority: AuthoringAuthority }
+type StoredAuthority = {
+  version: 1
+  assistantId: string
+  ceiling: AccessCeiling
+  workflowAuthoringAuthority: AuthoringAuthority
+  sourceGoal?: GoalBinding | null
+}
 function unavailable(): Error {
   return Object.assign(new Error('Workflow execution permissions are missing or changed. Review permissions and start a new run.'), { reason: 'workflow_authority_unavailable' })
+}
+
+function goalUnavailable(): Error {
+  return Object.assign(new Error('Goal execution permissions are missing or changed. Review permissions and confirm the goal again.'), { reason: 'goal_authority_unavailable' })
+}
+
+type AuthoringBinding = { contextGroupId: string | null; contextProjectId: string | null }
+
+async function resolveSavedAuthoringCeiling(
+  value: unknown,
+  expected: { userId: string; workspaceId: string },
+  binding: AuthoringBinding,
+): Promise<{ authority: AuthoringAuthority; ceiling: AccessCeiling }> {
+  const authority = parseAuthoringAuthority(value)
+  if (!authority || authority.ceiling.userId !== expected.userId
+    || authority.ceiling.workspaceId !== expected.workspaceId) throw unavailable()
+  const assistant = await findAssistantById(authority.assistantId)
+  if (!assistant || assistant.workspaceId !== expected.workspaceId) throw unavailable()
+  let current: AccessCeiling
+  try {
+    current = await resolveLiveAccessCeilingSystem({
+      userId: expected.userId,
+      assistant,
+      workspaceId: expected.workspaceId,
+      key: binding,
+    })
+    if (!accessCeilingContains(current, authority.ceiling)) throw unavailable()
+  } catch {
+    throw unavailable()
+  }
+  return { authority, ceiling: intersectAccessCeilings(current, authority.ceiling) }
+}
+
+/** Capture attended authoring consent from an authenticated server surface. */
+export async function captureAuthoringAuthoritySystem(params: {
+  userId: string
+  workspaceId: string
+  assistantId: string
+  contextGroupId?: string | null
+  contextProjectId?: string | null
+}): Promise<AuthoringAuthority> {
+  const assistant = await findAssistantById(params.assistantId)
+  if (!assistant || assistant.workspaceId !== params.workspaceId) throw unavailable()
+  try {
+    const scope = await resolveTurnScopeSystem({
+      userId: params.userId,
+      assistant,
+      workspaceId: params.workspaceId,
+      key: {
+        contextGroupId: params.contextGroupId ?? null,
+        contextProjectId: params.contextProjectId ?? null,
+      },
+    }, {
+      resolveReadCeilings: (actor, workspace, clearance, compartments) =>
+        resolveOperationCeilingsSystem(actor, workspace, clearance, compartments, true),
+    })
+    return pinAuthoringAuthority(scope.access)
+  } catch {
+    throw unavailable()
+  }
 }
 
 /** The durable run binding survives edits to input and cannot change actors. */
@@ -18,12 +84,17 @@ async function readGoalBinding(runId: string, workspaceId: string, userId: strin
   const row = (await query<{
     source: string | null; id: string | null; actor: string | null;
     contextGroupId: string | null; contextProjectId: string | null;
+    authoringAuthority: unknown;
   }>(`SELECT r.source_goal_id AS source,g.id,g.created_by_user_id AS actor,
-      g.context_group_id AS "contextGroupId",g.context_project_id AS "contextProjectId"
+      g.context_group_id AS "contextGroupId",g.context_project_id AS "contextProjectId",
+      g.authoring_authority AS "authoringAuthority"
     FROM workflow_runs r LEFT JOIN goals g ON g.id=r.source_goal_id AND g.workspace_id=r.workspace_id
     WHERE r.id=$1 AND r.workspace_id=$2`, [runId,workspaceId])).rows[0]
   if (!row || (row.source && (!row.id || row.actor !== userId))) throw unavailable()
-  return row.source ? { id:row.id!, contextGroupId:row.contextGroupId, contextProjectId:row.contextProjectId } : null
+  if (!row.source) return null
+  const authoringAuthority = parseAuthoringAuthority(row.authoringAuthority)
+  if (!authoringAuthority) throw unavailable()
+  return { id:row.id!, contextGroupId:row.contextGroupId, contextProjectId:row.contextProjectId, authoringAuthority }
 }
 
 function sameGoalBinding(a: GoalBinding | null | undefined, b: GoalBinding | null): boolean {
@@ -34,16 +105,27 @@ function sameGoalBinding(a: GoalBinding | null | undefined, b: GoalBinding | nul
 /** Server-owned run snapshot; never accepted from workflow input or run vars. */
 async function resolveWorkflowRunSnapshot(params: {
   userId: string; assistantId: string; workspaceId: string; run: WorkflowRunRecord
-}): Promise<{ turnScope: ResolvedTurnScope; assistantClearance: import('@use-brian/core').Sensitivity; sourceGoal: GoalBinding | null }> {
+}): Promise<{ turnScope: ResolvedTurnScope; assistantClearance: import('@use-brian/core').Sensitivity; sourceGoal: GoalBinding | null; storedAuthority: StoredAuthority }> {
   const { userId, assistantId, workspaceId, run } = params
-  const readStored = async () => (await query<{ status: string; authority: StoredAuthority | null; actor: string | null }>(
-    `SELECT r.status, r.execution_authority AS authority, COALESCE(r.triggered_by,w.created_by) AS actor
+  const readStored = async () => (await query<{
+    status: string
+    authority: StoredAuthority | null
+    actor: string | null
+    workflowAuthoringAuthority: unknown
+  }>(
+    `SELECT r.status, r.execution_authority AS authority, COALESCE(r.triggered_by,w.created_by) AS actor,
+            w.authoring_authority AS "workflowAuthoringAuthority"
        FROM workflow_runs r JOIN workflows w ON w.id=r.workflow_id AND w.workspace_id=r.workspace_id
       WHERE r.id=$1 AND r.workspace_id=$2`, [run.id, workspaceId],
   )).rows[0]
   let row = await readStored()
   if (!row || row.actor !== userId) throw unavailable()
   if (!row.authority && row.status !== 'pending') throw unavailable()
+  const workflowAuthoring = await resolveSavedAuthoringCeiling(
+    row.authority?.workflowAuthoringAuthority ?? row.workflowAuthoringAuthority,
+    { userId, workspaceId },
+    { contextGroupId:run.contextGroupId ?? null, contextProjectId:run.contextProjectId ?? null },
+  )
   const assistant = await findAssistantById(assistantId)
   if (!assistant || assistant.workspaceId !== workspaceId) throw unavailable()
   const sourceGoal = await readGoalBinding(run.id, workspaceId, userId)
@@ -73,9 +155,23 @@ async function resolveWorkflowRunSnapshot(params: {
         writeCompartments,writeProjectIds }
     } catch { throw unavailable() }
   }
-  const current = pinAccessCeiling(scope.access)
+  let current = intersectAccessCeilings(pinAccessCeiling(scope.access), workflowAuthoring.ceiling)
+  if (sourceGoal) {
+    const goalAuthoring = await resolveSavedAuthoringCeiling(
+      row.authority?.sourceGoal?.authoringAuthority ?? sourceGoal.authoringAuthority,
+      { userId, workspaceId },
+      { contextGroupId:sourceGoal.contextGroupId, contextProjectId:sourceGoal.contextProjectId },
+    )
+    current = intersectAccessCeilings(current, goalAuthoring.ceiling)
+  }
   if (!row.authority) {
-    const authority: StoredAuthority = { version:1, assistantId, ceiling:current, sourceGoal }
+    const authority: StoredAuthority = {
+      version:1,
+      assistantId,
+      ceiling:current,
+      workflowAuthoringAuthority: workflowAuthoring.authority,
+      sourceGoal,
+    }
     // Compare-and-set under the row lock: never overwrite a concurrent winner,
     // and never capture new authority after execution has started.
     await query(`UPDATE workflow_runs r SET execution_authority=$3::jsonb
@@ -89,6 +185,7 @@ async function resolveWorkflowRunSnapshot(params: {
   const frozen = row?.authority
   if (row?.actor !== userId || !frozen || frozen.version !== 1 || frozen.assistantId !== assistantId
     || !sameGoalBinding(frozen.sourceGoal,sourceGoal)
+    || !parseAuthoringAuthority(frozen.workflowAuthoringAuthority)
     || frozen.ceiling?.workspaceId !== workspaceId || frozen.ceiling?.userId !== userId) throw unavailable()
   let bounded: AccessCeiling
   try {
@@ -97,7 +194,7 @@ async function resolveWorkflowRunSnapshot(params: {
     if (!scopeGrantContains(bounded.mutationCompartments,scope.writeCompartments)
       || !scopeGrantContains(bounded.projectIds,scope.writeProjectIds)) throw unavailable()
   } catch { throw unavailable() }
-  return { assistantClearance:assistant.clearance, sourceGoal, turnScope:{ ...scope,
+  return { assistantClearance:assistant.clearance, sourceGoal, storedAuthority:frozen, turnScope:{ ...scope,
     access:{ ...scope.access,...bounded }, effectiveCompartments:bounded.compartments,
     effectiveProjectIds:bounded.projectIds } }
 }
@@ -137,24 +234,83 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     } catch { return null }
     // A nested callee can narrow ambient execution access. Renewal checks the
     // actor's live metadata, never that narrower projection, and reads no content.
-    const current = await resolveLiveAccessCeilingSystem({
+    let current = await resolveLiveAccessCeilingSystem({
       userId: params.userId, assistant, workspaceId: params.workspaceId,
       key: { contextGroupId: params.run.contextGroupId ?? null,
         contextProjectId: params.run.contextProjectId ?? null, contextLockedAt: params.run.startedAt },
     })
     const sourceGoal = await readGoalBinding(params.run.id,params.workspaceId,params.userId)
     if (!sameGoalBinding(resolved.sourceGoal,sourceGoal)) return null
-    if (!sourceGoal) return current
-    const goalCeiling = await resolveLiveAccessCeilingSystem({
-      userId:params.userId,assistant,workspaceId:params.workspaceId,key:sourceGoal,
-    })
-    return intersectAccessCeilings(current,goalCeiling)
+    try {
+      const workflowAuthoring = await resolveSavedAuthoringCeiling(
+        resolved.storedAuthority.workflowAuthoringAuthority,
+        { userId:params.userId,workspaceId:params.workspaceId },
+        { contextGroupId:params.run.contextGroupId ?? null, contextProjectId:params.run.contextProjectId ?? null },
+      )
+      current = intersectAccessCeilings(current,workflowAuthoring.ceiling)
+      if (!sourceGoal) return current
+      const goalCeiling = await resolveLiveAccessCeilingSystem({
+        userId:params.userId,assistant,workspaceId:params.workspaceId,key:sourceGoal,
+      })
+      const goalAuthoring = await resolveSavedAuthoringCeiling(
+        resolved.storedAuthority.sourceGoal?.authoringAuthority,
+        { userId:params.userId,workspaceId:params.workspaceId },
+        { contextGroupId:sourceGoal.contextGroupId,contextProjectId:sourceGoal.contextProjectId },
+      )
+      return intersectAccessCeilings(intersectAccessCeilings(current,goalCeiling),goalAuthoring.ceiling)
+    } catch {
+      return null
+    }
   })
   return {
     ...resolved,
     inputScopeEvidence,
     executeWithAuthority: <T>(operation: () => Promise<T>): Promise<T> =>
       runWithAgentAccess(pinAccessCeiling(resolved.turnScope.access), () =>
+        runWithAuthorityLease(lease, () => executeWithCurrentAuthority(operation))),
+  }
+}
+
+/** Sticky authority for the goal driver's non-workflow work and delivery. */
+export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
+  if (!goal.createdByUserId) throw goalUnavailable()
+  let saved: Awaited<ReturnType<typeof resolveSavedAuthoringCeiling>>
+  try {
+    saved = await resolveSavedAuthoringCeiling(
+      goal.authoringAuthority,
+      { userId:goal.createdByUserId,workspaceId:goal.workspaceId },
+      { contextGroupId:goal.contextGroupId,contextProjectId:goal.contextProjectId },
+    )
+  } catch {
+    throw goalUnavailable()
+  }
+  const lease = createAuthorityLease(saved.ceiling, async () => {
+    const row = (await query<{
+      actor: string | null
+      contextGroupId: string | null
+      contextProjectId: string | null
+      authoringAuthority: unknown
+    }>(`SELECT created_by_user_id AS actor,context_group_id AS "contextGroupId",
+              context_project_id AS "contextProjectId",authoring_authority AS "authoringAuthority"
+         FROM goals WHERE id=$1 AND workspace_id=$2`, [goal.id,goal.workspaceId])).rows[0]
+    const currentSaved = parseAuthoringAuthority(row?.authoringAuthority)
+    if (!row || row.actor !== goal.createdByUserId
+      || row.contextGroupId !== goal.contextGroupId || row.contextProjectId !== goal.contextProjectId
+      || JSON.stringify(currentSaved) !== JSON.stringify(saved.authority)) return null
+    try {
+      return (await resolveSavedAuthoringCeiling(
+        saved.authority,
+        { userId:goal.createdByUserId!,workspaceId:goal.workspaceId },
+        { contextGroupId:goal.contextGroupId,contextProjectId:goal.contextProjectId },
+      )).ceiling
+    } catch {
+      return null
+    }
+  })
+  return {
+    ceiling:saved.ceiling,
+    executeWithAuthority:<T>(operation:()=>Promise<T>):Promise<T> =>
+      runWithAgentAccess(saved.ceiling, () =>
         runWithAuthorityLease(lease, () => executeWithCurrentAuthority(operation))),
   }
 }

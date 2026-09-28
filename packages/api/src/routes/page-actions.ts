@@ -56,6 +56,7 @@ export type PageActionsRouteOptions = {
   executorDeps: ExecutorDeps
   /** P2 — goal-kind dispatch. Absent → invoking a goal action returns 501. */
   goalStore?: Pick<GoalStore, 'create'>
+  resolveGoalAuthoringAuthority?: (params: { userId: string; workspaceId: string }) => Promise<import('@use-brian/core').AuthoringAuthority>
 }
 
 function unauthorized(res: { status: (n: number) => { json: (b: unknown) => void } }) {
@@ -278,6 +279,9 @@ export function pageActionsRoutes(opts: PageActionsRouteOptions): Router {
     if (!opts.goalStore) {
       return res.status(501).json({ error: 'Goal actions are not available on this deployment.' })
     }
+    if (!opts.resolveGoalAuthoringAuthority) {
+      return res.status(503).json({ error: 'Goal authoring authority is unavailable on this server.' })
+    }
     const baseOutcome = action.action.outcome ?? `Work on "${page.name}" to completion`
     const goal = await opts.goalStore.create({
       workspaceId: page.workspaceId,
@@ -291,6 +295,7 @@ export function pageActionsRoutes(opts: PageActionsRouteOptions): Router {
       means: {},
       budget: {},
       createdByUserId: userId,
+      authoringAuthority: await opts.resolveGoalAuthoringAuthority({ userId,workspaceId:page.workspaceId }),
     })
     res.json({ kind: 'goal', goalId: goal.id, outcome: goal.outcome })
   })

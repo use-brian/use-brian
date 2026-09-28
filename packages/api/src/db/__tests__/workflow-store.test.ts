@@ -32,6 +32,19 @@ const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)
 const wf = createDbWorkflowStore()
 const runs = createDbWorkflowRunStore()
+const AUTHORING_AUTHORITY = {
+  version: 1 as const,
+  assistantId: 'a-1',
+  ceiling: {
+    workspaceId: 'ws-1',
+    userId: 'u-1',
+    clearance: 'confidential' as const,
+    compartments: null,
+    mutationCompartments: null,
+    projectIds: null,
+    visibilityAssistantIds: null,
+  },
+}
 
 function workflowRow(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -45,6 +58,7 @@ function workflowRow(over: Record<string, unknown> = {}): Record<string, unknown
     trigger: { kind: 'manual' },
     webhookSlug: null,
     webhookSecret: null,
+    authoringAuthority: AUTHORING_AUTHORITY,
     createdAt: new Date('2026-05-16T00:00:00Z'),
     updatedAt: new Date('2026-05-16T00:00:00Z'),
     ...over,
@@ -92,6 +106,18 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
+  it('fails closed when a durable authoring principal is missing', async () => {
+    await expect(wf.create({
+      userId: 'u-1',
+      workspaceId: 'ws-1',
+      name: 'Legacy workflow',
+      definition: { steps: [] },
+    } as unknown as Parameters<typeof wf.create>[0])).rejects.toMatchObject({
+      reason: 'workflow_authority_unavailable',
+    })
+    expect(mockRls).not.toHaveBeenCalled()
+  })
+
   it('create inserts with the definition JSON-encoded', async () => {
     mockRls.mockResolvedValueOnce({ rows: [workflowRow()], rowCount: 1 } as never)
     const out = await wf.create({
@@ -99,12 +125,14 @@ describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
       workspaceId: 'ws-1',
       name: 'My Workflow',
       definition: { steps: [] },
+      authoringAuthority: AUTHORING_AUTHORITY,
     } as unknown as Parameters<typeof wf.create>[0])
     expect(out.id).toBe('wf-1')
     const [userId, sql, params] = mockRls.mock.calls[0]
     expect(userId).toBe('u-1')
     expect(sql).toContain('INSERT INTO workflows')
     expect(params?.[4]).toBe(JSON.stringify({ steps: [] }))
+    expect(params?.[14]).toBe(JSON.stringify(AUTHORING_AUTHORITY))
   })
 
   it('fires the command-roster hook after a workflow write', async () => {
@@ -116,6 +144,7 @@ describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
       workspaceId: 'ws-1',
       name: 'My Workflow',
       definition: { steps: [] },
+      authoringAuthority: AUTHORING_AUTHORITY,
     } as unknown as Parameters<typeof hooked.create>[0])
     expect(onChanged).toHaveBeenCalledWith('u-1', 'ws-1')
   })

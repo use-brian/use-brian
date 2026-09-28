@@ -51,5 +51,6 @@ export { deriveResourceScope, DerivedScopeError, resourceScopeKey } from './deri
 export type { ResourceScope, ScopeSource, DerivedWriteEvidence } from './derived-scope.js'
 export { bindScopeSource, boundScopeSource } from './source-evidence.js'
 
-export { pinAccessCeiling, intersectAccessCeilings, accessCeilingContains } from './access-ceiling.js'
-export type { AccessCeiling } from './access-ceiling.js'
+export { pinAccessCeiling, pinAuthoringAuthority, parseAuthoringAuthority, intersectAccessCeilings, accessCeilingContains } from './access-ceiling.js'
+export type { AccessCeiling, AuthoringAuthority } from './access-ceiling.js'
+export { pinToolAuthoringAuthority } from './tool-authority.js'

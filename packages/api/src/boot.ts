@@ -166,7 +166,7 @@ import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
 import { findAssistantById, findUserByAuthProvider, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
-import { resolveWorkflowRunScope } from './context-scope/workflow-authority.js'
+import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowRunScope } from './context-scope/workflow-authority.js'
 import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
@@ -3459,6 +3459,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const goalDriver = createGoalDriver({
     claimCrmEventResume: claimCrmGoalEventResume,
     assertSourceAuthority: assertGoalCrmSourceAuthority,
+    executeWithAuthority: async (goal, operation) =>
+      (await resolveGoalAuthoritySystem(goal)).executeWithAuthority(operation),
     goalStore,
     tryClaim: tryClaimGoalForTick,
     transitionRunningStatus: transitionRunningGoalStatusSystem,
@@ -3625,6 +3627,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       instructions,
       contextGroupId: goal.contextGroupId,
       contextProjectId: goal.contextProjectId,
+      authoringAuthority: goal.authoringAuthority
+        ?? (() => { throw new Error('goal_authority_unavailable') })(),
       // No wall-clock on a goal iteration (2026-08-19). It used to pin the
       // 900s ceiling because the 90s reminder default clipped real work (a
       // browser-skill run in the cloud sandbox, a research pass, file writes)
@@ -6094,6 +6098,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       assessClarity: goalClarityAssessor,
       resolveAssistantId: async (userId, workspaceId) =>
         (await getWorkspacePrimaryAssistant(userId, workspaceId))?.id,
+      resolveAuthoringAuthority: async ({ userId,goal }) => {
+        const assistantId = await workflowExecutorDeps.resolvePrimary(goal.workspaceId)
+        if (!assistantId) throw new Error('goal_authority_unavailable')
+        return captureAuthoringAuthoritySystem({
+          userId,
+          workspaceId:goal.workspaceId,
+          assistantId,
+          contextGroupId:goal.contextGroupId,
+          contextProjectId:goal.contextProjectId,
+        })
+      },
     }),
   )
 
@@ -6127,6 +6142,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     jobStore,
     resolvePrimary: workflowExecutorDeps.resolvePrimary,
+    resolveAuthoringAuthority: async (params) => {
+      const assistantId = await workflowExecutorDeps.resolvePrimary(params.workspaceId)
+      if (!assistantId) throw new Error('workflow_authority_unavailable')
+      return captureAuthoringAuthoritySystem({ ...params, assistantId })
+    },
     validateDeliveryTarget: workflowDependencyPreflight.validateDeliveryTarget,
     preflightConnectorTool: workflowDependencyPreflight.preflightConnectorTool,
     emitAudit: async (event) => {
@@ -6164,6 +6184,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runStore: workflowRunStore,
     executorDeps: workflowExecutorDeps,
     goalStore,
+    resolveGoalAuthoringAuthority: async ({ userId,workspaceId }) => {
+      const assistantId = await workflowExecutorDeps.resolvePrimary(workspaceId)
+      if (!assistantId) throw new Error('goal_authority_unavailable')
+      return captureAuthoringAuthoritySystem({ userId,workspaceId,assistantId })
+    },
   }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), viewsRoutes({
@@ -7240,6 +7265,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowStore,
     jobStore,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
+    resolveAuthoringAuthority: async ({ userId,workspaceId }) => {
+      const assistantId = await resolvePrimaryAssistantForWorkspace(workspaceId)
+      if (!assistantId) throw new Error('workflow_authority_unavailable')
+      return captureAuthoringAuthoritySystem({ userId,workspaceId,assistantId })
+    },
   }))
 
   // ════════════════════════════════════════════════════════════════

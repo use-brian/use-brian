@@ -1,5 +1,5 @@
 import { describe,expect,it } from 'vitest'
-import { pinAccessCeiling,intersectAccessCeilings,accessCeilingContains } from '../access-ceiling.js'
+import { pinAccessCeiling,pinAuthoringAuthority,parseAuthoringAuthority,intersectAccessCeilings,accessCeilingContains } from '../access-ceiling.js'
 import type { AccessContext } from '../access-context.js'
 
 const context:AccessContext={workspaceId:'workspace',userId:'actor',assistantId:'caller',assistantKind:'standard',clearance:'internal',compartments:['product'],projectIds:null}
@@ -46,6 +46,17 @@ describe('[COMP:security/access-ceiling] delegated authority',()=>{
     const pinned=pinAccessCeiling(context),legacy={...pinned};
     delete (legacy as Partial<typeof pinned>).mutationCompartments;
     expect(()=>intersectAccessCeilings(pinned,legacy)).toThrow('access_ceiling_missing');
+  })
+  it('round-trips a normalized durable authoring envelope',()=>{
+    const pinned=pinAuthoringAuthority({...context,compartments:['product','product'],mutationCompartments:['product']})
+    expect(parseAuthoringAuthority(JSON.parse(JSON.stringify(pinned)))).toEqual(pinned)
+  })
+  it('refuses legacy or partial authoring envelopes instead of filling absent axes',()=>{
+    const pinned=pinAuthoringAuthority({...context,mutationCompartments:['product']})
+    const legacy={...pinned,ceiling:{...pinned.ceiling}}
+    delete (legacy.ceiling as Partial<typeof pinned.ceiling>).mutationCompartments
+    expect(parseAuthoringAuthority(legacy)).toBeNull()
+    expect(parseAuthoringAuthority({...pinned,version:0})).toBeNull()
   })
 
 })

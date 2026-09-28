@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { getPool, getAppPool, runWithAgentAccess } from '../../db/client.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../../db/workflow-store.js'
+import { createGoal } from '../../db/goals.js'
 import { currentAgentAccess } from '../../db/agent-access-context.js'
-import { resolveWorkflowRunScope } from '../workflow-authority.js'
+import { resolveGoalAuthoritySystem, resolveWorkflowRunScope } from '../workflow-authority.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -15,13 +16,14 @@ async function fixture(triggered = true) {
   await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label) VALUES($1,'product','Product')",[workspaceId])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance,compartments) VALUES($1,$2,'owner','confidential',NULL),($1,$3,'member','internal',ARRAY['product'])",[workspaceId,owner,userId])
   await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance,compartments) VALUES($1,'Fixture primary',$2,$3,'primary','confidential',NULL)",[assistantId,owner,workspaceId])
+  const authoringAuthority={version:1 as const,assistantId,ceiling:{workspaceId,userId,clearance:'internal' as const,compartments:['product'],mutationCompartments:['product'],projectIds:null,visibilityAssistantIds:null}}
   const workflow = await createDbWorkflowStore().create({ userId,workspaceId,name:'Authority fixture',
-    definition:{startStepId:'consult',steps:[{id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Fixture question'}]} })
+    definition:{startStepId:'consult',steps:[{id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Fixture question'}]},authoringAuthority })
   const runStore=createDbWorkflowRunStore()
   const run=await runStore.createRun({workflowId:workflow.id,workspaceId,triggeredBy:triggered?userId:null,triggerKind:triggered?'manual':'schedule'})
   const params={userId,assistantId,workspaceId,run}
   const snapshot=async()=>(await pool.query('SELECT execution_authority FROM workflow_runs WHERE id=$1',[run.id])).rows[0].execution_authority
-  return{...params,owner,workflow,runStore,params,snapshot}
+  return{...params,owner,workflow,authoringAuthority,runStore,params,snapshot}
 }
 
 describe('[COMP:api/workflow-authority] persisted member-run authority',()=>{
@@ -42,6 +44,24 @@ describe('[COMP:api/workflow-authority] persisted member-run authority',()=>{
   })
   it('refuses a resumed legacy run instead of inventing new authority',async()=>{
     const f=await fixture();await f.runStore.updateRun(f.run.id,{status:'running'})
+    await expect(resolveWorkflowRunScope(f.params)).rejects.toMatchObject({reason:'workflow_authority_unavailable'})
+    expect(await f.snapshot()).toBeNull()
+  })
+  it('refuses a legacy workflow whose authoring principal was never captured',async()=>{
+    const f=await fixture()
+    await pool.query('UPDATE workflows SET authoring_authority=NULL WHERE id=$1',[f.workflow.id])
+    await expect(resolveWorkflowRunScope(f.params)).rejects.toMatchObject({reason:'workflow_authority_unavailable'})
+    expect(await f.snapshot()).toBeNull()
+  })
+  it('never widens a first run when the author gains broader access after saving the workflow',async()=>{
+    const f=await fixture()
+    await pool.query("UPDATE workspace_members SET clearance='confidential',compartments=NULL WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
+    const resolved=await resolveWorkflowRunScope(f.params)
+    expect(resolved.turnScope.access).toMatchObject({clearance:'internal',compartments:['product']})
+  })
+  it('refuses a first run when the saved authoring principal has contracted',async()=>{
+    const f=await fixture()
+    await pool.query("UPDATE workspace_members SET clearance='public',compartments=ARRAY[]::text[] WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
     await expect(resolveWorkflowRunScope(f.params)).rejects.toMatchObject({reason:'workflow_authority_unavailable'})
     expect(await f.snapshot()).toBeNull()
   })
@@ -96,5 +116,26 @@ describe('[COMP:api/workflow-authority] persisted member-run authority',()=>{
     await expect(pool.query("UPDATE workflow_runs SET execution_authority=jsonb_set(execution_authority,'{ceiling,clearance}','\"confidential\"') WHERE id=$1",[f.run.id])).rejects.toThrow('workflow_execution_authority_immutable')
     await expect(pool.query('UPDATE workflow_runs SET execution_authority=NULL WHERE id=$1',[f.run.id])).rejects.toThrow('workflow_execution_authority_immutable')
     expect(await f.snapshot()).toEqual(stored)
+  })
+  it('pins a goal to its saved authoring principal even after later permission expansion',async()=>{
+    const f=await fixture()
+    const goal=await createGoal({workspaceId:f.workspaceId,outcome:'Complete fixture work',doneWhen:{kind:'subtasks'},
+      means:{workflowId:f.workflow.id},createdByUserId:f.userId,authoringAuthority:f.authoringAuthority})
+    await pool.query("UPDATE workspace_members SET clearance='confidential',compartments=NULL WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
+    const scope=await resolveGoalAuthoritySystem(goal)
+    expect(scope.ceiling).toMatchObject({clearance:'internal',compartments:['product']})
+    expect(await scope.executeWithAuthority(async()=>currentAgentAccess())).toMatchObject({clearance:'internal',compartments:['product']})
+  })
+  it('keeps legacy and contracted goals inert before any tick claim',async()=>{
+    const legacyFixture=await fixture()
+    const legacy=await createGoal({workspaceId:legacyFixture.workspaceId,outcome:'Legacy draft',doneWhen:{kind:'subtasks'},
+      createdByUserId:legacyFixture.userId,confirmed:false})
+    await expect(resolveGoalAuthoritySystem(legacy)).rejects.toMatchObject({reason:'goal_authority_unavailable'})
+
+    const f=await fixture()
+    const goal=await createGoal({workspaceId:f.workspaceId,outcome:'Contracted fixture work',doneWhen:{kind:'subtasks'},
+      means:{workflowId:f.workflow.id},createdByUserId:f.userId,authoringAuthority:f.authoringAuthority})
+    await pool.query("UPDATE workspace_members SET clearance='public',compartments=ARRAY[]::text[] WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
+    await expect(resolveGoalAuthoritySystem(goal)).rejects.toMatchObject({reason:'goal_authority_unavailable'})
   })
 })

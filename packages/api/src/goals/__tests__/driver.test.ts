@@ -203,6 +203,48 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     expect(h.statuses).toHaveLength(0)
   })
 
+  it('installs the saved goal authority before claiming and keeps it through delivery', async () => {
+    const events: string[] = []
+    const tryClaim = vi.fn(async () => { events.push('claim'); return true })
+    const { driver, h } = makeDriver({
+      openSubGoals: 0,
+      overrides: {
+        tryClaim,
+        executeWithAuthority: async (_goal, operation) => {
+          events.push('authority:start')
+          try { return await operation() }
+          finally { events.push('authority:end') }
+        },
+        deliver: async () => { events.push('deliver') },
+      },
+    })
+
+    await driver.tickGoal('g1')
+
+    expect(h.dispatch).toHaveBeenCalledOnce()
+    expect(events).toEqual(['authority:start', 'claim', 'deliver', 'authority:end'])
+  })
+
+  it('does not claim a goal when its saved authoring authority is unavailable', async () => {
+    const tryClaim = vi.fn(async () => true)
+    const { driver, h } = makeDriver({
+      overrides: {
+        tryClaim,
+        executeWithAuthority: async () => {
+          throw Object.assign(new Error('legacy goal has no authority'), {
+            reason: 'goal_authority_unavailable',
+          })
+        },
+      },
+    })
+
+    await expect(driver.tickGoal('g1')).rejects.toMatchObject({
+      reason: 'goal_authority_unavailable',
+    })
+    expect(tryClaim).not.toHaveBeenCalled()
+    expect(h.dispatch).not.toHaveBeenCalled()
+  })
+
   it('does not re-arm when explicit task deletion retires the running goal mid-iteration', async () => {
     const transitionRunningStatus = vi.fn().mockResolvedValue(false)
     const { driver, h } = makeDriver({
