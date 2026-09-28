@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { Cable, Check, Copy, Download, Link2, RefreshCw } from "lucide-react";
+import { desktopBridge } from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
 import { deploymentCapabilities } from "@/lib/edition";
 import { planGateApplies } from "@/lib/plan-gate";
@@ -93,6 +94,7 @@ export function ConnectBrowserPanel({
 }) {
   const t = useT();
   const c = t.computer.connectBrowser;
+  const desktop = !!desktopBridge()?.browserControl;
   const params = useParams<{ workspaceId?: string }>();
   const workspaceId = params?.workspaceId ?? "";
 
@@ -123,9 +125,19 @@ export function ConnectBrowserPanel({
 
   const refreshStatus = useCallback(async () => {
     const next = await getBrowserExtensionStatus(workspaceId, profileId);
-    setStatus(next);
-    onConnectionChange?.(profileId, next.connected);
-  }, [onConnectionChange, profileId, workspaceId]);
+    // Relay presence can belong to Chrome or another device, not this shell.
+    let connected = next.connected;
+    if (desktop) {
+      try {
+        const local = await desktopBridge()?.browserControl?.({ type: "status" });
+        connected = next.connected && local?.connected === true && local.browserProfileId === profileId;
+      } catch {
+        connected = false;
+      }
+    }
+    setStatus({ ...next, connected });
+    onConnectionChange?.(profileId, connected);
+  }, [desktop, onConnectionChange, profileId, workspaceId]);
 
   useEffect(() => {
     void refreshStatus();
@@ -186,18 +198,22 @@ export function ConnectBrowserPanel({
       await refreshStatus();
       return;
     }
+    if (desktop) {
+      setError(c.desktop.failed);
+      return;
+    }
     // Show the copy fields so the user is never left without a way forward.
     setPairing(p);
     setInstalled(false);
     if (result === "refused") setError(c.oneClickFailed);
-  }, [busy, workspaceId, profileId, c.generateFailed, c.oneClickFailed, refreshStatus]);
+  }, [busy, workspaceId, profileId, c.generateFailed, c.oneClickFailed, c.desktop.failed, desktop, refreshStatus]);
 
   // Gated: paid feature upsell (opens the Plan section in-app).
   if (gated) {
     return (
       <div className="rounded-lg border border-border bg-muted/40 p-3">
         <h3 className="text-sm font-medium">{c.gatedTitle}</h3>
-        <p className="mt-1 text-xs text-muted-foreground">{c.gatedBody}</p>
+        <p className="mt-1 text-xs text-muted-foreground">{desktop ? c.desktop.gatedBody : c.gatedBody}</p>
         <button
           type="button"
           onClick={() => openWorkspaceSettings("ws-plan")}
@@ -216,7 +232,7 @@ export function ConnectBrowserPanel({
       <div className="flex items-center justify-between gap-2">
         <h3 className="flex items-center gap-2 text-sm font-medium">
           <Cable className="size-4 text-muted-foreground" aria-hidden />
-          {c.title}
+          {desktop ? c.desktop.title : c.title}
           <span className="sr-only">{profileName}</span>
         </h3>
         <span
@@ -226,23 +242,24 @@ export function ConnectBrowserPanel({
               : "rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
           }
         >
-          {connected ? c.statusConnected : c.statusDisconnected}
+          {desktop ? (connected ? c.desktop.connected : c.desktop.disconnected) : (connected ? c.statusConnected : c.statusDisconnected)}
         </span>
       </div>
+      {desktop ? <p className="mt-2 text-xs text-muted-foreground">{c.desktop.description}</p> : null}
       {/* Shown alongside the connected badge, never instead of it: a stale
           extension is genuinely connected, and saying otherwise would send the
           user to re-pair when the fix is to reload. */}
       {status?.staleBuild ? (
         <p className="mt-2 rounded-md bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
-          {c.staleBuildWarning}
+          {desktop ? c.desktop.staleBuildWarning : c.staleBuildWarning}
         </p>
       ) : null}
 
       {status && !status.configured ? (
         <p className="mt-3 text-xs text-muted-foreground">{c.notConfigured}</p>
-      ) : connected ? (
+      ) : connected && !desktop ? (
         null
-      ) : installed && !pairing ? (
+      ) : desktop || (installed && !pairing) ? (
         // The extension answered, so it already has everything it needs from
         // us. Asking the user to copy a relay address and a code into a popup
         // before a 10 minute expiry buys nothing here.
@@ -254,7 +271,7 @@ export function ConnectBrowserPanel({
             className="inline-flex h-8 items-center gap-1.5 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
           >
             <Cable className="size-3.5" aria-hidden />
-            {busy ? c.oneClickConnecting : c.oneClickCta}
+            {busy ? c.oneClickConnecting : desktop ? c.desktop.connect : c.oneClickCta}
           </button>
           {error ? <p className="mt-1 text-[11px] text-destructive">{error}</p> : null}
         </div>

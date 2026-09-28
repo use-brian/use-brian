@@ -10806,6 +10806,18 @@ export const zhCN: Dictionary = {
       unnamed: "浏览器会话",
     },
     connectBrowser: {
+      desktop: {
+        title: "应用内浏览器",
+        description: "连接 Use Brian 内置的浏览器，无需扩展程序。",
+        connect: "连接应用内浏览器",
+        connected: "应用内浏览器已连接",
+        disconnected: "应用内浏览器尚未连接",
+        failed: "无法连接应用内浏览器，请重试。",
+        manage: "管理应用内浏览器连接",
+        allow: "允许 Use Brian 控制应用内浏览器",
+        gatedBody: "升级套餐以使用应用内浏览器。",
+        staleBuildWarning: "请重启 Use Brian 以更新应用内浏览器。",
+      },
       title: "我的浏览器",
       description: "将这个Use Brian身分连接到提供登录状态与网络的Chrome个人数据。分别配对不同的Chrome个人数据，即可同时运行不同的助理身分。每个连接只会在你核准的分页中运作。",
       notConfigured: "此部署尚未提供我的浏览器。",

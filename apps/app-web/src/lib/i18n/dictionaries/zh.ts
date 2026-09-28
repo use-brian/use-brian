@@ -10705,6 +10705,18 @@ export const zh: Dictionary = {
       unnamed: "瀏覽器工作階段",
     },
     connectBrowser: {
+      desktop: {
+        title: "應用程式內瀏覽器",
+        description: "連接 Use Brian 內建的瀏覽器，無需擴充功能。",
+        connect: "連接應用程式內瀏覽器",
+        connected: "應用程式內瀏覽器已連接",
+        disconnected: "應用程式內瀏覽器尚未連接",
+        failed: "無法連接應用程式內瀏覽器，請再試一次。",
+        manage: "管理應用程式內瀏覽器連線",
+        allow: "允許 Use Brian 控制應用程式內瀏覽器",
+        gatedBody: "升級方案以使用應用程式內瀏覽器。",
+        staleBuildWarning: "請重新啟動 Use Brian 以更新應用程式內瀏覽器。",
+      },
       title: "我的瀏覽器",
       description:
         "將這個Use Brian身分連接到提供登入狀態與網路的Chrome個人資料。分別配對不同的Chrome個人資料，即可同時執行不同的助理身分。每個連接只會在你核准的分頁中運作。",

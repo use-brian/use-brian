@@ -79,7 +79,13 @@ export interface DesktopLinkNavigationState {
   canCancel: boolean;
 }
 
+export type DesktopBrowserControlMessage =
+  | { type: "status" | "request-control" }
+  | { type: "pair"; relayUrl: string; pairingToken: string };
+
 export interface DesktopBridge {
+  /** Pair resolves successfully only once the embedded browser relay is ready. */
+  browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; hasControl?: boolean; connected?: boolean; browserProfileId?: string; workspaceId?: string }>;
   /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */
   platform?: string;
   /** Open the macOS Shortcuts editor for the one-time Siri workflow setup. */

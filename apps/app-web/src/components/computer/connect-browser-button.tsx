@@ -43,6 +43,7 @@ import { useRouter } from "next/navigation";
 import { Globe } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip } from "@/components/ui/tooltip";
+import { desktopBridge } from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
 import {
   chromeMessenger,
@@ -66,7 +67,9 @@ import {
 const STATUS_POLL_MS = 60_000;
 
 export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
-  const c = useT().computer.connectBrowser.sidebarRow;
+  const copy = useT().computer.connectBrowser;
+  const c = copy.sidebarRow;
+  const desktop = !!desktopBridge()?.browserControl;
   const router = useRouter();
   const openProfiles = useCallback(() => {
     router.push(`/w/${workspaceId}/computer/profiles`);
@@ -86,6 +89,21 @@ export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
 
   const refreshStatus = useCallback(async () => {
     const next = await getBrowserExtensionStatus(workspaceId);
+    if (desktop) {
+      // hasControl is a capability, not evidence of a local paired session.
+      let connected = false;
+      try {
+        const local = await desktopBridge()?.browserControl?.({ type: "status" });
+        connected = next.connected && local?.connected === true && local.workspaceId === workspaceId;
+      } catch {
+        // An unavailable native status must not hide the connect action.
+      }
+      if (alive.current) {
+        setStatus({ ...next, connected });
+        setHasControl(null);
+      }
+      return;
+    }
     if (!alive.current) return;
     setStatus(next);
     // Only worth asking the extension once the relay says this user has one
@@ -96,7 +114,7 @@ export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
     }
     const control = await extensionHasControl({ send: chromeMessenger() });
     if (alive.current) setHasControl(control);
-  }, [workspaceId]);
+  }, [desktop, workspaceId]);
 
   useEffect(() => {
     alive.current = true;
@@ -170,10 +188,10 @@ export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
   const label = busy
     ? c.connecting
     : needsControl
-      ? c.allowAria
+      ? (desktop ? copy.desktop.allow : c.allowAria)
       : connected
-        ? c.manageAria
-        : c.connectAria;
+        ? (desktop ? copy.desktop.manage : c.manageAria)
+        : (desktop ? copy.desktop.connect : c.connectAria);
 
   return (
     <Tooltip label={label}>

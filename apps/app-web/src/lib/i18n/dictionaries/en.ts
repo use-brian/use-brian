@@ -11045,6 +11045,18 @@ export const en = {
       unnamed: "Browser session",
     },
     connectBrowser: {
+      desktop: {
+        title: "In-app browser",
+        description: "Connect the browser built into Use Brian. No extension is needed.",
+        connect: "Connect in-app browser",
+        connected: "In-app browser connected",
+        disconnected: "In-app browser not connected",
+        failed: "Could not connect the in-app browser. Please try again.",
+        manage: "Manage the in-app browser connection",
+        allow: "Allow Use Brian to control the in-app browser",
+        gatedBody: "Upgrade your plan to use the in-app browser.",
+        staleBuildWarning: "Restart Use Brian to update the in-app browser.",
+      },
       title: "My Browser",
       description:
         "Connect this Use Brian profile to the Chrome profile that should supply its logins and network. Pair separate Chrome profiles to run different assistant identities at the same time. Each connection runs only in a tab you approve.",
