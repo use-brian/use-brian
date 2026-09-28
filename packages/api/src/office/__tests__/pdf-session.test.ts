@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { createFictionalSignaturePng, createFlatPdfFixture, createSupportedPdfFixture } from '../../../../core/src/office/__tests__/fixtures/pdf/index.js'
-import { createPdfSessionService } from '../pdf-session-service.js'
+import { PDF_EDITING_SESSION_RUNTIME, canBootPdfEditingSession, createPdfSessionService } from '../pdf-session-service.js'
 
 const userId = randomUUID()
 const workspaceId = randomUUID()
@@ -74,6 +74,11 @@ function fixture(options: { supported?: boolean; signature?: boolean } = {}) {
 }
 
 describe('[COMP:api/office-pdf-sessions] PDF session service', () => {
+  it('boots only with the complete same-build capability inventory', () => {
+    expect(canBootPdfEditingSession()).toBe(true)
+    expect(Object.values(PDF_EDITING_SESSION_RUNTIME).every(Boolean)).toBe(true)
+  })
+
   it('copies an accessible source, prepares version zero, and reuses the owner idempotency key', async () => {
     const f = fixture()
     const input = { userId, workspaceId, source: { kind: 'workspace_file' as const, id: originalFileId }, title: 'Fictional form', sensitivity: 'internal' as const, idempotencyKey: 'session-key-0001' }

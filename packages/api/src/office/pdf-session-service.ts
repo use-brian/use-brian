@@ -11,9 +11,11 @@ import {
 import {
   encodeOfficeState,
   applyOfficeCommand,
+  canEnablePdfEditingSession,
   officeStateVector,
   snapshotToYDoc,
   type OfficeCommand,
+  type PdfEditingCapabilityAvailability,
   type PdfSnapshot,
 } from '@use-brian/office-model'
 import { officeLiveStore, type OfficeLiveSnapshot } from '../db/office-live.js'
@@ -78,6 +80,29 @@ export type PdfSessionServiceDeps = {
   sessions?: OfficePdfSessionStore
   live?: LiveStore
   now?: () => Date
+}
+
+/** Compile-time inventory consumed by the boot composition barrier. Keeping
+ * every required slice here makes a missing runtime path fail the TypeScript
+ * build instead of silently exposing a partial PDF editor. */
+export const PDF_EDITING_SESSION_RUNTIME = {
+  canonicalModel: true,
+  pdfParser: true,
+  browserRenderer: true,
+  serverWriter: true,
+  reopenValidator: true,
+  sessionStorage: true,
+  expiryCleanup: true,
+  release: true,
+  saveToFiles: true,
+  targetPlanner: true,
+  signatureApproval: true,
+  editor: true,
+  approvalPreview: true,
+} as const satisfies PdfEditingCapabilityAvailability
+
+export function canBootPdfEditingSession(): boolean {
+  return canEnablePdfEditingSession(PDF_EDITING_SESSION_RUNTIME)
 }
 
 const scopeRank = { public: 0, internal: 1, confidential: 2 } as const

@@ -121,6 +121,15 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     ).rejects.toThrow(/episodes.*no embedding column/)
   })
 
+  it('[COMP:api/office-pdf-sessions] excludes session-owned files from every embedding claim lane', async () => {
+    await store.withClaimedRows('workspace_files', 10, async () => undefined)
+    expect(claims()).not.toHaveLength(0)
+    for (const claim of claims()) {
+      expect(claim.text).toContain("path NOT LIKE '/office/sessions/%'")
+      expect(claim.text).toContain("NOT COALESCE((metadata->>'noIndex')::boolean,false)")
+    }
+  })
+
   it('claims NULL-embedding rows with priority ordering + skip-locked lease', async () => {
     claimRows = []
     await store.withClaimedRows('memories', 50, async (rows) => {

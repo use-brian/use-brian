@@ -561,7 +561,7 @@ import { createOfficeService } from './office/service.js'
 import { deriveOfficeSnapshot } from './office/release.js'
 import { createOfficeLifecycleWorker, purgeExpiredPdfSessions, runPdfPurgeBlobWorker } from './office/lifecycle-worker.js'
 import { resolveDurableOfficeAccess, resolveOfficeAccess } from './office/access.js'
-import { createPdfSessionService } from './office/pdf-session-service.js'
+import { canBootPdfEditingSession, createPdfSessionService } from './office/pdf-session-service.js'
 import { PDF_SESSION_FILE_METADATA } from './office/pdf-session-assets.js'
 import { officeArtifactRoutes } from './routes/office-artifacts.js'
 import { officePdfSessionRoutes } from './routes/office-pdf-sessions.js'
@@ -6805,7 +6805,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { id }
     },
   } satisfies import('./office/pdf-session-assets.js').PdfSessionAssetPort : null
-  const pdfSessionService = pdfSessionAssets ? createPdfSessionService({
+  const pdfSessionService = pdfSessionAssets && canBootPdfEditingSession() ? createPdfSessionService({
     sessions: officePdfSessionStore,
     live: officeLiveStore,
     assets: pdfSessionAssets,

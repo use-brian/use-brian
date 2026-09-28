@@ -17,7 +17,7 @@ function server(service: Record<string, unknown>) {
   return app
 }
 
-describe('[COMP:api/office-pdf-routes] PDF session routes', () => {
+describe('[COMP:api/office-pdf-sessions] PDF session routes', () => {
   it('returns a ready session only after synchronous intake completes', async () => {
     const create = vi.fn(async () => ({ artifactId: ARTIFACT, version: 0, expiresAt: new Date(Date.now() + 86_400_000).toISOString(), editorUrl: `/w/${WORKSPACE}/office/${ARTIFACT}`, targets: [], sourceHash: 'a'.repeat(64) }))
     const response = await request(server({ create })).post('/api/office/pdf-sessions').send({
