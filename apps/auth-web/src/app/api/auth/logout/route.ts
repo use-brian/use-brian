@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { clearAuthCookies } from "@/lib/cookies";
+import { clearAuthCookies, parseLastCookie } from "@/lib/cookies";
+import { backendUrl } from "@/lib/backend";
 import { portalConfig } from "@/lib/config";
 import { safeReturnUrl } from "@/lib/origins";
 
@@ -13,7 +14,35 @@ export async function POST(request: Request) {
   }
   const form = contentType.includes("form") ? await request.formData().catch(() => null) : null;
   const next = typeof form?.get("next") === "string" ? safeReturnUrl(String(form.get("next")), config) : null;
+  // The portal owns the refresh cookie, so it must also end the server-side
+  // session. Client-side access-token revocation is only best effort and can
+  // fail once the access token expires. Cookie deletion alone lets a retained
+  // token (or an in-flight refresh response) restore a usable session.
+  const token = parseLastCookie(request.headers.get("cookie") ?? "", "refresh_token");
+  if (token) {
+    try {
+      const backend = await fetch(backendUrl("/auth/logout"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: token }),
+        cache: "no-store",
+        signal: AbortSignal.timeout(10_000),
+      });
+      // An invalid/expired refresh token cannot restore a session either.
+      if (!backend.ok && backend.status !== 401) throw new Error("Logout unavailable");
+    } catch {
+      // Keep the credential for a retry; never claim success while the backend
+      // session may still be live. Do not bounce into the app's refresh guard.
+      const retry = new URL("/logout", config.portalOrigin);
+      retry.searchParams.set("error", "unavailable");
+      if (next) retry.searchParams.set("next", next.toString());
+      return form
+        ? NextResponse.redirect(retry, { status: 303, headers: { "Cache-Control": "no-store" } })
+        : NextResponse.json({ error: "logout_unavailable" }, { status: 503, headers: { "Cache-Control": "no-store" } });
+    }
+  }
   const response = form ? NextResponse.redirect(next ?? new URL("/login", config.portalOrigin), 303) : NextResponse.json({ ok: true });
+  response.headers.set("Cache-Control", "no-store");
   clearAuthCookies(response);
   return response;
 }

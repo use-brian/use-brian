@@ -44,7 +44,8 @@ export type AuthSessionStore = {
   validateRefresh(claims: AuthTokenClaims, client: AuthSessionClientInfo): Promise<{ id: string; authVersion: number } | null>
   listForUser(userId: string): Promise<AuthSession[]>
   revokeForUser(userId: string, sessionId: string): Promise<boolean>
-  revokeAllForUser(userId: string): Promise<boolean>
+  // expectedAuthVersion makes legacy logout replay-safe even across concurrent requests.
+  revokeAllForUser(userId: string, expectedAuthVersion?: number): Promise<boolean>
 }
 
 function bounded(value: string | undefined | null, max: number): string | null {
@@ -106,14 +107,15 @@ export function createAuthSessionStore(
   const createSession = async (
     userId: string,
     client: AuthSessionClientInfo,
+    expectedAuthVersion?: number,
   ): Promise<{ id: string; authVersion: number } | null> => {
     const result = await db.query<{ id: string; authVersion: number }>(
       `INSERT INTO auth_sessions (user_id, auth_version, device_label, user_agent, last_ip)
        SELECT id, auth_version, $2, $3, $4
          FROM users
-        WHERE id = $1
+        WHERE id = $1 AND ($5::integer IS NULL OR auth_version = $5)
        RETURNING id, auth_version AS "authVersion"`,
-      [userId, client.deviceLabel, client.userAgent, client.ipAddress],
+      [userId, client.deviceLabel, client.userAgent, client.ipAddress, expectedAuthVersion ?? null],
     )
     return result.rows[0] ?? null
   }
@@ -167,7 +169,9 @@ export function createAuthSessionStore(
     async validateRefresh(claims, client) {
       const row = await admission(claims)
       if (!row) return null
-      if (!claims.sessionId) return createSession(claims.userId, client)
+      // A concurrent legacy logout may bump auth_version after admission.
+      // Never upgrade that old refresh token into the newly authenticated version.
+      if (!claims.sessionId) return createSession(claims.userId, client, claims.authVersion ?? 0)
       const refreshed = await db.query<{ id: string; authVersion: number }>(
         `UPDATE auth_sessions
             SET last_seen_at = clock_timestamp(),
@@ -214,13 +218,14 @@ export function createAuthSessionStore(
       return (result.rowCount ?? 0) > 0
     },
 
-    async revokeAllForUser(userId) {
+    async revokeAllForUser(userId, expectedAuthVersion) {
       const client = await (pool ?? getPool()).connect()
       try {
         await client.query('BEGIN')
         const bumped = await client.query(
-          `UPDATE users SET auth_version = auth_version + 1 WHERE id = $1`,
-          [userId],
+          `UPDATE users SET auth_version = auth_version + 1
+            WHERE id = $1 AND ($2::integer IS NULL OR auth_version = $2)`,
+          [userId, expectedAuthVersion ?? null],
         )
         if ((bumped.rowCount ?? 0) === 0) {
           await client.query('ROLLBACK')

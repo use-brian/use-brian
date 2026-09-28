@@ -67,6 +67,7 @@ export const zhCN: Dictionary = {
     retry: "重试",
   },
   logout: {
+    error: "无法完成注销，请重试。",
     title: "要注销吗？",
     body: "返回工作空间前，您需要再次验证身分。",
     confirm: "注销",
