@@ -10971,8 +10971,14 @@ export const ja: Dictionary = {
     speakerRenameAction: "名前を保存",
   },
   meetingTags: {
+    settings: "タグルール",
+    close: "タグルールを閉じる",
+    addTags: "タグを追加",
+    editTags: "タグを編集",
+    suggestionCount: "提案されたルール（{count}件）",
+
     title: "会議タグ",
-    help: "既定ではタグを付けません。手動で追加するか、今後のライブメモ用のルールを定義してください。",
+    help: "初期状態ではタグは追加されません。ルールはこのフォルダーの今後のメモに適用されます。",
     tags: "この会議のタグ",
     commaSeparated: "コンマで区切る",
     save: "タグを保存",

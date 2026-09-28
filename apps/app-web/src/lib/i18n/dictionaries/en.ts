@@ -11226,8 +11226,14 @@ export const en = {
   // Dock live recording (docs/architecture/media/live-capture.md): the
   // record button + live strip + crash-recovery banner on the chat dock.
   meetingTags: {
+    settings: "Tag rules",
+    close: "Close tag rules",
+    addTags: "Add tags",
+    editTags: "Edit tags",
+    suggestionCount: "Suggested rules ({count})",
+
     title: "Meeting tags",
-    help: "No tags are added by default. Set tags yourself or define a rule for future live notes.",
+    help: "No tags are added by default. Rules apply to future notes in this folder.",
     tags: "Tags on this meeting",
     commaSeparated: "Separate with commas",
     save: "Save tags",

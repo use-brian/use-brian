@@ -10896,8 +10896,14 @@ export const zh: Dictionary = {
     speakerRenameAction: "保存名字",
   },
   meetingTags: {
+    settings: "標籤規則",
+    close: "關閉標籤規則",
+    addTags: "新增標籤",
+    editTags: "編輯標籤",
+    suggestionCount: "建議規則（{count}）",
+
     title: "會議標籤",
-    help: "預設不加入標籤。請手動設定，或為之後的即時筆記定義規則。",
+    help: "預設不會新增任何標籤。規則會套用至此資料夾未來的會議筆記。",
     tags: "這次會議的標籤",
     commaSeparated: "以逗號分隔",
     save: "儲存標籤",

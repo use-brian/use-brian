@@ -11013,8 +11013,14 @@ export const zhCN: Dictionary = {
     speakerRenameAction: "保存名字",
   },
   meetingTags: {
+    settings: "标签规则",
+    close: "关闭标签规则",
+    addTags: "添加标签",
+    editTags: "编辑标签",
+    suggestionCount: "建议规则（{count}）",
+
     title: "会议标签",
-    help: "默认不添加标签。请手动设置，或为之后的实时笔记定义规则。",
+    help: "默认不会添加任何标签。规则会应用于此文件夹未来的会议笔记。",
     tags: "这次会议的标签",
     commaSeparated: "以逗号分隔",
     save: "保存标签",
