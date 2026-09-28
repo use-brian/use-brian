@@ -570,7 +570,7 @@ export async function reingestStoredFile(
   throw new Error(data?.detail || data?.error || `Ingest failed (HTTP ${res.status})`);
 }
 
-export type IngestApplicationCounts = {
+type IngestApplicationCounts = {
   pending: number;
   committed: number;
   alreadyApplied: number;
