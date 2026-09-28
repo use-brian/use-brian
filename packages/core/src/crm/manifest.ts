@@ -7,7 +7,7 @@ import {
 } from './config-commands.js'
 import {
   SaveCrmConsentPurposeCommandSchema, SaveCrmEntitlementPlanCommandSchema, SaveCrmEventCommandSchema,
-  SaveCrmIntakeDefinitionCommandSchema, SaveCrmSegmentCommandSchema,
+  SaveCrmIntakeDefinitionCommandSchema, SaveCrmSegmentCommandSchema, isUnverifiedIdentityPolicy,
 } from './operations-types.js'
 import { CrmSegmentPredicateSchema } from './segments.js'
 
@@ -48,8 +48,8 @@ const entry = <T extends z.ZodTypeAny>(value: T) => z.object({ ref: Ref, id: Id.
 const definitions = entry(business(SaveCrmIntakeDefinitionCommandSchema, 'save_intake_definition')).extend({
   sensitiveFieldKeys: z.array(Ref).max(100).default([]),
 }).superRefine((item, ctx) => {
-  if (item.value.definition.identityPolicy !== 'new_or_review' || item.value.definition.identityVerification) {
-    ctx.addIssue({ code: 'custom', path: ['value', 'definition', 'identityPolicy'], message: 'Trusted identity setup requires the owner-managed settings path; manifests use new_or_review.' })
+  if (!isUnverifiedIdentityPolicy(item.value.definition.identityPolicy) || item.value.definition.identityVerification) {
+    ctx.addIssue({ code: 'custom', path: ['value', 'definition', 'identityPolicy'], message: 'Trusted identity setup requires the owner-managed settings path; manifests use new_or_review or existing_or_new.' })
   }
   for (const key of item.sensitiveFieldKeys) {
     const field = item.value.definition.fields.find((field: { key: string }) => field.key === key)

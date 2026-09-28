@@ -3,7 +3,7 @@
  */
 import { createPublicKey, verify } from 'node:crypto'
 import {
-  CrmIntakeVerificationConfigSchema, CrmOperationsError, canonicalCrmRequest,
+  CrmIntakeVerificationConfigSchema, CrmOperationsError, canonicalCrmRequest, isUnverifiedIdentityPolicy,
   type CrmOperationsContext, type CrmIntakeDefinitionVersionInput, type CrmIntakeIdentityProof,
   type RecordCrmSubmissionCommand,
 } from '@use-brian/core'
@@ -15,7 +15,7 @@ function publicKey(value: string) {
 }
 
 export function assertIntakeVerificationConfiguration(context: CrmOperationsContext, definition: CrmIntakeDefinitionVersionInput): void {
-  if (definition.identityPolicy === 'new_or_review') {
+  if (isUnverifiedIdentityPolicy(definition.identityPolicy)) {
     if (definition.identityVerification) throw new CrmOperationsError('invalid_input', 'Unverified intake must not configure a trusted identity key.')
     return
   }
@@ -37,7 +37,7 @@ export function verifyIntakeIdentity(
   context: CrmOperationsContext, definition: Pick<StoredIntakeDefinition, 'identityPolicy' | 'schemaSnapshot' | 'verificationAcknowledgedByUserId' | 'currentVersion' | 'definitionKey'>,
   command: RecordCrmSubmissionCommand, requestHash: string, now: Date,
 ): (CrmIntakeIdentityProof & { requestHash: string }) | null {
-  if (definition.identityPolicy === 'new_or_review') {
+  if (isUnverifiedIdentityPolicy(definition.identityPolicy)) {
     if (command.identityProof) throw new CrmOperationsError('invalid_input', 'This intake definition does not accept identity proof.')
     if (command.submittedAt) throw new CrmOperationsError('invalid_input', 'Caller occurrence time requires verified backend admission.', { reason: 'occurrence_time_requires_verification' })
     return null

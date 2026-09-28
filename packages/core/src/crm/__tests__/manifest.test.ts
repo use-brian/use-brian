@@ -42,6 +42,9 @@ describe('[COMP:crm/manifest] Versioned canonical manifest schema', () => {
     expect(CrmManifestSchema.safeParse({ ...base, intakeDefinitions: [changed] }).success).toBe(false)
     expect(CrmManifestSchema.safeParse({ ...base, intakeDefinitions: [{ ...definition, value: { ...definition.value,
       definition: { ...definition.value.definition, identityPolicy: 'trusted_verified_email' } } }] }).success).toBe(false)
+    // The unverified reuse policy needs no owner setup, so a manifest may declare it.
+    expect(CrmManifestSchema.safeParse({ ...base, intakeDefinitions: [{ ...definition, value: { ...definition.value,
+      definition: { ...definition.value.definition, identityPolicy: 'existing_or_new' } } }] }).success).toBe(true)
     expect(CrmManifestSchema.safeParse({ ...base, segments: [{ ref: 'segment', value: {
       segmentKey: 'segment', name: 'Segment', entityKind: 'person', predicate: { arbitrary: true },
     } }] }).success).toBe(false)
