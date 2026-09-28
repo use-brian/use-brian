@@ -79,13 +79,15 @@ export interface DesktopLinkNavigationState {
   canCancel: boolean;
 }
 
+/** cancel invalidates only pending pairing; disconnect clears identity while preserving the explicit Stop latch.
+ * show focuses the existing host without opening a consent dialog. */
 export type DesktopBrowserControlMessage =
-  | { type: "status" | "request-control" }
-  | { type: "pair"; relayUrl: string; pairingToken: string };
+  | { type: "status" | "request-control" | "show" | "disconnect" | "cancel" }
+  | { type: "pair"; relayUrl: string; pairingToken: string; automatic?: boolean; expectedControlEpoch?: number };
 
 export interface DesktopBridge {
   /** Pair resolves successfully only once the embedded browser relay is ready. */
-  browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; hasControl?: boolean; connected?: boolean; browserProfileId?: string; workspaceId?: string }>;
+  browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; controlEpoch?: number; hasControl?: boolean; connected?: boolean; automaticBlocked?: boolean; browserProfileId?: string; workspaceId?: string }>;
   /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */
   platform?: string;
   /** Open the macOS Shortcuts editor for the one-time Siri workflow setup. */

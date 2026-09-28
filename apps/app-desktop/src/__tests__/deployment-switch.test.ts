@@ -23,6 +23,7 @@ vi.mock("node:fs", async (importOriginal) => ({
     if (!value) throw new Error("ENOENT");
     return encoding ? value.toString() : value;
   },
+  mkdirSync: vi.fn(),
   writeFileSync: (path: string, data: string | Buffer) => state.files.set(String(path), Buffer.from(data)),
   renameSync: (from: string, to: string) => { state.files.set(to, state.files.get(from)!); state.files.delete(from); },
   rmSync: (path: string) => state.files.delete(String(path)),
@@ -160,10 +161,11 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
     expect(state.windows[0].destroyed).toBe(true);
   });
 
-  it.each(["status", "request-control", "pair"])("validates the sender and main frame for %s", async (type) => {
+  it.each(["status", "request-control", "pair", "show", "cancel", "disconnect"])("validates the sender and main frame for %s", async (type) => {
     const { EmbeddedBrowser } = await import("../embedded-browser.js");
     const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
     const status = vi.spyOn(EmbeddedBrowser.prototype, "status");
+    const actions = ["show", "cancelPending", "dispose"].map(method => vi.spyOn(EmbeddedBrowser.prototype, method as "show"));
     const input = type === "pair" ? pairInput() : { type };
     const foreignContents = { id: 999, isDestroyed: () => false, mainFrame: {} };
     expect(await invoke({ sender: foreignContents, senderFrame: foreignContents.mainFrame }, input)).toEqual({ ok: false });
@@ -172,18 +174,26 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
     expect(await invoke(sender(), input)).toEqual({ ok: false });
     expect(pair).not.toHaveBeenCalled();
     expect(status).not.toHaveBeenCalled();
+    for (const action of actions) expect(action).not.toHaveBeenCalled();
   });
 
   it("reports capability to the trusted renderer and pairs only matching user claims", async () => {
     const { EmbeddedBrowser } = await import("../embedded-browser.js");
     const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
     for (const type of ["status", "request-control"]) {
-      expect(await invoke(sender(), { type })).toEqual({ ok: true, hasControl: true, connected: false });
+      expect(await invoke(sender(), { type })).toEqual({ ok: true, hasControl: true, connected: false, automaticBlocked: false, controlEpoch: 0 });
     }
     expect(await invoke(sender(), pairInput("other-user"))).toEqual({ ok: false });
     expect(pair).not.toHaveBeenCalled();
     expect(await invoke(sender(), pairInput())).toEqual({ ok: true });
     expect(pair).toHaveBeenCalledExactlyOnceWith(pairInput(), JSON.stringify([local.appUrl, "same-user"]));
+  });
+
+  it.each([['show', 'show'], ['cancel', 'cancelPending'], ['disconnect', 'dispose']] as const)('delegates trusted %s requests', async (type, method) => {
+    const { EmbeddedBrowser } = await import('../embedded-browser.js');
+    const action = vi.spyOn(EmbeddedBrowser.prototype, method).mockImplementation(() => {});
+    expect(await invoke(sender(), { type })).toEqual({ ok: true });
+    expect(action).toHaveBeenCalledExactlyOnceWith(...(type === 'disconnect' ? [true] : []));
   });
 
   it.each(["sign-out", "clear-tokens"])("disposes browser control on %s", async (action) => {

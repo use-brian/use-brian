@@ -7,6 +7,7 @@ import regressions. The opt-in browser test uses the live official catalog.
 
 | COMP tag | doc path | source path | test path |
 | --- | --- | --- | --- |
+| app-web/automatic-desktop-browser | docs/embedded-desktop-browser.md | apps/app-web/src/lib/automatic-desktop-browser.ts; apps/app-web/src/components/computer/desktop-browser-coordinator.tsx | apps/app-web/src/lib/__tests__/automatic-desktop-browser.test.ts; apps/app-web/src/components/computer/__tests__/desktop-browser-coordinator.test.tsx; apps/app-web/src/lib/api/__tests__/computer.test.ts |
 | workflow/recent-approval-channel | docs/workflow/recent-approval-channel.md | packages/api/src/workflow/recent-approval-channel.ts | packages/api/src/workflow/__tests__/recent-approval-channel.test.ts |
 | app-web/workflow | docs/workflow/recent-approval-channel.md | apps/app-web/src/components/workflow/step-editor.tsx | apps/app-web/src/components/workflow/__tests__/step-editor.test.tsx |
 | channels/approval-deliveries | docs/workflow/recent-approval-channel.md | packages/api/src/workflow/approval-deliveries.ts | packages/api/src/workflow/__tests__/approval-deliveries.test.ts |

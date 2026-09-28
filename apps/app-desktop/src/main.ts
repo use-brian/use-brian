@@ -4450,6 +4450,9 @@ if (!gotLock) {
     const type = (input as { type?: unknown }).type;
     // Capability, not an implicit permission grant: pairing has its own native consent.
     if (type === "status" || type === "request-control") return { ok: true, hasControl: true, ...embeddedBrowser.status() };
+    if (type === "show") { embeddedBrowser.show(); return { ok: true }; }
+    if (type === "cancel") { embeddedBrowser.cancelPending(); return { ok: true }; }
+    if (type === "disconnect") { embeddedBrowser.dispose(true); return { ok: true }; }
     if (type !== "pair") return { ok: false };
     const config = cfg;
     const user = cfg.bundled ? readStoredTokens()?.user : parseUserCookieValue(await readJarCookie("user"));

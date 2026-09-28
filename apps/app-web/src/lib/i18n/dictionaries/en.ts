@@ -11046,6 +11046,11 @@ export const en = {
     },
     connectBrowser: {
       desktop: {
+        automatic: "Automatic after local profile setup",
+        paused: "Browser paused",
+        open: "Open browser",
+        resume: "Resume",
+        retry: "Retry",
         title: "In-app browser",
         description: "Connect the browser built into Use Brian. No extension is needed.",
         connect: "Connect in-app browser",

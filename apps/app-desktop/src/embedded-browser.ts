@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { dialog, type BrowserWindow } from "electron";
+import { app, dialog, type BrowserWindow } from "electron";
+import { join } from "node:path";
+import { BrowserApprovals } from "./browser-approvals.js";
 import { TabExecutor, ExecutorError, type ExecutorPlatform, type ExecutorTabUpdatedListener } from "@use-brian/browser-control/executor.js";
 import { RelayClient, type WebSocketLike } from "@use-brian/browser-control/relay-client.js";
 import type { LocalControlMode } from "@use-brian/browser-control/protocol.js";
@@ -37,7 +39,7 @@ const text = (value: unknown): string => {
 };
 
 /** One explicitly approved, profile-scoped session. Tokens live only in main-process memory.
- * Restart/sign-out/switch requires pairing again; website cookies persist in their own partition.
+ * Restart/sign-out/switch requires fresh pairing credentials, but native profile consent persists.
  */
 export class EmbeddedBrowser {
   private host: EmbeddedBrowserHost | null = null;
@@ -52,27 +54,46 @@ export class EmbeddedBrowser {
   private identity: { workspaceId: string; browserProfileId: string } | null = null;
   private approvingTab = false;
 
-  constructor(private readonly options: { getDockWindow?: () => BrowserWindow | null } = {}) {}
+  private automaticBlocked = false;
+  private readonly approvals: Pick<BrowserApprovals, "has" | "grant">;
+
+  constructor(private readonly options: {
+    getDockWindow?: () => BrowserWindow | null;
+    approvals?: Pick<BrowserApprovals, "has" | "grant">;
+  } = {}) {
+    this.approvals = options.approvals ?? new BrowserApprovals(() => join(app.getPath("userData"), "browser-approvals.json"));
+  }
+
+  show(): void { this.host?.show(); }
+  cancelPending(): void { if (this.pairing) this.dispose(); }
 
   isDockedFocused(): boolean { return this.host?.isDockedFocused() ?? false; }
 
-  status(): { connected: boolean; workspaceId?: string; browserProfileId?: string } {
-    return this.active && this.relay?.getState() === "ready"
-      ? { connected: true, ...this.identity }
-      : { connected: false };
+  status(): { connected: boolean; automaticBlocked: boolean; controlEpoch: number; workspaceId?: string; browserProfileId?: string } {
+    return { connected: this.active && this.relay?.getState() === "ready",
+      automaticBlocked: this.automaticBlocked, controlEpoch: this.generation, ...this.identity };
   }
 
   async pair(input: unknown, accountScope: string): Promise<boolean> {
     if (this.pairing) return false;
     const pair = browserPairing(input, accountScope);
+    const { automatic: auto, expectedControlEpoch } = input as { automatic?: unknown; expectedControlEpoch?: unknown };
+    // An explicit Resume must not override a newer Stop while credentials were minted.
+    if (expectedControlEpoch !== undefined && expectedControlEpoch !== this.generation) return false;
+    const automatic = auto === true;
+    if (automatic && (this.automaticBlocked || this.active)) return false;
     this.pairing = true;
     this.dispose();
+    this.identity = { workspaceId: pair.workspaceId, browserProfileId: pair.browserProfileId };
     const generation = this.generation;
     try {
-      const answer = await dialog.showMessageBox({ type: "question", title: "Connect Brian Browser", message: "Allow Brian to control an in-app browser?",
-        detail: `Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with websites in its task tabs, including sites you sign in to. This profile has separate cookies from your normal browser. Use Stop Brian at any time. Downloads and protected credential filling are not supported. Connecting replaces any browser already paired to this profile.`,
-        buttons: ["Cancel", "Connect browser"], defaultId: 0, cancelId: 0 });
-      if (answer.response !== 1 || generation !== this.generation) return false;
+      if (!this.approvals.has(pair.partition)) {
+        const answer = await dialog.showMessageBox({ type: "question", title: "Set up Brian Browser", message: "Allow this browser profile to start automatically?",
+          detail: `Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with its task tabs, including sites you sign in to. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian pauses automatic sessions for this app launch until you choose Resume. Manual tabs still need separate approval. Downloads and protected credential filling are not supported. This replaces any browser already paired to this profile.`,
+          buttons: ["Not now", "Allow automatic sessions"], defaultId: 0, cancelId: 0 });
+        if (generation !== this.generation) return false;
+        if (answer.response !== 1) { this.automaticBlocked = true; return false; }
+      }
       let token = pair.token;
       let settle!: (ok: boolean) => void;
       const ready = new Promise<boolean>(resolve => { settle = resolve; });
@@ -87,7 +108,7 @@ export class EmbeddedBrowser {
           if (generation !== this.generation) return;
           if (state === "ready") settle(true);
           else if (state === "unpaired" || state === "replaced") { settle(false); this.stop(); }
-          else if (this.active && state === "disconnected") this.stop();
+          else if (this.active && state === "disconnected") this.stop(false);
         },
         onCommand: cmd => this.receive(cmd, generation),
       });
@@ -109,10 +130,11 @@ export class EmbeddedBrowser {
           if (this.executor?.onDetached(id)) this.stop();
         },
       }, { dockWindow: this.options.getDockWindow?.() });
+      this.approvals.grant(pair.partition);
       this.active = true;
       this.identity = { workspaceId: pair.workspaceId, browserProfileId: pair.browserProfileId };
       this.executor = new TabExecutor(this.platform(generation));
-      this.host.setStatus("Brian connected. Task tabs only. Stop Brian disconnects agent control.");
+      this.host.setStatus("Brian ready. Task tabs only.");
       this.host.show();
       return true;
     } catch {
@@ -122,9 +144,9 @@ export class EmbeddedBrowser {
   }
 
   /** Synchronous revocation before any async detach. Queued/in-flight CDP calls are fenced. */
-  stop(): void {
+  stop(blockAutomatic = true): void {
+    if (blockAutomatic) this.automaticBlocked = true;
     this.active = false;
-    this.identity = null;
     this.generation++;
     this.cancelReady?.();
     this.cancelReady = null;
@@ -145,11 +167,13 @@ export class EmbeddedBrowser {
       } catch { /* A renderer/debugger can disappear during teardown; revocation still wins. */ }
     }
     this.fullBrowserApproved = false;
-    this.host?.setStatus("Brian stopped. Manual browsing only. Reconnect from My Browser to resume.");
+    this.host?.setStatus("Brian paused. Manual browsing only. Resume from Browsers.");
   }
 
-  dispose(): void {
-    this.stop();
+  dispose(preserveAutomaticBlock = false): void {
+    this.stop(false);
+    if (!preserveAutomaticBlock) this.automaticBlocked = false;
+    this.identity = null;
     const host = this.host;
     this.host = null;
     host?.destroy();
@@ -173,7 +197,7 @@ export class EmbeddedBrowser {
   }
 
   private check(generation: number): void {
-    if (!this.active || generation !== this.generation) throw new ExecutorError("Browser control was stopped. Reconnect from My Browser.", "user_stopped");
+    if (!this.active || generation !== this.generation) throw new ExecutorError("Browser control was paused. Resume from Browsers.", "user_stopped");
   }
 
   private platform(generation: number): ExecutorPlatform {
