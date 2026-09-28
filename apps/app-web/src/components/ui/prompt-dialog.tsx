@@ -123,7 +123,7 @@ export function PromptDialogProvider() {
         <Dialog.Popup
           initialFocus={inputRef}
           className={cn(
-            "fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2",
+            "fixed left-1/2 top-1/2 z-50 w-[calc(var(--native-app-width,100vw)-2rem)] -translate-x-1/2 -translate-y-1/2",
             active?.multiline ? "max-w-lg" : "max-w-md",
             "rounded-2xl border border-border bg-background p-6 shadow-xl ring-1 ring-foreground/5",
             "transition-all duration-150",

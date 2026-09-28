@@ -25,6 +25,8 @@
  * [COMP:app-web/dropdown-menu]
  */
 
+import { useAppPopupBoundary } from "@/lib/app-viewport";
+
 import * as React from "react";
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
 
@@ -46,9 +48,11 @@ function DropdownMenuContent({
     MenuPrimitive.Positioner.Props,
     "align" | "alignOffset" | "side" | "sideOffset"
   >) {
+  const collisionBoundary = useAppPopupBoundary();
   return (
     <MenuPrimitive.Portal>
       <MenuPrimitive.Positioner
+        collisionBoundary={collisionBoundary}
         side={side}
         sideOffset={sideOffset}
         align={align}

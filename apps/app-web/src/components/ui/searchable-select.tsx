@@ -20,6 +20,8 @@
  * [COMP:app-web/searchable-select]
  */
 
+import { useAppPopupBoundary } from "@/lib/app-viewport";
+
 import * as React from "react";
 import { Combobox } from "@base-ui/react/combobox";
 import { CheckIcon, ChevronDownIcon, SearchIcon } from "lucide-react";
@@ -98,6 +100,7 @@ export function SearchableSelect({
 
   const selected = items.find((i) => i.value === value) ?? null;
 
+  const collisionBoundary = useAppPopupBoundary();
   return (
     <Combobox.Root
       items={itemsForView}
@@ -158,6 +161,7 @@ export function SearchableSelect({
 
       <Combobox.Portal>
         <Combobox.Positioner
+          collisionBoundary={collisionBoundary}
           sideOffset={4}
           className={cn(
             "isolate z-50 w-(--anchor-width) min-w-[min(18rem,var(--available-width))]",

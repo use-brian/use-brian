@@ -1,6 +1,8 @@
 "use client";
 
 
+import { availableAppWidth, subscribeAppViewport } from "@/lib/app-viewport";
+
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Floating chat panel for app-web — the ambient "Ask anything…"
@@ -326,12 +328,12 @@ type ChatSize = { w: number; h: number };
  */
 function clampChatSize(size: ChatSize): ChatSize {
   const hasWindow = typeof window !== "undefined";
-  const maxW = hasWindow ? Math.max(MIN_CHAT_W, window.innerWidth - 32) : size.w;
+  const maxW = hasWindow ? Math.max(0, availableAppWidth() - 32) : size.w;
   const maxH = hasWindow
     ? Math.max(MIN_CHAT_H, Math.round(window.innerHeight * 0.92))
     : size.h;
   return {
-    w: Math.round(Math.max(MIN_CHAT_W, Math.min(size.w, maxW))),
+    w: Math.round(Math.min(maxW, Math.max(MIN_CHAT_W, size.w))),
     h: Math.round(Math.max(MIN_CHAT_H, Math.min(size.h, maxH))),
   };
 }
@@ -815,8 +817,8 @@ export function FloatingChat({
   useEffect(() => {
     if (isSidePanel || typeof window === "undefined") return;
     const onResize = () => setChatSize((s) => clampChatSize(s));
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    onResize();
+    return subscribeAppViewport(onResize);
   }, [isSidePanel]);
 
   const session = useChatSession();
@@ -3289,7 +3291,7 @@ export function FloatingChat({
             ? "h-full w-full"
             : cn(
                 "absolute right-0 bottom-0 origin-bottom-right",
-                "max-w-[calc(100vw-2rem)] max-h-[92dvh]",
+                "max-w-[calc(var(--native-app-width,100vw)-2rem)] max-h-[92dvh]",
                 "rounded-xl border border-border bg-popover shadow-2xl",
                 "transition-[opacity,transform] duration-200 ease-out",
                 expanded
@@ -3367,7 +3369,7 @@ export function FloatingChat({
                 </PopoverTrigger>
                 <PopoverContent
                   align="start"
-                  className="w-60 max-w-[calc(100vw-2rem)] gap-0.5 p-1"
+                  className="w-60 max-w-[calc(var(--native-app-width,100vw)-2rem)] gap-0.5 p-1"
                 >
                   <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                     {t.switchAssistantTitle}
@@ -3927,7 +3929,7 @@ export function FloatingChat({
               tabIndex={expanded ? -1 : 0}
               className={cn(
                 "relative inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
-                "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
+                "max-w-[min(260px,calc(var(--native-app-width,100vw)-3rem))] text-left text-sm",
                 "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
                 isActive
                   ? "border border-primary/40 bg-primary/10 text-foreground ring-2 ring-primary/20"

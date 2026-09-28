@@ -21,6 +21,8 @@
  * [COMP:app-web/emoji-picker]
  */
 
+import { useAppPopupBoundary } from "@/lib/app-viewport";
+
 import * as React from "react";
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import type { LucideIcon } from "lucide-react";
@@ -75,11 +77,13 @@ export function EmojiPicker({
     [onPick, setOpen],
   );
 
+  const collisionBoundary = useAppPopupBoundary();
   return (
     <PopoverPrimitive.Root open={open} onOpenChange={setOpen}>
       <PopoverPrimitive.Trigger render={trigger} />
       <PopoverPrimitive.Portal>
         <PopoverPrimitive.Positioner
+          collisionBoundary={collisionBoundary}
           side={side}
           align={align}
           sideOffset={6}
