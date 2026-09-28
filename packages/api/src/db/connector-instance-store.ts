@@ -147,6 +147,8 @@ export type UpdateInstanceParams = {
   credentials?: ConnectorCredentials | OAuthCredentials | null
   compartments?: string[]
   projectIds?: string[]
+  /** Merge into config in the same statement as the lifecycle mutation. */
+  configPatch?: Record<string, unknown>
 }
 
 export type ConnectorInstanceStore = {
@@ -177,10 +179,9 @@ export type ConnectorInstanceStore = {
    * the route: the UPDATE's USING clause (ci_access) requires the OLD row be
    * the caller's own user-scoped instance; the WITH CHECK requires the NEW
    * row's workspace be one the caller belongs to. A non-owner or non-member
-   * changes 0 rows → returns null (the route maps that to 403). Also clears
-   * ingest routing (workspace-scoped instances route via `workspace_id`) and
-   * deletes the instance's grants — a workspace-owned instance is visible by
-   * scope and needs none, and the grant store forbids grants on it.
+   * changes 0 rows → returns null (the route maps that to 403). The same SQL
+   * statement clears ingest routing and deletes the instance's grants, so no
+   * committed ownership state can retain a stale personal grant.
    *
    * See docs/plans/workspace-owned-connector-transfer.md §2A.
    */
@@ -467,6 +468,10 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       if (updates.ingestWorkspaceId !== undefined) { sets.push(`ingest_workspace_id = $${idx}`); values.push(updates.ingestWorkspaceId); idx++ }
       if (updates.compartments !== undefined) { sets.push(`compartments = $${idx}`); values.push(updates.compartments); idx++ }
       if (updates.projectIds !== undefined) { sets.push(`project_ids = $${idx}`); values.push(updates.projectIds); idx++ }
+      if (updates.configPatch !== undefined) {
+        sets.push(`config = COALESCE(config, '{}') || $${idx}::jsonb`)
+        values.push(JSON.stringify(updates.configPatch)); idx++
+      }
       if(updates.compartments!==undefined||updates.projectIds!==undefined)sets.push("context_binding_origin = 'explicit'")
       if (updates.credentials !== undefined) {
         const encrypted = encryptOrNull(updates.credentials, encryptionKey)
@@ -498,35 +503,31 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
     },
 
     async transferToWorkspace(actingUserId, id, workspaceId, sensitivity) {
-      // Single RLS-gated UPDATE. The explicit `scope='user' AND user_id=$4`
+      // One RLS-gated data-modifying CTE makes the ownership move and grant
+      // invalidation indivisible. The explicit `scope='user' AND user_id=$4`
       // mirrors the ci_access USING clause (defense-in-depth — RLS is not the
       // filter, see listForUser); the WITH CHECK on the resulting workspace row
       // rejects a non-member target. `COALESCE($3::text, sensitivity)` keeps the
       // existing tier when the caller passes none.
       const result = await queryWithRLS<PublicRow>(
         actingUserId,
-        `UPDATE connector_instance
-            SET scope = 'workspace',
-                user_id = NULL,
-                workspace_id = $2,
-                ingest_workspace_id = NULL,
-                sensitivity = COALESCE($3::text, sensitivity)
-          WHERE id = $1 AND scope = 'user' AND user_id = $4
-          RETURNING ${PUBLIC_COLS}`,
+        `WITH transferred AS (
+           UPDATE connector_instance
+              SET scope = 'workspace',
+                  user_id = NULL,
+                  workspace_id = $2,
+                  ingest_workspace_id = NULL,
+                  sensitivity = COALESCE($3::text, sensitivity)
+            WHERE id = $1 AND scope = 'user' AND user_id = $4
+            RETURNING ${PUBLIC_COLS}
+         ), cleared_grants AS (
+           DELETE FROM connector_grant
+            WHERE connector_instance_id IN (SELECT id FROM transferred)
+         )
+         SELECT * FROM transferred`,
         [id, workspaceId, sensitivity ?? null, actingUserId],
       )
-      const transferred = result.rows[0] ?? null
-      if (!transferred) return null
-      // Drop any exposures the personal instance carried. A workspace-owned
-      // instance is visible by scope and needs no grant; the grant store also
-      // forbids grants on scope='workspace' rows. The owner made every grant on
-      // a personal instance, so cg_access permits this delete.
-      await queryWithRLS(
-        actingUserId,
-        `DELETE FROM connector_grant WHERE connector_instance_id = $1`,
-        [id],
-      )
-      return transferred
+      return result.rows[0] ?? null
     },
 
     async setConfig(actingUserId, id, config) {

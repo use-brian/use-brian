@@ -6029,6 +6029,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (usesOpenStandaloneRoutes(profile)) {
     const connectorInstanceRouteOptions = {
       connectorInstanceStore,
+      connectorStore,
       connectorGrantStore,
       workspaceStore,
       auditStore: workspaceAuditStore,

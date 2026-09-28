@@ -7,16 +7,11 @@
 import { Router, type Response } from 'express'
 import { z } from 'zod'
 import {
-  ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS,
-  MULTI_INSTANCE_CONNECTOR_IDS,
-} from '@use-brian/shared'
-import { classifyTool } from '@use-brian/core'
-import {
-  connectorInstanceGovernanceId,
   type ConnectorInstance,
   type ConnectorInstanceStore,
   type SensitivityTier,
 } from '../db/connector-instance-store.js'
+import type { ConnectorStore } from '../db/connector-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import {
@@ -26,11 +21,13 @@ import {
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { WorkspaceToolPolicyStore } from '../db/workspace-tool-policy-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
+import { createConnectorLifecycleService } from '../connectors/lifecycle-service.js'
 
 type Membership = Awaited<ReturnType<typeof getWorkspaceMembershipWithClearanceSystem>>
 
 export type ConnectorInstanceRouteOptions = {
   connectorInstanceStore: ConnectorInstanceStore
+  connectorStore: ConnectorStore
   connectorGrantStore: ConnectorGrantStore
   workspaceStore: WorkspaceStore
   auditStore: WorkspaceAuditStore
@@ -79,6 +76,20 @@ function capSensitivity(requested: SensitivityTier, ceiling: SensitivityTier): S
 export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOptions): Router {
   const router = Router({ mergeParams: true })
   const getMembership = opts.getMembershipWithClearance ?? getWorkspaceMembershipWithClearanceSystem
+  const lifecycle = createConnectorLifecycleService({
+    instanceStore: opts.connectorInstanceStore,
+    legacyStore: opts.connectorStore,
+    grantStore: opts.connectorGrantStore,
+    workspaceToolPolicyStore: opts.workspaceToolPolicyStore,
+    policy: { directoryInstall: 'reuse_primary' },
+    canMutateWorkspaceInstance: async (userId, instance) => {
+      if (!instance.workspaceId) return false
+      const membership = await getMembership(userId, instance.workspaceId)
+      if (!membership) return false
+      const ceiling = effectiveReadClearance(membership.role, membership.clearance, 'confidential')
+      return SENSITIVITY_RANK[ceiling] >= SENSITIVITY_RANK[instance.sensitivity]
+    },
+  })
 
   async function requireConnectorClearance(
     req: { userId?: string; params: Record<string, string> },
@@ -102,24 +113,6 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
       return null
     }
     return { userId, instance, ceiling }
-  }
-
-  async function governanceIdForInstance(
-    userId: string,
-    workspaceId: string,
-    instance: ConnectorInstance,
-  ): Promise<string> {
-    if (ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(instance.provider)) {
-      return connectorInstanceGovernanceId(instance.provider, instance.id)
-    }
-    if (!MULTI_INSTANCE_CONNECTOR_IDS.has(instance.provider)) return instance.provider
-
-    const primary = (await opts.connectorInstanceStore.listByWorkspace(userId, workspaceId))
-      .filter((candidate) => candidate.provider === instance.provider)
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id))[0]
-    return primary?.id === instance.id
-      ? instance.provider
-      : connectorInstanceGovernanceId(instance.provider, instance.id)
   }
 
   router.get('/', async (req, res) => {
@@ -154,7 +147,11 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
     }
     const patch = { ...parsed.data }
     if (patch.sensitivity) patch.sensitivity = capSensitivity(patch.sensitivity, gate.ceiling)
-    const instance = await opts.connectorInstanceStore.update(gate.userId, req.params.instanceId, patch)
+    const instance = await lifecycle.update(gate.userId, {
+      kind: 'instance',
+      instanceId: req.params.instanceId,
+      provider: gate.instance.provider,
+    }, patch)
     res.json({ instance })
   })
 
@@ -168,12 +165,15 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
     }
     try {
       const workspaceId = (req.params as Record<string, string>).workspaceId
-      const instance = await opts.connectorInstanceStore.update(gate.userId, req.params.instanceId, {
+      const instance = await lifecycle.attachCredentials({
+        userId: gate.userId,
+        provider: gate.instance.provider,
+        instanceId: req.params.instanceId,
+        fallbackLabel: gate.instance.label,
         credentials: {
           client_id: parsed.data.clientId ?? '',
           client_secret: parsed.data.clientSecret,
         },
-        connected: true,
       })
       void opts.auditStore.append({
         workspaceId,
@@ -197,17 +197,19 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
   router.delete('/:instanceId', async (req, res) => {
     const gate = await requireConnectorClearance(req, res)
     if (!gate) return
-    const deleted = await opts.connectorInstanceStore.delete(gate.userId, req.params.instanceId)
-    if (deleted) {
-      void opts.auditStore.append({
-        workspaceId: (req.params as Record<string, string>).workspaceId,
-        actorUserId: gate.userId,
-        eventType: 'connector.disconnected',
-        subjectId: req.params.instanceId,
-        details: { provider: gate.instance.provider, label: gate.instance.label },
-      })
-    }
-    res.json({ deleted })
+    await lifecycle.remove(gate.userId, {
+      kind: 'instance',
+      instanceId: req.params.instanceId,
+      provider: gate.instance.provider,
+    })
+    void opts.auditStore.append({
+      workspaceId: (req.params as Record<string, string>).workspaceId,
+      actorUserId: gate.userId,
+      eventType: 'connector.disconnected',
+      subjectId: req.params.instanceId,
+      details: { provider: gate.instance.provider, label: gate.instance.label },
+    })
+    res.json({ deleted: true })
   })
 
   router.get('/:instanceId/tool-policies', async (req, res) => {
@@ -215,17 +217,11 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
     if (!gate) return
     try {
       const workspaceId = (req.params as Record<string, string>).workspaceId
-      const policies = await opts.workspaceToolPolicyStore.listForWorkspace(workspaceId)
-      const governanceId = await governanceIdForInstance(gate.userId, workspaceId, gate.instance)
-      // Legacy provider rows seed an account until that concrete instance has an
-      // explicit row. Exact rows overwrite by tool, so sibling edits stay split.
-      const byTool = new Map<string, (typeof policies)[number]>()
-      for (const policy of policies) {
-        if (policy.serverName === gate.instance.provider) byTool.set(policy.toolName, policy)
-      }
-      for (const policy of policies) {
-        if (policy.serverName === governanceId) byTool.set(policy.toolName, policy)
-      }
+      const { policies } = await lifecycle.listWorkspaceToolPolicies({
+        userId: gate.userId,
+        workspaceId,
+        target: { kind: 'instance', instanceId: gate.instance.id, provider: gate.instance.provider },
+      })
 
       // A transferred custom MCP no longer belongs to the caller's personal
       // ConnectorStore projection, so the generic /api/connectors/:provider/tools
@@ -245,14 +241,14 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
           gate.instance.label,
           buildConnectorAuthHeaders(credentials),
         )
-        tools = server.tools.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          classification: classifyTool(tool.name, tool.description),
-        }))
+        tools = await lifecycle.projectToolInventory({
+          userId: gate.userId,
+          serverName: gate.instance.label,
+          tools: server.tools,
+        })
       }
 
-      res.json({ policies: [...byTool.values()], tools })
+      res.json({ policies, tools })
     } catch (error) {
       console.error('[workspace-connector] tool catalog discovery failed:', error)
       res.status(502).json({ error: 'Failed to discover connector tools' })
@@ -268,14 +264,13 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
       return
     }
     const workspaceId = (req.params as Record<string, string>).workspaceId
-    const governanceId = await governanceIdForInstance(gate.userId, workspaceId, gate.instance)
-    const policy = await opts.workspaceToolPolicyStore.setPolicy({
+    const { policy } = await lifecycle.setWorkspaceToolPolicy({
+      userId: gate.userId,
       workspaceId,
-      serverName: governanceId,
+      target: { kind: 'instance', instanceId: gate.instance.id, provider: gate.instance.provider },
       toolName: req.params.toolName,
       policy: parsed.data.policy,
       classification: parsed.data.classification ?? null,
-      updatedBy: gate.userId,
     })
     void opts.auditStore.append({
       workspaceId,
@@ -297,6 +292,12 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
 export function memberConnectorInstanceRoutes(opts: ConnectorInstanceRouteOptions): Router {
   const router = Router()
   const getMembership = opts.getMembershipWithClearance ?? getWorkspaceMembershipWithClearanceSystem
+  const lifecycle = createConnectorLifecycleService({
+    instanceStore: opts.connectorInstanceStore,
+    legacyStore: opts.connectorStore,
+    grantStore: opts.connectorGrantStore,
+    policy: { directoryInstall: 'reuse_primary' },
+  })
 
   router.post('/:instanceId/grants', async (req, res) => {
     const userId = req.userId
@@ -320,7 +321,7 @@ export function memberConnectorInstanceRoutes(opts: ConnectorInstanceRouteOption
       })
       const sensitivity = parsed.data.sensitivity ??
         effectiveReadClearance(membership.role, membership.clearance, 'confidential')
-      await opts.connectorInstanceStore.update(userId, req.params.instanceId, { sensitivity })
+      await lifecycle.update(userId, { kind: 'instance', instanceId: req.params.instanceId }, { sensitivity })
       res.status(201).json({ grant })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create grant'
@@ -355,13 +356,15 @@ export function memberConnectorInstanceRoutes(opts: ConnectorInstanceRouteOption
     }
     const ceiling = effectiveReadClearance(membership.role, membership.clearance, 'confidential')
     const sensitivity = capSensitivity(parsed.data.sensitivity ?? ceiling, ceiling)
-    const instance = await opts.connectorInstanceStore.transferToWorkspace(
-      userId,
-      req.params.instanceId,
-      parsed.data.workspaceId,
-      sensitivity,
-    )
-    if (!instance) {
+    let instance: ConnectorInstance
+    try {
+      instance = await lifecycle.transferToWorkspace({
+        userId,
+        target: { kind: 'instance', instanceId: req.params.instanceId },
+        workspaceId: parsed.data.workspaceId,
+        sensitivity,
+      })
+    } catch {
       res.status(403).json({ error: 'Not the owner of this connector' })
       return
     }

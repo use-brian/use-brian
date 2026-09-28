@@ -58,9 +58,8 @@
 import { Router } from 'express'
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
-import { classifyTool, defaultPolicy, type FilesApi, type McpSettingsStore } from '@use-brian/core'
+import type { FilesApi, McpSettingsStore } from '@use-brian/core'
 import {
-  APP_LEVEL_ASSISTANT_ID,
   CONFIGURABLE_APP_CREDENTIAL_CONNECTORS,
   connectorSupportsMultipleInstances,
   OFFICIAL_CONNECTORS,
@@ -72,7 +71,6 @@ import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store
 import type { ConnectorInstanceStore, ConnectorInstance, ConnectorHealthStatus } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { effectiveReadClearance, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
-import { listUsableWorkspaceConnectors } from '../connectors/usable-connectors.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import { customConnectorRoutes } from './custom-connectors.js'
 import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
@@ -139,6 +137,10 @@ import { readMailboxIdleStatus } from '../mailbox/idle-watcher.js'
 import { countEmailArchiveMessages } from '../db/email-archive-store.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { CHAT_ARCHIVE_SEARCH_TOOL } from '../chat-archive/tool-catalog.js'
+import {
+  ConnectorLifecycleError,
+  createConnectorLifecycleService,
+} from '../connectors/lifecycle-service.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -308,7 +310,7 @@ function credentialsFor(secret: string, provider: string): ConnectorCredentials 
  * it to 503; returns a discriminated 404 for a missing reconnect target.
  */
 async function persistConnectorInstance(opts: {
-  store: ConnectorInstanceStore
+  service: ReturnType<typeof createConnectorLifecycleService>
   userId: string
   provider: string
   fallbackLabel: string
@@ -319,39 +321,25 @@ async function persistConnectorInstance(opts: {
   createNew?: boolean
   instanceId?: string
 }): Promise<{ ok: true; connectorInstanceId: string } | { ok: false; status: 404; error: string }> {
-  const { store, userId, provider, fallbackLabel, credentials, email, label, configPatch } = opts
-
-  if (opts.createNew) {
-    const created = await store.createUserInstance({
-      userId, provider, label: label ?? fallbackLabel, connectedEmail: email, connected: true, credentials,
-      ...(configPatch ? { config: configPatch } : {}),
+  try {
+    const instance = await opts.service.attachCredentials({
+      userId: opts.userId,
+      provider: opts.provider,
+      fallbackLabel: opts.fallbackLabel,
+      credentials: opts.credentials,
+      connectedEmail: opts.email,
+      label: opts.label,
+      configPatch: opts.configPatch,
+      createNew: opts.createNew,
+      instanceId: opts.instanceId,
     })
-    return { ok: true, connectorInstanceId: created.id }
+    return { ok: true, connectorInstanceId: instance.id }
+  } catch (error) {
+    if (error instanceof ConnectorLifecycleError && error.code === 'not_found') {
+      return { ok: false, status: 404, error: 'Connector instance not found' }
+    }
+    throw error
   }
-
-  if (opts.instanceId) {
-    const updated = await store.update(userId, opts.instanceId, {
-      connected: true, connectedEmail: email, credentials, ...(label ? { label } : {}),
-    })
-    if (!updated) return { ok: false, status: 404, error: 'Connector instance not found' }
-    if (configPatch) await store.setConfig(userId, updated.id, configPatch)
-    return { ok: true, connectorInstanceId: updated.id }
-  }
-
-  const existing = (await store.listByUser(userId, userId)).find((i) => i.provider === provider)
-  if (existing) {
-    const updated = await store.update(userId, existing.id, {
-      connected: true, connectedEmail: email, credentials, ...(label ? { label } : {}),
-    })
-    if (configPatch) await store.setConfig(userId, existing.id, configPatch)
-    return { ok: true, connectorInstanceId: updated?.id ?? existing.id }
-  }
-
-  const created = await store.createUserInstance({
-    userId, provider, label: label ?? fallbackLabel, connectedEmail: email, connected: true, credentials,
-    ...(configPatch ? { config: configPatch } : {}),
-  })
-  return { ok: true, connectorInstanceId: created.id }
 }
 
 /** A never-connected built-in: the bare "Connect" affordance in the list. */
@@ -411,6 +399,20 @@ function instanceRow(
 export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   const { connectorStore, connectorInstanceStore, mcpSettingsStore } = opts
   const router = Router()
+  const lifecycle = createConnectorLifecycleService({
+    instanceStore: connectorInstanceStore,
+    legacyStore: connectorStore,
+    grantStore: opts.connectorGrantStore,
+    settingsStore: mcpSettingsStore,
+    policy: { directoryInstall: 'reuse_primary' },
+    canMutateWorkspaceInstance: async (userId, instance) => {
+      if (!instance.workspaceId) return false
+      const membership = await getWorkspaceMembershipWithClearanceSystem(userId, instance.workspaceId)
+      const ceiling = effectiveReadClearance(membership?.role ?? null, membership?.clearance ?? null, 'confidential')
+      const rank = { public: 0, internal: 1, confidential: 2 } as const
+      return rank[ceiling] >= rank[instance.sensitivity]
+    },
+  })
 
   // Custom MCP connector CRUD. Mounted FIRST so the literal `/custom` and
   // `/custom/:id` paths resolve before the `/:provider` catch-all routes below
@@ -1396,7 +1398,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
 
   /** Group the caller's PERSONAL instances by provider, each list oldest-first. */
   async function personalInstancesByProvider(userId: string): Promise<Map<string, ConnectorInstance[]>> {
-    const instances = await connectorInstanceStore.listByUser(userId, userId)
+    const instances = (await lifecycle.list(userId)).personal
     const byProvider = new Map<string, ConnectorInstance[]>()
     for (const inst of instances) {
       if (CHANNEL_INFRASTRUCTURE_PROVIDERS.has(inst.provider)) continue
@@ -1420,17 +1422,15 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       return
     }
     try {
-      const [byProvider, usable] = await Promise.all([
-        personalInstancesByProvider(userId),
-        workspaceId && opts.connectorGrantStore
-          ? listUsableWorkspaceConnectors({
-              connectorInstanceStore,
-              connectorGrantStore: opts.connectorGrantStore,
-              userId,
-              workspaceId,
-            })
-          : Promise.resolve([]),
-      ])
+      const listed = await lifecycle.list(userId, workspaceId)
+      const byProvider = new Map<string, ConnectorInstance[]>()
+      for (const instance of listed.personal) {
+        if (CHANNEL_INFRASTRUCTURE_PROVIDERS.has(instance.provider)) continue
+        const rows = byProvider.get(instance.provider) ?? []
+        rows.push(instance)
+        byProvider.set(instance.provider, rows)
+      }
+      const usable = listed.workspace
       const rows: ConnectorRowOut[] = []
 
       // Every official connector: real instances if connected/added, else the
@@ -1471,16 +1471,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     try {
-      const byProvider = await personalInstancesByProvider(userId)
-      const directory = OFFICIAL_CONNECTORS.map((entry) => {
-        const insts = byProvider.get(entry.id) ?? []
-        return {
-          ...entry,
-          added: insts.length > 0,
-          connected: insts.some((i) => i.connected),
-          addable: connectorSupportsMultipleInstances(entry),
-        }
-      })
+      const directory = await lifecycle.directory(userId)
       res.json({ directory })
     } catch (err) {
       console.error('[connectors] directory failed:', err)
@@ -1499,15 +1490,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const entry = OFFICIAL_BY_ID.get(req.params.id)
     if (!entry) { res.status(404).json({ error: `Unknown connector: ${req.params.id}` }); return }
     try {
-      const existing = (await connectorInstanceStore.listByUser(userId, userId))
-        .find((i) => i.provider === entry.id)
-      if (existing) { res.json({ ok: true, connectorInstanceId: existing.id }); return }
-      const created = await connectorInstanceStore.createUserInstance({
-        userId,
-        provider: entry.id,
-        label: entry.name,
-        connected: false,
-      })
+      const created = await lifecycle.install(userId, entry.id)
       res.json({ ok: true, connectorInstanceId: created.id })
     } catch (err) {
       console.error('[connectors] directory add failed:', err)
@@ -1597,24 +1580,11 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
             cwd: typeof instance.config?.cwd === 'string' ? instance.config.cwd : undefined,
             timeoutMs: typeof instance.config?.timeoutMs === 'number' ? instance.config.timeoutMs : undefined,
           }, instance.label)
-          const tools = await Promise.all(server.tools.map(async (t) => {
-            const classification = classifyTool(t.name, t.description)
-            const fallback = defaultPolicy(classification)
-            const override = mcpSettingsStore
-              ? await mcpSettingsStore.getPolicy({
-                  assistantId: APP_LEVEL_ASSISTANT_ID,
-                  userId,
-                  serverName: server.name,
-                  toolName: t.name,
-                })
-              : null
-            return {
-              name: t.name,
-              description: t.description,
-              classification,
-              policy: override?.policy ?? fallback,
-            }
-          }))
+          const tools = await lifecycle.projectToolInventory({
+            userId,
+            serverName: server.name,
+            tools: server.tools,
+          })
           res.json({
             serverName: server.name,
             tools,
@@ -1630,26 +1600,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     // Built-in: static registry catalog.
     const catalog = OFFICIAL_CONNECTOR_TOOLS[provider]
     if (catalog) {
-      const tools = await Promise.all(catalog.map(async (t) => {
-        const override = mcpSettingsStore
-          ? await mcpSettingsStore.getPolicy({
-              assistantId: APP_LEVEL_ASSISTANT_ID,
-              userId,
-              serverName: provider,
-              toolName: t.name,
-            })
-          : null
-        return {
-          name: t.name,
-          description: t.description,
-          classification: t.classification,
-          policy: override?.policy ?? t.defaultPolicy,
-        }
-      }))
-      res.json({
-        serverName: provider,
-        tools,
-      })
+      res.json(await lifecycle.tools(userId, { kind: 'primary', provider }))
       return
     }
 
@@ -1663,24 +1614,11 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       const { discoverMcpServer } = await import('../mcp/client.js')
       const authCreds = await connectorStore.getAuthCredentials(userId, provider)
       const server = await discoverMcpServer(connector.url, connector.name, buildConnectorAuthHeaders(authCreds))
-      const tools = await Promise.all(server.tools.map(async (t) => {
-        const classification = classifyTool(t.name, t.description)
-        const fallback = defaultPolicy(classification)
-        const override = mcpSettingsStore
-          ? await mcpSettingsStore.getPolicy({
-              assistantId: APP_LEVEL_ASSISTANT_ID,
-              userId,
-              serverName: server.name,
-              toolName: t.name,
-            })
-          : null
-        return {
-          name: t.name,
-          description: t.description,
-          classification,
-          policy: override?.policy ?? fallback,
-        }
-      }))
+      const tools = await lifecycle.projectToolInventory({
+        userId,
+        serverName: server.name,
+        tools: server.tools,
+      })
       res.json({
         serverName: server.name,
         tools,
@@ -1708,13 +1646,9 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
 
     try {
-      await mcpSettingsStore.setPolicy({
-        assistantId: APP_LEVEL_ASSISTANT_ID,
-        userId,
-        serverName,
-        toolName,
+      await lifecycle.setToolPolicy({
+        userId, serverName, toolName,
         policy: policy as 'allow' | 'ask' | 'block',
-        classification: classifyTool(toolName),
       })
       res.json({ ok: true })
     } catch (err) {
@@ -1728,7 +1662,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     try {
-      const config = await connectorStore.getConfig(userId, req.params.provider)
+      const config = await lifecycle.getConfig(userId, { kind: 'primary', provider: req.params.provider })
       res.json({ config })
     } catch (err) {
       console.error('[connectors] get config failed:', err)
@@ -1742,8 +1676,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     const patch = (req.body ?? {}) as Record<string, unknown>
     try {
-      await connectorStore.setConfig(userId, req.params.provider, patch)
-      const config = await connectorStore.getConfig(userId, req.params.provider)
+      const config = await lifecycle.configure(userId, { kind: 'primary', provider: req.params.provider }, patch)
       res.json({ config })
     } catch (err) {
       console.error('[connectors] set config failed:', err)
@@ -2216,7 +2149,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         clientSecret: app.clientSecret,
       })
       const stored = await persistConnectorInstance({
-        store: connectorInstanceStore,
+        service: lifecycle,
         userId,
         provider: 'gdrive',
         fallbackLabel: OFFICIAL_BY_ID.get('gdrive')?.name ?? 'Google Drive',
@@ -2462,7 +2395,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       const email = claims.email ?? null
 
       const stored = await persistConnectorInstance({
-        store: connectorInstanceStore,
+        service: lifecycle,
         userId,
         provider: 'msgraph',
         fallbackLabel: OFFICIAL_BY_ID.get('msgraph')?.name ?? 'Microsoft Teams',
@@ -2754,7 +2687,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
 
     try {
       const result = await persistConnectorInstance({
-        store: connectorInstanceStore,
+        service: lifecycle,
         userId,
         provider,
         fallbackLabel: entry.name,
@@ -2829,7 +2762,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
 
     try {
       const result = await persistConnectorInstance({
-        store: connectorInstanceStore,
+        service: lifecycle,
         userId,
         provider,
         fallbackLabel: entry.name,
@@ -2862,12 +2795,31 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const { id } = req.params
     if (!UUID_RE.test(id)) { res.status(400).json({ error: 'Invalid instance id' }); return }
     try {
-      const updated = await connectorInstanceStore.update(userId, id, { connected: true })
-      if (!updated) { res.status(404).json({ error: 'Connector instance not found' }); return }
+      const updated = await lifecycle.connect(userId, { kind: 'instance', instanceId: id })
       res.json({ ok: true, connectorInstanceId: updated.id })
     } catch (err) {
+      if (err instanceof ConnectorLifecycleError && err.code === 'not_found') {
+        res.status(404).json({ error: 'Connector instance not found' }); return
+      }
       console.error('[connectors] instance connect failed:', err)
       res.status(500).json({ error: 'Failed to connect' })
+    }
+  })
+
+  router.post('/instances/:id/disconnect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { id } = req.params
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'Invalid instance id' }); return }
+    try {
+      const updated = await lifecycle.disconnect(userId, { kind: 'instance', instanceId: id })
+      res.json({ ok: true, connectorInstanceId: updated.id })
+    } catch (err) {
+      if (err instanceof ConnectorLifecycleError && err.code === 'not_found') {
+        res.status(404).json({ error: 'Connector instance not found' }); return
+      }
+      console.error('[connectors] instance disconnect failed:', err)
+      res.status(500).json({ error: 'Failed to disconnect' })
     }
   })
 
@@ -2878,10 +2830,12 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     try {
-      const row = await connectorStore.setConnected(userId, req.params.provider, true)
-      if (!row) { res.status(404).json({ error: 'Connector not found (connect it first)' }); return }
+      await lifecycle.connect(userId, { kind: 'primary', provider: req.params.provider })
       res.json({ ok: true })
     } catch (err) {
+      if (err instanceof ConnectorLifecycleError && err.code === 'not_found') {
+        res.status(404).json({ error: 'Connector not found (connect it first)' }); return
+      }
       console.error('[connectors] connect failed:', err)
       res.status(500).json({ error: 'Failed to connect' })
     }
@@ -2892,10 +2846,12 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     try {
-      const row = await connectorStore.setConnected(userId, req.params.provider, false)
-      if (!row) { res.status(404).json({ error: 'Connector not found' }); return }
+      await lifecycle.disconnect(userId, { kind: 'primary', provider: req.params.provider })
       res.json({ ok: true })
     } catch (err) {
+      if (err instanceof ConnectorLifecycleError && err.code === 'not_found') {
+        res.status(404).json({ error: 'Connector not found' }); return
+      }
       console.error('[connectors] disconnect failed:', err)
       res.status(500).json({ error: 'Failed to disconnect' })
     }
@@ -2910,10 +2866,12 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const label = ((req.body ?? {}) as { label?: string }).label?.trim()
     if (!label) { res.status(400).json({ error: 'label is required' }); return }
     try {
-      const updated = await connectorInstanceStore.update(userId, id, { label })
-      if (!updated) { res.status(404).json({ error: 'Connector instance not found' }); return }
+      const updated = await lifecycle.rename(userId, { kind: 'instance', instanceId: id }, { label })
       res.json({ ok: true, label: updated.label })
     } catch (err) {
+      if (err instanceof ConnectorLifecycleError && err.code === 'not_found') {
+        res.status(404).json({ error: 'Connector instance not found' }); return
+      }
       console.error('[connectors] rename failed:', err)
       res.status(500).json({ error: 'Failed to rename connector' })
     }
@@ -2926,10 +2884,12 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const { id } = req.params
     if (!UUID_RE.test(id)) { res.status(400).json({ error: 'Invalid instance id' }); return }
     try {
-      const deleted = await connectorInstanceStore.delete(userId, id)
-      if (!deleted) { res.status(404).json({ error: 'Connector instance not found' }); return }
+      await lifecycle.remove(userId, { kind: 'instance', instanceId: id })
       res.json({ ok: true })
     } catch (err) {
+      if (err instanceof ConnectorLifecycleError && err.code === 'not_found') {
+        res.status(404).json({ error: 'Connector instance not found' }); return
+      }
       console.error('[connectors] delete instance failed:', err)
       res.status(500).json({ error: 'Failed to delete connector' })
     }
@@ -2940,10 +2900,12 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     try {
-      const deleted = await connectorStore.delete(userId, req.params.provider)
-      if (!deleted) { res.status(404).json({ error: 'Connector not found' }); return }
+      await lifecycle.remove(userId, { kind: 'primary', provider: req.params.provider })
       res.json({ ok: true })
     } catch (err) {
+      if (err instanceof ConnectorLifecycleError && err.code === 'not_found') {
+        res.status(404).json({ error: 'Connector not found' }); return
+      }
       console.error('[connectors] delete failed:', err)
       res.status(500).json({ error: 'Failed to delete connector' })
     }
