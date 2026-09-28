@@ -1,7 +1,7 @@
 "use client";
 
 /** Events index: table with upcoming/past/draft views, opening the event detail page. [COMP:app-web/association] */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CalendarDays, Plus } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import type { AssociationEvent } from "@/lib/api/association";
@@ -20,19 +20,22 @@ export function eventWhere(event:AssociationEvent,labels:{venue:string;online:st
   return event.venue||labels[event.mode];
 }
 
-export function AssociationEventsPanel({workspaceId,initialEventId="",initialNew=false}:{workspaceId:string;initialEventId?:string;initialNew?:boolean}) {
+export function AssociationEventsPanel({workspaceId,initialEventId="",initialEventSlug="",initialNew=false}:{workspaceId:string;initialEventId?:string;initialEventSlug?:string;initialNew?:boolean}) {
   const [view,setView]=useState<EventView>("upcoming");
   // Each view asks the server for its own rows; pages are oldest-first, so filtering one page client-side hides newer events.
   const t=useT().associationPage,u=t.ux,m=t.manage,rows=useAssociationPage(workspaceId,"events",view==="upcoming"?{when:"upcoming"}:view==="past"?{when:"past"}:view==="drafts"?{status:"draft"}:{}),module=useAssociationModule(workspaceId);
   const [selectedId,setSelectedId]=useState<string|null>(initialEventId||null),[editing,setEditing]=useState<AssociationEvent|"new"|null>(initialNew?"new":null),[saved,setSaved]=useState(false);
   const configure=!!module.data?.canManage&&!module.error,enabled=module.data?.module.state==="enabled"&&!module.error;
-  // A deep link reads its event directly: it may be on any page of any view.
-  const direct=useAssociationPage(workspaceId,"events",{id:initialEventId},!!initialEventId);
+  // A deep link reads its event directly (by id, or by reference from an assistant's preview link): it may be on any page of any view.
+  const direct=useAssociationPage(workspaceId,"events",initialEventId?{id:initialEventId}:{slug:initialEventSlug},!!(initialEventId||initialEventSlug));
+  const linked=initialEventId||direct.data?.items.find(row=>row.slug===initialEventSlug)?.id||"";
+  useEffect(()=>{if(linked&&!initialEventId)setSelectedId(current=>current??linked);},[linked,initialEventId]);
   const selected=selectedId?rows.data?.items.find(row=>row.id===selectedId) ?? direct.data?.items.find(row=>row.id===selectedId) ?? null:null;
   const now=Date.now();
   const visible=(rows.data?.items ?? []).filter(event=>view==="all"?true:view==="drafts"?event.status==="draft":view==="past"?Date.parse(event.endsAt)<now||event.status==="completed"||event.status==="cancelled":Date.parse(event.endsAt)>=now&&event.status!=="cancelled"&&event.status!=="completed");
   if(editing)return <AssociationEditor title={editing==="new"?m.newEvent:editing.title} onClose={()=>setEditing(null)}><AssociationEventForm key={editing==="new"?"new":editing.id} workspaceId={workspaceId} event={editing==="new"?undefined:editing} disabled={!configure||!!rows.error} onSaved={()=>{setEditing(null);setSaved(true);void rows.refresh();}}/></AssociationEditor>;
-  if(selectedId&&((!rows.data&&!rows.error)||(selectedId===initialEventId&&!direct.data&&!direct.error)))return <AssociationListState {...rows}><span/></AssociationListState>;
+  const resolvingLink=!!initialEventSlug&&!initialEventId&&!direct.data&&!direct.error;
+  if(resolvingLink||(selectedId&&((!rows.data&&!rows.error)||(selectedId===linked&&!direct.data&&!direct.error))))return <AssociationListState {...rows}><span/></AssociationListState>;
   if(selected)return <AssociationEventDetail key={selected.id} workspaceId={workspaceId} event={selected} enabled={enabled} canManage={configure} loadFailed={!!rows.error}
     onBack={()=>setSelectedId(null)} onEdit={()=>setEditing(selected)} onChanged={()=>void rows.refresh()}/>;
   return <section className="space-y-5">

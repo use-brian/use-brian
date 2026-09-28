@@ -36,6 +36,7 @@ import { buildStorageKey, buildStorageUri, type StorageUriScheme } from './gcs-c
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { WorkspacePlan } from '../db/workspace-store.js'
 import { localDirectoryMetadata, storageKeyForWorkspaceFile } from './local-directory-import.js'
+import { WEBSITE_MEDIA_PREFIX } from '../db/website-media-store.js'
 
 /**
  * Per-workspace resolution of the bytes-layer client. The default
@@ -146,6 +147,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function isUuid(s: string): boolean {
   return UUID_RE.test(s)
+}
+
+/**
+ * Public website media (`/doc/website-media/`) is written only by the owner/admin media route and the
+ * Association service, both as the person (no assistant). Assistant file tools may not add, change or
+ * delete it there: that would bypass the owner/admin check and could break a live site.
+ */
+function assistantInWebsiteMedia(ctx: FilesContext, path: string): boolean {
+  return !!ctx.assistantId && `${path}/`.startsWith(WEBSITE_MEDIA_PREFIX)
 }
 
 /** Normalize an absolute-or-leading-slash workspace path to a canonical form. */
@@ -344,6 +354,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     },
   ): Promise<FilesResult<WorkspaceFile>> {
     const path = normalizePath(p.path)
+    if (assistantInWebsiteMedia(ctx, path)) return err({ kind: 'read_only', path })
     const parentPath = deriveParentPath(path)
     const name = deriveName(path)
     const { mime, bytes } = p
@@ -451,7 +462,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     async append(ctx, idOrPath, content): Promise<FilesResult<WorkspaceFile>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
-      if (localDirectoryMetadata(file)) return err({ kind: 'read_only', path: file.path })
+      if (localDirectoryMetadata(file) || assistantInWebsiteMedia(ctx, file.path)) return err({ kind: 'read_only', path: file.path })
       if (!mutationAllowed(ctx, file)) return err({ kind: 'read_only', reason: 'scope', path: file.path })
       if (!file.scopeVersion) return err({ kind: 'conflict', reason: 'changed', path: file.path })
 
@@ -528,6 +539,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     async setMeta(ctx, idOrPath, patch: WorkspaceFileMetaPatch): Promise<FilesResult<WorkspaceFile>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
+      if (assistantInWebsiteMedia(ctx, file.path)) return err({ kind: 'read_only', path: file.path })
       if (patch.sensitivity !== undefined && maxSensitivity(file.sensitivity, ctx.writeSensitivity ?? 'public', patch.sensitivity) !== patch.sensitivity) {
         return err({ kind: 'read_only', reason: 'release_required', path: file.path })
       }
@@ -558,7 +570,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     async delete(ctx, idOrPath): Promise<FilesResult<{ id: string; path: string }>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
-      if (localDirectoryMetadata(file)) return err({ kind: 'read_only', path: file.path })
+      if (localDirectoryMetadata(file) || assistantInWebsiteMedia(ctx, file.path)) return err({ kind: 'read_only', path: file.path })
       if (!mutationAllowed(ctx, file)) return err({ kind: 'read_only', reason: 'scope', path: file.path })
 
       const deleted = await executeWithCurrentAuthority(() => store.delete(ctx.userId, ctx.workspaceId, file.id, accessCtx(ctx)))

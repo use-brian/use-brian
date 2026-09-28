@@ -1648,8 +1648,11 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     opts.agentActiveCapabilities ?? new Set(),
   )
   const associationReads = new Set([...visibleAssociation.values()].filter(tool => tool.isReadOnly).map(tool => tool.name))
+  // The bridge runs execute() directly, so a tool that needs a person's confirmation in chat (publishing
+  // website content or a catalogue, confirming a free order) would run unconfirmed here. Association keeps
+  // those in chat and the console only; other brain-MCP tools are unchanged.
   const associationBridges = [...visibleAssociation.values()]
-    .filter(tool => opts.scope === 'read_write' || tool.isReadOnly)
+    .filter(tool => (opts.scope === 'read_write' || tool.isReadOnly) && !tool.requiresConfirmation)
     .map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
 
   // ── File bridges (workspace filesystem). Present only when a blob client is

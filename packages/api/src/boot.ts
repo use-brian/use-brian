@@ -686,14 +686,15 @@ import { createDbCompartmentStore } from './db/compartment-store.js'
 import { compartmentRoutes } from './routes/compartments.js'
 import { brainMcpRoutes } from './brain-mcp/server.js'
 import { associationRoutes } from './routes/association.js'
-import { createAssociationService } from './association/service.js'
+import { createAssociationService, type AssociationWebsiteMediaPort } from './association/service.js'
+import { promoteCachedFile } from '@use-brian/core'
 import { createAssociationStore } from './db/association-store.js'
 import { createAssociationWorkspaceModulesStore } from './association/workspace-module.js'
 import { createCrmIntegrationStore } from './db/crm-integration-store.js'
 import { crmIntegrationRoutes, crmIntegrationCredentialRoutes } from './routes/crm-integration.js'
 import { crmAssociationRoutes, associationMemberContext, workspaceModuleRoutes } from './routes/crm-association.js'
 import { websiteMediaMemberRoutes } from './routes/association-media.js'
-import { createWebsiteMediaStore } from './db/website-media-store.js'
+import { createWebsiteMediaStore, recordWebsiteMediaAdded, WEBSITE_MEDIA_MIME, WEBSITE_MEDIA_PREFIX } from './db/website-media-store.js'
 import { createStoreToolResolver } from './home-apps/store-tools-resolver.js'
 import { appsShopifyRoutes } from './routes/apps-shopify.js'
 import { agentAllowedToolsFor } from './brain-mcp/store-tools.js'
@@ -1799,7 +1800,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     promotionHmacKey: env.ASSOCIATION_PROMOTION_HMAC_KEY,
   })
   const workspaceModulesStore = createAssociationWorkspaceModulesStore()
-  const associationService = createAssociationService({ store: associationStore, modules: workspaceModulesStore, crmService: crmOperationsService })
+  // Late-bound: the files API and media store are created further down.
+  let associationWebsiteMedia: AssociationWebsiteMediaPort | null = null
+  const associationService = createAssociationService({ store: associationStore, modules: workspaceModulesStore, crmService: crmOperationsService,
+    websiteMedia: () => associationWebsiteMedia })
   const crmIntegrationStore = createCrmIntegrationStore()
   const crmIntakeReadStore = createDbCrmIntakeReadStore()
   setGlobalMailboxContactImportDeps({ crm: crmStore })
@@ -5304,6 +5308,29 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     entityLinks: entityLinksStore,
   })
   const websiteMediaStore = createWebsiteMediaStore()
+  if (filesApi) {
+    const mediaFilesApi = filesApi
+    // Assistant tools add chat uploads to the website media library as the person (the service checked they
+    // are an owner/admin); the upload is read with that person's and assistant's access, then written like the
+    // media route writes (no assistant), since assistant file tools may not write the library directly.
+    associationWebsiteMedia = {
+      list: workspaceId => websiteMediaStore.list(workspaceId),
+      async importUpload({ workspaceId, userId, assistantId, fileId, name }) {
+        const member = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+        if (!member) return { error: 'upload_not_found' }
+        const cached = await fileStore.get(fileId, { workspaceId, userId, assistantId: assistantId ?? APP_LEVEL_ASSISTANT_ID, assistantKind: 'standard', clearance: member.clearance })
+        if (!cached) return { error: 'upload_not_found' }
+        if (!(WEBSITE_MEDIA_MIME as readonly string[]).includes(cached.mimeType)) return { error: 'unsupported_type' }
+        const label = (name ?? cached.fileName).replace(/[/\\\0]/g, '_').trim().slice(0, 180) || 'file'
+        const written = await promoteCachedFile(mediaFilesApi, { workspaceId, userId, assistantId: null, clearance: member.clearance }, cached,
+          { path: `${WEBSITE_MEDIA_PREFIX}${randomUUID()}-${label}`, title: label })
+        if (!written.ok) return { error: written.error.kind }
+        const stored = await websiteMediaStore.get(workspaceId, written.value.id)
+        return stored ? { id: stored.id, name: stored.title ?? stored.name, mime: stored.mime, sizeBytes: stored.sizeBytes } : { error: 'not_stored' }
+      },
+      audit: (workspaceId, mediaId, actor) => recordWebsiteMediaAdded(workspaceId, mediaId, actor),
+    }
+  }
   app.use('/api/crm/integration', crmIntegrationRoutes({
     deliveries: crmDeliveries,
     credentials: crmIntegrationStore, service: crmOperationsService, association: associationService,

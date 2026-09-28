@@ -89,3 +89,17 @@ export function createWebsiteMediaStore(run: typeof query = query): WebsiteMedia
     },
   }
 }
+
+/** Record who added a library file through the Association service (assistant tools). */
+export async function recordWebsiteMediaAdded(
+  workspaceId: string,
+  mediaId: string,
+  actor: { credentialKind: string; credentialId: string; actingUserId?: string },
+  run: typeof query = query,
+): Promise<void> {
+  await run(
+    `INSERT INTO association_audit_log (workspace_id,action,subject_kind,subject_id,actor_kind,actor_credential_id,acting_user_id,metadata)
+     VALUES ($1,'website_media.added','website_media',$2,$3,$4,$5,'{}'::jsonb)`,
+    [workspaceId, mediaId, actor.credentialKind, actor.credentialId, actor.actingUserId ?? null],
+  )
+}

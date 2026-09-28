@@ -960,7 +960,7 @@ export const zhCN: Dictionary = {
       "mediaHelp": "网站页面使用的图片和 PDF。",
       "backToPages": "所有页面与内容",
       "publishDone": "已发布。网站会在下次加载页面时显示。",
-      "issues": {"duplicate_group": "组别代号 {group} 重复使用", "group_needs_title": "组别 {group} 需要英文标题", "duplicate_person": "{person} 在 {group} 中重复列出", "person_needs_name": "{group} 中有人员未填姓名", "duplicate_partner": "合作伙伴 {partner} 重复列出", "partner_needs_name": "有合作伙伴未填名称", "settings_need_site": "请至少为一个网站添加设置", "site_needs_address": "{site}：请添加联系地址", "site_needs_legal_line": "{site}：请添加法律声明", "duplicate_directory_entry": "{site}：联系人 {entry} 重复列出", "duplicate_news": "新闻条目 {item} 重复列出", "news_needs_title": "有新闻条目需要标题", "news_link_or_file": "有新闻条目同时有链接和文件，请只保留一项", "hero_needs_title": "请添加主标题", "duplicate_audience": "对象 {audience} 重复列出", "duplicate_featured_programme": "课程 {programme} 重复精选", "chairman_message_needed": "请添加主席致辞"},
+      "issues": {"duplicate_group": "组别代号 {group} 重复使用", "group_needs_title": "组别 {group} 需要英文标题", "duplicate_person": "{person} 在 {group} 中重复列出", "person_needs_name": "{group} 中有人员未填姓名", "duplicate_partner": "合作伙伴 {partner} 重复列出", "partner_needs_name": "有合作伙伴未填名称", "settings_need_site": "请至少为一个网站添加设置", "site_needs_address": "{site}：请添加联系地址", "site_needs_legal_line": "{site}：请添加法律声明", "duplicate_directory_entry": "{site}：联系人 {entry} 重复列出", "duplicate_news": "新闻条目 {item} 重复列出", "news_needs_title": "有新闻条目需要标题", "news_link_or_file": "有新闻条目同时有链接和文件，请只保留一项", "hero_needs_title": "请添加主标题", "duplicate_audience": "对象 {audience} 重复列出", "duplicate_featured_programme": "课程 {programme} 重复精选", "chairman_message_needed": "请添加主席致辞", "media_missing": "有图片或文件已不在媒体库中，请重新选择"},
       "create": "创建内容",
       "edit": "编辑",
       "save": "保存更改",

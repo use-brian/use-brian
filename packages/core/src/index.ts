@@ -151,6 +151,8 @@ export * from './association/programme-catalogue.js'
 
 export { askQuestionSchema, formatAssistantQuestion, type AssistantQuestion } from './tools/base/ask-question.js'
 export * from './association/site-content.js'
+export * from './association/site-content-edit.js'
+export * from './association/compat-text.js'
 
 // Temporary opt-in, content-free document extraction diagnostics.
 export { debugDocumentFlow } from './engine/document-flow-debug.js'

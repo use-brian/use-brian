@@ -84,6 +84,8 @@ export type CrmOperationsReadPort = {
     when?: 'upcoming' | 'past'
     /** One event by id (deep links). */
     id?: string
+    /** One event by its reference (assistant preview links). */
+    slug?: string
     limit?: number
   }): Promise<CrmPage<'events'>>
   listParticipation(workspaceId: string, filters?: CrmPageQuery & {

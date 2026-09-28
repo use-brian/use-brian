@@ -8,6 +8,7 @@
  */
 import { z } from 'zod'
 import { MembershipSiteSchema } from './membership-catalogue.js'
+import { tolerantBoolean } from '../tools/schema-tolerance.js'
 
 export const SITE_CONTENT_COLLECTIONS = ['people', 'partners', 'settings', 'news', 'home-oasa', 'home-sea', 'event-pages'] as const
 export const SiteContentCollectionSchema = z.enum(SITE_CONTENT_COLLECTIONS)
@@ -144,7 +145,8 @@ export const SeaHomeDocumentSchema = z.object({
 const eventSlug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,99}$/, 'Use the event reference')
 const sectionId = z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/)
 const heading = LocalizedShortSchema.optional()
-const section = { id: sectionId, hidden: z.boolean().default(false) }
+// `hidden` tolerates "true"/"false": assistant tool schemas may present a defaulted flag to the model as text.
+const section = { id: sectionId, hidden: tolerantBoolean().default(false) }
 export const EventSectionSchema = z.discriminatedUnion('kind', [
   z.object({ ...section, kind: z.literal('text'), heading, body: LocalizedTextSchema }).strict(),
   z.object({ ...section, kind: z.literal('image'), image: SiteImageSchema, caption: LocalizedShortSchema.optional() }).strict(),
