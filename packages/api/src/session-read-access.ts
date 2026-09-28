@@ -17,7 +17,7 @@
  *
  * [COMP:api/live-work-roster]
  */
-import { canRead } from '@use-brian/core'
+import { canRead, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
 
 /** The session fields the read decision consumes. */
 export type ReadGatedSessionFields = {
@@ -25,6 +25,8 @@ export type ReadGatedSessionFields = {
   visibility: string | null
   mode: string | null
   effectiveClearance: string | null
+  contextCompartments?: string[]
+  contextProjectId?: string | null
 }
 
 /** Resolved facts the pure decision needs — callers do the async lookups. */
@@ -38,6 +40,9 @@ export type SessionReadFacts = {
   assistantWorkspaceId: string | null
   /** The caller's clearance in that workspace; null = not a member. */
   membershipClearance: 'public' | 'internal' | 'confidential' | null
+  /** Null is an owner/admin universe grant; [] grants no named Team/Project. */
+  membershipCompartments?: ScopeGrant
+  membershipProjectIds?: ScopeGrant
 }
 
 export type SessionReadDecision =
@@ -50,7 +55,14 @@ export type SessionReadDecision =
  * `gateSessionRead` body.
  */
 export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision {
-  const { callerUserId, session, assistantWorkspaceId, membershipClearance } = facts
+  const {
+    callerUserId,
+    session,
+    assistantWorkspaceId,
+    membershipClearance,
+    membershipCompartments,
+    membershipProjectIds,
+  } = facts
   if (session.visibility === 'workspace' || session.mode === 'draft') {
     if (!assistantWorkspaceId) {
       return { readable: false, status: 403, error: 'Draft session is not team-owned' }
@@ -63,6 +75,15 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
       !canRead(membershipClearance, session.effectiveClearance as 'public' | 'internal' | 'confidential')
     ) {
       return { readable: false, status: 403, error: 'Insufficient clearance' }
+    }
+    if (!scopeGrantContains(membershipCompartments, session.contextCompartments ?? [])) {
+      return { readable: false, status: 403, error: 'Session context unavailable' }
+    }
+    if (!scopeGrantContains(
+      membershipProjectIds,
+      session.contextProjectId ? [session.contextProjectId] : [],
+    )) {
+      return { readable: false, status: 403, error: 'Session context unavailable' }
     }
     return { readable: true }
   }
@@ -89,9 +110,9 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
 export type LiveSessionTier = 'full' | 'presence' | 'omitted'
 
 export function liveSessionTier(facts: SessionReadFacts): LiveSessionTier {
-  if (facts.session.userId === facts.callerUserId) return 'full'
   if (facts.session.visibility === 'workspace' || facts.session.mode === 'draft') {
     return decideSessionRead(facts).readable ? 'full' : 'omitted'
   }
+  if (facts.session.userId === facts.callerUserId) return 'full'
   return 'presence'
 }

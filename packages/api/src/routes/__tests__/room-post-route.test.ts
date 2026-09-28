@@ -29,6 +29,9 @@ vi.mock('../../db/client.js', () => ({
 
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceMembershipWithClearanceSystem: vi.fn(async () => ({ clearance: 'confidential' })),
+  getWorkspaceMembershipWithReadScopeSystem: vi.fn(async () => ({
+    role: 'member', clearance: 'confidential', compartments: null, projectIds: null,
+  })),
   getWorkspaceRoleSystem: vi.fn(async () => 'member'),
 }))
 

@@ -108,6 +108,10 @@ import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
 import type { ApiKeyStore } from '../db/api-key-store.js'
+import {
+  createDeliveryAudienceAuthorizer,
+  type AuthorizeDeliveryAudience,
+} from '../context-scope/delivery-authority.js'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { renderCharterBlock } from '@use-brian/shared'
 import {
@@ -215,6 +219,8 @@ export type CalleeExecutorOptions = {
    */
   deferredConfirmationStore?: DeferredConfirmationStore
   integrationStore?: ChannelIntegrationStore
+  /** Pre-generation and deferred-prompt destination policy. */
+  authorizeDeliveryAudience?: AuthorizeDeliveryAudience
   defaultTelegramBotToken?: string
   waConnectorUrl?: string
   waConnectorSecret?: string
@@ -465,6 +471,8 @@ function hasForbiddenExternalClientDepth(depth: ResearchDepthConfig | undefined)
 }
 
 export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExecutor {
+  const authorizeAudience = options.authorizeDeliveryAudience
+    ?? createDeliveryAudienceAuthorizer({ integrationStore: options.integrationStore })
   return async function executeCalleeQuery(params: CalleeQueryParams, inheritedEvidence?: import('@use-brian/core').ScopeEvidence): Promise<string> {
     if (params.callerScopeEvidence !== undefined && !params.callerAccessCeiling && !inheritedEvidence) {
       throw Object.assign(new Error('Source context requires verified caller authority.'), { reason:'caller_evidence_unavailable', retrySafe:false })
@@ -614,6 +622,27 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           }
         : undefined,
     })
+
+    // Refuse an incompatible unattended destination before creating a
+    // session or spending a model token. The final workflow delivery repeats
+    // this check with the full post-tool high-water evidence.
+    if (params.deliverTarget && calleeAssistant.workspaceId) {
+      const destination = await authorizeAudience({
+        workspaceId: calleeAssistant.workspaceId,
+        assistantId: calleeAssistant.id,
+        userId: calleeActorUserId,
+        channelType: params.deliverTarget.channelType,
+        channelId: params.deliverTarget.channelId,
+        channelIntegrationId: params.deliverTarget.channelIntegrationId,
+        scopeEvidence: inheritedEvidence ?? params.callerScopeEvidence ?? {},
+      })
+      if (!destination.allowed) {
+        throw Object.assign(
+          new Error('The destination audience cannot receive this scoped output.'),
+          { reason: 'delivery_audience_unverified', retrySafe: false },
+        )
+      }
+    }
 
     const callerAssistant = await findAssistantById(params.callerAssistantId)
     const callerName = callerAssistant?.name ?? 'Unknown assistant'
@@ -2243,6 +2272,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 waConnectorUrl: options.waConnectorUrl,
                 waConnectorSecret: options.waConnectorSecret,
                 customChannelStore: options.customChannelStore,
+                authorizeDeliveryAudience: authorizeAudience,
+                scopeEvidence: scopeAccumulator.evidence,
+                userId: calleeActorUserId,
               },
             )
           }

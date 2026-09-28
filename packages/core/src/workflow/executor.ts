@@ -20,7 +20,7 @@ import {
   type ConsultTransport,
 } from '../a2a/index.js'
 import type { Tool, ToolContext } from '../tools/types.js'
-import { ContextScopeAccumulator, type TurnScope } from '../security/context-scope.js'
+import { ContextScopeAccumulator, type ScopeEvidence, type TurnScope } from '../security/context-scope.js'
 import { pinAccessCeiling } from '../security/access-ceiling.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type {
@@ -176,6 +176,7 @@ export type DeliveryOutcome =
         | 'provider_mismatch'
         | 'access_denied'
         | 'customer_service_window_expired'
+        | 'delivery_audience_unverified'
     }
   | { status: 'failed'; channelType: string; error: string }
 
@@ -196,6 +197,8 @@ export type DeliverToChannel = (params: {
   channelId: string
   channelIntegrationId?: string
   text: string
+  /** Trusted run/turn high-water evidence checked against the current audience. */
+  scopeEvidence?: import('../security/context-scope.js').ScopeEvidence
   question?: import('../tools/base/ask-question.js').AssistantQuestion
   questionResponse?: { toolName: string; arguments: Record<string, unknown>; answerField: string }
   /**
@@ -499,6 +502,20 @@ const FRONTIER_VAR = '__frontier'
 /** Persisted run-wide high-water evidence across wait/approval/process resumes. */
 export const WORKFLOW_SCOPE_EVIDENCE_VAR = '__contextScopeEvidence'
 const EXTERNAL_CLIENT_PRINCIPAL_VAR = '__externalClientPrincipal'
+
+/** Rebuild the persisted run high-water mark for terminal/out-of-band sends. */
+function deliveryScopeEvidenceForRun(run: WorkflowRunRecord): ScopeEvidence {
+  const evidence = new ContextScopeAccumulator({
+    compartments: run.contextCompartments ?? [],
+    projectIds: run.contextProjectIds
+      ?? (run.contextProjectId ? [run.contextProjectId] : []),
+  })
+  const persisted = run.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]
+  if (persisted && typeof persisted === 'object' && !Array.isArray(persisted)) {
+    evidence.note(persisted as ScopeEvidence)
+  }
+  return evidence.evidence
+}
 
 function clientPrincipalError(message: string): Error {
   return Object.assign(new Error(message), { reason: 'client_principal_unresolved' })
@@ -1825,6 +1842,7 @@ async function dispatchAssistantCall(
                   ? step.deliver.channelIntegrationId
                   : undefined),
               text: deliveredText,
+              scopeEvidence: ctx.scopeAccumulator.evidence,
               question,
               questionResponse: question && step.questionResponse ? {
                 ...step.questionResponse,
@@ -2475,6 +2493,7 @@ async function surfaceConnectorHealth(
               `Heads up: workflow "${workflow.name}" couldn't use a connector because its ` +
               `credentials stopped working (${dead.map((c) => c.label).join(', ')}). ` +
               `Reconnect it in Studio then Connectors, then re-run.`,
+            scopeEvidence: deliveryScopeEvidenceForRun(run),
           })
         } catch (err) {
           console.warn('[workflow] connector-health notification failed:', err)
@@ -2599,6 +2618,7 @@ async function maybeDisableForDeadAnchor(
               `Workflow "${workflow.name}" was disabled after ${DEAD_ANCHOR_DISABLE_STREAK} runs in a row failed: ` +
               `its page anchor points to a page that no longer exists. ` +
               `Re-pick the page in the workflow builder, then re-enable the workflow.`,
+            scopeEvidence: deliveryScopeEvidenceForRun(run),
           })
         } catch (err) {
           console.warn('[workflow] dead-anchor disable notification failed:', err)
@@ -2786,6 +2806,7 @@ async function attemptFailureDelivery(
         channelId: reply.channelId,
         channelIntegrationId: reply.channelIntegrationId,
         text,
+        scopeEvidence: deliveryScopeEvidenceForRun(run),
         replyToTrigger: reply,
       })
     } else {
@@ -2800,6 +2821,7 @@ async function attemptFailureDelivery(
         channelId: target.channelId,
         channelIntegrationId: target.channelIntegrationId,
         text,
+        scopeEvidence: deliveryScopeEvidenceForRun(run),
         threadRef: typeof parent === 'string' ? parent : undefined,
       })
     }

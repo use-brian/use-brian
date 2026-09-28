@@ -19,8 +19,14 @@ import {
 } from '@use-brian/channels'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import { createFeishuApi } from '../feishu/client.js'
+import {
+  createDeliveryAudienceAuthorizer,
+  type AuthorizeDeliveryAudience,
+} from '../context-scope/delivery-authority.js'
 
 export type DeliveryParams = {
+  /** Owning workspace for live audience authorization. */
+  workspaceId?: string
   assistantId: string
   userId: string
   text: string
@@ -30,6 +36,10 @@ export type DeliveryParams = {
   channelType?: string
   /** Original channel ID (chat ID, thread ID, etc.). */
   channelId?: string
+  channelIntegrationId?: string
+  /** Trusted high-water evidence for the content being delivered. */
+  scopeEvidence?: import('@use-brian/core').ScopeEvidence
+  authorizeDeliveryAudience?: AuthorizeDeliveryAudience
   integrationStore?: ChannelIntegrationStore
   /**
    * Official shared Use Brian bot token. Used for Telegram delivery when
@@ -80,6 +90,35 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
   // workspace-channels migration (C2). See docs/architecture/channels/adapter-pattern.md.
   const channelType = params.channelType ?? 'web'
   const channelId = params.channelId ?? 'default'
+
+  if (params.scopeEvidence !== undefined) {
+    if (!params.workspaceId) {
+      return {
+        delivered: false,
+        channelType,
+        reason: 'Not delivered: the destination audience could not be verified for this scoped output.',
+      }
+    }
+    const authorizeAudience = params.authorizeDeliveryAudience
+      ?? createDeliveryAudienceAuthorizer({ integrationStore })
+    const decision = await authorizeAudience({
+      workspaceId: params.workspaceId,
+      assistantId,
+      userId,
+      channelType,
+      channelId,
+      channelIntegrationId: params.channelIntegrationId,
+      sessionId: params.sessionId,
+      scopeEvidence: params.scopeEvidence,
+    })
+    if (!decision.allowed) {
+      return {
+        delivered: false,
+        channelType,
+        reason: 'Not delivered: the destination audience could not be verified for this scoped output.',
+      }
+    }
+  }
 
   // Only persist to notification session if delivering to web (avoid double notification)
   if (channelType === 'web' || channelType === 'notification') {

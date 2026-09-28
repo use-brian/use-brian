@@ -14,11 +14,11 @@ import request from 'supertest'
 
 vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
 vi.mock('../../db/workspace-store.js', () => ({
-  getWorkspaceMembershipWithClearanceSystem: vi.fn(),
+  getWorkspaceMembershipWithReadScopeSystem: vi.fn(),
 }))
 
 import { query } from '../../db/client.js'
-import { getWorkspaceMembershipWithClearanceSystem } from '../../db/workspace-store.js'
+import { getWorkspaceMembershipWithReadScopeSystem } from '../../db/workspace-store.js'
 import {
   liveWorkRoutes,
   deriveSessionState,
@@ -28,7 +28,7 @@ import {
 } from '../live-work.js'
 
 const mockQuery = vi.mocked(query)
-const mockMembership = vi.mocked(getWorkspaceMembershipWithClearanceSystem)
+const mockMembership = vi.mocked(getWorkspaceMembershipWithReadScopeSystem)
 
 const WS = '11111111-1111-1111-1111-111111111111'
 const CALLER = '22222222-2222-2222-2222-222222222222'
@@ -71,6 +71,8 @@ function sessionRow(overrides: Record<string, unknown> = {}) {
     mode: null,
     status: 'running',
     effectiveClearance: null,
+    contextCompartments: [],
+    contextProjectId: null,
     title: 'Quarterly recap',
     createdAt: new Date(NOW.getTime() - 3_600_000),
     lastActiveAt: FRESH,
@@ -103,7 +105,12 @@ function primeRoster(sessions: unknown[], runs: unknown[]) {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  mockMembership.mockResolvedValue({ role: 'member', clearance: 'internal' })
+  mockMembership.mockResolvedValue({
+    role: 'member',
+    clearance: 'internal',
+    compartments: null,
+    projectIds: null,
+  })
 })
 
 describe('[COMP:api/live-work-roster] roster route', () => {

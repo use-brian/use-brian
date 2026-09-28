@@ -22,12 +22,16 @@ function facts(overrides: {
       visibility: 'owner',
       mode: null,
       effectiveClearance: null,
+      contextCompartments: [],
+      contextProjectId: null,
       ...overrides.session,
     },
     assistantWorkspaceId:
       overrides.assistantWorkspaceId === undefined ? WS : overrides.assistantWorkspaceId,
     membershipClearance:
       overrides.membershipClearance === undefined ? 'internal' : overrides.membershipClearance,
+    membershipCompartments: null,
+    membershipProjectIds: null,
   }
 }
 
@@ -84,11 +88,48 @@ describe('[COMP:api/live-work-roster] decideSessionRead', () => {
     )
     expect(d.readable).toBe(true)
   })
+
+  it.each([
+    ['Team', { contextCompartments: ['finance'] }, [], null],
+    ['Project', { contextProjectId: 'project-1' }, null, []],
+  ])('workspace session: missing %s reach is refused without naming it', (_axis, session, compartments, projectIds) => {
+    const d = decideSessionRead({
+      ...facts({ session: { visibility: 'workspace', ...session } }),
+      membershipCompartments: compartments,
+      membershipProjectIds: projectIds,
+    })
+    expect(d).toEqual({ readable: false, status: 403, error: 'Session context unavailable' })
+  })
+
+  it('workspace session: matching Team and Project reach permits the room', () => {
+    const d = decideSessionRead({
+      ...facts({ session: {
+        visibility: 'workspace',
+        contextCompartments: ['finance'],
+        contextProjectId: 'project-1',
+      } }),
+      membershipCompartments: ['finance'],
+      membershipProjectIds: ['project-1'],
+    })
+    expect(d.readable).toBe(true)
+  })
 })
 
 describe('[COMP:api/live-work-roster] liveSessionTier (§3.3 precedence)', () => {
   it("caller's own session is full, first rule wins", () => {
     expect(liveSessionTier(facts({ session: { userId: CALLER } }))).toBe('full')
+  })
+
+  it("caller's own shared room is omitted after its Team reach is revoked", () => {
+    expect(liveSessionTier({
+      ...facts({ session: {
+        userId: CALLER,
+        visibility: 'workspace',
+        contextCompartments: ['finance'],
+      } }),
+      membershipCompartments: [],
+      membershipProjectIds: null,
+    })).toBe('omitted')
   })
 
   it('workspace-visible within clearance is full', () => {

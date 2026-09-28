@@ -1723,10 +1723,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // its terminal line back into that transcript, so the conversation records
     // how the pursuit ended (the notification-session copy still lands).
     await deliverToChannel({
+      workspaceId: goal.workspaceId,
       assistantId,
       userId: goal.createdByUserId,
       text,
       channelType: 'web',
+      scopeEvidence: {
+        sensitivity: 'public',
+        compartments: goal.authoringAuthority?.ceiling.mutationCompartments ?? [],
+        projectIds: goal.contextProjectId ? [goal.contextProjectId] : [],
+      },
+      integrationStore: integrationStore ?? undefined,
       ...(goal.originSessionId ? { sessionId: goal.originSessionId } : {}),
     })
   }

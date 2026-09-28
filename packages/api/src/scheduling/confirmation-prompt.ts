@@ -33,6 +33,7 @@ import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { CustomChannelStore } from '../db/custom-channel-store.js'
 import { createFeishuApi } from '../feishu/client.js'
 import type { FeishuCredentials } from '../db/channel-integrations.js'
+import type { AuthorizeDeliveryAudience } from '../context-scope/delivery-authority.js'
 
 export type ConfirmationPromptTarget = {
   workspaceId?: string
@@ -49,6 +50,9 @@ export type ConfirmationPromptDeps = {
   waConnectorUrl?: string
   waConnectorSecret?: string
   customChannelStore?: Pick<CustomChannelStore, 'enqueue'>
+  authorizeDeliveryAudience?: AuthorizeDeliveryAudience
+  scopeEvidence?: import('@use-brian/core').ScopeEvidence
+  userId?: string
 }
 
 /**
@@ -135,6 +139,32 @@ export async function sendConfirmationPrompt(
     : formatConfirmationInput(req.input)
   const inputSummary = lines.length > 0 ? '\n\n' + lines.join('\n') : ''
   const allowPersist = req.allowPersistentApproval ?? false
+
+  if (deps.scopeEvidence !== undefined) {
+    if (!deps.authorizeDeliveryAudience || !target.workspaceId || !deps.userId) {
+      return {
+        delivered: false,
+        channelType: target.channelType,
+        reason: 'The confirmation prompt was not delivered because its destination audience could not be verified.',
+      }
+    }
+    const audience = await deps.authorizeDeliveryAudience({
+      workspaceId: target.workspaceId,
+      assistantId: target.assistantId,
+      userId: deps.userId,
+      channelType: target.channelType,
+      channelId: target.channelId,
+      channelIntegrationId: target.channelIntegrationId,
+      scopeEvidence: deps.scopeEvidence,
+    })
+    if (!audience.allowed) {
+      return {
+        delivered: false,
+        channelType: target.channelType,
+        reason: 'The confirmation prompt was not delivered because its destination audience could not be verified.',
+      }
+    }
+  }
 
   try {
     if (target.channelType === 'telegram') {

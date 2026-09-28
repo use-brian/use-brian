@@ -473,6 +473,43 @@ export async function getWorkspaceMembershipWithClearanceSystem(
   }
 }
 
+/** Current human read authority for room/session audience checks. */
+export async function getWorkspaceMembershipWithReadScopeSystem(
+  userId: string,
+  workspaceId: string,
+): Promise<{
+  role: 'owner' | 'admin' | 'member'
+  clearance: 'public' | 'internal' | 'confidential'
+  compartments: string[] | null
+  projectIds: string[] | null
+} | null> {
+  try {
+    const result = await query<{
+      role: 'owner' | 'admin' | 'member'
+      clearance: 'public' | 'internal' | 'confidential'
+      compartments: string[] | null
+      projectIds: string[] | null
+    }>(
+      `SELECT wm.role, wm.clearance,
+              effective_member_read_compartments(wm.user_id, wm.workspace_id) AS compartments,
+              CASE WHEN wm.role IN ('owner','admin') THEN NULL
+                   ELSE COALESCE((
+                     SELECT array_agg(pm.project_id::text ORDER BY pm.project_id::text)
+                       FROM workspace_project_members pm
+                       JOIN workspace_projects p ON p.id = pm.project_id
+                      WHERE pm.user_id = wm.user_id AND p.workspace_id = wm.workspace_id
+                   ), '{}') END AS "projectIds"
+         FROM workspace_members wm
+        WHERE wm.workspace_id = $1 AND wm.user_id = $2`,
+      [workspaceId, userId],
+    )
+    return result.rows[0] ?? null
+  } catch (err) {
+    console.error('[workspace-store] scoped membership lookup failed:', err)
+    return null
+  }
+}
+
 /**
  * Resolve the READ-side clearance ceiling for a turn — `min(actingMember,
  * assistant)`. This is the value to put in `AccessContext.clearance` /

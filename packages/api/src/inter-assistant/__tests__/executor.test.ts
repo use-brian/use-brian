@@ -41,6 +41,8 @@ vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
   addSessionMessage: vi.fn().mockResolvedValue({ id: 'msg-1' }),
   getSessionMessages: vi.fn().mockResolvedValue([]),
+  findSessionById: vi.fn().mockResolvedValue(null),
+  findSessionByChannel: vi.fn().mockResolvedValue(null),
   toStampedMessages: vi.fn((m: unknown) => m),
   // Delivery-conversation lookup for the session-state bridge. Empty by
   // default so every consult that carries a deliverTarget stays block-free
@@ -253,6 +255,37 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
+  it('refuses an incompatible delivery audience before session creation or model spend', async () => {
+    const workspaceCallee = {
+      ...calleeAssistant,
+      workspaceId: 'workspace-1',
+      kind: 'primary',
+      compartments: [],
+      defaultCompartments: [],
+    }
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : { ...callerAssistant, workspaceId: 'workspace-1' }) as never,
+    )
+    const authorizeDeliveryAudience = vi.fn(async () => ({
+      allowed: false as const,
+      reason: 'delivery_audience_unverified' as const,
+    }))
+    const run = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      authorizeDeliveryAudience,
+    })
+
+    await expect(run({
+      ...baseParams,
+      deliverTarget: { channelType: 'slack', channelId: 'C-FICTIONAL' },
+    })).rejects.toMatchObject({ reason: 'delivery_audience_unverified', retrySafe: false })
+    expect(mockSession).not.toHaveBeenCalled()
+    expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+
   it('carries validated caller sources into the receiver write accumulator and returned evidence',async()=>{
     const primary={...calleeAssistant,workspaceId:'workspace-1',kind:'primary',clearance:'internal',compartments:['product']}
     mockFindAssistant.mockImplementation(async id=>({...primary,id}) as never)

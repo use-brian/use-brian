@@ -9,7 +9,7 @@ import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
-import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
+import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
@@ -53,6 +53,8 @@ type GatedSession = {
   visibility: string | null
   mode: string | null
   effectiveClearance: string | null
+  contextCompartments?: string[]
+  contextProjectId?: string | null
 }
 
 /**
@@ -85,6 +87,8 @@ export async function gateSessionRead(
   }
   let assistantWorkspaceId: string | null = null
   let membershipClearance: 'public' | 'internal' | 'confidential' | null = null
+  let membershipCompartments: string[] | null | undefined
+  let membershipProjectIds: string[] | null | undefined
   if (session.visibility === 'workspace' || session.mode === 'draft') {
     const teamRow = await query<{ workspaceId: string | null }>(
       `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
@@ -92,8 +96,10 @@ export async function gateSessionRead(
     )
     assistantWorkspaceId = teamRow.rows[0]?.workspaceId ?? null
     if (assistantWorkspaceId) {
-      const membership = await getWorkspaceMembershipWithClearanceSystem(jwtUserId, assistantWorkspaceId)
+      const membership = await getWorkspaceMembershipWithReadScopeSystem(jwtUserId, assistantWorkspaceId)
       membershipClearance = membership?.clearance ?? null
+      membershipCompartments = membership?.compartments
+      membershipProjectIds = membership?.projectIds
     }
   }
   const decision = decideSessionRead({
@@ -101,6 +107,8 @@ export async function gateSessionRead(
     session,
     assistantWorkspaceId,
     membershipClearance,
+    membershipCompartments,
+    membershipProjectIds,
   })
   return decision.readable ? null : { status: decision.status, error: decision.error }
 }

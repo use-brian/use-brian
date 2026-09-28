@@ -23,7 +23,7 @@
  */
 import { Router } from 'express'
 import { query } from '../db/client.js'
-import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
+import { getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { isSharedChatSession, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 import { liveSessionTier } from '../session-read-access.js'
 
@@ -134,6 +134,8 @@ type SessionRosterRow = {
   mode: string | null
   status: string
   effectiveClearance: string | null
+  contextCompartments: string[]
+  contextProjectId: string | null
   title: string | null
   createdAt: Date
   lastActiveAt: Date
@@ -163,6 +165,8 @@ export function projectSessionRow(
   callerUserId: string,
   membershipClearance: 'public' | 'internal' | 'confidential',
   now?: Date,
+  membershipCompartments: string[] | null = null,
+  membershipProjectIds: string[] | null = null,
 ): LiveSessionItem | null {
   const tier = liveSessionTier({
     callerUserId,
@@ -171,9 +175,13 @@ export function projectSessionRow(
       visibility: row.visibility,
       mode: row.mode,
       effectiveClearance: row.effectiveClearance,
+      contextCompartments: row.contextCompartments,
+      contextProjectId: row.contextProjectId,
     },
     assistantWorkspaceId: row.assistantWorkspaceId,
     membershipClearance,
+    membershipCompartments,
+    membershipProjectIds,
   })
   if (tier === 'omitted') return null
   const state = deriveSessionState({
@@ -262,6 +270,8 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
             s.mode,
             s.status,
             s.effective_clearance    AS "effectiveClearance",
+            s.context_compartments   AS "contextCompartments",
+            s.context_project_id     AS "contextProjectId",
             s.title,
             s.created_at             AS "createdAt",
             s.last_active_at         AS "lastActiveAt",
@@ -332,7 +342,7 @@ export function liveWorkRoutes(): Router {
         return
       }
       const { workspaceId } = req.params
-      const membership = await getWorkspaceMembershipWithClearanceSystem(callerUserId, workspaceId)
+      const membership = await getWorkspaceMembershipWithReadScopeSystem(callerUserId, workspaceId)
       if (!membership) {
         res.status(403).json({ error: 'Not a member of this workspace' })
         return
@@ -345,7 +355,14 @@ export function liveWorkRoutes(): Router {
       const now = new Date()
       const items: LiveWorkItem[] = [
         ...sessionRows
-          .map((row) => projectSessionRow(row, callerUserId, membership.clearance, now))
+          .map((row) => projectSessionRow(
+            row,
+            callerUserId,
+            membership.clearance,
+            now,
+            membership.compartments,
+            membership.projectIds,
+          ))
           .filter((item): item is LiveSessionItem => item !== null),
         ...runRows.map((row) => projectRunRow(row, now)),
       ].sort((a, b) => (a.lastActiveAt < b.lastActiveAt ? 1 : a.lastActiveAt > b.lastActiveAt ? -1 : 0))
