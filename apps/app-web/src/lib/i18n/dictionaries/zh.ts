@@ -10849,6 +10849,11 @@ export const zh: Dictionary = {
     },
     connectBrowser: {
       desktop: {
+        automatic: "設定本機設定檔後自動連線",
+        paused: "瀏覽器已暫停",
+        open: "開啟瀏覽器",
+        resume: "繼續",
+        retry: "重試",
         title: "應用程式內瀏覽器",
         description: "連接 Use Brian 內建的瀏覽器，無需擴充功能。",
         connect: "連接應用程式內瀏覽器",

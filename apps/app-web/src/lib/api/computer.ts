@@ -1,3 +1,4 @@
+import { markSurfaceCacheStale } from "@/lib/surface-cache";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the computer-use web surface (app-web).
@@ -340,6 +341,7 @@ export async function createBrowserProfile(params: {
   const body = (await res.json()) as {
     profile: Omit<BrowserProfile, "sessions" | "credentials" | "grants"> | null;
   };
+  if (body.profile) markSurfaceCacheStale("browser-profiles:");
   return body.profile
     ? { ...body.profile, sessions: [], credentials: [], grants: [] }
     : null;
@@ -479,6 +481,9 @@ export async function updateBrowserProfile(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
+  // Profile-id mutations do not carry workspaceId. Mark the canonical family
+  // stale so every mounted reader (including workspace chrome) revalidates.
+  if (res.ok) markSurfaceCacheStale("browser-profiles:");
   return res.ok;
 }
 
@@ -486,6 +491,7 @@ export async function deleteBrowserProfile(profileId: string): Promise<boolean> 
   const res = await authFetch(`${API_URL}/api/computer/profiles/${encodeURIComponent(profileId)}`, {
     method: "DELETE",
   });
+  if (res.ok) markSurfaceCacheStale("browser-profiles:");
   return res.ok;
 }
 
@@ -557,8 +563,10 @@ export type BrowserExtensionPairing = {
 export async function pairBrowserExtension(
   workspaceId: string,
   browserProfileId?: string,
+  signal?: AbortSignal,
 ): Promise<BrowserExtensionPairing | null> {
   const res = await authFetch(`${API_URL}/api/browser-extension/pair`, {
+    signal,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workspaceId, ...(browserProfileId ? { browserProfileId } : {}) }),

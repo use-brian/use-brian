@@ -10930,6 +10930,11 @@ export const ja: Dictionary = {
     },
     connectBrowser: {
       desktop: {
+        automatic: "ローカルプロファイル設定後に自動接続",
+        paused: "ブラウザーは一時停止中",
+        open: "ブラウザーを開く",
+        resume: "再開",
+        retry: "再試行",
         title: "アプリ内ブラウザー",
         description: "Use Brian 内蔵のブラウザーに接続します。拡張機能は不要です。",
         connect: "アプリ内ブラウザーに接続",

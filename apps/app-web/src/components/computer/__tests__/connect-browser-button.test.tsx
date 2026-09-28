@@ -37,6 +37,7 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush }) }));
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
+import { automaticDesktopBrowser as browser, type BrowserState } from "@/lib/automatic-desktop-browser";
 import { ConnectBrowserButton } from "../connect-browser-button";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -91,47 +92,29 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     requestBrowserControl.mockResolvedValue("prompted");
   });
 
-  it("labels the desktop connection as in-app rather than Chrome", async () => {
-    window.usebrianDesktop = { browserControl: vi.fn(), signIn: vi.fn() };
-    try {
-      getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: false });
-      const { el, root } = await mount();
-      expect(labelOf(el)).toBe(en.computer.connectBrowser.desktop.connect);
-      await click(el);
-      expect(pairViaExtension).toHaveBeenCalled();
-      await act(async () => root.unmount());
-      el.remove();
-    } finally {
-      delete window.usebrianDesktop;
-    }
-  });
-
-  it.each(["other browser", "other workspace", "missing fields", "rejected", "local connected"])(
-    "uses local workspace pairing for desktop sidebar: %s",
-    async (scenario) => {
-      window.usebrianDesktop = {
-        signIn: vi.fn(),
-        browserControl: vi.fn(async () => {
-          if (scenario === "rejected") throw new Error("IPC unavailable");
-          if (scenario === "missing fields") return { ok: true, hasControl: true };
-          return { ok: true, hasControl: true, connected: scenario !== "other browser",
-            workspaceId: scenario === "other workspace" ? "ws-2" : "ws-1" };
-        }),
-      };
-      getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: true });
+  it.each(["idle", "connecting", "connected", "paused", "failed"] as const)(
+    "desktop observes coordinator %s state without manual pairing", async (phase) => {
+      const state: BrowserState = { workspaceId: "ws-1", profileId: "p", phase };
+      const snapshot = vi.spyOn(browser, "snapshot").mockReturnValue(state);
+      const show = vi.spyOn(browser, "show").mockResolvedValue();
+      const retry = vi.spyOn(browser, "retry").mockResolvedValue();
+      window.usebrianDesktop = { signIn: vi.fn(), browserControl: vi.fn() };
       const { el, root } = await mount();
       try {
-        const connected = scenario === "local connected";
-        expect(labelOf(el)).toBe(connected ? en.computer.connectBrowser.desktop.manage : en.computer.connectBrowser.desktop.connect);
-        expect(dotOf(el)).toBe(connected ? "primary" : null);
-        expect(extensionHasControl).not.toHaveBeenCalled();
+        const d = en.computer.connectBrowser.desktop;
+        expect(labelOf(el)).toBe(phase === "connected" ? d.open : phase === "paused" ? d.resume :
+          phase === "failed" ? d.retry : phase === "connecting" ? en.computer.connectBrowser.oneClickConnecting : d.automatic);
+        expect(getBrowserExtensionStatus).not.toHaveBeenCalled();
         await click(el);
-        if (connected) expect(routerPush).toHaveBeenCalled();
-        else expect(pairViaExtension).toHaveBeenCalled();
+        expect(pairViaExtension).not.toHaveBeenCalled();
+        expect(pairBrowserExtension).not.toHaveBeenCalled();
+        if (phase === "connected") expect(show).toHaveBeenCalledOnce();
+        if (phase === "paused" || phase === "failed") expect(retry).toHaveBeenCalledOnce();
+        if (phase === "idle") expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
       } finally {
-        await act(async () => root.unmount());
-        el.remove();
+        await act(async () => root.unmount()); el.remove();
         delete window.usebrianDesktop;
+        snapshot.mockRestore(); show.mockRestore(); retry.mockRestore();
       }
     },
   );

@@ -8,6 +8,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('@/lib/auth-fetch', () => ({ authFetch: vi.fn() }))
+vi.mock('@/lib/surface-cache', () => ({ markSurfaceCacheStale: vi.fn() }))
+import { markSurfaceCacheStale } from '@/lib/surface-cache'
 
 import { authFetch } from '@/lib/auth-fetch'
 import {
@@ -348,5 +350,29 @@ describe('[COMP:app-web/connect-browser] Profile-scoped extension pairing SDK', 
       workspaceId: 'ws-1',
       browserProfileId: 'profile-1',
     })
+  })
+})
+
+
+describe('[COMP:app-web/automatic-desktop-browser] profile mutation signals', () => {
+  it('invalidates the shared roster on successful setup, backend change and removal', async () => {
+    mockFetch.mockResolvedValueOnce(respond(200, { profile: { id: 'p' } }))
+    await createBrowserProfile({ workspaceId: 'w', name: 'Local', defaultBackend: 'local' })
+    await updateBrowserProfile('p', { defaultBackend: 'cloud' })
+    await deleteBrowserProfile('p')
+    expect(markSurfaceCacheStale).toHaveBeenCalledTimes(3)
+    expect(markSurfaceCacheStale).toHaveBeenCalledWith('browser-profiles:')
+  })
+  it('does not announce a failed mutation', async () => {
+    mockFetch.mockResolvedValue(respond(403))
+    await createBrowserProfile({ workspaceId: 'w', name: 'Local' })
+    await updateBrowserProfile('p', { defaultBackend: 'cloud' })
+    await deleteBrowserProfile('p')
+    expect(markSurfaceCacheStale).not.toHaveBeenCalled()
+  })
+  it('forwards cancellation to the token request', async () => {
+    const abort = new AbortController()
+    await pairBrowserExtension('w', 'p', abort.signal)
+    expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: abort.signal }))
   })
 })

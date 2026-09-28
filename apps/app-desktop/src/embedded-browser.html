@@ -8,13 +8,18 @@
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; background: #f4f6fa; color: #172033; font: 14px system-ui, sans-serif; overflow: hidden; }
-    header { height: 176px; padding: 8px 8px 8px 16px; border-bottom: 2px solid #94a3b8; display: flex; flex-direction: column; gap: 7px; }
+    header { height: 176px; padding: 8px 8px 8px 16px; border-bottom: 1px solid #dbe2ec; background: #f8fafc; display: flex; flex-direction: column; gap: 7px; }
     .row { display: flex; align-items: center; gap: 4px; min-height: 32px; }
-    button, input { font: inherit; border: 1px solid #94a3b8; border-radius: 5px; padding: 6px; background: white; color: inherit; }
+    button, input { font: inherit; border: 1px solid #cbd5e1; border-radius: 7px; padding: 6px; background: white; color: inherit; }
     button { cursor: pointer; white-space: nowrap; }
+    button:hover:not(:disabled) { background: #eef2f7; border-color: #94a3b8; }
+    button:active:not(:disabled) { background: #e2e8f0; }
     button:disabled { opacity: .5; cursor: default; }
     button:focus-visible, input:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
     #stop { background: #b91c1c; border-color: #991b1b; color: white; font-weight: 750; }
+    #stop:hover { background: #991b1b; }
+    .icon-button { width: 32px; height: 32px; flex: 0 0 32px; display: inline-flex; align-items: center; justify-content: center; padding: 6px; background: transparent; border-color: transparent; color: #475569; }
+    .icon-button svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
     #status { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
     #address { flex: 1; min-width: 0; width: 0; }
     #tabs { display: flex; gap: 5px; overflow-x: auto; flex: 1; }
@@ -22,17 +27,24 @@
     .tab button:first-child { max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
     .tab [aria-selected="true"] { background: #dbeafe; border-color: #2563eb; }
     [hidden] { display: none !important; }
-    #separator { position: fixed; left: 0; top: 0; width: 8px; height: 100vh; cursor: ew-resize; touch-action: none; background: #cbd5e1; }
-    #rail { padding: 6px 2px 6px 10px; display: flex; flex-direction: column; gap: 8px; }
-    #rail button { white-space: normal; font-size: 11px; padding: 5px 0; overflow-wrap: anywhere; }
+    #separator { position: fixed; left: 0; top: 0; width: 8px; height: 100vh; cursor: ew-resize; touch-action: none; background: transparent; border-left: 1px solid #dbe2ec; }
+    #separator::after { content: ""; position: absolute; left: 2px; top: calc(50% - 18px); width: 3px; height: 36px; border-radius: 3px; background: #cbd5e1; }
+    #separator:hover::after, #separator:focus-visible::after { background: #2563eb; }
+    #separator:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
+    #rail { height: 100vh; padding: 8px 6px; display: flex; flex-direction: column; align-items: center; gap: 8px; background: #f8fafc; border-left: 1px solid #dbe2ec; }
+    #rail .icon-button { width: 36px; height: 36px; flex-basis: 36px; }
+    #expand { background: white; border-color: #dbe2ec; box-shadow: 0 1px 2px #1720330a; }
+    #rail-stop { width: 42px; min-height: 44px; padding: 5px 2px; white-space: normal; font-size: 11px; line-height: 15px; font-weight: 650; color: #b91c1c; background: #fff1f2; border-color: #fecdd3; }
+    #rail-stop:hover { background: #ffe4e6; border-color: #fda4af; }
+    #rail-detach { margin-top: auto; }
     main { padding: 32px; color: #64748b; text-align: center; }
   </style>
 </head>
 <body>
   <div id="separator" role="separator" aria-label="Browser panel width" aria-orientation="vertical" tabindex="0"></div>
-  <aside id="rail" aria-label="Browser controls" hidden><button id="expand">Expand</button><button id="rail-stop">Stop Brian</button><button id="rail-detach">Detach</button></aside>
+  <aside id="rail" aria-label="Browser controls" hidden><button id="expand" class="icon-button" aria-label="Expand browser panel" title="Expand browser panel" aria-controls="controls" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/><path d="m10 9-3 3 3 3"/></svg></button><button id="rail-stop" title="Stop Brian">Stop Brian</button><button id="rail-detach" class="icon-button" aria-label="Detach browser window" title="Detach browser window"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 3h7v7m0-7-9 9M10 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/></svg></button></aside>
   <header id="controls" aria-label="Trusted browser controls">
-    <div class="row"><span id="status" role="status">Manual browsing ready</span><button id="detach">Detach</button><button id="dock" hidden>Dock</button><button id="collapse">Collapse</button></div>
+    <div class="row"><span id="status" role="status">Manual browsing ready</span><button id="detach" class="icon-button" aria-label="Detach browser window" title="Detach browser window"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 3h7v7m0-7-9 9M10 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/></svg></button><button id="dock" class="icon-button" aria-label="Dock browser panel" title="Dock browser panel" hidden><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/><path d="m8 9 3 3-3 3"/></svg></button><button id="collapse" class="icon-button" aria-label="Collapse browser panel" title="Collapse browser panel" aria-controls="controls" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/><path d="m8 9 3 3-3 3"/></svg></button></div>
     <div class="row"><button id="approve" disabled>Allow Brian on this tab</button><button id="stop">Stop Brian</button></div>
     <form id="navigation" class="row">
       <button type="button" id="back" aria-label="Back">←</button>

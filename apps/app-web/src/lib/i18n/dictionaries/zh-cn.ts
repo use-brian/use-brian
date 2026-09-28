@@ -10950,6 +10950,11 @@ export const zhCN: Dictionary = {
     },
     connectBrowser: {
       desktop: {
+        automatic: "设置本地配置后自动连接",
+        paused: "浏览器已暂停",
+        open: "打开浏览器",
+        resume: "继续",
+        retry: "重试",
         title: "应用内浏览器",
         description: "连接 Use Brian 内置的浏览器，无需扩展程序。",
         connect: "连接应用内浏览器",

@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { Cable, Check, Copy, Download, Link2, RefreshCw } from "lucide-react";
+import { DesktopBrowserState } from "./desktop-browser-coordinator";
 import { desktopBridge } from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
 import { deploymentCapabilities } from "@/lib/edition";
@@ -83,7 +84,16 @@ function CopyField({
   );
 }
 
-export function ConnectBrowserPanel({
+type PanelProps = { profileId: string; profileName: string; onConnectionChange?: (profileId: string, connected: boolean) => void };
+
+export function ConnectBrowserPanel(props: PanelProps) {
+  const params = useParams<{ workspaceId?: string }>();
+  return desktopBridge()?.browserControl
+    ? <DesktopBrowserState workspaceId={params?.workspaceId ?? ""} {...props} />
+    : <ExtensionBrowserPanel {...props} />;
+}
+
+function ExtensionBrowserPanel({
   profileId,
   profileName,
   onConnectionChange,
