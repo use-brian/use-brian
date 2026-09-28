@@ -34,6 +34,11 @@ import {
   SensitivityAccumulator,
   ContextScopeAccumulator,
   INTERACTIVE_CHANNEL_TYPES,
+  accessCeilingContains,
+  intersectAccessCeilings,
+  pinAccessCeiling,
+  scopeGrantContains,
+  type AccessCeiling,
   type LLMProvider,
   type Tool,
   type ToolContext,
@@ -53,10 +58,19 @@ import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
 import { MODEL_MAP, chatTierBudget, tierForModel } from '../model-resolution.js'
 import {
   formatActiveWorkspaceContext,
+  resolveLiveAccessCeilingSystem,
   resolveTurnScopeSystem,
   type ResolvedTurnScope,
 } from '../context-scope/resolve-turn-scope.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
+import { runWithAgentAccess } from '../db/client.js'
+import {
+  assertCurrentAuthority,
+  AuthorityChangedError,
+  createAuthorityLease,
+  executeWithCurrentAuthority,
+  runWithAuthorityLease,
+} from '../context-scope/authority-lease.js'
 
 export type SessionResumeReplayDeps = {
   provider: LLMProvider
@@ -118,17 +132,12 @@ export function resolveDurableResumePolicy(
 }
 
 /** Build the `ToolContext` shared by the suspended-tool run and the queryLoop turn. */
-async function buildContext(
+function buildContext(
   session: Session,
   assistant: AssistantRow,
-): Promise<{ context: ToolContext; turnScope: ResolvedTurnScope }> {
-  const turnScope = await resolveTurnScopeSystem({
-    userId: session.userId,
-    assistant,
-    workspaceId: assistant.workspaceId,
-    session,
-  })
-  return { turnScope, context: {
+  turnScope: ResolvedTurnScope,
+): ToolContext {
+  return {
     userId: session.userId,
     workspaceActorUserId: INTERACTIVE_CHANNEL_TYPES.has(session.channelType) ? session.userId : undefined,
     assistantId: assistant.id,
@@ -155,15 +164,28 @@ async function buildContext(
       projectIds: turnScope.writeProjectIds,
     }),
     abortSignal: new AbortController().signal,
-  } }
+  }
+}
+
+class SessionResumeAuthorityUnavailableError extends Error {
+  readonly code = 'session_resume_authority_unavailable'
+  readonly retrySafe = true
+  constructor() {
+    super('Access for this suspended turn can no longer be verified. Start a new request with the current permissions.')
+    this.name = 'SessionResumeAuthorityUnavailableError'
+  }
+}
+
+function authorityUnavailable(): SessionResumeAuthorityUnavailableError {
+  return new SessionResumeAuthorityUnavailableError()
 }
 
 /**
  * Resolve the self-contained outcome note handed to the continuation
  * turn. For an approved action this runs the suspended tool with its
- * frozen input. Never throws — every failure mode (missing tool, invalid
- * input, tool error, tool throw) resolves to a note the model can relay
- * to the user. Exported for direct unit testing.
+ * frozen input. Ordinary tool failures become a relayable note; live
+ * authority loss is structural and propagates so no possibly executed result
+ * reaches the model. Exported for direct unit testing.
  */
 export async function resolveResumeOutcomeNote(
   tools: Map<string, Tool>,
@@ -270,6 +292,10 @@ export async function resolveResumeOutcomeNote(
       `successfully. Result:\n${resultText}\n\nReport the outcome to the user and continue.`
     )
   } catch (err) {
+    // Live-authority loss is a structural withholding signal. Converting it
+    // into ordinary prose would feed a possibly executed external action back
+    // into the model and could invite an unsafe retry.
+    if (err instanceof AuthorityChangedError) throw err
     return (
       `[Resumed after approval] The user approved "${toolName}" but it threw an error: ` +
       `${err instanceof Error ? err.message : String(err)}. Tell the user it did not complete.`
@@ -281,7 +307,16 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
   const model = deps.model ?? 'gemini-flash'
 
   return async function replay(params: ResumeReplayParams): Promise<'completed' | 'deferred'> {
-    const { sessionId, suspendedToolName } = params
+    const { sessionId, suspendedToolName, startingAccessCeiling: storedStarting } = params
+
+    if (!storedStarting) throw authorityUnavailable()
+    let starting: AccessCeiling
+    try {
+      if (!storedStarting.workspaceId || !storedStarting.userId) throw authorityUnavailable()
+      starting = intersectAccessCeilings(storedStarting, storedStarting)
+    } catch {
+      throw authorityUnavailable()
+    }
 
     const session = await findSessionById(sessionId)
     if (!session) {
@@ -292,188 +327,236 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
     const assistant = await findAssistantById(session.assistantId)
     if (!assistant) return 'completed'
 
-    const { context, turnScope } = await buildContext(session, assistant)
-    const policy = resolveDurableResumePolicy(params, model)
-    const customLlm = assistant.workspaceId && params.selectedCustomModel && deps.resolveWorkspaceCustomLlm && !params.selectedLegacyByo
-      ? await deps.resolveWorkspaceCustomLlm({
-          workspaceId: assistant.workspaceId,
-          requestedModel: params.selectedCustomModel,
-          requestedTier: policy.logicalTier,
-        })
-      : null
-    if (params.selectedCustomModel && !customLlm) {
-      throw new Error('The custom model selected for this suspended turn is no longer available.')
-    }
-    let continuationProvider = customLlm?.provider ?? deps.provider
-    let providerKeySource: 'user' | 'platform' = customLlm ? 'user' : 'platform'
-    if (params.selectedLegacyByo) {
-      if (!assistant.workspaceId || !deps.resolveWorkspaceByoGeminiKey || !deps.buildWorkspaceProvider) {
-        throw new Error('The legacy BYO Gemini runtime for this suspended turn is unavailable.')
-      }
-      const key = await deps.resolveWorkspaceByoGeminiKey(assistant.workspaceId)
-      if (!key) throw new Error('The legacy BYO Gemini key for this suspended turn is unavailable.')
-      continuationProvider = deps.buildWorkspaceProvider(key)
-      providerKeySource = 'user'
-    }
-    const runtimeContext = customLlm
-      ? {
-          ...context,
-          workerRuntime: {
-            provider: customLlm.provider,
-            model: customLlm.selector,
-            modelTier: customLlm.modelTier,
-            providerKeySource: customLlm.providerKeySource,
-            inputTokenLimit: customLlm.inputTokenLimit,
-            maxTokens: customLlm.maxTokens,
-          },
-        }
-      : context
+    if (!assistant.workspaceId
+      || session.userId !== starting.userId
+      || assistant.workspaceId !== starting.workspaceId) throw authorityUnavailable()
 
-    // Phase 3 of askQuestion suspend-resume — rehydrate the worker
-    // manager from `worker_runs` BEFORE the continuation turn runs.
-    // Completed rows arrive as pre-populated notifications so Phase 4b's
-    // drain on the first turn boundary surfaces them to the synthesis;
-    // running rows respawn from their last checkpointed history so they
-    // continue from where they were when the prior instance died.
-    // Workspace-scoped only — matches the suspend gate in chat.ts.
-    if (
-      assistant.workspaceId
-      && deps.workerManager
-      && deps.workerRunsStore
-    ) {
-      deps.workerManager.setPersistence({
-        store: deps.workerRunsStore,
-        sessionId,
+    let current: AccessCeiling
+    let turnScope: ResolvedTurnScope
+    try {
+      const live = await resolveLiveAccessCeilingSystem({
+        userId: session.userId,
+        assistant,
         workspaceId: assistant.workspaceId,
+        session,
       })
+      const resolved = await resolveTurnScopeSystem({
+        userId: session.userId,
+        assistant,
+        workspaceId: assistant.workspaceId,
+        session,
+      })
+      current = intersectAccessCeilings(live, pinAccessCeiling(resolved.access))
+      if (!accessCeilingContains(current, starting)) throw authorityUnavailable()
+      const bounded = intersectAccessCeilings(current, starting)
+      if (!scopeGrantContains(bounded.mutationCompartments, resolved.writeCompartments)
+        || !scopeGrantContains(bounded.projectIds, resolved.writeProjectIds)) throw authorityUnavailable()
+      turnScope = {
+        ...resolved,
+        access: { ...resolved.access, ...bounded },
+        effectiveCompartments: bounded.compartments,
+        effectiveProjectIds: bounded.projectIds,
+      }
+    } catch {
+      throw authorityUnavailable()
+    }
+
+    const bounded = pinAccessCeiling(turnScope.access)
+    const context = buildContext(session, assistant, turnScope)
+    const lease = createAuthorityLease(bounded, async () => {
+      const [freshSession, freshAssistant] = await Promise.all([
+        findSessionById(sessionId),
+        findAssistantById(session.assistantId),
+      ])
+      if (!freshSession || !freshAssistant
+        || freshSession.userId !== starting.userId
+        || freshSession.assistantId !== assistant.id
+        || freshAssistant.workspaceId !== starting.workspaceId) return null
       try {
-        const { respawned, notificationsReady } = await deps.workerManager.rehydrate(
-          sessionId,
-          { ...runtimeContext, workerManager: undefined },
-          deps.tools,
-        )
-        if (respawned > 0 || notificationsReady > 0) {
-          deps.analytics?.logEvent({
-            userId: session.userId,
-            sessionId,
-            eventName: 'session_resume_workers_rehydrated',
-            channelType: 'web',
-            metadata: {
-              respawned,
-              notifications_ready: notificationsReady,
-            },
-          })
-        }
-      } catch (err) {
-        // Don't fail the resume because rehydration failed — the user
-        // still gets a reply (possibly missing worker findings). Log
-        // loudly for diagnosis.
-        console.warn(
-          `[session-resume] worker rehydrate failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
-    }
-
-    // ── 1. Resolve the outcome note (runs the approved tool) ──
-    const scopedTools = bindToolsToAgentAccess(deps.tools, {
-      clearance: turnScope.access.clearance,
-      compartments: turnScope.effectiveCompartments,
-      mutationCompartments: turnScope.access.mutationCompartments,
-      projectIds: turnScope.effectiveProjectIds,
-    })
-    const outcomeNote = await resolveResumeOutcomeNote(scopedTools, params, context)
-
-    // ── 2. Rebuild the conversation, append the outcome note ──
-    const dbMessages = await getSessionMessages(sessionId)
-    const history = ensureToolResultPairing(toStampedMessages(dbMessages, 'UTC') as Message[])
-    const messages: Message[] = [
-      ...history,
-      { role: 'user', content: [{ type: 'text', text: outcomeNote }] },
-    ]
-
-    // Persist the outcome as a system-role note so the session timeline
-    // explains the assistant message the resume is about to produce.
-    await addSessionMessage({
-      sessionId,
-      role: 'system',
-      content: [{ type: 'text', text: outcomeNote }],
-    })
-
-    // ── 3. Drive the continuation turn ──
-    const baseSystemPrompt = assistant.systemPrompt
-      ? `${deps.systemPrompt}\n\n${assistant.systemPrompt}`
-      : deps.systemPrompt
-    const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
-    const systemPrompt = activeWorkspaceContext
-      ? `${baseSystemPrompt}\n\n${activeWorkspaceContext}`
-      : baseSystemPrompt
-
-    for await (const event of queryLoop({
-      ledger: createTurnLedger({
-        workspaceId: runtimeContext.workspaceId ?? null,
-        assistantId: runtimeContext.assistantId,
-        sessionId: runtimeContext.sessionId,
-        payloads: getLedgerPayloadStore(),
-      }).ledger,
-      provider: continuationProvider,
-      model: customLlm?.selector ?? policy.logicalModel,
-      maxTokens: customLlm?.maxTokens,
-      inputTokenLimit: customLlm?.inputTokenLimit,
-      systemPrompt,
-      messages,
-      tools: scopedTools,
-      // Inject the rehydrated workerManager so Phase 4b sees the
-      // pre-populated notifications + any respawned running workers.
-      // Absent when worker persistence isn't wired (legacy path).
-      context: deps.workerManager
-        ? { ...runtimeContext, workerManager: deps.workerManager }
-        : runtimeContext,
-      channelType: session.channelType,
-      resumeContext: {
-        approvalId: params.approvalId,
-        suspendedToolName,
-        loopStepIndex: params.loopStepIndex,
-      },
-      ...(policy.budget ?? {}),
-    })) {
-      if (event.type === 'turn_complete') {
-        await addSessionMessage({
-          sessionId,
-          role: 'assistant',
-          content: event.response.content,
+        return await resolveLiveAccessCeilingSystem({
+          userId: freshSession.userId,
+          assistant: freshAssistant,
+          workspaceId: freshAssistant.workspaceId,
+          session: freshSession,
         })
-        if (deps.usageStore && event.totalUsage) {
-          const usage = event.totalUsage
-          const turnKeySource: 'user' | 'platform' = customLlm?.providerKeySource ?? providerKeySource
-          void deps.usageStore.recordUsage({
-            userId: session.userId,
-            assistantId: assistant.id,
-            workspaceId: assistant.workspaceId ?? undefined,
-            sessionId,
-            model: event.response.model,
-            modelTier: policy.logicalTier,
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            cacheReadTokens: usage.cacheReadTokens,
-            cacheWriteTokens: usage.cacheWriteTokens,
-            // Re-read the custom runtime's DERIVED key source: an endpoint
-            // that failed had this turn served on platform capacity, and the
-            // snapshot above was taken before the turn ran.
-            actualCostUsd: turnKeySource === 'user'
-              ? 0
-              : calculateCost(event.response.model, usage),
-            source: 'included',
-            triggerKey: 'session_resume',
-            providerKeySource: turnKeySource,
-          }).catch((err) => console.error('[session-resume] usage tracking failed:', err))
-        }
-      } else if (event.type === 'error') {
-        // Surface the failure so the poll worker marks the job failed
-        // with a loud log rather than silently dropping the resume.
-        throw event.error
+      } catch {
+        return null
       }
-    }
+    })
 
-    return 'completed'
+    const executeReplay = async (): Promise<'completed' | 'deferred'> => {
+      await assertCurrentAuthority()
+      const policy = resolveDurableResumePolicy(params, model)
+      const customLlm = params.selectedCustomModel && deps.resolveWorkspaceCustomLlm && !params.selectedLegacyByo
+        ? await deps.resolveWorkspaceCustomLlm({
+            workspaceId: assistant.workspaceId!,
+            requestedModel: params.selectedCustomModel,
+            requestedTier: policy.logicalTier,
+          })
+        : null
+      await assertCurrentAuthority()
+      if (params.selectedCustomModel && !customLlm) {
+        throw new Error('The custom model selected for this suspended turn is no longer available.')
+      }
+      let continuationProvider = customLlm?.provider ?? deps.provider
+      let providerKeySource: 'user' | 'platform' = customLlm ? 'user' : 'platform'
+      if (params.selectedLegacyByo) {
+        if (!deps.resolveWorkspaceByoGeminiKey || !deps.buildWorkspaceProvider) {
+          throw new Error('The legacy BYO Gemini runtime for this suspended turn is unavailable.')
+        }
+        const key = await deps.resolveWorkspaceByoGeminiKey(assistant.workspaceId!)
+        await assertCurrentAuthority()
+        if (!key) throw new Error('The legacy BYO Gemini key for this suspended turn is unavailable.')
+        continuationProvider = deps.buildWorkspaceProvider(key)
+        providerKeySource = 'user'
+      }
+      const runtimeContext = customLlm
+        ? {
+            ...context,
+            workerRuntime: {
+              provider: customLlm.provider,
+              model: customLlm.selector,
+              modelTier: customLlm.modelTier,
+              providerKeySource: customLlm.providerKeySource,
+              inputTokenLimit: customLlm.inputTokenLimit,
+              maxTokens: customLlm.maxTokens,
+            },
+          }
+        : context
+
+      // Phase 3 of askQuestion suspend-resume — rehydrate the worker
+      // manager from `worker_runs` before any continuation output.
+      if (deps.workerManager && deps.workerRunsStore) {
+        deps.workerManager.setPersistence({
+          store: deps.workerRunsStore,
+          sessionId,
+          workspaceId: assistant.workspaceId!,
+        })
+        try {
+          const { respawned, notificationsReady } = await executeWithCurrentAuthority(() =>
+            deps.workerManager!.rehydrate(
+              sessionId,
+              { ...runtimeContext, workerManager: undefined },
+              deps.tools,
+            ))
+          if (respawned > 0 || notificationsReady > 0) {
+            deps.analytics?.logEvent({
+              userId: session.userId,
+              sessionId,
+              eventName: 'session_resume_workers_rehydrated',
+              channelType: 'web',
+              metadata: { respawned, notifications_ready: notificationsReady },
+            })
+          }
+        } catch (err) {
+          if (err instanceof AuthorityChangedError) throw err
+          // A non-authority rehydration failure stays non-fatal: the user can
+          // still receive a continuation without the missing worker findings.
+          console.warn(
+            `[session-resume] worker rehydrate failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
+      }
+
+      // ── 1. Resolve the outcome note (runs the approved tool) ──
+      const scopedTools = bindToolsToAgentAccess(deps.tools, {
+        clearance: bounded.clearance,
+        compartments: bounded.compartments,
+        mutationCompartments: bounded.mutationCompartments,
+        projectIds: bounded.projectIds,
+        visibilityAssistantIds: bounded.visibilityAssistantIds,
+      })
+      const outcomeNote = await resolveResumeOutcomeNote(scopedTools, params, context)
+      await assertCurrentAuthority()
+
+      // ── 2. Rebuild the conversation, append the outcome note ──
+      const dbMessages = await getSessionMessages(sessionId)
+      await assertCurrentAuthority()
+      const history = ensureToolResultPairing(toStampedMessages(dbMessages, 'UTC') as Message[])
+      const messages: Message[] = [
+        ...history,
+        { role: 'user', content: [{ type: 'text', text: outcomeNote }] },
+      ]
+
+      await executeWithCurrentAuthority(() => addSessionMessage({
+        sessionId,
+        role: 'system',
+        content: [{ type: 'text', text: outcomeNote }],
+      }))
+
+      // ── 3. Drive the continuation turn ──
+      const baseSystemPrompt = assistant.systemPrompt
+        ? `${deps.systemPrompt}\n\n${assistant.systemPrompt}`
+        : deps.systemPrompt
+      const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
+      const systemPrompt = activeWorkspaceContext
+        ? `${baseSystemPrompt}\n\n${activeWorkspaceContext}`
+        : baseSystemPrompt
+
+      for await (const event of queryLoop({
+        ledger: createTurnLedger({
+          workspaceId: runtimeContext.workspaceId ?? null,
+          assistantId: runtimeContext.assistantId,
+          sessionId: runtimeContext.sessionId,
+          payloads: getLedgerPayloadStore(),
+        }).ledger,
+        provider: continuationProvider,
+        model: customLlm?.selector ?? policy.logicalModel,
+        maxTokens: customLlm?.maxTokens,
+        inputTokenLimit: customLlm?.inputTokenLimit,
+        systemPrompt,
+        messages,
+        tools: scopedTools,
+        context: deps.workerManager
+          ? { ...runtimeContext, workerManager: deps.workerManager }
+          : runtimeContext,
+        channelType: session.channelType,
+        resumeContext: {
+          approvalId: params.approvalId,
+          suspendedToolName,
+          loopStepIndex: params.loopStepIndex,
+        },
+        ...(policy.budget ?? {}),
+      })) {
+        // The replay is not an interactive stream. No generated event may be
+        // accepted or persisted after authority changes.
+        await assertCurrentAuthority()
+        if (event.type === 'turn_complete') {
+          await executeWithCurrentAuthority(() => addSessionMessage({
+            sessionId,
+            role: 'assistant',
+            content: event.response.content,
+          }))
+          if (deps.usageStore && event.totalUsage) {
+            const usage = event.totalUsage
+            const turnKeySource: 'user' | 'platform' = customLlm?.providerKeySource ?? providerKeySource
+            void deps.usageStore.recordUsage({
+              userId: session.userId,
+              assistantId: assistant.id,
+              workspaceId: assistant.workspaceId!,
+              sessionId,
+              model: event.response.model,
+              modelTier: policy.logicalTier,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              cacheReadTokens: usage.cacheReadTokens,
+              cacheWriteTokens: usage.cacheWriteTokens,
+              actualCostUsd: turnKeySource === 'user'
+                ? 0
+                : calculateCost(event.response.model, usage),
+              source: 'included',
+              triggerKey: 'session_resume',
+              providerKeySource: turnKeySource,
+            }).catch((err) => console.error('[session-resume] usage tracking failed:', err))
+          }
+        } else if (event.type === 'error') {
+          throw event.error
+        }
+      }
+
+      await assertCurrentAuthority()
+      return 'completed'
+    }
+    return runWithAgentAccess(bounded, () => runWithAuthorityLease(lease, executeReplay))
   }
 }

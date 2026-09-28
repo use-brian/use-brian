@@ -1,5 +1,5 @@
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
-import { debugDocumentFlow, summarizeProviderError } from '@use-brian/core'
+import { debugDocumentFlow, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
 import { closeProviderError } from './chat-provider-error.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
 import { resolveFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
@@ -1975,6 +1975,8 @@ export type ResumeReplayParams = {
   selectedTier?: string
   selectedLegacyByo?: boolean
   selectedMeteredModel?: string
+  /** Pinned original authoring/security principal for durable replay. */
+  startingAccessCeiling?: import('@use-brian/core').AccessCeiling
   approvalStatus: ResumeReplayApprovalStatus
   rejectReason: string | null
   /**
@@ -2091,6 +2093,7 @@ export async function runSessionResume(
       ...(point.selectedTier ? { selectedTier: point.selectedTier } : {}),
       ...(point.selectedLegacyByo !== undefined ? { selectedLegacyByo: point.selectedLegacyByo } : {}),
       ...(point.selectedMeteredModel ? { selectedMeteredModel: point.selectedMeteredModel } : {}),
+      ...(point.startingAccessCeiling ? { startingAccessCeiling: point.startingAccessCeiling } : {}),
       approvalStatus: approval.status,
       rejectReason: approval.rejectReason,
       answerText: approval.answerText,
@@ -7119,6 +7122,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   selectedTier: logicalTier,
                   selectedLegacyByo: usedLegacyByoKey,
                   selectedMeteredModel: meteredTurn?.alias,
+                  startingAccessCeiling: pinAccessCeiling(turnScope.access),
                   // `mcp_call` is the loop step being executed; replay
                   // re-enters that same step and the dispatcher's fast
                   // path picks up the resolved approval.
@@ -7640,6 +7644,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   selectedTier: logicalTier,
                   selectedLegacyByo: usedLegacyByoKey,
                   selectedMeteredModel: meteredTurn?.alias,
+                  startingAccessCeiling: pinAccessCeiling(turnScope.access),
                   loopStepIndex: event.loopStepIndex,
                 })
               } catch (err) {
