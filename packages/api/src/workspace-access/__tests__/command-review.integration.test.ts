@@ -10,8 +10,9 @@ import {getPool,getAppPool} from '../../db/client.js'
 import {workspaceAccessRoutes} from '../../routes/workspace-access.js'
 import {executeDepartmentAccessCommand,getWorkspaceAccess} from '../service.js'
 import {prepareDepartmentCommand,applyDepartmentCommand,applyDepartmentCommandIntent} from '../command-review.js'
-import type {DepartmentAccessCommand,DepartmentCommandReview} from '@use-brian/shared'
-vi.mock('../readiness.js',()=>({getDepartmentalReadinessSystem:vi.fn(async()=>({ready:true,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:[]}))}))
+import type {DepartmentAccessCommand,DepartmentCommandReview,DepartmentalReadiness} from '@use-brian/shared'
+const mocks=vi.hoisted(()=>({readiness:vi.fn(async():Promise<DepartmentalReadiness>=>({ready:true,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:[]}))}))
+vi.mock('../readiness.js',()=>({getDepartmentalReadinessSystem:mocks.readiness}))
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
@@ -28,6 +29,22 @@ const apply=(review:DepartmentCommandReview)=>({type:'access.command.apply' as c
 function appFor(userId:string){const app=express();app.use(express.json());app.use((req,_res,next)=>{req.userId=userId;next()});app.use('/api',workspaceAccessRoutes());app.use('/api',contextScopeRoutes({workspaceStore:createWorkspaceStore()}));return app}
 describe('[COMP:api/workspace-access] immutable command review and application',()=>{
   afterAll(async()=>{await getAppPool().end();await pool.end()})
+  it('activates strict classification only through an administrator saved command bound to live policy, inventory and readiness',async()=>{
+    const f=await fixture()
+    await pool.query("UPDATE workspace_access_policies SET classification_mode='review',reviewed_inventory_revision=1 WHERE workspace_id=$1",[f.workspaceId])
+    const current=await getWorkspaceAccess(f.workspaceId,f.owner)
+    const command={type:'workspace.classification.set' as const,mode:'strict' as const,expectedPolicyRevision:current.policyRevision,expectedInventoryRevision:'1'}
+    await expect(prepareDepartmentCommand(f.workspaceId,f.member,{command,expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'admin_required'})
+    await expect(prepareDepartmentCommand(f.workspaceId,f.owner,{command:{...command,expectedInventoryRevision:'2'},expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'scope_review_changed'})
+    mocks.readiness.mockResolvedValueOnce({ready:false,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:['operation_separation']}).mockResolvedValueOnce({ready:false,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:['operation_separation']})
+    await expect(prepareDepartmentCommand(f.workspaceId,f.owner,{command,expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'departmental_enforcement_incomplete'})
+    const review=await prepareDepartmentCommand(f.workspaceId,f.owner,{command,expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})
+    expect(review.changes).toContainEqual({field:'classification_mode',before:[{kind:'code',value:'review'}],after:[{kind:'code',value:'strict'}]})
+    expect((await pool.query('SELECT classification_mode FROM workspace_access_policies WHERE workspace_id=$1',[f.workspaceId])).rows[0].classification_mode).toBe('review')
+    const applied=await applyDepartmentCommand(f.workspaceId,f.owner,apply(review))
+    expect(applied.classificationMode).toBe('strict');expect(BigInt(applied.policyRevision)).toBeGreaterThan(BigInt(current.policyRevision))
+    expect((await pool.query("SELECT 1 FROM workspace_access_events WHERE workspace_id=$1 AND kind='workspace.classification.set'",[f.workspaceId])).rows).toHaveLength(1)
+  })
   it('reviews assistant clearance atomically with session/thread denormalization and idempotent replay',async()=>{
     const f=await fixture(),assistantId=randomUUID(),sessionId=randomUUID(),pageId=randomUUID();
     await pool.query("INSERT INTO assistants(id,workspace_id,name,clearance) VALUES($1,$2,'Review assistant','internal')",[assistantId,f.workspaceId]);

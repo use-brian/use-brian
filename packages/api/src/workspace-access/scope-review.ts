@@ -7,7 +7,9 @@ import { z } from 'zod'
 import { getPool } from '../db/client.js'
 import { WorkspaceAccessError } from './policy.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
+import { getDepartmentalReadinessSystem } from './readiness.js'
 import type { ScopeReview, ScopeReviewContent, ScopeReviewImpact, ScopeReviewInventory, ScopeReviewKind, ScopeReviewSource, ScopeReviewSummary } from '@use-brian/shared'
+import { departmentIsolationManifestCoverage } from '@use-brian/shared'
 import {
   getScopeReviewCoverage,
   SCOPE_REVIEW_KINDS,
@@ -59,6 +61,13 @@ async function content(client:PoolClient,workspaceId:string,kind:Kind,id:string)
 }
 async function policy(client:PoolClient,workspaceId:string):Promise<string>{
   return (await client.query<{revision:string}>('SELECT revision::text FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0]?.revision??'1'
+}
+const manifestCoverage=departmentIsolationManifestCoverage()
+async function completeCoverage(client:PoolClient,workspaceId:string){
+  if(!manifestCoverage.complete)return false
+  const coverage=await getScopeReviewCoverage(client,workspaceId)
+  const reviewed=(await client.query<{revision:string|null}>('SELECT reviewed_inventory_revision::text AS revision FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0]?.revision??null
+  return coverage.unresolved==='0'&&reviewed===coverage.registryRevision
 }
 function canonical(value:unknown):string {
   if(Array.isArray(value))return `[${value.map(canonical).join(',')}]`
@@ -145,7 +154,7 @@ async function view(client:PoolClient,workspaceId:string,id:string):Promise<Scop
   const job=(await client.query<Job>(`SELECT ${jobColumns} FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2`,[workspaceId,id])).rows[0]
   if(!job)throw new WorkspaceAccessError('not_found',404)
   const items=(await client.query<Item>(`SELECT ${itemColumns} FROM workspace_scope_review_items WHERE workspace_id=$1 AND review_id=$2 ORDER BY resource_id`,[workspaceId,id])).rows
-  return {...job,items,completeCoverage:false,validForMs:30_000}
+  return {...job,items,completeCoverage:await completeCoverage(client,workspaceId),validForMs:30_000}
 }
 
 /** Content-bearing inventory over every frozen source and impact family. */
@@ -190,12 +199,19 @@ export async function getWorkspaceScopeInventory(workspaceId:string,userId:strin
       ORDER BY created_at DESC,id DESC LIMIT 21`,[workspaceId,reviewAfter??null])).rows
     const recentReviews=reviewRows.slice(0,20)
     const coverage=await getScopeReviewCoverage(client,workspaceId)
-    const reviewed=(await client.query<{revision:string|null}>('SELECT reviewed_inventory_revision::text AS revision FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0]?.revision??null
+    const policyRow=(await client.query<{revision:string;reviewedInventoryRevision:string|null;classificationMode:'legacy'|'review'|'strict'}>(`SELECT revision::text,reviewed_inventory_revision::text AS "reviewedInventoryRevision",classification_mode AS "classificationMode"
+      FROM workspace_access_policies WHERE workspace_id=$1`,[workspaceId])).rows[0]
+    const reviewed=policyRow?.reviewedInventoryRevision??null
+    const coverageComplete=manifestCoverage.complete&&coverage.unresolved==='0'&&reviewed===coverage.registryRevision
+    const readiness=await getDepartmentalReadinessSystem(workspaceId,client.query.bind(client))
     return {resourceKind:parsed.data,total,items:rows.slice(0,100).map(row=>({...row,allowedActions:[...adapter.actions]})),nextCursor:rows.length>100?rows[99].id:null,
-      supportedKinds:[...SCOPE_REVIEW_KINDS],completeCoverage:false,validForMs:30_000,recentReviews,nextReviewCursor:reviewRows.length>20?reviewRows[19].id:null,
+      supportedKinds:[...SCOPE_REVIEW_KINDS],completeCoverage:coverageComplete,validForMs:30_000,recentReviews,nextReviewCursor:reviewRows.length>20?reviewRows[19].id:null,
       selectedReview:reviewId?await view(client,workspaceId,reviewId):null,
+      policyRevision:policyRow?.revision??'1',classificationMode:policyRow?.classificationMode??'legacy',readiness,canActivateStrict:coverageComplete&&readiness.ready&&policyRow?.classificationMode!=='strict',
       registryRevision:String(SCOPE_REVIEW_REGISTRY_REVISION),reviewedInventoryRevision:reviewed,coverage,
-      uncovered:['readiness_v2_acceptance']}
+      uncovered:[...manifestCoverage.missingCases,...manifestCoverage.missingCapabilities,
+        ...(coverage.unresolved==='0'?[]:coverage.families.filter(family=>family.unresolved!=='0').map(family=>family.family)),
+        ...(reviewed===coverage.registryRevision?[]:['reviewed_inventory_revision'])]}
   })
 }
 export async function getWorkspaceScopeReview(workspaceId:string,userId:string,id:string){

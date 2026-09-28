@@ -154,7 +154,7 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     expect(preview.status).toBe('preview')
     expect((await inventory(f.workspaceId,f.owner)).total).toBe('1')
     const applied=await f.apply(preview)
-    expect(applied).toMatchObject({status:'complete',version:'2',completeCoverage:false})
+    expect(applied).toMatchObject({status:'complete',version:'2',completeCoverage:true})
     expect(applied.items[0]).toMatchObject({status:'applied',resultVersion:record.scopeVersion})
     expect((await inventory(f.workspaceId,f.owner)).total).toBe('0')
     expect((await pool.query('SELECT user_id,assistant_id,sensitivity,compartments,summary FROM memories WHERE id=$1',[record.id])).rows[0]).toEqual({user_id:f.owner,assistant_id:f.assistantId,sensitivity:'confidential',compartments:[],summary:'Private fixture content'})

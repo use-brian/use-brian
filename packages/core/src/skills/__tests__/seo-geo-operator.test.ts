@@ -289,6 +289,12 @@ function context(): ToolContext & { activeProjectId: string } {
     channelId: 'web',
     workspaceId: WORKSPACE_ID,
     activeProjectId: PROJECT_ID,
+    assistantKind: 'primary',
+    clearance: 'confidential',
+    compartments: null,
+    mutationCompartments: null,
+    projectIds: [PROJECT_ID],
+    visibilityAssistantIds: null,
     abortSignal: new AbortController().signal,
   }
 }

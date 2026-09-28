@@ -38,7 +38,7 @@ async function changes(client:PoolClient,workspaceId:string,auditEventId:string|
     UNION ALL SELECT id::text,name FROM workspace_projects WHERE workspace_id=$1`,[workspaceId])).rows
   const labels=new Map(names.map(row=>[row.id,row.name]))
   const plain=['name','description','color','reason','starts_at','expires_at']
-  const codes=['status','directory_visibility','requestable','read_all','clearance','team_scope_mode','project_scope_mode','member','capabilities','revoked_at']
+  const codes=['status','classification_mode','reviewed_inventory_revision','directory_visibility','requestable','read_all','clearance','team_scope_mode','project_scope_mode','member','capabilities','revoked_at']
   const references=['bundle','assistant_ids','team_ids','project_ids','default_workspace_group_id','default_project_id','reviewer_id']
   const before=audit.before??{},after=audit.after??{}
   return [...plain,...codes,...references].filter(field=>canonical(before[field]??null)!==canonical(after[field]??null)).map(field=>{

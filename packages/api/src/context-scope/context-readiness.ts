@@ -12,14 +12,29 @@
 
 import { query } from '../db/client.js'
 import { getScopeReviewCoverage, SCOPE_REVIEW_REGISTRY_REVISION } from '../workspace-access/scope-review-registry.js'
+import {
+  DEPARTMENT_ISOLATION_REQUIRED_CAPABILITIES,
+  departmentIsolationManifestCoverage,
+} from '@use-brian/shared'
 
-export const CONTEXT_SCOPE_ENFORCEMENT_VERSION = 1
+export const CONTEXT_SCOPE_ENFORCEMENT_VERSION = 2
+
+const COMPILED_MANIFEST_COVERAGE = departmentIsolationManifestCoverage()
+const manifestCapability = (id: string) => COMPILED_MANIFEST_COVERAGE.complete
+  && DEPARTMENT_ISOLATION_REQUIRED_CAPABILITIES.includes(id as typeof DEPARTMENT_ISOLATION_REQUIRED_CAPABILITIES[number])
 
 export const CONTEXT_SCOPE_CODE_CAPABILITIES = Object.freeze({
-  turn_entry_points: true,
-  write_inheritance: true,
-  connectors: true,
-  background_lanes: true,
+  turn_entry_points: manifestCapability('turn_entry_points'),
+  write_inheritance: manifestCapability('write_inheritance'),
+  connectors: manifestCapability('connectors'),
+  background_lanes: manifestCapability('background_lanes'),
+  derived_writes: manifestCapability('derived_writes'),
+  delegation: manifestCapability('delegation'),
+  operation_separation: manifestCapability('operation_separation'),
+  replay_delivery: manifestCapability('replay_delivery'),
+  grant_expiry: manifestCapability('grant_expiry'),
+  org_references: manifestCapability('org_references'),
+  scope_review: manifestCapability('scope_review'),
 } as const)
 
 export type ContextReadinessCheckId =
@@ -118,6 +133,15 @@ const REQUIRED_TRIGGERS = {
   ],
 } as const
 
+const REQUIRED_FUNCTIONS = {
+  derived_writes: ['advance_canonical_scope_version','hold_scope_descendants'],
+  delegation: ['agent_read_scope_allows','agent_mutation_scope_allows'],
+  operation_separation: ['member_operation_scope_allows'],
+  grant_expiry: ['effective_member_read_compartments'],
+  org_references: ['validate_workspace_organization'],
+  scope_review: ['read_scope_review_source','scope_review_registry_revision'],
+} as const
+
 const LEGACY_GENERAL_TABLES = [
   'memories',
   'tasks',
@@ -150,6 +174,7 @@ function check(
 async function schemaEvidence(queryFn: ReadinessQuery): Promise<{
   missingColumns: string[]
   triggerNames: Set<string>
+  functionNames: Set<string>
 }> {
   const columns = await queryFn<{ tableName: string; columnName: string }>(
     `SELECT table_name AS "tableName", column_name AS "columnName"
@@ -168,9 +193,16 @@ async function schemaEvidence(queryFn: ReadinessQuery): Promise<{
        FROM pg_trigger
       WHERE NOT tgisinternal`,
   )
+  const functions = await queryFn<{ name: string }>(
+    `SELECT proname AS name
+       FROM pg_proc
+       JOIN pg_namespace ON pg_namespace.oid=pg_proc.pronamespace
+      WHERE pg_namespace.nspname='public'`,
+  )
   return {
     missingColumns,
     triggerNames: new Set(triggers.rows.map((row) => row.name)),
+    functionNames: new Set(functions.rows.map((row) => row.name)),
   }
 }
 
@@ -204,7 +236,7 @@ export async function getContextReadinessSystem(
   workspaceId: string,
   queryFn: ReadinessQuery = query,
 ): Promise<ContextReadiness> {
-  const [{ missingColumns, triggerNames }, legacyGeneral] = await Promise.all([
+  const [{ missingColumns, triggerNames, functionNames }, legacyGeneral] = await Promise.all([
     schemaEvidence(queryFn),
     legacyInventory(workspaceId, queryFn),
   ])
@@ -221,6 +253,7 @@ export async function getContextReadinessSystem(
     triggerNames,
     REQUIRED_TRIGGERS.write_inheritance,
   )
+  const functionMissing=(id:keyof typeof REQUIRED_FUNCTIONS)=>missingTriggers(functionNames,REQUIRED_FUNCTIONS[id])
   const coverage=missingColumns.length===0
     ? await getScopeReviewCoverage({query:queryFn},workspaceId)
     : {registryRevision:String(SCOPE_REVIEW_REGISTRY_REVISION),unresolved:'1',families:[]}
@@ -289,17 +322,54 @@ export async function getContextReadinessSystem(
       inheritanceMissing,
     ),
     check(
+      'derived_writes',
+      CONTEXT_SCOPE_CODE_CAPABILITIES.derived_writes&&functionMissing('derived_writes').length===0,
+      'Canonical derived writers retain complete source evidence and current source versions.',
+      functionMissing('derived_writes'),
+    ),
+    check(
+      'delegation',
+      CONTEXT_SCOPE_CODE_CAPABILITIES.delegation&&functionMissing('delegation').length===0,
+      'Delegated execution intersects the authenticated caller, callee and current authority.',
+      functionMissing('delegation'),
+    ),
+    check(
+      'operation_separation',
+      CONTEXT_SCOPE_CODE_CAPABILITIES.operation_separation&&functionMissing('operation_separation').length===0,
+      'Read grants and ordinary mutation authority remain independent.',
+      functionMissing('operation_separation'),
+    ),
+    check(
+      'replay_delivery',
+      CONTEXT_SCOPE_CODE_CAPABILITIES.replay_delivery,
+      'Replay, compaction, generation and recipient delivery renew current authority.',
+    ),
+    check(
+      'grant_expiry',
+      CONTEXT_SCOPE_CODE_CAPABILITIES.grant_expiry&&functionMissing('grant_expiry').length===0,
+      'Grant expiry and revocation are resolved from current server time and invalidate live leases.',
+      functionMissing('grant_expiry'),
+    ),
+    check(
+      'org_references',
+      CONTEXT_SCOPE_CODE_CAPABILITIES.org_references&&functionMissing('org_references').length===0,
+      'Organization references, cycles and optimistic revisions are guarded in the database.',
+      functionMissing('org_references'),
+    ),
+    check(
       'legacy_data',
       true,
       'Workspace General rows are informational and remain reviewable.',
     ),
     check(
       'scope_review',
-      coverage.unresolved==='0'&&reviewedInventoryRevision===coverage.registryRevision,
-      coverage.unresolved==='0'&&reviewedInventoryRevision===coverage.registryRevision
+      CONTEXT_SCOPE_CODE_CAPABILITIES.scope_review&&functionMissing('scope_review').length===0
+        &&coverage.unresolved==='0'&&reviewedInventoryRevision===coverage.registryRevision,
+      CONTEXT_SCOPE_CODE_CAPABILITIES.scope_review&&functionMissing('scope_review').length===0
+        &&coverage.unresolved==='0'&&reviewedInventoryRevision===coverage.registryRevision
         ? 'Every frozen source, impact, binding, and active-job family has been reviewed or held.'
         : 'The complete scope inventory still has unresolved or unacknowledged rows.',
-      coverage.families.filter(family=>family.unresolved!=='0').map(family=>family.family),
+      [...functionMissing('scope_review'),...coverage.families.filter(family=>family.unresolved!=='0').map(family=>family.family)],
     ),
   ]
 

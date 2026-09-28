@@ -20,13 +20,33 @@ async function fixture() {
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode) VALUES($1,$2,'owner','confidential','assigned'),($1,$3,'member','internal','assigned')",[workspaceId,owner,member])
   await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind,clearance,compartments) VALUES($1,'Fixture primary',$2,$3,'primary','confidential',NULL)",[assistantId,workspaceId,owner])
   const groups=createDbWorkspaceGroupStore(),team=await groups.createTeam(owner,workspaceId,{name:'Fixture department',key:'fixture-department'})
+  if(!team.compartmentKey)throw new Error('Fixture team has no compartment key')
+  const teamKey=team.compartmentKey
   await groups.addMember(owner,team.id,member)
   const deal=await createDeal(owner,{workspaceId})
   await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1',[deal.id,[team.compartmentKey]])
   const eventId=randomUUID()
   await pool.query(`INSERT INTO crm_domain_event_outbox(id,workspace_id,event_type,event_key,subject_kind,subject_id,payload,actor_kind)
     VALUES($1::uuid,$2,'crm.deal.stage_changed',$1::text,'deal',$3,'{}','user')`,[eventId,workspaceId,deal.id])
-  const workflow=await createDbWorkflowStore().create({userId:member,workspaceId,name:'Event audience fixture',definition:{startStepId:'consult',steps:[{id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Fixture question'}]}})
+  const workflow=await createDbWorkflowStore().create({
+    userId:member,
+    workspaceId,
+    name:'Event audience fixture',
+    definition:{startStepId:'consult',steps:[{id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Fixture question'}]},
+    authoringAuthority:{
+      version:1,
+      assistantId,
+      ceiling:{
+        workspaceId,
+        userId:member,
+        clearance:'internal',
+        compartments:[teamKey],
+        mutationCompartments:[teamKey],
+        projectIds:null,
+        visibilityAssistantIds:null,
+      },
+    },
+  })
   const input={trigger:{sourceType:'crm'},event:{domainEventId:eventId,subjectId:deal.id}}
   const create=(actor=member)=>runs.createRun({workflowId:workflow.id,workspaceId,triggeredBy:actor,triggerKind:'event',input})
   const revoke=()=>pool.query('DELETE FROM workspace_group_members WHERE group_id=$1 AND user_id=$2',[team.id,member])

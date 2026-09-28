@@ -253,6 +253,37 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
     assert.equal((await db.query<{ttl:number}>('SELECT department_media_valid_for_ms($1) AS ttl',[WORKSPACE_ID])).rows[0].ttl,0)
   })
 
+  it('fresh, 591 and predecessor migration lifecycles preserve data and enforce completion guards',async()=>{
+    const directory=fileURLToPath(new URL('../../../../packages/api/migrations',import.meta.url))
+    assert.equal((await db.query<{name:string}>("SELECT name FROM public._migrations WHERE name='603_complete_scope_inventory.sql'")).rows[0].name,'603_complete_scope_inventory.sql')
+    assert.equal((await db.query<{revision:number}>('SELECT scope_review_registry_revision()::int AS revision')).rows[0].revision,1)
+    for(const [through,last] of [['591_organization_command_reviews.sql','1'],['602_procedural_skill_scope.sql','2']] as const){
+      const previous=new PGlite({extensions:{vector,pg_trgm}})
+      try{
+        await previous.waitReady
+        await migratePglite(previous,directory,{through})
+        const workspace='71000000-0000-4000-8000-00000000000'+last
+        const owner='72000000-0000-4000-8000-00000000000'+last
+        const assistant='73000000-0000-4000-8000-00000000000'+last
+        const session='74000000-0000-4000-8000-00000000000'+last
+        await previous.query('INSERT INTO users(id,auth_provider_id,name) VALUES($1,$2,$3)',[owner,'completion-'+last,'Existing owner'])
+        await previous.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Completion upgrade',$2)",[workspace,owner])
+        await previous.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[workspace,owner])
+        await previous.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind) VALUES($1,'Existing assistant',$2,$3,'standard')",[assistant,workspace,owner])
+        await previous.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,status,workspace_id) VALUES($1,$2,$3,'web',$4,'idle',$5)",[session,assistant,owner,'completion-'+last,workspace])
+        await previous.query("INSERT INTO workspace_access_policies(workspace_id,classification_mode,reviewed_inventory_revision) VALUES($1,'review',1) ON CONFLICT(workspace_id) DO UPDATE SET classification_mode='review',reviewed_inventory_revision=1",[workspace])
+        assert.ok(await migratePglite(previous,directory)>0)
+        assert.equal(await migratePglite(previous,directory),0)
+        assert.deepEqual((await previous.query('SELECT name FROM workspaces WHERE id=$1',[workspace])).rows,[{name:'Completion upgrade'}])
+        assert.deepEqual((await previous.query('SELECT context_binding_origin FROM assistants WHERE id=$1',[assistant])).rows,[{context_binding_origin:'legacy'}])
+        assert.deepEqual((await previous.query('SELECT context_binding_origin FROM sessions WHERE id=$1',[session])).rows,[{context_binding_origin:'legacy'}])
+        assert.equal((await previous.query<{name:string}>("SELECT name FROM public._migrations WHERE name='603_complete_scope_inventory.sql'")).rows[0].name,'603_complete_scope_inventory.sql')
+        await assert.rejects(previous.query("UPDATE assistants SET context_binding_origin='invented' WHERE id=$1",[assistant]))
+        assert.deepEqual((await previous.query('SELECT context_binding_origin FROM assistants WHERE id=$1',[assistant])).rows,[{context_binding_origin:'legacy'}])
+      }finally{await previous.close()}
+    }
+  })
+
   for (const [principal, scope] of Object.entries(SCOPES)) {
     it(`${principal} receives the exact same row set through every discovery shape`, async () => {
       const expected = [...EXPECTED[principal]].sort()

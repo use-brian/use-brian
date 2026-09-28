@@ -2,7 +2,7 @@
 
 /** Explicit legacy classification with persisted previews. [COMP:app-web/scope-review] */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ScopeReview, ScopeReviewAction, ScopeReviewCommand, ScopeReviewKind } from '@use-brian/shared';
+import type { ScopeReview, ScopeReviewAction, ScopeReviewCommand, ScopeReviewInventory, ScopeReviewKind } from '@use-brian/shared';
 import { useWorkspaceContext } from '@/lib/workspace-context';
 import { useT } from '@/lib/i18n/client';
 import { useCachedResource, invalidateSurfaceCache } from '@/lib/surface-cache';
@@ -15,6 +15,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { confirmDialog } from '@/components/ui/confirm-dialog';
 import { SurfaceSkeletonFor } from '@/components/chrome/surface-skeleton';
+import { DepartmentChangeFeedback, useDepartmentChange } from './use-department-change';
 
 const fieldClass='min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
 const knownImpact=(job:ScopeReview)=>[...new Map(job.items.flatMap(item=>item.impact?.descendants??[]).map(row=>[`${'resourceKind' in row?row.resourceKind:'memory'}:${row.resourceId}`,row])).values()];
@@ -32,6 +33,7 @@ function ScopeReviewWorkspace({teams,close}:{teams:Array<{id:string;name:string}
   const key=scopeReviewCacheKey(workspaceId,me.id,kind,after,reviewId,reviewAfter);
   const resource=useCachedResource(key,()=>fetchScopeReview(workspaceId,kind,after||undefined,reviewId||undefined,reviewAfter||undefined));
   const data=useProtectedProjection(key,resource.data,()=>{cancelConfirmation();setSelected([]);},resource.refresh);
+  const activation=useDepartmentChange(workspaceId,async()=>{invalidateSurfaceCache(`scope-review:${workspaceId}:`);await resource.refresh();},`${me.id}:strict-activation`);
   useEffect(()=>{
     const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;if(event.type===WORKSPACE_IDENTITY_REFRESH_EVENT)operation.current?.controller.abort();else cancelConfirmation();setSelected([]);invalidateSurfaceCache(`scope-review:${workspaceId}:`);};
     const visible=()=>{if(document.visibilityState==='visible')cancelConfirmation();};
@@ -69,15 +71,26 @@ function ScopeReviewWorkspace({teams,close}:{teams:Array<{id:string;name:string}
   };
   const sensitivityLabel=(value:string|null)=>value==='public'?t.public:value==='internal'?t.internal:value==='confidential'?t.confidential:t.unknown;
   const picker=(label:string,value:string,onChange:(v:string)=>void,items:Array<{value:string;label:string}>)=><label className="grid min-w-0 gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} placeholder={label} value={value} onValueChange={onChange} items={items} disabled={busy} className="min-h-11 min-w-0 max-w-full" searchPlaceholder={a.search} emptyMessage={a.noResults}/></label>;
-  const header=<header className="space-y-3"><Button variant="outline" className="min-h-11" onClick={close}>{t.back}</Button><Button variant="ghost" className="min-h-11" disabled={busy} onClick={()=>{setSelected([]);setError('');invalidateSurfaceCache(key);}}>{a.reload}</Button><h1 className="text-xl font-semibold">{t.title}</h1><p className="text-sm">{t.generalHint}</p><p role="status" className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.coverage}</p></header>;
-  if(!data)return <section className="space-y-4 p-4">{header}{resource.error?<><p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{a.reload}</Button></>:<SurfaceSkeletonFor surface="organization"/>}</section>;
+  const header=(mode?:ScopeReviewInventory['classificationMode'])=><header className="space-y-3"><Button variant="outline" className="min-h-11" onClick={close}>{t.back}</Button><Button variant="ghost" className="min-h-11" disabled={busy} onClick={()=>{setSelected([]);setError('');invalidateSurfaceCache(key);}}>{a.reload}</Button><h1 className="text-xl font-semibold">{t.title}</h1><p className="text-sm">{t.generalHint}</p><p role="status" className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{mode==='strict'?t.activationActive:t.coverage}</p></header>;
+  if(!data)return <section className="space-y-4 p-4">{header()}{resource.error?<><p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{a.reload}</Button></>:<SurfaceSkeletonFor surface="organization"/>}</section>;
   const job=data.selectedReview,canApply=job&&(job.status==='preview'||job.status==='running');
   const impact=job?knownImpact(job):[],impactMissing=job?.items.some(item=>!item.impact);
   const selectedRows=data.items.filter(row=>selected.includes(row.id));
   const unsupportedAction=selectedRows.some(row=>!row.allowedActions.includes(action));
   const reviewOptions=job&&!data.recentReviews.some(review=>review.id===job.id)?[job,...data.recentReviews]:data.recentReviews;
-  return <section className="min-w-0 space-y-5 p-4 md:p-6">{header}
+  return <section className="min-w-0 space-y-5 p-4 md:p-6">{header(data.classificationMode)}
     {error||resource.error?<p role="alert" className="text-sm text-destructive">{error||t.loadError}</p>:null}
+    <article className="space-y-3 rounded-xl border border-border p-4">
+      <h2 className="font-semibold">{t.activationTitle}</h2>
+      <p className="text-sm">{t.classificationMode}: {t[data.classificationMode]}</p>
+      {data.classificationMode==='strict'?<p role="status" className="text-sm">{t.activationActive}</p>:<>
+        <p className="text-sm">{data.canActivateStrict?t.activationReady:t.activationBlocked}</p>
+        {!data.completeCoverage?<p className="break-words text-sm">{t.coverageBlockers}: {data.uncovered.join(', ')||t.unknown}</p>:null}
+        {!data.readiness.ready?<p className="break-words text-sm">{t.readinessBlockers}: {data.readiness.missingCapabilities.join(', ')||t.unknown}</p>:null}
+        <Button className="min-h-11" disabled={busy||activation.busy||!data.canActivateStrict} onClick={()=>void activation.save({type:'workspace.classification.set',mode:'strict',expectedPolicyRevision:data.policyRevision,expectedInventoryRevision:data.registryRevision},`${t.activationConfirm} ${t.inventoryRevision}: ${data.registryRevision}.`,data.policyRevision)}>{t.activateStrict}</Button>
+        <DepartmentChangeFeedback change={activation}/>
+      </>}
+    </article>
     <div className="grid min-w-0 grid-cols-1 gap-3 md:grid-cols-2">{picker(t.kind,kind,v=>{setKind(v as ScopeReviewKind);setAfter('');setSelected([]);},data.supportedKinds.map(k=>({value:k,label:t[k]})))}{picker(t.recent,reviewId,id=>{setReviewId(id);setSelected([]);},[{value:'',label:t.newReview},...reviewOptions.map(r=>({value:r.id,label:`${t[r.resourceKind]} · ${t[r.action]} · ${t[r.status]} · ${r.id}`}))])}</div>
     <div className="flex flex-wrap gap-2"><Button variant="outline" className="min-h-11" disabled={busy||!reviewAfter} onClick={()=>{setReviewAfter('');setSelected([]);}}>{t.latestReviews}</Button><Button variant="outline" className="min-h-11" disabled={busy||!data.nextReviewCursor} onClick={()=>{setReviewAfter(data.nextReviewCursor??'');setSelected([]);}}>{t.olderReviews}</Button></div>
     {job?<article className="space-y-3 rounded-xl border border-border p-4">

@@ -37,12 +37,13 @@ describe('[COMP:api/departmental-readiness] release boundary', () => {
     evidence.readyForActivation=false
     expect(departmentalReadiness(evidence)).toMatchObject({ready:false,missingCapabilities:expect.arrayContaining(['legacy_data','context_activation'])})
   })
-  it('reports the real current release as unavailable without accepting caller readiness', async () => {
+  it('uses the real v2 resolver and refuses an incomplete live schema', async () => {
     let queries=0
-    const emptySchema:ReadinessQuery=async()=>{queries++;return{rows:[]}}
+    const emptySchema:ReadinessQuery=async<T extends Record<string,unknown>>(sql:string)=>{queries++;return{rows:(sql.includes('count(*)')?[{count:'0'}]:[]) as unknown as T[]}}
     const result=await getDepartmentalReadinessSystem('workspace-fixture',emptySchema)
     expect(result.ready).toBe(false)
-    expect(result.missingCapabilities).toEqual(expect.arrayContaining(['enforcement_version','derived_writes','grant_expiry','org_references','scope_review']))
-    expect(queries).toBe(0)
+    expect(result.enforcementVersion).toBe(2)
+    expect(result.missingCapabilities).toEqual(expect.arrayContaining(['row_store_coverage','operation_separation','scope_review','context_activation']))
+    expect(queries).toBeGreaterThan(0)
   })
 })

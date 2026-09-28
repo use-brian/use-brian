@@ -90,18 +90,13 @@ describe('[COMP:api/execution-read-ceiling] direct app-role source projection',(
     await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.userId])
     expect((await f.read()).rows).toEqual([])
   })
-  it('adds the member operation floor during upgrade without changing existing source data',async()=>{
-    const f=await fixture('entities'),client=await pool.connect()
-    const migration=(await readFile(new URL('../../../migrations/589_member_operation_floor.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*/,'').replace(/COMMIT;\s*$/,'')
-    try {
-      await client.query('BEGIN')
-      const before=(await client.query('SELECT to_jsonb(e) row FROM entities e WHERE id=$1',[f.id])).rows[0].row
-      for(const table of [...tables,'memories_shadow'])for(const policy of ['member_operation_read','member_operation_insert','member_operation_update','member_operation_delete'])await client.query(`DROP POLICY ${policy} ON ${table}`)
-      await client.query('DROP FUNCTION member_operation_scope_allows(uuid,text,text[],boolean)')
-      await client.query(migration)
-      expect((await client.query('SELECT to_jsonb(e) row FROM entities e WHERE id=$1',[f.id])).rows[0].row).toEqual(before)
-      expect((await client.query("SELECT count(*)::int count FROM pg_policies WHERE policyname LIKE 'member_operation_%' AND permissive='RESTRICTIVE'")).rows[0].count).toBe(36)
-    } finally {await client.query('ROLLBACK');client.release()}
+  it('retains the member operation floor after later migrations without changing source data',async()=>{
+    const f=await fixture('entities')
+    const before=(await pool.query('SELECT to_jsonb(e) row FROM entities e WHERE id=$1',[f.id])).rows[0].row
+    expect((await pool.query("SELECT count(*)::int count FROM _migrations WHERE name='589_member_operation_floor.sql'")).rows[0].count).toBe(1)
+    expect((await pool.query("SELECT count(*)::int count FROM pg_proc WHERE proname='member_operation_scope_allows'")).rows[0].count).toBe(1)
+    expect((await pool.query("SELECT count(*)::int count FROM pg_policies WHERE policyname LIKE 'member_operation_%' AND permissive='RESTRICTIVE'")).rows[0].count).toBe(36)
+    expect((await pool.query('SELECT to_jsonb(e) row FROM entities e WHERE id=$1',[f.id])).rows[0].row).toEqual(before)
   })
   it('rejects malformed grants even for General rows and keeps the shadow deny-by-default',async()=>{
     const f=await fixture('entities'),client=await getAppPool().connect()

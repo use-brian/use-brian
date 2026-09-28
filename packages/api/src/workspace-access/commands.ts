@@ -5,6 +5,7 @@ const uuid = z.string().uuid()
 const version = z.string().regex(/^[1-9][0-9]*$/)
 export const departmentAccessRequestSchema = z.object({type:z.literal('access.request.create'),targetTeamId:uuid,beneficiaryKind:z.enum(['member','team']),beneficiaryId:uuid,reason:z.string().trim().min(1).max(1000),days:z.number().int().min(1).max(90),ongoing:z.boolean(),startsAt:z.string().datetime().optional()}).strict()
 export const departmentAccessCommandSchema:z.ZodType<DepartmentAccessCommand> = z.discriminatedUnion('type',[
+  z.object({type:z.literal('workspace.classification.set'),mode:z.literal('strict'),expectedPolicyRevision:version,expectedInventoryRevision:version}).strict(),
   z.object({type:z.literal('assistant.clearance.set'),assistantId:uuid,clearance:z.enum(['public','internal','confidential'])}).strict(),
   z.object({type:z.literal('member.access.set'),userId:uuid,clearance:z.enum(['public','internal','confidential']),teamScopeMode:z.enum(['legacy','assigned']),expectedPolicyRevision:version}).strict(),
   z.object({type:z.literal('assistant.audience.set'),assistantId:uuid,teamMode:z.enum(['all','assigned']),teamIds:z.array(uuid).max(100),defaultGroupId:uuid.nullable(),projectMode:z.enum(['all','assigned']),projectIds:z.array(uuid).max(100),defaultProjectId:uuid.nullable()}).strict(),

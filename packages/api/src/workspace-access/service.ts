@@ -103,7 +103,7 @@ async function overview(client:PoolClient,p:Principal,history?:WorkspaceAccessHi
 
 export async function getWorkspaceAccess(workspaceId:string,userId:string):Promise<WorkspaceAccessOverview>{
   const client=await getPool().connect()
-  try{await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');const p=await principal(client,workspaceId,userId);const result=await overview(client,p);await client.query('COMMIT');return result}
+  try{await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');const p=await principal(client,workspaceId,userId);const result=await overview(client,p);await client.query('COMMIT');return result}
   catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
 }
 
@@ -111,7 +111,7 @@ export async function getWorkspaceAccess(workspaceId:string,userId:string):Promi
 export async function getWorkspaceAccessRequest(workspaceId:string,userId:string,requestId:string):Promise<{policyRevision:string;request:DepartmentAccessRequest}>{
   const client=await getPool().connect();
   try{
-    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
     const p=await principal(client,workspaceId,userId);
     const view=await overview(client,p,{kind:'requests',requestId});
     if(!view.requests[0])throw new WorkspaceAccessError('not_found',404);
@@ -123,7 +123,7 @@ export async function getWorkspaceAccessHistory(workspaceId:string,userId:string
   if(!workspaceAccessHistoryQuerySchema.safeParse(query).success)throw new WorkspaceAccessError('invalid_command',400);
   const client=await getPool().connect();
   try{
-    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
     const p=await principal(client,workspaceId,userId);
     if(query.expectedPolicyRevision&&query.expectedPolicyRevision!==p.revision)throw new WorkspaceAccessError('access_history_changed',409);
     const view=await overview(client,p,{kind,...query});
@@ -161,6 +161,7 @@ async function attachApproval(client:PoolClient,p:Principal,r:RequestRow,all:Tea
 
 /** Canonical before/after audit, never a model-written account of the change. */
 async function auditState(client:PoolClient,workspaceId:string,command:DepartmentAccessCommand,createdId?:string):Promise<unknown> {
+  if(command.type==='workspace.classification.set')return (await client.query('SELECT workspace_id,classification_mode,revision::text,reviewed_inventory_revision::text FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0]??null
   if(command.type==='assistant.clearance.set')return (await client.query('SELECT id,clearance FROM assistants WHERE workspace_id=$1 AND id=$2',[workspaceId,command.assistantId])).rows[0]??null
   if(command.type==='member.access.set')return (await client.query('SELECT user_id,role,clearance,team_scope_mode FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,command.userId])).rows[0]??null
   if(command.type==='assistant.audience.set')return (await client.query(`SELECT a.id,a.team_scope_mode,a.default_workspace_group_id,a.project_scope_mode,a.default_project_id,
@@ -193,7 +194,19 @@ export async function executeDepartmentAccessInTransaction(client:PoolClient,wor
     const p=await principal(client,workspaceId,userId,true),all=await teams(client,p)
     const before=await auditState(client,workspaceId,command)
     let subjectId:string
-    if(command.type==='assistant.clearance.set') {
+    if(command.type==='workspace.classification.set') {
+      admin(p)
+      if(command.expectedPolicyRevision!==p.revision)throw new WorkspaceAccessError('access_policy_conflict',409)
+      const policy=(await client.query<{classificationMode:string;inventoryRevision:string|null}>(`SELECT classification_mode AS "classificationMode",reviewed_inventory_revision::text AS "inventoryRevision"
+        FROM workspace_access_policies WHERE workspace_id=$1 FOR UPDATE`,[workspaceId])).rows[0]
+      if(policy?.classificationMode==='strict')throw new WorkspaceAccessError('classification_already_strict',409)
+      if(policy?.inventoryRevision!==command.expectedInventoryRevision)throw new WorkspaceAccessError('scope_review_changed',409)
+      await requireDelegationReady(client,p)
+      const updated=await client.query(`UPDATE workspace_access_policies SET classification_mode='strict',revision=revision+1,updated_at=now()
+        WHERE workspace_id=$1 AND revision=$2::bigint AND reviewed_inventory_revision=$3::bigint RETURNING workspace_id`,[workspaceId,command.expectedPolicyRevision,command.expectedInventoryRevision])
+      if(!updated.rows.length)throw new WorkspaceAccessError('access_policy_conflict',409)
+      subjectId=workspaceId
+    }else if(command.type==='assistant.clearance.set') {
       const target=(await client.query('SELECT id FROM assistants WHERE workspace_id=$1 AND id=$2 FOR UPDATE',[workspaceId,command.assistantId])).rows[0]
       if(!target)throw new WorkspaceAccessError('not_found',404)
       if(!isAccessAdmin(p.role)){

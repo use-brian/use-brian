@@ -24,7 +24,18 @@ import type { AddressInfo } from 'node:net'
 import http from 'node:http'
 
 vi.mock('../../db/client.js', () => ({
-  query: vi.fn(async () => ({ rows: [{ workspaceId: 'ws-1' }], rowCount: 1 })),
+  query: vi.fn(async () => ({ rows: [{
+    id: 'a-1',
+    workspaceId: 'ws-1',
+    kind: 'primary',
+    clearance: 'confidential',
+    compartments: null,
+    defaultCompartments: [],
+    teamScopeMode: 'all',
+    defaultWorkspaceGroupId: null,
+    projectScopeMode: 'all',
+    defaultProjectId: null,
+  }], rowCount: 1 })),
 }))
 
 vi.mock('../../db/workspace-store.js', () => ({
@@ -33,6 +44,9 @@ vi.mock('../../db/workspace-store.js', () => ({
     role: 'member', clearance: 'confidential', compartments: null, projectIds: null,
   })),
   getWorkspaceRoleSystem: vi.fn(async () => 'member'),
+  resolveOperationCeilingsSystem: vi.fn(async () => ({
+    clearance: 'confidential', compartments: null, mutationCompartments: null,
+  })),
 }))
 
 vi.mock('../route-helpers.js', () => ({

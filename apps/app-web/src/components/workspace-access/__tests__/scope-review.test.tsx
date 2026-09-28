@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act } from 'react';
+import {renderToStaticMarkup} from 'react-dom/server';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ScopeReviewInventory, ScopeReview } from '@use-brian/shared';
@@ -13,11 +14,11 @@ import { invalidateSurfaceCache, SurfaceCacheEvictionError } from '@/lib/surface
 import { WORKSPACE_IDENTITY_REFRESH_EVENT } from '@/lib/workspace-identity-events';
 
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
-const mocks=vi.hoisted(()=>({fetch:vi.fn(),save:vi.fn(),confirm:vi.fn(),close:vi.fn()}));
+const mocks=vi.hoisted(()=>({fetch:vi.fn(),save:vi.fn(),prepareAccess:vi.fn(),applyAccess:vi.fn(),confirm:vi.fn(),close:vi.fn()}));
 const viewer=vi.hoisted(()=>({workspaceId:'review-workspace',me:{id:'admin'}}));
 vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>viewer}));
 vi.mock('@/lib/surface-prefetch',()=>({scopeReviewCacheKey:(...parts:string[])=>`scope-review:${parts.join(':')}`}));
-vi.mock('@/lib/api/workspace-access',()=>({fetchScopeReview:mocks.fetch,saveScopeReview:mocks.save,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
+vi.mock('@/lib/api/workspace-access',()=>({fetchScopeReview:mocks.fetch,saveScopeReview:mocks.save,prepareWorkspaceAccessCommand:mocks.prepareAccess,saveWorkspaceAccessCommand:mocks.applyAccess,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:mocks.confirm}));
 vi.mock('@/components/chrome/surface-skeleton',()=>({SurfaceSkeletonFor:()=> <div data-skeleton/>}));
 // Exercise form decisions, not the shared combobox's own keyboard suite.
@@ -25,16 +26,35 @@ vi.mock('@/components/ui/searchable-select',()=>({SearchableSelect:({items,onVal
 const t=en.scopeReview;
 let root:Root,host:HTMLDivElement;
 const protectedData=<T extends object>(data:T)=>({...data,projectionDeadline:Date.now()+30_000,projectionMonotonicDeadline:performance.now()+30_000});
-function fixture():ScopeReviewInventory{return{validForMs:30_000,resourceKind:'memory',total:'2',nextCursor:'next-page',supportedKinds:['memory','task'],completeCoverage:false,uncovered:['readiness_v2_acceptance'],registryRevision:'1',reviewedInventoryRevision:null,coverage:{registryRevision:'1',unresolved:'2',families:[]},recentReviews:[],nextReviewCursor:null,selectedReview:null,items:[{id:'record-one',version:'1',held:false,sensitivity:'confidential',compartments:[],projectIds:['project'],userId:'person',assistantId:null,canClassify:true,allowedActions:['confirm_general','assign_team','hold'],content:{title:'Quarterly plan',text:'Bounded content excerpt'}},{id:'held-record',version:'3',held:true,sensitivity:'internal',compartments:['research'],projectIds:[],userId:null,assistantId:null,canClassify:false,allowedActions:['confirm_general','assign_team','hold'],content:{title:'Held note',text:'Held content excerpt'}}]};}
+function fixture():ScopeReviewInventory{return{validForMs:30_000,resourceKind:'memory',total:'2',nextCursor:'next-page',supportedKinds:['memory','task'],completeCoverage:false,uncovered:['readiness_v2_acceptance'],registryRevision:'1',reviewedInventoryRevision:null,policyRevision:'2',classificationMode:'review',readiness:{ready:false,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:['scope_review']},canActivateStrict:false,coverage:{registryRevision:'1',unresolved:'2',families:[]},recentReviews:[],nextReviewCursor:null,selectedReview:null,items:[{id:'record-one',version:'1',held:false,sensitivity:'confidential',compartments:[],projectIds:['project'],userId:'person',assistantId:null,canClassify:true,allowedActions:['confirm_general','assign_team','hold'],content:{title:'Quarterly plan',text:'Bounded content excerpt'}},{id:'held-record',version:'3',held:true,sensitivity:'internal',compartments:['research'],projectIds:[],userId:null,assistantId:null,canClassify:false,allowedActions:['confirm_general','assign_team','hold'],content:{title:'Held note',text:'Held content excerpt'}}]};}
 function job():ScopeReview{return{id:'saved-review',workspaceId:'review-workspace',resourceKind:'memory',action:'assign_team',targetTeamId:'research',targetCompartment:'research',reason:'Explicit review',payloadHash:'a'.repeat(64),selectionRevision:'2',policyRevision:'2',version:'1',status:'preview',validForMs:30_000,completeCoverage:false,items:[{resourceId:'record-one',resourceVersion:'1',content:{title:'Quarterly plan',text:'Bounded content excerpt'},impact:{version:2,descendants:[],dependents:{}},source:{workspaceId:'review-workspace',resourceKind:'memory',resourceId:'record-one',version:'1',userId:'person',assistantId:null,sensitivity:'confidential',compartments:[],projectIds:['project'],held:false,validTo:null,retractedAt:null},status:'pending',resultVersion:null,errorCode:null}]};}
 async function render(){await act(async()=>root.render(<I18nProvider locale="en" dict={en}><ScopeReviewPanel teams={[{id:'research',name:'Research'}]} close={mocks.close}/></I18nProvider>));}
 async function click(label:string){const button=[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent?.trim()===label);expect(button).toBeDefined();await act(async()=>button!.click());}
 async function select(id:string){await act(async()=>host.querySelector<HTMLButtonElement>(`[role="checkbox"][aria-label="${t.select} ${id}"]`)!.click());}
 async function reason(){await act(async()=>{const input=host.querySelector('textarea')!;Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(input,'Classify selected source');input.dispatchEvent(new Event('input',{bubbles:true}));});}
-beforeEach(()=>{viewer.workspaceId='review-workspace';viewer.me={id:'admin'};invalidateSurfaceCache('scope-review:');mocks.fetch.mockReset().mockImplementation(async()=>protectedData(fixture()));mocks.save.mockReset().mockResolvedValue(protectedData(job()));mocks.confirm.mockReset().mockResolvedValue(true);mocks.close.mockReset();host=document.createElement('div');document.body.append(host);root=createRoot(host);});
+beforeEach(()=>{viewer.workspaceId='review-workspace';viewer.me={id:'admin'};invalidateSurfaceCache('scope-review:');mocks.fetch.mockReset().mockImplementation(async()=>protectedData(fixture()));mocks.save.mockReset().mockResolvedValue(protectedData(job()));mocks.prepareAccess.mockReset().mockResolvedValue({id:'activation-review',payloadHash:'b'.repeat(64),policyRevision:'2',expiresAt:new Date(Date.now()+30_000).toISOString(),validForMs:30_000,command:{type:'workspace.classification.set',mode:'strict',expectedPolicyRevision:'2',expectedInventoryRevision:'1'},changes:[{field:'classification_mode',before:[{kind:'code',value:'review'}],after:[{kind:'code',value:'strict'}]}]});mocks.applyAccess.mockReset().mockResolvedValue({validForMs:30_000,workspaceId:'review-workspace',policyRevision:'3',classificationMode:'strict',canAdminister:true,readiness:{ready:true,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:[]},teams:[],people:[],requests:[],grants:[]});mocks.confirm.mockReset().mockResolvedValue(true);mocks.close.mockReset();host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('scope-review:');vi.useRealTimers();});
 
 describe('[COMP:app-web/scope-review] explicit administrator review path',()=>{
+  it('keeps strict activation visibly blocked until coverage and readiness qualify',async()=>{
+    await render();
+    expect(host.textContent).toContain(t.activationBlocked);expect(host.textContent).toContain('readiness_v2_acceptance');expect(host.textContent).toContain('scope_review');
+    expect([...host.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent===t.activateStrict)?.disabled).toBe(true);
+    expect(mocks.prepareAccess).not.toHaveBeenCalled();
+  })
+  it('activates strict mode only through the confirmed saved command bound to both revisions',async()=>{
+    mocks.fetch.mockResolvedValue(protectedData({...fixture(),completeCoverage:true,uncovered:[],reviewedInventoryRevision:'1',readiness:{ready:true,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:[]},canActivateStrict:true}));
+    await render();await click(t.activateStrict);
+    expect(mocks.prepareAccess).toHaveBeenCalledWith('review-workspace',{type:'workspace.classification.set',mode:'strict',expectedPolicyRevision:'2',expectedInventoryRevision:'1'},'2',expect.any(String));
+    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({description:expect.stringContaining(t.activationConfirm)}));
+    const effects=renderToStaticMarkup(<I18nProvider locale="en" dict={en}>{mocks.confirm.mock.calls[0][0].content}</I18nProvider>);
+    expect(effects).toContain(t.classificationMode);expect(effects).toContain(t.review);expect(effects).toContain(t.strict);expect(effects).not.toContain(en.workspaceAccess.unnamed);
+    expect(mocks.applyAccess).toHaveBeenCalledWith('review-workspace',{type:'access.command.apply',reviewId:'activation-review',payloadHash:'b'.repeat(64)});
+  })
+  it('replaces the pre-activation coverage warning after strict mode is active',async()=>{
+    mocks.fetch.mockResolvedValue(protectedData({...fixture(),classificationMode:'strict',completeCoverage:true,uncovered:[],reviewedInventoryRevision:'1',readiness:{ready:true,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:[]},canActivateStrict:false}));
+    await render();expect(host.textContent).toContain(t.activationActive);expect(host.textContent).not.toContain(t.coverage);
+  })
   it('shows coverage and retained protections and previews only explicitly selected records',async()=>{
     await render();expect(host.textContent).toContain(t.coverage);expect(host.textContent).toContain(t.generalHint)
     expect(host.querySelector('select')).toBeNull();await select('record-one');await reason()

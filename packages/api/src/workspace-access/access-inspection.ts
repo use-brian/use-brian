@@ -15,7 +15,7 @@ type Inspection = {client:PoolClient;view:WorkspaceAccessOverview}
 async function inspect<T>(workspaceId:string,userId:string,run:(snapshot:Inspection)=>Promise<T>):Promise<T>{
   const client=await getPool().connect()
   try{
-    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
     const view=await getWorkspaceAccessInTransaction(client,workspaceId,userId)
     const result=await run({client,view})
     await client.query('COMMIT')

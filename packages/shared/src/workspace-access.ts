@@ -28,6 +28,7 @@ export type OrganizationCommand =
   | { type: 'org.placement.remove'; id: string; expectedVersion: string }
 
 export type DepartmentAccessCommand =
+  | {type:'workspace.classification.set';mode:'strict';expectedPolicyRevision:string;expectedInventoryRevision:string}
   | {type:'assistant.clearance.set';assistantId:string;clearance:'public'|'internal'|'confidential'}
   | {type:'member.access.set';userId:string;clearance:'public'|'internal'|'confidential';teamScopeMode:'legacy'|'assigned';expectedPolicyRevision:string}
   | {type:'assistant.audience.set';assistantId:string;teamMode:'all'|'assigned';teamIds:string[];defaultGroupId:string|null;projectMode:'all'|'assigned';projectIds:string[];defaultProjectId:string|null}
@@ -105,7 +106,7 @@ export type ScopeReviewSummary = {
   status:'preview'|'running'|'complete'|'stale'|'cancelled'
 }
 export type ScopeReview = ScopeReviewSummary & {
-  completeCoverage:false;validForMs:number
+  completeCoverage:boolean;validForMs:number
   items:Array<{resourceId:string;resourceVersion:string;source:ScopeReviewSource;content:ScopeReviewContent|null;impact:ScopeReviewImpact|null;status:'pending'|'applied'|'stale'|'cancelled';resultVersion:string|null;errorCode:string|null}>
 }
 export type ScopeReviewImpact =
@@ -121,7 +122,8 @@ export type ScopeReviewInventory = {
   validForMs:number;resourceKind:ScopeReviewKind;total:string;nextCursor:string|null;supportedKinds:ScopeReviewKind[]
   items:Array<{id:string;version:string;held:boolean;sensitivity:string|null;compartments:string[]|null;projectIds:string[]|null;userId:string|null;assistantId:string|null;canClassify:boolean;allowedActions:ScopeReviewAction[];content:ScopeReviewContent}>
   registryRevision:string;reviewedInventoryRevision:string|null;coverage:ScopeReviewCoverage
-  completeCoverage:false;uncovered:string[];recentReviews:ScopeReviewSummary[];nextReviewCursor:string|null;selectedReview:ScopeReview|null
+  policyRevision:string;classificationMode:'legacy'|'review'|'strict';readiness:DepartmentalReadiness;canActivateStrict:boolean
+  completeCoverage:boolean;uncovered:string[];recentReviews:ScopeReviewSummary[];nextReviewCursor:string|null;selectedReview:ScopeReview|null
 }
 
 /** A review is bound to the verified actor by the server, never by these fields. */
