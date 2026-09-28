@@ -56,6 +56,10 @@ function integration(): AssociationContext {
 }
 
 describe('[COMP:crm/association-service] Canonical authority and adapters', () => {
+  it('keeps the website status summary a workspace member read', async () => {
+    const f=fixture();
+    await expect(f.service.execute(integration(),command({kind:'website_status'}))).rejects.toMatchObject({code:'not_authorized'});
+  })
   it('restricts catalogue drafts and publication to configuration authority', async () => {
     const f=fixture();
     for(const context of [member,{...member,authority:{...member.authority,canConfigure:true}},integration()]) {
@@ -86,6 +90,52 @@ describe('[COMP:crm/association-service] Canonical authority and adapters', () =
     siteContent.save.mockResolvedValue({ version: 1, issues: [] })
     await service.execute(owner, command({ kind: 'save_site_content', collection: 'news', expectedVersion: 0, document: { schemaVersion: 1, items: [] } }))
     expect(siteContent.save).toHaveBeenCalledWith(workspaceId, 'news', 0, { schemaVersion: 1, items: [] }, expect.anything())
+  })
+
+  it('lets an assistant edit website content only for an owner or admin, and never over an integration key', async () => {
+    const siteContent = { draft: vi.fn().mockResolvedValue({ version: 1 }), save: vi.fn(), update: vi.fn().mockResolvedValue({ version: 2, changed: ['set x'] }), publish: vi.fn(),
+      status: vi.fn().mockResolvedValue([]), read: vi.fn(), observe: vi.fn() }
+    const roles: Record<string, string> = {}
+    const f = fixture()
+    const service = createAssociationService({ store: f.store as unknown as AssociationStore, crmService: f.crm as CrmOperationsServicePort,
+      modules: f.modules as unknown as WorkspaceModulesStore, siteContent: siteContent as never,
+      programmeCatalogue: { status: vi.fn().mockResolvedValue({}) } as never, membershipCatalogue: { status: vi.fn().mockResolvedValue({}) } as never,
+      memberRole: async user => roles[user] ?? null })
+    const assistantFor = (person: string): AssociationContext => ({ workspaceId, actor: { kind: 'assistant', assistantId: credentialId, userId: person, sessionId: eventId },
+      authority: { ...member.authority, canConfigure: true } })
+    const update = command({ kind: 'update_site_content', collection: 'partners', expectedVersion: 1, operations: [{ op: 'set', path: 'partners/acme/href', value: 'https://example.org' }] })
+    const memberId = randomUUID(), adminId = randomUUID()
+    roles[memberId] = 'member'; roles[adminId] = 'admin'
+    // A member chatting with an assistant that holds the configure grant is refused, even for a draft read.
+    await expect(service.execute(assistantFor(memberId), command({ kind: 'site_content_draft', collection: 'partners' }))).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(service.execute(assistantFor(memberId), update)).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(service.execute(assistantFor(memberId), command({ kind: 'publish_membership_catalogue', expectedVersion: 1 }))).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(service.execute(assistantFor(randomUUID()), update)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(siteContent.update).not.toHaveBeenCalled()
+    await expect(service.execute(assistantFor(adminId), update)).resolves.toMatchObject({ record: { version: 2 } })
+    expect(siteContent.update).toHaveBeenCalledWith(workspaceId, 'partners', 1, update.kind === 'update_site_content' ? update.operations : [], expect.objectContaining({ credentialKind: 'assistant', actingUserId: adminId }))
+    await expect(service.execute(integration(), update)).rejects.toBeDefined()
+    // Status summaries are a plain read for assistants too.
+    await expect(service.execute({ ...assistantFor(memberId), authority: { ...member.authority } }, command({ kind: 'website_status' }))).resolves.toMatchObject({ record: { collections: [] } })
+  })
+
+  it('adds a chat upload to the website media library as the person, with an audit entry', async () => {
+    const f = fixture(), adminId = randomUUID(), fileId = randomUUID(), mediaId = randomUUID()
+    const media = { list: vi.fn().mockResolvedValue([{ id: mediaId, name: 'x-stage.png', title: 'Stage', mime: 'image/png', sizeBytes: 3, updatedAt: 'now' }]),
+      importUpload: vi.fn().mockResolvedValue({ id: mediaId, name: 'Stage', mime: 'image/png', sizeBytes: 3 }), audit: vi.fn() }
+    const context: AssociationContext = { workspaceId, actor: { kind: 'assistant', assistantId: credentialId, userId: adminId, sessionId: eventId },
+      authority: { ...member.authority, canConfigure: true } }
+    const bare = createAssociationService({ store: f.store as unknown as AssociationStore, crmService: f.crm as CrmOperationsServicePort, memberRole: async () => 'owner' })
+    await expect(bare.execute(context, command({ kind: 'list_website_media' }))).rejects.toMatchObject({ code: 'not_available' })
+    const service = createAssociationService({ store: f.store as unknown as AssociationStore, crmService: f.crm as CrmOperationsServicePort,
+      memberRole: async () => 'owner', websiteMedia: () => media })
+    await expect(service.execute(context, command({ kind: 'list_website_media', query: 'stage' }))).resolves.toMatchObject({ items: [{ mediaId, name: 'Stage' }] })
+    await expect(service.execute(context, command({ kind: 'list_website_media', query: 'nothing' }))).resolves.toMatchObject({ items: [] })
+    await expect(service.execute(context, command({ kind: 'add_website_media', fileId }))).resolves.toMatchObject({ record: { mediaId } })
+    expect(media.importUpload).toHaveBeenCalledWith({ workspaceId, userId: adminId, assistantId: credentialId, fileId, name: undefined })
+    expect(media.audit).toHaveBeenCalledWith(workspaceId, mediaId, expect.objectContaining({ credentialKind: 'assistant', actingUserId: adminId }))
+    media.importUpload.mockResolvedValueOnce({ error: 'upload_not_found' })
+    await expect(service.execute(context, command({ kind: 'add_website_media', fileId }))).rejects.toMatchObject({ code: 'not_found' })
   })
 
   it('keeps source membership assertions inside the matching owner/admin import job', async () => {

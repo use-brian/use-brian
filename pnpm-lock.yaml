@@ -57,6 +57,9 @@ importers:
 
   apps/app-desktop:
     dependencies:
+      '@use-brian/browser-control':
+        specifier: workspace:*
+        version: link:../../packages/browser-control
       '@use-brian/firefox-companion':
         specifier: workspace:*
         version: link:../firefox-companion
@@ -320,6 +323,10 @@ importers:
         version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(sass@1.51.0)(tsx@4.22.4)
 
   apps/browser-extension:
+    dependencies:
+      '@use-brian/browser-control':
+        specifier: workspace:*
+        version: link:../../packages/browser-control
     devDependencies:
       '@types/chrome':
         specifier: ^0.0.287
@@ -327,6 +334,9 @@ importers:
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.43
+      jsdom:
+        specifier: ^29.1.1
+        version: 29.1.1(@noble/hashes@1.8.0)
       typescript:
         specifier: ^5.7
         version: 5.9.3
@@ -429,6 +439,9 @@ importers:
         specifier: 13.6.31
         version: 13.6.31
     devDependencies:
+      '@hocuspocus/provider':
+        specifier: 4.2.0
+        version: 4.2.0(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
       '@types/express':
         specifier: ^5
         version: 5.0.6
@@ -687,6 +700,9 @@ importers:
       '@types/supertest':
         specifier: ^7.2.0
         version: 7.2.0
+      '@use-brian/browser-control':
+        specifier: workspace:*
+        version: link:../browser-control
       supertest:
         specifier: ^7.2.2
         version: 7.2.2
@@ -720,6 +736,12 @@ importers:
       vitest:
         specifier: ^3
         version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(sass@1.51.0)(tsx@4.22.4)
+
+  packages/browser-control:
+    devDependencies:
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
 
   packages/channels:
     devDependencies:

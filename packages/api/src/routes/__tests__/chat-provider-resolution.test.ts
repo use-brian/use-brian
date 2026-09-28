@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ChatTurnRefusal, chatTurnErrorEvent, customModelMediaRefusal, resolveWorkspaceTurnLlm } from '../chat.js'
 import { CUSTOM_MODEL_IMAGE_REJECTION } from '../_channel-error-text.js'
+import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
+import { DeliveryAudienceUnverifiedError } from '../../context-scope/delivery-authority.js'
 
 describe('[COMP:api/chat-route] workspace provider precedence', () => {
   it('uses a valid custom endpoint without touching stale legacy BYO settings', async () => {
@@ -69,6 +71,17 @@ describe('[COMP:api/chat-route] post-SSE turn refusals', () => {
     expect(chatTurnErrorEvent(new Error('Cannot set headers after they are sent to the client')))
       .toEqual({ error: 'Something went wrong' })
     expect(chatTurnErrorEvent('not even an error')).toEqual({ error: 'Something went wrong' })
+  })
+
+  it('preserves typed live-authority and recipient refusals on the SSE wire', () => {
+    expect(chatTurnErrorEvent(new AuthorityChangedError(true))).toMatchObject({
+      code: 'authority_changed',
+      operationMayHaveExecuted: true,
+    })
+    expect(chatTurnErrorEvent(new DeliveryAudienceUnverifiedError())).toEqual({
+      code: 'delivery_audience_unverified',
+      error: 'The current destination is not authorized for this response.',
+    })
   })
 
   // A tier route captures every built-in in the model picker, so the old copy

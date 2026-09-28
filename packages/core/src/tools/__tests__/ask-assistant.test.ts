@@ -2,10 +2,15 @@ import { describe, it, expect, vi } from 'vitest'
 import { createInterAssistantTools, type InterAssistantDeps } from '../base/ask-assistant.js'
 import type { ToolContext } from '../types.js'
 import type { ConsultResponse, Task } from '../../a2a/types.js'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
 
 const ctx: ToolContext = {
   userId: 'u_caller',
   assistantId: 'a_caller',
+  assistantKind: 'standard',
+  clearance: 'internal',
+  compartments: [],
+  projectIds: null,
   workspaceId: 'ws_caller',
   sessionId: 's_1',
   appId: 'web',
@@ -151,6 +156,53 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools', () => {
   })
 
   describe('askAssistant', () => {
+    it('carries a detached source floor and never retries rejected source context',async()=>{
+      const deps=makeDeps({getFollowing:vi.fn().mockResolvedValue([{followingAssistantId:'a_target',followingWorkspaceId:'ws_caller'}])})
+      const ask=createInterAssistantTools(deps).find(t=>t.name==='askAssistant')!
+      const accumulator=new ContextScopeAccumulator({sensitivity:'internal',compartments:['product'],sources:[{
+        workspaceId:'ws_caller',userId:'u_caller',assistantId:null,sensitivity:'internal',compartments:['product'],projectIds:[],resourceKind:'memory',resourceId:'source-1',version:'1',
+      }]})
+      await ask.execute({targetAssistantId:'a_target',question:'Use this context'}, {...ctx,scopeAccumulator:accumulator})
+      const sent=vi.mocked(deps.consultTransport.send).mock.calls[0]![0].callerScopeEvidence
+      accumulator.note({compartments:['finance']})
+      expect(sent).toMatchObject({sensitivity:'internal',compartments:['product'],sources:[{resourceId:'source-1',userId:'u_caller'}]})
+      vi.mocked(deps.consultTransport.send).mockRejectedValue(Object.assign(new Error('Private source detail'),{reason:'caller_evidence_unavailable'}))
+      const refusal=await ask.execute({targetAssistantId:'a_target',question:'Use this context'},ctx)
+      expect(refusal.isError).toBe(true)
+      expect(refusal.data).not.toContain('Retry once')
+      expect(refusal.data).not.toContain('Private source detail')
+    })
+    it.each([false, true])('does not advise replay after an authority refusal (possibly executed: %s)', async operationMayHaveExecuted => {
+      const deps = makeDeps({ getFollowing: vi.fn().mockResolvedValue([
+        { followingAssistantId: 'a_target', followingWorkspaceId: 'ws_caller' },
+      ]) })
+      vi.mocked(deps.consultTransport.send).mockRejectedValue(Object.assign(new Error('Private diagnostic'), {
+        reason: 'authority_changed', operationMayHaveExecuted, retrySafe: false,
+      }))
+      const ask = createInterAssistantTools(deps).find(t => t.name === 'askAssistant')!
+      const result = await ask.execute({ targetAssistantId: 'a_target', question: 'Perform this action' }, ctx)
+      expect(result.isError).toBe(true)
+      expect(result.data).not.toContain('Retry once')
+      expect(result.data).not.toContain('Private diagnostic')
+      expect(result.data).toContain(operationMayHaveExecuted ? 'Check its outcome' : 'Start a new request')
+      expect(deps.consultTransport.send).toHaveBeenCalledTimes(1)
+    })
+    it('serializes a detached complete ceiling and refuses missing authority axes', async () => {
+      const deps = makeDeps({ getFollowing: vi.fn().mockResolvedValue([
+        { followingAssistantId: 'a_target', followingWorkspaceId: 'ws_caller' },
+      ]) })
+      const ask = createInterAssistantTools(deps).find(t => t.name === 'askAssistant')!
+      const source = { ...ctx, compartments: ['product'], mutationCompartments: [], visibilityAssistantIds: ['a_caller'] }
+      await ask.execute({ targetAssistantId: 'a_target', question: 'Status?' }, source)
+      const snapshot = vi.mocked(deps.consultTransport.send).mock.calls[0]![0].callerAccessCeiling
+      source.compartments.push('finance')
+      expect(snapshot).toEqual({ workspaceId: 'ws_caller', userId: 'u_caller',
+        clearance: 'internal', compartments: ['product'], mutationCompartments: [], projectIds: null,
+        visibilityAssistantIds: ['a_caller'] })
+      const result = await ask.execute({ targetAssistantId: 'a_target', question: 'Status?' }, { ...ctx, projectIds: undefined })
+      expect(result.isError).toBe(true)
+      expect(deps.consultTransport.send).toHaveBeenCalledTimes(1)
+    })
     it('rejects an unknown target with the id, the discovery tool, and a no-retry verdict', async () => {
       const deps = makeDeps({
         isFollowing: vi.fn().mockResolvedValue(false),

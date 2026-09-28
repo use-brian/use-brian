@@ -28,6 +28,7 @@
  */
 
 import { canRead, type Sensitivity } from '@use-brian/core/dist/security/sensitivity.js'
+import { parseSyncDocumentName } from './document-router.js'
 
 export class PageAccessDenied extends Error {
   constructor(public readonly reason: string) {
@@ -43,11 +44,39 @@ export type GrantRole = 'view' | 'comment' | 'edit' | 'full'
 
 export type PageAccess = { workspaceId: string; clearance: Sensitivity; role: GrantRole }
 
+type PageConnectionContext = {
+  service?: true
+  userId?: string
+  sessionId?: string
+  authVersion?: number
+  workspaceId?: string
+  role?: GrantRole
+}
+
+export type PageRoomConnection = {
+  context?: PageConnectionContext
+  readOnly: boolean
+  sendStateless(message: string): void
+  close(event?: { code: number; reason: string }): void
+}
+
+export type PageRoomDocument = { getConnections(): PageRoomConnection[] }
+
+export type PageAuthorityDeps = {
+  query: RlsQuery
+  validateSession(claims: { userId: string; sessionId?: string; authVersion?: number }): Promise<boolean>
+}
+
+export type PageConnectionAuthority = 'read-write' | 'read-only' | 'denied' | 'service'
+
 export const PAGE_ACCESS_SQL = `
   SELECT sv.workspace_id AS "workspaceId",
          sv.clearance    AS "pageClearance",
          wm.clearance    AS "memberClearance",
-         ts.sensitivity  AS "teamspaceSensitivity"
+         ts.sensitivity  AS "teamspaceSensitivity",
+         saved_view_operation_scope_allows(
+           sv.workspace_id, sv.clearance, sv.teamspace_id, sv.project_id, true
+         ) AS "canMutate"
   FROM saved_views sv
   JOIN workspace_members wm ON wm.workspace_id = sv.workspace_id
   LEFT JOIN teamspaces ts ON ts.id = sv.teamspace_id
@@ -101,6 +130,7 @@ export async function assertPageAccess(params: {
     pageClearance: Sensitivity | null
     memberClearance: Sensitivity | null
     teamspaceSensitivity: Sensitivity | null
+    canMutate: boolean
   }>(params.userId, PAGE_ACCESS_SQL, [params.pageId, params.userId])
 
   const row = rows[0]
@@ -125,7 +155,11 @@ export async function assertPageAccess(params: {
   }
 
   const role = await resolveEffectiveRole(params)
-  return { workspaceId: row.workspaceId, clearance: pageClearance, role }
+  return {
+    workspaceId: row.workspaceId,
+    clearance: pageClearance,
+    role: row.canMutate ? role : 'view',
+  }
 }
 
 /**
@@ -156,6 +190,19 @@ export function isReadOnlyRole(role: GrantRole): boolean {
   return role !== 'edit' && role !== 'full'
 }
 
+/** Bind a trusted internal apply to the same current Edit floor as a human
+ * socket. The shared secret authenticates the API service, never the page
+ * mutation itself. */
+export async function assertPageMutationAccess(params: {
+  userId: string
+  pageId: string
+  query: RlsQuery
+}): Promise<PageAccess> {
+  const access = await assertPageAccess(params)
+  if (isReadOnlyRole(access.role)) throw new PageAccessDenied('write_denied')
+  return access
+}
+
 /** Refresh a live connection before accepting a message, failing closed. */
 export async function recheckPageConnection(params: {
   userId?: string
@@ -175,4 +222,74 @@ export async function recheckPageConnection(params: {
     connection.sendStateless('page-write-denied')
     throw error
   }
+}
+
+function denyPageConnection(connection: PageRoomConnection): PageConnectionAuthority {
+  connection.readOnly = true
+  connection.sendStateless('page-access-denied')
+  connection.close({ code: 4403, reason: 'Page access denied' })
+  return 'denied'
+}
+
+/** Re-resolve one current room recipient. Resolver/session failure denies and
+ * closes only that connection; another peer's failure never blocks an
+ * authorized recipient from being audited. Direct internal connections are
+ * already bound at their HTTP endpoint and do not represent a socket peer. */
+async function revalidatePageConnection(params: {
+  pageId: string
+  connection: PageRoomConnection
+  deps: PageAuthorityDeps
+}): Promise<PageConnectionAuthority> {
+  const { connection } = params
+  const context = connection.context
+  if (context?.service) return 'service'
+  if (!context?.userId) return denyPageConnection(connection)
+  try {
+    if (!await params.deps.validateSession({
+      userId: context.userId,
+      sessionId: context.sessionId,
+      authVersion: context.authVersion,
+    })) return denyPageConnection(connection)
+    const access = await assertPageAccess({ userId: context.userId, pageId: params.pageId, query: params.deps.query })
+    const wasReadOnly = connection.readOnly
+    connection.readOnly = isReadOnlyRole(access.role)
+    context.workspaceId = access.workspaceId
+    context.role = access.role
+    if (wasReadOnly !== connection.readOnly) {
+      connection.sendStateless(connection.readOnly ? 'page-write-denied' : 'page-write-allowed')
+    }
+    return connection.readOnly ? 'read-only' : 'read-write'
+  } catch {
+    return denyPageConnection(connection)
+  }
+}
+
+/** Audit every human recipient before a protected room broadcast. */
+export async function revalidatePageRoom(params: {
+  pageId: string
+  document: PageRoomDocument
+  deps: PageAuthorityDeps
+}): Promise<Map<PageRoomConnection, PageConnectionAuthority>> {
+  const connections = params.document.getConnections()
+  const results = await Promise.all(connections.map(async connection => [
+    connection,
+    await revalidatePageConnection({ ...params, connection }),
+  ] as const))
+  return new Map(results)
+}
+
+/** Close passive revoked peers even while their page room is otherwise idle. */
+export async function sweepPageRooms(params: {
+  documents: ReadonlyMap<string, PageRoomDocument>
+  deps: PageAuthorityDeps
+}): Promise<number> {
+  let audited = 0
+  for (const [name, document] of params.documents) {
+    let target
+    try { target = parseSyncDocumentName(name) } catch { continue }
+    if (target.kind !== 'page') continue
+    audited += document.getConnections().length
+    await revalidatePageRoom({ pageId: target.id, document, deps: params.deps })
+  }
+  return audited
 }

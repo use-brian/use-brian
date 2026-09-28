@@ -447,7 +447,14 @@ describe('[COMP:api/pending-approvals-store] createQuestion', () => {
         kind: 'question',
         toolName: 'askQuestion',
         arguments: { question: 'Which MeshJS?' },
-        approvalPayload: { question: 'Which MeshJS?', toolUseId: 'call_42' },
+        approvalPayload: {
+          question: 'Which MeshJS?',
+          toolUseId: 'call_42',
+          actionId: 'connector_authorization:gcal',
+          version: 1,
+          allowCustom: false,
+          options: ['Connect now', 'Cancel'],
+        },
         blockingSessionId: 'sess-1',
         originatingAssistantId: 'asst-1',
       })],
@@ -460,11 +467,22 @@ describe('[COMP:api/pending-approvals-store] createQuestion', () => {
       approverUserId: 'u-1',
       question: 'Which MeshJS?',
       toolUseId: 'call_42',
+      actionId: 'connector_authorization:gcal',
+      version: 1,
+      allowCustom: false,
+      options: ['Connect now', 'Cancel'],
       deliveryChannelType: 'web',
     })
     expect(row.kind).toBe('question')
     expect(row.toolName).toBe('askQuestion')
-    expect(row.approvalPayload).toMatchObject({ question: 'Which MeshJS?', toolUseId: 'call_42' })
+    expect(row.approvalPayload).toMatchObject({
+      question: 'Which MeshJS?',
+      toolUseId: 'call_42',
+      actionId: 'connector_authorization:gcal',
+      version: 1,
+      allowCustom: false,
+      options: ['Connect now', 'Cancel'],
+    })
     const [sql, values] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain("'question'")
     expect(sql).toContain("'askQuestion'")

@@ -236,7 +236,7 @@ export type CrmStore = {
     id: string,
     fields: CompanyUpdateFields,
     access?: AccessContext,
-    scope?: { compartments: string[]; projectIds: string[] },
+    scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   ): Promise<CompanyRecord | null>
 
   // Contacts
@@ -282,13 +282,14 @@ export type CrmStore = {
     id: string,
     fields: ContactUpdateFields,
     access?: AccessContext,
-    scope?: { compartments: string[]; projectIds: string[] },
+    scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   ): Promise<ContactRecord | null>
 
   // Deals
   createDeal(params: {
     userId: string
     workspaceId: string
+    access?: AccessContext
     contactId?: string | null
     companyId?: string | null
     stage?: DealStage
@@ -320,7 +321,7 @@ export type CrmStore = {
     id: string,
     fields: DealUpdateFields,
     access?: AccessContext,
-    scope?: { compartments: string[]; projectIds: string[] },
+    scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   ): Promise<DealRecord | null>
 
   /** Stage-only update — sole cut-point for stage transitions. */
@@ -330,7 +331,7 @@ export type CrmStore = {
     id: string,
     stage: DealStage,
     access?: AccessContext,
-    scope?: { compartments: string[]; projectIds: string[] },
+    scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   ): Promise<DealRecord | null>
 
   /**

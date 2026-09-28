@@ -158,6 +158,7 @@ type Options = {
     storeScope: AppStoreScope
     appId: string
     actingUserId?: string
+    maxClearance: BrainAuth['maxClearance']
     task: string
   }) => Promise<string>
 }
@@ -238,7 +239,7 @@ export function brainMcpRoutes(opts: Options): Router {
     // exposed only on an explicit `agent` grant, and charged accordingly at
     // the call site rather than riding the flat per-call unit.
     const agentTask =
-      opts.agentTask && auth.authKind === 'home_app' && auth.agentScope === 'ask'
+      opts.agentTask && auth.authKind === 'home_app' && auth.agentScope === 'ask' && auth.actingUserId
         ? opts.agentTask
         : undefined
 
@@ -276,6 +277,7 @@ export function brainMcpRoutes(opts: Options): Router {
                 storeScope: auth.storeScope,
                 appId: auth.keyId,
                 actingUserId: auth.actingUserId,
+                maxClearance: auth.maxClearance,
                 task,
               }),
           }

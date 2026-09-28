@@ -18,6 +18,8 @@
  */
 
 import { Router } from 'express'
+import {departmentRouteReview,executeReviewedDepartmentRoute} from '../workspace-access/reviewed-route.js'
+import {WorkspaceAccessError} from '../workspace-access/policy.js'
 import { queryWithRLS, query, getPool } from '../db/client.js'
 import { resolveAssistantAccess } from '../db/users.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -427,6 +429,21 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     if (apiModelAlias !== undefined) {
       sets.push(`api_model_alias = $${idx++}`)
       values.push(apiModelAlias)
+    }
+    if(clearance!==undefined&&member.workspaceId){
+      if(Object.keys(body).some(key=>key!=='clearance')){res.status(400).json({error:'clearance_requires_separate_review'});return}
+      try{
+        const proof=departmentRouteReview(req)
+        await executeReviewedDepartmentRoute(member.workspaceId,member.userId,{type:'assistant.clearance.set',assistantId,clearance},proof)
+        const current=await queryWithRLS<{clearance:string}>(member.userId,'SELECT clearance FROM assistants WHERE id=$1 AND workspace_id=$2',[assistantId,member.workspaceId])
+        if(!current.rows[0]){res.status(404).json({error:'Assistant not found'});return}
+        res.json({id:assistantId,clearance:current.rows[0].clearance})
+      }catch(error){
+        if(error instanceof WorkspaceAccessError){res.status(error.status).json({error:error.code});return}
+        console.error('[assistants] reviewed clearance update failed:',error)
+        res.status(500).json({error:'Failed to update assistant'})
+      }
+      return
     }
     if (clearance !== undefined && ['public', 'internal', 'confidential'].includes(clearance)) {
       sets.push(`clearance = $${idx++}`)

@@ -6,19 +6,21 @@ const state = vi.hoisted(() => ({
   events: [] as any[], rows: [] as any[], bus: [] as any[], held: true, cancelled: false,
   beforeLoop: null as null | ((options: any) => Promise<void>),
   onRelease: null as null | (() => Promise<void>),
-  session: { id: 'session-test', userId: 'user-test', assistantId: 'assistant-test', channelType: 'web', channelId: 'user-test', status: 'idle', mode: 'default', title: 'Existing title' },
+  session: { id: 'session-test', userId: 'user-test', assistantId: 'assistant-test', channelType: 'web', channelId: 'user-test', status: 'idle', mode: 'default', visibility: 'owner', title: 'Existing title', contextGroupId: null, contextProjectId: null, contextLockedAt: null },
 }))
 vi.mock('../../db/notify-listener.js', () => ({ registerNotifyChannel: vi.fn(), startNotifyListener: vi.fn() }))
 vi.mock('../_recovery-message.js', () => ({ composeRecoveryMessage: vi.fn() }))
 vi.mock('../_empty-turn-synthesis.js', () => ({ composeEmptyTurnSynthesis: vi.fn() }))
 vi.mock('../../db/client.js', () => ({ query: vi.fn(async () => ({ rows: [] })) }))
 vi.mock('../../db/users.js', () => ({
-  getDefaultAssistant: async () => ({ id: 'assistant-test', kind: 'personal', name: 'Test', soul: 'Test', userId: 'user-test' }),
+  getDefaultAssistant: async () => ({ id: 'assistant-test', kind: 'personal', name: 'Test', soul: 'Test', userId: 'user-test', workspaceId: 'workspace-test', clearance: 'internal' }),
+  findAssistantById: async () => ({ id: 'assistant-test', kind: 'personal', name: 'Test', soul: 'Test', userId: 'user-test', workspaceId: 'workspace-test', clearance: 'internal' }),
 }))
 vi.mock('../../db/sessions.js', async (original) => ({
   ...await original<any>(),
   findOrCreateSession: async () => state.session,
   findSessionById: async () => state.session,
+  findSessionAuthorityById: async () => state.session,
   findSessionByChannel: async () => state.session,
   getPreferredChannel: async () => null, getSessionMessages: async () => [...state.rows], getSessionTopicLabels: async () => [],
   addSessionMessage: vi.fn(async (row) => { const saved = { ...row, createdAt: new Date(), id: `row-${state.rows.length}`, sequenceNum: state.rows.length }; state.rows.push(saved); return saved }),
@@ -33,7 +35,9 @@ vi.mock('../route-helpers.js', async (original) => ({
   checkUsageBudget: async () => null,
 }))
 vi.mock('../../context-scope/resolve-turn-scope.js', async (original) => ({
-  ...await original<any>(), resolveTurnScopeSystem: async () => ({ access: {}, effectiveCompartments: [], writeCompartments: [], writeProjectIds: [], activeTeam: null, activeProject: null }),
+  ...await original<any>(),
+  resolveTurnScopeSystem: async () => ({ access: { workspaceId: 'workspace-test', userId: 'user-test', assistantId: 'assistant-test', assistantKind: 'primary', clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: null }, effectiveCompartments: [], effectiveProjectIds: [], writeCompartments: [], writeProjectIds: [], activeTeam: null, activeProject: null }),
+  resolveLiveAccessCeilingSystem: async () => ({ workspaceId: 'workspace-test', userId: 'user-test', clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: null }),
 }))
 vi.mock('@use-brian/core', async (original) => ({
   ...await original<any>(),
@@ -54,7 +58,16 @@ async function run(extra: Record<string, unknown> = {}) {
   app.use('/chat', chatRoutes({
     provider: { stream: async function* () {} }, systemPrompt: 'Test', tools: new Map(),
     capabilityStore: { listActive: async () => [] },
-    memoryStore: { getSoul: async () => 'Test', getIndexRanked: async () => ({ rows: [], totalCount: 0 }), search: async () => [], getAll: async () => [], getIdentity: async () => [] },
+    memoryStore: {
+      getSoul: async () => 'Test',
+      getIndexRanked: async () => ({ rows: [], totalCount: 0 }),
+      search: async () => [],
+      getAll: async () => [],
+      getIdentity: async () => [],
+      getWorkspaceIdentity: async () => [],
+      getWorkspaceIndex: async () => [],
+      getWorkspaceMemoriesByCategory: async () => [],
+    },
     publishSessionEvent: (event: any) => state.bus.push(event),
     ...extra,
   } as any))

@@ -10,16 +10,18 @@ import type {
   WorkspaceFileSupersedePatch,
 } from '@use-brian/core'
 import type pg from 'pg'
-import { buildAccessPredicate } from './access-predicate.js'
+import { bindScopeSource, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
+import { currentAgentAccess } from './agent-access-context.js'
+import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 import { emitDocumentedByEdges } from './edge-hooks.js'
 
 const FULL_SELECT = `
   id, workspace_id as "workspaceId", path, parent_path as "parentPath",
   name, title, summary, mime, size_bytes as "sizeBytes",
   tags, related_ids as "relatedIds", storage_uri as "storageUri",
-  sensitivity, compartments, project_ids as "projectIds", metadata,
+  sensitivity, compartments, project_ids as "projectIds", metadata, scope_version::text as "scopeVersion",
   user_id as "userId", assistant_id as "assistantId",
   source, source_episode_id as "sourceEpisodeId",
   verified_by_user_id as "verifiedByUserId", verified_at as "verifiedAt",
@@ -35,10 +37,12 @@ const FULL_SELECT = `
 const INDEX_SELECT = `
   id, workspace_id as "workspaceId", path, parent_path as "parentPath",
   name, title, summary, mime, size_bytes as "sizeBytes",
-  tags, sensitivity, compartments, project_ids as "projectIds", updated_at as "updatedAt"
+  tags, sensitivity, compartments, project_ids as "projectIds", updated_at as "updatedAt",
+  user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion"
 `
 
 type FileRow = {
+  scopeVersion: string
   id: string
   workspaceId: string
   path: string
@@ -74,6 +78,9 @@ type FileRow = {
 }
 
 type IndexRow = {
+  userId: string | null
+  assistantId: string | null
+  scopeVersion: string
   id: string
   workspaceId: string
   path: string
@@ -96,7 +103,8 @@ function asNumber(v: number | string): number {
 }
 
 function toRecord(row: FileRow): WorkspaceFile {
-  return {
+  return bindFileSource({
+    scopeVersion: row.scopeVersion,
     id: row.id,
     workspaceId: row.workspaceId,
     path: row.path,
@@ -129,11 +137,11 @@ function toRecord(row: FileRow): WorkspaceFile {
     createdByAssistantId: row.createdByAssistantId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-  }
+  }, row)
 }
 
 function toIndexRow(row: IndexRow): WorkspaceFileIndexRow {
-  return {
+  return bindFileSource({
     id: row.id,
     workspaceId: row.workspaceId,
     path: row.path,
@@ -148,7 +156,29 @@ function toIndexRow(row: IndexRow): WorkspaceFileIndexRow {
     compartments: row.compartments ?? [],
     projectIds: row.projectIds ?? [],
     updatedAt: row.updatedAt,
+  }, row)
+}
+
+function bindFileSource<T extends object>(value: T, row: IndexRow): T {
+  return bindScopeSource(value, { resourceKind: 'workspace_file', resourceId: row.id,
+    version: row.scopeVersion, workspaceId: row.workspaceId, userId: row.userId,
+    assistantId: row.assistantId, sensitivity: row.sensitivity,
+    compartments: row.compartments, projectIds: row.projectIds })
+}
+
+function fileMutationAccess(userId: string, workspaceId: string, access?: AccessContext): AccessContext | undefined {
+  const agent = currentAgentAccess()
+  if (agent && (!agent.workspaceId || !agent.userId || agent.workspaceId !== workspaceId || agent.userId !== userId)
+      || access && (access.workspaceId !== workspaceId || access.userId !== userId)) {
+    throw Object.assign(new Error('The operation requires the executing author.'), { code: 'scope_operation_denied' })
   }
+  return access ?? (agent ? { workspaceId, userId, assistantId: '', assistantKind: 'primary' } : undefined)
+}
+
+function fileSourceGuard(userId: string, access: AccessContext | undefined, startIdx: number) {
+  const execution = access ? buildAccessPredicate(access, { startIdx, operation: 'mutation' }) : { sql: 'TRUE', params: [], nextIdx: startIdx }
+  const member = buildCurrentMemberSourcePredicate(userId, { alias: 'workspace_files', startIdx: execution.nextIdx })
+  return { sql: `(${execution.sql}) AND (${member.sql})`, params: [...execution.params, ...member.params], nextIdx: member.nextIdx }
 }
 
 /**
@@ -167,6 +197,7 @@ export async function createWorkspaceFile(
   userId: string,
   input: WorkspaceFileCreateInput,
   opts: {
+    access?: AccessContext
     entityLinks?: EntityLinksStore
     /** Entity ids this file documents — each gets a `documented_by`
      *  edge (WU-1.7). Optional; empty/absent means no edge emission. */
@@ -175,6 +206,11 @@ export async function createWorkspaceFile(
     commitSha?: string
   } = {},
 ): Promise<WorkspaceFile> {
+  const access = fileMutationAccess(userId, input.workspaceId, opts.access)
+  assertExecutionResourceScope({ workspaceId: input.workspaceId,
+    userId: input.userId ?? null, assistantId: input.assistantId ?? null,
+    sensitivity: input.sensitivity ?? 'internal', compartments: input.compartments ?? [],
+    projectIds: input.projectIds ?? [] }, 'mutation', access)
   // WU-4.5 — `input.createdByUserId` is the row author (separate from
   // the `userId` arg which is the RLS actor; they are usually equal
   // but the row-author identity is what gets stamped). Reject the
@@ -219,13 +255,21 @@ export async function createWorkspaceFile(
     values.unshift(input.id)
   }
   const placeholders = values.map((_, i) => `$${i + 1}`).join(', ')
+  const workspaceParam = cols.indexOf('workspace_id') + 1
+  const teamParam = cols.indexOf('compartments') + 1
+  values.push(userId)
+  const actorParam = values.length
   const result = await queryWithRLS<FileRow>(
     userId,
     `INSERT INTO workspace_files (${cols.join(', ')})
-     VALUES (${placeholders})
+     SELECT ${placeholders}
+     WHERE EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id=$${workspaceParam} AND user_id=$${actorParam})
+       AND (effective_member_team_compartments($${actorParam},$${workspaceParam}) IS NULL
+         OR $${teamParam}::text[] <@ effective_member_team_compartments($${actorParam},$${workspaceParam}))
      RETURNING ${FULL_SELECT}`,
     values,
   )
+  if (!result.rows[0]) throw Object.assign(new Error('The operation exceeds current department access.'), { code: 'scope_operation_denied' })
   const file = toRecord(result.rows[0])
 
   // Fire-and-forget `documented_by` edges (entity → file) — `void`,
@@ -284,20 +328,61 @@ export async function getWorkspaceFileByPath(
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
 }
 
+/** Current source and browser display lifetime from the same RLS snapshot. */
+export async function getWorkspaceFileReadProjection(ctx: AccessContext, id: string): Promise<{file:WorkspaceFile;validForMs:number}|null> {
+  const ap=buildAccessPredicate(ctx,{startIdx:1})
+  const result=await queryWithRLS<FileRow & {validForMs:number}>(ctx.userId,
+    `SELECT ${FULL_SELECT}, department_media_valid_for_ms(workspace_files.workspace_id) AS "validForMs"
+     FROM workspace_files WHERE ${ap.sql} AND id=$${ap.nextIdx} AND valid_to IS NULL`,
+    [...ap.params,id])
+  const row=result.rows[0]
+  return row?{file:toRecord(row),validForMs:row.validForMs}:null
+}
+
 export async function updateWorkspaceFileMeta(
   userId: string,
   workspaceId: string,
   id: string,
   patch: WorkspaceFileMetaPatch,
   transactionClient?: pg.PoolClient,
+  access?: AccessContext,
 ): Promise<WorkspaceFile | null> {
+  access = fileMutationAccess(userId, workspaceId, access)
+  if (access) assertExecutionResourceScope({ workspaceId, userId: null, assistantId: null, sensitivity: 'public',
+    compartments: patch.inheritCompartments ?? [], projectIds: patch.inheritProjectIds ?? [] }, 'mutation', access)
+  if (!transactionClient) {
+    const client = await getAppPool().connect()
+    try {
+      await client.query('BEGIN')
+      await applyRLSGucs(client, userId)
+      const result = await updateWorkspaceFileMeta(userId, workspaceId, id, patch, client, access)
+      await client.query('COMMIT')
+      return result
+    } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
+    finally { await rollbackAndRelease(client) }
+  }
   // Metadata-only edits stay in-place per corrections.md §D.7 — only
   // content (substantive) edits route through `supersedeWorkspaceFile`.
   // The lock-in side of the draft lifecycle (remove `'draft'`, add
   // `'final'`) is a tags patch, which lands here.
+  {
+    const guard = fileSourceGuard(userId, access, 3)
+    const current = await transactionClient.query<FileRow>(`SELECT ${FULL_SELECT} FROM workspace_files
+      WHERE id=$1 AND workspace_id=$2 AND valid_to IS NULL AND retracted_at IS NULL
+        AND NOT scope_held AND ${guard.sql} FOR UPDATE`, [id, workspaceId, ...guard.params])
+    if (!current.rows[0]) return null
+    const source = current.rows[0]
+    if (patch.sensitivity !== undefined && maxSensitivity(source.sensitivity, patch.sensitivity) !== patch.sensitivity) {
+      throw Object.assign(new Error('Lowering sensitivity requires an audited release.'), { code: 'scope_declassification_required' })
+    }
+    assertExecutionResourceScope({ ...source, sensitivity: patch.sensitivity ?? source.sensitivity,
+      compartments: unionScopeRequirements(source.compartments, patch.inheritCompartments),
+      projectIds: unionScopeRequirements(source.projectIds, patch.inheritProjectIds) }, 'mutation', access)
+  }
   const sets: string[] = []
   const values: unknown[] = []
   let idx = 1
+  let destinationCompartments = 'workspace_files.compartments'
 
   if (patch.title !== undefined)       { sets.push(`title = $${idx}`);       values.push(patch.title);       idx++ }
   if (patch.summary !== undefined)     { sets.push(`summary = $${idx}`);     values.push(patch.summary);     idx++ }
@@ -306,6 +391,7 @@ export async function updateWorkspaceFileMeta(
   if (patch.sensitivity !== undefined) { sets.push(`sensitivity = $${idx}`); values.push(patch.sensitivity); idx++ }
   if (patch.metadata !== undefined)    { sets.push(`metadata = $${idx}`);    values.push(JSON.stringify(patch.metadata)); idx++ }
   if (patch.inheritCompartments !== undefined) {
+    destinationCompartments = `(workspace_files.compartments || $${idx}::text[])`
     sets.push(`compartments = ARRAY(SELECT DISTINCT unnest(compartments || $${idx}::text[]) ORDER BY 1)`)
     values.push(patch.inheritCompartments)
     idx++
@@ -317,12 +403,11 @@ export async function updateWorkspaceFileMeta(
   }
 
   if (sets.length === 0) {
-    // No-op short-circuit — read the current row through the write
-    // path's RLS-only gate (this is the write surface; per-viewer
-    // projection lives on the read entrypoint).
+    // No-op reads retain the current-member and execution source floor.
+    const guard = fileSourceGuard(userId, access, 3)
     const sql = `SELECT ${FULL_SELECT} FROM workspace_files
-       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`
-    const values = [id, workspaceId]
+       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql}`
+    const values = [id, workspaceId, ...guard.params]
     const cur = transactionClient
       ? await transactionClient.query<FileRow>(sql, values)
       : await queryWithRLS<FileRow>(userId, sql, values)
@@ -330,8 +415,13 @@ export async function updateWorkspaceFileMeta(
   }
 
   values.push(id, workspaceId)
+  const guard = fileSourceGuard(userId, access, values.length + 1)
+  values.push(...guard.params)
   const sql = `UPDATE workspace_files SET ${sets.join(', ')}
      WHERE id = $${idx} AND workspace_id = $${idx + 1} AND valid_to IS NULL
+       AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql}
+       AND (effective_member_team_compartments($${guard.nextIdx - 1},workspace_files.workspace_id) IS NULL
+         OR ${destinationCompartments} <@ effective_member_team_compartments($${guard.nextIdx - 1},workspace_files.workspace_id))
      RETURNING ${FULL_SELECT}`
   const result = transactionClient
     ? await transactionClient.query<FileRow>(sql, values)
@@ -350,7 +440,7 @@ export async function updateWorkspaceFileMeta(
     const segValues: unknown[] = [id]
     if (patch.sensitivity !== undefined) {
       segValues.push(patch.sensitivity)
-      segSets.push(`sensitivity = $${segValues.length}`)
+      segSets.push(`sensitivity = CASE WHEN sensitivity_rank($${segValues.length}) > sensitivity_rank(sensitivity) THEN $${segValues.length} ELSE sensitivity END`)
     }
     if (patch.tags !== undefined) {
       segValues.push(patch.tags)
@@ -382,28 +472,38 @@ export async function updateWorkspaceFileSize(
   id: string,
   sizeBytes: number,
   scope: { compartments?: string[]; projectIds?: string[] } = {},
+  access?: AccessContext,
 ): Promise<WorkspaceFile | null> {
-  // `append` calls this. Size drift is a content edit but the existing
-  // files-api semantics treat append as an in-place bump on the current
-  // row, not a supersession. The `staged_write` approval flow is the
-  // explicit supersession driver.
-  const result = await queryWithRLS<FileRow>(
-    userId,
-    `UPDATE workspace_files SET size_bytes = $1,
-       compartments = ARRAY(SELECT DISTINCT unnest(compartments || $4::text[]) ORDER BY 1),
-       project_ids = ARRAY(SELECT DISTINCT unnest(project_ids || $5::uuid[]) ORDER BY 1)
-     WHERE id = $2 AND workspace_id = $3 AND valid_to IS NULL
-     RETURNING ${FULL_SELECT}`,
-    [sizeBytes, id, workspaceId, scope.compartments ?? [], scope.projectIds ?? []],
-  )
-  return result.rows.length === 0 ? null : toRecord(result.rows[0])
+  // Legacy metadata-only adapter. Content append publishes a successor blob.
+  access = fileMutationAccess(userId, workspaceId, access)
+  assertExecutionResourceScope({ workspaceId, userId: null, assistantId: null, sensitivity: 'public',
+    compartments: scope.compartments ?? [], projectIds: scope.projectIds ?? [] }, 'mutation', access)
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, userId)
+    // This UPDATE holds the source lock and propagates inherited requirements
+    // to segments in the same transaction as the metadata-only size change.
+    const current = await updateWorkspaceFileMeta(userId, workspaceId, id, {
+      inheritCompartments: scope.compartments ?? [], inheritProjectIds: scope.projectIds ?? [],
+    }, client, access)
+    if (!current) { await client.query('ROLLBACK'); return null }
+    const result = await client.query<FileRow>(`UPDATE workspace_files SET size_bytes=$1
+      WHERE id=$2 AND workspace_id=$3 RETURNING ${FULL_SELECT}`, [sizeBytes, id, workspaceId])
+    await client.query('COMMIT')
+    return toRecord(result.rows[0])
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
+  finally { await rollbackAndRelease(client) }
 }
 
 export async function deleteWorkspaceFile(
   userId: string,
   workspaceId: string,
   id: string,
+  access?: AccessContext,
 ): Promise<boolean> {
+  access = fileMutationAccess(userId, workspaceId, access)
+  const guard = fileSourceGuard(userId, access, 3)
   // Hard-deletes the current row. WU-6 (D.3 retraction) introduces the
   // soft-delete path; for now `delete` clears both the DB row and (via
   // files-api) the GCS blob, matching pre-WS-2 semantics.
@@ -411,8 +511,9 @@ export async function deleteWorkspaceFile(
     userId,
     `DELETE FROM workspace_files
      WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL
+       AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql}
      RETURNING id`,
-    [id, workspaceId],
+    [id, workspaceId, ...guard.params],
   )
   return result.rows.length > 0
 }
@@ -669,20 +770,27 @@ export async function supersedeWorkspaceFile(
   workspaceId: string,
   id: string,
   patch: WorkspaceFileSupersedePatch,
+  access?: AccessContext,
 ): Promise<WorkspaceFile | null> {
+  access = fileMutationAccess(userId, workspaceId, access)
+  const agent = currentAgentAccess()
+  if (patch.editorUserId !== userId || (agent?.userId !== undefined && agent.userId !== userId)) {
+    throw Object.assign(new Error('The operation requires the executing author.'), { code: 'scope_operation_denied' })
+  }
   const client = await getAppPool().connect()
   try {
     // Runs on the app pool (app_user, subject to RLS). `BEGIN` first, then
     // `SET LOCAL app.current_user_id` so it reverts at COMMIT/ROLLBACK to the
     // seeded sentinel and never leaks onto the pooled connection.
     await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
+    await applyRLSGucs(client, userId)
 
+    const sourceGuard = fileSourceGuard(userId, access, 3)
     const current = await client.query<FileRow>(
       `SELECT ${FULL_SELECT} FROM workspace_files
-       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL
-       FOR UPDATE`,
-      [id, workspaceId],
+       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+       AND ${sourceGuard.sql} FOR UPDATE`,
+      [id, workspaceId, ...sourceGuard.params],
     )
 
     if (current.rows.length === 0) {
@@ -691,6 +799,20 @@ export async function supersedeWorkspaceFile(
     }
 
     const old = current.rows[0]
+    if (patch.expectedScopeVersion !== undefined && old.scopeVersion !== patch.expectedScopeVersion) {
+      await client.query('ROLLBACK')
+      return null
+    }
+    const sourceScope = { ...old, compartments: old.compartments ?? [], projectIds: old.projectIds ?? [] }
+    assertExecutionResourceScope(sourceScope, 'read', access)
+    assertExecutionResourceScope(sourceScope, 'mutation', access)
+    const nextSensitivity = maxSensitivity(old.sensitivity, patch.sensitivity ?? old.sensitivity)
+    if (patch.sensitivity !== undefined && nextSensitivity !== patch.sensitivity) {
+      throw Object.assign(new Error('Lowering sensitivity requires an audited release.'), { code: 'scope_declassification_required' })
+    }
+    assertExecutionResourceScope({ ...sourceScope, sensitivity: nextSensitivity,
+      compartments: unionScopeRequirements(old.compartments, patch.compartments),
+      projectIds: unionScopeRequirements(old.projectIds, patch.projectIds) }, 'mutation', access)
     const newId = randomUUID()
 
     await client.query(
@@ -722,7 +844,7 @@ export async function supersedeWorkspaceFile(
          valid_from, created_by_user_id, created_by_assistant_id,
          compartments, project_ids
        )
-       VALUES (
+       SELECT
          $1, $2, $3, $4, $5, $6, $7,
          $8, $9, $10, $11, $12,
          $13, $14,
@@ -730,7 +852,9 @@ export async function supersedeWorkspaceFile(
          now(), $19, $20,
          ARRAY(SELECT DISTINCT unnest($21::text[] || $22::text[]) ORDER BY 1),
          ARRAY(SELECT DISTINCT unnest($23::uuid[] || $24::uuid[]) ORDER BY 1)
-       )
+       WHERE EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id=$2 AND user_id=$19)
+         AND (effective_member_team_compartments($19,$2) IS NULL
+           OR ($21::text[] || $22::text[]) <@ effective_member_team_compartments($19,$2))
        RETURNING ${FULL_SELECT}`,
       [
         newId,
@@ -745,7 +869,7 @@ export async function supersedeWorkspaceFile(
         patch.tags ?? old.tags,
         patch.relatedIds ?? old.relatedIds,
         patch.storageUri,
-        patch.sensitivity ?? old.sensitivity,
+        nextSensitivity,
         JSON.stringify(patch.metadata ?? old.metadata ?? {}),
         old.userId,
         old.assistantId,
@@ -760,6 +884,7 @@ export async function supersedeWorkspaceFile(
       ],
     )
 
+    if (!inserted.rows[0]) throw Object.assign(new Error('The operation exceeds current department access.'), { code: 'scope_operation_denied' })
     await client.query('COMMIT')
     return toRecord(inserted.rows[0])
   } catch (err) {

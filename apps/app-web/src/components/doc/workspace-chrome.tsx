@@ -30,6 +30,7 @@
  * [COMP:app-web/views-shell]
  */
 
+import { DesktopBrowserCoordinator } from "@/components/computer/desktop-browser-coordinator";
 import {
   createContext,
   useCallback,
@@ -622,6 +623,7 @@ export function WorkspaceChrome({
       offline={offlineState.offline}
       className="relative flex h-full w-full flex-col overflow-hidden"
     >
+      <DesktopBrowserCoordinator workspaceId={workspaceId} />
       <div data-workspace-surfaces className="relative flex min-h-0 w-full flex-1 overflow-hidden">
         {/* Backdrop — mobile only, dismisses the drawer on tap. */}
         {sidebarOpen && (

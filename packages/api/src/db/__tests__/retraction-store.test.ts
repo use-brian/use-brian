@@ -98,7 +98,7 @@ describe('[COMP:corrections/retraction-store] createMemoryRetractionStore', () =
     expect(await memoryRepo.readMemoryForRetraction('ws-1', 'ghost')).toBeNull()
   })
 
-  it('applySoftRetract stamps retracted_at + reason + valid_to', async () => {
+  it('applySoftRetract stamps the tombstone and audit receipt atomically', async () => {
     await memoryRepo.applySoftRetract({
       workspaceId: 'ws-1',
       memoryId: 'mem-1',
@@ -106,7 +106,10 @@ describe('[COMP:corrections/retraction-store] createMemoryRetractionStore', () =
       reason: 'user correction',
       now: NOW,
     })
-    const q = poolQueries[0]
+    const q = clientQueries[1]
+    expect(clientQueries[0].text).toBe('BEGIN')
+    expect(clientQueries[2].text).toContain('INSERT INTO correction_audit')
+    expect(clientQueries[3].text).toBe('COMMIT')
     expect(q.text).toContain('UPDATE memories')
     expect(q.text).toContain('retracted_at')
     expect(q.text).toContain('COALESCE(valid_to, $3)')

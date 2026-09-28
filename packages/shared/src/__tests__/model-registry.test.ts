@@ -14,6 +14,8 @@ import {
   recordedAliasIds,
   providerModelIds,
   providerPricingIds,
+  decisionModelRows,
+  isChatModelRow,
   menuForClass,
   MutableProviderAvailability,
   bracketFor,
@@ -407,6 +409,38 @@ describe('[COMP:providers/model-registry] nativePdf capability', () => {
   it('the chat tier defaults are all native (the zero-overhead path stays zero-overhead)', () => {
     for (const alias of Object.values(chatTierDefaults())) {
       expect(registryRow(alias)!.capabilities.nativePdf, `${alias} is a chat tier default`).toBe(true)
+    }
+  })
+})
+
+describe('[COMP:providers/model-registry] decision-only models', () => {
+  it('keeps Jev identity, capabilities, and pricing in the single shared catalog', () => {
+    const [jev] = decisionModelRows()
+    expect(jev).toMatchObject({
+      alias: 'typesafe-jev-1.13',
+      provider: 'typesafe',
+      apiModelId: 'jev-1.13.0',
+      inference: 'decision',
+      decisionCapabilities: {
+        adapterId: 'typesafe',
+        wireModelId: 'jev-1.13.0',
+        primitives: ['choice', 'boolean', 'score'],
+      },
+    })
+    expect(modelRates('typesafe-jev-1.13')?.brackets[0]).toMatchObject({
+      inPerMTok: 0.042,
+      outPerMTok: 0,
+    })
+  })
+
+  it('never leaks a decision row into chat defaults, menus, provider lists, or fallbacks', () => {
+    const jev = registryRow('typesafe-jev-1.13')!
+    expect(isChatModelRow(jev)).toBe(false)
+    expect(Object.values(chatTierDefaults())).not.toContain(jev.alias)
+    expect(menuForClass('background')).not.toContainEqual(jev)
+    expect(providerModelIds('typesafe')).toEqual([])
+    for (const row of MODEL_REGISTRY) {
+      if (isChatModelRow(row)) expect(row.fallbackAlias).not.toBe(jev.alias)
     }
   })
 })

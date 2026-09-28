@@ -28,6 +28,7 @@ vi.mock('../../db/sessions.js', () => ({
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceRoleSystem: vi.fn(),
   getWorkspaceMembershipWithClearanceSystem: vi.fn(),
+  getWorkspaceMembershipWithReadScopeSystem: vi.fn(),
 }))
 vi.mock('../route-helpers.js', () => ({ resolveUser: vi.fn() }))
 

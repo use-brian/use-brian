@@ -1,7 +1,8 @@
 import { z } from 'zod'
 import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
-import { resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
+import { intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
+import { deriveResourceScope } from '../security/derived-scope.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
 import {
@@ -186,6 +187,8 @@ function ctxFor(context: {
   assistantKind?: AccessContext['assistantKind']
   clearance?: AccessContext['clearance']
   compartments?: AccessContext['compartments']
+  mutationCompartments?: AccessContext['mutationCompartments']
+  visibilityAssistantIds?: AccessContext['visibilityAssistantIds']
   projectIds?: AccessContext['projectIds']
 }): AccessContext {
   return {
@@ -195,6 +198,8 @@ function ctxFor(context: {
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+    mutationCompartments: context.mutationCompartments,
+    visibilityAssistantIds: context.visibilityAssistantIds,
     projectIds: context.projectIds,
   }
 }
@@ -265,14 +270,20 @@ export function createTaskTools(
   archiveTasks: Tool
 } {
   function accessFor(context: ToolContext): AccessContext {
-    return ctxFor({
-      userId: context.userId,
-      assistantId: context.assistantId,
-      workspaceId: context.workspaceId!,
-      assistantKind: context.assistantKind,
-      clearance: context.clearance,
-      compartments: context.compartments,
-    })
+    return ctxFor({...context,workspaceId:context.workspaceId!})
+  }
+
+  function writeGrant(context:ToolContext){
+    return intersectScopeGrants(context.compartments??null,
+      context.mutationCompartments===undefined?context.compartments??null:context.mutationCompartments)
+  }
+
+  function inheritedVisibility(context:ToolContext){
+    const sources=context.scopeAccumulator?.evidence.sources
+    if(!sources?.length)return undefined
+    const floor=deriveResourceScope({producer:'task-write',sources})
+    if(floor.workspaceId!==context.workspaceId)throw new Error('scope_operation_denied')
+    return {userId:floor.userId,assistantId:floor.assistantId}
   }
 
   function resolveVisibleTask(context: ToolContext, id: string): Promise<TaskRecord | null> {
@@ -431,6 +442,7 @@ export function createTaskTools(
 
       try {
         const writeScope = resolveWriteScope({
+          sensitivity: 'internal',
           baseCompartments: context.assistantDefaultCompartments,
           baseProjectIds: context.assistantDefaultProjectIds,
           explicitProjectIds: input.projectId ? [input.projectId] : undefined,
@@ -438,7 +450,7 @@ export function createTaskTools(
             sensitivity: context.sensitivity?.max,
             compartments: context.compartmentAccumulator?.compartments,
           },
-          compartmentGrant: context.compartments,
+          compartmentGrant: writeGrant(context),
           projectGrant: context.projectIds,
         })
         const task = await store.create({
@@ -457,6 +469,9 @@ export function createTaskTools(
               : input.attributes,
           compartments: writeScope.compartments,
           projectIds: writeScope.projectIds,
+          sensitivity: writeScope.sensitivity,
+          visibility: inheritedVisibility(context),
+          access: accessFor(context),
           source: opts?.writeSource,
           // Provenance anchors (mig 316). Extraction runs (writeSource
           // 'extracted') and the programmatic brain-MCP surface carry a
@@ -493,6 +508,7 @@ export function createTaskTools(
         const momentNote = moment ? ` @ ${formatStamp(moment.startMs)}` : ''
         return {
           data: `Created task [${task.id}]: ${task.title}${momentNote}${formatLinksSummary(linksSummary)}${admissionWarning ?? ''}`,
+          scopeEvidence: scopeEvidenceFromRows([task]),
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -625,18 +641,24 @@ export function createTaskTools(
           sensitivity: context.sensitivity?.max,
           compartments: context.compartmentAccumulator?.compartments,
         },
-        compartmentGrant: context.compartments,
+        compartmentGrant: writeGrant(context),
         projectGrant: context.projectIds,
       })
       updated = await store.update(context.userId, id, fields, {
         writtenBy: 'system',
+        access: accessFor(context),
         scope: {
+          sensitivity: writeScope.sensitivity,
+          visibility: inheritedVisibility(context),
           compartments: writeScope.compartments,
           projectIds: writeScope.projectIds,
         },
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('task_reference_conflict')) {
+        return {data:'The task or its related records cannot be changed in this context. Nothing was saved. Refresh the task and review your access before trying a new edit.',isError:true}
+      }
       if (msg.includes('parent_id must reference a task in the same workspace')) {
         return { data: 'parent_id must reference a task in the same workspace.', isError: true }
       }
@@ -716,7 +738,7 @@ export function createTaskTools(
           baseCompartments: context.assistantDefaultCompartments,
           baseProjectIds: context.assistantDefaultProjectIds,
           evidence: context.scopeAccumulator,
-          compartmentGrant: context.compartments,
+          compartmentGrant: writeGrant(context),
           projectGrant: context.projectIds,
         })
         const linksSummary = await applyExplicitLinks({
@@ -762,6 +784,7 @@ export function createTaskTools(
         const { linksMsg, closesMsg } = await writeEdgesAndClose(result.record.id)
         return {
           data: `Updated task [${result.record.id}]: ${result.record.title}${linksMsg}${closesMsg}`,
+          scopeEvidence: scopeEvidenceFromRows([result.record]),
         }
       }
 
@@ -775,7 +798,7 @@ export function createTaskTools(
         return { data: taskNotFoundMessage(input.id), isError: true }
       }
       const { linksMsg, closesMsg } = await writeEdgesAndClose(current.id)
-      return { data: `Updated task [${current.id}]${linksMsg}${closesMsg}` }
+      return { data: `Updated task [${current.id}]${linksMsg}${closesMsg}`, scopeEvidence:scopeEvidenceFromRows([current]) }
     },
   })
 
@@ -788,7 +811,7 @@ export function createTaskTools(
       const result = await applyUpdate(context, input.id, { status: 'done' }, ['update_status'])
       if ('isError' in result) return result
       opts?.onEvent?.({ type: 'task_updated', taskId: result.record.id, fields: ['status'] }, eventCtx(context))
-      return { data: `Closed task [${result.record.id}]: ${result.record.title}` }
+      return { data: `Closed task [${result.record.id}]: ${result.record.title}`, scopeEvidence:scopeEvidenceFromRows([result.record]) }
     },
   })
 
@@ -801,7 +824,7 @@ export function createTaskTools(
       const result = await applyUpdate(context, input.id, { status: 'todo' }, ['update_status'])
       if ('isError' in result) return result
       opts?.onEvent?.({ type: 'task_updated', taskId: result.record.id, fields: ['status'] }, eventCtx(context))
-      return { data: `Reopened task [${result.record.id}]: ${result.record.title}` }
+      return { data: `Reopened task [${result.record.id}]: ${result.record.title}`, scopeEvidence:scopeEvidenceFromRows([result.record]) }
     },
   })
 
@@ -952,12 +975,15 @@ export function createTaskTools(
             sensitivity: context.sensitivity?.max,
             compartments: context.compartmentAccumulator?.compartments,
           },
-          compartmentGrant: context.compartments,
+          compartmentGrant: writeGrant(context),
           projectGrant: context.projectIds,
         })
         const result = await store.update(context.userId, row.id, fieldsFor(row), {
           writtenBy: 'system',
+          access: accessFor(context),
           scope: {
+            sensitivity: writeScope.sensitivity,
+            visibility: inheritedVisibility(context),
             compartments: writeScope.compartments,
             projectIds: writeScope.projectIds,
           },

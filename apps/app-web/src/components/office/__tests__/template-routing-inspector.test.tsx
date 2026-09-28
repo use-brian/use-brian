@@ -1,10 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { OfficeTemplateRoutingDraft } from "@use-brian/office-model";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { TemplateRoutingInspector, recipeForSelectedTargets, templateRecipeName } from "../template-routing-inspector";
 import { presentationFixture, uid } from "./editor-fixtures";
+
+import { attachOfficeMetadata } from "@/lib/office/metadata";
+vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: "workspace", me: {id: "viewer"}})}));
 
 function routing(): OfficeTemplateRoutingDraft {
   return {
@@ -27,7 +30,7 @@ describe("[COMP:app-web/office-template-routing] Template routing inspector", ()
     const snapshot = presentationFixture();
     const draft = routing();
     expect(recipeForSelectedTargets(draft, snapshot, [uid(70)])?.id).toBe(uid(91));
-    const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en}><TemplateRoutingInspector templateId={uid(92)} snapshot={snapshot} selectedTargetIds={[uid(70)]} initialRouting={draft} /></I18nProvider>);
+    const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en}><TemplateRoutingInspector templateId={uid(92)} snapshot={snapshot} selectedTargetIds={[uid(70)]} initialRouting={attachOfficeMetadata(draft, 30_000, performance.now(), "viewer")} /></I18nProvider>);
     expect(html).toContain('data-template-routing="ready"');
     expect(html).toContain('data-template-routing-field="selected"');
     expect(html).toContain("Slide routing");

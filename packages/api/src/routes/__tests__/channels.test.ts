@@ -817,6 +817,62 @@ describe('[COMP:api/channels-route] channel config', () => {
     expect(updateConfig).not.toHaveBeenCalled()
   })
 
+  it('PATCH config server-stamps and canonicalizes owner-approved delivery audiences', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
+    const integration = makeIntegration()
+    const updateConfig = vi.fn().mockImplementation(async ({ config }) => ({ ...integration, config }))
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([integration]),
+      updateConfig,
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore, role: 'owner' }))
+      .patch('/api/workspaces/ws-1/channels/chan-1/config')
+      .send({ deliveryAudienceBindings: [{
+        channelId: 'C-FICTIONAL',
+        audienceType: 'group',
+        clearance: 'internal',
+        compartments: ['finance', 'finance'],
+        projectIds: ['11111111-1111-4111-8111-111111111111'],
+      }] })
+
+    expect(res.status).toBe(200)
+    const config = updateConfig.mock.calls[0][0].config
+    expect(config.deliveryAudienceBindings[0]).toMatchObject({
+      version: 1,
+      channelId: 'C-FICTIONAL',
+      audienceType: 'group',
+      compartments: ['finance'],
+      recipientUserId: null,
+      expiresAt: null,
+      approvedByUserId: 'user-1',
+    })
+    expect(config.deliveryAudienceBindings[0].approvedAt).toEqual(expect.any(String))
+  })
+
+  it('PATCH config refuses delivery audience approval by an ordinary member', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
+    const updateConfig = vi.fn()
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([makeIntegration()]),
+      updateConfig,
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore, role: 'member' }))
+      .patch('/api/workspaces/ws-1/channels/chan-1/config')
+      .send({ deliveryAudienceBindings: [{
+        channelId: 'C-FICTIONAL',
+        audienceType: 'group',
+        clearance: 'public',
+        compartments: [],
+        projectIds: [],
+      }] })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('delivery_audience_binding_requires_admin')
+    expect(updateConfig).not.toHaveBeenCalled()
+  })
+
   it('PATCH config normalizes WhatsApp Cloud allowlist phone numbers', async () => {
     vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ channelType: 'whatsapp' }))
     const integration = makeIntegration({
@@ -1746,6 +1802,15 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
         integrationLabel: 'Global app',
       }),
     ])
+  })
+
+  it('keeps discussion destinations and resolves their base group without treating the root as a topic', async () => {
+    mockRows([destRow({ channelId: '-10020:discussion:30' })])
+    const getChat = vi.fn().mockResolvedValue({ id: -10020, type: 'supergroup', title: 'Comments' })
+    vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
+    const res = await request(buildApp({ telegramBotToken: 'default-token' })).get('/api/workspaces/ws-1/channel-destinations')
+    expect(res.status).toBe(200)
+    expect(res.body.destinations[0]).toMatchObject({ channelId: '-10020:discussion:30', title: 'Comments › discussion #30' })
   })
 
   it('resolves a topic group by its base chat id and falls back to the topic number', async () => {

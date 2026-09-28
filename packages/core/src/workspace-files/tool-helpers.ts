@@ -77,6 +77,7 @@ export function ctxFor(context: {
   assistantKind?: FilesContext['assistantKind']
   clearance?: FilesContext['clearance']
   compartments?: FilesContext['compartments']
+  mutationCompartments?: FilesContext['mutationCompartments']
   projectIds?: FilesContext['projectIds']
   assistantDefaultCompartments?: string[]
   assistantDefaultProjectIds?: string[]
@@ -96,7 +97,9 @@ export function ctxFor(context: {
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+    mutationCompartments: context.mutationCompartments,
     projectIds: context.projectIds,
+    writeSensitivity: context.scopeAccumulator?.sensitivity,
     writeCompartments: writeScope.compartments,
     writeProjectIds: writeScope.projectIds,
   }
@@ -151,8 +154,12 @@ export function errorMessage(err: FilesError): string {
         ? `No workspace file matches ${err.reference}. If that id came from an <attached_file id="…"> tag it is an UPLOADED attachment, not a stored file — uploads must be saved into the workspace files first, and the save returns the durable path you then pass here. Save it, then retry with the returned path. If you have no tool to save uploaded files, tell the user plainly that this assistant cannot keep or attach files and that Workspace files must be turned on for it in Studio → the assistant → Capabilities — never claim a file was attached when it was not, and never substitute a text note for the file.`
         : `No workspace file at path ${err.reference}. Paths are exact — a leading slash, a folder segment, or the extension being off by one character all miss the same way, and a file that was moved or renamed no longer answers to its old path. Call fileSearch (by name, title, tag, or parent_path) to get the file's current id and path, then retry with what it returns. Do NOT retry this exact path.`
     case 'conflict':
-      return `A file already exists at ${err.path}. Pass an existing id (or delete first) to overwrite.`
+      return err.reason === 'changed'
+        ? `The file at ${err.path} changed or its current version could not be verified. Read the current file before making a new edit. No staged update was published; do not delete the file to resolve this conflict.`
+        : `A file already exists at ${err.path}. Choose another path, or read the existing file before editing it.`
     case 'read_only':
+      if (err.reason === 'release_required') return `Lowering sensitivity for ${err.path} requires an audited release. Nothing was changed. Do not retry through ordinary file editing or delete and recreate the file to remove its protection.`
+      if (err.reason === 'scope') return `Your current access does not allow writing this file scope (${err.path}). Read access alone does not authorize an edit. Use an authorized context or ask a workspace administrator to review access.`
       return `${err.path} is a read-only file imported from Local Directory. Read or download it, or edit the original file on the server and sync the directory again.`
   }
 }

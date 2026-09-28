@@ -9,6 +9,7 @@ export * from './crm/index.js'
 export * from './workspace/index.js'
 export * from './entities/index.js'
 export * from './classification/index.js'
+export * from './decisions/index.js'
 export * from './corrections/index.js'
 export * from './brain/index.js'
 export * from './retrieval/index.js'
@@ -150,8 +151,11 @@ export * from './association/programme-catalogue.js'
 
 export { askQuestionSchema, formatAssistantQuestion, type AssistantQuestion } from './tools/base/ask-question.js'
 export * from './association/site-content.js'
+export * from './association/site-content-edit.js'
+export * from './association/compat-text.js'
 
 // Temporary opt-in, content-free document extraction diagnostics.
 export { debugDocumentFlow } from './engine/document-flow-debug.js'
 
 export { summarizeProviderError, type ProviderErrorCategory, type ProviderErrorSummary } from './providers/provider-error-summary.js'
+export { prepareLinkedInImage } from './media/linkedin-image.js'

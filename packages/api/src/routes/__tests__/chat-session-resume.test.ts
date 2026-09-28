@@ -7,6 +7,7 @@ import {
 } from '../chat.js'
 import type { SessionResumeStore, SessionResumePoint } from '../../db/session-resume-store.js'
 import type { PendingApprovalsStore, PendingApproval } from '../../db/pending-approvals-store.js'
+import type { AccessCeiling } from '@use-brian/core'
 
 // ─────────────────────────────────────────────────────────────────────
 // `runSessionResume` orchestrator (WU-6.4 — Path B durable chat resume).
@@ -18,6 +19,16 @@ import type { PendingApprovalsStore, PendingApproval } from '../../db/pending-ap
 // The actual tool replay (mocked via `replay`) is wired in apps/api.
 // ─────────────────────────────────────────────────────────────────────
 
+const STARTING_ACCESS: AccessCeiling = {
+  workspaceId: 'ws-1',
+  userId: 'user-1',
+  clearance: 'internal',
+  compartments: ['product'],
+  mutationCompartments: ['product'],
+  projectIds: ['project-1'],
+  visibilityAssistantIds: ['assistant-1'],
+}
+
 const SAMPLE_POINT: SessionResumePoint = {
   sessionId: 'sess-1',
   approvalId: 'app-1',
@@ -26,6 +37,7 @@ const SAMPLE_POINT: SessionResumePoint = {
   loopStepIndex: 2,
   selectedCustomModel: 'custom:profile-1',
   selectedTier: 'max',
+  startingAccessCeiling: STARTING_ACCESS,
   createdAt: new Date('2026-05-14T00:00:00Z'),
 }
 
@@ -179,6 +191,7 @@ describe('[COMP:brain/session-resume-worker] runSessionResume', () => {
       loopStepIndex: 2,
       selectedCustomModel: 'custom:profile-1',
       selectedTier: 'max',
+      startingAccessCeiling: STARTING_ACCESS,
       approvalStatus: 'approved',
       rejectReason: null,
       answerText: null,

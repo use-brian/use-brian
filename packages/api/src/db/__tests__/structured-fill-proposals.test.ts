@@ -9,6 +9,9 @@ const input: StructuredFillProposalInput = {
   assistantId:uuid(5),extractionId:uuid(6),evidenceHash:'a'.repeat(64),
   command:{type:'batch',commands:[]},preview:[{targetId:uuid(9),value:'0012'}],
   lineage:[{recordId:'record:1',cellId:'cell:1',targetId:uuid(9)}],body:'Unreviewed source evidence. 0012',targetIds:[uuid(9)],
+  access:{userId:uuid(1),workspaceId:uuid(2),assistantId:uuid(5),assistantKind:'standard',clearance:'confidential',compartments:['team'],mutationCompartments:['team'],projectIds:[uuid(13)]},
+  evidenceFiles:[{id:uuid(7),scopeVersion:'1'},{id:uuid(8),scopeVersion:'1'},{id:uuid(12),scopeVersion:'1'}],
+  evidenceScope:{sensitivity:'internal',compartments:['team'],projectIds:[uuid(13)]},
 }
 const migration = () => readFileSync(new URL('../../../migrations/557_structured_document_extractions.sql',import.meta.url),'utf8')
 
@@ -18,7 +21,7 @@ describe('[COMP:api/structured-document-store] structured fill proposal SQL cont
     const {query,store}=setup(); expect(await store.save(input)).toBeNull(); expect(query).toHaveBeenCalledTimes(1)
     const [actor,sql,params]=query.mock.calls[0]
     expect(actor).toBe(input.userId); expect(params[4]).toBe(1)
-    for (const part of ["a.lifecycle_state='active'",'a.head_version_id=$4 AND c.seq=$5','FOR UPDATE OF a,c',"e.status='completed'",'INSERT INTO structured_document_fill_proposals','INSERT INTO office_comment_threads','INSERT INTO office_comment_messages','INSERT INTO office_suggestions',"'assistant'",'WHERE p.payload_hash=EXCLUDED.payload_hash']) expect(sql).toContain(part)
+    for (const part of ["a.lifecycle_state='active'",'a.head_version_id=$4 AND c.seq=$5','FOR SHARE OF f','FOR UPDATE OF a,c,e',"e.status='completed'",'effective_member_team_compartments','scopeVersion', "IN ('comment','edit')",'INSERT INTO structured_document_fill_proposals','INSERT INTO office_comment_threads','INSERT INTO office_comment_messages','INSERT INTO office_suggestions',"'assistant'",'WHERE p.payload_hash=EXCLUDED.payload_hash']) expect(sql).toContain(part)
     expect(sql).not.toMatch(/advisory|UPDATE office_collab_documents|UPDATE office_artifacts/)
     expect(params[12]).toBe(input.body); expect(JSON.parse(params[11] as string)).toEqual(input.lineage)
   })
@@ -28,13 +31,13 @@ describe('[COMP:api/structured-document-store] structured fill proposal SQL cont
     await store.save({...input,body:'Different explanation'})
     const [a,b,c]=query.mock.calls.map(call=>call[2])
     expect(a[8]).toBe(b[8]); expect(a[8]).not.toBe(c[8])
-    expect(a.slice(14)).toEqual(b.slice(14)); expect(a.slice(14)).toEqual(c.slice(14))
-    expect(new Set(a.slice(14)).size).toBe(3)
-    for (const id of a.slice(14)) expect(id).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-8[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+    expect(a.slice(14,17)).toEqual(b.slice(14,17)); expect(a.slice(14,17)).toEqual(c.slice(14,17))
+    expect(new Set(a.slice(14,17)).size).toBe(3)
+    for (const id of a.slice(14,17)) expect(id).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-8[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
   })
   it('rejects unbounded or non-JSON payloads before any DB call', async () => {
     const {query,store}=setup()
-    for (const patch of [{body:''},{body:'x'.repeat(20001)},{body:'bad\0body'},{targetIds:[]},{targetIds:[uuid(9),uuid(9)]},{expectedSeq:0},{command:undefined},{preview:{x:NaN}}]) await expect(store.save({...input,...patch})).rejects.toThrow('invalid_proposal_payload')
+    for (const patch of [{body:''},{body:'x'.repeat(20001)},{body:'bad\0body'},{targetIds:[]},{targetIds:[uuid(9),uuid(9)]},{expectedSeq:0},{command:undefined},{preview:{x:NaN}},{evidenceFiles:[]},{evidenceFiles:[input.evidenceFiles[0],input.evidenceFiles[0]]}]) await expect(store.save({...input,...patch})).rejects.toThrow('invalid_proposal_payload')
     expect(query).not.toHaveBeenCalled()
   })
   it('scopes reads and migration references to actor/workspace', async () => {
@@ -56,10 +59,21 @@ it.skipIf(!pgliteModule)('[COMP:api/structured-document-store] executes migratio
       CREATE TABLE users(id uuid PRIMARY KEY);
       CREATE TABLE workspaces(id uuid PRIMARY KEY);
       CREATE TABLE assistants(id uuid PRIMARY KEY);
-      CREATE TABLE workspace_members(workspace_id uuid,user_id uuid,UNIQUE(workspace_id,user_id));
-      CREATE TABLE workspace_files(id uuid PRIMARY KEY,workspace_id uuid NOT NULL);
-      CREATE TABLE office_artifacts(id uuid PRIMARY KEY,workspace_id uuid NOT NULL,head_version_id uuid,lifecycle_state text,family text,mode text);
+      CREATE TABLE workspace_members(workspace_id uuid,user_id uuid,clearance text NOT NULL DEFAULT 'confidential',compartments text[] DEFAULT '{}',UNIQUE(workspace_id,user_id));
+      CREATE TABLE workspace_files(id uuid PRIMARY KEY,workspace_id uuid NOT NULL,scope_version bigint NOT NULL DEFAULT 1,
+        user_id uuid,assistant_id uuid,sensitivity text NOT NULL DEFAULT 'internal',compartments text[] NOT NULL DEFAULT '{}',project_ids uuid[] NOT NULL DEFAULT '{}',
+        valid_to timestamptz,retracted_at timestamptz,superseded_by uuid);
+      CREATE TABLE office_artifacts(id uuid PRIMARY KEY,workspace_id uuid NOT NULL,head_version_id uuid,lifecycle_state text,family text,mode text,
+        creator_user_id uuid,owner_user_id uuid,default_workspace_role text NOT NULL DEFAULT 'view',sensitivity text NOT NULL DEFAULT 'internal',
+        compartments text[] NOT NULL DEFAULT '{}',project_ids uuid[] NOT NULL DEFAULT '{}');
+      CREATE TABLE office_artifact_grants(artifact_id uuid,user_id uuid,role text,revoked_at timestamptz,UNIQUE(artifact_id,user_id));
       CREATE TABLE office_artifact_versions(id uuid PRIMARY KEY,artifact_id uuid NOT NULL);
+      CREATE FUNCTION sensitivity_rank(value text) RETURNS integer LANGUAGE sql IMMUTABLE AS $$
+        SELECT CASE value WHEN 'public' THEN 0 WHEN 'internal' THEN 1 WHEN 'confidential' THEN 2 ELSE 99 END
+      $$;
+      CREATE FUNCTION effective_member_team_compartments(actor uuid,workspace uuid) RETURNS text[] LANGUAGE sql STABLE AS $$
+        SELECT compartments FROM workspace_members WHERE user_id=actor AND workspace_id=workspace
+      $$;
     `)
     await pg.exec(readFileSync(new URL('../../../migrations/3943_office_collaboration.sql',import.meta.url),'utf8'))
     await pg.exec(migration())
@@ -68,12 +82,17 @@ it.skipIf(!pgliteModule)('[COMP:api/structured-document-store] executes migratio
       INSERT INTO workspaces VALUES ('${uuid(2)}');
       INSERT INTO assistants VALUES ('${uuid(5)}');
       INSERT INTO workspace_members VALUES ('${uuid(2)}','${uuid(1)}'),('${uuid(2)}','${uuid(11)}');
-      INSERT INTO workspace_files VALUES ('${uuid(7)}','${uuid(2)}'),('${uuid(8)}','${uuid(2)}');
-      INSERT INTO office_artifacts VALUES ('${uuid(3)}','${uuid(2)}','${uuid(4)}','active','spreadsheet','artifact');
+      UPDATE workspace_members SET compartments=ARRAY['team'];
+      INSERT INTO workspace_files(id,workspace_id,compartments,project_ids) VALUES
+        ('${uuid(7)}','${uuid(2)}',ARRAY['team'],ARRAY['${uuid(13)}']::uuid[]),
+        ('${uuid(8)}','${uuid(2)}',ARRAY['team'],ARRAY['${uuid(13)}']::uuid[]),
+        ('${uuid(12)}','${uuid(2)}',ARRAY['team'],ARRAY['${uuid(13)}']::uuid[]);
+      INSERT INTO office_artifacts(id,workspace_id,head_version_id,lifecycle_state,family,mode,creator_user_id,owner_user_id,default_workspace_role,sensitivity,compartments,project_ids)
+        VALUES ('${uuid(3)}','${uuid(2)}','${uuid(4)}','active','spreadsheet','artifact','${uuid(1)}','${uuid(1)}','comment','internal',ARRAY['team'],ARRAY['${uuid(13)}']::uuid[]);
       INSERT INTO office_artifact_versions VALUES ('${uuid(4)}','${uuid(3)}');
       INSERT INTO office_collab_documents(artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version) VALUES ('${uuid(3)}','${uuid(2)}','\\x','\\x','${'b'.repeat(64)}',1);
       INSERT INTO structured_document_extractions(id,user_id,workspace_id,source_file_id,pdf_sha256,context,status,remote_job_id,records_file_id,records_sha256,document_id,page_numbers,image_files)
-      VALUES ('${uuid(6)}','${uuid(1)}','${uuid(2)}','${uuid(7)}','${'c'.repeat(64)}','{}','completed','remote','${uuid(8)}','${'d'.repeat(64)}','document','[1]','[{"page":1}]');
+      VALUES ('${uuid(6)}','${uuid(1)}','${uuid(2)}','${uuid(7)}','${'c'.repeat(64)}','{}','completed','remote','${uuid(8)}','${'d'.repeat(64)}','document','[1]','[{"page":1,"fileId":"${uuid(12)}","sha256":"${'e'.repeat(64)}","sizeBytes":8}]');
       CREATE ROLE proposal_actor;
       GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA public TO proposal_actor;
       SET ROLE proposal_actor;
@@ -92,7 +111,7 @@ it.skipIf(!pgliteModule)('[COMP:api/structured-document-store] executes migratio
     for (const table of ['structured_document_fill_proposals','office_comment_threads','office_comment_messages','office_suggestions']) expect((await pg.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n).toBe(1)
     await pg.exec(`UPDATE office_collab_documents SET seq=2; SET ROLE proposal_actor`)
     expect(await store.save({...input,evidenceHash:'e'.repeat(64)})).toBeNull()
-    expect(await store.save(input)).toEqual(first) // exact retry, not a new stale proposal
+    expect(await store.save(input)).toBeNull() // exact retry also needs current destination authority/version
     await pg.exec(`RESET ROLE; UPDATE office_artifacts SET head_version_id=NULL; SET ROLE proposal_actor`)
     expect(await store.save({...input,expectedSeq:2,evidenceHash:'f'.repeat(64)})).toBeNull()
     // A failing dependent Office insert rolls back reservation and thread too.

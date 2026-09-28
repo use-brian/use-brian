@@ -64,6 +64,7 @@ function makeTransaction(overrides: Partial<CrmOperationsTransaction> = {}) {
     resolveAttributionUser: vi.fn().mockResolvedValue(USER_ID),
     createContact: vi.fn().mockResolvedValue({ id: CONTACT_ID }),
     updateContact: vi.fn().mockResolvedValue({ id: CONTACT_ID }),
+    fillContactGaps: vi.fn().mockResolvedValue({ id: CONTACT_ID }),
     bindExternalIdentity: vi.fn().mockResolvedValue(undefined),
     createSubmission: vi.fn().mockResolvedValue({ id: SUBMISSION_ID, contactId: CONTACT_ID }),
     createSubmissionAttachments: vi.fn().mockResolvedValue(undefined),
@@ -496,5 +497,51 @@ describe('[COMP:crm/operations-service] canonical CRM operations service', () =>
     expect(tx.appendDomainAudit).not.toHaveBeenCalled()
     expect(tx.appendWorkspaceAudit).not.toHaveBeenCalled()
     expect(tx.emitDomainEvent).not.toHaveBeenCalled()
+  })
+
+  describe('existing_or_new identity policy', () => {
+    const existingOrNew = { ...definition, identityPolicy: 'existing_or_new' as const }
+    const EXISTING_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+
+    it('attaches an unverified claim to the one live contact and only fills its gaps', async () => {
+      const tx = makeTransaction({
+        getIntakeDefinition: vi.fn().mockResolvedValue(existingOrNew),
+        findContactByEmail: vi.fn().mockResolvedValue(EXISTING_ID),
+        fillContactGaps: vi.fn().mockResolvedValue({ id: EXISTING_ID }),
+      })
+      const output = await createCrmOperationsService(makeStore(tx)).execute(context, submissionCommand)
+      expect(tx.findContactByEmail).toHaveBeenCalledWith('ari@example.com')
+      expect(tx.fillContactGaps).toHaveBeenCalledWith(EXISTING_ID, expect.objectContaining({ name: 'Ari Example', email: 'ari@example.com' }))
+      expect(tx.updateContact).not.toHaveBeenCalled()
+      expect(tx.createContact).not.toHaveBeenCalled()
+      expect(tx.createSubmission).toHaveBeenCalledWith(expect.objectContaining({ contactId: EXISTING_ID }))
+      expect(tx.appendConsent).toHaveBeenCalledWith(expect.objectContaining({ contactId: EXISTING_ID }))
+      expect(output.record).toMatchObject({ contactId: EXISTING_ID })
+    })
+
+    it('creates a contact when none holds the address', async () => {
+      const tx = makeTransaction({ getIntakeDefinition: vi.fn().mockResolvedValue(existingOrNew) })
+      await createCrmOperationsService(makeStore(tx)).execute(context, submissionCommand)
+      expect(tx.createContact).toHaveBeenCalledOnce()
+      expect(tx.fillContactGaps).not.toHaveBeenCalled()
+    })
+
+    it('keeps the submission on a new contact when several live contacts share the address', async () => {
+      const tx = makeTransaction({
+        getIntakeDefinition: vi.fn().mockResolvedValue(existingOrNew),
+        findContactByEmail: vi.fn().mockRejectedValue(new CrmOperationsError('conflict', 'Multiple live contacts match this email; review is required.', { reason: 'identity_review_required' })),
+      })
+      await createCrmOperationsService(makeStore(tx)).execute(context, submissionCommand)
+      expect(tx.createContact).toHaveBeenCalledOnce()
+      expect(tx.fillContactGaps).not.toHaveBeenCalled()
+      expect(tx.updateContact).not.toHaveBeenCalled()
+    })
+
+    it('never matches for new_or_review', async () => {
+      const tx = makeTransaction({ findContactByEmail: vi.fn().mockResolvedValue(EXISTING_ID) })
+      await createCrmOperationsService(makeStore(tx)).execute(context, submissionCommand)
+      expect(tx.findContactByEmail).not.toHaveBeenCalled()
+      expect(tx.createContact).toHaveBeenCalledOnce()
+    })
   })
 })

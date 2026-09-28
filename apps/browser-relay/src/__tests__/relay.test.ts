@@ -487,3 +487,96 @@ describe('[COMP:ext/relay] Relay internal auth', () => {
     expect(relaySecretMatches('anything', '')).toBe(false)
   })
 })
+
+describe('protected fill human approval budget', () => {
+  it('keeps the command live beyond generic timeout but bounds it at 120 seconds', async () => {
+    vi.useFakeTimers()
+    const relay = relayWithVerifier()
+    const socket = fakeSocket()
+    relay.handleMessage(socket, JSON.stringify({ type: 'hello', capabilities: { protectedFillV1: true }, pairingToken: signBrowserExtPairToken({ userId: 'user-1', workspaceId: 'ws-1', browserProfileId: PROFILE }, SECRET) }), 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+    let done = false
+    const pending = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'browserFillReference' })
+    void pending.then(() => { done = true })
+    await vi.advanceTimersByTimeAsync(90_000)
+    expect(done).toBe(false)
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect((await pending).ok).toBe(false)
+  })
+})
+
+
+describe('protected fill transport eligibility', () => {
+  it.each([undefined, 'moz-extension://firefox-id', 'https://page.example'])('fails closed on unsupported upgrade origin %s', async origin => {
+    const relay = relayWithVerifier()
+    const socket = fakeSocket()
+    relay.handleMessage(socket, JSON.stringify({ type: 'hello', capabilities: { protectedFillV1: true }, pairingToken: signBrowserExtPairToken({ userId: 'user-1', workspaceId: 'ws-1', browserProfileId: PROFILE }, SECRET) }), origin)
+    const result = await relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'browserFillReference' })
+    expect(result).toEqual({ ok: false, error: 'Protected fill unavailable', code: 'protected_fill_denied' })
+    expect(socket.sent.filter(msg => msg.type === 'command')).toHaveLength(0)
+  })
+})
+
+
+describe('protected fill explicit protocol capability', () => {
+  it.each([undefined, { protectedFillV1: false }, { protectedFillV1: true }])('persists hello capability %j, independent of current build fingerprint', async capabilities => {
+    const relay = relayWithVerifier()
+    const socket = fakeSocket()
+    const token = signBrowserExtPairToken({ userId: 'user-1', workspaceId: 'ws-1', browserProfileId: PROFILE }, SECRET)
+    relay.handleMessage(socket, JSON.stringify({ type: 'hello', pairingToken: token, build: CURRENT_EXTENSION_BUILD, capabilities }), 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+    expect(relay.connectionStatus('user-1', { browserProfileId: PROFILE }).capabilities?.protectedFillV1 === true).toBe(capabilities?.protectedFillV1 === true)
+    const pending = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'browserFillReference' })
+    if (capabilities?.protectedFillV1 === true) {
+      const command = socket.sent.find(m => m.type === 'command')!
+      relay.handleMessage(socket, JSON.stringify({ type: 'result', id: command.id, ok: true }))
+      expect((await pending).ok).toBe(true)
+    } else {
+      expect((await pending).ok).toBe(false)
+      expect(socket.sent.some(m => m.type === 'command')).toBe(false)
+    }
+  })
+  it('rejects malformed truthy capability instead of coercing it', () => {
+    const relay = relayWithVerifier()
+    const socket = fakeSocket()
+    relay.handleMessage(socket, JSON.stringify({ type: 'hello', pairingToken: 'anything', capabilities: { protectedFillV1: 'true' } }))
+    expect(socket.closed?.code).toBe(4400)
+  })
+})
+
+
+describe('capability is bound to the current paired connection', () => {
+  it('does not inherit support when an older install replaces a capable connection', async () => {
+    const relay = relayWithVerifier()
+    const token = signBrowserExtPairToken({ userId: 'user-1', workspaceId: 'ws-1', browserProfileId: PROFILE }, SECRET)
+    const origin = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    relay.handleMessage(fakeSocket(), JSON.stringify({ type: 'hello', pairingToken: token, capabilities: { protectedFillV1: true } }), origin)
+    expect(relay.connectionStatus('user-1', { browserProfileId: PROFILE }).capabilities?.protectedFillV1).toBe(true)
+    relay.handleMessage(fakeSocket(), JSON.stringify({ type: 'hello', pairingToken: token }), origin)
+    expect(relay.connectionStatus('user-1', { browserProfileId: PROFILE }).capabilities).toBeUndefined()
+    expect((await relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'browserFillReference' })).ok).toBe(false)
+  })
+})
+
+describe('Electron compatibility metadata', () => {
+  it.each([undefined, 'old-electron-build'])('skips extension staleness for Electron build %s, never grants protected fill', async build => {
+    const relay = relayWithVerifier()
+    const socket = fakeSocket()
+    const token = signBrowserExtPairToken({ userId: 'user-1', workspaceId: 'ws-1', browserProfileId: PROFILE }, SECRET)
+    relay.handleMessage(socket, JSON.stringify({ type: 'hello', pairingToken: token,
+      clientKind: 'electron', build, capabilities: { protectedFillV1: true },
+    }), 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+    expect(socket.sent[0]).toEqual({ type: 'ready' })
+    expect(relay.connectionStatus('user-1', { browserProfileId: PROFILE })).toMatchObject({ staleBuild: false })
+    expect(relay.connectionStatus('user-1', { browserProfileId: PROFILE }).capabilities).toBeUndefined()
+    expect(await relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'browserFillReference' }))
+      .toEqual({ ok: false, error: 'Protected fill unavailable', code: 'protected_fill_denied' })
+    expect(socket.sent.some(msg => msg.type === 'command')).toBe(false)
+  })
+
+  it('still requires a valid pairing token', () => {
+    const relay = relayWithVerifier()
+    const socket = fakeSocket()
+    relay.handleMessage(socket, JSON.stringify({ type: 'hello', pairingToken: 'invalid', clientKind: 'electron' }))
+    expect(socket.sent[0]).toMatchObject({ type: 'error' })
+    expect(relay.isConnected('user-1')).toBe(false)
+  })
+})

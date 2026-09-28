@@ -86,7 +86,7 @@ async function assertLearningAuthority(client: pg.PoolClient, actor: FeedActor, 
   const ranks = ['public', 'internal', 'confidential', 'restricted']
   if (ranks.indexOf(scope.clearance) < ranks.indexOf(confirmation.scope.sensitivity)
     || scope.compartments !== null && confirmation.scope.compartments.some(id => !scope.compartments!.includes(id))) throw new FeedCollaborationError(403, 'learning_context_not_available')
-  await assertFeedFiles(client, actor, scope, confirmation.content.composition, confirmation.history.fileIds)
+  await assertFeedFiles(client, actor, scope, confirmation.content.composition, confirmation.history.fileIds, confirmation.content.linkedin)
   const currentSources = await learningInput(client, confirmation)
   if (currentSources.coverage.missing) throw new FeedCollaborationError(409, 'learning_sources_unavailable')
   if (input && input.sources.some(source => !currentSources.sources.some(current => current.id === source.id && current.body === source.body))) throw new FeedCollaborationError(409, 'learning_sources_changed')

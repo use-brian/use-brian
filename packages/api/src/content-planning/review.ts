@@ -181,7 +181,7 @@ const reviewStates = {
 
 export function deterministicFeedFindings(context: FeedReviewContext, content: StructuredFeedContent, locale: FeedReviewRequest['locale']): FeedReviewFinding[] {
   const copy = deterministicCopy[locale]; const composition = context.dimensions.content.sources.find(source => source.kind === 'composition')
-  const result: FeedReviewFinding[] = feedOutputProjection(content, context.platform).issues.map(issue => ({ issueKey: `readiness_${issue.code}`, dimensions: ['content'], priority: 'high', target: issue.target, issue: copy[issue.code], nextStep: copy.repair, evidence: composition ? [{ sourceId: composition.id }] : [] }))
+  const result: FeedReviewFinding[] = feedOutputProjection(content, context.platform).issues.map(issue => ({ issueKey: `readiness_${issue.code}`, dimensions: ['content'], priority: 'high', target: issue.target, issue: (issue.code in copy ? copy[issue.code as keyof typeof copy] : copy.unsupported_format), nextStep: copy.repair, evidence: composition ? [{ sourceId: composition.id }] : [] }))
   const brand = context.dimensions.memory.sources.find(source => source.kind === 'brand')
   if (brand) { try {
     for (const flag of brandCopyFlags(JSON.parse(brand.body) as BrandRecord, composition?.body ?? '')) result.push({ issueKey: `brand_${feedEditorialHash(flag)}`, dimensions: ['memory'], priority: 'medium', target: { kind: 'post' }, issue: `${copy.brand}: ${flag.phrase}`, nextStep: copy.brandRepair, evidence: [{ sourceId: brand.id, quote: JSON.stringify(flag.phrase) }] })

@@ -87,6 +87,11 @@ import {
   retireCrmEntitySeparation,
 } from '../../db/crm-identity-store.js'
 import {
+  addCrmDealParticipant,
+  removeCrmDealParticipant,
+  setCrmArchived,
+  setCrmDealPipelineStage,
+  updateCrmCustomFields,
   appendCrmActivity,
   applyCrmFieldPreset,
   createCrmPipeline,
@@ -568,4 +573,52 @@ describe('[COMP:api/crm-record-http] canonical CRM record HTTP boundary', () => 
       metadata: { field: 'contactId', before: 'contact-1', after: null },
     }))
   })
+
+  it.each(['add','remove'] as const)('returns an actionable content-free scope refusal for participant %s',async operation=>{
+    const write=operation==='add'?addCrmDealParticipant:removeCrmDealParticipant
+    vi.mocked(write).mockRejectedValue(Object.assign(new Error('private target details'),{code:'scope_operation_denied'}))
+    const app=request(makeApp())
+    const response=operation==='add'
+      ?await app.post(`/api/crm/${WS}/records/deal-1/participants`).send({contactId:'person-1'})
+      :await app.delete(`/api/crm/${WS}/records/deal-1/participants/person-1`)
+    expect(response.status).toBe(403)
+    expect(response.body).toEqual({code:'scope_operation_denied',error:'This relationship is unavailable for this operation. Ask a workspace administrator to review access.'})
+    expect(JSON.stringify(response.body)).not.toContain('private target details')
+  })
+
+  it.each(['record','custom','archive','stage'] as const)('reports %s scope loss as authorization failure without activity or private exception details',async operation=>{
+    const error=Object.assign(new Error('private source details'),{code:'scope_operation_denied'})
+    const app=request(makeApp())
+    let response
+    if(operation==='record') {
+      vi.mocked(getCrmR2Record).mockResolvedValueOnce({id:'record-1',kind:'person',name:'Visible record',attributes:{}} as never)
+      vi.mocked(updateContact).mockRejectedValueOnce(error)
+      response=await app.patch(`/api/crm/${WS}/records/record-1`).send({name:'Changed'})
+    } else if(operation==='custom') {
+      vi.mocked(updateCrmCustomFields).mockRejectedValueOnce(error)
+      response=await app.patch(`/api/crm/${WS}/records/record-1/custom-fields`).send({values:{note:'Changed'}})
+    } else if(operation==='stage') {
+      vi.mocked(setCrmDealPipelineStage).mockRejectedValueOnce(error)
+      response=await app.patch(`/api/crm/${WS}/records/record-1/pipeline-stage`).send({stageId:'stage-1'})
+    } else {
+      vi.mocked(setCrmArchived).mockRejectedValueOnce(error)
+      response=await app.post(`/api/crm/${WS}/records/record-1/archive`)
+    }
+    expect(response.status).toBe(403)
+    expect(response.body.code).toBe('scope_operation_denied')
+    expect(response.body.error).toContain('workspace administrator')
+    expect(JSON.stringify(response.body)).not.toContain('private source details')
+    expect(appendCrmActivity).not.toHaveBeenCalled()
+  })
+  it.each(['scope','missing'] as const)('does not report a saved activity after source refusal: %s', async mode=>{
+    vi.mocked(getEntityById).mockResolvedValue({id:'record-1',kind:'deal',attributes:{}} as never)
+    if(mode==='scope') vi.mocked(appendCrmActivity).mockRejectedValueOnce(Object.assign(new Error('private source details'),{code:'scope_operation_denied'}))
+    else vi.mocked(appendCrmActivity).mockResolvedValueOnce(null)
+    const response=await request(makeApp()).post(`/api/crm/${WS}/records/record-1/activities`).send({activityType:'note',summary:'Fixture'})
+    expect(response.status).toBe(mode==='scope'?403:404)
+    expect(response.body).not.toHaveProperty('activity')
+    expect(JSON.stringify(response.body)).not.toContain('private source details')
+    expect(appendCrmActivity).toHaveBeenCalledWith(expect.objectContaining({access:CTX,userId:CTX.userId,workspaceId:WS}))
+  })
+
 })

@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import {
   assertPageAccess,
+  assertPageMutationAccess,
   recheckPageConnection,
+  revalidatePageRoom,
+  sweepPageRooms,
   resolveEffectiveRole,
   isReadOnlyRole,
   PageAccessDenied,
@@ -23,11 +26,12 @@ function makeQuery(opts: {
     memberClearance: string | null
     /** Migration 313 — the page's teamspace tier; null/omitted = a private page / no container. */
     teamspaceSensitivity?: string | null
+    canMutate?: boolean
   } | null
   grantRole?: GrantRole | null
 }): RlsQuery {
   return (async (_userId: string, sql: string) => {
-    if (sql === PAGE_ACCESS_SQL) return (opts.access ? [opts.access] : []) as never[]
+    if (sql === PAGE_ACCESS_SQL) return (opts.access ? [{ ...opts.access, canMutate: opts.access.canMutate ?? true }] : []) as never[]
     if (sql === PAGE_ROLE_SQL) return (opts.grantRole ? [{ role: opts.grantRole }] : []) as never[]
     throw new Error(`unexpected sql: ${sql}`)
   }) as RlsQuery
@@ -121,6 +125,15 @@ describe('[COMP:doc-sync/clearance-gate] assertPageAccess', () => {
     expect(isReadOnlyRole(access.role)).toBe(false)
   })
 
+  it('downgrades an Edit role when current department reach is read-only', async () => {
+    const query = makeQuery({
+      access: { workspaceId: 'w', pageClearance: 'internal', memberClearance: 'internal', canMutate: false },
+      grantRole: 'edit',
+    })
+    await expect(assertPageAccess({ userId: 'u', pageId: 'p', query })).resolves.toMatchObject({ role: 'view' })
+    await expect(assertPageMutationAccess({ userId: 'u', pageId: 'p', query })).rejects.toMatchObject({ reason: 'write_denied' })
+  })
+
   it('denies a member whose clearance is below the TEAMSPACE sensitivity (migration 313)', async () => {
     // The demotion edge: filed into the container while cleared, tier raised
     // (or clearance dropped) later — the page-open gate is the backstop.
@@ -177,7 +190,7 @@ describe('[COMP:doc-sync/clearance-gate] assertPageAccess', () => {
     let roleQueried = false
     const query = (async (_u: string, sql: string) => {
       if (sql === PAGE_ACCESS_SQL)
-        return [{ workspaceId: 'w', pageClearance: 'confidential', memberClearance: 'public' }] as never[]
+        return [{ workspaceId: 'w', pageClearance: 'confidential', memberClearance: 'public', canMutate: false }] as never[]
       if (sql === PAGE_ROLE_SQL) {
         roleQueried = true
         return [] as never[]
@@ -217,13 +230,69 @@ describe('[COMP:doc-sync/clearance-gate] resolveEffectiveRole', () => {
     const query = (async (_u: string, sql: string, params: unknown[]) => {
       seen.push({ sql, params })
       if (sql === PAGE_ACCESS_SQL)
-        return [{ workspaceId: 'w', pageClearance: 'public', memberClearance: 'internal' }] as never[]
+        return [{ workspaceId: 'w', pageClearance: 'public', memberClearance: 'internal', canMutate: true }] as never[]
       return [{ role: 'view' }] as never[]
     }) as RlsQuery
     await assertPageAccess({ userId: 'user-1', pageId: 'page-1', query })
     // Second read is the role resolver, keyed by (pageId, userId).
     const roleRead = seen.find((s) => s.sql === PAGE_ROLE_SQL)
     expect(roleRead?.params).toEqual(['page-1', 'user-1'])
+  })
+})
+
+describe('[COMP:doc-sync/clearance-gate] current room recipients', () => {
+  function connection(userId: string, readOnly = false) {
+    const messages: string[] = []
+    const closes: unknown[] = []
+    return {
+      peer: {
+        context: { userId, sessionId: `session-${userId}`, authVersion: 1 },
+        readOnly,
+        sendStateless: (message: string) => { messages.push(message) },
+        close: (event?: unknown) => { closes.push(event) },
+      },
+      messages,
+      closes,
+    }
+  }
+
+  it('downgrades a read-only recipient and closes a revoked passive peer before delivery', async () => {
+    const writer = connection('writer')
+    const reader = connection('reader')
+    const revoked = connection('revoked')
+    const query = (async (userId: string, sql: string) => {
+      if (sql === PAGE_ACCESS_SQL) return [{
+        workspaceId: 'workspace', pageClearance: 'internal', memberClearance: 'internal',
+        teamspaceSensitivity: 'internal', canMutate: userId === 'writer',
+      }] as never[]
+      if (sql === PAGE_ROLE_SQL) return [{ role: 'edit' }] as never[]
+      throw new Error('unexpected query')
+    }) as RlsQuery
+    const results = await revalidatePageRoom({
+      pageId: 'page',
+      document: { getConnections: () => [writer.peer, reader.peer, revoked.peer] },
+      deps: { query, validateSession: async ({ userId }) => userId !== 'revoked' },
+    })
+    expect(results.get(writer.peer)).toBe('read-write')
+    expect(results.get(reader.peer)).toBe('read-only')
+    expect(reader.messages).toEqual(['page-write-denied'])
+    expect(results.get(revoked.peer)).toBe('denied')
+    expect(revoked.messages).toEqual(['page-access-denied'])
+    expect(revoked.closes).toEqual([{ code: 4403, reason: 'Page access denied' }])
+  })
+
+  it('sweeps page rooms while ignoring Office rooms', async () => {
+    const peer = connection('reader', true)
+    const query = makeQuery({ access: {
+      workspaceId: 'workspace', pageClearance: 'internal', memberClearance: 'internal', canMutate: false,
+    } })
+    await expect(sweepPageRooms({
+      documents: new Map([
+        ['page-a', { getConnections: () => [peer.peer] }],
+        ['office:artifact-a', { getConnections: () => { throw new Error('Office room inspected') } }],
+      ]),
+      deps: { query, validateSession: async () => true },
+    })).resolves.toBe(1)
   })
 })
 

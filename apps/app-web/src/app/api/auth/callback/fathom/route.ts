@@ -6,6 +6,7 @@ import {
   parseConnectorState,
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
+import { completeConnectorAuthorizationAfterOAuth } from "@/lib/connector-authorization-completion";
 
 const FATHOM_CLIENT_ID =
   process.env.PUBLIC_FATHOM_CLIENT_ID ??
@@ -41,7 +42,7 @@ export async function GET(request: Request) {
   const stateRaw = url.searchParams.get("state") ?? ""; // "fathom[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
 
-  const { connector: intent, createNew, instanceId, workspaceId, nonce } = parseConnectorState(stateRaw);
+  const { connector: intent, createNew, instanceId, workspaceId, nonce, continuation } = parseConnectorState(stateRaw);
   const validIntent = intent === "fathom";
 
   if (error || !code || !validIntent) {
@@ -161,6 +162,15 @@ export async function GET(request: Request) {
     const stored = (await storeRes.json().catch(() => ({}))) as {
       connectorInstanceId?: string;
     };
+
+    const resumedPath = await completeConnectorAuthorizationAfterOAuth({
+      accessToken,
+      workspaceId,
+      continuation,
+      provider: "fathom",
+      connectorInstanceId: stored.connectorInstanceId,
+    });
+    if (resumedPath) return NextResponse.redirect(new URL(resumedPath, request.url));
 
     return NextResponse.redirect(
       new URL(

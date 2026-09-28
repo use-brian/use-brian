@@ -10,7 +10,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '@use-brian/core'
+import { buildTool, type AccessContext, type Tool, type ToolContext } from '@use-brian/core'
 import {
   EDITABLE_FIELDS_BY_PRIMITIVE,
   type BrainEntryMutator,
@@ -109,6 +109,20 @@ function revision(entry: EditableBrainEntry): string {
   return entry.updatedAt.toISOString()
 }
 
+function viewerAccess(context: ToolContext): AccessContext {
+  return {
+    userId: context.userId,
+    workspaceId: context.workspaceId ?? '',
+    assistantId: context.assistantId,
+    assistantKind: context.assistantKind ?? 'standard',
+    clearance: context.clearance,
+    compartments: context.compartments,
+    mutationCompartments: context.mutationCompartments,
+    projectIds: context.projectIds,
+    visibilityAssistantIds: context.visibilityAssistantIds,
+  }
+}
+
 function compact(value: unknown): string {
   if (value === null || value === undefined || value === '') return '(empty)'
   const rendered = Array.isArray(value)
@@ -179,6 +193,12 @@ function mutationFailure(
         `${what} No editable Brain entry answers to that primitive + rowId. ${BRAIN_SUPERSESSION} ` +
         `It may also have been deleted, or sit above this assistant's clearance. ` +
         `Call ${BRAIN_DISCOVERY} to re-resolve BOTH the current rowId and its revision, then re-issue with the pair from that result. Do NOT retry this exact rowId.`,
+      isError: true,
+    }
+  }
+  if (result.status === 409 && result.body.code === 'scope_declassification_required') {
+    return {
+      data: `${what} Existing sensitivity protection was retained. Lowering it requires an audited release; refreshing the revision cannot authorize this change. Tell the user the downgrade was refused. Do not retry it through this edit tool.`,
       isError: true,
     }
   }
@@ -279,7 +299,7 @@ export function createBrainEntryEditTools(args: {
         context.workspaceId,
         input.query,
         input.limit,
-        { userId: context.userId, clearance: context.clearance },
+        viewerAccess(context),
       )
       discoveredTargets.clear()
       discoveryWasAmbiguous = entries.length > 1
@@ -351,7 +371,7 @@ export function createBrainEntryEditTools(args: {
         args.scopedEntry?.workspaceId ?? context.workspaceId ?? '',
         input.primitive,
         input.rowId,
-        { userId: context.userId, clearance: context.clearance },
+        viewerAccess(context),
       )
       if (!entry) {
         return [
@@ -421,6 +441,7 @@ export function createBrainEntryEditTools(args: {
       const result = await args.mutator.mutate({
         userId: context.userId,
         workspaceId: context.workspaceId,
+        access: viewerAccess(context),
         primitive,
         rowId,
         expectedUpdatedAt,

@@ -412,6 +412,7 @@ function baseParams(overrides: Partial<Parameters<typeof runProactiveCompaction>
     unconditional: overrides.unconditional,
     analytics: overrides.analytics,
     circuitBreaker: overrides.circuitBreaker,
+    authority: overrides.authority,
   } as Parameters<typeof runProactiveCompaction>[0]
 }
 
@@ -523,6 +524,42 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     expect(memoryStore.create).not.toHaveBeenCalled()
     expect(episodicStore.listBySession).not.toHaveBeenCalled()
     expect(episodicStore.create).not.toHaveBeenCalled()
+    expect(chatEpisodeIngestor).not.toHaveBeenCalled()
+  })
+
+  it('propagates authority loss instead of trimming or running later derived writes', async () => {
+    const chatEpisodeIngestor = vi.fn(async () => undefined)
+    const authorityError = Object.assign(new Error('authority changed'), {
+      reason: 'authority_changed',
+      retrySafe: false,
+      operationMayHaveExecuted: true,
+    })
+    const authority = {
+      assertCurrent: vi.fn(async () => undefined),
+      execute: vi.fn(async <T>(operation: () => Promise<T>) => {
+        await operation()
+        throw authorityError
+      }),
+    }
+    const sessionMessages: SessionMessage[] = [
+      makeSessionMessage({ sequenceNum: 100, role: 'user', content: [{ type: 'text', text: 'old question' }] }),
+      makeSessionMessage({ sequenceNum: 101, role: 'assistant', content: [{ type: 'text', text: 'old answer' }] }),
+      makeSessionMessage({ sequenceNum: 102, role: 'user', content: [{ type: 'text', text: 'current turn' }] }),
+    ]
+
+    await expect(runProactiveCompaction(baseParams({
+      sessionMessages,
+      unconditional: true,
+      persistLongTermContext: false,
+      workspaceId: 'ws_1',
+      chatEpisodeIngestor,
+      authority,
+      memoryStore: {
+        getIndexSystem: vi.fn(async () => []),
+        create: vi.fn(),
+      } as unknown as MemoryStore,
+    }))).rejects.toBe(authorityError)
+    expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
     expect(chatEpisodeIngestor).not.toHaveBeenCalled()
   })
 

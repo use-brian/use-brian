@@ -38,7 +38,7 @@ function fixture() {
   const records = recordsFixture()
   const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 42])
   const file = (id: string, bytes: Uint8Array, mime: string): WorkspaceFile => ({
-    id, workspaceId: uid(2), path: `/fictional/${id}`, parentPath: '/fictional', name: 'fictional', title: null, summary: null,
+    scopeVersion: `scope-${id}`, id, workspaceId: uid(2), path: `/fictional/${id}`, parentPath: '/fictional', name: 'fictional', title: null, summary: null,
     mime, sizeBytes: bytes.length, tags: [], relatedIds: [], storageUri: `memory:${id}`, sensitivity: 'internal', compartments: ['team-a'], projectIds: ['project-a'], metadata: {},
     userId: null, assistantId: null, source: 'user', sourceEpisodeId: null, verifiedByUserId: null, verifiedAt: null,
     validFrom: date(), validTo: null, supersededBy: null, retractedAt: null, retractedReason: null, retractedBy: null,
@@ -162,11 +162,12 @@ describe('[COMP:api/structured-documents] runtime factory', () => {
     expect(f.connectors.resolve).not.toHaveBeenCalled()
     expect(f.files.writeBytes).not.toHaveBeenCalled()
   })
-  it.each(['wrong owner', 'source changed', 'current record hash', 'destination scope', 'stale seq', 'tampered command', 'missing snapshot guard', 'no edit', 'missing proposal'])(
+  it.each(['wrong owner', 'source changed', 'source mutation revoked', 'current record hash', 'destination scope', 'stale seq', 'tampered command', 'missing snapshot guard', 'no edit', 'missing proposal'])(
     'rejects %s at acceptance', async failure => {
       const f = await proposed(); let userId = f.ctx.userId
       if (failure === 'wrong owner') userId = uid(99)
       if (failure === 'source changed') f.blobs.get(uid(4))!.bytes[5] = 88
+      if (failure === 'source mutation revoked') f.setLiveContext({ ...f.ctx, mutationCompartments: ['team-b'] })
       if (failure === 'current record hash') f.job().recordsSha256 = 'f'.repeat(64)
       if (failure === 'destination scope') f.artifact.compartments = []
       if (failure === 'stale seq') f.live.seq++

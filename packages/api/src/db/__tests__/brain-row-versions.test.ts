@@ -48,6 +48,7 @@ import {
   resolveMemoryAsOf,
   resolveMemoryAsOfForClearance,
 } from '../brain-row-versions.js'
+import { deleteMemory } from '../memories.js'
 
 beforeEach(() => {
   calls.sql.length = 0
@@ -177,9 +178,9 @@ describe('[COMP:api/brain-row-versions] D7 clearance rule', () => {
 describe('[COMP:api/brain-row-versions] destructive-path hooks', () => {
   it('deleteMemory captures the before-image BEFORE the DELETE', async () => {
     calls.results.push({ rows: [], rowCount: 1 }) // capture insert
+    calls.results.push({ rows: [], rowCount: 0 }) // no cited descendants to retain
     calls.results.push({ rows: [], rowCount: 1 }) // delete
-    const { deleteMemory } = await import('../memories.js')
-    await deleteMemory('m1', { actor: 'consolidation_run', reason: 'prune' })
+    expect(await deleteMemory('m1', { actor: 'consolidation_run', reason: 'prune' })).toBe(true)
     const order = calls.sql.map((c) => (c.text.includes('brain_row_versions') ? 'capture' : c.text.includes('DELETE FROM memories') ? 'delete' : 'other'))
     expect(order.filter((o) => o !== 'other')).toEqual(['capture', 'delete'])
     expect(calls.events[0].actor).toBe('consolidation_run')

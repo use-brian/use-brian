@@ -1,11 +1,16 @@
-/** Atomic proposal-only Office persistence. Caller owns current Files/Office authorization. */
+/** Atomic proposal-only Office persistence with current evidence and destination authority. */
 import { createHash } from 'node:crypto'
+import type { AccessContext, ScopeEvidence } from '@use-brian/core'
+import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 
 export type StructuredFillProposalInput = {
   userId: string; workspaceId: string; artifactId: string; baseVersionId: string
   expectedSeq: number; assistantId: string | null; extractionId: string; evidenceHash: string
   command: unknown; preview: unknown; lineage: unknown; body: string; targetIds: string[]
+  access: AccessContext
+  evidenceFiles: Array<{ id: string; scopeVersion: string }>
+  evidenceScope: Required<Pick<ScopeEvidence, 'sensitivity' | 'compartments' | 'projectIds'>>
 }
 export type StructuredFillProposalResult = { id: string; threadId: string }
 
@@ -31,30 +36,59 @@ export function createStructuredFillProposalStore(db: OfficeDbQuery = defaultOff
     async save(input: StructuredFillProposalInput): Promise<StructuredFillProposalResult | null> {
       if (!Number.isSafeInteger(input.expectedSeq) || input.expectedSeq < 1 || !/^[a-f0-9]{64}$/.test(input.evidenceHash) ||
           typeof input.body !== 'string' || !input.body.trim() || input.body.length > 20_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.body) ||
-          !Array.isArray(input.targetIds) || input.targetIds.length < 1 || input.targetIds.length > 1000 || new Set(input.targetIds).size !== input.targetIds.length) throw new Error('invalid_proposal_payload')
+          !Array.isArray(input.targetIds) || input.targetIds.length < 1 || input.targetIds.length > 1000 || new Set(input.targetIds).size !== input.targetIds.length ||
+          !Array.isArray(input.evidenceFiles) || input.evidenceFiles.length < 2 || input.evidenceFiles.length > 12 ||
+          input.evidenceFiles.some(file => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(file.id) || typeof file.scopeVersion !== 'string' || !file.scopeVersion) ||
+          new Set(input.evidenceFiles.map(file => file.id)).size !== input.evidenceFiles.length ||
+          !input.evidenceScope || !['public', 'internal', 'confidential'].includes(input.evidenceScope.sensitivity) ||
+          !Array.isArray(input.evidenceScope.compartments) || !Array.isArray(input.evidenceScope.projectIds)) throw new Error('invalid_proposal_payload')
+      const access = mutationActorAccess(input.userId, input.workspaceId, input.access)
       const command = canonical(input.command), preview = canonical(input.preview), lineage = canonical(input.lineage)
       if ([command,preview,lineage].some(s => Buffer.byteLength(s) > 4 * 1024 * 1024)) throw new Error('invalid_proposal_payload')
-      const payloadHash = digest(canonical({ ...input, command: JSON.parse(command), preview: JSON.parse(preview), lineage: JSON.parse(lineage) }))
+      const { access: _access, ...payloadInput } = input
+      const payloadHash = digest(canonical({ ...payloadInput, command: JSON.parse(command), preview: JSON.parse(preview), lineage: JSON.parse(lineage) }))
       const key = canonical([input.userId,input.workspaceId,input.extractionId,input.artifactId,input.evidenceHash])
       const id = stableId('suggestion',key), threadId = stableId('thread',key), messageId = stableId('message',key)
+      const fileAccess = buildAccessPredicate(access, { alias: 'f', operation: 'mutation', startIdx: 22 })
+      const fileMember = buildCurrentMemberSourcePredicate(input.userId, { alias: 'f', operation: 'mutation', startIdx: fileAccess.nextIdx })
       const result = await db<StructuredFillProposalResult>(input.userId, `
-        WITH current_target AS MATERIALIZED (
+        WITH evidence_files AS MATERIALIZED (
+          SELECT f.id
+          FROM structured_document_extractions evidence_job
+          JOIN workspace_files f ON f.id=evidence_job.source_file_id
+            OR f.id=evidence_job.records_file_id
+            OR f.id IN (SELECT (image->>'fileId')::uuid FROM jsonb_array_elements(evidence_job.image_files) image)
+          JOIN jsonb_to_recordset($18::jsonb) AS expected(id uuid,"scopeVersion" text)
+            ON expected.id=f.id AND expected."scopeVersion"=f.scope_version::text
+          WHERE evidence_job.id=$7 AND evidence_job.user_id=$1 AND evidence_job.workspace_id=$2
+            AND evidence_job.status='completed'
+            AND f.valid_to IS NULL AND f.retracted_at IS NULL AND f.superseded_by IS NULL
+            AND (${fileAccess.sql}) AND (${fileMember.sql})
+          FOR SHARE OF f
+        ), current_target AS MATERIALIZED (
           SELECT a.id FROM office_artifacts a
           JOIN office_collab_documents c ON c.artifact_id=a.id AND c.workspace_id=a.workspace_id
           JOIN structured_document_extractions e ON e.id=$7 AND e.workspace_id=a.workspace_id AND e.user_id=$1
+          JOIN workspace_members member ON member.workspace_id=a.workspace_id AND member.user_id=$1
+          LEFT JOIN office_artifact_grants g ON g.artifact_id=a.id AND g.user_id=$1
           WHERE a.id=$3 AND a.workspace_id=$2 AND a.lifecycle_state='active'
             AND a.family='spreadsheet' AND a.mode='artifact'
             AND a.head_version_id=$4 AND c.seq=$5 AND e.status='completed'
-            AND EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id=$2 AND m.user_id=$1)
-          FOR UPDATE OF a,c
+            AND NOT (g.role='deny' AND g.revoked_at IS NULL)
+            AND COALESCE(CASE WHEN g.revoked_at IS NULL THEN g.role END,
+                  CASE WHEN a.creator_user_id=$1 OR a.owner_user_id=$1 THEN 'edit' ELSE a.default_workspace_role END)
+                IN ('comment','edit')
+            AND sensitivity_rank(a.sensitivity)>=sensitivity_rank($19)
+            AND $20::text[] <@ a.compartments AND $21::uuid[] <@ a.project_ids
+            AND (SELECT count(*) FROM evidence_files)=jsonb_array_length($18::jsonb)
+            AND jsonb_array_length($18::jsonb)=2+jsonb_array_length(e.image_files)
+          FOR UPDATE OF a,c,e
         ), reservation AS (
           INSERT INTO structured_document_fill_proposals AS p
             (id,thread_id,user_id,workspace_id,artifact_id,base_version_id,expected_seq,
              assistant_id,extraction_id,evidence_hash,payload_hash,command,preview,lineage,body,target_ids)
           SELECT $15,$16,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb,$13,$14::uuid[]
           WHERE EXISTS (SELECT 1 FROM current_target)
-             OR EXISTS (SELECT 1 FROM structured_document_fill_proposals prior
-                        WHERE prior.id=$15 AND prior.user_id=$1 AND prior.payload_hash=$9)
           ON CONFLICT (user_id,workspace_id,extraction_id,artifact_id,evidence_hash)
           DO UPDATE SET payload_hash=p.payload_hash WHERE p.payload_hash=EXCLUDED.payload_hash
           RETURNING *
@@ -84,7 +118,9 @@ export function createStructuredFillProposalStore(db: OfficeDbQuery = defaultOff
           RETURNING id,thread_id
         ) SELECT id,thread_id AS "threadId" FROM suggestion
       `, [input.userId,input.workspaceId,input.artifactId,input.baseVersionId,input.expectedSeq,input.assistantId,
-        input.extractionId,input.evidenceHash,payloadHash,command,preview,lineage,input.body,input.targetIds,id,threadId,messageId])
+        input.extractionId,input.evidenceHash,payloadHash,command,preview,lineage,input.body,input.targetIds,id,threadId,messageId,
+        JSON.stringify(input.evidenceFiles),input.evidenceScope.sensitivity,input.evidenceScope.compartments,input.evidenceScope.projectIds,
+        ...fileAccess.params,...fileMember.params])
       return result.rows[0] ?? null
     },
     async get(userId: string, id: string): Promise<(StructuredFillProposalResult & { preview: unknown; lineage: unknown; evidenceHash: string; baseVersionId: string; expectedSeq: number }) | null> {

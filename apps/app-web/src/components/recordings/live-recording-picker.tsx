@@ -10,12 +10,13 @@ import {
 } from "@/components/ui/searchable-select";
 
 export const LIVE_NEW_ROOT = "new:root";
+export const LIVE_MEETING_NOTES = "meeting-notes";
 export const liveNewUnder = (pageId: string) => `new:${pageId}`;
 export const liveUseExisting = (pageId: string) => `existing:${pageId}`;
 
 export function LiveRecordingPicker({
   items,
-  initial = LIVE_NEW_ROOT,
+  initial = LIVE_MEETING_NOTES,
   onChange,
 }: {
   items: SearchableSelectItem[];
@@ -32,7 +33,7 @@ export function LiveRecordingPicker({
       <SearchableSelect
         value={value}
         onValueChange={(next) => {
-          const resolved = next || LIVE_NEW_ROOT;
+          const resolved = next || LIVE_MEETING_NOTES;
           setValue(resolved);
           onChange(resolved);
         }}
@@ -45,4 +46,3 @@ export function LiveRecordingPicker({
     </div>
   );
 }
-

@@ -1,10 +1,13 @@
 /** Office artifact/version/source/grant/audit persistence. [COMP:api/office-store] */
 import { queryWithRLS } from './client.js'
 import type { QueryResultRow } from 'pg'
+import {officeProjectionQuery} from './office-read-projection.js'
 
 export type OfficeDbQuery = <T>(userId: string, sql: string, params: unknown[]) => Promise<{ rows: T[] }>
 
 export const defaultOfficeDbQuery: OfficeDbQuery = async <T>(userId: string, sql: string, params: unknown[]) => {
+  const projection=officeProjectionQuery(userId)
+  if(projection)return projection<T>(userId,sql,params)
   const result = await queryWithRLS<T & QueryResultRow>(userId, sql, params)
   return { rows: result.rows as T[] }
 }
@@ -97,6 +100,67 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows.length === 1
     },
 
+    async createCopiedArtifact(params: {
+      userId: string
+      artifactId: string
+      versionId: string
+      workspaceId: string
+      family: 'document' | 'presentation' | 'spreadsheet'
+      title: string
+      templateVersionId: string | null
+      capabilityVersion: number
+      sensitivity: 'public' | 'internal' | 'confidential'
+      compartments: string[]
+      projectIds: string[]
+      snapshotFileId: string
+      snapshotHash: string
+      operationClock: Uint8Array
+      schemaVersion: number
+      snapshotCapabilityVersion: number
+      liveUpdate: Uint8Array
+      liveStateVector: Uint8Array
+      sourceArtifactId: string
+      sourceVersionId: string
+    }): Promise<{ id: string; version: number } | null> {
+      const result=await db<{id:string;version:number}>(params.userId,`
+        WITH artifact AS (
+          INSERT INTO office_artifacts
+            (id,workspace_id,family,mode,title,creator_user_id,owner_user_id,
+             template_version_id,head_version_id,head_version,capability_version,
+             sensitivity,compartments,project_ids)
+          VALUES ($1,$3,$4,'artifact',$5,$6,$6,$7,$2,1,$8,$9,$10::text[],$11::uuid[])
+          RETURNING id,workspace_id
+        ), version AS (
+          INSERT INTO office_artifact_versions
+            (id,artifact_id,workspace_id,version,parent_version_id,snapshot_file_id,
+             snapshot_hash,operation_clock,schema_version,capability_version,
+             author_type,author_user_id,origin,summary,named,checkpoint_kind)
+          SELECT $2,id,workspace_id,1,NULL,$12,$13,$14,$15,$16,'user',$6,'manual',$21,TRUE,'named'
+            FROM artifact
+          RETURNING id,artifact_id,workspace_id,version
+        ), live AS (
+          INSERT INTO office_collab_documents
+            (artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version,seq)
+          SELECT artifact_id,workspace_id,$17,$18,$13,version,1 FROM version
+          RETURNING artifact_id
+        ), source AS (
+          INSERT INTO office_artifact_sources
+            (artifact_id,artifact_version_id,workspace_id,source_kind,source_id,source_version,sensitivity)
+          SELECT artifact_id,id,workspace_id,'artifact',$19,$20,$9 FROM version
+          RETURNING artifact_id
+        )
+        SELECT v.id,v.version::int AS version FROM version v
+          JOIN live l ON l.artifact_id=v.artifact_id
+          JOIN source s ON s.artifact_id=v.artifact_id
+      `,[params.artifactId,params.versionId,params.workspaceId,params.family,params.title,params.userId,
+        params.templateVersionId,params.capabilityVersion,params.sensitivity,
+        params.compartments,params.projectIds,params.snapshotFileId,params.snapshotHash,
+        Buffer.from(params.operationClock),params.schemaVersion,params.snapshotCapabilityVersion,
+        Buffer.from(params.liveUpdate),Buffer.from(params.liveStateVector),params.sourceArtifactId,
+        params.sourceVersionId,`Copied from version ${params.sourceVersionId}`])
+      return result.rows[0]??null
+    },
+
     async get(userId: string, artifactId: string): Promise<OfficeArtifactRow | null> {
       const result = await db<OfficeArtifactRow>(userId, `
         SELECT id, workspace_id AS "workspaceId", family, mode, title,
@@ -167,6 +231,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                v.workspace_id AS "workspaceId"
          FROM office_artifact_versions v
           JOIN office_artifacts a ON a.id=v.artifact_id
+          JOIN workspace_files f ON f.id=v.snapshot_file_id
          WHERE v.artifact_id=$1 AND v.id=$2 AND a.lifecycle_state<>'purged'
       `, [artifactId, versionId])
       return result.rows[0] ?? null
@@ -288,16 +353,21 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows[0] ?? null
     },
 
-    async setGrant(params: { userId: string; artifactId: string; workspaceId: string; targetUserId: string; role: 'view' | 'comment' | 'edit' | 'deny'; reason?: string }): Promise<void> {
-      await db(params.userId, `
+    async setGrant(params: { userId: string; artifactId: string; workspaceId: string; targetUserId: string; role: 'view' | 'comment' | 'edit' | 'deny'; reason?: string }): Promise<boolean> {
+      const result=await db<{artifactId:string}>(params.userId, `
         INSERT INTO office_artifact_grants
           (artifact_id, workspace_id, user_id, role, granted_by, elevation_reason)
-        VALUES ($1,$2,$3,$4,$5,$6)
+        SELECT a.id,a.workspace_id,target.user_id,$4,$5,$6
+          FROM office_artifacts a
+          JOIN workspace_members target ON target.workspace_id=a.workspace_id AND target.user_id=$3
+         WHERE a.id=$1 AND a.workspace_id=$2 AND a.owner_user_id<>target.user_id
         ON CONFLICT (artifact_id, user_id) DO UPDATE SET
           role = EXCLUDED.role, granted_by = EXCLUDED.granted_by,
           elevation_reason = EXCLUDED.elevation_reason,
           granted_at = now(), revoked_at = NULL
+        RETURNING artifact_id AS "artifactId"
       `, [params.artifactId, params.workspaceId, params.targetUserId, params.role, params.userId, params.reason ?? null])
+      return result.rows.length===1
     },
 
     async revokeGrant(params: { userId: string; artifactId: string; targetUserId: string }): Promise<boolean> {

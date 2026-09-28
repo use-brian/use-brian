@@ -41,6 +41,12 @@ function makeContext(overrides: Partial<ToolContext> = {}): ToolContext {
     channelType: 'web',
     channelId: 'web',
     workspaceId: WORKSPACE_ID,
+    assistantKind: 'primary',
+    clearance: 'confidential',
+    compartments: null,
+    mutationCompartments: null,
+    projectIds: null,
+    visibilityAssistantIds: null,
     abortSignal: new AbortController().signal,
     ...overrides,
   }
@@ -73,6 +79,7 @@ function fakeStores() {
         pinned: false,
         managedBy: null,
         contextProjectId: projectParams.contextProjectId ?? null,
+        authoringAuthority: params.authoringAuthority ?? null,
         createdAt: now, updatedAt: now,
       }
       workflows.set(r.id, r)
@@ -1020,6 +1027,56 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     const builder = loadBuiltinSkills().find((skill) => skill.id === 'workflow-builder')
     expect(builder?.content).toMatch(/Treat approval as continuation, not a restart/)
     expect(builder?.content).toMatch(/call the matching write tool with no arguments/)
+  })
+
+  it('pins proposal-time authoring authority, ignores later expansion, and refuses contraction', async () => {
+    const { tools, stores } = makeAllTools({ allowLegacyDirectWrites: false })
+    const bounded = makeContext({
+      clearance: 'internal',
+      compartments: ['product'],
+      mutationCompartments: ['product'],
+      projectIds: [PROJECT_ID],
+      visibilityAssistantIds: [PRIMARY_ASSISTANT_ID],
+    })
+    const proposed = await tools.proposeWorkflow.execute(
+      { name: 'Bounded workflow', definition: SIMPLE_DEF },
+      bounded,
+    )
+    const receipt = (proposed.data as { proposalReceipt: string }).proposalReceipt
+
+    const created = await tools.createWorkflow.execute(
+      {},
+      makeContext({ workflowProposalReceipt: receipt }),
+    )
+    expect(created.isError).toBeFalsy()
+    expect(stores.workflows.get((created.data as { id: string }).id)?.authoringAuthority).toEqual({
+      version: 1,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      ceiling: {
+        workspaceId: WORKSPACE_ID,
+        userId: USER_ID,
+        clearance: 'internal',
+        compartments: ['product'],
+        mutationCompartments: ['product'],
+        projectIds: [PROJECT_ID],
+        visibilityAssistantIds: [PRIMARY_ASSISTANT_ID],
+      },
+    })
+
+    const broaderProposal = await tools.proposeWorkflow.execute(
+      { name: 'Cannot survive contraction', definition: SIMPLE_DEF },
+      makeContext(),
+    )
+    const contracted = await tools.createWorkflow.execute({}, makeContext({
+      workflowProposalReceipt: (broaderProposal.data as { proposalReceipt: string }).proposalReceipt,
+      clearance: 'public',
+      compartments: [],
+      mutationCompartments: [],
+      projectIds: [],
+      visibilityAssistantIds: [],
+    }))
+    expect(contracted.isError).toBe(true)
+    expect(contracted.data).toContain('permissions changed')
   })
 
   it('proposeWorkflow surfaces the researchMode advisory (parity with the REST path)', async () => {

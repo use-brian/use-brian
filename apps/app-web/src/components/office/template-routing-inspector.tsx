@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Route, Sparkles, Trash2 } from "lucide-react";
 import { presentationTextCapacity, type OfficeArtifactSnapshot, type OfficeTemplateField, type OfficeTemplateRoutingDraft, type OfficeTemplateSlideRecipe, type PresentationObject, type PresentationSnapshot } from "@use-brian/office-model";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { format, useT } from "@/lib/i18n/client";
-import { getOfficeTemplateRouting, saveOfficeTemplateRouting, type OfficeTemplateSlideRole } from "@/lib/office/api";
+import { type OfficeTemplateSlideRole } from "@/lib/office/api";
 import { cn } from "@/lib/utils";
 
+import { TemplateRoutingBoundary } from "./template-routing-boundary";
 import { TokenTemplateRoutingInspector } from "./token-template-routing-inspector";
 
 const ROLES: OfficeTemplateSlideRole[] = ["cover", "agenda", "section", "narrative", "comparison", "metrics", "timeline", "process", "caseStudy", "team", "quote", "closing", "appendix"];
@@ -68,11 +69,12 @@ function selectedObjectLabel(object: PresentationObject): string {
   return "Content";
 }
 
-function PresentationTemplateRoutingInspector({ templateId, snapshot, selectedTargetIds, initialRouting, onStateChange }: {
-  templateId: string;
+function PresentationTemplateRoutingInspector({ snapshot, selectedTargetIds, initialRouting, onStateChange, saveRouting, saveConfirmed }: {
+  saveConfirmed: boolean;
+  saveRouting: (draft: OfficeTemplateRoutingDraft) => Promise<OfficeTemplateRoutingDraft>;
   snapshot: PresentationSnapshot;
   selectedTargetIds: string[];
-  initialRouting?: OfficeTemplateRoutingDraft;
+  initialRouting: OfficeTemplateRoutingDraft;
   onStateChange?: (state: TemplateRoutingInspectorState) => void;
 }) {
   const t = useT().office;
@@ -80,18 +82,9 @@ function PresentationTemplateRoutingInspector({ templateId, snapshot, selectedTa
   const [activeRecipeId, setActiveRecipeId] = useState<string | null>(initialRouting?.slideRecipes[0]?.id ?? null);
   const [status, setStatus] = useState<"loading" | "ready" | "dirty" | "saving" | "saved" | "failed">(initialRouting ? "ready" : "loading");
 
-  useEffect(() => {
-    if (initialRouting) return;
-    let active = true;
-    setStatus("loading");
-    void getOfficeTemplateRouting(templateId).then((value) => {
-      if (!active) return;
-      setRouting(value);
-      setActiveRecipeId(value.slideRecipes[0]?.id ?? null);
-      setStatus("ready");
-    }).catch(() => { if (active) setStatus("failed"); });
-    return () => { active = false; };
-  }, [initialRouting, templateId]);
+  useEffect(() => { if (saveConfirmed && status === "ready") setStatus("saved"); }, [saveConfirmed, status]);
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   useEffect(() => {
     if (!routing) return;
@@ -208,10 +201,12 @@ function PresentationTemplateRoutingInspector({ templateId, snapshot, selectedTa
     if (!routing || (status !== "dirty" && status !== "failed")) return;
     setStatus("saving");
     try {
-      setRouting(await saveOfficeTemplateRouting(templateId, routing));
+      const value = await saveRouting(routing);
+      if (!alive.current) return;
+      setRouting(value);
       setStatus("saved");
     } catch {
-      setStatus("failed");
+      if (alive.current) setStatus("failed");
     }
   }
 
@@ -289,7 +284,9 @@ export function TemplateRoutingInspector(props: {
   initialRouting?: OfficeTemplateRoutingDraft;
   onStateChange?: (state: TemplateRoutingInspectorState) => void;
 }) {
-  return props.snapshot.family === "presentation"
-    ? <PresentationTemplateRoutingInspector key={props.templateId} {...props} snapshot={props.snapshot} />
-    : <TokenTemplateRoutingInspector key={props.templateId} {...props} snapshot={props.snapshot} />;
+  return <TemplateRoutingBoundary templateId={props.templateId} initialRouting={props.initialRouting} onStateChange={props.onStateChange}>
+    {(routing, saveRouting, identity, saved) => props.snapshot.family === "presentation"
+      ? <PresentationTemplateRoutingInspector key={identity} {...props} initialRouting={routing} saveRouting={saveRouting} saveConfirmed={saved} snapshot={props.snapshot} />
+      : <TokenTemplateRoutingInspector key={identity} {...props} initialRouting={routing} saveRouting={saveRouting} saveConfirmed={saved} snapshot={props.snapshot} />}
+  </TemplateRoutingBoundary>;
 }

@@ -43,6 +43,7 @@ function freshState(): StoreState {
 function mem(partial: Partial<MemoryWithMetrics> & { id: string; summary: string }): MemoryWithMetrics {
   return {
     id: partial.id,
+    workspaceId: partial.workspaceId ?? 'workspace-fixture',compartments: partial.compartments ?? [],projectIds: partial.projectIds ?? [],scopeVersion: partial.scopeVersion ?? '1',
     scope: partial.scope ?? 'shared',
     summary: partial.summary,
     detail: partial.detail ?? null,
@@ -67,7 +68,8 @@ function makeFakeStore(state: StoreState): MemoryStore {
     create: notImpl as never,
     async update(id, u) {
       state.updates.push({ id, summary: u.summary, detail: u.detail })
-      return null
+      const memory = state.memoriesWithMetrics.find(m => m.id === id)
+      return memory ? { ...memory,...u,id: `${id}-new` } : null
     },
     getById: notImpl as never,
     getByIdSystem: notImpl as never,
@@ -347,10 +349,10 @@ describe('[COMP:consolidation/deep-orchestrator] runDeepConsolidation — SOUL s
     store = makeFakeStore(state)
   })
 
-  it('synthesises and writes the shared SOUL from self-entity attributes + preferences', async () => {
+  it('synthesises scoped preferences and withholds an unversioned self-profile', async () => {
     state.soulSynthInput.set('__shared__', {
       selfEntityAttributes: { diet: 'Vegetarian' },
-      preferences: [{ id: 'p1', scope: 'shared', summary: 'Prefers tea', detail: null, tags: [], confidence: 1, sensitivity: 'internal' }],
+      preferences: [{ workspaceId: 'workspace-fixture',userId: 'u1',assistantId: 'a1',scopeVersion: '1',compartments: [],projectIds: [],id: 'p1', scope: 'shared', summary: 'Prefers tea', detail: null, tags: [], confidence: 1, sensitivity: 'internal' }],
     })
 
     let prompt = ''
@@ -359,7 +361,7 @@ describe('[COMP:consolidation/deep-orchestrator] runDeepConsolidation — SOUL s
       return 'Be concise. User is a vegetarian tea drinker. No emojis.'
     })
 
-    expect(prompt).toContain('Vegetarian')
+    expect(prompt).not.toContain('Vegetarian')
     expect(prompt).toContain('Prefers tea')
     expect(state.soulWrites).toHaveLength(1)
     expect(state.soulWrites[0].appId).toBe(null)
@@ -368,8 +370,8 @@ describe('[COMP:consolidation/deep-orchestrator] runDeepConsolidation — SOUL s
 
   it('skips SOUL write when the model returns NO_SOUL', async () => {
     state.soulSynthInput.set('__shared__', {
-      selfEntityAttributes: { name: 'User' },
-      preferences: [],
+      selfEntityAttributes: null,
+      preferences: [mem({ id: 'shared-source',summary: 'Prefers concise explanations' })],
     })
 
     await runDeepConsolidation(store, 'a1', 'u1', async () => 'NO_SOUL')
@@ -379,12 +381,12 @@ describe('[COMP:consolidation/deep-orchestrator] runDeepConsolidation — SOUL s
 
   it('synthesises per-app SOUL deltas when appIds are provided', async () => {
     state.soulSynthInput.set('__shared__', {
-      selfEntityAttributes: { role: 'Senior dev' },
-      preferences: [],
+      selfEntityAttributes: null,
+      preferences: [mem({ id: 'shared-source',summary: 'Prefers direct technical explanations' })],
     })
     state.soulSynthInput.set('sidantrip', {
       selfEntityAttributes: null,
-      preferences: [{ id: 'p1', scope: 'app', summary: 'HKD budget', detail: null, tags: [], confidence: 1, sensitivity: 'internal' }],
+      preferences: [{ workspaceId: 'workspace-fixture',userId: 'u1',assistantId: 'a1',scopeVersion: '1',compartments: [],projectIds: [],id: 'p1', scope: 'app', summary: 'HKD budget', detail: null, tags: [], confidence: 1, sensitivity: 'internal' }],
     })
 
     const prompts: string[] = []
@@ -404,8 +406,8 @@ describe('[COMP:consolidation/deep-orchestrator] runDeepConsolidation — SOUL s
 
   it('fires soul_updated events with change magnitude', async () => {
     state.soulSynthInput.set('__shared__', {
-      selfEntityAttributes: { name: 'User' },
-      preferences: [],
+      selfEntityAttributes: null,
+      preferences: [mem({ id: 'shared-source',summary: 'Prefers concise explanations' })],
     })
     state.soulReads.set('__shared__', 'old soul')
 
@@ -565,6 +567,25 @@ describe('[COMP:consolidation/deep-orchestrator] runDeepConsolidation — LLM de
     expect(state.updates[0].detail).toContain('Full merged explanation')
     expect(state.deleted.has('f1')).toBe(true)
     expect(state.deleted.has('f2')).toBe(true)
+  })
+
+  it('applies only one cluster from a prompt and removes its superseded keeper from downstream synthesis', async () => {
+    state.memoriesWithMetrics=fillerBucket(6)
+    const prompts:string[]=[]
+    await runDeepConsolidation(store,'a1','u1',async prompt=>{
+      prompts.push(prompt)
+      if(prompt.includes('Review these memories'))return 'KEEP: f0\nMERGE: f1\nCOMBINED_SUMMARY: First merge\n\nKEEP: f2\nMERGE: f3\nCOMBINED_SUMMARY: Stale second merge'
+      return 'Remaining domain summary'
+    },{dedupSweepMinTotal:3,dedupSweepMinGroup:3,domainSummaryThreshold:1})
+    expect(state.updates.map(u=>u.id)).toEqual(['f0'])
+    expect([...state.deleted]).toEqual(['f1'])
+    expect(state.domainUpserts.flatMap(row=>row.memoryIds)).not.toContain('f0')
+    expect(prompts.filter(p=>!p.includes('Review these memories')).join(' ')).not.toContain('Filler about topic 0')
+  })
+  it('does not choose between colliding shortened source identifiers',async()=>{
+    state.memoriesWithMetrics=fillerBucket(3).map((m,i)=>({...m,id:i<2?`aaaaaaaa-${i}`:'bbbbbbbb-2'}))
+    await runDeepConsolidation(store,'a1','u1',async prompt=>prompt.includes('Review these memories')?'KEEP: aaaaaaaa\nMERGE: bbbbbbbb\nCOMBINED_SUMMARY: Ambiguous':'NO_SOUL',{dedupSweepMinTotal:3,dedupSweepMinGroup:3})
+    expect(state.updates).toEqual([]);expect(state.deleted.size).toBe(0)
   })
 
   it('handles NO_CLUSTERS response by doing nothing', async () => {

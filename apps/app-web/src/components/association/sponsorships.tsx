@@ -18,7 +18,7 @@ import {
 const selectClass="min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-base";
 const plusYear=()=>{const date=new Date();date.setUTCFullYear(date.getUTCFullYear()+1);return date.toISOString();};
 
-export function AssociationSponsorships({workspaceId,canManage}:{workspaceId:string;canManage:boolean}){
+function AssociationSponsorships({workspaceId,canManage}:{workspaceId:string;canManage:boolean}){
   const t=useT().associationPage.sponsorship,plans=useAssociationPage(workspaceId,"plans"),action=useAssociationAction(workspaceId);
   const allocations=useAssociationPage(workspaceId,"allocations"),invitations=useAssociationPage(workspaceId,"invitations");
   const [sponsor,setSponsor]=useState<CrmLookupRow|null>(null),[nominee,setNominee]=useState<CrmLookupRow|null>(null);
@@ -68,4 +68,9 @@ export function AssociationSponsorships({workspaceId,canManage}:{workspaceId:str
     <AssociationListState {...allocations}><div className="divide-y divide-border">{allocations.data?.items.map(row=><div key={row.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm"><div><p className="font-medium">{row.sponsorContactName} → {row.beneficiaryPlanName}</p><p>{row.allocatedSeats}/{row.seatLimit} · {row.status} · {new Date(row.endsAt).toLocaleString()}</p></div>{row.status==="active"?<Button type="button" variant="outline" className="min-h-11" disabled={!canManage||action.pending||reason.trim().length===0} onClick={()=>void action.run(t.cancelAllocation,async()=>{await cancelAssociationSponsorshipAllocation(workspaceId,row.id,{requestId:crypto.randomUUID(),reason});await Promise.all([allocations.refresh(),invitations.refresh()]);}, {description:t.cancelHelp})}>{t.cancelAllocation}</Button>:null}</div>)}</div></AssociationListState>
     <AssociationListState {...invitations}><div className="divide-y divide-border">{invitations.data?.items.map(row=><div key={row.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm"><div><p className="font-medium">{row.nomineeContactName}</p><p>{row.expired?t.expired:row.status} · {new Date(row.expiresAt).toLocaleString()}</p></div>{row.status!=="revoked"?<Button type="button" variant="outline" className="min-h-11" disabled={!canManage||action.pending||reason.trim().length===0} onClick={()=>void action.run(t.revokeInvitation,async()=>{await revokeAssociationSponsorshipInvitation(workspaceId,row.id,{requestId:crypto.randomUUID(),reason});await Promise.all([allocations.refresh(),invitations.refresh()]);},{description:t.revokeHelp})}>{t.revokeInvitation}</Button>:null}</div>)}</div></AssociationListState>
   </section>;
+}
+
+/** Membership → Sponsored places (owner/admin section; the surface shows who manages it to members). */
+export function AssociationSponsorshipsSection({workspaceId}:{workspaceId:string}){
+  return <section className="space-y-5" data-association-sponsorships><AssociationSponsorships workspaceId={workspaceId} canManage/></section>;
 }

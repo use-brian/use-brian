@@ -23,8 +23,9 @@ import {
   loadChannelCredentialKey,
   pinTrustedTelegramUsernameInConfig,
   trustedGuestAuthorityChanged,
+  deliveryAudienceAuthorityChanged,
 } from '../channel-integrations.js'
-import { getPool } from '../client.js'
+import { getPool, query } from '../client.js'
 
 function makeKey(): Buffer {
   return randomBytes(32)
@@ -83,6 +84,26 @@ describe('[COMP:api/channel-integrations-store] encrypt/decrypt roundtrip', () =
 })
 
 describe('[COMP:api/channel-integrations-store] trusted guest authority changes', () => {
+  it('detects destination audience grant changes independently of ordinary config', () => {
+    const binding = [{
+      version: 1 as const,
+      channelId: 'C-FICTIONAL',
+      audienceType: 'group' as const,
+      clearance: 'internal' as const,
+      compartments: ['finance'],
+      projectIds: [],
+      recipientUserId: null,
+      expiresAt: null,
+      approvedByUserId: '11111111-1111-4111-8111-111111111111',
+      approvedAt: '2026-09-28T00:00:00.000Z',
+    }]
+    expect(deliveryAudienceAuthorityChanged({}, { deliveryAudienceBindings: binding })).toBe(true)
+    expect(deliveryAudienceAuthorityChanged(
+      { deliveryAudienceBindings: binding, replyInThread: true },
+      { deliveryAudienceBindings: binding, replyInThread: false },
+    )).toBe(false)
+  })
+
   it('detects the full-access toggle and its active allowlist surface', () => {
     expect(trustedGuestAuthorityChanged({}, { allowTrustedGuestFullAccess: true })).toBe(true)
     expect(trustedGuestAuthorityChanged(
@@ -197,5 +218,22 @@ describe('[COMP:api/channel-integrations-store] tampering detection', () => {
 
   it('fails on a too-short blob', () => {
     expect(() => decryptCredentials(Buffer.alloc(10), key)).toThrow(/too short/)
+  })
+})
+
+
+describe('[COMP:api/channel-integrations-store] Telegram discussion inheritance', () => {
+  it('passes the base group to credential selection and routing diagnostics', async () => {
+    vi.mocked(query).mockResolvedValue({ rows: [] } as never)
+    const store = createDbChannelIntegrationStore(makeKey())
+    const args = ['ws', 'assistant', 'integration', 'telegram', '-10020:discussion:30'] as const
+    await store.getCredentialsForAssistantIntegrationSystem(...args)
+    expect(query).toHaveBeenLastCalledWith(expect.any(String), [
+      'assistant', 'integration', 'telegram', '-10020:discussion:30', '-10020', 'ws',
+    ])
+    await store.diagnoseAssistantIntegrationRoutingSystem(...args)
+    expect(query).toHaveBeenLastCalledWith(expect.any(String), [
+      'assistant', 'integration', 'telegram', '-10020:discussion:30', '-10020', 'ws',
+    ])
   })
 })

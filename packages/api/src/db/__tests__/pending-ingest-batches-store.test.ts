@@ -171,7 +171,7 @@ describe('[COMP:api/programmatic-capture] atomic pooled append', () => {
 
     expect(result).toMatchObject({ duplicate: false, status: 'queued', batchId: 'batch-1' })
     const upsert = calls.find((call) => call.text.includes('INSERT INTO pending_ingest_batches'))
-    expect(upsert?.text).toContain('ON CONFLICT (rule_id, assistant_id, partition_key, fires_at)')
+    expect(upsert?.text).toContain('ON CONFLICT (rule_id, assistant_id, partition_key, fires_at, scope_binding_origin, scope_held)')
     expect(upsert?.text).toContain("source = 'programmatic'")
     expect(calls.map((call) => call.text.trim())).toEqual(expect.arrayContaining([
       'BEGIN',

@@ -6,7 +6,7 @@ import {
   MULTI_INSTANCE_CONNECTOR_IDS,
   OFFICIAL_CONNECTORS,
 } from '../connector-registry.js'
-import { GDRIVE_BYO_OAUTH_SCOPES, connectorToolGrouping, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_OAUTH_SCOPES } from '../builtin-connectors.js'
+import { BOOT_INJECTED_BUILTIN_TOOLS, GDRIVE_BYO_OAUTH_SCOPES, connectorToolGrouping, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_OAUTH_SCOPES } from '../builtin-connectors.js'
 import { TOOL_DISPLAY_NAMES } from '../tool-display-names.js'
 
 /**
@@ -27,6 +27,18 @@ const MSGRAPH_TOOLS = [
 ]
 
 describe('[COMP:shared/connector-registry] Official connector registry', () => {
+  it('discovers batch form filling as a boot-injected, governed composing tool', () => {
+    expect(BOOT_INJECTED_BUILTIN_TOOLS.computer).toContain('browserFillForm')
+    expect(OFFICIAL_CONNECTOR_TOOLS.computer.filter(tool => tool.name === 'browserFillForm')).toEqual([
+      {
+        name: 'browserFillForm',
+        description: expect.stringContaining('Chromium local browser only'),
+        classification: 'write',
+        defaultPolicy: 'allow',
+      },
+    ])
+  })
+
   it('routes WordPress Directory Connect through its credential form', () => {
     expect(OFFICIAL_CONNECTORS.find((connector) => connector.id === 'wordpress')).toMatchObject({
       auth_type: 'api_key',

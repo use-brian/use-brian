@@ -83,7 +83,7 @@ describe('[COMP:crm/privacy-copies] Notification retirement and workflow depende
     expect((await pool.query('SELECT status,payload FROM crm_domain_event_outbox WHERE id=$1',[unrelated])).rows[0]).toMatchObject({status:'pending',payload:{status:'original'}})
     const listed=await createAssociationStore(pool).listNotifications(f.workspaceId,{limit:100,cursor:null,status:'retired'})
     expect(listed.items).toHaveLength(100);expect(listed.nextCursor).toBeTruthy();expect(listed.items[0]).toMatchObject({status:'retired',retiredFromStatus:expect.any(String),retiredAt:expect.any(Date)})
-    const delivery=await listCrmEventDelivery(f.workspaceId,{limit:100})
+    const delivery=await listCrmEventDelivery(f.context,{limit:100})
     const retiredDelivery=delivery.events.filter((row:Record<string,unknown>)=>row.status==='retired')
     expect(retiredDelivery.length).toBeGreaterThan(0)
     for(const row of retiredDelivery)expect(row).toMatchObject({retiredAt:expect.any(Date),retiredFromStatus:expect.any(String)})

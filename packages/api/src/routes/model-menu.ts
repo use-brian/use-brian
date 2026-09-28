@@ -11,6 +11,7 @@
  *   DELETE /api/workspaces/:wid/metered-profiles/:id — delete
  *   PUT    /api/workspaces/:wid/model-defaults/:cls — set a class default (owner/admin)
  *   DELETE /api/workspaces/:wid/model-defaults/:cls — back to registry default (owner/admin)
+ *   PUT    /api/workspaces/:wid/decision-routing  — LLM-only, shadow, or approved hybrid (owner/admin)
  *
  * Menus honor key presence (L12): a model whose provider key is absent at
  * boot is absent from every menu — never listed, never erroring. Metered
@@ -26,6 +27,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import {
   MODEL_REGISTRY,
+  decisionModelRows,
   isRegistryModelAvailable,
   menuForClass,
   registryRow,
@@ -39,12 +41,22 @@ import { isDefaultableClass, type WorkspaceModelDefaultsStore } from '../db/work
 import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
 import { CUSTOM_LLM_TIERS, isCustomLlmTier } from '../db/workspace-custom-llm-endpoints.js'
 import { customLlmAlias } from '../custom-llm-runtime.js'
+import type { WorkspaceDecisionRoutingStore } from '../db/workspace-decision-routing.js'
+import type {
+  ApprovedDecisionProfileSummary,
+  DecisionEvaluationProfileStore,
+} from '../db/decision-evaluation-profiles.js'
+import { isAuthorityBearingDecisionOperation } from '../decision-promotion.js'
+import { WORKSPACE_DECISION_SHADOW_SAMPLE_RATE } from '../workspace-decision-routing.js'
 
 export type ModelMenuRouteOptions = {
   workspaceStore: WorkspaceStore
   meteredProfileStore: MeteredProfileStore
   modelDefaultsStore: WorkspaceModelDefaultsStore
   customLlmEndpointStore?: WorkspaceCustomLlmEndpointStore
+  decisionRoutingStore?: WorkspaceDecisionRoutingStore
+  decisionEvaluationProfileStore?: Pick<DecisionEvaluationProfileStore, 'listApproved'>
+  configuredDecisionAdapters?: ReadonlySet<string>
   /** Provider keys configured at boot (the routing table's keys). */
   configuredProviders: ProviderAvailability
   /** Closed billing seam; absent on the open build (menus still work,
@@ -103,6 +115,12 @@ const setModelRouteSchema = z.union([
   z.object({ profileId: z.string().uuid() }).strict(),
 ])
 
+const setDecisionRoutingSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('llm_only') }).strict(),
+  z.object({ mode: z.literal('shadow'), modelAlias: z.string().min(1) }).strict(),
+  z.object({ mode: z.literal('hybrid'), modelAlias: z.string().min(1) }).strict(),
+])
+
 function configuredProviderForPreference(preference: string): string {
   return preference === 'dashscope-intl' ? 'openai-compat:dashscope-intl' : preference
 }
@@ -133,7 +151,15 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
     for (const cls of MENU_CLASSES) {
       classes[cls] = menuForClass(cls, opts.configuredProviders).map(serializeRow)
     }
-    const [profiles, defaults, customConnections, customTierDefaults, storedRoutes] = await Promise.all([
+    const [
+      profiles,
+      defaults,
+      customConnections,
+      customTierDefaults,
+      storedRoutes,
+      decisionSetting,
+      approvedDecisionProfiles,
+    ] = await Promise.all([
       opts.meteredProfileStore.list(workspaceId),
       opts.modelDefaultsStore.list(workspaceId),
       opts.customLlmEndpointStore
@@ -144,6 +170,17 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
         : Promise.resolve([]),
       opts.customLlmEndpointStore
         ? opts.customLlmEndpointStore.listModelRoutes({ actingUserId: req.userId!, workspaceId })
+        : Promise.resolve([]),
+      opts.decisionRoutingStore
+        ? opts.decisionRoutingStore.get({ actingUserId: req.userId!, workspaceId })
+        : Promise.resolve(null),
+      opts.decisionEvaluationProfileStore
+        ? opts.decisionEvaluationProfileStore.listApproved().catch((error: unknown) => {
+            console.warn('[decision-routing] profile capability read failed', {
+              error: error instanceof Error ? error.message : String(error),
+            })
+            return []
+          })
         : Promise.resolve([]),
     ])
     let modelRoutes = storedRoutes
@@ -223,6 +260,33 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
           provider: row?.provider ?? null,
         }
       }),
+      decisionRouting: {
+        mode: decisionSetting?.mode ?? 'llm_only',
+        modelAlias: decisionSetting?.modelAlias ?? null,
+        updatedAt: decisionSetting?.updatedAt ?? null,
+        shadowSampleRate: WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
+        models: decisionModelRows()
+          .filter((row) => opts.configuredDecisionAdapters?.has(row.decisionCapabilities.adapterId))
+          .map((row) => ({
+            alias: row.alias,
+            displayName: row.displayName,
+            provider: row.provider,
+            adapterId: row.decisionCapabilities.adapterId,
+            hybridOperations: approvedDecisionProfiles
+              .filter((profile) => (
+                profile.modelCatalogId === row.alias
+                && profile.modelWireId === row.decisionCapabilities.wireModelId
+                && isAuthorityBearingDecisionOperation(profile.operationId)
+              ))
+              .map((profile) => ({
+                operationId: profile.operationId,
+                operationVersion: profile.operationVersion,
+                evaluationSegment: profile.evaluationSegment,
+                profileId: profile.id,
+                profileVersion: profile.version,
+              })),
+          })),
+      },
       meteredBillingAvailable: Boolean(opts.estimateMeteredTurn),
     })
   })
@@ -402,6 +466,50 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
       tier,
     })
     res.json({ ok: true })
+  })
+
+  router.put('/workspaces/:wid/decision-routing', async (req, res) => {
+    if (!(await adminOr403(req as { userId?: string }, res, req.params.wid))) return
+    if (!opts.decisionRoutingStore) {
+      return void res.status(503).json({ error: 'Decision routing is unavailable' })
+    }
+    const parsed = setDecisionRoutingSchema.safeParse(req.body)
+    if (!parsed.success) return void res.status(400).json({ error: 'Invalid decision route' })
+
+    if (parsed.data.mode !== 'llm_only') {
+      const modelAlias = parsed.data.modelAlias
+      const row = decisionModelRows().find((candidate) => candidate.alias === modelAlias)
+      if (!row || !opts.configuredDecisionAdapters?.has(row.decisionCapabilities.adapterId)) {
+        return void res.status(400).json({ error: 'Decision classifier is not available' })
+      }
+      if (parsed.data.mode === 'hybrid') {
+        if (!opts.decisionEvaluationProfileStore) {
+          return void res.status(503).json({ error: 'Decision profile registry is unavailable' })
+        }
+        let approved: ApprovedDecisionProfileSummary[]
+        try {
+          approved = await opts.decisionEvaluationProfileStore.listApproved()
+        } catch {
+          return void res.status(503).json({ error: 'Decision profile registry is unavailable' })
+        }
+        const eligible = approved.some((profile) => (
+          profile.modelCatalogId === row.alias
+          && profile.modelWireId === row.decisionCapabilities.wireModelId
+          && isAuthorityBearingDecisionOperation(profile.operationId)
+        ))
+        if (!eligible) {
+          return void res.status(400).json({ error: 'No approved hybrid operation is available for this classifier' })
+        }
+      }
+    }
+
+    const setting = await opts.decisionRoutingStore.set({
+      actingUserId: (req as { userId?: string }).userId!,
+      workspaceId: req.params.wid,
+      mode: parsed.data.mode,
+      modelAlias: parsed.data.mode === 'llm_only' ? null : parsed.data.modelAlias,
+    })
+    res.json({ decisionRouting: setting })
   })
 
   return router

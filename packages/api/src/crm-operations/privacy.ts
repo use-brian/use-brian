@@ -9,9 +9,10 @@
  */
 
 import type pg from 'pg'
-import type { CrmPageQuery } from '@use-brian/core'
+import { CrmOperationsError, type CrmPageQuery, type CrmOperationsContext } from '@use-brian/core'
 import { queryCrmPage } from './pagination.js'
-import { getPool, query } from '../db/client.js'
+import { getPool, query, queryWithRLS } from '../db/client.js'
+import { currentAgentAccess } from '../db/agent-access-context.js'
 import { retireCrmIntakeReceipts, readCrmPrivacyPolicy } from './privacy-policy.js'
 import { acquireCrmPrivacyAdmission } from './privacy-admission.js'
 import { retainCrmAddressSuppression } from './suppression-tombstones.js'
@@ -183,7 +184,7 @@ export async function redactCrmOperationsForContact(
   // Resolve audit references before clearing the attendee/enquiry/membership
   // links on which attribution depends. Reuse the preview/export predicates.
   for (const [domain, assignments] of [
-    ['association_audit_log', "metadata=jsonb_build_object('erased',true)"],
+    ['association_audit_log', "subject_id='00000000-0000-0000-0000-000000000000'::uuid,metadata=jsonb_build_object('erased',true)"],
     ['workspace_audit_log', "subject_id=NULL,details=jsonb_build_object('erased',true)"],
     ['brain_row_versions', "before_image=NULL,erased_at=COALESCE(erased_at,clock_timestamp()),mutation_reason='Personal data erased',workspace_id=$1"],
     ['correction_audit', "reason='Personal data erased',ticket_reference=NULL,row_snapshot=jsonb_build_object('erased',true),detail=jsonb_build_object('erased',true)"],
@@ -344,7 +345,8 @@ export async function pruneCrmOperationsRetention(
         AND NOT(COALESCE(e.payload->>'contactId','')=ANY($3::text[]))
         AND NOT EXISTS(SELECT 1 FROM association_enquiries q WHERE q.workspace_id=e.workspace_id AND q.id=e.subject_id AND q.contact_id=ANY($3::uuid[]))
         AND NOT EXISTS(SELECT 1 FROM workflow_runs r
-          WHERE r.workspace_id=e.workspace_id AND r.crm_event_id=e.id)`,
+          WHERE r.workspace_id=e.workspace_id AND r.crm_event_id=e.id)
+        AND NOT EXISTS(SELECT 1 FROM goal_crm_event_sources g WHERE g.workspace_id=e.workspace_id AND g.event_id=e.id)`,
       [workspaceId, before, heldContacts, heldSubmissions])
     await remove('crm_intake_idempotency',
       `DELETE FROM crm_intake_idempotency WHERE workspace_id=$1 AND status='retired'
@@ -370,22 +372,40 @@ export async function pruneCrmOperationsRetention(
   }
 }
 
-export async function listCrmOperationsAudit(workspaceId: string, filters: CrmPageQuery = {}) {
-  return queryCrmPage(query, { workspaceId, resource: 'crm.audit', key: 'entries', query: filters,
+export async function listCrmOperationsAudit(context: CrmOperationsContext, filters: CrmPageQuery = {}) {
+  const {workspaceId}=context,userId=operationsHistoryActor(context)
+  return queryCrmPage((sql,values)=>queryWithRLS(userId,sql,values), { workspaceId, resource: 'crm.audit', key: 'entries', query: filters,
     sql: `SELECT id,action,subject_kind AS "subjectKind",subject_id AS "subjectId",
             actor_kind AS "actorKind",created_at AS "occurredAt",created_at AS "createdAt",metadata AS details
-       FROM association_audit_log WHERE workspace_id=$1 AND action LIKE 'crm.%'`,
-    params: [workspaceId],
+       FROM association_audit_log WHERE workspace_id=$1 AND action LIKE 'crm.%'
+         AND EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2)`,
+    params: [workspaceId,userId],
   })
 }
 
-export async function listCrmEventDelivery(workspaceId: string, filters: CrmPageQuery = {}) {
-  return queryCrmPage(query, { workspaceId, resource: 'crm.event-delivery', key: 'events', query: filters,
+function operationsHistoryActor(context: CrmOperationsContext): string {
+  const {workspaceId,actor}=context
+  if(!('userId' in actor) || !actor.userId || !['user','import','assistant','workflow'].includes(actor.kind))
+    throw new CrmOperationsError('not_authorized','Operation history requires current member scope. Review Department access.')
+  const userId=actor.userId
+  if(actor.kind==='assistant'||actor.kind==='workflow') {
+    const bound=currentAgentAccess()
+    if(!bound||bound.workspaceId!==workspaceId||bound.userId!==userId
+      ||bound.compartments===undefined||bound.projectIds===undefined||bound.visibilityAssistantIds===undefined)
+      throw new CrmOperationsError('not_authorized','Operation history requires bound execution scope. Review Department access.')
+  }
+  return userId
+}
+
+export async function listCrmEventDelivery(context: CrmOperationsContext, filters: CrmPageQuery = {}) {
+  const {workspaceId}=context,userId=operationsHistoryActor(context)
+  return queryCrmPage((sql,values)=>queryWithRLS(userId,sql,values), { workspaceId, resource: 'crm.event-delivery', key: 'events', query: filters,
     sql: `SELECT id,event_type AS "eventType",subject_kind AS "subjectKind",
             subject_id AS "subjectId",status,attempts,created_at AS "createdAt",
             occurred_at AS "occurredAt",delivered_at AS "deliveredAt",
             retired_at AS "retiredAt",retired_from_status AS "retiredFromStatus"
-       FROM crm_domain_event_outbox WHERE workspace_id=$1`,
-    params: [workspaceId],
+       FROM crm_domain_event_outbox WHERE workspace_id=$1
+         AND EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2)`,
+    params: [workspaceId,userId],
   })
 }

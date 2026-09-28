@@ -10,6 +10,11 @@
 
 import type { ContentBlock, TokenUsage } from '../providers/types.js'
 import type { MemoryStore } from './types.js'
+import type {
+  DecisionCompletionRoute,
+  DecisionExecutionPort,
+  DecisionResponse,
+} from '../decisions/index.js'
 
 export type NudgeTurn = {
   content: ContentBlock[]
@@ -45,8 +50,15 @@ type RecalledMemory = {
  */
 export async function runMemoryNudge(params: {
   turns: NudgeTurn[]
-  callModel: (prompt: string) => Promise<NudgeModelResult | string>
+  callModel: (
+    prompt: string,
+    llm?: DecisionCompletionRoute,
+  ) => Promise<NudgeModelResult | string>
   store: MemoryStore
+  decisionRuntime?: DecisionExecutionPort
+  llm?: DecisionCompletionRoute
+  workspaceId?: string
+  runId?: string
 }): Promise<NudgeResult> {
   const recalled = extractRecalledMemories(params.turns)
   if (recalled.length === 0) return { judged: 0, useful: 0, usage: null, model: null }
@@ -54,12 +66,58 @@ export async function runMemoryNudge(params: {
   const responseText = extractResponseText(params.turns)
   if (!responseText.trim()) return { judged: 0, useful: 0, usage: null, model: null }
 
-  const prompt = buildJudgmentPrompt(recalled, responseText)
-  const modelResult = await params.callModel(prompt)
-  const { text, usage, model } = typeof modelResult === 'string'
-    ? { text: modelResult, usage: undefined, model: undefined }
-    : modelResult
-  const verdicts = parseVerdicts(text, recalled)
+  const decision = params.decisionRuntime
+      ? (await params.decisionRuntime.run<MemoryDecision>({
+        ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+        ...(params.llm ? { llm: params.llm } : {}),
+        request: {
+          runId: params.runId ?? `memory-usefulness-${Date.now()}`,
+          operation: {
+            id: 'memory.usefulness',
+            version: '1',
+            stateVersion: '1',
+            questionVersion: '1',
+          },
+          state: {
+            recalled: recalled.map((memory) => ({ id: memory.fullId, summary: memory.summary })),
+            response: responseText.length > 2000 ? `${responseText.slice(0, 2000)}...` : responseText,
+          },
+          questions: recalled.map((memory) => ({
+            kind: 'boolean' as const,
+            id: memory.fullId,
+            prompt: `Was this memory used in the assistant response? Memory: ${memory.summary}`,
+            criteria: {
+              true: 'The response references, draws on, or was clearly informed by the memory',
+              false: 'The response did not use the memory, including when uncertain',
+            },
+          })),
+        },
+        operation: {
+          decide: (response, { profile }) => decideMemoryUsefulness(response, recalled, profile?.policy),
+          validateResult: (result) => validateMemoryDecision(result, recalled),
+          safeFailure: () => ({ verdicts: [], usage: null, model: null }),
+          async completeWithLlm(context) {
+            const result = await judgeMemoriesWithLlm(params.callModel, recalled, responseText, context.llm)
+            return {
+              result,
+              providerId: context.llm.provider.name,
+              model: { catalogId: context.llm.modelId, wireId: result.model ?? context.llm.modelId },
+              ...(result.usage ? {
+                usage: {
+                  inputTokens: result.usage.inputTokens,
+                  outputTokens: result.usage.outputTokens,
+                },
+              } : {}),
+            }
+          },
+        },
+      })).result
+    : validateMemoryDecision(
+        await judgeMemoriesWithLlm(params.callModel, recalled, responseText),
+        recalled,
+      )
+
+  const verdicts = new Map(decision.verdicts)
 
   let useful = 0
   for (const [memoryId, isUseful] of verdicts) {
@@ -67,7 +125,91 @@ export async function runMemoryNudge(params: {
     if (isUseful) useful++
   }
 
-  return { judged: verdicts.size, useful, usage: usage ?? null, model: model ?? null }
+  return {
+    judged: verdicts.size,
+    useful,
+    usage: decision.usage,
+    model: decision.model,
+  }
+}
+
+type MemoryDecision = {
+  verdicts: Array<[memoryId: string, useful: boolean]>
+  usage: TokenUsage | null
+  model: string | null
+}
+
+function decideMemoryUsefulness(
+  response: DecisionResponse,
+  recalled: RecalledMemory[],
+  policy: import('../decisions/index.js').JsonValue | undefined,
+) {
+  const uncertaintyMin = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+    && typeof policy.uncertaintyMin === 'number'
+    ? policy.uncertaintyMin
+    : undefined
+  const uncertaintyMax = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+    && typeof policy.uncertaintyMax === 'number'
+    ? policy.uncertaintyMax
+    : undefined
+  const answers = new Map(response.answers.map((answer) => [answer.questionId, answer]))
+  const verdicts: Array<[string, boolean]> = []
+  for (const memory of recalled) {
+    const answer = answers.get(memory.fullId)
+    if (answer?.kind !== 'boolean') return { kind: 'unavailable' as const, reason: 'invalid_response' as const }
+    if (
+      answer.pTrue !== undefined && uncertaintyMin !== undefined && uncertaintyMax !== undefined &&
+      answer.pTrue >= uncertaintyMin && answer.pTrue <= uncertaintyMax
+    ) {
+      return { kind: 'follow_up' as const, reason: 'uncertain' as const }
+    }
+    verdicts.push([memory.fullId, answer.value])
+  }
+  return {
+    kind: 'complete' as const,
+    result: {
+      verdicts,
+      usage: response.usage
+        ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
+        : null,
+      model: response.model.wireId,
+    },
+  }
+}
+
+function validateMemoryDecision(
+  result: MemoryDecision,
+  recalled: RecalledMemory[],
+): MemoryDecision {
+  const expected = new Set(recalled.map((memory) => memory.fullId))
+  const actual = new Set<string>()
+  for (const [memoryId, useful] of result.verdicts) {
+    if (!expected.has(memoryId) || actual.has(memoryId) || typeof useful !== 'boolean') {
+      throw new Error('memory usefulness returned an invalid verdict set')
+    }
+    actual.add(memoryId)
+  }
+  if (actual.size !== 0 && actual.size !== expected.size) {
+    throw new Error('memory usefulness returned an incomplete verdict set')
+  }
+  return result
+}
+
+async function judgeMemoriesWithLlm(
+  callModel: (prompt: string, llm?: DecisionCompletionRoute) => Promise<NudgeModelResult | string>,
+  recalled: RecalledMemory[],
+  responseText: string,
+  llm?: DecisionCompletionRoute,
+): Promise<MemoryDecision> {
+  const modelResult = await callModel(buildJudgmentPrompt(recalled, responseText), llm)
+  const { text, usage, model } = typeof modelResult === 'string'
+    ? { text: modelResult, usage: undefined, model: undefined }
+    : modelResult
+  return {
+    verdicts: [...parseVerdicts(text, recalled)],
+    usage: usage ?? null,
+    model: model ?? null,
+  }
 }
 
 /**

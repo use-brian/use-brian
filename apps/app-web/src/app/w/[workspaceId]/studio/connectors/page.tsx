@@ -91,7 +91,7 @@ import { GDRIVE_BYO_OAUTH_SCOPES, OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOL
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
 import { useT } from "@/lib/i18n/client";
 import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
-import { buildConnectorState } from "@/lib/connector-oauth-state";
+import { buildConnectorState, parseConnectorAuthorizationContinuation } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import { desktopBridge } from "@/lib/desktop-auth-source";
 import {
@@ -1055,6 +1055,10 @@ function ConnectorsList() {
   const tc = t.settings.connectors;
   const { activeId, active } = useWorkspaces();
   const workspaceId = activeId ?? "";
+  const currentSetupContinuation = () =>
+    typeof window === "undefined"
+      ? undefined
+      : parseConnectorAuthorizationContinuation(window.location.search);
   // The list paints from the surface cache (instant-navigation contract):
   // a revisit renders last-known rows on the first frame and revalidates
   // behind them; `loading` is true only when nothing is cached.
@@ -1672,6 +1676,7 @@ function ConnectorsList() {
       createNew: !!input.opts?.addAnother,
       instanceId: input.opts?.instanceId,
       nonce,
+      continuation: currentSetupContinuation(),
     }));
     window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
   }
@@ -1780,7 +1785,7 @@ function ConnectorsList() {
       });
       if (startConnectorOAuthOnDesktop({ connector: "notion", authorizeBase: "https://api.notion.com/v1/oauth/authorize", params: sp, redirectUri, opts })) return;
       const nonce = armConnectorOauthState();
-      sp.set("state", buildConnectorState({ connector: "notion", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }));
+      sp.set("state", buildConnectorState({ connector: "notion", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce, continuation: currentSetupContinuation() }));
       window.location.href = `https://api.notion.com/v1/oauth/authorize?${sp}`;
       return;
     }
@@ -1794,7 +1799,7 @@ function ConnectorsList() {
         redirect_uri: redirectUri,
         response_type: "code",
         scope: "public_api",
-        state: buildConnectorState({ connector: "fathom", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
+        state: buildConnectorState({ connector: "fathom", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce, continuation: currentSetupContinuation() }),
       });
       window.location.href = `${FATHOM_AUTHORIZE_URL}?${sp}`;
       return;
@@ -2219,6 +2224,7 @@ function ConnectorsList() {
         createNew: !!input.opts?.addAnother,
         instanceId: input.opts?.instanceId,
         nonce,
+        continuation: currentSetupContinuation(),
       }),
     });
   }

@@ -169,6 +169,57 @@ jobs:
           --filter='!@use-brian/app-desktop'
           --concurrency=4
 
+  department-isolation:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.head_ref != 'develop' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    name: Department isolation acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install PostgreSQL 18 with required extensions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --show-error --location \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-18 postgresql-18-pgvector
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build test dependencies
+        run: pnpm exec turbo run build --filter="@use-brian/api-open^..." --filter="app-web^..."
+
+      - name: Run no-credential acceptance
+        run: >-
+          node scripts/test-department-isolation.mjs
+          --pg-bin /usr/lib/postgresql/18/bin
+          --report /tmp/department-isolation-report.json
+
+      - name: Upload acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: department-isolation-report
+          path: /tmp/department-isolation-report.json
+          if-no-files-found: error
+
   # Preserve the historical required-check context while making it depend on
   # every parallel lane. `always()` turns a failed dependency into a red
   # aggregate check instead of leaving the required check skipped.
@@ -178,7 +229,7 @@ jobs:
       (github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository)
-    needs: [build-typecheck, api-tests, app-web-tests, heavyweight-tests, remaining-tests]
+    needs: [build-typecheck, api-tests, app-web-tests, heavyweight-tests, remaining-tests, department-isolation]
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
@@ -188,12 +239,14 @@ jobs:
           APP_WEB_TESTS_RESULT: ${{ needs.app-web-tests.result }}
           HEAVYWEIGHT_TESTS_RESULT: ${{ needs.heavyweight-tests.result }}
           REMAINING_TESTS_RESULT: ${{ needs.remaining-tests.result }}
+          DEPARTMENT_ISOLATION_RESULT: ${{ needs.department-isolation.result }}
         run: |
           if [[ "$BUILD_TYPECHECK_RESULT" != "success" ||
                 "$API_TESTS_RESULT" != "success" ||
                 "$APP_WEB_TESTS_RESULT" != "success" ||
                 "$HEAVYWEIGHT_TESTS_RESULT" != "success" ||
-                "$REMAINING_TESTS_RESULT" != "success" ]]; then
-            echo "CI lane failure: build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT"
+                "$REMAINING_TESTS_RESULT" != "success" ||
+                "$DEPARTMENT_ISOLATION_RESULT" != "success" ]]; then
+            echo "CI lane failure: build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT isolation=$DEPARTMENT_ISOLATION_RESULT"
             exit 1
           fi

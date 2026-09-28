@@ -1,9 +1,10 @@
+import { getSoulContext } from '../db/scoped-summary-store.js'
 /**
  * Memory management routes for the assistant detail page.
  *
  * Mounted at `/api/assistants/:assistantId/memories` behind requireAuth.
- * All queries use queryWithRLS so a user can only access memories on
- * assistants they are a member of.
+ * Reads use the resolved viewer scope. Canonical mutation writers recheck
+ * current membership in addition to the viewer and execution ceilings.
  *
  * [COMP:api/memories-route]
  *
@@ -26,19 +27,18 @@
  */
 
 import { Router } from 'express'
-import type { AccessContext, Sensitivity } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/core'
 import {
   listMemories, getMemoryById, updateMemory, deleteMemory,
-  searchMemories, getMemoryStats, getSoul,
+  searchMemories, getMemoryStats,
   listWorkspaceMemories, searchWorkspaceMemories,
   createMemory,
   listUnverifiedByWorkspace,
-  countUnverifiedByWorkspace,
 } from '../db/memories.js'
 import { query } from '../db/client.js'
-import { queryWithRLS } from '../db/client.js'
 import { resolveAssistantAccess } from '../db/users.js'
-import { getWorkspaceRoleSystem, resolveReadCeilingsSystem } from '../db/workspace-store.js'
+import { resolveTurnScopeSystem, type TurnScopeAssistant } from '../context-scope/resolve-turn-scope.js'
+import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import {
   adjustMemoryDecision,
   verifyMemoryDecision,
@@ -59,37 +59,19 @@ async function resolveViewerCtx(
   userId: string,
   assistantId: string,
 ): Promise<AccessContext | null> {
-  const result = await query<{
-    workspaceId: string | null
-    clearance: Sensitivity
-    compartments: string[] | null
-    kind: AccessContext['assistantKind']
-  }>(
-    `SELECT workspace_id AS "workspaceId", clearance, compartments, kind FROM assistants WHERE id = $1`,
+  const result = await query<Omit<TurnScopeAssistant, 'id'>>(
+    `SELECT workspace_id AS "workspaceId", clearance, compartments, kind,
+       team_scope_mode AS "teamScopeMode", project_scope_mode AS "projectScopeMode"
+     FROM assistants WHERE id = $1`,
     [assistantId],
   )
   const row = result.rows[0]
   if (!row) return null
-  // Read-side ceilings (incident 2026-06-01 + compartment axis): this REST
-  // surface lists a workspace assistant's memories to any member. Bound the
-  // read ceiling to the acting member (`min(member, assistant)` clearance +
-  // `member ∩ assistant` compartments) so a member can't read above their tier
-  // or outside their compartments via a broader assistant. Read-only — no write
-  // ceiling needed.
-  const { clearance, compartments } = await resolveReadCeilingsSystem(
-    userId,
-    row.workspaceId,
-    row.clearance,
-    row.compartments,
-  )
-  return {
-    workspaceId: row.workspaceId ?? '',
-    userId,
-    assistantId,
-    assistantKind: row.kind,
-    clearance,
-    compartments,
-  }
+  const scope = await resolveTurnScopeSystem({
+    userId, assistant: { ...row, id: assistantId },
+    session: { contextGroupId: null, contextProjectId: null },
+  })
+  return scope.access
 }
 
 export function memoryRoutes(): Router {
@@ -237,7 +219,7 @@ export function memoryRoutes(): Router {
           }
         }
 
-        const rows = await listUnverifiedByWorkspace(ctx.workspaceId, limit, cursor)
+        const rows = await listUnverifiedByWorkspace(ctx, limit, cursor)
         const filteredRows = badOutcomeIds
           ? rows.filter((r) => badOutcomeIds!.has(r.id)).map((r) => ({
               ...r,
@@ -293,7 +275,9 @@ export function memoryRoutes(): Router {
     const { assistantId } = req.params
 
     try {
-      const soul = await getSoul(assistantId, userId)
+      const ctx = await resolveViewerCtx(userId,assistantId)
+      if (!ctx) { res.status(404).json({ error: 'Assistant not found' }); return }
+      const { content: soul } = await getSoulContext(ctx)
       res.json({ soul })
     } catch (err) {
       console.error('[memories] soul failed:', err)
@@ -568,35 +552,16 @@ export function memoryRoutes(): Router {
     const { scope } = req.body as { scope?: string }
 
     if (scope !== 'workspace' && scope !== 'user') {
-      res.status(400).json({ error: 'scope must be "team" or "user"' })
+      res.status(400).json({ error: 'scope must be "workspace" or "user"' })
       return
     }
 
-    // Fetch assistant first so the (workspace + clearance) → viewer
-    // ctx is available for `getMemoryById`. The existing
-    // `assistantTeamId` check below reuses the same row — one query,
-    // not two.
-    const assistantResult = await query<{
-      workspaceId: string | null
-      clearance: Sensitivity
-      kind: AccessContext['assistantKind']
-    }>(
-      `SELECT workspace_id AS "workspaceId", clearance, kind FROM assistants WHERE id = $1`,
-      [assistantId],
-    )
-    const assistantRow = assistantResult.rows[0]
-    if (!assistantRow) {
+    const ctx = await resolveViewerCtx(userId, assistantId)
+    if (!ctx) {
       res.status(404).json({ error: 'Assistant not found' })
       return
     }
-    const assistantTeamId = assistantRow.workspaceId
-    const ctx: AccessContext = {
-      workspaceId: assistantRow.workspaceId ?? '',
-      userId,
-      assistantId,
-      assistantKind: assistantRow.kind,
-      clearance: assistantRow.clearance,
-    }
+    const assistantTeamId = ctx.workspaceId
     const memory = await getMemoryById(ctx, memoryId)
     if (!memory || memory.assistantId !== assistantId) {
       res.status(404).json({ error: 'Memory not found' })
@@ -634,8 +599,8 @@ export function memoryRoutes(): Router {
     try {
       const updated =
         scope === 'workspace'
-          ? await updateMemory(memoryId, { scope: 'workspace', workspaceId: assistantTeamId })
-          : await updateMemory(memoryId, { scope: 'shared', workspaceId: null })
+          ? await updateMemory(memoryId, { scope: 'workspace', workspaceId: assistantTeamId }, ctx)
+          : await updateMemory(memoryId, { scope: 'shared', workspaceId: assistantTeamId }, ctx)
       if (!updated) {
         res.status(404).json({ error: 'Memory not found' })
         return
@@ -680,12 +645,6 @@ export function memoryRoutes(): Router {
         res.status(404).json({ error: 'Memory not found' })
         return
       }
-      // Idempotent — already-verified rows short-circuit so a UI double-tap
-      // doesn't append a duplicate `confirm` audit event.
-      if (memory.verifiedByUserId) {
-        res.json({ memory })
-        return
-      }
       if (!memory.workspaceId) {
         res.status(400).json({ error: 'Memory is not workspace-partitioned' })
         return
@@ -694,16 +653,21 @@ export function memoryRoutes(): Router {
         memoryId,
         workspaceId: memory.workspaceId,
         verifiedBy: userId,
+        access: ctx,
       })
       if (verified.status === 'not_found') {
         res.status(404).json({ error: 'Memory not found' })
         return
       }
       const stamped = await getMemoryById(ctx, memoryId)
+      if (!stamped) {
+        res.status(404).json({ error: 'Memory not found' })
+        return
+      }
       // Realtime repaint so the now-verified memory drops off the inbox queue
       // on other tabs / devices.
-      void notifyBrainInboxChange(memory.workspaceId, 'memory', memoryId, 'update')
-      res.json({ memory: stamped ?? memory })
+      if (verified.stamped) void notifyBrainInboxChange(memory.workspaceId, 'memory', memoryId, 'update')
+      res.json({ memory: stamped })
     } catch (err) {
       console.error('[memories] verify failed:', err)
       res.status(500).json({ error: 'Failed to verify memory' })
@@ -759,12 +723,10 @@ export function memoryRoutes(): Router {
     // Validate inputs up front so we never mint a partial audit trail
     // before bailing on a downstream type error.
     let nextScope: 'shared' | 'workspace' | undefined
-    let nextWorkspaceId: string | null | undefined
     let scopeUserValue: 'personal' | 'workspace_shared' | 'workspace' | undefined
     if (scope !== undefined) {
       if (scope === 'personal') {
         nextScope = 'shared'
-        nextWorkspaceId = null
         scopeUserValue = 'personal'
       } else if (scope === 'workspace_shared') {
         nextScope = 'shared'
@@ -840,14 +802,8 @@ export function memoryRoutes(): Router {
         return
       }
 
-      // Default `workspaceId` for workspace/workspace_shared scope to the
-      // assistant's own workspace; explicit personal scope clears it.
-      const computedWorkspaceId =
-        nextWorkspaceId === null
-          ? null
-          : nextScope !== undefined
-            ? before.workspaceId
-            : undefined
+      // Visibility choices preserve the canonical workspace partition.
+      const computedWorkspaceId = nextScope !== undefined ? before.workspaceId : undefined
 
       // Per-field audit envelope. `model_value` is read from the row
       // pre-supersession; `original_scope` etc. on `memories` carry the
@@ -902,6 +858,7 @@ export function memoryRoutes(): Router {
         memoryId,
         workspaceId: before.workspaceId,
         verifiedBy: userId,
+        access: ctx,
         updates: {
           scope: nextScope,
           workspaceId: computedWorkspaceId,
@@ -936,16 +893,14 @@ export function memoryRoutes(): Router {
     if (!userId) return
 
     try {
-      // Capture the workspace before the row is gone — `deleteMemory` returns
-      // only a boolean, and we need a workspaceId to scope the realtime NOTIFY
-      // below. A null workspace (personal memory) just no-ops the notify.
-      const wsLookup = await query<{ workspaceId: string | null }>(
-        `SELECT workspace_id AS "workspaceId" FROM memories WHERE id = $1`,
-        [req.params.memoryId],
-      )
-      const workspaceId = wsLookup.rows[0]?.workspaceId ?? null
-
-      const deleted = await deleteMemory(req.params.memoryId)
+      const ctx = await resolveViewerCtx(userId, req.params.assistantId)
+      const memory = ctx ? await getMemoryById(ctx, req.params.memoryId) : null
+      if (!ctx || !memory || memory.assistantId !== req.params.assistantId) {
+        res.status(404).json({ error: 'Memory not found' })
+        return
+      }
+      const workspaceId = memory.workspaceId
+      const deleted = await deleteMemory(req.params.memoryId, { workspaceId }, undefined, ctx)
       if (!deleted) {
         res.status(404).json({ error: 'Memory not found' })
         return

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -9,6 +9,12 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { OfficeJobActivity, OfficeJobActivityView, officeBrianScope } from "../job-activity";
 import { presentationFixture, uid } from "./editor-fixtures";
 import { getOfficeJob, listOfficeJobEvents, type OfficeJob } from "@/lib/office/api";
+
+import {attachOfficeMetadata} from "@/lib/office/metadata";
+import {resetSurfaceCache} from "@/lib/surface-cache";
+vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: "workspace-a", me: {id: "viewer-a"}})}));
+const bounded = <T extends object>(value:T):T => attachOfficeMetadata(value,30_000,performance.now(),"viewer-a");
+afterEach(() => resetSurfaceCache());
 
 vi.mock("@/lib/office/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/office/api")>(),
@@ -46,8 +52,9 @@ const job = (status: OfficeJob["status"]): OfficeJob => ({
 
 describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
   beforeEach(() => {
+    resetSurfaceCache();
     vi.mocked(getOfficeJob).mockReset().mockImplementation(() => new Promise(() => undefined));
-    vi.mocked(listOfficeJobEvents).mockReset().mockResolvedValue([]);
+    vi.mocked(listOfficeJobEvents).mockReset().mockImplementation(async () => bounded([]));
   });
 
   it("uses family-neutral guidance and an accurate revision recovery path", () => {
@@ -127,7 +134,7 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
   });
 
   it.each(["failed", "completed"] as const)("retains failed instructions but clears successful ones: %s", async (status) => {
-    vi.mocked(getOfficeJob).mockResolvedValue({ ...job(status), id: "revision-job" });
+    vi.mocked(getOfficeJob).mockImplementation(async () => bounded({ ...job(status), id: "revision-job" }));
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);

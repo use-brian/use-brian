@@ -145,6 +145,9 @@ export const EntitlementsQuery = CrmPageQuerySchema.extend({
 }).strict()
 export const EventsQuery = CrmPageQuerySchema.extend({
   status: z.enum(['draft', 'published', 'cancelled', 'completed']).optional(),
+  when: z.enum(['upcoming', 'past']).optional(),
+  id: z.string().uuid().optional(),
+  slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,99}$/).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 }).strict()
 export const ParticipationQuery = CrmPageQuerySchema.extend({
@@ -197,6 +200,11 @@ type Options = {
 }
 
 function writeError(res: Response, error: unknown): void {
+  if ((error as { code?: string } | null)?.code === 'scope_operation_denied') {
+    res.status(403).json({ error: 'scope_operation_denied',
+      message: 'This operation is unavailable in your current scope. Ask a workspace administrator to review access.' })
+    return
+  }
   if (error instanceof CrmIntegrationScopeError) {
     res.status(403).json({ error: error.code, message: error.message })
     return
@@ -923,7 +931,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await listCrmOperationsAudit(ctx.workspaceId, filters.data))
+      res.json(await listCrmOperationsAudit(ctx, filters.data))
     } catch (error) { writeError(res, error) }
   })
 
@@ -936,7 +944,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await listCrmEventDelivery(ctx.workspaceId, filters.data))
+      res.json(await listCrmEventDelivery(ctx, filters.data))
     } catch (error) { writeError(res, error) }
   })
 

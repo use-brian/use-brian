@@ -161,13 +161,13 @@ export function LiveWatchPane({
   }, [refreshPendingInput]);
 
   const restoreUnappliedSteering = useCallback(() => {
-    const unapplied = drainQueuedInputs();
+    const unapplied = drainQueuedInputs(sessionId);
     if (unapplied.length === 0) return;
     const restored = joinQueuedInputs(unapplied);
     setSteerDraft((current) => [restored, current].filter(Boolean).join("\n\n"));
     setControlNotice(null);
     setControlError(tl.steerNotApplied);
-  }, [drainQueuedInputs, tl.steerNotApplied]);
+  }, [drainQueuedInputs, sessionId, tl.steerNotApplied]);
 
   // Transcript history — one authed fetch under the same read gate.
   useEffect(() => {
@@ -216,7 +216,7 @@ export function LiveWatchPane({
               if (frame.event === "done") sawDone = true;
               if (frame.event === "activity") {
                 const appliedInputId = appliedInputIdFromWatchActivity(frame.data);
-                if (appliedInputId) takeQueuedInput(appliedInputId);
+                if (appliedInputId) takeQueuedInput(appliedInputId, sessionId);
 
                 const liveConfirmation = confirmationFromWatchActivity(
                   frame.data,

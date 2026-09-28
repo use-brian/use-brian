@@ -4,6 +4,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { officeTemplateRoutes, type OfficeTemplatesRouteDeps } from '../office-templates.js'
 import { documentFixture, spreadsheetFixture } from '../../../../office-model/src/__tests__/fixtures.js'
 
+// Transport fixtures only; real transaction/RLS proof lives in office-library-scope.integration.
+vi.mock('../../db/office-read-projection.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../db/office-read-projection.js')>(),
+  readOfficeProjection: async (_user: string, read: () => Promise<import('../../db/office-read-projection.js').OfficeMetadataReply>) => ({...await read(), validForMs: 30_000}),
+}))
+
 describe('[COMP:api/office-routes] DOCX/XLSX routing endpoints', () => {
   it.each(['document', 'spreadsheet'] as const)('allows %s field review and rejects stale bindings and empty contracts', async (family) => {
     const snapshot = family === 'document' ? documentFixture() : spreadsheetFixture()
@@ -17,7 +23,7 @@ describe('[COMP:api/office-routes] DOCX/XLSX routing endpoints', () => {
     }
     const save = vi.fn(async () => true)
     const deps = {
-      getTemplate: vi.fn(async () => ({ id: snapshot.templateVersionId!, family, lifecycleState: 'draft', draftArtifactId: snapshot.artifactId })),
+      getTemplate: vi.fn(async () => ({ id: snapshot.templateVersionId!, workspaceId: snapshot.workspaceId, family, lifecycleState: 'draft', draftArtifactId: snapshot.artifactId })),
       getSnapshot: vi.fn(async () => ({ snapshot, baseVersion: 0, seq: 0 })),
       getDraftRouting: vi.fn(async () => null),
       saveDraftRouting: save,
@@ -28,6 +34,7 @@ describe('[COMP:api/office-routes] DOCX/XLSX routing endpoints', () => {
     server.use('/api/office', officeTemplateRoutes(deps))
     const path = `/api/office/templates/${snapshot.templateVersionId}/routing`
     const get = await request(server).get(path).expect(200)
+    expect(save).not.toHaveBeenCalled()
     const routing = get.body.routing
     expect(routing.fields).toHaveLength(1)
     expect(routing.fields[0]).toMatchObject({ name: 'NAME', required: false, type: 'plainText', maxLength: 100_000 })

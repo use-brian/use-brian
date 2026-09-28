@@ -136,6 +136,7 @@ type KnowledgeRouteOptions = {
   workflowStore?: WorkflowStore
   jobStore?: JobStore
   resolvePrimary?: (workspaceId: string) => Promise<string | null>
+  resolveAuthoringAuthority?: (params: { userId: string; workspaceId: string }) => Promise<import('@use-brian/core').AuthoringAuthority>
 }
 
 function isLoopbackAddress(address: string | undefined): boolean {
@@ -1101,6 +1102,7 @@ export function workspaceKnowledgeRoutes({
   workflowStore,
   jobStore,
   resolvePrimary,
+  resolveAuthoringAuthority,
 }: KnowledgeRouteOptions): Router {
   const router = Router({ mergeParams: true })
 
@@ -1840,6 +1842,11 @@ export function workspaceKnowledgeRoutes({
         sourceType: source.sourceType,
       })
 
+      if (!resolveAuthoringAuthority) {
+        res.status(503).json({ error: 'Workflow authoring authority is unavailable on this server.' })
+        return
+      }
+      const authoringAuthority = await resolveAuthoringAuthority({ userId:auth.userId,workspaceId:auth.workspaceId })
       const existing = await kbMaintenanceStore.getBySource(source.id)
       let workflow = existing?.workflowId
         ? await workflowStore.update(auth.userId, existing.workflowId, {
@@ -1848,6 +1855,7 @@ export function workspaceKnowledgeRoutes({
             definition: materialized.definition,
             trigger: materialized.trigger,
             enabled: config.enabled,
+            authoringAuthority,
           })
         : null
       if (!workflow) {
@@ -1860,6 +1868,7 @@ export function workspaceKnowledgeRoutes({
           definition: materialized.definition,
           trigger: materialized.trigger,
           managedBy: 'knowledge',
+          authoringAuthority,
         })
         if (!config.enabled) {
           await workflowStore.update(auth.userId, workflow.id, { enabled: false })

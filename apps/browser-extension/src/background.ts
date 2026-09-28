@@ -4,6 +4,7 @@
  * governed backend: it executes one discrete relay command at a time in the
  * profile-scoped tab set the user allowed, and the Stop button always wins.
  */
+import { CommandQueue } from './command-queue.js'
 import { RelayClient } from './relay-client.js'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach } from './executor.js'
 import {
@@ -24,7 +25,11 @@ import { readBuildStamp } from './build-info.js'
 import { isTabControlPreapproved } from './consent-preapproval.js'
 import type { LocalControlMode } from './protocol.js'
 
+import { ProtectedFill, denied } from './protected-fill.js'
+
+const protectedFill = new ProtectedFill(chrome.storage.local)
 const executor = new TabExecutor()
+const commands = new CommandQueue()
 
 // ── Consent prompt: a small extension window with Allow / Deny ──
 
@@ -77,10 +82,14 @@ const gate = new TaskGate({ prompt: promptForConsent })
 let relayWasReady = false
 
 async function stopTask(): Promise<void> {
+  protectedFill.approve(false)
+  pendingConsent?.({ allowed: false })
   await clearTask(gate.stop())
 }
 
 async function clearTask(createdTabIds: number[]): Promise<void> {
+  commands.cancel()
+  protectedFill.approve(false)
   await executor.detach()
   if (createdTabIds.length > 0) {
     await chrome.tabs.remove(createdTabIds).catch(() => undefined)
@@ -99,11 +108,17 @@ const client = new RelayClient({
   connect: (url) => new WebSocket(url) as unknown as import('./relay-client.js').WebSocketLike,
   getToken: async () => (await getStored('sessionToken')) ?? (await getStored('pairingToken')),
   getBuild: () => readBuildStamp(),
+  capabilities: { protectedFillV1: true },
   onSessionToken: async (token) => {
+    await protectedFill.allowCredential(token, 'browser-ext-session')
     await chrome.storage.local.set({ sessionToken: token })
     await chrome.storage.local.remove('pairingToken')
   },
-  onCommand: (cmd) => void handleCommand(cmd),
+  onCommand: (cmd) => {
+    // Enqueue at receipt, so Stop invalidates the actual waiting generation.
+    // An outer promise chain here would let stale commands enqueue AFTER Stop.
+    void handleCommand(cmd).catch(() => undefined)
+  },
   onStateChange: (state) => {
     if (state === 'ready') {
       relayWasReady = true
@@ -132,6 +147,7 @@ async function startClient(): Promise<void> {
  * session instead of wiping it.
  */
 async function applyPairing(req: PairRequest): Promise<void> {
+  if (req.pairingToken?.trim()) await protectedFill.allowCredential(req.pairingToken.trim(), 'browser-ext-pair')
   const { set, remove } = credentialsForConfigure(req)
   if (Object.keys(set).length > 0) await chrome.storage.local.set(set)
   if (remove.length > 0) await chrome.storage.local.remove(remove)
@@ -152,9 +168,22 @@ async function handleCommand(cmd: {
   controlMode: LocalControlMode
 }): Promise<void> {
   try {
-    const data = await executeOp(cmd.op, cmd.args, cmd.controlMode)
+    // Stop bypasses the queue and invalidates work submitted before it.
+    const data = cmd.op === 'stop'
+      ? await executeOp(cmd.op, cmd.args, cmd.controlMode)
+      : await commands.run(async check => {
+        const result = await executeOp(cmd.op, cmd.args, cmd.controlMode, check)
+        check() // Do not publish a stale in-flight observation after Stop.
+        return result
+      })
     client.sendResult({ id: cmd.id, ok: true, data })
   } catch (err) {
+    let redact = true
+    try { redact = cmd.op === 'browserFillReference' || await protectedFill.locked() } catch { /* Unknown lock state fails closed. */ }
+    if (redact) {
+      client.sendResult({id:cmd.id, ok:false, error:'Protected fill unavailable', code:'protected_fill_denied'})
+      return
+    }
     const code =
       err instanceof ExecutorError
         ? err.code
@@ -172,20 +201,24 @@ async function executeOp(
   op: string,
   args: Record<string, unknown>,
   controlMode: LocalControlMode,
+  check: () => void = () => {},
 ): Promise<unknown> {
   if (op === 'stop') {
     await stopTask()
     return { stopped: true }
   }
+  if (await protectedFill.locked()) throw denied()
+  check()
   try {
-    return await dispatch(op, args, controlMode)
+    return await dispatch(op, args, controlMode, check)
   } catch (err) {
     // Chrome can drop the CDP session mid-command. Re-attaching costs one
     // round trip and the gate still governs it (a revoked consent re-prompts),
     // so recover once rather than handing the model a dead browser — but only
     // for ops that cannot double-fire. See `retryableAfterReattach`.
+    check()
     if (!isDetachedError(err) || !retryableAfterReattach(op)) throw err
-    return await dispatch(op, args, controlMode)
+    return await dispatch(op, args, controlMode, check)
   }
 }
 
@@ -205,25 +238,46 @@ async function executeOp(
  * command fail for the rest of the idle window even after they switched back.
  * `stop()` would be disproportionate — it has no resume path.
  */
-async function attachToEligibleTab(tabId: number): Promise<void> {
+async function attachToEligibleTab(tabId: number, check: () => void): Promise<void> {
+  check()
   let url: string | undefined
   try {
     url = (await chrome.tabs.get(tabId)).url
   } catch {
     // Tab is gone. Let `attach` produce the authoritative failure.
   }
+  check()
   if (!attachabilityOf(url)) {
     gate.revokeConsent()
     throw new ExecutorError(RESTRICTED_TAB_MESSAGE, 'no_eligible_tab')
   }
   await executor.attach(tabId)
+  try { check() } catch (error) {
+    // Stop can race an already-issued asynchronous debugger attachment.
+    await executor.detach()
+    throw error
+  }
 }
 
 async function dispatch(
   op: string,
   args: Record<string, unknown>,
   controlMode: LocalControlMode,
+  check: () => void = () => {},
 ): Promise<unknown> {
+  if (op === 'browserFillReference') {
+    return protectedFill.fill(args, () => gate.entries(controlMode).map(t => t.tabId), async request => {
+      if (!(await hasBrowserControl())) throw denied()
+      check()
+      const tabId = await gate.requireTab(controlMode)
+      check()
+      if (!(await chrome.tabs.get(tabId)).active) throw denied()
+      await attachToEligibleTab(tabId, check)
+      const assign = await executor.prepareProtectedFill(request.destinationOrigin, request.items.map(i => i.ref))
+      check()
+      return assign
+    }, check)
+  }
   // Required in the manifest. If it is absent, this install is malformed;
   // report that honestly instead of blaming the website.
   if (!(await hasBrowserControl())) {
@@ -232,12 +286,15 @@ async function dispatch(
       'no_browser_permission',
     )
   }
+  check()
   const tabId = await gate.requireTab(controlMode)
-  if (op === 'openTab') return openTab(args, controlMode)
-  if (op === 'listTabs') return listTabs(controlMode)
-  if (op === 'switchTab') return switchTab(args, controlMode)
-  if (op === 'closeTab') return closeTab(args, controlMode)
-  await attachToEligibleTab(tabId)
+  check()
+  if (op === 'openTab') return openTab(args, controlMode, check)
+  if (op === 'listTabs') return listTabs(controlMode, check)
+  if (op === 'switchTab') return switchTab(args, controlMode, check)
+  if (op === 'closeTab') return closeTab(args, controlMode, check)
+  await attachToEligibleTab(tabId, check)
+  check()
   switch (op) {
     case 'navigate':
       return executor.navigate(String(args.url ?? ''))
@@ -246,6 +303,8 @@ async function dispatch(
     case 'click':
       await executor.click(String(args.ref ?? ''))
       return { clicked: true }
+    case 'fillForm':
+      return executor.fillForm(args)
     case 'type':
       await executor.type(String(args.ref ?? ''), String(args.text ?? ''))
       return { typed: true }
@@ -277,40 +336,54 @@ function webUrl(value: unknown): string {
 async function openTab(
   args: Record<string, unknown>,
   _controlMode: LocalControlMode,
+  check: () => void,
 ): Promise<{ tabId: string; url: string; title: string }> {
+  check()
   if (!gate.canOpenTaskTab()) {
     throw new ExecutorError('A task may open at most 8 browser tabs.', 'tab_limit')
   }
   const tab = await chrome.tabs.create({ url: webUrl(args.url), active: true })
+  try { check() } catch (error) {
+    // Stop's cleanup list was collected before this create completed. Only this
+    // newly-created tab belongs to us; never close a switch target on cancellation.
+    if (tab.id != null) await chrome.tabs.remove(tab.id).catch(() => undefined)
+    throw error
+  }
   if (tab.id == null) throw new ExecutorError('Chrome did not create the requested tab.', 'backend_error')
   const handle = gate.registerCreatedTab(tab.id, true)
-  await attachToEligibleTab(tab.id)
+  await attachToEligibleTab(tab.id, check)
   const current = await chrome.tabs.get(tab.id)
+  check()
   return { tabId: handle, url: current.url ?? '', title: current.title ?? '' }
 }
 
-async function eligibleTabs(controlMode: LocalControlMode): Promise<chrome.tabs.Tab[]> {
+async function eligibleTabs(controlMode: LocalControlMode, check: () => void): Promise<chrome.tabs.Tab[]> {
+  check()
   if (controlMode === 'full_browser') {
     const all = await chrome.tabs.query({})
+    check()
     return all.filter((tab) => tab.id != null && !tab.incognito && attachabilityOf(tab.url))
   }
   const tabs: chrome.tabs.Tab[] = []
   for (const entry of gate.entries(controlMode)) {
     try {
       const tab = await chrome.tabs.get(entry.tabId)
+      check()
       if (!tab.incognito && attachabilityOf(tab.url)) tabs.push(tab)
     } catch {
+      check() // A cancelled read must not mutate the gate (or continue the loop).
       gate.onTabRemoved(entry.tabId)
     }
   }
   return tabs
 }
 
-async function listTabs(controlMode: LocalControlMode): Promise<{
+async function listTabs(controlMode: LocalControlMode, check: () => void): Promise<{
   tabs: Array<{ id: string; title: string; url: string; active: boolean; taskOwned: boolean }>
   activeTabId: string | null
 }> {
-  const tabs = await eligibleTabs(controlMode)
+  const tabs = await eligibleTabs(controlMode, check)
+  check()
   const visible = tabs.map((tab) => {
     const id = tab.id as number
     const handle = gate.handleForTab(id) ?? gate.registerFullTab(id)
@@ -328,30 +401,40 @@ async function listTabs(controlMode: LocalControlMode): Promise<{
 async function switchTab(
   args: Record<string, unknown>,
   controlMode: LocalControlMode,
+  check: () => void,
 ): Promise<{ tabId: string; url: string; title: string }> {
+  check()
   const handle = String(args.tabId ?? '')
   const tabId = gate.selectHandle(handle, controlMode)
   const tab = await chrome.tabs.get(tabId)
+  check()
   if (!attachabilityOf(tab.url) || tab.incognito) {
     gate.onTabRemoved(tabId)
     throw new ExecutorError(RESTRICTED_TAB_MESSAGE, 'no_eligible_tab')
   }
   await chrome.tabs.update(tabId, { active: true })
+  check()
   if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true })
-  await attachToEligibleTab(tabId)
+  check()
+  await attachToEligibleTab(tabId, check)
   const current = await chrome.tabs.get(tabId)
+  check()
   return { tabId: handle, url: current.url ?? '', title: current.title ?? '' }
 }
 
 async function closeTab(
   args: Record<string, unknown>,
   controlMode: LocalControlMode,
+  check: () => void,
 ): Promise<{ closed: boolean; activeTabId: string | null }> {
+  check()
   const tabId = gate.selectHandle(String(args.tabId ?? ''), controlMode)
   const wasCurrent = gate.currentTab() === tabId
   if (wasCurrent) await executor.detach()
-  gate.onTabRemoved(tabId)
+  check()
   await chrome.tabs.remove(tabId)
+  check()
+  gate.onTabRemoved(tabId)
   return { closed: true, activeTabId: gate.currentHandle() }
 }
 
@@ -376,6 +459,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 })
 
 chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.id != null && tab.openerTabId != null) protectedFill.trackTab(tab.id, tab.openerTabId)
   if (tab.id == null || tab.openerTabId == null || !gate.isAuthorizedTab(tab.openerTabId)) return
   if (!gate.canOpenTaskTab()) {
     // The site opened this tab from a task-owned page, so it belongs to the
@@ -388,14 +472,55 @@ chrome.tabs.onCreated.addListener((tab) => {
 })
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (_sender.id !== chrome.runtime.id || !_sender.url?.startsWith(chrome.runtime.getURL(''))) return undefined
   const msg = message as {
+    protectedApiBase?: string
     type?: string
     allowed?: boolean
     relayUrl?: string
     pairingToken?: string
     preapproveEnabled?: boolean
   }
-  if (msg.type === 'consent-response') {
+  if (msg.type === 'protected-status') {
+    void protectedFill.status().then(sendResponse)
+    return true
+  } else if (msg.type === 'protected-approval') {
+    // This is a response to the active queued fill, not another queued job:
+    // putting it behind fill would deadlock its approval wait.
+    protectedFill.approve(msg.allowed === true)
+    sendResponse({ok:true})
+  } else if (msg.type === 'protected-recover-server') {
+    if (_sender.url?.split('#')[0] !== chrome.runtime.getURL('popup.html') || msg.allowed !== true) {
+      sendResponse({ok:false})
+      return undefined
+    }
+    void commands.run(() => protectedFill.recoverServer())
+      .then(status => sendResponse({ok:true, status}), () => sendResponse({ok:false}))
+    return true
+  } else if (msg.type === 'protected-recover-all-tabs') {
+    // Broad destructive recovery has a separate, explicitly confirmed trusted UI
+    // route. It is never a relay op, nor a boolean smuggled into normal completion.
+    if (_sender.url?.split('#')[0] !== chrome.runtime.getURL('popup.html') || msg.allowed !== true) {
+      sendResponse({ok:false})
+      return undefined
+    }
+    protectedFill.approve(false)
+    void commands.run(() => protectedFill.complete(stopTask, true))
+      .then(() => sendResponse({ok:true}), () => sendResponse({ok:false}))
+    return true
+  } else if (msg.type === 'protected-complete') {
+    protectedFill.approve(false)
+    void commands.run(() => protectedFill.complete(stopTask)).then(() => sendResponse({ok:true}), () => sendResponse({ok:false}))
+    return true
+  } else if (msg.type === 'protected-configure') {
+    void (async () => {
+      try {
+        await protectedFill.configureApi(msg.protectedApiBase)
+        sendResponse({ok:true})
+      } catch { sendResponse({ok:false}) }
+    })()
+    return true
+  } else if (msg.type === 'consent-response') {
     pendingConsent?.({ allowed: msg.allowed === true })
     sendResponse({ ok: true })
   } else if (msg.type === 'stop-task') {
@@ -410,8 +535,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: true })
   } else if (msg.type === 'configure') {
     void (async () => {
-      await applyPairing({ relayUrl: msg.relayUrl, pairingToken: msg.pairingToken })
-      sendResponse({ ok: true })
+      try {
+        await applyPairing({ relayUrl: msg.relayUrl, pairingToken: msg.pairingToken })
+        sendResponse({ ok: true })
+      } catch { sendResponse({ok:false, error:'Protected fill unavailable', code:'protected_fill_denied'}) }
     })()
     return true // async sendResponse
   } else if (msg.type === 'disconnect') {
@@ -460,8 +587,10 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   const msg = message as { type?: string; relayUrl?: string; pairingToken?: string }
   if (msg.type === 'pair') {
     void (async () => {
-      await applyPairing({ relayUrl: msg.relayUrl, pairingToken: msg.pairingToken })
-      sendResponse({ ok: true })
+      try {
+        await applyPairing({ relayUrl: msg.relayUrl, pairingToken: msg.pairingToken })
+        sendResponse({ ok: true })
+      } catch { sendResponse({ok:false, error:'Protected fill unavailable', code:'protected_fill_denied'}) }
     })()
     return true // async sendResponse
   }

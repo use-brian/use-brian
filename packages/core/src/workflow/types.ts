@@ -13,6 +13,7 @@
  */
 
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
+import type { AuthoringAuthority } from '../security/access-ceiling.js'
 
 // ── Definition shape ────────────────────────────────────────────────────
 
@@ -714,6 +715,8 @@ export type WorkflowRecord = {
   /** Immutable Team/Project binding used for future run snapshots. */
   contextGroupId?: string | null
   contextProjectId?: string | null
+  /** Mig 600. Attended authoring principal; null only for legacy rows. */
+  authoringAuthority?: AuthoringAuthority | null
   createdAt: Date
   updatedAt: Date
 }
@@ -834,6 +837,8 @@ export type WorkflowStore = {
     managedBy?: string | null
     contextGroupId?: string | null
     contextProjectId?: string | null
+    /** Required for every newly authored workflow; never inferred by the store. */
+    authoringAuthority?: AuthoringAuthority
   }): Promise<WorkflowRecord>
 
   getById(userId: string, id: string): Promise<WorkflowRecord | null>
@@ -885,6 +890,8 @@ export type WorkflowStore = {
       pinned: boolean
       contextGroupId: string | null
       contextProjectId: string | null
+      /** Replaced only by an explicit execution-affecting authoring action. */
+      authoringAuthority: AuthoringAuthority
     }>,
   ): Promise<WorkflowRecord | null>
 

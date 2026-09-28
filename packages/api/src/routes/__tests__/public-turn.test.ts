@@ -17,6 +17,7 @@ vi.mock('../../db/users.js', () => ({
 vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
   findSessionByChannel: vi.fn(),
+  findSessionAuthorityById: vi.fn(),
   addSessionMessage: vi.fn(),
   getSessionMessages: vi.fn(),
   truncateMessagesFrom: vi.fn(),

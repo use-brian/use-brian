@@ -42,7 +42,8 @@
 
 import type pg from 'pg'
 
-import { getPool, query } from './client.js'
+import { applyRLSGucs, getAppPool, getPool, query, queryWithRLS } from './client.js'
+import { buildAccessPredicate, mutationActorAccess, type AccessContext } from './access-predicate.js'
 import { appendDecisionEvent } from './decision-event-store.js'
 import { recordVerification } from './memory-verifications-store.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
@@ -155,7 +156,8 @@ function danglingEntityLinkSql(alias: string): string {
  * large extracted-edge backlog. Called lazily from the inbox list route when
  * edges are in scope. Returns the number of rows pruned.
  *
- * System-level — caller (route) enforces workspace membership.
+ * System-level maintenance. The caller only schedules this workspace-bounded,
+ * idempotent dangling-reference sweep from an authenticated list request.
  */
 export async function pruneDanglingEntityLinks(
   workspaceId: string,
@@ -215,15 +217,21 @@ function encodeCursor(row: BrainInboxRow): string {
  * exposes a toggle for this; the chrome pill count uses the default
  * (off) value to stay quiet.
  *
- * System-level — caller (route) enforces workspace membership.
+ * Authenticated projection — the app role and explicit read predicate both
+ * evaluate the current actor. A workspace-membership preflight is not the
+ * content authorization boundary.
  */
 export async function listBrainInbox(params: {
   workspaceId: string
+  userId: string
+  access?: AccessContext
   primitive?: BrainInboxPrimitive
   cursor?: string
   limit?: number
   includeExtracted?: boolean
 }): Promise<ListBrainInboxResult> {
+  const access = mutationActorAccess(params.userId, params.workspaceId, params.access)
+  const ap = buildAccessPredicate(access, { startIdx: 3, operation: 'read' })
   const limit = Math.min(params.limit ?? 20, 100)
   const cursor = decodeCursor(params.cursor)
   const sourceFilter = params.includeExtracted
@@ -234,7 +242,7 @@ export async function listBrainInbox(params: {
   // then optional cursor pair, then limit. The per-primitive subqueries
   // template `$sourceFilter` with `$2` (the array). cursor + limit
   // positions are computed dynamically from `values.length`.
-  const values: unknown[] = [params.workspaceId, sourceFilter]
+  const values: unknown[] = [params.workspaceId, sourceFilter, ...ap.params]
   const cursorFilter = cursor
     ? `WHERE (created_at, id) < ($${values.length + 1}, $${values.length + 2})`
     : ''
@@ -279,6 +287,8 @@ export async function listBrainInbox(params: {
              ) AS body
       FROM memories
       WHERE workspace_id = $1
+        AND NOT scope_held
+        AND ${ap.sql}
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
         AND retracted_at IS NULL
@@ -304,6 +314,8 @@ export async function listBrainInbox(params: {
              ) AS body
       FROM entities
       WHERE workspace_id = $1
+        AND NOT scope_held
+        AND ${ap.sql}
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
         AND retracted_at IS NULL
@@ -338,6 +350,8 @@ export async function listBrainInbox(params: {
              ) AS body
       FROM entity_links el
       WHERE workspace_id = $1
+        AND NOT scope_held
+        AND ${ap.sql}
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
         AND retracted_at IS NULL
@@ -370,6 +384,8 @@ export async function listBrainInbox(params: {
              ) AS body
       FROM tasks
       WHERE workspace_id = $1
+        AND NOT scope_held
+        AND ${ap.sql}
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
         AND retracted_at IS NULL
@@ -396,6 +412,8 @@ export async function listBrainInbox(params: {
              ) AS body
       FROM entities
       WHERE workspace_id = $1
+        AND NOT scope_held
+        AND ${ap.sql}
         AND kind = 'person'
         AND NOT COALESCE((attributes->>'self')::boolean, false)
         AND verified_by_user_id IS NULL
@@ -423,6 +441,8 @@ export async function listBrainInbox(params: {
              ) AS body
       FROM entities
       WHERE workspace_id = $1
+        AND NOT scope_held
+        AND ${ap.sql}
         AND kind = 'company'
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
@@ -449,6 +469,8 @@ export async function listBrainInbox(params: {
              ) AS body
       FROM entities
       WHERE workspace_id = $1
+        AND NOT scope_held
+        AND ${ap.sql}
         AND kind = 'deal'
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
@@ -478,6 +500,8 @@ export async function listBrainInbox(params: {
              ) AS body
       FROM workspace_files
       WHERE workspace_id = $1
+        AND NOT scope_held
+        AND ${ap.sql}
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
         AND retracted_at IS NULL
@@ -504,7 +528,7 @@ export async function listBrainInbox(params: {
     LIMIT ${limitParam}
   `
 
-  const result = await query<{
+  const result = await queryWithRLS<{
     primitive: BrainInboxPrimitive
     id: string
     workspaceId: string
@@ -512,7 +536,7 @@ export async function listBrainInbox(params: {
     updatedAt: Date
     createdByAssistantId: string | null
     body: Record<string, unknown>
-  }>(sql, values)
+  }>(params.userId, sql, values)
 
   const rows: BrainInboxRow[] = result.rows.map((r) => ({
     primitive: r.primitive,
@@ -551,15 +575,27 @@ export type BrainInboxRowDetail = BrainInboxRow & {
  * rows (unlike the inbox list) so the page survives the verify click
  * and bookmark/deep-link patterns work.
  *
- * System-level — caller (route) enforces workspace membership.
+ * Authenticated current-source read. The app role and explicit access predicate
+ * both re-evaluate the actor; a membership preflight is not authorization.
  */
-export async function getBrainInboxRow(
-  workspaceId: string,
-  primitive: BrainInboxPrimitive,
-  rowId: string,
-): Promise<BrainInboxRowDetail | null> {
-  const select = SINGLE_ROW_SELECT[primitive]
-  const result = await query<{
+export async function getBrainInboxRow(params: {
+  workspaceId: string
+  userId: string
+  primitive: BrainInboxPrimitive
+  rowId: string
+  access?: AccessContext
+  operation?: 'read' | 'mutation'
+}): Promise<BrainInboxRowDetail | null> {
+  const access = mutationActorAccess(params.userId, params.workspaceId, params.access)
+  const alias = params.primitive === 'entity_link' ? 'el' : undefined
+  const ap = buildAccessPredicate(access, {
+    ...(alias ? { alias } : {}),
+    startIdx: 3,
+    operation: params.operation ?? 'read',
+  })
+  const select = SINGLE_ROW_SELECT[params.primitive]
+  const prefix = alias ? `${alias}.` : ''
+  const result = await queryWithRLS<{
     primitive: BrainInboxPrimitive
     id: string
     workspaceId: string
@@ -570,11 +606,14 @@ export async function getBrainInboxRow(
     verifiedAt: Date | null
     body: Record<string, unknown>
   }>(
+    params.userId,
     `${select}
-       AND id = $2
-       AND valid_to IS NULL
-       AND retracted_at IS NULL`,
-    [workspaceId, rowId],
+       AND ${prefix}id = $2
+       AND ${prefix}valid_to IS NULL
+       AND ${prefix}retracted_at IS NULL
+       AND NOT ${prefix}scope_held
+       AND ${ap.sql}`,
+    [params.workspaceId, params.rowId, ...ap.params],
   )
   const row = result.rows[0]
   if (!row) return null
@@ -747,16 +786,23 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
  * with default-false to stay quiet; the page calls with whatever the
  * user toggled to keep its chip badges accurate.
  *
- * System-level — caller enforces workspace membership.
+ * Authenticated projection. Count and list use the same current-source
+ * predicates so a hidden row cannot survive as a badge side channel.
  */
 export async function countBrainInbox(
-  workspaceId: string,
-  options?: { includeExtracted?: boolean },
+  params: {
+    workspaceId: string
+    userId: string
+    access?: AccessContext
+    includeExtracted?: boolean
+  },
 ): Promise<{
   total: number
   byPrimitive: Record<BrainInboxPrimitive, number>
 }> {
-  const sourceFilter = options?.includeExtracted
+  const access = mutationActorAccess(params.userId, params.workspaceId, params.access)
+  const ap = buildAccessPredicate(access, { startIdx: 3, operation: 'read' })
+  const sourceFilter = params.includeExtracted
     ? ['model', 'extracted']
     : ['model']
   const counts: Record<BrainInboxPrimitive, number> = {
@@ -770,53 +816,33 @@ export async function countBrainInbox(
     workspace_file: 0,
   }
 
-  // Parallel per-primitive count queries — each hits its partial index.
-  const queries: Array<Promise<{ primitive: BrainInboxPrimitive; n: number }>> = [
-    countOne(workspaceId, sourceFilter, 'memories', 'memory'),
-    countOne(workspaceId, sourceFilter, 'entities', 'entity', `AND kind NOT IN ('person', 'company', 'deal')`),
-    // Exclude dangling edges so the badge matches the (auto-pruned) list.
-    countOne(
-      workspaceId,
-      sourceFilter,
-      'entity_links',
-      'entity_link',
-      `AND NOT ${danglingEntityLinkSql('entity_links')}`,
-    ),
-    countOne(workspaceId, sourceFilter, 'tasks', 'task'),
-    // CRM primitives are entities filtered by kind (post-unification).
-    countOne(workspaceId, sourceFilter, 'entities', 'contact', `AND kind = 'person' AND NOT COALESCE((attributes->>'self')::boolean, false)`),
-    countOne(workspaceId, sourceFilter, 'entities', 'company', `AND kind = 'company'`),
-    countOne(workspaceId, sourceFilter, 'entities', 'deal', `AND kind = 'deal'`),
-    countOne(workspaceId, sourceFilter, 'workspace_files', 'workspace_file'),
-  ]
-
-  const results = await Promise.all(queries)
-  for (const { primitive, n } of results) {
-    counts[primitive] = n
-  }
-
-  const total = results.reduce((sum, r) => sum + r.n, 0)
-  return { total, byPrimitive: counts }
-}
-
-async function countOne(
-  workspaceId: string,
-  sourceFilter: string[],
-  table: string,
-  primitive: BrainInboxPrimitive,
-  extra: string = '',
-): Promise<{ primitive: BrainInboxPrimitive; n: number }> {
-  const result = await query<{ n: string }>(
-    `SELECT count(*)::text AS n FROM ${table}
-     WHERE workspace_id = $1
-       AND verified_by_user_id IS NULL
-       AND valid_to IS NULL
-       AND retracted_at IS NULL
-       AND source = ANY($2)
-       ${extra}`,
-    [workspaceId, sourceFilter],
+  const common = `workspace_id = $1 AND NOT scope_held AND ${ap.sql}
+    AND verified_by_user_id IS NULL AND valid_to IS NULL
+    AND retracted_at IS NULL AND source = ANY($2)`
+  const result = await queryWithRLS<{ primitive: BrainInboxPrimitive; n: string }>(
+    params.userId,
+    `WITH visible AS (
+       SELECT 'memory'::text AS primitive FROM memories WHERE ${common}
+       UNION ALL SELECT 'entity'::text FROM entities
+         WHERE ${common} AND kind NOT IN ('person', 'company', 'deal')
+       UNION ALL SELECT 'entity_link'::text FROM entity_links
+         WHERE ${common} AND NOT ${danglingEntityLinkSql('entity_links')}
+       UNION ALL SELECT 'task'::text FROM tasks WHERE ${common}
+       UNION ALL SELECT 'contact'::text FROM entities
+         WHERE ${common} AND kind = 'person'
+           AND NOT COALESCE((attributes->>'self')::boolean, false)
+       UNION ALL SELECT 'company'::text FROM entities
+         WHERE ${common} AND kind = 'company'
+       UNION ALL SELECT 'deal'::text FROM entities
+         WHERE ${common} AND kind = 'deal'
+       UNION ALL SELECT 'workspace_file'::text FROM workspace_files WHERE ${common}
+     )
+     SELECT primitive, count(*)::text AS n FROM visible GROUP BY primitive`,
+    [params.workspaceId, sourceFilter, ...ap.params],
   )
-  return { primitive, n: Number(result.rows[0]?.n ?? '0') }
+  for (const { primitive, n } of result.rows) counts[primitive] = Number(n)
+  const total = result.rows.reduce((sum, row) => sum + Number(row.n), 0)
+  return { total, byPrimitive: counts }
 }
 
 /**
@@ -888,10 +914,14 @@ export async function verifyBrainInboxRow(params: {
   rowId: string
   workspaceId: string
   verifiedByUserId: string
+  access?: AccessContext
 }): Promise<VerifyBrainInboxRowResult> {
-  const client = await getPool().connect()
+  const access = mutationActorAccess(params.verifiedByUserId, params.workspaceId, params.access)
+  const ap = buildAccessPredicate(access, { startIdx: 2, operation: 'mutation' })
+  const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
+    await applyRLSGucs(client, params.verifiedByUserId)
     const table = primitiveToTable(params.primitive)
     const selected = await client.query<{
       workspaceId: string
@@ -900,18 +930,17 @@ export async function verifyBrainInboxRow(params: {
       `SELECT workspace_id AS "workspaceId",
               verified_by_user_id AS "verifiedByUserId"
          FROM ${table}
-        WHERE id = $1 AND valid_to IS NULL
+        WHERE id = $1 AND workspace_id IS NOT NULL
+          AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+          AND ${ap.sql}
+          AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
         FOR UPDATE`,
-      [params.rowId],
+      [params.rowId, ...ap.params],
     )
     const row = selected.rows[0]
     if (!row) {
       await client.query('COMMIT')
       return { status: 'not_found', stamped: false }
-    }
-    if (row.workspaceId !== params.workspaceId) {
-      await client.query('COMMIT')
-      return { status: 'wrong_workspace', stamped: false }
     }
     if (row.verifiedByUserId) {
       await client.query('COMMIT')
@@ -968,25 +997,28 @@ export async function deleteBrainInboxRow(params: {
   rowId: string
   workspaceId: string
   deletedByUserId: string
+  access?: AccessContext
 }): Promise<DeleteBrainInboxRowResult> {
-  const client = await getPool().connect()
+  const access = mutationActorAccess(params.deletedByUserId, params.workspaceId, params.access)
+  const ap = buildAccessPredicate(access, { startIdx: 2, operation: 'mutation' })
+  const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
+    await applyRLSGucs(client, params.deletedByUserId)
     const table = primitiveToTable(params.primitive)
     const selected = await client.query<{ workspaceId: string }>(
       `SELECT workspace_id AS "workspaceId"
          FROM ${table}
-        WHERE id = $1 AND valid_to IS NULL
+        WHERE id = $1 AND workspace_id IS NOT NULL
+          AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+          AND ${ap.sql}
+          AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
         FOR UPDATE`,
-      [params.rowId],
+      [params.rowId, ...ap.params],
     )
     if (!selected.rows[0]) {
       await client.query('COMMIT')
       return { status: 'not_found' }
-    }
-    if (selected.rows[0].workspaceId !== params.workspaceId) {
-      await client.query('COMMIT')
-      return { status: 'wrong_workspace' }
     }
 
     await client.query(
@@ -1045,18 +1077,24 @@ export async function deleteBrainInboxTasks(params: {
   taskIds: readonly string[]
   workspaceId: string
   deletedByUserId: string
+  access?: AccessContext
 }): Promise<readonly string[]> {
-  const client = await getPool().connect()
+  const access = mutationActorAccess(params.deletedByUserId, params.workspaceId, params.access)
+  const ap = buildAccessPredicate(access, { startIdx: 3, operation: 'mutation' })
+  const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
+    await applyRLSGucs(client, params.deletedByUserId)
     const deleted = await client.query<{ id: string }>(
       `UPDATE tasks
           SET valid_to = now(), updated_at = now()
         WHERE id = ANY($1::uuid[])
           AND workspace_id = $2
-          AND valid_to IS NULL
+          AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+          AND ${ap.sql}
+          AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
         RETURNING id::text AS id`,
-      [params.taskIds, params.workspaceId],
+      [params.taskIds, params.workspaceId, ...ap.params],
     )
     for (const row of deleted.rows) {
       await abandonGoalsForHostTaskSystem(row.id, 'host_task_deleted', { exec: client })

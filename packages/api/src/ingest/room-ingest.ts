@@ -67,6 +67,8 @@ export type RoomPostInput = {
   effectiveClearance: string | null
   compartments?: string[]
   projectIds?: string[]
+  contextBindingOrigin?: 'legacy' | 'explicit' | 'reviewed' | 'held'
+  classificationMode?: 'legacy' | 'review' | 'strict'
 }
 
 export type RoomIngestor = {
@@ -176,6 +178,13 @@ export function createRoomIngestor(deps: RoomIngestorDeps): RoomIngestor {
       const clearance = toDecisionSensitivity(input.effectiveClearance)
       const engine = buildRoomIngestEngine(input.sessionId, clearance)
       const event = buildIngestEvent(input)
+      const origin=input.contextBindingOrigin??'legacy'
+      if(input.classificationMode==='strict'&&!['explicit','reviewed'].includes(origin)){
+        await appendEvent({workspaceId:input.workspaceId,ruleId:input.sessionId,source:'room',firesAt:now(),event,
+          episodeSensitivity:clearance,compartments:input.compartments??[],projectIds:input.projectIds??[],
+          scopeBindingOrigin:origin,scopeHeld:true})
+        return {episodeId:null}
+      }
       const decision = await engine.ingest(event, {
         workspace_id: input.workspaceId,
         connector_instance_id: input.sessionId,
@@ -205,6 +214,7 @@ export function createRoomIngestor(deps: RoomIngestorDeps): RoomIngestor {
           episodeSensitivity: sensitivity,
           compartments: input.compartments ?? [],
           projectIds: input.projectIds ?? [],
+          scopeBindingOrigin:origin,
         })
         return { episodeId: null }
       }

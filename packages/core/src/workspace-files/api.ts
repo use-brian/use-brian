@@ -36,9 +36,12 @@ export type FilesContext = {
    * `null`/`undefined` = universe (clause dropped). See docs/plans/compartment-axis.md.
    */
   compartments?: string[] | null
+  /** Independent mutation authority; temporary read grants do not expand it. */
+  mutationCompartments?: string[] | null
   /** Effective Project read grant. Null/undefined is universe. */
   projectIds?: string[] | null
   /** Trusted high-water write stamp resolved from the turn. */
+  writeSensitivity?: Sensitivity
   writeCompartments?: string[]
   writeProjectIds?: string[]
 }
@@ -56,11 +59,13 @@ export type FilesNotFoundError = {
 }
 
 export type FilesConflictError = {
+  reason?: 'changed'
   kind: 'conflict'
   path: string
 }
 
 type FilesReadOnlyError = {
+  reason?: 'scope' | 'release_required'
   kind: 'read_only'
   path: string
 }

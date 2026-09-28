@@ -10,6 +10,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { z } from 'zod'
+import { buildTool } from '@use-brian/core'
+import { currentAgentAccess } from '../../db/agent-access-context.js'
 
 vi.mock('../../mcp/inject.js', () => ({ injectMcpTools: vi.fn() }))
 
@@ -38,6 +41,17 @@ beforeEach(() => {
 })
 
 describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
+  it('enforces the supplied run ceiling during a deterministic tool invocation',async()=>{
+    const probe=buildTool({name:'scopeProbe',description:'Fixture scope probe',inputSchema:z.object({}),execute:async()=>({data:currentAgentAccess()})})
+    const turnScope={access:{workspaceId:'ws-1',userId:'u-1',assistantId:'a-1',assistantKind:'primary' as const,
+      clearance:'internal' as const,compartments:['product'],projectIds:[],visibilityAssistantIds:[]},
+      effectiveCompartments:['product'],effectiveProjectIds:[],writeCompartments:['product'],writeProjectIds:[],activeGroupId:null,activeProjectId:null}
+    const registry=await buildWorkflowToolRegistry(makeDeps(new Map([[probe.name,probe]])),{...scope,turnScope})
+    const result=await registry.get(probe.name)!.execute({}, {userId:'u-1',assistantId:'a-1',assistantKind:'primary',workspaceId:'ws-1',
+      sessionId:'run',appId:'fixture',channelType:'workflow',channelId:'run',abortSignal:new AbortController().signal})
+    expect(result.data).toMatchObject({workspaceId:'ws-1',userId:'u-1',clearance:'internal',compartments:['product'],projectIds:[],visibilityAssistantIds:[]})
+    expect(currentAgentAccess()).toBeUndefined()
+  })
   it('returns a shallow copy — mutating the result never touches the boot map', async () => {
     const firstParty = new Map<string, Tool>([['fp', {} as Tool]])
     const out = await buildWorkflowToolRegistry(makeDeps(firstParty), { ...scope, userId: null })

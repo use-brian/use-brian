@@ -46,7 +46,8 @@ function verify(token: string, secret: string): TokenPayload | null {
 
   try {
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString()) as TokenPayload
-    if (payload.exp < Math.floor(Date.now() / 1000)) return null
+    if (!payload || typeof payload !== 'object') return null
+    if (!Number.isSafeInteger(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null
     return payload
   } catch {
     return null
@@ -95,8 +96,8 @@ export function verifyRefreshToken(token: string, secret: string): string | null
 }
 
 function verifiedClaims(payload: TokenPayload): VerifiedAuthToken | null {
-  if (typeof payload.sub !== 'string') return null
-  if (payload.sid !== undefined && typeof payload.sid !== 'string') return null
+  if (typeof payload.sub !== 'string' || !payload.sub.trim()) return null
+  if (payload.sid !== undefined && (typeof payload.sid !== 'string' || !payload.sid.trim())) return null
   if (
     payload.ver !== undefined &&
     (!Number.isSafeInteger(payload.ver) || payload.ver < 0)

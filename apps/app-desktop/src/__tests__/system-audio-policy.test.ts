@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  captureSourceSnapshot,
   isTrustedCaptureOrigin,
   selectPrimaryDisplaySource,
 } from "../system-audio-policy.js";
@@ -56,5 +57,27 @@ describe("[COMP:app-desktop/system-audio] Media capture policy", () => {
     expect(selectPrimaryDisplaySource(sources, 10)?.name).toBe("primary");
     expect(selectPrimaryDisplaySource(sources, 999)?.name).toBe("secondary");
     expect(selectPrimaryDisplaySource([], 10)).toBeUndefined();
+  });
+
+  it("serializes a static source preview and preserves an honest empty fallback", () => {
+    const toDataURL = () => "data:image/png;base64,preview";
+    expect(captureSourceSnapshot({
+      id: "screen:1",
+      name: "Built-in Display",
+      thumbnail: { isEmpty: () => false, toDataURL },
+    })).toEqual({
+      id: "screen:1",
+      name: "Built-in Display",
+      thumbnailDataUrl: "data:image/png;base64,preview",
+    });
+    expect(captureSourceSnapshot({
+      id: "window:1",
+      name: "Protected Window",
+      thumbnail: { isEmpty: () => true, toDataURL },
+    })).toEqual({
+      id: "window:1",
+      name: "Protected Window",
+      thumbnailDataUrl: null,
+    });
   });
 });

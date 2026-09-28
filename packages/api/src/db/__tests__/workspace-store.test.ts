@@ -11,7 +11,7 @@ vi.mock('../client.js', () => ({
   })),
 }))
 
-import { createWorkspaceStore, canMemberDraftRole, resolveReadClearanceSystem, resolveReadCompartmentsSystem, effectiveReadCompartments, intersectCompartments, getWorkspaceDefaultRecordingBlueprint, InvalidRecordingBlueprintError } from '../workspace-store.js'
+import { createWorkspaceStore, canMemberDraftRole, resolveReadClearanceSystem, resolveReadCompartmentsSystem, resolveReadCeilingsSystem, resolveOperationCeilingsSystem, effectiveReadCompartments, intersectCompartments, getWorkspaceDefaultRecordingBlueprint, InvalidRecordingBlueprintError } from '../workspace-store.js'
 import { query, queryWithRLS, getPool } from '../client.js'
 
 const mockQuery = vi.mocked(query)
@@ -23,6 +23,43 @@ beforeEach(() => {
 })
 
 const store = createWorkspaceStore()
+
+describe('[COMP:api/workspace-store] strict live authority lookup', () => {
+  it('rejects a missing membership rather than accepting the external public fallback', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+    await expect(resolveReadCeilingsSystem('actor', 'workspace', 'public', [], true)).rejects.toThrow('authority_unavailable')
+  })
+  it('propagates a failed membership query so the lease cannot renew', async () => {
+    const error = new Error('Fixture database unavailable')
+    mockQuery.mockRejectedValueOnce(error)
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(resolveReadCeilingsSystem('actor', 'workspace', 'public', [], true)).rejects.toBe(error)
+    } finally { log.mockRestore() }
+  })
+  it('preserves the ordinary external-principal fallback outside a lease refresh', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+    await expect(resolveReadCeilingsSystem('actor', 'workspace', 'confidential', null)).resolves.toEqual({ clearance:'public', compartments:[] })
+  })
+})
+
+describe('[COMP:api/workspace-store] operation-aware authority lookup', () => {
+  it('keeps read and mutation reach separate under the assistant ceiling',async()=>{
+    mockQuery.mockResolvedValueOnce({rows:[{role:'member',clearance:'internal',readCompartments:['finance','delivery'],mutationCompartments:['delivery']}]} as never)
+    await expect(resolveOperationCeilingsSystem('actor','workspace','confidential',['finance'])).resolves.toEqual({clearance:'internal',compartments:['finance'],mutationCompartments:[]})
+    expect(mockQuery).toHaveBeenCalledTimes(1)
+  })
+  it('preserves an explicit legacy universe instead of collapsing it to General',async()=>{
+    mockQuery.mockResolvedValueOnce({rows:[{role:'member',clearance:'internal',readCompartments:null,mutationCompartments:null}]} as never)
+    await expect(resolveOperationCeilingsSystem('actor','workspace','confidential',null)).resolves.toEqual({clearance:'internal',compartments:null,mutationCompartments:null})
+  })
+  it('refuses missing live membership and propagates database failure',async()=>{
+    mockQuery.mockResolvedValueOnce({rows:[]} as never)
+    await expect(resolveOperationCeilingsSystem('actor','workspace','public',[],true)).rejects.toThrow('authority_unavailable')
+    const failure=new Error('Fixture lookup failed');mockQuery.mockRejectedValueOnce(failure)
+    await expect(resolveOperationCeilingsSystem('actor','workspace','public',[])).rejects.toBe(failure)
+  })
+})
 
 describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
   describe('create', () => {

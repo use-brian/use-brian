@@ -46,6 +46,9 @@ vi.mock("@/lib/user", () => ({
 
 vi.mock("@/lib/i18n/client", () => ({ useT: () => en }));
 
+const openWorkspaceSettings = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/workspace-settings-events", () => ({ openWorkspaceSettings }));
+
 const api = vi.hoisted(() => ({
   getWorkflowRun: vi.fn<() => Promise<WorkflowRunDetail | null>>(),
   getWorkflowFull: vi.fn<() => Promise<WorkflowFull | null>>(),
@@ -127,6 +130,7 @@ async function render() {
 
 beforeEach(() => {
   resetSurfaceCache();
+  openWorkspaceSettings.mockReset();
   api.getWorkflowRun.mockReset();
   api.getWorkflowFull.mockReset();
   container = document.createElement("div");
@@ -140,6 +144,20 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/workflow-detail-cache] run page", () => {
+  it.each(["authority_changed", "workflow_authority_unavailable", "caller_authority_changed", "caller_evidence_unavailable"])("opens department access for %s without retrying the run", async (reason) => {
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => ({ ...RUN, status: "failed", error: { reason, message: "Internal diagnostic" } }));
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    api.getWorkflowRun.mockImplementation(pending);
+    api.getWorkflowFull.mockImplementation(pending);
+    await render();
+    expect(container.textContent).toContain(en.workflowPage.builder.runDetail.sourceAccessChanged);
+    expect(container.textContent).not.toContain("Internal diagnostic");
+    const action = [...container.querySelectorAll("button")].find(button => button.textContent === en.workflowPage.builder.runDetail.reviewDepartmentAccess)!;
+    expect(action).toBeTruthy();
+    act(() => action.click());
+    expect(openWorkspaceSettings).toHaveBeenCalledExactlyOnceWith("ws-access");
+    expect(api.getWorkflowRun).not.toHaveBeenCalled();
+  });
   it("paints the run and the workflow header from warmed keys while both fetches are still pending", async () => {
     await loadSurfaceCache(workflowRunCacheKey("w1", "run-1234567890"), async () => RUN);
     await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);

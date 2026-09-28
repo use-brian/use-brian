@@ -26,7 +26,8 @@ import { resolveUser } from './route-helpers.js'
 import { gateSessionRead } from './sessions.js'
 import { ContextNotAvailableError, resolveTurnScopeSystem } from '../context-scope/resolve-turn-scope.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
-import { mintFilePreviewToken, verifyFilePreviewToken } from './file-preview-token.js'
+import { getFileCachePreviewProjection } from '../db/file-store.js'
+import { executeWithCurrentAuthority } from '../context-scope/authority-lease.js'
 import {
   ChunkedUploadError,
   MAX_CHUNKED_UPLOAD_BYTES,
@@ -39,10 +40,6 @@ const PDF_STORE_ONLY_MIN_BYTES = 2 * 1024 * 1024
 const MAX_CACHE_FILE_SIZE = 20 * 1024 * 1024 // 20 MiB — transient chat cache
 const MAX_INGEST_FILE_SIZE = 30 * 1024 * 1024 // 30 MiB — 2 MiB below Cloud Run HTTP/1
 const MAX_FILES_PER_REQUEST = 10
-// Preview capability-URL TTL. The browser fetches the signed `<img src>` /
-// download URL promptly after the mint round-trip, so a few minutes is ample
-// and bounds the replay window on a leaked URL. See file-preview-token.ts.
-const PREVIEW_URL_TTL_MS = 5 * 60_000
 // Ingest does a model distill + a Pipeline B pass per file, synchronously, so
 // the per-request fan-out is capped tighter than the plain cache upload. A
 // background job queue is the documented scale follow-up (files.md).
@@ -138,14 +135,8 @@ export function fileRoutes(
    * Absent (files-less deploy) -> cache-only, exactly the legacy behavior.
    */
   artifactPromoter?: ArtifactPromoter | null,
-  /**
-   * HMAC secret for signed preview capability URLs (WS3 #8). When set, the
-   * `/preview` GET requires a valid `?sig` and gains an authenticated
-   * `/preview-url` mint route; when absent (secret-less test/deploy) the mint
-   * route 503s and `/preview` falls back to the legacy unsigned read. Prod
-   * always passes `JWT_SECRET`. See file-preview-token.ts.
-   */
-  previewSecret?: string | null,
+  /** Reserved positional argument; preview reads no longer accept capabilities. */
+  _previewSecret?: string | null,
   /** Large durable-file lane. Metadata crosses the API; exact parts do not. */
   chunkedUploads?: ChunkedFileUploadService | null,
   /**
@@ -154,6 +145,7 @@ export function fileRoutes(
    * (`@use-brian/core` `convertToPdfWithLibreOffice`), never a second renderer.
    */
   convertPdf: (bytes: Uint8Array, opts: { inputName: string; tempPrefix?: string }) => Promise<Uint8Array> = convertToPdfWithLibreOffice,
+  readPreview: typeof getFileCachePreviewProjection = getFileCachePreviewProjection,
 ): Router {
   const router = Router()
 
@@ -883,243 +875,68 @@ export function fileRoutes(
     })
   })
 
-  /**
-   * GET /api/files/:id/preview-url?workspaceId=… — mint a short-lived signed
-   * preview URL (WS3 #8). AUTHENTICATED + access-scoped: the caller must be
-   * able to read the `file_cache` row through the universal access predicate
-   * (`fileStore.get(id, ctx)`), so a bare id from another user/workspace mints
-   * nothing (404, existence-hiding). Returns `{ url }` — a relative
-   * `/api/files/:id/preview?sig=…` the browser uses cross-origin as `<img src>`
-   * without needing the SameSite=Lax cookie.
-   *
-   * This is the mint half; the `/preview` GET below is the (unauthenticated)
-   * verify half. Requires `previewSecret`; 503s without it.
-   */
-  const PreviewUrlQuery = z.object({ workspaceId: z.string().min(1) })
-  router.get('/:id/preview-url', async (req, res) => {
-    if (!previewSecret) {
-      res.status(503).json({ error: 'Signed preview URLs are not available on this deployment.' })
-      return
-    }
-    const userId = (req as { userId?: string }).userId
-    if (!userId) {
-      res.status(401).json({ error: 'Unauthorized' })
-      return
-    }
-    const parsed = PreviewUrlQuery.safeParse(req.query)
-    if (!parsed.success) {
-      res.status(400).json({ error: 'workspaceId is required' })
-      return
-    }
-
-    // Access gate: mirror the chat/skill-draft `file_cache` read ctx
-    // (skills.ts "Gate each client-supplied fileId by the turn's identity").
-    // A non-assistant caller echoes its userId into assistantId so
-    // workspace-shared rows (assistant_id IS NULL) still match; the
-    // workspace + user visibility axes are the real gate. `fileStore.get`
-    // with a ctx runs the access-predicate branch, so a foreign-workspace or
-    // foreign-user id returns null → 404.
-    const ctx = {
-      workspaceId: parsed.data.workspaceId,
-      userId,
-      assistantId: userId,
-      assistantKind: 'standard' as const,
-    }
-    let file
-    try {
-      file = await fileStore.get(req.params.id, ctx)
-    } catch (err) {
-      console.error('File preview-url mint error:', err)
-      res.status(500).json({ error: 'Failed to mint preview URL' })
-      return
-    }
-    if (!file) {
-      res.status(404).json({ error: 'File not found or expired' })
-      return
-    }
-
-    const token = mintFilePreviewToken({
-      fid: file.id,
-      ttlMs: PREVIEW_URL_TTL_MS,
-      secret: previewSecret,
+  // Retained signed/bare URLs never authorize a read. Every representation
+  // goes through the same app-role source projection and post-conversion check.
+  const PreviewQuery = z.object({ workspaceId: z.string().min(1) })
+  for (const representation of ['preview', 'preview-pdf', 'preview-url'] as const) {
+    router.get(`/:id/${representation}`, async (req, res) => {
+      res.setHeader('Cache-Control', 'private, no-store')
+      const userId = req.userId
+      if (!userId) { res.status(401).json({error:'Unauthorized'}); return }
+      const parsed = PreviewQuery.safeParse(req.query)
+      if (!parsed.success) { res.status(400).json({error:'workspaceId is required'}); return }
+      const ctx = {workspaceId:parsed.data.workspaceId,userId,assistantId:userId,assistantKind:'standard' as const}
+      const unavailable = () => res.status(404).json({error:'File not found or expired',code:'preview_source_unavailable'})
+      try {
+        const source = await executeWithCurrentAuthority(() => readPreview(ctx,req.params.id))
+        if (!source) { unavailable(); return }
+        if (representation === 'preview-url') {
+          // Compatibility locator only. It requires the Authorization header
+          // again when read and contains no reusable authority.
+          res.json({url:`/api/files/${encodeURIComponent(req.params.id)}/preview?workspaceId=${encodeURIComponent(ctx.workspaceId)}`,requiresAuth:true})
+          return
+        }
+        const {file,originalContent} = source
+        const inline = (value:string|null) => {
+          const match=value?.match(/^data:[^;]+;base64,([A-Za-z0-9+/=\r\n]+)$/)
+          return match ? Buffer.from(match[1]!,'base64') : null
+        }
+        let bytes:Uint8Array|null, mime=file.mimeType
+        if (representation === 'preview-pdf') {
+          mime='application/pdf'
+          if (file.mimeType==='application/pdf') bytes=inline(file.content)
+          else {
+            const format=documentFormatFromMetadata(file.mimeType,file.fileName)
+            if (!format || format==='pdf') { res.status(415).json({error:'This file type has no PDF preview',code:'preview_unsupported'}); return }
+            const original=inline(originalContent)
+            if (!original) { unavailable(); return }
+            bytes=await convertPdf(original,{inputName:`attachment.${DOCUMENT_FORMATS[format].extensions[0]!}`,tempPrefix:'brian-attachment-pdf-'})
+          }
+        } else {
+          bytes=inline(originalContent)??inline(file.content)
+          if (!bytes && (file.mimeType.startsWith('text/') || file.mimeType==='application/json')) bytes=Buffer.from(file.content,'utf8')
+        }
+        if (!bytes) { unavailable(); return }
+        const started=performance.now()
+        const current=await executeWithCurrentAuthority(() => readPreview(ctx,req.params.id))
+        const validForMs=Math.floor((current?.validForMs??0)-(performance.now()-started))
+        if (!current || current.revision!==source.revision || !Number.isFinite(validForMs) || validForMs<=0) { unavailable(); return }
+        res.setHeader('X-Brian-Media-Valid-For-Ms',String(Math.min(30_000,validForMs)))
+        res.append('Access-Control-Expose-Headers','X-Brian-Media-Valid-For-Ms')
+        res.setHeader('Content-Type',mime)
+        res.setHeader('Content-Disposition','inline')
+        res.setHeader('Content-Length',String(bytes.length))
+        res.send(Buffer.from(bytes))
+      } catch (err) {
+        if (err instanceof LibreOfficeError) {
+          res.status(err.code==='timeout'?504:503).json({error:'PDF preview could not be generated',code:'pdf_unavailable'})
+          return
+        }
+        console.error('File preview error:',err)
+        res.status(500).json({error:'Failed to load preview'})
+      }
     })
-    res.json({
-      url: `/api/files/${encodeURIComponent(file.id)}/preview?sig=${encodeURIComponent(token)}`,
-      expiresInMs: PREVIEW_URL_TTL_MS,
-    })
-  })
-
-  /**
-   * GET /api/files/:id/preview?sig=… — serve a previously cached file.
-   * For images: streams the image bytes inline so <img src="..."> works.
-   * For other files: returns JSON metadata.
-   *
-   * UNAUTHENTICATED but signature-gated (WS3 #8): mounted `optionalAuth`, so
-   * this used to be a bare-UUID IDOR (any holder of a live `file_cache` id got
-   * the bytes). It now requires a valid `?sig` minted by `/preview-url` for an
-   * authorized viewer — id-bound, short-TTL, HMAC-signed, constant-time
-   * verified. No cookie is needed (that's the point — the cross-origin `<img>`
-   * can't send the SameSite=Lax cookie). When no `previewSecret` is configured
-   * the check is skipped (legacy unsigned behavior for secret-less deploys).
-   */
-  const PreviewSigQuery = z.object({ sig: z.string().min(1).optional() })
-  router.get('/:id/preview', async (req, res) => {
-    try {
-      if (previewSecret) {
-        const parsed = PreviewSigQuery.safeParse(req.query)
-        const sig = parsed.success ? parsed.data.sig : undefined
-        if (!sig) {
-          res.status(401).json({ error: 'Missing preview signature' })
-          return
-        }
-        const verified = verifyFilePreviewToken({
-          token: sig,
-          fid: req.params.id,
-          secret: previewSecret,
-        })
-        if (!verified.ok) {
-          // 403 (not 404) — the id may be valid; it's the capability that's
-          // rejected. Reason stays server-side (never leak which check failed).
-          res.status(403).json({ error: 'Invalid or expired preview signature' })
-          return
-        }
-      }
-
-      const file = await fileStore.get(req.params.id)
-      if (!file) {
-        res.status(404).json({ error: 'File not found or expired' })
-        return
-      }
-
-      if (file.mimeType.startsWith('image/')) {
-        // Image content is stored as a "data:mime;base64,<data>" URL string.
-        // Decode and stream the raw bytes so browsers can use it as <img src>.
-        const match = file.content.match(/^data:[^;]+;base64,(.+)$/)
-        const base64 = match ? match[1] : file.content
-        try {
-          const buffer = Buffer.from(base64, 'base64')
-          res.setHeader('Content-Type', file.mimeType)
-          res.setHeader('Cache-Control', 'private, max-age=3600')
-          res.setHeader('Content-Length', String(buffer.length))
-          res.send(buffer)
-        } catch {
-          res.status(500).json({ error: 'Failed to decode image' })
-        }
-        return
-      }
-
-      // Non-image: return metadata only (the preview card will show a generic icon)
-      res.json({
-        id: file.id,
-        fileName: file.fileName,
-        mimeType: file.mimeType,
-        sizeBytes: file.sizeBytes,
-      })
-    } catch (err) {
-      console.error('File preview error:', err)
-      res.status(500).json({ error: 'Failed to load file' })
-    }
-  })
-
-  /**
-   * GET /api/files/:id/preview-pdf?workspaceId=… — render a cached upload as
-   * a PDF for in-app preview. AUTHENTICATED + access-scoped exactly like
-   * `/preview-url` (fileStore.get with the caller's ctx; foreign ids 404,
-   * existence-hiding). Two source shapes:
-   *
-   *  - `application/pdf` whose bytes are inline in `content` → streamed as-is.
-   *  - A structured document (docx/pptx/xlsx/csv/doc/odt/…) whose original
-   *    bytes were kept in `original_content` (migration 487) → converted
-   *    through the ONE LibreOffice runner and streamed.
-   *
-   * A row with no client-servable bytes (store-only big PDF, legacy row from
-   * before 487, or a lapsed cache row) answers 404 `preview_source_unavailable`
-   * — the client renders honest "expired/unavailable" copy, never a spinner.
-   * Conversion failures follow the views-export precedent: timeout → 504,
-   * everything else → 503 `pdf_unavailable`. `Cache-Control: private` lets the
-   * browser cache the rendered PDF so repeat opens skip the conversion.
-   */
-  const PreviewPdfQuery = z.object({ workspaceId: z.string().min(1) })
-  router.get('/:id/preview-pdf', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) {
-      res.status(401).json({ error: 'Unauthorized' })
-      return
-    }
-    const parsed = PreviewPdfQuery.safeParse(req.query)
-    if (!parsed.success) {
-      res.status(400).json({ error: 'workspaceId is required' })
-      return
-    }
-    // Same ctx shape as `/preview-url`: echo userId into assistantId so
-    // workspace-shared rows (assistant_id IS NULL) still match.
-    const ctx = {
-      workspaceId: parsed.data.workspaceId,
-      userId,
-      assistantId: userId,
-      assistantKind: 'standard' as const,
-    }
-
-    const sendPdf = (bytes: Uint8Array) => {
-      res.setHeader('Content-Type', 'application/pdf')
-      res.setHeader('Content-Disposition', 'inline')
-      res.setHeader('Cache-Control', 'private, max-age=3600')
-      res.setHeader('Content-Length', String(bytes.length))
-      res.send(Buffer.from(bytes))
-    }
-
-    try {
-      const file = await fileStore.get(req.params.id, ctx)
-      if (!file) {
-        res.status(404).json({ error: 'File not found or expired' })
-        return
-      }
-
-      // Already a PDF: the inline bytes (≤ the store-only threshold) stream
-      // without conversion. Store-only rows keep no inline bytes → 404 below.
-      if (file.mimeType === 'application/pdf') {
-        const m = file.content.match(/^data:[^;]+;base64,(.+)$/)
-        if (m) {
-          sendPdf(Buffer.from(m[1]!, 'base64'))
-          return
-        }
-        res.status(404).json({ error: 'Preview source unavailable', code: 'preview_source_unavailable' })
-        return
-      }
-
-      const format = documentFormatFromMetadata(file.mimeType, file.fileName)
-      if (!format || format === 'pdf') {
-        res.status(415).json({ error: 'This file type has no PDF preview', code: 'preview_unsupported' })
-        return
-      }
-
-      const original = await fileStore.getOriginalContent?.(req.params.id, ctx)
-      const m = original?.match(/^data:[^;]+;base64,(.+)$/)
-      if (!m) {
-        res.status(404).json({ error: 'Preview source unavailable', code: 'preview_source_unavailable' })
-        return
-      }
-
-      // The runner sniffs the format from the input file's extension alone —
-      // use the format's canonical extension, never the (user-controlled)
-      // upload filename.
-      const ext = DOCUMENT_FORMATS[format].extensions[0]!
-      const pdf = await convertPdf(Buffer.from(m[1]!, 'base64'), {
-        inputName: `attachment.${ext}`,
-        tempPrefix: 'brian-attachment-pdf-',
-      })
-      sendPdf(pdf)
-    } catch (err) {
-      if (err instanceof LibreOfficeError) {
-        // Own-sentence errors only; the vendor text stays server-side (cause).
-        const status = err.code === 'timeout' ? 504 : 503
-        res.status(status).json({ error: 'PDF preview could not be generated', code: 'pdf_unavailable' })
-        return
-      }
-      console.error('File preview-pdf error:', err)
-      res.status(500).json({ error: 'Failed to render preview' })
-    }
-  })
+  }
 
   // Map multer limit rejections to a clear 413 instead of the generic 500 a
   // thrown MulterError would otherwise surface. The web client guards before

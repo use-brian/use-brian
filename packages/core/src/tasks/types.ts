@@ -30,6 +30,14 @@ export type TaskRecordStatus = (typeof TASK_STATUSES)[number]
  */
 export type TaskWriteActor = 'user' | 'system'
 
+/** Trusted write metadata, separate from model-editable task fields. */
+export type TaskWriteScope = {
+  sensitivity?: Sensitivity
+  visibility?: { userId:string|null; assistantId:string|null }
+  compartments:string[]
+  projectIds:string[]
+}
+
 /**
  * External-system reference for synced tasks. Free-form for v1; the intended
  * shape is `{provider, id, url}` but it is not validated at this layer. Open
@@ -120,6 +128,9 @@ export type TaskStore = {
     parentId?: string | null
     externalRef?: TaskExternalRef
     attributes?: TaskAttributes
+    sensitivity?: Sensitivity
+    visibility?: { userId:string|null; assistantId:string|null }
+    access?: AccessContext
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
     /** Stable Project association. Empty means Workspace General. */
@@ -190,7 +201,8 @@ export type TaskStore = {
     opts?: {
       writtenBy?: TaskWriteActor
       /** High-water scope inherited by the successor; never clears old scope. */
-      scope?: { compartments: string[]; projectIds: string[] }
+      scope?: TaskWriteScope
+      access?: AccessContext
     },
   ): Promise<TaskRecord | null>
 

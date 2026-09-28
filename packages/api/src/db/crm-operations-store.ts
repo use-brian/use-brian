@@ -22,6 +22,7 @@ import {
   type CrmOperationsContext,
   type CrmSegmentCatalog,
   type CrmSegmentPredicate,
+  type AccessContext,
 } from '@use-brian/core'
 import { getPool } from './client.js'
 import { readCrmPrivacyPolicy, saveCrmPrivacyPolicy } from '../crm-operations/privacy-policy.js'
@@ -29,7 +30,7 @@ import { releaseCrmAddressSuppression } from '../crm-operations/suppression-tomb
 import { saveCrmManagedMailboxPolicy, saveCrmMailboxIntegrationGrant } from '../crm-operations/delivery-policy.js'
 import { saveCrmEntitlementPlanRecord, saveCrmEventRecord } from './association-store.js'
 import { prepareProviderEntitlementPeriod, requireProviderEntitlementActor } from '../crm-operations/entitlement-periods.js'
-import { actorAuditIdentity } from '@use-brian/core'
+import { actorAuditIdentity, isUnverifiedIdentityPolicy } from '@use-brian/core'
 import { lockAssociationInventory, refreshAssociationInventory } from '../association/inventory.js'
 import type { PlanInput, EventInput } from '../association/domain.js'
 import { authorizeCrmIntegrationCommand } from '../crm-operations/integration-authority.js'
@@ -38,6 +39,38 @@ import { loadCrmSegmentCatalog } from './crm-segment-store.js'
 import { crmEvidenceRequestHash, resolveCrmEvidenceReplay, type CrmEvidenceRequest } from '../crm-operations/evidence-replay.js'
 import { executeCrmConfigCommand } from './crm-config-commands.js'
 import type { CrmConfigCommand } from '@use-brian/core'
+import { readCrmMutationSource } from './crm.js'
+import { updateEntity } from './entities-store.js'
+import { currentAgentAccess } from './agent-access-context.js'
+import { mutationActorAccess } from './access-predicate.js'
+
+/** A command role or credential author is not a resource principal. */
+async function stageActorAccess(client: PoolClient, context: CrmOperationsContext): Promise<AccessContext> {
+  const denied = () => Object.assign(new Error('This operation requires a verifiable current resource scope.'), { code: 'scope_operation_denied' })
+  const actor = context.actor
+  if (!['user', 'import', 'assistant', 'workflow'].includes(actor.kind)
+    || !('userId' in actor) || !actor.userId || !context.authority.canWrite) throw denied()
+  const access = mutationActorAccess(actor.userId, context.workspaceId)
+  const member = await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [context.workspaceId, actor.userId])
+  if (!member.rowCount) throw denied()
+  if (actor.kind === 'assistant' || actor.kind === 'workflow') {
+    const scope = currentAgentAccess()
+    if (!scope || scope.workspaceId !== context.workspaceId || scope.userId !== actor.userId
+      || scope.compartments === undefined || scope.mutationCompartments === undefined
+      || scope.projectIds === undefined || scope.visibilityAssistantIds === undefined) throw denied()
+    Object.assign(access, scope)
+    if (actor.kind === 'assistant') {
+      const assistant = await client.query<{ kind: AccessContext['assistantKind']; clearance: AccessContext['clearance'] }>(
+        'SELECT kind,clearance FROM assistants WHERE workspace_id=$1 AND id=$2 FOR SHARE', [context.workspaceId, actor.assistantId])
+      if (!assistant.rows[0] || (scope.visibilityAssistantIds !== null && !scope.visibilityAssistantIds.includes(actor.assistantId))) throw denied()
+      access.assistantId = actor.assistantId
+      access.assistantKind = assistant.rows[0].kind
+      // The predicate intersects this current ceiling with the retained turn ceiling.
+      access.clearance = assistant.rows[0].clearance
+    }
+  }
+  return access
+}
 
 export type CrmOperationsRecord = Record<string, unknown>
 
@@ -131,6 +164,9 @@ export type CrmOperationsTransaction = {
     createdByAssistantId: string | null
   }): Promise<CrmOperationsRecord>
   updateContact(contactId: string, input: ContactWrite): Promise<CrmOperationsRecord>
+  /** Unverified claims (`existing_or_new`): set only what the contact lacks. A
+   *  populated name, phone or custom field is never replaced; tags are added. */
+  fillContactGaps(contactId: string, input: ContactWrite): Promise<CrmOperationsRecord>
   bindExternalIdentity(contactId: string, provider: string, subject: string): Promise<void>
   createSubmission(params: {
     definition: StoredIntakeDefinition
@@ -550,6 +586,44 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
       return first(result)
     },
 
+    async fillContactGaps(contactId, input) {
+      const result = await client.query<DbRecord>(
+        `UPDATE entities
+            SET display_name = CASE
+                  WHEN NULLIF(btrim(display_name),'') IS NULL
+                    OR lower(btrim(display_name)) = lower(btrim(COALESCE(NULLIF(btrim(attributes->>'email'),''),canonical_id,'')))
+                  THEN COALESCE(NULLIF(btrim($3),''), display_name)
+                  ELSE display_name END,
+                attributes = attributes
+                  || CASE WHEN NULLIF(btrim(attributes->>'phone'),'') IS NULL AND NULLIF(btrim($4),'') IS NOT NULL
+                       THEN jsonb_build_object('phone',$4::text) ELSE '{}'::jsonb END
+                  || CASE WHEN cardinality($5::text[]) > 0
+                       THEN jsonb_build_object('tags', (
+                         SELECT jsonb_agg(tag ORDER BY position)
+                           FROM (SELECT tag, min(position) AS position FROM (
+                                   SELECT value AS tag, ordinality AS position
+                                     FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(attributes->'tags')='array' THEN attributes->'tags' ELSE '[]'::jsonb END)
+                                          WITH ORDINALITY
+                                   UNION ALL
+                                   SELECT tag, 1000000 + position FROM unnest($5::text[]) WITH ORDINALITY AS added(tag, position)
+                                 ) merged GROUP BY tag) ordered))
+                       ELSE '{}'::jsonb END
+                  || CASE WHEN $6::jsonb <> '{}'::jsonb
+                       THEN jsonb_build_object('custom_fields', $6::jsonb
+                         || CASE WHEN jsonb_typeof(attributes->'custom_fields')='object' THEN attributes->'custom_fields' ELSE '{}'::jsonb END)
+                       ELSE '{}'::jsonb END,
+                updated_at = now()
+          WHERE workspace_id = $1 AND id = $2 AND kind = 'person'
+            AND valid_to IS NULL AND retracted_at IS NULL
+         RETURNING id, workspace_id AS "workspaceId", display_name AS name,
+                   canonical_id AS email, attributes, created_at AS "createdAt",
+                   updated_at AS "updatedAt"`,
+        [workspaceId, contactId, input.name, input.phone, input.tags, JSON.stringify(input.customFields)],
+      )
+      if (!result.rows[0]) throw new Error('crm contact not found in workspace')
+      return first(result)
+    },
+
     async bindExternalIdentity(contactId, provider, subject) {
       const result = await client.query<{ contactId: string }>(
         `INSERT INTO association_external_identities (
@@ -823,7 +897,7 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
     },
 
     async saveIntakeDefinition(params) {
-      if (params.definition.identityPolicy !== 'new_or_review') {
+      if (!isUnverifiedIdentityPolicy(params.definition.identityPolicy)) {
         const member = context.actor.kind === 'user' ? await client.query(
           `SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND role IN ('owner','admin') FOR SHARE`,
           [workspaceId, context.actor.userId],
@@ -1395,6 +1469,12 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
     },
 
     async setDealPipelineStage(params) {
+      const access = await stageActorAccess(client, context)
+      const source = await readCrmMutationSource(access, params.dealId, ['deal'], client)
+      if (!source) return null
+      const project = (entity: typeof source) => ({ id: entity.id, name: entity.displayName,
+        attributes: entity.attributes, createdAt: entity.createdAt, updatedAt: entity.updatedAt })
+      const deal = project(source)
       const catalog = await client.query<DbRecord>(
         `SELECT p.id AS "pipelineId",p.name AS "pipelineName",
                 p.id::text AS "pipelineKey",
@@ -1406,7 +1486,7 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
            JOIN crm_pipeline_stages s
              ON s.workspace_id=p.workspace_id AND s.pipeline_id=p.id
           WHERE p.workspace_id=$1 AND p.id=$2 AND s.id=$3
-            AND p.archived_at IS NULL AND s.archived_at IS NULL`,
+            AND p.archived_at IS NULL AND s.archived_at IS NULL FOR SHARE OF p,s`,
         [workspaceId, params.pipelineId, params.stageId],
       )
       const stage = catalog.rows[0]
@@ -1428,16 +1508,6 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
           { validValues: valid.rows },
         )
       }
-      const current = await client.query<DbRecord>(
-        `SELECT id,display_name AS name,attributes,
-                created_at AS "createdAt",updated_at AS "updatedAt"
-           FROM entities
-          WHERE workspace_id=$1 AND id=$2 AND kind='deal'
-            AND valid_to IS NULL AND retracted_at IS NULL FOR UPDATE`,
-        [workspaceId, params.dealId],
-      )
-      const deal = current.rows[0]
-      if (!deal) return null
       const custom = deal.attributes.custom_fields
       const customFields = custom && typeof custom === 'object' && !Array.isArray(custom)
         ? custom as Record<string, unknown> : {}
@@ -1461,19 +1531,10 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
       }
       const legacyStage = stage.legacyStage
         ?? (stage.category === 'won' ? 'won' : stage.category === 'lost' ? 'lost' : 'lead')
-      const updated = await client.query<DbRecord>(
-        `UPDATE entities
-            SET attributes=attributes || jsonb_build_object(
-                  'pipeline_id',$3::text,'pipeline_stage_id',$4::text,
-                  'stage',COALESCE($5::text,attributes->>'stage')),
-                updated_at=now()
-          WHERE workspace_id=$1 AND id=$2 AND kind='deal'
-            AND valid_to IS NULL AND retracted_at IS NULL
-         RETURNING id,display_name AS name,attributes,
-                   created_at AS "createdAt",updated_at AS "updatedAt"`,
-        [workspaceId, params.dealId, params.pipelineId, params.stageId, legacyStage],
-      )
-      const updatedDeal = updated.rows[0]
+      const updated = await updateEntity(access.userId, params.dealId, { attributes: {
+        ...deal.attributes, pipeline_id: params.pipelineId, pipeline_stage_id: params.stageId, stage: legacyStage,
+      } }, access, client)
+      const updatedDeal = updated ? project(updated) : null
       if (!updatedDeal) return null
       await client.query(
         `INSERT INTO crm_activities (
@@ -1482,7 +1543,7 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
          ) VALUES ($1,$2,'stage_change','internal',$3,'crm_operation',$4,$5,$6,$7::jsonb)`,
         [workspaceId, params.dealId, `Moved deal to ${String(stage.stageName)}`,
           `${params.pipelineId}:${params.stageId}:${Date.now()}`,
-          params.actorUserId, params.actorAssistantId,
+          access.userId, actorAssistantId(context.actor),
           JSON.stringify({
             fromPipelineId: deal.attributes.pipeline_id ?? null,
             fromStageId: deal.attributes.pipeline_stage_id ?? null,

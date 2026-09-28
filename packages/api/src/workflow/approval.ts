@@ -14,6 +14,7 @@
  * [COMP:workflow/approval]
  */
 
+import { assertCurrentAuthority } from '../context-scope/authority-lease.js'
 import type {
   ExecutorDeps,
   JobStore,
@@ -27,6 +28,7 @@ import type {
 } from '@use-brian/core'
 import {
   advanceWorkflowRun,
+  resolveExternalClientWorkflowPrincipal,
   ContextScopeAccumulator,
   stepSuccessors,
   WORKFLOW_SCOPE_EVIDENCE_VAR,
@@ -141,6 +143,7 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
     // is durable in the DB even if delivery fails, and the user can always
     // approve via the web UI.
     try {
+      await assertCurrentAuthority()
       await deps.deliveries({
         approvalId: approval.id,
         workspaceId,
@@ -190,6 +193,11 @@ export async function resumeFromApproval(
   const run = await deps.runStore.getRunSystem(updated.workflowRunId)
   if (!run) {
     return { status: 'orphaned', runId: updated.workflowRunId }
+  }
+  // A pending approval can outlive a failed/revoked run. Restoring permissions
+  // must not turn that old card into a new invocation of its frozen operation.
+  if (run.status === 'completed' || run.status === 'failed' || run.status === 'timeout') {
+    return { status: run.status, runId: run.id }
   }
 
   // Audit the decision.
@@ -250,6 +258,9 @@ export async function resumeFromApproval(
         assistantId: toolAssistantId,
         workspaceId: run.workspaceId,
         run,
+        externalClientPrincipal: await resolveExternalClientWorkflowPrincipal(
+          workflow.definition, run, deps.executorDeps.resolveVerifiedClientEmail,
+        ),
       })
     } catch (err) {
       await failStep(
@@ -321,6 +332,7 @@ export async function resumeFromApproval(
     channelId: run.id,
     workspaceId: run.workspaceId,
     assistantKind: workflow.definition.principal ? 'standard' : 'primary',
+    visibilityAssistantIds: runtimeScope?.turnScope.access.visibilityAssistantIds,
     clearance: runtimeScope?.turnScope.access.clearance,
     compartments: runtimeScope?.turnScope.effectiveCompartments,
     projectIds: runtimeScope?.turnScope.effectiveProjectIds,
@@ -337,9 +349,11 @@ export async function resumeFromApproval(
 
   let result
   try {
-    result = await tool.execute(validatedInput, toolContext)
+    const execute = () => tool.execute(validatedInput, toolContext)
+    result = await (runtimeScope?.executeWithAuthority ? runtimeScope.executeWithAuthority(execute) : execute())
   } catch (err) {
-    await failStep(deps, run, workflow, updated, 'tool_threw_after_resume', err instanceof Error ? err.message : String(err))
+    const reason = (err as { reason?: unknown } | null)?.reason
+    await failStep(deps, run, workflow, updated, typeof reason === 'string' ? reason : 'tool_threw_after_resume', err instanceof Error ? err.message : String(err))
     return { status: 'failed', runId: run.id }
   }
 

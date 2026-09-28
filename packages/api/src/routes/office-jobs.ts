@@ -1,5 +1,6 @@
 /** Persisted Office activity/steering routes. [COMP:api/office-routes] */
 import { Router } from 'express'
+import {officeMetadataRoute} from './office-metadata.js'
 import { z } from 'zod'
 import type { OfficeGenerationEventRow, OfficeGenerationJobRow } from '../db/office-generation.js'
 
@@ -12,23 +13,19 @@ export type OfficeJobsRouteDeps = {
 
 export function officeJobRoutes(deps: OfficeJobsRouteDeps): Router {
   const router = Router()
-  router.get('/jobs/:jobId', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/jobs/:jobId', officeMetadataRoute(async (req, userId) => {
     const job = await deps.get(userId, String(req.params.jobId))
-    if (!job) return void res.status(404).json({ error: 'Office job not found' })
-    res.json({ job })
-  })
+    if (!job) return {status:404,body:{ error: 'Office job not found' }}
+    return {workspaceId:job.workspaceId,body:{job}}
+  }))
 
-  router.get('/jobs/:jobId/events', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/jobs/:jobId/events', officeMetadataRoute(async (req, userId) => {
     const jobId = String(req.params.jobId)
     const job = await deps.get(userId, jobId)
-    if (!job) return void res.status(404).json({ error: 'Office job not found' })
+    if (!job) return {status:404,body:{ error: 'Office job not found' }}
     const afterSeq = z.coerce.number().int().min(0).catch(0).parse(req.query.afterSeq)
-    res.json({ events: await deps.events(userId, jobId, afterSeq) })
-  })
+    return {workspaceId:job.workspaceId,body:{ events: await deps.events(userId, jobId, afterSeq) }}
+  }))
 
   router.post('/jobs/:jobId/steering', async (req, res) => {
     const userId = (req as { userId?: string }).userId

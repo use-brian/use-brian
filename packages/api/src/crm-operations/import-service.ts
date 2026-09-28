@@ -1063,6 +1063,7 @@ export function createCrmProductionImportService(deps: {
         : 'lead'
       const record = await createDeal(attributionUserId, {
         workspaceId: context.workspaceId,
+        access,
         contactId: values.contactId,
         companyId: values.companyId,
         stage: legacyStage,

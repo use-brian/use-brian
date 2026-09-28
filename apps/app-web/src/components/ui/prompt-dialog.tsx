@@ -24,6 +24,8 @@ import { cn } from "@/lib/utils";
 import { Button } from "./button";
 
 export type PromptOptions = {
+  /** Cancel protected pre-filled content when its owning read is discarded. */
+  signal?: AbortSignal;
   title?: string;
   description?: string;
   /** Pre-filled value (e.g. the current page name for a rename). */
@@ -50,14 +52,30 @@ export type PromptOptions = {
   emptyConfirmLabel?: string;
 };
 
-type Pending = PromptOptions & { resolve: (value: string | null) => void };
+type Pending = PromptOptions & { cancelled?: boolean; resolve: (value: string | null) => void };
 
 const queue: Pending[] = [];
 let notify: (() => void) | null = null;
 
 export function promptDialog(opts: PromptOptions): Promise<string | null> {
+  if (opts.signal?.aborted) return Promise.resolve(null);
   return new Promise<string | null>((resolve) => {
-    queue.push({ ...opts, resolve });
+    let settled = false;
+    const pending: Pending = {...opts, resolve(value) {
+      if (settled) return;
+      settled = true;
+      opts.signal?.removeEventListener("abort", abort);
+      resolve(value);
+    }};
+    const abort = () => {
+      pending.cancelled = true;
+      const index = queue.indexOf(pending);
+      if (index >= 0) queue.splice(index, 1);
+      pending.resolve(null);
+      notify?.();
+    };
+    queue.push(pending);
+    opts.signal?.addEventListener("abort", abort, {once: true});
     notify?.();
   });
 }
@@ -65,17 +83,17 @@ export function promptDialog(opts: PromptOptions): Promise<string | null> {
 export function PromptDialogProvider() {
   const [active, setActive] = React.useState<Pending | null>(null);
   const [value, setValue] = React.useState("");
+  const activeRef = React.useRef<Pending | null>(null);
   // One ref for whichever field renders (input or textarea) - base-ui's
   // `initialFocus` only needs an HTMLElement.
   const inputRef = React.useRef<HTMLElement | null>(null);
 
   const drain = React.useCallback(() => {
-    setActive((current) => {
-      if (current) return current;
-      const next = queue.shift() ?? null;
-      if (next) setValue(next.defaultValue ?? "");
-      return next;
-    });
+    if (activeRef.current && !activeRef.current.cancelled) return;
+    const next = queue.shift() ?? null;
+    activeRef.current = next;
+    setValue(next?.defaultValue ?? "");
+    setActive(next);
   }, []);
 
   React.useEffect(() => {
@@ -87,8 +105,10 @@ export function PromptDialogProvider() {
   }, [drain]);
 
   function resolveWith(answer: string | null) {
-    if (!active) return;
-    active.resolve(answer);
+    const current = activeRef.current;
+    if (!current) return;
+    current.resolve(answer);
+    activeRef.current = null;
     setActive(null);
     setValue("");
     queueMicrotask(drain);
@@ -123,7 +143,7 @@ export function PromptDialogProvider() {
         <Dialog.Popup
           initialFocus={inputRef}
           className={cn(
-            "fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2",
+            "fixed left-1/2 top-1/2 z-50 w-[calc(var(--native-app-width,100vw)-2rem)] -translate-x-1/2 -translate-y-1/2",
             active?.multiline ? "max-w-lg" : "max-w-md",
             "rounded-2xl border border-border bg-background p-6 shadow-xl ring-1 ring-foreground/5",
             "transition-all duration-150",

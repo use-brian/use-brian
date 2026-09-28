@@ -6,6 +6,7 @@ import type { WorkflowStore } from '../workflow/types.js'
 import { buildOneStepReminderWorkflow, frameSchedulerPrompt, type ReminderDeliverTarget } from '../workflow/one-step.js'
 import { generateWorkflowTitle } from '../workflow/auto-title.js'
 import { ResearchDepthConfigSchema } from '../engine/research-depth.js'
+import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
 import type { LLMProvider } from '../providers/types.js'
 import type { DeliverToChannel } from '../workflow/executor.js'
 import type {
@@ -335,6 +336,7 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         trigger: { kind: 'schedule', schedule, timezone },
         contextGroupId: context.activeGroupId ?? null,
         contextProjectId: context.activeProjectId ?? null,
+        authoringAuthority: pinToolAuthoringAuthority(context),
       })
 
       const job = await jobStore.create({
@@ -595,6 +597,7 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
           : null
         if (wf && step) {
           await workflowStore.update(context.userId, wf.id, {
+            authoringAuthority: pinToolAuthoringAuthority(context),
             definition: {
               ...wf.definition,
               steps: [{

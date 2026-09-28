@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { bindScopeSource } from '../../security/source-evidence.js'
 import {
   runSkillDecay,
   evaluateDemoteRule,
@@ -29,7 +30,7 @@ import {
 // ── Fixtures ─────────────────────────────────────────────────────
 
 function makeSkill(over: Partial<SkillDecayCandidate>): SkillDecayCandidate {
-  return {
+  const skill: SkillDecayCandidate = {
     rowId: 'row-1',
     id: 'slug-1',
     workspaceId: 'ws-1',
@@ -51,6 +52,17 @@ function makeSkill(over: Partial<SkillDecayCandidate>): SkillDecayCandidate {
     validFrom: new Date('2026-01-01'),
     ...over,
   }
+  return bindScopeSource(skill, {
+    workspaceId: skill.workspaceId,
+    userId: 'user-1',
+    assistantId: 'assistant-1',
+    sensitivity: 'internal',
+    compartments: [],
+    projectIds: [],
+    resourceKind: 'workspace_skill_revision',
+    resourceId: skill.rowId,
+    version: '1',
+  })
 }
 
 function makeStore(skills: SkillDecayCandidate[]): SkillDecayStore & {

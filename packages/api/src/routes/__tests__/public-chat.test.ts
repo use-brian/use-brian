@@ -111,6 +111,19 @@ describe('[COMP:api/public-chat-route] Public chat routes', () => {
       expect(input.body.externalUserId).toBe('visitor-uuid-1')
     })
 
+    it('revalidates the exact public link during the turn', async () => {
+      await request(app()).post('/api/public/chat/tok_1/messages').send(validBody)
+      const credentialCurrent = mockTurn.mock.calls[0][1].credentialCurrent
+      expect(credentialCurrent).toBeTypeOf('function')
+
+      chatLinkStore.resolveToken.mockResolvedValueOnce(RESOLVED)
+      await expect(credentialCurrent!()).resolves.toBe(true)
+      chatLinkStore.resolveToken.mockResolvedValueOnce(null)
+      await expect(credentialCurrent!()).resolves.toBe(false)
+      chatLinkStore.resolveToken.mockResolvedValueOnce({ ...RESOLVED, assistantId: 'a_other' })
+      await expect(credentialCurrent!()).resolves.toBe(false)
+    })
+
     it('rejects Tier-1 self-identification fields (strict schema)', async () => {
       const res = await request(app())
         .post('/api/public/chat/tok_1/messages')

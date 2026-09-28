@@ -17,6 +17,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       workflow.jobs['app-web-tests'],
       workflow.jobs['heavyweight-tests'],
       workflow.jobs['remaining-tests'],
+      workflow.jobs['department-isolation'],
     ];
     for (const job of executionJobs) {
       expect(job.if).toContain("github.event_name != 'pull_request'");
@@ -66,6 +67,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       'app-web-tests',
       'heavyweight-tests',
       'remaining-tests',
+      'department-isolation',
     ]);
     expect(workflow.jobs['build-test'].if).toContain('always()');
   });

@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { EventSubscription, GoalRecord, GoalStore } from '@use-brian/core'
+import type { DispatchEvent, EventSubscription, GoalRecord, GoalStore } from '@use-brian/core'
 import {
   createGoalDriver,
+  isGoalAuthorityFailure,
   DEFAULT_GOAL_BUDGET,
   type DispatchRunResult,
   type GoalAwaitingEvent,
@@ -202,6 +203,48 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     expect(h.statuses).toHaveLength(0)
   })
 
+  it('installs the saved goal authority before claiming and keeps it through delivery', async () => {
+    const events: string[] = []
+    const tryClaim = vi.fn(async () => { events.push('claim'); return true })
+    const { driver, h } = makeDriver({
+      openSubGoals: 0,
+      overrides: {
+        tryClaim,
+        executeWithAuthority: async (_goal, operation) => {
+          events.push('authority:start')
+          try { return await operation() }
+          finally { events.push('authority:end') }
+        },
+        deliver: async () => { events.push('deliver') },
+      },
+    })
+
+    await driver.tickGoal('g1')
+
+    expect(h.dispatch).toHaveBeenCalledOnce()
+    expect(events).toEqual(['authority:start', 'claim', 'deliver', 'authority:end'])
+  })
+
+  it('does not claim a goal when its saved authoring authority is unavailable', async () => {
+    const tryClaim = vi.fn(async () => true)
+    const { driver, h } = makeDriver({
+      overrides: {
+        tryClaim,
+        executeWithAuthority: async () => {
+          throw Object.assign(new Error('legacy goal has no authority'), {
+            reason: 'goal_authority_unavailable',
+          })
+        },
+      },
+    })
+
+    await expect(driver.tickGoal('g1')).rejects.toMatchObject({
+      reason: 'goal_authority_unavailable',
+    })
+    expect(tryClaim).not.toHaveBeenCalled()
+    expect(h.dispatch).not.toHaveBeenCalled()
+  })
+
   it('does not re-arm when explicit task deletion retires the running goal mid-iteration', async () => {
     const transitionRunningStatus = vi.fn().mockResolvedValue(false)
     const { driver, h } = makeDriver({
@@ -340,6 +383,59 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     expect(h.ticks[0].fireAt).toEqual(NOW) // immediate
     expect(h.ticks[0].state).toEqual(state) // budget counters preserved across the wait
     expect(h.dispatch).not.toHaveBeenCalled() // resume only SCHEDULES the tick
+  })
+
+  it('requires CRM admission and preserves the marker on an unavailable source gate', async () => {
+    const marker={subscriptions:[SUB]},event={source:{type:'crm'},workspaceId:'w1',payload:{domainEventId:'event-1'},text:null,actorId:null,channelId:null,mentions:[],isBot:false} satisfies DispatchEvent
+    const {driver,h}=makeDriver({awaitingSeed:{g1:marker}})
+    await expect(driver.resumeOnEvent('g1',event)).rejects.toThrow('goal_source_scope_unavailable')
+    expect(h.awaiting.get('g1')).toEqual(marker)
+    expect(h.ticks).toEqual([])
+  })
+
+  it('schedules only after the CRM source claim accepts the exact marker', async () => {
+    const marker={subscriptions:[SUB],state:{iteration:4,spend:1,noProgressStreak:0,runId:null}}
+    const event={source:{type:'crm'},workspaceId:'w1',payload:{domainEventId:'event-1'},text:null,actorId:null,channelId:null,mentions:[],isBot:false} satisfies DispatchEvent
+    const claim=vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    const {driver,h}=makeDriver({awaitingSeed:{g1:marker},overrides:{claimCrmEventResume:claim}})
+    await driver.resumeOnEvent('g1',event)
+    expect(h.ticks).toEqual([])
+    await driver.resumeOnEvent('g1',event)
+    expect(claim).toHaveBeenLastCalledWith('g1',event,marker)
+    expect(h.ticks[0].state).toEqual(marker.state)
+  })
+
+  it('blocks source authority loss without iteration, host writeback, delivery or automatic retries', async () => {
+    const error=Object.assign(new Error('goal_source_scope_unavailable'),{code:'goal_source_scope_unavailable'})
+    const {driver,h}=makeDriver({overrides:{assertSourceAuthority:async()=>{throw error}}})
+    await expect(driver.tickGoal('g1')).rejects.toBe(error)
+    expect(h.statuses).toEqual([{status:'blocked',reason:'goal_source_scope_unavailable'}])
+    expect(h.dispatch).not.toHaveBeenCalled()
+    expect(h.delivered).toEqual([])
+    expect(h.ticks).toEqual([])
+  })
+
+  it('withholds an iteration result when its source authority contracts during execution',async()=>{
+    let checks=0
+    const error=Object.assign(new Error('goal_source_scope_unavailable'),{code:'goal_source_scope_unavailable'})
+    const {driver,h}=makeDriver({openSubGoals:0,overrides:{assertSourceAuthority:async()=>{if(++checks>=3)throw error}}})
+    await expect(driver.tickGoal('g1')).rejects.toBe(error)
+    expect(h.dispatch).toHaveBeenCalledOnce()
+    expect(h.statuses).toEqual([{status:'running',reason:null},{status:'blocked',reason:'goal_source_scope_unavailable'}])
+    expect(h.delivered).toEqual([])
+    expect(h.ticks).toEqual([])
+  })
+
+  it.each(['workflow_authority_unavailable','authority_changed','context_not_available','caller_evidence_unavailable'])('blocks %s from a failed workflow instead of rearming a replacement',async reason=>{
+    const error=Object.assign(new Error('Execution access changed'),{reason})
+    const {driver,h}=makeDriver({overrides:{dispatchRun:async()=>{throw error}}})
+    await expect(driver.tickGoal('g1')).rejects.toBe(error)
+    expect(h.statuses.at(-1)).toEqual({status:'blocked',reason:'goal_source_scope_unavailable'})
+    expect(h.delivered).toEqual([])
+    expect(h.ticks).toEqual([])
+    const storedError=JSON.parse(JSON.stringify({message:error.message,reason}))
+    expect(isGoalAuthorityFailure(storedError)).toBe(true)
+    expect(isGoalAuthorityFailure({message:'Provider failed',reason:'provider_error'})).toBe(false)
   })
 
   it('resumeOnEvent is a no-op when the goal already un-parked (marker gone) — concurrent events resume once', async () => {

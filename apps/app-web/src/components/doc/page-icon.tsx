@@ -1,88 +1,12 @@
 "use client";
 
-/**
- * PageIcon — the one renderer for a page's leading icon, shared by every
- * surface that shows one (page header, sidebar rows/tree, tabs, breadcrumb,
- * chat page cards, child-page blocks, landing lists).
- *
- * A `saved_views.icon` value is either an emoji grapheme or an image token
- * `img:<workspaceId>/<fileId>` (minted by the assistant's `fetchSiteIcon`
- * tool — see `@use-brian/shared` `page-icon.ts`). Emoji render as the
- * historical `<span>`; image tokens render an `<img>` whose bytes load
- * through `GET /api/doc-files/:workspaceId/:fileId` — that route is
- * Bearer-auth only (no cookie), so a plain `<img src>` can't reach it:
- * `fetchDocFileBlob` (doc-file-url.ts) mints the signed storage URL via
- * `?redirect=0` + fetches it directly (a CORS fetch can't follow the
- * route's cross-origin 302 — see the helper's comment), and we hand the
- * element a blob object-URL.
- *
- * Object-URLs are cached module-level by token — a sidebar of N rows for
- * the same page must not fetch N times, and re-mounts (tab switches,
- * sidebar reloads) reuse the same blob. Never revoked: icons are tiny and
- * the set per workspace is bounded. A failed load (revoked access, deleted
- * file, other-workspace token) falls back to the derived lucide glyph —
- * same as no icon.
- *
- * Spec: docs/architecture/features/doc.md → "Image icons".
- *
+/** Page icons use the viewer-scoped, expiring surface cache.
+ * Spec: docs/architecture/features/doc.md → "Protected durable-media display".
  * [COMP:app-web/page-icon]
  */
-
-import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import { parseImageIcon } from "@use-brian/shared/page-icon";
-import { fetchDocFileBlob } from "@/components/doc/doc-file-url";
-
-/** token → resolved object-URL (or in-flight promise). Module-level. */
-const iconUrlCache = new Map<string, string | Promise<string>>();
-
-async function loadIconUrl(icon: string): Promise<string> {
-  const parsed = parseImageIcon(icon);
-  if (!parsed) throw new Error("not an image icon");
-  const blob = await fetchDocFileBlob(parsed.workspaceId, parsed.fileId);
-  return URL.createObjectURL(blob);
-}
-
-/**
- * Resolve an image-icon token to a blob object-URL. Returns `null` while
- * loading and `"error"` on failure (caller falls back to the glyph).
- * Non-image icons resolve to `null` forever (callers branch on
- * `parseImageIcon` first, this is belt-and-braces).
- */
-function useImageIconUrl(icon: string | null | undefined): string | null | "error" {
-  const token = icon && parseImageIcon(icon) ? icon : null;
-  const cached = token ? iconUrlCache.get(token) : undefined;
-  const [state, setState] = React.useState<string | null | "error">(
-    typeof cached === "string" ? cached : null,
-  );
-
-  React.useEffect(() => {
-    if (!token) return;
-    const existing = iconUrlCache.get(token);
-    if (typeof existing === "string") {
-      setState(existing);
-      return;
-    }
-    let alive = true;
-    const promise = existing ?? loadIconUrl(token);
-    if (!existing) {
-      iconUrlCache.set(token, promise);
-      promise.then(
-        (url) => iconUrlCache.set(token, url),
-        () => iconUrlCache.delete(token),
-      );
-    }
-    promise.then(
-      (url) => alive && setState(url),
-      () => alive && setState("error"),
-    );
-    return () => {
-      alive = false;
-    };
-  }, [token]);
-
-  return token ? state : null;
-}
+import { useDocMediaSrc } from "@/lib/use-doc-media";
 
 type PageIconProps = {
   /** The `saved_views.icon` value: emoji, `img:` token, or null/undefined. */
@@ -104,11 +28,12 @@ export function PageIcon({
   glyphClassName,
   imgClassName,
 }: PageIconProps) {
-  const isImage = !!(icon && parseImageIcon(icon));
-  const url = useImageIconUrl(isImage ? icon : null);
+  const parsed = icon ? parseImageIcon(icon) : null;
+  const isImage = !!parsed;
+  const url = useDocMediaSrc(parsed?.workspaceId ?? null, parsed?.fileId ?? null);
 
   if (isImage) {
-    if (url && url !== "error") {
+    if (url) {
       // Decorative: the page name always sits next to the icon.
       // eslint-disable-next-line @next/next/no-img-element
       return <img src={url} alt="" aria-hidden className={imgClassName} />;

@@ -1,6 +1,8 @@
 "use client";
 
 
+import { availableAppWidth, subscribeAppViewport } from "@/lib/app-viewport";
+
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Floating chat panel for app-web — the ambient "Ask anything…"
@@ -326,12 +328,12 @@ type ChatSize = { w: number; h: number };
  */
 function clampChatSize(size: ChatSize): ChatSize {
   const hasWindow = typeof window !== "undefined";
-  const maxW = hasWindow ? Math.max(MIN_CHAT_W, window.innerWidth - 32) : size.w;
+  const maxW = hasWindow ? Math.max(0, availableAppWidth() - 32) : size.w;
   const maxH = hasWindow
     ? Math.max(MIN_CHAT_H, Math.round(window.innerHeight * 0.92))
     : size.h;
   return {
-    w: Math.round(Math.max(MIN_CHAT_W, Math.min(size.w, maxW))),
+    w: Math.round(Math.min(maxW, Math.max(MIN_CHAT_W, size.w))),
     h: Math.round(Math.max(MIN_CHAT_H, Math.min(size.h, maxH))),
   };
 }
@@ -815,8 +817,8 @@ export function FloatingChat({
   useEffect(() => {
     if (isSidePanel || typeof window === "undefined") return;
     const onResize = () => setChatSize((s) => clampChatSize(s));
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    onResize();
+    return subscribeAppViewport(onResize);
   }, [isSidePanel]);
 
   const session = useChatSession();
@@ -857,11 +859,8 @@ export function FloatingChat({
   const resetThread = useCallback(() => {
     threadEpochRef.current += 1;
     stream.abort();
-    // The aborted turn's queued messages belong to the thread we are leaving.
-    // Hand them back to the composer instead of letting the end-of-stream
-    // flush post them into whatever session comes next.
-    const abandoned = midTurn.drain();
-    if (abandoned.length > 0) setInput(joinQueuedInputs(abandoned));
+    // Do not restore the departing thread's queue into the new composer.
+    // The queue hook abandons retries when ownership changes.
     sessionIdRef.current = null;
     session.setSession(null);
     session.loadMessages([]);
@@ -871,7 +870,7 @@ export function FloatingChat({
     setReconnectSessionId(null);
     setError(null);
     setNotice(null);
-  }, [stream, session, midTurn]);
+  }, [stream, session]);
 
   // ── Assistant switch ─────────────────────────────────────────────────────
   // On the DOC surface a switch is a per-turn re-address, not a thread
@@ -1241,12 +1240,13 @@ export function FloatingChat({
    * Deferred a tick: `onDone` runs while the stream's abort registration is
    * still live, and `sendMessage` refuses to start while one is.
    */
-  const flushQueuedInputs = useCallback(() => {
-    const stillWaiting = midTurn.drain();
-    if (stillWaiting.length === 0) return;
-    const joined = joinQueuedInputs(stillWaiting);
+  const flushQueuedInputs = useCallback((owningSessionId: string | null) => {
+    const epoch = threadEpochRef.current;
     setTimeout(() => {
-      void sendMessageRef.current?.(joined);
+      // Never deliver a departing thread's fallback through the new composer.
+      if (!owningSessionId || epoch !== threadEpochRef.current || sessionIdRef.current !== owningSessionId) return;
+      const stillWaiting = midTurn.drain(owningSessionId);
+      if (stillWaiting.length > 0) void sendMessageRef.current?.(joinQueuedInputs(stillWaiting));
     }, 0);
   }, [midTurn]);
   // `midTurn` is a fresh object every render, so `flushQueuedInputs` is too.
@@ -1592,7 +1592,7 @@ export function FloatingChat({
         current?.code === RECONNECT_NOTICE_CODE ? null : current,
       );
     const onCompleted = () => {
-      if (sawDone) return;
+      if (sawDone || cancelled || epoch !== threadEpochRef.current || sessionIdRef.current !== sid) return;
       sawDone = true;
       setReconnectSessionId(null);
       clearReconnectNotice();
@@ -1611,7 +1611,7 @@ export function FloatingChat({
       // so restore the current-turn question or tool confirmation.
       void fetchPendingSessionInput(sid)
         .then(({ pending, toolConfirmation }) => {
-          if (epoch !== threadEpochRef.current) return;
+          if (epoch !== threadEpochRef.current || sessionIdRef.current !== sid) return;
           if (pending) {
             setPendingQuestion({
               approvalId: pending.approvalId,
@@ -1632,7 +1632,7 @@ export function FloatingChat({
       // Queued mid-turn input the dead POST never took: the turn is over
       // now, so it goes out as an ordinary turn (the queue's "client is
       // the durable holder" fallback).
-      flushQueuedInputsRef.current();
+      flushQueuedInputsRef.current(sid);
     };
     const giveUp = () => {
       if (sawDone) return;
@@ -1783,8 +1783,8 @@ export function FloatingChat({
    * and reads as its answer.
    */
   const applyQueuedInput = useCallback(
-    (inputId: string, messageId: string) => {
-      const entry = midTurn.take(inputId);
+    (inputId: string, messageId: string, owningSessionId: string) => {
+      const entry = midTurn.take(inputId, owningSessionId);
       if (!entry) return;
       const segment = buildStreamedTurnMessage();
       if (segment) session.dispatch({ type: "message/append", message: segment });
@@ -1856,6 +1856,10 @@ export function FloatingChat({
       // path too, which calls sendMessage directly past the disabled composer.
       if (pendingQuestion) return false;
 
+      let owningSessionId = sessionIdRef.current;
+      const epoch = threadEpochRef.current;
+      const current = () => epoch === threadEpochRef.current && sessionIdRef.current === owningSessionId;
+
       // Snapshot the ready attachment ids for this turn, then clear the tray.
       // A seed (the landing's build flow) hands its own ids in — those win,
       // since this chat's own tray is empty on that path.
@@ -1911,7 +1915,7 @@ export function FloatingChat({
           ...(turnRecordingIds.length > 0
             ? { attachedRecordingIds: turnRecordingIds }
             : {}),
-          sessionId: sessionIdRef.current ?? undefined,
+          sessionId: owningSessionId ?? undefined,
           // The landing's picker overrides the chat's current tier for the
           // build turn; otherwise the chat's own selection is used. An armed
           // metered pick (confirmed at selection time) wins over the tier —
@@ -1985,6 +1989,7 @@ export function FloatingChat({
           ...(CLIENT_TIMEZONE ? { timezone: CLIENT_TIMEZONE } : {}),
         },
         onEvent: (event) => {
+          if (!current()) return;
           const payload = coercePayload(event.data);
           switch (event.event) {
             case "session": {
@@ -1992,7 +1997,11 @@ export function FloatingChat({
                 typeof payload.sessionId === "string"
                   ? payload.sessionId
                   : null;
-              if (id) session.setSession(id);
+              if (id) {
+                owningSessionId = id;
+                sessionIdRef.current = id;
+                session.setSession(id);
+              }
               break;
             }
             case "goal_accepted": {
@@ -2609,7 +2618,7 @@ export function FloatingChat({
                 typeof payload.messageId === "string"
                   ? payload.messageId
                   : `queued-${inputId}`;
-              applyQueuedInput(inputId, messageId);
+              if (owningSessionId) applyQueuedInput(inputId, messageId, owningSessionId);
               break;
             }
             case "error": {
@@ -2769,6 +2778,7 @@ export function FloatingChat({
           }
         },
         onDone: () => {
+          if (!current()) return;
           const askedQuestion = turnAskedQuestionRef.current;
           // Doc is an `app` surface with no chip affordance: the builder
           // strips any `<followup>[...]</followup>` tag the model volunteered
@@ -2787,7 +2797,7 @@ export function FloatingChat({
           resetTurnBuffers();
           // Anything still queued was never taken by this turn — send it as
           // an ordinary one. See mid-turn-input.md → "the client is the holder".
-          flushQueuedInputs();
+          flushQueuedInputs(owningSessionId);
           // Surface docks: a general chat turn may have written to the brain
           // (the assistant saves memories / entities while researching) —
           // nudge the brain page to re-pull so new rows appear without a
@@ -2805,11 +2815,11 @@ export function FloatingChat({
           // fetch the pending row now to surface the answer panel + gate
           // the composer immediately. See askquestion-suspend-resume.md.
           if (askedQuestion) {
-            const sid = sessionIdRef.current;
+            const sid = owningSessionId;
             if (sid) {
               void fetchPendingQuestion(sid)
                 .then((q) => {
-                  if (!q) return;
+                  if (!q || !current()) return;
                   setPendingQuestion({
                     approvalId: q.approvalId,
                     question: q.question ?? "",
@@ -2822,6 +2832,7 @@ export function FloatingChat({
           }
         },
         onDisconnect: () => {
+          if (!current()) return;
           // The body closed with no `done` / `error`: a request-timeout cut,
           // a deploy, a network blip. The server keeps the turn running
           // (2026-08-24), so drop the live bubble, tell the user, and
@@ -2829,14 +2840,14 @@ export function FloatingChat({
           // loaded when that stream reports the turn over. Queued input is
           // NOT flushed here: the turn is still running and a re-send
           // would only be answered `turn_in_flight`.
-          const sid = sessionIdRef.current;
+          const sid = owningSessionId;
           session.dispatch({ type: "stream/abort" });
           resetTurnBuffers();
           if (!sid) {
             // No `session` frame ever arrived, so there is nothing to
             // re-attach to. Report it like any other transport failure.
             setError(t.streamInterrupted);
-            flushQueuedInputs();
+            flushQueuedInputs(owningSessionId);
             return;
           }
           reconnectStartedAtRef.current = Date.now();
@@ -2845,6 +2856,7 @@ export function FloatingChat({
           setReconnectEpoch((n) => n + 1);
         },
         onError: (err) => {
+          if (!current()) return;
           setError(
             isTransportError(err)
               ? t.streamInterrupted
@@ -2854,7 +2866,7 @@ export function FloatingChat({
           );
           session.dispatch({ type: "stream/abort" });
           resetTurnBuffers();
-          flushQueuedInputs();
+          flushQueuedInputs(owningSessionId);
         },
       });
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
@@ -3113,7 +3125,8 @@ export function FloatingChat({
     // Stop in the first place. It waits for the server-side stop to land,
     // because a flush racing the still-running turn is answered
     // `turn_in_flight`.
-    void stopRunningTurn().finally(flushQueuedInputs);
+    const owningSessionId = sessionIdRef.current;
+    void stopRunningTurn().finally(() => flushQueuedInputs(owningSessionId));
   }, [stopRunningTurn, flushQueuedInputs]);
 
   const handleConfirmation = useCallback(
@@ -3278,7 +3291,7 @@ export function FloatingChat({
             ? "h-full w-full"
             : cn(
                 "absolute right-0 bottom-0 origin-bottom-right",
-                "max-w-[calc(100vw-2rem)] max-h-[92dvh]",
+                "max-w-[calc(var(--native-app-width,100vw)-2rem)] max-h-[92dvh]",
                 "rounded-xl border border-border bg-popover shadow-2xl",
                 "transition-[opacity,transform] duration-200 ease-out",
                 expanded
@@ -3356,7 +3369,7 @@ export function FloatingChat({
                 </PopoverTrigger>
                 <PopoverContent
                   align="start"
-                  className="w-60 max-w-[calc(100vw-2rem)] gap-0.5 p-1"
+                  className="w-60 max-w-[calc(var(--native-app-width,100vw)-2rem)] gap-0.5 p-1"
                 >
                   <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                     {t.switchAssistantTitle}
@@ -3916,7 +3929,7 @@ export function FloatingChat({
               tabIndex={expanded ? -1 : 0}
               className={cn(
                 "relative inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
-                "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
+                "max-w-[min(260px,calc(var(--native-app-width,100vw)-3rem))] text-left text-sm",
                 "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
                 isActive
                   ? "border border-primary/40 bg-primary/10 text-foreground ring-2 ring-primary/20"

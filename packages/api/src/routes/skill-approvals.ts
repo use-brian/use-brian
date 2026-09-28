@@ -26,7 +26,12 @@
  */
 
 import { Router } from 'express'
-import { matchInducedSkill, type ExistingSkillForMatch } from '@use-brian/core'
+import {
+  boundScopeSource,
+  matchInducedSkill,
+  type DerivedWriteEvidence,
+  type ExistingSkillForMatch,
+} from '@use-brian/core'
 import { query } from '../db/client.js'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
@@ -35,6 +40,12 @@ import type { WorkspaceSkillFilesStore } from '../db/workspace-skill-files-store
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
 import type { EntityLinksStore, WorkflowStore } from '@use-brian/core'
 import type { ValidatedDefinitionEditor } from './workflows.js'
+import {
+  applyDerivedSkillPatch,
+  applyDerivedSkillSupportFile,
+  createDerivedWorkspaceSkill,
+  recordDerivedSkillRederivation,
+} from '../db/skill-derived-store.js'
 
 export type SkillApprovalRouteOptions = {
   approvalsStore: PendingApprovalsStore
@@ -339,6 +350,7 @@ type StagedUpdateArgs = {
       description?: string
     }>
   }
+  derivation?: DerivedWriteEvidence
 }
 
 async function applyStagedSkillUpdate(
@@ -351,6 +363,7 @@ async function applyStagedSkillUpdate(
   if (!parsed.targetSkillId || !parsed.patch) {
     throw new Error('Invalid staged_skill_update arguments')
   }
+  if (!parsed.derivation?.sources?.length) throw new Error('scope_evidence_missing')
 
   const skill = await opts.workspaceSkillStore.getByIdSystem(parsed.targetSkillId)
   if (!skill || skill.workspaceId !== workspaceId) {
@@ -366,19 +379,25 @@ async function applyStagedSkillUpdate(
   // already-`auto-generated` skills the approval flow promotes source
   // to 'user' here, again per Approach W.
   if (parsed.patch.newContent !== undefined) {
-    await opts.workspaceSkillStore.update(approverUserId, workspaceId, parsed.targetSkillId, {
+    await applyDerivedSkillPatch({
+      workspaceId,
+      skillId: parsed.targetSkillId,
       content: parsed.patch.newContent,
+      diff: parsed.patch.diff ?? null,
+      evidence: parsed.derivation,
     })
   }
 
   if (parsed.patch.addedFiles && parsed.patch.addedFiles.length > 0) {
     for (const file of parsed.patch.addedFiles) {
-      await opts.fileStore.upsert(approverUserId, {
-        workspaceSkillId: parsed.targetSkillId,
+      await applyDerivedSkillSupportFile({
+        workspaceId,
+        skillId: parsed.targetSkillId,
         kind: file.kind,
         name: file.name,
         content: file.content,
         description: file.description ?? null,
+        evidence: parsed.derivation,
       })
     }
   }
@@ -395,6 +414,7 @@ async function applyStagedSkillUpdate(
                   END,
          author_id = COALESCE(author_id, $1),
          acknowledged_at = COALESCE(acknowledged_at, now()),
+         write_origin = 'foreground',
          updated_at = now()
      WHERE id = $2`,
     [approverUserId, parsed.targetSkillId],
@@ -417,6 +437,7 @@ type StagedCreationArgs = {
       description?: string
     }>
   }
+  derivation?: DerivedWriteEvidence
 }
 
 /**
@@ -516,6 +537,7 @@ async function applyStagedSkillCreation(
   if (!parsed.umbrella) {
     throw new Error('Invalid staged_skill_creation arguments')
   }
+  if (!parsed.derivation?.sources?.length) throw new Error('scope_evidence_missing')
   // Origin-aware induction: a workflow-origin candidate routes its
   // `learned_from` provenance edge at the source WORKFLOW instead of the
   // assistant (D6) — the workflow is where the pattern actually lives.
@@ -533,11 +555,18 @@ async function applyStagedSkillCreation(
   // a `learned_from` provenance edge to the SAME existing skill INSTEAD of
   // creating a duplicate. Deliberately strict (slug / near-duplicate name) so a
   // false negative just keeps a skill suggested a little longer.
-  const existingSkills = await opts.workspaceSkillStore.listForWorkspace(workspaceId, {
-    actingUserId: approverUserId,
-  })
+  const admittedRevisionIds = new Set(
+    parsed.derivation.sources
+      .filter((source) => source.resourceKind === 'workspace_skill_revision')
+      .map((source) => source.resourceId),
+  )
+  const existingSkills = await opts.workspaceSkillStore.listScopedForWorkspace(workspaceId)
   const matchCandidates: ExistingSkillForMatch[] = existingSkills
-    .filter((s) => s.state !== 'archived')
+    .filter((s) => {
+      const source = boundScopeSource(s)
+      return s.state !== 'archived' && source !== undefined
+        && admittedRevisionIds.has(source.resourceId)
+    })
     .map((s) => ({ rowId: s.rowId, slug: s.slug, name: s.name, whenToUse: s.whenToUse }))
   const match = matchInducedSkill(
     { slug: parsed.umbrella.slug, name: parsed.umbrella.name },
@@ -548,7 +577,11 @@ async function applyStagedSkillCreation(
     // Re-derivation: bump the existing skill's count/confidence (never auto-
     // activates an `ingested`-source skill — that path is guarded in the store)
     // and emit a provenance edge to it. No new row.
-    await opts.workspaceSkillStore.recordRederivation(match.rowId)
+    await recordDerivedSkillRederivation({
+      workspaceId,
+      skillId: match.rowId,
+      evidence: parsed.derivation,
+    })
     emitLearnedFromEdge(opts, {
       skillRowId: match.rowId,
       workspaceId,
@@ -571,10 +604,9 @@ async function applyStagedSkillCreation(
   // explicit cleanup since we don't have a transaction handle here. The
   // workspace_skills row is created first; on failure of subsequent file
   // upserts, the parent row is closed bi-temporally.
-  const created = await opts.workspaceSkillStore.create(
-    approverUserId,
-    workspaceId,
-    {
+  const created = await createDerivedWorkspaceSkill({
+      authorUserId: approverUserId,
+      workspaceId,
       slug: parsed.umbrella.slug,
       name: parsed.umbrella.name,
       description: parsed.umbrella.description,
@@ -589,8 +621,9 @@ async function applyStagedSkillCreation(
       writeOrigin: 'foreground',
       originatingAssistantId,
       inductionSource: 'self',
-    },
-  )
+      humanApproved: true,
+      evidence: parsed.derivation,
+  })
 
   // Provenance audit trail — `learned_from` edge to the source workflow
   // (workflow-origin inductions) or the originating assistant (interactive).
@@ -605,12 +638,14 @@ async function applyStagedSkillCreation(
   try {
     if (parsed.umbrella.supportFiles && parsed.umbrella.supportFiles.length > 0) {
       for (const file of parsed.umbrella.supportFiles) {
-        await opts.fileStore.upsert(approverUserId, {
-          workspaceSkillId: created.rowId,
+        await applyDerivedSkillSupportFile({
+          workspaceId,
+          skillId: created.rowId,
           kind: file.kind,
           name: file.name,
           content: file.content,
           description: file.description ?? null,
+          evidence: parsed.derivation,
         })
       }
     }

@@ -20,6 +20,7 @@
 
 import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi, EngineHooks, TurnScope } from '@use-brian/core'
 import { injectMcpTools } from '../mcp/inject.js'
+import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
@@ -165,5 +166,11 @@ export async function buildWorkflowToolRegistry(
   })
 
   stripOrchestrationTools(tools)
-  return tools
+  return scope.turnScope ? bindToolsToAgentAccess(tools, {
+    clearance: scope.turnScope.access.clearance,
+    compartments: scope.turnScope.effectiveCompartments,
+    mutationCompartments: scope.turnScope.access.mutationCompartments,
+    projectIds: scope.turnScope.effectiveProjectIds,
+    visibilityAssistantIds: scope.turnScope.access.visibilityAssistantIds,
+  }) : tools
 }

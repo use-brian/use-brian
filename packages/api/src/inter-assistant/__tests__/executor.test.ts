@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { z } from 'zod'
 
 const mockQueryLoop = vi.fn()
 const mockRunPreflight = vi.fn()
@@ -40,6 +41,8 @@ vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
   addSessionMessage: vi.fn().mockResolvedValue({ id: 'msg-1' }),
   getSessionMessages: vi.fn().mockResolvedValue([]),
+  findSessionById: vi.fn().mockResolvedValue(null),
+  findSessionByChannel: vi.fn().mockResolvedValue(null),
   toStampedMessages: vi.fn((m: unknown) => m),
   // Delivery-conversation lookup for the session-state bridge. Empty by
   // default so every consult that carries a deliverTarget stays block-free
@@ -51,15 +54,16 @@ vi.mock('../../billing-party.js', () => ({
 }))
 vi.mock('../../db/workspace-store.js', () => ({
   getConnectorUserId: vi.fn().mockResolvedValue('owner-1'),
+  getWorkspaceRoleSystem: vi.fn().mockResolvedValue('member'),
   // injectMcpTools gates the owner-personal base load on this; `true`
   // (solo workspace) preserves the pre-gate load behavior these tests expect.
   isSoloWorkspaceSystem: vi.fn().mockResolvedValue(true),
   // Read-ceiling resolver for the brain retrieval actor. Returned shape mirrors
   // the real `min(member, assistant)` ceiling; the callee threads it onto the
   // query-loop ToolContext.
-  resolveReadCeilingsSystem: vi
+  resolveOperationCeilingsSystem: vi
     .fn()
-    .mockResolvedValue({ clearance: 'confidential', compartments: null }),
+    .mockResolvedValue({ clearance: 'confidential', compartments: null, mutationCompartments: null }),
 }))
 vi.mock('../../mcp/inject.js', () => ({
   injectMcpTools: vi.fn().mockResolvedValue({
@@ -80,12 +84,15 @@ vi.mock('../../doc/inject.js', () => ({
   injectDocTools: vi.fn().mockResolvedValue(undefined),
 }))
 
+import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createCalleeExecutor } from '../executor.js'
+import * as callerEvidence from '../../context-scope/caller-evidence.js'
 // Real (unmocked) core factories — the '@use-brian/core' mock above spreads the
 // actual module, so everything but queryLoop/runPreflight resolves for real.
 // Used by the goal-path browser-surface describes at the bottom of this file.
 import {
   createComputerTools,
+  buildTool,
   createSkillRunnerTools,
   createBuFallbackTool,
   createLocalBrowserProvider,
@@ -114,7 +121,7 @@ import {
   listSessionsByChannelForWorkspaceSystem,
 } from '../../db/sessions.js'
 import { billingPartyForAssistant } from '../../billing-party.js'
-import { resolveReadCeilingsSystem } from '../../db/workspace-store.js'
+import { resolveOperationCeilingsSystem, getWorkspaceRoleSystem } from '../../db/workspace-store.js'
 import { runProactiveCompaction } from '../../routes/proactive-compaction.js'
 import { injectDocTools } from '../../doc/inject.js'
 import { injectMcpTools } from '../../mcp/inject.js'
@@ -133,7 +140,7 @@ const mockFindUser = vi.mocked(findUserById)
 const mockFindOrCreateUser = vi.mocked(findOrCreateUser)
 const mockFindUserByEmail = vi.mocked(findUserByEmail)
 const mockResolveAssistantAccess = vi.mocked(resolveAssistantAccess)
-const mockResolveReadCeilings = vi.mocked(resolveReadCeilingsSystem)
+const mockResolveReadCeilings = vi.mocked(resolveOperationCeilingsSystem)
 const mockSession = vi.mocked(findOrCreateSession)
 const mockAddMessage = vi.mocked(addSessionMessage)
 const mockListConversationSessions = vi.mocked(listSessionsByChannelForWorkspaceSystem)
@@ -185,6 +192,7 @@ function executorWithMcp() {
 }
 
 const baseParams = {
+  callerUserId:'owner-1',
   callerAssistantId: 'caller-1',
   calleeAssistantId: 'callee-1',
   mode: null,
@@ -214,6 +222,7 @@ function yieldsText(text = 'ok') {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(getWorkspaceRoleSystem).mockResolvedValue('member')
   mockFindAssistant.mockImplementation(async (id: string) =>
     (id === 'callee-1' ? calleeAssistant : id === 'caller-1' ? callerAssistant : null) as never,
   )
@@ -237,7 +246,8 @@ beforeEach(() => {
   } as never)
   mockResolveReadCeilings.mockImplementation(async (_userId, _workspaceId, clearance, compartments) => ({
     clearance,
-    compartments,
+    compartments: compartments === undefined ? [] : compartments,
+    mutationCompartments: compartments === undefined ? [] : compartments,
   }))
   mockBilling.mockResolvedValue('owner-1')
   mockSession.mockResolvedValue({ id: 'sess-1' } as never)
@@ -245,6 +255,204 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
+  it('refuses an incompatible delivery audience before session creation or model spend', async () => {
+    const workspaceCallee = {
+      ...calleeAssistant,
+      workspaceId: 'workspace-1',
+      kind: 'primary',
+      compartments: [],
+      defaultCompartments: [],
+    }
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : { ...callerAssistant, workspaceId: 'workspace-1' }) as never,
+    )
+    const authorizeDeliveryAudience = vi.fn(async () => ({
+      allowed: false as const,
+      reason: 'delivery_audience_unverified' as const,
+    }))
+    const run = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      authorizeDeliveryAudience,
+    })
+
+    await expect(run({
+      ...baseParams,
+      deliverTarget: { channelType: 'slack', channelId: 'C-FICTIONAL' },
+    })).rejects.toMatchObject({ reason: 'delivery_audience_unverified', retrySafe: false })
+    expect(mockSession).not.toHaveBeenCalled()
+    expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+
+  it('carries validated caller sources into the receiver write accumulator and returned evidence',async()=>{
+    const primary={...calleeAssistant,workspaceId:'workspace-1',kind:'primary',clearance:'internal',compartments:['product']}
+    mockFindAssistant.mockImplementation(async id=>({...primary,id}) as never)
+    const evidence={sensitivity:'internal' as const,compartments:['product'],projectIds:[],sources:[{
+      workspaceId:'workspace-1',userId:'owner-1',assistantId:null,sensitivity:'internal' as const,
+      compartments:['product'],projectIds:[],resourceKind:'memory',resourceId:'source-1',version:'1',
+    }]}
+    const validate=vi.spyOn(callerEvidence,'validateCallerScopeEvidence').mockImplementation(async value=>structuredClone(value))
+    const returned=vi.fn()
+    try {
+      yieldsText('Scoped result')
+      await expect(executor()({...baseParams,callerAccessCeiling:{workspaceId:'workspace-1',userId:'owner-1',clearance:'internal',compartments:['product'],mutationCompartments:['product'],projectIds:[],visibilityAssistantIds:null},callerScopeEvidence:evidence,onScopeEvidence:returned})).resolves.toBe('Scoped result')
+      expect(mockQueryLoop.mock.calls.at(-1)?.[0].context.scopeAccumulator.evidence).toMatchObject(evidence)
+      expect(returned).toHaveBeenCalledWith(expect.objectContaining({sources:expect.arrayContaining(evidence.sources)}))
+      expect(validate).toHaveBeenCalledWith(evidence,expect.objectContaining({userId:'owner-1',compartments:['product']}))
+      expect(validate.mock.calls.length).toBeGreaterThan(1)
+    } finally {validate.mockRestore()}
+  })
+  it('refuses evidence without a verified caller ceiling before any session or model work',async()=>{
+    await expect(executor()({...baseParams,callerScopeEvidence:{compartments:['product']}})).rejects.toMatchObject({reason:'caller_evidence_unavailable'})
+    expect(mockSession).not.toHaveBeenCalled();expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+  it('withholds the consult result when its inherited source changes during generation',async()=>{
+    const primary={...calleeAssistant,workspaceId:'workspace-1',kind:'primary',clearance:'internal',compartments:['product']}
+    mockFindAssistant.mockImplementation(async id=>({...primary,id}) as never)
+    let changed=false
+    const validate=vi.spyOn(callerEvidence,'validateCallerScopeEvidence').mockImplementation(async value=>{
+      if(changed)throw Object.assign(new Error('Private source changed'),{reason:'caller_evidence_unavailable'})
+      return structuredClone(value)
+    })
+    const returned=vi.fn()
+    try {
+      mockQueryLoop.mockImplementationOnce(async function*(){
+        changed=true
+        yield {type:'assistant_turn',response:{content:[{type:'text',text:'Stale source result'}]},toolResults:[]}
+        yield {type:'turn_complete',response:{content:[{type:'text',text:'Stale source result'}]}}
+      })
+      await expect(executor()({...baseParams,callerAccessCeiling:{workspaceId:'workspace-1',userId:'owner-1',clearance:'internal',compartments:['product'],mutationCompartments:['product'],projectIds:[],visibilityAssistantIds:null},callerScopeEvidence:{compartments:['product']},onScopeEvidence:returned})).rejects.toMatchObject({reason:'authority_changed'})
+      expect(returned).not.toHaveBeenCalled()
+    }finally{validate.mockRestore()}
+  })
+  it('refuses a narrower receiver before using the caller question',async()=>{
+    const primary={...calleeAssistant,workspaceId:'workspace-1',kind:'primary',clearance:'internal',compartments:['product']}
+    mockFindAssistant.mockImplementation(async id=>({...primary,id,compartments:id==='callee-1'?[]:['product']}) as never)
+    await expect(executor()({...baseParams,callerAccessCeiling:{workspaceId:'workspace-1',userId:'owner-1',clearance:'internal',compartments:['product'],mutationCompartments:['product'],projectIds:[],visibilityAssistantIds:null},callerScopeEvidence:{sensitivity:'internal',compartments:['product']}})).rejects.toMatchObject({reason:'caller_evidence_unavailable'})
+    expect(mockSession).not.toHaveBeenCalled();expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+  it('keeps both standard assistants restricted to shared visibility without a false lease failure', async () => {
+    const scopedMemory = memoryStore()
+    const standard = { ...calleeAssistant, workspaceId: 'workspace-1', kind: 'standard', clearance: 'internal', compartments: ['product'] }
+    mockFindAssistant.mockImplementation(async id => ({ ...standard, id }) as never)
+    const run = createCalleeExecutor({ provider: {} as never, tools: new Map(), memoryStore: scopedMemory as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never })
+    yieldsText('shared response')
+    await expect(run({ ...baseParams, callerAccessCeiling: {
+      workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'internal',
+      compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['caller-1'],
+    } })).resolves.toBe('shared response')
+    expect(scopedMemory.getIndex).toHaveBeenCalledWith(expect.objectContaining({ visibilityAssistantIds: [] }))
+  })
+  it('withholds a tool result after revocation and preserves the uncertain-operation warning', async () => {
+    const primary = { ...calleeAssistant, workspaceId: 'workspace-1', kind: 'primary', clearance: 'confidential', compartments: null }
+    const caller = { ...primary, id: 'caller-1', kind: 'standard', clearance: 'internal', compartments: ['product'] }
+    mockFindAssistant.mockImplementation(async id => (id === 'caller-1' ? caller : primary) as never)
+    const perform = vi.fn(async () => { caller.compartments = []; return { data: 'Restricted tool result' } })
+    const tool = buildTool({ name: 'authorityProbe', description: 'Fixture operation', inputSchema: z.object({}), execute: perform })
+    const run = createCalleeExecutor({ provider: {} as never, tools: new Map([[tool.name, tool]]), memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never })
+    mockQueryLoop.mockImplementation(async function* (options) {
+      await expect(options.tools.get(tool.name).execute({}, options.context)).rejects.toMatchObject({
+        reason: 'authority_changed', operationMayHaveExecuted: true,
+      })
+      // The real loop may turn a tool exception into an event. Its original
+      // uncertainty must survive that conversion into the executor's refusal.
+      yield { type: 'text_delta', text: 'Do not return this' }
+    })
+    await expect(run({ ...baseParams, callerAccessCeiling: {
+      workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'internal',
+      compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['caller-1'],
+    } })).rejects.toMatchObject({ reason: 'authority_changed', operationMayHaveExecuted: true, retrySafe: false })
+    expect(perform).toHaveBeenCalledTimes(1)
+  })
+  it.each(['caller', 'callee', 'membership'] as const)('withholds the next streamed event after %s authority is revoked', async revoked => {
+    const primary = { ...calleeAssistant, workspaceId: 'workspace-1', kind: 'primary', clearance: 'confidential', compartments: null as string[] | null }
+    const caller = { ...primary, id: 'caller-1', kind: 'standard', clearance: 'internal', compartments: ['product'] }
+    mockFindAssistant.mockImplementation(async id => (id === 'caller-1' ? caller : primary) as never)
+    const publishSessionEvent = vi.fn()
+    const onActivity = vi.fn()
+    const run = createCalleeExecutor({ provider: {} as never, tools: new Map(), memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never, publishSessionEvent })
+    mockQueryLoop.mockImplementation(async function* () {
+      if (revoked === 'caller') caller.compartments = []
+      else if (revoked === 'callee') primary.compartments = []
+      else vi.mocked(getWorkspaceRoleSystem).mockResolvedValue(null)
+      yield { type: 'text_delta', text: 'Restricted response after revocation' }
+      throw new Error('The model stream must be closed before resuming')
+    })
+    await expect(run({ ...baseParams, onActivity, callerAccessCeiling: {
+      workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'internal',
+      compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['caller-1'],
+    } })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(onActivity).not.toHaveBeenCalled()
+    expect(JSON.stringify(publishSessionEvent.mock.calls)).not.toContain('Restricted response')
+    expect(mockAddMessage.mock.calls.some(([message]) => message.role === 'assistant')).toBe(false)
+  })
+  it('restores a serialized caller ceiling without an ambient execution context', async () => {
+    const scopedMemory = memoryStore()
+    const primary = { ...calleeAssistant, workspaceId: 'workspace-1', kind: 'primary', clearance: 'confidential', compartments: null }
+    const caller = { ...primary, id: 'caller-1', kind: 'standard', clearance: 'internal', compartments: ['product'] }
+    mockFindAssistant.mockImplementation(async id => (id === 'caller-1' ? caller : primary) as never)
+    const run = createCalleeExecutor({ provider: {} as never, tools: new Map(), memoryStore: scopedMemory as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never })
+    yieldsText('bounded')
+    await expect(run({ ...baseParams, callerAccessCeiling: {
+      workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'internal',
+      compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['caller-1'],
+    } })).resolves.toBe('bounded')
+    expect(scopedMemory.getIndex).toHaveBeenCalledWith(expect.objectContaining({
+      clearance: 'internal', compartments: ['product'], visibilityAssistantIds: ['caller-1'],
+    }))
+  })
+  it('refuses a serialized request after caller access shrinks, before callee reads', async () => {
+    mockFindAssistant.mockResolvedValue({ ...calleeAssistant, id: 'caller-1', workspaceId: 'workspace-1',
+      kind: 'standard', compartments: [], clearance: 'internal' } as never)
+    await expect(executor()({ ...baseParams, callerAccessCeiling: {
+      workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'internal',
+      compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['caller-1'],
+    } })).rejects.toMatchObject({ reason: 'caller_authority_changed' })
+    expect(mockSession).not.toHaveBeenCalled()
+    expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+  it('refuses a snapshot attributed to a different actor', async () => {
+    await expect(executor()({ ...baseParams, callerAccessCeiling: {
+      workspaceId: 'workspace-1', userId: 'someone-else', clearance: 'internal',
+      compartments: [], mutationCompartments: [], projectIds: null, visibilityAssistantIds: null,
+    } })).rejects.toMatchObject({ reason: 'caller_authority_mismatch' })
+    expect(mockFindAssistant).not.toHaveBeenCalled()
+    expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+  it('refuses a removed member even when the saved ceiling was already public and empty', async () => {
+    mockFindAssistant.mockResolvedValue({ ...calleeAssistant, id: 'caller-1', workspaceId: 'workspace-1',
+      kind: 'standard', compartments: [], clearance: 'public' } as never)
+    vi.mocked(getWorkspaceRoleSystem).mockResolvedValue(null)
+    await expect(executor()({ ...baseParams, callerAccessCeiling: {
+      workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'public',
+      compartments: [], mutationCompartments: [], projectIds: null, visibilityAssistantIds: ['caller-1'],
+    } })).rejects.toMatchObject({ reason: 'caller_authority_changed' })
+    expect(mockResolveReadCeilings).not.toHaveBeenCalled()
+    expect(mockSession).not.toHaveBeenCalled()
+  })
+  it('refuses an unbound caller before creating a session or invoking the model',async()=>{
+    await expect(executor()({...baseParams,callerUserId:undefined})).rejects.toMatchObject({reason:'caller_authority_missing'})
+    expect(mockSession).not.toHaveBeenCalled();expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+  it('keeps the caller actor and inherited ceiling when consulting a more privileged primary',async()=>{
+    const scopedMemory=memoryStore()
+    const primary={...calleeAssistant,workspaceId:'workspace-1',kind:'primary',clearance:'confidential',compartments:null}
+    mockFindAssistant.mockImplementation(async(id:string)=>(id==='callee-1'?primary:callerAssistant) as never)
+    const callee=createCalleeExecutor({provider:{} as never,tools:new Map(),memoryStore:scopedMemory as never,capabilityStore:{listActive:vi.fn().mockResolvedValue([])} as never,connectorStore:{} as never,mcpSettingsStore:{} as never})
+    yieldsText('Bounded response')
+    await runWithAgentAccess({workspaceId:'workspace-1',userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']},()=>callee({...baseParams,callerUserId:'actor-1'}))
+    expect(mockResolveReadCeilings).toHaveBeenCalledWith('actor-1','workspace-1','confidential',null)
+    expect(scopedMemory.getIndex).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']}))
+    expect(mockInjectMcp).toHaveBeenCalledWith(expect.objectContaining({contextScope:expect.objectContaining({effectiveCompartments:['product'],effectiveProjectIds:[]})}))
+    expect(mockQueryLoop.mock.calls.at(-1)?.[0].context).toMatchObject({userId:'actor-1',visibilityAssistantIds:['caller-1'],clearance:'internal',compartments:['product'],mutationCompartments:[]})
+    expect(mockSession).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1'}))
+  })
   it('uses the 15-turn standard assistant-call budget when depth is absent', async () => {
     yieldsText('done')
 
@@ -274,7 +482,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     mockFindAssistant.mockImplementation(async (id: string) =>
       (id === 'callee-1' ? clientAssistant : id === 'caller-1' ? callerAssistant : null) as never,
     )
-    mockResolveReadCeilings.mockResolvedValue({ clearance: 'public', compartments: [] })
+    mockResolveReadCeilings.mockResolvedValue({ clearance: 'public', compartments: [], mutationCompartments: [] })
     yieldsText('Internal draft')
 
     const readClientInfo = {

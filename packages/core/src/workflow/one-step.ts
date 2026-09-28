@@ -17,6 +17,7 @@
 import { randomUUID } from 'node:crypto'
 import type { WorkflowDefinition, WorkflowModelAlias, WorkflowStore, WorkflowTrigger } from './types.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
+import type { AuthoringAuthority } from '../security/access-ceiling.js'
 
 /**
  * Default model tier for a scheduled-job reminder's agentic turn. Scheduled
@@ -148,6 +149,7 @@ export async function buildOneStepReminderWorkflow(
     trigger?: WorkflowTrigger
     contextGroupId?: string | null
     contextProjectId?: string | null
+    authoringAuthority: AuthoringAuthority
   },
 ): Promise<string> {
   const workflow = await store.create({
@@ -165,6 +167,7 @@ export async function buildOneStepReminderWorkflow(
     trigger: params.trigger ?? { kind: 'manual' },
     contextGroupId: params.contextGroupId ?? null,
     contextProjectId: params.contextProjectId ?? null,
+    authoringAuthority: params.authoringAuthority,
   })
   return workflow.id
 }

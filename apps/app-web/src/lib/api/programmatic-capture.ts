@@ -24,6 +24,8 @@ export type CaptureRule = {
   episodeSensitivity: "public" | "internal" | "confidential" | null;
   compartments: string[];
   projectIds: string[];
+  scopeBindingOrigin?: "legacy" | "explicit" | "reviewed" | "held";
+  scopeBindingMode: "inherit" | "explicit";
 };
 
 export type CaptureProfile = {

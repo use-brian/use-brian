@@ -15,6 +15,8 @@ const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 for (const file of [
   "preload.cjs",
   "pet-preload.cjs",
+  "embedded-browser-preload.cjs",
+  "embedded-browser.html",
   "signin.html",
   "offline.html",
   "brian-pet.html",

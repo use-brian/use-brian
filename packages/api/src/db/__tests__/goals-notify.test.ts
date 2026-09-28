@@ -32,6 +32,19 @@ import {
 
 const mockQuery = vi.mocked(query)
 const mockNotify = vi.mocked(notifyWorkspaceChange)
+const AUTHORING_AUTHORITY = {
+  version: 1 as const,
+  assistantId: 'assistant-1',
+  ceiling: {
+    workspaceId: 'ws-1',
+    userId: 'user-1',
+    clearance: 'confidential' as const,
+    compartments: null,
+    mutationCompartments: null,
+    projectIds: null,
+    visibilityAssistantIds: null,
+  },
+}
 
 const ROW = {
   id: 'goal-1',
@@ -51,6 +64,7 @@ const ROW = {
   originSessionId: null,
   contextGroupId: null,
   contextProjectId: null,
+  authoringAuthority: AUTHORING_AUTHORITY,
   confirmedAt: null,
   completionClaim: null,
   brief: null,
@@ -64,16 +78,26 @@ beforeEach(() => {
 })
 
 describe('[COMP:goals/store] goal primitive store-seam emits', () => {
+  it('keeps legacy rows inert until a current authoring principal is captured', async () => {
+    await expect(createGoal({
+      workspaceId: 'ws-1', outcome: 'Legacy goal', doneWhen: { type: 'hostTaskDone' },
+    } as never)).rejects.toMatchObject({ reason: 'goal_authority_unavailable' })
+    await expect(updateGoalSystem('goal-1', { confirm: true })).rejects.toMatchObject({
+      reason: 'goal_authority_unavailable',
+    })
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
   it('createGoal emits create with the new row id and its workspace', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [ROW], rowCount: 1 } as never)
-    await createGoal({ workspaceId: 'ws-1', outcome: 'Ship the thing', doneWhen: { type: 'hostTaskDone' } } as never)
+    await createGoal({ workspaceId: 'ws-1', outcome: 'Ship the thing', doneWhen: { type: 'hostTaskDone' }, authoringAuthority: AUTHORING_AUTHORITY } as never)
     expect(mockNotify).toHaveBeenCalledTimes(1)
     expect(mockNotify).toHaveBeenCalledWith('ws-1', 'goal', 'create', 'goal-1')
   })
 
   it('updateGoalSystem (amend / confirm) emits update', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ ...ROW, confirmedAt: new Date() }], rowCount: 1 } as never)
-    await updateGoalSystem('goal-1', { confirm: true })
+    await updateGoalSystem('goal-1', { confirm: true, authoringAuthority: AUTHORING_AUTHORITY })
     expect(mockNotify).toHaveBeenCalledWith('ws-1', 'goal', 'update', 'goal-1')
   })
 

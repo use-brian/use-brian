@@ -16,6 +16,7 @@ vi.mock('../client.js', () => ({
   query: vi.fn(),
   queryWithRLS: vi.fn(),
   getPool: vi.fn(),
+  applyRLSGucs: vi.fn(),
 }))
 
 import {
@@ -25,12 +26,25 @@ import {
   findEventTriggeredWorkflowsSystem,
   getWorkflowCreatorSystem,
 } from '../workflow-store.js'
-import { query, queryWithRLS, getPool } from '../client.js'
+import { query, queryWithRLS, getPool, applyRLSGucs } from '../client.js'
 
 const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)
 const wf = createDbWorkflowStore()
 const runs = createDbWorkflowRunStore()
+const AUTHORING_AUTHORITY = {
+  version: 1 as const,
+  assistantId: 'a-1',
+  ceiling: {
+    workspaceId: 'ws-1',
+    userId: 'u-1',
+    clearance: 'confidential' as const,
+    compartments: null,
+    mutationCompartments: null,
+    projectIds: null,
+    visibilityAssistantIds: null,
+  },
+}
 
 function workflowRow(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -44,6 +58,7 @@ function workflowRow(over: Record<string, unknown> = {}): Record<string, unknown
     trigger: { kind: 'manual' },
     webhookSlug: null,
     webhookSecret: null,
+    authoringAuthority: AUTHORING_AUTHORITY,
     createdAt: new Date('2026-05-16T00:00:00Z'),
     updatedAt: new Date('2026-05-16T00:00:00Z'),
     ...over,
@@ -91,6 +106,18 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
+  it('fails closed when a durable authoring principal is missing', async () => {
+    await expect(wf.create({
+      userId: 'u-1',
+      workspaceId: 'ws-1',
+      name: 'Legacy workflow',
+      definition: { steps: [] },
+    } as unknown as Parameters<typeof wf.create>[0])).rejects.toMatchObject({
+      reason: 'workflow_authority_unavailable',
+    })
+    expect(mockRls).not.toHaveBeenCalled()
+  })
+
   it('create inserts with the definition JSON-encoded', async () => {
     mockRls.mockResolvedValueOnce({ rows: [workflowRow()], rowCount: 1 } as never)
     const out = await wf.create({
@@ -98,12 +125,14 @@ describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
       workspaceId: 'ws-1',
       name: 'My Workflow',
       definition: { steps: [] },
+      authoringAuthority: AUTHORING_AUTHORITY,
     } as unknown as Parameters<typeof wf.create>[0])
     expect(out.id).toBe('wf-1')
     const [userId, sql, params] = mockRls.mock.calls[0]
     expect(userId).toBe('u-1')
     expect(sql).toContain('INSERT INTO workflows')
     expect(params?.[4]).toBe(JSON.stringify({ steps: [] }))
+    expect(params?.[14]).toBe(JSON.stringify(AUTHORING_AUTHORITY))
   })
 
   it('fires the command-roster hook after a workflow write', async () => {
@@ -115,6 +144,7 @@ describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
       workspaceId: 'ws-1',
       name: 'My Workflow',
       definition: { steps: [] },
+      authoringAuthority: AUTHORING_AUTHORITY,
     } as unknown as Parameters<typeof hooked.create>[0])
     expect(onChanged).toHaveBeenCalledWith('u-1', 'ws-1')
   })
@@ -418,12 +448,12 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     expect(values.some((v) => typeof v === 'string' && v.includes('"summary":"done"'))).toBe(true)
   })
 
-  function outcomeClient(outcome:Record<string,unknown>|null,record:Record<string,unknown>|null=null) {
+  function outcomeClient(outcome:Record<string,unknown>|null,record:Record<string,unknown>|null=null,actor:string|null='u-1') {
     const release=vi.fn(),commands:string[]=[]
     const clientQuery=vi.fn(async(sql:string)=>{
       commands.push(sql)
       if(sql.includes('AS acquired'))return {rows:[{acquired:true}],rowCount:1}
-      if(sql.startsWith('SELECT workspace_id'))return {rows:[{workspace_id:'workspace-1'}],rowCount:1}
+      if(sql.startsWith('SELECT r.workspace_id'))return {rows:[{workspace_id:'workspace-1',actor}],rowCount:1}
       if(sql.startsWith('SELECT id FROM workflow_runs'))return {rows:[{id:'run-current'}],rowCount:1}
       if(sql.includes('SELECT id,outcome,privacy_erased'))return {rows:outcome?[{id:'run-prior',outcome,privacy_erased:false}]:[],rowCount:outcome?1:0}
       if(sql.includes('SELECT fields,status'))return {rows:record?[record]:[],rowCount:record?1:0}
@@ -438,6 +468,13 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     expect(client.commands.some(sql=>sql.includes('INSERT INTO workflow_run_copy_sources'))).toBe(true)
     expect(client.commands.at(-1)).toBe('COMMIT');expect(client.release).toHaveBeenCalledOnce()
     expect(mockRls).not.toHaveBeenCalled()
+    expect(applyRLSGucs).toHaveBeenCalledWith(expect.objectContaining({query:client.clientQuery}),'u-1')
+  })
+  it('withholds a prior outcome when the destination has no recorded actor',async()=>{
+    const client=outcomeClient({status:'completed',summary:'private copy'},null,null)
+    await expect(runs.getLatestOutcomeForWorkflowSystem('wf-1','run-current')).rejects.toThrow('Workflow outcome copy could not be recorded')
+    expect(client.commands.some(sql=>sql.includes('INSERT INTO workflow_run_copy_sources'))).toBe(false)
+    expect(client.commands.at(-1)).toBe('ROLLBACK')
   })
   it('enriches the copied result from a workspace-bound blueprint output',async()=>{
     const client=outcomeClient({status:'completed',summary:'prior'},{fields:{budget:12},status:'complete'})

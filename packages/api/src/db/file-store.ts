@@ -1,5 +1,5 @@
 import type { AccessContext, FileStore } from '@use-brian/core'
-import { query } from './client.js'
+import { query, queryWithRLS } from './client.js'
 import { buildAccessPredicate } from './access-predicate.js'
 
 const SELECT = `id, session_id as "sessionId", file_name as "fileName", mime_type as "mimeType", content, summary, size_bytes as "sizeBytes", artifact_file_id as "artifactFileId", artifact_segment_count as "artifactSegmentCount", sensitivity, compartments, project_ids as "projectIds"`
@@ -30,12 +30,9 @@ export function createDbFileStore(): FileStore {
       return result.rows[0]
     },
 
-    // 2026-06-02 audit #3: with `ctx`, gate the read through the universal
-    // access predicate (workspace + visibility double + sensitivity ceiling),
-    // exactly like memories/tasks/workspace_files — a file from another
-    // workspace or above the viewer's clearance is never returned. Without
-    // `ctx` it's the unscoped legacy read, reserved for the `/preview` route
-    // until that moves to signed capability URLs (#3 part 2).
+    // Caller-scoped reads use the universal access predicate. The unscoped
+    // overload is trusted-internal only; authenticated previews use the
+    // app-role current-source projection below.
     async get(id, ctx?: AccessContext) {
       if (ctx) {
         const ap = buildAccessPredicate(ctx, { startIdx: 1 })
@@ -109,4 +106,30 @@ export function createDbFileStore(): FileStore {
       )
     },
   }
+}
+
+
+// [COMP:api/file-cache-preview]
+// Preview bytes are read together, including original structured-document bytes.
+// The row's MVCC revision is rechecked after conversion before any delivery.
+export type FileCachePreviewProjection = {
+  file: Row
+  originalContent: string | null
+  revision: string
+  validForMs: number
+}
+
+export async function getFileCachePreviewProjection(ctx: AccessContext, id: string): Promise<FileCachePreviewProjection | null> {
+  const ap = buildAccessPredicate(ctx)
+  const result = await queryWithRLS<Row & {originalContent: string | null; revision: string; validForMs: number}>(ctx.userId,
+    `SELECT ${SELECT}, original_content AS "originalContent", xmin::text AS revision,
+       least(department_media_valid_for_ms(workspace_id),
+         greatest(0,floor(extract(epoch FROM (expires_at-clock_timestamp()))*1000)))::integer AS "validForMs"
+     FROM file_cache WHERE ${ap.sql} AND id=$${ap.nextIdx}
+       AND workspace_id=$${ap.nextIdx+1} AND expires_at>now() AND NOT scope_held`,
+    [...ap.params,id,ctx.workspaceId])
+  const row = result.rows[0]
+  if (!row) return null
+  const {originalContent,revision,validForMs,...file} = row
+  return {file,originalContent,revision,validForMs}
 }

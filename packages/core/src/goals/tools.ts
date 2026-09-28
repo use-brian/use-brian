@@ -14,6 +14,7 @@ import { isoDateOrDateTime } from '../entities/index.js'
 import { buildTool, type Tool } from '../tools/types.js'
 import { doneWhenSchema } from './done-when.js'
 import { GOAL_HOST_TYPES, GOAL_STATUSES, type GoalHostType, type GoalStatus, type GoalStore } from './types.js'
+import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
 
 export type GoalToolEvent =
   | { type: 'goal_created'; goalId: string }
@@ -93,6 +94,7 @@ export function createGoalTools(store: GoalStore, opts?: GoalToolOptions): { set
         originSessionId: UUID_RE.test(context.sessionId) ? context.sessionId : null,
         contextGroupId: context.activeGroupId ?? null,
         contextProjectId: context.activeProjectId ?? null,
+        authoringAuthority: pinToolAuthoringAuthority(context),
       })
       opts?.onEvent?.({ type: 'goal_created', goalId: goal.id }, eventCtx(context))
       // The next-step nudge is load-bearing: a goal without a workflow

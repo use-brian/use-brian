@@ -1,5 +1,5 @@
 /**
- * Doc-block media routes — durable storage + signed reads for images
+ * Doc-block media routes — durable storage + authenticated byte reads for images
  * and files embedded in doc pages.
  *
  * Unlike the transient chat-attachment path (`/api/files` → `file_cache`,
@@ -25,15 +25,12 @@ import { Router } from 'express'
 import { randomUUID } from 'node:crypto'
 import multer from 'multer'
 import type {
-  AccessContext,
   FilesApi,
   FilesContext,
-  WorkspaceFilesStore,
 } from '@use-brian/core'
-import type { GcsFilesClient } from '../files/gcs-client.js'
-import type { FilesClientResolver } from '../files/files-api.js'
-import { storageKeyForWorkspaceFile } from '../files/local-directory-import.js'
 import { isAllowedMime } from './files.js'
+import type { getWorkspaceFileReadProjection } from '../db/workspace-files.js'
+import { workspaceFileReadRevision } from '../files/files-api.js'
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
 const MAX_FILES_PER_REQUEST = 10
@@ -60,11 +57,8 @@ export type DocFilesMembership = (
 
 export type DocFilesDeps = {
   filesApi: FilesApi
-  store: WorkspaceFilesStore
-  gcs: GcsFilesClient
-  /** Routes reads to the backend recorded in each workspace_files row. */
-  resolver?: FilesClientResolver
   membership: DocFilesMembership
+  readProjection: typeof getWorkspaceFileReadProjection
 }
 
 /**
@@ -82,29 +76,8 @@ function sanitizeFilename(name: string): string {
   return cleaned.length > 0 ? cleaned : 'file'
 }
 
-/**
- * Build the per-viewer `AccessContext` used for RLS-scoped reads. Mirrors
- * the `accessCtx` helper inside `files-api.ts`: a non-assistant caller
- * echoes its `userId` into `assistantId` (workspace-shared rows have
- * `assistant_id IS NULL` and still match), and is treated as a `standard`
- * assistant kind.
- */
-function buildAccessContext(
-  workspaceId: string,
-  userId: string,
-  clearance: 'public' | 'internal' | 'confidential',
-): AccessContext {
-  return {
-    workspaceId,
-    userId,
-    assistantId: userId,
-    assistantKind: 'standard',
-    clearance,
-  }
-}
-
 export function docFilesRoutes(deps: DocFilesDeps): Router {
-  const { filesApi, store, gcs, resolver, membership } = deps
+  const { filesApi, membership } = deps
   const router = Router({ mergeParams: true })
 
   // ── POST /:workspaceId/upload ───────────────────────────────────
@@ -192,18 +165,10 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
   })
 
   // ── GET /:workspaceId/:id ───────────────────────────────────────
-  // Resolve the row under workspace RLS, mint a short-lived signed object read
-  // URL, and 302-redirect to it. `?redirect=0` returns `{ url }` as JSON
-  // instead — for fetch()-based consumers (PageIcon, chat attachment
-  // downloads), which CANNOT follow the redirect: a CORS fetch redirected
-  // across origins (app → api → storage.googleapis.com) gets a tainted
-  // origin, the browser sends `Origin: null` on the storage leg, the bucket
-  // CORS config only matches the app origins, and the browser blocks the
-  // response. The client fetches the minted URL directly (single-hop CORS,
-  // real app origin) instead. Same auth, same RLS, same short-lived URL as
-  // the redirect — the Location header was always delivered to this caller
-  // anyway; the signed URL is still never logged.
+  // Every backend returns authenticated bytes through the canonical reader.
+  // A retained provider capability must not bypass later access revocation.
   router.get('/:workspaceId/:id', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
     const userId = req.userId
     if (!userId) {
       res.status(401).json({ error: 'Unauthorized' })
@@ -218,40 +183,28 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
     }
 
     try {
-      const accessCtx = buildAccessContext(workspaceId, userId, member.clearance)
-      const row = await store.getById(accessCtx, id)
-      if (!row) {
+      const result = await filesApi.readBytes({
+        workspaceId, userId, assistantId: null, clearance: member.clearance,
+      }, id)
+      if (!result.ok) {
         res.status(404).json({ error: 'File not found' })
         return
       }
-
-      const key = storageKeyForWorkspaceFile(row)
-      const blobClient = resolver ? await resolver.forUri(workspaceId, row.storageUri) : gcs
-      const url = await blobClient.signedReadUrl(key)
-      // Cloud backends return a signed HTTPS URL → redirect so the browser fetches
-      // the bytes straight from object storage (no API egress, CDN-friendly), and the
-      // signed URL never lands in a body/log. The local-disk dev client returns
-      // a `file://` URL a browser can't navigate to — stream the bytes through
-      // the API instead so `<img src>` works in local dev.
-      if (/^https?:\/\//i.test(url)) {
-        if (req.query.redirect === '0') {
-          res.json({ url })
-          return
-        }
-        res.redirect(302, url)
+      const revision=workspaceFileReadRevision(result.value.file)
+      const projectionStarted=performance.now()
+      const projection=await deps.readProjection({workspaceId,userId,assistantId:userId,assistantKind:'standard',clearance:member.clearance},id)
+      const validForMs=Math.floor((projection?.validForMs??0)-(performance.now()-projectionStarted))
+      if(!projection||!Number.isFinite(validForMs)||validForMs<=0||workspaceFileReadRevision(projection.file)!==revision){
+        res.status(404).json({error:'File not found'})
         return
       }
-      const blob = await blobClient.readBlob(key)
-      if (!blob) {
-        res.status(404).json({ error: 'File not found' })
-        return
-      }
-      res.setHeader('Content-Type', row.mime || blob.mime)
-      res.setHeader('Cache-Control', 'private, max-age=3600')
-      res.setHeader('Content-Length', String(blob.bytes.length))
-      res.send(blob.bytes)
+      res.setHeader('X-Brian-Media-Valid-For-Ms',String(Math.min(30_000,validForMs)))
+      res.append('Access-Control-Expose-Headers','X-Brian-Media-Valid-For-Ms')
+      res.setHeader('Content-Type', result.value.file.mime)
+      res.setHeader('Content-Length', String(result.value.bytes.length))
+      res.send(result.value.bytes)
     } catch (err) {
-      console.error('[doc-files] signed-read failed:', err)
+      console.error('[doc-files] byte-read failed:', err)
       res.status(500).json({ error: 'Failed to load file' })
     }
   })

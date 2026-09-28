@@ -33,7 +33,7 @@ export function createFeedGenerationService(port: FeedGenerationPort, loadContex
         const candidates = suggestions.flatMap(suggestion => suggestion.edits.flatMap(edit => edit.kind === 'replaceBlock' && edit.blockId === node.attrs.id && edit.segmentId === request.segmentId ? edit.replacement.flatMap(image => image.type === 'image' ? [{ fileId: image.attrs.fileId, current: canonicalFeedValue(edit.preimage) === canonicalFeedValue(node) }] : []) : []))
         baseImageFileId = candidates.find(candidate => candidate.current)?.fileId ?? candidates[0]?.fileId
       }
-      await assertFeedFiles(client, actor, scope, content.composition, baseImageFileId ? [baseImageFileId] : [])
+      await assertFeedFiles(client, actor, scope, content.composition, baseImageFileId ? [baseImageFileId] : [], content.linkedin)
       return { content, slot: node.attrs, workspaceId: scope.workspaceId, baseImageFileId }
     })
     const sourceImage = input.baseImageFileId ? await readImage(actor, input.baseImageFileId) : undefined
@@ -103,7 +103,7 @@ export function createFeedGenerationService(port: FeedGenerationPort, loadContex
     if (!run.result.parts[part]) {
       // Recheck permission and source references, but editing may continue. The
       // frozen original revision is still the source for a stale candidate.
-      await withFeedTransaction(actor, async (client, scope) => { await assertFeedFiles(client, actor, scope, context.content.composition, context.baseImage ? [context.baseImage.fileId] : []) })
+      await withFeedTransaction(actor, async (client, scope) => { await assertFeedFiles(client, actor, scope, context.content.composition, context.baseImage ? [context.baseImage.fileId] : [], context.content.linkedin) })
       const sourceImage = context.baseImage ? await readImage(actor, context.baseImage.fileId) : undefined
       if (context.baseImage && sourceImage?.hash !== context.baseImage.hash) throw new FeedCollaborationError(409, 'generation_sources_changed')
       const currentReview = await loadContext(actor, { source: { revision: run.revision, content: context.content }, month: context.review.month, historyCursor: context.review.historyCursor })
@@ -126,7 +126,7 @@ export function createFeedGenerationService(port: FeedGenerationPort, loadContex
       await saveFeedPart(run, part, { ...response, applicationId: applicationId ?? undefined }, response.usage)
     }
     await settleGeneration(port, run, context)
-    await withFeedTransaction(actor, async (client, scope) => { await assertFeedFiles(client, actor, scope, context.content.composition, context.baseImage ? [context.baseImage.fileId] : []) })
+    await withFeedTransaction(actor, async (client, scope) => { await assertFeedFiles(client, actor, scope, context.content.composition, context.baseImage ? [context.baseImage.fileId] : [], context.content.linkedin) })
     const currentSources = await loadContext(actor, { source: { revision: run.revision, content: context.content }, month: context.review.month })
     const allowed = [...currentSources.dimensions.post_goal.sources, ...currentSources.dimensions.memory.sources]
     if (context.sources.some(source => /^(goal|memory|playbook|brand):/.test(source.id) && !allowed.some(item => item.id === source.id && item.hash === source.hash))) throw new FeedCollaborationError(409, 'generation_sources_changed')

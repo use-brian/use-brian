@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { bindScopeSource } from '../../security/source-evidence.js'
 import {
   runSkillUmbrellaPass,
   clusterByEmbedding,
@@ -26,7 +27,7 @@ import {
 // ── Fixtures ─────────────────────────────────────────────────────
 
 function makeSkill(over: Partial<UmbrellaSkill>): UmbrellaSkill {
-  return {
+  const skill: UmbrellaSkill = {
     rowId: 'row-1',
     id: 'slug-1',
     workspaceId: 'ws-1',
@@ -48,6 +49,17 @@ function makeSkill(over: Partial<UmbrellaSkill>): UmbrellaSkill {
     validFrom: new Date('2026-01-01'),
     ...over,
   }
+  return bindScopeSource(skill, {
+    workspaceId: skill.workspaceId,
+    userId: 'user-1',
+    assistantId: 'assistant-1',
+    sensitivity: 'internal',
+    compartments: [],
+    projectIds: [],
+    resourceKind: 'workspace_skill_revision',
+    resourceId: skill.rowId,
+    version: '1',
+  })
 }
 
 function makeStore(overrides: Partial<SkillUmbrellaStore> = {}): SkillUmbrellaStore & {
@@ -205,6 +217,72 @@ describe('[COMP:consolidation/skill-umbrella] trigger gates', () => {
     // Skipped action persisted in digest so operators see it.
     expect(digest.appended.length).toBe(1)
     expect(digest.appended[0].actions[0].kind).toBe('skipped')
+  })
+})
+
+describe('[COMP:consolidation/skill-umbrella] departmental model boundaries', () => {
+  function department(skill: UmbrellaSkill, compartment: string): UmbrellaSkill {
+    return bindScopeSource(skill, {
+      workspaceId: skill.workspaceId,
+      userId: 'user-1',
+      assistantId: 'assistant-1',
+      sensitivity: 'internal',
+      compartments: [compartment],
+      projectIds: [],
+      resourceKind: 'workspace_skill_revision',
+      resourceId: skill.rowId,
+      version: '1',
+    })
+  }
+
+  it('does not combine small departments to reach the umbrella threshold', async () => {
+    const skills = [
+      ...Array.from({ length: 10 }, (_, i) => department(makeSkill({ rowId: `f-${i}` }), 'finance')),
+      ...Array.from({ length: 10 }, (_, i) => department(makeSkill({ rowId: `p-${i}` }), 'product')),
+    ]
+    const getEmbeddings = vi.fn(async () => [])
+    const result = await runSkillUmbrellaPass({
+      workspaceId: 'ws-1',
+      workspaceCreatedAt: WS_CREATED,
+      store: makeStore({ async listCuratorEligible() { return skills } }),
+      digestStore: makeDigest(),
+      getEmbeddings,
+      callModel: vi.fn(async () => '{"move":"REJECT","reason":"none"}'),
+      now: () => NOW,
+    })
+    expect(result.clustersProcessed).toBe(0)
+    expect(getEmbeddings).not.toHaveBeenCalled()
+  })
+
+  it('embeds and proposes exact departments in separate calls', async () => {
+    const skills = [
+      department(makeSkill({ rowId: 'f-1', description: 'Shared reporting procedure' }), 'finance'),
+      department(makeSkill({ rowId: 'f-2', description: 'Shared reporting procedure' }), 'finance'),
+      department(makeSkill({ rowId: 'p-1', description: 'Shared reporting procedure' }), 'product'),
+      department(makeSkill({ rowId: 'p-2', description: 'Shared reporting procedure' }), 'product'),
+    ]
+    const batches: string[][] = []
+    const prompts: string[] = []
+    await runSkillUmbrellaPass({
+      workspaceId: 'ws-1',
+      workspaceCreatedAt: WS_CREATED,
+      store: makeStore({ async listCuratorEligible() { return skills } }),
+      digestStore: makeDigest(),
+      getEmbeddings: async (texts) => {
+        batches.push(texts)
+        return texts.map(() => vec('a'))
+      },
+      callModel: async (prompt) => {
+        prompts.push(prompt)
+        return '{"move":"REJECT","reason":"Keep separate"}'
+      },
+      minSkillCount: 2,
+      now: () => NOW,
+    })
+    expect(batches).toHaveLength(2)
+    expect(batches.every((batch) => batch.length === 2)).toBe(true)
+    expect(prompts).toHaveLength(2)
+    expect(prompts.every((prompt) => !(prompt.includes('f-1') && prompt.includes('p-1')))).toBe(true)
   })
 })
 

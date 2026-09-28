@@ -37,6 +37,7 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush }) }));
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
+import { automaticDesktopBrowser as browser, type BrowserState } from "@/lib/automatic-desktop-browser";
 import { ConnectBrowserButton } from "../connect-browser-button";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -90,6 +91,33 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     extensionHasControl.mockResolvedValue(true);
     requestBrowserControl.mockResolvedValue("prompted");
   });
+
+  it.each(["idle", "connecting", "connected", "paused", "failed"] as const)(
+    "desktop observes coordinator %s state without manual pairing", async (phase) => {
+      const state: BrowserState = { workspaceId: "ws-1", profileId: "p", phase };
+      const snapshot = vi.spyOn(browser, "snapshot").mockReturnValue(state);
+      const show = vi.spyOn(browser, "show").mockResolvedValue();
+      const retry = vi.spyOn(browser, "retry").mockResolvedValue();
+      window.usebrianDesktop = { signIn: vi.fn(), browserControl: vi.fn() };
+      const { el, root } = await mount();
+      try {
+        const d = en.computer.connectBrowser.desktop;
+        expect(labelOf(el)).toBe(phase === "connected" ? d.open : phase === "paused" ? d.resume :
+          phase === "failed" ? d.retry : phase === "connecting" ? en.computer.connectBrowser.oneClickConnecting : d.automatic);
+        expect(getBrowserExtensionStatus).not.toHaveBeenCalled();
+        await click(el);
+        expect(pairViaExtension).not.toHaveBeenCalled();
+        expect(pairBrowserExtension).not.toHaveBeenCalled();
+        if (phase === "connected") expect(show).toHaveBeenCalledOnce();
+        if (phase === "paused" || phase === "failed") expect(retry).toHaveBeenCalledOnce();
+        if (phase === "idle") expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
+      } finally {
+        await act(async () => root.unmount()); el.remove();
+        delete window.usebrianDesktop;
+        snapshot.mockRestore(); show.mockRestore(); retry.mockRestore();
+      }
+    },
+  );
 
   it("renders nothing where the deployment has no relay configured", async () => {
     getBrowserExtensionStatus.mockResolvedValue({ configured: false, connected: false });

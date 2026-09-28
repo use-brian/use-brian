@@ -52,8 +52,13 @@ import {
 // autoUpdater }`) resolves at compile time but THROWS at runtime in this ESM
 // main process. Default-import the module object and destructure instead.
 import electronUpdater from "electron-updater";
+import { EmbeddedBrowser, browserPairing } from "./embedded-browser.js";
+
+const embeddedBrowser = new EmbeddedBrowser({ getDockWindow: () => ensureWindow() });
+let browserIdentityChanging = false;
 
 import { DeploymentAccounts, TargetOperations, deploymentKey, deploymentAccountKey, type AccountTarget, type SavedDeploymentAccount } from "./deployment-accounts.js";
+import { validateGatewayTarget } from "./gateway-target.js";
 import { bundledDefaultForRuntime, resolveConfig } from "./config.js";
 import {
   AWAKE_BRIAN_FILE_NAME,
@@ -135,6 +140,7 @@ import {
   type CompanionState,
 } from "./desktop-chat.js";
 import {
+  captureSourceSnapshot,
   isTrustedCaptureOrigin,
   selectPrimaryDisplaySource,
 } from "./system-audio-policy.js";
@@ -357,8 +363,9 @@ let requestedCaptureSourceId: string | null = null;
 let gatewayWindow: BrowserWindow | null = null;
 /** One gateway login at a time; concurrent challenged requests wait for this result. */
 let gatewayAuthInFlight: Promise<boolean> | null = null;
-/** Origin currently being authenticated; another origin queues behind it. */
+/** Origin and partition being authenticated; other contexts queue behind it. */
 let gatewayAuthOrigin: string | null = null;
+let gatewayAuthSession: ReturnType<typeof targetSession> | null = null;
 /** Protected target currently being validated from the local-target chooser. */
 let pendingLocalGatewayUrl: string | null = null;
 /** The edge grant stays main-process-only; the renderer never receives it. */
@@ -393,6 +400,17 @@ function authenticatedSessionFetch(input: string, init: RequestInit): Promise<Re
   const headers = new Headers(init.headers);
   if (authorization) headers.set("Authorization", authorization);
   return targetSession().fetch(input, { ...init, headers, credentials: "include" });
+}
+
+type GatewayContext = { session: ReturnType<typeof targetSession>; fetch: GatewayProbeFetch };
+function gatewayContext(target = accountTarget(), grant: CloudflareAccessGrant | null = activeAccessGrant): GatewayContext {
+  const jar = targetSession(target);
+  return { session: jar, fetch: (input, init) => {
+    const headers = new Headers(init.headers);
+    const authorization = accessAuthorizationForUrl(grant, input);
+    if (authorization) headers.set("Authorization", authorization);
+    return jar.fetch(input, { ...init, headers, credentials: "include" });
+  } };
 }
 
 const gatewayProbeFetch: GatewayProbeFetch = authenticatedSessionFetch;
@@ -535,15 +553,17 @@ function refreshSessionForTarget(target: AccountTarget, refreshToken: string, pr
 function authenticateGateway(
   protectedUrl: string,
   validate: () => Promise<boolean>,
+  context: GatewayContext,
 ): Promise<boolean> {
   const protectedOrigin = new URL(protectedUrl).origin;
   console.log(`[gateway-auth] opening authentication for ${protectedOrigin}`);
   if (gatewayAuthInFlight) {
-    if (gatewayAuthOrigin === protectedOrigin) return gatewayAuthInFlight;
+    if (gatewayAuthOrigin === protectedOrigin && gatewayAuthSession === context.session) return gatewayAuthInFlight;
     const pending = gatewayAuthInFlight;
-    return pending.then(() => authenticateGateway(protectedUrl, validate));
+    return pending.then(() => authenticateGateway(protectedUrl, validate, context));
   }
   gatewayAuthOrigin = protectedOrigin;
+  gatewayAuthSession = context.session;
 
   const run = new Promise<boolean>((resolveAuth) => {
     const win = new BrowserWindow({
@@ -553,7 +573,7 @@ function authenticateGateway(
       show: false,
       autoHideMenuBar: true,
       webPreferences: {
-        session: targetSession(),
+        session: context.session,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -627,6 +647,7 @@ function authenticateGateway(
     if (gatewayAuthInFlight === run) {
       gatewayAuthInFlight = null;
       gatewayAuthOrigin = null;
+      gatewayAuthSession = null;
     }
   });
   return run;
@@ -707,7 +728,8 @@ function createWindow(initialLoad: { useBrian?: boolean; route?: string; linkReq
   // clicks" (the post-login symptom). This is the durable counterpart to the
   // explicit focusWindow() calls. See focusWindow.
   win.on("focus", () => {
-    if (!win.webContents.isDestroyed()) win.webContents.focus();
+    // A docked website or its address bar is a legitimate focus target too.
+    if (!win.webContents.isDestroyed() && !embeddedBrowser.isDockedFocused()) win.webContents.focus();
   });
 
   // Re-apply the chrome safety net (see DESKTOP_CHROME_SAFETY_CSS) on every
@@ -811,7 +833,12 @@ function createWindow(initialLoad: { useBrian?: boolean; route?: string; linkReq
     void loadApp(win, initialLoad);
   }
   win.on("closed", () => {
-    if (mainWindow === win) mainWindow = null;
+    if (mainWindow === win) {
+      mainWindow = null;
+      // Also cancel consent/pairing before a host exists; never reopen a window
+      // from a late relay ready after the user closed the app window.
+      embeddedBrowser.dispose();
+    }
     // The capture lives in this window's renderer — with it gone the overlay
     // has nothing to mirror or control.
     destroyRecorderOverlay();
@@ -1224,14 +1251,21 @@ function showRecorderOverlay(): void {
   // ONE app-origin page and must never become a browsing surface — no child
   // windows, no off-origin navigation.
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  win.webContents.on("will-navigate", (event, url) => {
-    if (!url.startsWith(cfg.appOrigin)) event.preventDefault();
+  win.webContents.on("will-navigate", (event) => {
+    // This recorder-only window never needs document navigation.
+    event.preventDefault();
   });
   win.once("ready-to-show", () => win.show());
   win.on("closed", () => {
     if (recorderOverlay === win) recorderOverlay = null;
   });
-  void win.webContents.loadURL(`${cfg.appUrl}/recorder-overlay`);
+  if (bundledAvailable()) {
+    // BroadcastChannel needs BOTH the same session and origin. Packaged main
+    // windows use file://, so a remote overlay cannot receive their updates.
+    void win.webContents.loadFile(BUNDLE_INDEX, { hash: "/recorder-overlay" });
+  } else {
+    void win.webContents.loadURL(`${cfg.appUrl}/recorder-overlay`);
+  }
   recorderOverlay = win;
 }
 
@@ -1280,7 +1314,7 @@ function handleRedirect(event: Event, url: string): void {
   // than consulting cfg.target and accidentally starting cloud PKCE.
   if (pendingLocalGatewayUrl && isAllowedGatewayNavigation(url, pendingLocalGatewayUrl)) {
     event.preventDefault();
-    void recoverPendingLocalGatewayRedirect(pendingLocalGatewayUrl);
+    // Destination validation owns gateway authentication; do not probe the active jar.
     return;
   }
   const action = decideRedirectAction(url, {
@@ -1299,17 +1333,6 @@ function handleRedirect(event: Event, url: string): void {
     return;
   }
   handleNavigation(event, url);
-}
-
-async function recoverPendingLocalGatewayRedirect(protectedUrl: string): Promise<void> {
-  return targetOperations.run(async () => {
-    const result = await probeWithGatewayAuthentication(
-      desktopConfigUrl(protectedUrl),
-      () => probeDesktopConfig(protectedUrl),
-    );
-    if (result.kind !== "ready") return;
-
-  });
 }
 
 async function recoverAppGatewayRedirect(redirectUrl: string): Promise<void> {
@@ -1465,8 +1488,8 @@ type LocalProbeResult<T> =
   | { kind: "cancelled" };
 
 /** Probe `/health`, requiring the API's JSON contract rather than any HTTP 2xx. */
-async function probeLocalBrain(apiUrl: string): Promise<LocalProbeResult<undefined>> {
-  const result = await probeExpectedJson(healthUrl(apiUrl), { fetchImpl: gatewayProbeFetch });
+async function probeLocalBrain(apiUrl: string, fetchImpl = gatewayProbeFetch): Promise<LocalProbeResult<undefined>> {
+  const result = await probeExpectedJson(healthUrl(apiUrl), { fetchImpl });
   if (result.kind === "authentication-required") return result;
   if (result.kind === "ok" && isHealthyDocument(result.body)) {
     return { kind: "ready", value: undefined };
@@ -1486,10 +1509,11 @@ async function probeLocalBrain(apiUrl: string): Promise<LocalProbeResult<undefin
  */
 async function probeDesktopConfig(
   appUrl: string,
+  fetchImpl = gatewayProbeFetch,
 ): Promise<LocalProbeResult<DeclaredDesktopConfig | null>> {
   const result = await probeExpectedJson(desktopConfigUrl(appUrl), {
     allowNotFound: true,
-    fetchImpl: gatewayProbeFetch,
+    fetchImpl,
   });
   if (result.kind === "authentication-required") return result;
   if (result.kind === "missing") return { kind: "ready", value: null };
@@ -1576,6 +1600,7 @@ async function fetchDeclaredApiUrl(
 async function probeWithGatewayAuthentication<T>(
   protectedUrl: string,
   probe: () => Promise<LocalProbeResult<T>>,
+  context = gatewayContext(),
 ): Promise<LocalProbeResult<T>> {
   const first = await probe();
   if (first.kind !== "authentication-required") return first;
@@ -1583,7 +1608,7 @@ async function probeWithGatewayAuthentication<T>(
   const authenticated = await authenticateGateway(protectedUrl, async () => {
     const result = await probe();
     return result.kind === "ready";
-  });
+  }, context);
   if (!authenticated) return { kind: "cancelled" };
   return probe();
 }
@@ -1599,6 +1624,7 @@ async function probeWithVisibleGatewayFallback<T>(
   protectedUrl: string,
   probe: () => Promise<LocalProbeResult<T>>,
   interactiveUrl = protectedUrl,
+  context = gatewayContext(),
 ): Promise<LocalProbeResult<T>> {
   const first = await probe();
   if (first.kind === "ready") return first;
@@ -1608,15 +1634,15 @@ async function probeWithVisibleGatewayFallback<T>(
   const authenticated = await authenticateGateway(interactiveUrl, async () => {
     const result = await probe();
     return result.kind === "ready";
-  });
+  }, context);
   if (!authenticated) return { kind: "cancelled" };
   return probe();
 }
 
 /** Validate both protected origins before loading or adopting a local target. */
 async function validateLocalTarget(
-  appUrl: string,
-  fallbackApiUrl: string,
+  initial: AccountTarget,
+  grant: CloudflareAccessGrant | null = activeAccessGrant,
 ): Promise<LocalProbeResult<{
   apiUrl: string
   declaredApiUrl: string | null
@@ -1624,42 +1650,39 @@ async function validateLocalTarget(
   publicConfig: DesktopPublicConfig | null
 }>> {
   return targetOperations.run(async () => {
-    console.log(`[gateway-auth] validating app ${appUrl}`);
-    const config = await probeWithVisibleGatewayFallback(
-      desktopConfigUrl(appUrl),
-      () => probeDesktopConfig(appUrl),
-    );
-    if (config.kind !== "ready") {
-      console.warn(`[gateway-auth] app validation ended: ${config.kind}`);
-      return config;
-    }
-
-    const target = localTarget(
-      appUrl,
-      config.value?.apiUrl,
-      config.value?.auth ?? "local-session",
-      config.value?.publicConfig,
-    ) ?? localTarget(appUrl);
-    const apiUrl = target?.apiUrl ?? fallbackApiUrl;
-    const health = await probeWithVisibleGatewayFallback(
-      healthUrl(apiUrl),
-      () => probeLocalBrain(apiUrl),
-    );
-    if (health.kind !== "ready") {
-      console.warn(`[gateway-auth] API validation ended: ${health.kind} (${apiUrl})`);
-      return health;
-    }
-    console.log(`[gateway-auth] target ready: app=${appUrl} api=${apiUrl}`);
-    return {
-      kind: "ready",
-      value: {
-        apiUrl,
-        declaredApiUrl: config.value?.apiUrl ?? null,
-        auth: target?.auth ?? "local-session",
-        publicConfig: config.value?.publicConfig ?? null,
+    let declaredApiUrl: string | null = null;
+    const result = await validateGatewayTarget(initial,
+      (target) => gatewayContext(target, grant),
+      async (target, context) => {
+        console.log(`[gateway-auth] validating app ${target.appUrl} api=${target.apiUrl}`);
+        const config = await probeWithVisibleGatewayFallback(
+          desktopConfigUrl(target.appUrl),
+          () => probeDesktopConfig(target.appUrl, context.fetch),
+          desktopConfigUrl(target.appUrl), context,
+        );
+        if (config.kind !== "ready") return config;
+        declaredApiUrl = config.value?.apiUrl ?? null;
+        return { kind: "ready", value: {
+          ...target,
+          apiUrl: config.value?.apiUrl ?? target.apiUrl,
+          auth: config.value?.auth ?? target.auth,
+          publicConfig: config.value?.publicConfig ?? target.publicConfig,
+        } };
       },
-    };
-
+      (target, context) => probeWithVisibleGatewayFallback(
+        healthUrl(target.apiUrl), () => probeLocalBrain(target.apiUrl, context.fetch),
+        healthUrl(target.apiUrl), context,
+      ),
+    );
+    if (result.kind !== "ready") {
+      console.warn(`[gateway-auth] target validation ended: ${result.kind}`);
+      return result;
+    }
+    console.log(`[gateway-auth] target ready: app=${result.value.appUrl} api=${result.value.apiUrl}`);
+    return { kind: "ready", value: {
+      apiUrl: result.value.apiUrl, declaredApiUrl,
+      auth: result.value.auth, publicConfig: result.value.publicConfig ?? null,
+    } };
   });
 }
 
@@ -1676,6 +1699,7 @@ async function activateTarget(
 ): Promise<boolean> {
   if (cfg.envTargetOverride || changingTarget || recorderOverlay) return false;
   changingTarget = true;
+  embeddedBrowser.dispose();
   try {
     closeAuthServer();
     closeConnectorServer();
@@ -1794,7 +1818,7 @@ function ensureBundledLocalSession(win: BrowserWindow): Promise<boolean> {
       }
       lastLocalMintAt = now;
       try {
-        const target = await validateLocalTarget(cfg.appUrl, cfg.apiUrl);
+        const target = await validateLocalTarget(accountTarget());
         if (target.kind !== "ready") {
           showLocalDown(win, target.kind === "cancelled" ? "gateway-auth" : "unreachable");
           return false;
@@ -2005,7 +2029,7 @@ async function loadApp(
       return;
     }
     if (cfg.target === "local") {
-      const target = await validateLocalTarget(cfg.appUrl, cfg.apiUrl);
+      const target = await validateLocalTarget(accountTarget());
       if (target.kind !== "ready") {
         showLocalDown(win, target.kind === "cancelled" ? "gateway-auth" : "unreachable");
         return;
@@ -2259,6 +2283,7 @@ function persistSession(sess: DesktopSession): boolean {
   const tokens = parseStoredTokens(serializeTokens(sess, Date.now()));
   if (!tokens) return false;
   tokens.user ??= readStoredTokens()?.user;
+  if (tokens.user?.id !== readStoredTokens()?.user?.id) embeddedBrowser.dispose();
   return deploymentAccounts.put(accountTarget(), tokens);
 }
 
@@ -2267,10 +2292,12 @@ function persistRendererTokens(input: unknown): void {
   const tokens = serialized ? parseStoredTokens(serialized) : null;
   if (!tokens) return;
   tokens.user ??= readStoredTokens()?.user;
+  if (tokens.user?.id !== readStoredTokens()?.user?.id) embeddedBrowser.dispose();
   deploymentAccounts.put(accountTarget(), tokens);
 }
 
 function clearStoredTokens(): void {
+  embeddedBrowser.dispose();
   const tokens = readStoredTokens();
   if (tokens) deploymentAccounts.remove(deploymentAccountKey({ target: accountTarget(), tokens }));
 }
@@ -2936,6 +2963,14 @@ function startSignIn(opts: { addAccount?: boolean } = {}): void {
 }
 
 async function completeSignIn(code: string): Promise<void> {
+  if (browserIdentityChanging) return;
+  browserIdentityChanging = true;
+  embeddedBrowser.dispose();
+  try { await completeSignInImpl(code); }
+  finally { browserIdentityChanging = false; }
+}
+
+async function completeSignInImpl(code: string): Promise<void> {
   return targetOperations.run(async () => {
     // In-memory state is authoritative for the loopback transport (same process);
     // the persisted blob covers the cross-process `usebrian://auth` fallback. Both
@@ -3159,6 +3194,14 @@ async function stashCurrentAccount(next: DesktopSession): Promise<boolean> {
  * `apps/web/src/app/api/auth/switch-account-and-return/route.ts`.
  */
 async function switchAccount(accountId: string): Promise<SwitchResult> {
+  if (browserIdentityChanging) return { ok: false, error: "switch" };
+  browserIdentityChanging = true;
+  embeddedBrowser.dispose();
+  try { return await switchAccountImpl(accountId); }
+  finally { browserIdentityChanging = false; }
+}
+
+async function switchAccountImpl(accountId: string): Promise<SwitchResult> {
   if (removingAccount) return { ok: false, error: "switch" };
   // Bundled mode authenticates with a single Bearer token, not the cookie store.
   if (cfg.bundled) {
@@ -3222,6 +3265,14 @@ async function switchAccount(accountId: string): Promise<SwitchResult> {
 }
 
 async function signOut(): Promise<void> {
+  if (browserIdentityChanging) return;
+  browserIdentityChanging = true;
+  embeddedBrowser.dispose();
+  try { await signOutImpl(); }
+  finally { browserIdentityChanging = false; }
+}
+
+async function signOutImpl(): Promise<void> {
   if (removingAccount) return;
   return targetOperations.run(async () => {
     const pendingLink = linkNavigation.state();
@@ -3456,7 +3507,7 @@ function refreshSessionInPlace(): Promise<RefreshOutcome> {
     if (sessionRefreshInFlight) return sessionRefreshInFlight;
     const run = (async (): Promise<RefreshOutcome> => {
       const refreshToken = await readJarCookie("refresh_token");
-      if (!refreshToken) return "signed-out";
+      if (!refreshToken) { embeddedBrowser.dispose(); return "signed-out"; }
       let result: DesktopSession | null;
       try {
         if (cfg.target === "local") {
@@ -3481,9 +3532,13 @@ function refreshSessionInPlace(): Promise<RefreshOutcome> {
       }
       if (!result) {
         // The refresh token itself is dead (revoked or >30d idle) — a real sign-out.
-        for (const name of AUTH_COOKIE_NAMES) {
-          await targetSession().cookies.remove(cfg.appUrl, name);
-        }
+        browserIdentityChanging = true;
+        embeddedBrowser.dispose();
+        try {
+          for (const name of AUTH_COOKIE_NAMES) {
+            await targetSession().cookies.remove(cfg.appUrl, name);
+          }
+        } finally { browserIdentityChanging = false; }
         return "signed-out";
       }
       // The refresh response carries no `plan`, so keep the display-only `user`
@@ -4152,17 +4207,18 @@ if (!gotLock) {
 
   // Screen-capture source picker: the renderer lists shareable windows and
   // points the NEXT display-media grant at the picked one (null reverts to
-  // the primary-display default). Name + id only — thumbnails stay in main.
+  // the primary-display default). The bounded thumbnail is a static chooser
+  // snapshot, not a live capture stream.
   ipcMain.handle("Use Brian:list-capture-sources", async (_event, kind: unknown) => {
     const type = kind === "screen" ? "screen" : "window";
     const sources = await desktopCapturer.getSources({
       types: [type],
-      thumbnailSize: { width: 0, height: 0 },
+      thumbnailSize: { width: 320, height: 180 },
       fetchWindowIcons: false,
     });
     return sources
       .filter((source) => source.name.trim().length > 0)
-      .map((source) => ({ id: source.id, name: source.name }));
+      .map(captureSourceSnapshot);
   });
   ipcMain.on("Use Brian:set-capture-source", (_event, id: unknown) => {
     requestedCaptureSourceId = typeof id === "string" && id.length > 0 ? id : null;
@@ -4274,7 +4330,7 @@ if (!gotLock) {
         declaredConfig?.publicConfig,
       ) ?? normalized;
       pendingLocalGatewayUrl = target.appUrl;
-      const validation = await validateLocalTarget(target.appUrl, target.apiUrl).finally(() => {
+      const validation = await validateLocalTarget({ ...target, kind: "local" }, grant).finally(() => {
         pendingLocalGatewayUrl = null;
       });
       if (validation.kind !== "ready") {
@@ -4284,7 +4340,7 @@ if (!gotLock) {
           url: target.appUrl,
         };
       }
-      const resolvedDeclaredApiUrl = validation.value.declaredApiUrl ?? declaredApiUrl;
+      const resolvedDeclaredApiUrl = validation.value.apiUrl;
       const resolvedTarget = localTarget(
         target.appUrl,
         resolvedDeclaredApiUrl,
@@ -4341,6 +4397,16 @@ if (!gotLock) {
     isCurrentAccountSender(event.sender.id) && event.senderFrame === event.sender.mainFrame && typeof key === "string"
       ? removeDeploymentAccount(key)
       : { ok: false, error: "remove" });
+  for (const action of ["update-account-presentation", "move-account"] as const) {
+    ipcMain.handle(`Use Brian:${action}`, (event, key: unknown, input: unknown) => {
+      if (!isCurrentAccountSender(event.sender.id) || event.senderFrame !== event.sender.mainFrame ||
+        changingTarget || selectingAccount || connectingDeployment || removingAccount || typeof key !== "string") return { ok: false };
+      const ok = action === "move-account"
+        ? deploymentAccounts.move(key, input)
+        : deploymentAccounts.updatePresentation(key, input);
+      return ok ? { ok: true, accounts: deploymentAccounts.rows(accountTarget()) } : { ok: false };
+    });
+  }
   ipcMain.handle("Use Brian:select-cloud", async (event) => {
     const ok = isCurrentAccountSender(event.sender.id) && await useCloud();
     const pendingLink = linkNavigation.state();
@@ -4395,6 +4461,27 @@ if (!gotLock) {
       if (isCurrentAccountSender(event.sender.id)) clearStoredTokens();
     });
   }
+
+  ipcMain.handle("Use Brian:browser-control", async (event, input: unknown) => {
+    const trusted = () => !changingTarget && !selectingAccount && !removingAccount &&
+      !browserIdentityChanging && trustedTokenSender(event);
+    if (!trusted() || !input || typeof input !== "object") return { ok: false };
+    const type = (input as { type?: unknown }).type;
+    // Capability, not an implicit permission grant: pairing has its own native consent.
+    if (type === "status" || type === "request-control") return { ok: true, hasControl: true, ...embeddedBrowser.status() };
+    if (type === "show") { embeddedBrowser.show(); return { ok: true }; }
+    if (type === "cancel") { embeddedBrowser.cancelPending(); return { ok: true }; }
+    if (type === "disconnect") { embeddedBrowser.dispose(true); return { ok: true }; }
+    if (type !== "pair") return { ok: false };
+    const config = cfg;
+    const user = cfg.bundled ? readStoredTokens()?.user : parseUserCookieValue(await readJarCookie("user"));
+    if (!trusted() || config !== cfg || !user?.id) return { ok: false };
+    try {
+      const scope = JSON.stringify([cfg.appOrigin, user.id]);
+      if (browserPairing(input, scope).userId !== user.id) return { ok: false };
+      return { ok: await embeddedBrowser.pair(input, scope) };
+    } catch { return { ok: false }; }
+  });
 
   app.whenReady().then(async () => {
     if (app.isPackaged) {
@@ -4467,6 +4554,7 @@ if (!gotLock) {
   });
 
   app.on("will-quit", () => {
+    embeddedBrowser.dispose();
     globalShortcut.unregisterAll();
     stopAwakeBrianBlocker();
   });

@@ -56,6 +56,8 @@ import {
   buildConfirmationPreview,
   getToolDisplayName,
 } from "@use-brian/shared";
+import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
+import { openWorkspaceSettings } from "@/lib/workspace-settings-events";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import Link from "next/link";
@@ -160,6 +162,16 @@ export function ApprovalsPanel() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchError, setBatchError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const reset=(event:Event)=>{
+      const detail=(event as CustomEvent<{workspaceId?:string}>).detail;
+      if(detail?.workspaceId&&detail.workspaceId!==activeId)return;
+      setSelected(new Set());setFilter(NO_FILTER);setBatchReason("");setBatchError(null);setAssistantNames({});
+    };
+    window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,reset);
+    return()=>window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,reset);
+  },[activeId]);
+
   // Pinned once at mount — the age filter buckets relative to "now", and
   // a stable reference keeps `filtered` from churning every render.
   const [now] = useState(() => Date.now());
@@ -206,6 +218,7 @@ export function ApprovalsPanel() {
           (r) =>
             isActionable(r.kind) &&
             r.kind !== "email_sender" &&
+            r.kind !== "department_access" &&
             !isReviewedWorkflowEmailApproval(r),
         )
         .map((r) => r.id),
@@ -427,6 +440,7 @@ export function ApprovalsPanel() {
               selectable={
                 isActionable(row.kind) &&
                 row.kind !== "email_sender" &&
+                row.kind !== "department_access" &&
                 !isReviewedWorkflowEmailApproval(row)
               }
               selected={selected.has(row.id)}
@@ -705,7 +719,7 @@ function ApprovalCard({
     ? getToolDisplayName(row.toolName.split("__", 1)[0]!)
     : "";
   const headline =
-    row.kind === "email_sender"
+    row.kind === "department_access" ? row.approvalPayload.targetTeamName ?? t.approvalsPage.kind.department_access : row.kind === "email_sender"
       ? row.approvalPayload.senderName?.trim() ||
         row.approvalPayload.sender ||
         t.approvalsPage.kind.email_sender
@@ -872,7 +886,7 @@ function ApprovalCard({
             </span>
           <div className="min-w-0 flex-1">
             <div className="text-sm font-medium max-sm:break-words sm:truncate">{headline}</div>
-            {!toolPreview &&
+            {!toolPreview && row.kind !== "department_access" &&
               row.approvalPayload.displayLines?.map((line, i) => (
                 <div key={i} className="text-xs text-muted-foreground truncate">
                   {line}
@@ -1034,6 +1048,7 @@ function ApprovalCard({
               <BrowserSkillSendBody row={row} />
             )}
             {row.kind === "email_sender" && <EmailSenderBody row={row} />}
+            {row.kind === "department_access" && <DepartmentAccessBody row={row} />}
             <div className="text-xs text-muted-foreground mt-0.5">
               {metaLine}
             </div>
@@ -1628,4 +1643,16 @@ function WorkflowRefinementBody({
       {open && diffRows && <DiffView rows={diffRows} />}
     </div>
   );
+}
+
+function DepartmentAccessBody({row}:{row:PendingApprovalRow}) {
+  const t=useT().workspaceAccess,payload=row.approvalPayload;
+  return <div className="space-y-2 text-sm">
+    <p className="break-words">{t.requestFor}: {payload.beneficiaryName??t.unnamed}</p>
+    <p className="break-words">{t.reason}: {payload.reason}</p>
+    <p>{t.starts}: {payload.startsAt?new Date(payload.startsAt).toLocaleString():''}</p>
+    <p>{t.expires}: {payload.expiresAt?new Date(payload.expiresAt).toLocaleString():t.ongoing}</p>
+    <p>{t.readOnly}</p>{payload.beneficiaryKind==='team'?<p>{t.futureMembers}</p>:null}
+    <Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-access')}>{t.title}</Button>
+  </div>;
 }

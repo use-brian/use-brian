@@ -14,6 +14,7 @@ import {
   fetchMeteredEstimate,
   fetchModelMenu,
   setWorkspaceModelDefault,
+  setWorkspaceDecisionRouting,
   setWorkspaceModelRoute,
   updateMeteredProfile,
   deleteMeteredProfile,
@@ -98,5 +99,43 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     expect(JSON.parse(init.body as string)).toEqual({ modelAlias: "gpt-5.6-sol" });
     expect(route.modelAlias).toBe("gpt-5.6-sol");
     expect((mockFetch.mock.calls[1][1] as RequestInit).method).toBe("DELETE");
+  });
+
+  it("sets a workspace decision classifier in shadow mode", async () => {
+    mockFetch.mockResolvedValueOnce(ok({
+      decisionRouting: {
+        mode: "shadow",
+        modelAlias: "typesafe-jev-1.13",
+        updatedAt: "now",
+      },
+    }));
+    const setting = await setWorkspaceDecisionRouting("ws-1", {
+      mode: "shadow",
+      modelAlias: "typesafe-jev-1.13",
+    });
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/workspaces/ws-1/decision-routing");
+    expect(JSON.parse(init.body as string)).toEqual({ mode: "shadow", modelAlias: "typesafe-jev-1.13" });
+    expect(setting.mode).toBe("shadow");
+  });
+
+  it("sets a workspace classifier to hybrid where approved", async () => {
+    mockFetch.mockResolvedValueOnce(ok({
+      decisionRouting: {
+        mode: "hybrid",
+        modelAlias: "typesafe-jev-1.13",
+        updatedAt: "now",
+      },
+    }));
+    const setting = await setWorkspaceDecisionRouting("ws-1", {
+      mode: "hybrid",
+      modelAlias: "typesafe-jev-1.13",
+    });
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      mode: "hybrid",
+      modelAlias: "typesafe-jev-1.13",
+    });
+    expect(setting.mode).toBe("hybrid");
   });
 });

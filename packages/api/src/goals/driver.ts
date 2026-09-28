@@ -43,6 +43,7 @@ import {
   processGoalIteration,
   type ActingLoopDeps,
   type EventSubscription,
+  type DispatchEvent,
   type GoalDefaultBudget,
   type GoalRecord,
   type GoalStatus,
@@ -69,6 +70,17 @@ export type GoalLoopState = {
  *  workflow completes without meeting `done_when` would otherwise re-arm on
  *  the `now` cadence forever, bounded only by the workspace credit cap). */
 export const DEFAULT_GOAL_BUDGET: Readonly<GoalDefaultBudget> = BUILTIN_GOAL_DEFAULT_BUDGET
+
+/** Authority failures are never provider retries or permission to replace a run. */
+export function isGoalAuthorityFailure(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const failure = error as { code?: unknown; reason?: unknown; message?: unknown }
+  return [failure.code,failure.reason,failure.message].some(value =>
+    value === 'goal_source_scope_unavailable' || value === 'workflow_authority_unavailable'
+      || value === 'goal_authority_unavailable'
+      || value === 'authority_changed' || value === 'context_not_available'
+      || value === 'caller_evidence_unavailable')
+}
 
 /** Consecutive errored ticks before the goal gives up loudly (`blocked`,
  *  `tick_error: …`) instead of re-arming another backoff retry. */
@@ -116,6 +128,8 @@ export function parseGoalTick(
  *  `GoalAwaitingEventMarker` in `db/goals.ts` (the store keeps `state` opaque;
  *  here it is typed). */
 export type GoalAwaitingEvent = {
+  /** Server-stamped park generation; never chosen by the event dispatcher. */
+  revision?: string
   subscriptions: EventSubscription[]
   state?: GoalLoopState
 }
@@ -173,6 +187,12 @@ export type GoalDriverDeps = {
   /** Drop the event-park marker. Returns true iff a marker was actually cleared
    *  — so an event resume is claimed exactly once under concurrent events. */
   clearAwaitingEvent: (goalId: string) => Promise<boolean>
+  /** CRM claims atomically persist source ancestry before consuming this marker. */
+  claimCrmEventResume?: (goalId: string, event: DispatchEvent, marker: GoalAwaitingEvent) => Promise<boolean>
+  /** Revalidate durable causal sources before ticks, iterations and delivery. */
+  assertSourceAuthority?: (goal: GoalRecord) => Promise<void>
+  /** Install the goal's persisted author/current sticky authority for host work. */
+  executeWithAuthority?: <T>(goal: GoalRecord, operation: () => Promise<T>) => Promise<T>
   /** Resolve the workspace override for a budget-less goal. Omitted or failed
    *  lookups fall back to `DEFAULT_GOAL_BUDGET`. */
   resolveDefaultBudget?: (goal: GoalRecord) => Promise<GoalDefaultBudget>
@@ -221,15 +241,16 @@ export type GoalDriver = {
    *
    *  NOTE (v1): the event payload is NOT handed to the agent — the resumed
    *  iteration re-reads the world. */
-  resumeOnEvent: (goalId: string) => Promise<void>
+  resumeOnEvent: (goalId: string, event?: DispatchEvent) => Promise<void>
 }
 
 export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
-  const finishDeps = { goalStore: deps.goalStore, deliver: deps.deliver }
+  const finishDeps = { goalStore: deps.goalStore, deliver: deps.deliver, assertSourceAuthority: deps.assertSourceAuthority }
   const claimedFinishDeps = deps.transitionRunningStatus
     ? {
         goalStore: deps.goalStore,
         deliver: deps.deliver,
+        assertSourceAuthority: deps.assertSourceAuthority,
         claimTerminal: deps.transitionRunningStatus,
       }
     : finishDeps
@@ -246,20 +267,19 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
       await finishGoal(goal, 'blocked', 'unconfirmed_needs_clarification', finishDeps)
       return
     }
-    // Single-flight: only one tick may drive a goal at a time. The claim flips
-    // `active`→`running` atomically; a lost claim means a concurrent tick (a
-    // re-arm racing an event wake) already owns it.
-    if (!(await deps.tryClaim(goalId))) return
-
-    // From here the claim is OURS: an unhandled throw would strand the goal in
-    // `running` (unclaimable — no re-trigger can flip it back) AND kill the
-    // re-arm chain (the poll worker never retries a failed once-job). Handle
-    // every error: re-arm with backoff, or give up loudly at the ceiling.
-    try {
-      await runClaimedTick(goal, carried)
-    } catch (err) {
-      await handleTickError(goal, carried, err)
+    const run = async (): Promise<void> => {
+      // Single-flight: only one tick may drive a goal at a time. The claim flips
+      // `active`→`running` atomically; a lost claim means a concurrent tick owns it.
+      if (!(await deps.tryClaim(goalId))) return
+      try {
+        await deps.assertSourceAuthority?.(goal)
+        await runClaimedTick(goal, carried)
+      } catch (err) {
+        await handleTickError(goal, carried, err)
+      }
     }
+    if (deps.executeWithAuthority) await deps.executeWithAuthority(goal, run)
+    else await run()
   }
 
   async function handleTickError(
@@ -267,6 +287,14 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     carried: GoalLoopState | undefined,
     err: unknown,
   ): Promise<void> {
+    if (isGoalAuthorityFailure(err)) {
+      // Do not re-arm stale authority, write back to a host, or deliver a
+      // goal outcome that may itself contain now-inaccessible source content.
+      if (deps.transitionRunningStatus) await deps.transitionRunningStatus(goal.id, 'blocked', 'goal_source_scope_unavailable')
+      else await deps.goalStore.setStatusSystem(goal.id, 'blocked', 'goal_source_scope_unavailable')
+      deps.onTickError?.(goal, err, false)
+      throw err
+    }
     const streak = (carried?.errorStreak ?? 0) + 1
     const willRetry = streak < MAX_CONSECUTIVE_TICK_ERRORS
     console.error(
@@ -328,7 +356,9 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     const loopDeps: ActingLoopDeps = {
       meteringAvailable: deps.meteringAvailable,
       runIteration: async (g) => {
+        await deps.assertSourceAuthority?.(g)
         const r = await deps.dispatchRun({ goal: g, runId: activeRunId })
+        await deps.assertSourceAuthority?.(g)
         // Terminal run → clear the id so the next tick starts a fresh iteration;
         // paused run → keep it so the next tick advances the same run.
         activeRunId = r.terminal ? null : r.runId
@@ -417,39 +447,44 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     // Only a confirmed, acting goal (a workflow means) self-drives; a draft, or
     // a no-means monitor / structural goal, is not kicked off here.
     if (!goal || !goal.means.workflowId || !goal.confirmedAt) return
-    // No unbudgeted autonomy: every arming path converges here, so a goal whose
-    // author set none of the three hard backstops arms with the default budget
-    // (the task-autopilot draft path always arrives with `budget = {}`).
-    const b = goal.budget
-    if (deps.applyDefaultBudget && b.maxIterations === undefined && b.maxSpend === undefined && !b.deadline) {
-      let defaultBudget: GoalDefaultBudget = { ...DEFAULT_GOAL_BUDGET }
-      if (deps.resolveDefaultBudget) {
-        try {
-          defaultBudget = await deps.resolveDefaultBudget(goal)
-        } catch (error) {
-          console.error('[goals] workspace default budget lookup failed, using built-in default:', error)
+    const arm = async (): Promise<void> => {
+      await deps.assertSourceAuthority?.(goal!)
+      // No unbudgeted autonomy: every arming path converges here.
+      const b = goal!.budget
+      if (deps.applyDefaultBudget && b.maxIterations === undefined && b.maxSpend === undefined && !b.deadline) {
+        let defaultBudget: GoalDefaultBudget = { ...DEFAULT_GOAL_BUDGET }
+        if (deps.resolveDefaultBudget) {
+          try {
+            defaultBudget = await deps.resolveDefaultBudget(goal!)
+          } catch (error) {
+            console.error('[goals] workspace default budget lookup failed, using built-in default:', error)
+          }
         }
+        goal = (await deps.applyDefaultBudget(goal!.id, defaultBudget)) ?? goal
       }
-      goal = (await deps.applyDefaultBudget(goal.id, defaultBudget)) ?? goal
+      await deps.scheduleGoalTick(goal!, deps.now(), INITIAL_STATE)
     }
-    await deps.scheduleGoalTick(goal, deps.now(), INITIAL_STATE)
+    if (deps.executeWithAuthority) await deps.executeWithAuthority(goal, arm)
+    else await arm()
   }
 
-  async function resumeOnEvent(goalId: string): Promise<void> {
+  async function resumeOnEvent(goalId: string, event?: DispatchEvent): Promise<void> {
     // Read the park marker first so we can restore the preserved loop state.
     const marker = await deps.getAwaitingEvent(goalId)
     if (!marker) return // already un-parked by a concurrent tick — nothing to do.
-    // Atomically claim the resume: only the caller that actually flips the
-    // marker null schedules the tick, so two events racing on one goal resume it
-    // exactly once (the loser no-ops). This also removes the goal from the
-    // dispatcher's event-waiting set immediately.
-    if (!(await deps.clearAwaitingEvent(goalId))) return
     const goal = await deps.goalStore.getByIdSystem(goalId)
     if (!goal) return
-    // Schedule an immediate tick restoring the budget counters (the safety-net
-    // tick armed at park time may still fire later; that is a budget-bounded
-    // redundant iteration, accepted in v1).
-    await deps.scheduleGoalTick(goal, deps.now(), marker.state ?? INITIAL_STATE)
+    const resume = async (): Promise<void> => {
+      // Atomically claim only after the current authoring principal is installed.
+      if (event?.source.type === 'crm') {
+        if (!deps.claimCrmEventResume) throw new Error('goal_source_scope_unavailable')
+        if (!await deps.claimCrmEventResume(goalId, event, marker)) return
+      } else if (!(await deps.clearAwaitingEvent(goalId))) return
+      await deps.assertSourceAuthority?.(goal)
+      await deps.scheduleGoalTick(goal, deps.now(), marker.state ?? INITIAL_STATE)
+    }
+    if (deps.executeWithAuthority) await deps.executeWithAuthority(goal, resume)
+    else await resume()
   }
 
   return { tickGoal, kickoffGoal, resumeOnEvent }

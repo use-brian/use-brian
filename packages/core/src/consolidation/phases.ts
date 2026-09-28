@@ -23,6 +23,7 @@
  */
 
 import type { MemoryStore, MemoryWithMetrics, MemoryRecord } from '../memory/types.js'
+import { deriveResourceScope, DerivedScopeError, resourceScopeKey, type ScopeSource } from '../security/derived-scope.js'
 import {
   runSkillUmbrellaPass,
   type RunSkillUmbrellaPassParams,
@@ -61,6 +62,7 @@ export type ConsolidationStore = {
 
 /** Analytics callback for consolidation events */
 export type ConsolidationEvent =
+  | { type: 'scope_withheld'; reason: 'scope_evidence_missing'; count: number }
   | { type: 'consolidation_completed'; phase: ConsolidationPhase; memoriesAffected: number; merged: number; patternsFound: number; pruned?: number; promoted?: number; domainsSummarized?: number; opPruned?: number }
   | { type: 'soul_updated'; previousLength: number; newLength: number; changeMagnitude: number }
 
@@ -126,6 +128,40 @@ export type ConsolidationOptions = {
   onEvent?: (event: ConsolidationEvent) => void
 }
 
+type ScopedMemoryInput = Pick<MemoryRecord, 'id' | 'sensitivity' | 'workspaceId' | 'userId' | 'assistantId' | 'compartments' | 'projectIds' | 'scopeVersion'>
+
+function memorySource(row: ScopedMemoryInput): ScopeSource {
+  if (!row.workspaceId || row.userId === undefined || row.assistantId === undefined
+    || !row.compartments || !row.projectIds || !row.scopeVersion) {
+    throw new DerivedScopeError('scope_evidence_missing')
+  }
+  const source: ScopeSource = {
+    workspaceId: row.workspaceId, userId: row.userId, assistantId: row.assistantId,
+    sensitivity: row.sensitivity, compartments: row.compartments, projectIds: row.projectIds,
+    resourceKind: 'memory', resourceId: row.id, version: row.scopeVersion,
+  }
+  deriveResourceScope({ producer: 'consolidation', sources: [source] })
+  return source
+}
+
+function scopeBuckets<T extends ScopedMemoryInput>(rows: T[], opts?: ConsolidationOptions): T[][] {
+  const buckets = new Map<string, T[]>()
+  let withheld = 0
+  for (const row of rows) {
+    try {
+      const key = resourceScopeKey(memorySource(row))
+      const bucket = buckets.get(key) ?? []
+      bucket.push(row)
+      buckets.set(key, bucket)
+    } catch (error) {
+      if (!(error instanceof DerivedScopeError)) throw error
+      withheld++
+    }
+  }
+  if (withheld) opts?.onEvent?.({ type: 'scope_withheld', reason: 'scope_evidence_missing', count: withheld })
+  return [...buckets.values()]
+}
+
 // ── Light phase: dedupe (6h interval, $0) ──────────────────────
 
 /**
@@ -167,6 +203,37 @@ function mergeDetails(a: string | null | undefined, b: string | null | undefined
   return joined.slice(0, MERGED_DETAIL_MAX_CHARS) + '\n... [truncated]'
 }
 
+async function mergeCompatibleMemories(
+  store: MemoryStore,
+  index: Array<ScopedMemoryInput & { summary: string; tags: string[] }>,
+): Promise<string[]> {
+  const affected: string[] = []
+  const consumed = new Set<string>()
+  for (let i = 0; i < index.length; i++) {
+    const a = index[i]
+    if (consumed.has(a.id)) continue
+    for (let j = i + 1; j < index.length; j++) {
+      const b = index[j]
+      if (consumed.has(b.id) || isRemOutput(a) !== isRemOutput(b)) continue
+      if (computeSimilarity(a.summary, b.summary) < (isRemOutput(a) ? 0.6 : 0.9)) continue
+      const aFull = await store.getByIdSystem(a.id), bFull = await store.getByIdSystem(b.id)
+      if (!aFull || !bFull) continue
+      const aSource = memorySource(aFull), bSource = memorySource(bFull)
+      if (resourceScopeKey(aSource) !== resourceScopeKey(bSource)) continue
+      const keeper = await store.update(a.id, {
+        detail: mergeDetails(aFull.detail, bFull.detail),
+        derivation: { producer: 'consolidation:light', sources: [aSource, bSource] },
+      })
+      if (!keeper) continue
+      await store.update(b.id, { confidence: 0 })
+      consumed.add(a.id); consumed.add(b.id)
+      affected.push(b.id)
+      break // supersession replaced the keeper ID; revisit its new version next tick
+    }
+  }
+  return affected
+}
+
 /**
  * Deduplicate memories by similarity.
  * Compares summaries — if 90%+ similar, merge the newer into the older.
@@ -187,61 +254,14 @@ export async function runLightConsolidation(
   const index = await store.getIndexSystem(assistantId, userId, true)
   const affected: string[] = []
 
-  // Compare all pairs (O(n²) but n < 200 at MVP, <1ms)
-  for (let i = 0; i < index.length; i++) {
-    for (let j = i + 1; j < index.length; j++) {
-      const a = index[i]
-      const b = index[j]
-      // Post-Phase-4 (retire-memory-type): no `type` field. Dedup
-      // groups by REM-vs-user provenance (via the `consolidation:rem`
-      // tag) and skip cross-group pairs. The looser threshold below
-      // would otherwise merge an LLM paraphrase into a user-written
-      // observation.
-      const aIsRemOutput = isRemOutput(a)
-      if (aIsRemOutput !== isRemOutput(b)) continue
-
-      const similarity = computeSimilarity(a.summary, b.summary)
-      // REM-output memories are LLM-generated paraphrases of the same
-      // insight — use a lower threshold (0.6) so word-overlap-blind
-      // duplicates still merge. User-generated rows keep the
-      // conservative 0.9 threshold to avoid false merges.
-      const threshold = aIsRemOutput ? 0.6 : 0.9
-      if (similarity >= threshold) {
-        // Merge b into a (keep older, update with newer detail).
-        // mergeDetails dedups at the line level + caps total length.
-        const bFull = await store.getByIdSystem(b.id)
-        if (bFull) {
-          const aFull = await store.getByIdSystem(a.id)
-          const mergedDetail = mergeDetails(aFull?.detail, bFull.detail)
-          await store.update(a.id, { detail: mergedDetail })
-          // Mark b as merged (set confidence to 0 for pruning).
-          // Light's getMemoryIndex query filters confidence > 0, so b
-          // won't reappear in subsequent Light ticks — no re-merge.
-          await store.update(b.id, { confidence: 0 })
-          affected.push(b.id)
-        }
-      }
-    }
+  for (const bucket of scopeBuckets(index, opts)) {
+    affected.push(...await mergeCompatibleMemories(store, bucket))
   }
-
-  // Cross-dedup: memory vs knowledge base entries.
-  // If a memory's summary closely matches a KB entry, it's a KB echo —
-  // mark for pruning so the KB entry remains the authoritative source.
-  const kbSummaries = opts?.knowledgeSummaries?.filter((k) => k.summary).map((k) => k.summary!) ?? []
-  if (kbSummaries.length > 0) {
-    for (const memory of index) {
-      if (affected.includes(memory.id)) continue // already merged
-      // Post-Phase-4: identity is no longer in memories (lives on the
-      // self entity). The "never prune identity" guard is moot here.
-      for (const kbSummary of kbSummaries) {
-        if (computeSimilarity(memory.summary, kbSummary) >= 0.85) {
-          await store.update(memory.id, { confidence: 0 })
-          affected.push(memory.id)
-          break
-        }
-      }
-    }
-  }
+  // Legacy KB summary strings carry no scope or version. They cannot prove
+  // that the surviving KB entry has the same audience as a memory being removed.
+  if (opts?.knowledgeSummaries?.length) opts.onEvent?.({
+    type: 'scope_withheld', reason: 'scope_evidence_missing', count: opts.knowledgeSummaries.length,
+  })
 
   const summary = `Deduped ${affected.length} memories`
   await store.logConsolidation({ assistantId, userId, phase: 'light', summary, memoriesAffected: affected })
@@ -344,6 +364,25 @@ export async function runREMConsolidation(
   opts?: ConsolidationOptions,
 ): Promise<ConsolidationResult> {
   const index = await store.getIndexSystem(assistantId, userId, true)
+  const buckets = scopeBuckets(index, opts)
+  if (buckets.length === 0) {
+    const summary = index.length ? 'scope_evidence_missing: no eligible memory buckets' : 'Too few memories for pattern recognition'
+    await store.logConsolidation({ assistantId, userId, phase: 'rem', summary, memoriesAffected: [] })
+    return { phase: 'rem', summary, memoriesAffected: [] }
+  }
+  const results: ConsolidationResult[] = []
+  for (const bucket of buckets) results.push(await runREMBucket(store, assistantId, userId, callModel, bucket, opts))
+  return { phase: 'rem', summary: results.map(result => result.summary).join('; '), memoriesAffected: results.flatMap(result => result.memoriesAffected) }
+}
+
+async function runREMBucket(
+  store: MemoryStore, assistantId: string, userId: string,
+  callModel: (prompt: string) => Promise<string>,
+  index: Awaited<ReturnType<MemoryStore['getIndexSystem']>>,
+  opts?: ConsolidationOptions,
+): Promise<ConsolidationResult> {
+  const derivation = { producer: 'consolidation:rem', sources: index.map(memorySource) }
+  const floor = deriveResourceScope(derivation)
 
   // Split user-generated memories from existing REM output. Only the
   // user-generated set drives pattern recognition (so the model doesn't
@@ -389,11 +428,6 @@ export async function runREMConsolidation(
     ? existingPatterns.map((m) => `[${m.id.slice(0, 8)}] ${m.summary}`).join('\n')
     : '(none yet)'
 
-  // Prefix-keyed lookup so we can resolve the 8-char IDs the model emits
-  // back to their source sensitivities, and stamp the synthesised pattern
-  // with the max.
-  const sensitivityByPrefix = new Map<string, 'public' | 'internal' | 'confidential'>()
-  for (const m of inputMemories) sensitivityByPrefix.set(m.id.slice(0, 8), m.sensitivity)
   // Full-ID lookup for EXTENDS resolution on existing patterns.
   const connectionByPrefix = new Map<string, typeof existingPatterns[number]>()
   for (const m of existingPatterns) connectionByPrefix.set(m.id.slice(0, 8), m)
@@ -403,8 +437,13 @@ export async function runREMConsolidation(
   // but `consolidation_logs.memories_affected` is `uuid[]`, which rejects
   // anything that isn't a full UUID. Resolve here; drop unresolvable.
   const fullIdByPrefix = new Map<string, string>()
-  for (const m of inputMemories) fullIdByPrefix.set(m.id.slice(0, 8), m.id)
-  for (const m of existingPatterns) fullIdByPrefix.set(m.id.slice(0, 8), m.id)
+  const ambiguousPrefixes=new Set<string>()
+  for(const memory of [...inputMemories,...existingPatterns]) {
+    const prefix=memory.id.slice(0,8),previous=fullIdByPrefix.get(prefix)
+    if(previous&&previous!==memory.id)ambiguousPrefixes.add(prefix)
+    else fullIdByPrefix.set(prefix,memory.id)
+  }
+  for(const prefix of ambiguousPrefixes){fullIdByPrefix.delete(prefix);connectionByPrefix.delete(prefix)}
   const resolveIds = (ids: string[]): string[] => {
     const out: string[] = []
     for (const id of ids) {
@@ -452,23 +491,11 @@ If no clear patterns, output: NO_PATTERNS`
     if (!isDupe) deduped.push(c)
   }
 
-  // Apply hard cap and write. Each synthesised pattern inherits the max
-  // sensitivity of its connected source memories — so a pattern drawn
-  // across confidential facts stays confidential. Defaults to 'internal'
-  // when the model emits an ID prefix we can't resolve (defensive).
-  //
-  // Cross-cycle dedup (only for NEW candidates — EXTENDS bypasses this):
-  // if a candidate near-duplicates an existing connection memory, keep the
-  // LOWER-tier one (broader access) and delete the higher-tier. This
-  // handles the case where day 1 produced a confidential-stamped pattern
-  // P, and day 2 re-draws the same gist from purely public sources (P'
-  // with a public stamp) — we want P' to win so the insight becomes
-  // visible to all clearances, not two near-duplicates at different tiers.
-  const rank: Record<'public' | 'internal' | 'confidential', number> = { public: 1, internal: 2, confidential: 3 }
-
+  // The full prompt envelope is authoritative, never the model's CONNECTS list.
   let patternsFound = 0
   let extended = 0
   for (const c of deduped.slice(0, maxPatterns)) {
+    if (resolveIds(c.ids).length !== c.ids.length || new Set(resolveIds(c.ids)).size < 2) continue
     // EXTENDS path: model says this refines an existing connection.
     if (c.extendsId) {
       const target = connectionByPrefix.get(c.extendsId.slice(0, 8))
@@ -481,6 +508,7 @@ If no clear patterns, output: NO_PATTERNS`
         await store.update(target.id, {
           summary: c.summary,
           detail: mergedDetail || undefined,
+          derivation,
         })
         affected.push(target.id, ...resolveIds(c.ids))
         extended++
@@ -489,41 +517,8 @@ If no clear patterns, output: NO_PATTERNS`
       // EXTENDS id didn't resolve — fall through to new-pattern path.
     }
 
-    // Start at the lowest tier and raise to max(source sensitivities).
-    // If no source resolves (defensive — shouldn't happen under the dedup
-    // upstream), fall through to 'internal' as a safe default.
-    let stamp: 'public' | 'internal' | 'confidential' = 'public'
-    let anyResolved = false
-    for (const id of c.ids) {
-      const prefix = id.slice(0, 8)
-      const src = sensitivityByPrefix.get(prefix)
-      if (src) {
-        anyResolved = true
-        if (rank[src] > rank[stamp]) stamp = src
-      }
-    }
-    if (!anyResolved) stamp = 'internal'
-
-    // Find near-duplicate existing patterns (Jaccard >= 0.7).
-    const duplicates = existingPatterns.filter(
-      (ex) => computeSimilarity(ex.summary, c.summary) >= 0.7,
-    )
-
-    if (duplicates.length > 0) {
-      const lowestExistingRank = Math.min(...duplicates.map((d) => rank[d.sensitivity]))
-      if (rank[stamp] >= lowestExistingRank) {
-        // An existing pattern already covers this insight at an equal-or-
-        // broader tier — skip writing the new one. Consumers of any tier
-        // >= lowestExistingRank will still see it through the existing row.
-        continue
-      }
-      // The new pattern is at a strictly lower tier than every existing
-      // duplicate — broaden visibility by deleting the higher-tier
-      // duplicates and writing the new one.
-      for (const dup of duplicates) {
-        await store.deleteMemory(dup.id)
-      }
-    }
+    // Only this exact envelope's prior patterns participated in the prompt.
+    if (existingPatterns.some(ex => computeSimilarity(ex.summary, c.summary) >= 0.7)) continue
 
     await store.create({
       assistantId, userId,
@@ -535,7 +530,11 @@ If no clear patterns, output: NO_PATTERNS`
       detail: c.detail ?? undefined,
       source: 'consolidation',
       confidence: 0.6,
-      sensitivity: stamp,
+      sensitivity: floor.sensitivity,
+      compartments: floor.compartments,
+      projectIds: floor.projectIds,
+      workspaceId: floor.workspaceId,
+      derivation,
       tags: [REM_OUTPUT_TAG],
       createdByUserId: userId,
       createdByAssistantId: assistantId,
@@ -809,50 +808,44 @@ export async function runDeepConsolidation(
       memories: liveMemories,
       minGroupSize: dedupMinGroup,
       maxGroupSize: dedupMaxGroup,
+      opts,
     })
     merged = dedupResult.mergedIds.length
     if (merged > 0) {
       affected.push(...dedupResult.mergedIds)
-      const mergedSet = new Set(dedupResult.mergedIds)
+      const mergedSet = new Set([...dedupResult.mergedIds,...dedupResult.supersededIds])
       liveScored = liveScored.filter(({ memory }) => !mergedSet.has(memory.id))
     }
   }
 
-  // ── 5. SOUL synthesis — shared first, then per-app deltas ──
-  const sharedSynth = await store.listForSoulSynthesis(assistantId, userId, null)
-  const sharedSoul = await synthesiseSoul({
-    callModel,
-    input: sharedSynth,
-    mode: 'shared',
-  })
-  if (sharedSoul) {
-    const previous = await store.getSoul(assistantId, userId)
-    await store.upsertSoul(assistantId, userId, null, sharedSoul)
-    opts?.onEvent?.({
-      type: 'soul_updated',
-      previousLength: previous?.length ?? 0,
-      newLength: sharedSoul.length,
-      changeMagnitude: changeMagnitude(previous, sharedSoul),
-    })
-  }
-
-  for (const appId of opts?.appIds ?? []) {
-    const appSynth = await store.listForSoulSynthesis(assistantId, userId, appId)
-    const appSoul = await synthesiseSoul({
-      callModel,
-      input: appSynth,
-      mode: 'app',
-      sharedSoul,
-    })
-    if (appSoul) {
-      const previous = await store.getSoul(assistantId, userId, appId)
-      await store.upsertSoul(assistantId, userId, appId, appSoul)
-      opts?.onEvent?.({
-        type: 'soul_updated',
-        previousLength: previous?.length ?? 0,
-        newLength: appSoul.length,
-        changeMagnitude: changeMagnitude(previous, appSoul),
+  // ── 5. Scope-bound preferences; no global slot receives restricted inputs. ──
+  const sharedByScope = new Map<string, { content: string; sources: ScopeSource[] }>()
+  for (const appId of [null, ...(opts?.appIds ?? [])]) {
+    const input = await store.listForSoulSynthesis(assistantId, userId, appId)
+    const buckets = new Map<string,{preferences:MemoryRecord[];attributes:Record<string,unknown>|null;sources:ScopeSource[]}>()
+    for(const preferences of scopeBuckets(input.preferences,opts)) {
+      const sources=preferences.map(memorySource)
+      buckets.set(resourceScopeKey(sources[0]),{preferences,attributes:null,sources})
+    }
+    if(input.selfEntityAttributes&&Object.keys(input.selfEntityAttributes).some(key=>key!=='self')) {
+      try {
+        const sources=input.selfEntitySources??[]
+        const scope=deriveResourceScope({producer:'consolidation:self-profile',sources})
+        const key=resourceScopeKey(scope),bucket=buckets.get(key)??{preferences:[],attributes:null,sources:[]}
+        bucket.attributes=input.selfEntityAttributes;bucket.sources.push(...sources);buckets.set(key,bucket)
+      } catch {opts?.onEvent?.({type:'scope_withheld',reason:'scope_evidence_missing',count:1})}
+    }
+    for (const [key,{preferences,attributes,sources}] of buckets) {
+      const shared = appId ? sharedByScope.get(key) : undefined
+      const content = await synthesiseSoul({ callModel,
+        input: { selfEntityAttributes: attributes, preferences },
+        mode: appId ? 'app' : 'shared', sharedSoul: shared?.content,
       })
+      if (!content) continue
+      const derivation = { producer: 'consolidation:soul', sources: [...sources, ...(shared?.sources ?? [])] }
+      await store.upsertSoul(assistantId,userId,appId,content,derivation)
+      if (!appId) sharedByScope.set(key,{ content,sources })
+      opts?.onEvent?.({ type: 'soul_updated',previousLength: 0,newLength: content.length,changeMagnitude: 1 })
     }
   }
 
@@ -988,83 +981,45 @@ export async function runReflectionConsolidation(
     limit: maxEvents,
   })
 
-  if (events.length < REFLECTION_MIN_EVENTS) {
-    return {
-      phase: 'reflection',
-      memoriesAffected: [],
-      summary: `Too few corrections for reflection (${events.length} < ${REFLECTION_MIN_EVENTS})`,
-    }
-  }
-
-  const prompt = buildReflectionPrompt(events)
-  const raw = (await callModel(prompt)).trim()
-  const patterns = parseReflectionOutput(raw)
-
-  if (patterns.length === 0) {
-    return {
-      phase: 'reflection',
-      memoriesAffected: [],
-      summary: `LLM returned no patterns over ${events.length} corrections`,
-    }
-  }
-
-  // Stamp every synthesised pattern. Sensitivity defaults to 'internal'
-  // — the corrections themselves cross sensitivity tiers and the
-  // synthesised rule is necessarily a coarser abstraction; reading it
-  // back doesn't leak the underlying confidential row content.
-  const affected: string[] = []
-  for (const p of patterns) {
+  const buckets = new Map<string, typeof events>()
+  let withheld = 0
+  for (const event of events) {
     try {
-      // No cast: the type-erasing `as Parameters<...>` here used to hide a
-      // missing `createdByUserId`, so every create threw against the WU-4.5
-      // authorship guard and the catch below swallowed it — reflection
-      // memories never persisted (2026-07-10 source audit, dead write path).
-      // `scope` is the DB vocabulary ('workspace', per the header contract
-      // "synthesized memories are workspace-scoped") — the old 'team' value
-      // was the tool-surface alias and violates the valid_scope CHECK.
-      const memory = await store.create({
-        assistantId: params.assistantId,
-        userId: params.userId,
-        workspaceId: params.workspaceId,
-        scope: 'workspace',
-        tags: [REFLECTION_OUTPUT_TAG, ...(p.tags ?? [])],
-        summary: p.summary,
-        detail: p.detail,
-        source: 'reflection',
-        sensitivity: 'internal',
-        createdByUserId: params.userId,
-        createdByAssistantId: params.assistantId,
-      })
-      affected.push(memory.id)
-    } catch (err) {
-      // Per-pattern failure shouldn't kill the whole reflection run —
-      // the LLM might emit a malformed pattern that breaks one create
-      // call. Log and continue.
-      console.warn(
-        '[reflection-consolidation] memory write failed:',
-        err instanceof Error ? err.message : String(err),
-      )
+      const scope = deriveResourceScope({producer:'consolidation:reflection',sources:event.scopeSources??[]})
+      if(scope.workspaceId!==params.workspaceId)throw new DerivedScopeError('scope_evidence_missing')
+      const key=resourceScopeKey(scope),bucket=buckets.get(key)??[]
+      bucket.push(event);buckets.set(key,bucket)
+    } catch { withheld++ }
+  }
+  if(withheld)opts?.onEvent?.({type:'scope_withheld',reason:'scope_evidence_missing',count:withheld})
+  const affected:string[]=[]
+  let patternsFound=0
+  for(const bucket of buckets.values()) {
+    if(bucket.length<REFLECTION_MIN_EVENTS)continue
+    const derivation={producer:'consolidation:reflection',sources:bucket.flatMap(event=>event.scopeSources!)}
+    const floor=deriveResourceScope(derivation)
+    const patterns=parseReflectionOutput((await callModel(buildReflectionPrompt(bucket))).trim())
+    patternsFound+=patterns.length
+    for(const pattern of patterns) {
+      try {
+        const memory=await store.create({
+          assistantId:params.assistantId,userId:params.userId,workspaceId:params.workspaceId,
+          scope:'workspace',tags:[REFLECTION_OUTPUT_TAG,...(pattern.tags??[])],
+          summary:pattern.summary,detail:pattern.detail,source:'reflection',
+          sensitivity:floor.sensitivity,compartments:floor.compartments,projectIds:floor.projectIds,
+          derivation,createdByUserId:params.userId,createdByAssistantId:params.assistantId,
+        })
+        affected.push(memory.id)
+      } catch(error) {
+        // Do not leak correction text into diagnostics or treat a failed write as success.
+        console.warn('[reflection-consolidation] scoped pattern write withheld',error instanceof DerivedScopeError?error.code:'write_failed')
+      }
     }
   }
-
-  const summary = `Synthesised ${affected.length} patterns from ${events.length} corrections`
-  await store.logWorkspaceConsolidation({
-    assistantId: params.assistantId,
-    workspaceId: params.workspaceId,
-    phase: 'reflection',
-    summary,
-    memoriesAffected: affected,
-  })
-
-  opts?.onEvent?.({
-    type: 'consolidation_completed',
-    phase: 'reflection',
-    memoriesAffected: affected.length,
-    merged: 0,
-    patternsFound: patterns.length,
-  })
-
-  return { phase: 'reflection', memoriesAffected: affected, summary }
+  const summary=`Synthesised ${affected.length} patterns from ${events.length-withheld} scoped corrections; withheld ${withheld} events without complete scope evidence`
+  await store.logWorkspaceConsolidation({assistantId:params.assistantId,workspaceId:params.workspaceId,phase:'reflection',summary,memoriesAffected:affected})
+  opts?.onEvent?.({type:'consolidation_completed',phase:'reflection',memoriesAffected:affected.length,merged:0,patternsFound})
+  return {phase:'reflection',memoriesAffected:affected,summary}
 }
 
 /** LLM prompt template for the reflection phase. */
@@ -1112,7 +1067,7 @@ INSTRUCTIONS:
     "tags": optional string[] of relevance tags (e.g. ["voice", "scope", "person:sarah"])
 - Output a JSON array. Wrap nothing else around it. If no patterns are durable, output [].
 - Be CONSERVATIVE. It's better to output nothing than to fabricate a pattern from thin signal.
-- The patterns will be saved as workspace-shared memories the model reads on every future turn — they should be true workspace conventions, not personal observations.
+- Patterns retain the audience and sensitivity of these corrections. Learn only what this evidence supports, including personal or departmental preferences; do not generalize them into company-wide conventions.
 
 OUTPUT (JSON array only):`
 }
@@ -1233,9 +1188,11 @@ async function runMemoryDedupSweep(params: {
   memories: MemoryWithMetrics[]
   minGroupSize: number
   maxGroupSize: number
-}): Promise<{ mergedIds: string[] }> {
+  opts?: ConsolidationOptions
+}): Promise<{ mergedIds: string[]; supersededIds: string[] }> {
   const { store, callModel, memories, minGroupSize, maxGroupSize } = params
   const mergedIds: string[] = []
+  const supersededIds: string[] = []
 
   // Post-Phase-4 (retire-memory-type): bucket by (first-tag,
   // sensitivity). The first tag is a coarse proxy for what was
@@ -1243,12 +1200,14 @@ async function runMemoryDedupSweep(params: {
   // operational-state, etc.). Untagged rows form one shared bucket.
   // Identity is no longer in memories so no special-case skip.
   const buckets = new Map<string, MemoryWithMetrics[]>()
-  for (const m of memories) {
+  for (const compatible of scopeBuckets(memories, params.opts)) {
+   for (const m of compatible) {
     const tagKey = m.tags[0] ?? 'untagged'
-    const key = `${tagKey}::${m.sensitivity}`
+    const key = JSON.stringify([tagKey,resourceScopeKey(memorySource(m))])
     const list = buckets.get(key) ?? []
     list.push(m)
     buckets.set(key, list)
+   }
   }
 
   for (const [, group] of buckets) {
@@ -1262,7 +1221,13 @@ async function runMemoryDedupSweep(params: {
       : group
 
     const byPrefix = new Map<string, MemoryWithMetrics>()
-    for (const m of subset) byPrefix.set(m.id.slice(0, 8), m)
+    const collisions=new Set<string>()
+    for (const m of subset) {
+      const prefix=m.id.slice(0,8)
+      if(byPrefix.has(prefix))collisions.add(prefix)
+      else byPrefix.set(prefix,m)
+    }
+    for(const prefix of collisions)byPrefix.delete(prefix)
 
     const block = subset
       .map((m) => {
@@ -1319,20 +1284,26 @@ If no duplicates, output: NO_CLUSTERS`
       if (mergeTargets.length === 0) continue
 
       // Apply: update keeper, hard-delete merge targets.
-      await store.update(keeper.id, {
+      const updated = await store.update(keeper.id, {
         summary: cluster.combinedSummary,
         detail: cluster.combinedDetail ?? undefined,
+        derivation: { producer: 'consolidation:dedup', sources: subset.map(memorySource) },
       })
+      if (!updated) continue
       alreadyTouched.add(keeper.id)
+      supersededIds.push(keeper.id)
       for (const target of mergeTargets) {
         await store.deleteMemory(target.id)
         alreadyTouched.add(target.id)
         mergedIds.push(target.id)
       }
+      // Updating one input makes this prompt's evidence stale. Continue from
+      // fresh source versions next tick, never apply a second cluster from it.
+      break
     }
   }
 
-  return { mergedIds }
+  return { mergedIds, supersededIds }
 }
 
 /**
@@ -1436,7 +1407,8 @@ async function summariseDomains(params: {
 }): Promise<string[]> {
   const upserted: string[] = []
 
-  for (const [domain, bucket] of params.domains) {
+  for (const [domain, unscopedBucket] of params.domains) {
+   for (const bucket of scopeBuckets(unscopedBucket)) {
     if (bucket.length === 0) continue
 
     let summary: string
@@ -1462,31 +1434,13 @@ Output a single line, no preamble.`
       domain,
       summary,
       memoryIds: bucket.map((m) => m.id),
+      derivation: { producer: 'consolidation:domain', sources: bucket.map(memorySource) },
     })
     upserted.push(domain)
+   }
   }
 
   return upserted
-}
-
-/**
- * A crude change-magnitude signal for analytics. 0 means unchanged, 1 means
- * completely different. Character-level edit distance would be more faithful
- * but also more expensive; this approximation is fine for bucketing trends.
- */
-function changeMagnitude(previous: string | null | undefined, next: string): number {
-  if (!previous) return 1
-  if (previous === next) return 0
-  const shared = commonPrefixLength(previous, next)
-  const longer = Math.max(previous.length, next.length)
-  return longer === 0 ? 0 : 1 - shared / longer
-}
-
-function commonPrefixLength(a: string, b: string): number {
-  const len = Math.min(a.length, b.length)
-  let i = 0
-  while (i < len && a[i] === b[i]) i++
-  return i
 }
 
 // ── Similarity helper ──────────────────────────────────────────
@@ -1516,27 +1470,8 @@ export async function runTeamLightConsolidation(
   const index = await store.getWorkspaceIndexSystem(assistantId, workspaceId, true)
   const affected: string[] = []
 
-  for (let i = 0; i < index.length; i++) {
-    for (let j = i + 1; j < index.length; j++) {
-      const a = index[i]
-      const b = index[j]
-      // Post-Phase-4: keep REM-output and user-generated rows in
-      // separate dedup groups (see Light phase comment).
-      const aIsRemOutput = isRemOutput(a)
-      if (aIsRemOutput !== isRemOutput(b)) continue
-      const similarity = computeSimilarity(a.summary, b.summary)
-      const threshold = aIsRemOutput ? 0.6 : 0.9
-      if (similarity >= threshold) {
-        const bFull = await store.getByIdSystem(b.id)
-        if (bFull) {
-          const aFull = await store.getByIdSystem(a.id)
-          const mergedDetail = mergeDetails(aFull?.detail, bFull.detail)
-          await store.update(a.id, { detail: mergedDetail })
-          await store.update(b.id, { confidence: 0 })
-          affected.push(b.id)
-        }
-      }
-    }
+  for (const bucket of scopeBuckets(index, opts)) {
+    affected.push(...await mergeCompatibleMemories(store, bucket))
   }
 
   const summary = `Deduped ${affected.length} team memories`

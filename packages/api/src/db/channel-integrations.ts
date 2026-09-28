@@ -24,6 +24,7 @@ import {
   decryptCredentials as _decryptCredentials,
 } from './credential-crypto.js'
 import { parseTopicChannelId } from '@use-brian/channels'
+import type { Sensitivity } from '@use-brian/core'
 import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -225,6 +226,21 @@ export type SeenChat = {
   lastSeenAt: string
 }
 
+/** Server-approved output audience for one exact provider conversation. */
+export type DeliveryAudienceBinding = {
+  version: 1
+  channelId: string
+  audienceType: 'individual' | 'group'
+  clearance: Sensitivity
+  compartments: string[]
+  projectIds: string[]
+  /** Exact current member for a private destination; null for shared audiences. */
+  recipientUserId: string | null
+  expiresAt: string | null
+  approvedByUserId: string
+  approvedAt: string
+}
+
 /**
  * Per-integration behavior settings stored in the `config` JSONB column.
  * Shared across Slack and Telegram BYO integrations. Not all fields apply
@@ -252,6 +268,8 @@ export type ChannelIntegrationConfig = {
    * to the app that observed the chat. Topic fields are Telegram-specific.
    */
   seenChats?: SeenChat[]
+  /** Owner/admin-attested external delivery audiences; approver fields are server-owned. */
+  deliveryAudienceBindings?: DeliveryAudienceBinding[]
   /**
    * Feishu/Lark only. Admin-owned fail-closed admission gate for passive group
    * ingest. Rules choose routing only after this allowlist admits the chat.
@@ -611,6 +629,14 @@ export function trustedGuestAuthorityChanged(
   return false
 }
 
+export function deliveryAudienceAuthorityChanged(
+  current: ChannelIntegrationConfig,
+  next: ChannelIntegrationConfig,
+): boolean {
+  return JSON.stringify(current.deliveryAudienceBindings ?? [])
+    !== JSON.stringify(next.deliveryAudienceBindings ?? [])
+}
+
 /** Resolve a trusted Telegram username entry to its stable sender id. Returns
  * null when the grant changed or disappeared before the first matching turn. */
 export function pinTrustedTelegramUsernameInConfig(
@@ -783,7 +809,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
       externalSurfaceId,
     ) {
       const parsedSurface = parseTopicChannelId(externalSurfaceId)
-      const parentSurfaceId = parsedSurface.messageThreadId == null
+      const parentSurfaceId = (parsedSurface.messageThreadId ?? parsedSurface.discussionRootId) == null
         ? externalSurfaceId
         : parsedSurface.chatId
       const result = await query<CiRow & { credentials: Buffer }>(
@@ -848,7 +874,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
       externalSurfaceId,
     ) {
       const parsedSurface = parseTopicChannelId(externalSurfaceId)
-      const parentSurfaceId = parsedSurface.messageThreadId == null
+      const parentSurfaceId = (parsedSurface.messageThreadId ?? parsedSurface.discussionRootId) == null
         ? externalSurfaceId
         : parsedSurface.chatId
       const result = await query<{
@@ -1044,9 +1070,12 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
       if (
         current.role !== 'owner'
         && current.role !== 'admin'
-        && trustedGuestAuthorityChanged(current.config ?? {}, params.config)
+        && (
+          trustedGuestAuthorityChanged(current.config ?? {}, params.config)
+          || deliveryAudienceAuthorityChanged(current.config ?? {}, params.config)
+        )
       ) {
-        throw new Error('not authorized: trusted guest full access requires owner or admin')
+        throw new Error('not authorized: channel authority changes require owner or admin')
       }
 
       // Revoke channel-provisioned workspace membership before persisting a

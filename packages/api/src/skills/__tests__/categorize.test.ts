@@ -1,12 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   buildCategorizePrompt,
   existingGroupsOf,
   MAX_NEW_GROUPS_PER_PASS,
   parseCategorySuggestions,
   selectCategorizableSkills,
+  suggestSkillCategories,
   type CategorizableSkill,
 } from '../categorize.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/core'
+import {
+  executionFixture,
+  fixtureDecisionProvider,
+} from '../../../../core/src/decisions/__tests__/execution-fixture.js'
 
 function skill(over: Partial<CategorizableSkill> = {}): CategorizableSkill {
   return {
@@ -17,6 +23,18 @@ function skill(over: Partial<CategorizableSkill> = {}): CategorizableSkill {
     category: 'custom',
     ...over,
   }
+}
+
+function llmProvider(output: string): LLMProvider {
+  async function* stream(): AsyncGenerator<StreamChunk> {
+    yield { type: 'text_delta', text: output } as StreamChunk
+  }
+  return {
+    name: 'mock',
+    models: ['mock'],
+    createSession: vi.fn(),
+    stream: vi.fn(() => stream()),
+  } as unknown as LLMProvider
 }
 
 describe('[COMP:api/skill-categorize] Candidate selection', () => {
@@ -254,5 +272,50 @@ describe('[COMP:api/skill-categorize] Response parsing', () => {
     expect(out).toEqual([
       { skillRowId: 'a', name: 'Weekly status', current: 'custom', suggested: 'research' },
     ])
+  })
+})
+
+describe('[COMP:api/skill-categorize] classifier cascade', () => {
+  it('accepts known groups without invoking the LLM', async () => {
+    const llm = llmProvider('[]')
+    const skills = [skill({ rowId: 'a' }), skill({ rowId: 'b', name: 'Lead research' })]
+    const suggestions = await suggestSkillCategories({
+      provider: llm,
+      model: 'mock',
+      skills,
+      existingGroups: ['Client Outreach'],
+      decisionRuntime: executionFixture({
+        llm,
+        primary: fixtureDecisionProvider(async (request) => ({
+          providerId: 'fixture-decision',
+          model: request.model,
+          answers: [
+            { questionId: '1', kind: 'choice', value: 'communication', evidence: { source: 'native_distribution', confidence: 0.96 } },
+            { questionId: '2', kind: 'choice', value: 'research', evidence: { source: 'native_distribution', confidence: 0.97 } },
+          ],
+        })),
+      }),
+    })
+    expect(suggestions.map((suggestion) => suggestion.suggested)).toEqual(['communication', 'research'])
+    expect(llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('uses one LLM completion when a new taxonomy group is required', async () => {
+    const llm = llmProvider('[{"i":1,"group":"Gym & Training","why":"Workout automation."}]')
+    const suggestions = await suggestSkillCategories({
+      provider: llm,
+      model: 'mock',
+      skills: [skill({ rowId: 'a', name: 'Workout planner' })],
+      decisionRuntime: executionFixture({
+        llm,
+        primary: fixtureDecisionProvider(async (request) => ({
+          providerId: 'fixture-decision',
+          model: request.model,
+          answers: [{ questionId: '1', kind: 'choice', value: '__new_group__', evidence: { source: 'native_distribution', confidence: 0.94 } }],
+        })),
+      }),
+    })
+    expect(suggestions[0]).toMatchObject({ skillRowId: 'a', suggested: 'Gym & Training' })
+    expect(llm.stream).toHaveBeenCalledTimes(1)
   })
 })

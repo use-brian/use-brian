@@ -88,10 +88,11 @@ export type LiveTranscriptWindowRow = {
 /** Prepare the collaborative page before opening the microphone. */
 export async function startLiveRecordingPage(params: {
   workspaceId: string;
-  destination: "existing" | "new";
+  destination: "existing" | "new" | "meeting-notes";
   pageId?: string;
   parentPageId?: string | null;
   title?: string;
+  folderName?: string;
 }): Promise<LiveRecordingPage> {
   const res = await authFetch(`${API_URL}/api/recordings/live/start`, {
     method: "POST",

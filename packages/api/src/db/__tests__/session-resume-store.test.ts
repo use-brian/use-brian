@@ -10,6 +10,16 @@ import { query } from '../client.js'
 const mockQuery = vi.mocked(query)
 const store = createDbSessionResumeStore()
 
+const STARTING_ACCESS = {
+  workspaceId: 'workspace-1',
+  userId: 'user-1',
+  clearance: 'internal' as const,
+  compartments: ['product'],
+  mutationCompartments: ['product'],
+  projectIds: ['project-1'],
+  visibilityAssistantIds: ['asst-1'],
+}
+
 beforeEach(() => {
   mockQuery.mockReset()
 })
@@ -33,6 +43,7 @@ describe('[COMP:api/session-resume-store] create', () => {
       suspendedToolName: 'gmailSendMessage',
       suspendedToolInput: { to: 'user@example.com', subject: 'hi' },
       loopStepIndex: 3,
+      startingAccessCeiling: STARTING_ACCESS,
     })
 
     expect(row).toEqual(SAMPLE_ROW)
@@ -44,8 +55,9 @@ describe('[COMP:api/session-resume-store] create', () => {
       'app-1',
       'gmailSendMessage',
       JSON.stringify({
-        __useBrianResumeVersion: 1,
+        __useBrianResumeVersion: 2,
         toolInput: { to: 'user@example.com', subject: 'hi' },
+        startingAccessCeiling: STARTING_ACCESS,
       }),
       3,
     ])
@@ -63,6 +75,7 @@ describe('[COMP:api/session-resume-store] create', () => {
       suspendedToolName: 'gmailSendMessage',
       suspendedToolInput: { to: 'user@example.com', subject: 'hi' },
       loopStepIndex: 3,
+      startingAccessCeiling: STARTING_ACCESS,
     })
 
     expect(row).toEqual(SAMPLE_ROW)
@@ -74,11 +87,12 @@ describe('[COMP:api/session-resume-store] create', () => {
 
   it('stores and decodes the selected profile and logical tier in JSONB', async () => {
     const storedInput = {
-      __useBrianResumeVersion: 1,
+      __useBrianResumeVersion: 2,
       toolInput: { to: 'user@example.com' },
       selectedCustomModel: 'custom:profile-1',
       selectedTier: 'max',
       selectedLegacyByo: false,
+      startingAccessCeiling: STARTING_ACCESS,
     }
     mockQuery.mockResolvedValueOnce({
       rows: [{ ...SAMPLE_ROW, suspendedToolInput: storedInput }],
@@ -94,6 +108,7 @@ describe('[COMP:api/session-resume-store] create', () => {
       selectedCustomModel: 'custom:profile-1',
       selectedTier: 'max',
       selectedLegacyByo: false,
+      startingAccessCeiling: STARTING_ACCESS,
     })
 
     expect(row).toMatchObject({
@@ -101,8 +116,43 @@ describe('[COMP:api/session-resume-store] create', () => {
       selectedCustomModel: 'custom:profile-1',
       selectedTier: 'max',
       selectedLegacyByo: false,
+      startingAccessCeiling: STARTING_ACCESS,
     })
     expect(mockQuery.mock.calls[0][1]?.[3]).toBe(JSON.stringify(storedInput))
+  })
+
+  it('decodes legacy envelopes without inventing a starting authority ceiling', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        ...SAMPLE_ROW,
+        suspendedToolInput: {
+          __useBrianResumeVersion: 1,
+          toolInput: { to: 'user@example.com' },
+        },
+      }],
+      rowCount: 1,
+    } as never)
+
+    const row = await store.getBySessionId('sess-1')
+    expect(row).toMatchObject({ suspendedToolInput: { to: 'user@example.com' } })
+    expect(row).not.toHaveProperty('startingAccessCeiling')
+  })
+
+  it('withholds a malformed version-2 starting ceiling', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        ...SAMPLE_ROW,
+        suspendedToolInput: {
+          __useBrianResumeVersion: 2,
+          toolInput: { to: 'user@example.com' },
+          startingAccessCeiling: { workspaceId: 'workspace-1', userId: 'user-1' },
+        },
+      }],
+      rowCount: 1,
+    } as never)
+
+    const row = await store.getBySessionId('sess-1')
+    expect(row).not.toHaveProperty('startingAccessCeiling')
   })
 })
 

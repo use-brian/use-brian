@@ -13,6 +13,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { assertExecutionResourceScope } from '../db/access-predicate.js'
+import { executeWithCurrentAuthority } from '../context-scope/authority-lease.js'
 import type {
   AccessContext,
   FilesApi,
@@ -33,6 +36,7 @@ import { buildStorageKey, buildStorageUri, type StorageUriScheme } from './gcs-c
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { WorkspacePlan } from '../db/workspace-store.js'
 import { localDirectoryMetadata, storageKeyForWorkspaceFile } from './local-directory-import.js'
+import { WEBSITE_MEDIA_PREFIX } from '../db/website-media-store.js'
 
 /**
  * Per-workspace resolution of the bytes-layer client. The default
@@ -108,6 +112,7 @@ function accessCtx(ctx: FilesContext): AccessContext {
     assistantKind: ctx.assistantKind ?? 'standard',
     clearance: ctx.clearance,
     compartments: ctx.compartments,
+    mutationCompartments: ctx.mutationCompartments,
     projectIds: ctx.projectIds,
   }
 }
@@ -142,6 +147,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function isUuid(s: string): boolean {
   return UUID_RE.test(s)
+}
+
+/**
+ * Public website media (`/doc/website-media/`) is written only by the owner/admin media route and the
+ * Association service, both as the person (no assistant). Assistant file tools may not add, change or
+ * delete it there: that would bypass the owner/admin check and could break a live site.
+ */
+function assistantInWebsiteMedia(ctx: FilesContext, path: string): boolean {
+  return !!ctx.assistantId && `${path}/`.startsWith(WEBSITE_MEDIA_PREFIX)
 }
 
 /** Normalize an absolute-or-leading-slash workspace path to a canonical form. */
@@ -227,6 +241,21 @@ export type CreateFilesApiDeps = {
     }
 )
 
+/** A commit acknowledgement can be lost after the successor became visible. */
+class FilePublicationUncertainError extends Error {
+  readonly code = 'file_publication_uncertain'
+  readonly retrySafe = false
+  readonly operationMayHaveExecuted = true
+  constructor() { super('The file update could not be confirmed. Inspect the file before retrying.') }
+}
+
+/** Snapshot primitive fields before I/O, including mutable adapter results. */
+export const workspaceFileReadRevision = (file: WorkspaceFile): string => JSON.stringify([
+  file.id, file.workspaceId, file.storageUri, file.scopeVersion, file.updatedAt,
+  file.userId, file.assistantId, file.sensitivity, file.compartments, file.projectIds,
+  file.validTo, file.retractedAt, file.supersededBy,
+])
+
 export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
   const { store, auditStore } = deps
   const resolver: FilesClientResolver =
@@ -243,6 +272,46 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       return store.getById(ac, idOrPath)
     }
     return store.getByPath(ac, normalizePath(idOrPath))
+  }
+
+  // Snapshot primitive fields before I/O: even a mutable adapter must not hide
+  // a source or classification change by mutating the same object in place.
+  const readRevision = workspaceFileReadRevision
+
+  async function readCurrentBytes(ctx: FilesContext, idOrPath: string): Promise<FilesResult<FilesReadBytesResult>> {
+    const unavailable = () => err<FilesReadBytesResult>({ kind: 'not_found', reference: idOrPath })
+    const file = await executeWithCurrentAuthority(() => resolveByIdOrPath(ctx, idOrPath))
+    if (!file || file.validTo || file.retractedAt || file.supersededBy) return unavailable()
+    const revision = readRevision(file)
+    const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
+    const blob = await gcs.readBlob(storageKeyForWorkspaceFile(file))
+    if (!blob) return unavailable()
+    return executeWithCurrentAuthority(async () => {
+      const current = await resolveByIdOrPath(ctx, idOrPath)
+      if (!current || readRevision(current) !== revision) return unavailable()
+      return ok({ file: current, bytes: blob.bytes })
+    })
+  }
+
+  function mutationAllowed(ctx: FilesContext, file?: WorkspaceFile, sensitivity: WorkspaceFile['sensitivity'] = file?.sensitivity ?? 'internal'): boolean {
+    const access = accessCtx(ctx)
+    const source = file ? { ...file, compartments: file.compartments ?? [], projectIds: file.projectIds ?? [] } : undefined
+    try {
+      if (source) {
+        if (file!.validTo || file!.retractedAt || file!.supersededBy) return false
+        assertExecutionResourceScope(source, 'read', access)
+        assertExecutionResourceScope(source, 'mutation', access)
+      }
+      assertExecutionResourceScope({ workspaceId: ctx.workspaceId,
+        userId: file?.userId ?? null, assistantId: file?.assistantId ?? null,
+        sensitivity: maxSensitivity(file?.sensitivity ?? 'public', sensitivity, ctx.writeSensitivity ?? 'public'),
+        compartments: unionScopeRequirements(file?.compartments, ctx.writeCompartments),
+        projectIds: unionScopeRequirements(file?.projectIds, ctx.writeProjectIds) }, 'mutation', access)
+      return true
+    } catch (error) {
+      if ((error as { code?: string }).code === 'scope_operation_denied') return false
+      throw error
+    }
   }
 
   function logAudit(
@@ -285,9 +354,11 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     },
   ): Promise<FilesResult<WorkspaceFile>> {
     const path = normalizePath(p.path)
+    if (assistantInWebsiteMedia(ctx, path)) return err({ kind: 'read_only', path })
     const parentPath = deriveParentPath(path)
     const name = deriveName(path)
     const { mime, bytes } = p
+    if (!mutationAllowed(ctx, undefined, p.sensitivity ?? 'internal')) return err({ kind: 'read_only', reason: 'scope', path })
 
     const ac = accessCtx(ctx)
     const existing = await store.getByPath(ac, path)
@@ -316,16 +387,16 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     const storageKey = buildStorageKey(ctx.workspaceId, fileId)
     const storageUri = buildStorageUri(bucket, ctx.workspaceId, fileId, uriScheme)
 
-    await gcs.writeBlob(storageKey, bytes, {
+    await executeWithCurrentAuthority(() => gcs.writeBlob(storageKey, bytes, {
       workspaceId: ctx.workspaceId,
       createdByUserId: ctx.userId,
       createdByAssistantId: ctx.assistantId ?? undefined,
       mime,
-    })
+    }))
 
     let row: WorkspaceFile
     try {
-      row = await store.create(ctx.userId, {
+      row = await executeWithCurrentAuthority(() => store.create(ctx.userId, {
         id: fileId,
         workspaceId: ctx.workspaceId,
         path,
@@ -337,33 +408,24 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
         title: p.title ?? null,
         summary: p.summary ?? null,
         tags: p.tags,
-        sensitivity: p.sensitivity,
+        sensitivity: maxSensitivity(p.sensitivity ?? 'internal', ctx.writeSensitivity ?? 'public'),
         compartments: ctx.writeCompartments,
         projectIds: ctx.writeProjectIds,
         createdByUserId: ctx.userId,
         createdByAssistantId: ctx.assistantId ?? null,
-      })
+      }, ac))
     } catch (dbErr) {
-      // Best-effort blob rollback. If this fails, the bucket's 30-day
-      // soft-delete lifecycle eventually reclaims the object.
-      try {
-        await gcs.deleteBlob(storageKey)
-      } catch (rollbackErr) {
-        console.warn(
-          `[files-api] write rollback failed for key=${storageKey} after DB insert failure:`,
-          rollbackErr,
-        )
+      // Only an explicit constraint/permission refusal proves the INSERT did
+      // not commit. An uncertain acknowledgement must retain the staged object.
+      const code = (dbErr as { code?: string }).code
+      if (typeof code !== 'string' || !(code.startsWith('23') || code === '42501' || code === 'scope_operation_denied')) {
+        throw new FilePublicationUncertainError()
       }
-      // The `getByPath` gate above is a CURRENT-version, access-scoped read;
-      // the DB constraint is neither. A row the caller cannot see — one that
-      // left the current window between the check and the insert, or one
-      // above their clearance / outside their visibility axes — passes the
-      // gate and still collides. Answer the same `conflict` the gate answers
-      // rather than throwing to a bare 500, so the surface can say which
-      // path is taken instead of "Failed to store file".
+      try { await gcs.deleteBlob(storageKey) } catch { /* Unpublished orphan: storage retention handles cleanup. */ }
       if (isUniqueViolation(dbErr)) {
         return err({ kind: 'conflict', path })
       }
+      if (code === 'scope_operation_denied') return err({ kind: 'read_only', reason: 'scope', path })
       throw dbErr
     }
 
@@ -400,43 +462,51 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     async append(ctx, idOrPath, content): Promise<FilesResult<WorkspaceFile>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
-      if (localDirectoryMetadata(file)) return err({ kind: 'read_only', path: file.path })
+      if (localDirectoryMetadata(file) || assistantInWebsiteMedia(ctx, file.path)) return err({ kind: 'read_only', path: file.path })
+      if (!mutationAllowed(ctx, file)) return err({ kind: 'read_only', reason: 'scope', path: file.path })
+      if (!file.scopeVersion) return err({ kind: 'conflict', reason: 'changed', path: file.path })
 
       const addBytes = Buffer.from(content, 'utf-8')
-      const { byo } = await resolver.forWorkspace(ctx.workspaceId)
-      if (!byo) {
+      const target = await resolver.forWorkspace(ctx.workspaceId)
+      if (!target.byo) {
         const limitBytes = await storageLimitBytesFor(ctx.workspaceId)
         const currentBytes = await store.sumSizeBytes(accessCtx(ctx))
-        if (currentBytes + addBytes.length > limitBytes) {
-          return err({
-            kind: 'quota_exceeded',
-            currentBytes,
-            limitBytes,
-            attemptedBytes: addBytes.length,
-          })
-        }
+        if (currentBytes + addBytes.length > limitBytes) return err({
+          kind: 'quota_exceeded', currentBytes, limitBytes, attemptedBytes: addBytes.length,
+        })
       }
+      const source = await resolver.forUri(ctx.workspaceId, file.storageUri)
+      const original = await executeWithCurrentAuthority(() => source.readBlob(storageKeyForWorkspaceFile(file)))
+      if (!original) return err({ kind: 'not_found', reference: idOrPath })
+      if (original.bytes.length !== file.sizeBytes) return err({ kind: 'conflict', reason: 'changed', path: file.path })
+      const bytes = Buffer.concat([original.bytes, addBytes])
+      const stagedId = randomUUID()
+      const storageKey = buildStorageKey(ctx.workspaceId, stagedId)
+      const storageUri = buildStorageUri(target.bucket, ctx.workspaceId, stagedId, target.uriScheme)
+      await executeWithCurrentAuthority(() => target.gcs.writeBlob(storageKey, bytes, {
+        workspaceId: ctx.workspaceId, createdByUserId: ctx.userId,
+        createdByAssistantId: ctx.assistantId ?? undefined, mime: file.mime,
+      }))
 
-      const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-      const storageKey = storageKeyForWorkspaceFile(file)
-      await gcs.appendBlob(storageKey, addBytes)
-
-      const newSize = file.sizeBytes + addBytes.length
-      const updated = await store.updateSize(ctx.userId, ctx.workspaceId, file.id, newSize, {
-        compartments: ctx.writeCompartments,
-        projectIds: ctx.writeProjectIds,
-      })
+      let updated: WorkspaceFile | null
+      try {
+        updated = await executeWithCurrentAuthority(() => store.supersede(ctx.userId, ctx.workspaceId, file.id, {
+          expectedScopeVersion: file.scopeVersion, editorUserId: ctx.userId,
+          editorAssistantId: ctx.assistantId ?? null, storageUri, sizeBytes: bytes.length,
+            sensitivity: maxSensitivity(file.sensitivity, ctx.writeSensitivity ?? 'public'),
+          compartments: ctx.writeCompartments, projectIds: ctx.writeProjectIds,
+        }, accessCtx(ctx)))
+      } catch {
+        // The commit may have succeeded. Deleting this object could destroy
+        // the new current file; leave it for inspection/retention instead.
+        throw new FilePublicationUncertainError()
+      }
       if (!updated) {
-        // Pathological: row vanished mid-append. The GCS append already
-        // happened; we leave it for the soft-delete lifecycle.
-        return err({ kind: 'not_found', reference: idOrPath })
+        try { await target.gcs.deleteBlob(storageKey) } catch { /* Unpublished orphan only. */ }
+        return err({ kind: 'conflict', reason: 'changed', path: file.path })
       }
-
-      logAudit(ctx, 'file.appended', {
-        id: updated.id,
-        path: updated.path,
-        sizeBytes: updated.sizeBytes,
-      }, { added_bytes: addBytes.length })
+      logAudit(ctx, 'file.appended', { id: updated.id, path: updated.path, sizeBytes: updated.sizeBytes },
+        { added_bytes: addBytes.length, previous_file_id: file.id })
       return ok(updated)
     },
 
@@ -448,31 +518,13 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     },
 
     async read(ctx, idOrPath): Promise<FilesResult<FilesReadResult>> {
-      const file = await resolveByIdOrPath(ctx, idOrPath)
-      if (!file) return err({ kind: 'not_found', reference: idOrPath })
-
-      const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-      const blob = await gcs.readBlob(storageKeyForWorkspaceFile(file))
-      if (!blob) {
-        // Row exists but bytes are missing — orphaned row. Surface as
-        // not_found; ops can investigate via storage_uri.
-        return err({ kind: 'not_found', reference: idOrPath })
-      }
-      return ok({ file, content: blob.bytes.toString('utf-8') })
+      const result = await readCurrentBytes(ctx, idOrPath)
+      if (!result.ok) return result
+      return ok({ file: result.value.file, content: Buffer.from(result.value.bytes).toString('utf-8') })
     },
 
     async readBytes(ctx, idOrPath): Promise<FilesResult<FilesReadBytesResult>> {
-      // Byte-preserving read — the read mirror of `writeBytes`. Backs
-      // outbound document delivery (adapter-pattern.md → "Outbound documents").
-      const file = await resolveByIdOrPath(ctx, idOrPath)
-      if (!file) return err({ kind: 'not_found', reference: idOrPath })
-
-      const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-      const blob = await gcs.readBlob(storageKeyForWorkspaceFile(file))
-      if (!blob) {
-        return err({ kind: 'not_found', reference: idOrPath })
-      }
-      return ok({ file, bytes: blob.bytes })
+      return readCurrentBytes(ctx, idOrPath)
     },
 
     async search(ctx, params: FilesSearchParams): Promise<WorkspaceFileIndexRow[]> {
@@ -487,12 +539,26 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     async setMeta(ctx, idOrPath, patch: WorkspaceFileMetaPatch): Promise<FilesResult<WorkspaceFile>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
+      if (assistantInWebsiteMedia(ctx, file.path)) return err({ kind: 'read_only', path: file.path })
+      if (patch.sensitivity !== undefined && maxSensitivity(file.sensitivity, ctx.writeSensitivity ?? 'public', patch.sensitivity) !== patch.sensitivity) {
+        return err({ kind: 'read_only', reason: 'release_required', path: file.path })
+      }
+      if (!mutationAllowed(ctx, file, patch.sensitivity ?? file.sensitivity)) return err({ kind: 'read_only', reason: 'scope', path: file.path })
 
-      const updated = await store.updateMeta(ctx.userId, ctx.workspaceId, file.id, {
-        ...patch,
-        inheritCompartments: ctx.writeCompartments,
-        inheritProjectIds: ctx.writeProjectIds,
-      })
+      let updated: WorkspaceFile | null
+      try {
+        updated = await executeWithCurrentAuthority(() => store.updateMeta(ctx.userId, ctx.workspaceId, file.id, {
+          ...patch,
+          sensitivity: maxSensitivity(file.sensitivity, patch.sensitivity ?? file.sensitivity, ctx.writeSensitivity ?? 'public'),
+          inheritCompartments: ctx.writeCompartments,
+          inheritProjectIds: ctx.writeProjectIds,
+        }, accessCtx(ctx)))
+      } catch (error) {
+        if ((error as { code?: string })?.code === 'scope_declassification_required') {
+          return err({ kind: 'read_only', reason: 'release_required', path: file.path })
+        }
+        throw error
+      }
       if (!updated) return err({ kind: 'not_found', reference: idOrPath })
 
       logAudit(ctx, 'file.meta_updated', { id: updated.id, path: updated.path }, {
@@ -504,14 +570,15 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     async delete(ctx, idOrPath): Promise<FilesResult<{ id: string; path: string }>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
-      if (localDirectoryMetadata(file)) return err({ kind: 'read_only', path: file.path })
+      if (localDirectoryMetadata(file) || assistantInWebsiteMedia(ctx, file.path)) return err({ kind: 'read_only', path: file.path })
+      if (!mutationAllowed(ctx, file)) return err({ kind: 'read_only', reason: 'scope', path: file.path })
 
-      const deleted = await store.delete(ctx.userId, ctx.workspaceId, file.id)
+      const deleted = await executeWithCurrentAuthority(() => store.delete(ctx.userId, ctx.workspaceId, file.id, accessCtx(ctx)))
       if (!deleted) return err({ kind: 'not_found', reference: idOrPath })
 
       try {
         const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-        await gcs.deleteBlob(storageKeyForWorkspaceFile(file))
+        await executeWithCurrentAuthority(() => gcs.deleteBlob(storageKeyForWorkspaceFile(file)))
       } catch (gcsErr) {
         console.warn(
           `[files-api] delete: GCS deleteBlob failed for ${file.id} (row already deleted):`,

@@ -46,6 +46,7 @@ import {
   type TaskTombstoneRecord,
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, query, rollbackAndRelease } from './client.js'
+import { buildAccessPredicate, mutationActorAccess, type AccessContext } from './access-predicate.js'
 import { appendDecisionEvent } from './decision-event-store.js'
 import { appendBrainVerification } from './brain-inbox-store.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
@@ -402,6 +403,7 @@ export async function rejectTask(input: {
   userId: string
   taskId: string
   reason: string
+  access?: AccessContext
   /** Explicit Tasks-UI consent to create/reuse an active narrow deny rule. */
   createRule?: boolean
   /** Brain review compatibility audit, committed with the rejection. */
@@ -413,6 +415,8 @@ export async function rejectTask(input: {
   proposedRuleId: string | null
   proposedRuleClause: string | null
 } | null> {
+  const access = mutationActorAccess(input.userId, input.workspaceId, input.access)
+  const ap = buildAccessPredicate(access, { alias: 't', startIdx: 3, operation: 'mutation' })
   const client = await getAppPool().connect()
   let title: string
   let tombstoneId: string
@@ -441,8 +445,11 @@ export async function rejectTask(input: {
          FROM tasks t
          LEFT JOIN episodes e ON e.id = t.source_episode_id
         WHERE t.id = $1 AND t.workspace_id = $2
-          AND t.valid_to IS NULL AND t.retracted_at IS NULL`,
-      [input.taskId, input.workspaceId],
+          AND t.valid_to IS NULL AND t.retracted_at IS NULL AND NOT t.scope_held
+          AND ${ap.sql}
+          AND context_scope_allows_current_principal(t.workspace_id,t.sensitivity,t.compartments,t.project_ids)
+        FOR UPDATE OF t`,
+      [input.taskId, input.workspaceId, ...ap.params],
     )
     if (existing.rows.length === 0) return null
     title = existing.rows[0].title

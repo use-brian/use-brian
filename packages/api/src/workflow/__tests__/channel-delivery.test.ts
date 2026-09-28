@@ -48,6 +48,7 @@ import {
   SlackApiError,
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
+import { addSessionMessage } from '../../db/sessions.js'
 
 const integrationStore = {
   getCredentialsForAssistantSystem: vi.fn(async () => ({
@@ -115,6 +116,26 @@ beforeEach(() => {
 })
 
 describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
+  it('refuses an unverified audience before persistence or adapter send', async () => {
+    const authorizeDeliveryAudience = vi.fn(async () => ({
+      allowed: false as const,
+      reason: 'delivery_audience_unverified' as const,
+    }))
+    const deliver = createWorkflowChannelDelivery({ integrationStore, authorizeDeliveryAudience })
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'slack',
+      scopeEvidence: { sensitivity: 'confidential', compartments: ['finance'] },
+    })
+    expect(outcome).toEqual({
+      status: 'skipped',
+      channelType: 'slack',
+      reason: 'delivery_audience_unverified',
+    })
+    expect(addSessionMessage).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
+  })
+
   it('slack: passes threadRef as opts.threadTs and returns the posted ts as messageId', async () => {
     const deliver = createWorkflowChannelDelivery({ integrationStore })
     const outcome = await deliver({

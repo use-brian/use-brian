@@ -18,7 +18,11 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const navigation = vi.hoisted(() => ({ search: "", pathname: "/office/templates/template-1", replace: vi.fn() }));
+const navigation = vi.hoisted(() => ({ viewerId: "viewer-1", workspaceId: "11111111-1111-4111-8111-111111111111", search: "", pathname: "/office/templates/template-1", replace: vi.fn(), push: vi.fn() }));
+const collab = vi.hoisted(() => ({ status: "disconnected", synced: false }));
+const offlineApi = vi.hoisted(() => ({
+  list: vi.fn(async () => [] as unknown[]), load: vi.fn(async () => null as unknown), remove: vi.fn(async () => undefined), quarantine: vi.fn(async () => undefined), classify: vi.fn(), materialize: vi.fn(),
+}));
 const api = vi.hoisted(() => ({
   listOfficeTemplates: vi.fn(),
   transitionOfficeTemplateLifecycle: vi.fn(),
@@ -27,34 +31,39 @@ const api = vi.hoisted(() => ({
   getOfficeSnapshot: vi.fn<() => Promise<unknown>>(),
   getOfficeTemplateRouting: vi.fn(),
   saveOfficeTemplateRouting: vi.fn(),
+  syncOfficeOfflineCommands: vi.fn(),
+  transitionOfficeLifecycle: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ back: vi.fn(), forward: vi.fn(), push: vi.fn(), prefetch: vi.fn(), replace: navigation.replace }),
+  useRouter: () => ({ back: vi.fn(), forward: vi.fn(), push: navigation.push, prefetch: vi.fn(), replace: navigation.replace }),
   usePathname: () => navigation.pathname,
   useSearchParams: () => new URLSearchParams(navigation.search),
 }));
 vi.mock("next/link", () => ({ default: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a> }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({ useSidebarData: () => ({ sidebarCollapsed: false, setSidebarCollapsed: vi.fn() }) }));
-vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: "viewer-1", name: "Viewer", email: "viewer@example.com" }) }));
+vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: navigation.workspaceId, me: {id: navigation.viewerId}})}));
+vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: navigation.viewerId, name: "Viewer", email: "viewer@example.com" }) }));
 vi.mock("@/lib/office/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/office/api")>();
   return {
     ...actual,
     getOfficeTemplateRouting: api.getOfficeTemplateRouting,
     saveOfficeTemplateRouting: api.saveOfficeTemplateRouting,
-    listOfficeTemplates: api.listOfficeTemplates,
+    listOfficeTemplates: (...args: unknown[]) => api.listOfficeTemplates(...args).then((value: object) => bounded(value)),
     transitionOfficeTemplateLifecycle: api.transitionOfficeTemplateLifecycle,
-    listOfficeArtifacts: (...args: unknown[]) => api.listOfficeArtifacts(...(args as [])),
-    getOfficeArtifact: (...args: unknown[]) => api.getOfficeArtifact(...(args as [])),
-    getOfficeSnapshot: (...args: unknown[]) => api.getOfficeSnapshot(...(args as [])),
-    listOfficeComments: vi.fn(async () => []),
-    listOfficeSuggestions: vi.fn(async () => []),
+    listOfficeArtifacts: (...args: unknown[]) => api.listOfficeArtifacts(...(args as [])).then((value) => bounded(value as object)),
+    getOfficeArtifact: (...args: unknown[]) => api.getOfficeArtifact(...(args as [])).then(value => bounded(value as object)),
+    getOfficeSnapshot: (...args: unknown[]) => api.getOfficeSnapshot(...(args as [])).then(value => bounded(value as object)),
+    listOfficeComments: vi.fn(async () => bounded([])),
+    listOfficeSuggestions: vi.fn(async () => bounded([])),
     detachMissingOfficeComments: vi.fn(async () => 0),
+    syncOfficeOfflineCommands: api.syncOfficeOfflineCommands,
+    transitionOfficeLifecycle: api.transitionOfficeLifecycle,
   };
 });
 // The editor shell's heavy neighbours: collab, presence, the three editors,
 // the recorder and the reclassify dialog are not what this test grades.
-vi.mock("@/lib/collab/use-collab-provider", () => ({ useCollabProvider: () => ({ doc: null, provider: null, status: "disconnected", synced: false }) }));
+vi.mock("@/lib/collab/use-collab-provider", () => ({ useCollabProvider: () => ({ doc: null, provider: null, status: collab.status, synced: collab.synced }) }));
 vi.mock("@/lib/collab/use-presence", () => ({ usePresence: () => [], usePublishPresenceActivity: vi.fn(), usePublishPresenceIdentity: vi.fn() }));
 vi.mock("@/components/doc/presence-avatars", () => ({ PresenceAvatars: () => null }));
 vi.mock("@/components/context/reclassify-context-dialog", () => ({ ReclassifyContextButton: () => <button type="button">Reclassify</button> }));
@@ -67,9 +76,14 @@ vi.mock("../presentation-presenter", () => ({ PresentationPresenter: () => null 
 vi.mock("../job-activity", () => ({ OfficeJobActivity: () => <div data-testid="job-activity" /> }));
 vi.mock("../office-card-preview", () => ({ OfficeCardPreview: () => <div data-testid="card-preview" /> }));
 vi.mock("@/lib/office/offline", () => ({
-  appendOfflineCommand: vi.fn(), classifyOfficeReconnect: vi.fn(), listOfflineJournal: vi.fn(async () => []),
-  loadOfflinePackage: vi.fn(async () => null), removeOfflineJournalEntry: vi.fn(), removeOfflinePackage: vi.fn(async () => undefined),
+  appendOfflineCommand: vi.fn(), classifyOfficeReconnect: offlineApi.classify, listOfflineJournal: offlineApi.list,
+  loadOfflinePackage: offlineApi.load, removeOfflineJournalEntry: offlineApi.remove, removeOfflinePackage: vi.fn(async () => undefined),
+  materializeOfflineRecoverySnapshot: offlineApi.materialize, officeOfflineDeviceId: vi.fn(async () => "fixture-device"), quarantineOfflineWork: offlineApi.quarantine,
 }));
+
+import { loadOfflinePackage } from "@/lib/office/offline";
+import { inheritOfficeMetadata, attachOfficeMetadata } from "@/lib/office/metadata";
+const bounded = <T extends object>(value: T): T => attachOfficeMetadata(structuredClone(value), 30_000, performance.now(), "viewer-1");
 
 import { OfficeTemplateLibrary } from "../template-library";
 import { OfficeHome } from "../office-home";
@@ -92,19 +106,33 @@ const pending = () => new Promise<never>(() => undefined);
 let container: HTMLDivElement;
 let root: Root;
 function render(node: React.ReactNode) {
+  const outer = node as {props?: {workspaceId?: string; children?: {props?: {workspaceId?: string}}}};
+  navigation.workspaceId = outer.props?.workspaceId ?? outer.props?.children?.props?.workspaceId ?? WORKSPACE;
   act(() => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}>{node}</I18nProvider>));
 }
 
 beforeEach(() => {
+  navigation.viewerId = "viewer-1";
   resetSurfaceCache();
   navigation.search = "";
   navigation.pathname = "/office/templates/template-1";
   navigation.replace.mockClear();
+  navigation.push.mockClear();
+  collab.status = "disconnected";
+  collab.synced = false;
+  offlineApi.list.mockReset().mockResolvedValue([]);
+  offlineApi.load.mockReset().mockResolvedValue(null);
+  offlineApi.remove.mockReset().mockResolvedValue(undefined);
+  offlineApi.quarantine.mockReset().mockResolvedValue(undefined);
+  offlineApi.classify.mockReset();
+  offlineApi.materialize.mockReset();
   api.listOfficeArtifacts.mockReset();
   api.getOfficeArtifact.mockReset();
   api.getOfficeSnapshot.mockReset();
   api.getOfficeTemplateRouting.mockReset();
   api.saveOfficeTemplateRouting.mockReset();
+  api.syncOfficeOfflineCommands.mockReset();
+  api.transitionOfficeLifecycle.mockReset();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -116,7 +144,7 @@ afterEach(() => {
 
 describe("[COMP:app-web/office-surface-cache] Office home", () => {
   it("paints the warmed list on the first frame while the fetch is still pending (N1)", async () => {
-    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "active"), async () => [ROW]);
+    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "active"), async () => bounded([ROW]));
     api.listOfficeArtifacts.mockImplementation(pending);
     render(<OfficeHome workspaceId={WORKSPACE} />);
     expect(container.querySelector('[data-office-file-grid="true"]')).not.toBeNull();
@@ -134,7 +162,7 @@ describe("[COMP:app-web/office-surface-cache] Office home", () => {
 
   it("repaints without a blank frame after markSurfaceCacheStale (N3)", async () => {
     const key = officeListCacheKey(WORKSPACE, "active");
-    await loadSurfaceCache(key, async () => [ROW]);
+    await loadSurfaceCache(key, async () => bounded([ROW]));
     let resolveNext: (rows: OfficeArtifact[]) => void = () => undefined;
     api.listOfficeArtifacts.mockImplementation(() => new Promise<OfficeArtifact[]>((resolve) => { resolveNext = resolve; }));
     render(<OfficeHome workspaceId={WORKSPACE} />);
@@ -148,7 +176,7 @@ describe("[COMP:app-web/office-surface-cache] Office home", () => {
   });
 
   it("reads each lifecycle view from its own key", async () => {
-    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "trash"), async () => [{ ...ROW, title: "Old deck", lifecycleState: "trash" }]);
+    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "trash"), async () => bounded([{ ...ROW, title: "Old deck", lifecycleState: "trash" }]));
     api.listOfficeArtifacts.mockImplementation(pending);
     navigation.search = "view=trash";
     render(<OfficeHome workspaceId={WORKSPACE} />);
@@ -158,7 +186,7 @@ describe("[COMP:app-web/office-surface-cache] Office home", () => {
 
 describe("[COMP:app-web/office-surface-cache] Office editor shell", () => {
   it("paints the chrome from the home's list row before the snapshot resolves, and fetches row + snapshot in parallel (N7)", async () => {
-    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "active"), async () => [ROW]);
+    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "active"), async () => bounded([ROW]));
     api.getOfficeArtifact.mockImplementation(pending);
     api.getOfficeSnapshot.mockImplementation(pending);
     render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
@@ -171,8 +199,8 @@ describe("[COMP:app-web/office-surface-cache] Office editor shell", () => {
   });
 
   it("paints the editor on the first frame from warmed row + snapshot keys (N1)", async () => {
-    await loadSurfaceCache(officeArtifactCacheKey(ARTIFACT), async () => ROW);
-    await loadSurfaceCache(officeSnapshotCacheKey(ARTIFACT), async () => SNAPSHOT);
+    await loadSurfaceCache(officeArtifactCacheKey(WORKSPACE, ARTIFACT), async () => bounded(ROW));
+    await loadSurfaceCache(officeSnapshotCacheKey(WORKSPACE, ARTIFACT), async () => bounded(SNAPSHOT));
     api.getOfficeArtifact.mockImplementation(pending);
     api.getOfficeSnapshot.mockImplementation(pending);
     render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
@@ -182,13 +210,13 @@ describe("[COMP:app-web/office-surface-cache] Office editor shell", () => {
   });
 
   it("keeps the editor up while a stale snapshot revalidates (N3)", async () => {
-    await loadSurfaceCache(officeArtifactCacheKey(ARTIFACT), async () => ROW);
-    await loadSurfaceCache(officeSnapshotCacheKey(ARTIFACT), async () => SNAPSHOT);
-    api.getOfficeArtifact.mockImplementation(async () => ROW);
+    await loadSurfaceCache(officeArtifactCacheKey(WORKSPACE, ARTIFACT), async () => bounded(ROW));
+    await loadSurfaceCache(officeSnapshotCacheKey(WORKSPACE, ARTIFACT), async () => bounded(SNAPSHOT));
+    api.getOfficeArtifact.mockImplementation(async () => bounded(ROW));
     let resolveSnapshot: (value: typeof SNAPSHOT) => void = () => undefined;
     api.getOfficeSnapshot.mockImplementation(() => new Promise<typeof SNAPSHOT>((resolve) => { resolveSnapshot = resolve; }));
     render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
-    act(() => markSurfaceCacheStale(officeSnapshotCacheKey(ARTIFACT)));
+    act(() => markSurfaceCacheStale(officeSnapshotCacheKey(WORKSPACE, ARTIFACT)));
     expect(container.querySelector('[data-testid="document-editor"]')).not.toBeNull();
     expect(container.querySelector("[data-office-editor-skeleton]")).toBeNull();
     await act(async () => { resolveSnapshot({ ...SNAPSHOT, seq: 8 }); await settle(); });
@@ -205,12 +233,38 @@ describe("[COMP:app-web/office-surface-cache] Office editor shell", () => {
   });
 
   it("lifts the recorder pill above the phone toolbar only for a Document (report B row 15)", async () => {
-    await loadSurfaceCache(officeArtifactCacheKey(ARTIFACT), async () => ROW);
-    await loadSurfaceCache(officeSnapshotCacheKey(ARTIFACT), async () => SNAPSHOT);
+    await loadSurfaceCache(officeArtifactCacheKey(WORKSPACE, ARTIFACT), async () => bounded(ROW));
+    await loadSurfaceCache(officeSnapshotCacheKey(WORKSPACE, ARTIFACT), async () => bounded(SNAPSHOT));
     api.getOfficeArtifact.mockImplementation(pending);
     api.getOfficeSnapshot.mockImplementation(pending);
     render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
     expect(container.querySelector('[data-testid="recorder"]')?.className).toContain("max-sm:bottom-20");
+  });
+
+  it("opens and discards the ordinary recovery artifact published for an offline conflict", async () => {
+    await loadSurfaceCache(officeArtifactCacheKey(WORKSPACE, ARTIFACT), async () => bounded(ROW));
+    await loadSurfaceCache(officeSnapshotCacheKey(WORKSPACE, ARTIFACT), async () => bounded(SNAPSHOT));
+    api.getOfficeArtifact.mockImplementation(pending);
+    api.getOfficeSnapshot.mockImplementation(pending);
+    collab.status = "connected";
+    collab.synced = true;
+    const command = { artifactId: ARTIFACT, seq: 8, kind: "command", expectedSeq: 7, command: { artifactId: ARTIFACT, baseVersion: 3, actor: { type: "user", id: navigation.viewerId }, origin: "offline", commandId: "33333333-3333-4333-8333-333333333333", kind: "setObjectProperty", targetId: "44444444-4444-4444-8444-444444444444", path: ["alignment"], value: "center" }, createdAt: "2026-09-28T00:00:00.000Z" };
+    offlineApi.list.mockResolvedValue([command]);
+    offlineApi.load.mockResolvedValue({ payload: { snapshot: SNAPSHOT.snapshot } });
+    offlineApi.materialize.mockReturnValue(SNAPSHOT.snapshot);
+    offlineApi.classify.mockReturnValue({ status: "needs_attention", quarantine: false, conflict: true });
+    api.syncOfficeOfflineCommands.mockResolvedValue({ status: "needs_attention", reason: "structural_conflict", recoveryArtifactId: "55555555-5555-4555-8555-555555555555" });
+    api.transitionOfficeLifecycle.mockResolvedValue({});
+    render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
+    await act(async () => { await settle(); await settle(); });
+    expect(container.textContent).toContain(en.office.offlineNeedsAttention);
+    const open = [...container.querySelectorAll("button")].find((node) => node.textContent === en.office.openRecoveryCopy)!;
+    act(() => open.click());
+    expect(navigation.push).toHaveBeenCalledWith(`/w/${WORKSPACE}/office/55555555-5555-4555-8555-555555555555`);
+    const discard = [...container.querySelectorAll("button")].find((node) => node.textContent === en.office.discardRecoveryCopy)!;
+    await act(async () => { discard.click(); await settle(); });
+    expect(api.transitionOfficeLifecycle).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555", "trash", "Discarded recovered offline copy");
+    expect(offlineApi.remove).toHaveBeenCalledWith(command, { workspaceId: WORKSPACE, userId: navigation.viewerId });
   });
 });
 
@@ -220,11 +274,11 @@ describe("[COMP:app-web/office-template-routing] live editor integration", () =>
     if (snapshot.family === "document") snapshot.sections[0]!.header[0]!.text = "{{NAME}}";
     else snapshot.worksheets[0]!.cells[0]!.value = "{{NAME}}";
     let persisted: OfficeTemplateRoutingDraft = { source: "upload", fields: [], slideRecipes: [] };
-    api.getOfficeTemplateRouting.mockImplementation(async () => structuredClone(persisted));
+    api.getOfficeTemplateRouting.mockImplementation(async () => bounded(persisted));
     api.saveOfficeTemplateRouting.mockImplementation(async (_id: string, value: OfficeTemplateRoutingDraft) => { persisted = structuredClone(value); return persisted; });
     navigation.search = "templateId=template-1";
-    await loadSurfaceCache(officeArtifactCacheKey(ARTIFACT), async () => ({ ...ROW, family: snapshot.family, mode: "template" }));
-    await loadSurfaceCache(officeSnapshotCacheKey(ARTIFACT), async () => ({ snapshot, seq: 0, baseVersion: 1 }));
+    await loadSurfaceCache(officeArtifactCacheKey(WORKSPACE, ARTIFACT), async () => bounded({ ...ROW, family: snapshot.family, mode: "template" }));
+    await loadSurfaceCache(officeSnapshotCacheKey(WORKSPACE, ARTIFACT), async () => bounded({ snapshot, seq: 0, baseVersion: 1 }));
     api.getOfficeArtifact.mockImplementation(pending);
     api.getOfficeSnapshot.mockImplementation(pending);
     render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
@@ -251,34 +305,35 @@ describe("[COMP:app-web/office-template-routing] live editor integration", () =>
     const changed = structuredClone(snapshot);
     if (changed.family === "document") changed.sections[0]!.header[0]!.text = "{{RENAMED}}";
     else changed.worksheets[0]!.cells[0]!.value = "{{RENAMED}}";
-    await act(async () => mutateSurfaceCache<OfficeLiveSnapshot>(officeSnapshotCacheKey(ARTIFACT), (previous) => ({ ...previous, snapshot: changed })));
+    await act(async () => mutateSurfaceCache<OfficeLiveSnapshot>(officeSnapshotCacheKey(WORKSPACE, ARTIFACT), (previous) => inheritOfficeMetadata({ ...previous, snapshot: changed }, previous, "viewer-1")));
     expect(publish().disabled).toBe(true);
     await act(async () => (container.querySelector(`[aria-label="${en.office.expandAssistantPanel}"]`) as HTMLButtonElement).click());
     expect(container.textContent).toContain("{{RENAMED}}");
     await act(async () => save().click());
     expect(persisted.fields.map((field) => field.name)).toEqual(["RENAMED"]);
     expect(publish().disabled).toBe(false);
-    // A route remount reloads what was saved, not the old inferred defaults.
+    expect(api.getOfficeTemplateRouting).toHaveBeenCalledTimes(3); // Initial read and two post-save readbacks.
+    // A route remount reuses the bounded saved read, not inferred defaults.
     act(() => root.render(null));
     render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
     await act(async () => { await settle(); });
     expect(publish().disabled).toBe(false);
-    expect(api.getOfficeTemplateRouting).toHaveBeenCalledTimes(2);
+    expect(api.getOfficeTemplateRouting).toHaveBeenCalledTimes(3);
   });
 });
 
 describe("[COMP:app-web/office-surface-cache] helpers", () => {
   it("finds the artifact row in whichever view's cached list carries it", async () => {
     expect(officeArtifactFromListCache(WORKSPACE, ARTIFACT)).toBeNull();
-    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "archived"), async () => [{ ...ROW, lifecycleState: "archived" }]);
+    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "archived"), async () => bounded([{ ...ROW, lifecycleState: "archived" }]));
     expect(officeArtifactFromListCache(WORKSPACE, ARTIFACT)?.lifecycleState).toBe("archived");
     expect(officeArtifactFromListCache("other", ARTIFACT)).toBeNull();
   });
 
   it("invalidateOfficeList drops every view of one workspace and nothing else", async () => {
-    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "active"), async () => ["a"]);
-    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "trash"), async () => ["t"]);
-    await loadSurfaceCache(officeListCacheKey("other", "active"), async () => ["other"]);
+    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "active"), async () => bounded(["a"]));
+    await loadSurfaceCache(officeListCacheKey(WORKSPACE, "trash"), async () => bounded(["t"]));
+    await loadSurfaceCache(officeListCacheKey("other", "active"), async () => bounded(["other"]));
     invalidateOfficeList(WORKSPACE);
     expect(readSurfaceCache(officeListCacheKey(WORKSPACE, "active")).data).toBeUndefined();
     expect(readSurfaceCache(officeListCacheKey(WORKSPACE, "trash")).data).toBeUndefined();
@@ -288,7 +343,7 @@ describe("[COMP:app-web/office-surface-cache] helpers", () => {
 
   it("marks the given prefixes stale when the tab comes back to the foreground, keeping the rows", async () => {
     const key = officeListCacheKey(WORKSPACE, "active");
-    await loadSurfaceCache(key, async () => [ROW]);
+    await loadSurfaceCache(key, async () => bounded([ROW]));
     function Probe() { useOfficeCacheRevalidation([`office:${WORKSPACE}:`]); return null; }
     render(<Probe />);
     expect(readSurfaceCache(key).updatedAt).toBeGreaterThan(0);
@@ -333,9 +388,9 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
     await act(async () => { await settle(); });
     const keys = [
       ...(["active", "archived", "trash", "retained"] as const).map(view => officeListCacheKey(WORKSPACE, view)),
-      officeArtifactCacheKey(ARTIFACT), officeSnapshotCacheKey(ARTIFACT),
+      officeArtifactCacheKey(WORKSPACE, ARTIFACT), officeSnapshotCacheKey(WORKSPACE, ARTIFACT),
     ];
-    await act(async () => { for (const key of keys) await loadSurfaceCache(key, async () => [ROW]); });
+    await act(async () => { for (const key of keys) await loadSurfaceCache(key, async () => bounded([ROW])); });
     api.transitionOfficeTemplateLifecycle.mockResolvedValue({ ...template, lifecycleState: "trash" });
     api.listOfficeTemplates.mockResolvedValue([{ ...template, lifecycleState: "trash" }]);
     await act(async () => { button(en.office.moveToTrash).click(); await settle(); });
@@ -396,7 +451,8 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
       navigation.pathname = "/office/templates/template-1";
       render(<StrictMode><OfficeTemplateLibrary workspaceId={WORKSPACE} templateId={template.id} /></StrictMode>);
     }
-    expect(readSurfaceCache(officeTemplateListCacheKey(WORKSPACE)).data).toBeDefined();
+    if (change === "workspace") expect(readSurfaceCache(officeTemplateListCacheKey(WORKSPACE)).data).toBeUndefined();
+    else expect(readSurfaceCache(officeTemplateListCacheKey(WORKSPACE)).data).toBeDefined();
     api.listOfficeTemplates.mockResolvedValue([]);
     await act(async () => { complete({}); await settle(); });
     expect(navigation.replace).not.toHaveBeenCalled();
@@ -468,5 +524,38 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
     resolveOld(["deleted"]);
     await old;
     expect(readSurfaceCache(key).data).toEqual([]);
+  });
+});
+
+
+describe("[COMP:app-web/office-surface-cache] editor ownership", () => {
+  it("drops the prior viewer's warmed artifact and snapshot on an account switch", async () => {
+    const oldArtifactKey = officeArtifactCacheKey(WORKSPACE, ARTIFACT, "viewer-1");
+    const oldSnapshotKey = officeSnapshotCacheKey(WORKSPACE, ARTIFACT, "viewer-1");
+    await loadSurfaceCache(oldArtifactKey, async () => bounded(ROW));
+    await loadSurfaceCache(oldSnapshotKey, async () => bounded(SNAPSHOT));
+    api.getOfficeArtifact.mockImplementation(pending); api.getOfficeSnapshot.mockImplementation(pending);
+    render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
+    expect(container.textContent).toContain(ROW.title);
+    navigation.viewerId = "viewer-2";
+    render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
+    expect(container.textContent).not.toContain(ROW.title);
+    expect(container.querySelector('[data-testid="document-editor"]')).toBeNull();
+    expect(readSurfaceCache(oldArtifactKey).data).toBeUndefined();
+    expect(readSurfaceCache(oldSnapshotKey).data).toBeUndefined();
+    expect(loadOfflinePackage).toHaveBeenLastCalledWith(ARTIFACT, {workspaceId: WORKSPACE, userId: "viewer-2"});
+  });
+
+  it("cannot adopt a previous viewer's pending artifact read after remount", async () => {
+    let resolveOld!: (row: OfficeArtifact) => void;
+    api.getOfficeArtifact.mockImplementationOnce(() => new Promise(resolve => {resolveOld = resolve;})).mockImplementation(pending);
+    api.getOfficeSnapshot.mockImplementation(pending);
+    render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
+    navigation.viewerId = "viewer-2";
+    render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
+    await act(async () => {resolveOld(ROW); await settle();});
+    expect(container.textContent).not.toContain(ROW.title);
+    expect(readSurfaceCache(officeArtifactCacheKey(WORKSPACE, ARTIFACT, "viewer-1")).data).toBeUndefined();
+    expect(readSurfaceCache(officeArtifactCacheKey(WORKSPACE, ARTIFACT, "viewer-2")).data).toBeUndefined();
   });
 });

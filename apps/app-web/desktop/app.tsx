@@ -87,6 +87,7 @@ import {
 // Route surfaces are local Vite chunks, loaded from disk on first entry. This
 // keeps the startup shell small without reintroducing network navigation.
 const DocSurfaceLayout = lazy(() => import("@/app/w/[workspaceId]/p/layout"));
+const RecorderOverlay = lazy(() => import("@/app/recorder-overlay/page"));
 const BrainPage = lazy(() => import("@/app/w/[workspaceId]/brain/page"));
 const BrainEntityPage = lazy(() => import("@/app/w/[workspaceId]/brain/[entityId]/page"));
 const BrainSkillEditorPage = lazy(() => import("@/app/w/[workspaceId]/brain/skills/[skillRowId]/page"));
@@ -101,6 +102,7 @@ const ProgrammaticAccessPage = lazy(() => import("@/app/w/[workspaceId]/studio/p
 const StudioBrandPage = lazy(() => import("@/app/w/[workspaceId]/studio/brand/page"));
 const StudioMiniAppsPage = lazy(() => import("@/app/w/[workspaceId]/studio/mini-apps/page"));
 const WorkflowPage = lazy(() => import("@/app/w/[workspaceId]/workflow/page"));
+const OrganizationPage = lazy(() => import("@/app/w/[workspaceId]/organization/page"));
 const WorkflowDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id]/page"));
 const WorkflowRunDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page"));
 const OfficePage = lazy(() => import("@/app/w/[workspaceId]/office/page"));
@@ -134,6 +136,7 @@ const FeedSurfaceShell = lazy(async () => ({
   default: (await import("@/components/feed/feed-surface-shell")).FeedSurfaceShell,
 }));
 const FeedPlan = lazy(async () => ({ default: (await import("@/components/feed/feed-plan")).FeedPlan }));
+const FeedCampaigns = lazy(async () => ({ default: (await import("@/components/feed/feed-campaigns")).FeedCampaigns }));
 const FeedVoice = lazy(async () => ({ default: (await import("@/components/feed/feed-voice")).FeedVoice }));
 const FeedInsights = lazy(async () => ({ default: (await import("@/components/feed/feed-insights")).FeedInsights }));
 const FeedInspiration = lazy(async () => ({ default: (await import("@/components/feed/feed-inspiration")).FeedInspiration }));
@@ -197,6 +200,7 @@ const OPERATOR_ROUTE_ELEMENTS: Record<OperatorAppKey, ReactNode> = {
   feed: (
     <Route key="feed" path="feed" element={<FeedShell />}>
       <Route index element={<FeedPlan />} />
+      <Route path="campaigns" element={<FeedCampaignsRoute />} />
       <Route path="voice" element={<FeedVoice scope="company" />} />
       <Route path="drafts" element={<FeedLegacyDraftsPage />} />
       <Route path="inbox" element={<FeedLegacyInboxPage />} />
@@ -243,6 +247,7 @@ export function App() {
       <I18nProvider locale="en" dict={dict}>
         <HashRouter>
           <Routes>
+            <Route path="/recorder-overlay" element={<Suspense fallback={null}><RecorderOverlay /></Suspense>} />
             <Route path="/" element={<Boot />} />
             {/* Web's /teams picker maps onto Boot here so in-app
                 `router.push("/teams")` (e.g. the workspace-switcher's
@@ -299,6 +304,7 @@ export function App() {
 
               {/* Workflow */}
               <Route path="workflow" element={<WorkflowPage />} />
+              <Route path="organization" element={<OrganizationPage />} />
               <Route path="workflow/:id" element={<WorkflowDetailRoute />} />
               <Route
                 path="workflow/:id/runs/:runId"
@@ -719,6 +725,11 @@ function FeedShell() {
       <Outlet />
     </FeedSurfaceShell>
   );
+}
+
+function FeedCampaignsRoute() {
+  const { workspaceId = "" } = useParams<{ workspaceId: string }>();
+  return <FeedCampaigns workspaceId={workspaceId} />;
 }
 
 /**

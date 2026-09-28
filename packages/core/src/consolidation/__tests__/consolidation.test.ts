@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { computeConsolidationScore, runLightConsolidation, runREMConsolidation, runReflectionConsolidation } from '../phases.js'
 import type { MemoryStore } from '../../memory/types.js'
 
@@ -63,6 +63,8 @@ describe('[COMP:consolidation/phases] computeConsolidationScore', () => {
 
 // ── REM phase tests ──────────────────────────────────────────────
 
+const generalScope = { workspaceId: 'workspace-fixture', userId: 'u1', assistantId: 'a1', compartments: [] as string[], projectIds: [] as string[], scopeVersion: '1' }
+
 type FakeIndexRow = {
   id: string
   summary: string
@@ -92,6 +94,7 @@ function makeREMStore(index: FakeIndexRow[]): MemoryStore & {
   const deleted: string[] = []
   const updates: Array<{ id: string; summary?: string; detail?: string }> = []
   const logs: Array<{ phase: string; memoriesAffected: string[] }> = []
+  index = index.map(row => ({ ...generalScope, ...row }))
   // Track detail state so EXTENDS merges see current value.
   const detailById = new Map<string, string | null>()
   const notImpl = () => { throw new Error('not used') }
@@ -108,6 +111,7 @@ function makeREMStore(index: FakeIndexRow[]): MemoryStore & {
       const row = index.find((r) => r.id === id)
       if (!row) return null
       return {
+        ...generalScope,
         id: row.id,
 
         scope: 'shared',
@@ -122,6 +126,7 @@ function makeREMStore(index: FakeIndexRow[]): MemoryStore & {
       const row = index.find((r) => r.id === id)
       if (!row) return null
       return {
+        ...generalScope,
         id: row.id,
 
         scope: 'shared',
@@ -138,6 +143,7 @@ function makeREMStore(index: FakeIndexRow[]): MemoryStore & {
       const row = index.find((r) => r.id === id)
       if (!row) return null
       return {
+        ...generalScope,
         id: row.id,
 
         scope: 'shared',
@@ -228,7 +234,7 @@ describe('[COMP:consolidation/phases] REM phase guards', () => {
   it('creates at most 3 connection memories', async () => {
     const store = makeREMStore(makeFakeIndex(30))
     const llmOutput = Array.from({ length: 10 }, (_, i) =>
-      remBlock({ summary: `Unique pattern number ${i} about completely different topic ${i}`, ids: [`mem-${i * 2}`, `mem-${i * 2 + 1}`] }),
+      remBlock({ summary: `Unique pattern number ${i} about completely different topic ${i}`, ids: [`mem-${String(i * 2).padStart(3, '0')}`, `mem-${String(i * 2 + 1).padStart(3, '0')}`] }),
     ).join('\n\n')
     const result = await runREMConsolidation(store, 'a1', 'u1', async () => llmOutput)
     expect(store.created.length).toBeLessThanOrEqual(3)
@@ -288,7 +294,7 @@ describe('[COMP:consolidation/phases] REM phase guards', () => {
 // ── Cross-cycle sensitivity dedup ───────────────────────────────────
 
 describe('[COMP:consolidation/phases] REM cross-cycle dedup by sensitivity', () => {
-  it('stamps a new pattern with the max sensitivity of its connected sources', async () => {
+  it('does not co-batch otherwise-ineligible sensitivity groups', async () => {
     const index: Array<{ id: string; summary: string; tags: string[]; sensitivity: 'public' | 'internal' | 'confidential' }> = [
       { id: 'mem-000-abcdef', summary: 'public fact', tags: [], sensitivity: 'public' },
       { id: 'mem-001-abcdef', summary: 'internal fact', tags: [], sensitivity: 'internal' },
@@ -306,11 +312,10 @@ describe('[COMP:consolidation/phases] REM cross-cycle dedup by sensitivity', () 
     await runREMConsolidation(store, 'a1', 'u1', async () =>
       remBlock({ summary: 'Some cross-domain insight', ids: ['mem-000-', 'mem-001-', 'mem-002-'] }),
     )
-    expect(store.created).toHaveLength(1)
-    expect(store.created[0].sensitivity).toBe('confidential')
+    expect(store.created).toHaveLength(0)
   })
 
-  it('skips a new candidate when an existing connection at equal-or-lower tier already covers it', async () => {
+  it('retains independent insights in different sensitivity buckets', async () => {
     const index: Array<{ id: string; summary: string; tags: string[]; sensitivity: 'public' | 'internal' | 'confidential' }> = [
       { id: 'conn-old', summary: 'The user prefers coffee over tea in the morning', tags: ['consolidation:rem'], sensitivity: 'public' },
       ...Array.from({ length: 16 }, (_, i) => ({
@@ -325,14 +330,13 @@ describe('[COMP:consolidation/phases] REM cross-cycle dedup by sensitivity', () 
     await runREMConsolidation(store, 'a1', 'u1', async () =>
       remBlock({ summary: 'The user prefers coffee over tea in the morning', ids: ['mem-000-', 'mem-001-'] }),
     )
-    // The new candidate duplicates the existing public connection. The new
-    // would be stamped confidential (sources are confidential); the existing
-    // public row is broader — keep it, drop the new, don't delete.
-    expect(store.created).toHaveLength(0)
+    // Public content is not a declassification proxy for a confidential synthesis.
+    expect(store.created).toHaveLength(1)
+    expect(store.created[0].sensitivity).toBe('confidential')
     expect(store.deleted).toHaveLength(0)
   })
 
-  it('deletes a higher-tier existing connection when a new lower-tier duplicate arrives', async () => {
+  it('does not delete a higher-tier insight when a public duplicate is independently derived', async () => {
     const index: Array<{ id: string; summary: string; tags: string[]; sensitivity: 'public' | 'internal' | 'confidential' }> = [
       { id: 'conn-old', summary: 'The user prefers coffee over tea in the morning', tags: ['consolidation:rem'], sensitivity: 'confidential' },
       ...Array.from({ length: 16 }, (_, i) => ({
@@ -347,9 +351,8 @@ describe('[COMP:consolidation/phases] REM cross-cycle dedup by sensitivity', () 
     await runREMConsolidation(store, 'a1', 'u1', async () =>
       remBlock({ summary: 'The user prefers coffee over tea in the morning', ids: ['mem-000-', 'mem-001-'] }),
     )
-    // New pattern's sources are all public → stamped public. Existing is
-    // confidential. Broaden visibility: delete the confidential, write the public.
-    expect(store.deleted).toContain('conn-old')
+    // Independently authorized buckets keep their own evidence and lifecycle.
+    expect(store.deleted).not.toContain('conn-old')
     expect(store.created).toHaveLength(1)
     expect(store.created[0].sensitivity).toBe('public')
   })
@@ -462,7 +465,7 @@ describe('[COMP:consolidation/phases] REM logConsolidation ID resolution', () =>
     )
   })
 
-  it('drops prefixes that do not resolve to any memory', async () => {
+  it('rejects a candidate with an unresolvable source citation', async () => {
     const index = uuidIndex(15)
     const store = makeREMStore(index)
     const realPrefix = index[0].id.slice(0, 8)
@@ -470,7 +473,8 @@ describe('[COMP:consolidation/phases] REM logConsolidation ID resolution', () =>
       remBlock({ summary: 'Pattern with one bogus id', ids: [realPrefix, 'deadbeef'] }),
     )
     expect(store.logs).toHaveLength(1)
-    expect(store.logs[0].memoriesAffected).toEqual([index[0].id])
+    expect(store.logs[0].memoriesAffected).toEqual([])
+    expect(store.created).toHaveLength(0)
   })
 
   it('on EXTENDS, logs full UUIDs for both target and connected sources', async () => {
@@ -617,27 +621,27 @@ describe('[COMP:consolidation/phases] REM LLM output parsing', () => {
 describe('[COMP:consolidation/phases] Light merge detail cap', () => {
   it('dedups identical lines instead of appending duplicates', async () => {
     const a = {
-      id: 'mem-a', summary: 'likes Threads',
-      detail: 'Hinson likes Threads\nHe posts daily',
+      ...generalScope, id: 'mem-a', summary: 'likes Threads',
+      detail: 'Riley likes Threads\nHe posts daily',
       tags: [], confidence: 0.7, scope: 'shared', sensitivity: 'internal' as const,
     }
     // b's first line duplicates a's first line; only the second line is new.
     const b = {
-      id: 'mem-b', summary: 'likes Threads',
-      detail: 'Hinson likes Threads\nHe avoids ads',
+      ...generalScope, id: 'mem-b', summary: 'likes Threads',
+      detail: 'Riley likes Threads\nHe avoids ads',
       tags: [], confidence: 0.6, scope: 'shared', sensitivity: 'internal' as const,
     }
     const updates: Array<{ id: string; patch: { detail?: string | undefined; confidence?: number } }> = []
     const notImpl = (..._args: unknown[]) => { throw new Error('not implemented') }
     const store: MemoryStore = {
       async getIndex() {
-        return [a, b].map((m) => ({ id: m.id, summary: m.summary, tags: m.tags, sensitivity: m.sensitivity }))
+        return [a, b].map((m) => ({ ...generalScope, id: m.id, summary: m.summary, tags: m.tags, sensitivity: m.sensitivity }))
       },
       async getById(_ctx, id) { return id === 'mem-a' ? a : id === 'mem-b' ? b : null },
       async getByIdSystem(id) { return id === 'mem-a' ? a : id === 'mem-b' ? b : null },
-      async getIndexSystem() { return [a, b].map((m) => ({ id: m.id, summary: m.summary, tags: m.tags, sensitivity: m.sensitivity })) },
+      async getIndexSystem() { return [a, b].map((m) => ({ ...generalScope, id: m.id, summary: m.summary, tags: m.tags, sensitivity: m.sensitivity })) },
       async getWorkspaceIndexSystem() { return [] },
-      async update(id, patch) { updates.push({ id, patch }); return null },
+      async update(id, patch) { updates.push({ id, patch }); return { ...a, id, ...patch } },
       async logConsolidation() {},
       async listCronContextCandidatesForPrune() { return [] },
       getIndexRanked: notImpl as never, search: notImpl as never, getIdentity: notImpl as never,
@@ -662,26 +666,26 @@ describe('[COMP:consolidation/phases] Light merge detail cap', () => {
     const detailUpdate = updates.find((u) => u.id === 'mem-a' && u.patch.detail !== undefined)
     expect(detailUpdate).toBeDefined()
     const merged = detailUpdate!.patch.detail!
-    // Only 3 unique lines total (Hinson likes Threads, He posts daily, He avoids ads)
+    // Only 3 unique lines total (Riley likes Threads, He posts daily, He avoids ads)
     expect(merged.split('\n')).toEqual([
-      'Hinson likes Threads',
+      'Riley likes Threads',
       'He posts daily',
       'He avoids ads',
     ])
     // The duplicate line appears exactly once
-    expect((merged.match(/Hinson likes Threads/g) ?? []).length).toBe(1)
+    expect((merged.match(/Riley likes Threads/g) ?? []).length).toBe(1)
   })
 
   it('truncates merged detail above ~16 KB', async () => {
     // Two memories with identical summaries (similarity = 1.0, well above
     // the 0.9 threshold), so Light will merge them.
     const a = {
-      id: 'mem-a', summary: 'Hinson likes Threads',
+      ...generalScope, id: 'mem-a', summary: 'Riley likes Threads',
       detail: 'A'.repeat(20_000), // 20 KB — already past the cap on its own
       tags: [], confidence: 0.7, scope: 'shared', sensitivity: 'internal' as const,
     }
     const b = {
-      id: 'mem-b', summary: 'Hinson likes Threads',
+      ...generalScope, id: 'mem-b', summary: 'Riley likes Threads',
       detail: 'B'.repeat(20_000),
       tags: [], confidence: 0.6, scope: 'shared', sensitivity: 'internal' as const,
     }
@@ -689,13 +693,13 @@ describe('[COMP:consolidation/phases] Light merge detail cap', () => {
     const notImpl = (..._args: unknown[]) => { throw new Error('not implemented') }
     const store: MemoryStore = {
       async getIndex() {
-        return [a, b].map((m) => ({ id: m.id, summary: m.summary, tags: m.tags, sensitivity: m.sensitivity }))
+        return [a, b].map((m) => ({ ...generalScope, id: m.id, summary: m.summary, tags: m.tags, sensitivity: m.sensitivity }))
       },
       async getById(_ctx, id) { return id === 'mem-a' ? a : id === 'mem-b' ? b : null },
       async getByIdSystem(id) { return id === 'mem-a' ? a : id === 'mem-b' ? b : null },
-      async getIndexSystem() { return [a, b].map((m) => ({ id: m.id, summary: m.summary, tags: m.tags, sensitivity: m.sensitivity })) },
+      async getIndexSystem() { return [a, b].map((m) => ({ ...generalScope, id: m.id, summary: m.summary, tags: m.tags, sensitivity: m.sensitivity })) },
       async getWorkspaceIndexSystem() { return [] },
-      async update(id, patch) { updates.push({ id, patch }); return null },
+      async update(id, patch) { updates.push({ id, patch }); return { ...a, id, ...patch } },
       async logConsolidation() {},
       async listCronContextCandidatesForPrune() { return [] },
       // Unused on the Light path
@@ -746,9 +750,12 @@ describe('[COMP:consolidation/phases] Reflection phase authorship', () => {
   // WU-4.5-style authorship guard threw on EVERY pattern write and the
   // per-pattern catch swallowed it — reflection memories never persisted.
   // The mock's create mirrors the real store's guard.
-  function makeReflectionStore() {
+  function makeReflectionStore(withEvidence=true) {
     const created: Array<{
       summary: string
+      sensitivity?: string
+      compartments?: string[]
+      derivation?: unknown
       scope?: string
       source?: string
       createdByUserId?: string
@@ -764,7 +771,7 @@ describe('[COMP:consolidation/phases] Reflection phase authorship', () => {
           throw new Error('createMemory: createdByUserId is required (authorship guard)')
         }
         created.push({
-          summary: params.summary,
+          summary: params.summary,sensitivity:params.sensitivity,compartments:params.compartments,derivation:params.derivation,
           scope: params.scope,
           source: params.source,
           createdByUserId: params.createdByUserId,
@@ -785,7 +792,7 @@ describe('[COMP:consolidation/phases] Reflection phase authorship', () => {
           { id: 'v1', action: 'adjust_scope', primitive: 'memory', rowId: 'm1', rowSummary: 'A', reason: null, modelValue: 'workspace', userValue: 'personal', at: new Date() },
           { id: 'v2', action: 'adjust_scope', primitive: 'memory', rowId: 'm2', rowSummary: 'B', reason: null, modelValue: 'workspace', userValue: 'personal', at: new Date() },
           { id: 'v3', action: 'delete', primitive: 'memory', rowId: 'm3', rowSummary: 'C', reason: 'noise', modelValue: null, userValue: null, at: new Date() },
-        ]
+        ].map(event=>({...event,...(withEvidence?{scopeSources:[{resourceKind:'correction',resourceId:event.id,version:'1',workspaceId:'ws-1',userId:null,assistantId:null,sensitivity:'confidential' as const,compartments:['team:research'],projectIds:[]}]}:{})}))
       },
       async logWorkspaceConsolidation(params: Parameters<MemoryStore['logWorkspaceConsolidation']>[0]) {
         workspaceLogs.push({ phase: params.phase, memoriesAffected: params.memoriesAffected })
@@ -839,10 +846,21 @@ describe('[COMP:consolidation/phases] Reflection phase authorship', () => {
     expect(created[0].createdByUserId).toBe('u1')
     expect(created[0].createdByAssistantId).toBe('a1')
     expect(created[0].source).toBe('reflection')
+    expect(created[0].sensitivity).toBe('confidential')
+    expect(created[0].compartments).toEqual(['team:research'])
+    expect(created[0].derivation).toMatchObject({producer:'consolidation:reflection',sources:expect.arrayContaining([expect.objectContaining({resourceId:'v1',sensitivity:'confidential'})])})
     // 'team' is the tool-surface alias and violates the memories
     // valid_scope CHECK — the store vocabulary is 'workspace'.
     expect(created[0].scope).toBe('workspace')
     expect(result.memoriesAffected).toHaveLength(1)
     expect(workspaceLogs).toHaveLength(1)
   })
+  it('withholds unversioned corrections before calling a model or writing a memory',async()=>{
+    const {store,created,workspaceLogs}=makeReflectionStore(false)
+    const callModel=vi.fn(async()=>JSON.stringify([{summary:'Must not be generated'}]))
+    const result=await runReflectionConsolidation(store,callModel,{workspaceId:'ws-1',assistantId:'a1',userId:'u1'})
+    expect(callModel).not.toHaveBeenCalled();expect(created).toEqual([])
+    expect(result.summary).toContain('withheld 3 events');expect(workspaceLogs).toHaveLength(1)
+  })
+
 })

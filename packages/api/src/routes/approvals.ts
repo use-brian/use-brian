@@ -30,6 +30,8 @@
  */
 
 import { Router } from 'express'
+import { executeDepartmentAccessCommand } from '../workspace-access/service.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import type {
   ApprovalKind,
   PendingApproval,
@@ -101,6 +103,7 @@ export type UnifiedApprovalRouteOptions = {
 
 /** Where a non-workflow approval kind is actually resolved. */
 const NATIVE_SURFACE: Record<Exclude<ApprovalKind, 'workflow_step'>, string> = {
+  department_access: 'workspace-access',
   tool_invocation: 'chat',
   distribution_draft: 'feed',
   staged_write: 'web',
@@ -299,6 +302,21 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
       res.status(403).json({ error: 'Only the assigned approver can respond' })
       return
     }
+    if (approval.kind === 'department_access') {
+      try {
+        const payload = approval.approvalPayload
+        const result = await executeDepartmentAccessCommand(approval.workspaceId,userId,{
+          type:'access.request.decide',requestId:payload.requestId,expectedVersion:payload.requestVersion,
+          payloadHash:payload.payloadHash,policyRevision:payload.policyRevision,decision,reason,
+        })
+        res.json({kind:approval.kind,status:result.requests.find(r=>r.id===payload.requestId)?.status})
+      } catch(error) {
+        if(error instanceof WorkspaceAccessError) res.status(error.status).json({error:error.code,nativeSurface:'workspace-access'})
+        else throw error
+      }
+      return
+    }
+
     if (approval.status !== 'pending') {
       // Idempotent — a double-submit just echoes the settled state.
       res.json({ status: approval.status, kind: approval.kind, idempotent: true })

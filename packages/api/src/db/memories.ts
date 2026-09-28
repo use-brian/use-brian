@@ -1,12 +1,14 @@
 import { captureMemoryVersions, type CaptureOpts } from './brain-row-versions.js'
-import type { AccessContext, EntityLinksStore, Sensitivity } from '@use-brian/core'
+import { deriveResourceScope, type AccessContext, type EntityLinksStore, type Sensitivity, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/core'
 import type pg from 'pg'
-import { buildAccessPredicate } from './access-predicate.js'
+import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
+import { currentAgentAccess } from './agent-access-context.js'
 import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { getPool, query } from './client.js'
+import { applyRLSGucs, getPool, query } from './client.js'
 import { emitMentionedEdges } from './edge-hooks.js'
 import { excludeExternalPrincipalsSql } from './external-principal.js'
+import { validateDerivedMemoryInputs, recordDerivedResource } from './derived-scope-store.js'
 
 export type { AccessContext }
 
@@ -41,6 +43,8 @@ export type Memory = {
   sensitivity: Sensitivity
   compartments: string[]
   projectIds: string[]
+  scopeVersion: string
+  scopeHeld: boolean
   source: string
   sourceSessionId: string | null
   recallCount: number
@@ -76,7 +80,7 @@ const MEMORY_SELECT = `
   id, assistant_id as "assistantId", user_id as "userId", app_id as "appId",
   workspace_id as "workspaceId",
   scope, tags, summary, detail, confidence, sensitivity, compartments,
-  project_ids as "projectIds", source,
+  project_ids as "projectIds", scope_version::text as "scopeVersion", scope_held as "scopeHeld", source,
   source_session_id as "sourceSessionId",
   recall_count as "recallCount", useful_recall_count as "usefulRecallCount",
   last_recalled_at as "lastRecalledAt",
@@ -138,6 +142,8 @@ export async function createMemory(
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
     projectIds?: string[]
+    derivation?: DerivedWriteEvidence
+    derivationTarget?: { userId: string | null; assistantId: string | null }
     createdByUserId: string
     createdByAssistantId?: string
     sourceEpisodeId?: string
@@ -158,6 +164,47 @@ export async function createMemory(
   transactionClient?: pg.PoolClient,
 ): Promise<Memory> {
   assertAuthorshipPresent('createMemory', params.createdByUserId)
+  if (params.derivationTarget && !params.derivation) throw new Error('scope_evidence_missing')
+  if (params.derivation && !transactionClient) {
+    const client = await getPool().connect()
+    try {
+      await client.query('BEGIN')
+      const memory = await createMemory(params, undefined, client)
+      await client.query('COMMIT')
+      return memory
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally { client.release() }
+  }
+  // Derived writes preserve actual source visibility, including a primary's
+  // assistant partition, instead of applying fresh-intake normalization.
+  const floor = params.derivation
+    ? await validateDerivedMemoryInputs(transactionClient!, params.derivation)
+    : null
+  const derived = floor && params.derivation ? deriveResourceScope(params.derivation, {
+    ...floor,
+    ...(params.derivationTarget ?? {}),
+    sensitivity: params.sensitivity,
+    compartments: params.compartments ?? [],
+    projectIds: params.projectIds ?? [],
+  }) : null
+  const executing=currentAgentAccess();
+  if(executing){
+    if(!executing.workspaceId||!executing.userId||params.createdByUserId!==executing.userId)throw Object.assign(new Error('The operation requires the executing author.'),{code:'scope_operation_denied'});
+    let candidate=derived;
+    if(!candidate){
+      const lookup=transactionClient?transactionClient.query.bind(transactionClient):query;
+      const authoringAssistant=(await lookup<{kind:string;workspaceId:string}>('SELECT kind,workspace_id AS "workspaceId" FROM assistants WHERE id=$1',[params.assistantId])).rows[0];
+      if(!authoringAssistant||authoringAssistant.workspaceId!==executing.workspaceId)throw Object.assign(new Error('The operation is outside the current workspace.'),{code:'scope_operation_denied'});
+      candidate={workspaceId:params.workspaceId??authoringAssistant.workspaceId,userId:params.userId,
+        assistantId:params.userId!==null&&authoringAssistant.kind==='primary'?null:params.assistantId,
+        sensitivity:params.sensitivity,compartments:params.compartments??[],projectIds:params.projectIds??[]};
+    }
+    assertExecutionResourceScope(candidate,derived?'read':'mutation');
+  }
+  if (derived && params.shadow) throw new Error('scope_evidence_missing')
+  if (derived && params.workspaceId && params.workspaceId !== derived.workspaceId) throw new Error('scope_workspace_mismatch')
   // `workspace_id` falls back to the row's assistant's workspace when
   // the caller omits it: every memory must be workspace-partitioned
   // (company-brain hard-isolation; migration 146 makes the column NOT
@@ -216,12 +263,12 @@ export async function createMemory(
        compartments, project_ids${shadow ? ', rebuild_run_id, pipeline_version' : ''}
      )
      VALUES (
-             CASE
+             ${derived ? '$1::uuid' : `CASE
                WHEN $2::uuid IS NOT NULL
                 AND (SELECT kind FROM assistants WHERE id = $1::uuid) = 'primary'
                THEN NULL
                ELSE $1::uuid
-             END,
+             END`},
              $2, $3, COALESCE($4, (SELECT workspace_id FROM assistants WHERE id = $1)),
              $5, $6, $7, $8,
              $9, $10, $11, $12,
@@ -229,10 +276,11 @@ export async function createMemory(
              $16, $17, $18, $19, $20${shadow ? ', $21, $22' : ''})
      RETURNING ${MEMORY_SELECT}`,
     [
-      params.assistantId, params.userId, params.appId ?? null, params.workspaceId ?? null,
+      derived ? derived.assistantId : params.assistantId, derived ? derived.userId : params.userId,
+      params.appId ?? null, derived?.workspaceId ?? params.workspaceId ?? null,
       effectiveScope, params.tags ?? [],
       params.summary, params.detail ?? null,
-      params.confidence ?? 0.8, params.sensitivity, effectiveSource,
+      params.confidence ?? 0.8, derived?.sensitivity ?? params.sensitivity, effectiveSource,
       params.sourceSessionId ?? null,
       params.createdByUserId,
       params.createdByAssistantId ?? null,
@@ -240,12 +288,17 @@ export async function createMemory(
       isModelWrite ? effectiveScope : null,
       isModelWrite ? params.sensitivity : null,
       isModelWrite ? params.summary : null,
-      params.compartments ?? [],
-      params.projectIds ?? [],
+      derived?.compartments ?? params.compartments ?? [],
+      derived?.projectIds ?? params.projectIds ?? [],
       ...(shadow ? [shadow.rebuildRunId, shadow.pipelineVersion] : []),
     ],
   )
   const memory = result.rows[0]
+  if (params.derivation) {
+    await recordDerivedResource(transactionClient!, params.derivation, {
+      ...memory, workspaceId: memory.workspaceId!, resourceKind: 'memory', resourceId: memory.id, version: memory.scopeVersion,
+    })
+  }
 
   // Fire-and-forget `mentioned` edges. Only fires when the graph store
   // is wired AND the memory carries a workspace (edges are
@@ -308,6 +361,7 @@ export type MemoryUpdateFields = {
   workspaceId?: string | null
   compartments?: string[]
   projectIds?: string[]
+  derivation?: DerivedWriteEvidence
 }
 
 export async function updateMemory(
@@ -321,6 +375,7 @@ export async function updateMemory(
   try {
     if (ownedClient) await client.query('BEGIN')
     try {
+      if (access && !access.clientSelfMemory) await applyRLSGucs(client, access.userId)
       // Lock the active version. If none matches (already tombstoned, or
       // id doesn't exist), nothing to supersede — bail before the INSERT.
       //
@@ -330,10 +385,11 @@ export async function updateMemory(
       // memory the caller can't read (the write sibling of getMemoryById's
       // projection). Omitting `access` keeps the system-wide path for trusted
       // background workers. WS3 memory read/write-asymmetry fix, 2026-07-07.
-      const ap = access ? buildMemoryAccessPredicate(access, { startIdx: 2 }) : null
+      const ap = access ? buildMemoryAccessPredicate(access, { startIdx: 2, operation:'mutation' }) : null
       const lockResult = await client.query<Memory>(
         `SELECT ${MEMORY_SELECT} FROM memories
          WHERE id = $1 AND valid_to IS NULL${ap ? ` AND ${ap.sql}` : ''}
+           ${access && !access.clientSelfMemory ? 'AND member_operation_scope_allows(workspace_id,sensitivity,compartments,true)' : ''}
          FOR UPDATE`,
         [id, ...(ap ? ap.params : [])],
       )
@@ -343,17 +399,68 @@ export async function updateMemory(
         return null
       }
 
+      assertExecutionResourceScope({...old,workspaceId:old.workspaceId!},'read',access)
+      assertExecutionResourceScope({...old,workspaceId:old.workspaceId!},'mutation',access)
+
+      const derivation = updates.derivation ? {
+        ...updates.derivation,
+        sources: [...updates.derivation.sources, {
+          ...old, workspaceId: old.workspaceId!, resourceKind: 'memory', resourceId: old.id, version: old.scopeVersion,
+        }],
+      } : null
+      const floor = derivation ? await validateDerivedMemoryInputs(client, derivation) : null
+
       // Merge updates over the old row. Untouched fields carry through.
       const next = {
+        userId: old.userId as string | null,
+        assistantId: old.assistantId as string | null,
         summary: updates.summary ?? old.summary,
         detail: updates.detail !== undefined ? updates.detail : old.detail,
         confidence: updates.confidence ?? old.confidence,
         tags: updates.tags ?? old.tags,
         sensitivity: updates.sensitivity ?? old.sensitivity,
         scope: updates.scope ?? old.scope,
-        workspaceId: updates.workspaceId !== undefined ? updates.workspaceId : old.workspaceId,
+        workspaceId: updates.workspaceId ?? old.workspaceId,
         compartments: updates.compartments ?? old.compartments,
         projectIds: updates.projectIds ?? old.projectIds,
+      }
+      if (floor && derivation) {
+        const resolved = deriveResourceScope(derivation, {
+          ...floor, workspaceId: next.workspaceId!, sensitivity: next.sensitivity,
+          compartments: next.compartments, projectIds: next.projectIds,
+        })
+        next.sensitivity = resolved.sensitivity
+        next.compartments = resolved.compartments
+        next.projectIds = resolved.projectIds
+        // A superseding row cannot silently erase visibility from new inputs.
+        next.userId = resolved.userId
+        next.assistantId = resolved.assistantId
+      }
+
+      assertExecutionResourceScope({...next,workspaceId:next.workspaceId!},'mutation',access)
+      if (access && !access.clientSelfMemory) {
+        const allowed = await client.query<{allowed:boolean}>(
+          'SELECT member_operation_scope_allows($1,$2,$3,true) AS allowed',
+          [next.workspaceId,next.sensitivity,next.compartments],
+        )
+        if (!allowed.rows[0]?.allowed) {
+          if (ownedClient) await client.query('ROLLBACK')
+          return null
+        }
+      }
+
+      // Supersession leaves the historical source row intact. Invalidate its
+      // existing descendants before inserting the replacement (which may
+      // legitimately cite that prior version under the new combined floor).
+      const changed = next.scope !== old.scope || next.summary !== old.summary || next.detail !== old.detail
+        || next.sensitivity !== old.sensitivity || next.workspaceId !== old.workspaceId
+        || next.userId !== old.userId || next.assistantId !== old.assistantId
+        || JSON.stringify(next.tags) !== JSON.stringify(old.tags)
+        || JSON.stringify(next.compartments) !== JSON.stringify(old.compartments)
+        || JSON.stringify(next.projectIds) !== JSON.stringify(old.projectIds)
+      if (changed) {
+        await client.query(`SELECT hold_scope_descendants($1,'memory',$2)`, [old.workspaceId, old.id])
+        if (derivation) await validateDerivedMemoryInputs(client, derivation)
       }
 
       // Insert the new version. Authorship + audit columns carry the old
@@ -379,7 +486,7 @@ export async function updateMemory(
          VALUES ($1, $2, $3, COALESCE($4, (SELECT workspace_id FROM assistants WHERE id = $1)), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, now())
          RETURNING ${MEMORY_SELECT}`,
         [
-          old.assistantId, old.userId, old.appId, next.workspaceId,
+          next.assistantId, next.userId, old.appId, next.workspaceId,
           next.scope, next.tags, next.summary, next.detail, next.confidence,
           next.sensitivity, old.source, old.sourceSessionId,
           old.createdByUserId, old.createdByAssistantId, old.sourceEpisodeId,
@@ -390,6 +497,10 @@ export async function updateMemory(
         ],
       )
       const newRow = insertResult.rows[0]
+
+      if (derivation) await recordDerivedResource(client, derivation, {
+        ...newRow, workspaceId: newRow.workspaceId!, resourceKind: 'memory', resourceId: newRow.id, version: newRow.scopeVersion,
+      })
 
       // Tombstone the old row, pointing OLD → NEW.
       await client.query(
@@ -438,7 +549,7 @@ export async function getMemoryById(ctx: AccessContext, id: string): Promise<Mem
  */
 export async function getMemoryByIdSystem(id: string): Promise<Memory | null> {
   const result = await query<Memory>(
-    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND valid_to IS NULL`,
+    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND valid_to IS NULL AND NOT scope_held`,
     [id],
   )
   return result.rows[0] ?? null
@@ -542,31 +653,46 @@ export async function searchMemoriesByIdPrefix(
  * `## Identity` block then renders nothing — same observable result
  * as a pre-Phase-2 user with no identity memories.
  */
-export async function getIdentityMemories(ctx: AccessContext): Promise<Memory[]> {
+export async function getIdentityMemories(ctx: AccessContext): Promise<Array<
+  Omit<Memory, 'userId' | 'assistantId'> & { userId: string | null; assistantId: string | null; scopeSource: ScopeSource }
+>> {
   // Resolve the self entity for this (user, workspace). Phase 2 data
   // migration (mig 176) materialised these for every user with
   // legacy identity rows; future users get one on first
   // `updateSelfProfile` call.
+  const access = buildAccessPredicate(ctx, { alias: 'e' })
   const selfRow = await query<{
     entityId: string
     displayName: string
     attributes: Record<string, unknown>
     sensitivity: Sensitivity
+    workspaceId: string
+    userId: string | null
+    assistantId: string | null
+    compartments: string[]
+    projectIds: string[]
+    scopeVersion: string
     updatedAt: Date
   }>(
     `SELECT e.id AS "entityId",
             e.display_name AS "displayName",
             e.attributes,
             e.sensitivity,
+            e.workspace_id AS "workspaceId", e.user_id AS "userId",
+            e.assistant_id AS "assistantId", e.compartments,
+            e.project_ids AS "projectIds", e.scope_version::text AS "scopeVersion",
             e.updated_at AS "updatedAt"
      FROM users u
      JOIN entities e ON e.id = u.entity_id
-     WHERE u.id = $1
-       AND e.workspace_id = $2
+     WHERE ${access.sql}
+       AND u.id = $${access.nextIdx}
+       AND e.workspace_id = $${access.nextIdx + 1}
        AND e.valid_to IS NULL
+       AND e.retracted_at IS NULL
+       AND e.scope_held = false
        AND e.attributes->>'self' = 'true'
      LIMIT 1`,
-    [ctx.userId, ctx.workspaceId],
+    [...access.params, ctx.userId, ctx.workspaceId],
   )
   if (selfRow.rows.length === 0) return []
   const self = selfRow.rows[0]
@@ -574,7 +700,12 @@ export async function getIdentityMemories(ctx: AccessContext): Promise<Memory[]>
   // Render each attribute as one Memory row. Skip `self` (the
   // discriminator) and any null/empty values. Humanise common keys;
   // fall back to "<Key>: <value>" for the rest.
-  const out: Memory[] = []
+  const scopeSource: ScopeSource = {
+    resourceKind: 'entity', resourceId: self.entityId, version: self.scopeVersion,
+    workspaceId: self.workspaceId, userId: self.userId, assistantId: self.assistantId,
+    sensitivity: self.sensitivity, compartments: self.compartments, projectIds: self.projectIds,
+  }
+  const out: Awaited<ReturnType<typeof getIdentityMemories>> = []
   const attrs = self.attributes ?? {}
   for (const [key, rawValue] of Object.entries(attrs)) {
     if (key === 'self') continue
@@ -589,18 +720,21 @@ export async function getIdentityMemories(ctx: AccessContext): Promise<Memory[]>
       // round-trip this id back to getMemoryById will fail (no row
       // exists); identity facts are now read-only via this synthesis.
       id: `${self.entityId}:${key}`,
-      assistantId: ctx.assistantId,
-      userId: ctx.userId,
+      scopeVersion: self.scopeVersion,
+      scopeSource: structuredClone(scopeSource),
+      scopeHeld: false,
+      assistantId: self.assistantId,
+      userId: self.userId,
       appId: null,
-      workspaceId: ctx.workspaceId,
+      workspaceId: self.workspaceId,
       scope: 'shared',
       tags: ['self-profile'],
       summary: humaniseSelfAttribute(key, value),
       detail: null,
       confidence: 1.0,
       sensitivity: self.sensitivity,
-      compartments: [],
-      projectIds: [],
+      compartments: [...self.compartments],
+      projectIds: [...self.projectIds],
       source: 'user',
       sourceSessionId: null,
       recallCount: 0,
@@ -661,16 +795,20 @@ function humaniseSelfAttribute(key: string, value: string): string {
  */
 export async function getSelfEntityId(ctx: AccessContext): Promise<string | null> {
   if (!ctx.workspaceId) return null
+  const access = buildAccessPredicate(ctx, { alias: 'e' })
   const result = await query<{ id: string }>(
     `SELECT e.id
      FROM users u
      JOIN entities e ON e.id = u.entity_id
-     WHERE u.id = $1
-       AND e.workspace_id = $2
+     WHERE ${access.sql}
+       AND u.id = $${access.nextIdx}
+       AND e.workspace_id = $${access.nextIdx + 1}
        AND e.valid_to IS NULL
+       AND e.retracted_at IS NULL
+       AND e.scope_held = false
        AND e.attributes->>'self' = 'true'
      LIMIT 1`,
-    [ctx.userId, ctx.workspaceId],
+    [...access.params, ctx.userId, ctx.workspaceId],
   )
   return result.rows[0]?.id ?? null
 }
@@ -687,16 +825,16 @@ export async function getMemoryIndex(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _validOnly: boolean = false, // WU-2.6 contract surface; WU-2.2 always-filters at SQL so this is a no-op
 ): Promise<Array<{
-  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]
+  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string
 }>> {
   const ap = buildMemoryAccessPredicate(ctx)
-  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(
+  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(
     `SELECT id, summary, tags, app_id as "appId", sensitivity, compartments,
-            project_ids as "projectIds"
+            project_ids as "projectIds", workspace_id AS "workspaceId", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion"
      FROM memories
      WHERE ${ap.sql}
        AND scope <> 'workspace'
-       AND valid_to IS NULL
+       AND valid_to IS NULL AND NOT scope_held
        AND confidence > 0
      ORDER BY updated_at DESC`,
     [...ap.params],
@@ -750,13 +888,15 @@ export async function getMemoryIndexSystem(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _validOnly: boolean = false,
 ): Promise<Array<{
-  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity
+  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string
 }>> {
-  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity }>(
-    `SELECT id, summary, tags, app_id as "appId", sensitivity
+  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(
+    `SELECT id, summary, tags, app_id as "appId", sensitivity, workspace_id AS "workspaceId",
+       user_id AS "userId", assistant_id AS "assistantId", compartments, project_ids AS "projectIds", scope_version::text AS "scopeVersion"
      FROM memories
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2
-       AND valid_to IS NULL
+       AND valid_to IS NULL AND NOT scope_held
+       AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        AND confidence > 0
      ORDER BY updated_at DESC`,
     [assistantId, userId],
@@ -783,21 +923,24 @@ export async function getMemoryIndexRanked(
   ctx: AccessContext,
   limit: number,
 ): Promise<{
-  rows: Array<{ id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; createdAt: Date }>
+  rows: Array<{ id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; createdAt: Date;
+    workspaceId: string; userId: string | null; assistantId: string | null; scopeVersion: string }>
   totalCount: number
 }> {
   const ap = buildMemoryAccessPredicate(ctx)
   const limIdx = ap.nextIdx
   const result = await query<{
-    id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; createdAt: Date; total: string
+    id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; createdAt: Date; total: string;
+    workspaceId: string; userId: string | null; assistantId: string | null; scopeVersion: string
   }>(
     `SELECT id, summary, tags, sensitivity, compartments,
+            workspace_id AS "workspaceId", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion",
             project_ids as "projectIds",
             created_at as "createdAt",
             COUNT(*) OVER () AS total
      FROM memories
      WHERE ${ap.sql}
-       AND valid_to IS NULL
+       AND valid_to IS NULL AND NOT scope_held
        AND confidence > 0
      ORDER BY last_recalled_at DESC NULLS LAST, recall_count DESC, updated_at DESC
      LIMIT $${limIdx}`,
@@ -807,6 +950,7 @@ export async function getMemoryIndexRanked(
   const rows = result.rows.map((r) => ({
     id: r.id, summary: r.summary, tags: r.tags, sensitivity: r.sensitivity,
     compartments: r.compartments, projectIds: r.projectIds, createdAt: r.createdAt,
+    workspaceId: r.workspaceId, userId: r.userId, assistantId: r.assistantId, scopeVersion: r.scopeVersion,
   }))
   return { rows, totalCount }
 }
@@ -895,14 +1039,46 @@ export async function listMemories(
 export async function deleteMemory(
   id: string,
   version?: Partial<CaptureOpts>,
+  transactionClient?: pg.PoolClient,
+  access?: AccessContext,
 ): Promise<boolean> {
+  if((access||currentAgentAccess())&&!transactionClient){
+    const client=await getPool().connect();
+    try{
+      await client.query('BEGIN');
+      const removed=await deleteMemory(id,version,client,access);
+      await client.query('COMMIT');return removed;
+    }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+  }
+  if(access && !access.clientSelfMemory) await applyRLSGucs(transactionClient!,access.userId);
+  if(access||currentAgentAccess()){
+    const ap=access?buildMemoryAccessPredicate(access,{startIdx:2,operation:'mutation'}):null;
+    const row=(await transactionClient!.query<Memory>(`SELECT ${MEMORY_SELECT} FROM memories WHERE id=$1${ap?` AND ${ap.sql}`:''}${access && !access.clientSelfMemory?' AND member_operation_scope_allows(workspace_id,sensitivity,compartments,true)':''} FOR UPDATE`,[id,...(ap?.params??[])])).rows[0];
+    if(!row)return false;
+    assertExecutionResourceScope({...row,workspaceId:row.workspaceId!},'read',access);
+    assertExecutionResourceScope({...row,workspaceId:row.workspaceId!},'mutation',access);
+  }
+  const execute=transactionClient?transactionClient.query.bind(transactionClient):query;
   await captureMemoryVersions([id], {
     actor: version?.actor ?? 'assistant_turn',
     reason: version?.reason ?? 'delete',
     workspaceId: version?.workspaceId ?? null,
     mutationEventId: version?.mutationEventId ?? null,
-  })
-  const result = await query(
+  }, transactionClient)
+  if (version?.actor === 'consolidation_run') {
+    // Background pruning retains cited source versions. Human deletion still
+    // takes the hard-delete path below, whose trigger holds dependent outputs.
+    const archived = await execute(
+      `WITH RECURSIVE ancestry(id) AS (
+         SELECT id FROM memories WHERE id=$1
+         UNION SELECT m.id FROM memories m JOIN ancestry a ON m.superseded_by=a.id
+       ) UPDATE memories SET valid_to=COALESCE(valid_to,now()),updated_at=now()
+         WHERE id=$1 AND EXISTS(SELECT 1 FROM scope_derivation_sources WHERE source_kind='memory' AND source_id IN (SELECT id FROM ancestry))
+         RETURNING id`,[id],
+    )
+    if (archived.rows.length) return true
+  }
+  const result = await execute(
     `DELETE FROM memories WHERE id = $1`,
     [id],
   )
@@ -1018,15 +1194,14 @@ export async function listOpenCommitments(params: {
  * encoding. Pass `cursor=undefined` for the first page. A NULL cursor
  * (or a malformed one) restarts from the head.
  *
- * System-level — the route layer enforces workspace membership
- * before calling.
+ * Viewer-scoped before pagination, including held rows and department grants.
  */
 export async function listUnverifiedByWorkspace(
-  workspaceId: string,
+  ctx: AccessContext,
   limit: number,
   cursor?: { createdAt: Date; id: string },
 ): Promise<Memory[]> {
-  const values: unknown[] = [workspaceId]
+  const values: unknown[] = [ctx.workspaceId]
   let cursorClause = ''
   if (cursor) {
     values.push(cursor.createdAt, cursor.id)
@@ -1035,15 +1210,19 @@ export async function listUnverifiedByWorkspace(
     cursorClause = `AND (created_at, id) < ($2, $3)`
   }
   values.push(limit)
+  const limitIndex=values.length
+  const ap=buildMemoryAccessPredicate(ctx,{startIdx:limitIndex+1})
+  values.push(...ap.params)
   const result = await query<Memory>(
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE workspace_id = $1
        AND verified_by_user_id IS NULL
        AND valid_to IS NULL
        AND retracted_at IS NULL
+       AND ${ap.sql}
        ${cursorClause}
      ORDER BY created_at DESC, id DESC
-     LIMIT $${values.length}`,
+     LIMIT $${limitIndex}`,
     values,
   )
   return result.rows
@@ -1055,18 +1234,20 @@ export async function listUnverifiedByWorkspace(
  * badge on the review page itself. Same partial-index scan as
  * `listUnverifiedByWorkspace`, just `count(*)` instead of `SELECT *`.
  *
- * System-level — caller (route) enforces workspace membership.
+ * The count uses the same viewer projection as the review list.
  */
 export async function countUnverifiedByWorkspace(
-  workspaceId: string,
+  ctx: AccessContext,
 ): Promise<number> {
+  const ap=buildMemoryAccessPredicate(ctx,{startIdx:2})
   const result = await query<{ count: string }>(
     `SELECT count(*)::text AS count FROM memories
      WHERE workspace_id = $1
        AND verified_by_user_id IS NULL
        AND valid_to IS NULL
-       AND retracted_at IS NULL`,
-    [workspaceId],
+       AND retracted_at IS NULL
+       AND ${ap.sql}`,
+    [ctx.workspaceId,...ap.params],
   )
   return Number(result.rows[0]?.count ?? '0')
 }
@@ -1183,6 +1364,10 @@ export async function getMemoryStats(ctx: AccessContext): Promise<{
 // ── Deep consolidation helpers ─────────────────────────────────
 
 export type MemoryWithMetricsRow = {
+  workspaceId: string
+  compartments: string[]
+  projectIds: string[]
+  scopeVersion: string
   id: string
   assistantId: string
   userId: string
@@ -1247,6 +1432,7 @@ export async function listMemoriesWithMetrics(
             user_id as "userId",
             app_id as "appId",
             scope, summary, detail, tags, confidence, sensitivity,
+            workspace_id AS "workspaceId", compartments, project_ids AS "projectIds", scope_version::text AS "scopeVersion",
             recall_count as "recallCount",
             useful_recall_count as "usefulRecallCount",
             coalesce(array_length(query_hashes, 1), 0) as "uniqueQueries",
@@ -1254,7 +1440,8 @@ export async function listMemoriesWithMetrics(
             GREATEST(EXTRACT(EPOCH FROM (now() - created_at)) / 86400, 0)::int as "ageDays",
             created_at as "createdAt"
      FROM memories
-     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2 AND valid_to IS NULL${pageSql}`,
+     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2 AND valid_to IS NULL AND NOT scope_held
+       AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)${pageSql}`,
     params,
   )
   return result.rows
@@ -1313,19 +1500,22 @@ export async function listForSoulSynthesis(
   appId: string | null,
 ): Promise<{
   selfEntityAttributes: Record<string, unknown> | null
+  selfEntitySources: ScopeSource[]
   preferences: Memory[]
 }> {
   // Look up the user's self entity. SOUL synthesis runs against the
   // assistant's workspace; the self entity lives in that same
   // workspace per `getOrCreateSelfEntity`'s materialisation policy.
-  const selfRow = await query<{ attributes: Record<string, unknown> }>(
-    `SELECT e.attributes
+  const selfRow = await query<ScopeSource & { attributes: Record<string, unknown> }>(
+    `SELECT e.attributes,e.workspace_id AS "workspaceId",e.user_id AS "userId",e.assistant_id AS "assistantId",
+       e.sensitivity,e.compartments,e.project_ids AS "projectIds",e.scope_version::text AS version,
+       'entity'::text AS "resourceKind",e.id AS "resourceId"
      FROM users u
      JOIN entities e ON e.id = u.entity_id
      JOIN assistants a ON a.id = $1
      WHERE u.id = $2
        AND e.workspace_id = a.workspace_id
-       AND e.valid_to IS NULL
+       AND e.valid_to IS NULL AND e.retracted_at IS NULL AND NOT e.scope_held
        AND e.attributes->>'self' = 'true'
      LIMIT 1`,
     [assistantId, userId],
@@ -1346,12 +1536,14 @@ export async function listForSoulSynthesis(
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2
        AND valid_to IS NULL
        AND ${scopeClause}
-       AND NOT ('self-profile' = ANY(tags))
+       AND NOT scope_held
+       AND NOT (tags && ARRAY['self-profile','consolidation:soul','consolidation:domain']::text[])
      ORDER BY confidence DESC, updated_at DESC`,
     params,
   )
 
-  return { selfEntityAttributes: selfAttrs, preferences: result.rows }
+  const selfEntitySources:ScopeSource[]=selfRow.rows.map(({attributes:_,...source})=>source)
+  return { selfEntityAttributes: selfAttrs, selfEntitySources, preferences: result.rows }
 }
 
 /**
@@ -1645,7 +1837,7 @@ export async function getWorkspaceIdentityMemories(ctx: AccessContext): Promise<
   // `self-profile` for the (rare) team-self case. Most teams have
   // no rows here. Per-individual identity lives on the user's self
   // entity (see `getIdentityMemories`).
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const result = await query<Memory>(
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE ${ap.sql}
@@ -1663,16 +1855,16 @@ export async function getWorkspaceMemoryIndex(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _validOnly: boolean = false, // WU-2.6 contract surface; WU-2.2 always-filters at SQL so this is a no-op
 ): Promise<Array<{
-  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]
+  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string
 }>> {
-  const ap = buildAccessPredicate(ctx)
-  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(
+  const ap = buildMemoryAccessPredicate(ctx)
+  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(
     `SELECT id, summary, tags, app_id as "appId", sensitivity, compartments,
-            project_ids as "projectIds"
+            project_ids as "projectIds", workspace_id AS "workspaceId", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion"
      FROM memories
      WHERE ${ap.sql}
        AND scope = 'workspace'
-       AND valid_to IS NULL
+       AND valid_to IS NULL AND NOT scope_held
        AND confidence > 0
      ORDER BY updated_at DESC`,
     [...ap.params],
@@ -1696,13 +1888,15 @@ export async function getWorkspaceMemoryIndexSystem(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _validOnly: boolean = false,
 ): Promise<Array<{
-  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity
+  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string
 }>> {
-  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity }>(
-    `SELECT id, summary, tags, app_id as "appId", sensitivity
+  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(
+    `SELECT id, summary, tags, app_id as "appId", sensitivity, workspace_id AS "workspaceId",
+       user_id AS "userId", assistant_id AS "assistantId", compartments, project_ids AS "projectIds", scope_version::text AS "scopeVersion"
      FROM memories
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2
-       AND valid_to IS NULL
+       AND valid_to IS NULL AND NOT scope_held
+       AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        AND confidence > 0
        ${excludeExternalPrincipalsSql('memories.user_id')}
      ORDER BY updated_at DESC`,
@@ -1725,7 +1919,7 @@ export async function getWorkspaceMemoriesByCategory(
   ctx: AccessContext,
   tag: string,
 ): Promise<Memory[]> {
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const tagIdx = ap.nextIdx
   const result = await query<Memory>(
     `SELECT ${MEMORY_SELECT} FROM memories
@@ -1755,7 +1949,7 @@ export async function searchWorkspaceMemories(
     .join(' & ')
 
   if (prefixTerms) {
-    const ap = buildAccessPredicate(ctx)
+    const ap = buildMemoryAccessPredicate(ctx)
     const tsqIdx = ap.nextIdx
     const limIdx = ap.nextIdx + 1
     const result = await query<Memory>(
@@ -1772,7 +1966,7 @@ export async function searchWorkspaceMemories(
     if (result.rows.length > 0) return result.rows
   }
 
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const likeIdx = ap.nextIdx
   const tagIdx = ap.nextIdx + 1
   const limIdx = ap.nextIdx + 2
@@ -1858,7 +2052,7 @@ export async function searchWorkspaceMemoriesByIdPrefix(
   params: { idPrefix: string; limit?: number },
 ): Promise<Memory[]> {
   const limit = params.limit ?? 1
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const pfxIdx = ap.nextIdx
   const limIdx = ap.nextIdx + 1
   const result = await query<Memory>(
@@ -1881,7 +2075,7 @@ export async function listWorkspaceMemories(
 ): Promise<{ memories: Memory[]; total: number }> {
   const limit = params.limit ?? 20
   const offset = params.offset ?? 0
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const conditions: string[] = [ap.sql, 'valid_to IS NULL']
   const values: unknown[] = [...ap.params]
   let idx = ap.nextIdx
@@ -1912,7 +2106,7 @@ export async function listWorkspaceMemories(
  * Count workspace memories for an assistant. Used by the detach guard.
  */
 export async function countWorkspaceMemories(ctx: AccessContext): Promise<number> {
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const result = await query<{ count: string }>(
     `SELECT count(*)::text FROM memories
      WHERE ${ap.sql} AND valid_to IS NULL`,
@@ -2034,6 +2228,7 @@ export async function listWorkspaceMemoriesWithMetrics(
             user_id as "userId",
             app_id as "appId",
             scope, summary, detail, tags, confidence, sensitivity,
+            workspace_id AS "workspaceId", compartments, project_ids AS "projectIds", scope_version::text AS "scopeVersion",
             recall_count as "recallCount",
             useful_recall_count as "usefulRecallCount",
             coalesce(array_length(query_hashes, 1), 0) as "uniqueQueries",
@@ -2041,7 +2236,8 @@ export async function listWorkspaceMemoriesWithMetrics(
             GREATEST(EXTRACT(EPOCH FROM (now() - created_at)) / 86400, 0)::int as "ageDays",
             created_at as "createdAt"
      FROM memories
-     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL
+     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL AND NOT scope_held
+       AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        ${excludeExternalPrincipalsSql('memories.user_id')}${pageSql}`,
     params,
   )

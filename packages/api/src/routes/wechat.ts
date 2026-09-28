@@ -65,6 +65,7 @@ export type WechatRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   /** Shared secret the connector presents on every call (WECHAT_CONNECTOR_SECRET). */
   connectorSecret: string
   provider: LLMProvider
@@ -438,6 +439,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
           ownerId,
           isIdentified,
           routing,
+          integrationId: integration.id,
           channelId,
           creds,
           confirmKey,
@@ -457,6 +459,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
     ownerId: string
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
+    integrationId: string
     channelId: string
     creds: WechatCredentials
     confirmKey: string
@@ -659,12 +662,15 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
 
     await processChannelMessage({
       backgroundModel: options.backgroundModel,
+      decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
       ownerId,
       assistant: { ...assistant, ownerUserId: ownerId },
       isIdentified,
       channelType: 'wechat',
       channelId: peerId,
+      channelIntegrationId: params.integrationId,
+      channelIntegrationStore: options.integrationStore,
       messageText: incoming.text,
       userContentBlocks,
       // Raw paste for the large-paste intercept (WeChat has no prefix wrapper).

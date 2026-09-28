@@ -73,6 +73,38 @@ try {
     results.push({ name, failures, ...row });
     await page.locator('[data-fixture-rail]').screenshot({ path: join(output, `${name}.png`) });
   }
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(`http://127.0.0.1:${port}/scripts/fixtures/feed-composer-browser.html?image=1`);
+    const preview = page.locator('[data-feed-pending-image]').first();
+    await page.locator('.ProseMirror p').last().click();
+    await preview.locator('img').waitFor();
+    await preview.scrollIntoViewIfNeeded();
+    const scroll = page.locator('[data-image-scroll]');
+    const before = await scroll.evaluate(el => el.scrollTop);
+    await preview.click();
+    await page.waitForTimeout(300);
+    const dialog = page.getByRole('dialog');
+    await page.screenshot({ path: join(output, `image-click-${width}.png`) });
+    await dialog.waitFor({ state: 'visible' });
+    assert.equal(await scroll.evaluate(el => el.scrollTop), before, 'Opening the image chooser must preserve the draft scroll position');
+    const dict = await page.evaluate(() => window.feedComposerFixture.dict);
+    await dialog.getByRole('button', { name: dict.feedGeneration.nextImage, exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('[data-feed-image-carousel] img')?.alt === 'Second option');
+    await dialog.getByRole('button', { name: dict.feedGeneration.closeDetails, exact: true }).click();
+    await dialog.waitFor({ state: 'hidden' });
+    assert.equal(await scroll.evaluate(el => el.scrollTop), before, 'Closing the image chooser must preserve the draft scroll position');
+    assert.equal(await preview.evaluate(el => el === document.activeElement), true, 'Focus returns to the image preview');
+    await preview.focus();
+    await preview.press('Enter');
+    await dialog.waitFor({ state: 'visible' });
+    await page.keyboard.press('Escape');
+    await dialog.waitFor({ state: 'hidden' });
+    assert.equal(await scroll.evaluate(el => el.scrollTop), before, 'Keyboard review preserves scroll');
+    assert.equal(await preview.evaluate(el => el === document.activeElement), true, 'Escape returns focus to the preview');
+    assert.deepEqual(await page.evaluate(() => window.feedImageFixture.commands), [], 'Reviewing images must not mutate the draft');
+    results.push({ name: `image-scroll-${width}`, failures: [] });
+  }
   for (const [locale, width] of [['en', 1440], ['en', 390], ['en', 320], ['ja', 390], ['zh', 390], ['zh-cn', 390]]) {
     await page.setViewportSize({ width, height: 844 });
     await page.goto(`http://127.0.0.1:${port}/scripts/fixtures/feed-composer-browser.html?workflow=1&locale=${locale}`);

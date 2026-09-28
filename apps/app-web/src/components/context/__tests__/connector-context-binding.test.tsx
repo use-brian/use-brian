@@ -56,6 +56,16 @@ afterEach(async () => {
 });
 
 describe("[COMP:app-web/context-scope] connector context binding", () => {
+  it("discloses the provider-root limit for a scoped connector", async () => {
+    api.getConnectorContext.mockResolvedValue({
+      contextGroupId: "team-product",
+      contextProjectId: "project-roadmap",
+    });
+    await renderBinding();
+
+    expect(host.textContent).toContain(en.contextScope.connectorProviderRootUnavailable);
+  });
+
   it("renders localized load copy instead of a raw API error code", async () => {
     api.getConnectorContext.mockRejectedValue(new Error("not_found"));
     await renderBinding();

@@ -52,10 +52,15 @@ function makeReader(): ControlPlaneReader {
     listConnectors: vi.fn(async () => [
       {
         provider: 'github',
+        name: 'GitHub',
+        description: 'Search repositories.',
         instanceId: '44444444-4444-4444-4444-444444444444',
         label: 'GitHub',
         connected: true,
+        availability: 'connected' as const,
         oauthRequired: false,
+        authorizationHandoff: false,
+        connectPath: `/w/${WS}/studio/connectors?connect=github`,
         authType: 'api_key' as const,
         scope: 'team-native' as const,
         sensitivity: 'internal' as const,

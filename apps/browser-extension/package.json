@@ -4,15 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.chromium.json && node scripts/assemble.mjs",
-    "build:firefox": "rm -rf dist-firefox && tsc -p tsconfig.firefox.json && node scripts/assemble-firefox.mjs",
+    "build": "pnpm --filter @use-brian/browser-control build && rm -rf dist && tsc -p tsconfig.chromium.json && node scripts/assemble.mjs",
+    "build:firefox": "pnpm --filter @use-brian/browser-control build && rm -rf dist-firefox && tsc -p tsconfig.firefox.json && node scripts/assemble-firefox.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
     "@types/node": "^20.19.39",
+    "jsdom": "^29.1.1",
     "typescript": "^5.7",
     "vitest": "^3"
+  },
+  "dependencies": {
+    "@use-brian/browser-control": "workspace:*"
   }
 }

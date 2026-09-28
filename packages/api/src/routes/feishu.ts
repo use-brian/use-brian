@@ -777,6 +777,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       sessionChannelId,
       connectorAuthority: config.allowAssistantConnectorTools === false ? 'disabled' : 'assistant',
       routing,
+      integrationId: integration.id,
       connectorInstanceId: integration.connectorInstanceId,
     }))
     } finally {
@@ -833,6 +834,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     sessionChannelId: string
     connectorAuthority: 'assistant' | 'disabled'
     routing: { assistantId: string; modelAlias: string }
+    integrationId: string
     connectorInstanceId: string | null
   }): Promise<void> {
     const { adapter, api, incoming, assistant, ownerId, channelUserId, isIdentified, sessionChannelId, connectorAuthority, routing, connectorInstanceId } = params
@@ -1030,12 +1032,15 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
 
     await processChannelMessage({
       backgroundModel: options.backgroundModel,
+      decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
       ownerId,
       assistant: { ...assistant, ownerUserId: ownerId },
       isIdentified,
       channelType: 'feishu',
       channelId: incoming.channelId,
+      channelIntegrationId: params.integrationId,
+      channelIntegrationStore: options.integrationStore,
       sessionChannelId,
       connectorAuthority,
       actorChannelId: incoming.userId,

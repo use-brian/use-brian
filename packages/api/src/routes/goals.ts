@@ -70,6 +70,7 @@ export type GoalsRouteOptions = {
    *  verify, instead of arming it. Absent (OSS / no provider) → gate skipped. */
   assessClarity?: GoalClarityAssessor
   resolveAssistantId?: (userId: string, workspaceId: string) => Promise<string | undefined>
+  resolveAuthoringAuthority?: (params: { userId: string; goal: GoalRecord }) => Promise<NonNullable<GoalRecord['authoringAuthority']>>
   contextStore?: Pick<
     ContextScopeStore,
     'getTeamSystem' | 'getProjectSystem' | 'resolveMemberTeamPrincipalSystem'
@@ -414,7 +415,17 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
         return
       }
     }
-    const goal = await updateGoalSystem(req.params.id, { confirm: true, outcome, brief })
+    if (!existing.authoringAuthority && !opts.resolveAuthoringAuthority) {
+      res.status(503).json({ error: 'Goal authoring authority is unavailable on this server' })
+      return
+    }
+    const goal = await updateGoalSystem(req.params.id, {
+      confirm: true,
+      outcome,
+      brief,
+      authoringAuthority: existing.authoringAuthority
+        ?? await opts.resolveAuthoringAuthority!({ userId,goal:existing }),
+    })
     res.json({ ok: true, goal: goal ? projectGoal(goal) : null })
   })
 

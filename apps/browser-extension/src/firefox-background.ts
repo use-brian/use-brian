@@ -110,10 +110,16 @@ async function handleCommand(cmd: { id: string; op: string; args: Record<string,
 }
 
 async function executeOp(op: string, args: Record<string, unknown>): Promise<unknown> {
+  if (op === 'browserFillReference' || (op !== 'stop' && (await chrome.storage.local.get('protectedDisclosureLock')).protectedDisclosureLock)) {
+    throw new FirefoxNativeError('Protected fill unavailable', 'protected_fill_denied')
+  }
   if (op === 'stop') {
     gate.stop()
     boundTabId = null
     return native.request('stop')
+  }
+  if (op === 'fillForm') {
+    throw new FirefoxNativeError('Batch form filling is not implemented in Firefox.', 'unsupported_browser')
   }
   if (op === 'openTab' || op === 'listTabs' || op === 'switchTab' || op === 'closeTab') {
     throw new FirefoxNativeError(

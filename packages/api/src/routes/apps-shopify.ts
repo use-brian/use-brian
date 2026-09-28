@@ -83,7 +83,7 @@ export type AppsShopifyRouteOptions = {
     alsoAllow?: readonly string[]
   }) => Promise<Tool[]>
   /** Hand a task to the workspace assistant, capped at this surface's own tools. */
-  askAssistant: (params: { workspaceId: string; storeScope: AppStoreScope; task: string }) => Promise<string>
+  askAssistant: (params: { workspaceId: string; userId: string; storeScope: AppStoreScope; task: string }) => Promise<string>
 }
 
 const callBody = z.object({
@@ -240,7 +240,7 @@ export function appsShopifyRoutes(opts: AppsShopifyRouteOptions): Router {
     try {
       // Capped at this surface's OWN tool ceiling by the caller's wiring, so
       // "ask the assistant to refund order 1042" cannot ladder around /call.
-      const answer = await opts.askAssistant({ workspaceId, storeScope: STORE_SCOPE, task })
+      const answer = await opts.askAssistant({ workspaceId, userId:req.userId!, storeScope: STORE_SCOPE, task })
       res.json({ answer })
     } catch (err) {
       res.status(502).json({ error: 'assistant_failed', detail: message(err) })

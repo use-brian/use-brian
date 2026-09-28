@@ -130,6 +130,7 @@ type SlackRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -844,12 +845,14 @@ export function slackRoutes(options: SlackRouteOptions): Router {
       await withChatLock(`slack:${sessionChannelId}`, () =>
         processMessage({
           backgroundModel: options.backgroundModel,
+          decisionRuntime: options.decisionRuntime,
           adapter,
           incoming,
           assistant,
           channelUserId,
           ownerId,
           isIdentified,
+          integrationId: integration.id,
           archiveConnectorInstanceId: integration.connectorInstanceId,
           threadTs,
           sessionChannelId,
@@ -1194,12 +1197,14 @@ async function dispatchSlackReactionFeedback(params: {
 type ProcessMessageParams = {
   /** Servable background-lane model, threaded from the route options. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   adapter: ReturnType<typeof createSlackAdapter>
   incoming: IncomingMessage
   assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
   channelUserId: string
   ownerId: string
   isIdentified: boolean
+  integrationId: string
   archiveConnectorInstanceId?: string | null
   threadTs?: string
   /** Thread-qualified Brian conversation id; never sent to the Slack API. */
@@ -1219,6 +1224,7 @@ type ProcessMessageParams = {
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   workerManager?: import('@use-brian/core').WorkerManager
   connectorStore?: ConnectorStore
+  integrationStore: ChannelIntegrationStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: import('../db/assistant-connector-store.js').AssistantConnectorStore
   /** Stage 4 of the team-connector promotion: enables team-exposure grant consumption. */
@@ -1826,12 +1832,15 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
 
   await processChannelMessage({
     backgroundModel: params.backgroundModel,
+    decisionRuntime: params.decisionRuntime,
     userId: channelUserId,
     ownerId,
     assistant: { ...assistant, ownerUserId: ownerId },
     isIdentified,
     channelType: 'slack',
     channelId: incoming.channelId,
+    channelIntegrationId: params.integrationId,
+    channelIntegrationStore: params.integrationStore,
     sessionChannelId: params.sessionChannelId,
     realtimeThreadTarget: params.realtimeThreadTarget,
     actorChannelId: incoming.userId, // Slack user id (e.g. U0123) → X-Sidanclaw-Actor-Id

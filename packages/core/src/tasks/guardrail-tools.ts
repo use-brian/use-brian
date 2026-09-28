@@ -26,6 +26,7 @@
  */
 
 import { z } from 'zod'
+import type { AccessContext } from '../security/access-context.js'
 import { buildTool, type Tool } from '../tools/types.js'
 import { tolerantBoolean } from '../tools/schema-tolerance.js'
 import { notFoundMessage } from '../tools/tool-failure.js'
@@ -53,6 +54,7 @@ export type TaskGuardrailStore = {
     userId: string
     taskId: string
     reason: string
+    access?: AccessContext
   }): Promise<{
     title: string
     tombstoneId: string
@@ -215,6 +217,13 @@ export function createTaskGuardrailTools(
         userId: context.userId,
         taskId: input.id,
         reason: input.reason,
+        access: {
+          userId: context.userId, workspaceId: context.workspaceId!,
+          assistantId: context.assistantId, assistantKind: context.assistantKind ?? 'standard',
+          clearance: context.clearance, compartments: context.compartments,
+          mutationCompartments: context.mutationCompartments, projectIds: context.projectIds,
+          visibilityAssistantIds: context.visibilityAssistantIds,
+        },
       })
       if (!result) {
         return {

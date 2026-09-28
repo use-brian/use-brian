@@ -320,6 +320,8 @@ export class FirefoxBidiExecutor {
       case "click":
         await this.click(String(args.ref ?? ""));
         return { clicked: true };
+      case "fillForm":
+        throw new FirefoxBidiError("Batch form filling is not implemented in Firefox.", "unsupported_browser");
       case "type":
         await this.type(String(args.ref ?? ""), String(args.text ?? ""));
         return { typed: true };

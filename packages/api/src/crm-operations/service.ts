@@ -331,13 +331,25 @@ async function executeSubmission(
     if (!mapped.email) invalidInput('This intake definition requires a mapped email field.')
     resolvedContactId = await tx.findContactByEmail(mapped.email)
   }
+  // An unverified claim may join the one live contact that already holds the
+  // address, but only fills its gaps below. Several live matches are a staff
+  // review case: keep the submission and create a contact as new_or_review does.
+  let fillGapsOnly = false
+  if (definition.identityPolicy === 'existing_or_new' && mapped.email) {
+    try {
+      resolvedContactId = await tx.findContactByEmail(mapped.email)
+      fillGapsOnly = resolvedContactId !== null
+    } catch (error) {
+      if (!(error instanceof CrmOperationsError && error.details?.reason === 'identity_review_required')) throw error
+    }
+  }
 
   const attributionUserId = await tx.resolveAttributionUser(
     actorUserId(context.actor) ?? definition.createdByUserId,
   )
   if (!attributionUserId) throw new Error('CRM contact attribution user is unavailable')
   const contact = resolvedContactId
-    ? await tx.updateContact(resolvedContactId, mapped)
+    ? fillGapsOnly ? await tx.fillContactGaps(resolvedContactId, mapped) : await tx.updateContact(resolvedContactId, mapped)
     : await tx.createContact(mapped, {
       createdByUserId: attributionUserId,
       createdByAssistantId: actorAssistantId(context.actor),

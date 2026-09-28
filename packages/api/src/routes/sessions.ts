@@ -9,11 +9,12 @@ import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
-import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
+import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
   resolveTurnScopeSystem,
+  sessionMessageInputScope,
   type TurnScopeAssistant,
 } from '../context-scope/resolve-turn-scope.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
@@ -53,6 +54,8 @@ type GatedSession = {
   visibility: string | null
   mode: string | null
   effectiveClearance: string | null
+  contextCompartments?: string[]
+  contextProjectId?: string | null
 }
 
 /**
@@ -85,6 +88,8 @@ export async function gateSessionRead(
   }
   let assistantWorkspaceId: string | null = null
   let membershipClearance: 'public' | 'internal' | 'confidential' | null = null
+  let membershipCompartments: string[] | null | undefined
+  let membershipProjectIds: string[] | null | undefined
   if (session.visibility === 'workspace' || session.mode === 'draft') {
     const teamRow = await query<{ workspaceId: string | null }>(
       `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
@@ -92,8 +97,10 @@ export async function gateSessionRead(
     )
     assistantWorkspaceId = teamRow.rows[0]?.workspaceId ?? null
     if (assistantWorkspaceId) {
-      const membership = await getWorkspaceMembershipWithClearanceSystem(jwtUserId, assistantWorkspaceId)
+      const membership = await getWorkspaceMembershipWithReadScopeSystem(jwtUserId, assistantWorkspaceId)
       membershipClearance = membership?.clearance ?? null
+      membershipCompartments = membership?.compartments
+      membershipProjectIds = membership?.projectIds
     }
   }
   const decision = decideSessionRead({
@@ -101,6 +108,8 @@ export async function gateSessionRead(
     session,
     assistantWorkspaceId,
     membershipClearance,
+    membershipCompartments,
+    membershipProjectIds,
   })
   return decision.readable ? null : { status: decision.status, error: decision.error }
 }
@@ -140,6 +149,8 @@ export type SessionRouteOptions = {
     effectiveClearance: string | null
     compartments: string[]
     projectIds: string[]
+    contextBindingOrigin: 'legacy' | 'explicit' | 'reviewed' | 'held'
+    classificationMode: 'legacy' | 'review' | 'strict'
   }) => void
   /**
    * Room human `@mention` badge signal (docs/plans/room-human-mentions.md
@@ -689,6 +700,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         `UPDATE sessions
             SET context_group_id = $3,
                 context_project_id = $4,
+                context_binding_origin = 'explicit',
                 context_locked_at = CASE
                   WHEN $3::uuid IS NOT NULL OR $4::uuid IS NOT NULL THEN now()
                   ELSE NULL
@@ -1143,12 +1155,40 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
+      const assistantResult = await query<TurnScopeAssistant>(
+        `SELECT id, workspace_id AS "workspaceId", kind, clearance, compartments,
+                default_compartments AS "defaultCompartments",
+                team_scope_mode AS "teamScopeMode",
+                default_workspace_group_id AS "defaultWorkspaceGroupId",
+                project_scope_mode AS "projectScopeMode",
+                default_project_id AS "defaultProjectId"
+           FROM assistants WHERE id = $1`,
+        [session.assistantId],
+      )
+      const scopedAssistant = assistantResult.rows[0]
+      const workspaceId = scopedAssistant?.workspaceId ?? null
+      const messageScope = scopedAssistant && workspaceId
+        ? sessionMessageInputScope({
+            scope: await resolveTurnScopeSystem({
+              userId: user.id,
+              assistant: scopedAssistant,
+              workspaceId,
+              session,
+            }),
+            workspaceId,
+            userId: user.id,
+            assistantId: scopedAssistant.id,
+            sharedAudience: true,
+          })
+        : undefined
+
       const stored = await addSessionMessage({
         sessionId: session.id,
         role: 'user',
         content: [{ type: 'text', text }],
         replyToText,
         senderUserId: user.id,
+        scope: messageScope,
       })
       publishSessionEvent({
         kind: 'user_message_saved',
@@ -1165,12 +1205,6 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // hook below and room-mention recording (docs/plans/room-human-mentions.md
       // T-H1/T-H2), which the onRoomPost lookup used to compute for itself
       // alone.
-      const wsRow = await query<{ workspaceId: string | null }>(
-        `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
-        [session.assistantId],
-      ).catch(() => null)
-      const workspaceId = wsRow?.rows[0]?.workspaceId ?? null
-
       // Room human @mentions — a silent post still writes an Inbox row for
       // any mentioned teammate (D-H1). No turn runs on this path (D-H2);
       // this only persists a durable notification. A recording failure must
@@ -1219,6 +1253,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
             effectiveClearance: session.effectiveClearance,
             compartments: session.contextCompartments,
             projectIds: session.contextProjectId ? [session.contextProjectId] : [],
+            contextBindingOrigin: session.contextBindingOrigin ?? 'legacy',
+            classificationMode: session.classificationMode ?? 'legacy',
           })
         } catch (err) {
           console.error('[sessions] room post capture hook failed:', err)

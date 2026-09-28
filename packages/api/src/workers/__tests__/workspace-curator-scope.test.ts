@@ -17,9 +17,33 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { buildWorkspaceCuratorScope } from '../workspace-curator-scope.js'
 
 const queryMock = vi.fn(async (..._args: unknown[]) => ({ rows: [] as unknown[], rowCount: 0 }))
+const patchMock = vi.fn(async (..._args: unknown[]) => undefined)
+const supportFileMock = vi.fn(async (..._args: unknown[]) => undefined)
+const createMock = vi.fn(async (..._args: unknown[]) => ({ rowId: 'new-row', slug: 'weekly-report' }))
+const deprecateMock = vi.fn(async (..._args: unknown[]) => undefined)
 vi.mock('../../db/client.js', () => ({
   query: (...args: unknown[]) => queryMock(...args),
 }))
+vi.mock('../../db/skill-derived-store.js', () => ({
+  applyDerivedSkillPatch: (...args: unknown[]) => patchMock(...args),
+  applyDerivedSkillSupportFile: (...args: unknown[]) => supportFileMock(...args),
+  createDerivedWorkspaceSkill: (...args: unknown[]) => createMock(...args),
+  softDeprecateScopedSkill: (...args: unknown[]) => deprecateMock(...args),
+}))
+
+const source = {
+  resourceKind: 'session_message',
+  resourceId: 'message-1',
+  version: '1',
+  workspaceId: 'ws-1',
+  userId: 'user-1',
+  assistantId: 'assistant-1',
+  sensitivity: 'internal' as const,
+  compartments: [],
+  projectIds: [],
+}
+
+const derivation = { producer: 'skill:umbrella', sources: [source] }
 
 function makeDeps() {
   const listCuratorEligible = vi.fn(async () => [{ rowId: 's1', id: 'slug-1' }] as never)
@@ -36,6 +60,11 @@ function makeDeps() {
 beforeEach(() => {
   queryMock.mockReset()
   queryMock.mockResolvedValue({ rows: [], rowCount: 0 })
+  patchMock.mockClear()
+  supportFileMock.mockClear()
+  createMock.mockClear()
+  createMock.mockResolvedValue({ rowId: 'new-row', slug: 'weekly-report' })
+  deprecateMock.mockClear()
 })
 
 describe('[COMP:workers/workspace-curator-scope] buildWorkspaceCuratorScope', () => {
@@ -59,14 +88,16 @@ describe('[COMP:workers/workspace-curator-scope] buildWorkspaceCuratorScope', ()
     expect(listCuratorEligible).toHaveBeenCalledWith('ws-1')
   })
 
-  it('patchUmbrella issues a content UPDATE gated on valid_to IS NULL', async () => {
+  it('patchUmbrella delegates the complete derivation to the scoped writer', async () => {
     const scope = buildWorkspaceCuratorScope(makeDeps().deps)
-    await scope.umbrellaStore.patchUmbrella('s1', { content: 'NEW', diff: 'd' })
-    const [sql, params] = queryMock.mock.calls[0] as [string, unknown[]]
-    expect(sql).toMatch(/UPDATE workspace_skills/)
-    expect(sql).toMatch(/SET content = \$1/)
-    expect(sql).toMatch(/valid_to IS NULL/)
-    expect(params).toEqual(['NEW', 'd', 's1'])
+    await scope.umbrellaStore.patchUmbrella('s1', { content: 'NEW', diff: 'd', derivation })
+    expect(patchMock).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      skillId: 's1',
+      content: 'NEW',
+      diff: 'd',
+      evidence: derivation,
+    })
   })
 
   it('createUmbrella inserts an auto-generated, background_review row and returns its id', async () => {
@@ -78,15 +109,17 @@ describe('[COMP:workers/workspace-curator-scope] buildWorkspaceCuratorScope', ()
       description: 'd',
       content: '# body',
       originatingAssistantId: 'a1',
+      derivation,
     })
     expect(out).toEqual({ rowId: 'new-row' })
-    const [sql, params] = queryMock.mock.calls[0] as [string, unknown[]]
-    expect(sql).toMatch(/INSERT INTO workspace_skills/)
-    expect(sql).toMatch(/'auto-generated'/)
-    expect(sql).toMatch(/'background_review'/)
-    expect(params).toContain('weekly-report')
-    expect(params).toContain('ws-1')
-    expect(params).toContain('a1')
+    expect(createMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-1',
+      slug: 'weekly-report',
+      source: 'auto-generated',
+      writeOrigin: 'background_review',
+      originatingAssistantId: 'a1',
+      evidence: derivation,
+    }))
   })
 
   it('createUmbrella seeds the proposer enablement row (enabled_by NULL = system-seeded)', async () => {
@@ -100,9 +133,10 @@ describe('[COMP:workers/workspace-curator-scope] buildWorkspaceCuratorScope', ()
       description: 'd',
       content: '# body',
       originatingAssistantId: 'a1',
+      derivation,
     })
-    expect(queryMock).toHaveBeenCalledTimes(2)
-    const [sql, params] = queryMock.mock.calls[1] as [string, unknown[]]
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    const [sql, params] = queryMock.mock.calls[0] as [string, unknown[]]
     expect(sql).toMatch(/INSERT INTO workspace_skill_enablement/)
     expect(sql).toMatch(/VALUES \(\$1, \$2, NULL\)/)
     expect(sql).toMatch(/ON CONFLICT \(workspace_skill_id, assistant_id\) DO NOTHING/)
@@ -117,8 +151,9 @@ describe('[COMP:workers/workspace-curator-scope] buildWorkspaceCuratorScope', ()
       name: 'Weekly report',
       description: 'd',
       content: '# body',
+      derivation,
     })
-    expect(queryMock).toHaveBeenCalledTimes(1)
+    expect(queryMock).not.toHaveBeenCalled()
   })
 
   it('addSupportFile upserts on the (skill,kind,name) unique key', async () => {
@@ -128,11 +163,17 @@ describe('[COMP:workers/workspace-curator-scope] buildWorkspaceCuratorScope', ()
       kind: 'template',
       name: 'weekly.md',
       content: 'body',
+      derivation,
     })
-    const [sql, params] = queryMock.mock.calls[0] as [string, unknown[]]
-    expect(sql).toMatch(/INSERT INTO workspace_skill_files/)
-    expect(sql).toMatch(/ON CONFLICT \(workspace_skill_id, kind, name\) DO UPDATE/)
-    expect(params).toEqual(['s1', 'template', 'weekly.md', 'body', null])
+    expect(supportFileMock).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      skillId: 's1',
+      kind: 'template',
+      name: 'weekly.md',
+      content: 'body',
+      description: undefined,
+      evidence: derivation,
+    })
   })
 
   it('recordAbsorption archives the member with absorbed_into metadata', async () => {
@@ -146,10 +187,11 @@ describe('[COMP:workers/workspace-curator-scope] buildWorkspaceCuratorScope', ()
 
   it('softDeprecate bi-temporally closes the row (valid_to = now)', async () => {
     const scope = buildWorkspaceCuratorScope(makeDeps().deps)
-    await scope.decayStore.softDeprecate('s1', 'inactive_30d' as never)
-    const [sql, params] = queryMock.mock.calls[0] as [string, unknown[]]
-    expect(sql).toMatch(/SET\s+valid_to = now\(\)/)
-    expect(sql).toMatch(/valid_to IS NULL/)
-    expect(params).toEqual(['s1'])
+    await scope.decayStore.softDeprecate('s1', 'inactive_30d' as never, source)
+    expect(deprecateMock).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      skillId: 's1',
+      source,
+    })
   })
 })

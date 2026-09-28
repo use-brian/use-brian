@@ -28,8 +28,8 @@ import {
  */
 export function createDbWorkspaceFilesStore(): WorkspaceFilesStore {
   return {
-    create(userId, input) {
-      return createWorkspaceFile(userId, input)
+    create(userId, input, access) {
+      return createWorkspaceFile(userId, input, { access })
     },
     getById(ctx, id) {
       return getWorkspaceFileById(ctx, id)
@@ -37,14 +37,14 @@ export function createDbWorkspaceFilesStore(): WorkspaceFilesStore {
     getByPath(ctx, path) {
       return getWorkspaceFileByPath(ctx, path)
     },
-    updateMeta(userId, workspaceId, id, patch) {
-      return updateWorkspaceFileMeta(userId, workspaceId, id, patch)
+    updateMeta(userId, workspaceId, id, patch, access) {
+      return updateWorkspaceFileMeta(userId, workspaceId, id, patch, undefined, access)
     },
-    updateSize(userId, workspaceId, id, sizeBytes, scope) {
-      return updateWorkspaceFileSize(userId, workspaceId, id, sizeBytes, scope)
+    updateSize(userId, workspaceId, id, sizeBytes, scope, access) {
+      return updateWorkspaceFileSize(userId, workspaceId, id, sizeBytes, scope, access)
     },
-    delete(userId, workspaceId, id) {
-      return deleteWorkspaceFile(userId, workspaceId, id)
+    delete(userId, workspaceId, id, access) {
+      return deleteWorkspaceFile(userId, workspaceId, id, access)
     },
     listByPath(ctx, opts) {
       return listWorkspaceFilesByPath(ctx, opts)
@@ -58,8 +58,8 @@ export function createDbWorkspaceFilesStore(): WorkspaceFilesStore {
     sumSizeBytes(ctx) {
       return sumWorkspaceFilesSizeBytes(ctx)
     },
-    supersede(userId, workspaceId, id, patch) {
-      return supersedeWorkspaceFile(userId, workspaceId, id, patch)
+    supersede(userId, workspaceId, id, patch, access) {
+      return supersedeWorkspaceFile(userId, workspaceId, id, patch, access)
     },
     getHistory(ctx, id) {
       return getWorkspaceFileHistory(ctx, id)

@@ -864,3 +864,52 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     ).toBe(501)
   })
 })
+
+describe('protected destination task linkage', () => {
+  it('exposes only browser-observed exact origin, and denies ordinary completion/backend changes while locked', async () => {
+    const tasks = createInMemoryLocalComputerTaskStore()
+    const ctx = { userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1', profileId: 'profile-1' }
+    tasks.touch(ctx, 'example.com')
+    let blocked = false
+    let supported = true
+    const app = createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: null,
+      localTasks: tasks, getWorkspaceRole: MEMBER_ROLE, protectedFillEnabled: true,
+      protectedBrowserSupported: async () => supported,
+      protectedFillBlocked: () => blocked,
+    }), { userId: 'user-1' })
+    expect((await request(app).get('/api/computer/tasks/sess-1')).body.destinationOrigin).toBeNull()
+    tasks.touch(ctx, 'example.com', 'https://example.com:8443')
+    expect((await request(app).get('/api/computer/tasks/sess-1')).body.destinationOrigin).toBe('https://example.com:8443')
+    supported = false
+    expect((await request(app).get('/api/computer/tasks/sess-1')).body.destinationOrigin).toBeUndefined()
+    supported = true
+    blocked = true
+    expect((await request(app).get('/api/computer/tasks/sess-1')).body.destinationOrigin).toBeUndefined()
+    expect((await request(app).post('/api/computer/tasks/sess-1/complete')).status).toBe(403)
+    expect((await request(app).post('/api/computer/sessions/sess-1/backend').send({ backend: 'cloud' })).status).toBe(403)
+  })
+})
+
+describe('local protected-task identity lifetime', () => {
+  it('assigns a fresh identity after retirement, expiry or profile change', () => {
+    let now = 0
+    const tasks = createInMemoryLocalComputerTaskStore(() => now)
+    const ctx = { userId: 'user', workspaceId: 'workspace', sessionId: 'session', profileId: 'profile' }
+    tasks.touch(ctx, 'example.com', 'https://example.com')
+    const first = tasks.getActiveBySession('session')!.taskId
+    tasks.touch(ctx)
+    expect(tasks.getActiveBySession('session')!.taskId).toBe(first)
+    tasks.complete('session')
+    tasks.touch(ctx, 'example.com', 'https://example.com')
+    const second = tasks.getActiveBySession('session')!.taskId
+    expect(second).not.toBe(first)
+    now += 20 * 60 * 1000
+    tasks.touch(ctx, 'example.com', 'https://example.com')
+    expect(tasks.getActiveBySession('session')!.taskId).not.toBe(second)
+    const third = tasks.getActiveBySession('session')!.taskId
+    tasks.touch({ ...ctx, profileId: 'another-profile' })
+    expect(tasks.getActiveBySession('session')!.taskId).not.toBe(third)
+    expect(tasks.getActiveBySession('session')!.destinationOrigin).toBeNull()
+  })
+})

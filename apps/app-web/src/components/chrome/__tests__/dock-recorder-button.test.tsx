@@ -317,10 +317,18 @@ describe("[COMP:app-web/dock-recorder] desktop capture-source picker", () => {
   it("shows screen and window cards, then returns the explicitly confirmed source", async () => {
     pickerMocks.listCaptureSources.mockImplementation(async (kind: "screen" | "window") =>
       kind === "screen"
-        ? [{ id: "screen:1", name: "Built-in Display" }]
+        ? [{
+            id: "screen:1",
+            name: "Built-in Display",
+            thumbnailDataUrl: "data:image/png;base64,screen-preview",
+          }]
         : [
-            { id: "window:1", name: "Browser" },
-            { id: "window:2", name: "Editor" },
+            {
+              id: "window:1",
+              name: "Browser",
+              thumbnailDataUrl: "data:image/png;base64,browser-preview",
+            },
+            { id: "window:2", name: "Editor", thumbnailDataUrl: null },
           ],
     );
     pickerMocks.confirmDialog.mockImplementation(
@@ -344,6 +352,8 @@ describe("[COMP:app-web/dock-recorder] desktop capture-source picker", () => {
         expect(screenTab?.textContent).toContain("Screen");
         expect(dialogHost.querySelector('[role="radiogroup"]')?.getAttribute("aria-label"))
           .toBe("Available screens");
+        expect(dialogHost.querySelector('img')?.getAttribute("src"))
+          .toBe("data:image/png;base64,screen-preview");
 
         const windowTab = Array.from(dialogHost.querySelectorAll('[role="tab"]')).find(
           (button) => button.textContent?.includes("Window"),
@@ -351,10 +361,13 @@ describe("[COMP:app-web/dock-recorder] desktop capture-source picker", () => {
         act(() => windowTab.click());
         expect(dialogHost.querySelector('[role="radiogroup"]')?.getAttribute("aria-label"))
           .toBe("Available windows");
+        expect(dialogHost.querySelector('img')?.getAttribute("src"))
+          .toBe("data:image/png;base64,browser-preview");
 
         const editor = Array.from(dialogHost.querySelectorAll('[role="radio"]')).find(
           (button) => button.textContent?.includes("Editor"),
         ) as HTMLButtonElement;
+        expect(editor.querySelector("img")).toBeNull();
         act(() => editor.click());
         expect(editor.getAttribute("aria-checked")).toBe("true");
 

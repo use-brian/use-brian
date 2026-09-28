@@ -43,6 +43,7 @@ import {
   fetchMeteredEstimate,
   fetchModelMenu,
   setWorkspaceModelDefault,
+  setWorkspaceDecisionRouting,
   setWorkspaceModelRoute,
   updateMeteredProfile,
   type MenuModel,
@@ -145,6 +146,14 @@ export function ModelsSection() {
   const customEndpoints: CustomLlmEndpoint[] = bundle.data?.custom.endpoints ?? EMPTY_LIST;
   const customTierDefaults: CustomLlmTierDefault[] = bundle.data?.custom.tierDefaults ?? EMPTY_LIST;
   const modelRoutes: WorkspaceModelRoute[] = menu?.modelRoutes ?? EMPTY_LIST;
+  const decisionRouting = menu?.decisionRouting;
+  const selectedDecisionModel = decisionRouting?.models.find(
+    (model) => model.alias === decisionRouting.modelAlias,
+  );
+  const selectedHybridOperationCount = selectedDecisionModel?.hybridOperations.length ?? 0;
+  const decisionRouteValue = decisionRouting?.mode !== "llm_only" && decisionRouting?.modelAlias
+    ? `${decisionRouting.mode}:${decisionRouting.modelAlias}`
+    : "llm_only";
   // Create form state.
   const [newModel, setNewModel] = useState<string>("");
   const [newName, setNewName] = useState("");
@@ -157,6 +166,7 @@ export function ModelsSection() {
   const [customSaving, setCustomSaving] = useState(false);
   const [editingCustomProfile, setEditingCustomProfile] = useState<CustomProfileDraft | null>(null);
   const [saving, setSaving] = useState(false);
+  const [decisionSaving, setDecisionSaving] = useState(false);
   const [activeView, setActiveView] = useState<ModelsView>("routing");
   const [showCustomCreate, setShowCustomCreate] = useState(false);
   const [showMeteredCreate, setShowMeteredCreate] = useState(false);
@@ -285,6 +295,41 @@ export function ModelsSection() {
       setError(err instanceof Error ? err.message : t.saveError);
     }
   }, [workspaceId, reload, t]);
+
+  const onDecisionRouteChange = useCallback(async (value: string) => {
+    if (!workspaceId || decisionSaving) return;
+    setError(null);
+    const separator = value.indexOf(":");
+    const mode = value === "llm_only" ? "llm_only" : value.slice(0, separator);
+    const modelAlias = value === "llm_only" ? null : value.slice(separator + 1);
+    if (mode !== "llm_only" && mode !== "shadow" && mode !== "hybrid") return;
+    if (mode !== "llm_only") {
+      const model = decisionRouting?.models.find((candidate) => candidate.alias === modelAlias);
+      if (!model) return;
+      const hybrid = mode === "hybrid";
+      const ok = await confirmDialog({
+        title: hybrid ? t.decisionHybridConfirmTitle : t.decisionConfirmTitle,
+        description: (hybrid ? t.decisionHybridConfirmBody : t.decisionConfirmBody)
+          .replace("{model}", model.displayName)
+          .replace("{percent}", String(Math.round((decisionRouting?.shadowSampleRate ?? 0.1) * 100)))
+          .replace("{count}", String(model.hybridOperations.length)),
+        confirmLabel: hybrid ? t.decisionHybridConfirmCta : t.decisionConfirmCta,
+      });
+      if (!ok) return;
+    }
+    setDecisionSaving(true);
+    try {
+      await setWorkspaceDecisionRouting(
+        workspaceId,
+        mode === "llm_only" ? { mode: "llm_only" } : { mode, modelAlias: modelAlias! },
+      );
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.saveError);
+    } finally {
+      setDecisionSaving(false);
+    }
+  }, [workspaceId, decisionSaving, decisionRouting, reload, t]);
 
   const onDeleteCustomProfile = useCallback(async (endpoint: CustomLlmEndpoint, profile: CustomLlmProfile) => {
     if (!workspaceId) return;
@@ -456,6 +501,88 @@ export function ModelsSection() {
                 <Button variant="outline" size="sm" onClick={() => setActiveView("providers")}>{t.routingEmptyCta}</Button>
               </div>
             ) : null}
+
+            <div className="space-y-3 border-t border-border/70 pt-4">
+              <div>
+                <div className="text-[13px] font-medium">{t.decisionRoutingTitle}</div>
+                <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">{t.decisionRoutingBlurb}</p>
+              </div>
+              <div className="space-y-2 rounded-xl border border-border/70 bg-muted/15 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[12.5px] font-medium">{t.decisionClassifierLabel}</span>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                    {decisionRouting?.mode === "hybrid"
+                      ? selectedHybridOperationCount > 0
+                        ? t.decisionHybridBadge.replace("{count}", String(selectedHybridOperationCount))
+                        : t.decisionHybridFallbackBadge
+                      : decisionRouting?.mode === "shadow"
+                      ? t.decisionShadowBadge.replace("{percent}", String(Math.round(decisionRouting.shadowSampleRate * 100)))
+                      : t.decisionLlmOnly}
+                  </span>
+                </div>
+                <SearchableSelect
+                  value={decisionRouteValue}
+                  onValueChange={(next) => void onDecisionRouteChange(next)}
+                  disabled={decisionSaving}
+                  items={[
+                    {
+                      value: "llm_only",
+                      label: t.decisionLlmOnly,
+                      hint: t.decisionLlmOnlyHint,
+                      badge: t.defaultBadge,
+                    },
+                    ...(decisionRouting?.models ?? []).flatMap((model) => [
+                      {
+                        value: `shadow:${model.alias}`,
+                        label: t.decisionShadowOption.replace("{model}", model.displayName),
+                        hint: t.decisionShadowHint,
+                        badge: t.decisionShadowBadge.replace(
+                          "{percent}",
+                          String(Math.round((decisionRouting?.shadowSampleRate ?? 0.1) * 100)),
+                        ),
+                      },
+                      ...(model.hybridOperations.length > 0 ? [{
+                        value: `hybrid:${model.alias}`,
+                        label: t.decisionHybridOption.replace("{model}", model.displayName),
+                        hint: t.decisionHybridHint.replace("{count}", String(model.hybridOperations.length)),
+                        badge: t.decisionHybridBadge.replace("{count}", String(model.hybridOperations.length)),
+                      }] : []),
+                    ]),
+                    ...(decisionRouting?.mode === "hybrid"
+                      && selectedDecisionModel
+                      && selectedHybridOperationCount === 0
+                      ? [{
+                          value: `hybrid:${selectedDecisionModel.alias}`,
+                          label: t.decisionHybridOption.replace("{model}", selectedDecisionModel.displayName),
+                          hint: t.decisionHybridRevokedHint,
+                          badge: t.decisionHybridFallbackBadge,
+                        }]
+                      : []),
+                    ...(decisionRouting
+                      && decisionRouting.mode !== "llm_only"
+                      && decisionRouting.modelAlias
+                      && !decisionRouting.models.some((model) => model.alias === decisionRouting.modelAlias)
+                      ? [{
+                          value: `${decisionRouting.mode}:${decisionRouting.modelAlias}`,
+                          label: t.unavailableModel.replace("{model}", decisionRouting.modelAlias),
+                          hint: t.decisionUnavailableModelHint,
+                        }]
+                      : []),
+                  ]}
+                  placeholder={t.decisionLlmOnly}
+                  aria-label={t.decisionClassifierLabel}
+                />
+                {decisionRouting?.models.length === 0 ? (
+                  <p className="text-[11.5px] leading-relaxed text-muted-foreground">{t.decisionUnavailable}</p>
+                ) : null}
+                <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+                  {(selectedHybridOperationCount > 0
+                    ? t.decisionHybridAvailable
+                    : t.decisionHybridGate
+                  ).replace("{count}", String(selectedHybridOperationCount))}
+                </p>
+              </div>
+            </div>
           </section>
         )
       ) : null}

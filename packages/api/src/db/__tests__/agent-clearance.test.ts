@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  currentAgentAccess,
   currentAgentClearance,
   currentAgentCompartments,
   runWithAgentAccess,
@@ -72,7 +73,7 @@ describe('[COMP:api/agent-clearance] runWithAgentClearance / currentAgentClearan
     }
   })
 
-  it('nested wraps: the innermost clearance wins, and unwinds correctly', async () => {
+  it('nested wraps: a narrower clearance wins, and unwinds correctly', async () => {
     await runWithAgentClearance('confidential', async () => {
       expect(currentAgentClearance()).toBe('confidential')
       await runWithAgentClearance('public', async () => {
@@ -95,5 +96,28 @@ describe('[COMP:api/agent-clearance] runWithAgentClearance / currentAgentClearan
       })(),
     ])
     expect(results).toEqual(['internal', undefined])
+  })
+})
+
+
+describe('[COMP:api/agent-access-ceiling] inherited execution ceiling',()=>{
+  const parent={workspaceId:'workspace',userId:'actor',clearance:'internal' as const,compartments:['product'],mutationCompartments:['product'],projectIds:['project'],visibilityAssistantIds:['caller']}
+  it('does not widen any axis through a more privileged nested context',()=>{
+    runWithAgentAccess(parent,()=>runWithAgentAccess({clearance:'confidential',compartments:null,projectIds:null,visibilityAssistantIds:null},()=>{
+      expect(currentAgentAccess()).toEqual(parent)
+    }))
+  })
+  it.each(['workspaceId','userId'] as const)('rejects a nested %s substitution',axis=>{
+    runWithAgentAccess(parent,()=>expect(()=>runWithAgentAccess({...parent,[axis]:'other'},()=>{})).toThrow('access_actor_mismatch'))
+  })
+  it('retains the outer ceiling through clearance-only legacy wrappers',()=>{
+    runWithAgentAccess(parent,()=>runWithAgentClearance('confidential',()=>expect(currentAgentAccess()).toEqual(parent)))
+  })
+  it('does not let a returned snapshot mutate the execution context',()=>{
+    runWithAgentAccess(parent,()=>{
+      currentAgentAccess()!.visibilityAssistantIds!.push('callee')
+      currentAgentCompartments()!.push('finance')
+      expect(currentAgentAccess()).toEqual(parent)
+    })
   })
 })

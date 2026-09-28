@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
+vi.mock('../../db/scoped-summary-store.js', () => ({ getSoulContext: vi.fn() }))
+
 vi.mock('../../db/memories.js', () => ({
   listMemories: vi.fn(),
   getMemoryById: vi.fn(),
@@ -45,13 +47,13 @@ vi.mock('../../db/workspace-store.js', () => ({
   // Fused read-ceiling resolver — echo the assistant clearance + compartments
   // so these CRUD tests (which don't assert on clearance/compartments) keep
   // their prior behavior.
-  resolveReadCeilingsSystem: vi.fn(
+  resolveOperationCeilingsSystem: vi.fn(
     async (
       _u: string,
       _w: unknown,
       assistantClearance: string,
       assistantCompartments: string[] | null,
-    ) => ({ clearance: assistantClearance, compartments: assistantCompartments }),
+    ) => ({ clearance: assistantClearance, compartments: assistantCompartments ?? null, mutationCompartments: assistantCompartments ?? null }),
   ),
 }))
 
@@ -69,13 +71,13 @@ import {
   deleteMemory,
   searchMemories,
   getMemoryStats,
-  getSoul,
   listWorkspaceMemories,
   markVerifiedDirect,
 } from '../../db/memories.js'
+import { getSoulContext } from '../../db/scoped-summary-store.js'
 import { query, queryWithRLS } from '../../db/client.js'
 import { resolveAssistantAccess } from '../../db/users.js'
-import { getWorkspaceRoleSystem } from '../../db/workspace-store.js'
+import { getWorkspaceRoleSystem, resolveOperationCeilingsSystem } from '../../db/workspace-store.js'
 import {
   adjustMemoryDecision,
   recordVerification,
@@ -90,7 +92,7 @@ const mockUpdateMemory = vi.mocked(updateMemory)
 const mockDeleteMemory = vi.mocked(deleteMemory)
 const mockSearchMemories = vi.mocked(searchMemories)
 const mockGetMemoryStats = vi.mocked(getMemoryStats)
-const mockGetSoul = vi.mocked(getSoul)
+const mockGetSoulContext = vi.mocked(getSoulContext)
 const mockListTeamMemories = vi.mocked(listWorkspaceMemories)
 const mockMarkVerifiedDirect = vi.mocked(markVerifiedDirect)
 const mockQuery = vi.mocked(query)
@@ -131,7 +133,10 @@ function mockResolveViewerCtx(workspaceId: string | null = 'w_1') {
 
 describe('[COMP:api/memories-route] Memory routes', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
+    vi.resetAllMocks()
+    vi.mocked(resolveOperationCeilingsSystem).mockImplementation(async (_user, _workspace, clearance, compartments) => ({
+      clearance, compartments: compartments ?? null, mutationCompartments: compartments ?? null,
+    }))
   })
 
   describe('GET /', () => {
@@ -173,12 +178,14 @@ describe('[COMP:api/memories-route] Memory routes', () => {
   describe('GET /soul', () => {
     it('returns 200 with soul content', async () => {
       setupAuth()
-      mockGetSoul.mockResolvedValueOnce('User is an engineer who loves hiking' as never)
+      mockResolveViewerCtx()
+      mockGetSoulContext.mockResolvedValueOnce({ content: 'Fixture preference',evidence: {} })
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
       const res = await request(app).get('/api/assistants/a_1/memories/soul')
       expect(res.status).toBe(200)
-      expect(res.body).toHaveProperty('soul')
+      expect(res.body).toEqual({ soul: 'Fixture preference' })
+      expect(mockGetSoulContext).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u_1',assistantId: 'a_1' }))
     })
   })
 
@@ -360,7 +367,7 @@ describe('[COMP:api/memories-route] Memory routes', () => {
         .send({ scope: 'workspace' })
       expect(res.status).toBe(200)
       expect(res.body.memory.scope).toBe('workspace')
-      expect(mockUpdateMemory).toHaveBeenCalledWith('mem_1', { scope: 'workspace', workspaceId: 'team_x' })
+      expect(mockUpdateMemory).toHaveBeenCalledWith('mem_1', { scope: 'workspace', workspaceId: 'team_x' }, expect.objectContaining({ userId: 'u_1', mutationCompartments: null }))
     })
 
     it('is idempotent when promoting an already-team memory', async () => {
@@ -394,7 +401,7 @@ describe('[COMP:api/memories-route] Memory routes', () => {
         .post('/api/assistants/a_1/memories/mem_1/scope')
         .send({ scope: 'user' })
       expect(res.status).toBe(200)
-      expect(mockUpdateMemory).toHaveBeenCalledWith('mem_1', { scope: 'shared', workspaceId: null })
+      expect(mockUpdateMemory).toHaveBeenCalledWith('mem_1', { scope: 'shared', workspaceId: 'team_x' }, expect.objectContaining({ userId: 'u_1', mutationCompartments: null }))
     })
   })
 
@@ -432,10 +439,12 @@ describe('[COMP:api/memories-route] Memory routes', () => {
     it('is idempotent for an already-verified memory (no audit row, no stamp)', async () => {
       setupAuth()
       mockResolveViewerCtx()
-      mockGetMemoryById.mockResolvedValueOnce({
+      const confirmed = {
         ...STAGED_MEMORY,
         verifiedByUserId: 'u_other',
-      } as never)
+      }
+      mockGetMemoryById.mockResolvedValueOnce(confirmed as never).mockResolvedValueOnce(confirmed as never)
+      mockVerifyMemoryDecision.mockResolvedValueOnce({ status: 'already_verified', stamped: false })
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
       const res = await request(app).post('/api/assistants/a_1/memories/mem_1/verify').send({})
@@ -443,6 +452,31 @@ describe('[COMP:api/memories-route] Memory routes', () => {
       expect(res.status).toBe(200)
       expect(mockMarkVerifiedDirect).not.toHaveBeenCalled()
       expect(mockRecordVerification).not.toHaveBeenCalled()
+      expect(mockVerifyMemoryDecision).toHaveBeenCalled()
+      expect(mockNotifyBrainInboxChange).not.toHaveBeenCalled()
+    })
+
+    it('checks mutation authority even when the earlier read was already confirmed', async () => {
+      setupAuth()
+      mockResolveViewerCtx()
+      mockGetMemoryById.mockResolvedValueOnce({ ...STAGED_MEMORY, verifiedByUserId: 'u_other' } as never)
+      mockVerifyMemoryDecision.mockResolvedValueOnce({ status: 'not_found', stamped: false })
+      const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
+      const res = await request(app).post('/api/assistants/a_1/memories/mem_1/verify').send({})
+      expect(res.status).toBe(404)
+      expect(res.body).toEqual({ error: 'Memory not found' })
+      expect(mockNotifyBrainInboxChange).not.toHaveBeenCalled()
+    })
+
+    it('does not return an earlier body when the post-confirmation read is unavailable', async () => {
+      setupAuth()
+      mockResolveViewerCtx()
+      mockGetMemoryById.mockResolvedValueOnce(STAGED_MEMORY as never).mockResolvedValueOnce(null)
+      mockVerifyMemoryDecision.mockResolvedValueOnce({ status: 'verified', stamped: true })
+      const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
+      const res = await request(app).post('/api/assistants/a_1/memories/mem_1/verify').send({})
+      expect(res.status).toBe(404)
+      expect(res.body).toEqual({ error: 'Memory not found' })
     })
 
     it('stamps verified + writes a confirm row atomically on success', async () => {
@@ -465,6 +499,7 @@ describe('[COMP:api/memories-route] Memory routes', () => {
         memoryId: 'mem_1',
         workspaceId: 'w_1',
         verifiedBy: 'u_1',
+        access: expect.objectContaining({ userId: 'u_1', workspaceId: 'w_1', assistantId: 'a_1' }),
       })
       expect(res.body.memory.verifiedByUserId).toBe('u_1')
       // Realtime: a verify emits an 'update' NOTIFY for the memory row.
@@ -610,9 +645,8 @@ describe('[COMP:api/memories-route] Memory routes', () => {
   describe('DELETE /:memoryId', () => {
     it('returns 404 if not found', async () => {
       setupAuth()
-      // Pre-delete workspace lookup (returns the row's workspace_id for the NOTIFY).
-      mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: 'w_1' }], rowCount: 1 } as never)
-      mockDeleteMemory.mockResolvedValueOnce(false as never)
+      mockResolveViewerCtx()
+      mockGetMemoryById.mockResolvedValueOnce(null)
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
       const res = await request(app).delete('/api/assistants/a_1/memories/mem_1')
@@ -623,8 +657,8 @@ describe('[COMP:api/memories-route] Memory routes', () => {
 
     it('returns 204 on success', async () => {
       setupAuth()
-      // Pre-delete lookup captures the workspace before the row is gone.
-      mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: 'w_1' }], rowCount: 1 } as never)
+      mockResolveViewerCtx()
+      mockGetMemoryById.mockResolvedValueOnce({id:'mem_1',assistantId:'a_1',workspaceId:'w_1'} as never)
       mockDeleteMemory.mockResolvedValueOnce(true as never)
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })

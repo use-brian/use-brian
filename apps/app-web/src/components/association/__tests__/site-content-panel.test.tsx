@@ -10,6 +10,7 @@ import { SiteContentPanel } from '../site-content/site-content-panel';
 import { FieldsEditor } from '../site-content/document-editor';
 import { I18nProvider } from '@/lib/i18n/client';
 import { en } from '@/lib/i18n/dictionaries/en';
+import { format } from '@/lib/i18n/format';
 import { resetSurfaceCache } from '@/lib/surface-cache';
 const c=en.associationPage.content;
 const doc={schemaVersion:1,partners:[{id:'acme',name:'Acme',logo:{src:'/media/partners/acme.png',alt:{en:'Acme logo'}},sites:['oasa'],active:true,order:0}]};
@@ -25,11 +26,10 @@ beforeEach(()=>{resetSurfaceCache();vi.resetAllMocks();api.module.mockResolvedVa
  host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();resetSurfaceCache();});
 describe('[COMP:app-web/site-content] website content publication',()=>{
- it('publishes only the previewed, saved version after confirmation and shows per-site sync',async()=>{
-  await render();expect(host.textContent).toContain(`OASA: ${c.observed}`);expect(host.textContent).toContain(`SEA: ${c.pending}`);
-  expect(buttons(c.publish)).toHaveLength(0);await click(c.preview);
-  api.confirm.mockResolvedValueOnce(false);await click(c.publish);expect(api.publish).not.toHaveBeenCalled();
-  await click(c.publish);expect(api.publish).toHaveBeenCalledWith('w','partners',2);
+ it('publishes the saved version without a review dialog and shows each website by name',async()=>{
+  await render();expect(host.textContent).toContain(format(c.observed,{site:'OASA'}));expect(host.textContent).toContain(format(c.pending,{site:'SEA'}));
+  await click(c.publish);expect(api.confirm).not.toHaveBeenCalled();expect(api.publish).toHaveBeenCalledWith('w','partners',2);
+  expect(host.textContent).toContain(c.publishDone);
  });
  it('edits a list entry and saves the whole document without publishing',async()=>{
   await render();await click(c.edit);
@@ -41,15 +41,15 @@ describe('[COMP:app-web/site-content] website content publication',()=>{
  it('keeps English as the fallback: a typed translation is stored, clearing it drops the key',async()=>{
   const changes:unknown[]=[];let value:Record<string,unknown>={title:{en:'Council'}};
   const field=[{kind:'localized' as const,key:'title',label:'title'}];
-  const draw=async()=>act(async()=>root.render(<I18nProvider locale="en" dict={en}><FieldsEditor fields={field} value={value} context={{locale:'zh-Hant',media:[],workspaceId:'w'}} onChange={next=>{changes.push(next);value=next;}}/></I18nProvider>));
+  const draw=async()=>act(async()=>root.render(<I18nProvider locale="en" dict={en}><FieldsEditor fields={field} value={value} context={{locale:'zh-Hant',media:[],workspaceId:'w',sites:['north','south'],siteNames:{}}} onChange={next=>{changes.push(next);value=next;}}/></I18nProvider>));
   await draw();const input=host.querySelector('input')!;expect(input.placeholder).toBe('Council');expect(host.textContent).toContain(c.englishShown);
   await type(input,'理事會（2025–2027）');expect(value).toEqual({title:{en:'Council','zh-Hant':'理事會（2025–2027）'}});
   await draw();await type(host.querySelector('input')!,'');expect(value).toEqual({title:{en:'Council'}});
  });
  it('adds an entry from the descriptor blank and blocks publishing when the server reports issues',async()=>{
   api.read.mockResolvedValue({collection:'partners',version:3,publishedRevision:1,document:doc,published:doc,observations:{},readers:['oasa','sea'],issues:['Partner acme is listed twice']});
-  await render();expect(host.textContent).toContain('Partner acme is listed twice');await click(c.preview);
-  expect((buttons(c.publish)[0] as HTMLButtonElement).disabled).toBe(true);
+  await render();expect(host.textContent).toContain('Partner acme is listed twice');expect(host.textContent).toContain(c.issuesTitle);
+  expect(buttons(c.publish)).toHaveLength(0);
   await click(c.edit);await click(`${c.add}: ${c.fields.partners}`);await click(c.save);
   expect(api.save.mock.calls[0]![3].partners).toHaveLength(2);expect(api.save.mock.calls[0]![3].partners[1]).toMatchObject({sites:['oasa'],active:true});
  });

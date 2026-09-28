@@ -22,7 +22,7 @@ const switcher = readFileSync(
 describe("[COMP:app-web/popover] PopoverContent clamps to the phone viewport", () => {
   it("carries the width and height clamps and scrolls its overflow", () => {
     const cls = /className=\{cn\(\s*(?:\/\/[^\n]*\n\s*)*"([^"]+)"/.exec(popover)?.[1] ?? "";
-    expect(cls).toContain("max-w-[calc(100vw-1rem)]");
+    expect(cls).toContain("max-w-[calc(var(--native-app-width,100vw)-1rem)]");
     expect(cls).toContain("max-h-[min(80dvh,var(--available-height))]");
     expect(cls).toContain("overflow-y-auto");
   });

@@ -81,6 +81,7 @@ export type MsTeamsRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -293,6 +294,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
           ownerId,
           isIdentified,
           routing,
+          integrationId: integration.id,
           archiveConnectorInstanceId: integration.connectorInstanceId,
         }),
       )
@@ -309,6 +311,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
     ownerId: string
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
+    integrationId: string
     archiveConnectorInstanceId?: string | null
   }): Promise<void> {
     const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing } = params
@@ -418,12 +421,15 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
 
     await processChannelMessage({
       backgroundModel: options.backgroundModel,
+      decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
       ownerId,
       assistant: { ...assistant, ownerUserId: ownerId },
       isIdentified,
       channelType: 'msteams',
       channelId,
+      channelIntegrationId: params.integrationId,
+      channelIntegrationStore: options.integrationStore,
       messageText: incoming.text,
       userContentBlocks,
       rawUserText: incoming.text ?? '',

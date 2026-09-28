@@ -19,6 +19,8 @@ import type { MemoryStore, MemoryRecord, MemoryWithMetrics } from '../../memory/
  * Tests seed a mix of live + tombstoned rows and assert the
  * consolidation pipeline only acts on live ones.
  */
+const generalScope = { workspaceId: 'workspace-fixture', userId: 'u1', assistantId: 'a1', compartments: [] as string[], projectIds: [] as string[], scopeVersion: '1' }
+
 type IndexRow = {
   id: string
   summary: string
@@ -73,13 +75,13 @@ function makeFakeStore(opts: {
       spy.getIndexCalls.push({ assistantId, userId, validOnly })
       return perUserIndex
         .filter((r) => (validOnly ? r.validTo === null : true))
-        .map(({ validTo: _, ...rest }) => rest)
+        .map(({ validTo: _, ...rest }) => ({ ...generalScope, ...rest }))
     },
     async getWorkspaceIndexSystem(assistantId, workspaceId, validOnly) {
       spy.getWorkspaceIndexCalls.push({ assistantId, workspaceId, validOnly })
       return workspaceIndex
         .filter((r) => (validOnly ? r.validTo === null : true))
-        .map(({ validTo: _, ...rest }) => rest)
+        .map(({ validTo: _, ...rest }) => ({ ...generalScope, ...rest }))
     },
     async listWithMetrics() {
       return withMetrics
@@ -96,7 +98,7 @@ function makeFakeStore(opts: {
     async listForSoulSynthesis() {
       return {
         selfEntityAttributes: soulSynth.selfEntityAttributes,
-        preferences: soulSynth.preferences.filter((m) => m.validTo === null).map(stripValidTo),
+        preferences: soulSynth.preferences.filter((m) => m.validTo === null).map(stripValidTo).map(m => ({ ...generalScope, ...m })),
       }
     },
     async listCronContextCandidatesForPrune(_a, _u, minAgeDays) {
@@ -109,7 +111,7 @@ function makeFakeStore(opts: {
       const r = perUserIndex.find((x) => x.id === id) ?? workspaceIndex.find((x) => x.id === id)
       if (!r) return null
       return {
-        id: r.id,
+        ...generalScope, id: r.id,
 
         scope: 'shared',
         summary: r.summary,
@@ -121,7 +123,8 @@ function makeFakeStore(opts: {
     },
     async update(id, u) {
       if (u.detail !== undefined) detailById.set(id, u.detail)
-      return null
+      const row = perUserIndex.find(r => r.id === id) ?? workspaceIndex.find(r => r.id === id)
+      return row ? { ...generalScope, ...row, ...u, scope: 'shared', confidence: 0.8, detail: detailById.get(id) ?? null } : null
     },
     async create(params) {
       const id = `new-${created.length}`
@@ -172,6 +175,7 @@ function fullMetrics(
   m: Partial<MemoryWithMetrics> & { id: string; summary: string; validTo: Date | null },
 ): MemoryWithMetrics & { validTo: Date | null } {
   return {
+    ...generalScope,
     id: m.id,
     scope: m.scope ?? 'shared',
     summary: m.summary,

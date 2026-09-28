@@ -19,3 +19,8 @@ writeFileSync(
 )
 
 console.log(`firefox extension assembled at apps/browser-extension/dist-firefox - build ${build}`)
+
+// Replace package re-export shims with browser-loadable shared modules.
+for (const name of ["executor", "snapshot", "dom-settle", "action-cursor", "fill-form", "tab-eligibility", "relay-client", "protocol"]) {
+  cpSync(join(root, '../../packages/browser-control/dist', `${name}.js`), join(output, `${name}.js`))
+}

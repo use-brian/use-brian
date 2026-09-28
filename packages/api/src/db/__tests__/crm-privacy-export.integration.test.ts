@@ -86,6 +86,10 @@ describe('[COMP:crm/privacy-export] Actual privacy projection coverage',()=>{
     const output=await collect(f.context,f.contactId),manifest=output.values.at(-1)!
     expect(output.values[0]).toMatchObject({type:'header',schema:'crm-privacy-v2',scope:'contact',contactId:f.contactId})
     expect(records(output,'crm_activities')).toHaveLength(135)
+    for(const row of records(output,'crm_activities')) {
+      for(const column of ['user_id','assistant_id','sensitivity','compartments','project_ids','source_scope_version','scope_origin','scope_held'])
+        expect(row).not.toHaveProperty(column)
+    }
     expect(records(output,'entities')).toMatchObject([{id:f.contactId,attributes:{custom_fields:{reference:'subject fixture'}}}])
     const recordLines=output.lines.filter(line=>JSON.parse(line).type==='record')
     expect(manifest).toMatchObject({type:'manifest',complete:true,totalRecords:recordLines.length,sha256:hash(recordLines)})

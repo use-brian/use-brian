@@ -9,11 +9,12 @@
   "main": "dist/bootstrap.js",
   "scripts": {
     "copy:assets": "node scripts/copy-static.mjs",
-    "build": "tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs",
-    "dev": "tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs && electron dist/bootstrap.js",
+    "build": "pnpm --filter @use-brian/browser-control build && tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs",
+    "dev": "pnpm --filter @use-brian/browser-control build && tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs && electron dist/bootstrap.js",
     "start": "electron dist/bootstrap.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:browser-docking": "pnpm run build && electron scripts/test-browser-docking.mjs",
     "build:renderer": "pnpm --filter \"app-web^...\" run build && pnpm --filter app-web build:desktop",
     "build:siri": "bash native/siri-companion/build.sh",
     "package": "pnpm run build:renderer && pnpm run build && pnpm run build:siri && electron-builder --mac",
@@ -32,6 +33,7 @@
     "@use-brian/shared": "workspace:*",
     "@use-brian/firefox-companion": "workspace:*",
     "electron-updater": "^6.8.9",
-    "zod": "^3.24"
+    "zod": "^3.24",
+    "@use-brian/browser-control": "workspace:*"
   }
 }

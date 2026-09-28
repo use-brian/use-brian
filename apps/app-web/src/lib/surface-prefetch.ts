@@ -40,6 +40,8 @@ import { getUserInfo } from "@/lib/user";
 import { getView, listWorkspaceAssistants } from "@/lib/api/views";
 import { listWorkflows } from "@/lib/api/workflow";
 import { fetchConnectorsList } from "@/lib/api/connectors";
+import { officeMetadataRemaining } from "@/lib/office/metadata";
+import type { CacheLifecycle } from "@/lib/surface-cache";
 import { listOfficeArtifacts } from "@/lib/office/api";
 import { listTools as listShopifyTools } from "@/lib/api/shopify";
 import { fetchLiveRoster } from "@/lib/api/live";
@@ -72,6 +74,19 @@ export type WarmableSurface =
 function viewerSuffix(): string {
   const id = getUserInfo()?.id;
   return id ? `:${id}` : "";
+}
+
+/** Organization directory is permission-sensitive and additionally keys the explicit shell viewer. */
+export function workspaceAccessCacheKey(workspaceId: string, userId: string): string {
+  return `workspace-access:${workspaceId}:${userId}`;
+}
+
+export function scopeReviewCacheKey(workspaceId:string,userId:string,kind:string,after:string,reviewId:string,reviewAfter:string=''):string {
+  return `scope-review:${workspaceId}:${userId}:${kind}:${after}:${reviewId}:${reviewAfter}`;
+}
+
+export function organizationCacheKey(workspaceId: string, userId: string): string {
+  return `organization:${workspaceId}:${userId}`;
 }
 
 /**
@@ -580,8 +595,8 @@ export function sidebarTreeCacheKey(workspaceId: string): string {
 export type OfficeListView = "active" | "archived" | "trash" | "retained";
 
 /** Permission-filtered template registry, memory-only like Office files. */
-export function officeTemplateListCacheKey(workspaceId: string): string {
-  return `office-templates:${workspaceId}${viewerSuffix()}`;
+export function officeTemplateListCacheKey(workspaceId: string, viewerId = getUserInfo()?.id): string {
+  return `office-templates:${workspaceId}:${viewerId ?? ""}`;
 }
 
 /**
@@ -593,8 +608,8 @@ export function officeTemplateListCacheKey(workspaceId: string): string {
  * shared with one teammate must never paint for another on a shared device).
  * Memory tier only (plan section 6.4: Office lists stay off IndexedDB).
  */
-export function officeListCacheKey(workspaceId: string, view: OfficeListView): string {
-  return `office:${workspaceId}${viewerSuffix()}:${view}`;
+export function officeListCacheKey(workspaceId: string, view: OfficeListView, viewerId = getUserInfo()?.id): string {
+  return `office:${workspaceId}:${viewerId ?? ""}:${view}`;
 }
 
 /** Every list key of one workspace: the prefix `invalidateOfficeList` drops. */
@@ -621,12 +636,12 @@ export function invalidateOfficeList(workspaceId: string | null | undefined): vo
  * row-then-snapshot waterfall, and can paint the chrome from the row (or
  * the home's list row) while the snapshot is still in flight.
  */
-export function officeArtifactCacheKey(artifactId: string): string {
-  return `office-artifact:${artifactId}`;
+export function officeArtifactCacheKey(workspaceId: string, artifactId: string, viewerId = getUserInfo()?.id ?? ""): string {
+  return `office-artifact:${workspaceId}:${viewerId}:${artifactId}`;
 }
 
-export function officeSnapshotCacheKey(artifactId: string): string {
-  return `office-snapshot:${artifactId}`;
+export function officeSnapshotCacheKey(workspaceId: string, artifactId: string, viewerId = getUserInfo()?.id ?? ""): string {
+  return `office-snapshot:${workspaceId}:${viewerId}:${artifactId}`;
 }
 
 /**
@@ -778,6 +793,7 @@ export type WarmTarget = {
   /** The exact key the destination surface reads on mount. */
   key: string;
   fetch: () => Promise<unknown>;
+  lifecycle?: CacheLifecycle<unknown>;
 };
 
 /**
@@ -847,6 +863,7 @@ export function warmTargetFor(
       return {
         key: officeListCacheKey(workspaceId, "active"),
         fetch: () => listOfficeArtifacts(workspaceId, "active"),
+        lifecycle: {expiresInMs: officeMetadataRemaining},
       };
     case "shopify":
       // The reachability answer gates everything the surface renders (the
@@ -891,7 +908,7 @@ function warmSurfaceData(
 ): void {
   if (!surface || !workspaceId || !WARMABLE.has(surface)) return;
   const target = warmTargetFor(surface as WarmableSurface, workspaceId);
-  warmSurfaceCache(target.key, target.fetch);
+  warmSurfaceCache(target.key, target.fetch, undefined, target.lifecycle);
 }
 
 /** The workspace id in a `/w/<id>/...` path, or null. */
@@ -931,4 +948,64 @@ export function useIntentPrefetch(): (href: string) => {
     },
     [router],
   );
+}
+
+export function workspaceAccessHistoryCacheKey(workspaceId:string,userId:string,kind:'requests'|'grants',revision:string,after:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:history:${kind}:${revision}:${after}`;
+}
+
+
+export function workspaceAccessInspectionCacheKey(workspaceId:string,userId:string,kind:'explain'|'events',revision:string,selection:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:${kind}:${revision}:${selection}`;
+}
+
+/** Meeting tags share workspace/page cache identity across the doc panel. */
+export const meetingTagsCacheKey = (workspaceId: string, pageId: string): string => `meeting-tags:${workspaceId}:${pageId}`;
+
+/** Registry snapshots share the access invalidation namespace and viewer scope. */
+export function workspaceDepartmentRegistryCacheKey(workspaceId:string,userId:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:registry`;
+}
+
+export function docMediaCacheKey(workspaceId:string,userId:string,fileId:string):string {
+  return `doc-media:${workspaceId}:${userId}:${fileId}`;
+}
+
+
+/** Temporary uploads have independent original/PDF admission and disposal. */
+export function fileCacheMediaCacheKey(workspaceId:string,userId:string,fileId:string,representation:'original'|'pdf'):string {
+  return `file-cache-media:${workspaceId}:${userId}:${fileId}:${representation}`;
+}
+
+/** Office bytes are owned by one viewer, artifact and exact resource set. */
+export function officeMediaCacheKey(workspaceId:string,userId:string,artifactId:string,resourceIds:readonly string[]):string {
+  return `office-media:${workspaceId}:${userId}:${artifactId}:${JSON.stringify([...new Set(resourceIds)].sort())}`;
+}
+
+/** SQL metadata previews are partitioned by the authenticated shell viewer. */
+export function officePreviewCacheKey(workspaceId: string, viewerId: string, artifactId: string, version: number): string {
+  return `office-preview:${workspaceId}:${viewerId}:${artifactId}:${version}`;
+}
+
+/** Routing drafts never share read ownership across workspaces or viewers. */
+export function officeRoutingCacheKey(workspaceId: string, viewerId: string, templateId: string): string {
+  return `office-routing:${workspaceId}:${viewerId}:${templateId}`;
+}
+
+export function officePanelCachePrefix(workspaceId: string, viewerId: string): string {
+  return `office-panel:${workspaceId}:${viewerId}:`;
+}
+
+export function officePanelCacheKey(prefix: string | null, kind: "job" | "job-events" | "versions" | "version-preview" | "sharing" | "comments" | "suggestions", id: string | undefined): string | null {
+  return prefix && id ? `${prefix}${kind}:${id}` : null;
+}
+
+/** Bounded human roster shared by mentions and person assignment controls. */
+export function workspaceMemberDirectoryCacheKey(workspaceId: string, viewerId: string): string {
+  return `workspace-member-directory:${workspaceId}:${viewerId}`;
+}
+
+/** Current-RLS page names used only by page-reference selection surfaces. */
+export function pageDirectoryCacheKey(workspaceId: string, viewerId: string): string {
+  return `page-directory:${workspaceId}:${viewerId}`;
 }

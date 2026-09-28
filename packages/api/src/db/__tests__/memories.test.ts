@@ -4,6 +4,7 @@ vi.mock('../client.js', () => ({
   query: vi.fn(),
   queryWithRLS: vi.fn(),
   getPool: vi.fn(),
+  applyRLSGucs: vi.fn(),
 }))
 
 import {

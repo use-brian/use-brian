@@ -47,10 +47,12 @@ import type { CustomChannelStore } from '../db/custom-channel-store.js'
 import { mintBridgeToken, hashBridgeToken } from '../db/custom-channel-token.js'
 import type {
   ChannelIntegration,
+  ChannelIntegrationConfig,
   ChannelIntegrationStore,
   SeenChat,
   WhatsAppCloudCredentials,
 } from '../db/channel-integrations.js'
+import { deliveryAudienceAuthorityChanged } from '../db/channel-integrations.js'
 import {
   whatsappCloudManagedGroupStore,
   type WhatsAppCloudManagedGroup,
@@ -95,6 +97,16 @@ const requireMentionOverrideSchema = z.object({
   topicId: z.union([z.number().int().min(1), z.null()]).optional(),
 }).strict()
 
+const deliveryAudienceBindingInputSchema = z.object({
+  channelId: z.string().min(1).max(256),
+  audienceType: z.enum(['individual', 'group']),
+  clearance: z.enum(['public', 'internal', 'confidential']),
+  compartments: z.array(z.string().min(1).max(128)).max(100),
+  projectIds: z.array(z.string().uuid()).max(100),
+  recipientUserId: z.string().uuid().nullable().optional(),
+  expiresAt: z.string().datetime().nullable().optional(),
+}).strict()
+
 export const channelConfigSchema = z.object({
   replyInThread: z.boolean().optional(),
   ackReaction: z.string().max(50).optional(),
@@ -107,6 +119,7 @@ export const channelConfigSchema = z.object({
   allowedUserIds: z.array(z.string().max(50)).max(100).optional(),
   allowGuestConnectorTools: z.boolean().optional(),
   allowTrustedGuestFullAccess: z.boolean().optional(),
+  deliveryAudienceBindings: z.array(deliveryAudienceBindingInputSchema).max(500).optional(),
   blockedUserIds: z.array(z.string().max(50)).max(100).optional(),
   whatsappCloudAllowAllGroupMembers: z.boolean().optional(),
 }).strict()
@@ -301,7 +314,7 @@ const wechatVerifyCodeSchema = z.object({
  * server-side keeps them out of every consumer, including stale clients.
  * WhatsApp JID shapes vary too much to police — they pass through unfiltered.
  */
-const TELEGRAM_DESTINATION_ID_PATTERN = /^(-?\d+)(?::topic:([1-9]\d*))?$/
+const TELEGRAM_DESTINATION_ID_PATTERN = /^(-?\d+)(?::(?:topic|discussion):([1-9]\d*))?$/
 
 const DESTINATION_ID_SHAPE: Record<string, RegExp> = {
   telegram: TELEGRAM_DESTINATION_ID_PATTERN,
@@ -595,7 +608,7 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         continue
       }
       const topicName = seen?.topics.find((topic) => topic.topicId === topicId)?.name
-      names.set(channelId, `${chatTitle ?? chatId} › ${topicName ?? `#${topicId}`}`)
+      names.set(channelId, `${chatTitle ?? chatId} › ${channelId.includes(':discussion:') ? `discussion #${topicId}` : topicName ?? `#${topicId}`}`)
     }
     return names
   }
@@ -1062,7 +1075,8 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     // Merge into the existing config so webhook-only fields (e.g. `seenChats`,
     // populated opportunistically by the BYO webhook) survive a UI PATCH that
     // doesn't echo them back. Mirrors the legacy per-assistant endpoint.
-    let patch = parsed.data
+    const { deliveryAudienceBindings: _bindings, ...ordinaryPatch } = parsed.data
+    let patch: ChannelIntegrationConfig = ordinaryPatch
     const isWhatsAppCloud = integration.channelType === 'whatsapp'
       && integration.botUserId
       && integration.teamId
@@ -1078,9 +1092,35 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         return
       }
       patch = {
-        ...parsed.data,
+        ...ordinaryPatch,
         ...(allowedUserIds ? { allowedUserIds } : {}),
         ...(blockedUserIds ? { blockedUserIds } : {}),
+      }
+    }
+
+    if (parsed.data.deliveryAudienceBindings !== undefined) {
+      if (role !== 'owner' && role !== 'admin') {
+        res.status(403).json({
+          error: 'delivery_audience_binding_requires_admin',
+          detail: 'Only the workspace owner or an admin can approve delivery audiences.',
+        })
+        return
+      }
+      const approvedAt = new Date().toISOString()
+      patch = {
+        ...patch,
+        deliveryAudienceBindings: parsed.data.deliveryAudienceBindings.map((binding) => ({
+          version: 1 as const,
+          channelId: binding.channelId,
+          audienceType: binding.audienceType,
+          clearance: binding.clearance,
+          compartments: [...new Set(binding.compartments)].sort(),
+          projectIds: [...new Set(binding.projectIds)].sort(),
+          recipientUserId: binding.recipientUserId ?? null,
+          expiresAt: binding.expiresAt ?? null,
+          approvedByUserId: userId,
+          approvedAt,
+        })),
       }
     }
 
@@ -1095,7 +1135,12 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
           || parsed.data.userAccessMode !== undefined
         )
       )
-    if (changesTrustedGuestAuthority && role !== 'owner' && role !== 'admin') {
+    const changesDeliveryAudienceAuthority = deliveryAudienceAuthorityChanged(
+      integration.config,
+      merged,
+    )
+    if ((changesTrustedGuestAuthority || changesDeliveryAudienceAuthority)
+      && role !== 'owner' && role !== 'admin') {
       res.status(403).json({
         error: 'trusted_guest_access_requires_admin',
         detail: 'Only the workspace owner or an admin can change trusted guest full access.',

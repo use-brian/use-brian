@@ -14,6 +14,7 @@ import {
 } from '@use-brian/office-model'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { ResolvedOfficeAccess } from '../office/access.js'
+import { classifyOfficeOutput, sameOfficeFileBinding, type OfficeFileBinding, type OfficeOutputScope } from '../office/file-binding.js'
 
 type ResourceContext = {
   artifact: OfficeArtifactRow
@@ -23,16 +24,16 @@ type ResourceContext = {
 
 export type OfficeResourceRouteDeps = {
   load(userId: string, artifactId: string): Promise<ResourceContext | null>
-  readUpload(userId: string, workspaceId: string, fileId: string): Promise<{ bytes: Uint8Array; sensitivity: OfficeArtifactRow['sensitivity'] } | null>
+  readUpload(userId: string, workspaceId: string, fileId: string): Promise<{ bytes: Uint8Array; binding: OfficeFileBinding; validForMs: number } | null>
   normalizeImage?(bytes: Uint8Array): Promise<NormalizedOfficeImage>
   persistImage(params: {
     userId: string
     workspaceId: string
     artifactId: string
-    sensitivity: OfficeArtifactRow['sensitivity']
+    scope: OfficeOutputScope
     image: NormalizedOfficeImage
   }): Promise<{ id: string; sensitivity?: OfficeArtifactRow['sensitivity'] }>
-  readResource(userId: string, workspaceId: string, resourceId: string): Promise<{ bytes: Uint8Array; mime: string; hash: string } | null>
+  readResource(userId: string, workspaceId: string, resourceId: string): Promise<{ bytes: Uint8Array; mime: string; hash: string; validForMs: number; binding: OfficeFileBinding } | null>
 }
 
 const Admission = z.object({ fileId: z.string().uuid(), kind: z.literal('image') }).strict()
@@ -41,30 +42,41 @@ export function officeResourceRoutes(deps: OfficeResourceRouteDeps): Router {
   const router = Router()
 
   router.get('/artifacts/:artifactId/resources/:resourceId', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
     const artifactId = String(req.params.artifactId)
     const resourceId = String(req.params.resourceId)
     const context = await deps.load(userId, artifactId)
-    if (!context) return void res.status(404).json({ error: 'Office resource not found' })
+    if (!context || (req.query.workspaceId !== undefined && req.query.workspaceId !== context.artifact.workspaceId)) return void res.status(404).json({ error: 'Office resource not found' })
     const ref = context.snapshot.resources.find((resource) => resource.id === resourceId)
     if (!ref) return void res.status(404).json({ error: 'Office resource not found' })
+    const referenceRevision = JSON.stringify(ref)
+    const started = performance.now()
     const resource = await deps.readResource(userId, context.artifact.workspaceId, resourceId)
-    const bytesHash = resource ? createHash('sha256').update(resource.bytes).digest('hex') : null
-    if (!resource || resource.hash !== ref.hash || bytesHash !== ref.hash) {
+    const current = await deps.load(userId, artifactId)
+    const currentRef = current?.snapshot.resources.find((entry) => entry.id === resourceId)
+    if (!resource || !current || current.artifact.workspaceId !== context.artifact.workspaceId ||
+      !currentRef || JSON.stringify(currentRef) !== referenceRevision) {
+      return void res.status(404).json({ error: 'Office resource not found' })
+    }
+    const validForMs = Math.floor(Math.min(30_000, resource.validForMs) - (performance.now() - started))
+    if (!Number.isFinite(validForMs) || validForMs <= 0) return void res.status(404).json({ error: 'Office resource not found' })
+    const bytesHash = createHash('sha256').update(resource.bytes).digest('hex')
+    if (resource.hash !== ref.hash || bytesHash !== ref.hash || resource.mime !== ref.mime) {
       return void res.status(409).json({ error: 'office_resource_incomplete', resourceId })
     }
-    const etag = `"${ref.hash}"`
-    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable')
+    res.setHeader('X-Brian-Media-Valid-For-Ms', String(validForMs))
+    res.append('Access-Control-Expose-Headers', 'X-Brian-Media-Valid-For-Ms')
     res.setHeader('Content-Type', ref.mime)
     res.setHeader('Content-Length', resource.bytes.byteLength)
-    res.setHeader('ETag', etag)
     res.setHeader('X-Content-Type-Options', 'nosniff')
-    if (req.headers['if-none-match'] === etag) return void res.status(304).end()
-    res.send(Buffer.from(resource.bytes))
+    // Bypass Express's automatic ETag/304 handling for protected bytes.
+    res.end(Buffer.from(resource.bytes))
   })
 
   router.post('/artifacts/:artifactId/resources', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
     const body = Admission.safeParse(req.body)
@@ -74,6 +86,7 @@ export function officeResourceRoutes(deps: OfficeResourceRouteDeps): Router {
     if (!context) return void res.status(404).json({ error: 'Office artifact not found' })
     if (context.artifact.lifecycleState !== 'active') return void res.status(409).json({ error: 'office_artifact_inactive' })
     if (!context.access.canEdit) return void res.status(403).json({ error: 'office_edit_required' })
+    const contextRevision = admissionContextRevision(context)
     const upload = await deps.readUpload(userId, context.artifact.workspaceId, body.data.fileId)
     if (!upload) return void res.status(404).json({ error: 'office_image_source_unavailable' })
     if (upload.bytes.byteLength > MAX_OFFICE_IMAGE_BYTES) return void res.status(413).json({ error: 'office_image_too_large' })
@@ -85,27 +98,54 @@ export function officeResourceRoutes(deps: OfficeResourceRouteDeps): Router {
       if (code === 'office_image_too_large') return void res.status(413).json({ error: code })
       return void res.status(415).json({ error: code === 'office_image_unsupported' ? code : 'office_image_invalid' })
     }
+    const [sourceBeforePublish, current] = await Promise.all([
+      deps.readUpload(userId, context.artifact.workspaceId, body.data.fileId),
+      deps.load(userId, artifactId),
+    ])
+    if (!sourceBeforePublish || !sameOfficeFileBinding(upload.binding, sourceBeforePublish.binding) ||
+      !current || !current.access.canEdit || current.artifact.lifecycleState !== 'active' ||
+      admissionContextRevision(current) !== contextRevision) {
+      return void res.status(409).json({ error: 'office_projection_changed' })
+    }
+    const scope = classifyOfficeOutput({
+      sensitivity: context.artifact.sensitivity,
+      compartments: context.artifact.compartments,
+      projectIds: context.artifact.projectIds,
+    }, upload.binding)
     const persisted = await deps.persistImage({
       userId,
       workspaceId: context.artifact.workspaceId,
       artifactId,
-      sensitivity: maxSensitivity(context.artifact.sensitivity, upload.sensitivity),
+      scope,
       image,
     })
+    const [sourceAfterPublish, published, finalContext] = await Promise.all([
+      deps.readUpload(userId, context.artifact.workspaceId, body.data.fileId),
+      deps.readResource(userId, context.artifact.workspaceId, persisted.id),
+      deps.load(userId, artifactId),
+    ])
+    if (!sourceAfterPublish || !sameOfficeFileBinding(upload.binding, sourceAfterPublish.binding) ||
+      !published || published.hash !== image.hash || published.mime !== image.mime ||
+      !finalContext || admissionContextRevision(finalContext) !== contextRevision) {
+      return void res.status(409).json({ error: 'office_projection_changed' })
+    }
+    const validForMs = Math.floor(Math.min(sourceAfterPublish.validForMs, published.validForMs))
+    if (!Number.isFinite(validForMs) || validForMs <= 0) return void res.status(404).json({ error: 'Office resource not found' })
     const resource: OfficeResourceRef = OfficeResourceRefSchema.parse({
       id: persisted.id,
       kind: 'image',
       hash: image.hash,
       mime: image.mime,
-      sensitivity: persisted.sensitivity ?? context.artifact.sensitivity,
+      sensitivity: persisted.sensitivity ?? scope.sensitivity,
     })
+    res.setHeader('X-Brian-Media-Valid-For-Ms', String(Math.min(30_000, validForMs)))
+    res.append('Access-Control-Expose-Headers', 'X-Brian-Media-Valid-For-Ms')
     res.status(201).json({ resource, widthPx: image.widthPx, heightPx: image.heightPx })
   })
 
   return router
 }
 
-function maxSensitivity(left: OfficeArtifactRow['sensitivity'], right: OfficeArtifactRow['sensitivity']): OfficeArtifactRow['sensitivity'] {
-  const rank = { public: 0, internal: 1, confidential: 2 } as const
-  return rank[left] >= rank[right] ? left : right
+function admissionContextRevision(context: ResourceContext): string {
+  return JSON.stringify({ artifact: context.artifact, access: context.access, snapshot: context.snapshot })
 }

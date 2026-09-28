@@ -40,6 +40,7 @@ import { useState } from "react";
 import { warmDocPage } from "@/lib/surface-prefetch";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
+import { MeetingTagRulesMenuItem, MeetingTagRulesDialog } from "@/components/recordings/meeting-tags-panel";
 import { ChevronRight, MoreHorizontal, Plus } from "lucide-react";
 import { daysUntilPrune, derivePageIcon } from "@/lib/api/views";
 import { PageIcon } from "./page-icon";
@@ -129,6 +130,7 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
   // the open page). `rowHovered` covers both the row and the caption below it
   // (the wrapper spans both), so moving the pointer down onto the clickable
   // "Save page" affordance doesn't collapse it out from under the cursor.
+  const [tagRulesOpen, setTagRulesOpen] = useState(false);
   const [rowHovered, setRowHovered] = useState(false);
   const pruneDays =
     row.state === "draft" && !keptByParent
@@ -303,6 +305,7 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
               }
             />
             <DropdownMenuContent>
+              <MeetingTagRulesMenuItem workspaceId={row.workspaceId} pageId={row.id} onOpen={() => setTagRulesOpen(true)} />
               <DropdownMenuItem onClick={() => onRename(row.id)}>
                 {t.sidebarRowRename}
               </DropdownMenuItem>
@@ -333,6 +336,7 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          {tagRulesOpen && <MeetingTagRulesDialog workspaceId={row.workspaceId} pageId={row.id} open={tagRulesOpen} onOpenChange={setTagRulesOpen} />}
 
           <button
             type="button"

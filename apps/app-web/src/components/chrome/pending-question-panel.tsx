@@ -14,15 +14,17 @@
  * confirm. See docs/architecture/engine/askquestion-suspend-resume.md.
  */
 
-import { useCallback, useRef, useState } from "react";
-import { TriangleAlert } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Cable, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isPhoneViewport } from "@/lib/viewport";
 import type { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   cancelPendingQuestion,
+  fetchPendingQuestion,
   submitAnswer,
+  type PendingQuestionAction,
 } from "@/lib/api/pending-questions";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
 
@@ -34,21 +36,40 @@ export function PendingQuestionPanel({
   dict,
   onAnswered,
   onCancelled,
+  action: initialAction,
 }: {
   sessionId: string;
   approvalId: string;
   dict: PendingQuestionDict;
   onAnswered: () => void;
   onCancelled: () => void;
+  action?: PendingQuestionAction | null;
 }) {
   const [answer, setAnswer] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const answerRef = useRef<HTMLTextAreaElement>(null);
+  const [action, setAction] = useState<PendingQuestionAction | null>(initialAction ?? null);
+  const [actionResolved, setActionResolved] = useState(initialAction !== undefined);
   // Grow the answer box line-by-line as the user types (Shift+Enter newline),
   // capped by `max-h-40`; past that the overflow scrolls.
   useAutoGrowTextarea(answerRef, answer);
+
+  useEffect(() => {
+    setAction(initialAction ?? null);
+    setActionResolved(initialAction !== undefined);
+    if (initialAction !== undefined) return;
+    let cancelled = false;
+    void fetchPendingQuestion(sessionId)
+      .then((pending) => {
+        if (!cancelled && pending?.approvalId === approvalId) setAction(pending.action);
+      })
+      .finally(() => {
+        if (!cancelled) setActionResolved(true);
+      });
+    return () => { cancelled = true; };
+  }, [approvalId, initialAction, sessionId]);
 
   const onSubmit = useCallback(async () => {
     const trimmed = answer.trim();
@@ -101,33 +122,53 @@ export function PendingQuestionPanel({
         <div className="text-[10px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300">
           {dict.heading}
         </div>
-        <textarea
-          ref={answerRef}
-          value={answer}
-          onChange={(e) => setAnswer(e.target.value)}
-          onKeyDown={(e) => {
-            // Enter submits; Shift+Enter newline — same as the composer.
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void onSubmit();
-            }
-          }}
-          placeholder={dict.placeholder}
-          rows={2}
-          // No auto-raised keyboard on a phone (responsive contract M4).
-          autoFocus={!isPhoneViewport()}
-          disabled={submitting || cancelling}
-          className={cn(
-            "w-full min-h-[3.25rem] max-h-40 resize-none overflow-y-auto rounded-md border border-border bg-background",
-            "px-2.5 py-1.5 text-[16px] leading-relaxed outline-none md:text-[13px]",
-            "placeholder:text-muted-foreground",
-            "disabled:opacity-60",
-          )}
-        />
+        {!actionResolved ? null : action ? (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              {dict.connectHelp.replace("{connector}", action.label)}
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.assign(action.connectPath)}
+              disabled={cancelling}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md bg-action px-3 py-1.5 text-[12px] font-medium text-action-foreground",
+                "transition-colors hover:bg-action/90 disabled:cursor-not-allowed disabled:opacity-50",
+              )}
+            >
+              <Cable className="size-3.5" aria-hidden />
+              {dict.connect.replace("{connector}", action.label)}
+            </button>
+          </div>
+        ) : (
+          <textarea
+            ref={answerRef}
+            value={answer}
+            onChange={(e) => setAnswer(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter submits; Shift+Enter newline — same as the composer.
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void onSubmit();
+              }
+            }}
+            placeholder={dict.placeholder}
+            rows={2}
+            // No auto-raised keyboard on a phone (responsive contract M4).
+            autoFocus={!isPhoneViewport()}
+            disabled={submitting || cancelling}
+            className={cn(
+              "w-full min-h-[3.25rem] max-h-40 resize-none overflow-y-auto rounded-md border border-border bg-background",
+              "px-2.5 py-1.5 text-[16px] leading-relaxed outline-none md:text-[13px]",
+              "placeholder:text-muted-foreground",
+              "disabled:opacity-60",
+            )}
+          />
+        )}
         {error ? (
           <div className="text-xs text-destructive">{error}</div>
         ) : null}
-        <div className="flex items-center justify-between gap-2">
+        {actionResolved ? <div className="flex items-center justify-between gap-2">
           <button
             type="button"
             onClick={() => void onCancel()}
@@ -139,18 +180,20 @@ export function PendingQuestionPanel({
           >
             {cancelling ? dict.cancelling : dict.cancel}
           </button>
-          <button
-            type="button"
-            onClick={() => void onSubmit()}
-            disabled={submitting || cancelling || answer.trim().length === 0}
-            className={cn(
-              "rounded-md bg-action px-3 py-1 text-[12px] font-medium text-action-foreground",
-              "transition-colors hover:bg-action/90 disabled:opacity-50 disabled:cursor-not-allowed",
-            )}
-          >
-            {submitting ? dict.submitting : dict.submit}
-          </button>
-        </div>
+          {!action ? (
+            <button
+              type="button"
+              onClick={() => void onSubmit()}
+              disabled={submitting || cancelling || answer.trim().length === 0}
+              className={cn(
+                "rounded-md bg-action px-3 py-1 text-[12px] font-medium text-action-foreground",
+                "transition-colors hover:bg-action/90 disabled:opacity-50 disabled:cursor-not-allowed",
+              )}
+            >
+              {submitting ? dict.submitting : dict.submit}
+            </button>
+          ) : null}
+        </div> : null}
       </div>
     </div>
   );

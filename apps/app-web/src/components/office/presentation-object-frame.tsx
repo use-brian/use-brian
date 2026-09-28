@@ -16,7 +16,7 @@ import {
   type OfficeRichTextRun,
 } from "@use-brian/office-model";
 import { useT } from "@/lib/i18n/client";
-import { getOfficeResourceObjectUrl } from "@/lib/office/api";
+import { useOfficeResourceMedia } from "@/lib/use-doc-media";
 import { cn } from "@/lib/utils";
 
 type PresentationGeometry = PresentationObject["geometry"];
@@ -426,17 +426,7 @@ function PresentationRichTextEditor({ object, slideSize, onText, onBlur }: { obj
 }
 
 function OfficeResourceImage({ artifactId, resourceId, alt, fallback }: { artifactId: string; resourceId: string; alt: string; fallback: string }) {
-  const [source, setSource] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    setFailed(false);
-    getOfficeResourceObjectUrl(artifactId, resourceId)
-      .then((url) => { if (active) setSource(url); })
-      .catch(() => { if (active) setFailed(true); });
-    return () => { active = false; };
-  }, [artifactId, resourceId]);
+  const {url:source,error:failed} = useOfficeResourceMedia(artifactId,resourceId);
 
   if (!source) return <div data-office-resource-image={failed ? "failed" : "loading"} className="flex h-full w-full items-center justify-center bg-slate-100 text-[0.7rem] text-slate-500">{fallback}</div>;
   return <img data-office-resource-image="ready" src={source} alt={alt} draggable={false} className="block h-full w-full object-fill" />;

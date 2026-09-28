@@ -1,3 +1,4 @@
+import { isProtectedFillOrigin, type ProtectedFillScope } from './protected-fill.js'
 /**
  * The computer-use tool surface (spec §3): discrete browser tools over
  * the `BrowserProvider` seam, browsing AS a profile (R2-4/R2-10), backend
@@ -20,6 +21,7 @@
  * See docs/architecture/features/builtin-primitives.md.
  */
 import { z } from 'zod'
+import { SnapshotObservationState, renderSnapshotNode, type ObservationMode } from './snapshot-observation.js'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
 import { isAutonomousToolContext } from '../tools/capability-gate.js'
 import type { Sensitivity } from '../security/sensitivity.js'
@@ -31,6 +33,7 @@ import {
   registrableSiteOf,
 } from './orchestrator.js'
 import {
+  canUseProfile,
   describeProfileDenials,
   describeProfileResolution,
   resolveProfileForCall,
@@ -41,6 +44,7 @@ import {
 } from './profiles.js'
 import {
   BrowserBackendError,
+  BrowserFormFieldsSchema,
   type BrowserCallContext,
   type BrowserProvider,
   type BrowserSnapshot,
@@ -71,6 +75,7 @@ export type ComputerToolEvent = {
     | 'snapshot'
     | 'click'
     | 'type'
+    | 'fillForm'
     | 'currentUrl'
     | 'readPage'
   backend: BrowserBackendKind
@@ -144,6 +149,10 @@ export type ComputerToolProfiles = {
 }
 
 export type CreateComputerToolsOptions = {
+  protectedFill?: {
+    scope: (context: ToolContext, profileId: string, origin: string) => Promise<ProtectedFillScope | null>
+    blocked: (context: ToolContext, profileId: string | null) => boolean
+  }
   local: BrowserProvider
   cloud: BrowserProvider
   /** Whether a cloud sandbox backend is configured (the toggle's default). */
@@ -206,6 +215,7 @@ type SessionBrowseState = {
   profileName: string | null
   /** ref → accessible name from the LATEST snapshot (send-gate + previews). */
   refLabels: Map<string, string>
+  observations: SnapshotObservationState
   /** Last text typed this session (approval preview context). */
   lastTyped: string | null
   calls: number
@@ -234,7 +244,9 @@ export type ComputerTools = {
   browserCloseTab: Tool
   browserSnapshot: Tool
   browserClick: Tool
+  browserFillReference: Tool
   browserType: Tool
+  browserFillForm: Tool
   browserCurrentUrl: Tool
   /**
    * The sends-forbidden one-shot reader (computer-use.md §12 "Part 2"):
@@ -276,6 +288,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         profileId: null,
         profileName: null,
         refLabels: new Map(),
+        observations: new SnapshotObservationState(),
         lastTyped: null,
         calls: 0,
         firstCallAt: now(),
@@ -451,7 +464,11 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     if (autonomous) return { error: autonomous }
     const blocked = await policyBlockGate(toolName, context)
     if (blocked) return { error: blocked }
-    return { state: sessionState(context) }
+    const state = sessionState(context)
+    if (opts.protectedFill?.blocked(context, state.profileId)) return {
+      error: { data: 'Protected fill requires human completion in the browser extension.', isError: true },
+    }
+    return { state }
   }
 
   /** The action/wall-clock fuse protects cloud work; watched local browsing is exempt. */
@@ -505,11 +522,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     const end = Math.min(offset + limit, snapshot.nodes.length)
     const lines = snapshot.nodes
       .slice(offset, end)
-      .map((n) => {
-        const value = n.value ? ` value=${JSON.stringify(n.value)}` : ''
-        const disabled = n.disabled ? ' (disabled)' : ''
-        return `${n.ref ? `${n.ref} ` : ''}${n.role} ${JSON.stringify(n.name)}${value}${disabled}`
-      })
+      .map(renderSnapshotNode)
     const noun = mode === 'full' ? 'accessibility nodes' : 'interactive nodes'
     const range =
       snapshot.nodes.length > limit || offset > 0
@@ -595,11 +608,17 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     context: ToolContext,
     state: SessionBrowseState,
     backend: BrowserBackendKind,
-  ): Promise<{ snapshot: BrowserSnapshot; rendered: string } | null> {
+    observation: ObservationMode = 'auto',
+  ): Promise<{ snapshot: BrowserSnapshot; rendered: string; advice: string } | null> {
     try {
-      const snapshot = await providerFor(backend).snapshot(callCtx(context, state))
-      state.refLabels = new Map(snapshot.nodes.flatMap((n) => n.ref ? [[n.ref, n.name]] : []))
-      const rendered = renderSnapshot(snapshot)
+      const snapshot = await providerFor(backend).snapshot(callCtx(context, state), { mode: 'full' })
+      const advice = pageAdvice(context, state, snapshot)
+      const observed = state.observations.observe(snapshot, {
+        scope: JSON.stringify([backend, state.profileId]), mode: 'full', observation,
+        render: snapshot => renderSnapshot(snapshot, { mode: 'full' }),
+      })
+      state.refLabels = observed.refLabels
+      const rendered = observed.rendered
       // This is the expensive one: navigate and click fold their follow-up
       // snapshot in here to save a model turn, so they cost snapshot-sized
       // context even though they read like cheap actions.
@@ -614,8 +633,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         },
         context,
       )
-      return { snapshot, rendered }
+      return { snapshot, rendered, advice }
     } catch {
+      state.observations.reset()
+      state.refLabels.clear()
       return null
     }
   }
@@ -681,6 +702,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           blockedProfiles = resolution.blocked ?? []
         }
       }
+      if (gate.state.profileId !== (profile?.id ?? null)) {
+        gate.state.observations.reset()
+        gate.state.refLabels.clear()
+      }
       gate.state.profileId = profile?.id ?? null
       gate.state.profileName = profile?.name ?? null
       const backend = resolveBackend(gate.state, profile)
@@ -702,6 +727,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const fused = backendFuseGate(gate.state, backend)
       if (fused) return fused
       gate.state.refLabels.clear()
+      gate.state.observations.reset()
       try {
         const res = await providerFor(backend).navigate(callCtx(context, gate.state), input.url)
         record(gate.state, { action: 'open', url: res.url })
@@ -743,7 +769,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         // be able to answer. Every cloud navigate carries the link.
         const liveLink = backend === 'cloud' ? opts.takeoverLinkFor?.(context) : null
         const snap = await inlineSnapshot(context, gate.state, backend)
-        const advice = snap ? pageAdvice(context, gate.state, snap.snapshot) : ''
+        const advice = snap ? snap.advice : ''
         return {
           data:
             `Opened ${res.url} (${backend} browser).` +
@@ -826,15 +852,16 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const unavailable = localTabOperationError(gate.state, Boolean(provider.openTab))
       if (unavailable) return unavailable
       try {
-        const opened = await provider.openTab!(callCtx(context, gate.state), parsed.toString())
         gate.state.refLabels.clear()
+        gate.state.observations.reset()
+        const opened = await provider.openTab!(callCtx(context, gate.state), parsed.toString())
         record(gate.state, { action: 'open', url: opened.url })
         emit({ type: 'browser_action', op: 'openTab', backend: 'local', host: hostOf(opened.url), ok: true }, context)
         const snap = await inlineSnapshot(context, gate.state, 'local')
         return {
           data:
             `Opened ${opened.url} in ${opened.tabId} and switched to it.` +
-            (snap ? `\n\n${snap.rendered}${pageAdvice(context, gate.state, snap.snapshot)}` : ''),
+            (snap ? `\n\n${snap.rendered}${snap.advice}` : ''),
           meta: { backend: 'local', tabId: opened.tabId },
         }
       } catch (err) {
@@ -905,14 +932,15 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const unavailable = localTabOperationError(gate.state, Boolean(provider.switchTab))
       if (unavailable) return unavailable
       try {
-        const selected = await provider.switchTab!(callCtx(context, gate.state), input.tabId)
         gate.state.refLabels.clear()
+        gate.state.observations.reset()
+        const selected = await provider.switchTab!(callCtx(context, gate.state), input.tabId)
         emit({ type: 'browser_action', op: 'switchTab', backend: 'local', host: hostOf(selected.url), ok: true }, context)
         const snap = await inlineSnapshot(context, gate.state, 'local')
         return {
           data:
             `Switched to ${selected.tabId}: ${selected.url}.` +
-            (snap ? `\n\n${snap.rendered}${pageAdvice(context, gate.state, snap.snapshot)}` : ''),
+            (snap ? `\n\n${snap.rendered}${snap.advice}` : ''),
           meta: { backend: 'local', tabId: selected.tabId },
         }
       } catch (err) {
@@ -941,8 +969,9 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const unavailable = localTabOperationError(gate.state, Boolean(provider.closeTab))
       if (unavailable) return unavailable
       try {
-        const closed = await provider.closeTab!(callCtx(context, gate.state), input.tabId)
         gate.state.refLabels.clear()
+        gate.state.observations.reset()
+        const closed = await provider.closeTab!(callCtx(context, gate.state), input.tabId)
         emit({ type: 'browser_action', op: 'closeTab', backend: 'local', host: null, ok: true }, context)
         return {
           data: `Closed ${input.tabId}.${closed.activeTabId ? ` Active tab: ${closed.activeTabId}.` : ' No task tab is active.'}`,
@@ -964,8 +993,9 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     name: 'browserSnapshot',
     requiresCapability: 'computer',
     description:
-      'Read the current browser page through accessibility data. mode:"interactive" (default) returns concise actionable controls with refs such as @e1 button "Send". mode:"full" also returns headings, tables, cells, labels, and static text for gathering visible information; informational rows have no refs and cannot be clicked or typed into. Returns at most 150 nodes per call; use the reported offset with the same mode for later ranges. browserNavigate and browserClick already return a fresh interactive snapshot. Refs are valid until the next navigation or snapshot — act on the latest snapshot only.',
+      'Read the current browser page through accessibility data. mode:"interactive" (default) returns concise actionable controls with refs such as @e1 button "Send". mode:"full" also returns headings, tables, cells, labels, and static text for gathering visible information; informational rows have no refs and cannot be clicked or typed into. Returns at most 150 nodes per call; use the reported offset with the same mode for later ranges. browserNavigate, browserClick, and browserFillForm already return a fresh full accessibility observation including question text. Observations are versioned: auto returns a full view first, then a diff only when smaller. full forces a fresh baseline; diff requests deltas when safe. Refs with verified DOM identity survive scans; full resets invalidate old refs. Act on the latest observation only.',
     inputSchema: z.object({
+      observation: z.enum(['auto', 'full', 'diff']).default('auto').describe('Versioned full view or semantic delta; unsafe baselines always reset to full'),
       mode: z.enum(['interactive', 'full']).default('interactive').describe('Interactive controls only, or a full curated accessibility view including static information'),
       offset: z.number().int().min(0).default(0).describe('Zero-based node offset; use the next offset reported by the previous snapshot with the same mode'),
       limit: z.number().int().min(1).max(SNAPSHOT_MAX_LINES).default(SNAPSHOT_MAX_LINES).describe('Maximum nodes to return (1-150)'),
@@ -988,8 +1018,13 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       if (fused) return fused
       try {
         const snapshot = await providerFor(backend).snapshot(callCtx(context, gate.state), { mode: input.mode })
-        gate.state.refLabels = new Map(snapshot.nodes.flatMap((n) => n.ref ? [[n.ref, n.name]] : []))
-        const data = renderSnapshot(snapshot, input) + pageAdvice(context, gate.state, snapshot)
+        const advice = pageAdvice(context, gate.state, snapshot)
+        const observed = gate.state.observations.observe(snapshot, {
+          ...input, scope: JSON.stringify([backend, gate.state.profileId]),
+          render: (publicSnapshot) => renderSnapshot(publicSnapshot, input),
+        })
+        gate.state.refLabels = observed.refLabels
+        const data = observed.rendered + advice
         const end = Math.min(input.offset + input.limit, snapshot.nodes.length)
         emit(
           {
@@ -1014,6 +1049,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           },
         }
       } catch (err) {
+        gate.state.observations.reset()
+        gate.state.refLabels.clear()
         emit(
           {
             type: 'browser_action',
@@ -1036,8 +1073,9 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     name: 'browserClick',
     requiresCapability: 'computer',
     description:
-      'Click an element by its ref from the latest snapshot, and get back a fresh snapshot of the page after the click. To choose a value in a dropdown (a combobox followed by option refs), click the option ref, then read the new dropdown value in the returned snapshot. Set intent:"submit" when the click sends, posts, buys, deletes, or otherwise commits an outward action — such clicks require user approval before they run. Ordinary clicks (opening a thread, focusing a field) need no approval.',
+      'Click an element by its ref from the latest observation, and get back a versioned full accessibility observation (auto uses a diff when smaller), including new question text and validation messages. To choose a value in a dropdown (a combobox followed by option refs), click the option ref, then read the new dropdown value in the returned snapshot. Set intent:"submit" when the click sends, posts, buys, deletes, or otherwise commits an outward action — such clicks require user approval before they run. Ordinary clicks (opening a thread, focusing a field) need no approval.',
     inputSchema: z.object({
+      observation: z.enum(['auto', 'full', 'diff']).default('auto').describe('Follow-up observation format; unsafe baselines always reset to full'),
       ref: z.string().min(1).describe('Element ref from the latest browserSnapshot, e.g. "@e12"'),
       intent: z
         .enum(['activate', 'submit'])
@@ -1082,11 +1120,11 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       try {
         const label = gate.state.refLabels.get(input.ref) ?? null
         const isSubmit = input.intent === 'submit' || (label ? SEND_LIKE_LABEL_PATTERN.test(label) : false)
-        await providerFor(backend).click(callCtx(context, gate.state), input.ref)
+        await providerFor(backend).click(callCtx(context, gate.state), gate.state.observations.resolve(input.ref))
         if (label) record(gate.state, { action: isSubmit ? 'submit' : 'click', detail: label, description: isSubmit ? label : null })
         emit({ type: 'browser_action', op: 'click', backend, host: null, ok: true }, context)
-        const snap = await inlineSnapshot(context, gate.state, backend)
-        const advice = snap ? pageAdvice(context, gate.state, snap.snapshot) : ''
+        const snap = await inlineSnapshot(context, gate.state, backend, input.observation)
+        const advice = snap ? snap.advice : ''
         return {
           data:
             `Clicked ${input.ref}.` +
@@ -1113,6 +1151,48 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     },
   })
 
+  const browserFillReference = buildTool({
+    name: 'browserFillReference', requiresCapability: 'computer',
+    description: 'Fill a batch of text fields using opaque references created by the user in the Protected fill panel. Never read CRM raw values for this path. Use a pre-fill snapshot for target refs. The extension asks the user to approve; after disclosure all browser actions stop until the human finishes and closes protected tabs in the extension. Never submit the page.',
+    inputSchema: z.object({
+      destinationOrigin: z.string().refine(isProtectedFillOrigin),
+      items: z.array(z.object({ referenceId: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+        ref: z.string().regex(/^@e[1-9][0-9]{0,8}$/) }).strict()).min(1).max(20),
+    }).strict(),
+    isReadOnly: false, isConcurrencySafe: false, requiresConfirmation: false,
+    resolveConfirmation: policyAsk('browserFillReference'), timeoutMs: 140_000,
+    async execute(input, context) {
+      const gate = await gates('browserFillReference', context)
+      if ('error' in gate) return gate.error
+      const { state } = gate
+      if (isAutonomousToolContext(context) || state.backend !== 'local' || !state.profileId ||
+        !opts.protectedFill || !opts.local.fillReference) {
+        return { data: 'Protected fill unavailable', isError: true }
+      }
+      try {
+        const profile = await opts.profiles?.store.get(state.profileId)
+        if (!profile || profile.workspaceId !== context.workspaceId || !opts.profiles || !canUseProfile(profile, {
+          userId: context.userId, workspaceId: context.workspaceId ?? '', assistantId: context.assistantId,
+          assistantClearance: await opts.profiles.assistantClearance(context),
+        }).ok) return { data: 'Protected fill unavailable', isError: true }
+        const scope = await opts.protectedFill.scope(context, state.profileId, input.destinationOrigin)
+        if (!scope || scope.userId !== context.userId || scope.workspaceId !== context.workspaceId ||
+          scope.sessionId !== context.sessionId || scope.browserProfileId !== state.profileId ||
+          scope.destinationOrigin !== input.destinationOrigin || !scope.taskId) {
+          return { data: 'Protected fill unavailable', isError: true }
+        }
+        // The protected path uses the same public-to-provider ref mapping,
+        // but must never record values or observe the page after disclosure.
+        const items = input.items.map(item => ({ ...item, ref: state.observations.resolve(item.ref) }))
+        state.observations.reset()
+        state.refLabels.clear()
+        state.lastTyped = null
+        await opts.local.fillReference(scope, items)
+        return { data: 'Protected fields filled. The user must finish in the browser and complete cleanup in the extension. Browser observations and actions are blocked.' }
+      } catch { return { data: 'Protected fill unavailable. Complete cleanup in the browser extension before continuing.', isError: true } }
+    },
+  })
+
   // ── browserType ──────────────────────────────────────────────
 
   const browserType = buildTool({
@@ -1136,7 +1216,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const fused = backendFuseGate(gate.state, backend)
       if (fused) return fused
       try {
-        await providerFor(backend).type(callCtx(context, gate.state), input.ref, input.text)
+        await providerFor(backend).type(callCtx(context, gate.state), gate.state.observations.resolve(input.ref), input.text)
         gate.state.lastTyped = input.text
         const label = gate.state.refLabels.get(input.ref)
         if (label) record(gate.state, { action: 'fill', detail: label, text: input.text })
@@ -1157,6 +1237,74 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           },
           context,
         )
+        return backendErrorResult(err, backend)
+      }
+    },
+  })
+
+  // ── browserFillForm ──────────────────────────────────────────
+
+  const browserFillForm = buildTool({
+    name: 'browserFillForm',
+    requiresCapability: 'computer',
+    description:
+      'Fill multiple independent form fields in ONE call after scanning the page: prepare all known values together. Chromium local browser only. Fields execute sequentially without model round trips. fill replaces text; select chooses a native dropdown option by exact value or unique visible label; check sets a native checkbox/radio state. Use only refs from the latest observation. Returns per-field results and a fresh observation; stops on failure, without rolling back earlier changes. Never use for submitting; use browserClick with intent:"submit" separately. Custom widgets need browserClick/browserType.',
+    inputSchema: z.object({
+      fields: BrowserFormFieldsSchema,
+      observation: z.enum(['auto', 'full', 'diff']).default('auto'),
+    }),
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    requiresConfirmation: false,
+    resolveConfirmation: policyAsk('browserFillForm'),
+    maxResultSizeChars: 24_000,
+    timeoutMs: 45_000,
+    async execute(input, context) {
+      const gate = await gates('browserFillForm', context)
+      if ('error' in gate) return gate.error
+      const backend = gate.state.backend
+      const fused = backendFuseGate(gate.state, backend)
+      if (fused) return fused
+      const provider = providerFor(backend)
+      if (!provider.fillForm) return { data: 'ERROR: Batch form filling is unavailable in this browser. Use browserType/browserClick for individual fields.', isError: true }
+      try {
+        // Resolve the whole batch before any mutation. Public refs never cross
+        // the provider seam, and no unobserved/stale target may be guessed.
+        const fields = input.fields.map(field => ({ ...field, ref: gate.state.observations.resolve(field.ref) }))
+        const result = await provider.fillForm(callCtx(context, gate.state), fields)
+        if (result.fields.length !== fields.length || result.fields.some((field, index) => field.ref !== fields[index]!.ref)) {
+          throw new BrowserBackendError('Invalid batch result; some fields may have changed. Take a fresh snapshot before retrying.', 'backend_error')
+        }
+        const rows = result.fields.map((field, index) => ({ ...field, ref: input.fields[index]!.ref }))
+        for (const [index, row] of rows.entries()) {
+          if (row.status !== 'success') continue
+          const field = input.fields[index]!
+          if (field.action === 'fill') {
+            gate.state.lastTyped = field.value
+            const label = gate.state.refLabels.get(field.ref)
+            if (label) record(gate.state, { action: 'fill', detail: label, text: field.value })
+          }
+        }
+        const ok = rows.every(field => field.status === 'success')
+        const summary = rows.map(field => `${field.ref}: ${field.status}${field.error ? ` — ${field.error}` : ''}`).join('\n')
+        emit({ type: 'browser_action', op: 'fillForm', backend, host: null, ok, ...sized(summary) }, context)
+        const snap = await inlineSnapshot(context, gate.state, backend, input.observation)
+        const data = `${summary}${snap ? `\n\n${snap.rendered}${snap.advice}` : '\nTake browserSnapshot before continuing.'}`
+        if (data.length > 24_000) {
+          // The downstream tool cap can cut off the observation. Do not diff
+          // against or act on a view the model did not receive completely.
+          gate.state.observations.reset()
+          gate.state.refLabels.clear()
+        }
+        return {
+          data,
+          ...(ok ? {} : { isError: true }),
+          meta: { backend, fields: rows.length, succeeded: rows.filter(field => field.status === 'success').length },
+        }
+      } catch (err) {
+        gate.state.observations.reset()
+        gate.state.refLabels.clear()
+        emit({ type: 'browser_action', op: 'fillForm', backend, host: null, ok: false, code: err instanceof BrowserBackendError ? err.code : undefined }, context)
         return backendErrorResult(err, backend)
       }
     },
@@ -1306,9 +1454,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       }
       return withReadLock(context.sessionId, async (): Promise<ToolResult> => {
         try {
-          const res = await opts.cloud.navigate(ctx, input.url)
-          // Interactive refs (if any) are stale now — the sandbox page moved.
+          // A failed navigation may still have invalidated the provider refs.
           gate.state.refLabels.clear()
+          gate.state.observations.reset()
+          const res = await opts.cloud.navigate(ctx, input.url)
           if (looksLikeLoginWall(res.url)) {
             // No pause, no Take-Over link: a headless worker cannot wait for
             // a sign-in, and other workers may need the sandbox next. The
@@ -1372,6 +1521,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
   })
 
   return {
+    browserFillReference,
     browserNavigate,
     browserOpenTab,
     browserListTabs,
@@ -1380,11 +1530,14 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     browserSnapshot,
     browserClick,
     browserType,
+    browserFillForm,
     browserCurrentUrl,
     browserReadPage,
     setSessionBackendOverride(sessionId, backend) {
       const state = sessions.get(sessionId)
       if (state) {
+        state.observations.reset()
+        state.refLabels.clear()
         state.backendOverride = backend
         if (backend) state.backend = backend === 'cloud' && !cloudAvailable() ? 'local' : backend
       } else if (backend) {
@@ -1394,6 +1547,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           profileId: null,
           profileName: null,
           refLabels: new Map(),
+          observations: new SnapshotObservationState(),
           lastTyped: null,
           calls: 0,
           firstCallAt: now(),

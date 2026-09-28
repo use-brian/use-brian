@@ -651,6 +651,19 @@ function appWsMaint(userId?: string) {
       knowledgeStore: knowledgeStore as never,
       kbMaintenanceStore: kbMaintenanceStore as never,
       workflowStore: workflowStore as never,
+      resolveAuthoringAuthority: async ({ userId, workspaceId }) => ({
+        version: 1,
+        assistantId: 'assistant-1',
+        ceiling: {
+          workspaceId,
+          userId,
+          clearance: 'confidential',
+          compartments: null,
+          mutationCompartments: null,
+          projectIds: null,
+          visibilityAssistantIds: null,
+        },
+      }),
     }),
     userId ? { userId } : undefined,
   )

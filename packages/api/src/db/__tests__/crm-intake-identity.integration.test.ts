@@ -98,4 +98,44 @@ describe('[COMP:crm/operations-store] Actual intake identity resolution', () => 
       await expect(store.transaction(f.context, resolve)).rejects.toMatchObject({ code: 'conflict', details: { reason: 'identity_review_required' } })
     }
   })
+
+  it('existing_or_new joins the one live contact, fills only its gaps and never overwrites', async () => {
+    const f = await fixture()
+    const existing = await pool.query<{ id: string }>(`INSERT INTO entities (workspace_id,kind,display_name,canonical_id,attributes,created_by_user_id,source)
+      VALUES ($1,'person','Real Name','owner@example.com',
+        jsonb_build_object('email','owner@example.com','tags',jsonb_build_array('member'),'custom_fields',jsonb_build_object('locale','en')),$2,'manual')
+      RETURNING id`, [f.workspaceId, f.userId])
+    const contactId = existing.rows[0].id
+    await service.execute(f.context, CrmOperationsCommandSchema.parse({ kind: 'save_intake_definition', definitionKey: 'public', label: 'Public', definition: {
+      identityPolicy: 'existing_or_new', fields: [
+        { key: 'name', label: 'Name', type: 'text', mapping: { kind: 'base_field', field: 'name' } },
+        { key: 'email', label: 'Email', type: 'email', required: true, mapping: { kind: 'base_field', field: 'email' } },
+        { key: 'phone', label: 'Phone', type: 'phone', mapping: { kind: 'base_field', field: 'phone' } },
+        { key: 'locale', label: 'Locale', type: 'text', mapping: { kind: 'custom_field', fieldKey: 'locale' } },
+        { key: 'source_site', label: 'Site', type: 'text', mapping: { kind: 'custom_field', fieldKey: 'source_site' } },
+      ],
+    } }))
+    const output = await service.execute(f.context, { kind: 'record_submission', definitionKey: 'public', idempotencyKey: 'claim-1',
+      fields: { name: 'Someone Else', email: ' OWNER@example.com ', phone: '+852 5555 0000', locale: 'zh-Hant', source_site: 'sea' } })
+    expect(output.record).toMatchObject({ contactId })
+    const row = (await pool.query(`SELECT display_name, attributes FROM entities WHERE workspace_id=$1 AND kind='person'`, [f.workspaceId])).rows
+    expect(row).toHaveLength(1)
+    expect(row[0].display_name).toBe('Real Name')
+    expect(row[0].attributes).toMatchObject({ email: 'owner@example.com', phone: '+852 5555 0000', tags: ['member'],
+      custom_fields: { locale: 'en', source_site: 'sea' } })
+    // The typed values stay on the submission for staff review.
+    const submission = await pool.query(`SELECT count(*)::int AS count FROM association_enquiries WHERE workspace_id=$1 AND contact_id=$2`, [f.workspaceId, contactId])
+    expect(submission.rows[0].count).toBe(1)
+    // A second claim with a different phone does not replace the first.
+    await service.execute(f.context, { kind: 'record_submission', definitionKey: 'public', idempotencyKey: 'claim-2',
+      fields: { name: 'Third Party', email: 'owner@example.com', phone: '+852 6666 0000' } })
+    const after = (await pool.query(`SELECT display_name, attributes FROM entities WHERE workspace_id=$1 AND kind='person'`, [f.workspaceId])).rows
+    expect(after).toHaveLength(1)
+    expect(after[0].display_name).toBe('Real Name')
+    expect(after[0].attributes.phone).toBe('+852 5555 0000')
+    // An unknown address still creates exactly one new contact.
+    await service.execute(f.context, { kind: 'record_submission', definitionKey: 'public', idempotencyKey: 'claim-3',
+      fields: { name: 'New Person', email: 'new@example.com' } })
+    expect((await pool.query(`SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1 AND kind='person'`, [f.workspaceId])).rows[0].count).toBe(2)
+  })
 })

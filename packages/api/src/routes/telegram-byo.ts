@@ -1,3 +1,4 @@
+import { createTelegramDiscussionStore, observeTelegramDiscussion, telegramDiscussionContext, type TelegramDiscussionStore, type DiscussionMessage } from '../telegram-discussion-context.js'
 import { createChannelQuestionStore, handleChannelQuestionReply, type ChannelQuestionStore } from '../workflow/channel-questions.js'
 import { dispatchQuestionResponse } from '../workflow/question-response.js'
 import { buildWorkflowToolRegistry } from '../workflow/mcp-bridge.js'
@@ -108,10 +109,12 @@ export type ChannelRecordingIngest = {
 // getConnectorUserId now used inside channel-pipeline.ts
 
 type TelegramByoRouteOptions = {
+  discussionStore?: TelegramDiscussionStore
   questionStore?: ChannelQuestionStore
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -299,6 +302,11 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
   // internal `TelegramMessage` definition.
   type RawTelegramGroupMessage = {
     message_id: number
+    chat?: { id: number; type: string; is_forum?: boolean }
+    from?: { id: number }
+    sender_chat?: { id: number; title?: string }
+    is_automatic_forward?: boolean
+    message_thread_id?: number
     caption?: string
     text?: string
     media_group_id?: string
@@ -447,7 +455,34 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           })),
         }
       : baseRequireMention
+    // ChatFullInfo, not Update.chat, carries linked_chat_id. Resolve it for
+    // nested discussion replies (including callbacks) on every request: no
+    // warm-process history or stale link cache is required. On lookup failure
+    // drop rather than merge an unknown thread into the room session.
+    const threadUpdate = req.body as { message?: RawTelegramGroupMessage; channel_post?: RawTelegramGroupMessage; callback_query?: { message?: RawTelegramGroupMessage } }
+    const threadMessage = threadUpdate.message ?? threadUpdate.channel_post ?? threadUpdate.callback_query?.message
+    const discussionStore = options.discussionStore ?? createTelegramDiscussionStore()
+    // Persist before suppression/address gates, including privacy-mode reply snapshots.
+    // A storage failure drops the update, never silently fabricates source context.
+    try {
+      await observeTelegramDiscussion(discussionStore, integration.id, req.body)
+    } catch (err) {
+      console.error('[telegram-byo] discussion context persistence failed:', err)
+      return
+    }
+    const discussionChatIds: string[] = []
+    if (threadMessage?.chat?.type === 'supergroup' && !threadMessage.chat.is_forum && threadMessage.message_thread_id != null) {
+      try {
+        const chat = await createTelegramApi({ token: credentials.bot_token }).getChat(String(threadMessage.chat.id))
+        if (chat.linked_chat_id != null) discussionChatIds.push(String(chat.id))
+      } catch (err) {
+        console.error('[telegram-byo] discussion metadata lookup failed; dropping threaded update:', err)
+        return
+      }
+    }
+
     const tgConfig: TelegramAdapterConfig = {
+      discussionChatIds,
       ackReaction: storedConfig.ackReaction,
       requireMention: requireMentionResolved,
     }
@@ -748,11 +783,15 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       //     they redundantly listed themself.
       const integrationConfig = boundIntegration.config ?? {}
       const accessMode = integrationConfig.userAccessMode ?? 'allow_all'
-      const rawSender = incoming.raw as { from?: { id: number; username?: string } }
-      const fromId = String(rawSender.from?.id ?? incoming.userId)
-      const fromUsername = rawSender.from?.username?.toLowerCase()
+      const rawSender = incoming.raw as { from?: { id: number; username?: string }; sender_chat?: { id: number; title?: string }; chat?: { type?: string } }
+      const isChatSender = Boolean(rawSender.sender_chat) || rawSender.chat?.type === 'channel'
+      // A synthetic `from` on anonymous/channel messages must never redeem a
+      // human link, match a trusted username, or acquire connector privileges.
+      const fromId = isChatSender ? incoming.userId : String(rawSender.from?.id ?? incoming.userId)
+      const fromUsername = isChatSender ? undefined : rawSender.from?.username?.toLowerCase()
       const matchesEntry = (rawEntry: string) => {
         const entry = rawEntry.trim()
+        if (isChatSender) return accessMode === 'blocklist' && entry === fromId
         if (entry.startsWith('@')) {
           return fromUsername === entry.slice(1).toLowerCase()
         }
@@ -833,7 +872,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       //       so only the owner can manage connectors here; non-owners get a
       //       polite refusal pointing them at the official shared bot.
       //       See docs/architecture/channels/telegram-mini-app.md → "/connect".
-      if (!questionBinding && !incoming.replyToMessageId && /^\/connect(\b|$)/i.test((incoming.text ?? '').trim())) {
+      if (!isChatSender && !questionBinding && !incoming.replyToMessageId && /^\/connect(\b|$)/i.test((incoming.text ?? '').trim())) {
         const telegramUserIdStr = incoming.userId
         const linked = options.linkedAccountStore
           ? await options.linkedAccountStore.findByProvider('telegram', telegramUserIdStr)
@@ -940,7 +979,21 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       let foundLinkedOwner = false
       const telegramUserId = incoming.userId
 
-      if (options.linkedAccountStore && options.channelUserStore) {
+      if (isChatSender) {
+        if (accessMode === 'allowlist' || !options.channelUserStore) return
+        try {
+          const resolved = await resolveChannelUser(
+            options.channelUserStore, 'telegram', incoming.userId, routedAssistantId,
+            async () => ({ email: null, displayName: incoming.senderDisplay ?? incoming.userId }),
+          )
+          channelUserId = resolved.user.id
+          isIdentified = false
+          externalGuest = true
+        } catch (err) {
+          console.error('[telegram-byo] chat sender identity resolution failed:', err)
+          return // Never fall back to the owner for a channel/anonymous sender.
+        }
+      } else if (options.linkedAccountStore && options.channelUserStore) {
         try {
           // Step 1: Check linked accounts, scoped to THIS assistant.
           // `linked_identities (provider, provider_id)` is globally unique, so
@@ -1149,6 +1202,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         questions.invalidate(boundIntegration.id, incoming)
         return processMessage({
           backgroundModel: options.backgroundModel,
+          decisionRuntime: options.decisionRuntime,
           adapter,
           incoming,
           assistant: routedAssistant,
@@ -1165,6 +1219,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           pendingConfResolvers,
           questions,
           integrationId: boundIntegration.id,
+          discussionStore,
         })
       })
     }
@@ -1174,11 +1229,12 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // can't merge them in BYO (fresh adapter per request). Bypass the
     // adapter for media-group photos and accumulate them in a route-level
     // buffer so we can download in parallel and emit ONE turn.
-    const rawUpdate = req.body as { message?: RawTelegramGroupMessage }
-    const groupId = rawUpdate.message?.media_group_id
-    if (groupId && rawUpdate.message) {
-      const key = `${integration.channelId}:${groupId}`
-      const incomingMsg = rawUpdate.message
+    const rawUpdate = req.body as { message?: RawTelegramGroupMessage; channel_post?: RawTelegramGroupMessage }
+    const incomingMsg = rawUpdate.message ?? rawUpdate.channel_post
+    if (incomingMsg?.is_automatic_forward) return
+    const groupId = incomingMsg?.media_group_id
+    if (groupId && incomingMsg) {
+      const key = `${integration.channelId}:${incomingMsg.chat?.id}:${incomingMsg.message_thread_id ?? 0}:${incomingMsg.sender_chat?.id ?? incomingMsg.from?.id}:${groupId}`
       const existing = mediaGroupBuffers.get(key)
       const rawMessages = existing?.rawMessages ?? []
       rawMessages.push(incomingMsg)
@@ -1272,10 +1328,13 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 // ── Per-message handler ─────────────────────────────────────────
 
 type ProcessMessageParams = {
+  discussionStore: TelegramDiscussionStore
   questions: TelegramQuestions
   integrationId: string
+  integrationStore: ChannelIntegrationStore
   /** Servable background-lane model, threaded from the route options. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   adapter: ReturnType<typeof createTelegramAdapter>
   incoming: IncomingMessage
   assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
@@ -1755,9 +1814,18 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
 
   // Telegram @handle from the inbound update → X-Sidanclaw-Actor-Id (absent for
   // users with no @username). Same raw access as the allowlist check above.
-  const byoUsername = (incoming.raw as { from?: { username?: string } }).from?.username
+  const sender = incoming.raw as { from?: { username?: string }; sender_chat?: unknown; chat?: { type?: string } }
+  const byoUsername = sender.sender_chat || sender.chat?.type === 'channel' ? undefined : sender.from?.username
+  const providerVisibleContext = await telegramDiscussionContext(params.discussionStore, params.integrationId, incoming.channelId)
+  const rawReply = incoming.raw as DiscussionMessage
+  // The generic quote resolver treats bot-authored quotes as assistant replies.
+  // An automatic forward is neither a human comment nor our assistant answer;
+  // supply it only through the source-labelled provider context, once per turn.
+  const replyRaw = providerVisibleContext && rawReply.reply_to_message?.is_automatic_forward
+    ? { ...rawReply, reply_to_message: undefined } : incoming.raw
   await processChannelMessage({
     backgroundModel: params.backgroundModel,
+    decisionRuntime: params.decisionRuntime,
     userId: channelUserId,
     ownerId,
     assistant: { ...assistant, ownerUserId: ownerId },
@@ -1766,14 +1834,19 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     externalGuestConnectorTools,
     channelType: 'telegram',
     channelId: incoming.channelId,
+    channelIntegrationId: params.integrationId,
+    channelIntegrationStore: params.integrationStore,
     actorChannelId: byoUsername ? `@${byoUsername}` : null,
     messageText: combinedText,
     userContentBlocks,
+    // Rebuilt once per invocation, not stored as a human message or consumed by
+    // an injection marker. Retries and compacted sessions retain the context.
+    providerVisibleContext,
     // Raw paste (pre-attachment-context) for the large-paste intercept.
     rawUserText: incoming.text ?? '',
     isGroupChat: incoming.isGroupChat,
     replyToMessageId: incoming.replyToMessageId ?? null,
-    replyRaw: incoming.raw,
+    replyRaw,
     incomingChannelMessageId: incoming.messageId ?? null,
     archiveIncoming: incoming,
     archiveConnectorInstanceId: params.archiveConnectorInstanceId,

@@ -2,6 +2,7 @@ export {
   TASK_STATUSES,
   type TaskRecordStatus,
   type TaskWriteActor,
+  type TaskWriteScope,
   type TaskExternalRef,
   type TaskAttributes,
   type TaskRecord,

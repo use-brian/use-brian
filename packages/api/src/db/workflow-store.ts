@@ -65,6 +65,7 @@ const WORKFLOW_SELECT = `
   managed_by          AS "managedBy",
   context_group_id    AS "contextGroupId",
   context_project_id  AS "contextProjectId",
+  authoring_authority AS "authoringAuthority",
   created_at          AS "createdAt",
   updated_at          AS "updatedAt"
 `
@@ -92,6 +93,7 @@ type WorkflowRow = {
   managedBy: string | null
   contextGroupId: string | null
   contextProjectId: string | null
+  authoringAuthority: WorkflowRecord['authoringAuthority']
   createdAt: Date
   updatedAt: Date
 }
@@ -148,6 +150,7 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
     managedBy: row.managedBy,
     contextGroupId: row.contextGroupId,
     contextProjectId: row.contextProjectId,
+    authoringAuthority: row.authoringAuthority,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -181,19 +184,23 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       managedBy,
       contextGroupId,
       contextProjectId,
+      authoringAuthority,
     }) {
+      if (!authoringAuthority) {
+        throw Object.assign(new Error('Workflow authoring permissions are missing. Review the workflow from a current workspace turn.'), { reason:'workflow_authority_unavailable' })
+      }
       const result = await queryWithRLS<WorkflowRow>(
         userId,
         `INSERT INTO workflows (
            workspace_id, created_by, name, description, definition, trigger,
            webhook_slug, webhook_secret,
            model_alias, max_turns, research_mode, managed_by,
-           context_group_id, context_project_id
+           context_group_id, context_project_id, authoring_authority
          )
          VALUES (
            $1, $2, $3, $4, $5, COALESCE($6::jsonb, '{"kind":"manual"}'::jsonb),
            $7, $8,
-           COALESCE($9, 'pro'), $10, COALESCE($11, false), $12, $13, $14
+           COALESCE($9, 'pro'), $10, COALESCE($11, false), $12, $13, $14, $15::jsonb
          )
          RETURNING ${WORKFLOW_SELECT}`,
         [
@@ -211,6 +218,7 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
           managedBy ?? null,
           contextGroupId ?? null,
           contextProjectId ?? null,
+          JSON.stringify(authoringAuthority),
         ],
       )
       const record = rowToWorkflow(result.rows[0])
@@ -261,6 +269,7 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       if (fields.pinned !== undefined) { sets.push(`pinned = $${idx}`); values.push(fields.pinned); idx++ }
       if (fields.contextGroupId !== undefined) { sets.push(`context_group_id = $${idx}`); values.push(fields.contextGroupId); idx++ }
       if (fields.contextProjectId !== undefined) { sets.push(`context_project_id = $${idx}`); values.push(fields.contextProjectId); idx++ }
+      if (fields.authoringAuthority !== undefined) { sets.push(`authoring_authority = $${idx}::jsonb`); values.push(JSON.stringify(fields.authoringAuthority)); idx++ }
       if (fields.lifecycleState !== undefined) {
         // The user-facing restore path (mig 308). Stamps the transition and
         // clears the sweep's reason so the row reads clean again.

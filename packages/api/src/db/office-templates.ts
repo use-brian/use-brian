@@ -99,7 +99,7 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows.length === 1
     },
 
-    async addVersion(params: { userId: string; templateId: string; workspaceId: string; bundleFileId: string; bundleHash: string; capabilityVersion: number; locales: string[]; tags: string[]; whenToUse: string[]; whenNotToUse: string[]; exampleRequests: string[]; fieldSchema: unknown; admissionReceipt: unknown; provenance: unknown; status: 'draft' | 'admitted' }): Promise<{ id: string; version: number }> {
+    async addVersion(params: { userId: string; templateId: string; workspaceId: string; bundleFileId: string; bundleHash: string; capabilityVersion: number; locales: string[]; tags: string[]; whenToUse: string[]; whenNotToUse: string[]; exampleRequests: string[]; fieldSchema: unknown; admissionReceipt: unknown; provenance: unknown; resourceIds: string[]; status: 'draft' | 'admitted' }): Promise<{ id: string; version: number }> {
       const result = await db<{ id: string; version: number }>(params.userId, `
         WITH next AS (
           SELECT COALESCE(max(version), 0) + 1 AS version
@@ -116,6 +116,10 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
                  CASE WHEN $14 = 'admitted' THEN now() END, $15
             FROM next JOIN office_templates t ON t.id = $1
           RETURNING id, version
+        ), linked_resources AS (
+          INSERT INTO office_template_resource_refs(template_version_id,resource_id,workspace_id,usage)
+          SELECT i.id,r.id,$2,'bundle'
+            FROM inserted i CROSS JOIN (SELECT DISTINCT unnest($16::uuid[]) AS id) r
         ), promoted AS (
           UPDATE office_templates t
              SET current_version_id = CASE WHEN $14 = 'admitted' THEN i.id ELSE t.current_version_id END,
@@ -124,25 +128,31 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
             FROM inserted i WHERE t.id = $1
         )
         SELECT id, version FROM inserted
-      `, [params.templateId, params.workspaceId, params.bundleFileId, params.bundleHash, params.capabilityVersion, params.locales, params.tags, JSON.stringify(params.whenToUse), JSON.stringify(params.whenNotToUse), JSON.stringify(params.exampleRequests), JSON.stringify(params.fieldSchema), JSON.stringify(params.admissionReceipt), JSON.stringify(params.provenance), params.status, params.userId])
+      `, [params.templateId, params.workspaceId, params.bundleFileId, params.bundleHash, params.capabilityVersion, params.locales, params.tags, JSON.stringify(params.whenToUse), JSON.stringify(params.whenNotToUse), JSON.stringify(params.exampleRequests), JSON.stringify(params.fieldSchema), JSON.stringify(params.admissionReceipt), JSON.stringify(params.provenance), params.status, params.userId, params.resourceIds])
       const row = result.rows[0]
       if (!row) throw new Error('Office template version insert returned no row')
       return row
     },
 
     async addResource(params: { userId: string; workspaceId: string; kind: 'font' | 'theme' | 'field_schema' | 'brand_media' | 'reusable_section' | 'reusable_slide'; name: string; fileId: string | null; hash: string; mime: string; licence: unknown; provenance?: unknown; embeddingRights: 'allowed' | 'subset_only' | 'prohibited' | 'unknown'; sensitivity: 'public' | 'internal' | 'confidential' }): Promise<{ id: string; sensitivity: 'public' | 'internal' | 'confidential' }> {
+      const conflict = params.fileId
+        ? `ON CONFLICT (workspace_id, kind, content_hash, file_id) WHERE file_id IS NOT NULL DO UPDATE SET
+             updated_at = now()
+           WHERE office_resources.mime = EXCLUDED.mime
+             AND office_resources.sensitivity = EXCLUDED.sensitivity`
+        : `ON CONFLICT (workspace_id, kind, content_hash) WHERE file_id IS NULL DO UPDATE SET
+             updated_at = now(),
+             sensitivity = CASE
+               WHEN office_resources.sensitivity = 'confidential' OR EXCLUDED.sensitivity = 'confidential' THEN 'confidential'
+               WHEN office_resources.sensitivity = 'internal' OR EXCLUDED.sensitivity = 'internal' THEN 'internal'
+               ELSE 'public'
+             END`
       const result = await db<{ id: string; sensitivity: 'public' | 'internal' | 'confidential' }>(params.userId, `
         INSERT INTO office_resources
           (workspace_id, kind, name, file_id, content_hash, mime, licence,
            provenance, embedding_rights, sensitivity, created_by)
         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11)
-        ON CONFLICT (workspace_id, kind, content_hash) DO UPDATE SET
-          updated_at = now(),
-          sensitivity = CASE
-            WHEN office_resources.sensitivity = 'confidential' OR EXCLUDED.sensitivity = 'confidential' THEN 'confidential'
-            WHEN office_resources.sensitivity = 'internal' OR EXCLUDED.sensitivity = 'internal' THEN 'internal'
-            ELSE 'public'
-          END
+        ${conflict}
         RETURNING id, sensitivity
       `, [params.workspaceId, params.kind, params.name, params.fileId, params.hash, params.mime, JSON.stringify(params.licence), JSON.stringify(params.provenance ?? {}), params.embeddingRights, params.sensitivity, params.userId])
       if (!result.rows[0]) throw new Error('Office resource insert returned no row')

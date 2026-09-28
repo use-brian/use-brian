@@ -135,7 +135,11 @@ export interface EntityDedupeDeps {
    */
   clusterByLlm?: boolean
   /** LLM dependencies for the alias-clustering pass. */
-  llmClusterer?: { provider: LLMProvider; model: string }
+  llmClusterer?: {
+    provider: LLMProvider
+    model: string
+    decisionRuntime?: import('../decisions/index.js').DecisionExecutionPort
+  }
 }
 
 export interface EntityDedupeResult {
@@ -336,6 +340,9 @@ async function runLlmAliasPass(
       entities,
       provider: deps.llmClusterer.provider,
       model: deps.llmClusterer.model,
+      decisionRuntime: deps.llmClusterer.decisionRuntime,
+      workspaceId: deps.workspaceId,
+      runId: `alias-clustering-${deps.workspaceId}-${Date.now()}`,
     })
   } catch (err) {
     console.warn(

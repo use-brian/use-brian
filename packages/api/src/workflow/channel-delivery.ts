@@ -46,6 +46,10 @@ import { query } from './../db/client.js'
 import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 import { createFeishuApi } from '../feishu/client.js'
 import type { FeishuCredentials } from '../db/channel-integrations.js'
+import {
+  createDeliveryAudienceAuthorizer,
+  type AuthorizeDeliveryAudience,
+} from '../context-scope/delivery-authority.js'
 
 export type WorkflowChannelDeliveryOptions = {
   questionStore?: ChannelQuestionStore
@@ -64,6 +68,8 @@ export type WorkflowChannelDeliveryOptions = {
    * (docs/architecture/channels/custom-channel.md).
    */
   customChannelStore?: Pick<CustomChannelStore, 'enqueue'>
+  /** Injectable final-sink policy; production defaults to live authority. */
+  authorizeDeliveryAudience?: AuthorizeDeliveryAudience
 }
 
 /**
@@ -101,6 +107,7 @@ export function createWorkflowChannelDelivery(
     channelId,
     channelIntegrationId,
     text,
+    scopeEvidence,
     question,
     questionResponse,
     threadRef,
@@ -115,6 +122,9 @@ export function createWorkflowChannelDelivery(
     // Keep every option in the portable fallback, including on non-interactive channels.
     const deliverable = question ? formatAssistantQuestion(question) : sanitizeDeliveryText(text)
     if (!deliverable) return { status: 'skipped', channelType, reason: 'empty_text' }
+    const messageDerivation = scopeEvidence?.sources?.length
+      ? { producer: 'delivery:workflow', sources: scopeEvidence.sources }
+      : undefined
 
     // Web is not a delivery target — drop it (see the file header). The web UI
     // is a pull surface; persisting here would re-introduce the scheduled-job
@@ -123,6 +133,42 @@ export function createWorkflowChannelDelivery(
     // typed `web_not_a_target` skip so the run-detail page shows the no-op
     // (and the authoring guard steers new workflows away from `web`).
     if (channelType === 'web') return { status: 'skipped', channelType, reason: 'web_not_a_target' }
+
+    // Resolve placeholder routing before the authority check: authorization
+    // is always against the exact conversation that will receive the text.
+    let targetChannelId = channelId
+    if (channelType === 'whatsapp' && !replyToTrigger && targetChannelId === 'notifications') {
+      const waSession = await query<{ channel_id: string }>(
+        `SELECT channel_id FROM sessions
+         WHERE assistant_id = $1 AND user_id = $2 AND channel_type = 'whatsapp'
+            AND channel_id LIKE '%@%'
+         ORDER BY last_active_at DESC LIMIT 1`,
+        [assistantId, userId],
+      )
+      if (!waSession.rows[0]) return { status: 'skipped', channelType, reason: 'no_recipient' }
+      targetChannelId = waSession.rows[0].channel_id
+    }
+
+    // Every unattended producer supplies a trusted snapshot, including the
+    // explicit empty/public snapshot. Undefined remains a compatibility path
+    // for interactive callers that R3d will bind to their live turn.
+    if (scopeEvidence !== undefined) {
+      const authorizeAudience = options.authorizeDeliveryAudience
+        ?? createDeliveryAudienceAuthorizer({ integrationStore: options.integrationStore })
+      const audience = await authorizeAudience({
+        workspaceId,
+        assistantId,
+        userId,
+        channelType,
+        channelId: targetChannelId,
+        channelIntegrationId,
+        recipientType: replyToTrigger?.recipientType,
+        scopeEvidence,
+      })
+      if (!audience.allowed) {
+        return { status: 'skipped', channelType, reason: 'delivery_audience_unverified' }
+      }
+    }
 
     if (replyToTrigger) {
       if (channelType !== 'whatsapp' || !channelIntegrationId) {
@@ -170,12 +216,13 @@ export function createWorkflowChannelDelivery(
         assistantId,
         userId,
         channelType,
-        channelId,
+        channelId: targetChannelId,
       })
       await addSessionMessage({
         sessionId: session.id,
         role: 'assistant',
         content: [{ type: 'text', text: deliverable }],
+        derivation: messageDerivation,
       })
       const messageId = await createWhatsAppCloudAdapter({
         accessToken: credentials.access_token,
@@ -184,11 +231,11 @@ export function createWorkflowChannelDelivery(
           ? credentials.graph_api_version
           : undefined,
         recipientType: replyToTrigger.recipientType,
-      }).sendMessage(channelId, { text: deliverable, format: 'markdown' })
+      }).sendMessage(targetChannelId, { text: deliverable, format: 'markdown' })
       return {
         status: 'delivered',
         channelType,
-        channelId,
+        channelId: targetChannelId,
         messageId: messageId || undefined,
       }
     }
@@ -199,12 +246,13 @@ export function createWorkflowChannelDelivery(
       assistantId,
       userId,
       channelType,
-      channelId,
+      channelId: targetChannelId,
     })
     await addSessionMessage({
       sessionId: session.id,
       role: 'assistant',
       content: [{ type: 'text', text: deliverable }],
+      derivation: messageDerivation,
     })
 
     if (channelType === 'telegram') {
@@ -369,29 +417,15 @@ export function createWorkflowChannelDelivery(
       if (!options.waConnectorUrl || !options.waConnectorSecret) {
         return { status: 'skipped', channelType, reason: 'no_integration' }
       }
-      // channelId may be a placeholder ('notifications') when the workflow
-      // wasn't authored from a WhatsApp chat — resolve a real JID.
-      let waChannelId = channelId
-      if (waChannelId === 'notifications') {
-        const waSession = await query<{ channel_id: string }>(
-          `SELECT channel_id FROM sessions
-           WHERE assistant_id = $1 AND user_id = $2 AND channel_type = 'whatsapp'
-              AND channel_id LIKE '%@%'
-           ORDER BY last_active_at DESC LIMIT 1`,
-          [assistantId, userId],
-        )
-        if (!waSession.rows[0]) return { status: 'skipped', channelType, reason: 'no_recipient' }
-        waChannelId = waSession.rows[0].channel_id
-      }
-      if (!waChannelId.includes('@')) {
+      if (!targetChannelId.includes('@')) {
         return { status: 'skipped', channelType, reason: 'no_integration' }
       }
       await createWhatsAppAdapter({
         connectorUrl: options.waConnectorUrl,
         connectorSecret: options.waConnectorSecret,
         connectionId: 'system',
-      }).sendMessage(waChannelId, { text: deliverable, format: 'plain' })
-      return { status: 'delivered', channelType, channelId: waChannelId }
+      }).sendMessage(targetChannelId, { text: deliverable, format: 'plain' })
+      return { status: 'delivered', channelType, channelId: targetChannelId }
     }
 
     return { status: 'skipped', channelType, reason: 'no_integration' }

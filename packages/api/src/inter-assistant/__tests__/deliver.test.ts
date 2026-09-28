@@ -31,6 +31,27 @@ describe('[COMP:api/inter-assistant-deliver] deliverToChannel', () => {
     mockAddSessionMessage.mockResolvedValue(undefined as never)
   })
 
+  it('refuses an unverified scoped destination before either DB-first write', async () => {
+    const result = await deliverToChannel({
+      workspaceId: 'ws-1',
+      assistantId: 'a_1',
+      userId: 'u_1',
+      text: 'Restricted relay',
+      sessionId: 'ses_existing_1',
+      channelType: 'web',
+      scopeEvidence: { sensitivity: 'confidential', compartments: ['finance'] },
+      authorizeDeliveryAudience: vi.fn(async () => ({
+        allowed: false as const,
+        reason: 'delivery_audience_unverified' as const,
+      })),
+    })
+
+    expect(result).toMatchObject({ delivered: false, channelType: 'web' })
+    expect(result.reason).toMatch(/audience could not be verified/)
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    expect(mockAddSessionMessage).not.toHaveBeenCalled()
+  })
+
   it('web delivery: creates notification session and adds message', async () => {
     mockFindOrCreateSession.mockResolvedValue({ id: 'ses_notif_1' } as never)
 

@@ -36,7 +36,7 @@ it('[COMP:api/structured-documents] carries PDF evidence through a leased worker
   const records = recordsFixture()
   const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 42])
   const file = (id: string, bytes: Uint8Array, mime: string): WorkspaceFile => ({
-    id, workspaceId: uid(2), path: `/fictional/${id}`, parentPath: '/fictional', name: 'fictional', title: null, summary: null,
+    scopeVersion: `scope-${id}`, id, workspaceId: uid(2), path: `/fictional/${id}`, parentPath: '/fictional', name: 'fictional', title: null, summary: null,
     mime, sizeBytes: bytes.length, tags: [], relatedIds: [], storageUri: `memory:${id}`, sensitivity: 'internal', compartments: ['team-a'], projectIds: ['project-a'], metadata: {},
     userId: null, assistantId: null, source: 'user', sourceEpisodeId: null, verifiedByUserId: null, verifiedAt: null,
     validFrom: date(), validTo: null, supersededBy: null, retractedAt: null, retractedReason: null, retractedBy: null,

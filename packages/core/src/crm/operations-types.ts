@@ -97,6 +97,7 @@ export type CrmOperationsActor = z.infer<typeof CrmOperationsActorSchema>
 /** Trusted native adapter ceiling, never command input. */
 export const CrmNativeDeliveryAuthoritySchema = z.object({
   assistantId: CrmOperationsUuidSchema,
+  mutationCompartments: z.array(z.string()).max(1000).nullable().default([]),
   compartments: z.array(z.string()).max(1000).nullable(),
   projectIds: z.array(CrmOperationsUuidSchema).max(1000).nullable(),
 }).strict()
@@ -124,8 +125,17 @@ export const CrmIdentityPolicySchema = z.enum([
   'external_subject',
   'trusted_verified_email',
   'new_or_review',
+  'existing_or_new',
 ])
 export type CrmIdentityPolicy = z.infer<typeof CrmIdentityPolicySchema>
+
+/** Policies that accept a claimed, unverified email: no verification key or
+ *  proof, no owner acknowledgement. `new_or_review` always creates a contact;
+ *  `existing_or_new` attaches to the single live match and only fills its
+ *  empty fields, so a claim can never overwrite someone else's record. */
+export function isUnverifiedIdentityPolicy(policy: CrmIdentityPolicy): boolean {
+  return policy === 'new_or_review' || policy === 'existing_or_new'
+}
 
 export const CrmIntakeVerificationConfigSchema = z.object({
   keyId: CrmOperationsStableKeySchema,

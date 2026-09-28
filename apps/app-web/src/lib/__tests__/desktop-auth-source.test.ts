@@ -35,7 +35,7 @@ function setBridge(bridge: unknown) {
   (globalThis as { window?: unknown }).window = { sidanclawDesktop: bridge };
 }
 
-/** Exercise the shipped preload cache with only Electron's IPC boundary mocked. */
+/** Exercise the shipped preload cache with mocked Electron IPC and DOM lifecycle. */
 function loadPreload(
   tokens: {
     accessToken: string;
@@ -64,6 +64,10 @@ function loadPreload(
         webFrame: { getZoomFactor: () => 1 },
       }),
       process: { platform: "darwin", argv: bundled ? ["--usebrian-bundled"] : [] },
+      // The preload also registers dock-layout listeners before DOM creation.
+      // Dock geometry is covered by app-desktop's browser-dock-preload suite.
+      document: { documentElement: null, addEventListener: vi.fn() },
+      window: { addEventListener: vi.fn() },
       queueMicrotask,
     },
   );
@@ -230,7 +234,7 @@ describe("[COMP:app-web/desktop-auth-source] desktopAuthSource", () => {
       json: async () => ({ accessToken: "newA", refreshToken: "newR", user: { id: "u1" } }),
     }) as unknown as typeof fetch;
 
-    expect(await desktopAuthSource.refresh()).toEqual({ kind: "ok", token: "newA" });
+    expect(await desktopAuthSource.refresh()).toEqual({ kind: "ok", token: "newA", user: { id: "u1" } });
     expect(setTokens).toHaveBeenCalledWith({
       accessToken: "newA",
       refreshToken: "newR",

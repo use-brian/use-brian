@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "./button";
 
 export type ConfirmOptions = {
+  signal?: AbortSignal;
   title?: string;
   description: string;
   confirmLabel?: string;
@@ -34,23 +35,43 @@ export type ConfirmOptions = {
   content?: React.ReactNode;
 };
 
-type Pending = ConfirmOptions & { resolve: (value: boolean) => void };
+type Pending = ConfirmOptions & { cancelled?: boolean; resolve: (value: boolean) => void };
 
 const queue: Pending[] = [];
 let notify: (() => void) | null = null;
 
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
+  if (opts.signal?.aborted) return Promise.resolve(false);
   return new Promise<boolean>((resolve) => {
-    queue.push({ ...opts, resolve });
+    let settled = false;
+    const pending: Pending = { ...opts, resolve(value) {
+      if (settled) return;
+      settled = true;
+      opts.signal?.removeEventListener("abort", abort);
+      resolve(value);
+    } };
+    const abort = () => {
+      pending.cancelled = true;
+      const index = queue.indexOf(pending);
+      if (index >= 0) queue.splice(index, 1);
+      pending.resolve(false);
+      notify?.();
+    };
+    queue.push(pending);
+    opts.signal?.addEventListener("abort", abort, { once: true });
     notify?.();
   });
 }
 
 export function ConfirmDialogProvider() {
   const [active, setActive] = React.useState<Pending | null>(null);
+  const activeRef = React.useRef<Pending | null>(null);
 
   const drain = React.useCallback(() => {
-    setActive((current) => current ?? queue.shift() ?? null);
+    if (activeRef.current && !activeRef.current.cancelled) return;
+    const next = queue.shift() ?? null;
+    activeRef.current = next;
+    setActive(next);
   }, []);
 
   React.useEffect(() => {
@@ -62,8 +83,10 @@ export function ConfirmDialogProvider() {
   }, [drain]);
 
   function resolveWith(answer: boolean) {
-    if (!active) return;
-    active.resolve(answer);
+    const current = activeRef.current;
+    if (!current) return;
+    current.resolve(answer);
+    activeRef.current = null;
     setActive(null);
     queueMicrotask(drain);
   }
@@ -84,7 +107,7 @@ export function ConfirmDialogProvider() {
         />
         <AlertDialog.Popup
           className={cn(
-            "fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2",
+            "fixed left-1/2 top-1/2 z-50 w-[calc(var(--native-app-width,100vw)-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2",
             "rounded-2xl border border-border bg-background p-6 shadow-xl ring-1 ring-foreground/5",
             "transition-all duration-150",
             "data-[starting-style]:opacity-0 data-[starting-style]:scale-95",
@@ -109,6 +132,7 @@ export function ConfirmDialogProvider() {
             <Button
               variant="outline"
               size="sm"
+              className="min-h-11"
               onClick={() => resolveWith(false)}
             >
               {active?.cancelLabel ?? "Cancel"}
@@ -116,6 +140,7 @@ export function ConfirmDialogProvider() {
             <Button
               variant={active?.variant === "destructive" ? "destructive" : "default"}
               size="sm"
+              className="min-h-11"
               onClick={() => resolveWith(true)}
             >
               {active?.confirmLabel ?? "Confirm"}

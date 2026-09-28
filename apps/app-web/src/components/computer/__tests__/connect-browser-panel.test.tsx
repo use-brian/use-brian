@@ -1,12 +1,13 @@
+// @vitest-environment jsdom
 /**
  * [COMP:app-web/connect-browser] "My Browser" connect surface — static render
- * contract (node-only vitest: `renderToString` + module mocks, the
+ * contract (SSR: `renderToString` + module mocks, the
  * domains-section test shape). Effects never run under SSR, so status stays
  * null and the panel renders its connect flow (install + generate). The
  * connected/gated/configured round-trips are web-QA.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
 
 vi.mock("next/navigation", () => ({
@@ -74,5 +75,21 @@ describe("[COMP:app-web/connect-browser] My Browser connect surface", () => {
     const html = render();
     expect(html).toContain(c.step1Cta);
     expect(html).not.toContain(c.oneClickCta);
+  });
+});
+
+
+describe("[COMP:app-web/connect-browser] Desktop connect surface", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("shows automatic lifecycle state, never extension installation or manual tokens", () => {
+    vi.stubGlobal("window", { usebrianDesktop: { browserControl: vi.fn() } });
+    const html = render();
+    expect(html).toContain(c.desktop.title);
+    expect(html).toContain(c.desktop.automatic);
+    expect(html).not.toContain(c.desktop.connect);
+    expect(html).not.toContain(c.desktop.resume);
+    expect(html).not.toContain("chromewebstore.google.com");
+    expect(html).not.toContain(c.step1Cta);
+    expect(html).not.toContain(c.generate);
   });
 });

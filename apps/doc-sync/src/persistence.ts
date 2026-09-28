@@ -180,7 +180,7 @@ export async function notifyOfficeCheckpoint(params: {
   expectedVersion: number
   canonicalHash: string
   config: { apiBaseUrl: string; syncSecret: string; doFetch?: typeof fetch }
-}): Promise<'checkpointed' | 'conflict' | 'error'> {
+}): Promise<{ status: 'checkpointed'; version: number } | { status: 'conflict' | 'error' }> {
   const doFetch = params.config.doFetch ?? fetch
   try {
     const response = await doFetch(`${params.config.apiBaseUrl.replace(/\/+$/, '')}/internal/office-checkpoint`, {
@@ -188,9 +188,14 @@ export async function notifyOfficeCheckpoint(params: {
       headers: { 'content-type': 'application/json', 'x-doc-sync-secret': params.config.syncSecret },
       body: JSON.stringify({ artifactId: params.artifactId, expectedVersion: params.expectedVersion, canonicalHash: params.canonicalHash }),
     })
-    return response.status === 409 ? 'conflict' : response.ok ? 'checkpointed' : 'error'
+    if (response.status === 409) return { status: 'conflict' }
+    if (!response.ok) return { status: 'error' }
+    const body = await response.json().catch(() => null) as { version?: unknown } | null
+    return typeof body?.version === 'number'
+      ? { status: 'checkpointed', version: body.version }
+      : { status: 'error' }
   } catch {
-    return 'error'
+    return { status: 'error' }
   }
 }
 

@@ -33,6 +33,7 @@
 import { use, useEffect } from "react";
 import { BackButton } from "@/components/ui/back-button";
 import { useT } from "@/lib/i18n/client";
+import { openWorkspaceSettings } from "@/lib/workspace-settings-events";
 import { format as fmt } from "@/lib/i18n";
 import type { Dictionary } from "@/lib/i18n";
 import {
@@ -199,10 +200,17 @@ export default function WorkflowRunDetailPage({
         </dl>
         {run.error && (
           <div className="text-sm text-red-600 dark:text-red-400 bg-red-500/5 border border-red-500/30 rounded-md px-3 py-2">
-            {String(
-              (run.error as { message?: unknown }).message ??
-                JSON.stringify(run.error),
-            )}
+            {["authority_changed", "workflow_authority_unavailable", "caller_authority_changed", "caller_evidence_unavailable"].includes(
+              String((run.error as { reason?: unknown }).reason),
+            ) ? (
+              <>
+                <p>{t.workflowPage.builder.runDetail.sourceAccessChanged}</p>
+                <button type="button" className="mt-2 min-h-11 rounded-md border border-current px-3 text-sm font-medium"
+                  onClick={() => openWorkspaceSettings("ws-access")}>
+                  {t.workflowPage.builder.runDetail.reviewDepartmentAccess}
+                </button>
+              </>
+            ) : String((run.error as { message?: unknown }).message ?? JSON.stringify(run.error))}
           </div>
         )}
       </header>

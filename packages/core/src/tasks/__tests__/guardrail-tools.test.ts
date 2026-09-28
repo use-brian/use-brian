@@ -10,8 +10,9 @@ import { createTaskGuardrailTools, type TaskGuardrailStore } from '../guardrail-
 import { createTaskTools } from '../tools.js'
 import type { TaskAdmissionPort } from '../admission.js'
 import type { TaskRecord, TaskStore } from '../types.js'
+import type { ToolContext } from '../../tools/types.js'
 
-const ctx = {
+const ctx: ToolContext = {
   assistantId: 'assistant_1',
   userId: 'user_1',
   sessionId: 'session_1',
@@ -20,7 +21,7 @@ const ctx = {
   channelId: 'c_1',
   workspaceId: 'workspace_1',
   abortSignal: new AbortController().signal,
-} as never
+}
 
 const TASK_ID = '11111111-1111-1111-1111-111111111111'
 const RULE_ID = '22222222-2222-2222-2222-222222222222'
@@ -61,6 +62,7 @@ describe('[COMP:tasks/guardrail-tools] rejectTask', () => {
       userId: 'user_1',
       taskId: TASK_ID,
       reason: 'not a work item',
+      access: expect.objectContaining({userId:ctx.userId,workspaceId:ctx.workspaceId,assistantId:ctx.assistantId,assistantKind:ctx.assistantKind ?? 'standard'}),
     })
     expect(res.isError).toBeFalsy()
     expect(res.data).toContain('no longer be created')

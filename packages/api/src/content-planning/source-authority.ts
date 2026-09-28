@@ -1,10 +1,10 @@
 /** Exact selected-resource projection for a workspace draft. [COMP:feed/source-authority] */
 import { maxSensitivity, type Sensitivity } from '@use-brian/core'
 import { walkFeed } from '@use-brian/doc-model'
-import type { FeedComposition } from '@use-brian/shared'
+import { feedLinkedInFileIds, type FeedLinkedInContext, type FeedComposition } from '@use-brian/shared'
 import type { FeedActor, FeedReader, FeedScope } from '../db/feed-collaboration-store.js'
 
-export function feedSelectedFiles(composition: FeedComposition): Map<string, string | null> {
+export function feedSelectedFiles(composition: FeedComposition, linkedin?: FeedLinkedInContext): Map<string, string | null> {
   const ids = new Map<string, string | null>()
   for (const { node } of walkFeed(composition)) {
     if (node.type === 'image') ids.set(node.attrs.fileId, node.attrs.mimeType)
@@ -13,6 +13,7 @@ export function feedSelectedFiles(composition: FeedComposition): Map<string, str
       for (const ref of node.attrs.references) if ('fileId' in ref && !ids.has(ref.fileId)) ids.set(ref.fileId, null)
     }
   }
+  for (const id of feedLinkedInFileIds(linkedin)) if (!ids.has(id)) ids.set(id, null)
   return ids
 }
 export type FeedSelectedSource = { id: string; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]; name?: string; mime?: string; summary?: string; detail?: string | null; metadata?: Record<string, unknown> }

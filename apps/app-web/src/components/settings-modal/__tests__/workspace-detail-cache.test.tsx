@@ -175,4 +175,11 @@ describe("[COMP:app-web/workspace-sections] detail row from the cache", () => {
     // One attempt for the mark, not a loop against the failing endpoint.
     expect(detailFetches()).toBe(1);
   });
+  it.each([401,403,404])('evicts the roster after an authorization/not-found response (%s)',async status=>{
+    await loadSurfaceCache(workspaceDetailCacheKey('w1'),async()=>detail('Former visible member'));
+    routeFetch(async()=>({ok:false,status,json:async()=>({})}));await mount();
+    await act(async()=>{applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,null,'w1');await settle();});
+    expect(container!.textContent).not.toContain('Former visible member');
+    expect(detailFetches()).toBe(1);
+  });
 });

@@ -1,17 +1,18 @@
-import { unionScopeRequirements } from '@use-brian/core'
-import type { AccessContext, EntityLinksStore, Sensitivity, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor } from '@use-brian/core'
-import { buildAccessPredicate } from './access-predicate.js'
+import { bindScopeSource, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import type { AccessContext, EntityLinksStore, Sensitivity, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor, TaskStore } from '@use-brian/core'
+import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 import { emitDependsOnEdges, emitMentionedEdges } from './edge-hooks.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
+import { currentAgentAccess } from './agent-access-context.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 
 const FULL_SELECT = `
   id, workspace_id as "workspaceId", title, status,
   assignee_id as "assigneeId", due, tags,
   parent_id as "parentId", external_ref as "externalRef", attributes,
-  sensitivity, compartments, project_ids as "projectIds",
+  sensitivity, compartments, project_ids as "projectIds", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion",
   created_at as "createdAt", updated_at as "updatedAt"
 `
 
@@ -19,7 +20,7 @@ const COMPACT_SELECT = `
   id, workspace_id as "workspaceId", title, status,
   assignee_id as "assigneeId", due, tags,
   parent_id as "parentId", attributes, sensitivity, compartments,
-  project_ids as "projectIds", updated_at as "updatedAt"
+  project_ids as "projectIds", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion", updated_at as "updatedAt"
 `
 
 type TaskRow = {
@@ -36,6 +37,9 @@ type TaskRow = {
   sensitivity: Sensitivity
   compartments: string[]
   projectIds: string[]
+  userId:string|null
+  assistantId:string|null
+  scopeVersion:string
   createdAt: Date
   updatedAt: Date
 }
@@ -53,11 +57,36 @@ type CompactRow = {
   sensitivity: Sensitivity
   compartments: string[]
   projectIds: string[]
+  userId:string|null
+  assistantId:string|null
+  scopeVersion:string
   updatedAt: Date
 }
 
+function bindTaskSource<T extends object>(value:T,row:Pick<TaskRow,'id'|'workspaceId'|'userId'|'assistantId'|'scopeVersion'|'sensitivity'|'compartments'|'projectIds'>):T {
+  return bindScopeSource(value,{resourceKind:'task',resourceId:row.id,workspaceId:row.workspaceId,
+    userId:row.userId,assistantId:row.assistantId,version:row.scopeVersion,
+    sensitivity:row.sensitivity,compartments:row.compartments,projectIds:row.projectIds})
+}
+
+function taskAccess(userId:string,workspaceId:string,explicit?:AccessContext):AccessContext {
+  const agent=currentAgentAccess()
+  if(agent&&(!agent.userId||!agent.workspaceId||agent.userId!==userId||agent.workspaceId!==workspaceId)
+    ||explicit&&(explicit.userId!==userId||explicit.workspaceId!==workspaceId))
+    throw Object.assign(new Error('The task operation requires the executing author.'),{code:'scope_operation_denied'})
+  return explicit??{userId,workspaceId,assistantId:'',assistantKind:'primary'}
+}
+
+function checkTaskCreate(userId:string,params:Parameters<typeof createTask>[1]):AccessContext {
+  const access=taskAccess(userId,params.workspaceId,params.access)
+  assertExecutionResourceScope({workspaceId:params.workspaceId,userId:params.visibility?.userId??null,
+    assistantId:params.visibility?.assistantId??null,sensitivity:params.sensitivity??'internal',
+    compartments:params.compartments??[],projectIds:params.projectIds??[]},'mutation',access)
+  return access
+}
+
 function toRecord(row: TaskRow): TaskRecord {
-  return {
+  return bindTaskSource({
     id: row.id,
     workspaceId: row.workspaceId,
     title: row.title,
@@ -73,11 +102,11 @@ function toRecord(row: TaskRow): TaskRecord {
     projectIds: row.projectIds ?? [],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-  }
+  },row)
 }
 
 function toListRow(row: CompactRow): TaskListRow {
-  return {
+  return bindTaskSource({
     id: row.id,
     workspaceId: row.workspaceId,
     title: row.title,
@@ -91,7 +120,7 @@ function toListRow(row: CompactRow): TaskListRow {
     compartments: row.compartments ?? [],
     projectIds: row.projectIds ?? [],
     updatedAt: row.updatedAt,
-  }
+  },row)
 }
 
 /**
@@ -114,9 +143,23 @@ const TASK_DEDUP_WINDOW_SECONDS = 120
  */
 const PLACEHOLDER_TASK_TITLE = 'Untitled task'
 
+async function checkTaskProject(userId: string, params: Parameters<typeof createTask>[1]): Promise<void> {
+  if ((params.projectIds?.length ?? 0) > 0) {
+    const validProject = await queryWithRLS<{ id: string }>(
+      userId,
+      `SELECT id FROM workspace_projects
+        WHERE workspace_id = $1 AND id = $2 AND status = 'active'`,
+      [params.workspaceId, params.projectIds![0]],
+    )
+    if (validProject.rows.length === 0 || params.projectIds!.length > 1) {
+      throw new Error('context_not_available: project')
+    }
+  }
+}
+
 /**
- * Return a live task in `workspaceId` that a create with these exact
- * (title, status, parentId) coordinates would duplicate if it landed within
+ * Return a live task in `workspaceId` that a create with this exact
+ * content, scope, author and provenance would duplicate if it landed within
  * `TASK_DEDUP_WINDOW_SECONDS`. Runs under the caller's RLS so only same-
  * workspace rows are visible. `valid_to IS NULL` (live version) +
  * `retracted_at IS NULL` exclude superseded / retracted rows. Placeholder
@@ -124,23 +167,38 @@ const PLACEHOLDER_TASK_TITLE = 'Untitled task'
  */
 export async function findRecentDuplicateTask(
   userId: string,
-  coords: { workspaceId: string; title: string; status: TaskRecordStatus; parentId: string | null },
+  coords: Parameters<typeof createTask>[1],
 ): Promise<TaskRecord | null> {
-  if (coords.title === PLACEHOLDER_TASK_TITLE) return null
-  const result = await queryWithRLS<TaskRow>(
-    userId,
+  const access=checkTaskCreate(userId,coords)
+  await checkTaskProject(userId,coords)
+  // Relationship writes are not represented by the row, so never swallow them.
+  if (coords.title === PLACEHOLDER_TASK_TITLE||coords.dependsOn?.length||coords.linkedEntityIds?.length) return null
+  const ap=buildAccessPredicate(access,{startIdx:20,operation:'mutation'})
+  const result = await queryWithRLS<TaskRow>(userId,
     `SELECT ${FULL_SELECT} FROM tasks
-      WHERE workspace_id = $1
-        AND title = $2
-        AND status = $3
-        AND parent_id IS NOT DISTINCT FROM $4
-        AND valid_to IS NULL
-        AND retracted_at IS NULL
+      WHERE workspace_id=$1 AND title=$2 AND status=$3 AND parent_id IS NOT DISTINCT FROM $4
+        AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
         AND created_at > now() - ($5 || ' seconds')::interval
-      ORDER BY created_at DESC
-      LIMIT 1`,
-    [coords.workspaceId, coords.title, coords.status, coords.parentId, String(TASK_DEDUP_WINDOW_SECONDS)],
-  )
+        AND sensitivity=$6 AND compartments @> $7::text[] AND compartments <@ $7::text[]
+        AND project_ids @> $8::uuid[] AND project_ids <@ $8::uuid[]
+        AND user_id IS NOT DISTINCT FROM $9::uuid AND assistant_id IS NOT DISTINCT FROM $10::uuid
+        AND assignee_id IS NOT DISTINCT FROM $11::uuid AND due IS NOT DISTINCT FROM $12::timestamptz
+        AND tags=$13::text[] AND attributes=$14::jsonb AND external_ref=$15::jsonb
+        AND created_by_user_id=$16 AND created_by_assistant_id IS NOT DISTINCT FROM $17::uuid
+        AND source=$18 AND jsonb_build_array(source_session_id,source_episode_id,source_start_ms)=$19::jsonb
+        AND ${ap.sql}
+        AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
+        AND EXISTS(SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=tasks.workspace_id
+          AND wm.user_id=$16 AND sensitivity_rank(tasks.sensitivity)<=sensitivity_rank(wm.clearance))
+        AND (effective_member_team_compartments($16,workspace_id) IS NULL
+          OR compartments <@ effective_member_team_compartments($16,workspace_id))
+      ORDER BY created_at DESC LIMIT 1`,
+    [coords.workspaceId,coords.title,coords.status??'todo',coords.parentId??null,String(TASK_DEDUP_WINDOW_SECONDS),
+      coords.sensitivity??'internal',coords.compartments??[],coords.projectIds??[],
+      coords.visibility?.userId??null,coords.visibility?.assistantId??null,coords.assigneeId??null,coords.due??null,
+      coords.tags??[],JSON.stringify(coords.attributes??{}),JSON.stringify(coords.externalRef??{}),
+      userId,coords.createdByAssistantId??null,coords.source??'user',
+      JSON.stringify([coords.sourceSessionId??null,coords.sourceEpisodeId??null,coords.sourceStartMs??null]),...ap.params])
   return result.rows[0] ? toRecord(result.rows[0]) : null
 }
 
@@ -167,6 +225,9 @@ export async function createTask(
     /** User-configurable per-task JSONB — sprint estimation / ordering /
      *  velocity keys per `decisions-log.md` 2026-05-14. Defaults to `{}`. */
     attributes?: Record<string, unknown>
+    sensitivity?: Sensitivity
+    visibility?: {userId:string|null;assistantId:string|null}
+    access?: AccessContext
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
     /** Stable Project association; at most one by schema. */
@@ -220,21 +281,15 @@ export async function createTask(
   // Other universal columns (sensitivity, source, valid_from) take
   // their schema defaults from migration 128.
   assertAuthorshipPresent('createTask', userId)
-  if ((params.projectIds?.length ?? 0) > 0) {
-    const validProject = await queryWithRLS<{ id: string }>(
-      userId,
-      `SELECT id FROM workspace_projects
-        WHERE workspace_id = $1 AND id = $2 AND status = 'active'`,
-      [params.workspaceId, params.projectIds![0]],
-    )
-    if (validProject.rows.length === 0 || params.projectIds!.length > 1) {
-      throw new Error('context_not_available: project')
-    }
-  }
+  checkTaskCreate(userId,params)
+  await checkTaskProject(userId,params)
   const result = await queryWithRLS<TaskRow>(
     userId,
-    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, project_ids, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, project_ids, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms, sensitivity, user_id, assistant_id)
+     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+     WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$10)
+       AND (effective_member_team_compartments($10,$1) IS NULL
+         OR $11::text[] <@ effective_member_team_compartments($10,$1))
      RETURNING ${FULL_SELECT}`,
     [
       params.workspaceId,
@@ -254,8 +309,10 @@ export async function createTask(
       params.sourceEpisodeId ?? null,
       params.createdByAssistantId ?? null,
       params.sourceStartMs ?? null,
+      params.sensitivity??'internal',params.visibility?.userId??null,params.visibility?.assistantId??null,
     ],
   )
+  if (!result.rows[0]) throw Object.assign(new Error('The task operation is outside the current access scope.'), { code: 'scope_operation_denied' })
   const task = toRecord(result.rows[0])
 
   // Workflow task-event emit — fire-and-forget after the committed insert
@@ -317,7 +374,7 @@ export async function getTaskById(ctx: AccessContext, id: string): Promise<TaskR
     ctx.userId,
     `SELECT ${FULL_SELECT} FROM tasks
      WHERE ${ap.sql}
-       AND id = $${ap.nextIdx} AND valid_to IS NULL`,
+       AND id = $${ap.nextIdx} AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held`,
     [...ap.params, id],
   )
   if (result.rows.length === 0) return null
@@ -328,7 +385,7 @@ export async function listTasks(ctx: AccessContext, filters: TaskListFilters): P
   // `valid_to IS NULL` filter hides superseded versions. Index
   // `idx_tasks_valid` (migration 128) covers this predicate.
   const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const wheres: string[] = [ap.sql, 'valid_to IS NULL']
+  const wheres: string[] = [ap.sql, 'valid_to IS NULL', 'retracted_at IS NULL', 'NOT scope_held']
   const values: unknown[] = [...ap.params]
   let idx = ap.nextIdx
 
@@ -407,7 +464,7 @@ type OldTaskRow = {
   parent_id: string | null
   external_ref: Record<string, unknown>
   attributes: Record<string, unknown>
-  sensitivity: string
+  sensitivity: Sensitivity
   compartments: string[]
   project_ids: string[]
   user_id: string | null
@@ -473,7 +530,7 @@ function sameStringSet(a: string[], b: string[]): boolean {
  */
 const LIVE_TASK_ID_CTE = `WITH RECURSIVE chain AS (
   SELECT id, superseded_by, valid_to FROM tasks WHERE id = $1
-  UNION ALL
+  UNION
   SELECT t.id, t.superseded_by, t.valid_to
   FROM tasks t JOIN chain c ON t.id = c.superseded_by
 )`
@@ -494,7 +551,8 @@ export async function resolveTaskById(
     `${LIVE_TASK_ID_CTE}
      SELECT ${FULL_SELECT} FROM tasks
       WHERE ${ap.sql}
-        AND id = (SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1)`,
+        AND id = (SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1)
+        AND retracted_at IS NULL AND NOT scope_held`,
     [id, ...ap.params],
   )
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
@@ -529,40 +587,20 @@ export async function updateTask(
   id: string,
   fields: TaskUpdateFields,
   entityLinks?: EntityLinksStore,
-  opts?: {
-    /** Write-actor marker for the workflow task-event self-loop guard.
-     *  An opts arg, NOT a `fields` key, so it can never trip the
-     *  empty-patch no-op check or leak into the supersession write. */
-    writtenBy?: TaskWriteActor
-    scope?: { compartments: string[]; projectIds: string[] }
-  },
+  opts?: Parameters<TaskStore['update']>[3],
 ): Promise<TaskRecord | null> {
-  if (Object.keys(fields).length === 0) {
-    // No-op short-circuit — read the current row without per-viewer
-    // projection (this is the write path; RLS is the workspace gate).
-    // Forward-resolve a superseded input id to its live head so a stale id
-    // round-trips to the current row (see header).
-    const result = await queryWithRLS<TaskRow>(
-      userId,
-      `${LIVE_TASK_ID_CTE}
-       SELECT ${FULL_SELECT} FROM tasks
-       WHERE id = (SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1)`,
-      [id],
-    )
-    return result.rows.length === 0 ? null : toRecord(result.rows[0])
-  }
-
+  const readOnly=Object.keys(fields).length===0
   const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
+    await applyRLSGucs(client,userId)
     try {
       // Forward-resolve a superseded input id to its live head (see header)
       // so a caller holding a pre-supersession id patches the current row
       // instead of getting a spurious not-found. A genuinely unknown id (or a
       // chain with no live row) resolves to nothing → not-found, as before.
-      const liveRes = await client.query<{ id: string }>(
-        `${LIVE_TASK_ID_CTE} SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1`,
+      const liveRes = await client.query<{ id: string; workspaceId:string }>(
+        `${LIVE_TASK_ID_CTE} SELECT t.id,t.workspace_id AS "workspaceId" FROM tasks t WHERE t.id=(SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1)`,
         [id],
       )
       if (liveRes.rows.length === 0) {
@@ -570,14 +608,29 @@ export async function updateTask(
         return null
       }
       const liveId = liveRes.rows[0].id
+      const access=taskAccess(userId,liveRes.rows[0].workspaceId,opts?.access)
+      const ap=buildAccessPredicate(access,{startIdx:2,operation:readOnly?'read':'mutation'})
+      const memberScope=`context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
+        AND EXISTS(SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=tasks.workspace_id
+          AND wm.user_id=current_setting('app.current_user_id')::uuid
+          AND sensitivity_rank(tasks.sensitivity)<=sensitivity_rank(wm.clearance))
+        AND (effective_member_team_compartments(current_setting('app.current_user_id')::uuid,workspace_id) IS NULL
+          OR compartments <@ effective_member_team_compartments(current_setting('app.current_user_id')::uuid,workspace_id))`
+      if(readOnly){
+        const current=await client.query<TaskRow>(`SELECT ${FULL_SELECT} FROM tasks
+          WHERE id=$1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${ap.sql} AND ${memberScope}`,[liveId,...ap.params])
+        await client.query('COMMIT')
+        return current.rows[0]?toRecord(current.rows[0]):null
+      }
 
       const oldRes = await client.query<OldTaskRow>(
         `SELECT workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
                 sensitivity, compartments, project_ids,
                 user_id, assistant_id, source, source_episode_id,
                 source_session_id, created_by_assistant_id, source_start_ms
-         FROM tasks WHERE id = $1 AND valid_to IS NULL`,
-        [liveId],
+         FROM tasks WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+           AND ${ap.sql} AND ${memberScope} FOR UPDATE`,
+        [liveId,...ap.params],
       )
       if (oldRes.rows.length === 0) {
         await client.query('ROLLBACK')
@@ -595,6 +648,15 @@ export async function updateTask(
       const newAttributes = fields.attributes !== undefined ? fields.attributes : (old.attributes ?? {})
       const nextCompartments = unionScopeRequirements(old.compartments, opts?.scope?.compartments)
       const nextProjectIds = unionScopeRequirements(old.project_ids, opts?.scope?.projectIds)
+      const nextSensitivity=maxSensitivity(old.sensitivity,opts?.scope?.sensitivity??'public')
+      const mergeVisibility=(current:string|null,inherited:string|null|undefined)=>{
+        if(current&&inherited&&current!==inherited)throw Object.assign(new Error('Task visibility cannot combine these sources.'),{code:'scope_visibility_incompatible'})
+        return current??inherited??null
+      }
+      const nextUserId=mergeVisibility(old.user_id,opts?.scope?.visibility?.userId)
+      const nextAssistantId=mergeVisibility(old.assistant_id,opts?.scope?.visibility?.assistantId)
+      assertExecutionResourceScope({workspaceId:old.workspace_id,userId:nextUserId,assistantId:nextAssistantId,
+        sensitivity:nextSensitivity,compartments:nextCompartments,projectIds:nextProjectIds},'mutation',access)
 
       const insertRes = await client.query<TaskRow>(
         `INSERT INTO tasks (
@@ -604,11 +666,14 @@ export async function updateTask(
            source_session_id, created_by_assistant_id, source_start_ms,
            created_by_user_id, valid_from, valid_to, superseded_by
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
                  $10, $11::text[], $12::uuid[],
                  $13, $14, $15, $16,
                  $17, $18, $19,
-                 $20, now(), NULL, NULL)
+                 $20, now(), NULL, NULL
+         WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$20)
+           AND (effective_member_team_compartments($20,$1) IS NULL
+             OR $11::text[] <@ effective_member_team_compartments($20,$1))
          RETURNING ${FULL_SELECT}`,
         [
           old.workspace_id,
@@ -620,11 +685,11 @@ export async function updateTask(
           newParentId,
           JSON.stringify(newExternalRef),
           JSON.stringify(newAttributes),
-          old.sensitivity,
+          nextSensitivity,
           nextCompartments,
           nextProjectIds,
-          old.user_id,
-          old.assistant_id,
+          nextUserId,
+          nextAssistantId,
           old.source,
           old.source_episode_id,
           // Provenance anchors carry forward through supersession — the
@@ -646,6 +711,7 @@ export async function updateTask(
         ],
       )
       const newRow = insertRes.rows[0]
+      if (!newRow) throw Object.assign(new Error('The task operation is outside the current access scope.'), { code: 'scope_operation_denied' })
 
       await client.query(
         `UPDATE tasks SET valid_to = now(), superseded_by = $1
@@ -658,10 +724,12 @@ export async function updateTask(
       // each child here and sees the just-inserted new row (same
       // transaction, so visible to subsequent statements) and validates
       // against its workspace_id, which carried forward from `old`.
+      const childAccess=buildAccessPredicate(access,{startIdx:3,operation:'mutation'})
       await client.query(
         `UPDATE tasks SET parent_id = $1
-         WHERE parent_id = $2 AND valid_to IS NULL`,
-        [newRow.id, liveId],
+         WHERE parent_id = $2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+           AND ${childAccess.sql} AND ${memberScope}`,
+        [newRow.id, liveId,...childAccess.params],
       )
 
       // Repoint any goal hosted on this task to the new id (mirrors the
@@ -741,20 +809,6 @@ export async function updateTask(
 }
 
 /**
- * Walk the full bi-temporal version chain for a task, in `valid_from`
- * order. Returns every row in the chain (including superseded ones)
- * regardless of which id in the chain the caller knew about. Empty array
- * if the id is unknown or RLS-hidden.
- *
- * Implementation walks `superseded_by` both directions from the start id
- * — forward (older→newer) following the pointer, backward (newer→older)
- * matching on rows whose `superseded_by` equals the current id. `UNION`
- * deduplicates the meet point.
- *
- * DB-layer helper only — not exposed via `TaskStore`. WU-6.9 will wire a
- * unified `getRowHistory` surface across primitives.
- */
-/**
  * System-level lookup of the active task row by id (no RLS, no
  * `AccessContext`). Returns the post-supersession active row, or null
  * if no such id exists or the task has been fully retracted.
@@ -767,7 +821,7 @@ export async function updateTask(
  */
 export async function getTaskByIdSystem(id: string): Promise<TaskRecord | null> {
   const result = await query<TaskRow>(
-    `SELECT ${FULL_SELECT} FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+    `SELECT ${FULL_SELECT} FROM tasks WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held`,
     [id],
   )
   if (result.rows.length === 0) return null
@@ -791,42 +845,31 @@ export async function findTasksByExternalRefSystem(
        AND external_ref @> $2::jsonb
        AND valid_to IS NULL
        AND status <> 'archived'
+       AND retracted_at IS NULL AND NOT scope_held
      ORDER BY created_at DESC`,
     [workspaceId, JSON.stringify(match)],
   )
   return result.rows.map(toRecord)
 }
 
+/**
+ * Return authorized versions in the bidirectional task history, ordered by
+ * valid_from. Every row passes its own full scope predicate; a visible version
+ * does not authorize a more restricted successor. Held and retracted bodies
+ * remain excluded. UNION prevents repeated traversal of the same version.
+ */
 export async function getTaskHistory(ctx: AccessContext, id: string): Promise<TaskRecord[]> {
-  // D.7 invariant: every row in a supersession chain shares the same
-  // universal-column tuple (workspace_id, user_id, assistant_id,
-  // sensitivity). Apply the universal access predicate to the anchor
-  // only; the recursive step inherits visibility implicitly.
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const result = await queryWithRLS<TaskRow>(
-    ctx.userId,
-    `WITH RECURSIVE chain AS (
-       SELECT id, workspace_id, title, status, assignee_id, due, tags,
-              parent_id, external_ref, attributes, created_at, updated_at,
-              valid_from, valid_to, superseded_by
-       FROM tasks
-       WHERE ${ap.sql} AND id = $${ap.nextIdx}
-       UNION
-       SELECT t.id, t.workspace_id, t.title, t.status, t.assignee_id, t.due, t.tags,
-              t.parent_id, t.external_ref, t.attributes, t.created_at, t.updated_at,
-              t.valid_from, t.valid_to, t.superseded_by
-       FROM tasks t, chain c
-       WHERE t.id = c.superseded_by OR t.superseded_by = c.id
-     )
-     SELECT
-       id, workspace_id as "workspaceId", title, status,
-       assignee_id as "assigneeId", due, tags,
-       parent_id as "parentId", external_ref as "externalRef", attributes,
-       created_at as "createdAt", updated_at as "updatedAt"
-     FROM chain
-     ORDER BY valid_from ASC`,
-    [...ap.params, id],
-  )
+  // Classification can change between versions. Filter each returned row;
+  // authorization of one lineage anchor is never authority over the chain.
+  const ap=buildAccessPredicate(ctx,{startIdx:2})
+  const result=await queryWithRLS<TaskRow>(ctx.userId,
+    `WITH RECURSIVE chain(id,superseded_by) AS (
+      SELECT id,superseded_by FROM tasks WHERE id=$1
+      UNION
+      SELECT t.id,t.superseded_by FROM tasks t JOIN chain c ON t.id=c.superseded_by OR t.superseded_by=c.id
+    ) SELECT ${FULL_SELECT} FROM tasks
+      WHERE id IN(SELECT id FROM chain) AND ${ap.sql} AND NOT scope_held AND retracted_at IS NULL
+      ORDER BY valid_from ASC`,[id,...ap.params])
   return result.rows.map(toRecord)
 }
 
@@ -886,7 +929,7 @@ export async function listTasksBySourceEpisode(
             source_start_ms as "sourceStartMs",
             (verified_by_user_id IS NOT NULL) as "verified"
      FROM tasks
-     WHERE ${ap.sql} AND valid_to IS NULL AND source_episode_id = $${ap.nextIdx}
+     WHERE ${ap.sql} AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND source_episode_id = $${ap.nextIdx}
      ORDER BY source_start_ms ASC NULLS LAST, created_at ASC`,
     [...ap.params, episodeId],
   )

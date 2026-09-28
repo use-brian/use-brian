@@ -41,7 +41,9 @@ export async function prepareCrmPrivacyCopies(client: PoolClient, workspaceId: s
   await client.query(`WITH args AS(SELECT $1::uuid workspace_id,$2::uuid contact_id)
     INSERT INTO pg_temp.crm_privacy_copy_workflows SELECT t.id FROM workflow_runs t WHERE t.workspace_id=$1 AND (
       ($2::uuid IS NULL AND (t.crm_event_id IS NOT NULL OR (t.trigger_kind='event' AND t.input#>>'{trigger,sourceType}'='crm')))
-      OR ($2::uuid IS NOT NULL AND (${CRM_WORKFLOW_COPY_ROOT})))`,[workspaceId,contactId])
+      OR ($2::uuid IS NOT NULL AND (${CRM_WORKFLOW_COPY_ROOT}))
+      OR EXISTS(SELECT 1 FROM goal_crm_event_sources g JOIN pg_temp.crm_privacy_copy_events e ON e.id=g.event_id
+        WHERE g.workspace_id=$1 AND g.goal_id=t.source_goal_id))`,[workspaceId,contactId])
 
   await client.query(`WITH RECURSIVE copies(id) AS(
     SELECT id FROM pg_temp.crm_privacy_copy_workflows
@@ -130,4 +132,9 @@ export async function retireCrmNotificationCopies(client:PoolClient,workspaceId:
       UPDATE ${domain} t SET retired_from_status=status,status='retired',retired_at=clock_timestamp(),${assignments}
       WHERE t.workspace_id=$1 AND t.status<>'retired' AND (${entry.subjectWhere})`,[workspaceId,contactId])
   }
+  await client.query(`UPDATE goal_crm_event_sources s SET event_binding='{"erased":true}'
+    WHERE s.workspace_id=$1 AND s.event_binding<>'{"erased":true}'::jsonb
+      AND s.event_id IN(SELECT id FROM pg_temp.crm_privacy_copy_events)
+      AND EXISTS(SELECT 1 FROM crm_domain_event_outbox e WHERE e.id=s.event_id AND e.status='retired' AND e.scope_source IS NULL)`,[workspaceId])
+
 }

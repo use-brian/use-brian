@@ -1,6 +1,8 @@
 import { collectStream } from '../providers/accumulator.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import type { EntityCandidate, EntityMention } from './types.js'
+import type { DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
+import { isJsonValue } from '../decisions/validate.js'
 
 export type ResolveTier = 'exact' | 'canonical_id' | 'fuzzy' | 'llm'
 
@@ -28,6 +30,9 @@ export interface ResolveOptions {
   candidates: EntityCandidate[]
   fuzzyThreshold?: number
   llm?: { provider: LLMProvider; model: string }
+  decisionRuntime?: DecisionExecutionPort
+  workspaceId?: string
+  runId?: string
 }
 
 export function normalizeName(s: string): string {
@@ -181,6 +186,169 @@ async function disambiguateWithLLM(
   }
 }
 
+const ENTITY_OPERATION = {
+  id: 'entity.disambiguation',
+  version: '1',
+  stateVersion: '1',
+  questionVersion: '1',
+} as const
+
+function validateDisambiguationResult(
+  result: ResolveResult,
+  candidates: EntityCandidate[],
+): ResolveResult {
+  if (result.status === 'resolved' && !candidates.some((candidate) => candidate.id === result.entityId)) {
+    throw new Error('entity disambiguation returned an id outside the candidate set')
+  }
+  if (result.status === 'ambiguous') {
+    const expected = new Set(candidates.map((candidate) => candidate.id))
+    if (result.candidates.some((candidate) => !expected.has(candidate.id))) {
+      throw new Error('entity disambiguation returned an unknown candidate')
+    }
+  }
+  return result
+}
+
+function primaryDisambiguation(
+  response: DecisionResponse,
+  candidates: EntityCandidate[],
+  fallbackTier: ResolveTier,
+  policy: import('../decisions/index.js').JsonValue | undefined,
+) {
+  const answer = response.answers[0]
+  if (answer?.kind !== 'choice') {
+    return { kind: 'unavailable' as const, reason: 'invalid_response' as const }
+  }
+  const selectedProbability = answer.evidence.probabilities?.[answer.value]
+    ?? answer.evidence.confidence
+  const reviewBelow = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+    && typeof policy.reviewBelow === 'number'
+    ? policy.reviewBelow
+    : undefined
+  if (reviewBelow !== undefined && selectedProbability !== undefined && selectedProbability < reviewBelow) {
+    return { kind: 'follow_up' as const, reason: 'uncertain' as const }
+  }
+  const usage = response.usage
+    ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
+    : undefined
+  if (answer.value === 'ambiguous') {
+    return {
+      kind: 'complete' as const,
+      result: {
+        status: 'ambiguous' as const,
+        tier: fallbackTier,
+        candidates,
+        ...(usage ? { usage } : {}),
+        model: response.model.wireId,
+      },
+    }
+  }
+  const picked = candidates.find((candidate) => candidate.id === answer.value)
+  if (!picked) return { kind: 'unavailable' as const, reason: 'invalid_response' as const }
+  return {
+    kind: 'complete' as const,
+    result: {
+      status: 'resolved' as const,
+      tier: 'llm' as const,
+      entityId: picked.id,
+      score: selectedProbability ?? 0,
+      flagged: true,
+      ...(usage ? { usage } : {}),
+      model: response.model.wireId,
+    },
+  }
+}
+
+async function disambiguateCandidates(
+  opts: ResolveOptions,
+  candidates: EntityCandidate[],
+  fallbackTier: ResolveTier,
+): Promise<ResolveResult> {
+  if (!opts.decisionRuntime) {
+    return opts.llm
+      ? disambiguateWithLLM(opts.mention, candidates, opts.llm, fallbackTier)
+      : { status: 'ambiguous', tier: fallbackTier, candidates }
+  }
+
+  const decisionCandidates = candidates.map((candidate) => {
+    const attributes: Record<string, import('../decisions/index.js').JsonValue> = {}
+    for (const [key, value] of Object.entries(candidate.attributes ?? {})) {
+      if (isJsonValue(value)) attributes[key] = value
+    }
+    return {
+      id: candidate.id,
+      kind: candidate.kind,
+      display_name: candidate.display_name,
+      canonical_id: candidate.canonical_id ?? null,
+      attributes,
+    }
+  })
+
+  try {
+    const cascade = await opts.decisionRuntime.run<ResolveResult>({
+    ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
+    ...(opts.llm ? { llm: { provider: opts.llm.provider, modelId: opts.llm.model } } : {}),
+    request: {
+      runId: opts.runId ?? `entity-disambiguation-${Date.now()}`,
+      operation: ENTITY_OPERATION,
+      state: {
+        mention: {
+          kind: opts.mention.kind,
+          display_name: opts.mention.display_name,
+          canonical_id: opts.mention.canonical_id ?? null,
+          context: opts.mention.context ?? null,
+        },
+        candidates: decisionCandidates,
+      },
+      questions: [{
+        kind: 'choice',
+        id: 'entity',
+        prompt: 'Choose exactly one supplied entity id, or ambiguous when the evidence does not distinguish them.',
+        options: [
+          ...candidates.map((candidate) => ({ value: candidate.id, description: candidate.display_name })),
+          { value: 'ambiguous', description: 'The supplied evidence cannot safely distinguish candidates' },
+        ],
+      }],
+    },
+    operation: {
+      decide: (response, { profile }) => primaryDisambiguation(
+        response,
+        candidates,
+        fallbackTier,
+        profile?.policy,
+      ),
+      validateResult: (result) => validateDisambiguationResult(result, candidates),
+      safeFailure: () => ({ status: 'ambiguous', tier: fallbackTier, candidates }),
+      async completeWithLlm(context) {
+        const result = await disambiguateWithLLM(
+          opts.mention,
+          candidates,
+          { provider: context.llm.provider, model: context.llm.modelId },
+          fallbackTier,
+        )
+        return {
+          result,
+          providerId: context.llm.provider.name,
+          model: {
+            catalogId: context.llm.modelId,
+            wireId: ('model' in result ? result.model : undefined) ?? context.llm.modelId,
+          },
+          ...('usage' in result && result.usage ? {
+            usage: {
+              inputTokens: result.usage.inputTokens,
+              outputTokens: result.usage.outputTokens,
+            },
+          } : {}),
+        }
+      },
+    },
+    })
+    return cascade.result
+  } catch {
+    return { status: 'ambiguous', tier: fallbackTier, candidates }
+  }
+}
+
 export async function resolveEntity(opts: ResolveOptions): Promise<ResolveResult> {
   const threshold = opts.fuzzyThreshold ?? 0.85
   const kindFiltered = filterByKind(opts.candidates, opts.mention.kind)
@@ -194,8 +362,7 @@ export async function resolveEntity(opts: ResolveOptions): Promise<ResolveResult
     return { status: 'resolved', tier: 'exact', entityId: exactMatches[0].id, score: 1 }
   }
   if (exactMatches.length > 1) {
-    if (opts.llm) return disambiguateWithLLM(opts.mention, exactMatches, opts.llm, 'exact')
-    return { status: 'ambiguous', tier: 'exact', candidates: exactMatches }
+    return disambiguateCandidates(opts, exactMatches, 'exact')
   }
 
   // Tier 2 — canonical_id exact
@@ -208,8 +375,7 @@ export async function resolveEntity(opts: ResolveOptions): Promise<ResolveResult
       return { status: 'resolved', tier: 'canonical_id', entityId: canonicalMatches[0].id, score: 1 }
     }
     if (canonicalMatches.length > 1) {
-      if (opts.llm) return disambiguateWithLLM(opts.mention, canonicalMatches, opts.llm, 'canonical_id')
-      return { status: 'ambiguous', tier: 'canonical_id', candidates: canonicalMatches }
+      return disambiguateCandidates(opts, canonicalMatches, 'canonical_id')
     }
   }
 
@@ -231,6 +397,5 @@ export async function resolveEntity(opts: ResolveOptions): Promise<ResolveResult
   }
 
   const fuzzyCandidates = scored.map((s) => s.candidate)
-  if (opts.llm) return disambiguateWithLLM(opts.mention, fuzzyCandidates, opts.llm, 'fuzzy')
-  return { status: 'ambiguous', tier: 'fuzzy', candidates: fuzzyCandidates }
+  return disambiguateCandidates(opts, fuzzyCandidates, 'fuzzy')
 }

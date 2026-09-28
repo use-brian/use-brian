@@ -185,6 +185,10 @@ export type ConsultChain = {
  * (free-text conversation, full tool surface, conversational reply).
  */
 export type ConsultRequest = {
+  /** Server-owned starting ceiling, never a model or public request argument. */
+  callerAccessCeiling?: import('../security/access-ceiling.js').AccessCeiling
+  /** Server-owned high-water evidence behind the question, never a tool argument. */
+  callerScopeEvidence?: import('../security/context-scope.js').ScopeEvidence
   target: {
     workspaceId: string
     assistantId: string

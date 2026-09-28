@@ -1,3 +1,4 @@
+import { desktopBridge, type DesktopBrowserControlMessage } from "@/lib/desktop-auth-source";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 
 /**
@@ -14,14 +15,14 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  */
 
 export type ExtensionPairResult =
-  /** The extension took the credentials and is reconnecting. */
+  /** Extension accepted the credentials, or the desktop relay is ready. */
   | "paired"
   /** No extension answered — not installed, or a different build id. */
   | "not_installed"
   /** It answered and refused (origin not allowed, or a malformed request). */
   | "refused";
 
-export type ExtensionMessenger = (extensionId: string, message: unknown) => Promise<unknown>;
+export type ExtensionMessenger = (extensionId: string, message: DesktopBrowserControlMessage) => Promise<unknown>;
 
 /**
  * Canonical install destination shared by every My Browser entry point.
@@ -46,8 +47,19 @@ function runtime(): ChromeRuntime | null {
   return typeof chrome?.runtime?.sendMessage === "function" ? chrome.runtime : null;
 }
 
-/** Null when the page is not in a Chrome-family browser (or is server-rendered). */
+// Only host-backed messengers can safely ignore a missing Chrome extension id.
+const desktopMessengers = new WeakSet<ExtensionMessenger>();
+
+/** Prefer the embedded browser; otherwise use Chrome external messaging, if available. */
 export function chromeMessenger(): ExtensionMessenger | null {
+  const bridge = desktopBridge();
+  if (bridge?.browserControl) {
+    // Preserve the host promise: pair is acknowledged only on relay ready,
+    // not when credentials are handed to the shell. Never fall back to Chrome.
+    const send: ExtensionMessenger = (_id, message) => bridge.browserControl!(message);
+    desktopMessengers.add(send);
+    return send;
+  }
   const rt = runtime();
   if (!rt) return null;
   return (extensionId, message) =>
@@ -66,7 +78,7 @@ export function chromeMessenger(): ExtensionMessenger | null {
 async function ask(
   send: ExtensionMessenger,
   extensionId: string,
-  message: unknown,
+  message: DesktopBrowserControlMessage,
 ): Promise<{ ok?: boolean } | null> {
   try {
     const response = (await send(extensionId, message)) as { ok?: boolean } | undefined | null;
@@ -82,7 +94,7 @@ export async function detectExtension(opts: {
   send: ExtensionMessenger | null;
 }): Promise<boolean> {
   const extensionId = opts.extensionId ?? EXTENSION_ID;
-  if (!extensionId || !opts.send) return false;
+  if (!opts.send || (!extensionId && !desktopMessengers.has(opts.send))) return false;
   const response = await ask(opts.send, extensionId, { type: "status" });
   return response?.ok === true;
 }
@@ -107,7 +119,7 @@ export async function requestBrowserControl(opts: {
   send: ExtensionMessenger | null;
 }): Promise<ControlPromptResult> {
   const extensionId = opts.extensionId ?? EXTENSION_ID;
-  if (!extensionId || !opts.send) return "not_installed";
+  if (!opts.send || (!extensionId && !desktopMessengers.has(opts.send))) return "not_installed";
   const response = (await ask(opts.send, extensionId, { type: "request-control" })) as
     | { ok?: boolean; hasControl?: boolean }
     | null;
@@ -125,7 +137,7 @@ export async function extensionHasControl(opts: {
   send: ExtensionMessenger | null;
 }): Promise<boolean | null> {
   const extensionId = opts.extensionId ?? EXTENSION_ID;
-  if (!extensionId || !opts.send) return null;
+  if (!opts.send || (!extensionId && !desktopMessengers.has(opts.send))) return null;
   const response = (await ask(opts.send, extensionId, { type: "status" })) as
     | { ok?: boolean; hasControl?: boolean }
     | null;
@@ -142,7 +154,7 @@ export async function pairViaExtension(opts: {
   send: ExtensionMessenger | null;
 }): Promise<ExtensionPairResult> {
   const extensionId = opts.extensionId ?? EXTENSION_ID;
-  if (!extensionId || !opts.send) return "not_installed";
+  if (!opts.send || (!extensionId && !desktopMessengers.has(opts.send))) return "not_installed";
   const response = await ask(opts.send, extensionId, {
     type: "pair",
     relayUrl: opts.relayUrl,

@@ -9,6 +9,7 @@ import { z } from 'zod'
 import {
   buildTool,
   CONFIGURE_CAPABILITY,
+  filterToolsByCapabilities,
   OPERATOR_AUTOMATION_CAPABILITY,
   type ControlPlaneReader,
   type Tool,
@@ -217,6 +218,20 @@ describe('[COMP:agent-surface/toolset] buildAgentToolset', () => {
       expect(tool!.requiresCapability, name).toBe(CONFIGURE_CAPABILITY)
     }
   })
+
+  it('hides connector authorization until Agent configuration is granted', () => {
+    const { toolset } = makeToolset()
+    expect(toolset.writes.has('requestConnectorAuthorization')).toBe(true)
+    expect(
+      filterToolsByCapabilities(toolset.writes, new Set()).has('requestConnectorAuthorization'),
+    ).toBe(false)
+    expect(
+      filterToolsByCapabilities(
+        toolset.writes,
+        new Set([CONFIGURE_CAPABILITY]),
+      ).has('requestConnectorAuthorization'),
+    ).toBe(true)
+  })
 })
 
 describe('[COMP:agent-surface/write-tools] addPatConnector — personal + grant', () => {
@@ -413,6 +428,66 @@ describe('[COMP:agent-surface/write-tools] workspace gate — one canonical, act
     expect(text).toContain('re-issue or re-scope the key')
     expect(text).toContain('will fail identically')
     expect(approvals.staged).toHaveLength(0)
+  })
+})
+
+describe('[COMP:agent-surface/write-tools] proposeSkill scope evidence', () => {
+  function proposalTool(
+    resolveProceduralEvidence: NonNullable<
+      Parameters<typeof createAgentWriteTools>[0]['resolveProceduralEvidence']
+    >,
+    createStagedSkillCreation = vi.fn(async () => ({ id: 'approval-skill' })),
+  ) {
+    const tools = createAgentWriteTools({
+      approvalsStore: { createStagedSkillCreation } as never,
+      enablementStore: {} as never,
+      workspaceSkillStore: { setAllAssistants: vi.fn() } as never,
+      mcpSettingsStore: {} as never,
+      connectorInstanceStore: {} as never,
+      connectorGrantStore: {} as never,
+      resolveApprover: vi.fn(async () => 'approver-1'),
+      resolveProceduralEvidence,
+    })
+    return { tool: tools.find((candidate) => candidate.name === 'proposeSkill')!, createStagedSkillCreation }
+  }
+
+  const input = {
+    name: 'Weekly reporting',
+    description: 'Prepare the weekly report',
+    whenToUse: 'When the weekly report is requested',
+    content: 'Collect the approved metrics and prepare the report.',
+  }
+
+  it('withholds a proposal instead of treating approval as declassification', async () => {
+    const { tool, createStagedSkillCreation } = proposalTool(async () => null)
+    const result = await tool.execute(input, ctx())
+    expect(result).toMatchObject({ isError: true })
+    expect(String(result.data)).toContain('scope_evidence_missing')
+    expect(createStagedSkillCreation).not.toHaveBeenCalled()
+  })
+
+  it('stores the complete trusted derivation with the staged proposal', async () => {
+    const evidence = {
+      producer: 'fixture:proposal',
+      sources: [{
+        workspaceId: WS,
+        userId: 'owner-1',
+        assistantId: '22222222-2222-2222-2222-222222222222',
+        sensitivity: 'internal' as const,
+        compartments: ['finance'],
+        projectIds: [],
+        resourceKind: 'session_message',
+        resourceId: 'message-1',
+        version: '1',
+      }],
+    }
+    const { tool, createStagedSkillCreation } = proposalTool(async () => evidence)
+    const result = await tool.execute(input, ctx())
+    expect(result.isError).not.toBe(true)
+    expect(createStagedSkillCreation).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: WS,
+      derivation: evidence,
+    }))
   })
 })
 

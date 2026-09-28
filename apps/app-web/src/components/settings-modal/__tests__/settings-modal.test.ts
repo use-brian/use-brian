@@ -24,7 +24,6 @@ vi.mock("@/lib/edition", () => ({
 }));
 import {
   OssVersionFooter,
-  workspaceMembersSectionKind,
   workspaceSettingsSections,
 } from "../settings-modal";
 
@@ -43,10 +42,9 @@ describe("[COMP:app-web/profile-management] settings navigation", () => {
   it("enables Outpost teammate management without exposing billing", () => {
     const capabilities = deploymentCapabilitiesFor("outpost");
     const sections = workspaceSettingsSections(capabilities);
-    expect(sections).toContain("ws-members");
+    expect(sections).toContain("ws-organization");
+    for (const duplicate of ["ws-members", "ws-teams", "ws-access"]) expect(sections).not.toContain(duplicate);
     expect(sections).not.toContain("ws-plan");
-    expect(workspaceMembersSectionKind(capabilities)).toBe("manage");
-    expect(workspaceMembersSectionKind(deploymentCapabilitiesFor("oss"))).toBe("upgrade");
   });
 });
 

@@ -1173,8 +1173,10 @@ function buildDocPageTools(
       if ('error' in ctx) return text(ctx.error, true)
       // resolveCtx caches, so the handler's own resolveCtx() re-read is free.
       return runWithAgentAccess({
+        workspaceId:ctx.workspaceId??undefined,userId:ctx.userId,visibilityAssistantIds:ctx.visibilityAssistantIds,
         clearance: ctx.clearance,
         compartments: ctx.compartments,
+        mutationCompartments:ctx.mutationCompartments,
         projectIds: ctx.projectIds,
       }, () => tool.handler(args))
     },
@@ -1646,8 +1648,11 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     opts.agentActiveCapabilities ?? new Set(),
   )
   const associationReads = new Set([...visibleAssociation.values()].filter(tool => tool.isReadOnly).map(tool => tool.name))
+  // The bridge runs execute() directly, so a tool that needs a person's confirmation in chat (publishing
+  // website content or a catalogue, confirming a free order) would run unconfirmed here. Association keeps
+  // those in chat and the console only; other brain-MCP tools are unchanged.
   const associationBridges = [...visibleAssociation.values()]
-    .filter(tool => opts.scope === 'read_write' || tool.isReadOnly)
+    .filter(tool => (opts.scope === 'read_write' || tool.isReadOnly) && !tool.requiresConfirmation)
     .map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
 
   // ── File bridges (workspace filesystem). Present only when a blob client is
@@ -2276,6 +2281,7 @@ export function makeBrainContextResolver(
       clearance,
       assistantClearance: clearance,
       compartments: turnScope.effectiveCompartments,
+      mutationCompartments: turnScope.access.mutationCompartments,
       projectIds: turnScope.effectiveProjectIds,
       activeGroupId: turnScope.activeGroupId,
       activeProjectId: turnScope.activeProjectId,

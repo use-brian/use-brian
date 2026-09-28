@@ -14,6 +14,7 @@ import { query, queryWithRLS } from './client.js'
 export type CapturePartitionBy = 'connection' | 'user' | 'session' | 'subject'
 export type CaptureRoutingMode = 'realtime' | 'scheduled' | 'drop'
 export type CaptureSensitivity = 'public' | 'internal' | 'confidential'
+export type ScopeBindingOrigin = 'legacy' | 'explicit' | 'reviewed' | 'held'
 
 export type ProgrammaticCaptureRule = {
   id: string
@@ -27,6 +28,8 @@ export type ProgrammaticCaptureRule = {
   episodeSensitivity: CaptureSensitivity | null
   compartments: string[]
   projectIds: string[]
+  scopeBindingOrigin?: ScopeBindingOrigin
+  scopeBindingMode?: 'inherit' | 'explicit'
 }
 
 export type ProgrammaticCaptureProfile = {
@@ -50,6 +53,8 @@ export type ProgrammaticCaptureTarget = {
   assistantClearance: CaptureSensitivity
   assistantDefaultCompartments: string[]
   assistantDefaultProjectId: string | null
+  assistantDefaultBindingOrigin?: ScopeBindingOrigin
+  classificationMode?: 'legacy' | 'review' | 'strict'
   profileId: string
   profileName: string
   partitionBy: CapturePartitionBy
@@ -65,6 +70,8 @@ export type ProgrammaticCaptureBatchTarget = Pick<
   | 'assistantClearance'
   | 'assistantDefaultCompartments'
   | 'assistantDefaultProjectId'
+  | 'assistantDefaultBindingOrigin'
+  | 'classificationMode'
   | 'profileId'
   | 'profileName'
 >
@@ -79,6 +86,7 @@ export type CaptureRuleInput = {
   episodeSensitivity?: CaptureSensitivity | null
   compartments?: string[]
   projectIds?: string[]
+  scopeBindingMode?: 'inherit' | 'explicit'
 }
 
 export type ProgrammaticCaptureStore = {
@@ -160,6 +168,8 @@ const RULE_COLS = `
   r.episode_sensitivity AS "episodeSensitivity",
   r.compartments,
   r.project_ids AS "projectIds"
+  ,r.scope_binding_origin AS "scopeBindingOrigin"
+  ,r.scope_binding_mode AS "scopeBindingMode"
 ` as const
 
 type ProfileRow = Omit<ProgrammaticCaptureProfile, 'assistantIds' | 'rules'>
@@ -284,9 +294,10 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
         `INSERT INTO ingest_rules AS r
            (connector_instance_id, capture_profile_id, source, rule_order,
             filter_type, filter_params, routing_mode, routing_schedule,
-            routing_timezone, alert, episode_sensitivity, compartments, project_ids)
+            routing_timezone, alert, episode_sensitivity, compartments, project_ids,
+            scope_binding_origin, scope_binding_mode)
          SELECT NULL, p.id, 'programmatic', $3, $4, $5::jsonb, $6, $7, $8,
-                false, $9, $10, $11
+                false, $9, $10, $11, 'explicit', $12
            FROM programmatic_capture_profiles p
           WHERE p.id = $1 AND p.workspace_id = $2
          RETURNING ${RULE_COLS}`,
@@ -302,6 +313,7 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
           input.rule.episodeSensitivity ?? null,
           input.rule.compartments ?? [],
           input.rule.projectIds ?? [],
+          input.rule.scopeBindingMode ?? 'inherit',
         ],
       )
       const row = result.rows[0]
@@ -322,6 +334,8 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
                 episode_sensitivity = $10,
                 compartments = $11,
                 project_ids = $12
+                ,scope_binding_origin = 'explicit'
+                ,scope_binding_mode = $13
            FROM programmatic_capture_profiles p
           WHERE r.id = $1
             AND r.capture_profile_id = $2
@@ -341,6 +355,7 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
           input.rule.episodeSensitivity ?? null,
           input.rule.compartments ?? [],
           input.rule.projectIds ?? [],
+          input.rule.scopeBindingMode ?? 'inherit',
         ],
       )
       const row = result.rows[0]
@@ -389,11 +404,14 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
                 a.clearance AS "assistantClearance",
                 a.default_compartments AS "assistantDefaultCompartments",
                 a.default_project_id AS "assistantDefaultProjectId",
+                a.context_binding_origin AS "assistantDefaultBindingOrigin",
+                coalesce(wap.classification_mode,'legacy') AS "classificationMode",
                 p.id AS "profileId",
                 p.name AS "profileName",
                 p.partition_by AS "partitionBy"
            FROM workspaces w
            JOIN assistants a ON a.workspace_id = w.id AND a.id = $1
+           LEFT JOIN workspace_access_policies wap ON wap.workspace_id=w.id
            JOIN programmatic_capture_profiles p
              ON p.id = COALESCE($3::uuid, a.capture_profile_id)
             AND p.workspace_id = a.workspace_id
@@ -431,10 +449,13 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
                 a.clearance AS "assistantClearance",
                 a.default_compartments AS "assistantDefaultCompartments",
                 a.default_project_id AS "assistantDefaultProjectId",
+                a.context_binding_origin AS "assistantDefaultBindingOrigin",
+                coalesce(wap.classification_mode,'legacy') AS "classificationMode",
                 p.id AS "profileId",
                 p.name AS "profileName"
            FROM assistants a
            JOIN workspaces w ON w.id = a.workspace_id
+           LEFT JOIN workspace_access_policies wap ON wap.workspace_id=w.id
            JOIN ingest_rules r ON r.id = $3 AND r.source = 'programmatic'
            JOIN programmatic_capture_profiles p
              ON p.id = r.capture_profile_id AND p.workspace_id = a.workspace_id

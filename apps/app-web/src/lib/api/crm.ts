@@ -369,7 +369,7 @@ export type CrmIntakeDefinition = {
   active: boolean;
   currentVersion: number;
   fields: CrmIntakeFieldDefinition[];
-  identityPolicy: "external_subject" | "trusted_verified_email" | "new_or_review";
+  identityPolicy: "external_subject" | "trusted_verified_email" | "new_or_review" | "existing_or_new";
   identityVerification?: { keyId: string; publicKey: string; maxAgeSeconds: number; acknowledged: true } | null;
   verificationAcknowledgedByUserId?: string | null;
   verificationAcknowledgedAt?: string | null;
@@ -689,6 +689,22 @@ export async function listCrmSubmissions(
     `/api/crm/${encodeURIComponent(workspaceId)}/operations/submissions${query ? `?${query}` : ""}`,
     "submissions",
   );
+}
+
+/** One page of submissions (the console never claims a total it has not read). */
+export async function listCrmSubmissionPage(
+  workspaceId: string,
+  filters: { status?: CrmSubmission["status"]; definitionKey?: string; cursor?: string | null; limit?: number } = {},
+): Promise<{ submissions: CrmSubmission[]; nextCursor: string | null }> {
+  const params = new URLSearchParams({ limit: String(filters.limit ?? 25) });
+  if (filters.status) params.set("status", filters.status);
+  if (filters.definitionKey) params.set("definitionKey", filters.definitionKey);
+  if (filters.cursor) params.set("cursor", filters.cursor);
+  const body = await jsonRequest<{ submissions: CrmSubmission[]; nextCursor?: string | null }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/submissions?${params}`,
+  );
+  if (!Array.isArray(body.submissions)) throw new Error("invalid_crm_page");
+  return { submissions: body.submissions, nextCursor: body.nextCursor ?? null };
 }
 
 export async function getCrmSubmission(workspaceId: string, submissionId: string): Promise<CrmSubmission> {

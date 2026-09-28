@@ -7,6 +7,7 @@ import { getPool, getAppPool } from '../client.js'
 import { encryptCredentials } from '../credential-crypto.js'
 import { createDbCrmOperationsStore } from '../crm-operations-store.js'
 import { createCrmIntegrationStore } from '../crm-integration-store.js'
+import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createWorkspaceStore } from '../workspace-store.js'
 import { createDbCrmIntakeReadStore } from '../crm-intake-store.js'
 import { createSoftDeleteStore } from '../soft-delete-store.js'
@@ -291,7 +292,7 @@ async function nativeFixture(provider:'gmail'|'imap'|'agentmail'='gmail') {
     await pool.query("INSERT INTO channel_integrations(channel_id,channel_type,credentials,connector_instance_id) VALUES($1,'email',$2,$3)",[channelId,Buffer.alloc(1),f.connectorInstanceId])
     await pool.query('INSERT INTO channel_assistants(channel_id,assistant_id) VALUES($1,$2)',[channelId,assistantId])
   }
-  const context:CrmOperationsContext={workspaceId:f.workspaceId,actor:{kind:'assistant',assistantId,userId:f.userId,sessionId:randomUUID()},authority:{role:'member',canWrite:true,canConfigure:false,trustedIdentitySources:[],nativeDelivery:{assistantId,compartments:null,projectIds:null}}}
+  const context:CrmOperationsContext={workspaceId:f.workspaceId,actor:{kind:'assistant',assistantId,userId:f.userId,sessionId:randomUUID()},authority:{role:'member',canWrite:true,canConfigure:false,trustedIdentitySources:[],nativeDelivery:{assistantId,compartments:null,mutationCompartments:null,projectIds:null}}}
   return {...f,assistantId,governance,nativeContext:context}
 }
 
@@ -304,6 +305,21 @@ describe('[COMP:crm/delivery-policy] Native dispatch authority at the real provi
     const audit=(await pool.query("SELECT actor_kind,actor_credential_id FROM association_audit_log WHERE workspace_id=$1 AND action='crm.delivery.accepted'",[f.workspaceId])).rows
     expect(audit).toEqual([{actor_kind:'assistant',actor_credential_id:f.assistantId}])
     expect(provider==='imap'?smtp.sendMail:send).toHaveBeenCalledTimes(1)
+  })
+  it.each(['empty', 'missing'] as const)('refuses a native mailbox with %s mutation authority before provider preparation', async mutation => {
+    const f=await nativeFixture(),prepare=vi.fn(production),{deliveries}=make(prepare)
+    const team=await createDbWorkspaceGroupStore().createTeam(f.userId,f.workspaceId,{name:'Product fixture',key:'product-fixture'})
+    await pool.query('UPDATE connector_instance SET compartments=$2 WHERE id=$1',[f.connectorInstanceId,[team.compartmentKey!]])
+    f.nativeContext.authority.nativeDelivery!.compartments=[team.compartmentKey!]
+    f.nativeContext.authority.nativeDelivery!.mutationCompartments=[]
+    if(mutation==='missing') delete (f.nativeContext.authority.nativeDelivery as unknown as Record<string,unknown>).mutationCompartments
+    await expect(deliveries.send(f.nativeContext,f.command)).rejects.toMatchObject({code:'not_authorized'})
+    expect(prepare).not.toHaveBeenCalled()
+    expect((await pool.query('SELECT delivery_id FROM crm_delivery_receipts WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
+    f.nativeContext.authority.nativeDelivery!.mutationCompartments=[team.compartmentKey!]
+    const send=transport()
+    expect(await deliveries.send(f.nativeContext,f.command)).toMatchObject({receipt:{status:'sent'}})
+    expect(send).toHaveBeenCalledTimes(1)
   })
   it.each(['capability','action','setting','membership','exposure','policy','context'] as const)('refuses changed %s authority before any provider preparation',async changed=>{
     const f=await nativeFixture(),prepare=vi.fn(production),{deliveries}=make(prepare)

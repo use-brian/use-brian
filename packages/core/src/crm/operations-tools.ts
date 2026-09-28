@@ -80,6 +80,12 @@ export type CrmOperationsReadPort = {
   }): Promise<CrmPage<'entitlements'>>
   listEvents(workspaceId: string, filters?: CrmPageQuery & {
     status?: 'draft' | 'published' | 'cancelled' | 'completed'
+    /** `upcoming`: still running or ahead (ends now or later); `past`: already ended. */
+    when?: 'upcoming' | 'past'
+    /** One event by id (deep links). */
+    id?: string
+    /** One event by its reference (assistant preview links). */
+    slug?: string
     limit?: number
   }): Promise<CrmPage<'events'>>
   listParticipation(workspaceId: string, filters?: CrmPageQuery & {
@@ -303,6 +309,10 @@ function workspaceError() {
 }
 
 function failure(error: unknown) {
+  if ((error as { code?: string } | null)?.code === 'scope_operation_denied') {
+    return { data: { error: 'scope_operation_denied',
+      message: 'This operation is unavailable in your current scope. Ask a workspace administrator to review access.' }, isError: true as const }
+  }
   if (error instanceof CrmOperationsError) {
     return { data: { error: error.code, message: error.message, ...error.details }, isError: true as const }
   }
@@ -350,7 +360,8 @@ export function createCrmOperationsTools(options: {
         if(missing) return {isError:true,data:{error:'not_authorized',requiredCapability:missing}}
         const caller=crmOperationsToolContext(context)
         if(!caller) return workspaceError()
-        caller.authority.nativeDelivery={assistantId:context.assistantId,compartments:context.compartments ?? null,projectIds:context.projectIds ?? null}
+        caller.authority.nativeDelivery={assistantId:context.assistantId,compartments:context.compartments ?? null,projectIds:context.projectIds ?? null,
+          mutationCompartments:context.mutationCompartments === undefined ? context.compartments ?? null : context.mutationCompartments}
         try {
           const parsed=inputSchema.parse(input)
           if(read) {

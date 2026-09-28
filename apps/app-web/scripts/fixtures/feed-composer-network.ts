@@ -10,6 +10,7 @@ export async function authFetch(input: string, init?: RequestInit): Promise<Resp
   const url = new URL(input, location.origin);
   const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
   requests.push({ url: url.pathname, body });
+  if (url.pathname.startsWith('/api/doc-files/')) return new Response('<svg xmlns="http://www.w3.org/2000/svg" width="480" height="320"><rect width="480" height="320" fill="steelblue"/></svg>', { headers: { 'Content-Type': 'image/svg+xml' } });
   if (url.pathname === '/api/chat/stop') {
     for (const inputId of pendingInputs.splice(0)) running?.enqueue(encode('input_applied', { inputId, messageId: `applied-${inputId}` }));
     running?.enqueue(encode('done')); running?.close(); running = undefined;

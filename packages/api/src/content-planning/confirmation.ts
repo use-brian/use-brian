@@ -1,7 +1,8 @@
+import { buildLinkedInPayload, type LinkedInPayload } from './linkedin-payload.js'
 /** Atomic editorial finish; provider delivery is a subsequent boundary. [COMP:feed/confirmation-learning] */
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
-import { feedConfirmationRequestSchema, type FeedConfirmationRequest, type FeedConfirmationSummary, type FeedLearningScope } from '@use-brian/shared'
+import { feedLinkedInFileIds, feedConfirmationRequestSchema, type FeedConfirmationRequest, type FeedConfirmationSummary, type FeedLearningScope } from '@use-brian/shared'
 import { canonicalFeedValue, walkFeed } from '@use-brian/doc-model'
 import { withFeedTransaction, readFeedCopy, requireFeedComposition, assertFeedFiles, FeedCollaborationError, type FeedActor, type FeedScope, type StructuredFeedContent } from '../db/feed-collaboration-store.js'
 import { appendDecisionEvent } from '../db/decision-event-store.js'
@@ -19,7 +20,7 @@ export type FeedConfirmationHistory = {
 }
 export type FeedConfirmation = {
   id: string; workspaceId: string; assistantId: string; sessionId: string; revision: number;
-  actorUserId: string; content: StructuredFeedContent; projection: ReturnType<typeof feedOutputProjection>;
+  actorUserId: string; content: StructuredFeedContent; projection: ReturnType<typeof feedOutputProjection> & { linkedinPayload?: LinkedInPayload };
   history: FeedConfirmationHistory; historyCutoff: Date; scope: FeedLearningScope;
   priorConfirmationId: string | null; reviewRunId: string | null; createdAt: Date;
 }
@@ -42,17 +43,22 @@ export async function confirmFeedPost(actor: FeedActor, raw: FeedConfirmationReq
       if (priorReceipt.actor_user_id !== actor.userId || priorReceipt.actor_kind !== actor.kind || priorReceipt.fingerprint !== fingerprint) throw new FeedCollaborationError(409, 'mutation_id_reused')
       const confirmation = await readFeedConfirmation(client, actor.sessionId, priorReceipt.receipt.confirmationId)
       if (await isFeedConfirmationRevoked(client, confirmation.id)) throw new FeedCollaborationError(409, 'revoked_confirmation_requires_revision')
-      await assertFeedFiles(client, actor, access, confirmation.content.composition)
+      await assertFeedFiles(client, actor, access, confirmation.content.composition, [], confirmation.content.linkedin)
       return { confirmation, runId: priorReceipt.receipt.runId as string }
     }
     const copy = await readFeedCopy(client, actor.sessionId)
     if (!copy || copy.revision !== input.expectedRevision) throw new FeedCollaborationError(409, 'revision_conflict')
     const content = requireFeedComposition(copy.content)
     if (options.source && (options.source.canonical.revision !== copy.revision || canonicalFeedValue(options.source.canonical.content) !== canonicalFeedValue(content))) throw new FeedCollaborationError(409, 'saved_composition_conflict')
-    await assertFeedFiles(client, actor, access, content.composition)
+    await assertFeedFiles(client, actor, access, content.composition, [], content.linkedin)
     const session = (await client.query('SELECT title,context_compartments,context_project_id FROM sessions WHERE id=$1', [actor.sessionId])).rows[0]
     const platform = options.source?.platform ?? /^\[([^\]]+)\]/.exec(session.title)?.[1] ?? 'threads'
-    const projection = feedOutputProjection(content, platform)
+    const projection: FeedConfirmation['projection'] = feedOutputProjection(content, platform)
+    if (platform === 'linkedin' && content.linkedin?.destinationId && content.linkedin.mode !== 'newsletter_edition') {
+      const prepared = await buildLinkedInPayload(actor, access, content, copy.revision)
+      if (input.linkedinPreviewHash !== prepared.hash) throw new FeedCollaborationError(409, 'linkedin_preview_required')
+      projection.linkedinPayload = prepared.payload
+    }
     if (projection.issues.length) throw new FeedCollaborationError(409, projection.issues[0]!.code)
     const existing = (await client.query<FeedConfirmation>(`SELECT ${columns} FROM feed_post_confirmations WHERE session_id=$1 AND source_revision=$2`, [actor.sessionId, copy.revision])).rows[0]
     let confirmation = existing
@@ -86,7 +92,7 @@ export async function confirmFeedPost(actor: FeedActor, raw: FeedConfirmationReq
           FROM session_messages m WHERE m.id=ANY($1::uuid[])
         UNION ALL SELECT 'proposal:'||p.id,encode(sha256(convert_to(jsonb_build_object('edits',p.edits,'rationale',p.rationale)::text,'UTF8')),'hex')
           FROM feed_draft_suggestions p WHERE p.id=ANY($2::uuid[])`, [history.messageIds, history.proposals.map(item => item.id)])).rows.map(row => [row.key, row.hash]))
-      const files = [...new Set(revisions.flatMap(row => row.content.schemaVersion === 2 && row.content.composition ? walkFeed(row.content.composition).flatMap(({ node }) => node.type === 'image' ? [node.attrs.fileId] : node.type === 'generationPlaceholder' ? node.attrs.references.flatMap(ref => 'fileId' in ref ? [ref.fileId] : []) : []) : []))]
+      const files = [...new Set([...revisions.flatMap(row=>feedLinkedInFileIds(row.content.linkedin)), ...revisions.flatMap(row => row.content.schemaVersion === 2 && row.content.composition ? walkFeed(row.content.composition).flatMap(({ node }) => node.type === 'image' ? [node.attrs.fileId] : node.type === 'generationPlaceholder' ? node.attrs.references.flatMap(ref => 'fileId' in ref ? [ref.fileId] : []) : []) : [])])]
       history.fileIds = files
       const sourceScopes = (await client.query<{ sensitivity: FeedLearningScope['sensitivity']; compartments: string[]; project_ids: string[] }>('SELECT sensitivity,compartments,project_ids FROM workspace_files WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [access.workspaceId, files])).rows
       const ranks: FeedLearningScope['sensitivity'][] = ['public', 'internal', 'confidential', 'restricted']

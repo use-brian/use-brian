@@ -2,11 +2,16 @@
 
 /** Compact Brian-first iteration rail. [COMP:app-web/office-iteration-panel] */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CheckCircle2, CircleDashed, Sparkles } from "lucide-react";
 import type { OfficeArtifactSnapshot } from "@use-brian/office-model";
 import { useT } from "@/lib/i18n/client";
-import { getOfficeJob, listOfficeJobEvents, officeJobFailureKind, steerOfficeJob, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
+import { getOfficeJob, listOfficeJobEvents, officeJobFailureKind, steerOfficeJob, OfficeApiError, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
+
+import { useOfficeMetadataResource, useOfficePanelIdentity } from "@/lib/office/surface-cache";
+import { officeMetadataRemaining } from "@/lib/office/metadata";
+import { officePanelCacheKey } from "@/lib/surface-prefetch";
+import { invalidateSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
@@ -39,15 +44,7 @@ export function officeBrianScope(snapshot: OfficeArtifactSnapshot | undefined, t
   return selectedObjects.length === 1 ? { kind: "object", slide } : { kind: "objects", slide, count: selectedObjects.length };
 }
 
-export function OfficeJobActivity({
-  jobId,
-  snapshot,
-  targetIds,
-  canRequestRevision,
-  requestDisabledReason,
-  onRequestRevision,
-  onRevisionCompleted,
-}: {
+type OfficeJobActivityProps = {
   jobId?: string;
   snapshot?: OfficeArtifactSnapshot;
   targetIds: string[];
@@ -55,11 +52,26 @@ export function OfficeJobActivity({
   requestDisabledReason?: string;
   onRequestRevision(instruction: string): Promise<OfficeBrianRevisionRequest>;
   onRevisionCompleted(): void | Promise<void>;
-}) {
+};
+
+export function OfficeJobActivity(props: OfficeJobActivityProps) {
+  const identity = useOfficePanelIdentity();
+  return <OfficeJobActivityContent key={`${identity.prefix}:${props.snapshot?.artifactId ?? props.jobId ?? "new"}`} {...props} {...identity}/>;
+}
+
+function OfficeJobActivityContent({jobId, snapshot, targetIds, canRequestRevision, requestDisabledReason, onRequestRevision, onRevisionCompleted, prefix, viewerId}: OfficeJobActivityProps & {prefix: string | null; viewerId: string}) {
   const [trackedJobId, setTrackedJobId] = useState(jobId);
   const [revisionJobId, setRevisionJobId] = useState<string | null>(null);
-  const [job, setJob] = useState<OfficeJob | null>(null);
-  const [events, setEvents] = useState<OfficeJobEvent[]>([]);
+  const jobKey = officePanelCacheKey(prefix, "job", trackedJobId);
+  const eventKey = officePanelCacheKey(prefix, "job-events", trackedJobId);
+  const jobRead = useOfficeMetadataResource(jobKey, viewerId, () => getOfficeJob(trackedJobId!));
+  const eventRead = useOfficeMetadataResource(eventKey, viewerId, () => listOfficeJobEvents(trackedJobId!, 0));
+  const job = jobRead.data ?? null;
+  const events = eventRead.data ?? [];
+  const available = Boolean(job && eventRead.data);
+  const owner = useRef<object | null>(null);
+  useLayoutEffect(() => { owner.current = {}; return () => { owner.current = null; }; }, [jobKey, available]);
+  const hadProjection = useRef(false);
   const [instruction, setInstruction] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<RequestFeedback>("idle");
@@ -71,39 +83,35 @@ export function OfficeJobActivity({
     if (!revisionJobId) setTrackedJobId(jobId);
   }, [jobId, revisionJobId]);
 
+  useLayoutEffect(() => {
+    if (available) hadProjection.current = true;
+    else if (hadProjection.current) {
+      hadProjection.current = false;
+      setInstruction("");
+      setFeedback("idle");
+      setSubmitting(false);
+    }
+  }, [available]);
+
   useEffect(() => {
-    if (!trackedJobId) { setJob(null); setEvents([]); return; }
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = async () => {
-      try {
-        const nextJob = await getOfficeJob(trackedJobId);
-        const nextEvents = await listOfficeJobEvents(trackedJobId, 0);
-        if (!live) return;
-        setJob(nextJob);
-        setEvents(nextEvents);
-        if (!TERMINAL.has(nextJob.status)) {
-          timer = setTimeout(poll, 1500);
-          return;
-        }
-        if (trackedJobId === revisionJobId && !completedRevisionIds.current.has(trackedJobId)) {
-          completedRevisionIds.current.add(trackedJobId);
-          if (nextJob.status === "completed") {
-            const proposed = nextEvents.some((event) => event.code === "office.job.completed" && event.params.proposal === true);
-            setFeedback(proposed ? "proposal" : "applied");
-            setInstruction("");
-            await onRevisionCompletedRef.current();
-          } else setFeedback("failed");
-        }
-      } catch {
-        if (live) timer = setTimeout(poll, 3000);
-      }
-    };
-    setJob(null);
-    setEvents([]);
-    void poll();
-    return () => { live = false; if (timer) clearTimeout(timer); };
-  }, [revisionJobId, trackedJobId]);
+    if (!trackedJobId || !prefix || job && TERMINAL.has(job.status)) return;
+    const error = jobRead.error ?? eventRead.error;
+    if (error instanceof OfficeApiError && ([401,403,404].includes(error.status) || error.message === "office_projection_changed")) return;
+    const timer = setTimeout(() => { void Promise.all([jobRead.refresh(), eventRead.refresh()]); }, error ? 3000 : 1500);
+    return () => clearTimeout(timer);
+  }, [trackedJobId, prefix, job, jobRead.error, eventRead.error, jobRead.refresh, eventRead.refresh]);
+
+  useEffect(() => {
+    if (!available || !job || !trackedJobId || !TERMINAL.has(job.status) || trackedJobId !== revisionJobId || completedRevisionIds.current.has(trackedJobId)) return;
+    if (!jobKey || !eventKey || readSurfaceCache(jobKey).data !== job || readSurfaceCache(eventKey).data !== eventRead.data || officeMetadataRemaining(job, viewerId) <= 0 || officeMetadataRemaining(eventRead.data, viewerId) <= 0) return;
+    completedRevisionIds.current.add(trackedJobId);
+    if (job.status === "completed") {
+      const proposed = events.some(event => event.code === "office.job.completed" && event.params.proposal === true);
+      setFeedback(proposed ? "proposal" : "applied");
+      setInstruction("");
+      void Promise.resolve(onRevisionCompletedRef.current()).catch(() => undefined);
+    } else setFeedback("failed");
+  }, [available, job, eventRead.data, trackedJobId, revisionJobId, jobKey, eventKey, viewerId]);
 
   const active = Boolean(job && !TERMINAL.has(job.status));
   const revisionActive = Boolean(revisionJobId && trackedJobId === revisionJobId && (!job || job.id !== trackedJobId || active));
@@ -111,16 +119,20 @@ export function OfficeJobActivity({
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const value = instruction.trim();
-    if (!value || submitting || revisionActive) return;
+    const started = owner.current;
+    const current = () => Boolean(started && started === owner.current && prefix && (!trackedJobId || jobKey && eventKey &&
+      officeMetadataRemaining(readSurfaceCache(jobKey).data, viewerId) > 0 && officeMetadataRemaining(readSurfaceCache(eventKey).data, viewerId) > 0));
+    if (!current() || !value || submitting || revisionActive) return;
     setSubmitting(true);
     try {
       if (active && trackedJobId && trackedJobId !== revisionJobId) {
         await steerOfficeJob(trackedJobId, value);
-        setInstruction("");
+        if (current()) setInstruction("");
         return;
       }
       if (!canRequestRevision) return;
       const result = await onRequestRevision(value);
+      if (!current()) return;
       if (result === "version_conflict") {
         setFeedback("conflict");
         return;
@@ -132,20 +144,26 @@ export function OfficeJobActivity({
       setFeedback(result.mode === "proposal" ? "proposal" : "queued");
       setRevisionJobId(result.jobId);
       setTrackedJobId(result.jobId);
-    } catch {
-      setFeedback("failed");
+    } catch (error) {
+      if (current()) {
+        if (error instanceof OfficeApiError && [401,403,404].includes(error.status)) {
+          if (jobKey) invalidateSurfaceCache(jobKey);
+          if (eventKey) invalidateSurfaceCache(eventKey);
+        }
+        setFeedback("failed");
+      }
     } finally {
-      setSubmitting(false);
+      if (current()) setSubmitting(false);
     }
   }
 
   return <OfficeJobActivityView
-    job={job}
-    events={events}
+    job={available ? job : null}
+    events={available ? events : []}
     loading={Boolean(trackedJobId && !job)}
     instruction={instruction}
     scope={officeBrianScope(snapshot, targetIds)}
-    canRequestRevision={canRequestRevision}
+    canRequestRevision={Boolean(prefix) && canRequestRevision && (!trackedJobId || available)}
     requestDisabledReason={requestDisabledReason}
     revisionActive={revisionActive}
     submitting={submitting}

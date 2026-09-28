@@ -31,6 +31,30 @@
     <!-- Separate from the status line, not folded into it: a stale build still
          connects and still holds consent, so both statements are true at once. -->
     <div id="build-warning" class="warn" hidden></div>
+    <section id="protected-fill">
+      <h1>Protected fill</h1>
+      <p id="protected-status">Checking disclosure status…</p>
+      <p id="protected-details"></p>
+      <p id="protected-setup" class="warn">Setup required: enter your deployment's API origin below (not the app or relay URL). Ask your administrator for the API_URL used by your app. Local development commonly uses http://localhost:4000. The API must enable protected fill and allow this extension ID in its extension-origin CORS list.</p>
+      <p id="protected-renewal" class="warn" hidden>Pairing expired. Generate a new pairing token in Settings → Browser extension for the SAME account, workspace and browser profile, paste it below, and Connect. Then retry cleanup. Re-pairing does not unlock the task or change its API origin.</p>
+      <p>Approval shares the selected private source fields with the exact destination below, in the listed text fields. The page receives those values. No automatic submit. Finish in the browser yourself.</p>
+      <p>All controlled task tabs, including pre-existing full-browser tabs, will be closed by cleanup. All assistant commands stay blocked until you clean up.</p>
+      <button id="protected-approve" hidden>Approve disclosure</button>
+      <button id="protected-deny" hidden>Deny</button>
+      <p id="protected-server-help">Browser actions blocked but no local task shown? Recover the server reservation below. Unresolved references will be invalidated and cancelled. If resolution may have occurred, a separate warned cleanup of ALL accessible browser tabs is required; this button never closes tabs.</p>
+      <button id="protected-recover-server">Recover server reservation</button>
+      <button id="protected-complete" hidden>Finished — close controlled tabs and unlock</button>
+      <div id="protected-session-recovery" class="warn" hidden>
+        <strong>Browser session changed or cannot be verified.</strong>
+        <p>Restored protected tabs cannot be identified safely. Ordinary cleanup is blocked; no old tab IDs will be used.</p>
+        <p>Recovery closes ALL tabs accessible to this extension in this Chrome profile, across ALL windows, including unrelated, pinned, pre-existing and other extension tabs. Unsaved work may be lost. Only a new, empty extension cleanup window will remain. Save your work first. This does not affect other browser profiles.</p>
+        <label><input id="protected-recovery-consent" type="checkbox" /> I approve closing ALL those tabs, not just the task tabs.</label>
+        <button id="protected-recover-all" class="danger" disabled>Close ALL browser tabs and complete cleanup</button>
+      </div>
+      <label for="protected-api">Trusted API origin (from your deployment administrator)</label>
+      <input id="protected-api" placeholder="https://api.example.com" />
+      <button id="protected-save">Save trusted API origin</button>
+    </section>
     <div class="row">
       <label for="relay-url">Relay URL</label>
       <input id="relay-url" placeholder="wss://relay.usebrian.ai/ext" />

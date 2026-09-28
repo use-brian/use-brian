@@ -2,6 +2,34 @@ import { describe, it, expect } from 'vitest'
 import { createFileTools, type FileToolEvent } from '../tools.js'
 import type { FilesApi, FilesContext, FilesError, FilesResult } from '../api.js'
 import type { WorkspaceFile, WorkspaceFileIndexRow, WorkspaceFileMetaPatch } from '../types.js'
+import { ctxFor, errorMessage } from '../tool-helpers.js'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
+
+describe('[COMP:files/tools] departmental mutation context', () => {
+  it('preserves independent edit reach and all evidence requirements', () => {
+    const context = ctxFor({ userId: 'fixture-user', workspaceId: 'fixture-workspace',
+      compartments: ['product', 'marketing'], mutationCompartments: ['marketing'],
+      projectIds: ['fixture-project'], assistantDefaultCompartments: ['marketing'],
+      scopeAccumulator: new ContextScopeAccumulator({ sensitivity: 'confidential',
+        compartments: ['product'], projectIds: ['fixture-project'] }) })
+    expect(context).toMatchObject({ mutationCompartments: ['marketing'],
+      writeSensitivity: 'confidential', writeCompartments: ['marketing', 'product'],
+      writeProjectIds: ['fixture-project'] })
+  })
+
+  it('does not invent mutation reach or a sensitivity floor without evidence', () => {
+    expect(ctxFor({ userId: 'fixture-user', workspaceId: 'fixture-workspace', compartments: ['product'] }))
+      .toMatchObject({ mutationCompartments: undefined, writeSensitivity: undefined })
+  })
+
+  it('explains scope refusals and stale edits without suggesting destructive recovery', () => {
+    expect(errorMessage({ kind: 'read_only', reason: 'release_required', path: '/fixture.txt' })).toContain('requires an audited release')
+    expect(errorMessage({ kind: 'read_only', reason: 'scope', path: '/fixture.txt' })).toContain('Read access alone does not authorize an edit')
+    expect(errorMessage({ kind: 'read_only', path: '/fixture.txt' })).toContain('Local Directory')
+    expect(errorMessage({ kind: 'conflict', reason: 'changed', path: '/fixture.txt' })).toContain('do not delete the file')
+    expect(errorMessage({ kind: 'conflict', path: '/fixture.txt' })).not.toContain('delete')
+  })
+})
 
 // ── Fake FilesApi ────────────────────────────────────────────
 //

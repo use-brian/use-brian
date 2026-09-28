@@ -155,6 +155,12 @@ to a Brian-hosted service.
 | ChatGPT / Codex subscription | **Beta** | Sign in with ChatGPT; no API key |
 | Claude outage fallback | Optional | `ANTHROPIC_API_KEY` |
 
+TypeSafe Jev is an optional classifier for small typed decisions, not a chat
+backend. `TYPESAFE_API_KEY` registers its transport, but all operations remain
+LLM-only until the deployment supplies an operation-specific, version-matched
+recorded evaluation profile and explicitly selects bounded shadow or hybrid
+routing. The key alone changes no production decision path.
+
 The ChatGPT lane uses Codex-managed OAuth and live model discovery (design:
 [`docs/plans/chatgpt-codex-oauth.md`](./docs/plans/chatgpt-codex-oauth.md)).
 It stays Beta until release validation passes on the supported OS matrix.
@@ -197,7 +203,7 @@ Every channel is configured in the app under **Studio → Channels**.
 | Channel | Setup |
 |---|---|
 | Web + desktop app | Ships in the box |
-| Telegram | Your own bot token; webhook needs a public HTTPS tunnel |
+| Telegram | Your own bot token; webhook needs a public HTTPS tunnel. [Channels and linked discussions](docs/telegram-channels.md) |
 | Slack | Your own Slack app; same tunnel |
 | Discord | Your own bot; no tunnel, a local Gateway bridge ships in the box |
 | WhatsApp | Personal number via a QR-paired local bridge, or the official Cloud API with your Meta app |

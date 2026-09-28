@@ -47,6 +47,8 @@ type DesktopRefreshResult =
  * by the bundled app.
  */
 export interface DesktopAccount {
+  displayName?: string;
+  icon?: string;
   key: string;
   id: string;
   name: string;
@@ -79,7 +81,15 @@ export interface DesktopLinkNavigationState {
   canCancel: boolean;
 }
 
+/** cancel invalidates only pending pairing; disconnect clears identity while preserving the explicit Stop latch.
+ * show focuses the existing host without opening a consent dialog. */
+export type DesktopBrowserControlMessage =
+  | { type: "status" | "request-control" | "show" | "disconnect" | "cancel" }
+  | { type: "pair"; relayUrl: string; pairingToken: string; automatic?: boolean; expectedControlEpoch?: number };
+
 export interface DesktopBridge {
+  /** Pair resolves successfully only once the embedded browser relay is ready. */
+  browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; controlEpoch?: number; hasControl?: boolean; connected?: boolean; automaticBlocked?: boolean; browserProfileId?: string; workspaceId?: string }>;
   /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */
   platform?: string;
   /** Open the macOS Shortcuts editor for the one-time Siri workflow setup. */
@@ -99,10 +109,14 @@ export interface DesktopBridge {
    * through the handler's primary-display default during version skew.
    */
   captureSourcePicker?: boolean;
-  /** List the shell's shareable capture sources (windows) for the picker. */
+  /** List the shell's shareable sources with one optional static preview. */
   listCaptureSources?: (
     kind: "window" | "screen",
-  ) => Promise<Array<{ id: string; name: string }>>;
+  ) => Promise<Array<{
+    id: string;
+    name: string;
+    thumbnailDataUrl?: string | null;
+  }>>;
   /**
    * Point the shell's NEXT display-media grant at a picked source id
    * (null = revert to the primary-display default).
@@ -140,6 +154,12 @@ export interface DesktopBridge {
   addAccount?: () => void;
   /** Saved identities across deployments; credentials stay in the shell. */
   listAccounts?: () => Promise<{ accounts: DesktopAccount[]; canSwitch: boolean; localAppUrl?: string }>;
+  updateAccountPresentation?: (key: string, presentation: { displayName: string; icon: string }) => Promise<
+    { ok: true; accounts: DesktopAccount[] } | { ok: false }
+  >;
+  moveAccount?: (key: string, direction: "up" | "down") => Promise<
+    { ok: true; accounts: DesktopAccount[] } | { ok: false }
+  >;
   selectAccount?: (key: string) => Promise<{ ok: true } | { ok: false; error: "switch" | "reauth" }>;
   /** Remove one inactive saved connection from secure storage and its target cookie partition. */
   removeAccount?: (key: string) => Promise<
@@ -336,7 +356,7 @@ export function desktopSignOut(): boolean {
  * docs/architecture/platform/auth.md → "On transient network failure".
  */
 export type RefreshOutcome =
-  | { kind: "ok"; token: string }
+  | { kind: "ok"; token: string; user?: DesktopUser }
   /** A prod full-page bounce to the primary started; the page is unloading. */
   | { kind: "redirecting" }
   /** Offline / network error / 5xx — keep the session and retry later. */
@@ -384,7 +404,11 @@ export const desktopAuthSource: AuthSource = {
       try {
         const result = await bridge.refreshTokens();
         return result.kind === "ok"
-          ? { kind: "ok", token: result.tokens.accessToken }
+          ? {
+              kind: "ok",
+              token: result.tokens.accessToken,
+              ...(result.tokens.user ? { user: result.tokens.user } : {}),
+            }
           : result;
       } catch {
         return { kind: "transient" };
@@ -423,7 +447,9 @@ export const desktopAuthSource: AuthSource = {
         user: data.user,
       });
     }
-    return data.accessToken ? { kind: "ok", token: data.accessToken } : { kind: "transient" };
+    return data.accessToken
+      ? { kind: "ok", token: data.accessToken, ...(data.user ? { user: data.user } : {}) }
+      : { kind: "transient" };
   },
 
   redirectToLogin() {

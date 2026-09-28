@@ -38,6 +38,7 @@ import { useEffect, useRef, useState } from "react";
 import { Check, Globe, Lock, MoreHorizontal, Star, Trash2 } from "lucide-react";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { MeetingTagRulesMenuItem, MeetingTagRulesDialog } from "@/components/recordings/meeting-tags-panel";
 import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
@@ -165,6 +166,7 @@ export function PageHeader({
   const dict = useT();
   const t = dict.docPage;
   const workspace = useWorkspaceContext();
+  const [tagRulesOpen, setTagRulesOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -513,6 +515,7 @@ export function PageHeader({
               }
             />
             <DropdownMenuContent className="max-w-[calc(100vw-1rem)]">
+              {view.anchorKey === "meeting-notes-folder" && <MeetingTagRulesMenuItem workspaceId={view.workspaceId} pageId={view.id} onOpen={() => setTagRulesOpen(true)} />}
               {/* Phone home of the page actions, schedule and triggered runs
                   (hidden from `md`, where they render as header chips). The
                   sections mount with the menu, so their fetches run on open. */}
@@ -602,6 +605,7 @@ export function PageHeader({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          {view.anchorKey === "meeting-notes-folder" && <MeetingTagRulesDialog workspaceId={view.workspaceId} pageId={view.id} open={tagRulesOpen} onOpenChange={setTagRulesOpen} />}
 
           {/* Hidden picker for the "Import file" menu item (journey A). */}
           <input

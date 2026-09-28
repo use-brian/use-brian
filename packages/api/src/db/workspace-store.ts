@@ -473,6 +473,43 @@ export async function getWorkspaceMembershipWithClearanceSystem(
   }
 }
 
+/** Current human read authority for room/session audience checks. */
+export async function getWorkspaceMembershipWithReadScopeSystem(
+  userId: string,
+  workspaceId: string,
+): Promise<{
+  role: 'owner' | 'admin' | 'member'
+  clearance: 'public' | 'internal' | 'confidential'
+  compartments: string[] | null
+  projectIds: string[] | null
+} | null> {
+  try {
+    const result = await query<{
+      role: 'owner' | 'admin' | 'member'
+      clearance: 'public' | 'internal' | 'confidential'
+      compartments: string[] | null
+      projectIds: string[] | null
+    }>(
+      `SELECT wm.role, wm.clearance,
+              effective_member_read_compartments(wm.user_id, wm.workspace_id) AS compartments,
+              CASE WHEN wm.role IN ('owner','admin') THEN NULL
+                   ELSE COALESCE((
+                     SELECT array_agg(pm.project_id::text ORDER BY pm.project_id::text)
+                       FROM workspace_project_members pm
+                       JOIN workspace_projects p ON p.id = pm.project_id
+                      WHERE pm.user_id = wm.user_id AND p.workspace_id = wm.workspace_id
+                   ), '{}') END AS "projectIds"
+         FROM workspace_members wm
+        WHERE wm.workspace_id = $1 AND wm.user_id = $2`,
+      [workspaceId, userId],
+    )
+    return result.rows[0] ?? null
+  } catch (err) {
+    console.error('[workspace-store] scoped membership lookup failed:', err)
+    return null
+  }
+}
+
 /**
  * Resolve the READ-side clearance ceiling for a turn — `min(actingMember,
  * assistant)`. This is the value to put in `AccessContext.clearance` /
@@ -645,15 +682,48 @@ export async function resolveReadCeilingsSystem(
   workspaceId: string | null | undefined,
   assistantClearance: Sensitivity,
   assistantCompartments: string[] | null,
+  /** Lease refresh requires membership and propagates lookup failure. */
+  requireMembership = false,
 ): Promise<{ clearance: Sensitivity; compartments: string[] | null }> {
   if (!workspaceId) {
     return { clearance: assistantClearance, compartments: assistantCompartments }
   }
-  const membership = await getWorkspaceMembershipWithCeilingsSystem(userId, workspaceId)
+  const membership = await getWorkspaceMembershipWithCeilingsSystem(userId, workspaceId, requireMembership)
+  if (requireMembership && !membership) throw new Error('authority_unavailable')
   const role = membership?.role ?? null
   return {
     clearance: effectiveReadClearance(role, membership?.clearance ?? null, assistantClearance),
     compartments: effectiveReadCompartments(role, membership?.compartments ?? null, assistantCompartments),
+  }
+}
+
+/** Operation-aware execution path. Keep temporary read grants out of legacy callers. */
+export async function resolveOperationCeilingsSystem(
+  userId: string,
+  workspaceId: string | null | undefined,
+  assistantClearance: Sensitivity,
+  assistantCompartments: string[] | null,
+  requireMembership = false,
+  authorityQuery: typeof query = query,
+): Promise<{ clearance: Sensitivity; compartments: string[] | null; mutationCompartments: string[] | null }> {
+  if (!workspaceId) return {
+    clearance: assistantClearance, compartments: assistantCompartments,
+    mutationCompartments: assistantCompartments,
+  }
+  // Authority resolution cannot depend on the content RLS policies it authorizes.
+  // One statement sees read grants and ordinary membership at the same snapshot.
+  const member = (await authorityQuery<{
+    role: 'owner' | 'admin' | 'member'; clearance: Sensitivity;
+    readCompartments: string[] | null; mutationCompartments: string[] | null;
+  }>(`SELECT role,clearance,
+      effective_member_read_compartments(user_id,workspace_id) AS "readCompartments",
+      effective_member_team_compartments(user_id,workspace_id) AS "mutationCompartments"
+    FROM workspace_members WHERE workspace_id=$1 AND user_id=$2`,[workspaceId,userId])).rows[0]
+  if (!member && requireMembership) throw new Error('authority_unavailable')
+  return {
+    clearance: effectiveReadClearance(member?.role ?? null,member?.clearance ?? null,assistantClearance),
+    compartments: effectiveReadCompartments(member?.role ?? null,member ? member.readCompartments : [],assistantCompartments),
+    mutationCompartments: effectiveReadCompartments(member?.role ?? null,member ? member.mutationCompartments : [],assistantCompartments),
   }
 }
 
@@ -665,6 +735,7 @@ export async function resolveReadCeilingsSystem(
 async function getWorkspaceMembershipWithCeilingsSystem(
   userId: string,
   workspaceId: string,
+  propagateFailure = false,
 ): Promise<{
   role: 'owner' | 'admin' | 'member'
   clearance: Sensitivity
@@ -691,6 +762,7 @@ async function getWorkspaceMembershipWithCeilingsSystem(
     return { role: row.role, clearance: row.clearance, compartments: row.compartments ?? null }
   } catch (err) {
     console.error('[workspace-store] getWorkspaceMembershipWithCeilingsSystem failed:', err)
+    if (propagateFailure) throw err
     return null
   }
 }
