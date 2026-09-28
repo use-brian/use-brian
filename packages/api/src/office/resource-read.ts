@@ -5,6 +5,7 @@ import type {createOfficeTemplateStore} from '../db/office-templates.js'
 import type {getWorkspaceFileReadProjection} from '../db/workspace-files.js'
 import type {getWorkspaceMembershipWithClearanceSystem} from '../db/workspace-store.js'
 import {workspaceFileReadRevision} from '../files/files-api.js'
+import {bindOfficeFile} from './file-binding.js'
 
 type Resource = NonNullable<Awaited<ReturnType<ReturnType<typeof createOfficeTemplateStore>['getResource']>>>
 const revision = (resource:Resource) => JSON.stringify(resource)
@@ -34,6 +35,6 @@ export function createOfficeResourceReader(deps:{
     const validForMs=Math.floor(Math.min(30_000,projection?.validForMs??0)-(performance.now()-started))
     if(!current||revision(current)!==resourceRevision||!projection||
       workspaceFileReadRevision(projection.file)!==fileRevision||!Number.isFinite(validForMs)||validForMs<=0)return null
-    return {bytes:read.value.bytes,mime:current.mime,hash:current.hash,validForMs}
+    return {bytes:read.value.bytes,mime:current.mime,hash:current.hash,validForMs,binding:bindOfficeFile(read.value.file,read.value.bytes)}
   }
 }

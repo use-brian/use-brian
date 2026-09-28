@@ -17,8 +17,9 @@ import {
   type OfficeResourceRef,
 } from "@use-brian/office-model";
 import { useT } from "@/lib/i18n/client";
-import type { UserInfo } from "@/lib/user";
+import { getUserInfo, type UserInfo } from "@/lib/user";
 import { admitOfficeImageResource, type OfficeCommentThread, type OfficeSuggestion } from "@/lib/office/api";
+import { officeMetadataRemaining } from "@/lib/office/metadata";
 import { officeDocumentEditorExtensions } from "./document/editor-schema";
 import { DocumentToolbar, type DocumentToolbarController } from "./document/document-toolbar";
 import { changeDocumentListLevel, convertDocumentList, insertDocumentImage, moveDocumentTableCell, toggleDocumentRunStyle, updateSelectedDocumentNode } from "./document/editor-actions";
@@ -53,10 +54,12 @@ function collaboratorColor(id: string): string {
   return palette[value % palette.length];
 }
 
-export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, currentUser, synced = true, onSelectTargets, onSelectCommentAnchor, onSelectSuggestionRange, commentThreads = NO_COMMENT_THREADS, suggestions = NO_SUGGESTIONS }: DocumentEditorProps) {
+export function DocumentEditor({ snapshot, baseVersion, role, suggestMode, doc, provider, currentUser, synced = true, onSelectTargets, onSelectCommentAnchor, onSelectSuggestionRange, commentThreads = NO_COMMENT_THREADS, suggestions = NO_SUGGESTIONS }: DocumentEditorProps) {
   const t = useT().office;
   const localDoc = useMemo(() => snapshotToYDoc(snapshot), [snapshot.artifactId]);
   const activeDoc = doc ?? localDoc;
+  const admissionOwner = useRef(`${snapshot.workspaceId}:${snapshot.artifactId}:${baseVersion}`);
+  admissionOwner.current = `${snapshot.workspaceId}:${snapshot.artifactId}:${baseVersion}`;
   const [fragmentReady, setFragmentReady] = useState(() => !doc);
   const [status, setStatus] = useState<string | null>(null);
   const toolbarRef = useRef<DocumentToolbarController | null>(null);
@@ -207,8 +210,11 @@ export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, cur
 
   async function addImage(file: File, placement: "body" | "header" = "body") {
     if (!editable || !editor) return;
+    const owner = admissionOwner.current;
     try {
       const uploaded = await admitOfficeImageResource(snapshot.artifactId, snapshot.workspaceId, file);
+      const viewerId = getUserInfo()?.id;
+      if (admissionOwner.current !== owner || !viewerId || officeMetadataRemaining(uploaded, viewerId) <= 0) throw new Error("office_projection_expired");
       attachDocumentResource(activeDoc, uploaded.resource, "manual");
       if (placement === "header") {
         setDocumentHeaderImage(editor, {

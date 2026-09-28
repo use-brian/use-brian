@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Download, Eye, MonitorPlay, Trash2, Undo2, X } from "lucide-react";
 import { columnIndexToName, parseCellAddress, type OfficeArtifactSnapshot, type SpreadsheetSnapshot } from "@use-brian/office-model";
 import type { OfficeArtifact } from "@/lib/office/api";
@@ -9,6 +9,8 @@ import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { officeOfflineDeviceId, persistOfficeOfflinePackage } from "@/lib/office/offline";
+import { inheritOfficeMetadata, officeMetadataRemaining } from "@/lib/office/metadata";
+import { getUserInfo } from "@/lib/user";
 
 type OfficeCopy = Dictionary["office"];
 
@@ -33,7 +35,7 @@ type OfficeReviewProps = { artifact: OfficeArtifact; artifactId: string; workspa
 export function OfficeReview(props: OfficeReviewProps) {
   const workspace = useOptionalWorkspaceContext();
   const viewerId = workspace?.workspaceId === props.workspaceId ? workspace.me.id : "";
-  return <OfficeReviewContent key={`${props.workspaceId}:${viewerId}:${props.artifactId}`} {...props} viewerId={viewerId} />;
+  return <OfficeReviewContent key={`${props.workspaceId}:${viewerId}:${props.artifactId}:${props.artifact.version}`} {...props} viewerId={viewerId} />;
 }
 
 function OfficeReviewContent({ artifact, artifactId, workspaceId, snapshot, onLifecycle, onPresent, offlineCopy = false, viewerId }: OfficeReviewProps & {viewerId: string}) {
@@ -42,11 +44,59 @@ function OfficeReviewContent({ artifact, artifactId, workspaceId, snapshot, onLi
   const [receipt, setReceipt] = useState<OfficeReleaseReceipt | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingFormat, setPendingFormat] = useState<"native" | "pdf">("native");
-  const [pdfPreview, setPdfPreview] = useState<{ url: string; filename: string } | null>(null);
+  const [pdfPreview, setPdfPreview] = useState<{ url: string; filename: string; expiresAt: number } | null>(null);
   const [offlineSaved, setOfflineSaved] = useState(false);
   const [purgeConfirmation, setPurgeConfirmation] = useState("");
   const purgeInputId = useId();
   const purgeTitleId = `${purgeInputId}-title`;
+  const operationOwner = useRef(0);
+
+  function purgeProtectedOutput() {
+    operationOwner.current += 1;
+    setReceipt(null);
+    setBusy(false);
+    setPdfPreview((current) => {
+      if (current) URL.revokeObjectURL(current.url);
+      return null;
+    });
+  }
+
+  useEffect(() => {
+    const purgeOnFocus = () => purgeProtectedOutput();
+    const purgeOnVisible = () => { if (document.visibilityState === "visible") purgeProtectedOutput(); };
+    window.addEventListener("focus", purgeOnFocus);
+    document.addEventListener("visibilitychange", purgeOnVisible);
+    return () => {
+      operationOwner.current += 1;
+      window.removeEventListener("focus", purgeOnFocus);
+      document.removeEventListener("visibilitychange", purgeOnVisible);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pdfPreview) return;
+    const remaining = pdfPreview.expiresAt - Date.now();
+    if (remaining <= 0) { purgeProtectedOutput(); return; }
+    const timer = window.setTimeout(purgeProtectedOutput, remaining);
+    return () => window.clearTimeout(timer);
+  }, [pdfPreview]);
+
+  useEffect(() => () => {
+    if (pdfPreview) URL.revokeObjectURL(pdfPreview.url);
+  }, [pdfPreview?.url]);
+
+  useEffect(() => {
+    if (!receipt) return;
+    const remaining = officeMetadataRemaining(receipt, viewerId);
+    if (remaining <= 0) { purgeProtectedOutput(); return; }
+    const timer = window.setTimeout(purgeProtectedOutput, remaining);
+    return () => window.clearTimeout(timer);
+  }, [receipt, viewerId]);
+
+  const beginOperation = () => ++operationOwner.current;
+  const ownsOperation = (owner: number, projection?: unknown) => operationOwner.current === owner &&
+    Boolean(viewerId) && getUserInfo()?.id === viewerId &&
+    (projection === undefined || officeMetadataRemaining(projection, viewerId) > 0);
 
   const releaseInput = (format: "native" | "pdf"): OfficeReleaseInput => {
     const input: OfficeReleaseInput = { expectedVersion: artifact.version, action: "export", destination: { sensitivity: "internal", external: false }, format };
@@ -56,32 +106,46 @@ function OfficeReviewContent({ artifact, artifactId, workspaceId, snapshot, onLi
   };
 
   async function startRelease(format: "native" | "pdf") {
+    const owner = beginOperation();
     setBusy(true);
     setPendingFormat(format);
     try {
       const reviewed = await reviewOfficeRelease(artifactId, releaseInput(format));
+      if (!ownsOperation(owner, reviewed)) return;
       setReceipt(reviewed);
-      if (reviewed.status === "ready") await completeRelease(reviewed, format);
+      if (reviewed.status === "ready") await finishRelease(owner, reviewed, format);
     } finally {
-      setBusy(false);
+      if (ownsOperation(owner)) setBusy(false);
     }
   }
 
   async function completeRelease(reviewed = receipt, format = pendingFormat) {
+    const owner = beginOperation();
     setBusy(true);
     try {
-      const acknowledgement = reviewed?.warnings.length ? { version: artifact.version, action: "export" as const, codes: reviewed.warnings.map((warning) => warning.code) } : undefined;
-      const released = await releaseOfficeArtifact(artifactId, { ...releaseInput(format), acknowledgement });
-      setReceipt(released.receipt);
-      if (released.receipt.status !== "ready" || !released.fileId) return;
-      if (format === "pdf") {
-        const blob = await readOfficeReleasedFile(workspaceId, released.fileId);
-        if (pdfPreview) URL.revokeObjectURL(pdfPreview.url);
-        setPdfPreview({ url: URL.createObjectURL(blob), filename: safeFilename(artifact.title, "pdf") });
-      } else await deliverReleasedFile({ workspaceId, fileId: released.fileId, title: artifact.title, family: artifact.family });
+      if (!reviewed || officeMetadataRemaining(reviewed, viewerId) <= 0) throw new Error("office_projection_expired");
+      await finishRelease(owner, reviewed, format);
     } finally {
-      setBusy(false);
+      if (ownsOperation(owner)) setBusy(false);
     }
+  }
+
+  async function finishRelease(owner: number, reviewed: OfficeReleaseReceipt, format: "native" | "pdf") {
+    const acknowledgement = reviewed.warnings.length ? { version: artifact.version, action: "export" as const, codes: reviewed.warnings.map((warning) => warning.code) } : undefined;
+    const released = await releaseOfficeArtifact(artifactId, { ...releaseInput(format), acknowledgement });
+    if (!ownsOperation(owner, released)) return;
+    setReceipt(inheritOfficeMetadata({ ...released.receipt }, released, viewerId));
+    if (released.receipt.status !== "ready" || !released.fileId) return;
+    const blob = await readOfficeReleasedFile(workspaceId, released.fileId);
+    if (!ownsOperation(owner, released) || officeMetadataRemaining(blob, viewerId) <= 0) return;
+    const remaining = Math.min(officeMetadataRemaining(released, viewerId), officeMetadataRemaining(blob, viewerId));
+    if (remaining <= 0) return;
+    if (format === "pdf") {
+      if (pdfPreview) URL.revokeObjectURL(pdfPreview.url);
+      setPdfPreview({ url: URL.createObjectURL(blob), filename: safeFilename(artifact.title, "pdf"), expiresAt: Date.now() + remaining });
+      return;
+    }
+    deliverReleasedBlob({ blob, title: artifact.title, family: artifact.family, revokeAfterMs: remaining });
   }
 
   async function saveOffline() {
@@ -121,16 +185,15 @@ function OfficeReviewContent({ artifact, artifactId, workspaceId, snapshot, onLi
   </div>;
 }
 
-async function deliverReleasedFile(params: { workspaceId: string; fileId: string; title: string; family: OfficeArtifact["family"] }): Promise<void> {
-  const blob = await readOfficeReleasedFile(params.workspaceId, params.fileId);
+function deliverReleasedBlob(params: { blob: Blob; title: string; family: OfficeArtifact["family"]; revokeAfterMs: number }): void {
   const extension = params.family === "document" ? "docx" : params.family === "presentation" ? "pptx" : "xlsx";
   const filename = safeFilename(params.title, extension);
-  const url = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(params.blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
   anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  window.setTimeout(() => URL.revokeObjectURL(url), Math.max(1, Math.min(60_000, params.revokeAfterMs)));
 }
 
 function invoiceSheet(snapshot: SpreadsheetSnapshot): SpreadsheetSnapshot["worksheets"][number] {

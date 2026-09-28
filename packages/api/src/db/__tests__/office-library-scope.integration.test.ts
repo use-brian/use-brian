@@ -66,6 +66,14 @@ async function fixture(grantLifetimeMs=86_400_000) {
 afterAll(async()=>{await getAppPool().end();await pool.end()})
 
 describe('[COMP:api/office-access] current Office library scopes (PG18)',()=>{
+  it('deduplicates bytes only inside one durable file scope',async()=>{
+    const f=await fixture(),otherTeam=await groups.createTeam(f.owner,f.workspaceId,{name:'Separate library department',key:'separate-library'})
+    const sameScope=await templates.addResource({...f.resourceParams,name:'Same file retry'})
+    const isolated=await templates.addResource({...f.resourceParams,name:'Same bytes, separate scope',fileId:await f.file([otherTeam.compartmentKey!])})
+    expect(sameScope.id).toBe(f.resource.id)
+    expect(isolated.id).not.toBe(f.resource.id)
+    expect((await pool.query('SELECT file_id FROM office_resources WHERE workspace_id=$1 AND content_hash=$2 ORDER BY file_id',[f.workspaceId,hash])).rows).toHaveLength(2)
+  })
   it('admits read-grant metadata but refuses every registry mutation without partial publication',async()=>{
     const f=await fixture()
     expect((await queryWithRLS(f.reader,'SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows).toEqual([{rolsuper:false,rolbypassrls:false}])

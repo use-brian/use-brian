@@ -16,23 +16,50 @@ import {
 import { getBrandStore } from '../db/brand-store.js'
 import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
+import type { OfficeArtifactRow } from '../db/office-artifacts.js'
+import { classifyOfficeOutput, officeFileBindingRevision, sameOfficeFileBinding, type OfficeFileBinding, type OfficeOutputScope } from './file-binding.js'
+
+type BoundTemplateResourceAdmission = OfficeTemplateResourceAdmission & { sourceBinding: OfficeFileBinding }
 
 export type OfficeTemplateCompileWorkerDeps = {
   claim(params: { userId: string; leaseToken: string; leaseMs: number; jobKinds: OfficeGenerationJobRow['jobKind'][] }): Promise<OfficeGenerationJobRow | null>
   getSnapshot(userId: string, artifactId: string): Promise<{ snapshot: OfficeArtifactSnapshot } | null>
   getTemplate(userId: string, templateId: string): Promise<{ id: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; draftArtifactId: string | null } | null>
-  readSource(params: { userId: string; workspaceId: string; assistantId: string | null; fileId: string }): Promise<Uint8Array>
+  getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
+  raiseArtifactScope(params: { userId: string; artifactId: string; sensitivity: OfficeOutputScope['sensitivity']; compartments: string[]; projectIds: string[] }): Promise<boolean>
+  readSource(params: { userId: string; workspaceId: string; assistantId: string | null; fileId: string }): Promise<{ bytes: Uint8Array; binding: OfficeFileBinding }>
   initialize(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot }): Promise<void>
-  saveImportedResource(params: { userId: string; workspaceId: string; resource: ExtractedOfficeResource }): Promise<OfficeTemplateResourceAdmission>
-  loadResourceAdmissions(params: { userId: string; workspaceId: string; resourceIds: string[] }): Promise<OfficeTemplateResourceAdmission[]>
+  saveImportedResource(params: { userId: string; workspaceId: string; assistantId: string | null; resource: ExtractedOfficeResource; sourceBinding: OfficeFileBinding; scope: OfficeOutputScope }): Promise<OfficeTemplateResourceAdmission>
+  loadResourceAdmissions(params: { userId: string; workspaceId: string; resourceIds: string[] }): Promise<BoundTemplateResourceAdmission[]>
   getDraftRouting(userId: string, templateId: string): Promise<unknown | null>
   saveDraftRouting(params: { userId: string; templateId: string; routing: unknown }): Promise<boolean>
-  saveBundle(params: { userId: string; workspaceId: string; templateId: string; hash: string; bytes: Uint8Array }): Promise<string>
+  saveBundle(params: { userId: string; workspaceId: string; templateId: string; hash: string; bytes: Uint8Array; scope: OfficeOutputScope }): Promise<string>
   addVersion(params: { userId: string; templateId: string; workspaceId: string; bundleFileId: string; bundleHash: string; capabilityVersion: number; locales: string[]; tags: string[]; whenToUse: string[]; whenNotToUse: string[]; exampleRequests: string[]; fieldSchema: unknown; admissionReceipt: OfficeTemplateAdmissionReceipt; provenance: unknown; resourceIds: string[]; status: 'draft' | 'admitted' }): Promise<unknown>
   appendEvent(params: { userId: string; jobId: string; workspaceId: string; code: string; values: Record<string, string | number | boolean>; actorType: 'system'; safeNarration: string }): Promise<unknown>
   finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed'; stage: string; errorCode?: string; errorDetail?: string }): Promise<boolean>
   leaseMs?: number
 }
+
+const artifactOutputScope = (artifact: OfficeArtifactRow): OfficeOutputScope => ({
+  sensitivity: artifact.sensitivity,
+  compartments: artifact.compartments,
+  projectIds: artifact.projectIds,
+})
+
+const compileInputRevision = (input: {
+  template: unknown
+  artifact: unknown
+  snapshot: OfficeArtifactSnapshot
+  resources: readonly BoundTemplateResourceAdmission[]
+}) => JSON.stringify({
+  template: input.template,
+  artifact: input.artifact,
+  snapshot: input.snapshot,
+  resources: input.resources.map(({ sourceBinding, bytes: _bytes, ...resource }) => ({
+    ...resource,
+    sourceBinding: officeFileBindingRevision(sourceBinding),
+  })),
+})
 
 function remapSnapshotResources(snapshot: OfficeArtifactSnapshot, admissions: readonly OfficeTemplateResourceAdmission[], extracted: readonly ExtractedOfficeResource[]): OfficeArtifactSnapshot {
   const ids = new Map(extracted.map((resource, index) => [resource.ref.id, admissions[index]?.id ?? resource.ref.id]))
@@ -63,19 +90,30 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
       if (typeof brief.templateId !== 'string') throw new Error('invalid_template_compile_brief')
       const template = await deps.getTemplate(userId, brief.templateId)
       if (!template || template.workspaceId !== job.workspaceId || template.draftArtifactId !== job.artifactId) throw new Error('template_compile_source_not_found')
+      const artifact = await deps.getArtifact(userId, job.artifactId)
+      if (!artifact || artifact.workspaceId !== job.workspaceId || artifact.mode !== 'template' || artifact.lifecycleState !== 'active') throw new Error('template_compile_source_not_found')
       let live: { snapshot: OfficeArtifactSnapshot } | null
-      let resourceAdmissions: OfficeTemplateResourceAdmission[] = []
+      let resourceAdmissions: BoundTemplateResourceAdmission[] = []
       if (brief.source?.kind === 'upload') {
         if (typeof brief.source.fileId !== 'string') throw new Error('invalid_template_upload_brief')
-        const bytes = await deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.source.fileId })
+        const source = await deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.source.fileId })
         const context = { artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: null, locale: 'en-US', defaultLanguage: 'en-US', title: template.name }
         const imported = template.family === 'document'
-          ? await importOfficeDocument(bytes, context)
+          ? await importOfficeDocument(source.bytes, context)
           : template.family === 'presentation'
-            ? await importOfficePresentation(bytes, context)
-            : await importOfficeSpreadsheet(bytes, context)
+            ? await importOfficePresentation(source.bytes, context)
+            : await importOfficeSpreadsheet(source.bytes, context)
         if (!imported.ok || !imported.snapshot) throw new Error(imported.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ') || 'template_upload_import_failed')
-        resourceAdmissions = await Promise.all(imported.resources.map((resource) => deps.saveImportedResource({ userId, workspaceId: job.workspaceId, resource })))
+        const currentSource = await deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.source.fileId })
+        const currentTemplate = await deps.getTemplate(userId, brief.templateId)
+        const currentArtifact = await deps.getArtifact(userId, job.artifactId)
+        if (!sameOfficeFileBinding(source.binding, currentSource.binding) || JSON.stringify(currentTemplate) !== JSON.stringify(template) || JSON.stringify(currentArtifact) !== JSON.stringify(artifact)) throw new Error('office_source_changed')
+        const scope = classifyOfficeOutput(artifactOutputScope(artifact), source.binding)
+        if (!await deps.raiseArtifactScope({ userId, artifactId: artifact.id, ...scope })) throw new Error('office_projection_changed')
+        resourceAdmissions = (await Promise.all(imported.resources.map(async (resource) => {
+          const admission = await deps.saveImportedResource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, resource, sourceBinding: source.binding, scope })
+          return { ...admission, sourceBinding: source.binding }
+        })))
         const snapshot: OfficeArtifactSnapshot = remapSnapshotResources({
           ...imported.snapshot,
           artifactId: job.artifactId,
@@ -84,6 +122,13 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
           title: template.name,
           accessibility: { ...imported.snapshot.accessibility, title: template.name },
         }, resourceAdmissions, imported.resources)
+        const [finalSource, finalTemplate, finalArtifact] = await Promise.all([
+          deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.source.fileId }),
+          deps.getTemplate(userId, brief.templateId),
+          deps.getArtifact(userId, job.artifactId),
+        ])
+        if (!sameOfficeFileBinding(source.binding, finalSource.binding) || JSON.stringify(finalTemplate) !== JSON.stringify(template) ||
+          !finalArtifact || JSON.stringify(artifactOutputScope(finalArtifact)) !== JSON.stringify(scope)) throw new Error('office_source_changed')
         await deps.initialize({ userId, artifactId: job.artifactId, snapshot })
         live = { snapshot }
         const routing = inferOfficeTemplateRouting(snapshot, 'upload')
@@ -104,6 +149,7 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
       const routingDiagnostics = officeTemplateRoutingDiagnostics(live.snapshot, routing)
       if (routingDiagnostics.length > 0) throw new Error(routingDiagnostics.join('; '))
       resourceAdmissions = await deps.loadResourceAdmissions({ userId, workspaceId: job.workspaceId, resourceIds: live.snapshot.resources.map((resource) => resource.id) })
+      const inputRevision = compileInputRevision({ template, artifact, snapshot: live.snapshot, resources: resourceAdmissions })
       const sourceHash = createHash('sha256').update(JSON.stringify(live.snapshot)).digest('hex')
       const draft = {
         id: template.id,
@@ -149,7 +195,26 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
       })
       const bundleBytes = new TextEncoder().encode(JSON.stringify(compiled.bundle ?? draft))
       const bundleHash = createHash('sha256').update(bundleBytes).digest('hex')
-      const bundleFileId = await deps.saveBundle({ userId, workspaceId: job.workspaceId, templateId: template.id, hash: bundleHash, bytes: bundleBytes })
+      const [checkedTemplate, checkedArtifact, checkedLive, checkedResources] = await Promise.all([
+        deps.getTemplate(userId, template.id),
+        deps.getArtifact(userId, artifact.id),
+        deps.getSnapshot(userId, artifact.id),
+        deps.loadResourceAdmissions({ userId, workspaceId: job.workspaceId, resourceIds: live.snapshot.resources.map((resource) => resource.id) }),
+      ])
+      if (!checkedTemplate || !checkedArtifact || !checkedLive || compileInputRevision({ template: checkedTemplate, artifact: checkedArtifact, snapshot: checkedLive.snapshot, resources: checkedResources }) !== inputRevision) throw new Error('office_projection_changed')
+      const scope = classifyOfficeOutput(artifactOutputScope(artifact), ...resourceAdmissions.map(({ sourceBinding }) => sourceBinding))
+      if (!await deps.raiseArtifactScope({ userId, artifactId: artifact.id, ...scope })) throw new Error('office_projection_changed')
+      const raisedArtifact = await deps.getArtifact(userId, artifact.id)
+      if (!raisedArtifact || JSON.stringify(artifactOutputScope(raisedArtifact)) !== JSON.stringify(scope)) throw new Error('office_projection_changed')
+      const bundleFileId = await deps.saveBundle({ userId, workspaceId: job.workspaceId, templateId: template.id, hash: bundleHash, bytes: bundleBytes, scope })
+      const [finalTemplate, finalArtifact, finalLive, finalResources] = await Promise.all([
+        deps.getTemplate(userId, template.id),
+        deps.getArtifact(userId, artifact.id),
+        deps.getSnapshot(userId, artifact.id),
+        deps.loadResourceAdmissions({ userId, workspaceId: job.workspaceId, resourceIds: live.snapshot.resources.map((resource) => resource.id) }),
+      ])
+      if (!finalTemplate || !finalArtifact || !finalLive || compileInputRevision({ template: finalTemplate, artifact: finalArtifact, snapshot: finalLive.snapshot, resources: finalResources }) !==
+        compileInputRevision({ template, artifact: raisedArtifact, snapshot: live.snapshot, resources: resourceAdmissions })) throw new Error('office_projection_changed')
       await deps.addVersion({
         userId,
         templateId: template.id,

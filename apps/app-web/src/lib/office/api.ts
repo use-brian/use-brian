@@ -113,6 +113,15 @@ async function metadata<T extends object, B = T>(path: string, fallback: string,
   catch { throw new OfficeApiError("office_projection_expired", 409); }
 }
 
+async function protectedMediaJson<T extends object, B = T>(response: Response, fallback: string, started: number, viewerId: string | undefined, select: (body: B) => T = value => value as unknown as T): Promise<OfficeMetadata<T>> {
+  const body = await json<B>(response, fallback);
+  const header = response.headers.get("X-Brian-Media-Valid-For-Ms");
+  try {
+    if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
+    return attachOfficeMetadata(select(body), header === null ? NaN : Number(header), started, viewerId);
+  } catch { throw new OfficeApiError("office_projection_expired", 409); }
+}
+
 export async function listOfficeArtifacts(
   workspaceId: string,
   view: "active" | "archived" | "trash" | "retained" = "active",
@@ -164,7 +173,9 @@ export async function admitOfficeImageResource(artifactId: string, workspaceId: 
   const upload = await json<{ files: Array<{ id?: string; error?: string }> }>(await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/upload`, { method: 'POST', body: form }), 'office_image_upload_failed');
   const source = upload.files[0];
   if (!source?.id || source.error) throw new Error(source?.error ?? 'office_image_upload_failed');
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fileId: source.id, kind: 'image' }) }), 'office_image_admission_failed');
+  const started = performance.now(), viewerId = getUserInfo()?.id;
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fileId: source.id, kind: 'image' }) });
+  return protectedMediaJson(response, 'office_image_admission_failed', started, viewerId);
 }
 
 export async function submitOfficeCommand(artifactId: string, expectedSeq: number, command: OfficeCommand, mode: "apply" | "suggest"): Promise<OfficeLiveSnapshot | { mode: "suggestion" }> {
@@ -366,25 +377,39 @@ export type OfficeReleaseReceipt = { status: "blocked" | "needs_ack" | "ready"; 
 export type OfficeReleaseInput = { expectedVersion: number; action: "export" | "share" | "present" | "send" | "publish"; destination: { sensitivity: "public" | "internal" | "confidential"; external: boolean; disclosureSatisfied?: boolean }; format?: "native" | "pdf"; spreadsheetPdf?: SpreadsheetPdfRequest; acknowledgement?: { version: number; action: "export" | "share" | "present" | "send" | "publish"; codes: string[] } };
 
 export async function reviewOfficeRelease(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseReceipt> {
-  const body = await json<{ receipt: OfficeReleaseReceipt }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases/preflight`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }), "office_release_review_failed");
-  return body.receipt;
+  const started = performance.now(), viewerId = getUserInfo()?.id;
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases/preflight`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  return protectedMediaJson<OfficeReleaseReceipt, { receipt: OfficeReleaseReceipt }>(response, "office_release_review_failed", started, viewerId, body => body.receipt);
 }
 
 export type OfficeReleaseResult = { releaseId?: string; fileId?: string; receipt: OfficeReleaseReceipt };
 
 export async function releaseOfficeArtifact(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseResult> {
+  const started = performance.now(), viewerId = getUserInfo()?.id;
   const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
   if (response.status === 409) {
     const body = await response.clone().json().catch(() => null) as { receipt?: OfficeReleaseReceipt } | null;
-    if (body?.receipt) return { receipt: body.receipt };
+    if (body?.receipt) {
+      const header = response.headers.get("X-Brian-Media-Valid-For-Ms");
+      try {
+        if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
+        return attachOfficeMetadata({ receipt: body.receipt }, header === null ? NaN : Number(header), started, viewerId);
+      } catch { throw new OfficeApiError("office_projection_expired", 409); }
+    }
   }
-  return json(response, "office_release_failed");
+  return protectedMediaJson<OfficeReleaseResult>(response, "office_release_failed", started, viewerId);
 }
 
 export async function readOfficeReleasedFile(workspaceId: string, fileId: string): Promise<Blob> {
+  const started = performance.now(), viewerId = getUserInfo()?.id;
   const response = await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}`);
   if (!response.ok) throw new OfficeApiError("office_release_download_failed", response.status);
-  return response.blob();
+  const blob = await response.blob();
+  const header = response.headers.get("X-Brian-Media-Valid-For-Ms");
+  try {
+    if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
+    return attachOfficeMetadata(blob, header === null ? NaN : Number(header), started, viewerId);
+  } catch { throw new OfficeApiError("office_projection_expired", 409); }
 }
 
 export async function transitionOfficeLifecycle(artifactId: string, action: "archive" | "unarchive" | "trash" | "restore" | "purge", reason: string): Promise<OfficeArtifact> {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import * as brandStore from '../../db/brand-store.js'
 import {documentSnapshot,completePresentationSnapshot,resolveFixtureResource,id} from '../../../../core/src/office/__tests__/fixtures.js'
 import { exportOfficePresentation, type Message } from '@use-brian/core'
@@ -549,7 +550,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(importStore.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'import_failed' }))
 
     const templateJob = { ...base, id: '30000000-0000-4000-8000-000000000012', jobKind: 'template_compile' as const } as OfficeGenerationJobRow
-    const templateDeps = { claim: vi.fn(async () => templateJob), getSnapshot: vi.fn(), getTemplate: vi.fn(), readSource: vi.fn(), initialize: vi.fn(), saveImportedResource: vi.fn(), loadResourceAdmissions: vi.fn(async () => []), getDraftRouting: vi.fn(), saveDraftRouting: vi.fn(async () => true), saveBundle: vi.fn(), addVersion: vi.fn(), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true) }
+    const templateDeps = { claim: vi.fn(async () => templateJob), getSnapshot: vi.fn(), getTemplate: vi.fn(), getArtifact: vi.fn(), raiseArtifactScope: vi.fn(async () => true), readSource: vi.fn(), initialize: vi.fn(), saveImportedResource: vi.fn(), loadResourceAdmissions: vi.fn(async () => []), getDraftRouting: vi.fn(), saveDraftRouting: vi.fn(async () => true), saveBundle: vi.fn(), addVersion: vi.fn(), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true) }
     const templateWorker = createOfficeTemplateCompileWorker(templateDeps)
     await expect(templateWorker(base.initiatedByUserId)).resolves.toBe(true)
     expect(templateDeps.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'template_compile_failed' }))
@@ -567,6 +568,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       const deps = {
         claim: vi.fn(async () => job),
         getTemplate: vi.fn(async () => ({ id: 'template-1', workspaceId: job.workspaceId, draftArtifactId: job.artifactId, family: 'presentation' as const, name: 'Example deck', description: '', sensitivity: 'internal' as const })),
+        getArtifact: vi.fn(async () => ({ id: job.artifactId, workspaceId: job.workspaceId, mode: 'template' as const, lifecycleState: 'active' as const, sensitivity: 'internal' as const, compartments: [], projectIds: [] } as never)), raiseArtifactScope: vi.fn(async () => true),
         readSource: vi.fn().mockRejectedValue(cause), getSnapshot: vi.fn().mockRejectedValue(cause),
         initialize: vi.fn(), saveImportedResource: vi.fn(), loadResourceAdmissions: vi.fn(),
         getDraftRouting: vi.fn(), saveDraftRouting: vi.fn(), saveBundle: vi.fn(), addVersion: vi.fn(),
@@ -622,7 +624,9 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       claim: vi.fn(async () => job),
       getSnapshot: vi.fn(),
       getTemplate: vi.fn(async () => ({ id: templateId, workspaceId, family: 'presentation' as const, name: 'Company deck', description: 'Use for company introductions', sensitivity: 'internal' as const, draftArtifactId: artifactId })),
-      readSource: vi.fn(async () => uploaded.bytes),
+      getArtifact: vi.fn(async () => ({ id: artifactId, workspaceId, mode: 'template' as const, lifecycleState: 'active' as const, sensitivity: 'internal' as const, compartments: [], projectIds: [] } as never)),
+      raiseArtifactScope: vi.fn(async () => true),
+      readSource: vi.fn(async () => ({ bytes: uploaded.bytes, binding: { fileId: '30000000-0000-4000-8000-000000000112', workspaceId, scopeVersion: '1', mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', hash: createHash('sha256').update(uploaded.bytes).digest('hex'), sensitivity: 'internal' as const, compartments: [], projectIds: [] } })),
       initialize: vi.fn(async () => undefined),
       saveImportedResource: vi.fn(),
       loadResourceAdmissions: vi.fn(async () => []),
@@ -651,15 +655,35 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     if(node.kind!=='paragraph')throw new Error('Invalid fixture paragraph')
     node.runs[0]!.text='Summary: {{SUMMARY}}'
     source.resources=completePresentationSnapshot().resources.slice(0,1)
-    const admissions=await Promise.all(source.resources.map(async ref=>({id:ref.id,hash:ref.hash,...(await resolveFixtureResource(ref.id))!,licence:{name:'Fixture media'},embeddingRights:'allowed' as const})))
+    const admissions=await Promise.all(source.resources.map(async ref=>({id:ref.id,hash:ref.hash,...(await resolveFixtureResource(ref.id))!,licence:{name:'Fixture media'},embeddingRights:'allowed' as const,sourceBinding:{fileId:id(899),workspaceId:source.workspaceId,scopeVersion:'1',mime:ref.mime,hash:ref.hash,sensitivity:'internal' as const,compartments:[],projectIds:[]}})))
     const templateId=id(800),userId=id(801)
     const job={id:id(802),workspaceId:source.workspaceId,artifactId:source.artifactId,initiatedByUserId:userId,assistantId:null,jobKind:'template_compile',brief:{templateId,source:{kind:'publish'}}} as OfficeGenerationJobRow
     const brand=vi.spyOn(brandStore,'getBrandStore').mockReturnValue({get:vi.fn(async()=>null)} as never)
-    const deps={claim:vi.fn(async()=>job),getSnapshot:vi.fn(async()=>({snapshot:source})),getTemplate:vi.fn(async()=>({id:templateId,workspaceId:source.workspaceId,family:'document' as const,name:'Library fixture',description:'Fixture document',sensitivity:'internal' as const,draftArtifactId:source.artifactId})),readSource:vi.fn(),initialize:vi.fn(),saveImportedResource:vi.fn(),loadResourceAdmissions:vi.fn(async()=>admissions),getDraftRouting:vi.fn(async()=>null),saveDraftRouting:vi.fn(async()=>true),saveBundle:vi.fn(async()=>id(803)),addVersion:vi.fn(async()=>({id:id(804),version:1})),appendEvent:vi.fn(),finish:vi.fn(async()=>true)}
+    const deps={claim:vi.fn(async()=>job),getSnapshot:vi.fn(async()=>({snapshot:source})),getTemplate:vi.fn(async()=>({id:templateId,workspaceId:source.workspaceId,family:'document' as const,name:'Library fixture',description:'Fixture document',sensitivity:'internal' as const,draftArtifactId:source.artifactId})),getArtifact:vi.fn(async()=>({id:source.artifactId,workspaceId:source.workspaceId,mode:'template' as const,lifecycleState:'active' as const,sensitivity:'internal' as const,compartments:[],projectIds:[]} as never)),raiseArtifactScope:vi.fn(async()=>true),readSource:vi.fn(),initialize:vi.fn(),saveImportedResource:vi.fn(),loadResourceAdmissions:vi.fn(async()=>admissions),getDraftRouting:vi.fn(async()=>null),saveDraftRouting:vi.fn(async()=>true),saveBundle:vi.fn(async()=>id(803)),addVersion:vi.fn(async()=>({id:id(804),version:1})),appendEvent:vi.fn(),finish:vi.fn(async()=>true)}
     try {
       await createOfficeTemplateCompileWorker(deps)(userId)
       expect(deps.addVersion).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({status:'admitted',resourceIds:source.resources.map(resource=>resource.id)}))
       expect(deps.finish).toHaveBeenCalledWith(expect.objectContaining({status:'completed'}))
+    } finally {brand.mockRestore()}
+  })
+
+  it('withholds a compiled template version when the live draft changes during compilation',async()=>{
+    const source=documentSnapshot(),changed=structuredClone(source)
+    const paragraph=source.sections[0]!.nodes.find(node=>node.id===id(9))!
+    if(paragraph.kind!=='paragraph')throw new Error('Invalid fixture paragraph')
+    paragraph.runs[0]!.text='Summary: {{SUMMARY}}'
+    changed.title='Changed while compiling'
+    const templateId=id(810),userId=id(811)
+    const job={id:id(812),workspaceId:source.workspaceId,artifactId:source.artifactId,initiatedByUserId:userId,assistantId:null,jobKind:'template_compile',brief:{templateId,source:{kind:'scratch'}}} as OfficeGenerationJobRow
+    const getSnapshot=vi.fn().mockResolvedValueOnce({snapshot:source}).mockResolvedValue({snapshot:changed})
+    const addVersion=vi.fn(),saveBundle=vi.fn()
+    const brand=vi.spyOn(brandStore,'getBrandStore').mockReturnValue({get:vi.fn(async()=>null)} as never)
+    const deps={claim:vi.fn(async()=>job),getSnapshot,getTemplate:vi.fn(async()=>({id:templateId,workspaceId:source.workspaceId,family:'document' as const,name:'Draft fixture',description:'Fixture document',sensitivity:'internal' as const,draftArtifactId:source.artifactId})),getArtifact:vi.fn(async()=>({id:source.artifactId,workspaceId:source.workspaceId,mode:'template' as const,lifecycleState:'active' as const,sensitivity:'internal' as const,compartments:[],projectIds:[]} as never)),raiseArtifactScope:vi.fn(async()=>true),readSource:vi.fn(),initialize:vi.fn(),saveImportedResource:vi.fn(),loadResourceAdmissions:vi.fn(async()=>[]),getDraftRouting:vi.fn(async()=>null),saveDraftRouting:vi.fn(async()=>true),saveBundle,addVersion,appendEvent:vi.fn(),finish:vi.fn(async()=>true)}
+    try {
+      await createOfficeTemplateCompileWorker(deps)(userId)
+      expect(saveBundle).not.toHaveBeenCalled()
+      expect(addVersion).not.toHaveBeenCalled()
+      expect(deps.finish).toHaveBeenCalledWith(expect.objectContaining({status:'failed',errorDetail:'office_projection_changed'}))
     } finally {brand.mockRestore()}
   })
 

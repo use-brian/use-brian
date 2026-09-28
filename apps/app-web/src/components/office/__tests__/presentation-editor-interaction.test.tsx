@@ -8,11 +8,13 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { clearPresentationClipboardForTest } from "@/lib/office/presentation-clipboard";
 import { admitOfficeImageResource } from "@/lib/office/api";
+import { attachOfficeMetadata } from "@/lib/office/metadata";
 import { PRESENTATION_SLIDE_TOUCH_HOLD_MS, PresentationEditor } from "../presentation-editor";
 import { presentationFixture } from "./editor-fixtures";
 
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: vi.fn(async () => true) }));
 vi.mock("@/lib/office/api", async (importOriginal) => ({ ...await importOriginal<typeof import("@/lib/office/api")>(), admitOfficeImageResource: vi.fn() }));
+vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: "viewer-1" }) }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -473,7 +475,7 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
   });
 
   it("admits an uploaded image then attaches and inserts it in one batch", async () => {
-    vi.mocked(admitOfficeImageResource).mockResolvedValue({ resource: { id: "00000000-0000-4000-8000-000000000250", kind: "image", hash: "c".repeat(64), mime: "image/png", sensitivity: "internal" }, widthPx: 1200, heightPx: 600 });
+    vi.mocked(admitOfficeImageResource).mockResolvedValue(attachOfficeMetadata({ resource: { id: "00000000-0000-4000-8000-000000000250", kind: "image", hash: "c".repeat(64), mime: "image/png", sensitivity: "internal" }, widthPx: 1200, heightPx: 600 }, 30_000, performance.now(), "viewer-1"));
     const { onCommand } = mount();
     const input = host.querySelector<HTMLInputElement>(`input[aria-label="${en.office.insertPresentationImage}"]`)!;
     const file = new File([new Uint8Array([137, 80, 78, 71])], "chart.png", { type: "image/png" });

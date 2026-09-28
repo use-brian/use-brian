@@ -20,6 +20,7 @@ function releaseServer(overrides: Partial<OfficeReleaseRouteDeps> = {}) {
       media: [],
     } as never)),
     resolveResource: vi.fn(() => resolveFixtureResource),
+    revalidate: vi.fn(async () => ({ scope: { sensitivity: 'internal' as const, compartments: ['team:product'], projectIds: [] }, validForMs: 30_000 })),
     saveReleasedFile: vi.fn(async () => 'file-1'),
     createRecord: vi.fn(async () => ({ id: 'release-1' })),
     createDerivative: vi.fn(),
@@ -40,6 +41,7 @@ describe('[COMP:api/office-release] Presentation PDF route', () => {
     const test = releaseServer()
     const response = await request(test.app).post(`/api/office/artifacts/${ARTIFACT}/releases/preflight`).send({ ...input, format: 'pdf' }).expect(200)
     expect(response.body.receipt).toMatchObject({ status: 'ready', blocks: [] })
+    expect(response.headers['x-brian-media-valid-for-ms']).toBe('30000')
   })
 
   it('persists canonical PDF bytes with the owned MIME and extension', async () => {
@@ -47,7 +49,8 @@ describe('[COMP:api/office-release] Presentation PDF route', () => {
     const response = await request(test.app).post(`/api/office/artifacts/${ARTIFACT}/releases`).send({ ...input, format: 'pdf' }).expect(201)
 
     expect(response.body).toMatchObject({ releaseId: 'release-1', fileId: 'file-1', receipt: { status: 'ready', presentationPdf: { expectedPageCount: 2, actualPageCount: 2 } } })
-    expect(test.deps.saveReleasedFile).toHaveBeenCalledWith(expect.objectContaining({ extension: 'pdf', mime: 'application/pdf', bytes: expect.any(Uint8Array) }))
+    expect(response.headers['x-brian-media-valid-for-ms']).toBe('30000')
+    expect(test.deps.saveReleasedFile).toHaveBeenCalledWith(expect.objectContaining({ extension: 'pdf', mime: 'application/pdf', bytes: expect.any(Uint8Array), scope: { sensitivity: 'internal', compartments: ['team:product'], projectIds: [] } }))
     expect(test.deps.createRecord).toHaveBeenCalledOnce()
   })
 
@@ -67,5 +70,23 @@ describe('[COMP:api/office-release] Presentation PDF route', () => {
 
     expect(convert).not.toHaveBeenCalled()
     expect(test.deps.saveReleasedFile).toHaveBeenCalledWith(expect.objectContaining({ extension: 'pptx', mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' }))
+  })
+
+  it('publishes nothing when authority changes after conversion', async () => {
+    const saveReleasedFile = vi.fn()
+    const test = releaseServer({ revalidate: vi.fn(async () => null), saveReleasedFile })
+    await request(test.app).post(`/api/office/artifacts/${ARTIFACT}/releases`).send({ ...input, format: 'native' }).expect(409, { error: 'office_projection_changed' })
+    expect(saveReleasedFile).not.toHaveBeenCalled()
+    expect(test.deps.createRecord).not.toHaveBeenCalled()
+  })
+
+  it('does not create a release record when authority changes while the classified file is written', async () => {
+    const revalidate = vi.fn()
+      .mockResolvedValueOnce({ scope: { sensitivity: 'internal', compartments: [], projectIds: [] }, validForMs: 30_000 })
+      .mockResolvedValueOnce(null)
+    const test = releaseServer({ revalidate })
+    await request(test.app).post(`/api/office/artifacts/${ARTIFACT}/releases`).send({ ...input, format: 'native' }).expect(409, { error: 'office_projection_changed' })
+    expect(test.deps.saveReleasedFile).toHaveBeenCalledOnce()
+    expect(test.deps.createRecord).not.toHaveBeenCalled()
   })
 })

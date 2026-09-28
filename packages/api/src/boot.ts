@@ -469,7 +469,7 @@ import { openRecordingsRoutes } from './routes/recordings.js'
 import { createMeetingTagsTool } from './recordings/meeting-tags-tool.js'
 import { recordingLiveRoutes } from './routes/recording-live.js'
 import { createDocGateway } from './doc/doc-gateway.js'
-import { createFilesApi, createSingletonFilesClientResolver, storageLimitBytesForPlan, type FilesClientResolver } from './files/files-api.js'
+import { createFilesApi, createSingletonFilesClientResolver, storageLimitBytesForPlan, workspaceFileReadRevision, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
@@ -560,11 +560,12 @@ import { generateSpreadsheetFromTemplate } from './office/spreadsheet-generation
 import { generateAssistantOfficeCommands } from './office/command-revision.js'
 import { runOfficeEdit } from '@use-brian/core'
 import { applyLiveOfficeSuggestion, replaceLiveOfficeSnapshot, officeSuggestionApplied } from './office/live-sync.js'
-import { officeReleaseRoutes } from './routes/office-releases.js'
+import { officeReleaseContextRevision, officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineRoutes } from './routes/office-offline.js'
 import { officeResourceRoutes } from './routes/office-resources.js'
 import { createOfficeResourceReader } from './office/resource-read.js'
+import { bindOfficeFile, classifyOfficeOutput, fileMatchesOfficeOutput, officeOutputScopeRevision, officeScopePathSegment, sameOfficeFileBinding, type OfficeOutputScope } from './office/file-binding.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
 import { assertOfficeArtifactSnapshot, encodeOfficeState, officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { publicShareRoutes } from './routes/public-share.js'
@@ -6381,6 +6382,70 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     steer: officeGenerationStore.steer,
     cancel: officeGenerationStore.cancel,
   }))
+  const readBoundOfficeFile = filesApi ? async (params: { userId: string; workspaceId: string; assistantId?: string | null; fileId: string }) => {
+    const membership = await getWorkspaceMembershipWithClearanceSystem(params.userId, params.workspaceId)
+    if (!membership) return null
+    const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
+    const context = {
+      workspaceId: params.workspaceId,
+      userId: params.userId,
+      assistantId: params.assistantId ?? null,
+      assistantKind: 'standard' as const,
+      clearance,
+    }
+    const read = await filesApi!.readBytes(context, params.fileId)
+    if (!read.ok || read.value.file.workspaceId !== params.workspaceId) return null
+    const revision = workspaceFileReadRevision(read.value.file)
+    const projectionStarted = performance.now()
+    const projection = await getWorkspaceFileReadProjection({
+      workspaceId: params.workspaceId,
+      userId: params.userId,
+      assistantId: params.assistantId ?? params.userId,
+      assistantKind: 'standard',
+      clearance,
+    }, read.value.file.id)
+    const validForMs = Math.floor(Math.min(30_000, projection?.validForMs ?? 0) - (performance.now() - projectionStarted))
+    if (!projection || workspaceFileReadRevision(projection.file) !== revision || !Number.isFinite(validForMs) || validForMs <= 0) return null
+    return { bytes: read.value.bytes, binding: bindOfficeFile(read.value.file, read.value.bytes), validForMs }
+  } : null
+  const saveClassifiedOfficeFile = filesApi ? async (params: {
+    userId: string
+    workspaceId: string
+    path: string
+    bytes: Uint8Array
+    mime: string
+    hash: string
+    scope: OfficeOutputScope
+  }): Promise<string> => {
+    const membership = await getWorkspaceMembershipWithClearanceSystem(params.userId, params.workspaceId)
+    if (!membership) throw new Error('Office output membership unavailable')
+    const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
+    const context = {
+      workspaceId: params.workspaceId,
+      userId: params.userId,
+      assistantKind: 'standard' as const,
+      clearance,
+      writeSensitivity: params.scope.sensitivity,
+      writeCompartments: params.scope.compartments,
+      writeProjectIds: params.scope.projectIds,
+    }
+    const existing = await filesApi!.stat(context, params.path)
+    if (existing.ok) {
+      const read = await filesApi!.readBytes(context, existing.value.id)
+      if (!read.ok || !fileMatchesOfficeOutput(read.value.file, read.value.bytes, params)) {
+        throw new Error('office_output_reuse_mismatch')
+      }
+      return read.value.file.id
+    }
+    const saved = await filesApi!.writeBytes(context, {
+      path: params.path,
+      bytes: params.bytes,
+      mime: params.mime,
+      sensitivity: params.scope.sensitivity,
+    })
+    if (!saved.ok) throw new Error(`Office output save failed: ${saved.error.kind}`)
+    return saved.value.id
+  } : null
   const officeImportWorker = filesApi ? createOfficeImportWorker({
     store: officeGenerationStore,
     async readSource({ userId, workspaceId, assistantId, fileId }) {
@@ -6399,27 +6464,26 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     claim: officeGenerationStore.claim,
     getSnapshot: officeLiveStore.get,
     getTemplate: officeTemplateStore.get,
+    getArtifact: officeArtifactStore.get,
+    raiseArtifactScope: officeArtifactStore.raiseScope,
     async readSource({ userId, workspaceId, assistantId, fileId }) {
-      const result = await filesApi!.readBytes({ workspaceId, userId, assistantId, assistantKind: 'standard', clearance: 'confidential' }, fileId)
-      if (!result.ok) throw new Error(`Office template source unavailable: ${result.error.kind}`)
-      return result.value.bytes
+      const result = await readBoundOfficeFile!({ userId, workspaceId, assistantId, fileId })
+      if (!result) throw new Error('Office template source unavailable')
+      return result
     },
     initialize: officeLiveStore.initialize,
     getDraftRouting: officeTemplateStore.getDraftRouting,
     saveDraftRouting: officeTemplateStore.saveDraftRouting,
-    async saveImportedResource({ userId, workspaceId, resource }) {
-      const path = `/office/resources/${resource.ref.hash}`
-      const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
-      const existing = await filesApi!.stat(ctx, path)
-      const fileId = existing.ok ? existing.value.id : await (async () => {
-        const saved = await filesApi!.writeBytes(ctx, { path, bytes: resource.bytes, mime: resource.ref.mime, sensitivity: resource.ref.sensitivity })
-        if (!saved.ok) throw new Error(`Office resource save failed: ${saved.error.kind}`)
-        return saved.value.id
-      })()
+    async saveImportedResource({ userId, workspaceId, assistantId, resource, sourceBinding, scope }) {
+      const source = await readBoundOfficeFile!({ userId, workspaceId, assistantId, fileId: sourceBinding.fileId })
+      if (!source || !sameOfficeFileBinding(source.binding, sourceBinding)) throw new Error('office_source_changed')
+      const resourceScope = classifyOfficeOutput(scope, { sensitivity: resource.ref.sensitivity, compartments: [], projectIds: [] })
+      const path = `/office/resources/${officeScopePathSegment(resourceScope)}/${resource.ref.hash}`
+      const fileId = await saveClassifiedOfficeFile!({ userId, workspaceId, path, bytes: resource.bytes, mime: resource.ref.mime, hash: resource.ref.hash, scope: resourceScope })
       const persisted = await officeTemplateStore.addResource({
         userId, workspaceId, kind: 'brand_media', name: resource.sourcePart, fileId,
         hash: resource.ref.hash, mime: resource.ref.mime,
-        licence: { name: 'Workspace-uploaded source file' }, embeddingRights: 'allowed', sensitivity: resource.ref.sensitivity,
+        licence: { name: 'Workspace-uploaded source file' }, embeddingRights: 'allowed', sensitivity: resourceScope.sensitivity,
       })
       return {
         id: persisted.id, bytes: resource.bytes, hash: resource.ref.hash, mime: resource.ref.mime,
@@ -6430,12 +6494,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return Promise.all(resourceIds.map(async (resourceId) => {
         const resource = await officeTemplateStore.getResource(userId, resourceId)
         if (!resource || resource.workspaceId !== workspaceId || !resource.fileId) throw new Error(`Office template resource ${resourceId} is unavailable`)
-        const read = await filesApi!.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, resource.fileId)
-        if (!read.ok) throw new Error(`Office template resource ${resourceId} is unavailable: ${read.error.kind}`)
+        const read = await readBoundOfficeFile!({ userId, workspaceId, fileId: resource.fileId })
+        if (!read || read.binding.hash !== resource.hash || read.binding.mime !== resource.mime) throw new Error(`Office template resource ${resourceId} is unavailable`)
         const name = typeof resource.licence?.name === 'string' && resource.licence.name.trim() ? resource.licence.name : 'Workspace resource'
         return {
           id: resource.id,
-          bytes: read.value.bytes,
+          bytes: read.bytes,
           hash: resource.hash,
           mime: resource.mime,
           licence: {
@@ -6444,17 +6508,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             ...(typeof resource.licence?.attribution === 'string' ? { attribution: resource.licence.attribution } : {}),
           },
           embeddingRights: resource.embeddingRights,
+          sourceBinding: read.binding,
         }
       }))
     },
-    async saveBundle({ userId, workspaceId, templateId, hash, bytes }) {
-      const path = `/office/templates/${templateId}/${hash}.json`
-      const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
-      const existing = await filesApi!.stat(ctx, path)
-      if (existing.ok) return existing.value.id
-      const saved = await filesApi!.writeBytes(ctx, { path, bytes, mime: 'application/json', sensitivity: 'confidential' })
-      if (!saved.ok) throw new Error(`Office template bundle save failed: ${saved.error.kind}`)
-      return saved.value.id
+    async saveBundle({ userId, workspaceId, templateId, hash, bytes, scope }) {
+      const path = `/office/templates/${templateId}/${officeScopePathSegment(scope)}/${hash}.json`
+      return saveClassifiedOfficeFile!({ userId, workspaceId, path, bytes, mime: 'application/json', hash, scope })
     },
     addVersion: officeTemplateStore.addVersion,
     appendEvent: officeGenerationStore.appendEvent,
@@ -6859,22 +6919,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return artifact && access && live ? { artifact, access, snapshot: live.snapshot } : null
     },
     async readUpload(userId, workspaceId, fileId) {
-      const membership = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
-      if (!membership) return null
-      const read = await filesApi!.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: membership.clearance }, fileId)
-      return read.ok && read.value.file.workspaceId === workspaceId ? { bytes: read.value.bytes, sensitivity: read.value.file.sensitivity } : null
+      return readBoundOfficeFile!({ userId, workspaceId, fileId })
     },
-    async persistImage({ userId, workspaceId, sensitivity, image }) {
-      const path = `/office/resources/${image.hash}`
-      const membership = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
-      if (!membership) throw new Error('Office resource membership unavailable')
-      const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: membership.clearance }
-      const existing = await filesApi!.stat(ctx, path)
-      const fileId = existing.ok ? existing.value.id : await (async () => {
-        const saved = await filesApi!.writeBytes(ctx, { path, bytes: image.bytes, mime: image.mime, sensitivity })
-        if (!saved.ok) throw new Error(`Office resource save failed: ${saved.error.kind}`)
-        return saved.value.id
-      })()
+    async persistImage({ userId, workspaceId, scope, image }) {
+      const path = `/office/resources/${officeScopePathSegment(scope)}/${image.hash}`
+      const fileId = await saveClassifiedOfficeFile!({ userId, workspaceId, path, bytes: image.bytes, mime: image.mime, hash: image.hash, scope })
       return officeTemplateStore.addResource({
         userId,
         workspaceId,
@@ -6886,7 +6935,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         licence: { name: 'Workspace-uploaded image', provenance: 'workspace-upload' },
         provenance: { source: 'workspace-upload', normalized: true },
         embeddingRights: 'allowed',
-        sensitivity,
+        sensitivity: scope.sensitivity,
       })
     },
     readResource: readOfficeResource,
@@ -6907,13 +6956,40 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }
     return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, brandClaims, media }
   }
+  const revalidateOfficeRelease = async (params: {
+    userId: string
+    expected: NonNullable<Awaited<ReturnType<typeof loadOfficeReleaseContext>>>
+    releasedFileId?: string
+    releasedHash?: string
+    releasedMime?: string
+  }): Promise<{ scope: OfficeOutputScope; validForMs: number } | null> => {
+    const current = await loadOfficeReleaseContext(params.userId, params.expected.artifact.id)
+    if (!current || officeReleaseContextRevision(current) !== officeReleaseContextRevision(params.expected)) return null
+    const resourceReads = await Promise.all(current.snapshot.resources.map(async (ref) => {
+      const resource = await readOfficeResource(params.userId, current.artifact.workspaceId, ref.id)
+      return resource && resource.hash === ref.hash && resource.mime === ref.mime ? resource : null
+    }))
+    if (resourceReads.some((resource) => resource === null)) return null
+    const scope = classifyOfficeOutput({
+      sensitivity: current.artifact.sensitivity,
+      compartments: current.artifact.compartments,
+      projectIds: current.artifact.projectIds,
+    }, ...resourceReads.map((resource) => resource!.binding))
+    let validForMs = resourceReads.reduce((ttl, resource) => Math.min(ttl, resource!.validForMs), 30_000)
+    if (params.releasedFileId) {
+      const output = await readBoundOfficeFile!({ userId: params.userId, workspaceId: current.artifact.workspaceId, fileId: params.releasedFileId })
+      if (!output || output.binding.hash !== params.releasedHash || output.binding.mime !== params.releasedMime ||
+        officeOutputScopeRevision(output.binding) !== officeOutputScopeRevision(scope)) return null
+      validForMs = Math.min(validForMs, output.validForMs)
+    }
+    return Number.isFinite(validForMs) && validForMs > 0 ? { scope, validForMs: Math.floor(validForMs) } : null
+  }
   if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes({
     load: loadOfficeReleaseContext,
     resolveResource: (userId, workspaceId) => async (resourceId) => readOfficeResource(userId, workspaceId, resourceId),
-    async saveReleasedFile({ userId, workspaceId, artifactId, version, action, extension, mime, bytes }) {
-      const saved = await filesApi!.writeBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/releases/${artifactId}/v${version}-${action}-${randomUUID()}.${extension}`, bytes, mime, sensitivity: 'confidential' })
-      if (!saved.ok) throw new Error(`Office release file save failed: ${saved.error.kind}`)
-      return saved.value.id
+    revalidate: revalidateOfficeRelease,
+    async saveReleasedFile({ userId, workspaceId, artifactId, version, action, extension, mime, bytes, hash, scope }) {
+      return saveClassifiedOfficeFile!({ userId, workspaceId, path: `/office/releases/${artifactId}/v${version}-${action}-${randomUUID()}.${extension}`, bytes, mime, hash, scope })
     },
     createRecord: officeReleaseStore.createRelease,
     async createDerivative({ userId, source, title, sensitivity, selectedObjectIds, visibilityUserIds }) {

@@ -40,6 +40,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useT } from "@/lib/i18n/client";
 import { admitOfficeImageResource } from "@/lib/office/api";
+import { officeMetadataRemaining } from "@/lib/office/metadata";
+import { getUserInfo } from "@/lib/user";
 import { cn } from "@/lib/utils";
 import { isPhoneViewport } from "@/lib/viewport";
 import { PresentationGeometryToolbar, PresentationObjectFrame } from "./presentation-object-frame";
@@ -102,6 +104,8 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   const [railResizing, setRailResizing] = useState(false);
   const [dataDialog, setDataDialog] = useState<"table" | "chart" | null>(null);
   const [imageBusy, setImageBusy] = useState(false);
+  const admissionOwner = useRef(`${snapshot.workspaceId}:${snapshot.artifactId}:${baseVersion}`);
+  admissionOwner.current = `${snapshot.workspaceId}:${snapshot.artifactId}:${baseVersion}`;
   const [imageError, setImageError] = useState("");
   const slide = snapshot.slides.find((candidate) => candidate.id === slideId) ?? snapshot.slides[0];
   const selectedObjects = useMemo(() => selectedObjectIds.map((id) => slide.objects.find((object) => object.id === id)).filter((object): object is PresentationObject => Boolean(object)), [selectedObjectIds, slide.objects]);
@@ -191,9 +195,12 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
 
   async function addImage(file: File) {
     if (!canChange || imageBusy) return;
+    const owner = admissionOwner.current;
     setImageBusy(true); setImageError("");
     try {
       const admitted = await admitOfficeImageResource(snapshot.artifactId, snapshot.workspaceId, file);
+      const viewerId = getUserInfo()?.id;
+      if (admissionOwner.current !== owner || !viewerId || officeMetadataRemaining(admitted, viewerId) <= 0) throw new Error("office_projection_expired");
       const maxWidth = snapshot.slideSize.widthPt * 0.6;
       const maxHeight = snapshot.slideSize.heightPt * 0.6;
       const scale = Math.min(maxWidth / admitted.widthPx, maxHeight / admitted.heightPx);
