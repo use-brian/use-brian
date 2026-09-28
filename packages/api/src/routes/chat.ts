@@ -1,5 +1,5 @@
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
-import { debugDocumentFlow, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
+import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
 import { closeProviderError } from './chat-provider-error.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
 import { resolveFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
@@ -102,6 +102,8 @@ import {
   resolveTurnScopeSystem,
   sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
 import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'
@@ -116,10 +118,7 @@ import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import { deploymentCapabilities } from '../edition.js'
 import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 import { connectorAuthorizationEntry } from '../agent-surface/connector-authorization.js'
-import {
-  createSessionAuthorityLease,
-  isAuthorityChangedError,
-} from '../context-scope/authority-lease.js'
+import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
   DeliveryAudienceUnverifiedError,
@@ -3003,19 +3002,33 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       // Resolve the one trusted scope before this entry point performs any
       // persistent semantic write or enters the normal model path.
-      const turnScope = await resolveTurnScopeSystem({
+      const abortController = new AbortController()
+      const resolvedExecution = await resolveExecutionContextSystem({
         userId: user.id,
         assistant,
         workspaceId: assistant.workspaceId,
         session: isNewSession
           ? { ...session, contextLockedAt: null }
           : session,
+        identity: {
+          kind: 'attended',
+          principal: { kind: 'workspace_member', userId: user.id },
+        },
+        ownership: assistant.workspaceId
+          ? { kind: 'workspace', workspaceId: assistant.workspaceId }
+          : { kind: 'personal', ownerUserId: user.id },
+        lifecycle: {
+          abortSignal: abortController.signal,
+          sessionId: session.id,
+          channelType: session.channelType,
+          channelId: session.channelId,
+        },
+        attribution: { billingUserId: user.id },
+        sessionAuthority: session,
       })
-      const authority = createSessionAuthorityLease({
-        starting: pinAccessCeiling(turnScope.access),
-        session,
-        userId: user.id,
-      })
+      const turnScope = resolvedExecution.turnScope
+      const executionContext = resolvedExecution.executionContext
+      const authority = executionContext.security.authority
 
       // Giant-paste promotion writes a durable artifact, so it runs only
       // after the immutable session scope is known and stamps that scope on
@@ -6651,8 +6664,6 @@ export function chatRoutes(options: WebChatOptions): Router {
         })
       }
 
-      const abortController = new AbortController()
-
       // EVERY turn runs to completion in the BACKGROUND; a disconnect is not a
       // stop. Until 2026-08-24 only `doc_thread` and room turns did, and every
       // other turn aborted itself when its `POST /api/chat` body closed. Then
@@ -7017,33 +7028,38 @@ export function chatRoutes(options: WebChatOptions): Router {
         // high-water evidence is checked again before each streamed event.
         await assertDeliveryAudience()
         const presentedDocumentInputs = new Map<string, PresentedDocumentInput>()
-        const scopedLoopTools = bindToolsToAgentAccess(loopTools, {
-          clearance: readClearance,
-          compartments: turnScope.effectiveCompartments,
-          mutationCompartments: turnScope.access.mutationCompartments,
-          projectIds: turnScope.effectiveProjectIds,
+        const preparedRun = await prepareAssistantRun({
+          executionContext,
+          model: {
+            provider: turnProvider,
+            model,
+            maxTokens: customLlmRuntime?.maxTokens,
+            inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+          },
+          candidateTools: loopTools,
+          bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, {
+            clearance: execution.security.access.clearance,
+            compartments: execution.security.access.compartments,
+            mutationCompartments: execution.security.access.mutationCompartments,
+            projectIds: execution.security.access.projectIds,
+          }),
+          trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
+          userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
         for await (const event of queryLoop({
           ledger: turnLedgerHandle.ledger,
           // BYO-aware: when the workspace set its own Gemini key, the main
           // response runs against that provider (else the platform provider).
-          provider: turnProvider,
-          model,
-          maxTokens: customLlmRuntime?.maxTokens,
-          inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+          provider: preparedRun.model.provider,
+          model: preparedRun.model.model,
+          maxTokens: preparedRun.model.maxTokens,
+          inputTokenLimit: preparedRun.model.inputTokenLimit,
           systemPrompt: splitPrompt.stablePrompt,
-          runtimeSystemContext,
+          runtimeSystemContext: preparedRun.trustedContext,
           messages,
-          tools: scopedLoopTools,
+          tools: preparedRun.tools,
           context: {
-            userId: user.id,
-            workspaceActorUserId: user.id,
-            assistantId: assistant.id,
-            sessionId: session.id,
-            appId: 'Use Brian',
-            channelType: session.channelType,
-            channelId: session.channelId,
-            workspaceId: assistant.workspaceId ?? undefined,
+            ...executionToolContext(executionContext, { appId: 'Use Brian' }),
             workerRuntime: customLlmRuntime
               ? {
                   provider: customLlmRuntime.provider,
@@ -7054,7 +7070,6 @@ export function chatRoutes(options: WebChatOptions): Router {
                   maxTokens: customLlmRuntime.maxTokens,
                 }
               : undefined,
-            assistantKind: assistant.kind,
             preferredChannel,
             userTimezone: user.timezone ?? undefined,
             workflowProposalReceipt,
@@ -7066,8 +7081,6 @@ export function chatRoutes(options: WebChatOptions): Router {
             // as the new page's `origin_prompt` (the History "first prompt").
             userMessageText:
               typeof message === 'string' && message.trim() ? message.trim() : undefined,
-            abortSignal: abortController.signal,
-            authority,
             cacheStore: options.cacheStore,
             sessionStateStore: options.sessionStateStore,
             requestTools: allTools,
@@ -7082,19 +7095,10 @@ export function chatRoutes(options: WebChatOptions): Router {
             // authorable at the assistant's clearance even when reads are
             // bounded lower. The sensitivity accumulator (max tier *seen* this
             // turn) drives write stamping and is naturally bounded by reads.
-            clearance: readClearance,
-            compartments: readCompartments,
-            mutationCompartments: turnScope.access.mutationCompartments,
-            projectIds: turnScope.effectiveProjectIds,
             activeGroupId: turnScope.activeGroupId,
             activeProjectId: turnScope.activeProjectId,
-            assistantClearance: assistant.clearance,
             // The effective turn ceiling is intentionally tighter than the
             // assistant's company-wide grant when Team/Project is selected.
-            assistantCompartments: turnScope.effectiveCompartments,
-            assistantDefaultCompartments: turnScope.writeCompartments,
-            assistantProjectIds: turnScope.effectiveProjectIds,
-            assistantDefaultProjectIds: turnScope.writeProjectIds,
             // Lifted to the per-turn accumulator constructed before the
             // extra-tool injection so the connector_action audit hook sees
             // the same instance the queryLoop populates.

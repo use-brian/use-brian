@@ -33,8 +33,8 @@ import {
   prepareSlashCommand, resolveNativeSlashCommand,
   buildSlashCommandBlock, buildWorkflowSlashCommandBlock,
   buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, formatAssistantQuestion,
-  pinAccessCeiling,
   createTurnOutputCollector,
+  executionToolContext,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -112,11 +112,10 @@ import {
   type ResolvedTurnScope,
   type ResolveTurnScopeInput,
 } from '../context-scope/resolve-turn-scope.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
-import {
-  createSessionAuthorityLease,
-  isAuthorityChangedError,
-} from '../context-scope/authority-lease.js'
+import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
   DeliveryAudienceUnverifiedError,
@@ -978,9 +977,17 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     channelType,
     channelId: sessionChannelId,
   })
+  // Resolve credential/billing ownership before constructing execution facts.
+  // It remains attribution only and never substitutes for the channel actor.
+  const billingUserId = await billingPartyForAssistant({
+    id: assistant.id,
+    ownerUserId: assistant.workspaceId ? null : ownerId,
+    workspaceId: assistant.workspaceId ?? null,
+  })
   let dataTurnScope
+  let executionContext
   try {
-    dataTurnScope = await resolveTurnScopeSystem({
+    const resolved = await resolveExecutionContextSystem({
       userId,
       assistant: {
         ...assistant,
@@ -988,7 +995,31 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       },
       workspaceId: assistant.workspaceId,
       session,
+      identity: isIdentified
+        ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
+        : {
+            kind: 'attended',
+            principal: {
+              kind: 'verified_channel_guest',
+              userId,
+              provider: channelType,
+              externalId: actorChannelId ?? channelId,
+            },
+          },
+      ownership: assistant.workspaceId
+        ? { kind: 'workspace', workspaceId: assistant.workspaceId }
+        : { kind: 'personal', ownerUserId: billingUserId },
+      lifecycle: {
+        abortSignal: abortController.signal,
+        sessionId: session.id,
+        channelType,
+        channelId,
+      },
+      attribution: { billingUserId },
+      sessionAuthority: session,
     })
+    dataTurnScope = resolved.turnScope
+    executionContext = resolved.executionContext
   } catch (err) {
     if (!(err instanceof ContextNotAvailableError)) throw err
     try {
@@ -1015,10 +1046,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     producer: `turn:${channelType}`,
     sources: scopeAccumulator.evidence.sources ?? [],
   })
-  const authority = createSessionAuthorityLease({
-    starting: pinAccessCeiling(dataTurnScope.access),
-    session,
-  })
+  const authority = executionContext.security.authority
   const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
     integrationStore: params.channelIntegrationStore,
   })
@@ -1056,11 +1084,6 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // null: `billingPartyForAssistant` throws when an assistant has neither a
   // workspace nor a personal owner, and it throws HERE, before the first
   // overhead call, rather than at a silent per-row catch.
-  const billingUserId = await billingPartyForAssistant({
-    id: assistant.id,
-    ownerUserId: assistant.workspaceId ? null : ownerId,
-    workspaceId: assistant.workspaceId ?? null,
-  })
   let budgetStatus: 'ok' | 'downgraded' | 'blocked' = 'ok'
   // Billing is per-workspace (migration 143) — the plan + budget windows
   // are the assistant's workspace's.
@@ -2312,11 +2335,23 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Query loop ──
   try {
-    const scopedTools = bindToolsToAgentAccess(allTools, {
-      clearance,
-      compartments: dataTurnScope.effectiveCompartments,
-      mutationCompartments: dataTurnScope.access.mutationCompartments,
-      projectIds: dataTurnScope.effectiveProjectIds,
+    const preparedRun = await prepareAssistantRun({
+      executionContext,
+      model: {
+        provider: turnProvider,
+        model,
+        maxTokens: customLlmRuntime?.maxTokens,
+        inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+      },
+      candidateTools: allTools,
+      bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, {
+        clearance: execution.security.access.clearance,
+        compartments: execution.security.access.compartments,
+        mutationCompartments: execution.security.access.mutationCompartments,
+        projectIds: execution.security.access.projectIds,
+      }),
+      trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
+      userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
     })
     for await (const event of queryLoop({
       ledger: createTurnLedger({
@@ -2325,19 +2360,16 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         sessionId: session.id,
         payloads: getLedgerPayloadStore(),
       }).ledger,
-      provider: turnProvider, model,
-      maxTokens: customLlmRuntime?.maxTokens,
-      inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+      provider: preparedRun.model.provider, model: preparedRun.model.model,
+      maxTokens: preparedRun.model.maxTokens,
+      inputTokenLimit: preparedRun.model.inputTokenLimit,
       systemPrompt: splitPrompt.stablePrompt,
-      runtimeSystemContext,
-      messages, tools: scopedTools,
+      runtimeSystemContext: preparedRun.trustedContext,
+      messages, tools: preparedRun.tools,
       context: {
-        userId, assistantId: assistant.id, sessionId: session.id,
-        workspaceActorUserId: isIdentified ? userId : undefined,
-        appId: 'Use Brian', channelType, channelId,
+        ...executionToolContext(executionContext, { appId: 'Use Brian' }),
         channelSessionId: sessionChannelId,
         taskAuthority,
-        workspaceId: assistant.workspaceId ?? undefined,
         workerRuntime: customLlmRuntime
           ? {
               provider: customLlmRuntime.provider,
@@ -2348,11 +2380,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               maxTokens: customLlmRuntime.maxTokens,
             }
           : undefined,
-        assistantKind: assistant.kind,
         preferredChannel,
         userTimezone,
         workflowProposalReceipt,
-        abortSignal: abortController.signal,
         sessionStateStore,
         requestTools: allTools,
         workerManager,
@@ -2365,18 +2395,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         evidence: replyEvidence,
         // `clearance` is the read ceiling = min(member, assistant);
         // `assistantClearance` is the write ceiling (the assistant's tier).
-        clearance,
-        compartments,
-        mutationCompartments: dataTurnScope.access.mutationCompartments,
-        projectIds: dataTurnScope.effectiveProjectIds,
         activeGroupId: dataTurnScope.activeGroupId,
         activeProjectId: dataTurnScope.activeProjectId,
-        assistantClearance: assistant.clearance,
-        assistantCompartments: dataTurnScope.effectiveCompartments,
-        assistantDefaultCompartments: dataTurnScope.writeCompartments,
-        assistantProjectIds: dataTurnScope.effectiveProjectIds,
-        assistantDefaultProjectIds: dataTurnScope.writeProjectIds,
-        authority,
       },
       confirmationResolver,
       confirmationTimeoutMs: 300_000,

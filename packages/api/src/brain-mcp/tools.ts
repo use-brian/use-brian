@@ -76,6 +76,7 @@ import {
   PAGE_TEMPLATE_CATEGORIES,
   pageTemplateCategorySchema,
   filterToolsByCapabilities,
+  executionToolContext,
 } from '@use-brian/core'
 import type {
   BindingConfig,
@@ -110,8 +111,8 @@ import type {
 import { BRAIN_WRITE_TOOL_SIGNALS, notifyBrainChange } from '../brain-stream/notify.js'
 import {
   ContextNotAvailableError,
-  resolveTurnScopeSystem,
 } from '../context-scope/resolve-turn-scope.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 
 /**
  * Best-effort row id extraction from a chat-tool result. Most write tools
@@ -2227,8 +2228,11 @@ export function makeBrainContextResolver(
       [keyId, workspaceId],
     )
     let turnScope
+    let executionContext
+    const sessionId = randomUUID()
+    const abortController = new AbortController()
     try {
-      turnScope = await resolveTurnScopeSystem({
+      const resolved = await resolveExecutionContextSystem({
         userId: target.ownerUserId,
         workspaceId,
         assistant: {
@@ -2248,7 +2252,33 @@ export function makeBrainContextResolver(
         key: binding.rows[0]
           ? { ...binding.rows[0], contextLockedAt: binding.rows[0].createdAt }
           : { contextGroupId: null, contextProjectId: null },
+        identity: {
+          kind: 'programmatic',
+          principal: {
+            kind: programmaticPrincipal?.kind ?? 'brain_key',
+            credentialId: programmaticPrincipal?.credentialId ?? keyId,
+            ...(programmaticPrincipal?.userId
+              ? { actorUserId: programmaticPrincipal.userId }
+              : {}),
+          },
+          credentialOwnerUserId: target.ownerUserId,
+        },
+        ownership: workspaceId
+          ? { kind: 'workspace', workspaceId }
+          : { kind: 'personal', ownerUserId: target.ownerUserId },
+        lifecycle: {
+          abortSignal: abortController.signal,
+          sessionId,
+          channelType,
+          channelId: keyId,
+        },
+        attribution: {
+          credentialOwnerUserId: target.ownerUserId,
+          billingUserId: target.ownerUserId,
+        },
       })
+      turnScope = resolved.turnScope
+      executionContext = resolved.executionContext
     } catch (err) {
       if (!(err instanceof ContextNotAvailableError)) throw err
       cached = {
@@ -2268,30 +2298,13 @@ export function makeBrainContextResolver(
       projectIds: turnScope.writeProjectIds,
     })
     cached = {
-      userId: target.ownerUserId,
-      assistantId: target.assistantId,
-      sessionId: randomUUID(),
-      appId: target.assistantId,
-      channelType,
-      channelId: keyId,
+      ...executionToolContext(executionContext, { appId: target.assistantId }),
       programmaticPrincipal,
-      workspaceId,
-      assistantKind: target.kind,
       activeCapabilities,
-      clearance,
-      assistantClearance: clearance,
-      compartments: turnScope.effectiveCompartments,
-      mutationCompartments: turnScope.access.mutationCompartments,
-      projectIds: turnScope.effectiveProjectIds,
       activeGroupId: turnScope.activeGroupId,
       activeProjectId: turnScope.activeProjectId,
-      assistantCompartments: turnScope.effectiveCompartments,
-      assistantDefaultCompartments: turnScope.writeCompartments,
-      assistantProjectIds: turnScope.effectiveProjectIds,
-      assistantDefaultProjectIds: turnScope.writeProjectIds,
       sensitivity,
       scopeAccumulator,
-      abortSignal: new AbortController().signal,
     }
     return cached
   }

@@ -66,7 +66,7 @@ export function createAuthorityLease(
   return lease
 }
 
-type SessionAuthoritySnapshot = Pick<Session,
+export type SessionAuthoritySnapshot = Pick<Session,
   'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
 >
 

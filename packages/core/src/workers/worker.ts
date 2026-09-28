@@ -13,6 +13,7 @@ import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
 import type { Tool, ToolContext } from '../tools/types.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
 import { queryLoop, type QueryEvent } from '../engine/query-loop.js'
+import { createExecutionContext, executionToolContext } from '../security/execution-context.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -538,6 +539,27 @@ export function createWorkerManager(options: WorkerOptions) {
         let urlReaderCalls = 0
         let webSearchCalls = 0
 
+        const workerExecution = context.executionContext
+          ? createExecutionContext({
+              identity: {
+                kind: 'delegated',
+                actorUserId: context.executionContext.security.access.userId,
+                delegationId: runId,
+                parentCeiling: context.executionContext.security.ceiling,
+              },
+              ownership: context.executionContext.ownership,
+              access: context.executionContext.security.access,
+              writeDefaults: context.executionContext.security.writeDefaults,
+              provenance: context.executionContext.security.provenance,
+              authority: context.executionContext.security.authority,
+              lifecycle: {
+                ...context.executionContext.lifecycle,
+                abortSignal: abortController.signal,
+              },
+              surface: context.executionContext.surface,
+              attribution: context.executionContext.attribution,
+            })
+          : undefined
         for await (const event of queryLoop({
           // Child trace on the invoking lane's recorder (stamped on the
           // context by the parent queryLoop). NOOP only reachable when a
@@ -552,6 +574,9 @@ export function createWorkerManager(options: WorkerOptions) {
           tools: workerTools,
           context: {
             ...context,
+            ...(workerExecution
+              ? executionToolContext(workerExecution, { appId: context.appId })
+              : {}),
             abortSignal: abortController.signal,
             // Workers must NOT have workerManager — otherwise Phase 4b
             // triggers inside the worker and deadlocks waiting for sibling workers.

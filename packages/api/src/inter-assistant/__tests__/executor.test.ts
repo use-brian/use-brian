@@ -151,7 +151,10 @@ const calleeAssistant = {
   id: 'callee-1',
   ownerUserId: 'owner-1',
   workspaceId: null,
+  kind: 'standard' as const,
   clearance: 'internal',
+  compartments: null,
+  defaultCompartments: [],
   name: 'Callee Bot',
 }
 const callerAssistant = { id: 'caller-1', name: 'Caller Bot' }
@@ -2044,7 +2047,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
 describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory continuity', () => {
   // A workspace-scoped callee — research fan-out + prior-run memory both
   // require a workspace. No pageAnchorId, so the page gate is skipped.
-  const wsCallee = { id: 'callee-1', ownerUserId: 'owner-1', workspaceId: 'ws-1', clearance: 'internal', name: 'Callee Bot' }
+  const wsCallee = { ...calleeAssistant, workspaceId: 'ws-1', name: 'Callee Bot' }
 
   function wsMemoryStore(overrides: Record<string, unknown> = {}) {
     return {
@@ -2552,7 +2555,7 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
  * the same Telegram topic (the 2026-08-18 daily health report). Read-only.
  */
 describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments bridge', () => {
-  const wsCallee = { id: 'callee-1', ownerUserId: 'owner-1', workspaceId: 'ws-1', clearance: 'internal', name: 'Brian' }
+  const wsCallee = { ...calleeAssistant, workspaceId: 'ws-1', name: 'Brian' }
   const deliverTarget = { channelType: 'telegram' as const, channelId: '-100123:topic:2' }
 
   function stateStore(rowsBySession: Record<string, Array<Record<string, unknown>>>) {

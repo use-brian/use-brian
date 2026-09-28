@@ -37,9 +37,9 @@ import {
   buildWorkspaceFilesContext,
   buildSessionStateBlock,
   ContextScopeAccumulator,
-  pinAccessCeiling,
   createTurnOutputCollector,
   formatAssistantQuestion,
+  executionToolContext,
 } from '@use-brian/core'
 import type {
   LLMProvider,
@@ -81,13 +81,11 @@ import {
   ContextNotAvailableError,
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
-  resolveTurnScopeSystem,
   sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
-import {
-  createSessionAuthorityLease,
-  isAuthorityChangedError,
-} from '../context-scope/authority-lease.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
+import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
   DeliveryAudienceUnverifiedError,
@@ -719,17 +717,48 @@ export async function executePublicTurn(
     channelType: 'api',
     channelId,
   })
+  const abortController = new AbortController()
   const fullScope = input.contextScope === 'assistant-full'
   let turnScope
+  let executionContext
   try {
-    turnScope = await resolveTurnScopeSystem({
+    const resolved = await resolveExecutionContextSystem({
       userId: user.id,
       assistant,
       workspaceId: assistant.workspaceId,
       session,
       memberMode: fullScope ? 'assistant' : 'enforce',
       systemRead: laneReadsSystemSide(input.contextScope) || undefined,
+      identity: internalScope
+        ? { kind: 'attended', principal: { kind: 'workspace_member', userId: user.id } }
+        : {
+            kind: 'programmatic',
+            principal: {
+              kind: input.identityNamespace.startsWith('chatlink:') ? 'public_share' : 'brain_key',
+              credentialId: input.identityNamespace,
+              actorUserId: user.id,
+            },
+            credentialOwnerUserId: ownerId,
+          },
+      ownership: assistant.workspaceId
+        ? { kind: 'workspace', workspaceId: assistant.workspaceId }
+        : { kind: 'personal', ownerUserId: ownerId },
+      lifecycle: {
+        abortSignal: abortController.signal,
+        sessionId: session.id,
+        channelType: 'api',
+        channelId,
+      },
+      surface: {
+        ...(laneReadsSystemSide(input.contextScope) ? { systemRead: true as const } : {}),
+        ...(clientSelfMemory ? { clientSelfMemory } : {}),
+      },
+      attribution: { credentialOwnerUserId: ownerId, billingUserId: ownerId },
+      sessionAuthority: session,
+      credentialCurrent: input.credentialCurrent,
     })
+    turnScope = resolved.turnScope
+    executionContext = resolved.executionContext
   } catch (err) {
     if (err instanceof ContextNotAvailableError) {
       return fail(res, 409, err.code, err.message)
@@ -752,13 +781,7 @@ export async function executePublicTurn(
     producer: 'turn:public-api',
     sources: scopeAccumulator.evidence.sources ?? [],
   })
-  const authority = createSessionAuthorityLease({
-    starting: pinAccessCeiling(turnScope.access),
-    session,
-    memberMode: fullScope ? 'assistant' : 'enforce',
-    systemRead: laneReadsSystemSide(input.contextScope) || undefined,
-    credentialCurrent: input.credentialCurrent,
-  })
+  const authority = executionContext.security.authority
   const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
   const assertDeliveryAudience = async (): Promise<void> => {
     await authority.assertCurrent()
@@ -1365,7 +1388,6 @@ export async function executePublicTurn(
   // disconnect, with a safety ceiling that exceeds the loop's
   // own EMPTY_RETRY_WALL_MS (90s in query-loop.ts) so the
   // empty-response retry plan is never killed mid-flight.
-  const abortController = new AbortController()
   req.on('close', () => abortController.abort())
   const timeout = setTimeout(() => abortController.abort(), 180_000)
   let sendEvent: PublicTurnSseSender | null = null
@@ -1379,11 +1401,23 @@ export async function executePublicTurn(
     await assertDeliveryAudience()
     sendEvent = input.delivery === 'sse' ? openPublicTurnSse(res) : null
     sendEvent?.('session', { sessionId: channelId })
-    const scopedTools = bindToolsToAgentAccess(baseTools, {
-      clearance: readClearance,
-      compartments: turnScope.effectiveCompartments,
-      mutationCompartments: turnScope.access.mutationCompartments,
-      projectIds: turnScope.effectiveProjectIds,
+    const preparedRun = await prepareAssistantRun({
+      executionContext,
+      model: {
+        provider: turnProvider,
+        model,
+        maxTokens: customLlmRuntime?.maxTokens,
+        inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+      },
+      candidateTools: baseTools,
+      bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, {
+        clearance: execution.security.access.clearance,
+        compartments: execution.security.access.compartments,
+        mutationCompartments: execution.security.access.mutationCompartments,
+        projectIds: execution.security.access.projectIds,
+      }),
+      trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
+      userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
     })
     for await (const event of queryLoop({
       ledger: createTurnLedger({
@@ -1392,38 +1426,26 @@ export async function executePublicTurn(
         sessionId: session.id,
         payloads: getLedgerPayloadStore(),
       }).ledger,
-      provider: turnProvider,
-      model,
-      maxTokens: customLlmRuntime?.maxTokens,
-      inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+      provider: preparedRun.model.provider,
+      model: preparedRun.model.model,
+      maxTokens: preparedRun.model.maxTokens,
+      inputTokenLimit: preparedRun.model.inputTokenLimit,
       systemPrompt: fullSystemPrompt,
-      runtimeSystemContext,
+      runtimeSystemContext: preparedRun.trustedContext,
       messages,
-      tools: scopedTools,
+      tools: preparedRun.tools,
       context: {
-        userId: user.id,
-        assistantId: assistant.id,
-        sessionId: session.id,
-        appId: 'Use Brian',
-        channelType: 'api',
-        channelId,
+        ...executionToolContext(executionContext, { appId: 'Use Brian' }),
         // Read ceiling = min(member, assistant); write ceiling stays the
         // assistant's own clearance (incident 2026-06-01).
-        clearance: readClearance,
-        compartments: readCompartments,
-        mutationCompartments: turnScope.access.mutationCompartments,
-        projectIds: turnScope.effectiveProjectIds,
         activeGroupId: turnScope.activeGroupId,
         activeProjectId: turnScope.activeProjectId,
         // Memory-only authenticated-client carve-out. Other tools ignore this
         // field and continue to receive the public/empty general projection.
-        clientSelfMemory: clientSelfMemory ?? undefined,
         memoryWriteSensitivityFloor: clientSelfMemory ? 'internal' : undefined,
         memoryWriteCompartments: clientSelfMemory
           ? [clientSelfMemory.compartment]
           : undefined,
-        assistantClearance: assistant.clearance,
-        assistantCompartments: turnScope.effectiveCompartments,
         // Every CRM / memory / task / knowledge write on this turn unions this
         // in (`unionCompartments(accumulator, assistantDefaultCompartments)`),
         // so adding the client's compartment here stamps the whole turn from
@@ -1432,10 +1454,7 @@ export async function executePublicTurn(
           turnScope.writeCompartments,
           accrual.compartments,
         ),
-        assistantProjectIds: turnScope.effectiveProjectIds,
-        assistantDefaultProjectIds: turnScope.writeProjectIds,
         scopeAccumulator,
-        workspaceId: assistant.workspaceId ?? undefined,
         workerRuntime: customLlmRuntime
           ? {
               provider: customLlmRuntime.provider,
@@ -1446,7 +1465,6 @@ export async function executePublicTurn(
               maxTokens: customLlmRuntime.maxTokens,
             }
           : undefined,
-        assistantKind: assistant.kind,
         // `assistant-full` runs as a synthetic non-member principal, so member
         // RLS hid every brain row before `clearance` was ever consulted — the
         // lane raised the application ceiling and left the database gate shut,
@@ -1459,13 +1477,10 @@ export async function executePublicTurn(
         // "external chat has no write access" enforced below the tool layer.
         // Never set this for `external-client`: that lane's `public` floor and
         // `client:*` compartment wall are the cross-client isolation contract.
-        systemRead: laneReadsSystemSide(input.contextScope) || undefined,
         userTimezone:
           (internalScope ? user.timezone : null) ?? owner.timezone ?? undefined,
-        abortSignal: abortController.signal,
         sessionStateStore: deps.sessionStateStore,
         activeCapabilities,
-        authority,
       },
       channelType: 'api',
       // Reactive compaction on context-overflow errors —

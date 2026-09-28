@@ -15,7 +15,8 @@ import type {
   WorkflowStore,
   WorkflowTriggerKind,
 } from '../types.js'
-import { buildTool, type Tool } from '../../tools/types.js'
+import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
+import { createExecutionContext } from '../../security/execution-context.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport, Task } from '../../a2a/types.js'
 
 // ── Fakes ────────────────────────────────────────────────────────────────
@@ -346,6 +347,71 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(requests[0].callerAccessCeiling).toEqual({workspaceId:WORKSPACE_ID,userId:USER_ID,
       clearance:'internal',compartments:['product'],mutationCompartments:['product'],projectIds:[],visibilityAssistantIds:[]})
     expect(requests[0].callerScopeEvidence).toMatchObject({compartments:['product'],projectIds:[],sources:[source]})
+  })
+  it('projects the validated run context into direct workflow tool execution', async () => {
+    let received: ToolContext | undefined
+    const tool = buildTool({
+      name: 'validatedWorkflowTool',
+      description: 'fixture',
+      inputSchema: z.object({}),
+      async execute(_input, context) {
+        received = context
+        return { data: { ok: true } }
+      },
+    })
+    const access = {
+      workspaceId: WORKSPACE_ID,
+      userId: USER_ID,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      assistantKind: 'primary' as const,
+      clearance: 'internal' as const,
+      compartments: ['product'],
+      mutationCompartments: ['product'],
+      projectIds: [],
+      visibilityAssistantIds: null,
+    }
+    const turnScope = {
+      access,
+      activeGroupId: null,
+      activeProjectId: null,
+      effectiveCompartments: ['product'],
+      effectiveProjectIds: [],
+      writeCompartments: ['product'],
+      writeProjectIds: [],
+    }
+    const authority = {
+      async assertCurrent() {},
+      async execute<T>(operation: () => Promise<T>) { return operation() },
+    }
+    const executionContext = createExecutionContext({
+      identity: { kind: 'system', purpose: 'workflow', jobId: 'run-fixture' },
+      ownership: { kind: 'workspace', workspaceId: WORKSPACE_ID },
+      access,
+      writeDefaults: { compartments: ['product'], projectIds: [] },
+      authority,
+      lifecycle: {
+        abortSignal: new AbortController().signal,
+        sessionId: 'run-fixture',
+        channelType: 'workflow',
+        channelId: 'run-fixture',
+      },
+    })
+    const deps = makeDeps({
+      buildToolRegistry: async () => new Map([[tool.name, tool]]),
+      resolveRunScope: async () => ({
+        assistantClearance: 'internal',
+        turnScope,
+        executionContext,
+      }),
+    })
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'tool',
+      steps: [{ id: 'tool', type: 'tool_call', toolName: tool.name, arguments: {} }],
+    })
+
+    expect((await advanceWorkflowRun(deps, run.id)).kind).toBe('completed')
+    expect(received?.executionContext).toBe(executionContext)
+    expect(received?.authority).toBe(authority)
   })
   it('fails before building tools when the persisted run authority cannot be renewed', async () => {
     const buildToolRegistry=vi.fn(async()=>new Map())

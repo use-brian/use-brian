@@ -12,6 +12,7 @@ import type { EvidenceAccumulator } from '../security/evidence.js'
 import type { AttachmentCollector } from '../workspace-files/attachments.js'
 import type { LLMProvider } from '../providers/types.js'
 import type { AccessContext } from '../security/access-context.js'
+import type { ExecutionContext } from '../security/execution-context.js'
 
 type TaskAuthorityContext = {
   kind: 'realtime_thread_target'
@@ -34,6 +35,8 @@ export type CurrentAuthorityBoundary = {
 // ── Tool context ───────────────────────────────────────────────
 
 export type ToolContext = {
+  /** Validated production execution facts; flat fields below are its compatibility projection. */
+  executionContext?: ExecutionContext
   userId: string
   /** Verified human actor for workspace administration. Set only by attended,
    * authenticated entrypoints; a billing owner or callee owner is not an actor. */

@@ -21,6 +21,7 @@ import {
 } from '../a2a/index.js'
 import type { Tool, ToolContext } from '../tools/types.js'
 import { ContextScopeAccumulator, type ScopeEvidence, type TurnScope } from '../security/context-scope.js'
+import { executionToolContext, type ExecutionContext } from '../security/execution-context.js'
 import { pinAccessCeiling } from '../security/access-ceiling.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type {
@@ -341,6 +342,8 @@ export type ExecutorDeps = {
   }) => Promise<{
     turnScope: TurnScope
     assistantClearance: Sensitivity
+    /** Validated production context backed by the same live run lease. */
+    executionContext?: ExecutionContext
     /** Server-resolved causal inputs, never audience claims from input JSON. */
     inputScopeEvidence?: import('../security/context-scope.js').ScopeEvidence
     /** API-owned live lease; rejects stale results without retrying effects. */
@@ -1347,7 +1350,11 @@ type DispatchContext = {
   toolRegistry: Map<string, Tool>
   consultTransport: ConsultTransport
   externalClientPrincipal?: ResolvedExternalClientWorkflowPrincipal
-  runtimeScope?: { turnScope: TurnScope; assistantClearance: Sensitivity }
+  runtimeScope?: {
+    turnScope: TurnScope
+    assistantClearance: Sensitivity
+    executionContext?: ExecutionContext
+  }
   scopeAccumulator: ContextScopeAccumulator
   scope: InterpolationScope
   /** Phase C — when present, ask-policy tool_calls pause instead of failing. */
@@ -1945,22 +1952,36 @@ async function dispatchToolCall(
   }
 
   const interpolatedArgs = interpolateValue(step.arguments, ctx.scope)
-  const runtimeToolScope = ctx.runtimeScope
+  const toolContext: ToolContext = ctx.runtimeScope?.executionContext
     ? {
-        visibilityAssistantIds: ctx.runtimeScope.turnScope.access.visibilityAssistantIds,
-        clearance: ctx.runtimeScope.turnScope.access.clearance,
-        compartments: ctx.runtimeScope.turnScope.effectiveCompartments,
-        projectIds: ctx.runtimeScope.turnScope.effectiveProjectIds,
+        ...executionToolContext(ctx.runtimeScope.executionContext, { appId: 'Use Brian' }),
         activeGroupId: ctx.runtimeScope.turnScope.activeGroupId,
         activeProjectId: ctx.runtimeScope.turnScope.activeProjectId,
-        assistantClearance: ctx.runtimeScope.assistantClearance,
-        assistantCompartments: ctx.runtimeScope.turnScope.effectiveCompartments,
-        assistantDefaultCompartments: ctx.runtimeScope.turnScope.writeCompartments,
-        assistantProjectIds: ctx.runtimeScope.turnScope.effectiveProjectIds,
-        assistantDefaultProjectIds: ctx.runtimeScope.turnScope.writeProjectIds,
         scopeAccumulator: ctx.scopeAccumulator,
       }
-    : { scopeAccumulator: ctx.scopeAccumulator }
+    : {
+        userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
+        assistantId: ctx.toolAssistantId,
+        sessionId: ctx.run.id,
+        appId: 'Use Brian',
+        channelType: 'workflow',
+        channelId: ctx.run.id,
+        workspaceId: ctx.run.workspaceId,
+        assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
+        visibilityAssistantIds: ctx.runtimeScope?.turnScope.access.visibilityAssistantIds,
+        clearance: ctx.runtimeScope?.turnScope.access.clearance,
+        compartments: ctx.runtimeScope?.turnScope.effectiveCompartments,
+        projectIds: ctx.runtimeScope?.turnScope.effectiveProjectIds,
+        activeGroupId: ctx.runtimeScope?.turnScope.activeGroupId,
+        activeProjectId: ctx.runtimeScope?.turnScope.activeProjectId,
+        assistantClearance: ctx.runtimeScope?.assistantClearance,
+        assistantCompartments: ctx.runtimeScope?.turnScope.effectiveCompartments,
+        assistantDefaultCompartments: ctx.runtimeScope?.turnScope.writeCompartments,
+        assistantProjectIds: ctx.runtimeScope?.turnScope.effectiveProjectIds,
+        assistantDefaultProjectIds: ctx.runtimeScope?.turnScope.writeProjectIds,
+        scopeAccumulator: ctx.scopeAccumulator,
+        abortSignal: new AbortController().signal,
+      }
 
   // Policy gate. MCP-discovered tools have `resolveConfirmation` set to a
   // closure that reads the user's effective allow/ask policy from
@@ -1971,20 +1992,7 @@ async function dispatchToolCall(
   let needsConfirmation = forceConfirmation || !!tool.requiresConfirmation
   if (tool.resolveConfirmation) {
     try {
-      // Run with a synthetic context — only the userId/assistantId fields
-      // are read by the resolver. We don't have the workflow ToolContext
-      // built yet (and don't need it for policy lookup).
-      const resolvedConfirmation = await tool.resolveConfirmation({
-        userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
-        assistantId: ctx.toolAssistantId,
-        sessionId: ctx.run.id,
-        appId: 'Use Brian',
-        channelType: 'workflow',
-        channelId: ctx.run.id,
-        workspaceId: ctx.run.workspaceId,
-        ...runtimeToolScope,
-        abortSignal: new AbortController().signal,
-      } satisfies ToolContext, interpolatedArgs)
+      const resolvedConfirmation = await tool.resolveConfirmation(toolContext, interpolatedArgs)
       needsConfirmation = forceConfirmation || resolvedConfirmation
     } catch {
       // Treat resolver failure as ask-policy (fail-closed).
@@ -1995,18 +2003,7 @@ async function dispatchToolCall(
     let displayLines: string[] | undefined
     if (tool.describeConfirmation) {
       try {
-        const lines = await tool.describeConfirmation(interpolatedArgs, {
-          userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
-          assistantId: ctx.toolAssistantId,
-          sessionId: ctx.run.id,
-          appId: 'Use Brian',
-          channelType: 'workflow',
-          channelId: ctx.run.id,
-          workspaceId: ctx.run.workspaceId,
-          assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
-          ...runtimeToolScope,
-          abortSignal: new AbortController().signal,
-        })
+        const lines = await tool.describeConfirmation(interpolatedArgs, toolContext)
         if (lines?.length) displayLines = lines
       } catch (err) {
         console.debug(`[workflow] describeConfirmation failed for ${step.toolName}:`, err)
@@ -2033,21 +2030,6 @@ async function dispatchToolCall(
         reason: 'tool_input_invalid',
       },
     }
-  }
-
-  // Build a workflow-scope ToolContext.
-  const abortController = new AbortController()
-  const toolContext: ToolContext = {
-    userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
-    assistantId: ctx.toolAssistantId,
-    sessionId: ctx.run.id,
-    appId: 'Use Brian',
-    channelType: 'workflow',
-    channelId: ctx.run.id,
-    workspaceId: ctx.run.workspaceId,
-    assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
-    ...runtimeToolScope,
-    abortSignal: abortController.signal,
   }
 
   let result

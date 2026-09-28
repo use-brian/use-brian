@@ -26,9 +26,9 @@ describe('[COMP:api/context-scope-entrypoints] execution entry-point parity', ()
   const paths: Record<string, readonly string[]> = {
     'packages/api/src/routes/chat.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
     'packages/api/src/routes/channel-pipeline.ts': ['resolveTurnScopeSystem', 'contextScope: turnScope', 'effectiveProjectIds'],
-    'packages/api/src/routes/public-turn.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
+    'packages/api/src/routes/public-turn.ts': ['resolveExecutionContextSystem', 'scopeAccumulator', 'effectiveProjectIds'],
     'packages/api/src/inter-assistant/executor.ts': ['resolveTurnScopeSystem', 'contextScope: turnScope', 'scopeAccumulator'],
-    'packages/api/src/brain-mcp/tools.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
+    'packages/api/src/brain-mcp/tools.ts': ['resolveExecutionContextSystem', 'executionToolContext', 'scopeAccumulator'],
     'packages/api/src/routes/assistant-mcp.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
     'packages/api/src/routes/session-resume-replay.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
     'packages/api/src/boot.ts': ['resolveRunScope:', 'turnScope', 'contextProjectId'],
@@ -53,10 +53,11 @@ describe('[COMP:api/telegram-byo-route] external guest connector scope', () => {
 
     expect(connectorBlock).toContain('resolveConnectorTurnScopeForChannelTurn')
     expect(connectorBlock).toContain('contextScope: turnScope')
-    expect(outsideConnectorBlock).not.toMatch(/\bturnScope\b/)
+    expect(outsideConnectorBlock).not.toMatch(/\bturnScope\s*\./)
+    expect(outsideConnectorBlock).not.toMatch(/\b(?:const|let)\s+turnScope\b/)
     expect(content).toContain('const viewerCtx = dataTurnScope.access')
-    expect(content).toContain('bindToolsToAgentAccess(allTools, {')
-    expect(content).toContain('compartments: dataTurnScope.effectiveCompartments')
+    expect(content).toContain('bindToolsToAgentAccess(candidateTools, {')
+    expect(content).toContain('compartments: execution.security.access.compartments')
   })
 })
 

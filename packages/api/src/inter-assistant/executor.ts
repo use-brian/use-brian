@@ -63,6 +63,8 @@ import {
   intersectAccessCeilings, accessCeilingContains,
   boundScopeSource,
   createTurnOutputCollector,
+  executionToolContext,
+  pinAccessCeiling,
 } from '@use-brian/core'
 import type { SavedViewStore, EngineHooks } from '@use-brian/core'
 import type { ResearchSynthesizeFn } from '../synthesis/research-synthesizer.js'
@@ -98,6 +100,8 @@ import {
   resolveLiveAccessCeilingSystem,
   sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -1757,6 +1761,52 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     let responseText = ''
     const turnOutput = createTurnOutputCollector({ format: 'compact' })
     const abortController = new AbortController()
+    const ambientAuthority = {
+      assertCurrent: assertCurrentAuthority,
+      execute: executeWithCurrentAuthority,
+    }
+    const { executionContext } = await resolveExecutionContextSystem({
+      userId: calleeActorUserId,
+      assistant: calleeAssistant,
+      workspaceId: calleeAssistant.workspaceId,
+      session,
+      identity: externalClient
+        ? {
+            kind: 'programmatic',
+            principal: {
+              kind: 'brain_key',
+              credentialId: externalClient.key.id,
+              actorUserId: calleeActorUserId,
+            },
+            credentialOwnerUserId: calleeOwnerUserId,
+          }
+        : {
+            kind: 'delegated',
+            actorUserId: calleeActorUserId,
+            delegationId: params.workflowRunId ?? session.id,
+            parentCeiling: pinAccessCeiling(turnScope.access),
+          },
+      ownership: calleeAssistant.workspaceId
+        ? { kind: 'workspace', workspaceId: calleeAssistant.workspaceId }
+        : { kind: 'personal', ownerUserId: calleeOwnerUserId },
+      lifecycle: {
+        abortSignal: abortController.signal,
+        sessionId: session.id,
+        channelType: 'assistant-call',
+        channelId: params.callerAssistantId,
+      },
+      surface: externalClient?.clientSelfMemory
+        ? { clientSelfMemory: externalClient.clientSelfMemory }
+        : undefined,
+      attribution: {
+        billingUserId: calleeOwnerUserId,
+        ...(externalClient ? { credentialOwnerUserId: calleeOwnerUserId } : {}),
+      },
+      sessionAuthority: session,
+    }, {
+      resolveScope: async () => turnScope,
+      createSessionLease: () => ambientAuthority,
+    })
     // Liveness, not wall-clock (2026-08-19). The step is bounded by cost
     // (`budget.maxTurns` / `maxToolCalls`) and by the query loop's stall
     // watchdog (`stallIdleMs`: no provider chunk / tool activity / loop event
@@ -2010,39 +2060,45 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // confirmation resolvers are still released.
     try {
       await assertCurrentAuthority()
-      if (!synthesisHandled)
-      for await (const event of queryLoop({
-        ledger: createTurnLedger({
-          workspaceId: calleeAssistant.workspaceId ?? null,
-          assistantId: params.calleeAssistantId,
-          sessionId: session.id,
-          actor: params.callerChannelType === 'workflow' ? 'workflow_step' : 'a2a',
-          payloads: getLedgerPayloadStore(),
-        }).ledger,
-        provider: loopProvider,
-        model,
-        maxTokens: customLlmRuntime?.maxTokens,
-        inputTokenLimit: customLlmRuntime?.inputTokenLimit,
-        // Workflow assistant calls are unattended and their terminal text is
-        // assembled only after the loop ends. Mark the lane explicitly so a
-        // max-token stop or finish-marker-less custom stream gets the core
-        // loop's single bounded continuation instead of recording a visibly
-        // truncated step as completed.
-        channelType: params.callerChannelType === 'workflow' ? 'workflow' : undefined,
-        systemPrompt: loopSystemPrompt,
-        messages,
-        tools: finalTools,
-        context: {
-          userId: calleeActorUserId,
-          assistantId: params.calleeAssistantId,
-          sessionId: session.id,
-          appId: 'Use Brian',
-          channelType: 'assistant-call',
-          channelId: params.callerAssistantId,
+      if (!synthesisHandled) {
+        const preparedRun = await prepareAssistantRun({
+          executionContext,
+          model: {
+            provider: loopProvider,
+            model,
+            maxTokens: customLlmRuntime?.maxTokens,
+            inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+          },
+          candidateTools: finalTools,
+          bindTools: (candidateTools) => candidateTools,
+          trustedContributions: [{ name: 'callee', content: loopSystemPrompt }],
+        })
+        for await (const event of queryLoop({
+          ledger: createTurnLedger({
+            workspaceId: calleeAssistant.workspaceId ?? null,
+            assistantId: params.calleeAssistantId,
+            sessionId: session.id,
+            actor: params.callerChannelType === 'workflow' ? 'workflow_step' : 'a2a',
+            payloads: getLedgerPayloadStore(),
+          }).ledger,
+          provider: preparedRun.model.provider,
+          model: preparedRun.model.model,
+          maxTokens: preparedRun.model.maxTokens,
+          inputTokenLimit: preparedRun.model.inputTokenLimit,
+          // Workflow assistant calls are unattended and their terminal text is
+          // assembled only after the loop ends. Mark the lane explicitly so a
+          // max-token stop or finish-marker-less custom stream gets the core
+          // loop's single bounded continuation instead of recording a visibly
+          // truncated step as completed.
+          channelType: params.callerChannelType === 'workflow' ? 'workflow' : undefined,
+          systemPrompt: preparedRun.trustedContext,
+          messages,
+          tools: preparedRun.tools,
+          context: {
+            ...executionToolContext(executionContext, { appId: 'Use Brian' }),
           // A page anchor already passed the workspace gate above — the doc
           // tools need workspaceId regardless of the memory-mode conditional.
           // Brain retrieval tools use the same resolved workspace actor.
-          workspaceId: calleeAssistant.workspaceId ?? undefined,
           workerRuntime: customLlmRuntime
             ? {
                 provider: customLlmRuntime.provider,
@@ -2053,29 +2109,18 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 maxTokens: customLlmRuntime.maxTokens,
               }
             : undefined,
-          assistantKind: calleeAssistant.kind,
-          visibilityAssistantIds:turnScope.access.visibilityAssistantIds,
           // Read ceilings for the brain retrieval actor — the `min(member,
           // assistant)` clearance + compartment grant. Set only when retrieval
           // tools were injected; absent otherwise (passthrough, unchanged for
           // callees without brain reads).
-          clearance: turnScope.access.clearance,
-          compartments: turnScope.effectiveCompartments,
-          mutationCompartments: turnScope.access.mutationCompartments,
-          projectIds: turnScope.effectiveProjectIds,
           activeGroupId: turnScope.activeGroupId,
           activeProjectId: turnScope.activeProjectId,
-          clientSelfMemory: externalClient?.clientSelfMemory,
           memoryWriteSensitivityFloor: externalClient ? 'internal' : undefined,
           memoryWriteCompartments: externalClient?.writeCompartments,
-          assistantClearance: calleeAssistant.clearance,
-          assistantCompartments: turnScope.effectiveCompartments,
           assistantDefaultCompartments: unionCompartments(
             turnScope.writeCompartments,
             externalClient?.writeCompartments ?? [],
           ),
-          assistantProjectIds: turnScope.effectiveProjectIds,
-          assistantDefaultProjectIds: turnScope.writeProjectIds,
           scopeAccumulator,
           // Doc anchor: renderView/renderChart append to this page instead
           // of minting drafts; patchPage/getCurrentPage target it.
@@ -2083,29 +2128,28 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // Record provenance: saves during a workflow consult stamp the RUN
           // id so `{{lastRun.output.*}}` resolves next run.
           workflowRunId: params.workflowRunId ?? null,
-          abortSignal: abortController.signal,
           activeCapabilities: calleeCapabilities,
           // Mechanical anti-fabrication gate (workflow-origin only; see the
           // EvidenceAccumulator construction above).
           evidence: evidenceAccumulator,
-        },
-        maxTurns: budget.maxTurns,
-        maxToolCalls: budget.maxToolCalls,
-        stallIdleMs,
-        confirmationResolver,
-        confirmationTimeoutMs: deferredConfirmations ? 300_000 : undefined,
-      })) {
-        await assertCurrentAuthority()
-        turnOutput.observe(event)
-        if (params.onActivity) {
-          for (const frame of goalActivityFramesFromQueryEvent(event)) {
-            try {
-              params.onActivity(frame)
-            } catch (error) {
-              console.warn('[inter-assistant] goal activity callback failed (non-fatal):', error)
+          },
+          maxTurns: budget.maxTurns,
+          maxToolCalls: budget.maxToolCalls,
+          stallIdleMs,
+          confirmationResolver,
+          confirmationTimeoutMs: deferredConfirmations ? 300_000 : undefined,
+        })) {
+          await assertCurrentAuthority()
+          turnOutput.observe(event)
+          if (params.onActivity) {
+            for (const frame of goalActivityFramesFromQueryEvent(event)) {
+              try {
+                params.onActivity(frame)
+              } catch (error) {
+                console.warn('[inter-assistant] goal activity callback failed (non-fatal):', error)
+              }
             }
           }
-        }
         // Live watch mirror (§5.2): snapshots are the full reply-so-far,
         // never deltas — the terminal-turns-only deliverable rule below is
         // untouched, this feed exists only behind the gateSessionRead relay.
@@ -2322,6 +2366,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         } else if (event.type === 'error') {
           console.error(`[inter-assistant] callee query error:`, event.error)
           throw event.error
+        }
         }
       }
     } catch (err) {

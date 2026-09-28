@@ -172,6 +172,7 @@ import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
 import { findAssistantById, findUserByAuthProvider, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
+import { resolveExecutionContextSystem } from './context-scope/execution-context.js'
 import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowRunScope } from './context-scope/workflow-authority.js'
 import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
@@ -3281,17 +3282,34 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       if (!externalClientPrincipal) return resolveWorkflowRunScope({ userId, assistantId, workspaceId, run })
       const assistant = await findAssistantById(assistantId)
       if (!assistant) throw new Error('Workflow assistant not found.')
-      const turnScope = await resolveTurnScopeSystem({
+      const { turnScope, executionContext } = await resolveExecutionContextSystem({
         userId,
         assistant,
         workspaceId,
+        identity: {
+          kind: 'programmatic',
+          principal: {
+            kind: 'brain_key',
+            credentialId: externalClientPrincipal.apiKeyId,
+            actorUserId: externalClientPrincipal.externalUserId,
+          },
+          credentialOwnerUserId: userId,
+        },
+        ownership: { kind: 'workspace', workspaceId },
+        lifecycle: {
+          abortSignal: new AbortController().signal,
+          sessionId: run.id,
+          channelType: 'workflow',
+          channelId: run.id,
+        },
+        attribution: { billingUserId: userId, credentialOwnerUserId: userId },
         key: {
           contextGroupId: run.contextGroupId ?? null,
           contextProjectId: run.contextProjectId ?? null,
           contextLockedAt: run.startedAt,
         },
       })
-      return { turnScope, assistantClearance: assistant.clearance }
+      return { turnScope, executionContext, assistantClearance: assistant.clearance }
     },
     sendPage: sendPagePort,
     resolveVerifiedClientEmail: ({ apiKeyId, assistantId, email }) =>

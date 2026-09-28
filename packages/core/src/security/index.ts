@@ -54,3 +54,20 @@ export { bindScopeSource, boundScopeSource } from './source-evidence.js'
 export { pinAccessCeiling, pinAuthoringAuthority, parseAuthoringAuthority, intersectAccessCeilings, accessCeilingContains } from './access-ceiling.js'
 export type { AccessCeiling, AuthoringAuthority } from './access-ceiling.js'
 export { pinToolAuthoringAuthority } from './tool-authority.js'
+export { createExecutionContext, executionToolContext } from './execution-context.js'
+export type {
+  AttendedExecutionIdentity,
+  CreateExecutionContextInput,
+  DelegatedExecutionIdentity,
+  ExecutionAttribution,
+  ExecutionContext,
+  ExecutionIdentity,
+  ExecutionLifecycle,
+  ExecutionOwnership,
+  ExecutionSecurityContext,
+  ExecutionSurfaceCapabilities,
+  ProgrammaticExecutionIdentity,
+  ResolvedExecutionAccess,
+  SystemExecutionIdentity,
+  SystemExecutionPurpose,
+} from './execution-context.js'
