@@ -192,7 +192,7 @@ function revisionScope(snapshot: OfficeArtifactSnapshot, targetIds: string[], lo
         scope.presentationSlides.add(slide.id)
       }
     }
-  } else {
+  } else if (snapshot.family === 'spreadsheet') {
     for (const sheet of snapshot.worksheets) {
       scope.spreadsheetSheetIds.add(sheet.id)
       const sheetSelected = targets.has(sheet.id)
@@ -208,7 +208,7 @@ function revisionScope(snapshot: OfficeArtifactSnapshot, targetIds: string[], lo
         scope.spreadsheetSheets.add(sheet.id)
       }
     }
-  }
+  } else throw new Error('PDF sessions require the PDF target planner')
   // Locks on an ancestor/master-owned object cover its runs too, even when
   // the user selected the whole slide and directIds includes all descendants.
   const collectLocks = (value: unknown, inherited = false): void => {
@@ -386,6 +386,7 @@ function promptContext(snapshot: OfficeArtifactSnapshot, targetIds: string[]): u
   if (snapshot.family === 'presentation') {
     return { ...common, slideSize: snapshot.slideSize, themeId: snapshot.themeId, masters: snapshot.masters, layouts: snapshot.layouts, slides: snapshot.slides.filter((slide) => targets.has(slide.id) || containsId(slide, targets)), otherSlides: snapshot.slides.map((slide, index) => ({ id: slide.id, index, title: slide.title })) }
   }
+  if (snapshot.family === 'pdf') throw new Error('PDF sessions require the PDF target planner')
   return { ...common, appendTables: snapshot.worksheets.flatMap(sheet => (sheet.tables ?? []).filter(t => targets.has(t.id) || targets.has(sheet.id)).map(table => { const b = tableBounds(table.ref); return { sheetId: sheet.id, ...table, prototypeRow: b.bottom, prototypeCells: sheet.cells.filter(c => { const a = parseCellAddress(c.address)!; return a.row === b.bottom && a.column >= b.left && a.column <= b.right }) } })), calculationMode: snapshot.calculationMode, worksheets: snapshot.worksheets.filter((sheet) => targets.has(sheet.id) || containsId(sheet, targets)).map((sheet) => ({ ...sheet, cells: targets.has(sheet.id) ? sheet.cells.slice(0, 2_000) : sheet.cells.filter((cell) => targets.has(cell.id)).concat(sheet.cells.filter((cell) => Boolean(cell.formula)).slice(0, 500)) })), otherWorksheets: snapshot.worksheets.map((sheet, index) => ({ id: sheet.id, index, name: sheet.name, cellCount: sheet.cells.length })) }
 }
 

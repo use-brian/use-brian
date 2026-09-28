@@ -22,7 +22,9 @@ export type OfficeAccessProjection = {
   requiredCompartments: string[]
   sourcesEligible: boolean
   mutationScopeEligible: boolean
-  defaultWorkspaceRole: OfficeRole
+  mode: 'artifact' | 'template' | 'session'
+  expiresAt: Date | null
+  defaultWorkspaceRole: OfficeRole | 'deny'
   lifecycleState: OfficeLifecycleState
   memberRole: WorkspaceRole
   memberClearance: OfficeClearance
@@ -34,6 +36,7 @@ export type OfficeAccessProjection = {
 export type ResolvedOfficeAccess = {
   artifactId: string
   workspaceId: string
+  mode: 'artifact' | 'template' | 'session'
   role: OfficeRole
   workspaceRole: WorkspaceRole
   lifecycleState: OfficeLifecycleState
@@ -55,8 +58,33 @@ const CLEARANCE_RANK: Record<OfficeClearance, number> = {
 export function resolveOfficeAccessProjection(
   userId: string,
   projection: OfficeAccessProjection,
+  now = new Date(),
 ): ResolvedOfficeAccess | null {
   if (projection.lifecycleState === 'purged') return null
+  if (projection.mode === 'session') {
+    if (projection.ownerUserId !== userId || projection.lifecycleState !== 'active') return null
+    if (!projection.expiresAt || now.getTime() >= projection.expiresAt.getTime()) return null
+    if (projection.defaultWorkspaceRole !== 'deny') return null
+    if (CLEARANCE_RANK[projection.memberClearance] < CLEARANCE_RANK[projection.sensitivity]) return null
+    if (!projection.sourcesEligible || !projection.mutationScopeEligible) return null
+    if (projection.visibilityUserIds.length > 0 && !projection.visibilityUserIds.includes(userId)) return null
+    if (projection.memberCompartments !== null && projection.requiredCompartments.some((required) => !projection.memberCompartments!.includes(required))) return null
+    return {
+      artifactId: projection.artifactId,
+      workspaceId: projection.workspaceId,
+      mode: 'session',
+      role: 'edit',
+      workspaceRole: projection.memberRole,
+      lifecycleState: projection.lifecycleState,
+      canView: true,
+      canComment: false,
+      canEdit: true,
+      canRestore: false,
+      canDeletePermanently: false,
+      canElevate: false,
+      canManageSharing: false,
+    }
+  }
   if (CLEARANCE_RANK[projection.memberClearance] < CLEARANCE_RANK[projection.sensitivity]) return null
   if (!projection.sourcesEligible) return null
   if (projection.visibilityUserIds.length > 0 && !projection.visibilityUserIds.includes(userId)) return null
@@ -73,6 +101,7 @@ export function resolveOfficeAccessProjection(
   } else if (projection.creatorUserId === userId || projection.ownerUserId === userId) {
     role = 'edit'
   } else {
+    if (projection.defaultWorkspaceRole === 'deny') return null
     role = projection.defaultWorkspaceRole
   }
 
@@ -81,6 +110,7 @@ export function resolveOfficeAccessProjection(
   return {
     artifactId: projection.artifactId,
     workspaceId: projection.workspaceId,
+    mode: projection.mode,
     role: mutationAllowed ? role : 'view',
     workspaceRole: projection.memberRole,
     lifecycleState: projection.lifecycleState,
@@ -99,6 +129,8 @@ export const OFFICE_ACCESS_SQL = `
          a.workspace_id               AS "workspaceId",
          a.creator_user_id            AS "creatorUserId",
          a.owner_user_id              AS "ownerUserId",
+         a.mode                       AS mode,
+         a.expires_at                 AS "expiresAt",
          a.sensitivity                AS sensitivity,
          a.visibility_user_ids        AS "visibilityUserIds",
          a.compartments               AS "requiredCompartments",
@@ -128,4 +160,13 @@ export async function resolveOfficeAccess(
   const result = await defaultOfficeDbQuery<OfficeAccessProjection>(userId, OFFICE_ACCESS_SQL, [artifactId, userId])
   const row = result.rows[0]
   return row ? resolveOfficeAccessProjection(userId, row) : null
+}
+
+/** Generic Office routes must never become an alternate session surface. */
+export async function resolveDurableOfficeAccess(
+  userId: string,
+  artifactId: string,
+): Promise<ResolvedOfficeAccess | null> {
+  const access = await resolveOfficeAccess(userId, artifactId)
+  return access?.mode === 'session' ? null : access
 }

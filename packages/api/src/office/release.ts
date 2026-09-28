@@ -126,6 +126,9 @@ export async function prepareOfficeRelease(params: Parameters<typeof reviewOffic
   if (receipt.status !== 'ready') return { receipt }
   const resolveResource = params.resolveResource ?? (async () => null)
   try {
+    if (params.snapshot.family === 'pdf') {
+      return { receipt: { ...receipt, status: 'blocked', blocks: [...receipt.blocks, { code: 'export.pdf_session_route_required', message: 'PDF sessions use their independent validated release route.' }] } }
+    }
     if (params.snapshot.family === 'document' && params.format === 'pdf') {
       const exportedPdf = await exportOfficeDocumentPdf(params.snapshot, resolveResource, params.documentPdfPort)
       const documentPdf = exportedPdf.receipt
@@ -173,6 +176,7 @@ export async function prepareOfficeRelease(params: Parameters<typeof reviewOffic
 
 export function deriveOfficeSnapshot(params: { source: OfficeArtifactSnapshot; artifactId: string; title: string; selectedObjectIds?: string[] }): OfficeArtifactSnapshot {
   const selected = params.selectedObjectIds ? new Set(params.selectedObjectIds) : null
+  if (params.source.family === 'pdf') throw new Error('PDF sessions cannot be copied or derived through generic Office release')
   if (params.source.family === 'document') {
     return {
       ...params.source,

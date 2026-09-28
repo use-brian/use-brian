@@ -46,6 +46,22 @@ function push(out: ArtifactTextFragment[], text: string, locator: string): void 
 
 export function collectArtifactText(snapshot: OfficeArtifactSnapshot): ArtifactTextFragment[] {
   const out: ArtifactTextFragment[] = []
+
+  if (snapshot.family === 'pdf') {
+    for (const [pageIndex, page] of snapshot.pages.entries()) {
+      for (const field of page.fields) {
+        if (field.kind === 'signature' || field.value === null) continue
+        const value = Array.isArray(field.value) ? field.value.join(', ') : String(field.value)
+        push(out, value, `page ${pageIndex + 1} field ${field.label}`)
+      }
+      for (const overlay of page.overlays) {
+        if (overlay.kind === 'text') push(out, overlay.text, `page ${pageIndex + 1} text overlay`)
+        else if (overlay.kind === 'date') push(out, overlay.date, `page ${pageIndex + 1} date overlay`)
+      }
+    }
+    return out
+  }
+
   push(out, snapshot.title, 'title')
 
   if (snapshot.family === 'document') {
@@ -182,7 +198,7 @@ export function collectFontFamilies(snapshot: OfficeArtifactSnapshot): string[] 
         else if (object.kind === 'table') for (const row of object.rows) for (const cell of row.cells) take(cell.runs)
       }
     }
-  } else {
+  } else if (snapshot.family === 'spreadsheet') {
     for (const sheet of snapshot.worksheets) {
       for (const cell of sheet.cells) {
         const family = cell.style.font?.family?.trim()

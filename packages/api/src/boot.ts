@@ -537,7 +537,7 @@ import { contextScopeRoutes } from './routes/context-scopes.js'
 import { workspaceAccessRoutes } from './routes/workspace-access.js'
 import { createOrganizationTools, createWorkspaceAccessTools } from './workspace-access/tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
-import { createOfficeArtifactStore } from './db/office-artifacts.js'
+import { createOfficeArtifactStore, isDurableOfficeArtifact } from './db/office-artifacts.js'
 import { readWorkspaceMemberDirectory } from './db/workspace-member-directory.js'
 import { OFFICE_LIFECYCLE_SWEEP_SQL } from './db/office-lifecycle.js'
 import { getBrandStore } from './db/brand-store.js'
@@ -550,7 +550,7 @@ import { createOfficeReleaseStore } from './db/office-release.js'
 import { createOfficeService } from './office/service.js'
 import { deriveOfficeSnapshot } from './office/release.js'
 import { createOfficeLifecycleWorker } from './office/lifecycle-worker.js'
-import { resolveOfficeAccess } from './office/access.js'
+import { resolveDurableOfficeAccess } from './office/access.js'
 import { officeArtifactRoutes } from './routes/office-artifacts.js'
 import { officeJobRoutes } from './routes/office-jobs.js'
 import { officeTemplateRoutes } from './routes/office-templates.js'
@@ -2834,7 +2834,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
     getArtifact: officeArtifactStore.get,
     raiseScope: officeArtifactStore.raiseScope,
-    resolveAccess: resolveOfficeAccess,
+    resolveAccess: resolveDurableOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
     getSnapshot: officeLiveStore.get,
@@ -4395,7 +4395,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           ? resolveOfficeToolPolicy(name, context) : resolveFilesToolPolicy(name, context),
         async getOffice(userId, artifactId) {
           const [artifact, access, live] = await Promise.all([
-            officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId),
+            officeArtifactStore.get(userId, artifactId), resolveDurableOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId),
           ])
           return artifact && access && live ? { artifact, access, live } : null
         },
@@ -6513,7 +6513,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return restored
     },
     getArtifact: officeArtifactStore.get,
-    resolveAccess: resolveOfficeAccess,
+    resolveAccess: resolveDurableOfficeAccess,
     listVersions: officeArtifactStore.listVersions,
     async previewVersion({ userId, artifactId, versionId }) {
       return (await readOfficeVersionSnapshot(userId, artifactId, versionId))?.snapshot ?? null
@@ -6525,7 +6525,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         officeArtifactStore.get(userId, artifactId),
         readOfficeVersionSnapshot(userId, artifactId, versionId),
       ])
-      if (!artifact || !loaded) return null
+      if (!artifact || !isDurableOfficeArtifact(artifact) || !loaded) return null
       const copiedArtifactId=randomUUID(),copiedVersionId=randomUUID()
       const snapshot = deriveOfficeSnapshot({ source: loaded.snapshot, artifactId: copiedArtifactId, title })
       const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
@@ -6543,7 +6543,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     async listSharing(userId, artifactId) {
       const artifact = await officeArtifactStore.get(userId, artifactId)
-      if (!artifact) return {status:'unavailable' as const}
+      if (!artifact || !isDurableOfficeArtifact(artifact)) return {status:'unavailable' as const}
       const [grants,directory]=await Promise.all([officeArtifactStore.listGrants(userId,artifactId),readWorkspaceMemberDirectory(userId,artifact.workspaceId)])
       if(directory.status===409)return {status:'changed' as const}
       if(directory.status!==200)return {status:'unavailable' as const}
@@ -6553,18 +6553,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     async setGrant({ userId, artifactId, targetUserId, role, reason }) {
       const artifact = await officeArtifactStore.get(userId, artifactId)
-      if (!artifact) return false
+      if (!artifact || !isDurableOfficeArtifact(artifact)) return false
       if (artifact.ownerUserId === targetUserId) return false
       return officeArtifactStore.setGrant({ userId, artifactId, workspaceId: artifact.workspaceId, targetUserId, role, reason })
     },
     async revokeGrant({ userId, artifactId, targetUserId }) {
       const artifact = await officeArtifactStore.get(userId, artifactId)
-      if (!artifact || artifact.ownerUserId === targetUserId) return false
+      if (!artifact || !isDurableOfficeArtifact(artifact) || artifact.ownerUserId === targetUserId) return false
       return officeArtifactStore.revokeGrant({ userId, artifactId, targetUserId })
     },
     setDefaultWorkspaceRole: officeArtifactStore.setDefaultWorkspaceRole,
     async canRestoreVersion(userId, artifactId) {
-      return (await resolveOfficeAccess(userId, artifactId))?.canEdit ?? false
+      return (await resolveDurableOfficeAccess(userId, artifactId))?.canEdit ?? false
     },
   }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeJobRoutes({
@@ -7018,7 +7018,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeCollaborationRoutes({
     getArtifact: officeArtifactStore.get,
-    resolveAccess: resolveOfficeAccess,
+    resolveAccess: resolveDurableOfficeAccess,
     getSnapshot: officeLiveStore.get,
     appendCommand: officeLiveStore.appendCommand,
     listThreads: officeCommentStore.listThreads,
@@ -7106,7 +7106,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     async load(userId, artifactId) {
       const [artifact, access, live] = await Promise.all([
         officeArtifactStore.get(userId, artifactId),
-        resolveOfficeAccess(userId, artifactId),
+        resolveDurableOfficeAccess(userId, artifactId),
         officeLiveStore.get(userId, artifactId),
       ])
       return artifact && access && live ? { artifact, access, snapshot: live.snapshot } : null
@@ -7134,7 +7134,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     readResource: readOfficeResource,
   }))
   const loadOfficeReleaseContext = async (userId: string, artifactId: string) => {
-    const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
+    const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveDurableOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
     if (!artifact || !access || !live) return null
     const [claims, media] = artifact.headVersionId ? await Promise.all([officeReleaseStore.listClaims(userId, artifactId, artifact.headVersionId), officeReleaseStore.listMedia(userId, artifactId, artifact.headVersionId)]) : [[], []]
     // The brand's APPROVED claims register (docs/architecture/features/brand.md
@@ -7186,6 +7186,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     createRecord: officeReleaseStore.createRelease,
     async createDerivative({ userId, source, title, sensitivity, selectedObjectIds, visibilityUserIds }) {
+      if (!isDurableOfficeArtifact(source.artifact)) throw new Error('PDF sessions cannot create Office derivatives')
       const shell = await officeArtifactStore.createShell({ userId, workspaceId: source.artifact.workspaceId, family: source.artifact.family, title, templateVersionId: source.artifact.templateVersionId, capabilityVersion: source.artifact.capabilityVersion, sensitivity, visibilityUserIds, requiredCompartments: source.artifact.compartments, projectIds: source.artifact.projectIds })
       const snapshot = deriveOfficeSnapshot({ source: source.snapshot, artifactId: shell.id, title, selectedObjectIds: selectedObjectIds.length ? selectedObjectIds : undefined })
       const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
@@ -7202,12 +7203,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { artifactId: shell.id, version: version.version }
     },
   }))
-  app.use('/api/office', requireAuth(env.JWT_SECRET), officeLifecycleRoutes({ resolveAccess: resolveOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }))
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeLifecycleRoutes({ resolveAccess: resolveDurableOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }))
   const loadOfficeOfflineContext = async (userId: string, artifactId: string) => {
     const reply = await readOfficeProjection(userId, async () => {
       const [artifact, access, live, comments, history] = await Promise.all([
         officeArtifactStore.get(userId, artifactId),
-        resolveOfficeAccess(userId, artifactId),
+        resolveDurableOfficeAccess(userId, artifactId),
         officeLiveStore.getOfflineSource(userId, artifactId),
         officeCommentStore.listThreads(userId, artifactId),
         officeArtifactStore.listVersions(userId, artifactId),
@@ -7245,15 +7246,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     upsert: officeReleaseStore.upsertOfflinePackage,
     getPackage: officeReleaseStore.getOfflinePackage,
-    resolveAccess: resolveOfficeAccess,
+    resolveAccess: resolveDurableOfficeAccess,
     syncCommands: officeLiveStore.appendOfflineCommands,
     async createRecovery({ userId, artifactId, sourceVersionId, title, snapshot: sourceSnapshot }) {
       const [artifact, access, sourceVersion] = await Promise.all([
         officeArtifactStore.get(userId, artifactId),
-        resolveOfficeAccess(userId, artifactId),
+        resolveDurableOfficeAccess(userId, artifactId),
         officeArtifactStore.getVersionSource(userId, artifactId, sourceVersionId),
       ])
-      if (!artifact || !access?.canEdit || artifact.lifecycleState !== 'active' || !sourceVersion || sourceVersion.workspaceId !== artifact.workspaceId) return null
+      if (!artifact || !isDurableOfficeArtifact(artifact) || !access?.canEdit || artifact.lifecycleState !== 'active' || !sourceVersion || sourceVersion.workspaceId !== artifact.workspaceId) return null
       const initialRevision = JSON.stringify({ artifact, access, sourceVersion })
       const resourceReads = await Promise.all(sourceSnapshot.resources.map(async ref => {
         const resource = await readOfficeResource(userId, artifact.workspaceId, ref.id)
@@ -7268,11 +7269,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const fileId = await saveClassifiedOfficeFile!({ userId, workspaceId: artifact.workspaceId, path: `/office/artifacts/${recoveryArtifactId}/versions/1-${hash}.json`, bytes, mime: 'application/json', hash, scope })
       const [currentArtifact, currentAccess, currentSourceVersion, currentResources] = await Promise.all([
         officeArtifactStore.get(userId, artifactId),
-        resolveOfficeAccess(userId, artifactId),
+        resolveDurableOfficeAccess(userId, artifactId),
         officeArtifactStore.getVersionSource(userId, artifactId, sourceVersionId),
         Promise.all(sourceSnapshot.resources.map(ref => readOfficeResource(userId, artifact.workspaceId, ref.id))),
       ])
-      if (!currentArtifact || !currentAccess?.canEdit || !currentSourceVersion || JSON.stringify({ artifact: currentArtifact, access: currentAccess, sourceVersion: currentSourceVersion }) !== initialRevision ||
+      if (!currentArtifact || !isDurableOfficeArtifact(currentArtifact) || !currentAccess?.canEdit || !currentSourceVersion || JSON.stringify({ artifact: currentArtifact, access: currentAccess, sourceVersion: currentSourceVersion }) !== initialRevision ||
         currentResources.some((resource, index) => !resource || !sameOfficeFileBinding(resource.binding, resourceReads[index]!.binding))) return null
       const doc = snapshotToYDoc(snapshot)
       const created = await officeArtifactStore.createCopiedArtifact({ userId, artifactId: recoveryArtifactId, versionId: recoveryVersionId,

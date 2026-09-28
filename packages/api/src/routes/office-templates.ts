@@ -4,7 +4,7 @@ import { Router } from 'express'
 import {officeMetadataRoute} from './office-metadata.js'
 import { z } from 'zod'
 import { inferOfficeTemplateRouting, officeTemplateRoutingDiagnostics } from '@use-brian/core'
-import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot } from '@use-brian/office-model'
+import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot, type PdfSnapshot } from '@use-brian/office-model'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 
 type TemplateDraftRow = {
@@ -17,6 +17,7 @@ type TemplateDraftRow = {
 }
 
 type TemplateLiveSnapshot = { snapshot: OfficeArtifactSnapshot; seq: number; baseVersion: number }
+type DurableOfficeSnapshot = Exclude<OfficeArtifactSnapshot, PdfSnapshot>
 
 export type OfficeTemplatesRouteDeps = {
   list(userId: string, workspaceId: string, family?: 'document' | 'presentation' | 'spreadsheet'): Promise<unknown[]>
@@ -161,7 +162,7 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
   return router
 }
 
-export function blankTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string }): OfficeArtifactSnapshot {
+export function blankTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string }): DurableOfficeSnapshot {
   const common = {
     schemaVersion: 1 as const,
     capabilityVersion: 1 as const,
@@ -225,7 +226,7 @@ const templateTextStyle = (fontSizePt: number, bold = false) => ({
 /** Seeds a useful, editable template draft from the member's guidance.
  * Artifact generation still requires the resulting draft to pass normal
  * template compilation and publish as an admitted immutable version. */
-export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; guidance: string; canonicalWebsite?: string }): OfficeArtifactSnapshot {
+export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; guidance: string; canonicalWebsite?: string }): DurableOfficeSnapshot {
   const base = blankTemplateSnapshot(params)
   const guidance = params.guidance.trim().replace(/\s+/g, ' ').slice(0, 480)
   const website = params.canonicalWebsite?.trim()

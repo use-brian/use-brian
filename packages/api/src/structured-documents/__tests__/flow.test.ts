@@ -81,8 +81,8 @@ it('[COMP:api/structured-documents] carries PDF evidence through a leased worker
     fail: (user, id, token, state, errorCode) => store.update(user, id, token, state, { status: 'failed', errorCode }),
     complete: (user, id, token) => store.update(user, id, token, 'archiving', { status: 'completed' }),
   }
-  const artifact: OfficeArtifactRow = { id: uid(8), workspaceId: uid(2), family: 'spreadsheet', mode: 'artifact', title: 'Fictional', creatorUserId: uid(1), ownerUserId: uid(1), templateVersionId: null, headVersionId: uid(11), headVersion: 3, capabilityVersion: 1, sensitivity: 'internal', compartments: ['team-a'], projectIds: ['project-a'], defaultWorkspaceRole: 'comment', lifecycleState: 'active', updatedAt: date() }
-  const access: ResolvedOfficeAccess = { artifactId: artifact.id, workspaceId: uid(2), role: 'comment', workspaceRole: 'member', lifecycleState: 'active', canView: true, canComment: true, canEdit: false, canRestore: false, canDeletePermanently: false, canElevate: false, canManageSharing: false }
+  const artifact: OfficeArtifactRow = { id: uid(8), workspaceId: uid(2), family: 'spreadsheet', mode: 'artifact', title: 'Fictional', creatorUserId: uid(1), ownerUserId: uid(1), templateVersionId: null, headVersionId: uid(11), headVersion: 3, capabilityVersion: 1, sensitivity: 'internal', compartments: ['team-a'], projectIds: ['project-a'], defaultWorkspaceRole: 'comment', lifecycleState: 'active', expiresAt: null, updatedAt: date() }
+  const access: ResolvedOfficeAccess = { artifactId: artifact.id, workspaceId: uid(2), mode: 'artifact', role: 'comment', workspaceRole: 'member', lifecycleState: 'active', canView: true, canComment: true, canEdit: false, canRestore: false, canDeletePermanently: false, canElevate: false, canManageSharing: false }
   const live: OfficeLiveSnapshot = { snapshot: snapshot(), seq: 4, baseVersion: 3, canonicalHash: 'fictional-hash' }
   if (live.snapshot.family !== 'spreadsheet') throw new Error('spreadsheet required')
   live.snapshot.worksheets[0]!.cells.push(

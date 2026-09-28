@@ -5,7 +5,7 @@ export const OFFICE_SCHEMA_VERSION = 1 as const
 export const OFFICE_CAPABILITY_VERSION = 1 as const
 
 export const OfficeUuidSchema = z.string().uuid()
-export const OfficeFamilySchema = z.enum(['document', 'presentation', 'spreadsheet'])
+export const OfficeFamilySchema = z.enum(['document', 'presentation', 'spreadsheet', 'pdf'])
 export type OfficeFamily = z.infer<typeof OfficeFamilySchema>
 
 export const OfficeSensitivitySchema = z.enum(['public', 'internal', 'confidential'])
@@ -410,6 +410,217 @@ const ArtifactCommonSchema = z.object({
   accessibility: z.object({ title: z.string().min(1).max(1_000), description: z.string().max(4_000).optional() }).strict(),
 })
 
+export const PdfRectSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+  width: z.number().finite().positive().max(20_000),
+  height: z.number().finite().positive().max(20_000),
+}).strict()
+export type PdfRect = z.infer<typeof PdfRectSchema>
+
+export const PdfWidgetSchema = z.object({
+  id: OfficeUuidSchema,
+  pageId: OfficeUuidSchema,
+  rect: PdfRectSchema,
+}).strict()
+export type PdfWidget = z.infer<typeof PdfWidgetSchema>
+
+export const PdfFieldValueSchema = z.union([
+  z.string().max(100_000),
+  z.boolean(),
+  z.array(z.string().max(10_000)).max(1_000),
+  z.null(),
+])
+export type PdfFieldValue = z.infer<typeof PdfFieldValueSchema>
+
+export const PdfFieldSchema = z.object({
+  id: OfficeUuidSchema,
+  originalName: z.string().min(1).max(1_000),
+  label: z.string().min(1).max(1_000),
+  kind: z.enum(['text', 'checkbox', 'radio', 'dropdown', 'option-list', 'signature']),
+  readOnly: z.boolean(),
+  required: z.boolean(),
+  value: PdfFieldValueSchema,
+  allowedOptions: z.array(z.string().max(10_000)).max(10_000).optional(),
+  widgets: z.array(PdfWidgetSchema).min(1).max(10_000),
+}).strict().superRefine((field, ctx) => {
+  const issue = (message: string, path: Array<string | number> = ['value']) =>
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message })
+  const options = field.allowedOptions
+  if ((field.kind === 'radio' || field.kind === 'dropdown' || field.kind === 'option-list') && (!options || options.length === 0)) {
+    issue('Choice fields require allowed options', ['allowedOptions'])
+  }
+  if (options && new Set(options).size !== options.length) issue('Field options must be unique', ['allowedOptions'])
+  if (field.kind === 'text' && field.value !== null && typeof field.value !== 'string') issue('Text field value must be text or null')
+  if (field.kind === 'checkbox' && field.value !== null && typeof field.value !== 'boolean') issue('Checkbox field value must be boolean or null')
+  if ((field.kind === 'radio' || field.kind === 'dropdown') && field.value !== null && typeof field.value !== 'string') issue('Single-choice field value must be text or null')
+  if (field.kind === 'option-list' && field.value !== null && !Array.isArray(field.value)) issue('Option-list field value must be a list or null')
+  if (field.kind === 'signature' && field.value !== null) issue('Signature widget values remain null; placement is an overlay')
+  const selected = Array.isArray(field.value) ? field.value : typeof field.value === 'string' ? [field.value] : []
+  if (options && selected.some((value) => !options.includes(value))) issue('Field value must use an allowed option')
+  if (Array.isArray(field.value) && new Set(field.value).size !== field.value.length) issue('Option-list values must be unique')
+  if (field.required && (field.value === null || field.value === '' || Array.isArray(field.value) && field.value.length === 0)) issue('Required field cannot be empty')
+})
+export type PdfField = z.infer<typeof PdfFieldSchema>
+
+const PdfOverlayCreatorSchema = z.object({
+  type: z.enum(['user', 'assistant']),
+  id: OfficeUuidSchema,
+}).strict()
+
+export const PdfTextAppearanceSchema = z.object({
+  fontSizePt: z.number().finite().min(4).max(144),
+  color: OfficeColorSchema,
+  backgroundColor: OfficeColorSchema.optional(),
+  alignment: z.enum(['start', 'center', 'end']).default('start'),
+}).strict()
+export type PdfTextAppearance = z.infer<typeof PdfTextAppearanceSchema>
+
+const PdfOverlayBaseSchema = z.object({
+  id: OfficeUuidSchema,
+  pageId: OfficeUuidSchema,
+  rect: PdfRectSchema,
+  rotation: z.number().finite().min(0).lt(360),
+  zOrder: z.number().int().min(-10_000).max(10_000),
+  creator: PdfOverlayCreatorSchema,
+})
+
+export const PdfTextOverlaySchema = PdfOverlayBaseSchema.extend({
+  kind: z.literal('text'),
+  text: z.string().max(100_000),
+  appearance: PdfTextAppearanceSchema,
+}).strict()
+export const PdfDateOverlaySchema = PdfOverlayBaseSchema.extend({
+  kind: z.literal('date'),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  appearance: PdfTextAppearanceSchema,
+}).strict()
+export const PdfCheckmarkOverlaySchema = PdfOverlayBaseSchema.extend({
+  kind: z.literal('checkmark'),
+  mark: z.enum(['check', 'x']).default('check'),
+  color: OfficeColorSchema,
+  strokeWidthPt: z.number().finite().positive().max(20).default(2),
+}).strict()
+export const PdfImageOverlaySchema = PdfOverlayBaseSchema.extend({
+  kind: z.literal('image'),
+  resourceId: OfficeUuidSchema,
+}).strict()
+export const PdfSignatureOverlaySchema = PdfOverlayBaseSchema.extend({
+  kind: z.literal('signature'),
+  resourceId: OfficeUuidSchema,
+  authorizingUserId: OfficeUuidSchema,
+  approvalReceiptId: OfficeUuidSchema.optional(),
+}).strict()
+export const PdfOverlaySchema = z.discriminatedUnion('kind', [
+  PdfTextOverlaySchema,
+  PdfDateOverlaySchema,
+  PdfCheckmarkOverlaySchema,
+  PdfImageOverlaySchema,
+  PdfSignatureOverlaySchema,
+])
+export type PdfOverlay = z.infer<typeof PdfOverlaySchema>
+
+export const PdfPlacementTargetSchema = z.object({
+  id: OfficeUuidSchema,
+  purpose: z.literal('signature'),
+  pageId: OfficeUuidSchema,
+  rect: PdfRectSchema,
+  creatorUserId: OfficeUuidSchema,
+  creationVersion: z.number().int().min(0),
+}).strict()
+export type PdfPlacementTarget = z.infer<typeof PdfPlacementTargetSchema>
+
+export const PdfPageSchema = z.object({
+  id: OfficeUuidSchema,
+  sourcePageIndex: z.number().int().min(0).max(99),
+  mediaBox: PdfRectSchema,
+  cropBox: PdfRectSchema,
+  rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
+  fields: z.array(PdfFieldSchema).max(10_000),
+  overlays: z.array(PdfOverlaySchema).max(10_000),
+  placementTargets: z.array(PdfPlacementTargetSchema).max(10_000),
+}).strict()
+export type PdfPage = z.infer<typeof PdfPageSchema>
+
+function pdfRectWithin(rect: PdfRect, bounds: PdfRect): boolean {
+  return rect.x >= 0 && rect.y >= 0
+    && rect.x + rect.width <= bounds.width
+    && rect.y + rect.height <= bounds.height
+}
+
+export const PdfSnapshotSchema = ArtifactCommonSchema.extend({
+  family: z.literal('pdf'),
+  source: z.object({
+    fileId: OfficeUuidSchema,
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    byteLength: z.number().int().positive().max(15 * 1024 * 1024),
+    originalFileName: z.string().min(1).max(1_000),
+    pageCount: z.number().int().min(1).max(100),
+  }).strict(),
+  pages: z.array(PdfPageSchema).min(1).max(100),
+}).strict().superRefine((snapshot, ctx) => {
+  const pageIds = new Set<string>()
+  const sourceIndexes = new Set<number>()
+  const objectIds = new Set<string>()
+  const resourceById = new Map(snapshot.resources.map((resource) => [resource.id, resource]))
+  const pagesById = new Map(snapshot.pages.map((page) => [page.id, page]))
+  const issue = (path: Array<string | number>, message: string) =>
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message })
+  const admitId = (id: string, path: Array<string | number>) => {
+    if (objectIds.has(id)) issue(path, 'PDF object IDs must be unique')
+    objectIds.add(id)
+  }
+  for (const [pageIndex, page] of snapshot.pages.entries()) {
+    if (pageIds.has(page.id)) issue(['pages', pageIndex, 'id'], 'PDF page IDs must be unique')
+    pageIds.add(page.id)
+    admitId(page.id, ['pages', pageIndex, 'id'])
+    if (sourceIndexes.has(page.sourcePageIndex) || page.sourcePageIndex >= snapshot.source.pageCount) {
+      issue(['pages', pageIndex, 'sourcePageIndex'], 'PDF source-page indexes must be unique and within the source')
+    }
+    sourceIndexes.add(page.sourcePageIndex)
+    if (page.cropBox.x < page.mediaBox.x || page.cropBox.y < page.mediaBox.y
+      || page.cropBox.x + page.cropBox.width > page.mediaBox.x + page.mediaBox.width
+      || page.cropBox.y + page.cropBox.height > page.mediaBox.y + page.mediaBox.height) {
+      issue(['pages', pageIndex, 'cropBox'], 'PDF CropBox must be contained by MediaBox')
+    }
+    const zOrders = new Set<number>()
+    for (const [fieldIndex, field] of page.fields.entries()) {
+      admitId(field.id, ['pages', pageIndex, 'fields', fieldIndex, 'id'])
+      for (const [widgetIndex, widget] of field.widgets.entries()) {
+        admitId(widget.id, ['pages', pageIndex, 'fields', fieldIndex, 'widgets', widgetIndex, 'id'])
+        const widgetPage = pagesById.get(widget.pageId)
+        if (!widgetPage || !pdfRectWithin(widget.rect, widgetPage.cropBox)) {
+          issue(['pages', pageIndex, 'fields', fieldIndex, 'widgets', widgetIndex], 'PDF widget must fit a page CropBox')
+        }
+      }
+    }
+    for (const [overlayIndex, overlay] of page.overlays.entries()) {
+      admitId(overlay.id, ['pages', pageIndex, 'overlays', overlayIndex, 'id'])
+      if (overlay.pageId !== page.id || !pdfRectWithin(overlay.rect, page.cropBox)) {
+        issue(['pages', pageIndex, 'overlays', overlayIndex], 'PDF overlay must fit its owning page CropBox')
+      }
+      if (zOrders.has(overlay.zOrder)) issue(['pages', pageIndex, 'overlays', overlayIndex, 'zOrder'], 'PDF overlay z-order must be unique within a page')
+      zOrders.add(overlay.zOrder)
+      if (overlay.kind === 'image' || overlay.kind === 'signature') {
+        const resource = resourceById.get(overlay.resourceId)
+        if (!resource || resource.kind !== 'image' || !/^image\/(?:png|jpeg)$/.test(resource.mime)) {
+          issue(['pages', pageIndex, 'overlays', overlayIndex, 'resourceId'], 'PDF image overlay requires a declared PNG/JPEG image resource')
+        }
+      }
+      if (overlay.kind === 'signature' && overlay.creator.type === 'assistant' && !overlay.approvalReceiptId) {
+        issue(['pages', pageIndex, 'overlays', overlayIndex, 'approvalReceiptId'], 'Assistant signature overlay requires an approval receipt')
+      }
+    }
+    for (const [targetIndex, target] of page.placementTargets.entries()) {
+      admitId(target.id, ['pages', pageIndex, 'placementTargets', targetIndex, 'id'])
+      if (target.pageId !== page.id || !pdfRectWithin(target.rect, page.cropBox)) {
+        issue(['pages', pageIndex, 'placementTargets', targetIndex], 'PDF placement target must fit its owning page CropBox')
+      }
+    }
+  }
+})
+export type PdfSnapshot = z.infer<typeof PdfSnapshotSchema>
+
 export const DocumentSnapshotSchema = ArtifactCommonSchema.extend({
   family: z.literal('document'),
   sections: z.array(DocumentSectionSchema).min(1).max(10_000),
@@ -601,6 +812,7 @@ export const OfficeArtifactSnapshotSchema = z.union([
   DocumentSnapshotSchema,
   PresentationSnapshotSchema,
   SpreadsheetSnapshotSchema,
+  PdfSnapshotSchema,
 ])
 export type OfficeArtifactSnapshot = z.infer<typeof OfficeArtifactSnapshotSchema>
 

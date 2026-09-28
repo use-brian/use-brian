@@ -60,6 +60,7 @@ export async function validateOfficeCandidateRendering(params: {
   let exportBytes: Uint8Array | undefined
   let stage = 'layout'
   try {
+    if (snapshot.family === 'pdf') throw new Error('PDF sessions require the independent PDF reopen validator')
     if (!Number.isFinite(params.fitBudget?.minimumFontSizePt ?? 8)) throw new Error('Font floor must be finite')
     const fit = fitOfficeArtifact(snapshot, { ...params.fitBudget, minimumFontSizePt: Math.max(8, params.fitBudget?.minimumFontSizePt ?? 8) })
     receipt.issues.push(...fit.issues)
