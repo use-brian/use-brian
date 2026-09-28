@@ -64,6 +64,9 @@ export * from './sensitivity-classifier.js'
 
 // WS-3 W3 final wave additions (coordinator-wired).
 export * from './pipeline-b.js'
+export * from './extraction-plan.js'
+export * from './application.js'
+export * from './pipeline-b-application.js'
 export * from './engine-triggers.js'
 
 // Doc-page → brain distillation (the "Sync to brain" pipeline). Pure,

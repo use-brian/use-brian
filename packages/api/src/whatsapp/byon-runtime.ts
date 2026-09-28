@@ -7,6 +7,8 @@ import type {
   EntityStore,
   LLMProvider,
   MemoryStore,
+  PipelineBApplicationPort,
+  TaskAdmissionPort,
   TaskStore,
   UsageStore,
 } from '@use-brian/core'
@@ -42,6 +44,8 @@ export type WhatsappByonRuntimeDeps = {
   entityLinks: EntityLinksStore
   memories: MemoryStore
   tasks: TaskStore
+  taskAdmission: TaskAdmissionPort
+  application: PipelineBApplicationPort
   episodes: DbEpisodesStore
   ingestRulesStore: IngestRulesStore
   analytics?: AnalyticsLogger
@@ -94,6 +98,8 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
     entityLinks: deps.entityLinks,
     memories: deps.memories,
     tasks: deps.tasks,
+    taskAdmission: deps.taskAdmission,
+    application: deps.application,
     episodes: deps.episodes,
     ingestRulesStore: deps.ingestRulesStore,
     resolveChannel: resolveListenerChannel,

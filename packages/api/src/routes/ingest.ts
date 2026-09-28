@@ -5,7 +5,7 @@
  */
 import { Router } from 'express'
 import { z } from 'zod'
-import type { IngestSourceProvider } from '@use-brian/core'
+import type { AccessContext, IngestSourceProvider } from '@use-brian/core'
 import { OFFICIAL_CONNECTORS } from '@use-brian/shared'
 import { listUsableWorkspaceConnectors } from '../connectors/usable-connectors.js'
 import type {
@@ -28,6 +28,9 @@ import {
   type ContextReadiness,
 } from '../context-scope/context-readiness.js'
 import { listAffiliatedRepos } from '../github/client.js'
+import type { IngestApplicationService } from '../ingest/application-service.js'
+import { resolveIngestApplicationAccess } from '../ingest/default-application-service.js'
+import { createIngestApplicationRecoveryRoutes } from './ingest-application.js'
 
 type Options = {
   connectorInstanceStore: ConnectorInstanceStore
@@ -37,6 +40,12 @@ type Options = {
   ingestSinkStore: IngestSinkStore
   contextStore?: ContextScopeStore
   getReadiness?: (workspaceId: string) => Promise<ContextReadiness>
+  application?: IngestApplicationService
+  resolveApplicationAccess?: (
+    userId: string,
+    workspaceId: string | undefined,
+    episodeId?: string,
+  ) => Promise<AccessContext>
 }
 
 const PROVIDER_TO_SOURCE: Record<string, IngestSourceProvider> = {
@@ -104,7 +113,6 @@ const patchSinkBody = createSinkBody.omit({ workspaceId: true }).partial().refin
   (patch) => Object.keys(patch).length > 0,
   { message: 'Body must include at least one field to update' },
 )
-
 function toRuleDto(rule: IngestRuleRow, teamIdByCompartment: ReadonlyMap<string, string>) {
   return {
     id: rule.id,
@@ -180,6 +188,14 @@ export function ingestRoutes(opts: Options): Router {
   const router = Router()
   const ruleEditor = createIngestRuleEditorStore()
   const contextStore = opts.contextStore ?? createDbContextScopeStore()
+  const resolveApplicationAccess = opts.resolveApplicationAccess ?? resolveIngestApplicationAccess
+
+  if (opts.application) {
+    router.use(createIngestApplicationRecoveryRoutes({
+      application: opts.application,
+      resolveAccess: resolveApplicationAccess,
+    }))
+  }
 
   async function teamIdsForRules(
     userId: string,

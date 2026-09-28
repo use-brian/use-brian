@@ -192,6 +192,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   saveFileBytes: 'Save file bytes to brain',
   sendFile: 'Send a file to the chat',
   renderPdf: 'Create a PDF file',
+  getIngestApplication: 'Read an ingest application',
+  retryIngestApplication: 'Retry an ingest application',
 
   createOfficeArtifact: 'Create an Office artifact',
   getOfficeArtifact: 'Read an Office artifact',

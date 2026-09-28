@@ -569,3 +569,75 @@ export async function reingestStoredFile(
   // for a phrase that exists nowhere in the product.
   throw new Error(data?.detail || data?.error || `Ingest failed (HTTP ${res.status})`);
 }
+
+export type IngestApplicationCounts = {
+  pending: number;
+  committed: number;
+  alreadyApplied: number;
+  held: number;
+  rejected: number;
+  failed: number;
+};
+
+export type IngestApplicationStatus =
+  | {
+      status: "legacy_untracked";
+      episodeId: string;
+      resumable: false;
+    }
+  | {
+      status: "tracked";
+      runId: string;
+      episodeId: string;
+      planHash: string;
+      extractionState: "succeeded" | "failed" | "skipped";
+      applicationState: "complete" | "partial" | "blocked" | "not_started";
+      errorCode: string | null;
+      counts: IngestApplicationCounts;
+      resumable: boolean;
+      items: Array<{
+        candidateId: string;
+        primitiveKind: string;
+        disposition: string;
+        attemptCount: number;
+        failureCode: string | null;
+        retryable: boolean;
+      }>;
+    };
+
+export async function listIngestApplications(
+  workspaceId: string,
+): Promise<IngestApplicationStatus[]> {
+  const res = await authFetch(
+    `${API_URL}/api/ingest/applications?workspaceId=${encodeURIComponent(workspaceId)}`,
+  );
+  const data = (await res.json().catch(() => null)) as
+    | { items?: IngestApplicationStatus[]; error?: string; message?: string }
+    | null;
+  if (!res.ok || !Array.isArray(data?.items)) {
+    throw new Error(data?.message ?? data?.error ?? `Application status failed (HTTP ${res.status})`);
+  }
+  return data.items;
+}
+
+export async function retryIngestApplication(input: {
+  episodeId: string;
+  runId: string;
+  expectedPlanHash: string;
+}): Promise<IngestApplicationStatus> {
+  const res = await authFetch(
+    `${API_URL}/api/ingest/episodes/${encodeURIComponent(input.episodeId)}/retry-application`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId: input.runId, expectedPlanHash: input.expectedPlanHash }),
+    },
+  );
+  const data = (await res.json().catch(() => null)) as
+    | (IngestApplicationStatus & { error?: string; message?: string })
+    | null;
+  if (!res.ok || !data) {
+    throw new Error(data?.message ?? data?.error ?? `Application retry failed (HTTP ${res.status})`);
+  }
+  return data;
+}

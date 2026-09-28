@@ -8,6 +8,7 @@ import type {
   LinkKind,
 } from '@use-brian/core'
 import type { Sensitivity } from '@use-brian/core'
+import type pg from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
 import { queryWithRLS } from './client.js'
 
@@ -133,7 +134,11 @@ function toLink(row: EntityLinkRow): EntityLinkRecord {
 export async function createEntityLink(
   actorUserId: string,
   params: EntityLinkCreateParams,
+  transactionClient?: pg.PoolClient,
 ): Promise<EntityLinkRecord> {
+  const run = transactionClient
+    ? transactionClient.query.bind(transactionClient)
+    : <T extends pg.QueryResultRow>(sql: string, values: unknown[]) => queryWithRLS<T>(actorUserId, sql, values)
   // Pass NULL for valid_from/valid_to when omitted — the DB default
   // (`now()` / `NULL`) handles the "currently active" case. Explicit
   // values flow through for past-relationship encoding ("Kinson left
@@ -144,8 +149,7 @@ export async function createEntityLink(
   // A duplicate active edge is updated in place so its Team/Project
   // scope can only narrow by unioning the newly observed evidence.
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const result = await queryWithRLS<EntityLinkRow>(
-      actorUserId,
+    const result = await run<EntityLinkRow>(
       `INSERT INTO entity_links (
          source_kind, source_id, target_kind, target_id, edge_type,
          attributes, source,
@@ -193,8 +197,7 @@ export async function createEntityLink(
     )
     if (result.rows[0]) return toLink(result.rows[0])
 
-    const existing = await queryWithRLS<EntityLinkRow>(
-      actorUserId,
+    const existing = await run<EntityLinkRow>(
       `SELECT ${FULL_SELECT} FROM entity_links
         WHERE workspace_id = $1
           AND source_kind = $2 AND source_id = $3

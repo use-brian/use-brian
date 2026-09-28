@@ -772,6 +772,38 @@ export type AdmitTaskResult = TaskAdmissionDecision & {
 }
 
 /**
+ * Evaluate the current task policy without persisting a tray/audit row.
+ * Frozen extraction planning uses this read-only seam so a candidate outcome
+ * can be committed later with its application receipt in one transaction.
+ */
+export async function evaluateTaskAdmissionWithPort(
+  port: TaskAdmissionPort,
+  candidate: TaskAdmissionCandidate,
+): Promise<TaskAdmissionDecision> {
+  const titleNorm = normalizeTaskTitle(candidate.title)
+  if (!titleNorm) return { outcome: 'allow' }
+  const [rules, tombstoneMatches, taskMatches] = await Promise.all([
+    port.listActiveRules(candidate.workspaceId),
+    port.findSimilarTombstones(
+      candidate.workspaceId,
+      titleNorm,
+      TASK_ADMISSION_THRESHOLDS.TOMBSTONE_MATCH,
+    ),
+    port.findSimilarTasks(
+      candidate.workspaceId,
+      titleNorm,
+      TASK_ADMISSION_THRESHOLDS.NEAR_DUPLICATE_HOLD,
+    ),
+  ])
+  return evaluateTaskAdmission({
+    candidate,
+    rules: rules.filter((rule) => rule.status === 'active'),
+    tombstoneMatches,
+    taskMatches,
+  })
+}
+
+/**
  * Run the gate: fetch what the decision needs, decide, and persist the
  * tray/audit row for anything that did not pass.
  *
@@ -790,29 +822,7 @@ export async function admitTask(
   candidate: TaskAdmissionCandidate,
   now: Date = new Date(),
 ): Promise<AdmitTaskResult> {
-  const titleNorm = normalizeTaskTitle(candidate.title)
-  if (!titleNorm) return { outcome: 'allow', admitted: true }
-
-  const [rules, tombstoneMatches, taskMatches] = await Promise.all([
-    port.listActiveRules(candidate.workspaceId),
-    port.findSimilarTombstones(
-      candidate.workspaceId,
-      titleNorm,
-      TASK_ADMISSION_THRESHOLDS.TOMBSTONE_MATCH,
-    ),
-    port.findSimilarTasks(
-      candidate.workspaceId,
-      titleNorm,
-      TASK_ADMISSION_THRESHOLDS.NEAR_DUPLICATE_HOLD,
-    ),
-  ])
-
-  const decision = evaluateTaskAdmission({
-    candidate,
-    rules: rules.filter((r) => r.status === 'active'),
-    tombstoneMatches,
-    taskMatches,
-  })
+  const decision = await evaluateTaskAdmissionWithPort(port, candidate)
 
   if (decision.outcome === 'allow') return { ...decision, admitted: true }
 

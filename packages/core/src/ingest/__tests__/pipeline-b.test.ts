@@ -909,6 +909,68 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(result).toBeTruthy()
   })
 
+  it('freezes the structured digest into the durable application path without model or direct writes', async () => {
+    const memories = spyMemories()
+    const links = spyLinks()
+    const episodes = spyEpisodes()
+    const application = { apply: vi.fn(async (input) => ({
+      id: 'run-digest', workspaceId: input.workspaceId, episodeId: input.plan.episodeId,
+      attemptKey: input.attemptKey, planHash: input.plan.planHash,
+      extractionState: 'succeeded' as const, applicationState: 'complete' as const,
+      errorCode: null, counts: { pending: 0, committed: 5, alreadyApplied: 0, held: 0, rejected: 0, failed: 0 },
+      items: [],
+    })) }
+    const digest: PlatformEngagementMetrics = {
+      per_post: [
+        { post_episode_id: 'post-ep-1', likes: 10 },
+        { post_episode_id: 'post-ep-2', replies: 2 },
+      ],
+      aggregate: { total_engagement: 12 },
+    }
+    const result = await processEpisode(
+      baseEpisode({ id: 'digest-ep', sourceKind: 'platform_engagement_digest', digest }),
+      '',
+      makeDeps({
+        provider: throwingProvider(), memories: memories.store, entityLinks: links.store,
+        episodes: {
+          ...episodes.port,
+          getEpisodeByIdSystem: vi.fn(async () => ({
+            ...baseEpisode({ id: 'digest-ep', sourceKind: 'platform_engagement_digest', digest }),
+            status: 'archived', scopeVersion: 'scope-v1', scopeHeld: false, extractionLocked: false,
+          } as never)),
+        },
+        application,
+      }),
+    )
+    expect(memories.created).toEqual([])
+    expect(links.created).toEqual([])
+    expect(application.apply).toHaveBeenCalledOnce()
+    const plan = application.apply.mock.calls[0]![0].plan
+    expect(plan.candidates.map((candidate) => candidate.primitiveKind)).toEqual([
+      'digest_memory', 'digest_edge', 'digest_memory', 'digest_edge', 'episode_finalization',
+    ])
+    expect(plan.candidates[1]!.dependencyIds).toEqual([plan.candidates[0]!.candidateId])
+    expect(result).toMatchObject({ applicationState: 'complete', applicationRunId: 'run-digest' })
+  })
+
+  it('keeps shadow rebuilds outside the live durable ledger', async () => {
+    const memories = spyMemories()
+    const application = { apply: vi.fn() }
+    const digest: PlatformEngagementMetrics = {
+      per_post: [{ post_episode_id: 'post-ep-1', likes: 1 }], aggregate: {},
+    }
+    const result = await processEpisode(
+      baseEpisode({ id: 'shadow-digest', sourceKind: 'platform_engagement_digest', digest }), '',
+      makeDeps({
+        provider: throwingProvider(), memories: memories.store,
+        application: application as never, applicationNamespace: 'shadow',
+      }),
+    )
+    expect(application.apply).not.toHaveBeenCalled()
+    expect(memories.created).toHaveLength(1)
+    expect(result.applicationState).toBe('not_started')
+  })
+
   it('skips writes and still archives when extraction is fully empty', async () => {
     const entities = spyEntities()
     const links = spyLinks()

@@ -120,6 +120,7 @@ import {
   type OfficeToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
+  createIngestApplicationTools,
   createRealtimeThreadTargetTools,
   createEntityKindClassifier,
   createCircuitBreaker,
@@ -163,6 +164,7 @@ import {
   type SandboxProvider,
   type SandboxTaskStore,
   type Sensitivity,
+  type TaskAdmissionPort,
   pinAccessCeiling, minSensitivity,
   type SessionVault,
   looksLikeLoginWall,
@@ -429,6 +431,9 @@ import { createWhatsappByonRuntime } from './whatsapp/byon-runtime.js'
 import { createIngestRulesStore } from './db/ingest-rules-store.js'
 import { createIngestRuleEditorStore } from './db/ingest-rules-editor-store.js'
 import { ingestRoutes } from './routes/ingest.js'
+import { createExtractionApplicationStore } from './db/extraction-application-store.js'
+import { createIngestApplicationService, type IngestApplicationService } from './ingest/application-service.js'
+import { createPipelineBApplicationMutationPort } from './ingest/pipeline-b-application-adapter.js'
 import { processChannelMessage } from './routes/channel-pipeline.js'
 import { loadConnectorRegistry } from './registry/load-registry.js'
 import { createDbLinkedAccountStore } from './db/linked-accounts.js'
@@ -990,6 +995,8 @@ export interface EpisodeIngestorDeps {
    * idempotent per episode); absent in OSS — ingest stays uncharged.
    */
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
+  application: IngestApplicationService
+  taskAdmission: TaskAdmissionPort
 }
 
 /**
@@ -1298,6 +1305,7 @@ export interface BootContext {
   entitiesStore: ReturnType<typeof createDbEntitiesStore>
   entityLinksStore: ReturnType<typeof createDbEntityLinksStore>
   episodesStore: ReturnType<typeof createDbEpisodesStore>
+  ingestApplicationService: IngestApplicationService
   crmStore: ReturnType<typeof createDbCrmStore>
   taskStore: ReturnType<typeof createDbTaskStore>
   connectorStore: ReturnType<typeof createDbConnectorStore>
@@ -2446,6 +2454,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { createConnectorGrantStore } = await import('./db/connector-grant-store.js')
   const connectorGrantStore = createConnectorGrantStore()
   const workspaceStore = createWorkspaceStore({ connectorGrantStore, channelRouteStore })
+  const ingestApplicationService = createIngestApplicationService({
+    store: createExtractionApplicationStore(),
+    episodes: episodesStore,
+    mutateCandidate: createPipelineBApplicationMutationPort(),
+    getWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
+  })
   const brainEntryMutator = createBrainEntryMutator({
     workspaceStore,
     entityLinks: entityLinksStore,
@@ -2541,6 +2555,38 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   function buildAllTools(): Map<string, Tool> {
     const tools = createBaseTools(process.env as EnginesEnv, externalCredentialPool)
+
+    const ingestApplicationTools = createIngestApplicationTools({
+      get: (toolContext, episodeId) => ingestApplicationService.get({
+        workspaceId: toolContext.workspaceId!,
+        userId: toolContext.userId,
+        assistantId: toolContext.assistantId,
+        assistantKind: toolContext.assistantKind ?? 'standard',
+        clearance: toolContext.clearance,
+        compartments: toolContext.compartments === undefined ? [] : toolContext.compartments,
+        mutationCompartments: toolContext.mutationCompartments === undefined
+          ? toolContext.compartments === undefined ? [] : toolContext.compartments
+          : toolContext.mutationCompartments,
+        projectIds: toolContext.projectIds === undefined ? [] : toolContext.projectIds,
+      }, episodeId),
+      retry: (toolContext, input) => ingestApplicationService.retry({
+        ctx: {
+          workspaceId: toolContext.workspaceId!,
+          userId: toolContext.userId,
+          assistantId: toolContext.assistantId,
+          assistantKind: toolContext.assistantKind ?? 'standard',
+          clearance: toolContext.clearance,
+          compartments: toolContext.compartments === undefined ? [] : toolContext.compartments,
+          mutationCompartments: toolContext.mutationCompartments === undefined
+            ? toolContext.compartments === undefined ? [] : toolContext.compartments
+            : toolContext.mutationCompartments,
+          projectIds: toolContext.projectIds === undefined ? [] : toolContext.projectIds,
+        },
+        ...input,
+      }),
+    })
+    tools.set(ingestApplicationTools.getIngestApplication.name, ingestApplicationTools.getIngestApplication)
+    tools.set(ingestApplicationTools.retryIngestApplication.name, ingestApplicationTools.retryIngestApplication)
 
     // Google Maps is an env-gated first-party read capability, not a personal
     // Google connector. Core owns the typed tool contract; this API seam owns
@@ -2962,6 +3008,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     backgroundModel,
     extractionModel,
     ingestCharge: ports.ingestCharge,
+    application: ingestApplicationService,
+    taskAdmission: createTaskAdmissionPort(),
   })
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
@@ -8818,6 +8866,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       memories: memoryStore,
       tasks: taskStore,
       taskAdmission: createTaskAdmissionPort(),
+      application: ingestApplicationService,
       episodes: episodesStore,
       ingestRulesStore,
       resolvePlaceholders: resolveIngestPlaceholders,
@@ -8903,6 +8952,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       workspaceStore,
       connectorGrantStore,
       ingestSinkStore,
+      application: ingestApplicationService,
     }))
   }
 
@@ -8994,6 +9044,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     entitiesStore,
     entityLinksStore,
     episodesStore,
+    ingestApplicationService,
     crmStore,
     taskStore,
     recordingSynthesize,
@@ -9129,6 +9180,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         entityLinks: entityLinksStore,
         memories: memoryStore,
         tasks: taskStore,
+        taskAdmission: createTaskAdmissionPort(),
+        application: ingestApplicationService,
         episodes: episodesStore,
         ingestRulesStore,
         analytics,

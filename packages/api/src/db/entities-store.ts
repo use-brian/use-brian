@@ -987,6 +987,7 @@ export async function addEntityAlias(
   entityId: string,
   alias: string,
   access?: AccessContext,
+  transactionClient?: pg.PoolClient,
 ): Promise<
   | { kind: 'ok'; entity: EntityRecord }
   | { kind: 'conflict'; conflictingEntityId: string }
@@ -999,9 +1000,11 @@ export async function addEntityAlias(
   }
 
   const targetGuard = entitySourceGuard(actorUserId, access, 'mutation', 2)
+  const run = transactionClient
+    ? transactionClient.query.bind(transactionClient)
+    : <T extends pg.QueryResultRow>(sql: string, values: unknown[]) => queryWithRLS<T>(actorUserId, sql, values)
   // Match the caller's projection as well as workspace membership.
-  const target = await queryWithRLS<{ workspaceId: string; displayName: string }>(
-    actorUserId,
+  const target = await run<{ workspaceId: string; displayName: string }>(
     `SELECT workspace_id AS "workspaceId", display_name AS "displayName"
        FROM entities
       WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
@@ -1015,8 +1018,7 @@ export async function addEntityAlias(
   // a no-op (lookups already match display_name). Still allowed so
   // callers don't have to special-case; just don't store the redundancy.
   if (displayName.trim().toLowerCase() === normalized) {
-    const fresh = await queryWithRLS<EntityRow>(
-      actorUserId,
+    const fresh = await run<EntityRow>(
       `SELECT ${FULL_SELECT} FROM entities WHERE id = $1 AND valid_to IS NULL
         AND retracted_at IS NULL AND NOT scope_held AND ${targetGuard.sql}`,
       [entityId, ...targetGuard.params],
@@ -1027,8 +1029,7 @@ export async function addEntityAlias(
   // Conflict check — does another live entity in this workspace already
   // claim this alias (or have it as its display_name)? GIN-indexed.
   const conflictGuard = entitySourceGuard(actorUserId, access, 'read', 4)
-  const conflict = await queryWithRLS<{ id: string }>(
-    actorUserId,
+  const conflict = await run<{ id: string }>(
     `SELECT id FROM entities
       WHERE workspace_id = $1
         AND id <> $2
@@ -1045,8 +1046,7 @@ export async function addEntityAlias(
   const writeGuard = entitySourceGuard(actorUserId, access, 'mutation', 3)
   // Append + dedup in a single statement so concurrent writers can't
   // race a duplicate in.
-  const updated = await queryWithRLS<EntityRow>(
-    actorUserId,
+  const updated = await run<EntityRow>(
     `UPDATE entities
         SET aliases = (
               SELECT array_agg(DISTINCT a)
@@ -1266,12 +1266,16 @@ export async function supersedeEntity(
   actorUserId: string,
   id: string,
   patch: EntitySupersedePatch,
+  transactionClient?: pg.PoolClient,
 ): Promise<EntityRecord | null> {
   const access = entityMutationAccess(actorUserId)
-  const client = await getAppPool().connect()
+  const ownedClient = transactionClient ? null : await getAppPool().connect()
+  const client = transactionClient ?? ownedClient!
   try {
-    await client.query('BEGIN')
-    await applyRLSGucs(client, actorUserId)
+    if (ownedClient) {
+      await client.query('BEGIN')
+      await applyRLSGucs(client, actorUserId)
+    }
     try {
       // Lock the live row so a concurrent supersede can't double-close it.
       const sourceGuard = entitySourceGuard(actorUserId, access, 'mutation', 2)
@@ -1283,7 +1287,7 @@ export async function supersedeEntity(
         [id, ...sourceGuard.params],
       )
       if (oldRes.rows.length === 0) {
-        await client.query('ROLLBACK')
+        if (ownedClient) await client.query('ROLLBACK')
         return null
       }
       const old = toEntity(oldRes.rows[0])
@@ -1359,14 +1363,14 @@ export async function supersedeEntity(
         [id, newRow.id],
       )
 
-      await client.query('COMMIT')
+      if (ownedClient) await client.query('COMMIT')
       return toEntity(newRow)
     } catch (err) {
-      await client.query('ROLLBACK')
+      if (ownedClient) await client.query('ROLLBACK')
       throw err
     }
   } finally {
-    await rollbackAndRelease(client)
+    if (ownedClient) await rollbackAndRelease(client)
   }
 }
 

@@ -67,6 +67,7 @@ import {
   admitTask,
   buildTaskPolicyPromptBlock,
   DROPPED_CANDIDATE_TTL_DAYS,
+  evaluateTaskAdmissionWithPort,
   verifyTaskEvidenceQuote,
   type TaskAdmissionPort,
   type TaskReadinessAssessment,
@@ -83,6 +84,20 @@ import {
 } from './sensitivity-classifier.js'
 import { SPOTLIGHT_RULE, spotlightContent } from './spotlight.js'
 import type { PlatformEngagementMetrics, SourceKind } from './types.js'
+import type { ExtractionApplicationCounts } from './application.js'
+import {
+  freezeExtractionPlan,
+  canonicalExtractionJson,
+  hashExtractionSource,
+  initialExtractionAttemptKey,
+  type ApplicationState,
+} from './extraction-plan.js'
+import type {
+  PipelineBApplicationCommand,
+  PipelineBApplicationPort,
+  PipelineBEntityApplication,
+  PipelineBSourceEnvelope,
+} from './pipeline-b-application.js'
 
 // ── Public types ─────────────────────────────────────────────────────
 
@@ -142,6 +157,8 @@ export type PipelineBEpisode = {
    * Slack → "Mention resolution".
    */
   personExternalRefs?: Array<{ name: string; externalRef: Record<string, unknown>; phone?: string }>
+  /** Persisted Episode scope version, hydrated after archive for frozen plans. */
+  scopeVersion?: string
 }
 
 /**
@@ -155,7 +172,14 @@ export type EpisodeUpdaterPort = {
     actorUserId: string,
     id: string,
     opts?: { asOf?: Date },
-  ): Promise<{ compartments?: string[]; projectIds?: string[] } | null>
+  ): Promise<{
+    compartments?: string[]
+    projectIds?: string[]
+    scopeVersion?: string
+    status?: string
+    scopeHeld?: boolean
+    extractionLocked?: boolean
+  } | null>
   updateCheckpoint(
     actorUserId: string,
     id: string,
@@ -289,6 +313,10 @@ export type PipelineBDeps = {
    * Best-effort: failures log and never break ingestion. Absent in OSS.
    */
   ingestCharge?: (episode: PipelineBEpisode) => Promise<void>
+  /** Durable application coordinator. Production callers must provide it. */
+  application?: PipelineBApplicationPort
+  /** Shadow rebuilds explicitly opt out of the live application ledger. */
+  applicationNamespace?: 'live' | 'shadow'
 }
 
 export type PipelineBResult = {
@@ -314,6 +342,10 @@ export type PipelineBResult = {
   extractionUsage: TokenUsage | null
   /** True iff extraction LLM returned a parseable payload (even if all arrays were empty). */
   extracted: boolean
+  extractionState: 'succeeded' | 'failed' | 'skipped'
+  applicationState: ApplicationState
+  applicationRunId: string | null
+  applicationCounts: ExtractionApplicationCounts | null
 }
 
 // ── Extraction-output schema (Zod safeParse target) ──────────────────
@@ -1713,7 +1745,7 @@ export async function processEpisode(
     )
     if (blocked) {
       await archiveWithEmptySummary(episode, deps, actorUserId)
-      return emptyResult(episode, null, false)
+      return emptyResult(episode, null, false, 'skipped')
     }
   }
 
@@ -1928,6 +1960,23 @@ export async function processEpisode(
 
   // 3. Merge tags.
   const tags = dedupTags(episode.preStampedTags, payload.tags)
+
+  // Production callers freeze every provider/classifier outcome before any
+  // derived write, then apply the immutable plan through atomically receipted
+  // transactions. Legacy/in-memory callers without the port retain the
+  // characterized direct-write path below.
+  if (deps.application && deps.applicationNamespace !== 'shadow') {
+    return processDurableExtractionApplication({
+      episode,
+      resolvedContent: extractableContent,
+      payload,
+      taskReadiness,
+      tags,
+      extractionUsage,
+      deps,
+      actorUserId,
+    })
+  }
 
   // 4. Write entities (CRM-routed for person/company; EntityStore for others).
   //
@@ -2268,6 +2317,428 @@ export async function processEpisode(
     sensitivity,
     extractionUsage,
     extracted: true,
+    extractionState: 'succeeded',
+    applicationState: 'not_started',
+    applicationRunId: null,
+    applicationCounts: null,
+  }
+}
+
+const PIPELINE_B_APPLICATION_CONTRACT = 'pipeline-b-v1'
+
+function sourceEnvelope(episode: PipelineBEpisode): PipelineBSourceEnvelope {
+  return {
+    workspaceId: episode.workspaceId,
+    episodeId: episode.id,
+    userId: episode.userId,
+    assistantId: episode.assistantId,
+    createdByUserId: episode.createdByUserId,
+    createdByAssistantId: episode.createdByAssistantId,
+    sensitivity: episode.sensitivity,
+    compartments: [...(episode.compartments ?? [])],
+    projectIds: [...(episode.projectIds ?? [])],
+  }
+}
+
+function entityApplicationForExisting(
+  envelope: PipelineBSourceEnvelope,
+  ex: ExtractedEntity,
+  current: EntityRecord,
+): PipelineBEntityApplication {
+  const merged = mergeAttributes(current.attributes, ex.attributes)
+  const emitted = ex.display_name.trim().toLowerCase()
+  const alias = emitted.length > 0
+    && emitted !== current.displayName.toLowerCase()
+    && !current.aliases.includes(emitted)
+      ? emitted
+      : null
+  return {
+    ...envelope,
+    command: 'entity',
+    action: merged === null ? 'reuse_entity' : 'supersede_entity',
+    entityKind: ex.kind,
+    displayName: ex.display_name,
+    canonicalId: ex.canonical_id ?? null,
+    attributes: merged ?? current.attributes,
+    targetEntityId: current.id,
+    alias,
+  }
+}
+
+async function planEntityApplication(
+  ex: ExtractedEntity,
+  episode: PipelineBEpisode,
+  deps: PipelineBDeps,
+  actorUserId: string,
+  sourceText: string,
+): Promise<PipelineBEntityApplication> {
+  const envelope = sourceEnvelope(episode)
+  if (ex.kind === 'person') {
+    const matched = matchPersonExternalRef(episode.personExternalRefs, ex.display_name)
+    const stableIdentity = stableExternalIdentityFromCrmRef(matched?.externalRef ?? null)
+    return {
+      ...envelope,
+      command: 'entity',
+      action: 'create_contact',
+      entityKind: ex.kind,
+      displayName: ex.display_name,
+      canonicalId: attestedEmail(ex.canonical_id, sourceText),
+      attributes: ex.attributes ?? {},
+      targetEntityId: null,
+      alias: null,
+      externalRef: matched?.externalRef ?? null,
+      stableIdentity,
+      phone: matched?.phone ?? null,
+    }
+  }
+
+  if (ex.canonical_id) {
+    const existing = await deps.entities.findByCanonicalIdSystem(
+      actorUserId,
+      episode.workspaceId,
+      ex.canonical_id,
+    )
+    if (existing[0]) return entityApplicationForExisting(envelope, ex, existing[0])
+  }
+  const named = await deps.entities.findByNameSystem(
+    actorUserId,
+    episode.workspaceId,
+    ex.display_name,
+    { kind: ex.kind },
+  )
+  if (named) return entityApplicationForExisting(envelope, ex, named)
+
+  if (deps.entityResolver) {
+    const candidates = await deps.entities.listLiveEntitiesSystem(
+      actorUserId,
+      episode.workspaceId,
+      { kind: ex.kind, limit: deps.entityResolver.candidateLimit ?? 100 },
+    )
+    if (candidates.length > 0) {
+      const resolved = await resolveEntity({
+        mention: {
+          kind: ex.kind,
+          display_name: ex.display_name,
+          canonical_id: ex.canonical_id ?? null,
+        },
+        candidates: candidates.map((candidate) => ({
+          id: candidate.id,
+          kind: candidate.kind,
+          display_name: candidate.displayName,
+          canonical_id: candidate.canonicalId,
+          attributes: candidate.attributes,
+        })),
+        fuzzyThreshold: deps.entityResolver.fuzzyThreshold ?? 0.92,
+        llm: deps.entityResolver.llm,
+        decisionRuntime: deps.decisionRuntime,
+        workspaceId: episode.workspaceId,
+        runId: `entity-disambiguation-${episode.id}-${ex.kind}-${ex.display_name}`,
+      })
+      if ('usage' in resolved) await recordResolverUsage(deps, episode, resolved.usage, resolved.model)
+      if (resolved.status === 'resolved' && (resolved.tier === 'fuzzy' || resolved.tier === 'llm')) {
+        const match = candidates.find((candidate) => candidate.id === resolved.entityId)
+        if (match) return entityApplicationForExisting(envelope, ex, match)
+      }
+    }
+  }
+
+  return {
+    ...envelope,
+    command: 'entity',
+    action: ex.kind === 'company' ? 'create_company' : 'create_entity',
+    entityKind: ex.kind,
+    displayName: ex.display_name,
+    canonicalId: ex.canonical_id ?? null,
+    attributes: ex.attributes ?? {},
+    targetEntityId: null,
+    alias: null,
+  }
+}
+
+async function classifyFrozenApplication(
+  episode: PipelineBEpisode,
+  payload: ExtractionOutput,
+  deps: PipelineBDeps,
+  actorUserId: string,
+): Promise<SensitivityClassification | null> {
+  const text = [payload.summary, ...payload.memories.map((memory) => memory.summary)].join('\n')
+  if (!text.trim()) return null
+  const forced = applySensitivityRules(text)
+  if (forced) {
+    return {
+      inferredSensitivity: forced,
+      briefReason: 'classifier rule: credential / secret pattern detected',
+      drifted: RANK[forced] > RANK[episode.sensitivity],
+      usage: null,
+    }
+  }
+  const classifierModel = deps.classifierModel === undefined ? deps.model : deps.classifierModel
+  if (!classifierModel) return null
+  return classifySensitivity({
+    provider: deps.provider,
+    model: classifierModel,
+    inputTokenLimit: deps.inputTokenLimit,
+    maxTokens: deps.maxTokens,
+    onUsage: (model, usage) => recordExtractionUsage(deps, episode, usage, {
+      model,
+      source: 'overhead:classifier',
+      triggerKey: 'sensitivity_classifier',
+    }),
+    analytics: deps.analytics,
+    decisionRuntime: deps.decisionRuntime,
+    runId: `ingest-sensitivity-${episode.id}`,
+    input: {
+      episodeId: episode.id,
+      workspaceId: episode.workspaceId,
+      userId: actorUserId,
+      assistantId: episode.assistantId,
+      channelSensitivity: episode.sensitivity,
+      summary: payload.summary,
+      memories: payload.memories.map((memory) => ({ summary: memory.summary })),
+    },
+  })
+}
+
+async function processDurableExtractionApplication(input: {
+  episode: PipelineBEpisode
+  resolvedContent: string
+  payload: ExtractionOutput
+  taskReadiness: TaskReadinessAssessment[]
+  tags: string[]
+  extractionUsage: TokenUsage | null
+  deps: PipelineBDeps
+  actorUserId: string
+}): Promise<PipelineBResult> {
+  const { deps, actorUserId } = input
+  let { episode } = input
+  const envelope = sourceEnvelope(episode)
+  const drafts: Parameters<typeof freezeExtractionPlan>[0]['candidates'] = []
+  const entityKeys = new Map<string, string>()
+  const plannedEntities = new Map<string, ExtractedEntity>()
+  const classificationAnalytics = createClassificationAnalytics(deps.analytics)
+
+  for (const [index, raw] of input.payload.entities.entries()) {
+    const key = `entity:${index}`
+    const ex = deps.entityKindClassifier
+      ? await applyEntityKindClassification(
+          deps.entityKindClassifier,
+          deps.classifierCircuitBreaker,
+          classificationAnalytics,
+          raw,
+          episode,
+          actorUserId,
+        )
+      : raw
+    try {
+      drafts.push({
+        key,
+        primitiveKind: 'entity',
+        payload: await planEntityApplication(ex, episode, deps, actorUserId, input.resolvedContent),
+      })
+      entityKeys.set(ex.display_name, key)
+      plannedEntities.set(ex.display_name, ex)
+    } catch (error) {
+      drafts.push({
+        key,
+        primitiveKind: 'entity',
+        payload: { ...envelope, command: 'entity', displayName: ex.display_name },
+        terminalDisposition: 'rejected',
+        terminalReason: error instanceof Error && error.message === 'scope_operation_denied'
+          ? 'authority_denied'
+          : 'entity_planning_failed',
+      })
+    }
+  }
+
+  for (const [index, edge] of input.payload.edges.entries()) {
+    const sourceKey = entityKeys.get(edge.source_ref)
+    const targetKey = entityKeys.get(edge.target_ref)
+    const sourceEntity = plannedEntities.get(edge.source_ref)
+    const targetEntity = plannedEntities.get(edge.target_ref)
+    const validation = sourceEntity && targetEntity
+      ? validateEdgeKindTriple(edge.edge_type as EdgeType, sourceEntity.kind, targetEntity.kind)
+      : null
+    const terminalReason = !sourceKey || !targetKey
+      ? 'dangling_entity_reference'
+      : validation && !validation.ok
+        ? validation.rule_id
+        : null
+    drafts.push({
+      key: `edge:${index}`,
+      primitiveKind: 'edge',
+      dependencyKeys: sourceKey && targetKey ? [sourceKey, targetKey] : [],
+      payload: {
+        ...envelope,
+        command: 'edge',
+        edgeType: edge.edge_type,
+        attributes: edge.attributes ?? {},
+        sourceDependencyIndex: 0,
+        targetDependencyIndex: 1,
+        targetRecordId: null,
+        sourceKind: 'entity',
+        targetKind: 'entity',
+      } satisfies PipelineBApplicationCommand,
+      ...(terminalReason ? {
+        terminalDisposition: 'rejected' as const,
+        terminalReason,
+      } : {}),
+    })
+  }
+
+  const createsTasks = sourceKindCreatesTasks(episode.sourceKind)
+  for (const [index, task] of input.payload.tasks.entries()) {
+    const quality = input.taskReadiness[index] ?? null
+    const due = task.due_iso && !Number.isNaN(new Date(task.due_iso).getTime())
+      ? new Date(task.due_iso)
+      : null
+    const candidate = {
+      workspaceId: episode.workspaceId,
+      title: task.text,
+      due,
+      lane: 'extracted' as const,
+      sourceKind: episode.sourceKind,
+      channelRef: episode.channelRef ?? null,
+      sourceEpisodeId: episode.id,
+      createdByAssistantId: episode.createdByAssistantId,
+      quality,
+    }
+    const decision = deps.tasks && createsTasks && deps.taskAdmission
+      ? await evaluateTaskAdmissionWithPort(deps.taskAdmission, candidate)
+      : deps.tasks && createsTasks
+        ? { outcome: 'allow' as const }
+        : { outcome: 'drop' as const, reasonCode: 'not_a_task' as const, explanation: 'Task creation is unavailable for this source.' }
+    drafts.push({
+      key: `task:${index}`,
+      primitiveKind: 'task',
+      payload: {
+        ...envelope,
+        command: 'task',
+        title: task.text,
+        dueIso: due?.toISOString() ?? null,
+        channelRef: episode.channelRef ?? null,
+        sourceKind: episode.sourceKind,
+        quality,
+      } satisfies PipelineBApplicationCommand,
+      ...(decision.outcome === 'allow' ? {} : {
+        terminalDisposition: decision.outcome === 'hold' ? 'held' as const : 'rejected' as const,
+        terminalReason: decision.reasonCode,
+      }),
+    })
+  }
+
+  for (const [index, memory] of input.payload.memories.entries()) {
+    drafts.push({
+      key: `memory:${index}`,
+      primitiveKind: 'memory',
+      payload: {
+        ...envelope,
+        command: 'memory',
+        scope: toDbScope(memory.scope ?? 'user'),
+        tags: dedupTags(input.tags, memory.tags),
+        summary: memory.summary,
+        detail: memory.detail ?? null,
+      } satisfies PipelineBApplicationCommand,
+      ...(!episode.userId || !episode.assistantId ? {
+        terminalDisposition: 'rejected' as const,
+        terminalReason: 'visibility_missing',
+      } : {}),
+    })
+  }
+  for (const [index, ephemeral] of input.payload.ephemeral.entries()) {
+    drafts.push({
+      key: `ephemeral:${index}`,
+      primitiveKind: 'ephemeral',
+      payload: { reason: ephemeral.reason },
+      terminalDisposition: 'rejected',
+      terminalReason: ephemeral.reason,
+    })
+  }
+
+  const sensitivity = await classifyFrozenApplication(episode, input.payload, deps, actorUserId)
+
+  try {
+    await deps.episodes.updateCheckpoint(actorUserId, episode.id, { summaryText: input.payload.summary })
+    await deps.episodes.updateStatus(actorUserId, episode.id, 'archived')
+  } catch (error) {
+    console.warn(`[pipeline-b] episode finalization failed for ${episode.id}:`, error)
+    return {
+      episodeId: episode.id,
+      summaryText: input.payload.summary,
+      entitiesWritten: [], edgesWritten: [], memoriesWritten: [], tasksWritten: [],
+      ephemeralCount: input.payload.ephemeral.length,
+      tags: input.tags,
+      sensitivity,
+      extractionUsage: input.extractionUsage,
+      extracted: true,
+      extractionState: 'succeeded',
+      applicationState: 'blocked',
+      applicationRunId: null,
+      applicationCounts: null,
+    }
+  }
+  const archived = await deps.episodes.getEpisodeByIdSystem?.(actorUserId, episode.id)
+  if (!archived?.scopeVersion || archived.status !== 'archived' || archived.scopeHeld || archived.extractionLocked) {
+    return {
+      episodeId: episode.id,
+      summaryText: input.payload.summary,
+      entitiesWritten: [], edgesWritten: [], memoriesWritten: [], tasksWritten: [],
+      ephemeralCount: input.payload.ephemeral.length,
+      tags: input.tags,
+      sensitivity,
+      extractionUsage: input.extractionUsage,
+      extracted: true,
+      extractionState: 'succeeded',
+      applicationState: 'blocked',
+      applicationRunId: null,
+      applicationCounts: null,
+    }
+  }
+  episode = { ...episode, scopeVersion: archived.scopeVersion }
+  drafts.push({
+    key: 'episode-finalization',
+    primitiveKind: 'episode_finalization',
+    payload: {
+      ...sourceEnvelope(episode),
+      command: 'episode_finalization',
+      summaryText: input.payload.summary,
+      tags: input.tags,
+      sensitivityResult: sensitivity,
+    } satisfies PipelineBApplicationCommand,
+  })
+
+  const sourceContentHash = hashExtractionSource(input.resolvedContent)
+  const plan = freezeExtractionPlan({
+    episodeId: episode.id,
+    sourceContentHash,
+    sourceScopeVersion: archived.scopeVersion,
+    extractorContractVersion: PIPELINE_B_APPLICATION_CONTRACT,
+    candidates: drafts,
+  })
+  const run = await deps.application!.apply({
+    workspaceId: episode.workspaceId,
+    actorUserId,
+    mutationCompartments: episode.compartments ?? [],
+    projectIds: episode.projectIds ?? [],
+    attemptKey: initialExtractionAttemptKey(sourceContentHash, PIPELINE_B_APPLICATION_CONTRACT),
+    plan,
+  })
+  if (run.applicationState === 'complete' && deps.ingestCharge) {
+    try { await deps.ingestCharge(episode) }
+    catch (error) { console.warn(`[pipeline-b] ingest charge failed for episode ${episode.id}:`, error) }
+  }
+  return {
+    episodeId: episode.id,
+    summaryText: input.payload.summary,
+    entitiesWritten: [], edgesWritten: [], memoriesWritten: [], tasksWritten: [],
+    ephemeralCount: input.payload.ephemeral.length,
+    tags: input.tags,
+    sensitivity,
+    extractionUsage: input.extractionUsage,
+    extracted: true,
+    extractionState: 'succeeded',
+    applicationState: run.applicationState,
+    applicationRunId: run.id,
+    applicationCounts: run.counts,
   }
 }
 
@@ -2321,6 +2792,112 @@ async function processEngagementDigest(
   const platform = typeof platformRaw === 'string' ? platformRaw : 'platform'
 
   const tags = dedupTags(episode.preStampedTags, ['engagement', 'platform-digest'])
+
+  const agg = metrics.aggregate
+  const aggParts: string[] = []
+  if (agg.total_engagement !== undefined) aggParts.push(`${agg.total_engagement} total engagement`)
+  if (agg.follower_delta !== undefined) {
+    aggParts.push(`${agg.follower_delta >= 0 ? '+' : ''}${agg.follower_delta} followers`)
+  }
+  const summaryText =
+    `${platform} engagement digest — ${metrics.per_post.length} post(s)` +
+    (aggParts.length > 0 ? `; ${aggParts.join(', ')}.` : '.')
+
+  if (deps.application && deps.applicationNamespace !== 'shadow') {
+    const drafts: Parameters<typeof freezeExtractionPlan>[0]['candidates'] = []
+    const envelope = sourceEnvelope(episode)
+    for (const [index, post] of metrics.per_post.entries()) {
+      const memoryKey = `digest-memory:${index}`
+      drafts.push({
+        key: memoryKey,
+        primitiveKind: 'digest_memory',
+        payload: {
+          ...envelope,
+          command: 'digest_memory',
+          scope: 'workspace',
+          tags,
+          summary: describePostEngagement(platform, post),
+          detail: JSON.stringify(post),
+        } satisfies PipelineBApplicationCommand,
+        ...(!episode.userId || !episode.assistantId ? {
+          terminalDisposition: 'rejected' as const,
+          terminalReason: 'visibility_missing',
+        } : {}),
+      })
+      drafts.push({
+        key: `digest-edge:${index}`,
+        primitiveKind: 'digest_edge',
+        dependencyKeys: [memoryKey],
+        payload: {
+          ...envelope,
+          command: 'digest_edge',
+          edgeType: 'platform_engagement_for',
+          attributes: { ...post },
+          sourceDependencyIndex: 0,
+          targetDependencyIndex: null,
+          targetRecordId: post.post_episode_id,
+          sourceKind: 'memory',
+          targetKind: 'episode',
+        } satisfies PipelineBApplicationCommand,
+      })
+    }
+
+    try {
+      await deps.episodes.updateCheckpoint(actorUserId, episode.id, { summaryText })
+      await deps.episodes.updateStatus(actorUserId, episode.id, 'archived')
+    } catch (error) {
+      console.warn(`[pipeline-b] digest episode finalization failed for ${episode.id}:`, error)
+      return {
+        episodeId: episode.id, summaryText, entitiesWritten: [], edgesWritten: [], memoriesWritten: [],
+        tasksWritten: [], ephemeralCount: 0, tags, sensitivity: null, extractionUsage: null,
+        extracted: true, extractionState: 'succeeded', applicationState: 'blocked',
+        applicationRunId: null, applicationCounts: null,
+      }
+    }
+    const archived = await deps.episodes.getEpisodeByIdSystem?.(actorUserId, episode.id)
+    if (!archived?.scopeVersion || archived.status !== 'archived' || archived.scopeHeld || archived.extractionLocked) {
+      return {
+        episodeId: episode.id, summaryText, entitiesWritten: [], edgesWritten: [], memoriesWritten: [],
+        tasksWritten: [], ephemeralCount: 0, tags, sensitivity: null, extractionUsage: null,
+        extracted: true, extractionState: 'succeeded', applicationState: 'blocked',
+        applicationRunId: null, applicationCounts: null,
+      }
+    }
+    episode = { ...episode, scopeVersion: archived.scopeVersion }
+    drafts.push({
+      key: 'episode-finalization',
+      primitiveKind: 'episode_finalization',
+      payload: {
+        ...sourceEnvelope(episode), command: 'episode_finalization', summaryText, tags, sensitivityResult: null,
+      } satisfies PipelineBApplicationCommand,
+    })
+    const sourceContentHash = hashExtractionSource(canonicalExtractionJson(metrics))
+    const plan = freezeExtractionPlan({
+      episodeId: episode.id,
+      sourceContentHash,
+      sourceScopeVersion: archived.scopeVersion,
+      extractorContractVersion: PIPELINE_B_APPLICATION_CONTRACT,
+      candidates: drafts,
+    })
+    const run = await deps.application.apply({
+      workspaceId: episode.workspaceId,
+      actorUserId,
+      mutationCompartments: episode.compartments ?? [],
+      projectIds: episode.projectIds ?? [],
+      attemptKey: initialExtractionAttemptKey(sourceContentHash, PIPELINE_B_APPLICATION_CONTRACT),
+      plan,
+    })
+    if (run.applicationState === 'complete' && deps.ingestCharge) {
+      try { await deps.ingestCharge(episode) }
+      catch (error) { console.warn(`[pipeline-b] ingest charge failed for episode ${episode.id}:`, error) }
+    }
+    return {
+      episodeId: episode.id, summaryText, entitiesWritten: [], edgesWritten: [], memoriesWritten: [],
+      tasksWritten: [], ephemeralCount: 0, tags, sensitivity: null, extractionUsage: null,
+      extracted: true, extractionState: 'succeeded', applicationState: run.applicationState,
+      applicationRunId: run.id, applicationCounts: run.counts,
+    }
+  }
 
   const memoriesWritten: MemoryRecord[] = []
   const edgesWritten: EntityLinkRecord[] = []
@@ -2392,16 +2969,6 @@ async function processEngagementDigest(
   }
 
   // Digest Episode summary — the period aggregate, human-readable.
-  const agg = metrics.aggregate
-  const aggParts: string[] = []
-  if (agg.total_engagement !== undefined) aggParts.push(`${agg.total_engagement} total engagement`)
-  if (agg.follower_delta !== undefined) {
-    aggParts.push(`${agg.follower_delta >= 0 ? '+' : ''}${agg.follower_delta} followers`)
-  }
-  const summaryText =
-    `${platform} engagement digest — ${metrics.per_post.length} post(s)` +
-    (aggParts.length > 0 ? `; ${aggParts.join(', ')}.` : '.')
-
   try {
     await deps.episodes.updateCheckpoint(actorUserId, episode.id, { summaryText })
     await deps.episodes.updateStatus(actorUserId, episode.id, 'archived')
@@ -2425,6 +2992,10 @@ async function processEngagementDigest(
     sensitivity: null,
     extractionUsage: null,
     extracted: true,
+    extractionState: 'succeeded',
+    applicationState: 'not_started',
+    applicationRunId: null,
+    applicationCounts: null,
   }
 }
 
@@ -2901,6 +3472,7 @@ function emptyResult(
   episode: PipelineBEpisode,
   extractionUsage: TokenUsage | null,
   extracted: boolean,
+  extractionState: PipelineBResult['extractionState'] = extracted ? 'succeeded' : 'failed',
 ): PipelineBResult {
   return {
     episodeId: episode.id,
@@ -2914,6 +3486,10 @@ function emptyResult(
     sensitivity: null,
     extractionUsage,
     extracted,
+    extractionState,
+    applicationState: 'not_started',
+    applicationRunId: null,
+    applicationCounts: null,
   }
 }
 

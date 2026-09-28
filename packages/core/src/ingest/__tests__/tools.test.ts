@@ -17,6 +17,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   createIngestRuleTools,
+  createIngestApplicationTools,
   type AddIngestRuleInput,
   type ConnectorInstanceSummary,
   type IngestRuleEditorStore,
@@ -460,5 +461,43 @@ describe('[COMP:brain/ingest-tools] createIngestRuleTools', () => {
     const { addIngestRule } = createIngestRuleTools(makeFakeStore())
     expect(addIngestRule.description).toMatch(/channel_match|is_dm|always/)
     expect(addIngestRule.description).toMatch(/realtime|scheduled|drop/)
+  })
+})
+
+describe('[COMP:brain/ingest-tools] application recovery', () => {
+  const episodeId = '33333333-3333-4333-8333-333333333333'
+  const runId = '44444444-4444-4444-8444-444444444444'
+  const planHash = 'a'.repeat(64)
+
+  it('reads and retries through one port while keeping retry confirmed and model-free', async () => {
+    const port = {
+      get: vi.fn(async () => ({ status: 'tracked', counts: { failed: 1 } })),
+      retry: vi.fn(async () => ({ applicationState: 'complete' })),
+    }
+    const tools = createIngestApplicationTools(port)
+    const read = await tools.getIngestApplication.execute({ episode_id: episodeId }, ctx)
+    const retry = await tools.retryIngestApplication.execute({
+      episode_id: episodeId, run_id: runId, expected_plan_hash: planHash,
+    }, ctx)
+    expect(read).toEqual({ data: { status: 'tracked', counts: { failed: 1 } } })
+    expect(retry).toEqual({ data: { applicationState: 'complete' } })
+    expect(port.retry).toHaveBeenCalledWith(ctx, {
+      episodeId, runId, expectedPlanHash: planHash,
+    })
+    expect(tools.getIngestApplication.isReadOnly).toBe(true)
+    expect(tools.retryIngestApplication.requiresConfirmation).toBe(true)
+    expect(tools.retryIngestApplication.allowPersistentApproval).toBe(false)
+  })
+
+  it.each([
+    { ...ctx, systemRead: true },
+    { ...ctx, clientSelfMemory: { compartment: 'client:self' } },
+    { ...ctx, workspaceId: null },
+  ])('does not expose recovery through an external or unbound context', async (external) => {
+    const port = { get: vi.fn(), retry: vi.fn() }
+    const tools = createIngestApplicationTools(port)
+    const result = await tools.getIngestApplication.execute({ episode_id: episodeId }, external)
+    expect(result).toMatchObject({ isError: true, data: { code: 'access_denied' } })
+    expect(port.get).not.toHaveBeenCalled()
   })
 })

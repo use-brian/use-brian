@@ -25,6 +25,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import type { ToolContext } from '../tools/types.js'
 import { resolveWriteScope } from '../security/context-scope.js'
 import type { RoutingMode, RuleEpisodeSensitivity } from './engine.js'
 import {
@@ -187,6 +188,105 @@ export type IngestRuleTools = {
   addIngestRule: Tool
   updateIngestRule: Tool
   deleteIngestRule: Tool
+}
+
+export type IngestApplicationToolPort = {
+  get(context: ToolContext, episodeId: string): Promise<unknown>
+  retry(context: ToolContext, input: {
+    episodeId: string
+    runId: string
+    expectedPlanHash: string
+  }): Promise<unknown>
+}
+
+export type IngestApplicationTools = {
+  getIngestApplication: Tool
+  retryIngestApplication: Tool
+}
+
+function recoveryUnavailable(context: ToolContext): { data: { code: string; message: string }; isError: true } | null {
+  if (!context.workspaceId || context.systemRead || context.clientSelfMemory) {
+    return {
+      data: {
+        code: 'access_denied',
+        message: 'Ingest recovery is available only from an authenticated workspace conversation.',
+      },
+      isError: true,
+    }
+  }
+  return null
+}
+
+/** Brian-facing adapter over the same authorized recovery service used by Studio. */
+export function createIngestApplicationTools(port: IngestApplicationToolPort): IngestApplicationTools {
+  const getInput = z.object({ episode_id: z.string().uuid() }).strict()
+  const retryInput = z.object({
+    episode_id: z.string().uuid(),
+    run_id: z.string().uuid(),
+    expected_plan_hash: z.string().regex(/^[0-9a-f]{64}$/),
+  }).strict()
+
+  const getIngestApplication = buildTool({
+    name: 'getIngestApplication',
+    description:
+      'Read the durable extraction-application status for one visible Episode. Returns application state, safe per-item outcomes, resumability, counts, and the frozen plan hash. Legacy Episodes without a ledger are reported as legacy_untracked.',
+    inputSchema: getInput,
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    async execute(input, context) {
+      const blocked = recoveryUnavailable(context)
+      if (blocked) return blocked
+      try {
+        return { data: await port.get(context, input.episode_id) }
+      } catch (error) {
+        const code = (error as { code?: unknown })?.code
+        return {
+          isError: true,
+          data: {
+            code: typeof code === 'string' ? code : 'application_recovery_failed',
+            message: error instanceof Error ? error.message : 'Application status could not be read.',
+          },
+        }
+      }
+    },
+  })
+
+  const retryIngestApplication = buildTool({
+    name: 'retryIngestApplication',
+    description:
+      'Resume only pending or retryable failed items from an Episode\'s existing frozen extraction plan. This never re-extracts content or performs paid model work. Use getIngestApplication first and pass back its exact run id and plan hash.',
+    inputSchema: retryInput,
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    requiresConfirmation: true,
+    allowPersistentApproval: false,
+    async describeConfirmation(input) {
+      const parsed = retryInput.safeParse(input)
+      return parsed.success ? [`Retry incomplete application for Episode ${parsed.data.episode_id}`] : null
+    },
+    async execute(input, context) {
+      const blocked = recoveryUnavailable(context)
+      if (blocked) return blocked
+      try {
+        return { data: await port.retry(context, {
+          episodeId: input.episode_id,
+          runId: input.run_id,
+          expectedPlanHash: input.expected_plan_hash,
+        }) }
+      } catch (error) {
+        const code = (error as { code?: unknown })?.code
+        return {
+          isError: true,
+          data: {
+            code: typeof code === 'string' ? code : 'application_recovery_failed',
+            message: error instanceof Error ? error.message : 'Application retry could not be completed.',
+          },
+        }
+      }
+    },
+  })
+
+  return { getIngestApplication, retryIngestApplication }
 }
 
 export function createIngestRuleTools(store: IngestRuleEditorStore): IngestRuleTools {

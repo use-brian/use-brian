@@ -1,5 +1,6 @@
 import { bindScopeSource, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type { AccessContext, EntityLinksStore, Sensitivity, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor, TaskStore } from '@use-brian/core'
+import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
@@ -143,14 +144,24 @@ const TASK_DEDUP_WINDOW_SECONDS = 120
  */
 const PLACEHOLDER_TASK_TITLE = 'Untitled task'
 
-async function checkTaskProject(userId: string, params: Parameters<typeof createTask>[1]): Promise<void> {
+async function checkTaskProject(
+  userId: string,
+  params: Parameters<typeof createTask>[1],
+  transactionClient?: pg.PoolClient,
+): Promise<void> {
   if ((params.projectIds?.length ?? 0) > 0) {
-    const validProject = await queryWithRLS<{ id: string }>(
-      userId,
+    const validProject = transactionClient
+      ? await transactionClient.query<{ id: string }>(
+        `SELECT id FROM workspace_projects
+          WHERE workspace_id = $1 AND id = $2 AND status = 'active'`,
+        [params.workspaceId, params.projectIds![0]],
+      )
+      : await queryWithRLS<{ id: string }>(
+        userId,
       `SELECT id FROM workspace_projects
         WHERE workspace_id = $1 AND id = $2 AND status = 'active'`,
       [params.workspaceId, params.projectIds![0]],
-    )
+      )
     if (validProject.rows.length === 0 || params.projectIds!.length > 1) {
       throw new Error('context_not_available: project')
     }
@@ -273,6 +284,7 @@ export async function createTask(
     writtenBy?: TaskWriteActor
   },
   entityLinks?: EntityLinksStore,
+  transactionClient?: pg.PoolClient,
 ): Promise<TaskRecord> {
   // WU-4.5 — authorship NOT NULL enforcement at the store layer. The
   // `userId` argument is both the RLS actor and the row author; without
@@ -282,16 +294,15 @@ export async function createTask(
   // their schema defaults from migration 128.
   assertAuthorshipPresent('createTask', userId)
   checkTaskCreate(userId,params)
-  await checkTaskProject(userId,params)
-  const result = await queryWithRLS<TaskRow>(
-    userId,
+  await checkTaskProject(userId,params,transactionClient)
+  const sql =
     `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, project_ids, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms, sensitivity, user_id, assistant_id)
      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
      WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$10)
        AND (effective_member_team_compartments($10,$1) IS NULL
          OR $11::text[] <@ effective_member_team_compartments($10,$1))
-     RETURNING ${FULL_SELECT}`,
-    [
+     RETURNING ${FULL_SELECT}`
+  const values = [
       params.workspaceId,
       params.title,
       params.status ?? 'todo',
@@ -310,15 +321,17 @@ export async function createTask(
       params.createdByAssistantId ?? null,
       params.sourceStartMs ?? null,
       params.sensitivity??'internal',params.visibility?.userId??null,params.visibility?.assistantId??null,
-    ],
-  )
+    ]
+  const result = transactionClient
+    ? await transactionClient.query<TaskRow>(sql, values)
+    : await queryWithRLS<TaskRow>(userId, sql, values)
   if (!result.rows[0]) throw Object.assign(new Error('The task operation is outside the current access scope.'), { code: 'scope_operation_denied' })
   const task = toRecord(result.rows[0])
 
   // Workflow task-event emit — fire-and-forget after the committed insert
   // (single-statement autocommit above). The late-bound fanout is a no-op
   // until bootOpenApi binds the dispatcher. [COMP:api/task-event-fanout]
-  publishTaskLifecycle({
+  if (!transactionClient) publishTaskLifecycle({
     workspaceId: task.workspaceId,
     taskId: task.id,
     kind: 'created',
@@ -338,7 +351,7 @@ export async function createTask(
 
   // Fire-and-forget `mentioned` edges — `void`, never awaited, never
   // able to throw into the task save.
-  if (entityLinks && params.linkedEntityIds && params.linkedEntityIds.length > 0) {
+  if (!transactionClient && entityLinks && params.linkedEntityIds && params.linkedEntityIds.length > 0) {
     void emitMentionedEdges(entityLinks, userId, {
       sourceKind: 'task',
       sourceId: task.id,
@@ -352,7 +365,7 @@ export async function createTask(
   }
   // Fire-and-forget `depends_on` edges from this task → each
   // depended-on task. v1 append-only — never removes existing edges.
-  if (entityLinks && params.dependsOn && params.dependsOn.length > 0) {
+  if (!transactionClient && entityLinks && params.dependsOn && params.dependsOn.length > 0) {
     void emitDependsOnEdges(entityLinks, userId, {
       sourceTaskId: task.id,
       dependsOnTaskIds: params.dependsOn,
