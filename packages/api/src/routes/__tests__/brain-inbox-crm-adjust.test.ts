@@ -68,12 +68,23 @@ import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
 import { appendBrainVerification, getBrainInboxRow } from '../../db/brain-inbox-store.js'
 import { updateWorkspaceFileMeta } from '../../db/workspace-files.js'
-import { updateEntity } from '../../db/entities-store.js'
+import {
+  addEntityAlias,
+  promoteEntityToCrm,
+  reclassifyEntityKind,
+  removeEntityAlias,
+  updateEntity,
+} from '../../db/entities-store.js'
+import { notifyBrainInboxChange } from '../../brain-stream/notify.js'
 import { setDealStage, updateCompany, updateContact, updateDeal } from '../../db/crm.js'
 import { appendCrmActivity } from '../../db/crm-r2.js'
 
 const mockQuery = vi.mocked(query)
 const mockUpdateEntity = vi.mocked(updateEntity)
+const mockAddEntityAlias = vi.mocked(addEntityAlias)
+const mockRemoveEntityAlias = vi.mocked(removeEntityAlias)
+const mockReclassifyEntityKind = vi.mocked(reclassifyEntityKind)
+const mockPromoteEntityToCrm = vi.mocked(promoteEntityToCrm)
 const mockUpdateContact = vi.mocked(updateContact)
 const mockUpdateCompany = vi.mocked(updateCompany)
 const mockUpdateDeal = vi.mocked(updateDeal)
@@ -316,5 +327,97 @@ describe('[COMP:crm/update] CRM adjust — typed fields (REST boundary)', () => 
       .send({ company_id: COMPANY })
     expect(res.status).toBe(400)
     expect(res.body.error).toMatch(/same workspace/)
+  })
+})
+
+describe('[COMP:api/entity-mutation-scope] CRM semantic corrections (REST boundary)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('adds and removes aliases through the complete access envelope without an owner-pool preflight', async () => {
+    mockAddEntityAlias.mockResolvedValueOnce({ kind: 'ok', entity: { aliases: ['known-as'] } as never })
+    mockRemoveEntityAlias.mockResolvedValueOnce({ aliases: [] } as never)
+    const app = makeApp()
+
+    const added = await request(app)
+      .post(`/api/brain-inbox/${WS}/entity/${ROW}/aliases`)
+      .send({ alias: 'Known-As' })
+    const removed = await request(app)
+      .delete(`/api/brain-inbox/${WS}/entity/${ROW}/aliases/known-as`)
+
+    expect(added.status).toBe(200)
+    expect(removed.status).toBe(200)
+    expect(mockAddEntityAlias).toHaveBeenCalledWith('u_caller', ROW, 'Known-As', ACCESS)
+    expect(mockRemoveEntityAlias).toHaveBeenCalledWith('u_caller', ROW, 'known-as', ACCESS)
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it('uses the locked previous kind for reclassification audit and treats an authorized no-op as idempotent', async () => {
+    mockReclassifyEntityKind
+      .mockResolvedValueOnce({ id: ROW, kind: 'product', previousKind: 'project', changed: true } as never)
+      .mockResolvedValueOnce({ id: ROW, kind: 'product', previousKind: 'product', changed: false } as never)
+    const app = makeApp()
+
+    const changed = await request(app)
+      .post(`/api/brain-inbox/${WS}/entity/${ROW}/reclassify`)
+      .send({ kind: 'product', reason: 'Correction' })
+    const noop = await request(app)
+      .post(`/api/brain-inbox/${WS}/entity/${ROW}/reclassify`)
+      .send({ kind: 'product' })
+
+    expect(changed.status).toBe(200)
+    expect(noop.body).toEqual({ ok: true, kind: 'product', idempotent: true })
+    expect(mockReclassifyEntityKind).toHaveBeenCalledWith(
+      'u_caller', ROW, { kind: 'product' }, ACCESS, expect.anything(),
+    )
+    expect(vi.mocked(appendBrainVerification)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(appendBrainVerification)).toHaveBeenCalledWith(expect.objectContaining({
+      modelValue: { kind: 'project' }, userValue: { kind: 'product' },
+    }))
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it('promotes with relationship fields and audits the kind captured by the store lock', async () => {
+    mockPromoteEntityToCrm.mockResolvedValueOnce({
+      entity: { id: ROW, kind: 'deal' }, specializationId: ROW, previousKind: 'project',
+    } as never)
+
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/entity/${ROW}/promote-to-crm`)
+      .send({ kind: 'deal', stage: 'proposal', companyId: COMPANY, contactId: 'contact-1', closeDate: '2026-10-01' })
+
+    expect(res.status).toBe(200)
+    expect(mockPromoteEntityToCrm).toHaveBeenCalledWith(
+      'u_caller', ROW,
+      expect.objectContaining({
+        kind: 'deal', stage: 'proposal', companyId: COMPANY, contactId: 'contact-1',
+        closeDate: new Date('2026-10-01'),
+      }),
+      ACCESS,
+      expect.anything(),
+    )
+    expect(vi.mocked(appendBrainVerification)).toHaveBeenCalledWith(expect.objectContaining({
+      modelValue: { kind: 'project' },
+    }))
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['alias', async (app: ReturnType<typeof makeApp>) => request(app).post(`/api/brain-inbox/${WS}/entity/${ROW}/aliases`).send({ alias: 'hidden' })],
+    ['reclassify', async (app: ReturnType<typeof makeApp>) => request(app).post(`/api/brain-inbox/${WS}/entity/${ROW}/reclassify`).send({ kind: 'product' })],
+    ['promotion', async (app: ReturnType<typeof makeApp>) => request(app).post(`/api/brain-inbox/${WS}/entity/${ROW}/promote-to-crm`).send({ kind: 'company' })],
+  ] as const)('maps a hidden %s target to the same not-found response without notification', async (operation, invoke) => {
+    const refusal = Object.assign(new Error('denied'), { code: 'scope_operation_denied' })
+    if (operation === 'alias') mockAddEntityAlias.mockRejectedValueOnce(refusal)
+    if (operation === 'reclassify') mockReclassifyEntityKind.mockRejectedValueOnce(refusal)
+    if (operation === 'promotion') mockPromoteEntityToCrm.mockRejectedValueOnce(refusal)
+
+    const res = await invoke(makeApp())
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'Entity not found' })
+    expect(mockQuery).not.toHaveBeenCalled()
+    expect(notifyBrainInboxChange).not.toHaveBeenCalled()
   })
 })

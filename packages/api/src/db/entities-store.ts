@@ -1905,6 +1905,13 @@ export type ReclassifyEntityKindParams = {
   kind: EntityKind
 }
 
+export type ReclassifiedEntityRecord = EntityRecord & {
+  /** Kind captured while the admitted source row was locked. */
+  previousKind: EntityKind
+  /** False for an authorized no-op; even no-ops must pass mutation authority. */
+  changed: boolean
+}
+
 /**
  * Path 1 — direct kind change between non-CRM kinds. CRM targets are
  * rejected upstream (route validation) and must go through
@@ -1916,18 +1923,64 @@ export async function reclassifyEntityKind(
   actorUserId: string,
   id: string,
   params: ReclassifyEntityKindParams,
+  access?: AccessContext,
   transactionClient?: pg.PoolClient,
-): Promise<EntityRecord | null> {
-  const sql = `UPDATE entities
-        SET kind = $1, updated_at = now()
-      WHERE id = $2 AND valid_to IS NULL
-      RETURNING ${FULL_SELECT}`
-  const values = [params.kind, id]
-  const result = transactionClient
-    ? await transactionClient.query<EntityRow>(sql, values)
-    : await queryWithRLS<EntityRow>(actorUserId, sql, values)
-  if (result.rows.length === 0) return null
-  return toEntity(result.rows[0])
+): Promise<ReclassifiedEntityRecord | null> {
+  if (params.kind === 'person' || params.kind === 'company' || params.kind === 'deal') {
+    throw new Error(`Reclassifying to '${params.kind}' requires CRM promotion.`)
+  }
+  access = entityMutationAccess(actorUserId, access)
+  const ownedClient = transactionClient ? null : await getAppPool().connect()
+  const client = transactionClient ?? ownedClient!
+  try {
+    if (ownedClient) {
+      await client.query('BEGIN')
+      await applyRLSGucs(client, actorUserId)
+    }
+    try {
+      const lockGuard = entitySourceGuard(actorUserId, access, 'mutation', 2)
+      const locked = await client.query<EntityRow>(
+        `SELECT ${FULL_SELECT} FROM entities
+          WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+            AND ${lockGuard.sql}
+          FOR UPDATE`,
+        [id, ...lockGuard.params],
+      )
+      if (!locked.rows[0]) {
+        if (ownedClient) await client.query('COMMIT')
+        return null
+      }
+      const before = toEntity(locked.rows[0])
+      if (before.kind === 'person' || before.kind === 'company' || before.kind === 'deal') {
+        throw new Error(`Entity is already CRM-specialized as '${before.kind}'.`)
+      }
+      if (before.kind === params.kind) {
+        if (ownedClient) await client.query('COMMIT')
+        return Object.assign(before, { previousKind: before.kind, changed: false })
+      }
+
+      const writeGuard = entitySourceGuard(actorUserId, access, 'mutation', 3)
+      const updated = await client.query<EntityRow>(
+        `UPDATE entities
+            SET kind = $1, updated_at = now()
+          WHERE id = $2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+            AND ${writeGuard.sql}
+          RETURNING ${FULL_SELECT}`,
+        [params.kind, id, ...writeGuard.params],
+      )
+      if (!updated.rows[0]) {
+        if (ownedClient) await client.query('ROLLBACK')
+        return null
+      }
+      if (ownedClient) await client.query('COMMIT')
+      return Object.assign(toEntity(updated.rows[0]), { previousKind: before.kind, changed: true })
+    } catch (error) {
+      if (ownedClient) await client.query('ROLLBACK').catch(() => {})
+      throw error
+    }
+  } finally {
+    if (ownedClient) await rollbackAndRelease(client)
+  }
 }
 
 export type PromoteEntityToCrmParams = {
@@ -1950,6 +2003,38 @@ export type PromoteEntityToCrmParams = {
   contactId?: string | null
 }
 
+type PromotionReference = Pick<
+  EntityRecord,
+  'id' | 'kind' | 'userId' | 'assistantId' | 'sensitivity' | 'compartments' | 'projectIds'
+>
+
+async function lockPromotionReference(
+  client: pg.PoolClient,
+  actorUserId: string,
+  access: AccessContext | undefined,
+  id: string,
+  kind: 'company' | 'person',
+): Promise<PromotionReference> {
+  const guard = entitySourceGuard(actorUserId, access, 'mutation', 2)
+  const result = await client.query<EntityRow>(
+    `SELECT ${FULL_SELECT} FROM entities
+      WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+        AND ${guard.sql}
+      FOR SHARE`,
+    [id, ...guard.params],
+  )
+  const reference = result.rows[0] ? toEntity(result.rows[0]) : null
+  if (!reference) {
+    throw Object.assign(new Error('The relationship cannot be used in the current scope.'), { code: 'scope_operation_denied' })
+  }
+  if (reference.kind !== kind || (kind === 'person' && reference.attributes.self)) {
+    throw new Error(kind === 'person'
+      ? 'contact_id must reference a non-self CRM person'
+      : 'company_id must reference a CRM company')
+  }
+  return reference
+}
+
 /**
  * Path 2 — atomic CRM promotion. Flips `entities.kind` and merges the
  * typed CRM fields into `attributes` (plus `canonical_id` from the
@@ -1969,14 +2054,19 @@ export async function promoteEntityToCrm(
   actorUserId: string,
   id: string,
   params: PromoteEntityToCrmParams,
+  access?: AccessContext,
   transactionClient?: pg.PoolClient,
-): Promise<{ entity: EntityRecord; specializationId: string }> {
+): Promise<{ entity: EntityRecord; specializationId: string; previousKind: EntityKind }> {
   if (params.kind === 'deal' && !params.stage) {
     throw new Error("Promoting to 'deal' requires a stage value.")
   }
+  if (params.amount != null && params.amount < 0) {
+    throw new Error('deals_amount_check: amount must be greater than or equal to 0')
+  }
+  access = entityMutationAccess(actorUserId, access)
   // Build the attributes patch + canonical_id for the target kind. No
-  // specialization row exists post-unification; typed fields live in
-  // `attributes`, relationship FKs are set later via updateContact/Deal.
+  // specialization row exists post-unification; typed fields and relationship
+  // ids live together in `attributes`.
   const attrs: Record<string, unknown> = {}
   if (params.kind === 'company') {
     if (params.domain) attrs.domain = params.domain
@@ -1985,10 +2075,14 @@ export async function promoteEntityToCrm(
     if (params.email) attrs.email = params.email
     if (params.phone) attrs.phone = params.phone
     if (params.tags && params.tags.length) attrs.tags = params.tags
+    if (params.companyId) attrs.company_id = params.companyId
   } else {
     attrs.stage = params.stage
     if (params.amount != null) attrs.amount = params.amount
-    if (params.closeDate) attrs.closeDate = params.closeDate
+    if (params.closeDate) attrs.close_date = params.closeDate.toISOString()
+    if (params.tags && params.tags.length) attrs.tags = params.tags
+    if (params.contactId) attrs.contact_id = params.contactId
+    if (params.companyId) attrs.company_id = params.companyId
   }
   const canonical =
     params.kind === 'person'
@@ -2011,28 +2105,60 @@ export async function promoteEntityToCrm(
       // Lock the entity row so a concurrent promote / supersede can't
       // race. The promotion target must be live, non-CRM, and visible
       // to the caller (FOR UPDATE inside the RLS context).
+      const sourceGuard = entitySourceGuard(actorUserId, access, 'mutation', 2)
       const entityRes = await client.query<EntityRow>(
         `SELECT ${FULL_SELECT} FROM entities
-          WHERE id = $1 AND valid_to IS NULL
+          WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+            AND ${sourceGuard.sql}
           FOR UPDATE`,
-        [id],
+        [id, ...sourceGuard.params],
       )
       if (entityRes.rows.length === 0) {
         throw new Error('Entity not found or not live.')
       }
       const before = toEntity(entityRes.rows[0])
+      if (before.kind === 'person' || before.kind === 'company' || before.kind === 'deal') {
+        throw new Error(`Entity is already CRM-specialized as '${before.kind}'.`)
+      }
       const effectiveName = params.name?.trim() || before.displayName
 
+      const references: PromotionReference[] = []
+      const requested = [
+        ...(params.companyId ? [{ id: params.companyId, kind: 'company' as const }] : []),
+        ...(params.contactId ? [{ id: params.contactId, kind: 'person' as const }] : []),
+      ].sort((a, b) => a.id.localeCompare(b.id))
+      for (const reference of requested) {
+        references.push(await lockPromotionReference(client, actorUserId, access, reference.id, reference.kind))
+      }
+      let sensitivity = before.sensitivity
+      let compartments = before.compartments
+      let projectIds = before.projectIds
+      for (const reference of references) {
+        if ((reference.userId !== null && reference.userId !== before.userId)
+          || (reference.assistantId !== null && reference.assistantId !== before.assistantId)) {
+          throw Object.assign(new Error('The relationship cannot be published in this scope.'), { code: 'scope_operation_denied' })
+        }
+        sensitivity = maxSensitivity(sensitivity, reference.sensitivity)
+        compartments = unionScopeRequirements(compartments, reference.compartments)
+        projectIds = unionScopeRequirements(projectIds, reference.projectIds)
+      }
+
+      const writeGuard = entitySourceGuard(actorUserId, access, 'mutation', 9)
       const updRes = await client.query<EntityRow>(
         `UPDATE entities
             SET kind = $1,
                 display_name = $2,
-                canonical_id = COALESCE($3, canonical_id),
+                canonical_id = $3,
                 attributes = attributes || $4::jsonb,
+                sensitivity = $5,
+                compartments = $6::text[],
+                project_ids = $7::uuid[],
                 updated_at = now()
-          WHERE id = $5 AND valid_to IS NULL
+          WHERE id = $8 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+            AND ${writeGuard.sql}
           RETURNING ${FULL_SELECT}`,
-        [params.kind, effectiveName, canonical, JSON.stringify(attrs), id],
+        [params.kind, effectiveName, canonical, JSON.stringify(attrs), sensitivity,
+          compartments, projectIds, id, ...writeGuard.params],
       )
       if (updRes.rows.length === 0) {
         // Shouldn't happen given the FOR UPDATE above, but be defensive.
@@ -2040,7 +2166,7 @@ export async function promoteEntityToCrm(
       }
       if (ownedClient) await client.query('COMMIT')
       const entity = toEntity(updRes.rows[0])
-      return { entity, specializationId: entity.id }
+      return { entity, specializationId: entity.id, previousKind: before.kind }
     } catch (err) {
       if (ownedClient) await client.query('ROLLBACK').catch(() => {})
       throw err

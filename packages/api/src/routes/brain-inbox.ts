@@ -672,12 +672,12 @@ export function brainInboxRoutes({
   //
   // Non-CRM kind change. Targets `product` / `project` / `event` /
   // tenant.* — anything not in CRM_SPECIALIZED_KINDS. CRM targets are
-  // rejected here; they go through /promote-to-crm so the companion
-  // row is created in the same transaction. Stamps a brain_verification
+  // rejected here; they go through /promote-to-crm so typed attributes
+  // and any relationship references land in the same transaction. Stamps a brain_verification
   // audit row with `action='reclassify_kind'`.
   router.post('/:workspaceId/entity/:entityId/reclassify', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
 
     const { workspaceId, entityId } = req.params as {
       workspaceId: string
@@ -712,37 +712,17 @@ export function brainInboxRoutes({
     }
 
     try {
-      const before = await query<{ workspaceId: string; kind: string }>(
-        `SELECT workspace_id AS "workspaceId", kind
-           FROM entities
-          WHERE id = $1 AND valid_to IS NULL`,
-        [entityId],
-      )
-      if (before.rows.length === 0) {
-        res.status(404).json({ error: 'Entity not found' })
-        return
-      }
-      if (before.rows[0].workspaceId !== workspaceId) {
-        res.status(403).json({ error: 'Entity belongs to a different workspace' })
-        return
-      }
-      if (before.rows[0].kind === targetKind) {
-        // No-op — surface as success so the UI moves on.
-        res.json({ ok: true, kind: targetKind, idempotent: true })
-        return
-      }
-
       const updated = await applyBrainCorrection({
         mutate: (client) => reclassifyEntityKind(userId, entityId, {
           kind: targetKind,
-        }, client),
-        verifications: (result) => result ? [{
+        }, access, client),
+        verifications: (result) => result?.changed ? [{
           targetKind: 'entity' as const,
           targetId: entityId,
           workspaceId,
           verifiedByUserId: userId,
           action: 'reclassify_kind' as const,
-          modelValue: { kind: before.rows[0].kind },
+          modelValue: { kind: result.previousKind },
           userValue: { kind: targetKind },
           reason: typeof reason === 'string' ? reason.slice(0, 500) : undefined,
         }] : [],
@@ -753,11 +733,18 @@ export function brainInboxRoutes({
       }
       // Realtime repaint for the reclassified entity node.
       void notifyBrainInboxChange(workspaceId, 'entity', entityId, 'update')
-      res.json({ ok: true, kind: targetKind })
+      res.json({ ok: true, kind: targetKind, ...(updated.changed ? {} : { idempotent: true }) })
     } catch (err) {
       console.error('[brain-inbox] entity reclassify failed:', err)
       const message = err instanceof Error ? err.message : String(err)
-      res.status(500).json({ error: 'Failed to reclassify entity', detail: message })
+      const code = typeof err === 'object' && err !== null && 'code' in err ? String(err.code) : ''
+      if (code === 'scope_operation_denied') {
+        res.status(404).json({ error: 'Entity not found' })
+      } else if (message.includes('already CRM-specialized') || message.includes('requires CRM promotion')) {
+        res.status(400).json({ error: message })
+      } else {
+        res.status(500).json({ error: 'Failed to reclassify entity', detail: message })
+      }
     }
   })
 
@@ -771,8 +758,8 @@ export function brainInboxRoutes({
   // with the conflicting entity id when the alias is bound elsewhere
   // in the workspace — the drawer surfaces that as a merge prompt.
   router.post('/:workspaceId/entity/:entityId/aliases', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
     const { workspaceId, entityId } = req.params as {
       workspaceId: string
       entityId: string
@@ -792,21 +779,7 @@ export function brainInboxRoutes({
       return
     }
     try {
-      // Ownership check — RLS in addEntityAlias would already block
-      // cross-workspace, but a 404 here is friendlier than a not_found.
-      const owner = await query<{ workspaceId: string }>(
-        `SELECT workspace_id AS "workspaceId" FROM entities WHERE id = $1 AND valid_to IS NULL`,
-        [entityId],
-      )
-      if (owner.rows.length === 0) {
-        res.status(404).json({ error: 'Entity not found' })
-        return
-      }
-      if (owner.rows[0].workspaceId !== workspaceId) {
-        res.status(403).json({ error: 'Entity belongs to a different workspace' })
-        return
-      }
-      const result = await addEntityAlias(userId, entityId, alias)
+      const result = await addEntityAlias(userId, entityId, alias, access)
       if (result.kind === 'not_found') {
         res.status(404).json({ error: 'Entity not found' })
         return
@@ -824,13 +797,15 @@ export function brainInboxRoutes({
     } catch (err) {
       console.error('[brain-inbox] alias add failed:', err)
       const message = err instanceof Error ? err.message : String(err)
-      res.status(500).json({ error: 'Failed to add alias', detail: message })
+      const code = typeof err === 'object' && err !== null && 'code' in err ? String(err.code) : ''
+      if (code === 'scope_operation_denied') res.status(404).json({ error: 'Entity not found' })
+      else res.status(500).json({ error: 'Failed to add alias', detail: message })
     }
   })
 
   router.delete('/:workspaceId/entity/:entityId/aliases/:alias', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
     const { workspaceId, entityId, alias } = req.params as {
       workspaceId: string
       entityId: string
@@ -842,19 +817,7 @@ export function brainInboxRoutes({
       return
     }
     try {
-      const owner = await query<{ workspaceId: string }>(
-        `SELECT workspace_id AS "workspaceId" FROM entities WHERE id = $1 AND valid_to IS NULL`,
-        [entityId],
-      )
-      if (owner.rows.length === 0) {
-        res.status(404).json({ error: 'Entity not found' })
-        return
-      }
-      if (owner.rows[0].workspaceId !== workspaceId) {
-        res.status(403).json({ error: 'Entity belongs to a different workspace' })
-        return
-      }
-      const updated = await removeEntityAlias(userId, entityId, decodeURIComponent(alias))
+      const updated = await removeEntityAlias(userId, entityId, decodeURIComponent(alias), access)
       if (!updated) {
         res.status(404).json({ error: 'Entity not found' })
         return
@@ -865,7 +828,9 @@ export function brainInboxRoutes({
     } catch (err) {
       console.error('[brain-inbox] alias remove failed:', err)
       const message = err instanceof Error ? err.message : String(err)
-      res.status(500).json({ error: 'Failed to remove alias', detail: message })
+      const code = typeof err === 'object' && err !== null && 'code' in err ? String(err.code) : ''
+      if (code === 'scope_operation_denied') res.status(404).json({ error: 'Entity not found' })
+      else res.status(500).json({ error: 'Failed to remove alias', detail: message })
     }
   })
 
@@ -880,8 +845,8 @@ export function brainInboxRoutes({
   //   - person : nothing extra (email/phone/companyId optional)
   //   - deal   : stage REQUIRED ('lead'|'qualified'|'proposal'|'negotiation'|'won'|'lost')
   router.post('/:workspaceId/entity/:entityId/promote-to-crm', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
 
     const { workspaceId, entityId } = req.params as {
       workspaceId: string
@@ -964,30 +929,15 @@ export function brainInboxRoutes({
     }
 
     try {
-      const before = await query<{ workspaceId: string; kind: string }>(
-        `SELECT workspace_id AS "workspaceId", kind
-           FROM entities
-          WHERE id = $1 AND valid_to IS NULL`,
-        [entityId],
-      )
-      if (before.rows.length === 0) {
-        res.status(404).json({ error: 'Entity not found' })
-        return
-      }
-      if (before.rows[0].workspaceId !== workspaceId) {
-        res.status(403).json({ error: 'Entity belongs to a different workspace' })
-        return
-      }
-
       const result = await applyBrainCorrection({
-        mutate: (client) => promoteEntityToCrm(userId, entityId, params, client),
+        mutate: (client) => promoteEntityToCrm(userId, entityId, params, access, client),
         verifications: (promoted) => [{
           targetKind: 'entity' as const,
           targetId: entityId,
           workspaceId,
           verifiedByUserId: userId,
           action: 'promote_to_crm' as const,
-          modelValue: { kind: before.rows[0].kind },
+          modelValue: { kind: promoted.previousKind },
           userValue: { kind: params.kind, specializationId: promoted.specializationId },
           reason: typeof body.reason === 'string' ? body.reason.slice(0, 500) : undefined,
         }],
@@ -1006,6 +956,7 @@ export function brainInboxRoutes({
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      const code = typeof err === 'object' && err !== null && 'code' in err ? String(err.code) : ''
       console.error('[brain-inbox] entity promote-to-crm failed:', message)
       // Map known-message errors from the helper to 4xx so the UI can
       // surface them cleanly.
@@ -1013,10 +964,12 @@ export function brainInboxRoutes({
         message.includes('already CRM-specialized')
         || message.includes('requires a stage')
         || message.includes('Cannot promote')
+        || message.includes('must reference')
+        || message.includes('deals_amount_check')
       ) {
         res.status(400).json({ error: message })
-      } else if (message === 'Entity not found or not live.') {
-        res.status(404).json({ error: message })
+      } else if (message === 'Entity not found or not live.' || code === 'scope_operation_denied') {
+        res.status(404).json({ error: 'Entity not found' })
       } else {
         res.status(500).json({ error: 'Failed to promote entity', detail: message })
       }

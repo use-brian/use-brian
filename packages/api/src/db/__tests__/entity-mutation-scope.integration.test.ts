@@ -3,7 +3,15 @@ import { afterAll, describe, expect, it } from 'vitest'
 import type { AccessContext, EntityCreateParams, CrmOperationsContext } from '@use-brian/core'
 import { getAppPool, getPool } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
-import { createEntity, updateEntity, supersedeEntity, addEntityAlias, removeEntityAlias } from '../entities-store.js'
+import {
+  createEntity,
+  updateEntity,
+  supersedeEntity,
+  addEntityAlias,
+  removeEntityAlias,
+  promoteEntityToCrm,
+  reclassifyEntityKind,
+} from '../entities-store.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createCompany, createContact, createDeal, updateCompany, updateContact, updateDeal, setDealStage } from '../crm.js'
 import { appendCrmActivity, listCrmTimeline, getCrmReport, addCrmDealParticipant, listCrmDealParticipants, removeCrmDealParticipant, setCrmArchived, setCrmDealPipelineStage, setCrmDealPrimaryContact, updateCrmCustomFields, validateCrmCustomFieldValues } from '../crm-r2.js'
@@ -60,6 +68,20 @@ async function stageFixture() {
   await pool.query("INSERT INTO crm_pipelines(id,workspace_id,name) VALUES($1,$2,'Fixture pipeline')",[pipelineId,f.workspaceId])
   await pool.query("INSERT INTO crm_pipeline_stages(id,workspace_id,pipeline_id,name,category,position) VALUES($1,$2,$3,'Approved','won',0)",[stageId,f.workspaceId,pipelineId])
   return {...f,pipelineId,stageId}
+}
+
+async function semanticSource(
+  f: Awaited<ReturnType<typeof fixture>>,
+  fields: Partial<EntityCreateParams> = {},
+) {
+  return createEntity({
+    ...f.params,
+    kind: 'product',
+    displayName: `Semantic source ${randomUUID()}`,
+    aliases: [],
+    attributes: { fixture: true },
+    ...fields,
+  })
 }
 
 describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
@@ -974,6 +996,145 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
       expect(next).toMatchObject({ attributes: { role: 'Revised' }, compartments: [f.key], projectIds: [f.projectId] })
       expect((await f.stored()).superseded_by).toBe(next!.id)
     })
+  })
+
+  it.each(['explicit', 'ambient', 'actor-only'] as const)('reclassifies an admitted source and authorizes its no-op through %s authority', async mode => {
+    const f = await fixture(), source = await semanticSource(f)
+    const access = { ...f.access, mutationCompartments: [f.key] }
+    const run = () => reclassifyEntityKind(f.userId, source.id, { kind: 'project' }, mode === 'explicit' ? access : undefined)
+    const changed = await (mode === 'ambient' ? runWithAgentAccess(f.execution([f.key]), run) : run())
+    expect(changed).toMatchObject({ id: source.id, kind: 'project', previousKind: 'product', changed: true })
+    const noop = await (mode === 'ambient'
+      ? runWithAgentAccess(f.execution([f.key]), () => reclassifyEntityKind(f.userId, source.id, { kind: 'project' }))
+      : reclassifyEntityKind(f.userId, source.id, { kind: 'project' }, mode === 'explicit' ? access : undefined))
+    expect(noop).toMatchObject({ id: source.id, kind: 'project', previousKind: 'project', changed: false })
+  })
+
+  it.each(['read-grant', 'team', 'project', 'private', 'assistant', 'clearance', 'held', 'retracted', 'retired', 'departed'] as const)(
+    'refuses semantic kind changes when current %s authority is absent',
+    async restriction => {
+      const f = await fixture()
+      if (restriction !== 'team') await f.groups.addMember(f.userId, f.team.id, f.member)
+      const source = await semanticSource(f, {
+        userId: restriction === 'private' ? f.userId : null,
+        assistantId: restriction === 'assistant' ? f.assistantId : null,
+        sensitivity: restriction === 'clearance' ? 'confidential' : 'internal',
+      })
+      if (restriction === 'held') await pool.query('UPDATE entities SET scope_held=true WHERE id=$1', [source.id])
+      if (restriction === 'retracted') await pool.query('UPDATE entities SET retracted_at=now() WHERE id=$1', [source.id])
+      if (restriction === 'retired') await pool.query('UPDATE entities SET valid_to=now() WHERE id=$1', [source.id])
+      if (restriction === 'departed') await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, f.member])
+      const access: AccessContext = {
+        ...f.access,
+        userId: restriction === 'read-grant' ? f.userId : f.member,
+        mutationCompartments: restriction === 'read-grant' ? [] : [f.key],
+        projectIds: restriction === 'project' ? [] : [f.projectId],
+        visibilityAssistantIds: restriction === 'assistant' ? [] : [f.assistantId],
+        clearance: restriction === 'clearance' ? 'internal' : 'confidential',
+      }
+      const actor = access.userId
+
+      expect(await reclassifyEntityKind(actor, source.id, { kind: 'project' }, access)).toBeNull()
+      await expect(promoteEntityToCrm(actor, source.id, { kind: 'company' }, access))
+        .rejects.toThrow('Entity not found or not live')
+      expect((await pool.query('SELECT kind FROM entities WHERE id=$1', [source.id])).rows[0]?.kind).toBe('product')
+    },
+  )
+
+  it('promotes a source with locked CRM relationships and inherits their audience', async () => {
+    const f = await fixture(), access = { ...f.access, mutationCompartments: [f.key] }
+    const company = await createCompany(f.userId, {
+      workspaceId: f.workspaceId,
+      name: 'Scope fixture company',
+      sensitivity: 'confidential',
+      compartments: [f.key],
+      projectIds: [f.projectId],
+      access,
+    })
+    const contact = await createContact(f.userId, {
+      workspaceId: f.workspaceId,
+      name: 'Scope fixture person',
+      compartments: [f.key],
+      projectIds: [f.projectId],
+      access,
+    })
+    const source = await semanticSource(f, { compartments: [], projectIds: [], sensitivity: 'internal' })
+    const result = await promoteEntityToCrm(f.userId, source.id, {
+      kind: 'deal',
+      stage: 'proposal',
+      amount: 1250,
+      closeDate: new Date('2026-10-01T00:00:00.000Z'),
+      companyId: company.id,
+      contactId: contact.id,
+    }, access)
+
+    expect(result).toMatchObject({ specializationId: source.id, previousKind: 'product' })
+    expect(result.entity).toMatchObject({
+      kind: 'deal',
+      sensitivity: 'confidential',
+      compartments: [f.key],
+      projectIds: [f.projectId],
+      attributes: expect.objectContaining({
+        stage: 'proposal', amount: 1250, company_id: company.id, contact_id: contact.id,
+        close_date: '2026-10-01T00:00:00.000Z',
+      }),
+    })
+  })
+
+  it('refuses a promotion relationship whose private audience is incompatible with the source', async () => {
+    const f = await fixture(), access = { ...f.access, mutationCompartments: [f.key] }
+    const company = await createCompany(f.userId, { workspaceId: f.workspaceId, name: 'Private fixture company', access })
+    await pool.query('UPDATE entities SET user_id=$2 WHERE id=$1', [company.id, f.userId])
+    const source = await semanticSource(f, { compartments: [], projectIds: [] })
+
+    await expect(promoteEntityToCrm(f.userId, source.id, { kind: 'person', companyId: company.id }, access))
+      .rejects.toMatchObject({ code: 'scope_operation_denied' })
+    expect((await pool.query('SELECT kind,attributes FROM entities WHERE id=$1', [source.id])).rows[0])
+      .toMatchObject({ kind: 'product', attributes: { fixture: true } })
+  })
+
+  it('rolls a semantic correction back when its verification cannot commit', async () => {
+    const f = await fixture(), source = await semanticSource(f), access = { ...f.access, mutationCompartments: [f.key] }
+    const trigger = `fixture_semantic_audit_${randomUUID().replaceAll('-', '')}`
+    await pool.query(`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.target_id='${source.id}'::uuid THEN RAISE EXCEPTION 'fixture semantic audit refusal'; END IF; RETURN NULL; END $$`)
+    await pool.query(`CREATE CONSTRAINT TRIGGER ${trigger} AFTER INSERT ON brain_verifications DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${trigger}()`)
+    try {
+      await expect(applyBrainCorrection({
+        mutate: client => reclassifyEntityKind(f.userId, source.id, { kind: 'project' }, access, client),
+        verifications: result => result?.changed ? [{
+          targetKind: 'entity', targetId: source.id, workspaceId: f.workspaceId,
+          verifiedByUserId: f.userId, action: 'reclassify_kind',
+          modelValue: { kind: result.previousKind }, userValue: { kind: result.kind },
+        }] : [],
+      })).rejects.toThrow('fixture semantic audit refusal')
+      expect((await pool.query('SELECT kind FROM entities WHERE id=$1', [source.id])).rows[0].kind).toBe('product')
+      expect((await pool.query('SELECT id FROM brain_verifications WHERE target_id=$1', [source.id])).rows).toEqual([])
+    } finally {
+      await pool.query(`DROP TRIGGER ${trigger} ON brain_verifications`)
+      await pool.query(`DROP FUNCTION ${trigger}()`)
+    }
+  })
+
+  it('holds the promoted source and relationship locks through composed completion', async () => {
+    const f = await fixture(), access = { ...f.access, mutationCompartments: [f.key] }
+    const company = await createCompany(f.userId, { workspaceId: f.workspaceId, name: 'Locked fixture company', access })
+    const source = await semanticSource(f, { compartments: [], projectIds: [] })
+    const client = await pool.connect(), contender = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await promoteEntityToCrm(f.userId, source.id, { kind: 'person', companyId: company.id }, access, client)
+      await contender.query("SET lock_timeout='50ms'")
+      await expect(contender.query('UPDATE entities SET scope_held=true WHERE id=$1', [source.id])).rejects.toMatchObject({ code: '55P03' })
+      await expect(contender.query("UPDATE entities SET kind='product' WHERE id=$1", [company.id])).rejects.toMatchObject({ code: '55P03' })
+      await client.query('ROLLBACK')
+      expect((await pool.query('SELECT kind FROM entities WHERE id=$1', [source.id])).rows[0].kind).toBe('product')
+    } finally {
+      await client.query('ROLLBACK')
+      await contender.query('RESET lock_timeout')
+      client.release()
+      contender.release()
+    }
   })
 
   it('refuses replacing the executing author', async () => {
