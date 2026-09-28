@@ -101,6 +101,12 @@ function zodFieldToJsonSchema(field: { _def: Record<string, unknown> }): JsonSch
       if (def.description && !inner.description) inner.description = def.description as string
       return inner
     }
+    case 'ZodDefault':
+    case 'ZodNullable': {
+      const inner = zodFieldToJsonSchema({ _def: (def.innerType as { _def: Record<string, unknown> })._def })
+      if (def.description && !inner.description) inner.description = def.description as string
+      return inner
+    }
     case 'ZodEnum':
       return { type: 'string', enum: def.values as string[], ...(def.description ? { description: def.description as string } : {}) }
     case 'ZodArray':
@@ -122,7 +128,7 @@ function jsonSchemaFromZod(schema: { _def: unknown }): JsonSchema {
     const required: string[] = []
     for (const [key, fieldSchema] of Object.entries(shape)) {
       properties[key] = zodFieldToJsonSchema(fieldSchema)
-      if (fieldSchema._def.typeName !== 'ZodOptional') required.push(key)
+      if (fieldSchema._def.typeName !== 'ZodOptional' && fieldSchema._def.typeName !== 'ZodDefault') required.push(key)
     }
     return { type: 'object', properties, ...(required.length > 0 ? { required } : {}) }
   }

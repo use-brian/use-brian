@@ -2523,7 +2523,8 @@ export function jsonSchemaFromZod(schema: { _def: unknown }): {
         continue
       }
       properties[key] = converted
-      if (fieldSchema._def.typeName !== 'ZodOptional') {
+      // A defaulted field may be omitted (the default fills it), so it is not required.
+      if (fieldSchema._def.typeName !== 'ZodOptional' && fieldSchema._def.typeName !== 'ZodDefault') {
         required.push(key)
       }
     }
@@ -2548,6 +2549,19 @@ function zodFieldToJsonSchema(field: { _def: Record<string, unknown> }): Record<
     case 'ZodOptional': {
       const inner = zodFieldToJsonSchema({ _def: (def.innerType as { _def: Record<string, unknown> })._def })
       // Preserve description from the optional wrapper if the inner type doesn't have one
+      if (def.description && !inner.description) {
+        inner.description = def.description as string
+      }
+      return inner
+    }
+    case 'ZodDefault':
+    case 'ZodNullable': {
+      // `.default(x)` / `.nullable()` — advertise the wrapped type. Without this
+      // branch the default fallback shows a defaulted `limit` or a nullable
+      // `capacity` as `type: 'string'` (and, for defaults, as required), so the
+      // model sends "10" and the number schema rejects it. `null` itself is not
+      // advertised: Gemini's `nullable` keyword is outside `ToolParameter`.
+      const inner = zodFieldToJsonSchema({ _def: (def.innerType as { _def: Record<string, unknown> })._def })
       if (def.description && !inner.description) {
         inner.description = def.description as string
       }
