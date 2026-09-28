@@ -65,10 +65,44 @@ describe('[COMP:api/auth-sessions] auth session store', () => {
     )).resolves.toEqual({ id: SESSION_ID, authVersion: 0 })
   })
 
+  it('does not upgrade a legacy refresh across a concurrent logout version bump', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ authVersion: 0, sessionId: null, sessionVersion: null, lastSeenAt: null }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    await expect(store().validateRefresh(
+      { userId: USER_ID },
+      { deviceLabel: 'Browser', userAgent: null, ipAddress: null },
+    )).resolves.toBeNull()
+    expect(query.mock.calls[1]?.[0]).toContain('auth_version = $5')
+    expect(query.mock.calls[1]?.[1]).toEqual([USER_ID, 'Browser', null, null, 0])
+  })
+
   it('revokes one session only inside its owning account', async () => {
     query.mockResolvedValueOnce({ rows: [], rowCount: 1 })
     await expect(store().revokeForUser(USER_ID, SESSION_ID)).resolves.toBe(true)
     expect(query.mock.calls[0]?.[1]).toEqual([SESSION_ID, USER_ID])
+    expect(query.mock.calls[0]?.[0]).toContain('WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL')
+  })
+
+  it('returns false without admission when a session is already revoked or absent', async () => {
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    await expect(store().revokeForUser(USER_ID, SESSION_ID)).resolves.toBe(false)
+    expect(query).toHaveBeenCalledOnce()
+    expect(query.mock.calls[0]?.[0]).toContain('UPDATE auth_sessions')
+  })
+
+  it('does not revoke fresh sessions when a concurrent legacy logout already bumped the version', async () => {
+    txQuery
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+    await expect(store().revokeAllForUser(USER_ID, 0)).resolves.toBe(false)
+    expect(txQuery.mock.calls[1]?.[0]).toContain('auth_version = $2')
+    expect(txQuery.mock.calls[1]?.[1]).toEqual([USER_ID, 0])
+    expect(txQuery.mock.calls.map((call) => call[0])).toEqual([
+      'BEGIN', expect.stringContaining('UPDATE users'), 'ROLLBACK',
+    ])
+    expect(release).toHaveBeenCalledOnce()
   })
 
   it('atomically bumps auth_version and revokes every session', async () => {
