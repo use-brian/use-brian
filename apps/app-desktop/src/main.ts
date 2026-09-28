@@ -52,6 +52,10 @@ import {
 // autoUpdater }`) resolves at compile time but THROWS at runtime in this ESM
 // main process. Default-import the module object and destructure instead.
 import electronUpdater from "electron-updater";
+import { EmbeddedBrowser, browserPairing } from "./embedded-browser.js";
+
+const embeddedBrowser = new EmbeddedBrowser();
+let browserIdentityChanging = false;
 
 import { DeploymentAccounts, TargetOperations, deploymentKey, deploymentAccountKey, type AccountTarget, type SavedDeploymentAccount } from "./deployment-accounts.js";
 import { bundledDefaultForRuntime, resolveConfig } from "./config.js";
@@ -1676,6 +1680,7 @@ async function activateTarget(
 ): Promise<boolean> {
   if (cfg.envTargetOverride || changingTarget || recorderOverlay) return false;
   changingTarget = true;
+  embeddedBrowser.dispose();
   try {
     closeAuthServer();
     closeConnectorServer();
@@ -2259,6 +2264,7 @@ function persistSession(sess: DesktopSession): boolean {
   const tokens = parseStoredTokens(serializeTokens(sess, Date.now()));
   if (!tokens) return false;
   tokens.user ??= readStoredTokens()?.user;
+  if (tokens.user?.id !== readStoredTokens()?.user?.id) embeddedBrowser.dispose();
   return deploymentAccounts.put(accountTarget(), tokens);
 }
 
@@ -2267,10 +2273,12 @@ function persistRendererTokens(input: unknown): void {
   const tokens = serialized ? parseStoredTokens(serialized) : null;
   if (!tokens) return;
   tokens.user ??= readStoredTokens()?.user;
+  if (tokens.user?.id !== readStoredTokens()?.user?.id) embeddedBrowser.dispose();
   deploymentAccounts.put(accountTarget(), tokens);
 }
 
 function clearStoredTokens(): void {
+  embeddedBrowser.dispose();
   const tokens = readStoredTokens();
   if (tokens) deploymentAccounts.remove(deploymentAccountKey({ target: accountTarget(), tokens }));
 }
@@ -2936,6 +2944,14 @@ function startSignIn(opts: { addAccount?: boolean } = {}): void {
 }
 
 async function completeSignIn(code: string): Promise<void> {
+  if (browserIdentityChanging) return;
+  browserIdentityChanging = true;
+  embeddedBrowser.dispose();
+  try { await completeSignInImpl(code); }
+  finally { browserIdentityChanging = false; }
+}
+
+async function completeSignInImpl(code: string): Promise<void> {
   return targetOperations.run(async () => {
     // In-memory state is authoritative for the loopback transport (same process);
     // the persisted blob covers the cross-process `usebrian://auth` fallback. Both
@@ -3159,6 +3175,14 @@ async function stashCurrentAccount(next: DesktopSession): Promise<boolean> {
  * `apps/web/src/app/api/auth/switch-account-and-return/route.ts`.
  */
 async function switchAccount(accountId: string): Promise<SwitchResult> {
+  if (browserIdentityChanging) return { ok: false, error: "switch" };
+  browserIdentityChanging = true;
+  embeddedBrowser.dispose();
+  try { return await switchAccountImpl(accountId); }
+  finally { browserIdentityChanging = false; }
+}
+
+async function switchAccountImpl(accountId: string): Promise<SwitchResult> {
   if (removingAccount) return { ok: false, error: "switch" };
   // Bundled mode authenticates with a single Bearer token, not the cookie store.
   if (cfg.bundled) {
@@ -3222,6 +3246,14 @@ async function switchAccount(accountId: string): Promise<SwitchResult> {
 }
 
 async function signOut(): Promise<void> {
+  if (browserIdentityChanging) return;
+  browserIdentityChanging = true;
+  embeddedBrowser.dispose();
+  try { await signOutImpl(); }
+  finally { browserIdentityChanging = false; }
+}
+
+async function signOutImpl(): Promise<void> {
   if (removingAccount) return;
   return targetOperations.run(async () => {
     const pendingLink = linkNavigation.state();
@@ -3456,7 +3488,7 @@ function refreshSessionInPlace(): Promise<RefreshOutcome> {
     if (sessionRefreshInFlight) return sessionRefreshInFlight;
     const run = (async (): Promise<RefreshOutcome> => {
       const refreshToken = await readJarCookie("refresh_token");
-      if (!refreshToken) return "signed-out";
+      if (!refreshToken) { embeddedBrowser.dispose(); return "signed-out"; }
       let result: DesktopSession | null;
       try {
         if (cfg.target === "local") {
@@ -3481,9 +3513,13 @@ function refreshSessionInPlace(): Promise<RefreshOutcome> {
       }
       if (!result) {
         // The refresh token itself is dead (revoked or >30d idle) — a real sign-out.
-        for (const name of AUTH_COOKIE_NAMES) {
-          await targetSession().cookies.remove(cfg.appUrl, name);
-        }
+        browserIdentityChanging = true;
+        embeddedBrowser.dispose();
+        try {
+          for (const name of AUTH_COOKIE_NAMES) {
+            await targetSession().cookies.remove(cfg.appUrl, name);
+          }
+        } finally { browserIdentityChanging = false; }
         return "signed-out";
       }
       // The refresh response carries no `plan`, so keep the display-only `user`
@@ -4396,6 +4432,24 @@ if (!gotLock) {
     });
   }
 
+  ipcMain.handle("Use Brian:browser-control", async (event, input: unknown) => {
+    const trusted = () => !changingTarget && !selectingAccount && !removingAccount &&
+      !browserIdentityChanging && trustedTokenSender(event);
+    if (!trusted() || !input || typeof input !== "object") return { ok: false };
+    const type = (input as { type?: unknown }).type;
+    // Capability, not an implicit permission grant: pairing has its own native consent.
+    if (type === "status" || type === "request-control") return { ok: true, hasControl: true, ...embeddedBrowser.status() };
+    if (type !== "pair") return { ok: false };
+    const config = cfg;
+    const user = cfg.bundled ? readStoredTokens()?.user : parseUserCookieValue(await readJarCookie("user"));
+    if (!trusted() || config !== cfg || !user?.id) return { ok: false };
+    try {
+      const scope = JSON.stringify([cfg.appOrigin, user.id]);
+      if (browserPairing(input, scope).userId !== user.id) return { ok: false };
+      return { ok: await embeddedBrowser.pair(input, scope) };
+    } catch { return { ok: false }; }
+  });
+
   app.whenReady().then(async () => {
     if (app.isPackaged) {
       void registerFirefoxNativeHost({
@@ -4467,6 +4521,7 @@ if (!gotLock) {
   });
 
   app.on("will-quit", () => {
+    embeddedBrowser.dispose();
     globalShortcut.unregisterAll();
     stopAwakeBrianBlocker();
   });

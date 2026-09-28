@@ -104,8 +104,58 @@ async function setup(auth: AccountTarget["auth"] = "pkce", bundled = true) {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 beforeEach(() => setup());
-afterEach(() => { vi.unstubAllEnvs(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 const sender = () => ({ sender: state.windows.at(-1).webContents, senderFrame: state.windows.at(-1).webContents.mainFrame });
+
+describe("[COMP:app-desktop/main] embedded browser IPC", () => {
+  const invoke = (event: unknown, input: unknown) => state.handlers.get("Use Brian:browser-control")!(event, input);
+  const pairInput = (userId = "same-user") => ({ type: "pair", relayUrl: "wss://relay.example/browser",
+    pairingToken: `header.${Buffer.from(JSON.stringify({ kind: "browser-ext-pair", exp: 4_000_000_000,
+      userId, workspaceId: "workspace", browserProfileId: "profile" })).toString("base64url")}.signature` });
+
+  it.each(["status", "request-control", "pair"])("validates the sender and main frame for %s", async (type) => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
+    const status = vi.spyOn(EmbeddedBrowser.prototype, "status");
+    const input = type === "pair" ? pairInput() : { type };
+    const foreignContents = { id: 999, isDestroyed: () => false, mainFrame: {} };
+    expect(await invoke({ sender: foreignContents, senderFrame: foreignContents.mainFrame }, input)).toEqual({ ok: false });
+    expect(await invoke({ ...sender(), senderFrame: {} }, input)).toEqual({ ok: false });
+    await state.windows.at(-1).webContents.loadURL("https://untrusted.example.com/");
+    expect(await invoke(sender(), input)).toEqual({ ok: false });
+    expect(pair).not.toHaveBeenCalled();
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it("reports capability to the trusted renderer and pairs only matching user claims", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
+    for (const type of ["status", "request-control"]) {
+      expect(await invoke(sender(), { type })).toEqual({ ok: true, hasControl: true, connected: false });
+    }
+    expect(await invoke(sender(), pairInput("other-user"))).toEqual({ ok: false });
+    expect(pair).not.toHaveBeenCalled();
+    expect(await invoke(sender(), pairInput())).toEqual({ ok: true });
+    expect(pair).toHaveBeenCalledExactlyOnceWith(pairInput(), JSON.stringify([local.appUrl, "same-user"]));
+  });
+
+  it.each(["sign-out", "clear-tokens"])("disposes browser control on %s", async (action) => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
+    state.handlers.get(`Use Brian:${action}`)!(sender());
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalled());
+  });
+
+  it("disposes browser control when renderer tokens change account identity", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
+    state.handlers.get("Use Brian:set-tokens")!(sender(), tokens("renewed"));
+    expect(dispose).not.toHaveBeenCalled();
+    state.handlers.get("Use Brian:set-tokens")!(sender(), { ...tokens("other"), user: { ...tokens("other").user, id: "other-user" } });
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(store.current(local)?.user?.id).toBe("other-user");
+  });
+});
 
 describe("[COMP:app-desktop/main] deployment switching", () => {
   it("keeps the recorder overlay in the active deployment session", () => {
@@ -118,10 +168,13 @@ describe("[COMP:app-desktop/main] deployment switching", () => {
   });
 
   it("switches local to cloud and back without restarting, preserving sessions and isolated caches", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
     const first = state.windows[0];
     const key = deploymentAccountKey({ target: cloud, tokens: tokens("cloud") });
     const result = await state.handlers.get("Use Brian:select-account")!(sender(), key);
     expect(result).toEqual({ ok: true });
+    expect(dispose).toHaveBeenCalled();
     expect(state.refresh).toHaveBeenCalledWith(cloud.apiUrl, "cloud-refresh", undefined);
     expect(first.destroyed).toBe(true);
     expect(state.windows).toHaveLength(2);
@@ -276,8 +329,11 @@ describe("[COMP:app-desktop/main] bundled owner session refresh", () => {
   });
 
   it("clears only a definitively rejected owner session", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
     await mockAppBridge({ status: 401, error: "refresh_rejected" });
     expect(await refresh()).toEqual({ kind: "unauthenticated" });
+    expect(dispose).toHaveBeenCalled();
     expect(store.current(ownerTarget)).toBeNull();
     expect(store.current(cloud)?.refreshToken).toBe("cloud-refresh");
   });

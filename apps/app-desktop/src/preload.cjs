@@ -76,6 +76,8 @@ const bridge = {
   // The host OS, so app-web can gate macOS-only chrome (e.g. the traffic-light
   // inset in `.is-canvas-desktop`) without shipping a new desktop build.
   platform: process.platform,
+  // Main validates the trusted sender; websites never receive this preload.
+  browserControl: (message) => ipcRenderer.invoke("Use Brian:browser-control", message),
   // Native macOS traffic lights stay in window coordinates while page zoom
   // scales app-web's CSS pixels. Expose only the current numeric factor so the
   // workspace chrome can keep its 76px clearance invariant. `webFrame` is used
