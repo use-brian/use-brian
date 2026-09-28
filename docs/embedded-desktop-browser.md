@@ -6,10 +6,12 @@ The Electron desktop app can be the executor for an existing **My Browser** prof
 
 1. Open **Browsers / browser profiles** in the desktop app and select or create a local browser profile.
 2. Choose **Connect in-app browser** and approve the native confirmation. Pairing replaces any extension or other desktop instance connected to that profile.
-3. Brian can open task tabs automatically. Alternatively, open a website with the browser toolbar, sign in manually, then choose **Allow Brian on this tab** and confirm.
-4. Use **Stop Brian** to disconnect control immediately. The window remains available for manual browsing. Reconnect from the profile panel to start another session.
+3. The browser opens docked on the **right side of the app**. Brian can open task tabs automatically. Alternatively, open a website with the browser toolbar, sign in manually, then choose **Allow Brian on this tab** and confirm.
+4. Drag the left divider to resize the browser (or focus the divider and use arrow keys/Home/End). **Collapse** hides pages into a narrow rail; **Expand** restores them. Narrow app windows automatically use the rail until space is available.
+5. **Detach** moves the same tabs into a separate window. **Dock**, or closing that detached window, brings them back to the app. These moves preserve page contents, form inputs, cookies, tab handles and the agent's debugger connection without reloading.
+6. Use **Stop Brian** to disconnect control immediately. The browser remains available for manual browsing. Stop is available in both layouts and the collapsed rail. Collapsing/detaching alone does **not** stop the agent. Reconnect from the profile panel to start another session.
 
-A relay must be configured on the deployment, just as for extension-based My Browser. Website cookies persist per deployment/account/relay/workspace/profile. Relay credentials are held only in main-process memory: restart, sign-out, account/deployment switch, authentication rejection, disconnect, or closing the browser requires explicit reconnection. Reconnecting closes the previous browser window; its cookies remain in its isolated partition.
+A relay must be configured on the deployment, just as for extension-based My Browser. Website cookies persist per deployment/account/relay/workspace/profile. Relay credentials are held only in main-process memory: restart, sign-out, account/deployment switch, authentication rejection, disconnect, or closing the main app window requires explicit reconnection. Reconnecting replaces the previous browser session; its cookies remain in its isolated partition.
 
 ## Supported operations
 
@@ -26,9 +28,9 @@ This is not a full Chrome replacement. Downloads, protected credential filling, 
 ## Architecture and security
 
 - `apps/app-desktop/src/embedded-browser.ts`: main-process relay client, native grants, serialized command dispatch and revocation fences.
-- `embedded-browser-host.ts`: sandboxed `WebContentsView` tabs in a dedicated persistent partition, below a separate trusted toolbar. Websites receive no preload or app-auth bridge. Navigation is HTTP(S)-only; permissions and downloads default to deny.
+- `embedded-browser-host.ts`: sandboxed `WebContentsView` tabs in a dedicated persistent partition, below a separate trusted toolbar view. Toolbar and tab views move between the main window and a lazy detached `BaseWindow`; closing the main window disposes all owned views. Websites receive no preload or app-auth bridge. Navigation is HTTP(S)-only; permissions and downloads default to deny.
 - `embedded-browser-preload.cjs` / `.html`: fixed toolbar commands. IPC requires the exact toolbar web contents, main frame, and local URL.
-- `main.ts` / `preload.cjs`: trusted app-frame pairing bridge, active-account validation, and lifecycle revocation. Pair-token claims are used for storage names only; the relay authenticates them before a browser is opened.
+- `main.ts` / `preload.cjs`: trusted app-frame pairing bridge, active-account validation, and lifecycle revocation. A main-process-only layout message reserves the right-hand pane in the app body, including fixed portals, with zoom-aware CSS dimensions. Renderer geometry helpers use the remaining app width and popup collision boundary. Pair-token claims are used for storage names only; the relay authenticates them before a browser is opened.
 - `packages/browser-control`: shared injected CDP executor, snapshot/form helpers, and relay state machine. Extension modules re-export this package. Build it before consuming its declarations or running extension tests directly on a fresh checkout.
 - The relay recognizes `clientKind: electron` only to avoid irrelevant extension-build warnings. This does not grant protected-fill capability or bypass authentication.
 
@@ -38,12 +40,22 @@ Stop invalidates queued/in-flight operations before debugger detachment and rela
 
 Automated coverage includes pairing/consent, real relay-client and executor paths with mocked Electron hosts, tab scope, native approval, Stop during queued/in-flight work, identity transitions, URL/IPC policy, and web pairing UI. These tests do not substitute for a native Electron smoke test.
 
+Run the native docking fixture on a Mac (no backend or account required):
+
+```sh
+pnpm --filter @use-brian/app-desktop test:browser-docking
+```
+
+It creates temporary profiles and loopback fixture pages, and exercises actual view moves, native input, cookies/form/CDP preservation, collapse/Stop, resize, reload, app zoom (80/100/125/150%), fixed-overlay containment and window-close cleanup for both file and HTTP app renderers. A sufficiently large display is required (at least 1280px wide); on Linux use Xvfb with a 1920x1080 screen. The fixture does not change production sandbox settings or test the backend relay.
+
 Native acceptance checklist (macOS, Windows, Linux):
 
 1. Build desktop and renderer, start with a configured relay, and connect a local profile.
 2. Navigate to a controlled test page, snapshot, click/type/fill, manage two tabs, capture a frame, and exercise takeover.
 3. Open a manual tab: verify it is excluded in task mode until **Allow Brian on this tab** is approved. Reject full-browser approval, then allow it and verify scope.
 4. Stop while a navigation or form operation is waiting; verify no subsequent input is delivered and manual browsing still works.
-5. Sign out, reject a token refresh, switch account/deployment, disconnect the relay, close the browser, and pair another client to the same profile; verify control ends each time.
+5. Sign out, reject a token refresh, switch account/deployment, disconnect the relay, close the main app window, and pair another client to the same profile; verify control ends each time.
 6. Reconnect and verify website cookies persist only in the same profile. Verify another account/profile cannot see them.
 7. Try `file:`, `javascript:`, custom protocols, popups, downloads, and permission requests; verify they are blocked without exposing the toolbar/app bridge.
+8. Dock/detach during navigation and typing; verify tabs and values persist. Close the detached window and verify it redocks without stopping the agent.
+9. Resize/collapse, zoom the app, and open app dialogs/menus beside the browser. Confirm controls stay inside the app pane, Stop remains reachable, and app/site/address-bar focus works on macOS and Windows.

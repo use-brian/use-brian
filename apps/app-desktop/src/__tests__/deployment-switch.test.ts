@@ -4,7 +4,16 @@ import { DeploymentAccounts, deploymentAccountKey, deploymentKey, type AccountTa
 import { serializePersistedTarget } from "../target-store.js";
 import type { StoredTokens } from "../desktop-token-store.js";
 
-const state = vi.hoisted(() => ({ files: new Map<string, Buffer>(), handlers: new Map<string, Function>(), windows: [] as any[], app: null as any, partitions: new Map<string, any>(), makeSession: null as null | (() => any), refresh: vi.fn(), request: vi.fn() }));
+const state = vi.hoisted(() => ({ browserOptions: undefined as undefined | ConstructorParameters<typeof import("../embedded-browser.js").EmbeddedBrowser>[0], files: new Map<string, Buffer>(), handlers: new Map<string, Function>(), windows: [] as any[], app: null as any, partitions: new Map<string, any>(), makeSession: null as null | (() => any), refresh: vi.fn(), request: vi.fn() }));
+vi.mock("../embedded-browser.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../embedded-browser.js")>();
+  return { ...original, EmbeddedBrowser: class extends original.EmbeddedBrowser {
+    constructor(options?: ConstructorParameters<typeof original.EmbeddedBrowser>[0]) {
+      super(options);
+      state.browserOptions = options;
+    }
+  } };
+});
 vi.mock("electron-updater", () => ({ default: { autoUpdater: {} } }));
 vi.mock("../desktop-auth.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../desktop-auth.js")>(), refreshSession: state.refresh }));
 vi.mock("node:fs", async (importOriginal) => ({
@@ -73,7 +82,7 @@ vi.mock("electron", async () => {
     safeStorage: { isEncryptionAvailable: () => true, encryptString: (s: string) => Buffer.from(s), decryptString: (b: Buffer) => b.toString() },
     session: { defaultSession: makeSession(), fromPartition: (key: string) => { if (!state.partitions.has(key)) state.partitions.set(key, makeSession()); return state.partitions.get(key); } },
     Menu: { buildFromTemplate: (template: unknown) => template, setApplicationMenu: vi.fn() },
-    dialog: { showErrorBox: vi.fn() }, net: { fetch: vi.fn(), request: state.request, isOnline: () => true },
+    dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() }, net: { fetch: vi.fn(), request: state.request, isOnline: () => true },
     powerMonitor: new EventEmitter(), powerSaveBlocker: {}, globalShortcut: {}, shell: {},
     screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } }) },
     systemPreferences: {}, Tray: class {}, Notification: class {}, nativeImage: {}, desktopCapturer: {},
@@ -113,6 +122,43 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
   const pairInput = (userId = "same-user") => ({ type: "pair", relayUrl: "wss://relay.example/browser",
     pairingToken: `header.${Buffer.from(JSON.stringify({ kind: "browser-ext-pair", exp: 4_000_000_000,
       userId, workspaceId: "workspace", browserProfileId: "profile" })).toString("base64url")}.signature` });
+
+  it("supplies the current main window factory and preserves docked browser focus", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const main = state.windows[0];
+    expect(state.browserOptions?.getDockWindow).toBeTypeOf("function");
+    expect(state.browserOptions!.getDockWindow!()).toBe(main);
+    expect(state.windows).toHaveLength(1);
+    const dockFocused = vi.spyOn(EmbeddedBrowser.prototype, "isDockedFocused").mockReturnValue(true);
+    main.webContents.focus.mockClear();
+    main.emit("focus");
+    expect(dockFocused).toHaveBeenCalledOnce();
+    expect(main.webContents.focus).not.toHaveBeenCalled();
+    dockFocused.mockReturnValue(false);
+    main.emit("focus");
+    expect(main.webContents.focus).toHaveBeenCalledOnce();
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
+    main.close();
+    expect(dispose).toHaveBeenCalledOnce();
+    const replacement = state.browserOptions!.getDockWindow!();
+    expect(replacement).toBe(state.windows[1]);
+    expect(replacement).not.toBe(main);
+  });
+
+  it("cancels pending native pairing when the main window closes", async () => {
+    const { dialog } = await import("electron");
+    let approve!: (answer: Electron.MessageBoxReturnValue) => void;
+    const consent = vi.spyOn(dialog, "showMessageBox").mockReturnValueOnce(
+      new Promise(resolve => { approve = resolve; }),
+    );
+    const pending = invoke(sender(), pairInput());
+    expect(consent).toHaveBeenCalledOnce();
+    state.windows[0].close();
+    approve({ response: 1, checkboxChecked: false });
+    expect(await pending).toEqual({ ok: false });
+    expect(state.windows).toHaveLength(1);
+    expect(state.windows[0].destroyed).toBe(true);
+  });
 
   it.each(["status", "request-control", "pair"])("validates the sender and main frame for %s", async (type) => {
     const { EmbeddedBrowser } = await import("../embedded-browser.js");
