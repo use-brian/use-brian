@@ -9,10 +9,13 @@ const nativeNames = [
   'startDocumentExtraction', 'readDocumentExtraction', 'proposeOfficeEvidenceFill',
 ]
 const planNames = ['setPlan', 'updatePlanStep', 'abandonPlan']
-const supportNames = ['saveFileToBrain', 'fileSearch', 'getOfficeArtifact']
+const supportNames = [
+  'saveFileToBrain', 'fileSearch', 'getOfficeArtifact',
+  'openPdfEditingSession', 'reviseOfficeArtifact', 'placePdfSignature',
+]
 const disallowed = ['webSearch', 'urlReader', 'mcpSearch', 'mcpCall', 'mcp__ocr__extract',
   'fileRead', 'fileWrite', 'fileAppend', 'fileDelete', 'fileSetMeta', 'sendFile',
-  'createOfficeArtifact', 'reviseOfficeArtifact', 'runWorkflow', 'createTask']
+  'createOfficeArtifact', 'runWorkflow', 'createTask']
 function tools() {
   const native = createStructuredDocumentTools({
     service: {} as StructuredDocumentService,
@@ -21,7 +24,7 @@ function tools() {
   const result = new Map(native.map(tool => [tool.name, tool]))
   for (const name of [...supportNames, ...disallowed, 'spawnWorker', 'saveMemory', 'delegateDocEdit', 'saveContact']) {
     result.set(name, { name, isReadOnly: ['getOfficeArtifact', 'fileSearch'].includes(name), requiresCapability: supportNames.includes(name)
-      ? name === 'getOfficeArtifact' ? 'office' : 'files' : undefined } as Tool)
+      ? ['saveFileToBrain', 'fileSearch'].includes(name) ? 'files' : 'office' : undefined } as Tool)
   }
   for (const tool of Object.values(createPlanTools({} as PlanStore))) result.set(tool.name, tool)
   return result
@@ -53,7 +56,11 @@ describe('chat coordinator tool admission', () => {
       expect(output.has('saveFileToBrain')).toBe(false)
       expect(output.has('fileSearch')).toBe(false)
     }
-    if (!grants.includes('office')) expect(output.has('proposeOfficeEvidenceFill')).toBe(false)
+    if (!grants.includes('office')) {
+      for (const name of ['proposeOfficeEvidenceFill', 'getOfficeArtifact', 'openPdfEditingSession', 'reviseOfficeArtifact', 'placePdfSignature']) {
+        expect(output.has(name), name).toBe(false)
+      }
+    }
   })
 
   it.each(['hidden', 'denied', 'removed'])('does not restore %s plan tools', kind => {
@@ -72,6 +79,9 @@ describe('chat coordinator tool admission', () => {
       new Set(['files', 'office', 'home_app:office:read'])), mode)
     expect(output.has('getOfficeArtifact')).toBe(true)
     expect(output.has('proposeOfficeEvidenceFill')).toBe(false)
+    expect(output.has('openPdfEditingSession')).toBe(false)
+    expect(output.has('reviseOfficeArtifact')).toBe(false)
+    expect(output.has('placePdfSignature')).toBe(false)
     expect(output.has('startDocumentExtraction')).toBe(true)
   })
 

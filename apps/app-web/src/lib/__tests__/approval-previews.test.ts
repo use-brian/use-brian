@@ -12,6 +12,7 @@ import {
   extractEmailSender,
   isReviewedWorkflowEmailApproval,
   parseEmailSendArgs,
+  parsePdfSignatureArgs,
   parseShopifyCancelArgs,
   parseShopifyRefundArgs,
   parseToolPreview,
@@ -140,6 +141,25 @@ describe("[COMP:app-web/approvals] parseToolPreview", () => {
   it("returns null for shopify order tools missing the orderId", () => {
     expect(parseToolPreview("shopifyRefundOrder", { notify: false })).toBeNull();
     expect(parseToolPreview("shopifyCancelOrder", {})).toBeNull();
+  });
+});
+
+describe("[COMP:app-web/pdf-signature-approval] PDF signature preview arguments", () => {
+  const args = {
+    artifactId: "10000000-0000-4000-8000-000000000001",
+    targetId: "10000000-0000-4000-8000-000000000002",
+    signatureResourceId: "10000000-0000-4000-8000-000000000003",
+    expectedSourceHash: "a".repeat(64),
+    expectedVersion: 2,
+    idempotencyKey: "signature-preview-1",
+  };
+
+  it("recognises only the exact opaque anchored input", () => {
+    expect(parsePdfSignatureArgs(args)).toBe(true);
+    expect(parseToolPreview("placePdfSignature", args)).toEqual({ kind: "pdf_signature" });
+    expect(parsePdfSignatureArgs({ ...args, sourcePath: "/private/source.pdf" })).toBe(false);
+    expect(parsePdfSignatureArgs({ ...args, expectedSourceHash: "short" })).toBe(false);
+    expect(parsePdfSignatureArgs({ ...args, expectedVersion: 2.5 })).toBe(false);
   });
 });
 

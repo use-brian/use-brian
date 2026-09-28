@@ -272,6 +272,8 @@ function RunApprovalActions({
         (preview ? (
           <ToolPreview
             preview={preview}
+            approvalId={approval.id}
+            displayLines={approval.approvalPayload.displayLines}
             attachmentLines={extractAttachmentLines(
               approval.approvalPayload.displayLines,
             )}

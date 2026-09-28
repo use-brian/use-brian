@@ -4766,6 +4766,13 @@ export const zh: Dictionary = {
       attachments: "已附加文件",
       noAttachments: "沒有附加文件",
     },
+    pdfSignaturePreview: {
+      title: "PDF 簽名核准",
+      alt: "顯示擬放置影像簽名的 PDF 頁面",
+      loading: "正在準備受保護的頁面預覽...",
+      stale: "此預覽已無法使用。PDF 可能已變更或過期。",
+      notice: "此操作會放置影像形式的簽名，並非基於憑證的數位簽名。",
+    },
     emailRevision: {
       revision: "草稿版本 {revision}",
       lockedEnvelope: "收件人、寄件人、主旨和郵件串均已鎖定。",

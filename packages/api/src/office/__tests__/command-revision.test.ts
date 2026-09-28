@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Message } from '@use-brian/core'
-import { applyOfficeCommand, type DocumentSnapshot, type PresentationSnapshot, type SpreadsheetSnapshot } from '@use-brian/office-model'
+import { applyOfficeCommand, PdfSnapshotSchema, type DocumentSnapshot, type PdfSnapshot, type PresentationSnapshot, type SpreadsheetSnapshot } from '@use-brian/office-model'
 import { generateAssistantOfficeCommands, officeRevisionFitRepairScope } from '../command-revision.js'
 
 const uid = (n: number) => `38000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -32,6 +32,113 @@ function spreadsheet(): SpreadsheetSnapshot {
   return { ...common, artifactId: uid(40), family: 'spreadsheet', rootId: uid(41), title: 'Fixture', activeSheetId: uid(42), calculationMode: 'automatic', worksheets: [{ id: uid(42), name: 'Sheet1', visibility: 'visible', cells: [{ id: uid(43), address: 'A1', valueType: 'number', value: 2, style: {}, locked: false }, { id: uid(44), address: 'B1', valueType: 'number', value: null, formula: 'A1*2', calculatedValue: 4, style: {}, locked: false }], merges: [], rowDimensions: [], columnDimensions: [], freeze: { rows: 0, columns: 0 }, images: [], validations: [], conditionalFormats: [], print: { paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.7, rightIn: 0.7, topIn: 0.75, bottomIn: 0.75, headerIn: 0.3, footerIn: 0.3 }, horizontalCentered: false, verticalCentered: false, showGridLines: false, showHeadings: false } }] }
 }
 
+function pdf(): PdfSnapshot {
+  return PdfSnapshotSchema.parse({
+    ...common,
+    artifactId: uid(60),
+    family: 'pdf',
+    rootId: uid(61),
+    title: 'Private agreement',
+    resources: [{ id: uid(62), kind: 'image', hash: 'c'.repeat(64), mime: 'image/png', sensitivity: 'confidential' }],
+    accessibility: { title: 'Private agreement' },
+    source: { fileId: uid(63), sha256: 'b'.repeat(64), byteLength: 2_048, originalFileName: 'private-source.example.pdf', pageCount: 1 },
+    pages: [{
+      id: uid(64), sourcePageIndex: 0,
+      mediaBox: { x: 0, y: 0, width: 612, height: 792 },
+      cropBox: { x: 12, y: 18, width: 588, height: 756 }, rotation: 0,
+      fields: [{ id: uid(65), originalName: 'full_name', label: 'Full name', kind: 'text', readOnly: false, required: true, value: 'Before', widgets: [{ id: uid(66), pageId: uid(64), rect: { x: 72, y: 650, width: 220, height: 24 } }] }],
+      overlays: [
+        { id: uid(67), pageId: uid(64), kind: 'text', rect: { x: 90, y: 300, width: 180, height: 30 }, rotation: 0, zOrder: 0, creator: { type: 'user', id: uid(80) }, text: 'Annotation', appearance: { fontSizePt: 12, color: '#111111', alignment: 'start' } },
+        { id: uid(68), pageId: uid(64), kind: 'signature', rect: { x: 300, y: 100, width: 180, height: 48 }, rotation: 0, zOrder: 1, creator: { type: 'user', id: uid(80) }, resourceId: uid(62), authorizingUserId: uid(80) },
+      ],
+      placementTargets: [{ id: uid(69), purpose: 'signature', pageId: uid(64), rect: { x: 300, y: 100, width: 180, height: 48 }, creatorUserId: uid(80), creationVersion: 0 }],
+    }],
+  })
+}
+
+describe('[COMP:office/pdf-tools] target-native PDF command planning', () => {
+  it('plans only bounded non-signature commands and exposes no backing bytes, filename, or signature resource', async () => {
+    const snapshot = pdf()
+    const model = provider({ commands: [
+      { kind: 'setPdfFieldValue', fieldId: uid(65), value: 'After' },
+      { kind: 'transformPdfOverlay', overlayId: uid(67), rect: { x: 100, y: 310, width: 180, height: 30 }, rotation: 0 },
+      { kind: 'rotatePdfPage', pageId: uid(64), rotation: 90 },
+    ] })
+    const commands = await generateAssistantOfficeCommands({
+      provider: model as never, model: 'test', snapshot, baseVersion: 0,
+      assistantId: uid(90), targetIds: [uid(64), uid(65), uid(67)], instruction: 'Update these exact targets',
+    })
+    expect(commands.map((command) => command.kind)).toEqual(['setPdfFieldValue', 'transformPdfOverlay', 'rotatePdfPage'])
+    const prompt = String(model.requests[0]?.messages?.[0]?.content)
+    expect(prompt).toContain(`"sourceHash":"${'b'.repeat(64)}"`)
+    expect(prompt).toContain('Full name')
+    expect(prompt).toContain('Annotation')
+    expect(prompt).not.toContain('private-source.example.pdf')
+    expect(prompt).not.toContain(uid(63))
+    expect(prompt).not.toContain(uid(62))
+    expect(prompt).not.toContain('appearance streams')
+  })
+
+  it('rejects signature overlays as targets and as generic add-overlay commands', async () => {
+    const snapshot = pdf()
+    await expect(generateAssistantOfficeCommands({
+      provider: provider({ commands: [{ kind: 'removePdfOverlay', overlayId: uid(68) }] }) as never,
+      model: 'test', snapshot, baseVersion: 0, assistantId: uid(90), targetIds: [uid(68)], instruction: 'Remove this',
+    })).rejects.toThrow('signature overlays are not revision targets')
+    const signature = provider({ commands: [{
+      kind: 'addPdfOverlay', pageId: uid(64),
+      overlay: { kind: 'signature', rect: { x: 1, y: 2, width: 100, height: 30 }, rotation: 0, resourceId: uid(62) },
+    }] })
+    await expect(generateAssistantOfficeCommands({
+      provider: signature as never, model: 'test', snapshot, baseVersion: 0,
+      assistantId: uid(90), targetIds: [uid(64)], instruction: 'Sign here',
+    })).rejects.toThrow()
+    expect(signature.requests).toHaveLength(3)
+  })
+
+  it('projects bounded PDF targets and refuses no-target or comment-only revisions', async () => {
+    const { createOfficeService } = await import('../service.js')
+    const snapshot = pdf()
+    const createJob = vi.fn(async () => ({ id: uid(95), artifactId: snapshot.artifactId } as never))
+    const raiseScope = vi.fn(async () => true)
+    let access: { role: 'edit' | 'comment'; canEdit: boolean; canComment: boolean } = { role: 'edit', canEdit: true, canComment: true }
+    const service = createOfficeService({
+      generationAvailable: () => true,
+      createShell: vi.fn(), deleteEmptyShell: vi.fn(),
+      getArtifact: async () => ({
+        id: snapshot.artifactId, workspaceId: snapshot.workspaceId, family: 'pdf', mode: 'session',
+        title: snapshot.title, headVersion: 0, lifecycleState: 'active', sensitivity: 'confidential',
+        compartments: [], projectIds: [], expiresAt: new Date('2026-10-01T00:00:00.000Z'),
+      } as never),
+      resolveAccess: async () => access as never,
+      raiseScope, createJob, latestJob: async () => null,
+      getSnapshot: async () => ({ snapshot }),
+    })
+    const projection = await service.get({ userId: uid(80), artifactId: snapshot.artifactId })
+    expect(projection).toMatchObject({ family: 'pdf', mode: 'session', sourceHash: 'b'.repeat(64), role: 'edit' })
+    expect(projection?.targets).toContainEqual(expect.objectContaining({ id: uid(64), kind: 'pdfPage', pageNumber: 1, rect: snapshot.pages[0]!.cropBox }))
+    expect(projection?.targets).toContainEqual(expect.objectContaining({ id: uid(65), kind: 'pdfField:text', value: 'Before' }))
+    expect(projection?.targets).toContainEqual(expect.objectContaining({ id: uid(67), kind: 'pdfOverlay:text', rect: snapshot.pages[0]!.overlays[0]!.rect }))
+    expect(projection?.targets).toContainEqual(expect.objectContaining({ id: uid(69), kind: 'pdfSignatureTarget' }))
+    expect(projection?.targets?.some((target) => target.id === uid(68))).toBe(false)
+
+    const params = {
+      userId: uid(80), assistantId: uid(90), artifactId: snapshot.artifactId,
+      instruction: 'Update the selected field', expectedVersion: 0,
+      idempotencyKey: 'pdf-revision-1', sensitivity: 'internal' as const,
+      compartments: [], projectIds: [], compartmentGrant: null, projectGrant: null,
+    }
+    await expect(service.revise({ ...params, targetIds: [] })).resolves.toBeNull()
+    expect(createJob).not.toHaveBeenCalled()
+    access = { role: 'comment' as const, canEdit: false, canComment: true }
+    await expect(service.revise({ ...params, targetIds: [uid(65)] })).resolves.toBeNull()
+    expect(createJob).not.toHaveBeenCalled()
+    access = { role: 'edit' as const, canEdit: true, canComment: true }
+    await expect(service.revise({ ...params, targetIds: [uid(65)] })).resolves.toEqual({ jobId: uid(95), mode: 'direct' })
+    expect(raiseScope).not.toHaveBeenCalled()
+  })
+})
+
 describe('[COMP:api/office-generation] Brian-native Office command planning', () => {
   it('supplies exact operation payload keys and canonical rich-text guidance', async () => {
     const snapshot = document()
@@ -45,13 +152,15 @@ describe('[COMP:api/office-generation] Brian-native Office command planning', ()
     expect(prompt).toContain('Individual header/footer run IDs are not updateText or deleteObject targets')
     const catalogLine = prompt.split('\n').find((line) => line.startsWith('[{"kind":'))
     const catalog = JSON.parse(catalogLine ?? '[]')
-    expect(catalog).toHaveLength(17)
+    expect(catalog).toHaveLength(24)
     expect(catalog).toContainEqual({ kind: 'appendSpreadsheetRecords', required: ['sheetId', 'tableId', 'records'], optional: ['prototypeRow'] })
     expect(catalog).toContainEqual({ kind: 'updateText', required: ['targetId', 'runs'], optional: [] })
     expect(catalog).toContainEqual({ kind: 'deleteObject', required: ['targetId'], optional: [] })
     expect(catalog).toContainEqual({ kind: 'insertDocumentNode', required: ['sectionId', 'node'], optional: ['index', 'beforeNodeId', 'afterNodeId'] })
     expect(prompt).toContain('Prefer beforeNodeId/afterNodeId')
     expect(catalog).toContainEqual({ kind: 'setSpreadsheetCell', required: ['sheetId', 'cellId', 'address', 'valueType', 'value'], optional: ['formula'] })
+    expect(catalog).toContainEqual({ kind: 'setPdfFieldValue', required: ['fieldId', 'value'], optional: [] })
+    expect(catalog).toContainEqual({ kind: 'addPdfOverlay', required: ['pageId', 'overlay'], optional: [] })
     expect(prompt).toContain('targetId, never id')
     expect(prompt).toContain('id, text, and style copied from the context')
     expect(prompt).toContain('Never put a bare text field on an operation')

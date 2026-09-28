@@ -4712,6 +4712,13 @@ export const zhCN: Dictionary = {
       attachments: "已附加文档",
       noAttachments: "没有附加文档",
     },
+    pdfSignaturePreview: {
+      title: "PDF 签名核准",
+      alt: "显示拟放置图像签名的 PDF 页面",
+      loading: "正在准备受保护的页面预览...",
+      stale: "此预览已不可用。PDF 可能已变更或过期。",
+      notice: "此操作会放置图像形式的签名，并非基于证书的数字签名。",
+    },
     emailRevision: {
       revision: "草稿版本 {revision}",
       lockedEnvelope: "收件人、寄件人、主旨和邮件串均已锁定。",

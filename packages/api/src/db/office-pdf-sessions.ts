@@ -187,6 +187,156 @@ export function createOfficePdfSessionStore(db: OfficeDbQuery = defaultOfficeDbQ
       `, [params.artifactId, params.sensitivity, params.compartments, params.projectIds, params.userId])
       return result.rows.length === 1
     },
+
+    async commitSignaturePlacement(params: {
+      userId: string
+      assistantId: string
+      artifactId: string
+      expectedVersion: number
+      expectedSeq: number
+      snapshot: PdfSnapshot
+      snapshotFileId: string
+      snapshotHash: string
+      snapshotBytes: Uint8Array
+      stateVector: Uint8Array
+      sourceHash: string
+      targetId: string
+      signatureResourceId: string
+      approvalId: string
+      commandId: string
+    }): Promise<{ version: number } | null> {
+      const result = await db<{ version: number }>(params.userId, `
+        WITH current_head AS (
+          SELECT a.* FROM office_artifacts a
+           WHERE a.id=$1 AND a.owner_user_id=$2 AND a.family='pdf' AND a.mode='session'
+             AND a.lifecycle_state='active' AND now()<a.expires_at
+             AND a.head_version=$3
+             AND EXISTS (
+               SELECT 1 FROM office_pdf_session_assets src
+                WHERE src.artifact_id=a.id AND src.role='source' AND src.content_sha256=$11
+             )
+             AND EXISTS (
+               SELECT 1 FROM office_pdf_session_assets sig
+                WHERE sig.artifact_id=a.id AND sig.role='signature' AND sig.file_id=$13
+             )
+           FOR UPDATE
+        ), current_live AS (
+          SELECT d.artifact_id FROM office_collab_documents d
+          JOIN current_head h ON h.id=d.artifact_id
+           WHERE d.base_version=$3 AND d.seq=$4
+           FOR UPDATE
+        ), inserted AS (
+          INSERT INTO office_artifact_versions
+            (artifact_id,workspace_id,version,parent_version_id,snapshot_file_id,
+             snapshot_hash,operation_clock,schema_version,capability_version,
+             author_type,author_assistant_id,origin,summary,checkpoint_kind)
+          SELECT h.id,h.workspace_id,h.head_version+1,h.head_version_id,$5,$6,$7,$8,$9,
+                 'assistant',$10,'ai','Approved PDF signature placement','revision'
+            FROM current_head h JOIN current_live l ON l.artifact_id=h.id
+          RETURNING id,artifact_id,version
+        ), advanced AS (
+          UPDATE office_artifacts a SET head_version_id=i.id,head_version=i.version,
+                 title=$14,updated_at=now()
+            FROM inserted i WHERE a.id=i.artifact_id
+          RETURNING a.workspace_id,i.version
+        ), live AS (
+          UPDATE office_collab_documents d SET ydoc=$15,state_vector=$7,
+                 canonical_hash=$6,base_version=a.version,seq=d.seq+1,updated_at=now()
+            FROM advanced a WHERE d.artifact_id=$1 AND d.seq=$4
+          RETURNING a.workspace_id,a.version
+        ), audit AS (
+          INSERT INTO office_audit_events
+            (workspace_id,artifact_id,actor_user_id,actor_assistant_id,event_type,
+             artifact_version,metadata)
+          SELECT workspace_id,$1,$2,$10,'office_pdf_signature_placed',version,
+                 jsonb_build_object('approvalId',$12::text,'commandId',$16::text,
+                   'targetId',$17::text,'signatureResourceId',$13::text,
+                   'sourceSha256',$11::text,'approvingUserId',$2::text)
+            FROM live
+          RETURNING artifact_version
+        )
+        SELECT artifact_version::int AS version FROM audit
+      `, [
+        params.artifactId, params.userId, params.expectedVersion, params.expectedSeq,
+        params.snapshotFileId, params.snapshotHash, Buffer.from(params.stateVector),
+        params.snapshot.schemaVersion, params.snapshot.capabilityVersion,
+        params.assistantId, params.sourceHash, params.approvalId,
+        params.signatureResourceId, params.snapshot.title, Buffer.from(params.snapshotBytes),
+        params.commandId, params.targetId,
+      ])
+      return result.rows[0] ?? null
+    },
+
+    /** Commit a validated target-native Brian revision only while both the
+     * durable head and live collaboration sequence still match the planner's
+     * input. This keeps an assistant from overwriting a direct editor command
+     * that arrived while the model was planning. */
+    async commitRevision(params: {
+      userId: string
+      assistantId: string
+      artifactId: string
+      expectedVersion: number
+      expectedSeq: number
+      snapshot: PdfSnapshot
+      snapshotFileId: string
+      snapshotHash: string
+      snapshotBytes: Uint8Array
+      stateVector: Uint8Array
+      sourceHash: string
+    }): Promise<{ version: number } | null> {
+      const result = await db<{ version: number }>(params.userId, `
+        WITH current_head AS (
+          SELECT a.* FROM office_artifacts a
+           WHERE a.id=$1 AND a.owner_user_id=$2 AND a.family='pdf' AND a.mode='session'
+             AND a.lifecycle_state='active' AND now()<a.expires_at
+             AND a.head_version=$3
+             AND EXISTS (
+               SELECT 1 FROM office_pdf_session_assets src
+                WHERE src.artifact_id=a.id AND src.role='source' AND src.content_sha256=$11
+             )
+           FOR UPDATE
+        ), current_live AS (
+          SELECT d.artifact_id FROM office_collab_documents d
+          JOIN current_head h ON h.id=d.artifact_id
+           WHERE d.base_version=$3 AND d.seq=$4
+           FOR UPDATE
+        ), inserted AS (
+          INSERT INTO office_artifact_versions
+            (artifact_id,workspace_id,version,parent_version_id,snapshot_file_id,
+             snapshot_hash,operation_clock,schema_version,capability_version,
+             author_type,author_assistant_id,origin,summary,checkpoint_kind)
+          SELECT h.id,h.workspace_id,h.head_version+1,h.head_version_id,$5,$6,$7,$8,$9,
+                 'assistant',$10,'ai','Brian PDF revision','revision'
+            FROM current_head h JOIN current_live l ON l.artifact_id=h.id
+          RETURNING id,artifact_id,version
+        ), advanced AS (
+          UPDATE office_artifacts a SET head_version_id=i.id,head_version=i.version,
+                 title=$12,updated_at=now()
+            FROM inserted i WHERE a.id=i.artifact_id
+          RETURNING a.workspace_id,i.version
+        ), live AS (
+          UPDATE office_collab_documents d SET ydoc=$13,state_vector=$7,
+                 canonical_hash=$6,base_version=a.version,seq=d.seq+1,updated_at=now()
+            FROM advanced a WHERE d.artifact_id=$1 AND d.seq=$4
+          RETURNING a.workspace_id,a.version
+        ), audit AS (
+          INSERT INTO office_audit_events
+            (workspace_id,artifact_id,actor_assistant_id,event_type,artifact_version,metadata)
+          SELECT workspace_id,$1,$10,'office_pdf_revised',version,
+                 jsonb_build_object('sourceSha256',$11::text)
+            FROM live
+          RETURNING artifact_version
+        )
+        SELECT artifact_version::int AS version FROM audit
+      `, [
+        params.artifactId, params.userId, params.expectedVersion, params.expectedSeq,
+        params.snapshotFileId, params.snapshotHash, Buffer.from(params.stateVector),
+        params.snapshot.schemaVersion, params.snapshot.capabilityVersion,
+        params.assistantId, params.sourceHash, params.snapshot.title,
+        Buffer.from(params.snapshotBytes),
+      ])
+      return result.rows[0] ?? null
+    },
   }
 }
 

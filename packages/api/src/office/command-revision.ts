@@ -1,5 +1,5 @@
 /** Command-native, target-bounded Brian revision planning for Office artifacts.
- * [COMP:api/office-generation] */
+ * [COMP:api/office-generation] [COMP:office/pdf-tools] */
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
@@ -9,6 +9,8 @@ import {
   OfficeArtifactSnapshotSchema,
   OfficeCommandSchema,
   OfficeRichTextRunSchema,
+  PdfFieldValueSchema,
+  PdfRectSchema,
   PresentationObjectSchema,
   PresentationSlideSchema,
   SpreadsheetCellValueSchema,
@@ -24,6 +26,12 @@ import {
 } from '@use-brian/office-model'
 
 const OperationBase = z.object({})
+const AssistantPdfOverlaySchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('text'), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360), text: z.string().max(100_000), appearance: z.object({ fontSizePt: z.number().finite().min(4).max(144), color: z.string().regex(/^#[0-9A-Fa-f]{6}$/), backgroundColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(), alignment: z.enum(['start', 'center', 'end']).default('start') }).strict() }).strict(),
+  z.object({ kind: z.literal('date'), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), appearance: z.object({ fontSizePt: z.number().finite().min(4).max(144), color: z.string().regex(/^#[0-9A-Fa-f]{6}$/), backgroundColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(), alignment: z.enum(['start', 'center', 'end']).default('start') }).strict() }).strict(),
+  z.object({ kind: z.literal('checkmark'), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360), mark: z.enum(['check', 'x']).default('check'), color: z.string().regex(/^#[0-9A-Fa-f]{6}$/), strokeWidthPt: z.number().finite().positive().max(20).default(2) }).strict(),
+  z.object({ kind: z.literal('image'), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360), resourceId: z.string().uuid() }).strict(),
+])
 const AssistantOfficeOperationSchema = z.discriminatedUnion('kind', [
   OperationBase.extend({ kind: z.literal('appendSpreadsheetRecords'), sheetId: z.string().uuid(), tableId: z.string().uuid(), prototypeRow: z.number().int().min(1).max(1048576).optional(), records: z.array(SpreadsheetRecordSchema).min(1).max(10000) }).strict(),
   OperationBase.extend({ kind: z.literal('updateText'), targetId: z.string().uuid(), runs: z.array(OfficeRichTextRunSchema).max(10_000) }).strict(),
@@ -51,6 +59,13 @@ const AssistantOfficeOperationSchema = z.discriminatedUnion('kind', [
   OperationBase.extend({ kind: z.literal('renameWorksheet'), sheetId: z.string().uuid(), name: z.string().min(1).max(31) }).strict(),
   OperationBase.extend({ kind: z.literal('reorderWorksheet'), sheetId: z.string().uuid(), index: z.number().int().min(0) }).strict(),
   OperationBase.extend({ kind: z.literal('deleteWorksheet'), sheetId: z.string().uuid() }).strict(),
+  OperationBase.extend({ kind: z.literal('setPdfFieldValue'), fieldId: z.string().uuid(), value: PdfFieldValueSchema }).strict(),
+  OperationBase.extend({ kind: z.literal('addPdfOverlay'), pageId: z.string().uuid(), overlay: AssistantPdfOverlaySchema }).strict(),
+  OperationBase.extend({ kind: z.literal('transformPdfOverlay'), overlayId: z.string().uuid(), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360) }).strict(),
+  OperationBase.extend({ kind: z.literal('removePdfOverlay'), overlayId: z.string().uuid() }).strict(),
+  OperationBase.extend({ kind: z.literal('rotatePdfPage'), pageId: z.string().uuid(), rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]) }).strict(),
+  OperationBase.extend({ kind: z.literal('reorderPdfPage'), pageId: z.string().uuid(), toIndex: z.number().int().min(0).max(99) }).strict(),
+  OperationBase.extend({ kind: z.literal('deletePdfPage'), pageId: z.string().uuid() }).strict(),
 ])
 type AssistantOfficeOperation = z.infer<typeof AssistantOfficeOperationSchema>
 
@@ -66,7 +81,7 @@ const operationFieldCatalog = AssistantOfficeOperationSchema.options.map((operat
 
 const SYSTEM_PROMPT = `You are Brian's command planner for a canonical Office artifact. Return one JSON object and nothing else: {"commands":[...]}.
 
-Use only these operation kinds: appendSpreadsheetRecords, updateText, insertDocumentNode, insertSlideObject, deleteObject, setObjectProperty, addSlide, reorderSlide, deleteSlide, reorderSlideObject, updateSpreadsheetImage, setSpreadsheetCell, setSpreadsheetDimension, addWorksheet, renameWorksheet, reorderWorksheet, deleteWorksheet. The server adds commandId, artifactId, baseVersion, actor, and origin; never include them. Do not return batch or attachResource.
+Use only these operation kinds: appendSpreadsheetRecords, updateText, insertDocumentNode, insertSlideObject, deleteObject, setObjectProperty, addSlide, reorderSlide, deleteSlide, reorderSlideObject, updateSpreadsheetImage, setSpreadsheetCell, setSpreadsheetDimension, addWorksheet, renameWorksheet, reorderWorksheet, deleteWorksheet, setPdfFieldValue, addPdfOverlay, transformPdfOverlay, removePdfOverlay, rotatePdfPage, reorderPdfPage, deletePdfPage. The server adds commandId, artifactId, baseVersion, actor, and origin; never include them. Do not return batch, attachResource, createPdfPlacementTarget, removePdfPlacementTarget, or placePdfSignature.
 
 Operation payload fields (in addition to kind; no extra keys):
 ${JSON.stringify(operationFieldCatalog)}
@@ -145,6 +160,11 @@ type RevisionScope = {
   spreadsheetSheets: Set<string>
   selectedSheets: Set<string>
   spreadsheetSheetIds: Set<string>
+  pdfPages: Set<string>
+  selectedPdfPages: Set<string>
+  pdfPageIds: Set<string>
+  pdfFields: Set<string>
+  pdfOverlays: Set<string>
 }
 
 function revisionScope(snapshot: OfficeArtifactSnapshot, targetIds: string[], lockedTargetIds: readonly string[] = []): RevisionScope {
@@ -155,6 +175,7 @@ function revisionScope(snapshot: OfficeArtifactSnapshot, targetIds: string[], lo
     documentSections: new Set(), selectedDocumentSections: new Set(), documentContainers: new Set(), documentSectionIds: new Set(),
     presentationSlides: new Set(), selectedSlides: new Set(), presentationSlideIds: new Set(), presentationRootSelected: false,
     spreadsheetSheets: new Set(), selectedSheets: new Set(), spreadsheetSheetIds: new Set(),
+    pdfPages: new Set(), selectedPdfPages: new Set(), pdfPageIds: new Set(), pdfFields: new Set(), pdfOverlays: new Set(),
   }
   if (snapshot.family === 'document') {
     for (const section of snapshot.sections) {
@@ -208,7 +229,30 @@ function revisionScope(snapshot: OfficeArtifactSnapshot, targetIds: string[], lo
         scope.spreadsheetSheets.add(sheet.id)
       }
     }
-  } else throw new Error('PDF sessions require the PDF target planner')
+  } else {
+    for (const page of snapshot.pages) {
+      scope.pdfPageIds.add(page.id)
+      if (targets.has(page.id)) {
+        found.add(page.id)
+        scope.pdfPages.add(page.id)
+        scope.selectedPdfPages.add(page.id)
+      }
+      for (const field of page.fields) {
+        if (!targets.has(field.id)) continue
+        if (field.kind === 'signature' || field.readOnly) throw new Error('Brian cannot revise a signature or read-only PDF field')
+        found.add(field.id)
+        scope.pdfFields.add(field.id)
+        scope.pdfPages.add(page.id)
+      }
+      for (const overlay of page.overlays) {
+        if (!targets.has(overlay.id)) continue
+        if (overlay.kind === 'signature') throw new Error('PDF signature overlays are not revision targets')
+        found.add(overlay.id)
+        scope.pdfOverlays.add(overlay.id)
+        scope.pdfPages.add(page.id)
+      }
+    }
+  }
   // Locks on an ancestor/master-owned object cover its runs too, even when
   // the user selected the whole slide and directIds includes all descendants.
   const collectLocks = (value: unknown, inherited = false): void => {
@@ -262,6 +306,32 @@ const spreadsheetCellValueParts = new Set(['address', 'formula', 'value', 'value
 
 function assertOperationAuthority(command: OfficeCommand, snapshot: OfficeArtifactSnapshot, scope: RevisionScope): void {
   if (command.kind === 'batch' || command.kind === 'attachResource' || command.kind === 'replaceTextRange') throw new Error(`Brian cannot emit ${command.kind} in the command planner`)
+  if (snapshot.family === 'pdf') {
+    if (command.kind === 'setPdfFieldValue') {
+      if (!scope.pdfFields.has(command.fieldId)) throw new Error('PDF field command escaped the selected target boundary')
+      return
+    }
+    if (command.kind === 'addPdfOverlay') {
+      if (!scope.selectedPdfPages.has(command.pageId)) throw new Error('Adding a PDF overlay requires an explicitly selected page')
+      if (command.overlay.kind === 'signature') throw new Error('Brian cannot create a PDF signature through generic revision')
+      if (command.overlay.kind === 'image') {
+        if (!('resourceId' in command.overlay)) throw new Error('PDF image overlay requires an opaque resource ID')
+        const resourceId = command.overlay.resourceId
+        const resource = snapshot.resources.find((candidate) => candidate.id === resourceId)
+        if (!resource || resource.kind !== 'image' || resource.mime !== 'image/png' && resource.mime !== 'image/jpeg') throw new Error('PDF image overlay requires an existing visible image resource')
+      }
+      return
+    }
+    if (command.kind === 'transformPdfOverlay' || command.kind === 'removePdfOverlay') {
+      if (!scope.pdfOverlays.has(command.overlayId)) throw new Error('PDF overlay command escaped the selected target boundary')
+      return
+    }
+    if (command.kind === 'rotatePdfPage' || command.kind === 'reorderPdfPage' || command.kind === 'deletePdfPage') {
+      if (!scope.selectedPdfPages.has(command.pageId)) throw new Error('PDF page command escaped the selected target boundary')
+      return
+    }
+    throw new Error(`Brian cannot emit ${command.kind} for a PDF session`)
+  }
   if (command.kind === 'appendSpreadsheetRecords') {
     const table = snapshot.family === 'spreadsheet' ? snapshot.worksheets.find(s => s.id === command.sheetId)?.tables?.find(t => t.id === command.tableId) : undefined
     if (!table || !scope.directIds.has(table.id)) throw new Error('Office append escaped the selected table or worksheet boundary')
@@ -371,6 +441,21 @@ function hydrateOperation(operation: AssistantOfficeOperation, envelope: Pick<Of
   else if (operation.kind === 'addSlide') payload = { ...operation, slide: freshenNewIds(operation.slide, existingIds) }
   else if (operation.kind === 'addWorksheet') payload = { ...operation, worksheet: freshenNewIds(operation.worksheet, existingIds) }
   else if (operation.kind === 'setSpreadsheetCell' && !existingIds.has(operation.cellId)) payload = { ...operation, cellId: randomUUID() }
+  else if (operation.kind === 'addPdfOverlay') {
+    const page = snapshot.family === 'pdf' ? snapshot.pages.find((candidate) => candidate.id === operation.pageId) : undefined
+    if (!page) throw new Error('PDF overlay page was not found')
+    payload = {
+      kind: operation.kind,
+      pageId: operation.pageId,
+      overlay: {
+        ...operation.overlay,
+        id: randomUUID(),
+        pageId: operation.pageId,
+        creator: envelope.actor,
+        zOrder: page.overlays.reduce((maximum, overlay) => Math.max(maximum, overlay.zOrder), -1) + 1,
+      },
+    }
+  }
   return OfficeCommandSchema.parse({ ...envelope, commandId: randomUUID(), ...payload })
 }
 
@@ -386,7 +471,29 @@ function promptContext(snapshot: OfficeArtifactSnapshot, targetIds: string[]): u
   if (snapshot.family === 'presentation') {
     return { ...common, slideSize: snapshot.slideSize, themeId: snapshot.themeId, masters: snapshot.masters, layouts: snapshot.layouts, slides: snapshot.slides.filter((slide) => targets.has(slide.id) || containsId(slide, targets)), otherSlides: snapshot.slides.map((slide, index) => ({ id: slide.id, index, title: slide.title })) }
   }
-  if (snapshot.family === 'pdf') throw new Error('PDF sessions require the PDF target planner')
+  if (snapshot.family === 'pdf') {
+    const pages = snapshot.pages.filter((page) => targets.has(page.id)
+      || page.fields.some((field) => targets.has(field.id))
+      || page.overlays.some((overlay) => overlay.kind !== 'signature' && targets.has(overlay.id)))
+      .map((page, pageOrder) => ({
+        id: page.id,
+        pageNumber: snapshot.pages.findIndex((candidate) => candidate.id === page.id) + 1,
+        pageOrder: snapshot.pages.findIndex((candidate) => candidate.id === page.id),
+        cropBox: page.cropBox,
+        rotation: page.rotation,
+        fields: page.fields.filter((field) => field.kind !== 'signature' && (targets.has(page.id) || targets.has(field.id))).map((field) => ({ id: field.id, label: field.label, kind: field.kind, readOnly: field.readOnly, required: field.required, value: field.value, allowedOptions: field.allowedOptions, widgets: field.widgets.filter((widget) => widget.pageId === page.id) })),
+        overlays: page.overlays.filter((overlay) => overlay.kind !== 'signature' && (targets.has(page.id) || targets.has(overlay.id))),
+      }))
+    const visibleResourceIds = new Set(pages.flatMap((page) => page.overlays.flatMap((overlay) => 'resourceId' in overlay ? [overlay.resourceId] : [])))
+    return {
+      family: 'pdf', title: snapshot.title, locale: snapshot.locale,
+      sourceHash: snapshot.source.sha256,
+      selectedTargetIds: targetIds,
+      pages,
+      otherPages: snapshot.pages.map((page, index) => ({ id: page.id, pageNumber: index + 1, pageOrder: index, cropBox: page.cropBox, rotation: page.rotation })),
+      resources: snapshot.resources.filter((resource) => visibleResourceIds.has(resource.id)).map((resource) => ({ id: resource.id, kind: resource.kind, mime: resource.mime })),
+    }
+  }
   return { ...common, appendTables: snapshot.worksheets.flatMap(sheet => (sheet.tables ?? []).filter(t => targets.has(t.id) || targets.has(sheet.id)).map(table => { const b = tableBounds(table.ref); return { sheetId: sheet.id, ...table, prototypeRow: b.bottom, prototypeCells: sheet.cells.filter(c => { const a = parseCellAddress(c.address)!; return a.row === b.bottom && a.column >= b.left && a.column <= b.right }) } })), calculationMode: snapshot.calculationMode, worksheets: snapshot.worksheets.filter((sheet) => targets.has(sheet.id) || containsId(sheet, targets)).map((sheet) => ({ ...sheet, cells: targets.has(sheet.id) ? sheet.cells.slice(0, 2_000) : sheet.cells.filter((cell) => targets.has(cell.id)).concat(sheet.cells.filter((cell) => Boolean(cell.formula)).slice(0, 500)) })), otherWorksheets: snapshot.worksheets.map((sheet, index) => ({ id: sheet.id, index, name: sheet.name, cellCount: sheet.cells.length })) }
 }
 
@@ -422,10 +529,12 @@ export async function generateAssistantOfficeCommands(params: {
     ? 'This is a document. Use only updateText, insertDocumentNode, deleteObject, and setObjectProperty. Delete a document table row with deleteObject targeting the row ID. For header/footer text, use setObjectProperty on the selected section ID with path ["header"] or ["footer"] and value equal to the complete preserved run array. Individual header/footer run IDs are not updateText or deleteObject targets. Preserve every untouched run ID and style. Never use slide or worksheet operations.'
     : params.snapshot.family === 'presentation'
       ? 'This is a presentation. Use only updateText, insertSlideObject, deleteObject, setObjectProperty, addSlide, reorderSlide, deleteSlide, and reorderSlideObject. Never use document or worksheet operations.'
-      : 'This is a spreadsheet. Use only appendSpreadsheetRecords, setObjectProperty, updateSpreadsheetImage, setSpreadsheetCell, setSpreadsheetDimension, addWorksheet, renameWorksheet, reorderWorksheet, and deleteWorksheet. Never use document or slide operations.'
+      : params.snapshot.family === 'spreadsheet'
+        ? 'This is a spreadsheet. Use only appendSpreadsheetRecords, setObjectProperty, updateSpreadsheetImage, setSpreadsheetCell, setSpreadsheetDimension, addWorksheet, renameWorksheet, reorderWorksheet, and deleteWorksheet. Never use document or slide operations.'
+        : 'This is a PDF editing session. Use only setPdfFieldValue, addPdfOverlay, transformPdfOverlay, removePdfOverlay, rotatePdfPage, reorderPdfPage, and deletePdfPage. Never create, transform, remove, or place a signature. Never invent coordinates: use only a selected page or object and geometry explicitly supplied by the user or preserved from canonical context. Resource IDs are opaque; use only a resource shown in context. Signature bytes, source bytes, filenames, appearance streams, and arbitrary PDF source text are unavailable by design.'
   const insertionGuidance = params.snapshot.family === 'document' ? '\nFor insertDocumentNode supply exactly one of beforeNodeId, afterNodeId, or index. Prefer beforeNodeId/afterNodeId for a request relative to an existing flow node. Anchors must name a top-level node in that section, not a run, table row or cell. The server resolves anchors after earlier commands. If using index, use the zero-based section nodes array position, adjusting for earlier commands, never a flattened text-target position. nodePositions contains original section indices even when context is filtered.' : ''
   const systemPrompt = `${SYSTEM_PROMPT}\n\n${familyGuidance}${insertionGuidance}`
-  const messages: Message[] = [{ role: 'user', content: `Instruction:\n${params.instruction.replace(/(^|\s)@Brian\b/gi, '$1').trim()}\n\nExisting editable text-container IDs for updateText.targetId:\n${JSON.stringify(editableTextTargetIds)}\nTarget the owning paragraph, heading, list item, table cell or text object that contains runs, never a run ID or paragraphStart ID.\n\nCanonical editable context:\n${JSON.stringify(promptContext(params.snapshot, params.targetIds))}` }]
+  const messages: Message[] = [{ role: 'user', content: `Instruction:\n${params.instruction.replace(/(^|\s)@Brian\b/gi, '$1').trim()}\n\n${params.snapshot.family === 'pdf' ? '' : `Existing editable text-container IDs for updateText.targetId:\n${JSON.stringify(editableTextTargetIds)}\nTarget the owning paragraph, heading, list item, table cell or text object that contains runs, never a run ID or paragraphStart ID.\n\n`}Canonical editable context:\n${JSON.stringify(promptContext(params.snapshot, params.targetIds))}` }]
   const envelope = { artifactId: params.snapshot.artifactId, baseVersion: params.baseVersion, actor: { type: 'assistant' as const, id: params.assistantId }, origin: 'ai' as const }
   let consumed = 0
   let failure: unknown
@@ -448,7 +557,7 @@ export async function generateAssistantOfficeCommands(params: {
         if (typeof record.id === 'string' && lockedRecords.has(record.id)) remainingLocks.set(record.id, record)
       })
       if ([...lockedRecords].some(([id, value]) => !isDeepStrictEqual(remainingLocks.get(id), value))) throw new Error('Office command plan changed or removed locked content')
-      let fit = fitOfficeArtifact(candidate, { readabilityReference: params.snapshot })
+      let fit = candidate.family === 'pdf' ? { ok: true as const, issues: [] } : fitOfficeArtifact(candidate, { readabilityReference: params.snapshot })
       if (!fit.ok && params.fitRepair !== false && consumed < 3) {
         const policy = params.fitRepair ?? {}
         const eligibleTargetIds = scopedFitTargets(candidate, scope, policy.eligibleTargetIds)
@@ -463,7 +572,7 @@ export async function generateAssistantOfficeCommands(params: {
           candidate = applyOfficeCommand(candidate, command)
           commands.push(command)
         }
-        fit = fitOfficeArtifact(candidate, { readabilityReference: params.snapshot })
+        fit = candidate.family === 'pdf' ? { ok: true as const, issues: [] } : fitOfficeArtifact(candidate, { readabilityReference: params.snapshot })
       }
       const preflight = preflightOfficeCandidate(candidate)
       if (!preflight.ok) throw new Error(`Office command plan failed preflight: ${preflight.diagnostics.map(item => `${item.path}: ${item.message}`).join('; ')}`)

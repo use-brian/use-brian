@@ -268,7 +268,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
   {
     id: 'office',
     name: 'Office',
-    description: 'Create, read, and revise Brian-native Documents and Presentations in your workspace.',
+    description: 'Create, read, and revise Brian-native documents, presentations, spreadsheets, and private PDF editing sessions.',
     category: 'official',
     auth_type: 'none',
     oauth_required: false,

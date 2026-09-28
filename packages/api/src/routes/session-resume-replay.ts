@@ -200,7 +200,7 @@ export async function resolveResumeOutcomeNote(
     | 'rejectReason'
     | 'answerText'
     | 'approvalKind'
-  >,
+  > & Partial<Pick<ResumeReplayParams, 'approvalId'>>,
   context: ToolContext,
 ): Promise<string> {
   const {
@@ -281,7 +281,13 @@ export async function resolveResumeOutcomeNote(
     )
   }
   try {
-    const result = await tool.execute(input, context)
+    const approvedToolInvocation = params.approvalId
+      ? { approvalId: params.approvalId, approverUserId: context.userId, toolName }
+      : undefined
+    const result = await tool.execute(input, {
+      ...context,
+      approvedToolInvocation,
+    })
     const resultText =
       typeof result.data === 'string' ? result.data : JSON.stringify(result.data)
     if (result.isError) {

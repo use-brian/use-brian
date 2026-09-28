@@ -4789,6 +4789,13 @@ export const ja: Dictionary = {
       attachments: "添付ドキュメント",
       noAttachments: "添付ドキュメントなし",
     },
+    pdfSignaturePreview: {
+      title: "PDF 署名の承認",
+      alt: "画像署名の配置案を表示した PDF ページ",
+      loading: "保護されたページプレビューを準備中...",
+      stale: "このプレビューは利用できなくなりました。PDF が変更されたか、有効期限が切れた可能性があります。",
+      notice: "これは画像ベースの署名を配置します。証明書ベースのデジタル署名ではありません。",
+    },
     emailRevision: {
       revision: "下書きリビジョン {revision}",
       lockedEnvelope: "宛先、送信元、件名、スレッドは固定されています。",

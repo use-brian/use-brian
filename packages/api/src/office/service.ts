@@ -52,7 +52,7 @@ function artifactWithinTurnScope(
   )
 }
 
-function targetOutline(snapshot: OfficeArtifactSnapshot, offset = 0): Pick<OfficeArtifactToolProjection, 'targets' | 'targetsTruncated' | 'nextTargetOffset'> {
+function targetOutline(snapshot: OfficeArtifactSnapshot, offset = 0): Pick<OfficeArtifactToolProjection, 'sourceHash' | 'targets' | 'targetsTruncated' | 'nextTargetOffset'> {
   const targets: NonNullable<OfficeArtifactToolProjection['targets']> = []
   let targetCount = 0
   const add = (target: NonNullable<OfficeArtifactToolProjection['targets']>[number]) => {
@@ -94,18 +94,22 @@ function targetOutline(snapshot: OfficeArtifactSnapshot, offset = 0): Pick<Offic
     }
   } else {
     for (const [pageIndex, page] of snapshot.pages.entries()) {
-      add({ id: page.id, kind: 'pdfPage', label: `Page ${pageIndex + 1}` })
-      for (const field of page.fields) add({ id: field.id, kind: `pdfField:${field.kind}`, label: field.label, parentId: page.id, locked: field.readOnly })
+      add({ id: page.id, kind: 'pdfPage', label: `Page ${pageIndex + 1}`, pageNumber: pageIndex + 1, pageOrder: pageIndex, rotation: page.rotation, rect: page.cropBox })
+      for (const field of page.fields) {
+        if (field.kind === 'signature') continue
+        const widget = field.widgets.find((candidate) => candidate.pageId === page.id)
+        add({ id: field.id, kind: `pdfField:${field.kind}`, label: field.label, parentId: page.id, locked: field.readOnly, value: field.value, ...(field.allowedOptions ? { options: field.allowedOptions } : {}), pageNumber: pageIndex + 1, ...(widget ? { rect: widget.rect } : {}) })
+      }
       for (const overlay of page.overlays) {
         if (overlay.kind === 'signature') continue
         const label = overlay.kind === 'text' ? overlay.text : overlay.kind === 'date' ? overlay.date : `PDF ${overlay.kind}`
-        add({ id: overlay.id, kind: `pdfOverlay:${overlay.kind}`, label: label.slice(0, 240), parentId: page.id })
+        add({ id: overlay.id, kind: `pdfOverlay:${overlay.kind}`, label: label.slice(0, 240), parentId: page.id, pageNumber: pageIndex + 1, rect: overlay.rect, rotation: overlay.rotation, ...('resourceId' in overlay ? { resourceId: overlay.resourceId } : {}) })
       }
-      for (const target of page.placementTargets) add({ id: target.id, kind: 'pdfSignatureTarget', label: `Signature target on page ${pageIndex + 1}`, parentId: page.id })
+      for (const target of page.placementTargets) add({ id: target.id, kind: 'pdfSignatureTarget', label: `Signature target on page ${pageIndex + 1}`, parentId: page.id, pageNumber: pageIndex + 1, rect: target.rect })
     }
   }
   const nextTargetOffset = offset + targets.length < targetCount ? offset + targets.length : undefined
-  return { targets, targetsTruncated: nextTargetOffset !== undefined, nextTargetOffset }
+  return { ...(snapshot.family === 'pdf' ? { sourceHash: snapshot.source.sha256 } : {}), targets, targetsTruncated: nextTargetOffset !== undefined, nextTargetOffset }
 }
 
 export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
@@ -147,12 +151,18 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
 
     async revise(params) {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
-      if (!artifact || !isDurableOfficeArtifact(artifact) || !access || !access.canComment || !artifactWithinTurnScope(artifact, params)) return null
+      const durable = artifact ? isDurableOfficeArtifact(artifact) : false
+      const pdfSession = artifact?.family === 'pdf' && artifact.mode === 'session'
+      if (!artifact || !access || !artifactWithinTurnScope(artifact, params)
+        || durable && !access.canComment
+        || pdfSession && !access.canEdit
+        || !durable && !pdfSession) return null
       if (artifact.headVersion !== params.expectedVersion) return 'version_conflict'
-      await deps.raiseScope({ userId: params.userId, artifactId: artifact.id, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds })
+      if (pdfSession && params.targetIds.length === 0) return null
+      if (durable) await deps.raiseScope({ userId: params.userId, artifactId: artifact.id, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds })
       const job = await deps.createJob({ userId: params.userId, workspaceId: artifact.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'revise', brief: { instruction: params.instruction, targetIds: params.targetIds, expectedVersion: params.expectedVersion }, authorityProjection: { role: access.role, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds, compartmentGrant: params.compartmentGrant, projectGrant: params.projectGrant }, baseArtifactVersion: artifact.headVersion, idempotencyKey: params.idempotencyKey })
       deps.wakeGeneration?.(params.userId)
-      return { jobId: job.id, mode: access.canEdit ? 'direct' : 'proposal' }
+      return { jobId: job.id, mode: pdfSession || access.canEdit ? 'direct' : 'proposal' }
     },
   }
 }

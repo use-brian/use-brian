@@ -995,6 +995,97 @@ describe('[COMP:engine/tool-executor-approval-refactor] autonomous approvals-row
   })
 })
 
+describe('[COMP:office/pdf-tools] durable attended confirmation', () => {
+  function durableTool(run: (context: ToolContext) => void = () => {}): Tool {
+    return buildTool({
+      name: 'placePdfSignature',
+      description: 'Place an image signature at an exact PDF target.',
+      inputSchema: z.object({ artifactId: z.string() }),
+      isConcurrencySafe: false,
+      isReadOnly: false,
+      requiresConfirmation: true,
+      confirmationMode: 'durable_attended',
+      allowPersistentApproval: false,
+      async execute(_input, context) {
+        run(context)
+        return { data: 'placed' }
+      },
+    })
+  }
+
+  it.each(['workflow', 'assistant-call', 'scheduled'])('refuses an unattended %s lane without parking or executing', async (channelType) => {
+    type PortFn = NonNullable<ToolContext['createToolInvocationApproval']>
+    const createApproval = vi.fn<PortFn>(async () => 'approval-1')
+    const run = vi.fn()
+    const executor = createToolExecutor({
+      tools: new Map([['placePdfSignature', durableTool(run)]]),
+      context: { ...ctx, channelType, createToolInvocationApproval: createApproval },
+      loopDetector: createLoopDetector(),
+      permissionGrantEvaluator: async () => ({
+        kind: 'allow', workflowRunId: 'run-1',
+        grant: { action_kind: 'placePdfSignature', grant: 'allow' },
+      }),
+    })
+    executor.addTool('call-1', 'placePdfSignature', { artifactId: 'artifact-1' })
+    const [result] = await drainResults(executor) as Array<Extract<ContentBlock, { type: 'tool_result' }>>
+    expect(result.isError).toBe(true)
+    expect(String(result.content)).toContain('no confirmation channel is available')
+    expect(String(result.content)).not.toContain('PARKED FOR APPROVAL')
+    expect(createApproval).not.toHaveBeenCalled()
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('requires a persisted receipt even when a live human allows the call', async () => {
+    const run = vi.fn()
+    const executor = createToolExecutor({
+      tools: new Map([['placePdfSignature', durableTool(run)]]),
+      context: ctx,
+      loopDetector: createLoopDetector(),
+      confirmationResolver: makeResolverThatAllows(),
+    })
+    executor.addTool('call-1', 'placePdfSignature', { artifactId: 'artifact-1' })
+    const [result] = await drainResults(executor) as Array<Extract<ContentBlock, { type: 'tool_result' }>>
+    expect(result.isError).toBe(true)
+    expect(String(result.content)).toContain('durable attended approval')
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('stamps the authenticated approval receipt into the executing context', async () => {
+    const run = vi.fn()
+    const executor = createToolExecutor({
+      tools: new Map([['placePdfSignature', durableTool(run)]]),
+      context: { ...ctx, createToolInvocationApproval: async () => 'approval-42' },
+      loopDetector: createLoopDetector(),
+      confirmationResolver: makeResolverThatAllows(),
+    })
+    executor.addTool('call-1', 'placePdfSignature', { artifactId: 'artifact-1' })
+    const [result] = await drainResults(executor) as Array<Extract<ContentBlock, { type: 'tool_result' }>>
+    expect(result.isError).toBeFalsy()
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({
+      approvedToolInvocation: {
+        approvalId: 'approval-42',
+        approverUserId: 'u1',
+        toolName: 'placePdfSignature',
+      },
+    }))
+  })
+
+  it('refuses an always-allow decision instead of converting it into execution', async () => {
+    const run = vi.fn()
+    const executor = createToolExecutor({
+      tools: new Map([['placePdfSignature', durableTool(run)]]),
+      context: { ...ctx, createToolInvocationApproval: async () => 'approval-43' },
+      loopDetector: createLoopDetector(),
+      confirmationResolver: { resolve: () => {}, waitForDecision: async () => ({ decision: 'always_allow' }) },
+    })
+    executor.addTool('call-1', 'placePdfSignature', { artifactId: 'artifact-1' })
+    const [result] = await drainResults(executor) as Array<Extract<ContentBlock, { type: 'tool_result' }>>
+    expect(result.isError).toBe(true)
+    expect(String(result.content)).toContain('one-time attended approval')
+    expect(run).not.toHaveBeenCalled()
+  })
+})
+
 describe('[COMP:engine/tool-executor] image tool results', () => {
   it('emits ToolResult.images as image blocks right after the tool_result', async () => {
     const framesTool = buildTool({

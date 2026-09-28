@@ -5006,6 +5006,13 @@ export const en = {
       attachments: "Documents attached",
       noAttachments: "No documents attached",
     },
+    pdfSignaturePreview: {
+      title: "PDF signature approval",
+      alt: "PDF page with the proposed image signature",
+      loading: "Preparing the protected page preview...",
+      stale: "This preview is no longer available. The PDF may have changed or expired.",
+      notice: "This places an image-based signature. It is not a certificate-based digital signature.",
+    },
     emailRevision: {
       revision: "Draft revision {revision}",
       lockedEnvelope: "Recipient, sender, subject, and thread are locked.",

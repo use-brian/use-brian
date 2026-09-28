@@ -429,7 +429,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     // that would otherwise create a pending_approvals row downstream.
     // Spec: docs/plans/company-brain/approvals.md → "Workflow-scoped permission grants".
     // Module: ../workflow/permission-grants.ts.
-    if (needsConfirmation && options.permissionGrantEvaluator) {
+    if (needsConfirmation && options.permissionGrantEvaluator && toolDef.confirmationMode !== 'durable_attended') {
       const decision = await options.permissionGrantEvaluator(t.name, options.context)
       if (decision.kind === 'allow') {
         needsConfirmation = false
@@ -467,7 +467,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       //
       //   (b) No port either (smoke tests, bare worker contexts). Reject
       //       exactly as before — never silently bypass confirmation.
-      if (options.context.createToolInvocationApproval) {
+      if (options.context.createToolInvocationApproval && toolDef.confirmationMode !== 'durable_attended') {
         // Enrich the parked row with the same human-readable lines the
         // interactive card shows (e.g. dedupeEntities' merge preview).
         let displayLines: string[] | undefined
@@ -549,6 +549,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       return
     }
 
+    let confirmedApprovalId: string | undefined
     if (needsConfirmation && options.confirmationResolver) {
       t.status = 'pending_confirmation'
 
@@ -610,6 +611,19 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         }
       }
 
+      if (toolDef.confirmationMode === 'durable_attended' && !approvalId) {
+        t.result = {
+          type: 'tool_result',
+          toolUseId: t.id,
+          name: t.name,
+          content: `ERROR: "${t.name}" requires a durable attended approval, but no approval receipt could be created. The tool was NOT executed.`,
+          isError: true,
+        }
+        t.status = 'completed'
+        wake()
+        return
+      }
+
       options.onConfirmationRequired?.({
         toolCallId: t.id,
         toolName: t.name,
@@ -648,6 +662,20 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           wake()
           return
         }
+        if (toolDef.confirmationMode === 'durable_attended' && decision !== 'allow') {
+          deniedTools.add(t.name)
+          t.result = {
+            type: 'tool_result',
+            toolUseId: t.id,
+            name: t.name,
+            content: `ERROR: "${t.name}" requires a one-time attended approval. Persistent approval was refused and the tool was NOT executed.`,
+            isError: true,
+          }
+          t.status = 'completed'
+          wake()
+          return
+        }
+        confirmedApprovalId = approvalId
         // 'allow' or 'always_allow' - fall through to execution
       } catch {
         // Timeout — treat as deny for this session
@@ -871,6 +899,15 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           notifyConfirmationRequired,
           confirmationTimeoutMs: options.confirmationTimeoutMs,
           parkForConfirmation,
+          ...(confirmedApprovalId
+            ? {
+                approvedToolInvocation: {
+                  approvalId: confirmedApprovalId,
+                  approverUserId: options.context.userId,
+                  toolName: t.name,
+                },
+              }
+            : {}),
         }),
         abandonSignal,
         t.name,

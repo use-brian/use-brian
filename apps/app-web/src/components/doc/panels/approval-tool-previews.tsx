@@ -9,17 +9,18 @@
  * `GenericToolPreview`, while exact input remains behind `ToolInputToggle`.
  *
  * Spec: docs/architecture/features/workflow.md → Unified approvals.
- * [COMP:app-web/approvals]
+ * [COMP:app-web/approvals] [COMP:app-web/pdf-signature-approval]
  */
 
-import { useState } from "react";
-import { Ban, Check, Mail, Paperclip, RotateCcw, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Ban, Check, FileSignature, Mail, Paperclip, RotateCcw, X } from "lucide-react";
 import remarkGfm from "remark-gfm";
 import { ChatMarkdown } from "@use-brian/chat-ui";
 import type { ConfirmationPreview } from "@use-brian/shared";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { fetchPdfSignaturePreview } from "@/lib/api/approvals";
 import {
   attachmentDisplayName,
   emailBodyPreviewMarkdown,
@@ -90,6 +91,8 @@ export function ToolPreview({
   preview,
   attachmentLines,
   senderEmail,
+  approvalId,
+  displayLines,
 }: {
   preview: ToolPreviewData;
   /** Server-resolved attachment names + sizes (from `displayLines`), when
@@ -98,6 +101,8 @@ export function ToolPreview({
   /** Server-resolved connected account, when the input omitted an explicit
    *  Gmail alias or IMAP account. */
   senderEmail?: string | null;
+  approvalId?: string;
+  displayLines?: string[];
 }) {
   switch (preview.kind) {
     case "email_send":
@@ -112,7 +117,69 @@ export function ToolPreview({
       return <ShopifyRefundPreview refund={preview.refund} />;
     case "shopify_cancel":
       return <ShopifyCancelPreview cancel={preview.cancel} />;
+    case "pdf_signature":
+      return <PdfSignaturePreview approvalId={approvalId ?? ""} displayLines={displayLines ?? []} />;
   }
+}
+
+function PdfSignaturePreview({
+  approvalId,
+  displayLines,
+}: {
+  approvalId: string;
+  displayLines: string[];
+}) {
+  const t = useT();
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!approvalId) {
+      setFailed(true);
+      return;
+    }
+    let active = true;
+    let objectUrl: string | null = null;
+    setFailed(false);
+    void fetchPdfSignaturePreview(approvalId).then((blob) => {
+      if (!active) return;
+      objectUrl = URL.createObjectURL(blob);
+      setUrl(objectUrl);
+    }).catch(() => {
+      if (active) setFailed(true);
+    });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [approvalId]);
+
+  return (
+    <div className="w-full max-w-2xl mt-1 rounded-lg border border-border bg-background overflow-hidden shadow-sm">
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/40 border-b border-border">
+        <FileSignature className="size-3.5 text-muted-foreground" aria-hidden />
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          {t.approvalsPage.pdfSignaturePreview.title}
+        </span>
+      </div>
+      <div className="bg-muted/20 p-2">
+        {url ? (
+          <img src={url} alt={t.approvalsPage.pdfSignaturePreview.alt} className="max-h-[32rem] w-full object-contain bg-white rounded border border-border" />
+        ) : failed ? (
+          <p className="p-4 text-sm text-destructive">{t.approvalsPage.pdfSignaturePreview.stale}</p>
+        ) : (
+          <p className="p-4 text-sm text-muted-foreground">{t.approvalsPage.pdfSignaturePreview.loading}</p>
+        )}
+      </div>
+      {displayLines.length > 0 && (
+        <div className="border-t border-border px-3 py-2 space-y-1">
+          {displayLines.map((line, index) => <p key={index} className="text-xs text-muted-foreground break-words">{line}</p>)}
+        </div>
+      )}
+      <p className="border-t border-border px-3 py-2 text-xs font-medium">
+        {t.approvalsPage.pdfSignaturePreview.notice}
+      </p>
+    </div>
+  );
 }
 
 /**

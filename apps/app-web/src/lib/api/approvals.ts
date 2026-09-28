@@ -163,6 +163,18 @@ export async function fetchEmailReviewContext(
   return { thread: data.thread ?? null };
 }
 
+/** Load the protected, server-composited page for a PDF signature approval. */
+export async function fetchPdfSignaturePreview(id: string): Promise<Blob> {
+  const res = await authFetch(
+    `${API_URL}/api/approvals/${encodeURIComponent(id)}/pdf-signature-preview`,
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Could not load the PDF signature preview (${res.status}).`);
+  }
+  return res.blob();
+}
+
 /**
  * Save a body-only revision of a reviewed workflow IMAP reply. The server
  * locks every envelope/authority field and returns a NEW pending approval;

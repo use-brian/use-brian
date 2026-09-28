@@ -489,7 +489,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     const deps = {
       ...OFFICE_SCOPE_DEPS,
       generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(),
-      getArtifact: vi.fn(async () => ({ id: 'artifact-1', workspaceId: 'workspace-1', headVersion: 2 } as never)),
+      getArtifact: vi.fn(async () => ({ id: 'artifact-1', workspaceId: 'workspace-1', family: 'document', mode: 'artifact', headVersion: 2, sensitivity: 'internal', compartments: [], projectIds: [], defaultWorkspaceRole: 'edit', expiresAt: null } as never)),
       resolveAccess: vi.fn(async () => ({ canComment: true, canEdit: true } as never)),
       createJob: vi.fn(async () => ({ id: 'revision-job' } as never)), latestJob: vi.fn(), getSnapshot: vi.fn(async () => null), wakeGeneration,
     }
@@ -504,7 +504,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     const command = { commandId: uid(506), artifactId: job.artifactId, baseVersion: 2, actor: { type: 'assistant' as const, id: job.assistantId! }, origin: 'ai' as const, kind: 'deleteObject' as const, targetId: uid(505) }
     const deps = {
       claim: vi.fn(async () => job),
-      getSnapshot: vi.fn(async () => ({ snapshot: revisionFixture(job.artifactId, uid(505)), baseVersion: 2 })),
+      getSnapshot: vi.fn(async () => ({ snapshot: revisionFixture(job.artifactId, uid(505)), baseVersion: 2, seq: 7 })),
       revise: vi.fn(async () => ({ mode: 'proposal' as const, commands: [command], affectedObjectIds: [uid(505)] })),
       commit: vi.fn(), propose: vi.fn(async () => undefined), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true),
     }
@@ -520,7 +520,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     const command = { commandId: uid(506), artifactId: job.artifactId, baseVersion: 4, actor: { type: 'assistant' as const, id: job.assistantId! }, origin: 'ai' as const, kind: 'setObjectProperty' as const, targetId: uid(505), path: ['styleName'], value: 'Heading' }
     const deps = {
       claim: vi.fn(async () => job),
-      getSnapshot: vi.fn(async () => ({ snapshot: revisionFixture(job.artifactId, uid(505)), baseVersion: 4 })),
+      getSnapshot: vi.fn(async () => ({ snapshot: revisionFixture(job.artifactId, uid(505)), baseVersion: 4, seq: 8 })),
       revise: vi.fn(async () => ({ mode: 'proposal' as const, commands: [command], affectedObjectIds: [uid(505)] })),
       commit: vi.fn(), propose: vi.fn(async () => undefined), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true),
     }

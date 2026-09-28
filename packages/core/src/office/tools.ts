@@ -1,5 +1,5 @@
 /**
- * First-party Office tool surface. [COMP:office/tools]
+ * First-party Office tool surface. [COMP:office/tools] [COMP:office/pdf-tools]
  *
  * Capability: every tool carries `requiresCapability: 'office'` so the
  * built-in primitive can be switched off per assistant — the grant is what
@@ -20,7 +20,21 @@ export type OfficeArtifactToolProjection = {
   expiresAt?: string
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained'
   role: 'view' | 'comment' | 'edit'
-  targets?: Array<{ id: string; kind: string; label: string; parentId?: string; locked?: boolean }>
+  sourceHash?: string
+  targets?: Array<{
+    id: string
+    kind: string
+    label: string
+    parentId?: string
+    locked?: boolean
+    value?: string | boolean | string[] | null
+    options?: string[]
+    pageNumber?: number
+    pageOrder?: number
+    rect?: { x: number; y: number; width: number; height: number }
+    rotation?: number
+    resourceId?: string
+  }>
   targetsTruncated?: boolean
   nextTargetOffset?: number
   job?: { id: string; status: string; stage: string; errorCode: string | null }
@@ -32,6 +46,9 @@ export type OfficeToolPort = {
   create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ artifactId: string; jobId: string }>
   get(params: { userId: string; artifactId: string; targetOffset?: number; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<OfficeArtifactToolProjection | null>
   revise(params: { userId: string; assistantId: string; artifactId: string; instruction: string; targetIds: string[]; expectedVersion: number; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
+  openPdfSession?(params: { userId: string; workspaceId: string; sessionId: string; sourceAttachmentId: string; signatureAttachmentId?: string; title: string; idempotencyKey: string; signal?: AbortSignal }): Promise<{ artifactId: string; version: number; expiresAt: string; editorUrl: string; targets: Array<{ targetId: string; pageId: string; pageNumber: number; rect: { x: number; y: number; width: number; height: number } }>; sourceHash: string; signatureResourceId?: string }>
+  describePdfSignature?(params: { userId: string; artifactId: string; targetId: string; signatureResourceId: string; expectedSourceHash: string; expectedVersion: number }): Promise<{ title: string; fileName: string; pageNumber: number; rect: { x: number; y: number; width: number; height: number }; sourceHash: string; version: number; expiresAt: string } | null>
+  placePdfSignature?(params: { userId: string; assistantId: string; approverUserId: string; approvalId: string; artifactId: string; targetId: string; signatureResourceId: string; expectedSourceHash: string; expectedVersion: number; idempotencyKey: string }): Promise<{ artifactId: string; version: number } | 'pdf_signature_approval_stale' | null>
 }
 
 function link(origin: string | undefined, workspaceId: string, artifactId: string): string | undefined {
@@ -82,6 +99,14 @@ export function createOfficeTools(params: {
   appOrigin?: string
   resolvePolicy?: ResolveOfficeToolPolicy
 }): Tool[] {
+  const signatureInput = z.object({
+    artifactId: z.string().uuid(),
+    targetId: z.string().uuid(),
+    signatureResourceId: z.string().uuid(),
+    expectedSourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+    expectedVersion: z.number().int().min(0),
+    idempotencyKey: z.string().min(8).max(255),
+  }).strict()
   /** Execute-time block gate — mirrors workspace-files' `policyBlockGate`.
    *  Fail-open on a resolver error: a policy-lookup outage must not take the
    *  Office surface down. */
@@ -108,6 +133,21 @@ export function createOfficeTools(params: {
       ? async (context: { userId: string; assistantId: string }) =>
           (await params.resolvePolicy!(toolName, context)) === 'ask'
       : undefined
+  const openPdfAskGate = params.resolvePolicy
+    ? async (context: { userId: string; assistantId: string; currentTurnAttachmentIds?: ReadonlySet<string> }, raw: unknown) => {
+        const input = raw && typeof raw === 'object' ? raw as { sourceAttachmentId?: unknown; signatureAttachmentId?: unknown } : {}
+        const attached = context.currentTurnAttachmentIds
+        const exactTurn = typeof input.sourceAttachmentId === 'string'
+          && attached?.has(input.sourceAttachmentId) === true
+          && (input.signatureAttachmentId === undefined
+            || typeof input.signatureAttachmentId === 'string' && attached.has(input.signatureAttachmentId))
+        // Invalid provenance reaches execute immediately and fails there. A
+        // policy-driven prompt is created only after this exact turn proves
+        // both opaque ids, so durable resume can treat that approval receipt
+        // as the provenance checkpoint.
+        return exactTurn && (await params.resolvePolicy!('openPdfEditingSession', context)) === 'ask'
+      }
+    : undefined
 
   const createOfficeArtifact = buildTool({
     name: 'createOfficeArtifact',
@@ -192,7 +232,7 @@ export function createOfficeTools(params: {
     resolveConfirmation: askGate('reviseOfficeArtifact'),
     isConcurrencySafe: false,
     isReadOnly: false,
-    description: 'Start a fresh context-clean, command-native revision job against an explicit Office artifact version and stable target IDs returned by getOfficeArtifact or selected by the user in the editor. Brian may use the supported canonical Document, Presentation, or Spreadsheet command vocabulary inside those targets. If the artifact advances before the job runs, the validated commands become a proposal instead of overwriting intervening edits. Comment-only callers always receive a proposal. Never use this as implicit authorization to create, export, share, send, publish, or overwrite intervening edits.',
+    description: 'Start a fresh context-clean, command-native revision job against an explicit Office artifact version and stable target IDs returned by getOfficeArtifact or selected by the user in the editor. Brian may use the supported canonical Document, Presentation, Spreadsheet, or PDF command vocabulary inside those targets, except PDF signatures, which require placePdfSignature. PDF revisions require at least one explicit target and are owner-only direct edits. If a durable artifact advances before the job runs, the validated commands become a proposal instead of overwriting intervening edits. Never use this as implicit authorization to create, sign, export, share, send, publish, or overwrite intervening edits.',
     inputSchema: z.object({
       artifactId: z.string().uuid(),
       instruction: z.string().min(1).max(10_000),
@@ -229,5 +269,95 @@ export function createOfficeTools(params: {
     },
   })
 
-  return [createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact]
+  const openPdfEditingSession = buildTool({
+    name: 'openPdfEditingSession',
+    requiresCapability: 'office',
+    resolveConfirmation: openPdfAskGate,
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    description: 'Open a bounded 24-hour canonical PDF editing session only after the user explicitly asks to edit, fill, or sign a PDF attached in this exact turn. The source and optional signature must be opaque IDs from current-turn <attached_file> envelopes. Intake is synchronous and makes no model call. Never accept a URL, workspace path, old attachment id, or reusable stored signature.',
+    inputSchema: z.object({
+      sourceAttachmentId: z.string().uuid(),
+      signatureAttachmentId: z.string().uuid().optional(),
+      title: z.string().min(1).max(1_000),
+      idempotencyKey: z.string().min(8).max(255),
+    }).strict(),
+    async execute(input, context) {
+      const blocked = await blockGate('openPdfEditingSession', context)
+      if (blocked) return blocked
+      if (!context.workspaceId || !params.port.openPdfSession) {
+        return { data: 'openPdfEditingSession is unavailable in this workspace. Nothing was created.', isError: true }
+      }
+      const approvedProvenance = context.approvedToolInvocation?.toolName === 'openPdfEditingSession'
+        && context.approvedToolInvocation.approverUserId === context.userId
+      const request = context.userMessageText?.toLocaleLowerCase() ?? ''
+      if (!/(?:edit|fill|complete|sign|annotate|modify|rotate|reorder|delete)\b/.test(request) && !approvedProvenance) {
+        return { data: 'openPdfEditingSession did not run because this turn does not contain an explicit request to edit, fill, or sign the PDF. Nothing was created.', isError: true }
+      }
+      const attached = context.currentTurnAttachmentIds
+      if ((!attached?.has(input.sourceAttachmentId) || input.signatureAttachmentId && !attached.has(input.signatureAttachmentId)) && !approvedProvenance) {
+        return { data: 'openPdfEditingSession did not run because every attachment id must come from this exact turn. Ask the user to attach the PDF and optional signature image again.', isError: true }
+      }
+      const ready = await params.port.openPdfSession({
+        userId: context.userId,
+        workspaceId: context.workspaceId,
+        sessionId: context.sessionId,
+        ...input,
+        signal: context.abortSignal,
+      })
+      return {
+        data: {
+          ...ready,
+          editorUrl: link(params.appOrigin, context.workspaceId, ready.artifactId) ?? ready.editorUrl,
+        },
+      }
+    },
+  })
+
+  const placePdfSignature = buildTool({
+    name: 'placePdfSignature',
+    requiresCapability: 'office',
+    requiresConfirmation: true,
+    confirmationMode: 'durable_attended',
+    allowPersistentApproval: false,
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    description: 'Place one already-admitted image signature into an imported signature widget or a rectangle the owner created in the PDF editor. This always requires one attended, non-persistent approval for the exact source hash, version, target, and resource. It never creates coordinates and never claims certificate-based signing.',
+    inputSchema: signatureInput,
+    async describeConfirmation(raw, context) {
+      if (!params.port.describePdfSignature) return null
+      const input = signatureInput.parse(raw)
+      const projection = await params.port.describePdfSignature({ userId: context.userId, ...input })
+      if (!projection) return ['The PDF signature target is stale or unavailable. Do not approve this request.']
+      const { rect } = projection
+      return [
+        `PDF: ${projection.title} (${projection.fileName})`,
+        `Page ${projection.pageNumber}; rectangle x=${rect.x}, y=${rect.y}, width=${rect.width}, height=${rect.height}`,
+        `Source ${projection.sourceHash.slice(0, 12)}; version ${projection.version}; expires ${projection.expiresAt}`,
+        'This places an image-based signature. It is not a certificate-based digital signature.',
+      ]
+    },
+    async execute(input, context) {
+      const blocked = await blockGate('placePdfSignature', context)
+      if (blocked) return blocked
+      const approval = context.approvedToolInvocation
+      if (!params.port.placePdfSignature || !approval || approval.toolName !== 'placePdfSignature' || approval.approverUserId !== context.userId) {
+        return { data: 'placePdfSignature requires a fresh attended one-time approval. The signature was not placed.', isError: true }
+      }
+      const result = await params.port.placePdfSignature({
+        userId: context.userId,
+        assistantId: context.assistantId,
+        approverUserId: approval.approverUserId,
+        approvalId: approval.approvalId,
+        ...input,
+      })
+      if (result === 'pdf_signature_approval_stale') {
+        return { data: 'pdf_signature_approval_stale: the PDF source, version, target, resource, owner, or expiry changed after review. Nothing was changed. Read the current PDF session before asking again.', isError: true }
+      }
+      if (!result) return { data: artifactUnreachable('placePdfSignature', 'revise', input.artifactId), isError: true }
+      return { data: result }
+    },
+  })
+
+  return [createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact, openPdfEditingSession, placePdfSignature]
 }

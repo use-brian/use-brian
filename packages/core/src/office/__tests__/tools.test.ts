@@ -214,3 +214,122 @@ describe('[COMP:office/tools] Office governance', () => {
     expect(res.isError).toBeFalsy()
   })
 })
+
+describe('[COMP:office/pdf-tools] PDF session tools', () => {
+  const basePort = (over: Partial<OfficeToolPort> = {}): OfficeToolPort => ({
+    create: vi.fn(async () => ({ artifactId: id(1), jobId: id(90) })),
+    get: vi.fn(async () => null),
+    revise: vi.fn(async () => null),
+    ...over,
+  })
+  const signatureInput = {
+    artifactId: id(1),
+    targetId: id(2),
+    signatureResourceId: id(3),
+    expectedSourceHash: 'a'.repeat(64),
+    expectedVersion: 4,
+    idempotencyKey: 'signature-request-1',
+  }
+
+  it('keeps PDF out of generic creation and admits only exact current-turn attachments', async () => {
+    const openPdfSession = vi.fn(async () => ({
+      artifactId: id(1), version: 0, expiresAt: '2026-10-01T00:00:00.000Z',
+      editorUrl: `/w/${id(2)}/office/${id(1)}`,
+      targets: [{ targetId: id(4), pageId: id(5), pageNumber: 1, rect: { x: 10, y: 20, width: 120, height: 30 } }],
+      sourceHash: 'b'.repeat(64), signatureResourceId: id(3),
+    }))
+    const tools = new Map(createOfficeTools({ port: basePort({ openPdfSession }), appOrigin: 'https://app.example.com' }).map((tool) => [tool.name, tool]))
+    expect(tools.get('createOfficeArtifact')!.inputSchema.safeParse({ family: 'pdf', outcome: 'Edit it', audience: 'Owner', sourceHandles: [], idempotencyKey: 'create-pdf-1' }).success).toBe(false)
+
+    const input = { sourceAttachmentId: id(6), signatureAttachmentId: id(7), title: 'Agreement', idempotencyKey: 'open-pdf-request' }
+    const stale = await tools.get('openPdfEditingSession')!.execute(input, {
+      ...context,
+      userMessageText: 'Please sign this PDF',
+      currentTurnAttachmentIds: new Set([id(6)]),
+    })
+    expect(stale.isError).toBe(true)
+    expect(openPdfSession).not.toHaveBeenCalled()
+
+    const opened = await tools.get('openPdfEditingSession')!.execute(input, {
+      ...context,
+      userMessageText: 'Please sign this PDF',
+      currentTurnAttachmentIds: new Set([id(6), id(7)]),
+    })
+    expect(opened.isError).toBeFalsy()
+    expect(opened.data).toMatchObject({
+      artifactId: id(1),
+      editorUrl: `https://app.example.com/w/${id(2)}/office/${id(1)}`,
+      sourceHash: 'b'.repeat(64),
+      signatureResourceId: id(3),
+    })
+    expect(openPdfSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: id(82), sourceAttachmentId: id(6), signatureAttachmentId: id(7) }))
+  })
+
+  it('checkpoints current-turn provenance before policy approval and restores it only from that receipt', async () => {
+    const openPdfSession = vi.fn(async () => ({
+      artifactId: id(1), version: 0, expiresAt: '2026-10-01T00:00:00.000Z', editorUrl: `/w/${id(2)}/office/${id(1)}`,
+      targets: [], sourceHash: 'b'.repeat(64),
+    }))
+    const tool = new Map(createOfficeTools({
+      port: basePort({ openPdfSession }),
+      resolvePolicy: async () => 'ask',
+    }).map((item) => [item.name, item])).get('openPdfEditingSession')!
+    const input = { sourceAttachmentId: id(6), title: 'Agreement', idempotencyKey: 'open-pdf-request' }
+    expect(await tool.resolveConfirmation!({ ...context, currentTurnAttachmentIds: new Set([id(7)]) }, input)).toBe(false)
+    expect(await tool.resolveConfirmation!({ ...context, currentTurnAttachmentIds: new Set([id(6)]) }, input)).toBe(true)
+    const replayed = await tool.execute(input, {
+      ...context,
+      approvedToolInvocation: { approvalId: id(70), approverUserId: context.userId, toolName: 'openPdfEditingSession' },
+    })
+    expect(replayed.isError).toBeFalsy()
+    expect(openPdfSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('pins the authoritative one-time signature approval copy and static policy', async () => {
+    const describePdfSignature = vi.fn(async () => ({
+      title: 'Agreement', fileName: 'agreement.pdf', pageNumber: 2,
+      rect: { x: 12, y: 34, width: 150, height: 42 },
+      sourceHash: 'a'.repeat(64), version: 4, expiresAt: '2026-10-01T00:00:00.000Z',
+    }))
+    const tools = new Map(createOfficeTools({
+      port: basePort({ describePdfSignature }),
+      resolvePolicy: async () => 'allow',
+    }).map((tool) => [tool.name, tool]))
+    const tool = tools.get('placePdfSignature')!
+    expect(tool.requiresConfirmation).toBe(true)
+    expect(tool.confirmationMode).toBe('durable_attended')
+    expect(tool.allowPersistentApproval).toBe(false)
+    expect(tool.resolveConfirmation).toBeUndefined()
+    expect(await tool.describeConfirmation!(signatureInput, context)).toEqual([
+      'PDF: Agreement (agreement.pdf)',
+      'Page 2; rectangle x=12, y=34, width=150, height=42',
+      `Source ${'a'.repeat(12)}; version 4; expires 2026-10-01T00:00:00.000Z`,
+      'This places an image-based signature. It is not a certificate-based digital signature.',
+    ])
+  })
+
+  it('cannot execute without an authenticated approval receipt and reports anchor drift', async () => {
+    const placePdfSignature = vi.fn()
+      .mockResolvedValueOnce({ artifactId: id(1), version: 5 })
+      .mockResolvedValueOnce('pdf_signature_approval_stale')
+    const tool = new Map(createOfficeTools({ port: basePort({ placePdfSignature }) }).map((item) => [item.name, item])).get('placePdfSignature')!
+    const refused = await tool.execute(signatureInput, context)
+    expect(refused.isError).toBe(true)
+    expect(placePdfSignature).not.toHaveBeenCalled()
+
+    const approvedContext = {
+      ...context,
+      approvedToolInvocation: { approvalId: id(70), approverUserId: context.userId, toolName: 'placePdfSignature' },
+    }
+    await expect(tool.execute(signatureInput, approvedContext)).resolves.toMatchObject({ data: { artifactId: id(1), version: 5 } })
+    expect(placePdfSignature).toHaveBeenCalledWith(expect.objectContaining({
+      approvalId: id(70),
+      approverUserId: context.userId,
+      expectedVersion: 4,
+      expectedSourceHash: 'a'.repeat(64),
+    }))
+    const stale = await tool.execute(signatureInput, approvedContext)
+    expect(stale.isError).toBe(true)
+    expect(String(stale.data)).toContain('pdf_signature_approval_stale')
+  })
+})

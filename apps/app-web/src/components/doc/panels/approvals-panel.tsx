@@ -898,6 +898,8 @@ function ApprovalCard({
                   {toolPreview ? (
                     <ToolPreview
                       preview={toolPreview}
+                      approvalId={row.id}
+                      displayLines={row.approvalPayload.displayLines}
                       attachmentLines={extractAttachmentLines(
                         row.approvalPayload.displayLines,
                       )}
@@ -1251,6 +1253,8 @@ function ToolCallBody({
       {preview && (
         <ToolPreview
           preview={preview}
+          approvalId={row.id}
+          displayLines={row.approvalPayload.displayLines}
           attachmentLines={extractAttachmentLines(
             row.approvalPayload.displayLines,
           )}

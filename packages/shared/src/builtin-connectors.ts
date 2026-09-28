@@ -322,9 +322,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   ],
   office: [
     { name: 'proposeOfficeEvidenceFill', description: 'Propose source-linked values for selected worksheet cells; human acceptance required', classification: 'write', defaultPolicy: 'allow' },
-    { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document or Presentation job', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet job', classification: 'write', defaultPolicy: 'allow' },
     { name: 'getOfficeArtifact', description: 'Read an Office artifact and its current generation state', classification: 'read', defaultPolicy: 'allow' },
     { name: 'reviseOfficeArtifact', description: 'Start an undoable Office revision or proposal job', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'openPdfEditingSession', description: 'Open a current-turn PDF attachment as a bounded private editing session', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'placePdfSignature', description: 'Place an imported image-based signature at one exact PDF target after approval', classification: 'write', defaultPolicy: 'ask' },
   ],
   // Google Cloud Storage (bring-your-own storage) — a credentialed connector
   // with NO assistant tools. It only rebinds where the Workspace Files bytes
@@ -638,6 +640,8 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'createOfficeArtifact',
     'getOfficeArtifact',
     'reviseOfficeArtifact',
+    'openPdfEditingSession',
+    'placePdfSignature',
   ],
   // Brand (docs/architecture/features/brand.md): wired at boot from
   // packages/core/src/brand/tools.ts, gated on the `brand` capability.

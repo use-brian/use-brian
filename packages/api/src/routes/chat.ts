@@ -3621,6 +3621,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       > = []
 
       let attachmentContext = ''
+      const currentTurnAttachmentIds = new Set<string>()
       // Voice transcription calls hit Gemini and must be attributed as
       // `overhead:transcription` — collect results here and record once we
       // have the stored user_message_id below.
@@ -3645,6 +3646,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           fileIds!.map((id) => options.fileStore!.get(id, fileCtx).catch(() => null)),
         )
         const validFiles = fetched.filter((f): f is NonNullable<typeof f> => f !== null)
+        for (const file of validFiles) currentTurnAttachmentIds.add(file.id)
 
         if (validFiles.length > 0) {
           // Only the PRE-FLIGHT needs this: whether the served model reads
@@ -7081,6 +7083,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // as the new page's `origin_prompt` (the History "first prompt").
             userMessageText:
               typeof message === 'string' && message.trim() ? message.trim() : undefined,
+            currentTurnAttachmentIds,
             cacheStore: options.cacheStore,
             sessionStateStore: options.sessionStateStore,
             requestTools: allTools,

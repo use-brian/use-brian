@@ -52,7 +52,9 @@ export async function runOfficeEdit(
   for (const command of commands) snapshot = applyOfficeCommand(snapshot, command)
   const preflight = preflightOfficeCandidate(snapshot)
   if (!preflight.ok) throw new Error(`Office edit failed preflight: ${preflight.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ')}`)
-  const fit = fitOfficeArtifact(snapshot, { readabilityReference: brief.snapshot })
+  const fit = snapshot.family === 'pdf'
+    ? { ok: true as const, issues: [] }
+    : fitOfficeArtifact(snapshot, { readabilityReference: brief.snapshot })
   if (!fit.ok) throw new Error(`Office edit failed fit: ${fit.issues.map((item) => `${item.objectId}: ${item.message}`).join('; ')}`)
   if (brief.role === 'comment') return { mode: 'proposal', reason: 'comment_role', commands, affectedObjectIds }
   if (overlap) return { mode: 'proposal', reason: 'overlap_conflict', commands, affectedObjectIds }
@@ -64,6 +66,10 @@ function commandTargets(command: OfficeCommand): string[] {
   if (command.kind === 'updateSpreadsheetImage') return [command.imageId]
   if (command.kind === 'setSpreadsheetCell') return [command.cellId]
   if (command.kind === 'reorderSlideObject') return [command.objectId]
+  if (command.kind === 'setPdfFieldValue') return [command.fieldId]
+  if (command.kind === 'addPdfOverlay') return [command.pageId, command.overlay.id]
+  if (command.kind === 'transformPdfOverlay' || command.kind === 'removePdfOverlay') return [command.overlayId]
+  if (command.kind === 'rotatePdfPage' || command.kind === 'reorderPdfPage' || command.kind === 'deletePdfPage') return [command.pageId]
   if (command.kind === 'addSlide') return [command.slide.id]
   if (command.kind === 'addWorksheet') return [command.worksheet.id]
   if ('slideId' in command) return [command.slideId]

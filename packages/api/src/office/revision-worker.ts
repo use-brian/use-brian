@@ -6,9 +6,9 @@ import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 
 export type OfficeRevisionWorkerDeps = {
   claim(params: { userId: string; leaseToken: string; leaseMs: number; jobKinds: OfficeGenerationJobRow['jobKind'][] }): Promise<OfficeGenerationJobRow | null>
-  getSnapshot(userId: string, artifactId: string): Promise<{ snapshot: OfficeArtifactSnapshot; baseVersion: number } | null>
+  getSnapshot(userId: string, artifactId: string): Promise<{ snapshot: OfficeArtifactSnapshot; baseVersion: number; seq: number } | null>
   revise(params: { snapshot: OfficeArtifactSnapshot; targetIds: string[]; instruction: string; currentVersion: number; versionDrifted: boolean; job: OfficeGenerationJobRow }): Promise<{ mode: 'direct' | 'proposal'; snapshot?: OfficeArtifactSnapshot; commands: OfficeCommand[]; affectedObjectIds: string[] }>
-  commit(params: { job: OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number }): Promise<number>
+  commit(params: { job: OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; expectedSeq: number }): Promise<number>
   propose(params: { job: OfficeGenerationJobRow; baseVersion: number; commands: OfficeCommand[]; affectedObjectIds: string[] }): Promise<void>
   appendEvent(params: { userId: string; jobId: string; workspaceId: string; code: string; values: Record<string, string | number | boolean>; actorType: 'system'; safeNarration: string }): Promise<unknown>
   finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed'; stage: string; errorCode?: string; errorDetail?: string }): Promise<boolean>
@@ -38,7 +38,7 @@ export function createOfficeRevisionWorker(deps: OfficeRevisionWorkerDeps) {
         await deps.appendEvent({ userId, jobId: job.id, workspaceId: job.workspaceId, code: 'office.job.completed', values: { proposal: true }, actorType: 'system', safeNarration: 'Revision proposed' })
       } else {
         if (!revision.snapshot) throw new Error('Office direct revision did not return a snapshot')
-        const version = await deps.commit({ job, snapshot: revision.snapshot, expectedVersion: live.baseVersion })
+        const version = await deps.commit({ job, snapshot: revision.snapshot, expectedVersion: live.baseVersion, expectedSeq: live.seq })
         await deps.appendEvent({ userId, jobId: job.id, workspaceId: job.workspaceId, code: 'office.job.completed', values: { version }, actorType: 'system', safeNarration: 'Revision completed' })
       }
       await deps.finish({ userId, jobId: job.id, leaseToken, status: 'completed', stage: 'completed' })

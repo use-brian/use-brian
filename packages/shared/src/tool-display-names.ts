@@ -196,6 +196,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   createOfficeArtifact: 'Create an Office artifact',
   getOfficeArtifact: 'Read an Office artifact',
   reviseOfficeArtifact: 'Revise an Office artifact',
+  openPdfEditingSession: 'Open a PDF editing session',
+  placePdfSignature: 'Place a PDF signature',
   listDocumentExtractionConnectors: 'List structured PDF connectors',
   prepareDocumentExtraction: 'Prepare structured PDF extraction',
   startDocumentExtraction: 'Start structured PDF extraction',

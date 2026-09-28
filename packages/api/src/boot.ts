@@ -115,6 +115,7 @@ import {
   createBrandTools,
   createOfficeTools,
   createPdfWriterPort,
+  validateRenderedPdf,
   type FileToolPolicy,
   type OfficeToolPolicy,
   createFindPageTool,
@@ -2830,6 +2831,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const officeCommentStore = createOfficeCommentStore()
   const officeLiveStore = createOfficeLiveStore()
   const officePdfSessionStore = createOfficePdfSessionStore()
+  let pdfSessionToolRuntime: ReturnType<typeof createPdfSessionService> | null = null
   let structuredDocumentRuntime: ReturnType<typeof createStructuredDocumentRuntime> | null = null
   const officeReleaseStore = createOfficeReleaseStore()
   const officeLifecycleWorker = createOfficeLifecycleWorker({
@@ -2896,7 +2898,28 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     return (OFFICE_POLICY_STRICTNESS[a] ?? 0) >= (OFFICE_POLICY_STRICTNESS[b] ?? 0) ? a : b
   }
   for (const tool of createOfficeTools({
-    port: officeService,
+    port: {
+      ...officeService,
+      async openPdfSession(params) {
+        if (!pdfSessionToolRuntime) throw new Error('PDF editing sessions are unavailable')
+        return pdfSessionToolRuntime.create({
+          userId: params.userId,
+          workspaceId: params.workspaceId,
+          source: { kind: 'file_cache', id: params.sourceAttachmentId, expectedSessionId: params.sessionId },
+          ...(params.signatureAttachmentId ? { signatureSource: { kind: 'file_cache' as const, id: params.signatureAttachmentId, expectedSessionId: params.sessionId } } : {}),
+          title: params.title,
+          sensitivity: 'internal',
+          idempotencyKey: params.idempotencyKey,
+          signal: params.signal,
+        })
+      },
+      async describePdfSignature(params) {
+        return pdfSessionToolRuntime?.describeSignature(params) ?? null
+      },
+      async placePdfSignature(params) {
+        return pdfSessionToolRuntime?.placeSignature(params) ?? null
+      },
+    },
     appOrigin: env.AUTHED_APP_URL ?? env.APP_URL,
     resolvePolicy: resolveOfficeToolPolicy,
   })) {
@@ -6249,6 +6272,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           },
         }
       : undefined,
+    pdfSignaturePreview: async (input) => pdfSessionToolRuntime?.previewSignature(input) ?? null,
   }))
 
   // Workspace default budget API must mount before the generic `/:id` goal
@@ -6753,6 +6777,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const access = { workspaceId, userId, assistantId: APP_LEVEL_ASSISTANT_ID, assistantKind: 'standard' as const, clearance }
       const cached = await fileStore.get(source.id, access)
       if (!cached) return null
+      if (source.expectedSessionId && cached.sessionId !== source.expectedSessionId) return null
       const encoded = await fileStore.getOriginalContent?.(source.id, access) ?? cached.content
       const match = encoded.match(/^data:([^;]+);base64,([A-Za-z0-9+/=\r\n]+)$/)
       if (!match || match[1] !== cached.mimeType) return null
@@ -6760,6 +6785,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         sensitivity: cached.sensitivity ?? 'internal', compartments: cached.compartments ?? [], projectIds: cached.projectIds ?? [] }
     },
   }) : null
+  pdfSessionToolRuntime = pdfSessionService
   if (pdfSessionService) app.use('/api/office', requireAuth(env.JWT_SECRET), officePdfSessionRoutes({ service: pdfSessionService }))
   const officeImportWorker = filesApi ? createOfficeImportWorker({
     store: officeGenerationStore,
@@ -6835,8 +6861,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     appendEvent: officeGenerationStore.appendEvent,
     finish: officeGenerationStore.finish,
   }) : null
-  const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; kind: 'generation' | 'revision'; authority?: import('@use-brian/core').OfficeAuthorityProjection }) => {
+  const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; expectedSeq?: number; kind: 'generation' | 'revision'; authority?: import('@use-brian/core').OfficeAuthorityProjection }) => {
     if (!filesApi) throw new Error('Office file storage is unavailable')
+    if (params.snapshot.family === 'pdf') {
+      if (params.kind !== 'revision' || params.expectedSeq === undefined || !pdfSessionService) throw new Error('PDF session revision runtime is unavailable')
+      return pdfSessionService.commitRevision({
+        userId: params.job.initiatedByUserId,
+        assistantId: params.job.assistantId ?? APP_LEVEL_ASSISTANT_ID,
+        artifactId: params.job.artifactId,
+        expectedVersion: params.expectedVersion,
+        expectedSeq: params.expectedSeq,
+        snapshot: params.snapshot,
+      })
+    }
     const bytes = new TextEncoder().encode(JSON.stringify(params.snapshot))
     const hash = createHash('sha256').update(bytes).digest('hex')
     const storedAuthority = params.job.authorityProjection as {
@@ -7038,6 +7075,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     claim: officeGenerationStore.claim,
     getSnapshot: officeLiveStore.get,
     async revise({ snapshot, targetIds, instruction, currentVersion, versionDrifted, job }) {
+      if (snapshot.family === 'pdf' && versionDrifted) throw new Error('revision_version_conflict')
       const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
       const runtime = await resolveBackgroundRuntime(job.workspaceId)
       const role = (job.authorityProjection as { role?: unknown }).role === 'comment' ? 'comment' as const : 'edit' as const
@@ -7071,6 +7109,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // The command planner derives bounded repair eligibility from the
         // selected scope (including explicit section/slide descendants).
         async validateCandidate(candidate) {
+          if (candidate.family === 'pdf') {
+            if (!pdfSessionService) throw new Error('PDF session revision runtime is unavailable')
+            // Full writer + independent reopen validation also runs in the
+            // atomic commit. This pre-commit pass keeps a bad candidate out of
+            // the revision result before any session-owned snapshot is stored.
+            const current = await officeLiveStore.get(job.initiatedByUserId, job.artifactId)
+            if (!current || current.baseVersion !== currentVersion) throw new Error('revision_version_conflict')
+            const source = await pdfSessionService.readSource(job.initiatedByUserId, job.artifactId)
+            const assets = await officePdfSessionStore.listAssets(job.initiatedByUserId, job.artifactId)
+            const writer = createPdfWriterPort({ resolveResource: async resourceId => {
+              const tracked = assets.find(asset => asset.fileId === resourceId && asset.role === 'signature')
+              if (!tracked || !pdfSessionAssets) return null
+              const value = await pdfSessionAssets.read({ userId: job.initiatedByUserId, workspaceId: job.workspaceId, fileId: resourceId })
+              if (!value || value.file.sha256 !== tracked.contentSha256 || value.file.mime !== 'image/png') return null
+              return { bytes: value.bytes, mime: value.file.mime, sha256: tracked.contentSha256 }
+            } })
+            await validateRenderedPdf(candidate, await writer.render(source.bytes, candidate))
+            return
+          }
           const { validateOfficeInternalCandidateRendering } = await import('./office/render-validation.js')
           const rendered = await validateOfficeInternalCandidateRendering({
             snapshot: candidate,
@@ -7082,8 +7139,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }))
       return { ...revision, affectedObjectIds: [...new Set([...revision.affectedObjectIds, ...revision.commands.flatMap(command => command.kind === 'appendSpreadsheetRecords' ? [command.tableId] : [])])] }
     },
-    async commit({ job, snapshot, expectedVersion }) {
-      return (await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion, kind: 'revision' })).version
+    async commit({ job, snapshot, expectedVersion, expectedSeq }) {
+      return (await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion, expectedSeq, kind: 'revision' })).version
     },
     async propose({ job, baseVersion, commands, affectedObjectIds }) {
       const head = await officeArtifactStore.getHeadVersion(job.initiatedByUserId, job.artifactId)

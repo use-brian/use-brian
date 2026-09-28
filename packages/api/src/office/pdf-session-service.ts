@@ -4,11 +4,13 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   createPdfWriterPort,
   parsePdfSession,
+  renderPdfApprovalPage,
   validateRenderedPdf,
   type PdfWriterResult,
 } from '@use-brian/core'
 import {
   encodeOfficeState,
+  applyOfficeCommand,
   officeStateVector,
   snapshotToYDoc,
   type OfficeCommand,
@@ -24,7 +26,7 @@ import {
 } from './pdf-session-assets.js'
 
 export type PdfSessionSource =
-  | { kind: 'file_cache'; id: string }
+  | { kind: 'file_cache'; id: string; expectedSessionId?: string }
   | { kind: 'workspace_file'; id: string }
 
 export type ResolvedPdfSessionSource = {
@@ -92,6 +94,13 @@ function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
+function stableUuid(seed: string): string {
+  const hex = createHash('sha256').update(seed).digest('hex').slice(0, 32).split('')
+  hex[12] = '4'
+  hex[16] = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)
+  return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`
+}
+
 function sessionTargets(snapshot: PdfSnapshot): PdfSessionTarget[] {
   return snapshot.pages.flatMap((page, pageIndex) => page.placementTargets.map((target) => ({
     targetId: target.id,
@@ -151,6 +160,67 @@ export function createPdfSessionService(deps: PdfSessionServiceDeps) {
   async function loadReady(userId: string, row: PdfSessionRow): Promise<PdfSessionReady> {
     const current = await requireLive(userId, row.id)
     return ready(row, current.snapshot)
+  }
+
+  async function writerContext(userId: string, session: PdfSessionRow, snapshot: PdfSnapshot) {
+    const assets = await sessions.listAssets(userId, session.id)
+    const sourceAsset = assets.find((asset) => asset.role === 'source')
+    if (!sourceAsset || sourceAsset.contentSha256 !== snapshot.source.sha256) {
+      throw new PdfSessionServiceError('source_unavailable', 'The PDF source is unavailable.', 404)
+    }
+    const source = await deps.assets.read({ userId, workspaceId: session.workspaceId, fileId: sourceAsset.fileId })
+    if (!source || sha256(source.bytes) !== snapshot.source.sha256) {
+      throw new PdfSessionServiceError('source_unavailable', 'The PDF source is unavailable.', 404)
+    }
+    const writer = createPdfWriterPort({
+      resolveResource: async (resourceId) => {
+        const asset = assets.find((candidate) => candidate.fileId === resourceId && candidate.role === 'signature')
+        if (!asset) return null
+        const resource = await deps.assets.read({ userId, workspaceId: session.workspaceId, fileId: resourceId })
+        if (!resource
+          || (resource.file.mime !== 'image/png' && resource.file.mime !== 'image/jpeg')
+          || sha256(resource.bytes) !== asset.contentSha256) return null
+        return { bytes: resource.bytes, mime: resource.file.mime, sha256: asset.contentSha256 }
+      },
+    })
+    return { assets, source, writer }
+  }
+
+  async function validateSignatureAnchors(params: {
+    userId: string
+    approverUserId: string
+    artifactId: string
+    targetId: string
+    signatureResourceId: string
+    expectedSourceHash: string
+    expectedVersion: number
+  }) {
+    if (params.userId !== params.approverUserId) return null
+    let session: PdfSessionRow
+    try {
+      session = await requireSession(params.userId, params.artifactId)
+    } catch (error) {
+      if (error instanceof PdfSessionServiceError) return null
+      throw error
+    }
+    if (session.ownerUserId !== params.approverUserId || session.headVersion !== params.expectedVersion) return null
+    let live: OfficeLiveSnapshot & { snapshot: PdfSnapshot }
+    try {
+      live = await requireLive(params.userId, params.artifactId)
+    } catch (error) {
+      if (error instanceof PdfSessionServiceError) return null
+      throw error
+    }
+    if (live.baseVersion !== params.expectedVersion || live.snapshot.source.sha256 !== params.expectedSourceHash) return null
+    const pageIndex = live.snapshot.pages.findIndex((page) => page.placementTargets.some((target) => target.id === params.targetId))
+    if (pageIndex < 0) return null
+    const target = live.snapshot.pages[pageIndex]!.placementTargets.find((candidate) => candidate.id === params.targetId)!
+    if (target.creatorUserId !== params.approverUserId || target.creationVersion > params.expectedVersion) return null
+    const resource = live.snapshot.resources.find((candidate) => candidate.id === params.signatureResourceId)
+    const assets = await sessions.listAssets(params.userId, params.artifactId)
+    const signatureAsset = assets.find((candidate) => candidate.fileId === params.signatureResourceId && candidate.role === 'signature')
+    if (!resource || resource.kind !== 'image' || resource.mime !== 'image/png' || !signatureAsset || signatureAsset.contentSha256 !== resource.hash) return null
+    return { session, live, pageIndex, target, signatureAsset }
   }
 
   return {
@@ -313,6 +383,163 @@ export function createPdfSessionService(deps: PdfSessionServiceDeps) {
       return { session, live: await requireLive(userId, artifactId) }
     },
 
+    async describeSignature(params: {
+      userId: string
+      artifactId: string
+      targetId: string
+      signatureResourceId: string
+      expectedSourceHash: string
+      expectedVersion: number
+    }) {
+      const anchors = await validateSignatureAnchors({ ...params, approverUserId: params.userId })
+      if (!anchors) return null
+      return {
+        title: anchors.live.snapshot.title,
+        fileName: anchors.live.snapshot.source.originalFileName,
+        pageNumber: anchors.pageIndex + 1,
+        rect: anchors.target.rect,
+        sourceHash: anchors.live.snapshot.source.sha256,
+        version: anchors.session.headVersion,
+        expiresAt: anchors.session.expiresAt.toISOString(),
+      }
+    },
+
+    async previewSignature(params: {
+      userId: string
+      approverUserId: string
+      assistantId: string
+      approvalId: string
+      artifactId: string
+      targetId: string
+      signatureResourceId: string
+      expectedSourceHash: string
+      expectedVersion: number
+      idempotencyKey: string
+    }): Promise<{ bytes: Buffer; validForMs: number } | null> {
+      const anchors = await validateSignatureAnchors(params)
+      if (!anchors) return null
+      const command: OfficeCommand = {
+        commandId: stableUuid(`${params.artifactId}:${params.idempotencyKey}`),
+        artifactId: params.artifactId,
+        baseVersion: params.expectedVersion,
+        actor: { type: 'assistant', id: params.assistantId },
+        origin: 'ai',
+        kind: 'placePdfSignature',
+        targetId: params.targetId,
+        signatureResourceId: params.signatureResourceId,
+        approvalReceiptId: params.approvalId,
+      }
+      const candidate = applyOfficeCommand(anchors.live.snapshot, command) as PdfSnapshot
+      const context = await writerContext(params.userId, anchors.session, candidate)
+      const rendered = await context.writer.render(context.source.bytes, candidate)
+      await validateRenderedPdf(candidate, rendered)
+      return {
+        bytes: await renderPdfApprovalPage(rendered.bytes, anchors.pageIndex + 1),
+        validForMs: Math.max(1, Math.min(30_000, anchors.session.expiresAt.getTime() - Date.now())),
+      }
+    },
+
+    async placeSignature(params: {
+      userId: string
+      assistantId: string
+      approverUserId: string
+      approvalId: string
+      artifactId: string
+      targetId: string
+      signatureResourceId: string
+      expectedSourceHash: string
+      expectedVersion: number
+      idempotencyKey: string
+    }): Promise<{ artifactId: string; version: number } | 'pdf_signature_approval_stale'> {
+      assertIdempotencyKey(params.idempotencyKey)
+      let session: PdfSessionRow
+      let current: OfficeLiveSnapshot & { snapshot: PdfSnapshot }
+      try {
+        session = await requireSession(params.userId, params.artifactId)
+        current = await requireLive(params.userId, params.artifactId)
+      } catch (error) {
+        if (error instanceof PdfSessionServiceError) return 'pdf_signature_approval_stale'
+        throw error
+      }
+      const commandId = stableUuid(`${params.artifactId}:${params.idempotencyKey}`)
+      const prior = current.snapshot.pages.flatMap((page) => page.overlays).find((overlay) => overlay.id === commandId)
+      if (prior) {
+        return prior.kind === 'signature'
+          && prior.resourceId === params.signatureResourceId
+          && prior.authorizingUserId === params.approverUserId
+          && prior.approvalReceiptId === params.approvalId
+          && current.snapshot.source.sha256 === params.expectedSourceHash
+          ? { artifactId: params.artifactId, version: params.expectedVersion + 1 }
+          : 'pdf_signature_approval_stale'
+      }
+      const anchors = await validateSignatureAnchors(params)
+      if (!anchors) return 'pdf_signature_approval_stale'
+      const command: OfficeCommand = {
+        commandId,
+        artifactId: params.artifactId,
+        baseVersion: params.expectedVersion,
+        actor: { type: 'assistant', id: params.assistantId },
+        origin: 'ai',
+        kind: 'placePdfSignature',
+        targetId: params.targetId,
+        signatureResourceId: params.signatureResourceId,
+        approvalReceiptId: params.approvalId,
+      }
+      const candidate = applyOfficeCommand(anchors.live.snapshot, command) as PdfSnapshot
+      let renderContext: Awaited<ReturnType<typeof writerContext>>
+      try {
+        renderContext = await writerContext(params.userId, anchors.session, candidate)
+      } catch (error) {
+        if (error instanceof PdfSessionServiceError) return 'pdf_signature_approval_stale'
+        throw error
+      }
+      const rendered = await renderContext.writer.render(renderContext.source.bytes, candidate)
+      await validateRenderedPdf(candidate, rendered)
+      const snapshotBytes = new TextEncoder().encode(JSON.stringify(candidate))
+      const snapshotHash = sha256(snapshotBytes)
+      const doc = snapshotToYDoc(candidate)
+      const stored = await deps.assets.write({
+        userId: params.userId,
+        workspaceId: session.workspaceId,
+        path: pdfSessionAssetPath(session.id, 'snapshot', `${params.expectedVersion + 1}-${snapshotHash}.json`),
+        bytes: snapshotBytes,
+        mime: 'application/json',
+        sensitivity: session.sensitivity,
+        compartments: session.compartments,
+        projectIds: session.projectIds,
+        metadata: PDF_SESSION_FILE_METADATA,
+      })
+      try {
+        if (!await sessions.trackAsset({ userId: params.userId, artifactId: session.id, fileId: stored.id, role: 'snapshot', contentSha256: snapshotHash })) {
+          throw new PdfSessionServiceError('pdf_signature_approval_stale', 'The PDF signature approval is stale.', 409)
+        }
+        const committed = await sessions.commitSignaturePlacement({
+          userId: params.userId,
+          assistantId: params.assistantId,
+          artifactId: params.artifactId,
+          expectedVersion: params.expectedVersion,
+          expectedSeq: anchors.live.seq,
+          snapshot: candidate,
+          snapshotFileId: stored.id,
+          snapshotHash,
+          snapshotBytes: encodeOfficeState(doc),
+          stateVector: officeStateVector(doc),
+          sourceHash: params.expectedSourceHash,
+          targetId: params.targetId,
+          signatureResourceId: params.signatureResourceId,
+          approvalId: params.approvalId,
+          commandId,
+        })
+        if (!committed) throw new PdfSessionServiceError('pdf_signature_approval_stale', 'The PDF signature approval is stale.', 409)
+        return { artifactId: params.artifactId, version: committed.version }
+      } catch (error) {
+        await sessions.untrackAsset(params.userId, session.id, stored.id)
+        await deps.assets.delete({ userId: params.userId, workspaceId: session.workspaceId, fileId: stored.id })
+        if (error instanceof PdfSessionServiceError && error.code === 'pdf_signature_approval_stale') return 'pdf_signature_approval_stale'
+        throw error
+      }
+    },
+
     async readSource(userId: string, artifactId: string) {
       const session = await requireSession(userId, artifactId)
       const source = await deps.assets.read({ userId, workspaceId: session.workspaceId, fileId: session.sourceFileId })
@@ -403,25 +630,67 @@ export function createPdfSessionService(deps: PdfSessionServiceDeps) {
       const session = await requireSession(params.userId, params.artifactId)
       const current = await requireLive(params.userId, params.artifactId)
       if (current.seq !== params.expectedSeq) throw new PdfSessionServiceError('version_conflict', 'The PDF changed. Reload it and try again.', 409)
-      const assets = await sessions.listAssets(params.userId, params.artifactId)
-      const sourceAsset = assets.find((asset) => asset.role === 'source')
-      if (!sourceAsset) throw new PdfSessionServiceError('source_unavailable', 'The PDF source is unavailable.', 404)
-      const source = await deps.assets.read({ userId: params.userId, workspaceId: session.workspaceId, fileId: sourceAsset.fileId })
-      if (!source || sha256(source.bytes) !== current.snapshot.source.sha256) {
-        throw new PdfSessionServiceError('source_unavailable', 'The PDF source is unavailable.', 404)
-      }
-      const writer = createPdfWriterPort({
-        resolveResource: async (resourceId) => {
-          const asset = assets.find((candidate) => candidate.fileId === resourceId && candidate.role === 'signature')
-          if (!asset) return null
-          const resource = await deps.assets.read({ userId: params.userId, workspaceId: session.workspaceId, fileId: resourceId })
-          if (!resource || (resource.file.mime !== 'image/png' && resource.file.mime !== 'image/jpeg')) return null
-          return { bytes: resource.bytes, mime: resource.file.mime, sha256: asset.contentSha256 }
-        },
-      })
-      const result = await writer.render(source.bytes, current.snapshot)
+      const context = await writerContext(params.userId, session, current.snapshot)
+      const result = await context.writer.render(context.source.bytes, current.snapshot)
       await validateRenderedPdf(current.snapshot, result)
       return { result, snapshot: current.snapshot, session }
+    },
+
+    async commitRevision(params: {
+      userId: string
+      assistantId: string
+      artifactId: string
+      expectedVersion: number
+      expectedSeq: number
+      snapshot: PdfSnapshot
+    }): Promise<{ version: number }> {
+      const session = await requireSession(params.userId, params.artifactId)
+      const current = await requireLive(params.userId, params.artifactId)
+      if (session.headVersion !== params.expectedVersion
+        || current.baseVersion !== params.expectedVersion
+        || current.seq !== params.expectedSeq
+        || params.snapshot.artifactId !== params.artifactId
+        || params.snapshot.source.sha256 !== current.snapshot.source.sha256
+        || JSON.stringify(params.snapshot.source) !== JSON.stringify(current.snapshot.source)
+        || JSON.stringify(params.snapshot.resources) !== JSON.stringify(current.snapshot.resources)) {
+        throw new PdfSessionServiceError('version_conflict', 'The PDF changed. Reload it and try again.', 409)
+      }
+      const renderContext = await writerContext(params.userId, session, params.snapshot)
+      const rendered = await renderContext.writer.render(renderContext.source.bytes, params.snapshot)
+      await validateRenderedPdf(params.snapshot, rendered)
+      const snapshotBytes = new TextEncoder().encode(JSON.stringify(params.snapshot))
+      const snapshotHash = sha256(snapshotBytes)
+      const doc = snapshotToYDoc(params.snapshot)
+      const stored = await deps.assets.write({
+        userId: params.userId,
+        workspaceId: session.workspaceId,
+        path: pdfSessionAssetPath(session.id, 'snapshot', `${params.expectedVersion + 1}-${snapshotHash}.json`),
+        bytes: snapshotBytes,
+        mime: 'application/json',
+        sensitivity: session.sensitivity,
+        compartments: session.compartments,
+        projectIds: session.projectIds,
+        metadata: PDF_SESSION_FILE_METADATA,
+      })
+      try {
+        if (!await sessions.trackAsset({ userId: params.userId, artifactId: session.id, fileId: stored.id, role: 'snapshot', contentSha256: snapshotHash })) {
+          throw new PdfSessionServiceError('version_conflict', 'The PDF changed. Reload it and try again.', 409)
+        }
+        const committed = await sessions.commitRevision({
+          ...params,
+          snapshotFileId: stored.id,
+          snapshotHash,
+          snapshotBytes: encodeOfficeState(doc),
+          stateVector: officeStateVector(doc),
+          sourceHash: params.snapshot.source.sha256,
+        })
+        if (!committed) throw new PdfSessionServiceError('version_conflict', 'The PDF changed. Reload it and try again.', 409)
+        return committed
+      } catch (error) {
+        await sessions.untrackAsset(params.userId, session.id, stored.id)
+        await deps.assets.delete({ userId: params.userId, workspaceId: session.workspaceId, fileId: stored.id })
+        throw error
+      }
     },
 
     async createRelease(params: { userId: string; artifactId: string; expectedSeq: number }) {
