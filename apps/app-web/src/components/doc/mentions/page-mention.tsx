@@ -38,6 +38,7 @@ import { Suggestion, type SuggestionProps } from "@tiptap/suggestion";
 import { PluginKey } from "@tiptap/pm/state";
 import { createSuggestionDismiss } from "../suggestion-dismiss";
 import { onViewportChange, positionSuggestionPopup } from "@/lib/popup-clamp";
+import { isCurrentDirectoryPage } from "@/lib/api/mentions";
 
 /**
  * Distinct suggestion plugin key for the standalone (`withSuggestion: true`)
@@ -210,6 +211,7 @@ export function createPageMentionExtension(
           allowSpaces: true,
           startOfLine: false,
           command: ({ editor, range, props }) => {
+            if (!isCurrentDirectoryPage(workspaceId, props)) return;
             const tr = editor.state.tr.deleteRange(range.from, range.to);
             editor.view.dispatch(tr);
             insertPageMention(editor, props);
@@ -254,6 +256,8 @@ export function createPageMentionExtension(
                     props: {
                       people: [],
                       pages: props.items,
+                      pagesWorkspaceId: workspaceId,
+                      query: props.query,
                       initialTab: "pages",
                       onSelect: (item: MentionItem) => {
                         if (item.kind === "page") props.command(item);
@@ -273,6 +277,8 @@ export function createPageMentionExtension(
                 component?.updateProps({
                   people: [],
                   pages: props.items,
+                  pagesWorkspaceId: workspaceId,
+                  query: props.query,
                   onSelect: (item: MentionItem) => {
                     if (item.kind === "page") props.command(item);
                   },

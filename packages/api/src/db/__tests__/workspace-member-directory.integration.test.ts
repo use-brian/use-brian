@@ -26,9 +26,10 @@ describe('[COMP:api/workspace-member-directory] real membership projection',()=>
     expect(first.body).toMatchObject({workspaceId,viewerId:member})
     expect(first.body.members).toHaveLength(2)
     expect(first.body.members).toEqual(expect.arrayContaining([
-      {userId:owner,name:'Fixture owner',email:'owner@example.com',avatarUrl:'https://cdn.example/owner.png'},
-      {userId:member,name:'Fixture member',email:'member@example.com',avatarUrl:null},
+      expect.objectContaining({userId:owner,name:'Fixture owner',email:'owner@example.com',avatarUrl:'https://cdn.example/owner.png',role:'owner',canDraft:false}),
+      expect.objectContaining({userId:member,name:'Fixture member',email:'member@example.com',avatarUrl:null,role:'member',canDraft:false}),
     ]))
+    expect(first.body.members.every(row=>typeof row.memberId==='string')).toBe(true)
     expect(first.body.validForMs).toBeGreaterThan(0)
     expect(first.body.validForMs).toBeLessThanOrEqual(30_000)
     await expect(readWorkspaceMemberDirectory(outsider,workspaceId)).resolves.toEqual({status:404,body:{error:'member_directory_unavailable'}})

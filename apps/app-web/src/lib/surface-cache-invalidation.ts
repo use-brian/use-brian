@@ -202,6 +202,7 @@ export function applySpineEventToSurfaceCache(
 ): void {
   if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) invalidateSurfaceCache(`workspace-member-directory:${workspaceId}:`);
+  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) invalidateSurfaceCache(`page-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT) {
     invalidateSurfaceCache(`doc-media:${workspaceId}:`);
     invalidateSurfaceCache(`file-cache-media:${workspaceId}:`);

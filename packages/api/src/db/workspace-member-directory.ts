@@ -1,11 +1,20 @@
 /** Bounded human workspace roster. [COMP:api/workspace-member-directory] */
 import {getPool,rollbackAndRelease} from './client.js'
 
-export type DirectoryMember={userId:string;name:string|null;email:string|null;avatarUrl:string|null}
+export type DirectoryMember={
+  memberId:string
+  userId:string
+  name:string|null
+  email:string|null
+  avatarUrl:string|null
+  role:'owner'|'admin'|'member'
+  canDraft:boolean
+}
 type DirectoryRead={members:DirectoryMember[]}
 const directorySql=`
   SELECT COALESCE(jsonb_agg(jsonb_build_object(
-    'userId', u.id, 'name', u.name, 'email', u.email, 'avatarUrl', u.avatar_url
+    'memberId', member.id, 'userId', u.id, 'name', u.name, 'email', u.email,
+    'avatarUrl', u.avatar_url, 'role', member.role, 'canDraft', member.can_draft
   ) ORDER BY member.joined_at, member.id), '[]'::jsonb) AS members
   FROM workspace_members caller
   JOIN workspace_members member ON member.workspace_id=caller.workspace_id

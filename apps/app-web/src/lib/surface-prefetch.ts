@@ -1004,3 +1004,8 @@ export function officePanelCacheKey(prefix: string | null, kind: "job" | "job-ev
 export function workspaceMemberDirectoryCacheKey(workspaceId: string, viewerId: string): string {
   return `workspace-member-directory:${workspaceId}:${viewerId}`;
 }
+
+/** Current-RLS page names used only by page-reference selection surfaces. */
+export function pageDirectoryCacheKey(workspaceId: string, viewerId: string): string {
+  return `page-directory:${workspaceId}:${viewerId}`;
+}

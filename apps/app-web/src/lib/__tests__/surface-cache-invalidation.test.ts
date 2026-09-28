@@ -276,3 +276,11 @@ it('[COMP:app-web/surface-cache-invalidation] purges the bounded member director
   applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,{workspaceId:'w1'},'w1');
   expect(readSurfaceCache('workspace-member-directory:w1:viewer').data).toBeUndefined();
 });
+
+it('[COMP:app-web/surface-cache-invalidation] purges only the changed workspace page directory on authority signals',async()=>{
+  await loadSurfaceCache('page-directory:w1:viewer',async()=>'restricted');
+  await loadSurfaceCache('page-directory:w2:viewer',async()=>'other');
+  applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,{workspaceId:'w1'},'w1');
+  expect(readSurfaceCache('page-directory:w1:viewer').data).toBeUndefined();
+  expect(readSurfaceCache('page-directory:w2:viewer').data).toBe('other');
+});

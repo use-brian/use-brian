@@ -56,6 +56,7 @@ import {
   sidebarTreeCacheKey,
   workspaceDetailCacheKey,
   workspaceMemberDirectoryCacheKey,
+  pageDirectoryCacheKey,
   workflowDetailCacheKey,
   workflowRunCacheKey,
   type WarmableSurface,
@@ -113,6 +114,11 @@ describe("[COMP:app-web/surface-prefetch] Surface prefetch keys", () => {
   it("keys the protected member directory by workspace and explicit viewer",()=>{
     expect(workspaceMemberDirectoryCacheKey("w1","u1")).toBe("workspace-member-directory:w1:u1");
     expect(workspaceMemberDirectoryCacheKey("w1","u1")).not.toBe(workspaceMemberDirectoryCacheKey("w1","u2"));
+  });
+
+  it("keys the protected page directory by workspace and explicit viewer",()=>{
+    expect(pageDirectoryCacheKey("w1","u1")).toBe("page-directory:w1:u1");
+    expect(pageDirectoryCacheKey("w1","u1")).not.toBe(pageDirectoryCacheKey("w1","u2"));
   });
 
   it("returns null for surfaces with no single landing list", () => {

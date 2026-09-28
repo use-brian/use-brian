@@ -100,6 +100,7 @@ import type { WorkspaceGroupStore } from '../db/workspace-group-store.js'
 import { publishPageShareChange } from '../page-share-fanout.js'
 import { renderPublicPage } from './_public-render.js'
 import { runDocAutoTitle } from '../doc/auto-title.js'
+import { readWorkspacePageDirectory } from '../db/page-directory.js'
 
 export type ViewsRouteOptions = {
   savedViewStore: SavedViewStore
@@ -1768,6 +1769,24 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const fresh = await opts.savedViewStore.getById(userId, req.params.id)
     if (!fresh) return notFound(res, 'View not found')
     res.json(viewMetadata(fresh))
+  })
+
+  // Minimal current-authority page names for references and child-page picks.
+  router.get('/workspaces/:workspaceId/page-directory', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
+    const send = (status: number, body: unknown) => res.status(status).type('json').end(JSON.stringify(body))
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { send(401, { error: 'Unauthorized' }); return }
+    if (!z.string().uuid().safeParse(req.params.workspaceId).success) {
+      send(404, { error: 'page_directory_unavailable' }); return
+    }
+    try {
+      const reply = await readWorkspacePageDirectory(userId, req.params.workspaceId)
+      send(reply.status, reply.body)
+    } catch (error) {
+      console.error('[views] page directory failed:', error)
+      send(500, { error: 'page_directory_unavailable' })
+    }
   })
 
   // Version handshake: an older API must not silently ignore offline IDs.

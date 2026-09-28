@@ -49,7 +49,7 @@ import {
   useState,
   type ForwardRefRenderFunction,
 } from "react";
-import { useWorkspaceDirectory } from "@/lib/use-workspace-directory";
+import { useWorkspaceDirectory, useWorkspacePageDirectory } from "@/lib/use-workspace-directory";
 import { FileText, User } from "lucide-react";
 import type { SuggestionKeyDownProps } from "@tiptap/suggestion";
 
@@ -124,6 +124,8 @@ export type MentionPopupRef = {
 export type MentionPopupProps = {
   /** Production person popups subscribe to the current bounded directory. */
   peopleWorkspaceId?: string;
+  /** Production page popups subscribe to the current bounded directory. */
+  pagesWorkspaceId?: string;
   query?: string;
   /** People-tab rows. May be empty (caller decides recents-vs-search). */
   people: PersonMentionItem[];
@@ -151,11 +153,13 @@ const FALLBACK_LABELS: NonNullable<MentionPopupProps["labels"]> = {
 };
 
 const MentionPopupImpl: ForwardRefRenderFunction<MentionPopupRef, MentionPopupProps> = (
-  { people: suppliedPeople, pages, initialTab = "people", onSelect, labels, peopleWorkspaceId, query },
+  { people: suppliedPeople, pages: suppliedPages, initialTab = "people", onSelect, labels, peopleWorkspaceId, pagesWorkspaceId, query },
   ref,
 ) => {
   const currentPeople = useWorkspaceDirectory(peopleWorkspaceId ?? null, query ?? "");
+  const currentPages = useWorkspacePageDirectory(pagesWorkspaceId ?? null, query ?? "");
   const people = peopleWorkspaceId ? currentPeople : suppliedPeople;
+  const pages = pagesWorkspaceId ? currentPages : suppliedPages;
   const [activeTab, setActiveTab] = useState<MentionTab>(initialTab);
   const [selectedIndex, setSelectedIndex] = useState(0);
 

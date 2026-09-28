@@ -229,12 +229,12 @@ describe('[COMP:api/workspace-member-directory] GET /:workspaceId/member-directo
   })
   it('publishes only the bounded reader response without HTTP caching',async()=>{
     const viewerId='00000000-0000-4000-8000-000000000001'
-    mockMemberDirectory.mockResolvedValueOnce({status:200,body:{workspaceId,viewerId,validForMs:12_000,members:[{userId:viewerId,name:'Ari Example',email:'ari@example.com',avatarUrl:null}]}})
+    mockMemberDirectory.mockResolvedValueOnce({status:200,body:{workspaceId,viewerId,validForMs:12_000,members:[{memberId:'00000000-0000-4000-8000-000000000101',userId:viewerId,name:'Ari Example',email:'ari@example.com',avatarUrl:null,role:'member',canDraft:true}]}})
     const res=await request(app(viewerId)).get(`/api/workspaces/${workspaceId}/member-directory`)
     expect(res.status).toBe(200)
     expect(res.headers['cache-control']).toBe('private, no-store')
     expect(res.headers.etag).toBeUndefined()
-    expect(res.body).toMatchObject({workspaceId,viewerId,validForMs:12_000})
+    expect(res.body).toMatchObject({workspaceId,viewerId,validForMs:12_000,members:[{memberId:'00000000-0000-4000-8000-000000000101',role:'member',canDraft:true}]})
     expect(mockMemberDirectory).toHaveBeenCalledWith(viewerId,workspaceId)
   })
   it.each([

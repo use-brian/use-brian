@@ -11,15 +11,16 @@ vi.mock('@/lib/user',()=>({
 vi.mock('@/lib/auth-fetch',()=>({authFetch:(...args:unknown[])=>state.fetch(...args)}))
 
 import {invalidateSurfaceCache,resetSurfaceCache,SurfaceCacheEvictionError} from '@/lib/surface-cache'
-import {isCurrentDirectoryPerson,listWorkspaceMembers,readWorkspaceMemberDirectory} from '@/lib/api/mentions'
+import {fetchPages,isCurrentDirectoryPage,isCurrentDirectoryPerson,listWorkspaceMembers,readWorkspaceMemberDirectory,readWorkspacePageDirectory} from '@/lib/api/mentions'
+import {loadWorkspaceRoster} from '@/lib/api/workspace-roster'
 import {useWorkspaceDirectory} from '@/lib/use-workspace-directory'
-import {workspaceMemberDirectoryCacheKey} from '@/lib/surface-prefetch'
+import {pageDirectoryCacheKey,workspaceMemberDirectoryCacheKey} from '@/lib/surface-prefetch'
 
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true
 
 const members=[
-  {userId:'person-a',name:'Ari Example',email:'ari@example.com',avatarUrl:null},
-  {userId:'person-b',name:'Bo Example',email:'bo@example.com',avatarUrl:null},
+  {memberId:'member-a',userId:'person-a',name:'Ari Example',email:'ari@example.com',avatarUrl:null,role:'member' as const,canDraft:true},
+  {memberId:'member-b',userId:'person-b',name:'Bo Example',email:'bo@example.com',avatarUrl:null,role:'admin' as const,canDraft:false},
 ]
 const response=(viewerId=state.viewer,validForMs=6_000)=>new Response(JSON.stringify({workspaceId:'workspace-a',viewerId,validForMs,members}),{status:200})
 const pending=()=>new Promise<Response>(()=>{})
@@ -77,5 +78,47 @@ describe('[COMP:app-web/mention-fetchers] bounded workspace directory',()=>{
   it('rejects a response bound to another viewer',async()=>{
     state.fetch.mockResolvedValue(response('viewer-b'))
     await expect(readWorkspaceMemberDirectory('workspace-a','viewer-a')).rejects.toBeInstanceOf(SurfaceCacheEvictionError)
+  })
+
+  it('derives task member ids from the same bounded member projection',async()=>{
+    await render()
+    await expect(loadWorkspaceRoster('workspace-a')).resolves.toEqual([
+      {id:'member-a',userId:'person-a',email:'ari@example.com',userName:'Ari Example',avatarUrl:null,role:'member',canDraft:true},
+      {id:'member-b',userId:'person-b',email:'bo@example.com',userName:'Bo Example',avatarUrl:null,role:'admin',canDraft:false},
+    ])
+    expect(state.fetch).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('[COMP:app-web/mention-fetchers] bounded page directory',()=>{
+  const pageResponse=(viewerId=state.viewer,validForMs=6_000)=>new Response(JSON.stringify({
+    workspaceId:'workspace-a',viewerId,validForMs,pages:[
+      {id:'page-a',title:'Current plan'},
+      {id:'page-b',title:'Roadmap'},
+    ],
+  }),{status:200})
+
+  it('shares one current projection, filters locally and binds selection to it',async()=>{
+    state.fetch.mockResolvedValue(pageResponse())
+    const rows=await fetchPages('workspace-a','road')
+    expect(rows.map(row=>row.id)).toEqual(['page-b'])
+    expect(isCurrentDirectoryPage('workspace-a',rows[0]!)).toBe(true)
+    expect(state.fetch).toHaveBeenCalledTimes(1)
+    expect(state.fetch.mock.calls[0]).toEqual([expect.stringContaining('/api/workspaces/workspace-a/page-directory'),{cache:'no-store'}])
+    expect((await fetchPages('workspace-a','current')).map(row=>row.id)).toEqual(['page-a'])
+    expect(state.fetch).toHaveBeenCalledTimes(1)
+    invalidateSurfaceCache(pageDirectoryCacheKey('workspace-a','viewer-a'))
+    expect(isCurrentDirectoryPage('workspace-a',rows[0]!)).toBe(false)
+  })
+
+  it('rejects cross-viewer page publications and expires cached titles',async()=>{
+    state.fetch.mockResolvedValue(pageResponse('viewer-b'))
+    await expect(readWorkspacePageDirectory('workspace-a','viewer-a')).rejects.toBeInstanceOf(SurfaceCacheEvictionError)
+    vi.useFakeTimers()
+    state.fetch.mockResolvedValue(pageResponse('viewer-a',800))
+    const rows=await fetchPages('workspace-a','')
+    expect(rows).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(801)
+    expect(isCurrentDirectoryPage('workspace-a',rows[0]!)).toBe(false)
   })
 })

@@ -7,7 +7,7 @@
  * filtered as you type, and calls `onPick` with the chosen page. The editor
  * (`collab-page-editor`) mounts it at the caret when the user picks "Link to
  * page" from the slash menu, then inserts a `child_page` embed pointing at the
- * selected page id. Backed by the same `fetchPages` resolver the `@page`
+ * selected page id. Backed by the same bounded page directory the `@page`
  * mention uses.
  *
  * Keyboard: ↑/↓ move, Enter picks, Esc closes. Click-outside closes. Mirrors
@@ -18,7 +18,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FileText } from "lucide-react";
-import { fetchPages } from "@/lib/api/mentions";
+import { isCurrentDirectoryPage } from "@/lib/api/mentions";
+import { useWorkspacePageDirectory } from "@/lib/use-workspace-directory";
 import type { PageMentionItem } from "@/components/doc/mentions/mention-popup";
 import { useT } from "@/lib/i18n/client";
 import { clampPopupRect, measureViewport, onViewportChange } from "@/lib/popup-clamp";
@@ -35,7 +36,6 @@ export type PagePickerProps = {
 export function PagePicker({ workspaceId, position, onPick, onClose }: PagePickerProps) {
   const t = useT().docPage.pagePicker;
   const [query, setQuery] = useState("");
-  const [items, setItems] = useState<PageMentionItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -45,6 +45,7 @@ export function PagePicker({ workspaceId, position, onPick, onClose }: PagePicke
   // first paint is where the caret is; the layout effect corrects it before
   // the frame shows, and again whenever the visual viewport changes.
   const [placed, setPlaced] = useState(position);
+  const items = useWorkspacePageDirectory(workspaceId, query);
 
   // Focus the search box on open. Not on a phone: the caret's keyboard is
   // already up and a second focus hop only scrolls the page (M4).
@@ -69,20 +70,10 @@ export function PagePicker({ workspaceId, position, onPick, onClose }: PagePicke
     return onViewportChange(place);
   }, [position.top, position.left, items.length]);
 
-  // Resolve pages on open + as the query changes. `fetchPages` caches the
-  // roster per workspace, so each keystroke is a local filter.
+  // Reset the highlight whenever the bounded current projection/filter changes.
   useEffect(() => {
-    let cancelled = false;
-    void fetchPages(workspaceId, query).then((rows) => {
-      if (!cancelled) {
-        setItems(rows);
-        setSelectedIndex(0);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId, query]);
+    setSelectedIndex(0);
+  }, [items, query]);
 
   // Click-outside closes.
   useEffect(() => {
@@ -96,9 +87,9 @@ export function PagePicker({ workspaceId, position, onPick, onClose }: PagePicke
   const pick = useCallback(
     (index: number) => {
       const item = items[index];
-      if (item) onPick(item);
+      if (item && isCurrentDirectoryPage(workspaceId, item)) onPick(item);
     },
-    [items, onPick],
+    [items, onPick, workspaceId],
   );
 
   const onKeyDown = useCallback(

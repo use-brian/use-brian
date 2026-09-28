@@ -8,7 +8,7 @@ vi.mock('../client.js',()=>({
 
 import {readWorkspaceMemberDirectory} from '../workspace-member-directory.js'
 
-const member={userId:'00000000-0000-4000-8000-000000000001',name:'Ari Example',email:'ari@example.com',avatarUrl:null}
+const member={memberId:'00000000-0000-4000-8000-000000000101',userId:'00000000-0000-4000-8000-000000000001',name:'Ari Example',email:'ari@example.com',avatarUrl:null,role:'member' as const,canDraft:true}
 
 function clientWith(rows:Array<{rows:unknown[]}>) {
   const snapshots=[...rows]
@@ -29,6 +29,7 @@ describe('[COMP:api/workspace-member-directory] coherent publication',()=>{
     const sql=String(client.query.mock.calls.find(([statement])=>String(statement).includes('SELECT COALESCE'))?.[0])
     expect(sql).toContain('workspace_members caller')
     expect(sql).toContain('member.workspace_id=caller.workspace_id')
+    expect(sql).toContain("'memberId', member.id")
     expect(state.rollback).toHaveBeenCalledWith(client)
   })
 

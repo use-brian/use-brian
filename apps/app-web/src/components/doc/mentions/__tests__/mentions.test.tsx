@@ -209,6 +209,14 @@ describe("[COMP:app-web/page-mention] PageMentionNode", () => {
     expect(dom[0]).toBe("a");
     expect(dom[1]).toMatchObject({ "data-mention": "page", href: "/p/p1" });
   });
+
+  it("renders the persisted authored title without consulting live target metadata", () => {
+    const renderText = PageMentionNode.config.renderText as unknown as (
+      args: { node: { attrs: Record<string, unknown> } },
+    ) => string;
+    expect(renderText({ node: { attrs: { id: "p1", title: "Title when inserted" } } }))
+      .toBe("📄 Title when inserted");
+  });
 });
 
 // ── Extension factories ────────────────────────────────────────────────
