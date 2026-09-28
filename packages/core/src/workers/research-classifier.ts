@@ -15,6 +15,10 @@
 
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import type {
+  DecisionExecutionPort,
+  DecisionResponse,
+} from '../decisions/index.js'
 
 const CLASSIFIER_SYSTEM_PROMPT = `You decide if a user message warrants deep research mode.
 Return JSON only. No explanation.
@@ -90,6 +94,10 @@ export type ResearchClassifyOptions = {
    * keeps standalone/test use on the historical literal.
    */
   model?: string
+  /** Provider-neutral decision cascade. Omitted preserves the legacy call. */
+  decisionRuntime?: DecisionExecutionPort
+  workspaceId?: string
+  runId?: string
 }
 
 export type ResearchClassifyResult = {
@@ -152,6 +160,96 @@ export function detectOperateSiteIntent(message: string): boolean {
   return (WEAK_OPERATE_VERB.test(message) || WEAK_OPERATE_VERB_CJK.test(message)) && URLISH.test(message)
 }
 
+const RESEARCH_OPERATION = {
+  id: 'research.intent',
+  version: '1',
+  stateVersion: '1',
+  questionVersion: '1',
+} as const
+
+function primaryResearchResult(response: DecisionResponse): ResearchClassifyResult | null {
+  const answer = response.answers[0]
+  if (answer?.kind !== 'choice') return null
+  const common = {
+    usage: response.usage
+      ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
+      : null,
+    model: response.model.wireId,
+  }
+  if (answer.value === 'research') {
+    return { research: true, operateSite: false, reason: 'research_classifier', ...common }
+  }
+  if (answer.value === 'operate_site') {
+    return { research: false, operateSite: true, reason: 'operate_site_classifier', ...common }
+  }
+  if (answer.value === 'ordinary') {
+    return { research: false, operateSite: false, reason: null, ...common }
+  }
+  return null
+}
+
+function validateResearchResult(result: ResearchClassifyResult): ResearchClassifyResult {
+  if (result.research && result.operateSite) throw new Error('research and operateSite are mutually exclusive')
+  if (typeof result.research !== 'boolean' || typeof result.operateSite !== 'boolean') {
+    throw new Error('research classifier returned an invalid result')
+  }
+  return result
+}
+
+async function classifyResearchWithLlm(params: {
+  provider: LLMProvider
+  model: string
+  message: string
+  recentConversation: Array<{ role: 'user' | 'assistant'; text: string }>
+}): Promise<ResearchClassifyResult> {
+  const stream = params.provider.stream({
+    model: params.model,
+    systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
+    messages: [{
+      role: 'user',
+      content: JSON.stringify({
+        currentMessage: params.message,
+        recentConversation: params.recentConversation,
+      }),
+    }],
+    maxTokens: 128,
+    temperature: 0,
+  })
+
+  const response = await collectStream(stream)
+  const text = response.content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+
+  const jsonMatch = text.match(/\{[\s\S]*\}/)
+  if (!jsonMatch) {
+    return { research: false, operateSite: false, reason: null, usage: response.usage, model: response.model || params.model }
+  }
+
+  const parsed = JSON.parse(jsonMatch[0]) as {
+    research?: unknown
+    operate_site?: unknown
+    reason?: unknown
+  }
+  if (parsed.research !== true) {
+    return {
+      research: false,
+      operateSite: parsed.operate_site === true,
+      reason: parsed.operate_site === true ? 'operate_site_classifier' : null,
+      usage: response.usage,
+      model: response.model || params.model,
+    }
+  }
+  return {
+    research: true,
+    operateSite: false,
+    reason: typeof parsed.reason === 'string' ? parsed.reason : null,
+    usage: response.usage,
+    model: response.model || params.model,
+  }
+}
+
 /**
  * Classify whether a user message should automatically enter research mode.
  *
@@ -179,54 +277,77 @@ export async function classifyResearchIntent(
     return { research: false, operateSite: false, reason: null, usage: null, model: null }
   }
 
-  try {
-    const recentConversation = (options.recentConversation ?? [])
-      .filter((turn) => turn.text.trim().length > 0)
-      .slice(-6)
-      .map((turn) => ({ role: turn.role, text: turn.text.trim().slice(0, 2000) }))
-    const stream = provider.stream({
-      model: model,
-      systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-      messages: [{
-        role: 'user',
-        content: JSON.stringify({ currentMessage: message, recentConversation }),
-      }],
-      maxTokens: 128,
-      temperature: 0,
+  const recentConversation = (options.recentConversation ?? [])
+    .filter((turn) => turn.text.trim().length > 0)
+    .slice(-6)
+    .map((turn) => ({ role: turn.role, text: turn.text.trim().slice(0, 2000) }))
+
+  if (options.decisionRuntime) {
+    const result = await options.decisionRuntime.run({
+      ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+      request: {
+        runId: options.runId ?? `research-intent-${Date.now()}`,
+        operation: RESEARCH_OPERATION,
+        state: { currentMessage: message, recentConversation },
+        questions: [{
+          kind: 'choice',
+          id: 'intent',
+          prompt: 'Classify the current request. Follow-ups are ordinary; one named site is a site operation.',
+          options: [
+            { value: 'ordinary', description: 'Normal request or contextual follow-up' },
+            { value: 'research', description: 'New deep multi-source investigation' },
+            { value: 'operate_site', description: 'Open, browse, log into, or act on one named site' },
+          ],
+        }],
+      },
+      operation: {
+        decide(response, { profile }) {
+          const answer = response.answers[0]
+          const probabilities = answer?.evidence.probabilities
+          const policy = profile?.policy
+          const reviewBelow = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+            && typeof policy.reviewBelow === 'number'
+            ? policy.reviewBelow
+            : undefined
+          if (
+            reviewBelow !== undefined && probabilities &&
+            Math.max(...Object.values(probabilities)) < reviewBelow
+          ) {
+            return { kind: 'follow_up', reason: 'uncertain' }
+          }
+          const result = primaryResearchResult(response)
+          return result
+            ? { kind: 'complete', result }
+            : { kind: 'unavailable', reason: 'invalid_response' }
+        },
+        validateResult: validateResearchResult,
+        safeFailure: () => ({ research: false, operateSite: false, reason: null, usage: null, model: null }),
+        async completeWithLlm(context) {
+          const result = await classifyResearchWithLlm({
+            provider: context.llm.provider,
+            model: context.llm.modelId,
+            message,
+            recentConversation,
+          })
+          return {
+            result,
+            providerId: context.llm.provider.name,
+            model: { catalogId: context.llm.modelId, wireId: result.model ?? context.llm.modelId },
+            ...(result.usage ? {
+              usage: {
+                inputTokens: result.usage.inputTokens,
+                outputTokens: result.usage.outputTokens,
+              },
+            } : {}),
+          }
+        },
+      },
     })
+    return result.result
+  }
 
-    const response = await collectStream(stream)
-    const text = response.content
-      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-      .map((b) => b.text)
-      .join('')
-
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) {
-      return { research: false, operateSite: false, reason: null, usage: response.usage, model: response.model || model }
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]) as {
-      research?: unknown
-      operate_site?: unknown
-      reason?: unknown
-    }
-    if (parsed.research !== true) {
-      return {
-        research: false,
-        operateSite: parsed.operate_site === true,
-        reason: parsed.operate_site === true ? 'operate_site_classifier' : null,
-        usage: response.usage,
-        model: response.model || model,
-      }
-    }
-    return {
-      research: true,
-      operateSite: false,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : null,
-      usage: response.usage,
-      model: response.model || model,
-    }
+  try {
+    return await classifyResearchWithLlm({ provider, model, message, recentConversation })
   } catch {
     // Any failure → safe default, no research. Usage is lost because the
     // stream didn't complete; caller records nothing.

@@ -130,6 +130,7 @@ type SlackRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -844,6 +845,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
       await withChatLock(`slack:${sessionChannelId}`, () =>
         processMessage({
           backgroundModel: options.backgroundModel,
+          decisionRuntime: options.decisionRuntime,
           adapter,
           incoming,
           assistant,
@@ -1194,6 +1196,7 @@ async function dispatchSlackReactionFeedback(params: {
 type ProcessMessageParams = {
   /** Servable background-lane model, threaded from the route options. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   adapter: ReturnType<typeof createSlackAdapter>
   incoming: IncomingMessage
   assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
@@ -1826,6 +1829,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
 
   await processChannelMessage({
     backgroundModel: params.backgroundModel,
+    decisionRuntime: params.decisionRuntime,
     userId: channelUserId,
     ownerId,
     assistant: { ...assistant, ownerUserId: ownerId },

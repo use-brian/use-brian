@@ -112,6 +112,7 @@ type TelegramByoRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -1149,6 +1150,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         questions.invalidate(boundIntegration.id, incoming)
         return processMessage({
           backgroundModel: options.backgroundModel,
+          decisionRuntime: options.decisionRuntime,
           adapter,
           incoming,
           assistant: routedAssistant,
@@ -1276,6 +1278,7 @@ type ProcessMessageParams = {
   integrationId: string
   /** Servable background-lane model, threaded from the route options. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   adapter: ReturnType<typeof createTelegramAdapter>
   incoming: IncomingMessage
   assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
@@ -1758,6 +1761,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   const byoUsername = (incoming.raw as { from?: { username?: string } }).from?.username
   await processChannelMessage({
     backgroundModel: params.backgroundModel,
+    decisionRuntime: params.decisionRuntime,
     userId: channelUserId,
     ownerId,
     assistant: { ...assistant, ownerUserId: ownerId },

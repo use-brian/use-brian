@@ -361,6 +361,8 @@ type WebChatOptions = {
   feedReviewContext?: import('../content-planning/review-context.js').FeedReviewContextLoader
   feedGeneration?: FeedGenerationService
   provider: LLMProvider
+  /** Shared provider-neutral classifier cascade; absent preserves legacy calls. */
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   /**
    * Workspace BYO LLM key store. When set together with `buildWorkspaceProvider`
    * and the turn's assistant has a workspace, the chat path resolves the
@@ -2648,6 +2650,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           message,
           model: backgroundModel,
           recentConversation: adaptiveRecentConversation,
+          decisionRuntime: options.decisionRuntime,
+          workspaceId: assistant.workspaceId ?? undefined,
         }).catch(() => ({ research: false, operateSite: false, reason: null, usage: null, model: null }))
         adaptiveResearchOverhead = {
           model: adaptive.model,
@@ -6181,7 +6185,14 @@ export function chatRoutes(options: WebChatOptions): Router {
           // being true here means the explicit toggle: splitter is moot.
           if (!researchMode && !operateSiteIntent) {
             const { classifySplit } = await import('@use-brian/core')
-            const splitResult = await classifySplit({ provider: backgroundProvider, message, model: backgroundModel })
+            const splitResult = await classifySplit({
+              provider: backgroundProvider,
+              message,
+              model: backgroundModel,
+              decisionRuntime: options.decisionRuntime,
+              workspaceId: assistant.workspaceId ?? undefined,
+              runId: `research-split-${storedUserMsg.id}`,
+            })
               .catch(() => ({ tasks: null, usage: null, model: null }))
             // Attribute splitter tokens as overhead. Recorded regardless of
             // whether the classifier chose to split — the Gemini call happened.
@@ -7996,9 +8007,11 @@ export function chatRoutes(options: WebChatOptions): Router {
         const nudgeModel = backgroundModel
         runMemoryNudge({
           turns: pendingAssistantTurns,
-          callModel: async (prompt) => {
-            const resp = await collectStream(backgroundProvider.stream({
-              model: nudgeModel,
+          callModel: async (prompt, llm) => {
+            const nudgeProvider = llm?.provider ?? backgroundProvider
+            const resolvedNudgeModel = llm?.modelId ?? nudgeModel
+            const resp = await collectStream(nudgeProvider.stream({
+              model: resolvedNudgeModel,
               messages: [{ role: 'user', content: prompt }],
               systemPrompt: 'You are a memory utility judge. Follow instructions exactly.',
               maxTokens: 256,
@@ -8006,10 +8019,13 @@ export function chatRoutes(options: WebChatOptions): Router {
             return {
               text: resp.content.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map((b) => b.text).join(''),
               usage: resp.usage,
-              model: nudgeModel,
+              model: resolvedNudgeModel,
             }
           },
           store: options.memoryStore,
+          decisionRuntime: options.decisionRuntime,
+          workspaceId: assistant.workspaceId ?? undefined,
+          runId: `memory-usefulness-${storedUserMsg.id}`,
         })
           .then((result) => recordOverheadUsage({
             usageStore: options.usageStore,

@@ -94,6 +94,7 @@ export type CustomChannelBridgeRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -1158,6 +1159,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
 
     await processChannelMessage({
       backgroundModel: options.backgroundModel,
+      decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
       ownerId,
       assistant: { ...assistant, ownerUserId: ownerId },

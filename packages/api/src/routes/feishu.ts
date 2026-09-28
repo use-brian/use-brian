@@ -1030,6 +1030,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
 
     await processChannelMessage({
       backgroundModel: options.backgroundModel,
+      decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
       ownerId,
       assistant: { ...assistant, ownerUserId: ownerId },

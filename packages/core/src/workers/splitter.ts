@@ -11,6 +11,7 @@
 
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import type { DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
 
 const CLASSIFIER_SYSTEM_PROMPT = `You decide if a user message requires parallel independent research.
 Return JSON only. No explanation.
@@ -52,6 +53,10 @@ export type SplitOptions = {
    * keeps standalone/test use on the historical literal.
    */
   model?: string
+  /** Provider-neutral decision cascade. Omitted preserves the legacy call. */
+  decisionRuntime?: DecisionExecutionPort
+  workspaceId?: string
+  runId?: string
 }
 
 export type SplitResult = {
@@ -61,6 +66,70 @@ export type SplitResult = {
   usage: TokenUsage | null
   /** Model used for the call — null when no call was made. */
   model: string | null
+}
+
+const SPLIT_OPERATION = {
+  id: 'research.split',
+  version: '1',
+  stateVersion: '1',
+  questionVersion: '1',
+} as const
+
+function validateSplitResult(result: SplitResult): SplitResult {
+  if (result.tasks === null) return result
+  if (
+    result.tasks.length < 2 || result.tasks.length > 3 ||
+    result.tasks.some((task) => typeof task !== 'string' || task.trim().length === 0)
+  ) throw new Error('splitter returned an invalid task set')
+  return result
+}
+
+function primaryNoSplit(response: DecisionResponse): SplitResult | null {
+  const answer = response.answers[0]
+  if (answer?.kind !== 'boolean' || answer.value) return null
+  return {
+    tasks: null,
+    usage: response.usage
+      ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
+      : null,
+    model: response.model.wireId,
+  }
+}
+
+async function classifySplitWithLlm(params: {
+  provider: LLMProvider
+  model: string
+  message: string
+}): Promise<SplitResult> {
+  const stream = params.provider.stream({
+    model: params.model,
+    systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: params.message }],
+    maxTokens: 512,
+    temperature: 0,
+  })
+
+  const response = await collectStream(stream)
+  const text = response.content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+
+  const jsonMatch = text.match(/\{[\s\S]*\}/)
+  if (!jsonMatch) return { tasks: null, usage: response.usage, model: response.model || params.model }
+
+  const parsed = JSON.parse(jsonMatch[0]) as { split?: unknown; tasks?: unknown }
+  if (
+    parsed.split !== true || !Array.isArray(parsed.tasks) ||
+    parsed.tasks.length < 2 || parsed.tasks.length > 3 ||
+    parsed.tasks.some((task) => typeof task !== 'string' || task.trim().length === 0)
+  ) return { tasks: null, usage: response.usage, model: response.model || params.model }
+
+  return {
+    tasks: parsed.tasks as string[],
+    usage: response.usage,
+    model: response.model || params.model,
+  }
 }
 
 /**
@@ -77,32 +146,75 @@ export async function classifySplit(options: SplitOptions): Promise<SplitResult>
   // Short messages never need splitting — short-circuit before the LLM call.
   if (message.length <= minMessageLength) return { tasks: null, usage: null, model: null }
 
-  try {
-    const stream = provider.stream({
-      model: model,
-      systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: message }],
-      maxTokens: 512,
-      temperature: 0,
+  if (options.decisionRuntime) {
+    const result = await options.decisionRuntime.run({
+      ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+      request: {
+        runId: options.runId ?? `research-split-${Date.now()}`,
+        operation: SPLIT_OPERATION,
+        state: { message },
+        questions: [{
+          kind: 'boolean',
+          id: 'split',
+          prompt: 'Does this request require two or three genuinely independent research searches?',
+          criteria: {
+            true: 'Two or three independent searches are required and can run concurrently',
+            false: 'One search, a dependent sequence, a follow-up, or a casual request',
+          },
+        }],
+      },
+      operation: {
+        decide(response, { profile }) {
+          const answer = response.answers[0]
+          if (answer?.kind !== 'boolean') return { kind: 'unavailable', reason: 'invalid_response' }
+          const policy = profile?.policy
+          const uncertaintyMin = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+            && typeof policy.uncertaintyMin === 'number'
+            ? policy.uncertaintyMin
+            : undefined
+          const uncertaintyMax = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
+            && typeof policy.uncertaintyMax === 'number'
+            ? policy.uncertaintyMax
+            : undefined
+          if (
+            answer.pTrue !== undefined && uncertaintyMin !== undefined && uncertaintyMax !== undefined &&
+            answer.pTrue >= uncertaintyMin && answer.pTrue <= uncertaintyMax
+          ) {
+            return { kind: 'follow_up', reason: 'uncertain' }
+          }
+          if (answer.value) return { kind: 'follow_up', reason: 'generation_required' }
+          const terminal = primaryNoSplit(response)
+          return terminal
+            ? { kind: 'complete', result: terminal }
+            : { kind: 'unavailable', reason: 'invalid_response' }
+        },
+        validateResult: validateSplitResult,
+        safeFailure: () => ({ tasks: null, usage: null, model: null }),
+        async completeWithLlm(context) {
+          const result = await classifySplitWithLlm({
+            provider: context.llm.provider,
+            model: context.llm.modelId,
+            message,
+          })
+          return {
+            result,
+            providerId: context.llm.provider.name,
+            model: { catalogId: context.llm.modelId, wireId: result.model ?? context.llm.modelId },
+            ...(result.usage ? {
+              usage: {
+                inputTokens: result.usage.inputTokens,
+                outputTokens: result.usage.outputTokens,
+              },
+            } : {}),
+          }
+        },
+      },
     })
+    return result.result
+  }
 
-    const response = await collectStream(stream)
-    const text = response.content
-      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-      .map((b) => b.text)
-      .join('')
-
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) {
-      return { tasks: null, usage: response.usage, model: response.model || model }
-    }
-
-    const parsed = JSON.parse(jsonMatch[0])
-    if (!parsed.split || !Array.isArray(parsed.tasks) || parsed.tasks.length < 2) {
-      return { tasks: null, usage: response.usage, model: response.model || model }
-    }
-
-    return { tasks: parsed.tasks as string[], usage: response.usage, model: response.model || model }
+  try {
+    return await classifySplitWithLlm({ provider, model, message })
   } catch {
     // Any failure in classification → safe default, no split. Usage is lost
     // because the stream didn't complete — caller records nothing.

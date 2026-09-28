@@ -4987,6 +4987,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     feedGeneration,
     feedReviewContext,
     provider,
+    decisionRuntime,
     artifactPromoter,
     checkCreditBudget: ports.checkCreditBudget,
     meteredProfileStore,
@@ -8750,6 +8751,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           if (!channel.assistantId) return
           await processChannelMessage({
             backgroundModel,
+            decisionRuntime,
             userId: channel.ownerUserId,
             ownerId: channel.ownerUserId,
             assistant: {
@@ -8870,6 +8872,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       app.use('/webhook/telegram', telegramByoRoutes({
         questionStore: channelQuestionStore,
         backgroundModel,
+        decisionRuntime,
         provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         appUrl: env.APP_URL, apiUrl: env.API_URL, integrationStore,
@@ -8891,6 +8894,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }))
       app.use('/webhook/slack', slackRoutes({
         backgroundModel,
+        decisionRuntime,
         ingestChannelMediaRef: channelHosts.slackIngestChannelMediaRef,
         artifactPromoter,
         provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
@@ -8908,6 +8912,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }))
       app.use('/webhook/whatsapp', whatsappCloudRoutes({
         backgroundModel,
+        decisionRuntime,
         provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
@@ -8922,6 +8927,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // docs/architecture/channels/msteams.md.
       app.use('/webhook/msteams', msteamsRoutes({
         backgroundModel,
+        decisionRuntime,
         provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
@@ -8935,6 +8941,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       if (env.DISCORD_CONNECTOR_SECRET) {
         app.use('/internal/discord', discordRoutes({
         backgroundModel,
+          decisionRuntime,
           ingestChannelMediaRef: channelHosts.discordIngestChannelMediaRef,
           artifactPromoter,
           connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT,
@@ -8949,6 +8956,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       if (env.WECHAT_CONNECTOR_SECRET) {
         app.use('/internal/wechat', wechatRoutes({
           backgroundModel,
+          decisionRuntime,
           artifactPromoter,
           connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore,
@@ -8968,6 +8976,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       if (env.FEISHU_CONNECTOR_SECRET) {
         app.use('/internal/feishu', feishuRoutes({
           backgroundModel,
+          decisionRuntime,
           artifactPromoter,
           connectorSecret: env.FEISHU_CONNECTOR_SECRET,
           provider,
@@ -9020,6 +9029,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // See docs/architecture/channels/custom-channel.md.
       app.use('/bridge/v1/channels', customChannelBridgeRoutes({
         backgroundModel,
+        decisionRuntime,
         artifactPromoter,
         provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT,
         tools: allTools, capabilityStore, memoryStore, usageStore,

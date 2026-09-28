@@ -12,8 +12,11 @@ import type {
   DecisionRequest,
   DecisionResponse,
   DecisionUsage,
+  JsonValue,
 } from './types.js'
 import { DecisionProviderError } from './types.js'
+import type { LLMProvider } from '../providers/types.js'
+import { isJsonValue } from './validate.js'
 
 export type DecisionMode = 'llm_only' | 'shadow' | 'hybrid'
 
@@ -32,6 +35,8 @@ export type DecisionEvaluationProfile = {
   totalTimeoutMs: number
   primaryTimeoutMs: number
   maxAttempts: 2
+  /** Versioned operation/model-specific thresholds; never inherited implicitly. */
+  policy?: JsonValue
   /** Required in shadow mode; 0 < rate <= 1. */
   shadowSampleRate?: number
 }
@@ -95,10 +100,40 @@ export type DecisionCompletionContext = {
 }
 
 export type DecisionCascadeOperation<T> = {
-  decide(response: DecisionResponse): DecisionDisposition<T>
+  decide(
+    response: DecisionResponse,
+    context: { profile?: DecisionEvaluationProfile },
+  ): DecisionDisposition<T>
   validateResult(result: T): T
   safeFailure(reason: DecisionFailureKind): T
   completeWithLlm(context: DecisionCompletionContext): Promise<DecisionCompletion<T>>
+}
+
+/** LLM lane selected by the API composition for a decision follow-up. */
+export type DecisionCompletionRoute = {
+  provider: LLMProvider
+  modelId: string
+}
+
+/** Operation contract accepted by the workspace-aware decision runtime. */
+export type DecisionExecutionOperation<T> = Omit<
+  DecisionCascadeOperation<T>,
+  'completeWithLlm'
+> & {
+  completeWithLlm(
+    context: DecisionCompletionContext & { llm: DecisionCompletionRoute },
+  ): Promise<DecisionCompletion<T>>
+}
+
+export type DecisionExecutionRunOptions<T> = {
+  workspaceId?: string
+  request: Omit<DecisionRequest, 'model'>
+  operation: DecisionExecutionOperation<T>
+}
+
+/** Core-facing structural port; implemented by the API composition runtime. */
+export interface DecisionExecutionPort {
+  run<T>(options: DecisionExecutionRunOptions<T>): Promise<DecisionCascadeResult<T>>
 }
 
 export type DecisionCascadePath =
@@ -172,6 +207,9 @@ export function validateDecisionRoute(
     profile.primaryTimeoutMs >= profile.totalTimeoutMs
   ) configError('evaluation profile requires positive primary < total timeouts')
   if (profile.maxAttempts !== 2) configError('v1 decision profiles require maxAttempts=2')
+  if (profile.policy !== undefined && !isJsonValue(profile.policy)) {
+    configError('evaluation profile policy must be JSON-compatible')
+  }
   if (route.mode === 'shadow') {
     if (
       profile.shadowSampleRate === undefined ||
@@ -363,7 +401,7 @@ export async function executeDecisionCascade<T>(
       now,
       call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline }),
     })
-    disposition = operation.decide(primaryResponse)
+    disposition = operation.decide(primaryResponse, { profile })
     await emit({
       runId: request.runId,
       operationId: request.operation.id,

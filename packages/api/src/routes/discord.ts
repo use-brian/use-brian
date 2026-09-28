@@ -53,6 +53,7 @@ export type DiscordRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   /** Shared secret the connector presents on every call (DISCORD_CONNECTOR_SECRET). */
   connectorSecret: string
   provider: LLMProvider
@@ -638,6 +639,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
 
     await processChannelMessage({
       backgroundModel: options.backgroundModel,
+      decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
       ownerId,
       assistant: { ...assistant, ownerUserId: ownerId },

@@ -335,6 +335,8 @@ export type ChannelPipelineParams = {
    * where a Google credential exists.
    */
   backgroundModel?: string
+  /** Shared provider-neutral classifier cascade; absent preserves legacy calls. */
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   // ── Identity ──
   /** The user whose session this is (channel user or owner). */
   userId: string
@@ -1202,6 +1204,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         message: messageText,
         model: backgroundLaneModel,
         recentConversation: adaptiveRecentConversation,
+        decisionRuntime: params.decisionRuntime,
+        workspaceId: assistant.workspaceId ?? undefined,
       })
       if (adaptive.research) {
         effectiveModelAlias = 'research'
@@ -2834,9 +2838,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       // → Model routing (extraction / classification / structured-output bucket).
       runMemoryNudge({
         turns: pendingAssistantTurns,
-        callModel: async (prompt) => {
-          const resp = await collectStream(backgroundProvider.stream({
-            model: backgroundLaneModel,
+        callModel: async (prompt, llm) => {
+          const nudgeProvider = llm?.provider ?? backgroundProvider
+          const nudgeModel = llm?.modelId ?? backgroundLaneModel
+          const resp = await collectStream(nudgeProvider.stream({
+            model: nudgeModel,
             messages: [{ role: 'user', content: prompt }],
             systemPrompt: 'You are a memory utility judge. Follow instructions exactly.',
             maxTokens: 256,
@@ -2847,10 +2853,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               .map((b) => b.text)
               .join(''),
             usage: resp.usage,
-            model: backgroundLaneModel,
+            model: nudgeModel,
           }
         },
         store: memoryStore,
+        decisionRuntime: params.decisionRuntime,
+        workspaceId: assistant.workspaceId ?? undefined,
+        runId: `memory-usefulness-${userMessageRow.id}`,
       })
         .then((result) => recordOverheadUsage({
           usageStore,

@@ -51,6 +51,7 @@ const MAX_MEDIA_BYTES = 25 * 1024 * 1024
 
 export type WhatsAppCloudRouteOptions = {
   backgroundModel?: string
+  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   provider: LLMProvider
   /**
    * Forwarded to the pipeline so `resolveChatModelSelection` can run its
@@ -403,6 +404,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
     const abortController = new AbortController()
     await processChannelMessage({
       backgroundModel: options.backgroundModel,
+      decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
       ownerId,
       assistant: { ...assistant, ownerUserId: ownerId },

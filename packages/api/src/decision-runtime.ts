@@ -16,9 +16,10 @@ import {
   type DecisionAttemptRecord,
   type DecisionCascadeOperation,
   type DecisionCascadeResult,
-  type DecisionCompletion,
-  type DecisionCompletionContext,
+  type DecisionCompletionRoute,
   type DecisionEvaluationProfile,
+  type DecisionExecutionOperation,
+  type DecisionExecutionRunOptions,
   type DecisionModelRef,
   type DecisionRequest,
   type DecisionProvider,
@@ -31,11 +32,7 @@ import {
   registryRow,
 } from '@use-brian/shared/model-registry'
 
-export type DecisionLlmRoute = {
-  provider: LLMProvider
-  /** Catalog/routing id accepted by this LLM provider. */
-  modelId: string
-}
+export type DecisionLlmRoute = DecisionCompletionRoute
 
 export type DecisionRouteConfig = {
   mode: 'llm_only' | 'shadow' | 'hybrid'
@@ -77,23 +74,9 @@ export type DecisionRuntimeOutcome = {
   failureKind?: DecisionCascadeResult<unknown>['failureKind']
 }
 
-export type DecisionRuntimeCompletionContext = DecisionCompletionContext & {
-  llm: DecisionLlmRoute
-}
+export type DecisionRuntimeOperation<T> = DecisionExecutionOperation<T>
 
-export type DecisionRuntimeOperation<T> = Omit<
-  DecisionCascadeOperation<T>,
-  'completeWithLlm'
-> & {
-  completeWithLlm(
-    context: DecisionRuntimeCompletionContext,
-  ): Promise<DecisionCompletion<T>>
-}
-
-export type DecisionRuntimeRunOptions<T> = {
-  workspaceId?: string
-  request: Omit<DecisionRequest, 'model'>
-  operation: DecisionRuntimeOperation<T>
+export type DecisionRuntimeRunOptions<T> = DecisionExecutionRunOptions<T> & {
   onAttempt?: (attempt: DecisionRuntimeAttempt) => void | Promise<void>
 }
 
