@@ -18,7 +18,11 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const navigation = vi.hoisted(() => ({ viewerId: "viewer-1", workspaceId: "11111111-1111-4111-8111-111111111111", search: "", pathname: "/office/templates/template-1", replace: vi.fn() }));
+const navigation = vi.hoisted(() => ({ viewerId: "viewer-1", workspaceId: "11111111-1111-4111-8111-111111111111", search: "", pathname: "/office/templates/template-1", replace: vi.fn(), push: vi.fn() }));
+const collab = vi.hoisted(() => ({ status: "disconnected", synced: false }));
+const offlineApi = vi.hoisted(() => ({
+  list: vi.fn(async () => [] as unknown[]), load: vi.fn(async () => null as unknown), remove: vi.fn(async () => undefined), quarantine: vi.fn(async () => undefined), classify: vi.fn(), materialize: vi.fn(),
+}));
 const api = vi.hoisted(() => ({
   listOfficeTemplates: vi.fn(),
   transitionOfficeTemplateLifecycle: vi.fn(),
@@ -27,9 +31,11 @@ const api = vi.hoisted(() => ({
   getOfficeSnapshot: vi.fn<() => Promise<unknown>>(),
   getOfficeTemplateRouting: vi.fn(),
   saveOfficeTemplateRouting: vi.fn(),
+  syncOfficeOfflineCommands: vi.fn(),
+  transitionOfficeLifecycle: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ back: vi.fn(), forward: vi.fn(), push: vi.fn(), prefetch: vi.fn(), replace: navigation.replace }),
+  useRouter: () => ({ back: vi.fn(), forward: vi.fn(), push: navigation.push, prefetch: vi.fn(), replace: navigation.replace }),
   usePathname: () => navigation.pathname,
   useSearchParams: () => new URLSearchParams(navigation.search),
 }));
@@ -51,11 +57,13 @@ vi.mock("@/lib/office/api", async (importOriginal) => {
     listOfficeComments: vi.fn(async () => bounded([])),
     listOfficeSuggestions: vi.fn(async () => bounded([])),
     detachMissingOfficeComments: vi.fn(async () => 0),
+    syncOfficeOfflineCommands: api.syncOfficeOfflineCommands,
+    transitionOfficeLifecycle: api.transitionOfficeLifecycle,
   };
 });
 // The editor shell's heavy neighbours: collab, presence, the three editors,
 // the recorder and the reclassify dialog are not what this test grades.
-vi.mock("@/lib/collab/use-collab-provider", () => ({ useCollabProvider: () => ({ doc: null, provider: null, status: "disconnected", synced: false }) }));
+vi.mock("@/lib/collab/use-collab-provider", () => ({ useCollabProvider: () => ({ doc: null, provider: null, status: collab.status, synced: collab.synced }) }));
 vi.mock("@/lib/collab/use-presence", () => ({ usePresence: () => [], usePublishPresenceActivity: vi.fn(), usePublishPresenceIdentity: vi.fn() }));
 vi.mock("@/components/doc/presence-avatars", () => ({ PresenceAvatars: () => null }));
 vi.mock("@/components/context/reclassify-context-dialog", () => ({ ReclassifyContextButton: () => <button type="button">Reclassify</button> }));
@@ -68,8 +76,9 @@ vi.mock("../presentation-presenter", () => ({ PresentationPresenter: () => null 
 vi.mock("../job-activity", () => ({ OfficeJobActivity: () => <div data-testid="job-activity" /> }));
 vi.mock("../office-card-preview", () => ({ OfficeCardPreview: () => <div data-testid="card-preview" /> }));
 vi.mock("@/lib/office/offline", () => ({
-  appendOfflineCommand: vi.fn(), classifyOfficeReconnect: vi.fn(), listOfflineJournal: vi.fn(async () => []),
-  loadOfflinePackage: vi.fn(async () => null), removeOfflineJournalEntry: vi.fn(), removeOfflinePackage: vi.fn(async () => undefined),
+  appendOfflineCommand: vi.fn(), classifyOfficeReconnect: offlineApi.classify, listOfflineJournal: offlineApi.list,
+  loadOfflinePackage: offlineApi.load, removeOfflineJournalEntry: offlineApi.remove, removeOfflinePackage: vi.fn(async () => undefined),
+  materializeOfflineRecoverySnapshot: offlineApi.materialize, officeOfflineDeviceId: vi.fn(async () => "fixture-device"), quarantineOfflineWork: offlineApi.quarantine,
 }));
 
 import { loadOfflinePackage } from "@/lib/office/offline";
@@ -108,11 +117,22 @@ beforeEach(() => {
   navigation.search = "";
   navigation.pathname = "/office/templates/template-1";
   navigation.replace.mockClear();
+  navigation.push.mockClear();
+  collab.status = "disconnected";
+  collab.synced = false;
+  offlineApi.list.mockReset().mockResolvedValue([]);
+  offlineApi.load.mockReset().mockResolvedValue(null);
+  offlineApi.remove.mockReset().mockResolvedValue(undefined);
+  offlineApi.quarantine.mockReset().mockResolvedValue(undefined);
+  offlineApi.classify.mockReset();
+  offlineApi.materialize.mockReset();
   api.listOfficeArtifacts.mockReset();
   api.getOfficeArtifact.mockReset();
   api.getOfficeSnapshot.mockReset();
   api.getOfficeTemplateRouting.mockReset();
   api.saveOfficeTemplateRouting.mockReset();
+  api.syncOfficeOfflineCommands.mockReset();
+  api.transitionOfficeLifecycle.mockReset();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -219,6 +239,32 @@ describe("[COMP:app-web/office-surface-cache] Office editor shell", () => {
     api.getOfficeSnapshot.mockImplementation(pending);
     render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
     expect(container.querySelector('[data-testid="recorder"]')?.className).toContain("max-sm:bottom-20");
+  });
+
+  it("opens and discards the ordinary recovery artifact published for an offline conflict", async () => {
+    await loadSurfaceCache(officeArtifactCacheKey(WORKSPACE, ARTIFACT), async () => bounded(ROW));
+    await loadSurfaceCache(officeSnapshotCacheKey(WORKSPACE, ARTIFACT), async () => bounded(SNAPSHOT));
+    api.getOfficeArtifact.mockImplementation(pending);
+    api.getOfficeSnapshot.mockImplementation(pending);
+    collab.status = "connected";
+    collab.synced = true;
+    const command = { artifactId: ARTIFACT, seq: 8, kind: "command", expectedSeq: 7, command: { artifactId: ARTIFACT, baseVersion: 3, actor: { type: "user", id: navigation.viewerId }, origin: "offline", commandId: "33333333-3333-4333-8333-333333333333", kind: "setObjectProperty", targetId: "44444444-4444-4444-8444-444444444444", path: ["alignment"], value: "center" }, createdAt: "2026-09-28T00:00:00.000Z" };
+    offlineApi.list.mockResolvedValue([command]);
+    offlineApi.load.mockResolvedValue({ payload: { snapshot: SNAPSHOT.snapshot } });
+    offlineApi.materialize.mockReturnValue(SNAPSHOT.snapshot);
+    offlineApi.classify.mockReturnValue({ status: "needs_attention", quarantine: false, conflict: true });
+    api.syncOfficeOfflineCommands.mockResolvedValue({ status: "needs_attention", reason: "structural_conflict", recoveryArtifactId: "55555555-5555-4555-8555-555555555555" });
+    api.transitionOfficeLifecycle.mockResolvedValue({});
+    render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
+    await act(async () => { await settle(); await settle(); });
+    expect(container.textContent).toContain(en.office.offlineNeedsAttention);
+    const open = [...container.querySelectorAll("button")].find((node) => node.textContent === en.office.openRecoveryCopy)!;
+    act(() => open.click());
+    expect(navigation.push).toHaveBeenCalledWith(`/w/${WORKSPACE}/office/55555555-5555-4555-8555-555555555555`);
+    const discard = [...container.querySelectorAll("button")].find((node) => node.textContent === en.office.discardRecoveryCopy)!;
+    await act(async () => { discard.click(); await settle(); });
+    expect(api.transitionOfficeLifecycle).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555", "trash", "Discarded recovered offline copy");
+    expect(offlineApi.remove).toHaveBeenCalledWith(command, { workspaceId: WORKSPACE, userId: navigation.viewerId });
   });
 });
 

@@ -25,11 +25,12 @@ try {
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/scripts/fixtures/office-offline-browser.html`);
   await page.waitForFunction(()=>Boolean(window.officeOfflineFixture));
   const results = await page.evaluate(async()=>{
-    const {offline:o,documentFixture} = window.officeOfflineFixture;
+    const {offline:o,metadata,documentFixture} = window.officeOfflineFixture;
     const passed=[];
     const check=(condition,message)=>{if(!condition)throw new Error(message);};
     const rejects=async(promise,reason)=>{try{await promise;}catch(error){check(error.message.includes(reason),`Expected ${reason}, got ${error.message}`);return;}throw new Error(`Expected rejection: ${reason}`);};
     const setUser=id=>{window.officeOfflineViewer=id;};
+    const persist=(params,owner,validForMs=30_000)=>o.persistOfficeOfflinePackage(params,owner,metadata.attachOfficeMetadata({},validForMs,performance.now(),owner.userId));
     const a={workspaceId:'workspace-a',userId:'viewer-a'}, b={...a,userId:'viewer-b'}, other={...a,workspaceId:'workspace-b'};
     const hash=async(text)=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(n=>n.toString(16).padStart(2,'0')).join('');
     async function pkg(owner,artifactId='artifact-1',title=owner.userId){
@@ -43,8 +44,9 @@ try {
     const request=p=>new Promise((resolve,reject)=>{p.onsuccess=()=>resolve(p.result);p.onerror=()=>reject(p.error);});
     const complete=t=>new Promise((resolve,reject)=>{t.oncomplete=resolve;t.onabort=()=>reject(t.error);t.onerror=()=>reject(t.error);});
     const open=async(version,upgrade)=>{const r=indexedDB.open('use-brian-office-offline-v1',version);if(upgrade)r.onupgradeneeded=()=>upgrade(r.result);return request(r);};
-    const raw=async(store,key)=>{const db=await open(3);try{return await request(db.transaction(store).objectStore(store).get(key));}finally{db.close();}};
-    const put=async(store,key,value)=>{const db=await open(3);try{const t=db.transaction(store,'readwrite'),done=complete(t);if(key===undefined)t.objectStore(store).put(value);else t.objectStore(store).put(value,key);await done;}finally{db.close();}};
+    const raw=async(store,key)=>{const db=await open(4);try{return await request(db.transaction(store).objectStore(store).get(key));}finally{db.close();}};
+    const all=async(store)=>{const db=await open(4);try{return await request(db.transaction(store).objectStore(store).getAll());}finally{db.close();}};
+    const put=async(store,key,value)=>{const db=await open(4);try{const t=db.transaction(store,'readwrite'),done=complete(t);if(key===undefined)t.objectStore(store).put(value);else t.objectStore(store).put(value,key);await done;}finally{db.close();}};
     // Populate the old schema before the production adapter upgrades it.
     const legacyKey=await crypto.subtle.importKey('raw',crypto.getRandomValues(new Uint8Array(32)),'HKDF',false,['deriveKey']);
     const legacyPackage=await o.encryptOfficePackage({...await pkg(a),deviceSecret:legacyKey});
@@ -60,11 +62,11 @@ try {
     check((await o.decryptOfflineJournalEntry(legacyJournal,await raw('keys','root'))).body==='private draft','Legacy key retained');
     passed.push('legacy ciphertext quarantined without data loss');
 
-    await o.persistOfficeOfflinePackage(await pkg(a),a);await o.appendOfflineCommand(entry(2),a);
-    await o.persistOfficeOfflinePackage(await pkg(other,'artifact-1','other workspace'),other);await o.appendOfflineCommand(entry(2,'artifact-1','other workspace draft'),other);
+    await persist(await pkg(a),a);await o.appendOfflineCommand(entry(2),a);
+    await persist(await pkg(other,'artifact-1','other workspace'),other);await o.appendOfflineCommand(entry(2,'artifact-1','other workspace draft'),other);
     setUser(b.userId);check(await o.loadOfflinePackage('artifact-1',b)===null,'Another viewer must not read A');
     check((await o.listOfflineJournal('artifact-1',b)).length===0,'Another viewer must not replay A');
-    await o.persistOfficeOfflinePackage(await pkg(b),b);await o.appendOfflineCommand(entry(2,'artifact-1','viewer B draft'),b);
+    await persist(await pkg(b),b);await o.appendOfflineCommand(entry(2,'artifact-1','viewer B draft'),b);
     check((await o.loadOfflinePackage('artifact-1',b)).payload.artifact.title===b.userId,'Viewer B owns own data');
     setUser(a.userId);check((await o.loadOfflinePackage('artifact-1',a)).payload.artifact.title===a.userId,'A preserved');
     check((await o.loadOfflinePackage('artifact-1',other)).payload.artifact.title==='other workspace','Workspace isolation');
@@ -77,14 +79,14 @@ try {
 
     setUser(null);await rejects(o.loadOfflinePackage('artifact-1',a),'owner_changed');await rejects(o.officeOfflineDeviceId(a),'owner_changed');
     setUser(b.userId);await rejects(o.appendOfflineCommand(entry(3),a),'owner_changed');
-    setUser(a.userId);await rejects(o.persistOfficeOfflinePackage(await pkg(other),a),'scope_mismatch');
+    setUser(a.userId);await rejects(persist(await pkg(other),a),'scope_mismatch');
     await rejects(o.appendOfflineCommand({...entry(3),kind:'command',command:{actor:{type:'user',id:b.userId},artifactId:'artifact-1'}},a),'scope_mismatch');
     await rejects(o.appendOfflineCommand({...entry(3),kind:'command',command:{kind:'batch',actor:{type:'user',id:a.userId},artifactId:'artifact-1',commands:[{actor:{type:'user',id:b.userId},artifactId:'artifact-1'}]}},a),'scope_mismatch');
     passed.push('missing identity stale caller and mismatched payload refused');
 
     const concurrent={...a,workspaceId:'concurrent-workspace'};
     const packages=await Promise.all(Array.from({length:12},(_,i)=>pkg(concurrent,`concurrent-${i}`)));
-    await Promise.all(packages.flatMap((p,i)=>[o.persistOfficeOfflinePackage(p,concurrent),o.appendOfflineCommand(entry(i,p.artifactId),concurrent)]));
+    await Promise.all(packages.flatMap((p,i)=>[persist(p,concurrent),o.appendOfflineCommand(entry(i,p.artifactId),concurrent)]));
     const read=await Promise.all(packages.flatMap(p=>[o.loadOfflinePackage(p.artifactId,concurrent),o.listOfflineJournal(p.artifactId,concurrent)]));
     check(read.every((row,i)=>i%2?row.length===1:Boolean(row)),'Concurrent first writes share a durable root');
     const ids=await Promise.all(Array.from({length:12},()=>o.officeOfflineDeviceId(concurrent)));
@@ -102,14 +104,14 @@ try {
       crypto.subtle[method]=async function(...args){const result=await original.apply(this,args);arrive();await released;return result;};
       try{await run(arrived,release);}finally{release();crypto.subtle[method]=original;}
     }
-    setUser(a.userId);await o.persistOfficeOfflinePackage(await pkg(a),a);await o.appendOfflineCommand(entry(10),a);
+    setUser(a.userId);await persist(await pkg(a),a);await o.appendOfflineCommand(entry(10),a);
     for(const operation of [()=>o.loadOfflinePackage('artifact-1',a),()=>o.listOfflineJournal('artifact-1',a)]){
       setUser(a.userId);await gate('decrypt',async(arrived,release)=>{const pending=operation();await arrived;setUser(b.userId);release();await rejects(pending,'owner_changed');});
     }
     passed.push('account switches during decrypt cannot return prior owner data');
 
     const pendingPackage=await pkg(a,'pending-package');
-    for(const operation of [()=>o.persistOfficeOfflinePackage(pendingPackage,a),()=>o.appendOfflineCommand(entry(1,'pending-journal'),a)]){
+    for(const operation of [()=>persist(pendingPackage,a),()=>o.appendOfflineCommand(entry(1,'pending-journal'),a)]){
       setUser(a.userId);await gate('encrypt',async(arrived,release)=>{const pending=operation();await arrived;setUser(b.userId);release();await rejects(pending,'owner_changed');});
     }
     check(await o.loadOfflinePackage('pending-package',b)===null,'Pending package not attributed to B');check((await o.listOfflineJournal('pending-journal',b)).length===0,'Pending edits not attributed to B');
@@ -118,16 +120,32 @@ try {
 
     // Changing a caller-owned options object during async work cannot retarget storage.
     const mutable={...a},mutablePkg=await pkg(a,'captured-owner');
-    await gate('encrypt',async(arrived,release)=>{const pending=o.persistOfficeOfflinePackage(mutablePkg,mutable);await arrived;mutable.workspaceId='redirected';release();await pending;});
+    await gate('encrypt',async(arrived,release)=>{const pending=persist(mutablePkg,mutable);await arrived;mutable.workspaceId='redirected';release();await pending;});
     check(Boolean(await o.loadOfflinePackage('captured-owner',a)),'Captured owner retained');check(await o.loadOfflinePackage('captured-owner',mutable)===null,'Mutable owner did not retarget');
     // Copying encrypted records between owner partitions cannot make their content readable.
     const record=await raw('viewer-packages',[a.workspaceId,a.userId,'artifact-1']);
     await put('viewer-packages',undefined,{...record,...b});setUser(b.userId);
     try{await o.loadOfflinePackage('artifact-1',b);throw new Error('Copied ciphertext accepted');}catch(error){check(error.name==='OperationError','Copied ciphertext must fail authentication');}
     passed.push('captured owner and per-owner encryption prevent storage retargeting');
+
+    setUser(a.userId);
+    const expiredPackage=await pkg(a,'expired-package');
+    await gate('encrypt',async(arrived,release)=>{const pending=persist(expiredPackage,a,5);await arrived;await new Promise(resolve=>setTimeout(resolve,15));release();await rejects(pending,'projection_expired');});
+    check(await o.loadOfflinePackage('expired-package',a)===null,'Expired response must not become durable');
+    passed.push('bounded package authority expires before durable browser commit');
+
+    const quarantinePackage=await pkg(a,'quarantined-artifact','quarantined title');
+    await persist(quarantinePackage,a);await o.appendOfflineCommand(entry(44,'quarantined-artifact','quarantined body'),a);
+    await o.quarantineOfflineWork('quarantined-artifact',a);
+    check(await o.loadOfflinePackage('quarantined-artifact',a)===null,'Quarantined package is not readable');
+    check((await o.listOfflineJournal('quarantined-artifact',a)).length===0,'Quarantined journal is not replayable');
+    const quarantined=(await all('viewer-quarantine')).find(row=>row.artifactId==='quarantined-artifact');
+    check(Boolean(quarantined?.packageRecord?.ciphertext)&&quarantined.journalRecords.length===1,'Raw encrypted work retained in quarantine');
+    check(!JSON.stringify(quarantined).includes('quarantined body'),'Quarantine remains ciphertext only');
+    passed.push('revoked local work moves atomically to opaque quarantine');
     return passed;
   });
-  assert.equal(results.length,7);assert.deepEqual(errors,[]);
+  assert.equal(results.length,9);assert.deepEqual(errors,[]);
   if(process.env.OFFICE_OFFLINE_RECEIPT)await writeFile(process.env.OFFICE_OFFLINE_RECEIPT,JSON.stringify({passed:results,errors},null,2)+'\n');
   console.log(JSON.stringify({passed:results,errors},null,2));
 } finally {await browser?.close();await server.close();await rm(cache,{recursive:true,force:true});}

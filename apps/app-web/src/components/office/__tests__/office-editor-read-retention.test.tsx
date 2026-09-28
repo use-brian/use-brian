@@ -35,7 +35,7 @@ vi.mock('../presentation-presenter',()=>({PresentationPresenter:({snapshot}:{sna
 vi.mock('../office-review',()=>({OfficeReview:({onPresent}:{onPresent:()=>void})=><button onClick={onPresent}>Present fixture</button>}));
 vi.mock('../job-activity',()=>({OfficeJobActivity:({targetIds}:{targetIds:string[]})=><div data-selection>{targetIds.join('|')}</div>}));
 vi.mock('../template-routing-inspector',()=>({TemplateRoutingInspector:()=>null}));
-vi.mock('@/lib/office/offline',()=>({loadOfflinePackage:vi.fn(async()=>null),listOfflineJournal:vi.fn(async()=>[]),appendOfflineCommand:vi.fn(async()=>{}),removeOfflinePackage:vi.fn(async()=>{}),removeOfflineJournalEntry:vi.fn(async()=>{}),classifyOfficeReconnect:vi.fn()}));
+vi.mock('@/lib/office/offline',()=>({loadOfflinePackage:vi.fn(async()=>null),listOfflineJournal:vi.fn(async()=>[]),appendOfflineCommand:vi.fn(async()=>{}),removeOfflinePackage:vi.fn(async()=>{}),removeOfflineJournalEntry:vi.fn(async()=>{}),classifyOfficeReconnect:vi.fn(),materializeOfflineRecoverySnapshot:vi.fn(),officeOfflineDeviceId:vi.fn(async()=>"fixture-device"),quarantineOfflineWork:vi.fn(async()=>{})}));
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 const artifact=()=>({artifactId:uid(1),title:'Protected artifact title',family:'document',role:'edit',version:1,lifecycleState:'active',...(state.search?{mode:'template'}:{})});
 const snapshot=(title='Protected snapshot text')=>({...documentFixture(),workspaceId:state.workspace,title});

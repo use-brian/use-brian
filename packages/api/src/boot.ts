@@ -562,10 +562,11 @@ import { runOfficeEdit } from '@use-brian/core'
 import { applyLiveOfficeSuggestion, replaceLiveOfficeSnapshot, officeSuggestionApplied } from './office/live-sync.js'
 import { officeReleaseContextRevision, officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
-import { officeOfflineRoutes } from './routes/office-offline.js'
+import { officeOfflineContextRevision, officeOfflineRoutes } from './routes/office-offline.js'
 import { officeResourceRoutes } from './routes/office-resources.js'
 import { createOfficeResourceReader } from './office/resource-read.js'
 import { bindOfficeFile, classifyOfficeOutput, fileMatchesOfficeOutput, officeOutputScopeRevision, officeScopePathSegment, sameOfficeFileBinding, type OfficeOutputScope } from './office/file-binding.js'
+import { readOfficeProjection } from './db/office-read-projection.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
 import { assertOfficeArtifactSnapshot, encodeOfficeState, officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { publicShareRoutes } from './routes/public-share.js'
@@ -7010,21 +7011,86 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeLifecycleRoutes({ resolveAccess: resolveOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }))
+  const loadOfficeOfflineContext = async (userId: string, artifactId: string) => {
+    const reply = await readOfficeProjection(userId, async () => {
+      const [artifact, access, live, comments, history] = await Promise.all([
+        officeArtifactStore.get(userId, artifactId),
+        resolveOfficeAccess(userId, artifactId),
+        officeLiveStore.getOfflineSource(userId, artifactId),
+        officeCommentStore.listThreads(userId, artifactId),
+        officeArtifactStore.listVersions(userId, artifactId),
+      ])
+      return artifact && access && live
+        ? { workspaceId: artifact.workspaceId, body: { artifact, access, snapshot: live.snapshot, update: live.update, stateVector: live.stateVector, seq: live.seq, comments, history } }
+        : { status: 404, body: { error: 'Office artifact not found' } }
+    })
+    return (reply.status ?? 200) < 400 && reply.validForMs && typeof reply.body === 'object'
+      ? { ...(reply.body as Omit<import('./routes/office-offline.js').OfficeOfflineContext, 'validForMs'>), validForMs: reply.validForMs }
+      : null
+  }
   if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeOfflineRoutes({
     signingSecret: env.JWT_SECRET,
-    async load(userId, artifactId) {
-      const [artifact, access, live, comments, history] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.getOfflineSource(userId, artifactId), officeCommentStore.listThreads(userId, artifactId), officeArtifactStore.listVersions(userId, artifactId)])
-      return artifact && access && live ? { artifact, access, snapshot: live.snapshot, update: live.update, stateVector: live.stateVector, seq: live.seq, comments, history } : null
-    },
+    load: loadOfficeOfflineContext,
+    getArtifact: officeArtifactStore.get,
     readResource: readOfficeResource,
-    async savePackage({ userId, workspaceId, artifactId, deviceId, bytes }) {
-      const saved = await filesApi!.writeBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/offline/${artifactId}/${encodeURIComponent(deviceId)}-${randomUUID()}.json`, bytes, mime: 'application/json', sensitivity: 'confidential' })
-      if (!saved.ok) throw new Error(`Office offline package save failed: ${saved.error.kind}`)
-      return saved.value.id
+    async revalidatePackage({ userId, expected, resourceBindings, packageFileId, packageHash }) {
+      const current = await loadOfficeOfflineContext(userId, expected.artifact.id)
+      if (!current || officeOfflineContextRevision(current) !== officeOfflineContextRevision(expected) || resourceBindings.length !== current.snapshot.resources.length) return null
+      const resources = await Promise.all(current.snapshot.resources.map((ref, index) => readOfficeResource(userId, current.artifact.workspaceId, ref.id).then(resource =>
+        resource && resource.hash === ref.hash && resource.mime === ref.mime && sameOfficeFileBinding(resource.binding, resourceBindings[index]!) ? resource : null)))
+      if (resources.some(resource => !resource)) return null
+      const scope = classifyOfficeOutput({ sensitivity: current.artifact.sensitivity, compartments: current.artifact.compartments, projectIds: current.artifact.projectIds }, ...resourceBindings)
+      let validForMs = Math.min(current.validForMs, ...resources.map(resource => resource!.validForMs))
+      if (packageFileId) {
+        const output = await readBoundOfficeFile!({ userId, workspaceId: current.artifact.workspaceId, fileId: packageFileId })
+        if (!output || output.binding.hash !== packageHash || output.binding.mime !== 'application/json' || officeOutputScopeRevision(output.binding) !== officeOutputScopeRevision(scope)) return null
+        validForMs = Math.min(validForMs, output.validForMs)
+      }
+      return Number.isFinite(validForMs) && validForMs > 0 ? { scope, validForMs: Math.floor(validForMs) } : null
+    },
+    async savePackage({ userId, workspaceId, artifactId, deviceId, bytes, hash, scope }) {
+      return saveClassifiedOfficeFile!({ userId, workspaceId, path: `/office/offline/${artifactId}/${officeScopePathSegment(scope)}/${encodeURIComponent(deviceId)}-${hash}.json`, bytes, mime: 'application/json', hash, scope })
     },
     upsert: officeReleaseStore.upsertOfflinePackage,
+    getPackage: officeReleaseStore.getOfflinePackage,
     resolveAccess: resolveOfficeAccess,
-    appendCommand: officeLiveStore.appendCommand,
+    syncCommands: officeLiveStore.appendOfflineCommands,
+    async createRecovery({ userId, artifactId, sourceVersionId, title, snapshot: sourceSnapshot }) {
+      const [artifact, access, sourceVersion] = await Promise.all([
+        officeArtifactStore.get(userId, artifactId),
+        resolveOfficeAccess(userId, artifactId),
+        officeArtifactStore.getVersionSource(userId, artifactId, sourceVersionId),
+      ])
+      if (!artifact || !access?.canEdit || artifact.lifecycleState !== 'active' || !sourceVersion || sourceVersion.workspaceId !== artifact.workspaceId) return null
+      const initialRevision = JSON.stringify({ artifact, access, sourceVersion })
+      const resourceReads = await Promise.all(sourceSnapshot.resources.map(async ref => {
+        const resource = await readOfficeResource(userId, artifact.workspaceId, ref.id)
+        return resource && resource.hash === ref.hash && resource.mime === ref.mime ? resource : null
+      }))
+      if (resourceReads.some(resource => !resource)) return null
+      const scope = classifyOfficeOutput({ sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...resourceReads.map(resource => resource!.binding))
+      const recoveryArtifactId = randomUUID(), recoveryVersionId = randomUUID()
+      const snapshot = deriveOfficeSnapshot({ source: sourceSnapshot, artifactId: recoveryArtifactId, title })
+      const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
+      const hash = createHash('sha256').update(bytes).digest('hex')
+      const fileId = await saveClassifiedOfficeFile!({ userId, workspaceId: artifact.workspaceId, path: `/office/artifacts/${recoveryArtifactId}/versions/1-${hash}.json`, bytes, mime: 'application/json', hash, scope })
+      const [currentArtifact, currentAccess, currentSourceVersion, currentResources] = await Promise.all([
+        officeArtifactStore.get(userId, artifactId),
+        resolveOfficeAccess(userId, artifactId),
+        officeArtifactStore.getVersionSource(userId, artifactId, sourceVersionId),
+        Promise.all(sourceSnapshot.resources.map(ref => readOfficeResource(userId, artifact.workspaceId, ref.id))),
+      ])
+      if (!currentArtifact || !currentAccess?.canEdit || !currentSourceVersion || JSON.stringify({ artifact: currentArtifact, access: currentAccess, sourceVersion: currentSourceVersion }) !== initialRevision ||
+        currentResources.some((resource, index) => !resource || !sameOfficeFileBinding(resource.binding, resourceReads[index]!.binding))) return null
+      const doc = snapshotToYDoc(snapshot)
+      const created = await officeArtifactStore.createCopiedArtifact({ userId, artifactId: recoveryArtifactId, versionId: recoveryVersionId,
+        workspaceId: artifact.workspaceId, family: artifact.family, title, templateVersionId: artifact.templateVersionId,
+        capabilityVersion: artifact.capabilityVersion, sensitivity: scope.sensitivity, compartments: scope.compartments,
+        projectIds: scope.projectIds, snapshotFileId: fileId, snapshotHash: hash, operationClock: officeStateVector(doc),
+        schemaVersion: snapshot.schemaVersion, snapshotCapabilityVersion: snapshot.capabilityVersion,
+        liveUpdate: encodeOfficeState(doc), liveStateVector: officeStateVector(doc), sourceArtifactId: artifactId, sourceVersionId })
+      return created ? { artifactId: recoveryArtifactId } : null
+    },
   }))
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)

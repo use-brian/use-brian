@@ -33,7 +33,7 @@ import { usePresence, usePublishPresenceActivity, usePublishPresenceIdentity } f
 import { getUserInfo } from "@/lib/user";
 import { appendOfficeCommand, applyOfficeUpdate, createOfficeUndoManager, officeCommandIds, yDocToSnapshot } from "@use-brian/office-model";
 import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
-import { appendOfflineCommand, classifyOfficeReconnect, listOfflineJournal, loadOfflinePackage, removeOfflineJournalEntry, removeOfflinePackage, type OfficeOfflineOwner, type LoadedOfficeOfflinePackage, type OfficeOfflineStatus, type OfflineJournalEntry } from "@/lib/office/offline";
+import { appendOfflineCommand, classifyOfficeReconnect, listOfflineJournal, loadOfflinePackage, materializeOfflineRecoverySnapshot, officeOfflineDeviceId, quarantineOfflineWork, removeOfflineJournalEntry, type OfficeOfflineOwner, type LoadedOfficeOfflinePackage, type OfficeOfflineStatus, type OfflineJournalEntry } from "@/lib/office/offline";
 import { handleOfficeHistoryShortcut, observeOfficeHistory, observeOfficeHistoryReadiness } from "@/lib/office/editor-history";
 import { OfficeTopbar } from "./office-topbar";
 import { cn } from "@/lib/utils";
@@ -117,6 +117,8 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   const [queuedCommentThreads, setQueuedCommentThreads] = useState<OfficeCommentThread[]>(EMPTY_COMMENTS);
   const receiveQueuedComments = useCallback((threads: OfficeCommentThread[]) => setQueuedCommentThreads(threads), []);
   const [reconnectStatus, setReconnectStatus] = useState<OfficeOfflineStatus>("synced");
+  const [recoveryArtifactId, setRecoveryArtifactId] = useState<string | null>(null);
+  const [offlineRecoveryBusy, setOfflineRecoveryBusy] = useState(false);
   const [recoveryState, setRecoveryState] = useState<"idle" | "moving" | "failed">("idle");
   const [templateDraftFailed, setTemplateDraftFailed] = useState(false);
   const [templateRoutingState, setTemplateRoutingState] = useState<TemplateRoutingInspectorState>({ ready: false, dirty: false, saving: false });
@@ -182,7 +184,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     if (!readDenied) return;
     setDenied(true);
     invalidateSurfaceCache(artifactKey);invalidateSurfaceCache(snapshotKey);
-    void removeOfflinePackage(artifactId, offlineOwner).catch(() => undefined);
+    void quarantineOfflineWork(artifactId, offlineOwner).catch(() => undefined);
   }, [readDenied, artifactKey, snapshotKey, artifactId, offlineOwner]);
   const offlineDiscussion = collab.status === "disconnected" || Boolean(offlineCopyAt);
   const discussionPrefix = viewerId && artifact?.family === "document" && !offlineCopyAt ? officePanelCachePrefix(workspaceId, viewerId) : null;
@@ -211,8 +213,8 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     return () => { active = false; };
   }, [artifactId, snapshotKey, offlineOwner]);
 
-  // A fetched row is authoritative: leave offline mode, reset the per-load
-  // flags, and drop a package the lifecycle no longer allows.
+  // A fetched row is authoritative: leave offline mode and reset the per-load
+  // flags. Lifecycle loss moves every local ciphertext out of replay paths.
   useEffect(() => {
     if (!artifactRow) return;
     setOffline(null);
@@ -220,7 +222,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     setCachedComments(null);
     setReconnectStatus("synced");
     setTemplateDraftFailed(false);
-    if (artifactRow.lifecycleState !== "active") void removeOfflinePackage(artifactId, offlineOwner).catch(() => undefined);
+    if (artifactRow.lifecycleState !== "active") void quarantineOfflineWork(artifactId, offlineOwner).catch(() => undefined);
   }, [artifactId, artifactRow, offlineOwner]);
 
   useEffect(() => {
@@ -236,7 +238,6 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
       setDenied(true);
       invalidateSurfaceCache(artifactKey);
       invalidateSurfaceCache(snapshotKey);
-      void removeOfflinePackage(artifactId, offlineOwner).catch(() => undefined);
       return;
     }
     if (onlineSeen.current) {setOfflineLookup("missing");return;}
@@ -335,13 +336,25 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
       if (!current()) return;
       const commands = entries.filter((entry): entry is Extract<(typeof entries)[number], { kind: "command" }> => entry.kind === "command");
       if (commands.length > 0) {
-        const result = await syncOfficeOfflineCommands(artifactId, commands[0].expectedSeq, commands.map((entry) => entry.command));
+        const sourcePackage = await loadOfflinePackage(artifactId, offlineOwner);
+        if (!sourcePackage || !artifact) { setReconnectStatus("sync_failed"); return; }
+        const result = await syncOfficeOfflineCommands({
+          artifactId,
+          expectedSeq: commands[0].expectedSeq,
+          commands: commands.map((entry) => entry.command),
+          deviceId: await officeOfflineDeviceId(offlineOwner),
+          recoveryTitle: t.offlineRecoveryTitle.replace("{title}", artifact.title),
+          recoverySnapshot: materializeOfflineRecoverySnapshot(sourcePackage, commands),
+        });
         if (!current()) return;
         const classified = classifyOfficeReconnect(result);
         setReconnectStatus(classified.status);
-        if (result.status === "synced") await Promise.all(commands.map(entry => removeOfflineJournalEntry(entry, offlineOwner)));
+        if (result.status === "synced" || (classified.conflict && result.recoveryArtifactId)) {
+          await Promise.all(commands.map(entry => removeOfflineJournalEntry(entry, offlineOwner)));
+          setRecoveryArtifactId(result.recoveryArtifactId ?? null);
+        }
         if (classified.quarantine) {
-          await removeOfflinePackage(artifactId, offlineOwner).catch(() => undefined);
+          await quarantineOfflineWork(artifactId, offlineOwner).catch(() => undefined);
           invalidateSurfaceCache(artifactKey);
           invalidateSurfaceCache(snapshotKey);
           setDenied(true);
@@ -349,6 +362,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
           setLiveLocal(null);
           return;
         }
+        if (result.status !== "synced" && !(classified.conflict && result.recoveryArtifactId)) return;
       }
       const suggestions = entries.filter((entry): entry is Extract<(typeof entries)[number], { kind: "suggestion" }> => entry.kind === "suggestion");
       for (const entry of suggestions) {
@@ -357,9 +371,9 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
         if (!current()) return;
         await removeOfflineJournalEntry(entry, offlineOwner);
       }
-    }).catch(() => undefined);
+    }).catch(() => { if (active && ownsRead()) setReconnectStatus("sync_failed"); });
     return () => {active = false;};
-  }, [artifactId, artifactKey, collab.status, collab.synced, snapshotKey, offlineOwner, viewerId, onlineReady]);
+  }, [artifact, artifactId, artifactKey, collab.status, collab.synced, snapshotKey, offlineOwner, viewerId, onlineReady, t.offlineRecoveryTitle]);
   useEffect(() => {
     const doc = collab.doc;
     if (!doc || !currentRead() || artifact?.lifecycleState !== "active" || artifact.role !== "edit" || suggestMode) return;
@@ -520,6 +534,16 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   const canRequestBrianRevision = !brianRevisionDisabledReason && Boolean(live);
   const canSuggest = artifact.family === "document" && artifact.role === "edit" && artifact.lifecycleState === "active";
   const toggleSuggestMode = () => { const next = !suggestMode; setSuggestMode(next); if (next) { setPanel("suggestions"); setPanelOpen(true); } };
+  const discardRecoveryCopy = async () => {
+    if (!recoveryArtifactId || offlineRecoveryBusy) return;
+    setOfflineRecoveryBusy(true);
+    try {
+      await transitionOfficeLifecycle(recoveryArtifactId, "trash", "Discarded recovered offline copy");
+      invalidateOfficeList(workspaceId);
+      setRecoveryArtifactId(null);
+      setReconnectStatus("synced");
+    } finally { setOfflineRecoveryBusy(false); }
+  };
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-office-shell-state="ready">
       {/* Below `md` the right cluster folds Suggest + undo / redo into one
@@ -529,7 +553,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
       {/* The topbar breadcrumb truncates to a few characters at 360px; the
           full title gets its own line on phones (report B row 50). */}
       <p className="line-clamp-2 border-b px-3 py-1.5 text-xs font-medium md:hidden" data-office-title-line="true">{artifact.title}</p>
-      {offlineCopyAt ? <div className="border-b bg-amber-50 px-4 py-2 text-xs text-amber-950">{reconnectStatus === "needs_attention" ? t.offlineNeedsAttention : t.offlineCopy.replace("{time}", new Date(offlineCopyAt).toLocaleString())}</div> : null}
+      {offlineCopyAt || reconnectStatus === "needs_attention" || reconnectStatus === "sync_failed" ? <div className="flex flex-wrap items-center gap-2 border-b bg-amber-50 px-4 py-2 text-xs text-amber-950"><span>{reconnectStatus === "needs_attention" ? t.offlineNeedsAttention : reconnectStatus === "sync_failed" ? t.syncFailed : t.offlineCopy.replace("{time}", new Date(offlineCopyAt!).toLocaleString())}</span>{recoveryArtifactId ? <><button type="button" className="rounded border border-amber-800/40 px-2 py-1 font-medium" onClick={() => router.push(`/w/${workspaceId}/office/${recoveryArtifactId}`)}>{t.openRecoveryCopy}</button><button type="button" disabled={offlineRecoveryBusy} className="rounded border border-amber-800/40 px-2 py-1 font-medium disabled:opacity-50" onClick={() => void discardRecoveryCopy()}>{t.discardRecoveryCopy}</button></> : null}</div> : null}
       {artifact.mode === "template" ? <div className="flex items-center justify-between gap-3 border-b bg-amber-50 px-4 py-2 text-xs font-medium text-amber-950"><span>{t.templateMode}</span>{templateId ? <button type="button" title={templateRoutingBlocked ? t.routingSaveBeforePublish : t.templateAdmit} disabled={templateCompileState === "queued" || !live || templateRoutingBlocked} className="rounded bg-amber-950 px-3 py-1.5 text-amber-50 disabled:opacity-50" onClick={() => void publishTemplate()}>{templateRoutingBlocked ? t.routingSaveBeforePublish : templateCompileState === "queued" ? t.templateCompiling : templateCompileState === "failed" ? t.templateCompileFailed : t.templateAdmit}</button> : null}</div> : null}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row">
         <main ref={editorRootRef} className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-muted/30">{editor}</main>

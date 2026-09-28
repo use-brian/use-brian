@@ -33,7 +33,7 @@ vi.mock('../spreadsheet-editor',()=>({SpreadsheetEditor:()=>null}));
 vi.mock('../presentation-presenter',()=>({PresentationPresenter:()=>null}));
 vi.mock('../job-activity',()=>({OfficeJobActivity:()=>null}));
 vi.mock('../office-card-preview',()=>({OfficeCardPreview:()=>null}));
-vi.mock('@/lib/office/offline',()=>({loadOfflinePackage:vi.fn(async()=>null),listOfflineJournal:vi.fn(async()=>[]),appendOfflineCommand:vi.fn(async()=>{}),removeOfflinePackage:vi.fn(async()=>{}),removeOfflineJournalEntry:vi.fn(async()=>{}),classifyOfficeReconnect:vi.fn()}));
+vi.mock('@/lib/office/offline',()=>({loadOfflinePackage:vi.fn(async()=>null),listOfflineJournal:vi.fn(async()=>[]),appendOfflineCommand:vi.fn(async()=>{}),removeOfflinePackage:vi.fn(async()=>{}),removeOfflineJournalEntry:vi.fn(async()=>{}),classifyOfficeReconnect:vi.fn(),materializeOfflineRecoverySnapshot:vi.fn(),officeOfflineDeviceId:vi.fn(async()=>"fixture-device"),quarantineOfflineWork:vi.fn(async()=>{})}));
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 const threads=[{id:'thread-a',artifactVersionId:'version-a',anchorKind:'block',anchor:{kind:'block',targetIds:['block-a']},status:'open',messages:[{id:'message-a',authorType:'user',body:'Protected server comment',mentions:[],createdAt:'2026-01-01T00:00:00Z'}]}];
 const suggestions=[{id:'protected-suggestion',status:'open',commandBatch:{kind:'replaceTextRange'}}];

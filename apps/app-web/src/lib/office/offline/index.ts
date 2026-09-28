@@ -1,8 +1,9 @@
 /** Device-encrypted Office packages and durable offline command journal.
  * [COMP:app-web/office-offline] */
 import { getUserInfo } from "@/lib/user";
-import type { OfficeCommand } from "@use-brian/office-model";
+import { appendOfficeCommand, snapshotToYDoc, yDocToSnapshot, type OfficeArtifactSnapshot, type OfficeCommand } from "@use-brian/office-model";
 import type { OfficeArtifact, OfficeCommentThread, OfficeLiveSnapshot } from "../api";
+import { officeMetadataRemaining } from "../metadata";
 
 export type OfficeOfflineOwner = Readonly<{userId: string; workspaceId: string}>;
 
@@ -95,18 +96,20 @@ const DB_NAME = "use-brian-office-offline-v1";
 const PACKAGE_STORE = "viewer-packages";
 const JOURNAL_STORE = "viewer-journal";
 const KEY_STORE = "keys";
+const QUARANTINE_STORE = "viewer-quarantine";
 
 type EncryptedJournalEntry = { artifactId: string; seq: number; iv: string; ciphertext: string };
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 3);
+    const request = indexedDB.open(DB_NAME, 4);
     request.onupgradeneeded = () => {
       const db = request.result;
       // Legacy artifact-only stores/root remain encrypted quarantine, never adopted.
       if (!db.objectStoreNames.contains(PACKAGE_STORE)) db.createObjectStore(PACKAGE_STORE, { keyPath: ["workspaceId", "userId", "artifactId"] });
       if (!db.objectStoreNames.contains(JOURNAL_STORE)) db.createObjectStore(JOURNAL_STORE, { keyPath: ["workspaceId", "userId", "artifactId", "seq"] });
       if (!db.objectStoreNames.contains(KEY_STORE)) db.createObjectStore(KEY_STORE);
+      if (!db.objectStoreNames.contains(QUARANTINE_STORE)) db.createObjectStore(QUARANTINE_STORE, { keyPath: ["workspaceId", "userId", "artifactId", "quarantinedAt"] });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("office_offline_db_open_failed"));
@@ -224,12 +227,74 @@ export async function officeOfflineDeviceId(expectedOwner: OfficeOfflineOwner): 
   return ownerValue(owner, "device-id", crypto.randomUUID());
 }
 
-export async function persistOfficeOfflinePackage(params: { artifactId: string; version: number; manifest: unknown; payload: unknown; signature: string; pinned: boolean }, expectedOwner: OfficeOfflineOwner): Promise<void> {
+export async function persistOfficeOfflinePackage(params: { artifactId: string; version: number; manifest: unknown; payload: unknown; signature: string; pinned: boolean }, expectedOwner: OfficeOfflineOwner, authority: unknown): Promise<void> {
   const owner = captureOwner(expectedOwner);
+  if (officeMetadataRemaining(authority, owner.userId) <= 0) throw new Error("office_projection_expired");
   assertPackageScope(params as OfficeOfflinePackage, owner, params.artifactId);
   const encrypted = await encryptOfficePackage({ ...params, deviceSecret: await getOrCreateOfficeDeviceKey(owner) });
   assertOwner(owner);
-  await writeRecord(owner, PACKAGE_STORE, store => {store.put({...encrypted, ...owner});});
+  const remaining = officeMetadataRemaining(authority, owner.userId);
+  if (remaining <= 0) throw new Error("office_projection_expired");
+  const db = await openDb();
+  try {
+    assertOwner(owner);
+    const transaction = db.transaction(PACKAGE_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    const expiry = window.setTimeout(() => transaction.abort(), Math.max(1, officeMetadataRemaining(authority, owner.userId)));
+    try {
+      if (officeMetadataRemaining(authority, owner.userId) <= 0) throw new Error("office_projection_expired");
+      transaction.objectStore(PACKAGE_STORE).put({...encrypted, ...owner});
+      await done;
+    } catch (error) {
+      try { transaction.abort(); } catch { /* already complete */ }
+      await done.catch(() => undefined);
+      throw error;
+    } finally { window.clearTimeout(expiry); }
+    assertOwner(owner);
+  } finally { db.close(); }
+}
+
+/** Move unreadable work out of every normal read/replay path without
+ * decrypting or deleting it. A future recovery flow must provide separate
+ * authorization and explicitly understand the opaque quarantine schema. */
+export async function quarantineOfflineWork(artifactId: string, expectedOwner: OfficeOfflineOwner): Promise<void> {
+  const owner = captureOwner(expectedOwner);
+  const db = await openDb();
+  try {
+    assertOwner(owner);
+    const transaction = db.transaction([PACKAGE_STORE, JOURNAL_STORE, QUARANTINE_STORE], "readwrite");
+    const done = transactionDone(transaction);
+    const packages = transaction.objectStore(PACKAGE_STORE);
+    const journal = transaction.objectStore(JOURNAL_STORE);
+    const quarantine = transaction.objectStore(QUARANTINE_STORE);
+    const packageRequest = packages.get(recordKey(owner, artifactId));
+    const range = IDBKeyRange.bound([...recordKey(owner, artifactId), 0], [...recordKey(owner, artifactId), Number.MAX_SAFE_INTEGER]);
+    const journalRequest = journal.getAll(range);
+    let packageRecord: unknown;
+    let journalRecords: Array<EncryptedJournalEntry & OfficeOfflineOwner> | undefined;
+    let refusal: unknown;
+    const finish = () => {
+      if (packageRequest.readyState !== "done" || journalRequest.readyState !== "done") return;
+      try {
+        assertOwner(owner);
+        packageRecord = packageRequest.result;
+        journalRecords = journalRequest.result as Array<EncryptedJournalEntry & OfficeOfflineOwner>;
+        const quarantinedAt = new Date().toISOString();
+        quarantine.put({ ...owner, artifactId, quarantinedAt, packageRecord, journalRecords });
+        packages.delete(recordKey(owner, artifactId));
+        for (const row of journalRecords) journal.delete([...recordKey(owner, artifactId), row.seq]);
+      } catch (error) {
+        refusal = error;
+        transaction.abort();
+      }
+    };
+    packageRequest.onsuccess = finish;
+    journalRequest.onsuccess = finish;
+    packageRequest.onerror = () => { refusal = packageRequest.error; transaction.abort(); };
+    journalRequest.onerror = () => { refusal = journalRequest.error; transaction.abort(); };
+    try { await done; } catch (error) { throw refusal ?? error; }
+    assertOwner(owner);
+  } finally { db.close(); }
 }
 
 export async function encryptOfflineJournalEntry(entry: OfflineJournalEntry, deviceKey: CryptoKey | Uint8Array): Promise<EncryptedJournalEntry> {
@@ -288,6 +353,12 @@ export async function removeOfflineJournalEntry(entry: OfflineJournalEntry, expe
   const owner = captureOwner(expectedOwner);
   assertJournalOwner(entry, owner);
   await writeRecord(owner, JOURNAL_STORE, store => {store.delete([...recordKey(owner, entry.artifactId), entry.seq]);});
+}
+
+export function materializeOfflineRecoverySnapshot(pkg: LoadedOfficeOfflinePackage, entries: Array<Extract<OfflineJournalEntry, { kind: "command" }>>): OfficeArtifactSnapshot {
+  const doc = snapshotToYDoc(pkg.payload.snapshot);
+  for (const entry of [...entries].sort((left, right) => left.seq - right.seq)) appendOfficeCommand(doc, entry.command);
+  return yDocToSnapshot(doc);
 }
 
 export function classifyOfficeReconnect(result: { status?: string; reason?: string; quarantine?: boolean }): { status: OfficeOfflineStatus; quarantine: boolean; conflict: boolean } {

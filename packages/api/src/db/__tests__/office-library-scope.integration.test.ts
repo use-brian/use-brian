@@ -112,6 +112,24 @@ describe('[COMP:api/office-access] current Office library scopes (PG18)',()=>{
     await expect(artifacts.createCopiedArtifact({userId:f.reader,...input,artifactId:refusedId,versionId:randomUUID()})).rejects.toMatchObject({code:'42501'})
     expect((await pool.query('SELECT id FROM office_artifacts WHERE id=$1',[refusedId])).rows).toHaveLength(0)
   })
+  it('admits reconnect commands atomically, acknowledges retries and leaves read-only grants unchanged',async()=>{
+    const f=await fixture(),nodeId=randomUUID()
+    const snapshot:DocumentSnapshot={schemaVersion:1,capabilityVersion:1,artifactId:f.artifact.id,workspaceId:f.workspaceId,family:'document',locale:'en',defaultLanguage:'en',templateVersionId:null,rootId:randomUUID(),title:'Offline fixture',resources:[],accessibility:{title:'Offline fixture'},sections:[{id:randomUUID(),page:{widthPt:612,heightPt:792,marginTopPt:72,marginRightPt:72,marginBottomPt:72,marginLeftPt:72,orientation:'portrait'},header:[],footer:[],showPageNumber:false,nodes:[{id:nodeId,kind:'paragraph',styleName:'Body',alignment:'start',runs:[{id:randomUUID(),text:'Draft',style:{fontFamily:'Arial',fontSizePt:11,bold:false,italic:false,underline:false,strike:false,color:'#111111'}}]}]}]}
+    const live=createOfficeLiveStore();await live.initialize({userId:f.owner,artifactId:f.artifact.id,snapshot})
+    const common={artifactId:f.artifact.id,baseVersion:0,actor:{type:'user' as const,id:f.editor},origin:'offline' as const}
+    const first={...common,commandId:randomUUID(),kind:'setObjectProperty' as const,targetId:nodeId,path:['alignment'],value:'center'}
+    const invalid={...common,commandId:randomUUID(),kind:'setObjectProperty' as const,targetId:randomUUID(),path:['alignment'],value:'end'}
+    await expect(live.appendOfflineCommands({userId:f.editor,artifactId:f.artifact.id,expectedSeq:1,commands:[first,invalid]})).rejects.toThrow()
+    expect((await pool.query('SELECT seq FROM office_collab_documents WHERE artifact_id=$1',[f.artifact.id])).rows).toEqual([{seq:'1'}])
+    const second={...common,commandId:randomUUID(),kind:'setObjectProperty' as const,targetId:nodeId,path:['styleName'],value:'Callout'}
+    const admitted=await live.appendOfflineCommands({userId:f.editor,artifactId:f.artifact.id,expectedSeq:1,commands:[first,second]})
+    if(!admitted||admitted==='conflict')throw new Error('offline batch should apply');expect(admitted.seq).toBe(3)
+    const retried=await live.appendOfflineCommands({userId:f.editor,artifactId:f.artifact.id,expectedSeq:1,commands:[first,second]})
+    if(!retried||retried==='conflict')throw new Error('offline retry should be acknowledged');expect(retried.seq).toBe(3)
+    const refused=await live.appendOfflineCommands({userId:f.reader,artifactId:f.artifact.id,expectedSeq:3,commands:[{...second,commandId:randomUUID(),actor:{type:'user',id:f.reader}}]})
+    expect(refused).toBe('conflict')
+    expect((await pool.query('SELECT seq FROM office_collab_documents WHERE artifact_id=$1',[f.artifact.id])).rows).toEqual([{seq:'3'}])
+  })
   it('rechecks revocation for all metadata and preserves independent live authority',async()=>{
     const f=await fixture(),other=await f.grant();await f.revoke()
     expect(await templates.getVersion(f.reader,f.version.id)).not.toBeNull()

@@ -149,12 +149,14 @@ function OfficeReviewContent({ artifact, artifactId, workspaceId, snapshot, onLi
   }
 
   async function saveOffline() {
+    const owner = beginOperation();
     setBusy(true);
     try {
       const response = await requestOfficeOfflinePackage(artifactId, await officeOfflineDeviceId(offlineOwner), artifact.version);
-      await persistOfficeOfflinePackage({ artifactId, version: artifact.version, manifest: response.manifest, payload: response.payload, signature: response.signature, pinned: true }, offlineOwner);
-      setOfflineSaved(true);
-    } finally { setBusy(false); }
+      if (!ownsOperation(owner, response)) return;
+      await persistOfficeOfflinePackage({ artifactId, version: artifact.version, manifest: response.manifest, payload: response.payload, signature: response.signature, pinned: true }, offlineOwner, response);
+      if (ownsOperation(owner)) setOfflineSaved(true);
+    } finally { if (ownsOperation(owner)) setBusy(false); }
   }
 
   return <div className="space-y-5 p-4 text-sm">

@@ -417,13 +417,17 @@ export async function transitionOfficeLifecycle(artifactId: string, action: "arc
   return body.artifact;
 }
 
-export async function syncOfficeOfflineCommands(artifactId: string, expectedSeq: number, commands: OfficeCommand[]): Promise<{ status: string; reason?: string; quarantine?: boolean; seq?: number; snapshot?: OfficeArtifactSnapshot }> {
-  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-sync`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedSeq, commands }) });
-  const body = await response.json() as { status: string; reason?: string; quarantine?: boolean; seq?: number; snapshot?: OfficeArtifactSnapshot };
+export type OfficeOfflineSyncResult = { status: string; reason?: string; quarantine?: boolean; seq?: number; recoveryArtifactId?: string };
+
+export async function syncOfficeOfflineCommands(input: { artifactId: string; expectedSeq: number; commands: OfficeCommand[]; deviceId: string; recoveryTitle: string; recoverySnapshot: OfficeArtifactSnapshot }): Promise<OfficeOfflineSyncResult> {
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(input.artifactId)}/offline-sync`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedSeq: input.expectedSeq, commands: input.commands, deviceId: input.deviceId, recoveryTitle: input.recoveryTitle, recoverySnapshot: input.recoverySnapshot }) });
+  const body = await response.json() as OfficeOfflineSyncResult;
   if (!response.ok && response.status !== 409) throw new Error("office_offline_sync_failed");
   return body;
 }
 
 export async function requestOfficeOfflinePackage(artifactId: string, deviceId: string, expectedVersion: number): Promise<{ manifest: Record<string, unknown>; signature: string; payload: unknown }> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-packages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, pinned: true, expectedVersion }) }), "office_offline_package_failed");
+  const started = performance.now(), viewerId = getUserInfo()?.id;
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-packages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, pinned: true, expectedVersion }) });
+  return protectedMediaJson(response, "office_offline_package_failed", started, viewerId);
 }

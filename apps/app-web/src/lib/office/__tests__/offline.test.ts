@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyOfficeCommand } from "@use-brian/office-model";
-import { classifyOfficeReconnect, decryptOfficePackage, decryptOfflineJournalEntry, encryptOfficePackage, encryptOfflineJournalEntry, officeManifestHash } from "../offline";
+import { classifyOfficeReconnect, decryptOfficePackage, decryptOfflineJournalEntry, encryptOfficePackage, encryptOfflineJournalEntry, materializeOfflineRecoverySnapshot, officeManifestHash, type LoadedOfficeOfflinePackage } from "../offline";
 import { presentationFixture, spreadsheetFixture } from "../../../components/office/__tests__/editor-fixtures";
 import { formattedPresentationSnapshot } from "../../../../../../packages/core/src/office/__tests__/fixtures";
 
@@ -138,5 +138,13 @@ describe("[COMP:app-web/office-offline] Encrypted Office offline package", () =>
     expect(classifyOfficeReconnect({ status: "needs_attention", reason: "access_revoked", quarantine: true })).toEqual({ status: "needs_attention", quarantine: true, conflict: false });
     expect(classifyOfficeReconnect({ status: "needs_attention", reason: "structural_conflict" })).toEqual({ status: "needs_attention", quarantine: false, conflict: true });
     expect(classifyOfficeReconnect({ status: "synced" }).status).toBe("synced");
+  });
+
+  it("materializes the exact offline branch for recovery publication", () => {
+    const snapshot = presentationFixture();
+    const command = { artifactId: snapshot.artifactId, baseVersion: 1, actor: { type: "user" as const, id: "00000000-0000-4000-8000-000000000090" }, origin: "offline" as const, commandId: "00000000-0000-4000-8000-000000000091", kind: "setObjectProperty" as const, targetId: snapshot.slides[0].objects[0].id, path: ["alignment"], value: "center" };
+    const pkg = { payload: { snapshot } } as LoadedOfficeOfflinePackage;
+    const recovered = materializeOfflineRecoverySnapshot(pkg, [{ artifactId: snapshot.artifactId, seq: 2, kind: "command", expectedSeq: 1, command, createdAt: "2026-08-13T00:00:00.000Z" }]);
+    expect(recovered.family === "presentation" && recovered.slides[0].objects[0]).toMatchObject({ alignment: "center" });
   });
 });

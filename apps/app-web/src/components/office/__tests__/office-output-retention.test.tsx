@@ -16,6 +16,8 @@ const state = vi.hoisted(() => ({
   review: vi.fn(),
   release: vi.fn(),
   read: vi.fn(),
+  requestOffline: vi.fn(),
+  persistOffline: vi.fn(),
 }))
 
 vi.mock('@/lib/user', () => ({ getUserInfo: () => ({ id: state.viewer }) }))
@@ -25,9 +27,10 @@ vi.mock('@/lib/office/api', async importOriginal => ({
   reviewOfficeRelease: (...args: unknown[]) => state.review(...args),
   releaseOfficeArtifact: (...args: unknown[]) => state.release(...args),
   readOfficeReleasedFile: (...args: unknown[]) => state.read(...args),
-  requestOfficeOfflinePackage: vi.fn(),
+  requestOfficeOfflinePackage: (...args: unknown[]) => state.requestOffline(...args),
   transitionOfficeLifecycle: vi.fn(),
 }))
+vi.mock('@/lib/office/offline', () => ({ officeOfflineDeviceId: vi.fn(async () => 'fixture-device'), persistOfficeOfflinePackage: (...args: unknown[]) => state.persistOffline(...args) }))
 
 const receipt: OfficeReleaseReceipt = { status: 'ready', version: 2, action: 'export', blocks: [], warnings: [], acknowledgedCodes: [] }
 const artifact = (artifactId = 'artifact-a'): OfficeArtifact => ({ artifactId, family: 'document', title: 'Department report', version: 2, lifecycleState: 'active', role: 'edit' })
@@ -52,6 +55,8 @@ describe('[COMP:app-web/office-iteration-panel] protected Office output retentio
     state.review.mockReset()
     state.release.mockReset()
     state.read.mockReset()
+    state.requestOffline.mockReset()
+    state.persistOffline.mockReset()
     vi.stubGlobal('URL', {
       ...URL,
       createObjectURL: vi.fn(() => 'blob:protected-office-output'),
@@ -88,5 +93,16 @@ describe('[COMP:app-web/office-iteration-panel] protected Office output retentio
     await act(async () => resolveReview(protectedValue({ ...receipt })))
     expect(state.release).not.toHaveBeenCalled()
     expect(host.textContent).not.toContain(en.office.releaseReady)
+  })
+
+  it('commits an offline package only under its initiating bounded response', async () => {
+    const response = protectedValue({ manifest: {}, signature: 'signed', payload: { artifact: { artifactId: 'artifact-a' }, snapshot: { artifactId: 'artifact-a', workspaceId: 'workspace-a' } } })
+    state.requestOffline.mockResolvedValue(response)
+    state.persistOffline.mockResolvedValue(undefined)
+    render()
+    const save = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === en.office.availableOffline)!
+    await act(async () => { save.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(state.persistOffline).toHaveBeenCalledWith(expect.objectContaining({ artifactId: 'artifact-a', signature: 'signed' }), { workspaceId: 'workspace-a', userId: 'viewer-a' }, response)
+    expect(host.textContent).toContain(en.office.savedDevice)
   })
 })
