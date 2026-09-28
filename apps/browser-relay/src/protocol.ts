@@ -15,6 +15,7 @@ import { z } from 'zod'
 // ── Extension → relay ──────────────────────────────────────────
 
 const HelloMessageSchema = z.object({
+  clientKind: z.literal('electron').optional(),
   type: z.literal('hello'),
   pairingToken: z.string().min(1),
   /**

@@ -57,6 +57,9 @@ importers:
 
   apps/app-desktop:
     dependencies:
+      '@use-brian/browser-control':
+        specifier: workspace:*
+        version: link:../../packages/browser-control
       '@use-brian/firefox-companion':
         specifier: workspace:*
         version: link:../firefox-companion
@@ -320,6 +323,10 @@ importers:
         version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(sass@1.51.0)(tsx@4.22.4)
 
   apps/browser-extension:
+    dependencies:
+      '@use-brian/browser-control':
+        specifier: workspace:*
+        version: link:../../packages/browser-control
     devDependencies:
       '@types/chrome':
         specifier: ^0.0.287
@@ -723,6 +730,12 @@ importers:
       vitest:
         specifier: ^3
         version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(sass@1.51.0)(tsx@4.22.4)
+
+  packages/browser-control:
+    devDependencies:
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
 
   packages/channels:
     devDependencies:

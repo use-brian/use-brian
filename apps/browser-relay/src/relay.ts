@@ -239,9 +239,10 @@ export class BrowserRelay {
       // read (ready, status, a failing command) must give the same answer, and
       // re-deriving it per call would let them disagree.
       const build = msg.data.build ?? null
-      const staleBuild = isExtensionBuildStale(build)
+      const staleBuild = msg.data.clientKind !== 'electron' && isExtensionBuildStale(build)
       const fresh: Connection = {
-        protectedFillV1: msg.data.capabilities?.protectedFillV1 === true,
+        // Client kind is compatibility metadata, never a capability grant.
+        protectedFillV1: msg.data.clientKind !== 'electron' && msg.data.capabilities?.protectedFillV1 === true,
         // Taken from HTTP upgrade headers, never from a model command or hello body.
         extensionOrigin: extensionOrigin ?? null,
         socket,

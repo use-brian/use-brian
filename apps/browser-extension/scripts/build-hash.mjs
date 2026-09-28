@@ -38,6 +38,7 @@ function sourceFiles(appRoot) {
     }
   }
   walk(join(appRoot, 'src'))
+  walk(join(appRoot, '../../packages/browser-control/src'))
   files.push(join(appRoot, 'static', 'manifest.json'))
   return files
 }

@@ -462,3 +462,117 @@ describe('protected-fill capability handshake', () => {
     client.stop()
   })
 })
+
+describe('relay lifecycle cancellation', () => {
+  it.each(['getUrl', 'getToken', 'getBuild'] as const)('stop prevents late %s completion from dialing', async getter => {
+    const { sockets, connect } = fakeWsFactory()
+    const t = timers()
+    let resolve!: (value: string) => void
+    const pending = new Promise<string>(r => { resolve = r })
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test', getToken: async () => 'token',
+      getBuild: async () => 'build', [getter]: () => pending,
+      connect, onSessionToken: async () => {}, onCommand: () => {}, ...t,
+    })
+    client.start(); await flush(); client.stop()
+    resolve('late'); await flush(); t.advance(120_000); await flush()
+    expect(sockets).toHaveLength(0)
+    expect(client.getState()).toBe('disconnected')
+  })
+
+  it('backs off after async configuration failure and cancels the retry on stop', async () => {
+    const { sockets, connect } = fakeWsFactory()
+    const t = timers()
+    const getUrl = vi.fn().mockRejectedValueOnce(new Error('storage unavailable')).mockResolvedValue('wss://relay.test')
+    const client = new RelayClient({
+      getUrl, getToken: async () => 'token', connect,
+      onSessionToken: async () => {}, onCommand: () => {}, ...t,
+    })
+    client.start(); await flush()
+    expect(t.scheduled.at(-1)?.ms).toBe(BACKOFF_STEPS_MS[0])
+    client.stop(); t.advance(120_000); await flush()
+    expect(getUrl).toHaveBeenCalledTimes(1)
+    expect(sockets).toHaveLength(0)
+  })
+
+  it.each(['getUrl', 'getToken', 'getBuild'] as const)('stop cancels a pending %s even across restart', async getter => {
+    const { sockets, connect } = fakeWsFactory()
+    const t = timers()
+    let resolve!: (value: string) => void
+    const pending = new Promise<string>(r => { resolve = r })
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test', getToken: async () => 'token',
+      getBuild: async () => 'build',
+      [getter]: vi.fn().mockReturnValueOnce(pending).mockResolvedValue('fresh'),
+      connect, onSessionToken: async () => {}, onCommand: () => {}, ...t,
+    })
+    client.start()
+    await flush()
+    client.stop()
+    client.start()
+    await flush()
+    expect(sockets).toHaveLength(1)
+    resolve('obsolete')
+    await flush()
+    expect(sockets).toHaveLength(1)
+    client.stop()
+    t.advance(120_000)
+    expect(client.getState()).toBe('disconnected')
+  })
+
+  it('ignores stale socket callbacks and already-queued timers after stop/restart', async () => {
+    const { sockets, connect } = fakeWsFactory()
+    const t = timers()
+    const onCommand = vi.fn()
+    const onSessionToken = vi.fn(async () => {})
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test', getToken: async () => 'token',
+      connect, onCommand, onSessionToken, ...t,
+    })
+    client.start(); client.start()
+    await flush()
+    expect(sockets).toHaveLength(1)
+    const old = sockets[0]
+    old.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+    old.close()
+    const queued = t.scheduled.map(t => t.fn)
+    client.stop(); client.start()
+    await flush()
+    const current = sockets[1]
+    current.readyState = 1
+    current.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+    old.onopen?.()
+    old.onmessage?.({ data: JSON.stringify({ type: 'ready', sessionToken: 'obsolete' }) })
+    old.onmessage?.({ data: JSON.stringify({ type: 'command', id: 'old', op: 'click' }) })
+    old.onclose?.({ code: 4000 }); old.onerror?.()
+    queued.forEach(fn => fn())
+    await flush()
+    expect(old.sentFrames).toEqual([])
+    expect(onCommand).not.toHaveBeenCalled()
+    expect(onSessionToken).not.toHaveBeenCalled()
+    expect(client.getState()).toBe('ready')
+    expect(sockets).toHaveLength(2)
+    client.sendResult({ id: 'current', ok: true })
+    expect(current.sentFrames).toHaveLength(1)
+    client.stop()
+    current.onopen?.(); current.onclose?.()
+    t.advance(120_000)
+    await flush()
+    expect(sockets).toHaveLength(2)
+    expect(client.getState()).toBe('disconnected')
+  })
+
+  it('reports electron kind without protected-fill capability, even if supplied', async () => {
+    const { sockets, connect } = fakeWsFactory()
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test', getToken: async () => 'token',
+      clientKind: 'electron', capabilities: { protectedFillV1: true },
+      connect, onSessionToken: async () => {}, onCommand: () => {},
+    })
+    client.start(); await flush(); sockets[0].onopen?.()
+    expect(JSON.parse(sockets[0].sentFrames[0])).toEqual({
+      type: 'hello', pairingToken: 'token', clientKind: 'electron',
+    })
+    client.stop()
+  })
+})
