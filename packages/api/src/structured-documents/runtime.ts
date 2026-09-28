@@ -67,7 +67,7 @@ export function createStructuredDocumentRuntime(options: {
         const job = await store.get(userId, lineage.extractionId)
         if (!job || job.userId !== userId) return false
         const principal = SavedPrincipalSchema.parse(job.context.principal)
-        const evidence = await service.evidence(principal, job.id)
+        const evidence = await service.evidence(principal, job.id, 'mutation')
         if (job.pdfSha256 !== lineage.pdfSha256 || job.recordsSha256 !== lineage.recordsSha256) return false
         const office = await options.getOffice(userId, lineage.artifactId)
         if (!office) return false

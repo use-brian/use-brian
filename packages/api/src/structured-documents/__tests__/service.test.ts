@@ -35,7 +35,7 @@ function fixture(resolverFactory?: (client: StructuredOcrClient) => StructuredOc
   const records = recordsFixture()
   const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 42])
   const file = (id: string, bytes: Uint8Array, mime: string): WorkspaceFile => ({
-    id, workspaceId: uid(2), path: `/fictional/${id}`, parentPath: '/fictional', name: 'fictional', title: null, summary: null,
+    scopeVersion: `scope-${id}`, id, workspaceId: uid(2), path: `/fictional/${id}`, parentPath: '/fictional', name: 'fictional', title: null, summary: null,
     mime, sizeBytes: bytes.length, tags: [], relatedIds: [], storageUri: `memory:${id}`, sensitivity: 'internal', compartments: ['team-a'], projectIds: ['project-a'], metadata: {},
     userId: null, assistantId: null, source: 'user', sourceEpisodeId: null, verifiedByUserId: null, verifiedAt: null,
     validFrom: date(), validTo: null, supersededBy: null, retractedAt: null, retractedReason: null, retractedBy: null,
@@ -176,7 +176,7 @@ describe('[COMP:api/structured-documents] authorized service', () => {
     expect(credentials).toHaveBeenCalledOnce()
     if (change === 'revoked') f.setLiveContext({ ...f.ctx, mutationCompartments: ['team-b'] })
     else delete (f.job().context.principal as Record<string, unknown>).mutationCompartments
-    await safeFailure(f.service.start(f.ctx, { extractionId: uid(7) }), 'connector_unavailable')
+    await safeFailure(f.service.start(f.ctx, { extractionId: uid(7) }), 'access_denied')
     expect(credentials).toHaveBeenCalledOnce()
     expect(f.store.enqueue).not.toHaveBeenCalled()
     expect(f.client.submit).not.toHaveBeenCalled()
@@ -301,6 +301,18 @@ describe('[COMP:api/structured-documents] authorized service', () => {
     for (const key of ['userId', 'workspaceId', 'assistantId'] as const) {
       await expect(f.service.read({ ...f.ctx, [key]: uid(98) }, { extractionId: uid(7) })).rejects.toMatchObject({ code: 'access_denied' })
     }
+  })
+  it('keeps temporary read grants useful for preflight/read but refuses start and proposal publication', async () => {
+    const f = fixture()
+    f.ctx.mutationCompartments = ['team-b']
+    f.setLiveContext({ ...f.ctx })
+    await expect(f.prepare()).resolves.toMatchObject({ status: 'prepared' })
+    f.archive()
+    await expect(f.service.read(f.ctx, { extractionId: uid(7) })).resolves.toMatchObject({ complete: true })
+    await expect(f.service.start(f.ctx, { extractionId: uid(7) })).rejects.toMatchObject({ code: 'access_denied' })
+    await expect(f.propose()).rejects.toMatchObject({ code: 'access_denied' })
+    expect(f.store.enqueue).not.toHaveBeenCalled()
+    expect(f.saveProposal).not.toHaveBeenCalled()
   })
   it('accepts indexing metadata updates between prepare/start and distinct stat/read snapshots', async () => {
     const f = fixture()
@@ -432,6 +444,15 @@ describe('[COMP:api/structured-documents] authorized service', () => {
     expect(payload.body).toContain('NOT an approved fact')
     expect(f.live.snapshot).toEqual(before)
     expect(f.files.writeBytes).not.toHaveBeenCalled(); expect(f.client.submit).not.toHaveBeenCalled()
+  })
+  it('revalidates complete mutation-authorized evidence after planning and before proposal persistence', async () => {
+    const f = fixture(); await f.prepare(); f.archive()
+    f.getOffice.mockImplementationOnce(async () => {
+      f.setLiveContext({ ...f.ctx, mutationCompartments: ['team-b'] })
+      return { artifact: f.artifact, access: f.access, live: f.live }
+    })
+    await expect(f.propose()).rejects.toMatchObject({ code: 'access_denied' })
+    expect(f.saveProposal).not.toHaveBeenCalled()
   })
   it('requires current comment authority, compatible destination scopes and exact live/head versions', async () => {
     for (const mutate of [

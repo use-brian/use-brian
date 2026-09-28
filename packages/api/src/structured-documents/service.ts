@@ -37,6 +37,7 @@ export const ProposeEvidenceFillSchema = z.object({
   mappings: z.array(FillMappingSchema).min(1).max(100),
 }).strict()
 const rank = { public: 0, internal: 1, confidential: 2 }
+type AuthorityMode = 'read' | 'mutation'
 const MiB = 1024 * 1024
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex')
 const unique = (values: string[]) => [...new Set(values)].sort()
@@ -112,10 +113,11 @@ function highWater(rows: WorkspaceFile[]): Required<Pick<ScopeEvidence, 'sensiti
   return { sensitivity: values.reduce<Required<Pick<ScopeEvidence, 'sensitivity' | 'compartments' | 'projectIds'>>['sensitivity']>((a, b) => rank[a] >= rank[b.sensitivity] ? a : b.sensitivity, 'public'),
     compartments: unique(values.flatMap(v => v.compartments)), projectIds: unique(values.flatMap(v => v.projectIds)) }
 }
-function eligible(file: WorkspaceFile, ctx: Principal, id: string) {
+function eligible(file: WorkspaceFile, ctx: Principal, id: string, mode: AuthorityMode = 'read') {
   const scope = requirements(file)
   if (file.id !== id || file.workspaceId !== ctx.workspaceId || file.validTo !== null || file.retractedAt !== null || file.supersededBy !== null ||
       rank[file.sensitivity] > rank[ctx.clearance] || !contains(ctx.compartments, scope.compartments) || !contains(ctx.projectIds, scope.projectIds)) reject('access_denied')
+  if (mode === 'mutation' && !contains(ctx.mutationCompartments, scope.compartments)) reject('access_denied')
   if (file.userId !== null || file.assistantId !== null) reject('private_source')
 }
 function sourceVersion(file: WorkspaceFile) {
@@ -159,14 +161,14 @@ export function createStructuredDocumentService(options: StructuredDocumentServi
     try { return intersect(saved, principal(await options.resolveContext(structuredClone(saved)))) }
     catch (error) { if (error instanceof StructuredDocumentServiceError) throw error; reject('access_denied') }
   }
-  async function source(ctx: Principal, fileId: string) {
+  async function source(ctx: Principal, fileId: string, mode: AuthorityMode = 'read') {
     const stat = await files.stat(ctx, fileId)
     if (!stat.ok) reject('access_denied')
-    eligible(stat.value, ctx, fileId)
+    eligible(stat.value, ctx, fileId, mode)
     if (stat.value.mime !== 'application/pdf' || !Number.isSafeInteger(stat.value.sizeBytes) || stat.value.sizeBytes < 5 || stat.value.sizeBytes > 15 * MiB) reject('invalid_pdf')
     const read = await files.readBytes(ctx, fileId)
     if (!read.ok) reject('access_denied')
-    eligible(read.value.file, ctx, fileId)
+    eligible(read.value.file, ctx, fileId, mode)
     if (sourceVersion(stat.value) !== sourceVersion(read.value.file)) reject('source_changed')
     const { file, bytes } = read.value
     if (bytes.length !== file.sizeBytes || bytes.length > 15 * MiB || Buffer.from(bytes.subarray(0, 5)).toString() !== '%PDF-') reject('invalid_pdf')
@@ -177,23 +179,23 @@ export function createStructuredDocumentService(options: StructuredDocumentServi
     if (!result.success || result.data.principal.userId !== job.userId || result.data.principal.workspaceId !== job.workspaceId) reject('access_denied')
     return result.data
   }
-  async function authorizeSource(job: StructuredExtractionJob, current?: Principal) {
+  async function authorizeSource(job: StructuredExtractionJob, current?: Principal, mode: AuthorityMode = 'read') {
     const saved = savedContext(job)
     if (current) sameActor(saved.principal, current)
     let ctx = await fresh(saved.principal)
     if (current) ctx = intersect(ctx, current)
-    const original = await source(ctx, job.sourceFileId)
+    const original = await source(ctx, job.sourceFileId, mode)
     if (original.pdfSha256 !== job.pdfSha256 || original.sourceVersion !== saved.sourceVersion) reject('source_changed')
     return { context: ctx, source: original.file }
   }
-  async function load(ctx: FilesContext, extractionId: string) {
+  async function load(ctx: FilesContext, extractionId: string, mode: AuthorityMode = 'read') {
     const current = principal(ctx)
     parsed(uuid, extractionId)
     const job = await store.get(current.userId, extractionId)
     if (!job || job.id !== extractionId || job.userId !== current.userId || job.workspaceId !== current.workspaceId) reject('access_denied')
-    return { job, ...await authorizeSource(job, current) }
+    return { job, ...await authorizeSource(job, current, mode) }
   }
-  async function completeEvidence(loaded: Awaited<ReturnType<typeof load>>) {
+  async function completeEvidence(loaded: Awaited<ReturnType<typeof load>>, mode: AuthorityMode = 'read') {
     const { job, context, source: original } = loaded
     if (job.status !== 'completed') reject('not_complete')
     if (!job.recordsFileId || !job.recordsSha256 || !job.documentId) reject('archive_changed')
@@ -203,12 +205,12 @@ export function createStructuredDocumentService(options: StructuredDocumentServi
       if (!z.string().regex(/^[a-f0-9]{64}$/).safeParse(sha256).success) reject('archive_changed')
       const stat = await files.stat(context, id)
       if (!stat.ok) reject('archive_changed')
-      eligible(stat.value, context, id)
+      eligible(stat.value, context, id, mode)
       if (stat.value.mime !== mime || !Number.isSafeInteger(stat.value.sizeBytes) || stat.value.sizeBytes < 1 || stat.value.sizeBytes > limit) reject('archive_changed')
       const read = await files.readBytes(context, id)
       if (!read.ok) reject('archive_changed')
       const file = read.value.file
-      eligible(file, context, id)
+      eligible(file, context, id, mode)
       if (sourceVersion(file) !== sourceVersion(stat.value)) reject('archive_changed')
       const scope = requirements(file), originalScope = requirements(original)
       if (rank[scope.sensitivity] < rank[originalScope.sensitivity] || !contains(scope.compartments, originalScope.compartments) || !contains(scope.projectIds, originalScope.projectIds)) reject('archive_changed')
@@ -231,7 +233,11 @@ export function createStructuredDocumentService(options: StructuredDocumentServi
       const bytes = await archive(image.fileId, image.sha256, 20 * MiB, 'image/png', image.sizeBytes)
       if (![137, 80, 78, 71, 13, 10, 26, 10].every((b, i) => bytes[i] === b)) reject('archive_changed')
     }
-    return { job, records, source: original, context, scopeEvidence: highWater(rows) }
+    const evidenceFiles = rows.map(file => {
+      if (typeof file.scopeVersion !== 'string' || !file.scopeVersion) reject('archive_changed')
+      return { id: file.id, scopeVersion: file.scopeVersion }
+    })
+    return { job, records, source: original, context, scopeEvidence: highWater(rows), evidenceFiles }
   }
   async function resolveClient(job: StructuredExtractionJob, context: FilesContext) {
     const binding = ConnectorBindingSchema.safeParse(job.context.connector)
@@ -247,8 +253,8 @@ export function createStructuredDocumentService(options: StructuredDocumentServi
       if (connectors.length > 100) reject('connector_limit_exceeded')
       return { connectors, scopeEvidence: { sensitivity: context.clearance, compartments: context.compartments ?? [], projectIds: context.projectIds ?? [] } }
     },
-    async authorize(job: StructuredExtractionJob): Promise<FilesContext> { return (await authorizeSource(job)).context },
-    async evidence(ctx: FilesContext, extractionId: string) { return completeEvidence(await load(ctx, extractionId)) },
+    async authorize(job: StructuredExtractionJob): Promise<FilesContext> { return (await authorizeSource(job, undefined, 'mutation')).context },
+    async evidence(ctx: FilesContext, extractionId: string, mode: AuthorityMode = 'read') { return completeEvidence(await load(ctx, extractionId, mode), mode) },
     async prepare(ctx: FilesContext, input: { fileId: string; connectorInstanceId: string }) {
       const { fileId, connectorInstanceId } = parsed(PrepareExtractionSchema, input)
       const context = await fresh(principal(ctx))
@@ -275,7 +281,7 @@ export function createStructuredDocumentService(options: StructuredDocumentServi
     },
     async start(ctx: FilesContext, input: { extractionId: string }) {
       const { extractionId } = parsed(StartExtractionSchema, input)
-      const loaded = await load(ctx, extractionId)
+      const loaded = await load(ctx, extractionId, 'mutation')
       if (loaded.job.status === 'failed' || loaded.job.status === 'cancelled') reject('restart_required')
       await resolveClient(loaded.job, loaded.context)
       const job = await store.enqueue(loaded.context.userId, extractionId)
@@ -304,7 +310,7 @@ export function createStructuredDocumentService(options: StructuredDocumentServi
     },
     async propose(ctx: FilesContext, input: { extractionId: string; artifactId: string; expectedVersion: number; mappings: FillMapping[] }) {
       const params = parsed(ProposeEvidenceFillSchema, input)
-      const { job, records, source: original, context, scopeEvidence } = await api.evidence(ctx, params.extractionId)
+      const { job, records, source: original, context, scopeEvidence, evidenceFiles } = await api.evidence(ctx, params.extractionId, 'mutation')
       const office = await options.getOffice(context.userId, params.artifactId)
       if (!office) reject('destination_denied')
       const { artifact, access, live } = office
@@ -326,6 +332,7 @@ export function createStructuredDocumentService(options: StructuredDocumentServi
       const evidenceHash = hash(JSON.stringify({ manifest: evidenceManifest, fillEvidenceHash: plan.evidenceHash, baseVersionId: artifact.headVersionId, seq: live.seq }))
       const command = stableCommand(plan.command, evidenceHash)
       const lineage = { version: 1, ...evidenceManifest, evidenceHash, sourceScope: requirements(original), evidenceScope: scopeEvidence,
+        evidenceFiles,
         artifactId: artifact.id, baseVersionId: artifact.headVersionId, expectedVersion: params.expectedVersion, expectedSeq: live.seq,
         mappings: plan.preview }
       const body = [
@@ -339,9 +346,14 @@ export function createStructuredDocumentService(options: StructuredDocumentServi
       // Check result size before the only persistence effect; do not save a proposal
       // whose complete preview cannot be returned for human review.
       displayBound({ preview: plan.preview, manifest: evidenceManifest, scopeEvidence })
+      // The plan may take meaningful CPU time. Re-read every exact evidence file
+      // under mutation authority immediately before the atomic proposal write.
+      const currentEvidence = await api.evidence(ctx, params.extractionId, 'mutation')
+      if (JSON.stringify(currentEvidence.evidenceFiles) !== JSON.stringify(evidenceFiles)) reject('proposal_conflict')
       const saved = await options.saveProposal({ userId: context.userId, workspaceId: context.workspaceId, artifactId: artifact.id,
         baseVersionId: artifact.headVersionId, expectedSeq: live.seq, assistantId: context.assistantId, extractionId: job.id,
-        evidenceHash, command, preview: plan.preview, lineage, body, targetIds: plan.preview.map(p => p.targetId) })
+        evidenceHash, command, preview: plan.preview, lineage, body, targetIds: plan.preview.map(p => p.targetId),
+        access: currentEvidence.context, evidenceFiles: currentEvidence.evidenceFiles, evidenceScope: currentEvidence.scopeEvidence })
       if (!saved) reject('proposal_conflict')
       return { proposalId: saved.id, threadId: saved.threadId, status: 'suggested' as const, requiresHumanReview: true,
         evidenceHash, preview: plan.preview, manifest: evidenceManifest, scopeEvidence }

@@ -40,11 +40,11 @@ describe('[COMP:files/structured-document-tools] source-reference-only tools', (
       expect(t.isReadOnly).toBe(['readDocumentExtraction', 'listDocumentExtractionConnectors'].includes(t.name))
       expect(t.allowPersistentApproval).toBe(false)
     }
-    expect(f.tool('startDocumentExtraction').requiresConfirmation).toBe(false)
+    expect(f.tool('startDocumentExtraction').requiresConfirmation).toBe(true)
   })
   it('honors allow, ask and block for every tool including start', async () => {
     const f = setup(), ctx = context()
-    for (const t of f.tools) await expect(t.resolveConfirmation!(ctx)).resolves.toBe(false)
+    for (const t of f.tools) await expect(t.resolveConfirmation!(ctx)).resolves.toBe(t.name === 'startDocumentExtraction')
     f.resolvePolicy.mockResolvedValue('ask')
     for (const t of f.tools) await expect(t.resolveConfirmation!(ctx)).resolves.toBe(true)
     f.resolvePolicy.mockResolvedValue('block')
