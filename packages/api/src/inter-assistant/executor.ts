@@ -62,6 +62,7 @@ import {
   unionCompartments,
   intersectAccessCeilings, accessCeilingContains,
   boundScopeSource,
+  createTurnOutputCollector,
 } from '@use-brian/core'
 import type { SavedViewStore, EngineHooks } from '@use-brian/core'
 import type { ResearchSynthesizeFn } from '../synthesis/research-synthesizer.js'
@@ -1748,16 +1749,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
     // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout
     // partialOutput (operator-facing, never delivered). The returned consult
-    // text is assembled from `turnTexts` instead: deltas re-stream on
+    // text is selected from finalised turn references instead: deltas re-stream on
     // empty-turn retries and include text the turn-boundary leak sanitiser
     // strips, so summing them duplicates/leaks (the 2026-07-02 "No recorded
     // GitHub activity" ×3 triplication, run 26d50608). See
     // docs/architecture/channels/inter-assistant.md → "Final-text assembly".
     let responseText = ''
-    // Finalised per-turn text (post leak-sanitiser), one entry per turn that
-    // produced visible text — the source of the returned consult text.
-    let surfacedQuestion: import('@use-brian/core').AssistantQuestion | undefined
-    const turnTexts: string[] = []
+    const turnOutput = createTurnOutputCollector({ format: 'compact' })
     const abortController = new AbortController()
     // Liveness, not wall-clock (2026-08-19). The step is bounded by cost
     // (`budget.maxTurns` / `maxToolCalls`) and by the query loop's stall
@@ -1910,6 +1908,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // so a synthesis failure never fails the step. Skipped when the gather found
     // nothing — there is no source to synthesize from, so author normally.
     let synthesisHandled = false
+    let synthesisOutput: string | undefined
     if (isBlueprintResearch && researchContext && options.researchSynthesize) {
       try {
         const result = await executeWithCurrentAuthority(() => options.researchSynthesize!({
@@ -1933,7 +1932,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         if (result) {
           synthesisHandled = true
           // The page IS the deliverable; the step's text output is a short receipt.
-          turnTexts.push('Filled the blueprint into the anchored page from the gathered research.')
+          synthesisOutput = 'Filled the blueprint into the anchored page from the gathered research.'
         }
       } catch (err) {
         console.error(
@@ -2097,6 +2096,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         confirmationTimeoutMs: deferredConfirmations ? 300_000 : undefined,
       })) {
         await assertCurrentAuthority()
+        turnOutput.observe(event)
         if (params.onActivity) {
           for (const frame of goalActivityFramesFromQueryEvent(event)) {
             try {
@@ -2129,44 +2129,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             }
           }
         }
-        if (event.type === 'question') {
-          const { type: _, ...question } = event
-          surfacedQuestion = question
-        } else if (event.type === 'text_delta') {
+        if (event.type === 'text_delta') {
           responseText += event.text
         } else if (event.type === 'error' && isStalledError(event.error)) {
           // The stall watchdog fired: typed below as a timeout-class exit
           // (progress timeout), carrying the partial text.
           stalledError = event.error
           throw event.error
-        } else if (event.type === 'assistant_turn') {
-          // Finalised turn content — a leak-suppressed turn has its text
-          // blocks stripped and contributes nothing; a retried turn
-          // contributes only the attempt that landed.
-          //
-          // TERMINAL TURNS ONLY. A turn that also carries a `tool_use` block is
-          // mid-reasoning by the provider contract: the loop feeds the tool
-          // result back and the model speaks again, so text riding alongside a
-          // call is narration ("Wait, I should check X…"), never the answer.
-          // Joining it into the deliverable shipped a model's entire
-          // chain-of-thought — including a verbatim dump of its own tool list —
-          // to a user's Telegram (2026-07-20, session b8e567d6: a scheduled job's
-          // instructions named `googleCalendarListEvents` / `googleTasksListTasks`
-          // while its assistant held no connector grant for them, so the model
-          // hunted for the missing tools and narrated the search — and that
-          // narration was the only text any turn produced).
-          // `sanitizeDeliveryText` cannot cover this class — it matches known
-          // scaffolding phrasings, and free-form reasoning has none; the shape
-          // that identifies it is structural (text + tool_use in one turn), not
-          // lexical. Dropping it is also why an all-narration run now fails
-          // `empty_response` honestly instead of delivering the spiral.
-          if (event.response.content.some((b) => b.type === 'tool_use')) continue
-          const turnText = event.response.content
-            .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
-            .map((b) => b.text)
-            .join('')
-            .trim()
-          if (turnText.length > 0) turnTexts.push(turnText)
         } else if (event.type === 'tool_result') {
           // Callee tool observability — mirror the chat route's
           // `tool_executed` emission so per-tool dashboards and SQL recipes
@@ -2405,7 +2374,17 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // step completed → downstream steps + chat asserted the send happened).
     // The typed reason is hoisted by the workflow run-loop catch into the
     // step-run error, so the run records `failed`/`empty_response` honestly.
-    const finalText = surfacedQuestion ? formatAssistantQuestion(surfacedQuestion) : turnTexts.join('\n').trim()
+    const selectedOutput = turnOutput.select()
+    const surfacedQuestion = selectedOutput.kind === 'question'
+      ? selectedOutput.question
+      : undefined
+    const finalText = synthesisOutput ?? (
+      surfacedQuestion
+        ? formatAssistantQuestion(surfacedQuestion)
+        : selectedOutput.kind === 'text'
+          ? selectedOutput.text
+          : ''
+    )
     if (!finalText) {
       throw Object.assign(
         new Error(
@@ -2441,6 +2420,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     await assertCurrentAuthority()
     if (surfacedQuestion) params.onQuestion?.(surfacedQuestion)
     params.onScopeEvidence?.(scopeAccumulator.evidence)
+    turnOutput.advanceDelivery()
     return finalText
   }
 }

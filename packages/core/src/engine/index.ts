@@ -1,5 +1,12 @@
 export { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, streamErrorCodes } from './query-loop.js'
 export type { QueryEvent, QueryLoopOptions, TerminalStopReason } from './query-loop.js'
+export { createTurnOutputCollector } from './turn-output.js'
+export type {
+  TurnOutputCollector,
+  TurnOutputEmptyReason,
+  TurnOutputFormat,
+  TurnOutputSelection,
+} from './turn-output.js'
 export {
   matchesDisputedFigure,
   buildDisputeContextNote,

@@ -13,12 +13,8 @@
 
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
-import type { ContentBlock } from '@use-brian/core'
-import {
-  assembleDeliverableText,
-  classifyEmptyDelivery,
-  EMPTY_DELIVERY_NOTICE,
-} from '../channel-pipeline.js'
+import { createTurnOutputCollector, type ContentBlock } from '@use-brian/core'
+import { EMPTY_DELIVERY_NOTICE } from '../channel-pipeline.js'
 
 const pipelineSource = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')
 
@@ -37,15 +33,52 @@ function textTurn(text: string): { content: ContentBlock[] } {
   return { content: [{ type: 'text', text }] as ContentBlock[] }
 }
 
-describe('[COMP:api/channel-delivery-assembly] assembleDeliverableText', () => {
+function collect(
+  turns: { content: ContentBlock[] }[],
+  options: { retractedBefore?: number } = {},
+) {
+  const collector = createTurnOutputCollector({ format: 'channel' })
+  turns.forEach((turn, index) => {
+    if (index === options.retractedBefore) {
+      collector.observe({ type: 'grounding_nudge', matchedCue: 'fixture', unbackedCount: 1 })
+    }
+    collector.observe({
+      type: 'assistant_turn',
+      response: {
+        content: turn.content,
+        stopReason: turn.content.some((block) => block.type === 'tool_use') ? 'tool_use' : 'end_turn',
+        usage: { inputTokens: 1, outputTokens: 1 },
+        model: 'fixture',
+      },
+      toolResults: [],
+    })
+  })
+  if (options.retractedBefore === turns.length) {
+    collector.observe({ type: 'grounding_nudge', matchedCue: 'fixture', unbackedCount: 1 })
+  }
+  return collector.select()
+}
+
+function assemble(turns: { content: ContentBlock[] }[]): string {
+  const result = collect(turns)
+  return result.kind === 'text' ? result.text : ''
+}
+
+describe('[COMP:api/channel-delivery-assembly] shared collector output', () => {
+  it('wires the canonical collector into the production channel adapter', () => {
+    expect(pipelineSource).toContain("createTurnOutputCollector({ format: 'channel' })")
+    expect(pipelineSource).toContain('turnOutput.observe(event)')
+    expect(pipelineSource).toContain('turnOutput.advanceDelivery()')
+  })
+
   it('drops narration riding alongside a tool call and keeps the terminal reply', () => {
     expect(
-      assembleDeliverableText([toolTurn('Let me check the brain.'), textTurn('All clear.')]),
+      assemble([toolTurn('Let me check the brain.'), textTurn('All clear.')]),
     ).toBe('All clear.')
   })
 
   it('joins multiple terminal turns with newlines', () => {
-    expect(assembleDeliverableText([textTurn('First.'), textTurn('Second.')])).toBe(
+    expect(assemble([textTurn('First.'), textTurn('Second.')])).toBe(
       'First.\nSecond.',
     )
   })
@@ -66,20 +99,20 @@ describe('[COMP:api/channel-delivery-assembly] assembleDeliverableText', () => {
       ),
       toolTurn('Let me try to `listConnectors` to see what is configured.', 'listConnectors'),
     ]
-    expect(assembleDeliverableText(spiral)).toBe('')
+    expect(assemble(spiral)).toBe('')
   })
 
   it('ignores a text-less tool turn without emitting stray newlines', () => {
     const bare: { content: ContentBlock[] } = {
       content: [{ type: 'tool_use', id: 'call_1', name: 'webSearch', input: {} }] as ContentBlock[],
     }
-    expect(assembleDeliverableText([bare, textTurn('Done.')])).toBe('Done.')
+    expect(assemble([bare, textTurn('Done.')])).toBe('Done.')
   })
 
   it('contributes nothing for a leak-suppressed turn (text blocks stripped)', () => {
     // The turn-boundary leak sanitiser empties `content` AFTER the text already
     // streamed as deltas — which is exactly why deltas are not the source.
-    expect(assembleDeliverableText([{ content: [] }, textTurn('Real answer.')])).toBe(
+    expect(assemble([{ content: [] }, textTurn('Real answer.')])).toBe(
       'Real answer.',
     )
   })
@@ -89,68 +122,63 @@ describe('[COMP:api/channel-delivery-assembly] assembleDeliverableText', () => {
     // turn was yielded. An eagerly-copied string would ship without the trailer.
     const turn = textTurn('Revenue was 5M.')
     ;(turn.content[0] as { text: string }).text += '\n\n(Unverified: 5M)'
-    expect(assembleDeliverableText([turn])).toBe('Revenue was 5M.\n\n(Unverified: 5M)')
+    expect(assemble([turn])).toBe('Revenue was 5M.\n\n(Unverified: 5M)')
   })
 
   it('returns empty string for no turns at all', () => {
-    expect(assembleDeliverableText([])).toBe('')
+    expect(assemble([])).toBe('')
   })
 })
 
 /** A turn the leak sanitiser emptied, or that the provider never filled. */
 const emptyTurn: { content: ContentBlock[] } = { content: [] }
 
-describe('[COMP:api/channel-delivery-assembly] classifyEmptyDelivery', () => {
+describe('[COMP:api/channel-delivery-assembly] shared collector empty classification', () => {
   it('calls an all-empty window with nothing retracted a model failure', () => {
     // The 2026-08-24 Telegram case: a workspace custom endpoint answered every
     // attempt with a clean 200 carrying no content and no usage, so all three
     // buffered turns were empty and `input_tokens` was 0 on each.
     expect(
-      classifyEmptyDelivery({ window: [emptyTurn, emptyTurn, emptyTurn], retractedCount: 0 }),
-    ).toBe('no_model_output')
+      collect([emptyTurn, emptyTurn, emptyTurn]),
+    ).toEqual({ kind: 'empty', reason: 'no_model_output' })
   })
 
   it('calls an EMPTY window with turns retracted a withhold, not a model failure', () => {
     // The vacuous case. When the grounding gate retracts every turn it has
-    // yielded, `deliveryCutIdx` consumes the whole buffer and the window is
+    // yielded, the grounding nudge retracts the whole collector window and it is
     // `[]` — which has no tool call and no text, so the structural tests alone
     // would blame the model for text this pipeline chose not to send.
-    expect(classifyEmptyDelivery({ window: [], retractedCount: 2 })).toBe('text_withheld')
+    expect(collect([], { retractedBefore: 0 })).toEqual({ kind: 'empty', reason: 'text_withheld' })
   })
 
   it('calls an empty window with nothing retracted a model failure', () => {
-    expect(classifyEmptyDelivery({ window: [], retractedCount: 0 })).toBe('no_model_output')
+    expect(collect([])).toEqual({ kind: 'empty', reason: 'no_model_output' })
   })
 
   it('reports tools_only when the run called a tool but never reached a terminal turn', () => {
     expect(
-      classifyEmptyDelivery({ window: [toolTurn('Let me look that up.')], retractedCount: 0 }),
-    ).toBe('tools_only')
+      collect([toolTurn('Let me look that up.')]),
+    ).toEqual({ kind: 'empty', reason: 'tools_only' })
   })
 
   it('prefers tools_only over text_withheld when both signals are present', () => {
     // A tool ran, so a retry could duplicate its side effect. That verdict has
     // to win over the presence of narration text.
     expect(
-      classifyEmptyDelivery({
-        window: [textTurn('   '), toolTurn('Checking.')],
-        retractedCount: 0,
-      }),
-    ).toBe('tools_only')
+      collect([textTurn('   '), toolTurn('Checking.')]),
+    ).toEqual({ kind: 'empty', reason: 'tools_only' })
   })
 
   it('reports text_withheld when a text block survived but assembly produced nothing', () => {
-    // Whitespace-only text: the model spoke, `assembleDeliverableText` trimmed
+    // Whitespace-only text: the model spoke, the collector trimmed
     // it to nothing. Not the provider's failure.
-    expect(classifyEmptyDelivery({ window: [textTurn('   ')], retractedCount: 0 })).toBe(
-      'text_withheld',
-    )
+    expect(collect([textTurn('   ')])).toEqual({ kind: 'empty', reason: 'text_withheld' })
   })
 
   it('reports text_withheld when only some turns were emptied', () => {
     expect(
-      classifyEmptyDelivery({ window: [emptyTurn, textTurn('')], retractedCount: 0 }),
-    ).toBe('text_withheld')
+      collect([emptyTurn, textTurn('')]),
+    ).toEqual({ kind: 'empty', reason: 'text_withheld' })
   })
 })
 

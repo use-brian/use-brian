@@ -38,6 +38,8 @@ import {
   buildSessionStateBlock,
   ContextScopeAccumulator,
   pinAccessCeiling,
+  createTurnOutputCollector,
+  formatAssistantQuestion,
 } from '@use-brian/core'
 import type {
   LLMProvider,
@@ -53,6 +55,7 @@ import type {
   SessionStateStore,
   McpSettingsStore,
   GDriveFilesStore,
+  TurnOutputSelection,
 } from '@use-brian/core'
 import type { ContentBlock, EngineHooks } from '@use-brian/core'
 import { sanitizeDeliveryText, resolveCharter, renderCharterBlock } from '@use-brian/shared'
@@ -125,6 +128,19 @@ import {
 // Backward-compatible exports for callers/tests that imported these pure
 // seams from public-turn before the reusable principal runtime was extracted.
 export { applyPublicResearchToolCeiling, resolveClientSelfMemory } from './client-principal-runtime.js'
+
+const PUBLIC_EMPTY_REPLY = "I couldn't generate a reply — please rephrase or try again."
+
+/** Final-only public JSON rendering; SSE remains an immediate event stream. */
+export function formatPublicTurnReply(selection: TurnOutputSelection): string {
+  const selectedText = selection.kind === 'question'
+    ? formatAssistantQuestion(selection.question)
+    : selection.kind === 'text'
+      ? selection.text
+      : ''
+  const trimmed = sanitizeDeliveryText(selectedText)
+  return trimmed.length > 0 ? trimmed : PUBLIC_EMPTY_REPLY
+}
 
 export function shouldExposeSaveMemoryTool(params: {
   isIdentified: boolean
@@ -1354,7 +1370,7 @@ export async function executePublicTurn(
   const timeout = setTimeout(() => abortController.abort(), 180_000)
   let sendEvent: PublicTurnSseSender | null = null
 
-  let responseText = ''
+  const turnOutput = createTurnOutputCollector({ format: 'compact' })
   let totalUsage: TokenUsage | null = null
   let responseModel: string | null = null
   let assistantMessageId: string | null = null
@@ -1457,9 +1473,9 @@ export async function executePublicTurn(
       compactModel: 'gemini-flash',
       maxTurns,
     })) {
+      turnOutput.observe(event)
       if (event.type === 'text_delta') {
         await assertDeliveryAudience()
-        responseText += event.text
         sendEvent?.('text_delta', { text: event.text })
       } else if (event.type === 'tool_result') {
         // Realtime parity with the web chat lane (realtime-sync): a
@@ -1615,15 +1631,16 @@ export async function executePublicTurn(
     return
   }
 
-  // Strip any model scaffolding / meta-commentary — synchronous programmatic
-  // consumers have no client render layer to do it (see sanitizeDeliveryText).
-  const trimmed = sanitizeDeliveryText(responseText)
+  // JSON is a final-only delivery lane. Select from finalised turn references
+  // before lexical sanitization; live SSE above remains delta-based.
+  const selected = turnOutput.select()
   res.json({
     sessionId: channelId,
     messageId: finalMessageId,
-    reply: trimmed.length > 0 ? trimmed : "I couldn't generate a reply — please rephrase or try again.",
+    reply: formatPublicTurnReply(selected),
     model: finalModel,
   })
+  turnOutput.advanceDelivery()
 }
 
 export type PublicHistoryInput = {
