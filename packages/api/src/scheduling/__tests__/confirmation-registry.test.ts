@@ -16,11 +16,11 @@ import {
 describe('[COMP:api/scheduler-confirmation-registry] owner-guarded resolution', () => {
   const mkResolver = () => ({ resolve: vi.fn() }) as never as { resolve: ReturnType<typeof vi.fn> } & Parameters<typeof registerSchedulerResolver>[1]
 
-  it('resolves when no guard is supplied (callers that pre-scope by other means)', () => {
+  it('rejects unguarded resolution even if a legacy caller claims to pre-scope', () => {
     const r = mkResolver()
     registerSchedulerResolver('t1', r, { userId: 'uA', channelType: 'telegram', channelId: '111' })
-    expect(tryResolveSchedulerConfirmation('t1', 'allow')).toBe(true)
-    expect(r.resolve).toHaveBeenCalledWith('t1', 'allow')
+    expect(tryResolveSchedulerConfirmation('t1', 'allow')).toBe(false)
+    expect(r.resolve).not.toHaveBeenCalled()
   })
 
   it('resolves when the guard matches the recorded owner', () => {
@@ -37,7 +37,8 @@ describe('[COMP:api/scheduler-confirmation-registry] owner-guarded resolution', 
     expect(tryResolveSchedulerConfirmation('t3', 'allow', { channelType: 'telegram', channelId: '222' })).toBe(false)
     expect(r.resolve).not.toHaveBeenCalled()
     // the legitimate owner still resolves
-    expect(tryResolveSchedulerConfirmation('t3', 'allow', { channelType: 'telegram', channelId: '111' })).toBe(true)
+    expect(tryResolveSchedulerConfirmation('t3', 'allow', { channelType: 'telegram', channelId: '111' })).toBe(false)
+    expect(tryResolveSchedulerConfirmation('t3', 'allow', { userId: 'uA' })).toBe(true)
     expect(r.resolve).toHaveBeenCalledTimes(1)
   })
 
@@ -46,8 +47,8 @@ describe('[COMP:api/scheduler-confirmation-registry] owner-guarded resolution', 
     registerSchedulerResolver('t4', r) // owner omitted → null fields
     expect(tryResolveSchedulerConfirmation('t4', 'allow', { userId: 'uA' })).toBe(false)
     expect(r.resolve).not.toHaveBeenCalled()
-    // an unguarded caller can still resolve it
-    expect(tryResolveSchedulerConfirmation('t4', 'allow')).toBe(true)
+    // no actor proof means no resolution
+    expect(tryResolveSchedulerConfirmation('t4', 'allow')).toBe(false)
   })
 
   it('returns false for an unknown toolCallId and after unregister', () => {

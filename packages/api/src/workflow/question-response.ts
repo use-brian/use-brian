@@ -9,6 +9,8 @@ export async function dispatchQuestionResponse(
   context: ToolContext,
   claim: () => Promise<boolean>,
 ): Promise<string> {
+  const stopped = 'Stopped. No response action was run.'
+  if (context.abortSignal.aborted) return stopped
   const response = binding.response
   // Generic dispatch/search tools would turn a fixed name back into arbitrary
   // execution authority. Only direct connector adapters are supported.
@@ -26,11 +28,19 @@ export async function dispatchQuestionResponse(
     }
   } catch { return 'The response action policy could not be verified. No action was run.' }
   if (!tool.inputSchema.safeParse(input).success) return 'The configured response arguments are invalid. No action was run; ask the workflow author to correct the binding.'
+  if (context.abortSignal.aborted) return stopped
   if (!await claim()) return 'This question has expired or was already answered.'
+  // A claim already in flight may finish after stop; do not execute even then.
+  if (context.abortSignal.aborted) return stopped
   const executor = createToolExecutor({
     tools: new Map([[tool.name, { ...tool, resolveConfirmation: async (ctx, args) => {
       try { return tool.resolveConfirmation ? await tool.resolveConfirmation(ctx, args) : tool.requiresConfirmation }
       catch { return true }
+    }, execute: (args, ctx) => {
+      // The executor awaits policy again after claim. Guard the final boundary
+      // too, including tools that do not themselves honor AbortSignal.
+      ctx.abortSignal.throwIfAborted()
+      return tool.execute(args, ctx)
     } }]]), context,
     loopDetector: createLoopDetector({ hardLimit: 2 }),
   })

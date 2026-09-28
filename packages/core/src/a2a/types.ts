@@ -265,6 +265,8 @@ export type ConsultRequest = {
     channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom' | 'feishu'
     channelId: string
     channelIntegrationId?: string
+    /** Native thread resolved by the workflow executor before the callee runs. */
+    threadRef?: string
   }
   /**
    * Optional page anchor for a workflow `assistant_call` step. Always a

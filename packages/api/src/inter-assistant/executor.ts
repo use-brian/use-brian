@@ -387,6 +387,7 @@ export type CalleeQueryParams = {
     channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom' | 'feishu'
     channelId: string
     channelIntegrationId?: string
+    threadRef?: string
   }
   /**
    * Page anchor — a concrete `saved_views` id resolved by the workflow
@@ -2267,6 +2268,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             // resolver only exists when deferredConfirmations is on).
             registerSchedulerResolver(req.toolCallId, confirmationResolver, {
               userId: calleeActorUserId,
+              workspaceId: params.workspaceId,
+              assistantId: params.calleeAssistantId,
+              allowPersistentApproval: req.allowPersistentApproval === true,
               channelType: params.deliverTarget?.channelType ?? null,
               channelId: params.deliverTarget?.channelId ?? null,
             })
@@ -2293,6 +2297,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 channelType: params.deliverTarget.channelType,
                 channelId: params.deliverTarget.channelId,
                 channelIntegrationId: params.deliverTarget.channelIntegrationId,
+                threadRef: params.deliverTarget.threadRef,
               },
               req,
               {

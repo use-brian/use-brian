@@ -2973,10 +2973,14 @@ describe('[COMP:workflow/executor] deliver.thread — reply-in-thread delivery',
   it('passes the parent delivery message id as threadRef and records __deliveryMsg_<stepId>', async () => {
     const stores = makeFakeStores()
     const delivered: Array<{ channelId: string; threadRef?: string }> = []
+    const confirmationTargets: ConsultRequest['deliver'][] = []
     const deps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
-      consultTransport: makeConsultTransport({ responseText: 'update text' }),
+      consultTransport: { async send(request) {
+        confirmationTargets.push(request.deliver)
+        return makeConsultTransport({ responseText: 'update text' }).send(request)
+      } },
       resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
       buildToolRegistry: async () => new Map(),
       deliverToChannel: async (p) => {
@@ -2994,6 +2998,10 @@ describe('[COMP:workflow/executor] deliver.thread — reply-in-thread delivery',
     const { run } = await seedWorkflowAndRun(deps, threadDefinition())
     const outcome = await advanceWorkflowRun(deps, run.id)
     expect(outcome.kind).toBe('completed')
+
+    // The callee receives the same native thread BEFORE it asks for tool approval.
+    expect(confirmationTargets[0]?.threadRef).toBeUndefined()
+    expect(confirmationTargets[1]?.threadRef).toBe('1751970000.111111')
 
     // Parent posted top-level; the reply threaded under the parent's ts.
     expect(delivered).toEqual([

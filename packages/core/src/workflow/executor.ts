@@ -1716,7 +1716,11 @@ async function dispatchAssistantCall(
     // Delivery target: a `deliver`-carrying step (scheduled-job reminders)
     // rides its channel through so the callee can surface `ask`-policy tool
     // confirmations there. Undefined = ordinary A2A (confirmations stripped).
-    deliver: step.deliver && !('replyToTrigger' in step.deliver) ? step.deliver : undefined,
+    deliver: step.deliver && !('replyToTrigger' in step.deliver) ? {
+      ...step.deliver,
+      threadRef: step.deliver.thread && typeof ctx.scope.vars[`__deliveryMsg_${step.deliver.thread.fromStep}`] === 'string'
+        ? ctx.scope.vars[`__deliveryMsg_${step.deliver.thread.fromStep}`] as string : undefined,
+    } : undefined,
     // Page anchor — resolved above to a concrete saved_views id. The callee
     // executor gates access + injects doc tools + sets ToolContext.docViewId.
     pageAnchorId,

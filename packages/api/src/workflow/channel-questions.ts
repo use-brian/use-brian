@@ -11,6 +11,8 @@ export type ChannelQuestion = {
   userId: string
   channelId: string
   messageId: string | null
+  /** Native thread root when the question was delivered within an existing thread. */
+  threadRef?: string
   available?: boolean
   question: AssistantQuestion
   response?: ResponseBinding
@@ -26,34 +28,47 @@ export function createChannelQuestionStore(runQuery: typeof query = query) {
         (token, integration_id, workspace_id, assistant_id, user_id, channel_id, question, response)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [token, input.integrationId, input.workspaceId, input.assistantId, input.userId,
-        input.channelId, JSON.stringify(input.question), input.response ? JSON.stringify(input.response) : null])
+        input.channelId, JSON.stringify({ ...input.question, ...(input.threadRef ? { __channelThreadRef: input.threadRef } : {}) }), input.response ? JSON.stringify(input.response) : null])
       return token
     },
     async attach(token: string, messageId: string) {
       await runQuery('UPDATE workflow_channel_questions SET message_id=$2 WHERE token=$1 AND message_id IS NULL', [token, messageId])
     },
-    async find(address: QuestionAddress, selector: { token?: string; messageId?: string; answerMessageId?: string }) {
+    async find(address: QuestionAddress, selector: { token?: string; messageId?: string; answerMessageId?: string; threadId?: string }) {
       // Explicit replies also return expired/consumed tombstones so they NEVER
-      // become unrestricted chat. Unthreaded typing is accepted only unambiguously.
-      const result = await runQuery<ChannelQuestion>(`SELECT token,
-        integration_id AS "integrationId", workspace_id AS "workspaceId",
-        assistant_id AS "assistantId", user_id AS "userId", channel_id AS "channelId",
-        message_id AS "messageId", question, response,
-        (consumed_at IS NULL AND expires_at > now()) AS available
-        FROM workflow_channel_questions
+      // become unrestricted chat. Implicit typing stays within its native thread;
+      // a reply under an originally top-level prompt uses that prompt as its root.
+      // An exact source message wins over thread-root matching, even when it
+      // is a tombstone. Thread-only matches exclude old questions, except for
+      // replay of their own answer message. Do not LIMIT before this selection.
+      const result = await runQuery<ChannelQuestion>(`WITH addressed AS (
+        SELECT * FROM workflow_channel_questions
         WHERE integration_id=$1 AND channel_id=$2 AND workspace_id=$3 AND assistant_id=$4 AND user_id=$5
         AND message_id IS NOT NULL
-        AND CASE WHEN $6::text IS NOT NULL THEN token=$6
-                 WHEN $7::text IS NOT NULL THEN message_id=$7
-                 ELSE answer_message_id=$8 OR (consumed_at IS NULL AND expires_at > now()) END
+      ) SELECT token,
+        integration_id AS "integrationId", workspace_id AS "workspaceId",
+        assistant_id AS "assistantId", user_id AS "userId", channel_id AS "channelId",
+        message_id AS "messageId", question - '__channelThreadRef' AS question, response,
+        question->>'__channelThreadRef' AS "threadRef",
+        (consumed_at IS NULL AND expires_at > now()) AS available
+        FROM addressed
+        WHERE CASE WHEN $6::text IS NOT NULL THEN token=$6
+                 WHEN $7::text IS NOT NULL THEN (message_id=$7 OR (
+                   question->>'__channelThreadRef'=$7
+                   AND (answer_message_id=$8 OR (consumed_at IS NULL AND expires_at > now()))
+                   AND NOT EXISTS (SELECT 1 FROM addressed exact WHERE exact.message_id=$7)))
+                 ELSE (answer_message_id=$8 OR (consumed_at IS NULL AND expires_at > now()))
+                   AND (question->>'__channelThreadRef' IS NOT DISTINCT FROM $9::text
+                     OR (question->>'__channelThreadRef' IS NULL AND message_id=$9)) END
         ORDER BY created_at DESC LIMIT 2`,
       [address.integrationId, address.channelId, address.workspaceId, address.assistantId, address.userId,
-        selector.token ?? null, selector.messageId ?? null, selector.answerMessageId ?? null])
+        selector.token ?? null, selector.messageId ?? null, selector.answerMessageId ?? null, selector.threadId ?? null])
       return result.rows
     },
     async isQuestionMessage(integrationId: string, channelId: string, messageId: string) {
       const result = await runQuery(`SELECT 1 FROM workflow_channel_questions
-        WHERE integration_id=$1 AND channel_id=$2 AND message_id=$3`, [integrationId, channelId, messageId])
+        WHERE integration_id=$1 AND channel_id=$2
+        AND (message_id=$3 OR question->>'__channelThreadRef'=$3)`, [integrationId, channelId, messageId])
       return result.rows.length > 0
     },
     async consume(binding: ChannelQuestion, answerMessageId?: string) {
@@ -69,7 +84,20 @@ export function createChannelQuestionStore(runQuery: typeof query = query) {
 }
 export type ChannelQuestionStore = ReturnType<typeof createChannelQuestionStore>
 export const workflowQuestionActions = (token: string, question: AssistantQuestion) =>
-  question.options?.map((label, index) => ({ id: String(index), label, data: `wq:${token}:${index}` }))
+  question.options?.map((label, index) => ({ id: String(index), label, data: `wq:${token}:${index}`, replyText: `wq:${token} ${index + 1}` }))
+
+/** Portable explicit reply for transports without quote IDs or native buttons. */
+export function parseWorkflowQuestionText(text: string): { token: string; answer: string } | null {
+  const match = /^\s*wq:([\w-]{24})(?:\s+([\s\S]*))?\s*$/i.exec(text)
+  return match ? { token: match[1]!, answer: match[2]?.trim() ?? '' } : null
+}
+export function workflowQuestionReplyHint(token: string, question: AssistantQuestion, actionable: boolean): string {
+  const hint = !actionable ? '\nNo response action is configured. Replies will not run an action.'
+    : (question.options?.length ? '\nReply with an option number or label.' : '\nReply with your answer.')
+      + (question.allowCustom !== false && question.options?.length ? ' You may also type another answer.' : '')
+      + `\nWithout a reply/quote, send: wq:${token} <answer>`
+  return `${hint}\nQuestion reference: wq:${token}`
+}
 
 /** No webhook tool names or LLM inference: only the immutable authored binding. */
 export async function handleChannelQuestionReply(params: {
@@ -77,28 +105,53 @@ export async function handleChannelQuestionReply(params: {
   address: QuestionAddress
   callback?: { data: string; messageId: string }
   replyToMessageId?: string
+  /** Current native thread root; absent means top-level, never any thread. */
+  threadId?: string
   referenceToken?: string
   answerMessageId?: string
   text: string
   authorized: () => Promise<boolean>
+  abortSignal?: AbortSignal
+  /** Opt out when another surface (e.g. conversational ask) owns unbound text. */
+  allowUnthreaded?: boolean
   dispatch: (binding: ChannelQuestion, answer: string, claim: () => Promise<boolean>) => Promise<string>
 }): Promise<string | null> {
   const { store, address, callback } = params
+  const typed = parseWorkflowQuestionText(params.text)
+  if (/^\s*wq:/i.test(params.text) && !typed) return 'This question reference is invalid.'
+  if (typed && params.referenceToken && typed.token !== params.referenceToken) return 'This question is unavailable.'
+  const referenceToken = typed?.token ?? params.referenceToken
   const match = callback && /^wq:([\w-]{24}):([0-7])$/.exec(callback.data)
   if (callback && !match) return 'This question is unavailable.'
-  const rows = await store.find(address, { token: match?.[1] ?? params.referenceToken, messageId: params.replyToMessageId, answerMessageId: params.answerMessageId })
+  if (!callback && !referenceToken && !params.replyToMessageId && !params.threadId && params.allowUnthreaded === false) return null
+  const rows = await store.find(address, { token: match?.[1] ?? referenceToken, messageId: params.replyToMessageId, answerMessageId: params.answerMessageId, threadId: params.threadId })
   if (rows.length !== 1) {
-    if (callback || params.referenceToken || rows.length > 1 || (params.replyToMessageId
-      && await store.isQuestionMessage(address.integrationId, address.channelId, params.replyToMessageId))) {
+    const questionMessageId = params.replyToMessageId ?? params.threadId
+    if (callback || referenceToken || rows.length > 1 || (questionMessageId
+      && await store.isQuestionMessage(address.integrationId, address.channelId, questionMessageId))) {
       return 'This question is unavailable or ambiguous. Reply to the original question from the authorized account.'
     }
     return null
   }
   const binding = rows[0]!
-  if ((params.referenceToken && binding.messageId !== params.replyToMessageId)
+  // Defense in depth for injected stores: only explicit tokens/source replies
+  // may recover a binding outside the current thread. Never consume implicit
+  // text merely because this is the only active question in the physical chat.
+  if (!callback && !referenceToken && !params.replyToMessageId
+    && (binding.threadRef ?? undefined) !== params.threadId
+    && !(binding.threadRef == null && params.threadId === binding.messageId)) return null
+  if ((referenceToken && params.replyToMessageId && binding.messageId !== params.replyToMessageId && binding.threadRef !== params.replyToMessageId)
     || (callback && binding.messageId !== callback.messageId)) return 'This question is unavailable.'
+  if (params.abortSignal?.aborted) return 'Stopped. No response action was run.'
   if (!await params.authorized()) return 'You are not authorized to answer this question.'
-  const answer = match ? binding.question.options?.[Number(match[2])] : params.text.trim()
+  if (params.abortSignal?.aborted) return 'Stopped. No response action was run.'
+  const text = typed?.answer ?? params.text.trim()
+  const options = binding.question.options ?? []
+  const index = /^[1-9]\d*$/.test(text) ? Number(text) - 1 : -1
+  const labels = options.filter(label => label.trim().toLocaleLowerCase() === text.toLocaleLowerCase())
+  const answer = match ? options[Number(match[2])]
+    : index >= 0 && index < options.length ? options[index]
+      : labels.length === 1 ? labels[0] : text
   if (!answer || answer.length > 8000) return 'Please provide a valid answer.'
   if (binding.question.allowCustom === false && !binding.question.options?.includes(answer)) {
     return 'Please choose one of the listed options.'

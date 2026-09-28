@@ -24,10 +24,13 @@ import {
   createTelegramAdapter,
   createWhatsAppAdapter,
   createCustomAdapter,
+  createMsTeamsAdapter,
   describeSlackError,
   isSlackApiError,
 } from '@use-brian/channels'
 import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
+import { bindSchedulerConfirmationDelivery, clearSchedulerConfirmationDelivery, getSchedulerConfirmationActor,
+  SHARED_TELEGRAM_CONFIRMATION_INTEGRATION, SYSTEM_WHATSAPP_CONFIRMATION_INTEGRATION } from './confirmation-registry.js'
 import { query } from '../db/client.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { CustomChannelStore } from '../db/custom-channel-store.js'
@@ -42,6 +45,8 @@ export type ConfirmationPromptTarget = {
   channelType: string
   channelId: string
   channelIntegrationId?: string
+  /** Resolved native thread anchor, not a workflow fromStep expression. */
+  threadRef?: string
 }
 
 export type ConfirmationPromptDeps = {
@@ -60,13 +65,13 @@ export type ConfirmationPromptDeps = {
  * the official shared Use Brian bot. `undefined` → neither is configured and
  * the caller falls through to persist-only.
  */
-export async function resolveTelegramBotToken(
+async function resolveTelegramDelivery(
   assistantId: string,
   deps: ConfirmationPromptDeps,
   channelIntegrationId?: string,
   channelId?: string,
   workspaceId?: string,
-): Promise<string | undefined> {
+): Promise<{ token: string; integrationId: string } | undefined> {
   if (channelIntegrationId) {
     if (!deps.integrationStore || !channelId || !workspaceId) return undefined
     const integration = await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
@@ -77,14 +82,17 @@ export async function resolveTelegramBotToken(
       channelId,
     )
     return integration
-      ? (integration.credentials as { bot_token: string }).bot_token
+      ? { token: (integration.credentials as { bot_token: string }).bot_token, integrationId: integration.id }
       : undefined
   }
   if (deps.integrationStore) {
     const integration = await deps.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
-    if (integration) return (integration.credentials as { bot_token: string }).bot_token
+    if (integration) return { token: (integration.credentials as { bot_token: string }).bot_token, integrationId: integration.id }
   }
-  return deps.defaultTelegramBotToken
+  return deps.defaultTelegramBotToken ? { token: deps.defaultTelegramBotToken, integrationId: SHARED_TELEGRAM_CONFIRMATION_INTEGRATION } : undefined
+}
+export async function resolveTelegramBotToken(...params: Parameters<typeof resolveTelegramDelivery>): Promise<string | undefined> {
+  return (await resolveTelegramDelivery(...params))?.token
 }
 
 /**
@@ -140,42 +148,52 @@ export async function sendConfirmationPrompt(
   const inputSummary = lines.length > 0 ? '\n\n' + lines.join('\n') : ''
   const allowPersist = req.allowPersistentApproval ?? false
 
-  if (deps.scopeEvidence !== undefined) {
-    if (!deps.authorizeDeliveryAudience || !target.workspaceId || !deps.userId) {
-      return {
-        delivered: false,
-        channelType: target.channelType,
-        reason: 'The confirmation prompt was not delivered because its destination audience could not be verified.',
-      }
-    }
+  // Authorize the resolved provider destination before binding a usable reply.
+  // WhatsApp's notifications placeholder is not the audience that receives it.
+  const authorize = async (channelId: string, channelIntegrationId = target.channelIntegrationId) => {
+    if (deps.scopeEvidence === undefined) return
+    const refusal = 'The confirmation prompt was not delivered because its destination audience could not be verified.'
+    if (!deps.authorizeDeliveryAudience || !target.workspaceId || !deps.userId) throw new Error(refusal)
     const audience = await deps.authorizeDeliveryAudience({
-      workspaceId: target.workspaceId,
-      assistantId: target.assistantId,
-      userId: deps.userId,
-      channelType: target.channelType,
-      channelId: target.channelId,
-      channelIntegrationId: target.channelIntegrationId,
-      scopeEvidence: deps.scopeEvidence,
+      workspaceId: target.workspaceId, assistantId: target.assistantId, userId: deps.userId,
+      channelType: target.channelType, channelId, channelIntegrationId, scopeEvidence: deps.scopeEvidence,
     })
-    if (!audience.allowed) {
-      return {
-        delivered: false,
-        channelType: target.channelType,
-        reason: 'The confirmation prompt was not delivered because its destination audience could not be verified.',
-      }
+    if (!audience.allowed) throw new Error(refusal)
+  }
+  const integrationFor = async (channelType: 'slack' | 'feishu' | 'custom' | 'msteams' | 'whatsapp', channelId = target.channelId) => {
+    if (!deps.integrationStore) return null
+    if (target.channelIntegrationId) return target.workspaceId
+      ? deps.integrationStore.getCredentialsForAssistantIntegrationSystem(target.workspaceId, target.assistantId, target.channelIntegrationId, channelType, channelId)
+      : null
+    return deps.integrationStore.getCredentialsForAssistantSystem(target.assistantId, channelType)
+  }
+  const push = async (adapter: Pick<ReturnType<typeof createTelegramAdapter>, 'sendMessage'>,
+    channelId: string, message: Parameters<typeof adapter.sendMessage>[1], integrationId: string,
+  ) => {
+    await authorize(channelId, integrationId)
+    const bind = (messageId?: string) => {
+      if (target.workspaceId && integrationId) bindSchedulerConfirmationDelivery(req.toolCallId, {
+        workspaceId: target.workspaceId, assistantId: target.assistantId, integrationId,
+        channelType: target.channelType, channelId, threadId: target.threadRef, messageId,
+      }, allowPersist)
     }
+    bind()
+    const messageId = target.threadRef
+      ? await adapter.sendMessage(channelId, message, { threadTs: target.threadRef })
+      : await adapter.sendMessage(channelId, message)
+    if (typeof messageId === 'string' && messageId) bind(messageId)
   }
 
   try {
     if (target.channelType === 'telegram') {
-      const botToken = await resolveTelegramBotToken(
+      const telegram = await resolveTelegramDelivery(
         target.assistantId,
         deps,
         target.channelIntegrationId,
         target.channelId,
         target.workspaceId,
       )
-      if (!botToken) {
+      if (!telegram) {
         return {
           delivered: false,
           channelType: target.channelType,
@@ -183,20 +201,15 @@ export async function sendConfirmationPrompt(
         }
       }
       {
-        const adapter = createTelegramAdapter({ token: botToken })
+        const adapter = createTelegramAdapter({ token: telegram.token, strictTopic: true })
         const actions = buildConfirmationActions(req.toolCallId, allowPersist)
-        await adapter.sendMessage(target.channelId, {
+        await push(adapter, target.channelId, {
           text: `${displayName}${inputSummary}\n\nAllow this action?`,
           actions,
-        })
+        }, telegram.integrationId)
       }
     } else if (target.channelType === 'slack') {
-      const integration = deps.integrationStore
-        ? await deps.integrationStore.getCredentialsForAssistantSystem(
-            target.assistantId,
-            'slack',
-          )
-        : null
+      const integration = await integrationFor('slack')
       if (!integration) {
         return {
           delivered: false,
@@ -212,27 +225,12 @@ export async function sendConfirmationPrompt(
         const replyHint = allowPersist
           ? 'Reply: yes / no / always / never'
           : 'Reply: yes / no'
-        await adapter.sendMessage(target.channelId, {
+        await push(adapter, target.channelId, {
           text: `${displayName}${inputSummary}\n\n${replyHint}`,
-        })
+        }, integration.id)
       }
     } else if (target.channelType === 'feishu') {
-      const integration = !deps.integrationStore
-        ? null
-        : target.channelIntegrationId
-          ? target.workspaceId
-            ? await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
-                target.workspaceId,
-                target.assistantId,
-                target.channelIntegrationId,
-                'feishu',
-                target.channelId,
-              )
-            : null
-          : await deps.integrationStore.getCredentialsForAssistantSystem(
-              target.assistantId,
-              'feishu',
-            )
+      const integration = await integrationFor('feishu')
       if (!integration) {
         return {
           delivered: false,
@@ -250,10 +248,10 @@ export async function sendConfirmationPrompt(
         botOpenId: integration.botUserId ?? undefined,
       })
       const actions = buildConfirmationActions(req.toolCallId, allowPersist)
-      await adapter.sendMessage(target.channelId, {
+      await push(adapter, target.channelId, {
         text: `${displayName}${inputSummary}\n\nAllow this action?`,
         actions,
-      })
+      }, integration.id)
     } else if (target.channelType === 'custom') {
       if (!deps.integrationStore || !deps.customChannelStore || !target.workspaceId) {
         return {
@@ -262,15 +260,7 @@ export async function sendConfirmationPrompt(
           reason: `The confirmation prompt for \`${req.toolName}\` could not be sent: no custom-channel bridge integration is available, so \`${target.channelId}\` was never asked. The parked tool call will time out unanswered.`,
         }
       }
-      const integration = target.channelIntegrationId
-        ? await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
-            target.workspaceId,
-            target.assistantId,
-            target.channelIntegrationId,
-            'custom',
-            target.channelId,
-          )
-        : await deps.integrationStore.getCredentialsForAssistantSystem(target.assistantId, 'custom')
+      const integration = await integrationFor('custom')
       if (!integration) {
         return {
           delivered: false,
@@ -281,11 +271,19 @@ export async function sendConfirmationPrompt(
       const replyHint = allowPersist
         ? 'Reply: yes / no / always / never'
         : 'Reply: yes / no'
-      await createCustomAdapter({
+      await push(createCustomAdapter({
         enqueue: (item) => deps.customChannelStore!.enqueue(integration.channelId, item),
-      }).sendMessage(target.channelId, {
+      }), target.channelId, {
         text: `${displayName}${inputSummary}\n\n${replyHint}`,
-      })
+      }, integration.id)
+    } else if (target.channelType === 'msteams') {
+      const integration = await integrationFor('msteams')
+      const serviceUrl = integration?.config?.msteamsServiceUrl
+      if (!integration || !serviceUrl) return { delivered: false, channelType: target.channelType, reason: 'No Teams integration/service URL is available.' }
+      const credentials = integration.credentials as { app_id: string; app_password: string; tenant_id: string }
+      await push(createMsTeamsAdapter({ appId: credentials.app_id, appPassword: credentials.app_password,
+        tenantId: credentials.tenant_id, serviceUrl, botId: integration.botUserId ?? undefined }), target.channelId,
+      { text: `${displayName}${inputSummary}\n\nAllow this action?`, actions: buildConfirmationActions(req.toolCallId, allowPersist) }, integration.id)
     } else if (target.channelType === 'whatsapp') {
       if (!deps.waConnectorUrl || !deps.waConnectorSecret) {
         return {
@@ -296,12 +294,14 @@ export async function sendConfirmationPrompt(
       }
       let waChannelId = target.channelId
       if (waChannelId === 'notifications') {
+        const actor = getSchedulerConfirmationActor(req.toolCallId)
+        if (!actor) return { delivered: false, channelType: target.channelType, reason: 'No verified confirmation actor for WhatsApp recipient lookup.' }
         const waSession = await query<{ channel_id: string }>(
           `SELECT channel_id FROM sessions
-           WHERE assistant_id = $1 AND channel_type = 'whatsapp'
+           WHERE assistant_id = $1 AND user_id = $2 AND channel_type = 'whatsapp'
               AND channel_id LIKE '%@%'
            ORDER BY last_active_at DESC LIMIT 1`,
-          [target.assistantId],
+          [target.assistantId, actor],
         )
         if (waSession.rows[0]) {
           waChannelId = waSession.rows[0].channel_id
@@ -315,22 +315,32 @@ export async function sendConfirmationPrompt(
         }
       }
       {
+        const integration = await integrationFor('whatsapp', waChannelId)
+        if (target.channelIntegrationId && !integration) return { delivered: false, channelType: target.channelType, reason: 'Selected WhatsApp integration is unavailable.' }
+        if (integration && (integration.credentials as { provider?: string }).provider === 'cloud_api') {
+          return { delivered: false, channelType: target.channelType, reason: 'Proactive Cloud API confirmations require a supported template/window; no prompt was sent.' }
+        }
         const adapter = createWhatsAppAdapter({
           connectorUrl: deps.waConnectorUrl,
           connectorSecret: deps.waConnectorSecret,
-          connectionId: 'system',
+          connectionId: integration?.channelId ?? 'system',
         })
         const replyHint = allowPersist
           ? 'Reply: *allow* / *deny* / *always* / *never*'
           : 'Reply: *allow* / *deny*'
-        await adapter.sendMessage(waChannelId, {
+        await push(adapter, waChannelId, {
           text: `*${displayName}*${inputSummary}\n\nAllow this action?\n${replyHint}`,
-        })
+        }, integration?.id ?? SYSTEM_WHATSAPP_CONFIRMATION_INTEGRATION)
       }
     }
+    if (!['web', 'telegram', 'slack', 'feishu', 'custom', 'msteams', 'whatsapp'].includes(target.channelType)) {
+      return { delivered: false, channelType: target.channelType, reason: 'Unsupported confirmation delivery channel.' }
+    }
     // 'web' — persist-only; the user sees the confirmation on next visit.
+    if (target.channelType === 'web') await authorize(target.channelId)
     return { delivered: true, channelType: target.channelType }
   } catch (err) {
+    clearSchedulerConfirmationDelivery(req.toolCallId)
     const reason = promptFailure(err, target, req.toolName)
     console.error(`[confirmation-prompt] delivery failed for ${target.channelType}:`, reason)
     return { delivered: false, channelType: target.channelType, reason }
