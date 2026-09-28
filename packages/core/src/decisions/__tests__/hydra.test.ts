@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   executeDecisionCascade,
+  executeDecisionObservation,
   validateDecisionRoute,
   type DecisionCascadeOperation,
   type DecisionEvaluationProfile,
@@ -250,6 +251,53 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
       result: { verdict: 'research', generated: 'shadow_legacy' },
       primaryResponse: { providerId: 'fixture-primary' },
     })
+  })
+
+  it('observation skips llm-only and unsampled routes without dispatch', async () => {
+    const evaluate = vi.fn(async () => response())
+    const observationOperation = {
+      decide: operation().decide,
+      validateResult: operation().validateResult,
+    }
+    await expect(executeDecisionObservation({
+      request: decisionRequest(),
+      operation: observationOperation,
+      route: { mode: 'llm_only' },
+    })).resolves.toMatchObject({ path: 'skipped', attempts: 0 })
+    await expect(executeDecisionObservation({
+      request: decisionRequest(),
+      operation: observationOperation,
+      route: {
+        mode: 'shadow',
+        primary: provider(evaluate),
+        profile: { ...profile('shadow'), shadowSampleRate: 0.25 },
+      },
+      random: () => 0.9,
+    })).resolves.toMatchObject({ path: 'skipped', attempts: 0 })
+    expect(evaluate).not.toHaveBeenCalled()
+  })
+
+  it('observation records one primary disposition with no completion stage', async () => {
+    const records: DecisionAttemptRecord[] = []
+    const result = await executeDecisionObservation({
+      request: decisionRequest(),
+      operation: {
+        decide: () => ({ kind: 'follow_up', reason: 'uncertain' }),
+        validateResult: operation().validateResult,
+      },
+      route: {
+        mode: 'shadow',
+        primary: provider(async () => response('ordinary')),
+        profile: profile('shadow'),
+      },
+      onAttempt: (record) => { records.push(record) },
+    })
+    expect(result).toMatchObject({ path: 'observed_follow_up', attempts: 1 })
+    expect(records).toEqual([expect.objectContaining({
+      stage: 'primary_decision',
+      disposition: 'follow_up',
+      followUpReason: 'uncertain',
+    })])
   })
 
   it('rejects missing, mismatched, unbounded, and synthetic production profiles before dispatch', () => {

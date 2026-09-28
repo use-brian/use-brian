@@ -133,9 +133,34 @@ export type DecisionExecutionRunOptions<T> = {
   operation: DecisionExecutionOperation<T>
 }
 
+export type DecisionObservationOperation<T> = Pick<
+  DecisionCascadeOperation<T>,
+  'decide' | 'validateResult'
+>
+
+export type DecisionObservationRunOptions<T> = {
+  workspaceId?: string
+  request: Omit<DecisionRequest, 'model'>
+  operation: DecisionObservationOperation<T>
+}
+
+export type DecisionObservationResult<T> = {
+  runId: string
+  path: 'skipped' | 'observed_complete' | 'observed_follow_up' | 'observed_unavailable' | 'observed_error'
+  attempts: 0 | 1
+  disposition?: DecisionDisposition<T>
+  primaryResponse?: DecisionResponse
+  failureKind?: DecisionFailureKind
+}
+
 /** Core-facing structural port; implemented by the API composition runtime. */
 export interface DecisionExecutionPort {
   run<T>(options: DecisionExecutionRunOptions<T>): Promise<DecisionCascadeResult<T>>
+  /**
+   * Run only the configured decision-provider stage. The result is evidence,
+   * never caller authority; `llm_only` and unsampled shadow routes do no work.
+   */
+  observe<T>(options: DecisionObservationRunOptions<T>): Promise<DecisionObservationResult<T>>
 }
 
 export type DecisionCascadePath =
@@ -159,6 +184,15 @@ export type DecisionCascadeResult<T> = {
 export type ExecuteDecisionCascadeOptions<T> = {
   request: DecisionRequest
   operation: DecisionCascadeOperation<T>
+  route: DecisionRoute
+  onAttempt?: (record: DecisionAttemptRecord) => void | Promise<void>
+  now?: () => number
+  random?: () => number
+}
+
+export type ExecuteDecisionObservationOptions<T> = {
+  request: DecisionRequest
+  operation: DecisionObservationOperation<T>
   route: DecisionRoute
   onAttempt?: (record: DecisionAttemptRecord) => void | Promise<void>
   now?: () => number
@@ -520,5 +554,85 @@ export async function executeDecisionCascade<T>(
     const failure = normalizeDecisionFailure(error)
     if (failure.kind === 'cancelled') throw failure
     return safe(failure.kind)
+  }
+}
+
+/**
+ * Execute a non-authoritative decision-provider observation.
+ *
+ * This deliberately has no LLM completion lane. Domain callers continue their
+ * mandatory legacy work regardless of the returned disposition.
+ */
+export async function executeDecisionObservation<T>(
+  options: ExecuteDecisionObservationOptions<T>,
+): Promise<DecisionObservationResult<T>> {
+  const now = options.now ?? Date.now
+  const random = options.random ?? Math.random
+  const { request, operation, route } = options
+  validateDecisionRoute(request, route)
+  if (route.mode === 'llm_only') {
+    return { runId: request.runId, path: 'skipped', attempts: 0 }
+  }
+
+  const profile = route.profile!
+  if (route.mode === 'shadow' && random() >= profile.shadowSampleRate!) {
+    return { runId: request.runId, path: 'skipped', attempts: 0 }
+  }
+
+  const startedAt = now()
+  const totalDeadline = earlierDeadline(request, profile.totalTimeoutMs, startedAt)
+  const primaryDeadline = Math.min(totalDeadline, startedAt + profile.primaryTimeoutMs)
+  try {
+    const response = await withDeadline({
+      parent: request.signal,
+      deadlineAt: primaryDeadline,
+      now,
+      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline }),
+    })
+    let disposition = operation.decide(response, { profile })
+    if (disposition.kind === 'complete') {
+      disposition = { kind: 'complete', result: operation.validateResult(disposition.result) }
+    }
+    await options.onAttempt?.({
+      runId: request.runId,
+      operationId: request.operation.id,
+      attempt: 1,
+      stage: 'primary_decision',
+      providerId: response.providerId,
+      modelCatalogId: response.model.catalogId,
+      modelWireId: response.model.wireId,
+      latencyMs: Math.max(0, now() - startedAt),
+      outcome: 'success',
+      disposition: disposition.kind,
+      ...(disposition.kind === 'follow_up' ? { followUpReason: disposition.reason } : {}),
+      ...(response.usage ? { usage: response.usage } : {}),
+    })
+    const path = disposition.kind === 'complete'
+      ? 'observed_complete'
+      : disposition.kind === 'follow_up'
+        ? 'observed_follow_up'
+        : 'observed_unavailable'
+    return { runId: request.runId, path, attempts: 1, disposition, primaryResponse: response }
+  } catch (error) {
+    const failure = normalizeDecisionFailure(error)
+    await options.onAttempt?.({
+      runId: request.runId,
+      operationId: request.operation.id,
+      attempt: 1,
+      stage: 'primary_decision',
+      providerId: route.primary!.id,
+      modelCatalogId: request.model.catalogId,
+      modelWireId: request.model.wireId,
+      latencyMs: Math.max(0, now() - startedAt),
+      outcome: 'error',
+      failureKind: failure.kind,
+    })
+    if (failure.kind === 'cancelled') throw failure
+    return {
+      runId: request.runId,
+      path: 'observed_error',
+      attempts: 1,
+      failureKind: failure.kind,
+    }
   }
 }

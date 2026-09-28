@@ -28,6 +28,7 @@ import type { AnalyticsLogger } from '../analytics/logger.js'
 import { sanitize } from '../analytics/logger.js'
 import { collectStream } from '../providers/accumulator.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
+import type { DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import { RANK, isSensitivity } from '../security/sensitivity.js'
 
@@ -83,6 +84,9 @@ export type SensitivityClassifierOptions = {
    * callers that only want the inferred tier back.
    */
   analytics?: AnalyticsLogger
+  /** Observation-only decision cascade. The mandatory LLM remains authoritative. */
+  decisionRuntime?: DecisionExecutionPort
+  runId?: string
   input: SensitivityClassifierInput
 }
 
@@ -160,6 +164,54 @@ export async function classifySensitivity(
   opts: SensitivityClassifierOptions,
 ): Promise<SensitivityClassification | null> {
   const { provider, model, analytics, input } = opts
+
+  if (opts.decisionRuntime) {
+    try {
+      await opts.decisionRuntime.observe({
+        workspaceId: input.workspaceId,
+        request: {
+          runId: opts.runId ?? `ingest-sensitivity-${input.episodeId}`,
+          operation: {
+            id: 'ingest.sensitivity',
+            version: '1',
+            stateVersion: '1',
+            questionVersion: '1',
+          },
+          state: {
+            channelSensitivity: input.channelSensitivity,
+            summary: truncate(input.summary, SUMMARY_CHAR_LIMIT),
+            memories: input.memories.slice(0, MAX_MEMORIES).map((memory) => truncate(memory.summary, MEMORY_CHAR_LIMIT)),
+          },
+          questions: [{
+            id: 'sensitivity',
+            kind: 'choice',
+            prompt: 'Which sensitivity tier best matches this extracted knowledge?',
+            options: [
+              { value: 'public' },
+              { value: 'internal' },
+              { value: 'confidential' },
+            ],
+          }],
+        },
+        operation: {
+          decide(response: DecisionResponse) {
+            const answer = response.answers.find((item) => item.questionId === 'sensitivity')
+            return answer?.kind === 'choice' && isSensitivity(answer.value)
+              ? { kind: 'complete', result: { inferredSensitivity: answer.value } }
+              : { kind: 'unavailable', reason: 'invalid_response' }
+          },
+          validateResult(result) {
+            if (!isSensitivity(result.inferredSensitivity)) throw new Error('invalid sensitivity observation')
+            return result
+          },
+        },
+      })
+    } catch (error) {
+      console.warn(
+        `[sensitivity-classifier] observation skipped: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
 
   let usage: TokenUsage | null = null
   try {

@@ -153,6 +153,59 @@ describe('[COMP:decisions/runtime] decision composition', () => {
     expect(complete).toHaveBeenCalledOnce()
   })
 
+  it('skips observation in llm-only mode without invoking an LLM completion', async () => {
+    const runtime = createDecisionRuntime({
+      llmProvider: fixtureLlm(),
+      defaultLlmModel: 'fixture-llm',
+    })
+    const complete = vi.fn(resultOperation().completeWithLlm)
+
+    const result = await runtime.observe({
+      request: request(),
+      operation: {
+        decide: resultOperation(complete).decide,
+        validateResult: resultOperation(complete).validateResult,
+      },
+    })
+
+    expect(result).toMatchObject({ path: 'skipped', attempts: 0 })
+    expect(complete).not.toHaveBeenCalled()
+  })
+
+  it('runs one configured primary observation without an LLM completion', async () => {
+    const adapters = new DecisionAdapterRegistry().register('typesafe', () => primaryProvider())
+    const complete = vi.fn(resultOperation().completeWithLlm)
+    const runtime = createDecisionRuntime({
+      llmProvider: fixtureLlm(),
+      defaultLlmModel: 'fixture-llm',
+      adapters,
+      resolveRoute: () => ({
+        mode: 'shadow',
+        primaryModelId: 'typesafe-jev-1.13',
+        profile: {
+          ...profile(),
+          mode: 'shadow',
+          status: 'evaluation',
+          shadowSampleRate: 1,
+        },
+      }),
+    })
+
+    const op = resultOperation(complete)
+    const result = await runtime.observe({
+      workspaceId: 'workspace-fictional',
+      request: request(),
+      operation: { decide: op.decide, validateResult: op.validateResult },
+    })
+
+    expect(result).toMatchObject({
+      path: 'observed_complete',
+      attempts: 1,
+      disposition: { kind: 'complete', result: { verdict: 'ordinary' } },
+    })
+    expect(complete).not.toHaveBeenCalled()
+  })
+
   it('resolves workspace policy to an injected adapter with no vendor branch in Hydra', async () => {
     const adapters = new DecisionAdapterRegistry()
       .register('typesafe', () => primaryProvider())

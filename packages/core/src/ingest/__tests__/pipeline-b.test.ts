@@ -695,6 +695,38 @@ function makeDeps(over: Partial<PipelineBDeps> & { provider: LLMProvider }): Pip
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe('[COMP:brain/pipeline-b] processEpisode', () => {
+  it('never skips extraction when the observation says no extraction is needed', async () => {
+    const requests: ProviderRequest[] = []
+    const provider = sequencedProvider([
+      JSON.stringify({ summary: 'Still extracted.', entities: [], edges: [], memories: [], tags: [] }),
+    ], requests)
+    const observe = vi.fn(async (request) => ({
+      providerId: 'fixture-decision',
+      model: request.model,
+      answers: [{
+        questionId: 'needs_extraction',
+        kind: 'boolean' as const,
+        value: false,
+        evidence: { source: 'native_distribution' as const, confidence: 0.99 },
+      }],
+    }))
+    const decisionRuntime = executionFixture({
+      mode: 'shadow',
+      llm: provider,
+      primary: fixtureDecisionProvider(observe),
+    })
+
+    const result = await processEpisode(
+      baseEpisode(),
+      'A deliberately quiet note.',
+      makeDeps({ provider, decisionRuntime, classifierModel: null }),
+    )
+
+    expect(observe).toHaveBeenCalledOnce()
+    expect(requests).toHaveLength(1)
+    expect(result).toMatchObject({ extracted: true, summaryText: 'Still extracted.' })
+  })
+
   it('writes entities (CRM-routed for person/company), edges, memories, then archives the Episode', async () => {
     // Shared world: CRM-create side-effects make the freshly-inserted entity
     // row visible to subsequent EntityStore lookups, mirroring the real

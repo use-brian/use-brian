@@ -56,7 +56,11 @@ import {
 } from '../entities/types.js'
 import { resolveEntity } from '../entities/resolver.js'
 import { stableExternalIdentityFromCrmRef } from '../decision-learning/types.js'
-import type { DecisionCompletionRoute, DecisionExecutionPort } from '../decisions/index.js'
+import type {
+  DecisionCompletionRoute,
+  DecisionExecutionPort,
+  DecisionResponse,
+} from '../decisions/index.js'
 import type { MemoryRecord, MemoryStore } from '../memory/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import {
@@ -1600,6 +1604,58 @@ async function recordResolverUsage(
 
 // ── Main entrypoint ──────────────────────────────────────────────────
 
+async function observeExtractionNeed(
+  episode: PipelineBEpisode,
+  content: string,
+  decisionRuntime: DecisionExecutionPort | undefined,
+): Promise<void> {
+  if (!decisionRuntime) return
+  try {
+    await decisionRuntime.observe({
+      workspaceId: episode.workspaceId,
+      request: {
+        runId: `ingest-extraction-gate-${episode.id}`,
+        operation: {
+          id: 'ingest.extraction-gate',
+          version: '1',
+          stateVersion: '1',
+          questionVersion: '1',
+        },
+        state: {
+          sourceKind: episode.sourceKind,
+          content: content.slice(0, 16_000),
+        },
+        questions: [{
+          id: 'needs_extraction',
+          kind: 'boolean',
+          prompt: 'Does this content need any entity, edge, task, memory, tag, or summary extraction?',
+          criteria: {
+            true: 'At least one required extraction output or useful summary is present.',
+            false: 'No required extraction output and no useful summary is present.',
+          },
+        }],
+      },
+      operation: {
+        decide(response: DecisionResponse) {
+          const answer = response.answers.find((item) => item.questionId === 'needs_extraction')
+          return answer?.kind === 'boolean'
+            ? { kind: 'complete', result: { needsExtraction: answer.value } }
+            : { kind: 'unavailable', reason: 'invalid_response' }
+        },
+        validateResult(result) {
+          if (typeof result.needsExtraction !== 'boolean') throw new Error('invalid extraction observation')
+          return result
+        },
+      },
+    })
+  } catch (error) {
+    console.warn(
+      `[pipeline-b] extraction-gate observation failed for episode ${episode.id}:`,
+      error instanceof Error ? error.message : error,
+    )
+  }
+}
+
 /**
  * Run extraction on an Episode, write derived rows, classify sensitivity.
  *
@@ -1679,6 +1735,10 @@ export async function processEpisode(
   // bumps a tier.
   const scrubbed = scrubCredentials(resolvedContent)
   const extractableContent = scrubbed.text
+
+  // Observation only. The returned decision is intentionally ignored and all
+  // extraction work below remains mandatory in the delivered configuration.
+  await observeExtractionNeed(episode, extractableContent, deps.decisionRuntime)
 
   // 1+2. Call extraction LLM and parse — windowed input, up to two attempts
   // per window.
@@ -2181,6 +2241,8 @@ export async function processEpisode(
           triggerKey: 'sensitivity_classifier',
         }),
         analytics: deps.analytics,
+        decisionRuntime: deps.decisionRuntime,
+        runId: `ingest-sensitivity-${episode.id}`,
         input: {
           episodeId: episode.id,
           workspaceId: episode.workspaceId,

@@ -13,6 +13,7 @@ import {
   assertDecisionCapabilities,
   createTypeSafeDecisionProvider,
   executeDecisionCascade,
+  executeDecisionObservation,
   type DecisionAttemptRecord,
   type DecisionCascadeOperation,
   type DecisionCascadeResult,
@@ -20,6 +21,8 @@ import {
   type DecisionEvaluationProfile,
   type DecisionExecutionOperation,
   type DecisionExecutionRunOptions,
+  type DecisionObservationResult,
+  type DecisionObservationRunOptions,
   type DecisionModelRef,
   type DecisionRequest,
   type DecisionProvider,
@@ -82,6 +85,7 @@ export type DecisionRuntimeRunOptions<T> = DecisionExecutionRunOptions<T> & {
 
 export interface DecisionRuntime {
   run<T>(options: DecisionRuntimeRunOptions<T>): Promise<DecisionCascadeResult<T>>
+  observe<T>(options: DecisionObservationRunOptions<T>): Promise<DecisionObservationResult<T>>
   resolveRoute(context: DecisionRouteContext): Promise<DecisionRouteConfig>
   configuredAdapterIds(): readonly string[]
 }
@@ -170,6 +174,44 @@ export function createDecisionRuntime(
   return {
     configuredAdapterIds: () => adapters.ids(),
     resolveRoute: async (context) => routeResolver(context),
+    async observe<T>(runOptions: DecisionObservationRunOptions<T>): Promise<DecisionObservationResult<T>> {
+      const routeContext: DecisionRouteContext = {
+        ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
+        operation: runOptions.request.operation,
+        questionKinds: runOptions.request.questions.map((question) => question.kind),
+      }
+      const config = await routeResolver(routeContext)
+      const primary = configuredPrimary(config, adapters)
+      const request: DecisionRequest = {
+        ...runOptions.request,
+        model: primary.model ?? modelRef(
+          config.llm && config.llm !== null
+            ? config.llm.modelId
+            : resolveDefaultLlm().modelId,
+        ),
+      }
+      if (primary.provider) assertDecisionCapabilities(request, primary.provider.capabilities)
+      return executeDecisionObservation({
+        request,
+        operation: runOptions.operation,
+        route: primary.effectiveMode === 'llm_only'
+          ? { mode: 'llm_only' }
+          : {
+              mode: primary.effectiveMode,
+              primary: primary.provider,
+              profile: config.profile,
+              allowSyntheticProfile: config.allowSyntheticProfile,
+            },
+        onAttempt: async (attempt) => {
+          await options.onAttempt?.({
+            ...priceUsage(attempt),
+            ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
+            configuredMode: config.mode,
+            effectiveMode: primary.effectiveMode,
+          })
+        },
+      })
+    },
     async run<T>(runOptions: DecisionRuntimeRunOptions<T>): Promise<DecisionCascadeResult<T>> {
       const routeContext: DecisionRouteContext = {
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
