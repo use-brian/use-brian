@@ -5,7 +5,9 @@ import type { MembershipCatalogueDocument, WebsiteMembershipPlan, MembershipLoca
 import { useT } from "@/lib/i18n/client";
 import { useCachedResource } from "@/lib/surface-cache";
 import { associationPageCacheKey } from "@/lib/surface-prefetch";
-import { getMembershipCatalogueDraft, saveMembershipCatalogueDraft, publishMembershipCatalogue } from "@/lib/api/association";
+import { getMembershipCatalogueDraft, saveMembershipCatalogueDraft, publishMembershipCatalogue, websiteSiteLabel } from "@/lib/api/association";
+import { format } from "@/lib/i18n/format";
+import { useWebsiteSiteNames } from "./website/website-status";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { AssociationField as Field, AssociationChoice as Choice, AssociationToggle as Toggle, AssociationListState, useAssociationAction, useAssociationPage } from "./operator-controls";
@@ -14,7 +16,6 @@ import { InlineNotice, PageHeader } from "./ui";
 import { associationLocalTime, associationInstant } from "./operator-controls";
 
 const locales = ["en", "zh-Hant", "zh-Hans"] as const;
-const sites = ["oasa", "sea"] as const;
 const emptyCopy = () => ({ name: "", summary: "", audience: "", badge: "", description: "", eligibility: "", benefits: [] as string[], actionLabel: "", billingLabel: "", documents: [] as {label:string;href:string}[] });
 const copies = () => ({ en: emptyCopy(), "zh-Hant": emptyCopy(), "zh-Hans": emptyCopy() });
 const emptyPage = () => ({ title: "", intro: "", groups: [{ id: "plans", title: "", intro: "" }], sections: [] as MembershipCatalogueDocument["pages"]["oasa"]["en"]["sections"] });
@@ -24,15 +25,19 @@ const lines = (value: string) => value.split("\n");
 
 export function MembershipPublishingPanel({ workspaceId }: { workspaceId: string }) {
   const t = useT().associationPage, c = t.publishing;
-  const module = useAssociationModule(workspaceId), manage = !!module.data?.canManage;
+  const module = useAssociationModule(workspaceId), manage = !!module.data?.canManage, commerceOn = module.data?.module.state === "enabled";
+  const names = useWebsiteSiteNames(workspaceId, manage);
   const read = useCachedResource(manage ? associationPageCacheKey(workspaceId, "membership-catalogue") : null, () => getMembershipCatalogueDraft(workspaceId));
   const promotions = useAssociationPage(workspaceId, "promotions", {}, manage);
   const action = useAssociationAction(workspaceId);
   const [editing, setEditing] = useState<{version:number;document:MembershipCatalogueDocument}|null>(null);
-  const [locale, setLocale] = useState<MembershipLocale>("en"), [brand, setBrand] = useState<"shared"|MembershipSite>("shared"), [site, setSite] = useState<MembershipSite>("oasa");
+  const [locale, setLocale] = useState<MembershipLocale>("en"), [brand, setBrand] = useState<"shared"|MembershipSite>("shared"), [chosenSite, setSite] = useState<string>("");
   const [feeInput, setFeeInput] = useState<Record<string,string>>({});
   const [preview, setPreview] = useState(false), [selected, setSelected] = useState(0);
   const doc = editing?.document ?? read.data?.document;
+  // Sites come from the catalogue document and the websites that read it, never from code.
+  const sites = [...new Set([...Object.keys(doc?.pages ?? {}), ...Object.keys(read.data?.observations ?? {})])].sort() as MembershipSite[];
+  const site = (sites.includes(chosenSite as MembershipSite) ? chosenSite : sites[0] ?? "") as MembershipSite;
   const plan = doc?.plans[selected];
   const patch = (fn:(document:MembershipCatalogueDocument)=>void) => setEditing(old => { if (!old) return old; const next = structuredClone(old); fn(next.document); return next; });
   const setPlan = <K extends keyof WebsiteMembershipPlan>(key:K, value:WebsiteMembershipPlan[K]) => patch(document => { document.plans[selected][key] = value; });
@@ -52,19 +57,19 @@ export function MembershipPublishingPanel({ workspaceId }: { workspaceId: string
   async function publish() { if (!read.data || editing || !preview) return; if (await action.run(c.publish, () => publishMembershipCatalogue(workspaceId, read.data!.version), { description: c.review })) { setPreview(false); await read.refresh(); } }
   return <section className="space-y-5">
     <PageHeader title={c.title} description={c.help}/>
-    {!manage ? <InlineNotice tone="neutral">{t.manage.canConfigure}</InlineNotice> : <AssociationListState {...read}>
+    {!manage ? <InlineNotice tone="neutral">{t.ux.readOnly}</InlineNotice> : <AssociationListState {...read}>
       {read.data && <>
-        <p className="text-sm">{c.published}: {read.data.publishedRevision}</p>
-        <div className="flex flex-wrap gap-3" role="status">{sites.map(s => <p key={s} className="text-sm">{s.toUpperCase()}: {read.data!.publishedRevision > 0 && read.data!.observations[s]?.revision === read.data!.publishedRevision ? c.observed : c.pending}</p>)}</div>
+                <div className="flex flex-wrap gap-3" role="status">{read.data.publishedRevision > 0 ? Object.keys(read.data.observations).length === 0 ? <p className="text-sm">{t.content.statusNotRead}</p> : Object.keys(read.data.observations).map(s => <p key={s} className="text-sm">{format(read.data!.observations[s]?.revision === read.data!.publishedRevision ? t.content.observed : t.content.pending, { site: websiteSiteLabel(s, names) })}</p>) : null}</div>
+        {!commerceOn && module.data ? <InlineNotice tone="neutral">{c.publishNeedsModule}</InlineNotice> : null}
         {!doc && <InlineNotice tone="neutral">{c.empty}</InlineNotice>}
         <div className="flex flex-wrap gap-2">
-          {!editing && <Button disabled={module.data?.module.state !== "enabled"} className="min-h-11" onClick={() => {setFeeInput({});setEditing({version:read.data!.version, document:structuredClone(doc ?? blank())});setPreview(false);}}>{doc ? c.edit : c.create}</Button>}
+          {!editing && <Button className="min-h-11" onClick={() => {setFeeInput({});setEditing({version:read.data!.version, document:structuredClone(doc ?? blank())});setPreview(false);}}>{doc ? c.edit : c.create}</Button>}
           {editing && <><Button className="min-h-11" disabled={action.pending || Object.values(feeInput).some(value=>!/^\d+(?:\.\d{1,2})?$/.test(value))} onClick={() => void save()}>{c.draft}</Button><Button className="min-h-11" variant="outline" onClick={async () => { if (await confirmDialog({title:t.ux.cancelEdit,description:t.ux.cancelHelp,confirmLabel:t.cancel,cancelLabel:t.ux.keepEditing})) { setEditing(null); setFeeInput({}); } }}>{t.cancel}</Button></>}
           {!editing && doc && <Button className="min-h-11" variant="outline" onClick={() => setPreview(!preview)}>{c.preview}</Button>}
-          {preview && !editing && <Button className="min-h-11" disabled={module.data?.module.state !== "enabled" || !!read.error || action.pending || !!read.data.issues.length || read.data.version === read.data.publishedRevision} onClick={() => void publish()}>{c.publish}</Button>}
+          {preview && !editing && <Button className="min-h-11" disabled={!commerceOn || !!read.error || action.pending || !!read.data.issues.length || read.data.version === read.data.publishedRevision} onClick={() => void publish()}>{c.publish}</Button>}
         </div>
         {action.feedback}{read.data.issues.length > 0 && <ul role="alert" className="list-inside list-disc text-sm text-destructive">{read.data.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
-        {doc && <div className="grid gap-3 md:grid-cols-3"><Choice label={c.locale} value={locale} values={locales} labels={{en:"English","zh-Hant":"繁體中文","zh-Hans":"简体中文"}} onChange={v=>setLocale(v as MembershipLocale)}/><Choice label={c.sites} value={site} values={sites} labels={{oasa:"OASA",sea:"SEA"}} onChange={v=>setSite(v as MembershipSite)}/></div>}
+        {doc && <div className="grid gap-3 md:grid-cols-3"><Choice label={c.locale} value={locale} values={locales} labels={{en:"English","zh-Hant":"繁體中文","zh-Hans":"简体中文"}} onChange={v=>setLocale(v as MembershipLocale)}/><Choice label={c.sites} value={site} values={sites} labels={Object.fromEntries(sites.map(key=>[key,websiteSiteLabel(key,names)]))} onChange={v=>setSite(v as MembershipSite)}/></div>}
         {!editing && !preview && doc && <div className="grid gap-3 md:grid-cols-2">{doc.plans.map((p,i)=><article key={p.key} className="space-y-3 rounded-xl border p-4"><h3 className="font-semibold">{(p.overrides[site]?.[locale]?.name??p.i18n[locale].name)}</h3><p className="text-sm">{p.currency} {p.feeMinor/100} · {c[p.billingPeriod]}</p><p className="text-sm text-muted-foreground">{p.sites.map(s=>s.toUpperCase()).join(" · ")} · {p.availability==="enquiry"?c.enquiryStatus:c[p.availability]}</p><Button className="min-h-11" variant="outline" disabled={module.data?.module.state!=="enabled"} onClick={()=>{setFeeInput({});setSelected(i);setEditing({version:read.data!.version,document:structuredClone(doc)});}}>{c.edit}</Button></article>)}</div>}
         {preview && doc && <div className="grid min-w-0 gap-4 lg:grid-cols-2">{([c.before,c.after] as const).map((title,index)=><div className="min-w-0 rounded-xl border p-4" key={title}><h3 className="font-semibold">{title}</h3><CataloguePreview document={index===0?read.data!.published:doc} locale={locale} site={site} promotionNames={Object.fromEntries((promotions.data?.items??[]).map(p=>[p.id,p.name]))}/></div>)}</div>}
         {editing && doc && <fieldset disabled={action.pending} className="min-w-0 space-y-6">
@@ -79,10 +84,10 @@ export function MembershipPublishingPanel({ workspaceId }: { workspaceId: string
             <Choice label={c.type} value={plan.application.type} values={["application","enquiry"]} labels={{application:c.application,enquiry:c.enquiry}} onChange={v=>setPlan("application",{...plan.application,type:v as "application"|"enquiry"})}/>
             <Field label={c.group} value={plan.group} onChange={v=>setPlan("group",v)}/><Field label={c.order} type="number" value={String(plan.order)} onChange={v=>setPlan("order",Number(v))}/>
             <Field label={c.activeFrom} type="datetime-local" value={associationLocalTime(plan.activeFrom)} onChange={v=>setPlan("activeFrom",associationInstant(v))}/><Field label={c.activeTo} type="datetime-local" value={associationLocalTime(plan.activeTo)} onChange={v=>setPlan("activeTo",associationInstant(v))}/>
-            {sites.map(s=><Toggle key={s} label={`${c.sites}: ${s.toUpperCase()}`} checked={plan.sites.includes(s)} onChange={v=>setPlan("sites",v?[...plan.sites,s]:plan.sites.filter(item=>item!==s))}/>)}
+            {sites.map(s=><Toggle key={s} label={`${c.sites}: ${websiteSiteLabel(s,names)}`} checked={plan.sites.includes(s)} onChange={v=>setPlan("sites",v?[...plan.sites,s]:plan.sites.filter(item=>item!==s))}/>)}
             <Toggle label={c.proposer} checked={plan.application.proposerRequired} onChange={v=>setPlan("application",{...plan.application,proposerRequired:v})}/>
             <Choice label={c.promotion} value={plan.promotionId ?? "none"} values={["none",...(promotions.data?.items.filter(p=>p.targetKind==="plan"&&!!plan.planId&&p.targetIds.includes(plan.planId)).map(p=>p.id)??[])]} labels={{none:c.noPromotion,...Object.fromEntries((promotions.data?.items??[]).map(p=>[p.id,p.name]))}} onChange={v=>setPlan("promotionId",v==="none"?null:v)}/>
-            <Choice label={c.description} value={brand} values={["shared","oasa","sea"]} labels={{shared:c.shared,oasa:c.oasa,sea:c.sea}} onChange={v=>setBrand(v as typeof brand)}/>
+            <Choice label={c.wordingFor} value={brand} values={["shared",...sites]} labels={{shared:c.shared,...Object.fromEntries(sites.map(key=>[key,format(c.siteOverride,{site:websiteSiteLabel(key,names)})]))}} onChange={v=>setBrand(v as typeof brand)}/>
             {brand!=="shared"&&<Button variant="outline" className="min-h-11" onClick={()=>patch(d=>{delete d.plans[selected].overrides[brand]?.[locale];})}>{c.inherit}</Button>}
             {(["name","summary","audience","badge","description","eligibility","actionLabel","billingLabel"] as const).map(key=><Field key={key} label={c[key]} value={copy[key]} multiline={["summary","description","eligibility"].includes(key)} onChange={v=>patchCopy(value=>{value[key]=v;})}/>)}
             <Field label={c.benefits} multiline value={copy.benefits.join("\n")} onChange={v=>patchCopy(value=>{value.benefits=lines(v);})}/>
@@ -92,8 +97,8 @@ export function MembershipPublishingPanel({ workspaceId }: { workspaceId: string
             {page.groups.map((group,i)=><div className="grid gap-2 md:grid-cols-3" key={i}><Field label={c.group} value={group.id} onChange={v=>patchPage(p=>{p.groups[i].id=v;})}/><Field label={c.titleField} value={group.title} onChange={v=>patchPage(p=>{p.groups[i].title=v;})}/><Field label={c.intro} value={group.intro} onChange={v=>patchPage(p=>{p.groups[i].intro=v;})}/><Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>{p.groups.splice(i,1);})}>{c.remove}</Button></div>)}
             <Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>p.groups.push({id:`group-${p.groups.length+1}`,title:"",intro:""}))}>{c.add}: {c.group}</Button>
             {page.sections.map((section,i)=><div className="space-y-3 rounded-xl border p-3" key={i}><Field label={c.titleField} value={section.title} onChange={v=>patchPage(p=>{p.sections[i].title=v;})}/><Field label={c.paragraphs} multiline value={section.paragraphs.join("\n")} onChange={v=>patchPage(p=>{p.sections[i].paragraphs=lines(v);})}/><Field label={c.bullets} multiline value={section.bullets.join("\n")} onChange={v=>patchPage(p=>{p.sections[i].bullets=lines(v);})}/>
-              {section.image&&<><Field label={c.url} value={section.image.src} onChange={v=>patchPage(p=>{p.sections[i].image!.src=v;})}/><Field label={c.description} value={section.image.alt} onChange={v=>patchPage(p=>{p.sections[i].image!.alt=v;})}/></>}{section.documents.map((link,j)=><div className="grid gap-2 md:grid-cols-2" key={j}><Field label={c.name} value={link.label} onChange={v=>patchPage(p=>{p.sections[i].documents[j].label=v;})}/><Field label={c.url} value={link.href} onChange={v=>patchPage(p=>{p.sections[i].documents[j].href=v;})}/><Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>{p.sections[i].documents.splice(j,1);})}>{c.remove}</Button></div>)}<Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>p.sections[i].documents.push({label:"",href:"/"}))}>{c.add}: {c.documents}</Button><Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>{p.sections.splice(i,1);})}>{c.remove}</Button></div>)}
-            <Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>p.sections.push({id:`section-${p.sections.length+1}`,title:"",paragraphs:[],bullets:[],documents:[]}))}>{c.add}: {c.description}</Button>
+              {section.image&&<><Field label={c.url} value={section.image.src} onChange={v=>patchPage(p=>{p.sections[i].image!.src=v;})}/><Field label={c.imageAlt} value={section.image.alt} onChange={v=>patchPage(p=>{p.sections[i].image!.alt=v;})}/></>}{section.documents.map((link,j)=><div className="grid gap-2 md:grid-cols-2" key={j}><Field label={c.name} value={link.label} onChange={v=>patchPage(p=>{p.sections[i].documents[j].label=v;})}/><Field label={c.url} value={link.href} onChange={v=>patchPage(p=>{p.sections[i].documents[j].href=v;})}/><Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>{p.sections[i].documents.splice(j,1);})}>{c.remove}</Button></div>)}<Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>p.sections[i].documents.push({label:"",href:"/"}))}>{c.add}: {c.documents}</Button><Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>{p.sections.splice(i,1);})}>{c.remove}</Button></div>)}
+            <Button variant="outline" className="min-h-11" onClick={()=>patchPage(p=>p.sections.push({id:`section-${p.sections.length+1}`,title:"",paragraphs:[],bullets:[],documents:[]}))}>{c.addSection}</Button>
             {page.newsletter&&<div className="space-y-2"><h4>{c.newsletter}</h4>{(["name","summary","actionLabel"] as const).map(key=><Field key={key} label={c[key]} value={page.newsletter![key]} onChange={v=>patchPage(p=>{p.newsletter![key]=v;})}/>)}<Field label={c.benefits} multiline value={page.newsletter.benefits.join("\n")} onChange={v=>patchPage(p=>{p.newsletter!.benefits=lines(v);})}/></div>}
           </section>}
         </fieldset>}

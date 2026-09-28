@@ -44,10 +44,10 @@ describe("[COMP:app-web/association] Home overview",()=>{
     expect(api.list).not.toHaveBeenCalledWith("w","rescues",expect.anything());
     expect(host.textContent).toContain(u.nothingAttention);
   });
-  it("points at Settings when new reservations are switched off",async()=>{
+  it("points owners at Admin when new reservations are switched off",async()=>{
     api.module.mockResolvedValue({module:{workspaceId:"w",state:"disabled",version:1},canManage:true});
     await render();
     expect(host.textContent).toContain(u.moduleOffRow);
-    expect([...host.querySelectorAll("a")].map(link=>link.getAttribute("href"))).toContain("/w/w/association?section=settings");
+    expect([...host.querySelectorAll("a")].map(link=>link.getAttribute("href"))).toContain("/w/w/association?section=admin&tab=general");
   });
 });

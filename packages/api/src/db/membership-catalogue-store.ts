@@ -9,6 +9,7 @@ import { lockAssociationModule, requireAssociationAdmission } from '../associati
 type State = { draft_version: number; draft: MembershipCatalogueDocument | null; published_revision: number; observations: Record<string, { revision: number; observedAt: string }> }
 const empty: State = { draft_version: 0, draft: null, published_revision: 0, observations: {} }
 export function createMembershipCatalogueStore(pool: Pool = getPool()) {
+  // Only publication is gated by the Association module: it writes plan rows that checkouts read. Drafts are website copy.
   async function transaction<T>(workspaceId: string, fn: (client: PoolClient) => Promise<T>, write = false) {
     const client = await pool.connect()
     try {
@@ -50,7 +51,7 @@ export function createMembershipCatalogueStore(pool: Pool = getPool()) {
           ON CONFLICT(workspace_id) DO UPDATE SET draft_version=$2,draft=$3,updated_at=now()`, [workspaceId, version, document])
         await audit(client, workspaceId, 'membership_catalogue.draft_saved', version, actor)
         return { version, issues: membershipPublicationIssues(document) }
-      }, true)
+      })
     },
     async publish(workspaceId: string, expectedVersion: number, actor: AssociationActor) {
       return transaction(workspaceId, async client => {
@@ -118,6 +119,15 @@ export function createMembershipCatalogueStore(pool: Pool = getPool()) {
         }
         return { revision: row.published_revision, source: 'brian', site, ...projection, plans }
       })
+    },
+    /** Summary without the document body: what the console Home and Website overview show. */
+    async status(workspaceId: string) {
+      const row = (await pool.query<State & { updated_at: Date; published_at: Date | null }>(
+        `SELECT c.*, r.published_at FROM association_membership_catalogues c
+           LEFT JOIN association_membership_catalogue_revisions r ON r.workspace_id=c.workspace_id AND r.revision=c.published_revision
+          WHERE c.workspace_id=$1`, [workspaceId])).rows[0]
+      return { version: row?.draft_version ?? 0, publishedRevision: row?.published_revision ?? 0, publishedAt: row?.published_at?.toISOString() ?? null,
+        updatedAt: row?.updated_at?.toISOString() ?? null, observations: row?.observations ?? {}, issueCount: row?.draft ? membershipPublicationIssues(row.draft).length : 0 }
     },
     async observe(workspaceId: string, site: MembershipSite, revision: number) {
       await pool.query(`UPDATE association_membership_catalogues SET observations=jsonb_set(observations,ARRAY[$2],$3::jsonb)

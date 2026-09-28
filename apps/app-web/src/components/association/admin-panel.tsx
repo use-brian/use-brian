@@ -1,21 +1,20 @@
 "use client";
 
-/** Settings host: module lifecycle, sponsored places, payment sync, activity log and owner administration. [COMP:app-web/association] */
-import { useState } from "react";
+/** Admin (owner/admin only): module lifecycle, email mailboxes, integration keys, payment sync, activity log and privacy. [COMP:app-web/association] */
+import { useRouter } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
 import { retryAssociationProviderReceipt } from "@/lib/api/association";
-import { useAssociationModule, AssociationModuleControls } from "./module-controls";
+import { AssociationModuleControls } from "./module-controls";
 import { AssociationPrivacyPanel } from "./privacy-panel";
 import { AssociationMailboxPanel } from "./mailbox-panel";
 import { AssociationCredentialsPanel } from "./credentials-panel";
-import { AssociationSponsorships } from "./sponsorships";
-import { WebsiteContentPanel } from "./website-content";
+import { associationHref } from "./navigation";
 import { AssociationListState,useAssociationAction,useAssociationPage } from "./operator-controls";
-import { EmptyState, InlineNotice, PageHeader, ResponsiveTable, Segmented, StatusPill, associationDate } from "./ui";
+import { EmptyState, PageHeader, ResponsiveTable, Segmented, StatusPill, TechnicalDetails, associationDate } from "./ui";
 
-type SettingsTab="general"|"website"|"sponsorship"|"sync"|"activity"|"keys"|"mailboxes"|"privacy";
-const TABS:SettingsTab[]=["general","website","sponsorship","sync","activity","keys","mailboxes","privacy"];
+type AdminTab="general"|"mailboxes"|"keys"|"sync"|"activity"|"privacy";
+const ADMIN_TABS:readonly AdminTab[]=["general","mailboxes","keys","sync","activity","privacy"];
 
 function PaymentSync({workspaceId,canManage}:{workspaceId:string;canManage:boolean}) {
   const t=useT().associationPage,u=t.ux,m=t.manage,receipts=useAssociationPage(workspaceId,"receipts"),retry=useAssociationAction(workspaceId);
@@ -37,10 +36,12 @@ function PaymentSync({workspaceId,canManage}:{workspaceId:string;canManage:boole
 }
 
 function ActivityLog({workspaceId}:{workspaceId:string}) {
-  const t=useT().associationPage,u=t.ux,m=t.manage,audit=useAssociationPage(workspaceId,"audit"),deliveries=useAssociationPage(workspaceId,"deliveries");
+  const t=useT().associationPage,u=t.ux,m=t.manage,activity=u.activityNames as Record<string,string>;
+  const activityLabel=(action:string)=>activity[action] ?? action.replace(/[._]/g," ");
+  const audit=useAssociationPage(workspaceId,"audit"),deliveries=useAssociationPage(workspaceId,"deliveries");
   return <div className="grid gap-6 lg:grid-cols-2">
     <section className="space-y-3"><h3 className="font-semibold">{u.changes}</h3><AssociationListState {...audit} compact><div className="divide-y divide-border rounded-2xl border border-border bg-background">
-      {audit.data?.items.map(row=><article className="space-y-0.5 px-4 py-3 text-sm break-words" key={row.id}><p className="font-medium">{row.action}</p><p className="text-xs text-muted-foreground">{row.actorKind} · {row.id}</p></article>)}
+      {audit.data?.items.map(row=><article className="space-y-0.5 px-4 py-3 text-sm break-words" key={row.id}><p className="font-medium">{activityLabel(row.action)}</p><TechnicalDetails>{row.action} · {row.actorKind} · {row.id}</TechnicalDetails></article>)}
       {audit.data?.items.length===0?<p className="p-4 text-sm text-muted-foreground">{m.empty}</p>:null}</div></AssociationListState></section>
     <section className="space-y-3"><h3 className="font-semibold">{u.notificationsSent}</h3><AssociationListState {...deliveries} compact><div className="divide-y divide-border rounded-2xl border border-border bg-background">
       {deliveries.data?.items.map(row=><article className="space-y-0.5 px-4 py-3 text-sm break-words" key={row.id}><p className="flex flex-wrap items-center gap-2 font-medium">{row.eventType}<StatusPill status={row.status}/></p><p className="text-xs text-muted-foreground">{m.attempts}: {row.attempts} · {associationDate(row.occurredAt)} · {row.id}</p></article>)}
@@ -48,24 +49,17 @@ function ActivityLog({workspaceId}:{workspaceId:string}) {
   </div>;
 }
 
-export function AssociationOperationsPanel({workspaceId,initialTab}:{workspaceId:string;initialTab?:string}) {
-  const module=useAssociationModule(workspaceId);
-  const t=useT().associationPage,u=t.ux;
-  const canManage=!!module.data?.canManage&&!module.error;
-  const [tab,setTab]=useState<SettingsTab>(TABS.includes(initialTab as SettingsTab)?initialTab as SettingsTab:"general");
-  const labels:Record<SettingsTab,string>={general:u.general,website:t.programmes.tab,sponsorship:u.sponsorship,sync:u.syncIssues,activity:u.activityLog,keys:t.admin.keys,mailboxes:t.admin.mailboxes,privacy:t.privacy.title};
-  const available=TABS.filter(id=>canManage||["general","sync","activity"].includes(id));
-  const current=available.includes(tab)?tab:"general";
-  return <section className="space-y-5" data-association-settings>
-    <PageHeader title={u.settings} description={u.settingsHelp}><Segmented label={u.goTo} value={current} onChange={setTab} options={available.map(id=>({value:id,label:labels[id]}))}/></PageHeader>
-    {module.data&&!canManage&&current==="general"?<InlineNotice tone="neutral">{t.ownerOnly}</InlineNotice>:null}
+export function AssociationAdminPanel({workspaceId,tab}:{workspaceId:string;tab?:string}) {
+  const t=useT().associationPage,u=t.ux,router=useRouter();
+  const current:AdminTab=ADMIN_TABS.includes(tab as AdminTab)?tab as AdminTab:"general";
+  const labels:Record<AdminTab,string>={general:u.general,mailboxes:t.admin.mailboxes,keys:t.admin.keys,sync:u.syncIssues,activity:u.activityLog,privacy:t.privacy.title};
+  return <section className="space-y-5" data-association-admin>
+    <PageHeader title={u.admin} description={u.adminHelp}><Segmented label={u.goTo} value={current} onChange={next=>router.replace(associationHref(workspaceId,"admin",{tab:next}))} options={ADMIN_TABS.map(id=>({value:id,label:labels[id]}))} className="flex-wrap"/></PageHeader>
     {current==="general"?<AssociationModuleControls workspaceId={workspaceId}/>:null}
-    {current==="website"?<WebsiteContentPanel workspaceId={workspaceId}/>:null}
-    {current==="sponsorship"?<AssociationSponsorships workspaceId={workspaceId} canManage={canManage}/>:null}
-    {current==="sync"?<PaymentSync workspaceId={workspaceId} canManage={canManage}/>:null}
+    {current==="mailboxes"?<AssociationMailboxPanel workspaceId={workspaceId} disabled={false}/>:null}
+    {current==="keys"?<AssociationCredentialsPanel workspaceId={workspaceId} disabled={false}/>:null}
+    {current==="sync"?<PaymentSync workspaceId={workspaceId} canManage/>:null}
     {current==="activity"?<ActivityLog workspaceId={workspaceId}/>:null}
-    {current==="keys"?<AssociationCredentialsPanel workspaceId={workspaceId} disabled={!canManage}/>:null}
-    {current==="mailboxes"?<AssociationMailboxPanel workspaceId={workspaceId} disabled={!canManage}/>:null}
-    {current==="privacy"?<AssociationPrivacyPanel workspaceId={workspaceId} disabled={!canManage}/>:null}
+    {current==="privacy"?<AssociationPrivacyPanel workspaceId={workspaceId} disabled={false}/>:null}
   </section>;
 }

@@ -1,7 +1,7 @@
 /** [COMP:crm/site-content] Website content collection schemas, checks and projections. */
 import { describe, expect, it } from 'vitest'
 import { AssociationCommandSchema, ASSOCIATION_READ_COMMANDS } from '../operations.js'
-import { parseSiteContent, resolveSiteContent, siteContentPublicationIssues, SITE_CONTENT_COLLECTIONS, SITE_CONTENT_READERS } from '../site-content.js'
+import { parseSiteContent, resolveSiteContent, siteContentPublicationIssueDetails, siteContentPublicationIssues, SITE_CONTENT_COLLECTIONS, SITE_CONTENT_READERS } from '../site-content.js'
 
 const L = (en: string, extra: Record<string, string> = {}) => ({ en, ...extra })
 const MEDIA = '11111111-1111-4111-8111-111111111111'
@@ -93,5 +93,23 @@ describe('[COMP:crm/site-content] commands', () => {
     expect(AssociationCommandSchema.parse({ kind: 'published_site_content', collection: 'people', site: 'sea' })).toMatchObject({ collection: 'people' })
     expect(() => AssociationCommandSchema.parse({ kind: 'site_content_draft', collection: 'secrets' })).toThrow()
     expect(AssociationCommandSchema.parse({ kind: 'save_site_content', collection: 'news', expectedVersion: 0, document: { schemaVersion: 1, items: [] } })).toMatchObject({ kind: 'save_site_content' })
+  })
+})
+
+describe('[COMP:crm/site-content] coded publication issues', () => {
+  it('gives every issue a stable code and parameters beside the English message', () => {
+    const doc = parseSiteContent('partners', { schemaVersion: 1, partners: [
+      { id: 'dup', name: '', logo: { src: '/logo.png', alt: L('Logo') }, sites: ['oasa'], order: 0 },
+      { id: 'dup', name: 'Named', logo: { src: '/logo.png', alt: L('Logo') }, sites: ['oasa'], order: 1 }] })
+    const details = siteContentPublicationIssueDetails('partners', doc)
+    expect(details.map(issue => issue.code)).toEqual(['duplicate_partner', 'partner_needs_name'])
+    expect(details[1]!.params).toEqual({ partner: 'dup' })
+    expect(siteContentPublicationIssues('partners', doc)).toEqual(details.map(issue => issue.message))
+    expect(AssociationCommandSchema.parse({ kind: 'website_status' })).toEqual({ kind: 'website_status' })
+    expect(ASSOCIATION_READ_COMMANDS).toContain('website_status')
+  })
+  it('accepts an optional per-site display name in settings', () => {
+    const settings = parseSiteContent('settings', { schemaVersion: 1, sites: { oasa: { name: L('Example site'), contact: { email: 'hello@example.org', address: L('1 Example Road') }, legalLine: L('Example Ltd'), responseDays: 3 } } })
+    expect(settings.sites.oasa?.name?.en).toBe('Example site')
   })
 })

@@ -12,7 +12,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { useAssociationModule } from "./module-controls";
 import { AssociationField as Field,AssociationToggle,AssociationContactPicker,AssociationIntentNotice,AssociationListState,useAssociationPage,useAssociationAction,useAssociationIntent,associationLocalTime,associationInstant } from "./operator-controls";
 import { AssociationEditor, associationMoney } from "./workspace-ui";
-import { associationHref } from "./association-surface";
+import { associationHref } from "./navigation";
 import { EmptyState, FormFooter, InlineNotice, PageHeader, ResponsiveTable, Segmented, StatusPill, associationDate } from "./ui";
 
 export function AssociationMembershipForm({workspaceId,plan,contact,row,disabled,onSaved}:{workspaceId:string;plan?:AssociationPlan;contact?:CrmLookupRow;row?:AssociationMembership;disabled:boolean;onSaved:()=>void}) {

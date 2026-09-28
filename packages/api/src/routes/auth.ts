@@ -68,6 +68,7 @@ export type OidcAuthDeps = {
  *                                    (see docs/architecture/platform/auth.md → "Email magic-link flow")
  *   POST /auth/email/verify        — Consume a magic-link token, mint JWT
  *   POST /auth/refresh             — Exchange refresh token for new access token
+ *   POST /auth/logout              — Revoke the session identified by a refresh token
  */
 export function authRoutes(
   jwtSecret: string,
@@ -734,6 +735,41 @@ export function authRoutes(
       ok: true,
       assistant: { id: assistant.id, name: assistant.name },
     })
+  })
+
+  /**
+   * Logout uses the signed refresh token, not access-token admission: an expired
+   * access token or an already-revoked session must not prevent logout.
+   * Legacy tokens have no session ID, so logout invalidates ALL user sessions
+   * by bumping auth_version. Check admission first so legacy replay is a no-op;
+   * the conditional version bump also protects against concurrent replays.
+   */
+  router.post('/logout', async (req, res) => {
+    const refreshToken: unknown = req.body?.refreshToken
+    if (typeof refreshToken !== 'string' || !refreshToken.trim()) {
+      res.status(400).json({ error: 'Missing or malformed refreshToken' })
+      return
+    }
+
+    const claims = verifyRefreshTokenClaims(refreshToken, jwtSecret)
+    if (!claims) {
+      res.status(401).json({ error: 'Invalid or expired refresh token' })
+      return
+    }
+
+    try {
+      if (claims.sessionId) {
+        // Ownership is enforced by the update. No live-session admission and
+        // no requirement that an update occurred: repeated logout is success.
+        await sessions.revokeForUser(claims.userId, claims.sessionId)
+      } else if (await sessions.validateAccess(claims)) {
+        await sessions.revokeAllForUser(claims.userId, claims.authVersion ?? 0)
+      }
+      res.json({ ok: true })
+    } catch (error) {
+      console.error('[auth] logout failed:', error)
+      res.status(503).json({ error: 'Authentication temporarily unavailable' })
+    }
   })
 
   /**

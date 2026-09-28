@@ -2,14 +2,15 @@
 /** Descriptor-driven editor and read-only outline for website content documents. [COMP:app-web/site-content] */
 import { useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
-import { websiteMediaPreviewUrl, type MembershipLocale, type WebsiteMedia } from "@/lib/api/association";
+import { websiteMediaPreviewUrl, websiteSiteLabel, type MembershipLocale, type WebsiteMedia } from "@/lib/api/association";
 import { useT } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
 import { AssociationField as Input, AssociationToggle as Toggle, AssociationChoice as Choice } from "../operator-controls";
 import { blankFor, type Field } from "./descriptors";
 
 type Value = Record<string, unknown>;
-export type EditorContext = { locale: MembershipLocale; media: WebsiteMedia[]; workspaceId: string; disabled?: boolean };
+/** `sites` are the websites that read this page (from the server); `siteNames` their staff-facing names. */
+export type EditorContext = { locale: MembershipLocale; media: WebsiteMedia[]; workspaceId: string; disabled?: boolean; sites: readonly string[]; siteNames: Record<string, string> };
 
 function useLabels() {
   const c = useT().associationPage.content;
@@ -42,7 +43,7 @@ function LocalizedInput({ label, value, onChange, context, optional, multiline, 
     help={fallback && english ? c.englishShown : context.locale === "en" && !optional && !anyLanguage && !english ? c.englishRequired : undefined}/>;
 }
 
-function MediaThumb({ workspaceId, id, mime }: { workspaceId: string; id: string; mime?: string }) {
+export function MediaThumb({ workspaceId, id, mime }: { workspaceId: string; id: string; mime?: string }) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     if (mime && !mime.startsWith("image/")) return;
@@ -108,13 +109,13 @@ function ListInput({ field, value, onChange, context }: { field: Extract<Field, 
         </div>
       </details>
     </li>)}</ul>
-    <Button type="button" variant="outline" className="min-h-11 w-fit" disabled={context.disabled} onClick={() => onChange([...items, field.blank()])}>{c.add}: {label(field.label)}</Button>
+    <Button type="button" variant="outline" className="min-h-11 w-fit" disabled={context.disabled} onClick={() => { const next = field.blank(); onChange([...items, Array.isArray(next.sites) && next.sites.length === 0 ? { ...next, sites: context.sites.slice(0, 1) } : next]); }}>{c.add}: {label(field.label)}</Button>
   </section>;
 }
 
 function FieldInput({ field, value, onChange, context }: { field: Field; value: unknown; onChange: (next: unknown) => void; context: EditorContext }) {
   const { c, label } = useLabels();
-  const name = label(field.label);
+  const name = field.kind === "object" && field.siteLabel ? websiteSiteLabel(field.key, context.siteNames) : label(field.label);
   switch (field.kind) {
     case "text":
       return <Input label={name} type={field.type === "email" ? "email" : field.type === "date" ? "date" : "text"} value={typeof value === "string" ? value : ""} multiline={field.multiline} disabled={context.disabled}
@@ -139,7 +140,7 @@ function FieldInput({ field, value, onChange, context }: { field: Field; value: 
     case "sites": {
       const sites = Array.isArray(value) ? (value as string[]) : [];
       return <fieldset className="flex flex-wrap items-center gap-4"><legend className="text-sm">{name}</legend>
-        {(["oasa", "sea"] as const).map(site => <Toggle key={site} label={site.toUpperCase()} checked={sites.includes(site)} disabled={context.disabled}
+        {context.sites.map(site => <Toggle key={site} label={websiteSiteLabel(site, context.siteNames)} checked={sites.includes(site)} disabled={context.disabled}
           onChange={on => onChange(on ? [...new Set([...sites, site])] : sites.filter(s => s !== site))}/>)}
       </fieldset>;
     }
@@ -177,19 +178,20 @@ export function FieldsEditor({ fields, value, onChange, context }: { fields: Fie
 }
 
 /** Read-only outline used by the before/after preview. */
-export function DocumentOutline({ fields, value, locale }: { fields: Field[]; value: Value | null | undefined; locale: MembershipLocale }) {
+export function DocumentOutline({ fields, value, locale, siteNames = {} }: { fields: Field[]; value: Value | null | undefined; locale: MembershipLocale; siteNames?: Record<string, string> }) {
   const { c, label } = useLabels();
   if (!value) return <p className="text-sm text-muted-foreground">{c.nothingPublished}</p>;
   const show = (field: Field, raw: unknown): React.ReactNode => {
     if (raw === undefined || raw === null || raw === "") return null;
-    const name = label(field.label);
+    const name = field.kind === "object" && field.siteLabel ? websiteSiteLabel(field.key, siteNames) : label(field.label);
     switch (field.kind) {
       case "localized": {
         const text = localizedText(raw, locale) || localizedText(raw, "en");
         return <p><span className="text-muted-foreground">{name}:</span> {text}{locale !== "en" && !localizedText(raw, locale) ? <span className="text-xs text-muted-foreground"> ({c.englishShown})</span> : null}</p>;
       }
       case "image": return isObject(raw) ? <p><span className="text-muted-foreground">{name}:</span> {raw.mediaId ? c.library : String(raw.src ?? "")}</p> : null;
-      case "sites": case "locales": return <p><span className="text-muted-foreground">{name}:</span> {(raw as string[]).map(site => site.toUpperCase()).join(" · ")}</p>;
+      case "sites": return <p><span className="text-muted-foreground">{name}:</span> {(raw as string[]).map(site => websiteSiteLabel(site, siteNames)).join(" · ")}</p>;
+      case "locales": return <p><span className="text-muted-foreground">{name}:</span> {(raw as string[]).join(" · ")}</p>;
       case "boolean": return <p><span className="text-muted-foreground">{name}:</span> {raw ? "✓" : "—"}</p>;
       case "localizedList": return <div><p className="text-muted-foreground">{name}:</p>{(raw as unknown[]).map((item, i) => <p key={i} className="pl-3">{localizedText(item, locale) || localizedText(item, "en")}</p>)}</div>;
       case "list": return <div><p className="font-medium">{name} ({(raw as unknown[]).length})</p><ol className="list-inside list-decimal space-y-1 pl-3">{(raw as Value[]).map((item, i) => <li key={i}>{field.itemTitle(item)}</li>)}</ol></div>;

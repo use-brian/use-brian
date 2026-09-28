@@ -3,16 +3,15 @@ import type { Pool, PoolClient } from 'pg'
 import { AssociationError, ProgrammeCatalogueDocumentSchema, programmePublicationIssues, resolveProgrammeCatalogue,
   type ProgrammeCatalogueDocument, type ProgrammeSite, type AssociationActor } from '@use-brian/core'
 import { getPool } from './client.js'
-import { lockAssociationModule, requireAssociationAdmission } from '../association/workspace-module.js'
 
 type State = { draft_version: number; draft: ProgrammeCatalogueDocument | null; published_revision: number; observations: Record<string, { revision: number; observedAt: string }> }
 const empty: State = { draft_version: 0, draft: null, published_revision: 0, observations: {} }
 export function createProgrammeCatalogueStore(pool: Pool = getPool()) {
-  async function transaction<T>(workspaceId: string, fn: (client: PoolClient) => Promise<T>, write = false) {
+  // Programme pages are website content: the Association module state never freezes editing (owner/admin is checked by the service).
+  async function transaction<T>(workspaceId: string, fn: (client: PoolClient) => Promise<T>) {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      if (write) requireAssociationAdmission(await lockAssociationModule(client, workspaceId))
       // Own lock key: content publication never serialises against membership checkouts.
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended('programme-catalogue:'||$1,0))", [workspaceId])
       const result = await fn(client)
@@ -50,7 +49,7 @@ export function createProgrammeCatalogueStore(pool: Pool = getPool()) {
           ON CONFLICT(workspace_id) DO UPDATE SET draft_version=$2,draft=$3,updated_at=now()`, [workspaceId, version, document])
         await audit(client, workspaceId, 'programme_catalogue.draft_saved', version, actor)
         return { version, issues: programmePublicationIssues(document) }
-      }, true)
+      })
     },
     async publish(workspaceId: string, expectedVersion: number, actor: AssociationActor) {
       return transaction(workspaceId, async client => {
@@ -68,7 +67,7 @@ export function createProgrammeCatalogueStore(pool: Pool = getPool()) {
         await client.query('UPDATE association_programme_catalogues SET published_revision=$2,observations=\'{}\'::jsonb,updated_at=now() WHERE workspace_id=$1', [workspaceId, expectedVersion])
         await audit(client, workspaceId, 'programme_catalogue.published', expectedVersion, actor)
         return { revision: expectedVersion, synchronization: 'pending', observations: {} }
-      }, true)
+      })
     },
     async read(workspaceId: string, site: ProgrammeSite) {
       return transaction(workspaceId, async client => {
@@ -78,6 +77,15 @@ export function createProgrammeCatalogueStore(pool: Pool = getPool()) {
         // Retired programmes are included so the website can redirect their old URLs.
         return { revision: row.published_revision, source: 'brian', site, ...resolveProgrammeCatalogue(document, site, true) }
       })
+    },
+    /** Summary without the document body: what the console Home and Website overview show. */
+    async status(workspaceId: string) {
+      const row = (await pool.query<State & { updated_at: Date; published_at: Date | null }>(
+        `SELECT c.*, r.published_at FROM association_programme_catalogues c
+           LEFT JOIN association_programme_catalogue_revisions r ON r.workspace_id=c.workspace_id AND r.revision=c.published_revision
+          WHERE c.workspace_id=$1`, [workspaceId])).rows[0]
+      return { version: row?.draft_version ?? 0, publishedRevision: row?.published_revision ?? 0, publishedAt: row?.published_at?.toISOString() ?? null,
+        updatedAt: row?.updated_at?.toISOString() ?? null, observations: row?.observations ?? {}, issueCount: row?.draft ? programmePublicationIssues(row.draft).length : 0 }
     },
     async observe(workspaceId: string, site: ProgrammeSite, revision: number) {
       await pool.query(`UPDATE association_programme_catalogues SET observations=jsonb_set(observations,ARRAY[$2],$3::jsonb)

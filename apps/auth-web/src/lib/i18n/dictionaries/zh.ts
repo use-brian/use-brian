@@ -57,5 +57,5 @@ export const zh: Dictionary = {
     manual: "伺服器仍然無法使用。請檢查連線或立即重試。",
     retry: "重試",
   },
-  logout: { title: "要登出嗎？", body: "返回工作空間前，您需要再次驗證身分。", confirm: "登出", cancel: "取消" },
+  logout: { error: "無法完成登出，請再試一次。", title: "要登出嗎？", body: "返回工作空間前，您需要再次驗證身分。", confirm: "登出", cancel: "取消" },
 };

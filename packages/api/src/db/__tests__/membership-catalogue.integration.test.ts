@@ -72,4 +72,11 @@ describe.skipIf(!pool)('[COMP:crm/membership-catalogue] actual PostgreSQL public
   await commerce.upsertPromotion(workspace,{...offer,status:'disabled'},actor)
   expect((await store.read(workspace,'oasa')).plans[0].promotion).toBeNull()
  })
+ it('saves membership drafts while commerce is off but only publishes plan prices when it is on',async()=>{
+  const {workspace,actor,store}=await fixture()
+  await createAssociationWorkspaceModulesStore(pool!).act(workspace,actor.credentialId,'association',{action:'request_disable',expectedVersion:2})
+  await store.save(workspace,0,document(),actor)
+  await expect(store.publish(workspace,1,actor)).rejects.toMatchObject({code:expect.stringMatching(/^module_(disabled|draining)$/)})
+  expect(await store.status(workspace)).toMatchObject({version:1,publishedRevision:0,publishedAt:null})
+ })
 })

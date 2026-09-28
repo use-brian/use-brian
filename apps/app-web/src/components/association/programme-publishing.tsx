@@ -2,7 +2,9 @@
 /** Website programme content: draft -> human preview -> immutable publication. Content only, no prices. [COMP:app-web/association] */
 import { useState } from "react";
 import type { ProgrammeCatalogueDocument, WebsiteProgramme, ProgrammeCopy, ProgrammeAudience, ProgrammeSection, ProgrammeSubsection, MembershipLocale, MembershipSite } from "@/lib/api/association";
-import { PROGRAMME_AUDIENCES, PROGRAMME_GALLERIES, getProgrammeCatalogueDraft, saveProgrammeCatalogueDraft, publishProgrammeCatalogue } from "@/lib/api/association";
+import { PROGRAMME_AUDIENCES, PROGRAMME_GALLERIES, getProgrammeCatalogueDraft, saveProgrammeCatalogueDraft, publishProgrammeCatalogue, websiteSiteLabel } from "@/lib/api/association";
+import { format } from "@/lib/i18n/format";
+import { useWebsiteSiteNames } from "./website/website-status";
 import { useT } from "@/lib/i18n/client";
 import { useCachedResource } from "@/lib/surface-cache";
 import { associationPageCacheKey } from "@/lib/surface-prefetch";
@@ -15,7 +17,6 @@ import { MediaChoice } from "./site-content/document-editor";
 import { listWebsiteMedia } from "@/lib/api/association";
 
 const locales = ["en", "zh-Hant", "zh-Hans"] as const;
-const sites = ["oasa", "sea"] as const;
 const emptyCopy = (): ProgrammeCopy => ({ name: "", tagline: "", kicker: "", summary: "", audienceBlurbs: {}, sections: [], facts: [], steps: null, feeUnit: "", feeNotes: [], eligibility: [], contacts: [], links: [], cta: null });
 const emptySub = (index: number): ProgrammeSubsection => ({ id: `part-${index}`, heading: "", paragraphs: [], bullets: [], numbered: [] });
 const emptySection = (index: number): ProgrammeSection => ({ ...emptySub(index), id: `section-${index}`, subsections: [] });
@@ -25,15 +26,19 @@ const money = /^\d+(?:\.\d{1,2})?$/;
 
 export function ProgrammePublishingPanel({ workspaceId }: { workspaceId: string }) {
   const t = useT().associationPage, c = t.programmes;
-  const module = useAssociationModule(workspaceId), manage = !!module.data?.canManage, enabled = module.data?.module.state === "enabled";
+  const module = useAssociationModule(workspaceId), manage = !!module.data?.canManage;
+  const names = useWebsiteSiteNames(workspaceId, manage);
   const read = useCachedResource(manage ? associationPageCacheKey(workspaceId, "programme-catalogue") : null, () => getProgrammeCatalogueDraft(workspaceId));
   const action = useAssociationAction(workspaceId);
   const media = useCachedResource(manage ? associationPageCacheKey(workspaceId, "website-media") : null, () => listWebsiteMedia(workspaceId));
   const [editing, setEditing] = useState<{ version: number; document: ProgrammeCatalogueDocument } | null>(null);
-  const [locale, setLocale] = useState<MembershipLocale>("en"), [site, setSite] = useState<MembershipSite>("oasa");
+  const [locale, setLocale] = useState<MembershipLocale>("en"), [chosenSite, setSite] = useState<string>("");
   const [feeInput, setFeeInput] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState(false), [selected, setSelected] = useState(0);
   const doc = editing?.document ?? read.data?.document;
+  // Sites come from data: websites that read programmes, sites already chosen, and sites with published settings. Never from code.
+  const sites = [...new Set([...Object.keys(read.data?.observations ?? {}), ...(doc?.programmes ?? []).flatMap(p => p.sites), ...Object.keys(names)])].sort() as MembershipSite[];
+  const site = (sites.includes(chosenSite as MembershipSite) ? chosenSite : sites[0] ?? "") as MembershipSite;
   const programme = doc?.programmes[selected];
   const publishedSlugs = new Set((read.data?.published?.programmes ?? []).map(p => p.slug));
   const patch = (fn: (document: ProgrammeCatalogueDocument) => void) => setEditing(old => { if (!old) return old; const next = structuredClone(old); fn(next.document); return next; });
@@ -42,28 +47,28 @@ export function ProgrammePublishingPanel({ workspaceId }: { workspaceId: string 
   const patchCopy = (fn: (value: ProgrammeCopy) => void) => patch(document => { const value = document.programmes[selected].i18n[locale]; if (value) fn(value); });
   const statusLabel = (status: WebsiteProgramme["status"]) => status === "live" ? c.live : status === "coming-soon" ? c.comingSoon : c.retired;
   async function save() { if (!editing) return; const current = editing; if (await action.run(c.draft, () => saveProgrammeCatalogueDraft(workspaceId, current.version, current.document), false)) { setEditing(null); setFeeInput({}); setPreview(false); await read.refresh(); } }
-  async function publish() { if (!read.data || editing || !preview) return; if (await action.run(c.publish, () => publishProgrammeCatalogue(workspaceId, read.data!.version), { description: c.review })) { setPreview(false); await read.refresh(); } }
+  async function publish() { if (!read.data || editing || !preview) return; if (await action.run(c.publish, () => publishProgrammeCatalogue(workspaceId, read.data!.version), false)) { setPreview(false); await read.refresh(); } }
   const startEditing = (index = selected) => { setFeeInput({}); setSelected(index); setEditing({ version: read.data!.version, document: structuredClone(doc ?? blank()) }); setPreview(false); };
   return <section className="space-y-5">
     <PageHeader title={c.title} description={c.help}/>
-    {!manage ? <InlineNotice tone="neutral">{t.manage.canConfigure}</InlineNotice> : <AssociationListState {...read}>
+    {!manage ? <InlineNotice tone="neutral">{t.ux.readOnly}</InlineNotice> : <AssociationListState {...read}>
       {read.data && <>
         <p className="text-sm">{c.published}: {read.data.publishedRevision}</p>
-        <div className="flex flex-wrap gap-3" role="status">{sites.map(s => <p key={s} className="text-sm">{s.toUpperCase()}: {read.data!.publishedRevision > 0 && read.data!.observations[s]?.revision === read.data!.publishedRevision ? c.observed : c.pending}</p>)}</div>
+        <div className="flex flex-wrap gap-3" role="status">{Object.keys(read.data.observations).length === 0 && read.data.publishedRevision > 0 ? <p className="text-sm">{t.content.statusNotRead}</p> : null}{Object.keys(read.data.observations).map(s => <p key={s} className="text-sm">{format(read.data!.observations[s]?.revision === read.data!.publishedRevision ? t.content.observed : t.content.pending, { site: websiteSiteLabel(s, names) })}</p>)}</div>
         {!doc && <InlineNotice tone="neutral">{c.empty}</InlineNotice>}
         <div className="flex flex-wrap gap-2">
-          {!editing && <Button disabled={!enabled} className="min-h-11" onClick={() => startEditing(0)}>{doc ? c.edit : c.create}</Button>}
+          {!editing && <Button className="min-h-11" onClick={() => startEditing(0)}>{doc ? c.edit : c.create}</Button>}
           {editing && <><Button className="min-h-11" disabled={action.pending || Object.values(feeInput).some(value => value !== "" && !money.test(value))} onClick={() => void save()}>{c.draft}</Button><Button className="min-h-11" variant="outline" onClick={async () => { if (await confirmDialog({ title: t.ux.cancelEdit, description: t.ux.cancelHelp, confirmLabel: t.cancel, cancelLabel: t.ux.keepEditing })) { setEditing(null); setFeeInput({}); } }}>{t.cancel}</Button></>}
           {!editing && doc && <Button className="min-h-11" variant="outline" onClick={() => setPreview(!preview)}>{c.preview}</Button>}
-          {preview && !editing && <Button className="min-h-11" disabled={!enabled || !!read.error || action.pending || !!read.data.issues.length || read.data.version === read.data.publishedRevision} onClick={() => void publish()}>{c.publish}</Button>}
+          {preview && !editing && <Button className="min-h-11" disabled={!!read.error || action.pending || !!read.data.issues.length || read.data.version === read.data.publishedRevision} onClick={() => void publish()}>{c.publish}</Button>}
         </div>
         {action.feedback}{read.data.issues.length > 0 && <ul role="alert" className="list-inside list-disc text-sm text-destructive">{read.data.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
-        {doc && <div className="grid gap-3 md:grid-cols-3"><Choice label={c.locale} value={locale} values={locales} labels={{ en: "English", "zh-Hant": "繁體中文", "zh-Hans": "简体中文" }} onChange={v => setLocale(v as MembershipLocale)}/><Choice label={c.site} value={site} values={sites} labels={{ oasa: "OASA", sea: "SEA" }} onChange={v => setSite(v as MembershipSite)}/></div>}
-        {!editing && !preview && doc && <div className="grid gap-3 md:grid-cols-2">{doc.programmes.map((p, i) => <article key={p.slug} className="space-y-2 rounded-xl border p-4"><h3 className="font-semibold">{(p.i18n[locale] ?? p.i18n.en).name}</h3><p className="text-sm text-muted-foreground">{statusLabel(p.status)} · {p.audiences.map(a => c[a]).join(" · ")}{p.fee ? ` · HKD ${p.fee.amountMinor / 100}` : ""}</p><Button className="min-h-11" variant="outline" disabled={!enabled} onClick={() => startEditing(i)}>{c.edit}</Button></article>)}</div>}
+        {doc && <div className="grid gap-3 md:grid-cols-3"><Choice label={c.locale} value={locale} values={locales} labels={{ en: "English", "zh-Hant": "繁體中文", "zh-Hans": "简体中文" }} onChange={v => setLocale(v as MembershipLocale)}/>{sites.length > 1 ? <Choice label={c.site} value={site} values={sites} labels={Object.fromEntries(sites.map(key => [key, websiteSiteLabel(key, names)]))} onChange={v => setSite(v)}/> : null}</div>}
+        {!editing && !preview && doc && <div className="grid gap-3 md:grid-cols-2">{doc.programmes.map((p, i) => <article key={p.slug} className="space-y-2 rounded-xl border p-4"><h3 className="font-semibold">{(p.i18n[locale] ?? p.i18n.en).name}</h3><p className="text-sm text-muted-foreground">{statusLabel(p.status)} · {p.audiences.map(a => c[a]).join(" · ")}{p.fee ? ` · HKD ${p.fee.amountMinor / 100}` : ""}</p><Button className="min-h-11" variant="outline" onClick={() => startEditing(i)}>{c.edit}</Button></article>)}</div>}
         {preview && doc && <div className="grid min-w-0 gap-4 lg:grid-cols-2">{([c.before, c.after] as const).map((title, index) => <div className="min-w-0 rounded-xl border p-4" key={title}><h3 className="font-semibold">{title}</h3><ProgrammePreview document={index === 0 ? read.data!.published : doc} locale={locale} site={site}/></div>)}</div>}
         {editing && doc && <fieldset disabled={action.pending} className="min-w-0 space-y-6">
           <div className="flex flex-wrap gap-2">{doc.programmes.map((p, i) => <Button className="min-h-11 max-w-full" key={i} variant={i === selected ? "default" : "outline"} onClick={() => setSelected(i)}>{(p.i18n[locale] ?? p.i18n.en).name || p.slug || c.newProgramme}</Button>)}
-            <Button className="min-h-11" variant="outline" onClick={() => { setSelected(doc.programmes.length); patch(d => d.programmes.push({ slug: `programme-${d.programmes.length + 1}`, audiences: ["students"], order: d.programmes.length, sites: ["oasa"], status: "live", fee: null, gallery: null, cover: null, href: null, i18n: { en: emptyCopy() } })); }}>{c.newProgramme}</Button>
+            <Button className="min-h-11" variant="outline" onClick={() => { setSelected(doc.programmes.length); patch(d => d.programmes.push({ slug: `programme-${d.programmes.length + 1}`, audiences: ["students"], order: d.programmes.length, sites: sites.slice(0, 1), status: "live", fee: null, gallery: null, cover: null, href: null, i18n: { en: emptyCopy() } })); }}>{c.newProgramme}</Button>
           </div>
           {programme && <section className="grid min-w-0 gap-4 rounded-xl border p-4 md:grid-cols-2">
             <Field label={c.slug} value={programme.slug} disabled={publishedSlugs.has(programme.slug)} help={publishedSlugs.has(programme.slug) ? c.slugLocked : undefined} onChange={v => setProgramme("slug", v)}/>
@@ -71,10 +76,10 @@ export function ProgrammePublishingPanel({ workspaceId }: { workspaceId: string 
             <Field label={c.order} type="number" min={0} value={String(programme.order)} onChange={v => setProgramme("order", Number(v))}/>
             <Field label={c.fee} type="number" min={0} step="0.01" value={feeInput[programme.slug] ?? (programme.fee ? String(programme.fee.amountMinor / 100) : "")} help={c.noFee} onChange={v => { setFeeInput(old => ({ ...old, [programme.slug]: v })); if (v === "") setProgramme("fee", null); else if (money.test(v)) setProgramme("fee", { currency: "HKD", amountMinor: Math.round(Number(v) * 100) }); }}/>
             {PROGRAMME_AUDIENCES.map(a => <Toggle key={a} label={`${c.audiences}: ${c[a]}`} checked={programme.audiences.includes(a)} onChange={v => setProgramme("audiences", v ? [...programme.audiences, a] : programme.audiences.filter(item => item !== a))}/>)}
-            {sites.map(s => <Toggle key={s} label={`${c.sites}: ${s.toUpperCase()}`} checked={programme.sites.includes(s)} onChange={v => setProgramme("sites", v ? [...programme.sites, s] : programme.sites.filter(item => item !== s))}/>)}
+            {sites.map(s => <Toggle key={s} label={`${c.sites}: ${websiteSiteLabel(s, names)}`} checked={programme.sites.includes(s)} onChange={v => setProgramme("sites", v ? [...programme.sites, s] : programme.sites.filter(item => item !== s))}/>)}
             <Choice label={c.gallery} value={programme.gallery ?? "none"} values={["none", ...PROGRAMME_GALLERIES]} labels={{ none: c.noGallery }} onChange={v => setProgramme("gallery", v === "none" ? null : v as WebsiteProgramme["gallery"])}/>
             <div className="space-y-2 md:col-span-2">
-              <MediaChoice label={c.coverLibrary} value={programme.coverMediaId ?? undefined} context={{ locale, media: media.data ?? [], workspaceId }} images
+              <MediaChoice label={c.coverLibrary} value={programme.coverMediaId ?? undefined} context={{ locale, media: media.data ?? [], workspaceId, sites, siteNames: names }} images
                 onChange={id => patch(d => { const p = d.programmes[selected]; p.coverMediaId = id ?? null; if (id) p.cover = null; })}/>
               <p className="text-xs text-muted-foreground">{c.coverLibraryHelp}</p>
             </div>
