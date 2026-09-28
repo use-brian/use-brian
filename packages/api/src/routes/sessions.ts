@@ -149,6 +149,8 @@ export type SessionRouteOptions = {
     effectiveClearance: string | null
     compartments: string[]
     projectIds: string[]
+    contextBindingOrigin: 'legacy' | 'explicit' | 'reviewed' | 'held'
+    classificationMode: 'legacy' | 'review' | 'strict'
   }) => void
   /**
    * Room human `@mention` badge signal (docs/plans/room-human-mentions.md
@@ -698,6 +700,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         `UPDATE sessions
             SET context_group_id = $3,
                 context_project_id = $4,
+                context_binding_origin = 'explicit',
                 context_locked_at = CASE
                   WHEN $3::uuid IS NOT NULL OR $4::uuid IS NOT NULL THEN now()
                   ELSE NULL
@@ -1250,6 +1253,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
             effectiveClearance: session.effectiveClearance,
             compartments: session.contextCompartments,
             projectIds: session.contextProjectId ? [session.contextProjectId] : [],
+            contextBindingOrigin: session.contextBindingOrigin ?? 'legacy',
+            classificationMode: session.classificationMode ?? 'legacy',
           })
         } catch (err) {
           console.error('[sessions] room post capture hook failed:', err)

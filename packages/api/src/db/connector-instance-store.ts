@@ -467,6 +467,7 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       if (updates.ingestWorkspaceId !== undefined) { sets.push(`ingest_workspace_id = $${idx}`); values.push(updates.ingestWorkspaceId); idx++ }
       if (updates.compartments !== undefined) { sets.push(`compartments = $${idx}`); values.push(updates.compartments); idx++ }
       if (updates.projectIds !== undefined) { sets.push(`project_ids = $${idx}`); values.push(updates.projectIds); idx++ }
+      if(updates.compartments!==undefined||updates.projectIds!==undefined)sets.push("context_binding_origin = 'explicit'")
       if (updates.credentials !== undefined) {
         const encrypted = encryptOrNull(updates.credentials, encryptionKey)
         sets.push(`credentials = $${idx}`); values.push(encrypted); idx++

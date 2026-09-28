@@ -31,14 +31,15 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     for(const id of ids)sources.push((await pool.query('SELECT read_scope_source($1,\'memory\',$2) AS source',[f.workspaceId,id])).rows[0].source)
     return createMemory({workspaceId:f.workspaceId,userId:f.owner,assistantId:f.assistantId,createdByUserId:f.owner,summary:'Derived impact fixture',sensitivity:'confidential',derivation:{producer:'review-fixture',sources}})
   }
-  it('freezes transitive and overlapping impact without bodies and applies the same reach',async()=>{
+  it('freezes bounded content plus transitive and overlapping impact and applies the same reach',async()=>{
     const f=await fixture(),first=await f.create(),second=await f.create()
     const shared=await derived(f,[first.id,second.id]),leaf=await derived(f,[shared.id])
     const saved=await f.preview([first.id,second.id],'assign_team')
     for(const item of saved.items){
-      expect(item.impact).toEqual({version:1,descendants:[shared,leaf].sort((a,b)=>a.id.localeCompare(b.id)).map(row=>({resourceId:row.id,version:row.scopeVersion,held:false}))})
+      expect(item.impact).toEqual({version:2,dependents:{},descendants:[shared,leaf].sort((a,b)=>a.id.localeCompare(b.id)).map(row=>({resourceKind:'memory',resourceId:row.id,version:row.scopeVersion,held:false}))})
+      expect(item.content).toEqual(expect.objectContaining({title:expect.any(String),text:expect.any(String)}))
     }
-    expect(JSON.stringify(saved)).not.toContain('Derived impact fixture')
+    expect(saved.items.every(item=>item.content!.text.length<=12_000)).toBe(true)
     await expect(pool.query("UPDATE workspace_scope_review_items SET impact_snapshot='{}' WHERE review_id=$1",[saved.id])).rejects.toThrow('scope_review_proposal_immutable')
     expect((await f.apply(saved)).status).toBe('complete')
     expect((await pool.query('SELECT scope_held FROM memories WHERE id=ANY($1::uuid[])',[[shared.id,leaf.id]])).rows).toEqual([{scope_held:true},{scope_held:true}])
@@ -89,9 +90,9 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
   })
   it('shows no invalidation for General confirmation or retaining a hold',async()=>{
     const f=await fixture(),root=await f.create();await derived(f,[root.id])
-    expect((await f.preview([root.id])).items[0].impact).toEqual({version:1,descendants:[]})
+    expect((await f.preview([root.id])).items[0].impact).toEqual({version:2,dependents:{},descendants:[]})
     await f.apply(await f.preview([root.id],'hold'))
-    expect((await f.preview([root.id],'hold')).items[0].impact).toEqual({version:1,descendants:[]})
+    expect((await f.preview([root.id],'hold')).items[0].impact).toEqual({version:2,dependents:{},descendants:[]})
   })
   it('keeps pre-impact jobs inspectable and cancellable while refusing apply',async()=>{
     const f=await fixture(),root=await f.create(),saved=await f.preview([root.id])
@@ -148,7 +149,7 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
   it('preserves private visibility, clearance and content while explicitly confirming General',async()=>{
     const f=await fixture(),record=await f.create(),before=await inventory(f.workspaceId,f.owner)
     expect(before).toMatchObject({total:'1',completeCoverage:false})
-    expect(JSON.stringify(before)).not.toContain('Private fixture content')
+    expect(before.items[0]?.content).toEqual({title:'memory',text:'Private fixture content'})
     const preview=await f.preview([record.id])
     expect(preview.status).toBe('preview')
     expect((await inventory(f.workspaceId,f.owner)).total).toBe('1')
@@ -157,7 +158,7 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     expect(applied.items[0]).toMatchObject({status:'applied',resultVersion:record.scopeVersion})
     expect((await inventory(f.workspaceId,f.owner)).total).toBe('0')
     expect((await pool.query('SELECT user_id,assistant_id,sensitivity,compartments,summary FROM memories WHERE id=$1',[record.id])).rows[0]).toEqual({user_id:f.owner,assistant_id:f.assistantId,sensitivity:'confidential',compartments:[],summary:'Private fixture content'})
-    expect((await pool.query('SELECT classification_mode,reviewed_inventory_revision FROM workspace_access_policies WHERE workspace_id=$1',[f.workspaceId])).rows[0]).toEqual({classification_mode:'review',reviewed_inventory_revision:null})
+    expect((await pool.query('SELECT classification_mode,reviewed_inventory_revision::text FROM workspace_access_policies WHERE workspace_id=$1',[f.workspaceId])).rows[0]).toEqual({classification_mode:'review',reviewed_inventory_revision:'1'})
   })
   it('resumes bounded pages and does not replay an old apply even under concurrent requests',async()=>{
     const f=await fixture(),ids:string[]=[]
@@ -234,13 +235,89 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     else content={chunk_text:'Private review source',created_by_user_id:f.owner,source:'user'}
     const fields={...base,...visibility,...content},columns=Object.keys(fields)
     await pool.query(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map((_,i)=>`$${i+1}`).join(',')})`,Object.values(fields))
-    expect((await inventory(f.workspaceId,f.owner,kind)).items.find(r=>r.id===id)).toMatchObject({canClassify:true,sensitivity:'confidential',projectIds:[project]})
+    expect((await inventory(f.workspaceId,f.owner,kind)).items.find(r=>r.id===id)).toMatchObject({
+      canClassify:true,sensitivity:'confidential',projectIds:[project],
+      content:{title:expect.any(String),text:expect.any(String)},
+    })
     const result=await f.apply(await f.preview([id],'assign_team',kind))
     expect(result.status).toBe('complete')
     const source=(await pool.query('SELECT read_scope_source($1,$2,$3) source',[f.workspaceId,kind,id])).rows[0].source
     expect(source).toMatchObject({sensitivity:'confidential',compartments:[f.team.compartmentKey],projectIds:[project]})
     if(kind!=='knowledge_entry')expect(source).toMatchObject({userId:f.owner,assistantId:f.assistantId})
     expect((await inventory(f.workspaceId,f.owner,kind)).items.map(r=>r.id)).not.toContain(id)
+  })
+  it('inspects and holds every frozen immutable evidence family',async()=>{
+    const f=await fixture(),memory=await f.create(),entityId=randomUUID(),sessionId=randomUUID(),skillId=randomUUID()
+    await pool.query("INSERT INTO entities(id,kind,display_name,workspace_id,user_id,assistant_id,created_by_user_id,source) VALUES($1,'person','Evidence target',$2,$3,$4,$3,'user')",[entityId,f.workspaceId,f.owner,f.assistantId])
+    const crm=(await pool.query<{id:string}>(`INSERT INTO crm_domain_event_outbox(workspace_id,event_type,event_key,subject_kind,subject_id,payload,actor_kind)
+      VALUES($1,'crm.submission.received',$2,'contact',$3,$4::jsonb,'user') RETURNING id`,[f.workspaceId,randomUUID(),entityId,JSON.stringify({body:'immutable-evidence-token'})])).rows[0].id
+    const memoryVerification=(await pool.query<{id:string}>("INSERT INTO memory_verifications(workspace_id,memory_id,verified_by,action,user_value,reason) VALUES($1,$2,$3,'edit_summary',$4::jsonb,'immutable-evidence-token') RETURNING id",[f.workspaceId,memory.id,f.owner,JSON.stringify('immutable-evidence-token')])).rows[0].id
+    const brainVerification=(await pool.query<{id:string}>("INSERT INTO brain_verifications(workspace_id,target_kind,target_id,verified_by,action,user_value,reason) VALUES($1,'entity',$2,$3,'edit_summary',$4::jsonb,'immutable-evidence-token') RETURNING id",[f.workspaceId,entityId,f.owner,JSON.stringify('immutable-evidence-token')])).rows[0].id
+    const correction=(await pool.query<{id:string}>("INSERT INTO correction_audit(workspace_id,action,primitive,row_id,actor_user_id,reason,row_snapshot) VALUES($1,'retract','memory',$2,$3,'immutable-evidence-token',$4::jsonb) RETURNING id",[f.workspaceId,memory.id,f.owner,JSON.stringify({body:'immutable-evidence-token'})])).rows[0].id
+    await pool.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,workspace_id,effective_clearance) VALUES($1,$2,$3,'web',$5,$4,'confidential')",[sessionId,f.assistantId,f.owner,f.workspaceId,sessionId])
+    const message=(await pool.query<{id:string}>(`INSERT INTO session_messages(session_id,role,content,sequence_num,sender_user_id,workspace_id,user_id,assistant_id,sensitivity,compartments,project_ids,scope_version,scope_held)
+      VALUES($1,'user',$2::jsonb,1,$3,$4,$3,$5,'confidential','{}','{}',1,false) RETURNING id`,[sessionId,JSON.stringify([{type:'text',text:'immutable-evidence-token'}]),f.owner,f.workspaceId,f.assistantId])).rows[0].id
+    const feedback=(await pool.query<{id:string}>(`INSERT INTO analytics_events(user_id,assistant_id,session_id,event_name,metadata,workspace_id,sensitivity,compartments,project_ids,scope_version,scope_held)
+      VALUES($1,$2,$3,'feedback_negative',$4::jsonb,$5,'confidential','{}','{}',1,false) RETURNING id`,[f.owner,f.assistantId,sessionId,JSON.stringify({body:'immutable-evidence-token'}),f.workspaceId])).rows[0].id
+    await pool.query("INSERT INTO workspace_skills(id,slug,name,description,content,workspace_id) VALUES($1,$2,'Evidence skill','Fixture','immutable-evidence-token',$3)",[skillId,`evidence-${skillId}`,f.workspaceId])
+    const skillRevision=(await pool.query<{id:string}>(`INSERT INTO workspace_skill_scope_revisions(workspace_id,skill_id,revision,user_id,assistant_id,sensitivity,compartments,project_ids)
+      VALUES($1,$2,1,$3,$4,'confidential','{}','{}') RETURNING id`,[f.workspaceId,skillId,f.owner,f.assistantId])).rows[0].id
+    await pool.query('UPDATE workspace_skills SET scope_revision_id=$2 WHERE id=$1',[skillId,skillRevision])
+    const cases=[
+      ['crm_event','crm_domain_event_outbox',crm],['memory_verification','memory_verifications',memoryVerification],
+      ['brain_verification','brain_verifications',brainVerification],['correction_audit','correction_audit',correction],
+      ['session_message','session_messages',message],['feedback_event','analytics_events',feedback],
+      ['workspace_skill_revision','workspace_skill_scope_revisions',skillRevision],
+    ] as const
+    for(const [kind,,id] of cases){
+      const item=(await inventory(f.workspaceId,f.owner,kind)).items.find(row=>row.id===id)
+      expect(item).toMatchObject({allowedActions:['hold'],content:{title:expect.any(String),text:expect.stringContaining('immutable-evidence-token')}})
+      expect((await f.apply(await f.preview([id],'hold',kind))).status).toBe('complete')
+      expect((await pool.query('SELECT read_scope_review_source($1,$2,$3) source',[f.workspaceId,kind,id])).rows[0].source).toMatchObject({held:true})
+    }
+    const client=await getAppPool().connect()
+    try{
+      await client.query('BEGIN')
+      await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.system_bypass','false',true)",[f.owner])
+      for(const [,table,id] of cases)expect((await client.query(`SELECT id FROM ${table} WHERE id=$1`,[id])).rows).toEqual([])
+    }finally{await client.query('ROLLBACK');client.release()}
+  })
+  it('inspects every frozen cache/index impact and makes a hold effective at RLS',async()=>{
+    const f=await fixture(),sessionId=randomUUID(),fileId=randomUUID(),recordingId=randomUUID(),typeId=randomUUID()
+    await pool.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,workspace_id,effective_clearance) VALUES($1,$2,$3,'web',$5,$4,'confidential')",[sessionId,f.assistantId,f.owner,f.workspaceId,sessionId])
+    const fileCache=(await pool.query<{id:string}>(`INSERT INTO file_cache(session_id,file_name,mime_type,content,size_bytes,expires_at,workspace_id,user_id,assistant_id,sensitivity)
+      VALUES($1,'impact.txt','text/plain','cache-impact-token',18,now()+interval '1 day',$2,$3,$4,'confidential') RETURNING id`,[sessionId,f.workspaceId,f.owner,f.assistantId])).rows[0].id
+    await pool.query("INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,created_by_user_id,user_id,assistant_id,sensitivity) VALUES($1,$2,'/impact.txt','impact.txt','fixture://impact',$3,$3,$4,'confidential')",[fileId,f.workspaceId,f.owner,f.assistantId])
+    const fileSegment=(await pool.query<{id:string}>(`INSERT INTO file_segments(workspace_id,file_id,segment_index,char_start,char_end,content,created_by_user_id,user_id,assistant_id,sensitivity)
+      VALUES($1,$2,0,0,17,'segment-impact-token',$3,$3,$4,'confidential') RETURNING id`,[f.workspaceId,fileId,f.owner,f.assistantId])).rows[0].id
+    await pool.query("INSERT INTO episodes(id,workspace_id,created_by_user_id,user_id,assistant_id,source_kind,source_ref,occurred_at,sensitivity) VALUES($1,$2,$3,$3,$4,'recording','{}',now(),'confidential')",[recordingId,f.workspaceId,f.owner,f.assistantId])
+    await pool.query("INSERT INTO recordings(id,workspace_id,title,mime,gcs_key,user_id,assistant_id,sensitivity,created_by_user_id) VALUES($1,$2,'recording-impact-token','audio/wav','fixture-impact',$3,$4,'confidential',$3)",[recordingId,f.workspaceId,f.owner,f.assistantId])
+    const transcript=(await pool.query<{id:string}>(`INSERT INTO transcript_segments(workspace_id,recording_id,segment_index,start_ms,end_ms,segment_text,user_id,assistant_id,sensitivity,created_by_user_id)
+      VALUES($1,$2,0,0,1000,'transcript-impact-token',$3,$4,'confidential',$3) RETURNING id`,[f.workspaceId,recordingId,f.owner,f.assistantId])).rows[0].id
+    await pool.query("INSERT INTO entity_types(id,workspace_id,name,properties,created_by) VALUES($1,$2,'Impact type',$3::jsonb,$4)",[typeId,f.workspaceId,JSON.stringify([{name:'title',label:'Title',config:{kind:'text'},required:true}]),f.owner])
+    const entityInstance=(await pool.query<{id:string}>("INSERT INTO entity_instances(entity_type_id,workspace_id,data,created_by,user_id,assistant_id,sensitivity) VALUES($1,$2,$3::jsonb,$4,$4,$5,'confidential') RETURNING id",[typeId,f.workspaceId,JSON.stringify({title:{kind:'text',value:'entity-impact-token'}}),f.owner,f.assistantId])).rows[0].id
+    const blueprint=(await pool.query<{id:string}>(`INSERT INTO blueprint_records(workspace_id,spec_snapshot,subject,anchor_key,fields,source_kind,source_id,sensitivity,created_by)
+      VALUES($1,'{}','Blueprint impact',$2,$3::jsonb,'brain','fixture','confidential',$4) RETURNING id`,[f.workspaceId,`impact-${randomUUID()}`,JSON.stringify({body:'blueprint-impact-token'}),f.owner])).rows[0].id
+    const office=(await pool.query<{id:string}>(`INSERT INTO office_artifacts(workspace_id,family,title,creator_user_id,owner_user_id,capability_version,sensitivity,visibility_user_ids)
+      VALUES($1,'document','office-impact-token',$2,$2,1,'confidential',ARRAY[$2]::uuid[]) RETURNING id`,[f.workspaceId,f.owner])).rows[0].id
+    const cases=[
+      ['file_cache','file_cache',fileCache,'cache-impact-token'],['file_segment','file_segments',fileSegment,'segment-impact-token'],
+      ['recording','recordings',recordingId,'recording-impact-token'],['transcript_segment','transcript_segments',transcript,'transcript-impact-token'],
+      ['entity_instance','entity_instances',entityInstance,'entity-impact-token'],['blueprint_record','blueprint_records',blueprint,'blueprint-impact-token'],
+      ['office_artifact','office_artifacts',office,'office-impact-token'],
+    ] as const
+    for(const [kind,,id,token] of cases){
+      const item=(await inventory(f.workspaceId,f.owner,kind)).items.find(row=>row.id===id)
+      expect(item).toMatchObject({allowedActions:['confirm_general','hold'],content:{title:expect.any(String),text:expect.stringContaining(token)}})
+      expect((await f.apply(await f.preview([id],'hold',kind))).status).toBe('complete')
+      expect((await pool.query('SELECT read_scope_review_source($1,$2,$3) source',[f.workspaceId,kind,id])).rows[0].source).toMatchObject({held:true})
+    }
+    const client=await getAppPool().connect()
+    try{
+      await client.query('BEGIN')
+      await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.system_bypass','false',true)",[f.owner])
+      for(const [,table,id] of cases)expect((await client.query(`SELECT id FROM ${table} WHERE id=$1`,[id])).rows).toEqual([])
+    }finally{await client.query('ROLLBACK');client.release()}
   })
   it('uses the canonical service from authenticated HTTP and rejects anonymous/member review access',async()=>{
     const f=await fixture(),record=await f.create()

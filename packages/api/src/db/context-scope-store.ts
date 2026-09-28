@@ -586,7 +586,8 @@ export function createDbContextScopeStore(transactionClient?: pg.PoolClient): Co
               SET team_scope_mode = $2,
                   default_workspace_group_id = $3,
                   project_scope_mode = $4,
-                  default_project_id = $5
+                  default_project_id = $5,
+                  context_binding_origin = 'explicit'
             WHERE id = $1
             RETURNING id`,
           [

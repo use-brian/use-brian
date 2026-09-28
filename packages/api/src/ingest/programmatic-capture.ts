@@ -172,6 +172,20 @@ function effectiveProjects(target: ProgrammaticCaptureTarget, rule: Programmatic
       : []
 }
 
+function resolvedCaptureScope(target:ProgrammaticCaptureTarget,rule:ProgrammaticCaptureRule):{
+  resolved:boolean;origin:'legacy'|'explicit'|'reviewed'|'held';compartments:string[];projectIds:string[]
+}{
+  const origin=rule.scopeBindingOrigin??'legacy'
+  if(target.classificationMode!=='strict')return {resolved:true,origin,
+    compartments:effectiveCompartments(target,rule),projectIds:effectiveProjects(target,rule)}
+  const trusted=(value:string|undefined)=>value==='explicit'||value==='reviewed'
+  if(rule.scopeBindingMode==='explicit')return {resolved:trusted(origin),origin,
+    compartments:rule.compartments,projectIds:rule.projectIds}
+  return {resolved:trusted(origin)&&trusted(target.assistantDefaultBindingOrigin),origin,
+    compartments:target.assistantDefaultCompartments,
+    projectIds:target.assistantDefaultProjectId?[target.assistantDefaultProjectId]:[]}
+}
+
 function duplicateResult(
   status: ProgrammaticCaptureReceiptStatus,
   batchId: string | null,
@@ -263,8 +277,26 @@ export function createProgrammaticCaptureRouter(deps: {
     }
 
     const sensitivity = effectiveSensitivity(target, matchedRule.episodeSensitivity, auth.maxClearance)
-    const compartments = effectiveCompartments(target, matchedRule)
-    const projectIds = effectiveProjects(target, matchedRule)
+    const scope=resolvedCaptureScope(target,matchedRule)
+    const compartments=scope.compartments
+    const projectIds=scope.projectIds
+    const queuedEvent:QueuedProgrammaticCaptureEvent={
+      eventId:input.eventId,content:input.content,occurredAt:occurredAt.toISOString(),
+      receivedAt:(deps.now?.()??new Date()).toISOString(),role:input.role??'user',
+      ...(input.sessionId?{sessionId:input.sessionId}:{}),...(input.subjectId?{subjectId:input.subjectId}:{}),
+      ...(input.sourceLabel?{sourceLabel:input.sourceLabel}:{}),metadata,
+      principalKind:principalKind(auth),principalId:auth.keyId,
+      ...(auth.actingUserId?{actingUserId:auth.actingUserId}:{})}
+    if(!scope.resolved){
+      const partitionKey=resolvePartition(target,auth,input)
+      const firesAt=deps.now?.()??new Date()
+      const receipt=await appendProgrammaticBatchEvent({workspaceId:auth.workspaceId,assistantId:target.assistantId,
+        ruleId:matchedRule.id,partitionKey,firesAt,event:queuedEvent,episodeSensitivity:sensitivity,
+        compartments,projectIds,scopeBindingOrigin:scope.origin,scopeHeld:true})
+      return receipt.duplicate?duplicateResult(receipt.status,receipt.batchId,receipt.firesAt,target.profileId,matchedRule.id):{
+        outcome:'queued',receiptStatus:'queued',profileId:target.profileId,ruleId:matchedRule.id,
+        batchId:receipt.batchId??undefined,firesAt:receipt.firesAt??firesAt}
+    }
 
     if (decision.routing_mode === 'realtime') {
       const reserved = await reserveRealtimeProgrammaticEvent({
@@ -342,26 +374,12 @@ export function createProgrammaticCaptureRouter(deps: {
         `Scheduled capture rule ${matchedRule.id} has no schedule.`,
       )
     }
-    const partitionKey = resolvePartition(target, auth, input)
     const firesAt = computeNextRun(
       { type: 'cron', expression: decision.schedule },
       decision.timezone,
       deps.now?.(),
     )
-    const queuedEvent: QueuedProgrammaticCaptureEvent = {
-      eventId: input.eventId,
-      content: input.content,
-      occurredAt: occurredAt.toISOString(),
-      receivedAt: (deps.now?.() ?? new Date()).toISOString(),
-      role: input.role ?? 'user',
-      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-      ...(input.subjectId ? { subjectId: input.subjectId } : {}),
-      ...(input.sourceLabel ? { sourceLabel: input.sourceLabel } : {}),
-      metadata,
-      principalKind: principalKind(auth),
-      principalId: auth.keyId,
-      ...(auth.actingUserId ? { actingUserId: auth.actingUserId } : {}),
-    }
+    const partitionKey=resolvePartition(target,auth,input)
     const receipt = await appendProgrammaticBatchEvent({
       workspaceId: auth.workspaceId,
       assistantId: target.assistantId,
@@ -372,6 +390,7 @@ export function createProgrammaticCaptureRouter(deps: {
       episodeSensitivity: sensitivity,
       compartments,
       projectIds,
+      scopeBindingOrigin:scope.origin,
     })
     if (receipt.duplicate) {
       return duplicateResult(
@@ -429,6 +448,7 @@ export function createProgrammaticBatchProcessor(deps: {
         `Programmatic batch ${batch.id} has no assistant.`,
       )
     }
+    if(batch.scopeHeld)throw new ProgrammaticCaptureError('capture_target_unavailable',`Programmatic batch ${batch.id} is held for scope review.`)
     const target = await deps.store.resolveBatchTargetSystem(
       batch.workspaceId,
       batch.assistantId,
@@ -439,6 +459,9 @@ export function createProgrammaticBatchProcessor(deps: {
         'capture_target_unavailable',
         `Programmatic batch ${batch.id} target is unavailable.`,
       )
+    }
+    if(target.classificationMode==='strict'&&!['explicit','reviewed'].includes(batch.scopeBindingOrigin??'legacy')){
+      throw new ProgrammaticCaptureError('capture_target_unavailable',`Programmatic batch ${batch.id} has an unresolved scope binding.`)
     }
     const events = batch.events
       .map((event, appendOrder) => ({ event, appendOrder }))

@@ -324,6 +324,8 @@ export type PendingBatch = {
   episodeSensitivity: 'public' | 'internal' | 'confidential' | null
   compartments?: string[]
   projectIds?: string[]
+  scopeBindingOrigin?: 'legacy' | 'explicit' | 'reviewed' | 'held'
+  scopeHeld?: boolean
 }
 
 /**

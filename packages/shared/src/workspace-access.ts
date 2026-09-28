@@ -83,16 +83,22 @@ export type DepartmentalReadiness = {
   missingCapabilities: string[]
 }
 
-export type ScopeReviewKind = 'memory'|'entity'|'entity_link'|'task'|'workspace_file'|'episode'|'knowledge_entry'|'kb_chunk'
+export type ScopeReviewKind =
+  | 'memory'|'entity'|'entity_link'|'task'|'workspace_file'|'episode'|'knowledge_entry'|'kb_chunk'
+  | 'crm_event'|'memory_verification'|'brain_verification'|'correction_audit'
+  | 'session_message'|'feedback_event'|'workspace_skill_revision'
+  | 'file_cache'|'file_segment'|'recording'|'transcript_segment'
+  | 'entity_instance'|'blueprint_record'|'office_artifact'
 export type ScopeReviewAction = 'confirm_general'|'assign_team'|'hold'
 export type ScopeReviewCommand =
   | {type:'scope.review.preview';resourceKind:ScopeReviewKind;resourceIds:string[];action:ScopeReviewAction;targetTeamId:string|null;reason:string}
   | {type:'scope.review.apply'|'scope.review.cancel';reviewId:string;expectedVersion:string;payloadHash:string}
 export type ScopeReviewSource = {
   workspaceId:string;resourceKind:ScopeReviewKind;resourceId:string;version:string
-  userId:string|null;assistantId:string|null;sensitivity:string;compartments:string[];projectIds:string[]
+  userId:string|null;assistantId:string|null;sensitivity:string|null;compartments:string[]|null;projectIds:string[]|null
   held:boolean;validTo:string|null;retractedAt:string|null
 }
+export type ScopeReviewContent = {title:string;text:string}
 export type ScopeReviewSummary = {
   id:string;workspaceId:string;resourceKind:ScopeReviewKind;action:ScopeReviewAction;targetTeamId:string|null
   targetCompartment:string|null;reason:string;payloadHash:string;selectionRevision:string;policyRevision:string;version:string
@@ -100,15 +106,21 @@ export type ScopeReviewSummary = {
 }
 export type ScopeReview = ScopeReviewSummary & {
   completeCoverage:false;validForMs:number
-  items:Array<{resourceId:string;resourceVersion:string;source:ScopeReviewSource;impact:ScopeReviewImpact|null;status:'pending'|'applied'|'stale'|'cancelled';resultVersion:string|null;errorCode:string|null}>
+  items:Array<{resourceId:string;resourceVersion:string;source:ScopeReviewSource;content:ScopeReviewContent|null;impact:ScopeReviewImpact|null;status:'pending'|'applied'|'stale'|'cancelled';resultVersion:string|null;errorCode:string|null}>
 }
-export type ScopeReviewImpact = {
-  version:1
-  descendants:Array<{resourceId:string;version:string;held:boolean}>
+export type ScopeReviewImpact =
+  | {version:1;descendants:Array<{resourceId:string;version:string;held:boolean}>}
+  | {version:2;descendants:Array<{resourceKind:ScopeReviewKind;resourceId:string;version:string;held:boolean}>;dependents:Record<string,string>}
+export type ScopeReviewCoverageFamily = {
+  family:string;category:'source'|'impact'|'binding'|'job';total:string;unresolved:string;held:string
+}
+export type ScopeReviewCoverage = {
+  registryRevision:string;unresolved:string;families:ScopeReviewCoverageFamily[]
 }
 export type ScopeReviewInventory = {
   validForMs:number;resourceKind:ScopeReviewKind;total:string;nextCursor:string|null;supportedKinds:ScopeReviewKind[]
-  items:Array<{id:string;version:string;held:boolean;sensitivity:string;compartments:string[];projectIds:string[];userId:string|null;assistantId:string|null;canClassify:boolean}>
+  items:Array<{id:string;version:string;held:boolean;sensitivity:string|null;compartments:string[]|null;projectIds:string[]|null;userId:string|null;assistantId:string|null;canClassify:boolean;allowedActions:ScopeReviewAction[];content:ScopeReviewContent}>
+  registryRevision:string;reviewedInventoryRevision:string|null;coverage:ScopeReviewCoverage
   completeCoverage:false;uncovered:string[];recentReviews:ScopeReviewSummary[];nextReviewCursor:string|null;selectedReview:ScopeReview|null
 }
 

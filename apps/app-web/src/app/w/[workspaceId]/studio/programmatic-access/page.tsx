@@ -902,6 +902,7 @@ function CaptureProfilesSection({
                   episodeSensitivity: null,
                   compartments: [],
                   projectIds: [],
+                  scopeBindingMode: "inherit",
                 });
               })}
             />

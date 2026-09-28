@@ -44,6 +44,7 @@ const RuleBody = z.object({
   episodeSensitivity: z.enum(['public', 'internal', 'confidential']).nullable().optional(),
   compartments: z.array(z.string().min(1).max(160)).max(50).default([]),
   projectIds: z.array(Uuid).max(50).default([]),
+  scopeBindingMode: z.enum(['inherit','explicit']).default('inherit'),
 }).strict().superRefine((value, ctx) => {
   const params = value.filterParams as Record<string, unknown>
   if (value.filterType === 'always' && Object.keys(params).length !== 0) {

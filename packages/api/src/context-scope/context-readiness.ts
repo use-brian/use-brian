@@ -11,6 +11,7 @@
  */
 
 import { query } from '../db/client.js'
+import { getScopeReviewCoverage, SCOPE_REVIEW_REGISTRY_REVISION } from '../workspace-access/scope-review-registry.js'
 
 export const CONTEXT_SCOPE_ENFORCEMENT_VERSION = 1
 
@@ -83,6 +84,16 @@ const REQUIRED_SCOPE_COLUMNS = [
   ['connector_grant', 'project_ids'],
   ['ingest_rules', 'project_ids'],
   ['pending_ingest_batches', 'project_ids'],
+  ['assistants','context_binding_origin'],
+  ['sessions','context_binding_origin'],
+  ['brain_keys','context_binding_origin'],
+  ['connector_instance','context_binding_origin'],
+  ['connector_grant','context_binding_origin'],
+  ['ingest_rules','scope_binding_origin'],
+  ['ingest_rules','scope_binding_mode'],
+  ['pending_ingest_batches','scope_binding_origin'],
+  ['pending_ingest_batches','scope_held'],
+  ['workspace_scope_review_items','content_snapshot'],
 ] as const
 
 const REQUIRED_TRIGGERS = {
@@ -210,6 +221,12 @@ export async function getContextReadinessSystem(
     triggerNames,
     REQUIRED_TRIGGERS.write_inheritance,
   )
+  const coverage=missingColumns.length===0
+    ? await getScopeReviewCoverage({query:queryFn},workspaceId)
+    : {registryRevision:String(SCOPE_REVIEW_REGISTRY_REVISION),unresolved:'1',families:[]}
+  const reviewedInventoryRevision=missingColumns.length===0
+    ? (await queryFn<{revision:string|null}>('SELECT reviewed_inventory_revision::text AS revision FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0]?.revision??null
+    : null
 
   const checks: ContextReadinessCheck[] = [
     check(
@@ -275,6 +292,14 @@ export async function getContextReadinessSystem(
       'legacy_data',
       true,
       'Workspace General rows are informational and remain reviewable.',
+    ),
+    check(
+      'scope_review',
+      coverage.unresolved==='0'&&reviewedInventoryRevision===coverage.registryRevision,
+      coverage.unresolved==='0'&&reviewedInventoryRevision===coverage.registryRevision
+        ? 'Every frozen source, impact, binding, and active-job family has been reviewed or held.'
+        : 'The complete scope inventory still has unresolved or unacknowledged rows.',
+      coverage.families.filter(family=>family.unresolved!=='0').map(family=>family.family),
     ),
   ]
 

@@ -97,6 +97,8 @@ export type Session = {
   contextProjectId: string | null
   contextCompartments: string[]
   contextLockedAt: Date | null
+  contextBindingOrigin?: 'legacy' | 'explicit' | 'reviewed' | 'held'
+  classificationMode?: 'legacy' | 'review' | 'strict'
   createdAt: Date
   lastActiveAt: Date
 }
@@ -437,6 +439,9 @@ export async function findSessionByChannel(params: {
             context_project_id as "contextProjectId",
             context_compartments as "contextCompartments",
             context_locked_at as "contextLockedAt",
+            context_binding_origin as "contextBindingOrigin",
+            coalesce((SELECT classification_mode FROM workspace_access_policies
+              WHERE workspace_id=(SELECT workspace_id FROM assistants WHERE id=sessions.assistant_id)),'legacy') as "classificationMode",
             created_at as "createdAt", last_active_at as "lastActiveAt"
      FROM sessions
      WHERE assistant_id = $1 AND user_id = $2 AND channel_type = $3

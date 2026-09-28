@@ -20,6 +20,11 @@ const columns = [
   ['brain_keys', 'context_project_id'], ['connector_instance', 'project_ids'],
   ['connector_grant', 'project_ids'], ['ingest_rules', 'project_ids'],
   ['pending_ingest_batches', 'project_ids'],
+  ['assistants','context_binding_origin'],['sessions','context_binding_origin'],
+  ['brain_keys','context_binding_origin'],['connector_instance','context_binding_origin'],
+  ['connector_grant','context_binding_origin'],['ingest_rules','scope_binding_origin'],
+  ['ingest_rules','scope_binding_mode'],['pending_ingest_batches','scope_binding_origin'],
+  ['pending_ingest_batches','scope_held'],['workspace_scope_review_items','content_snapshot'],
 ] as const
 
 const triggers = [
@@ -47,6 +52,8 @@ function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string 
           .map((name) => ({ name })) as unknown as T[],
       }
     }
+    if(sql.includes('reviewed_inventory_revision'))return {rows:[{revision:'1'}] as unknown as T[]}
+    if(sql.includes(' AS total')||sql.includes(' total,'))return {rows:[{total:'0',unresolved:'0',held:'0'}] as unknown as T[]}
     return { rows: [{ count: '3' }] as unknown as T[] }
   }
 }
