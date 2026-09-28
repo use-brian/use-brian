@@ -90,7 +90,8 @@ export function planManifest(manifestInput, catalogs) {
       const row = locate(resource, item, rows), before = business(resource, row)
       if (row?.archivedAt) fail('archived_configuration', { ref: item.ref, id: row.id })
       if (row && resource === 'recordFields' && before.fieldType !== item.value.fieldType) fail('immutable_field_type', { ref: item.ref, currentType: before.fieldType })
-      if (row && resource === 'intakeDefinitions' && before.definition.identityPolicy !== 'new_or_review') fail('trusted_definition_requires_owner', { ref: item.ref })
+      // Only the unverified policies are manifest-owned; a trusted one stays with its owner.
+      if (row && resource === 'intakeDefinitions' && !['new_or_review', 'existing_or_new'].includes(before.definition.identityPolicy)) fail('trusted_definition_requires_owner', { ref: item.ref })
       if (row && resource === 'segments' && before.entityKind !== item.value.entityKind) fail('immutable_segment_entity_kind', { ref: item.ref })
       if (row?.id) {
         const bound = `${resource}:${row.id}`

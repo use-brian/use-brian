@@ -369,7 +369,7 @@ export type CrmIntakeDefinition = {
   active: boolean;
   currentVersion: number;
   fields: CrmIntakeFieldDefinition[];
-  identityPolicy: "external_subject" | "trusted_verified_email" | "new_or_review";
+  identityPolicy: "external_subject" | "trusted_verified_email" | "new_or_review" | "existing_or_new";
   identityVerification?: { keyId: string; publicKey: string; maxAgeSeconds: number; acknowledged: true } | null;
   verificationAcknowledgedByUserId?: string | null;
   verificationAcknowledgedAt?: string | null;
