@@ -45,6 +45,16 @@ const workspaceStore = {
   getRole: vi.fn().mockResolvedValue('member'),
 } as never
 
+const actorAccess = {
+  userId: 'user-1',
+  workspaceId: 'workspace-1',
+  assistantId: 'assistant-1',
+  assistantKind: 'primary' as const,
+  clearance: 'confidential' as const,
+  compartments: null,
+  mutationCompartments: null,
+}
+
 const row = {
   primitive: 'memory' as const,
   id: '11111111-1111-4111-8111-111111111111',
@@ -75,7 +85,13 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
       'workspace-1',
       'memory',
       row.id,
-      { userId: 'user-1', clearance: 'confidential' },
+      {
+        userId: 'user-1',
+        workspaceId: 'workspace-1',
+        assistantId: 'assistant-1',
+        assistantKind: 'primary',
+        clearance: 'confidential',
+      },
     )
     expect(result).toBeNull()
   })
@@ -90,7 +106,13 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
       'workspace-1',
       'memory',
       row.id,
-      { userId: 'user-1', clearance: 'internal' },
+      {
+        userId: 'user-1',
+        workspaceId: 'workspace-1',
+        assistantId: 'assistant-1',
+        assistantKind: 'primary',
+        clearance: 'internal',
+      },
     )
     expect(result).toBeNull()
   })
@@ -104,6 +126,7 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
     const result = await mutator.mutate({
       userId: 'user-1',
       workspaceId: 'workspace-1',
+      access: actorAccess,
       primitive: 'memory',
       rowId: row.id,
       changes: { detail: 'Graduate.' },
@@ -114,6 +137,36 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
     expect(adjustMemoryDecision).not.toHaveBeenCalled()
   })
 
+  it('keeps temporary read reach useful without turning it into mutation authority', async () => {
+    const readGranted = {
+      ...actorAccess,
+      compartments: ['Finance'],
+      mutationCompartments: [],
+    }
+    vi.mocked(getBrainInboxRow).mockImplementation(async (params) =>
+      params.operation === 'mutation' ? null : row)
+    const mutator = createBrainEntryMutator({ workspaceStore })
+
+    await expect(mutator.getEditableEntry(
+      'workspace-1', 'memory', row.id, readGranted,
+    )).resolves.toMatchObject({ id: row.id })
+    const result = await mutator.mutate({
+      userId: 'user-1',
+      workspaceId: 'workspace-1',
+      access: readGranted,
+      primitive: 'memory',
+      rowId: row.id,
+      changes: { detail: 'Denied mutation.' },
+    })
+
+    expect(result).toMatchObject({ status: 404, body: { error: 'Row not found' } })
+    expect(getBrainInboxRow).toHaveBeenLastCalledWith(expect.objectContaining({
+      access: readGranted,
+      operation: 'mutation',
+    }))
+    expect(adjustMemoryDecision).not.toHaveBeenCalled()
+  })
+
   it('returns not-found rather than stale when the bound row disappeared', async () => {
     vi.mocked(getBrainInboxRow).mockResolvedValueOnce(null)
     const mutator = createBrainEntryMutator({ workspaceStore })
@@ -121,6 +174,7 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
     const result = await mutator.mutate({
       userId: 'user-1',
       workspaceId: 'workspace-1',
+      access: actorAccess,
       primitive: 'memory',
       rowId: row.id,
       expectedUpdatedAt: row.updatedAt.toISOString(),
@@ -138,6 +192,7 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
     const result = await mutator.mutate({
       userId: 'user-1',
       workspaceId: 'workspace-1',
+      access: actorAccess,
       primitive: 'memory',
       rowId: row.id,
       expectedUpdatedAt: '2026-08-10T00:00:00.000Z',
@@ -173,6 +228,7 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
     const result = await mutator.mutate({
       userId: 'user-1',
       workspaceId: 'workspace-1',
+      access: actorAccess,
       primitive: 'memory',
       rowId: row.id,
       expectedUpdatedAt: row.updatedAt.toISOString(),
@@ -187,6 +243,7 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
       memoryId: row.id,
       workspaceId: 'workspace-1',
       verifiedBy: 'user-1',
+      access: actorAccess,
       updates: expect.objectContaining({ detail: 'Graduate.' }),
       verifications: [expect.objectContaining({ action: 'edit_summary' })],
     }))

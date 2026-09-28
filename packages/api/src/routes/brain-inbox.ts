@@ -27,8 +27,8 @@
 
 import { Router } from 'express'
 import type { Response } from 'express'
-import { query } from '../db/client.js'
-import type { WorkspaceStore } from '../db/workspace-store.js'
+import { query, queryWithRLS } from '../db/client.js'
+import { resolveOperationCeilingsSystem, type WorkspaceStore } from '../db/workspace-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import {
   listBrainInbox,
@@ -63,7 +63,7 @@ import {
   LibreOfficeError,
 } from '@use-brian/core'
 import { updateTask } from '../db/tasks.js'
-import type { EntityLinksStore, FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@use-brian/core'
+import type { AccessContext, EntityLinksStore, FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@use-brian/core'
 import {
   createBrainEntryMutator,
   isEditableBrainPrimitive,
@@ -73,6 +73,7 @@ import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 
 type RouteOptions = {
   workspaceStore: WorkspaceStore
+  resolveAccess?: (userId: string, workspaceId: string) => Promise<AccessContext>
   /**
    * Office→PDF converter seam for the content route's `?as=pdf` — tests
    * inject a fake; production defaults to the ONE LibreOffice runner, never a
@@ -174,6 +175,19 @@ export function brainInboxRoutes({
   entityLinks,
   workspaceSkillStore,
   brainEntryMutator,
+  resolveAccess = async (userId, workspaceId) => ({
+    userId,
+    workspaceId,
+    assistantId: '',
+    assistantKind: 'primary',
+    ...(await resolveOperationCeilingsSystem(
+      userId,
+      workspaceId,
+      'confidential',
+      null,
+      true,
+    )),
+  }),
   convertToPdf = convertToPdfWithLibreOffice,
 }: RouteOptions): Router {
   const router = Router()
@@ -185,7 +199,7 @@ export function brainInboxRoutes({
   async function requireWorkspaceMember(
     req: { userId?: string; params: { workspaceId: string } },
     res: Response,
-  ): Promise<string | null> {
+  ): Promise<AccessContext | null> {
     const userId = req.userId
     if (!userId) {
       res.status(401).json({ error: 'Unauthorized' })
@@ -196,14 +210,19 @@ export function brainInboxRoutes({
       res.status(403).json({ error: 'Not a member of this workspace' })
       return null
     }
-    return role
+    try {
+      return await resolveAccess(userId, req.params.workspaceId)
+    } catch {
+      res.status(403).json({ error: 'Not a member of this workspace' })
+      return null
+    }
   }
 
   // ── GET /:workspaceId — list ────────────────────────────────────
 
   router.get('/:workspaceId', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
 
     const { workspaceId } = req.params as { workspaceId: string }
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100)
@@ -221,12 +240,9 @@ export function brainInboxRoutes({
     }
 
     try {
-      // Auto-prune dead relationships before listing when edges are in scope
-      // (the unscoped feed or an explicit entity_link fetch): a dangling edge
-      // points at a hard-deleted endpoint, so there's nothing to review. Soft-
-      // deleting them here keeps the queue + badge honest. Best-effort — a
-      // prune failure must not break the list (the list query also excludes
-      // dangling edges, so correctness doesn't depend on the prune landing).
+      // Best-effort maintenance preserves the existing dangling-reference
+      // behavior. It never supplies response content: the scoped list query
+      // independently excludes every dangling edge.
       if (!primitive || primitive === 'entity_link') {
         try {
           await pruneDanglingEntityLinks(workspaceId)
@@ -236,6 +252,8 @@ export function brainInboxRoutes({
       }
       const result = await listBrainInbox({
         workspaceId,
+        userId: access.userId,
+        access,
         primitive,
         cursor,
         limit,
@@ -260,8 +278,8 @@ export function brainInboxRoutes({
   // Spec: docs/architecture/brain/classification/README.md
   //   §Decision semantics per boundary — B3 brain inbox / web UI
   router.post('/:workspaceId/classify', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
     if (!entityKindClassifier) {
       res.json({ kind: 'no_signal' })
       return
@@ -306,8 +324,8 @@ export function brainInboxRoutes({
   // Newest-first, capped at 100. Returns 200 with empty array when
   // pending_classifications isn't wired (older deployments).
   router.get('/:workspaceId/pending-classifications', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
     if (!pendingClassificationStore) {
       res.json({ rows: [] })
       return
@@ -322,12 +340,7 @@ export function brainInboxRoutes({
     const primitiveKindRaw = req.query.primitive as string | undefined
     try {
       const rows = await pendingClassificationStore.listUnresolvedForWorkspace(
-        {
-          workspaceId,
-          userId,
-          assistantId: '',  // brain-inbox is workspace-scoped; no per-assistant filter
-          assistantKind: 'primary',
-        },
+        { ...access },
         {
           limit,
           primitiveKind:
@@ -355,8 +368,8 @@ export function brainInboxRoutes({
   // POST /:workspaceId/entity/:entityId/reclassify endpoint).
   // 'reject' and 'dismiss' just flip the resolution state.
   router.post('/:workspaceId/pending-classifications/:id/resolve', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
     if (!pendingClassificationStore) {
       res.status(404).json({ error: 'Pending classifications not enabled' })
       return
@@ -373,7 +386,7 @@ export function brainInboxRoutes({
       return
     }
     try {
-      const resolved = await pendingClassificationStore.resolve(userId, id, resolution)
+      const resolved = await pendingClassificationStore.resolve(access, id, resolution)
       if (!resolved) {
         res.status(404).json({ error: 'Pending classification not found or already resolved' })
         return
@@ -388,13 +401,18 @@ export function brainInboxRoutes({
   // ── GET /:workspaceId/count ─────────────────────────────────────
 
   router.get('/:workspaceId/count', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
 
     const { workspaceId } = req.params as { workspaceId: string }
     const includeExtracted = req.query.includeExtracted === 'true'
     try {
-      const counts = await countBrainInbox(workspaceId, { includeExtracted })
+      const counts = await countBrainInbox({
+        workspaceId,
+        userId: access.userId,
+        access,
+        includeExtracted,
+      })
       res.json(counts)
     } catch (err) {
       console.error('[brain-inbox] count failed:', err)
@@ -411,8 +429,8 @@ export function brainInboxRoutes({
   // retracted rows still return 404 — those really are gone.
 
   router.get('/:workspaceId/:primitive/:rowId', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
 
     const { workspaceId, primitive: primitiveParam, rowId } = req.params as {
       workspaceId: string
@@ -425,7 +443,13 @@ export function brainInboxRoutes({
     }
 
     try {
-      const row = await getBrainInboxRow(workspaceId, primitiveParam, rowId)
+      const row = await getBrainInboxRow({
+        workspaceId,
+        userId: access.userId,
+        primitive: primitiveParam,
+        rowId,
+        access,
+      })
       if (!row) {
         res.status(404).json({ error: 'Row not found' })
         return
@@ -465,8 +489,8 @@ export function brainInboxRoutes({
   // not collide with the 3-segment `/:primitive/:rowId` detail route.
 
   router.get('/:workspaceId/workspace_file/:rowId/content', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
     if (!filesApi) {
       res.status(501).json({ error: 'File preview is not available on this deployment' })
       return
@@ -474,13 +498,18 @@ export function brainInboxRoutes({
     const { workspaceId, rowId } = req.params as { workspaceId: string; rowId: string }
     const userId = (req as { userId?: string }).userId as string
     try {
-      // Clearance is the read ceiling for the access-scoped byte read.
-      const member = await query<{ clearance: 'public' | 'internal' | 'confidential' }>(
-        `SELECT clearance FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`,
-        [workspaceId, userId],
-      )
-      const clearance = member.rows[0]?.clearance ?? 'public'
-      const ctx: FilesContext = { workspaceId, userId, assistantId: null, clearance }
+      const admitted = await getBrainInboxRow({
+        workspaceId,
+        userId,
+        primitive: 'workspace_file',
+        rowId,
+        access,
+      })
+      if (!admitted) {
+        res.status(404).json({ error: 'File not found' })
+        return
+      }
+      const ctx: FilesContext = { ...access, assistantId: null }
       const result = await filesApi.readBytes(ctx, rowId)
       if (!result.ok) {
         res.status(404).json({ error: 'File not found' })
@@ -520,9 +549,20 @@ export function brainInboxRoutes({
         }
       }
 
+      const stillAdmitted = await getBrainInboxRow({
+        workspaceId,
+        userId,
+        primitive: 'workspace_file',
+        rowId,
+        access,
+      })
+      if (!stillAdmitted || stillAdmitted.updatedAt.getTime() !== admitted.updatedAt.getTime()) {
+        res.status(404).json({ error: 'File not found' })
+        return
+      }
       res.setHeader('Content-Type', mime)
       res.setHeader('Content-Length', String(bytes.length))
-      res.setHeader('Cache-Control', 'private, max-age=300')
+      res.setHeader('Cache-Control', 'private, no-store')
       // Inline so the drawer renders images / text / pdf in place; the
       // filename is advisory for a save-as.
       const safeName = (file.name || 'file').replace(/"/g, '')
@@ -542,8 +582,8 @@ export function brainInboxRoutes({
   // evolution worker consumes that table specifically).
 
   router.post('/:workspaceId/:primitive/:rowId/verify', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
 
     const { workspaceId, primitive: primitiveParam, rowId } = req.params as {
       workspaceId: string
@@ -562,6 +602,7 @@ export function brainInboxRoutes({
         rowId,
         workspaceId,
         verifiedByUserId: userId,
+        access,
       })
       if (verified.status === 'not_found') {
         res.status(404).json({ error: 'Row not found' })
@@ -609,9 +650,12 @@ export function brainInboxRoutes({
   // authorization, audit, notification, and supersession behavior.
 
   router.post('/:workspaceId/:primitive/:rowId/adjust', async (req, res) => {
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
     const result = await entryMutator.mutate({
       userId: (req as any).userId as string,
       workspaceId: req.params.workspaceId,
+      access,
       primitive: req.params.primitive,
       rowId: req.params.rowId,
       changes: req.body as Record<string, unknown>,
@@ -998,8 +1042,8 @@ export function brainInboxRoutes({
   //
   // [COMP:api/tasks-bulk-route]
   router.post('/:workspaceId/tasks/bulk', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
     const { workspaceId } = req.params as { workspaceId: string }
     const userId = (req as any).userId as string
 
@@ -1055,6 +1099,7 @@ export function brainInboxRoutes({
           taskIds,
           workspaceId,
           deletedByUserId: userId,
+          access,
         }))
         const results = taskIds.map((id) => ({ id, ok: deletedIds.has(id) }))
         void notifyBrainInboxChange(workspaceId, 'task', taskIds[0], 'delete')
@@ -1142,11 +1187,15 @@ export function brainInboxRoutes({
         // Per-row ownership pre-check (same contract as the single-row
         // endpoints): live version, in THIS workspace. Carries attributes
         // for the priority merge.
-        const before = await query<{ workspace_id: string; attributes: unknown }>(
-          `SELECT workspace_id, attributes FROM tasks WHERE id = $1 AND valid_to IS NULL`,
-          [id],
-        )
-        if (before.rows.length === 0 || before.rows[0].workspace_id !== workspaceId) {
+        const before = await getBrainInboxRow({
+          workspaceId,
+          userId,
+          primitive: 'task',
+          rowId: id,
+          access,
+          operation: 'mutation',
+        })
+        if (!before) {
           results.push({ id, ok: false })
           continue
         }
@@ -1161,6 +1210,7 @@ export function brainInboxRoutes({
             reason: rejectReason,
             createRule,
             recordBrainVerification: true,
+            access,
           })
           if (!rejected) {
             results.push({ id, ok: false })
@@ -1175,7 +1225,7 @@ export function brainInboxRoutes({
         } else {
           const rowFields: TaskUpdateFields = { ...fields }
           if (priorityChange !== undefined) {
-            const raw = before.rows[0].attributes
+            const raw = before.body.attributes
             const attrs: Record<string, unknown> =
               raw && typeof raw === 'object' && !Array.isArray(raw)
                 ? { ...(raw as Record<string, unknown>) }
@@ -1184,7 +1234,13 @@ export function brainInboxRoutes({
             else attrs.priority = priorityChange
             rowFields.attributes = attrs
           }
-          const updated = await updateTask(userId, id, rowFields)
+          const updated = await updateTask(
+            userId,
+            id,
+            rowFields,
+            undefined,
+            { access },
+          )
           if (updated) results.push({ id, ok: true, newId: updated.id })
           else results.push({ id, ok: false })
         }
@@ -1211,8 +1267,8 @@ export function brainInboxRoutes({
   // for memory).
 
   router.delete('/:workspaceId/:primitive/:rowId', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
 
     const { workspaceId, primitive: primitiveParam, rowId } = req.params as {
       workspaceId: string
@@ -1253,6 +1309,7 @@ export function brainInboxRoutes({
           reason: rejectReason,
           createRule,
           recordBrainVerification: true,
+          access,
         })
         if (!rejected) {
           res.status(404).json({ error: 'Row not found' })
@@ -1273,6 +1330,7 @@ export function brainInboxRoutes({
         rowId,
         workspaceId,
         deletedByUserId: userId,
+        access,
       })
       if (deleted.status === 'not_found') {
         res.status(404).json({ error: 'Row not found' })
@@ -1318,8 +1376,8 @@ export function brainInboxRoutes({
   // [COMP:api/brain-inbox-explain]
 
   router.get('/:workspaceId/:primitive/:rowId/explain', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
+    const access = await requireWorkspaceMember(req as any, res)
+    if (!access) return
 
     const { workspaceId, primitive: primitiveParam, rowId } = req.params as {
       workspaceId: string
@@ -1332,6 +1390,17 @@ export function brainInboxRoutes({
     }
 
     try {
+      const admitted = await getBrainInboxRow({
+        workspaceId,
+        userId: access.userId,
+        primitive: primitiveParam,
+        rowId,
+        access,
+      })
+      if (!admitted) {
+        res.status(404).json({ error: 'Row not found' })
+        return
+      }
       // Pull the universal-column fields we need. Every brain primitive
       // carries created_by_* + source_episode_id + source; memory, task,
       // and the entity-backed primitives (entity / contact / company /
@@ -1396,7 +1465,7 @@ export function brainInboxRoutes({
                   source, ${tagsCol} AS tags
            FROM ${targetTable}
            WHERE id = $1`
-      const meta = await query<ExplainMetaRow>(metaSql, [rowId])
+      const meta = await queryWithRLS<ExplainMetaRow>(access.userId, metaSql, [rowId])
       if (meta.rows.length === 0) {
         res.status(404).json({ error: 'Row not found' })
         return
@@ -1410,7 +1479,8 @@ export function brainInboxRoutes({
       // Resolve the saving assistant's name.
       let assistantName: string | null = null
       if (row.created_by_assistant_id) {
-        const a = await query<{ name: string }>(
+        const a = await queryWithRLS<{ name: string }>(
+          access.userId,
           `SELECT name FROM assistants WHERE id = $1`,
           [row.created_by_assistant_id],
         )
@@ -1421,7 +1491,8 @@ export function brainInboxRoutes({
       // author-fallback label).
       let createdByUserName: string | null = null
       if (row.created_by_user_id) {
-        const u = await query<{ name: string | null }>(
+        const u = await queryWithRLS<{ name: string | null }>(
+          access.userId,
           `SELECT name FROM users WHERE id = $1`,
           [row.created_by_user_id],
         )
@@ -1440,7 +1511,7 @@ export function brainInboxRoutes({
         source_ref: EpisodeRef | null
       } | null = null
       if (row.source_episode_id) {
-        const ep = await query<{
+        const ep = await queryWithRLS<{
           id: string
           source_kind: string
           occurred_at: Date
@@ -1448,6 +1519,7 @@ export function brainInboxRoutes({
           content_ref: EpisodeRef | null
           source_ref: EpisodeRef | null
         }>(
+          access.userId,
           `SELECT id, source_kind, occurred_at, summary_text, content_ref, source_ref
            FROM episodes WHERE id = $1`,
           [row.source_episode_id],
@@ -1471,13 +1543,16 @@ export function brainInboxRoutes({
       // channel type for the origin label.
       let sourceSessionId: string | null = null
       let sessionChannelType: string | null = null
+      let resolvedSessionExists = false
       if (candidateSessionId) {
-        const s = await query<{ id: string; channel_type: string }>(
-          `SELECT id, channel_type FROM sessions WHERE id = $1`,
-          [candidateSessionId],
+        const s = await query<{ id: string; channel_type: string; owned: boolean }>(
+          `SELECT id, channel_type, user_id = $2 AS owned
+             FROM sessions WHERE id = $1`,
+          [candidateSessionId, access.userId],
         )
         if (s.rows[0]) {
-          sourceSessionId = s.rows[0].id
+          resolvedSessionExists = true
+          sourceSessionId = s.rows[0].owned ? s.rows[0].id : null
           sessionChannelType = s.rows[0].channel_type
         }
       }
@@ -1502,7 +1577,7 @@ export function brainInboxRoutes({
         originKind = 'manual'
       } else if (row.source === 'consolidation' || row.source === 'reflection') {
         originKind = 'consolidation'
-      } else if (sourceSessionId) {
+      } else if (resolvedSessionExists) {
         originKind =
           workflowId || sessionChannelType === 'assistant-call'
             ? 'workflow'
@@ -1526,13 +1601,14 @@ export function brainInboxRoutes({
         createdAt: Date
       }> = []
       if (sourceSessionId) {
-        const msgs = await query<{
+        const msgs = await queryWithRLS<{
           id: string
           role: string
           content: unknown
           createdAt: Date
           rn: number
         }>(
+          access.userId,
           `WITH ordered AS (
              SELECT id, role, content, created_at AS "createdAt",
                     row_number() OVER (ORDER BY created_at ASC) AS rn,
@@ -1557,6 +1633,19 @@ export function brainInboxRoutes({
         }))
       }
 
+      const stillAdmitted = await getBrainInboxRow({
+        workspaceId,
+        userId: access.userId,
+        primitive: primitiveParam,
+        rowId,
+        access,
+      })
+      if (!stillAdmitted || stillAdmitted.updatedAt.getTime() !== admitted.updatedAt.getTime()) {
+        res.status(404).json({ error: 'Row not found' })
+        return
+      }
+
+      res.setHeader('Cache-Control', 'private, no-store')
       res.json({
         savedAt: row.created_at,
         savedByAssistantId: row.created_by_assistant_id,
@@ -1596,8 +1685,8 @@ export function brainInboxRoutes({
   router.post(
     '/:workspaceId/:primitive/:rowId/edit-session',
     async (req, res) => {
-      const role = await requireWorkspaceMember(req as any, res)
-      if (!role) return
+      const access = await requireWorkspaceMember(req as any, res)
+      if (!access) return
 
       const { workspaceId, primitive, rowId } = req.params
       if (!isEditableBrainPrimitive(primitive)) {
@@ -1613,12 +1702,14 @@ export function brainInboxRoutes({
           workspaceId,
           primitive,
           rowId,
+          access,
         )
         if (!entry) {
           res.status(404).json({ error: 'Row not found' })
           return
         }
-        const primary = await query<{ id: string; name: string }>(
+        const primary = await queryWithRLS<{ id: string; name: string }>(
+          access.userId,
           `SELECT id, name FROM assistants
             WHERE workspace_id = $1
               AND kind != 'app'
@@ -1668,8 +1759,8 @@ export function brainInboxRoutes({
   router.post(
     '/:workspaceId/:primitive/:rowId/inspection-session',
     async (req, res) => {
-      const role = await requireWorkspaceMember(req as any, res)
-      if (!role) return
+      const access = await requireWorkspaceMember(req as any, res)
+      if (!access) return
 
       const { workspaceId, primitive: primitiveParam, rowId } = req.params as {
         workspaceId: string
@@ -1683,16 +1774,14 @@ export function brainInboxRoutes({
       const userId = (req as any).userId as string
 
       try {
-        // Validate ownership.
-        const ownership = await query<{ workspace_id: string }>(
-          `SELECT workspace_id FROM ${primitiveToTable(primitiveParam)}
-           WHERE id = $1`,
-          [rowId],
-        )
-        if (
-          ownership.rows.length === 0 ||
-          ownership.rows[0].workspace_id !== workspaceId
-        ) {
+        const admitted = await getBrainInboxRow({
+          workspaceId,
+          userId,
+          primitive: primitiveParam,
+          rowId,
+          access,
+        })
+        if (!admitted) {
           res.status(404).json({ error: 'Row not found' })
           return
         }
@@ -1701,7 +1790,8 @@ export function brainInboxRoutes({
         // the most-recently-created assistant if no kind='primary'
         // exists. Workspaces with only kind='app' distribution
         // assistants have no inspectable assistant — return 422.
-        const primary = await query<{ id: string; kind: string; name: string }>(
+        const primary = await queryWithRLS<{ id: string; kind: string; name: string }>(
+          access.userId,
           `SELECT id, kind, name FROM assistants
             WHERE workspace_id = $1
               AND kind != 'app'

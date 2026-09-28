@@ -10,6 +10,7 @@
  */
 
 import type {
+  AccessContext,
   DealStage,
   EntityLinksStore,
   TaskRecordStatus,
@@ -121,6 +122,8 @@ const TASK_PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const
 export type BrainEntryMutationRequest = {
   userId: string
   workspaceId: string
+  /** Exact execution envelope from the REST request or confirmed tool turn. */
+  access: AccessContext
   primitive: string
   rowId: string
   changes: Record<string, unknown>
@@ -144,13 +147,13 @@ export type BrainEntryMutator = {
     workspaceId: string,
     primitive: string,
     rowId: string,
-    viewer?: { userId: string; clearance?: 'public' | 'internal' | 'confidential' },
+    viewer?: AccessContext,
   ): Promise<EditableBrainEntry | null>
   findEditableEntries(
     workspaceId: string,
     queryText: string,
     limit?: number,
-    viewer?: { userId: string; clearance?: 'public' | 'internal' | 'confidential' },
+    viewer?: AccessContext,
   ): Promise<EditableBrainEntry[]>
   mutate(
     request: BrainEntryMutationRequest,
@@ -217,6 +220,7 @@ export function createBrainEntryMutator(args: {
       }
       body: Record<string, unknown>
       expectedUpdatedAt?: string
+      access: AccessContext
     },
     res: MutationResponse,
   ): Promise<void> {
@@ -234,13 +238,26 @@ export function createBrainEntryMutator(args: {
     }
     const userId = req.userId
 
+    // Bind every writer to the current live row under mutation authority.
+    // This is deliberately independent of the optional revision guard: a
+    // temporary read grant may make discovery useful, but never authorizes an
+    // edit. Hidden, held, retired, private, or otherwise inaccessible rows all
+    // collapse to the same not-found response.
+    const admitted = await getBrainInboxRow({
+      workspaceId,
+      userId,
+      primitive: primitiveParam,
+      rowId,
+      access: req.access,
+      operation: 'mutation',
+    })
+    if (!admitted) {
+      res.status(404).json({ error: 'Row not found' })
+      return
+    }
+
     if (req.expectedUpdatedAt) {
-      const current = await getBrainInboxRow(workspaceId, primitiveParam, rowId)
-      if (!current) {
-        res.status(404).json({ error: 'Row not found' })
-        return
-      }
-      if (current.updatedAt.toISOString() !== req.expectedUpdatedAt) {
+      if (admitted.updatedAt.toISOString() !== req.expectedUpdatedAt) {
         res.status(409).json({
           error: 'The entry changed while this edit was awaiting approval. Review the latest version and try again.',
           code: 'stale_entry',
@@ -403,6 +420,7 @@ export function createBrainEntryMutator(args: {
           memoryId: rowId,
           workspaceId: before.workspaceId,
           verifiedBy: userId,
+          access: req.access,
           updates: {
             scope: nextScope,
             workspaceId: computedWorkspaceId,
@@ -472,27 +490,11 @@ export function createBrainEntryMutator(args: {
       }
 
       try {
-        const before = await query<{
-          workspaceId: string
-          displayName: string
-          sensitivity: 'public' | 'internal' | 'confidential'
-        }>(
-          `SELECT workspace_id as "workspaceId",
-                  display_name as "displayName",
-                  sensitivity
-             FROM entities
-            WHERE id = $1 AND valid_to IS NULL`,
-          [rowId],
-        )
-        if (before.rows.length === 0) {
-          res.status(404).json({ error: 'Entity not found' })
-          return
+        const prev = {
+          workspaceId: admitted.workspaceId,
+          displayName: String(admitted.body.display_name ?? ''),
+          sensitivity: admitted.body.sensitivity as 'public' | 'internal' | 'confidential',
         }
-        if (before.rows[0].workspaceId !== workspaceId) {
-          res.status(403).json({ error: 'Entity belongs to a different workspace' })
-          return
-        }
-        const prev = before.rows[0]
 
         const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
         // Write under the viewer's workspace projection (primary-reflector
@@ -503,7 +505,7 @@ export function createBrainEntryMutator(args: {
             sensitivity: nextSensitivity,
             verifiedByUserId: userId,
             verifiedAt: new Date(),
-          }, { workspaceId, userId, assistantId: '', assistantKind: 'primary' }, client),
+          }, req.access, client),
           verifications: (result) => {
             if (!result) return []
             const verifications: BrainCorrectionVerification[] = []
@@ -721,33 +723,17 @@ export function createBrainEntryMutator(args: {
       try {
         // Post CRM→entity unification the CRM row IS the entity — read it
         // directly; the record id is the entity id (entityId == rowId).
-        const before = await query<{
-          workspaceId: string
-          name: string | null
-          sensitivity: 'public' | 'internal' | 'confidential'
-          entityId: string | null
-          attributes: Record<string, unknown> | null
-        }>(
-          `SELECT workspace_id AS "workspaceId", display_name AS name, sensitivity,
-                  id AS "entityId", attributes
-             FROM entities
-            WHERE id = $1 AND valid_to IS NULL`,
-          [rowId],
-        )
-        if (before.rows.length === 0) {
-          res.status(404).json({ error: 'Row not found' })
-          return
+        const prev = {
+          workspaceId: admitted.workspaceId,
+          name: typeof admitted.body.name === 'string' ? admitted.body.name : null,
+          sensitivity: admitted.body.sensitivity as 'public' | 'internal' | 'confidential',
+          entityId: typeof admitted.body.entity_id === 'string' ? admitted.body.entity_id : rowId,
+          attributes: admitted.body.attributes && typeof admitted.body.attributes === 'object'
+            ? admitted.body.attributes as Record<string, unknown>
+            : admitted.body,
         }
-        if (before.rows[0].workspaceId !== workspaceId) {
-          res.status(403).json({ error: 'Row belongs to a different workspace' })
-          return
-        }
-        const prev = before.rows[0]
 
         const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
-        const access = {
-          workspaceId, userId, assistantId: '', assistantKind: 'primary',
-        } as const
         await applyBrainCorrection({
           mutate: async (client) => {
             // The CRM row IS the entity now — a single updateEntity write
@@ -758,7 +744,7 @@ export function createBrainEntryMutator(args: {
                 ...(nextSensitivity !== undefined ? { sensitivity: nextSensitivity } : {}),
                 verifiedByUserId: userId,
                 verifiedAt: new Date(),
-              }, access, client)
+              }, req.access, client)
               if (!updated) throw new BrainMutationTargetMissingError()
             }
 
@@ -770,26 +756,26 @@ export function createBrainEntryMutator(args: {
                   ...(phoneV.value !== undefined ? { phone: phoneV.value } : {}),
                   ...(nextCompanyId !== undefined ? { companyId: nextCompanyId } : {}),
                   ...(nextTags !== undefined ? { tags: nextTags } : {}),
-                }, entityLinks, access, client)
+                }, entityLinks, req.access, client)
                 if (!updated) throw new BrainMutationTargetMissingError()
               } else if (primitiveParam === 'company') {
                 const updated = await updateCompany(userId, rowId, {
                   ...(domainV.value !== undefined ? { domain: domainV.value } : {}),
                   ...(nextTags !== undefined ? { tags: nextTags } : {}),
-                }, access, client)
+                }, req.access, client)
                 if (!updated) throw new BrainMutationTargetMissingError()
               } else {
                 if (nextAmount !== undefined || nextCloseDate !== undefined) {
                   const updated = await updateDeal(userId, rowId, {
                     ...(nextAmount !== undefined ? { amount: nextAmount } : {}),
                     ...(nextCloseDate !== undefined ? { closeDate: nextCloseDate } : {}),
-                  }, entityLinks, access, client)
+                  }, entityLinks, req.access, client)
                   if (!updated) throw new BrainMutationTargetMissingError()
                 }
                 // Stage is LAST and only via setDealStage — the canonical
                 // stage-transition verb (crm.md decision 13; never updateDeal).
                 if (nextStage !== undefined) {
-                  const updated = await setDealStage(userId, rowId, nextStage, access, client)
+                  const updated = await setDealStage(userId, rowId, nextStage, req.access, client)
                   if (!updated) throw new BrainMutationTargetMissingError()
                 }
               }
@@ -957,25 +943,11 @@ export function createBrainEntryMutator(args: {
       }
 
       try {
-        const before = await query<{
-          workspaceId: string
-          sensitivity: 'public' | 'internal' | 'confidential'
-          tags: string[]
-        }>(
-          `SELECT workspace_id AS "workspaceId", sensitivity, tags
-             FROM workspace_files
-            WHERE id = $1 AND valid_to IS NULL`,
-          [rowId],
-        )
-        if (before.rows.length === 0) {
-          res.status(404).json({ error: 'File not found' })
-          return
+        const prev = {
+          workspaceId: admitted.workspaceId,
+          sensitivity: admitted.body.sensitivity as 'public' | 'internal' | 'confidential',
+          tags: Array.isArray(admitted.body.tags) ? admitted.body.tags as string[] : [],
         }
-        if (before.rows[0].workspaceId !== workspaceId) {
-          res.status(403).json({ error: 'File belongs to a different workspace' })
-          return
-        }
-        const prev = before.rows[0]
 
         const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
         const updated = await applyBrainCorrection({
@@ -983,7 +955,7 @@ export function createBrainEntryMutator(args: {
             const result = await updateWorkspaceFileMeta(userId, workspaceId, rowId, {
               ...(nextSensitivity !== undefined ? { sensitivity: nextSensitivity } : {}),
               ...(nextTags !== undefined ? { tags: nextTags } : {}),
-            }, client)
+            }, client, req.access)
             if (result) {
               // An explicit edit acknowledges the row and removes it from the
               // pending queue under the same correction transaction.
@@ -1186,19 +1158,6 @@ export function createBrainEntryMutator(args: {
         // distinguishes 404 (gone) from 403 (cross-workspace). Also carries
         // the live attributes so a priority change merges instead of
         // clobbering sibling keys (attributes is overwrite-on-update).
-        const before = await query<{ workspaceId: string; attributes: unknown }>(
-          `SELECT workspace_id as "workspaceId", attributes FROM tasks WHERE id = $1 AND valid_to IS NULL`,
-          [rowId],
-        )
-        if (before.rows.length === 0) {
-          res.status(404).json({ error: 'Task not found' })
-          return
-        }
-        if (before.rows[0].workspaceId !== workspaceId) {
-          res.status(403).json({ error: 'Task belongs to a different workspace' })
-          return
-        }
-
         if (typeof fields.assigneeId === 'string') {
           const member = await query(
             `SELECT id FROM workspace_members WHERE id = $1 AND workspace_id = $2`,
@@ -1215,7 +1174,7 @@ export function createBrainEntryMutator(args: {
           || descriptionChange !== undefined
           || iconChange !== undefined
         ) {
-          const raw = before.rows[0].attributes
+          const raw = admitted.body.attributes
           const attrs: Record<string, unknown> =
             raw && typeof raw === 'object' && !Array.isArray(raw)
               ? { ...(raw as Record<string, unknown>) }
@@ -1235,7 +1194,9 @@ export function createBrainEntryMutator(args: {
           fields.attributes = attrs
         }
 
-        const updated = await updateTask(userId, rowId, fields)
+        const updated = await updateTask(userId, rowId, fields, undefined, {
+          access: req.access,
+        })
         if (!updated) {
           res.status(404).json({ error: 'Task not found' })
           return
@@ -1266,7 +1227,14 @@ export function createBrainEntryMutator(args: {
         const role = await workspaceStore.getRole(viewer.userId, workspaceId)
         if (!role) return null
       }
-      const row = await getBrainInboxRow(workspaceId, primitive, rowId)
+      if (!viewer) return null
+      const row = await getBrainInboxRow({
+        workspaceId,
+        userId: viewer.userId,
+        primitive,
+        rowId,
+        access: viewer,
+      })
       if (!row) return null
       if (viewer) {
         const sensitivity = row.body.sensitivity
@@ -1289,6 +1257,7 @@ export function createBrainEntryMutator(args: {
     },
 
     async findEditableEntries(workspaceId, queryText, limit = 8, viewer) {
+      if (!viewer) return []
       if (viewer) {
         const role = await workspaceStore.getRole(viewer.userId, workspaceId)
         if (!role) return []
@@ -1297,6 +1266,8 @@ export function createBrainEntryMutator(args: {
       if (!needle) return []
       const { rows } = await listBrainInbox({
         workspaceId,
+        userId: viewer.userId,
+        access: viewer,
         includeExtracted: true,
         limit: 100,
       })
@@ -1365,6 +1336,7 @@ export function createBrainEntryMutator(args: {
           },
           body: request.changes,
           expectedUpdatedAt: request.expectedUpdatedAt,
+          access: request.access,
         },
         response,
       )

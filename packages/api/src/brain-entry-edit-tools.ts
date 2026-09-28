@@ -10,7 +10,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '@use-brian/core'
+import { buildTool, type AccessContext, type Tool, type ToolContext } from '@use-brian/core'
 import {
   EDITABLE_FIELDS_BY_PRIMITIVE,
   type BrainEntryMutator,
@@ -107,6 +107,20 @@ export type BrainEntryEditTools = {
 
 function revision(entry: EditableBrainEntry): string {
   return entry.updatedAt.toISOString()
+}
+
+function viewerAccess(context: ToolContext): AccessContext {
+  return {
+    userId: context.userId,
+    workspaceId: context.workspaceId ?? '',
+    assistantId: context.assistantId,
+    assistantKind: context.assistantKind ?? 'standard',
+    clearance: context.clearance,
+    compartments: context.compartments,
+    mutationCompartments: context.mutationCompartments,
+    projectIds: context.projectIds,
+    visibilityAssistantIds: context.visibilityAssistantIds,
+  }
 }
 
 function compact(value: unknown): string {
@@ -285,7 +299,7 @@ export function createBrainEntryEditTools(args: {
         context.workspaceId,
         input.query,
         input.limit,
-        { userId: context.userId, clearance: context.clearance },
+        viewerAccess(context),
       )
       discoveredTargets.clear()
       discoveryWasAmbiguous = entries.length > 1
@@ -357,7 +371,7 @@ export function createBrainEntryEditTools(args: {
         args.scopedEntry?.workspaceId ?? context.workspaceId ?? '',
         input.primitive,
         input.rowId,
-        { userId: context.userId, clearance: context.clearance },
+        viewerAccess(context),
       )
       if (!entry) {
         return [
@@ -427,6 +441,7 @@ export function createBrainEntryEditTools(args: {
       const result = await args.mutator.mutate({
         userId: context.userId,
         workspaceId: context.workspaceId,
+        access: viewerAccess(context),
         primitive,
         rowId,
         expectedUpdatedAt,

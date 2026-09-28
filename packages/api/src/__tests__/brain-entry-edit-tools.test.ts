@@ -198,6 +198,12 @@ describe('[COMP:api/brain-entry-edit] Brain entry assistant tools', () => {
     expect(port.mutate).toHaveBeenCalledWith({
       userId: 'user-1',
       workspaceId: 'workspace-1',
+      access: expect.objectContaining({
+        userId: 'user-1',
+        workspaceId: 'workspace-1',
+        assistantId: 'assistant-1',
+        assistantKind: 'standard',
+      }),
       primitive: 'memory',
       rowId: entry.id,
       expectedUpdatedAt: entry.updatedAt.toISOString(),

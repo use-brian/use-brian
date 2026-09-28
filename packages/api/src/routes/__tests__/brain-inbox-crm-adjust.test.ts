@@ -42,6 +42,7 @@ vi.mock('../../db/brain-inbox-store.js', async (importOriginal) => {
   const appendBrainVerification = vi.fn().mockResolvedValue(undefined)
   return {
     ...actual,
+    getBrainInboxRow: vi.fn(),
     appendBrainVerification,
     applyBrainCorrection: vi.fn(async <T,>(params: {
       mutate: (client: never) => Promise<T>
@@ -65,7 +66,7 @@ vi.mock('../../db/crm-r2.js', () => ({ appendCrmActivity: vi.fn().mockResolvedVa
 
 import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
-import { appendBrainVerification } from '../../db/brain-inbox-store.js'
+import { appendBrainVerification, getBrainInboxRow } from '../../db/brain-inbox-store.js'
 import { updateWorkspaceFileMeta } from '../../db/workspace-files.js'
 import { updateEntity } from '../../db/entities-store.js'
 import { setDealStage, updateCompany, updateContact, updateDeal } from '../../db/crm.js'
@@ -77,6 +78,7 @@ const mockUpdateContact = vi.mocked(updateContact)
 const mockUpdateCompany = vi.mocked(updateCompany)
 const mockUpdateDeal = vi.mocked(updateDeal)
 const mockSetDealStage = vi.mocked(setDealStage)
+const mockGetBrainInboxRow = vi.mocked(getBrainInboxRow)
 
 const WS = 'e1799b0e-9f64-46d5-8ed8-132a2194943d'
 const ROW = 'f4b30b32-1771-4c90-b5af-b1b42311f543'
@@ -89,35 +91,50 @@ const ACCESS = {
   workspaceId: WS,
   userId: 'u_caller',
   assistantId: '',
-  assistantKind: 'primary',
+  assistantKind: 'primary' as const,
 }
 
 function makeApp(role: string | null = 'member') {
   const workspaceStore = { getRole: vi.fn().mockResolvedValue(role) } as never
   return createTestApp(
     '/api/brain-inbox',
-    brainInboxRoutes({ workspaceStore, entityLinks: ENTITY_LINKS }),
+    brainInboxRoutes({
+      workspaceStore,
+      entityLinks: ENTITY_LINKS,
+      resolveAccess: async () => ACCESS,
+    }),
     { userId: 'u_caller' },
   )
 }
 
-/** Seed the `before` SELECT the CRM adjust branch runs first. */
+function admittedRow(
+  primitive: 'entity' | 'contact' | 'company' | 'deal' | 'workspace_file',
+  attributes: Record<string, unknown> = {},
+  sensitivity: 'public' | 'internal' | 'confidential' = 'confidential',
+) {
+  return {
+    primitive, id: ROW, workspaceId: WS,
+    createdAt: new Date(), updatedAt: new Date(), createdByAssistantId: null,
+    verifiedByUserId: null, verifiedAt: null,
+    body: {
+      display_name: 'Fixture', name: 'Fixture', entity_id: ROW,
+      sensitivity, tags: [], attributes, ...attributes,
+    },
+  } as never
+}
+
+/** Seed the mutation-scoped current row the shared mutator admits first. */
 function seedBefore(attributes: Record<string, unknown> = {}) {
-  mockQuery.mockResolvedValueOnce({
-    rows: [
-      {
-        workspaceId: WS,
-        name: 'Acme',
-        sensitivity: 'internal',
-        entityId: ROW,
-        attributes,
-      },
-    ],
-  } as never)
+  mockGetBrainInboxRow.mockImplementationOnce(async ({ primitive }) =>
+    admittedRow(primitive as 'entity' | 'contact' | 'company' | 'deal' | 'workspace_file', attributes, 'internal'))
 }
 
 describe('[COMP:crm/update] CRM adjust — typed fields (REST boundary)', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetBrainInboxRow.mockImplementation(async ({ primitive }) =>
+      admittedRow(primitive as 'entity' | 'contact' | 'company' | 'deal' | 'workspace_file'))
+  })
 
   it('returns a release-required conflict for files without recording an audit',async()=>{
     mockQuery.mockResolvedValueOnce({rows:[{workspaceId:WS,sensitivity:'confidential',tags:[]}]} as never)

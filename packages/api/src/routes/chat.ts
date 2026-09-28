@@ -5095,7 +5095,11 @@ export function chatRoutes(options: WebChatOptions): Router {
                 assistant.workspaceId,
                 target.primitive,
                 target.rowId,
-                { userId: user.id, clearance: readClearance },
+                {
+                  ...turnScope.access,
+                  userId: user.id,
+                  workspaceId: assistant.workspaceId,
+                },
               )
             : null
           if (scopedEntry) {

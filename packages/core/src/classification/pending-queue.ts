@@ -73,7 +73,7 @@ export interface PendingClassificationStore {
    * only flips the queue row's resolution state for audit.
    */
   resolve(
-    actorUserId: string,
+    ctx: AccessContext,
     id: string,
     resolution: PendingClassificationResolution,
   ): Promise<PendingClassificationRecord | null>

@@ -59,17 +59,22 @@ import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
 import { updateTask } from '../../db/tasks.js'
 import { rejectTask } from '../../db/task-admission-store.js'
-import { deleteBrainInboxTasks } from '../../db/brain-inbox-store.js'
+import { deleteBrainInboxTasks, getBrainInboxRow } from '../../db/brain-inbox-store.js'
 
 const mockQuery = vi.mocked(query)
 const mockUpdate = vi.mocked(updateTask)
 const mockReject = vi.mocked(rejectTask)
 const mockDeleteTasks = vi.mocked(deleteBrainInboxTasks)
+const mockGetBrainInboxRow = vi.mocked(getBrainInboxRow)
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function makeApp(role: string | null = 'member') {
   const router = brainInboxRoutes({
     workspaceStore: { getRole: vi.fn().mockResolvedValue(role) } as any,
+    resolveAccess: async () => ({
+      workspaceId: 'w1', userId: 'u1', assistantId: '', assistantKind: 'primary',
+      clearance: 'confidential', compartments: null, mutationCompartments: null,
+    }),
   })
   return createTestApp('/api/brain-inbox', router, { userId: 'u1' })
 }
@@ -78,7 +83,15 @@ const URL = '/api/brain-inbox/w1/tasks/bulk'
 
 /** Queue the per-row ownership pre-check SELECT result. */
 function queueRow(workspaceId: string, attributes: Record<string, unknown> = {}) {
-  mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: workspaceId, attributes }] } as any)
+  if (workspaceId !== 'w1') {
+    mockGetBrainInboxRow.mockResolvedValueOnce(null)
+    return
+  }
+  mockGetBrainInboxRow.mockResolvedValueOnce({
+    primitive: 'task', id: 'task', workspaceId,
+    createdAt: new Date(), updatedAt: new Date(), createdByAssistantId: null,
+    verifiedByUserId: null, verifiedAt: null, body: { attributes },
+  } as any)
 }
 
 describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
@@ -166,11 +179,11 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
         { id: 'missing', ok: false },
       ],
     })
-    expect(mockDeleteTasks).toHaveBeenCalledWith({
+    expect(mockDeleteTasks).toHaveBeenCalledWith(expect.objectContaining({
       taskIds: ['t1', 'missing'],
       workspaceId: 'w1',
       deletedByUserId: 'u1',
-    })
+    }))
     expect(mockQuery).not.toHaveBeenCalled()
     expect(mockUpdate).not.toHaveBeenCalled()
   })
@@ -211,24 +224,24 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
         { id: 't2', ok: true, tombstoned: true, activeRuleId: 'rule2' },
       ],
     })
-    expect(mockReject).toHaveBeenNthCalledWith(1, {
+    expect(mockReject).toHaveBeenNthCalledWith(1, expect.objectContaining({
       workspaceId: 'w1',
       userId: 'u1',
       taskId: 't1',
       reason,
       createRule: true,
       recordBrainVerification: true,
-    })
-    expect(mockReject).toHaveBeenNthCalledWith(2, {
+    }))
+    expect(mockReject).toHaveBeenNthCalledWith(2, expect.objectContaining({
       workspaceId: 'w1',
       userId: 'u1',
       taskId: 't2',
       reason,
       createRule: true,
       recordBrainVerification: true,
-    })
-    // Only the two ownership probes touch the route-level query seam; the
-    // rejection primitive owns each atomic delete/tombstone/rule transaction.
-    expect(mockQuery).toHaveBeenCalledTimes(2)
+    }))
+    // Scoped row admission uses the store seam; the rejection primitive owns
+    // each atomic delete/tombstone/rule transaction.
+    expect(mockQuery).not.toHaveBeenCalled()
   })
 })

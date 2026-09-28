@@ -8,9 +8,9 @@
  * Every source is wrapped so one failing query degrades to a zero/empty value
  * rather than 500-ing the whole dock — the surface must always render.
  *
- * Aggregate counts use bare `query` (system reads filtered by `workspace_id`);
- * the route gates on `isWorkspaceMember` first, same as the chat-home reads in
- * `home-store.ts`. See docs/architecture/features/home-dock.md.
+ * Brain Review counts use the authenticated current-source projection; other
+ * legacy aggregates remain workspace-gated here. See
+ * docs/architecture/features/home-dock.md.
  *
  * [COMP:api/home-signals]
  */
@@ -75,7 +75,7 @@ export async function assembleHomeSignals(
     drafts,
     hasConnector,
   ] = await Promise.all([
-    safe(() => countBrainInbox(workspaceId).then((r) => r.total), 0),
+    safe(() => countBrainInbox({ workspaceId, userId }).then((r) => r.total), 0),
     safe(() => pendingApprovalSummary(workspaceId), emptyApprovalSummary()),
     safe(() => countAutopilotAttention(workspaceId), 0),
     safe(() => countTaskTriage(workspaceId), 0),

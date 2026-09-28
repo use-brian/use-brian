@@ -34,6 +34,7 @@ vi.mock('../../db/brain-inbox-store.js', async (importOriginal) => {
     }),
     verifyBrainInboxRow: vi.fn(),
     deleteBrainInboxRow: vi.fn(),
+    getBrainInboxRow: vi.fn(),
   }
 })
 
@@ -60,7 +61,7 @@ vi.mock('../../db/sessions.js', () => ({
 }))
 
 import { brainInboxRoutes } from '../brain-inbox.js'
-import { query } from '../../db/client.js'
+import { query, queryWithRLS } from '../../db/client.js'
 import { updateTask } from '../../db/tasks.js'
 import { updateMemory, getMemoryByIdSystem } from '../../db/memories.js'
 import {
@@ -70,10 +71,12 @@ import { rejectTask } from '../../db/task-admission-store.js'
 import { createBrainEditSession } from '../../db/sessions.js'
 import {
   deleteBrainInboxRow,
+  getBrainInboxRow,
   verifyBrainInboxRow,
 } from '../../db/brain-inbox-store.js'
 
 const mockQuery = vi.mocked(query)
+const mockQueryWithRLS = vi.mocked(queryWithRLS)
 const mockUpdateTask = vi.mocked(updateTask)
 const mockUpdateMemory = vi.mocked(updateMemory)
 const mockGetMemoryByIdSystem = vi.mocked(getMemoryByIdSystem)
@@ -81,13 +84,57 @@ const mockAdjustMemoryDecision = vi.mocked(adjustMemoryDecision)
 const mockRejectTask = vi.mocked(rejectTask)
 const mockVerifyBrainInboxRow = vi.mocked(verifyBrainInboxRow)
 const mockDeleteBrainInboxRow = vi.mocked(deleteBrainInboxRow)
+const mockGetBrainInboxRow = vi.mocked(getBrainInboxRow)
 
 const WS = 'e1799b0e-9f64-46d5-8ed8-132a2194943d'
 const ROW = 'f4b30b32-1771-4c90-b5af-b1b42311f543'
+const ACCESS = {
+  workspaceId: WS,
+  userId: 'u_caller',
+  assistantId: '',
+  assistantKind: 'primary' as const,
+  clearance: 'confidential' as const,
+  compartments: null,
+  mutationCompartments: null,
+}
+
+function scopedRow(
+  primitive: Parameters<typeof getBrainInboxRow>[0]['primitive'] = 'memory',
+  body: Record<string, unknown> = {},
+) {
+  return {
+    primitive,
+    id: ROW,
+    workspaceId: WS,
+    createdAt: new Date('2026-08-10T00:00:00Z'),
+    updatedAt: new Date('2026-08-11T00:00:00Z'),
+    createdByAssistantId: 'assistant-1',
+    verifiedByUserId: null,
+    verifiedAt: null,
+    body: {
+      summary: 'Essay',
+      display_name: 'Fixture',
+      name: 'Fixture',
+      sensitivity: 'confidential',
+      attributes: {},
+      ...body,
+    },
+  } as never
+}
+
+function resetScopedMocks() {
+  mockGetBrainInboxRow.mockReset()
+  mockGetBrainInboxRow.mockImplementation(async ({ primitive }) => scopedRow(primitive))
+  mockQueryWithRLS.mockReset()
+  mockQueryWithRLS.mockImplementation(async (_userId, sql, params) => mockQuery(sql, params))
+}
 
 function makeApp(role: string | null = 'member') {
   const workspaceStore = { getRole: vi.fn().mockResolvedValue(role) } as never
-  return createTestApp('/api/brain-inbox', brainInboxRoutes({ workspaceStore }), {
+  return createTestApp('/api/brain-inbox', brainInboxRoutes({
+    workspaceStore,
+    resolveAccess: async () => ACCESS,
+  }), {
     userId: 'u_caller',
   })
 }
@@ -95,14 +142,15 @@ function makeApp(role: string | null = 'member') {
 describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockQuery.mockReset()
+    resetScopedMocks()
     mockVerifyBrainInboxRow.mockResolvedValue({ status: 'verified', stamped: true })
     mockDeleteBrainInboxRow.mockResolvedValue({ status: 'deleted' })
   })
 
   it('GET /:workspaceId/:primitive/:rowId returns a live memory row', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [
-        {
+    mockGetBrainInboxRow.mockResolvedValueOnce(
+      {
           primitive: 'memory',
           id: ROW,
           workspaceId: WS,
@@ -112,9 +160,8 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
           verifiedByUserId: null,
           verifiedAt: null,
           body: { summary: 'sandbox.md', sensitivity: 'confidential' },
-        },
-      ],
-    } as never)
+      } as never,
+    )
 
     const res = await request(makeApp()).get(`/api/brain-inbox/${WS}/memory/${ROW}`)
 
@@ -124,15 +171,16 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     // Both audit timestamps ride the detail payload (drawer Created/Updated rows).
     expect(res.body.createdAt).toBe('2026-06-24T07:41:18.000Z')
     expect(res.body.updatedAt).toBe('2026-06-25T09:02:00.000Z')
-    // The detail SELECT must be workspace-scoped + liveness-filtered.
-    const sql = mockQuery.mock.calls[0][0] as string
-    expect(sql).toMatch(/FROM memories/)
-    expect(sql).toMatch(/valid_to IS NULL/)
-    expect(sql).toMatch(/retracted_at IS NULL/)
+    expect(mockGetBrainInboxRow).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: WS,
+      userId: 'u_caller',
+      primitive: 'memory',
+      rowId: ROW,
+    }))
   })
 
   it('returns 404 when the row is absent (soft-deleted / retracted / wrong workspace)', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+    mockGetBrainInboxRow.mockResolvedValueOnce(null)
     const res = await request(makeApp()).get(`/api/brain-inbox/${WS}/memory/${ROW}`)
     expect(res.status).toBe(404)
   })
@@ -148,23 +196,9 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   })
 
   it('creates a server-bound transient edit session for an editable row', async () => {
-    mockQuery
-      .mockResolvedValueOnce({
-        rows: [{
-          primitive: 'memory',
-          id: ROW,
-          workspaceId: WS,
-          createdAt: new Date('2026-08-10T00:00:00Z'),
-          updatedAt: new Date('2026-08-11T00:00:00Z'),
-          createdByAssistantId: 'assistant-1',
-          verifiedByUserId: null,
-          verifiedAt: null,
-          body: { summary: 'Essay', detail: 'Old detail' },
-        }],
-      } as never)
-      .mockResolvedValueOnce({
-        rows: [{ id: 'assistant-1', name: 'Primary Assistant' }],
-      } as never)
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'assistant-1', name: 'Primary Assistant' }],
+    } as never)
     vi.mocked(createBrainEditSession).mockResolvedValueOnce({
       id: 'session-1',
       assistantId: 'assistant-1',
@@ -198,6 +232,53 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     // makeApp() omits `filesApi`, mirroring an OSS boot without a blob client.
     const res = await request(makeApp()).get(`/api/brain-inbox/${WS}/workspace_file/${ROW}/content`)
     expect(res.status).toBe(501)
+  })
+
+  it('file content uses the full viewer envelope, disables caching, and revalidates the row', async () => {
+    const readBytes = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        file: { name: 'finance.txt', mime: 'text/plain' },
+        bytes: Buffer.from('bounded preview'),
+      },
+    })
+    const app = createTestApp('/api/brain-inbox', brainInboxRoutes({
+      workspaceStore: { getRole: vi.fn().mockResolvedValue('member') } as never,
+      filesApi: { readBytes } as never,
+      resolveAccess: async () => ACCESS,
+    }), { userId: 'u_caller' })
+
+    const res = await request(app)
+      .get(`/api/brain-inbox/${WS}/workspace_file/${ROW}/content`)
+
+    expect(res.status).toBe(200)
+    expect(res.headers['cache-control']).toBe('private, no-store')
+    expect(readBytes).toHaveBeenCalledWith({ ...ACCESS, assistantId: null }, ROW)
+    expect(mockGetBrainInboxRow).toHaveBeenCalledTimes(2)
+  })
+
+  it('file content emits no bytes when access disappears during the read', async () => {
+    mockGetBrainInboxRow
+      .mockResolvedValueOnce(scopedRow('workspace_file'))
+      .mockResolvedValueOnce(null)
+    const readBytes = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        file: { name: 'finance.txt', mime: 'text/plain' },
+        bytes: Buffer.from('must not escape'),
+      },
+    })
+    const app = createTestApp('/api/brain-inbox', brainInboxRoutes({
+      workspaceStore: { getRole: vi.fn().mockResolvedValue('member') } as never,
+      filesApi: { readBytes } as never,
+      resolveAccess: async () => ACCESS,
+    }), { userId: 'u_caller' })
+
+    const res = await request(app)
+      .get(`/api/brain-inbox/${WS}/workspace_file/${ROW}/content`)
+
+    expect(res.status).toBe(404)
+    expect(res.text).not.toContain('must not escape')
   })
 
   it('file adjust requires at least one of sensitivity / tags', async () => {
@@ -237,8 +318,6 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   })
 
   it('task adjust patches the task and returns the new (superseded) id', async () => {
-    // 1) workspace-ownership pre-check, then 2) updateTask returns the new row.
-    mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: WS }] } as never)
     mockUpdateTask.mockResolvedValueOnce({ id: 'new-task-id', title: 'Refreshed' } as never)
 
     const res = await request(makeApp())
@@ -247,11 +326,12 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
 
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ ok: true, id: 'new-task-id' })
-    expect(mockUpdateTask).toHaveBeenCalledWith('u_caller', ROW, {
-      title: 'Refreshed',
-      status: 'in_progress',
-      due: null,
-    })
+    expect(mockUpdateTask).toHaveBeenCalledWith(
+      'u_caller', ROW,
+      { title: 'Refreshed', status: 'in_progress', due: null },
+      undefined,
+      { access: ACCESS },
+    )
   })
 
   it('task adjust rejects an invalid priority', async () => {
@@ -271,8 +351,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   })
 
   it('task adjust rejects an assignee who is not a member of this workspace', async () => {
-    // 1) ownership pre-check ok, 2) workspace_members lookup misses.
-    mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: WS, attributes: {} }] } as never)
+    // The scoped preflight admits the task; the workspace-member lookup misses.
     mockQuery.mockResolvedValueOnce({ rows: [] } as never)
 
     const res = await request(makeApp())
@@ -282,16 +361,14 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     expect(res.status).toBe(400)
     expect(mockUpdateTask).not.toHaveBeenCalled()
     // The member lookup must be scoped to THIS workspace.
-    const [sql, params] = mockQuery.mock.calls[1] as [string, unknown[]]
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toMatch(/FROM workspace_members/)
     expect(params).toEqual(['member-elsewhere', WS])
   })
 
   it('task adjust assigns a member and merges priority into attributes', async () => {
     // Existing attributes must survive the priority merge (overwrite-on-update).
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ workspaceId: WS, attributes: { order: 3 } }],
-    } as never)
+    mockGetBrainInboxRow.mockResolvedValueOnce(scopedRow('task', { attributes: { order: 3 } }))
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 'member-1' }] } as never)
     mockUpdateTask.mockResolvedValueOnce({ id: 'new-task-id' } as never)
 
@@ -301,16 +378,18 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
 
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ ok: true, id: 'new-task-id' })
-    expect(mockUpdateTask).toHaveBeenCalledWith('u_caller', ROW, {
-      assigneeId: 'member-1',
-      attributes: { order: 3, priority: 'high' },
-    })
+    expect(mockUpdateTask).toHaveBeenCalledWith(
+      'u_caller', ROW,
+      { assigneeId: 'member-1', attributes: { order: 3, priority: 'high' } },
+      undefined,
+      { access: ACCESS },
+    )
   })
 
   it('task adjust clears assignee and priority with nulls (no member lookup)', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ workspaceId: WS, attributes: { order: 3, priority: 'high' } }],
-    } as never)
+    mockGetBrainInboxRow.mockResolvedValueOnce(scopedRow('task', {
+      attributes: { order: 3, priority: 'high' },
+    }))
     mockUpdateTask.mockResolvedValueOnce({ id: 'new-task-id' } as never)
 
     const res = await request(makeApp())
@@ -318,19 +397,20 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       .send({ assignee_id: null, priority: null })
 
     expect(res.status).toBe(200)
-    // Only the ownership pre-check hit the DB; null never validates a member.
-    expect(mockQuery).toHaveBeenCalledTimes(1)
-    expect(mockUpdateTask).toHaveBeenCalledWith('u_caller', ROW, {
-      assigneeId: null,
-      attributes: { order: 3 },
-    })
+    expect(mockQuery).not.toHaveBeenCalled()
+    expect(mockUpdateTask).toHaveBeenCalledWith(
+      'u_caller', ROW,
+      { assigneeId: null, attributes: { order: 3 } },
+      undefined,
+      { access: ACCESS },
+    )
   })
 
   it('task adjust merges description into attributes and clears with null', async () => {
     // The page-body key rides the same merge as priority — siblings survive.
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ workspaceId: WS, attributes: { priority: 'high' } }],
-    } as never)
+    mockGetBrainInboxRow.mockResolvedValueOnce(scopedRow('task', {
+      attributes: { priority: 'high' },
+    }))
     mockUpdateTask.mockResolvedValueOnce({ id: 'new-task-id' } as never)
 
     let res = await request(makeApp())
@@ -338,13 +418,16 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       .send({ description: 'Deep context\n\n- [ ] step one' })
 
     expect(res.status).toBe(200)
-    expect(mockUpdateTask).toHaveBeenCalledWith('u_caller', ROW, {
-      attributes: { priority: 'high', description: 'Deep context\n\n- [ ] step one' },
-    })
+    expect(mockUpdateTask).toHaveBeenCalledWith(
+      'u_caller', ROW,
+      { attributes: { priority: 'high', description: 'Deep context\n\n- [ ] step one' } },
+      undefined,
+      { access: ACCESS },
+    )
 
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ workspaceId: WS, attributes: { priority: 'high', description: 'old' } }],
-    } as never)
+    mockGetBrainInboxRow.mockResolvedValueOnce(scopedRow('task', {
+      attributes: { priority: 'high', description: 'old' },
+    }))
     mockUpdateTask.mockResolvedValueOnce({ id: 'newer-task-id' } as never)
 
     res = await request(makeApp())
@@ -352,9 +435,12 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       .send({ description: null })
 
     expect(res.status).toBe(200)
-    expect(mockUpdateTask).toHaveBeenLastCalledWith('u_caller', ROW, {
-      attributes: { priority: 'high' },
-    })
+    expect(mockUpdateTask).toHaveBeenLastCalledWith(
+      'u_caller', ROW,
+      { attributes: { priority: 'high' } },
+      undefined,
+      { access: ACCESS },
+    )
   })
 
   it('task adjust rejects an over-length description', async () => {
@@ -366,9 +452,9 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   })
 
   it('task adjust merges and clears the optional icon without clobbering sibling attributes', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ workspaceId: WS, attributes: { priority: 'high', description: 'Context' } }],
-    } as never)
+    mockGetBrainInboxRow.mockResolvedValueOnce(scopedRow('task', {
+      attributes: { priority: 'high', description: 'Context' },
+    }))
     mockUpdateTask.mockResolvedValueOnce({ id: 'new-task-id' } as never)
 
     let res = await request(makeApp())
@@ -376,13 +462,16 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       .send({ icon: '🚀' })
 
     expect(res.status).toBe(200)
-    expect(mockUpdateTask).toHaveBeenCalledWith('u_caller', ROW, {
-      attributes: { priority: 'high', description: 'Context', icon: '🚀' },
-    })
+    expect(mockUpdateTask).toHaveBeenCalledWith(
+      'u_caller', ROW,
+      { attributes: { priority: 'high', description: 'Context', icon: '🚀' } },
+      undefined,
+      { access: ACCESS },
+    )
 
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ workspaceId: WS, attributes: { priority: 'high', icon: '🚀' } }],
-    } as never)
+    mockGetBrainInboxRow.mockResolvedValueOnce(scopedRow('task', {
+      attributes: { priority: 'high', icon: '🚀' },
+    }))
     mockUpdateTask.mockResolvedValueOnce({ id: 'newer-task-id' } as never)
 
     res = await request(makeApp())
@@ -390,9 +479,12 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       .send({ icon: null })
 
     expect(res.status).toBe(200)
-    expect(mockUpdateTask).toHaveBeenLastCalledWith('u_caller', ROW, {
-      attributes: { priority: 'high' },
-    })
+    expect(mockUpdateTask).toHaveBeenLastCalledWith(
+      'u_caller', ROW,
+      { attributes: { priority: 'high' } },
+      undefined,
+      { access: ACCESS },
+    )
   })
 
   it('task adjust rejects an invalid icon', async () => {
@@ -404,7 +496,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   })
 
   it('task adjust returns 404 when the task is absent', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+    mockGetBrainInboxRow.mockResolvedValueOnce(null)
     const res = await request(makeApp())
       .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
       .send({ title: 'x' })
@@ -412,12 +504,12 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     expect(mockUpdateTask).not.toHaveBeenCalled()
   })
 
-  it('task adjust returns 403 for a task in a different workspace', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: 'other-ws' }] } as never)
+  it('task adjust hides a task in a different workspace behind 404', async () => {
+    mockGetBrainInboxRow.mockResolvedValueOnce(null)
     const res = await request(makeApp())
       .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
       .send({ status: 'done' })
-    expect(res.status).toBe(403)
+    expect(res.status).toBe(404)
     expect(mockUpdateTask).not.toHaveBeenCalled()
   })
 
@@ -433,7 +525,14 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     const workspaceSkillStore = { confirmSkill } as never
     return createTestApp(
       '/api/brain-inbox',
-      brainInboxRoutes({ workspaceStore, workspaceSkillStore }),
+      brainInboxRoutes({
+        workspaceStore,
+        workspaceSkillStore,
+        resolveAccess: async () => ({
+          workspaceId: WS, userId: 'u_caller', assistantId: '', assistantKind: 'primary',
+          clearance: 'confidential', compartments: null, mutationCompartments: null,
+        }),
+      }),
       { userId: 'u_caller' },
     )
   }
@@ -494,12 +593,12 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
 
     expect(res.status).toBe(200)
     expect(confirmSkill).not.toHaveBeenCalled()
-    expect(mockVerifyBrainInboxRow).toHaveBeenCalledWith({
+    expect(mockVerifyBrainInboxRow).toHaveBeenCalledWith(expect.objectContaining({
       primitive: 'memory',
       rowId: ROW,
       workspaceId: WS,
       verifiedByUserId: 'u_caller',
-    })
+    }))
   })
 
   // ── Memory adjust ────────────────────────────────────────────────
@@ -599,7 +698,11 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
 
 describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
   beforeEach(() => {
+    vi.clearAllMocks()
     mockQuery.mockReset()
+    resetScopedMocks()
+    mockVerifyBrainInboxRow.mockResolvedValue({ status: 'verified', stamped: true })
+    mockDeleteBrainInboxRow.mockResolvedValue({ status: 'deleted' })
   })
 
   const SAVED_AT = new Date('2026-07-09T10:00:00Z')
@@ -653,7 +756,9 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     // 3. user name
     mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Hinson' }] } as never)
     // 4. sessions verify
-    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'ses-1111', channel_type: 'telegram' }] } as never)
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'ses-1111', channel_type: 'telegram', owned: true }],
+    } as never)
     // 5. surrounding messages
     mockQuery.mockResolvedValueOnce({
       rows: [{ id: 'm1', role: 'user', content: 'hello', createdAt: SAVED_AT, rn: 1 }],
@@ -671,6 +776,61 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
       workflowId: null,
       createdByUserName: 'Hinson',
     })
+  })
+
+  it('keeps another reader\'s source transcript owner-only while preserving a safe origin label', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          workspace_id: WS,
+          created_at: SAVED_AT,
+          created_by_assistant_id: 'a_1',
+          created_by_user_id: 'u_1',
+          source_episode_id: null,
+          source_session_id: 'ses-private',
+          source: 'user',
+          tags: null,
+        }],
+      } as never)
+      .mockResolvedValueOnce({ rows: [{ name: 'Nova' }] } as never)
+      .mockResolvedValueOnce({ rows: [{ name: 'Creator' }] } as never)
+      .mockResolvedValueOnce({
+        rows: [{ id: 'ses-private', channel_type: 'telegram', owned: false }],
+      } as never)
+
+    const res = await request(makeApp())
+      .get(`/api/brain-inbox/${WS}/memory/${ROW}/explain`)
+
+    expect(res.status).toBe(200)
+    expect(res.headers['cache-control']).toBe('private, no-store')
+    expect(res.body.sourceSessionId).toBeNull()
+    expect(res.body.messages).toEqual([])
+    expect(res.body.origin).toMatchObject({ kind: 'chat', channelType: 'telegram' })
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(3)
+  })
+
+  it('emits no provenance when the row changes during reconstruction', async () => {
+    mockGetBrainInboxRow
+      .mockResolvedValueOnce(scopedRow('memory'))
+      .mockResolvedValueOnce(null)
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        workspace_id: WS,
+        created_at: SAVED_AT,
+        created_by_assistant_id: null,
+        created_by_user_id: null,
+        source_episode_id: null,
+        source_session_id: null,
+        source: 'manual',
+        tags: null,
+      }],
+    } as never)
+
+    const res = await request(makeApp())
+      .get(`/api/brain-inbox/${WS}/memory/${ROW}/explain`)
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'Row not found' })
   })
 
   it('labels consolidation output without a session or episode', async () => {
@@ -745,12 +905,12 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/task/${ROW}`)
 
     expect(res.status).toBe(200)
-    expect(mockDeleteBrainInboxRow).toHaveBeenCalledWith({
+    expect(mockDeleteBrainInboxRow).toHaveBeenCalledWith(expect.objectContaining({
       primitive: 'task',
       rowId: ROW,
       workspaceId: WS,
       deletedByUserId: 'u_caller',
-    })
+    }))
     expect(mockQuery).not.toHaveBeenCalled()
   })
 
@@ -781,14 +941,14 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
       })
 
     expect(res.status).toBe(200)
-    expect(mockRejectTask).toHaveBeenCalledWith({
+    expect(mockRejectTask).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: WS,
       userId: 'u_caller',
       taskId: ROW,
       reason: 'Discussion about an active task is context, not a new commitment',
       createRule: true,
       recordBrainVerification: true,
-    })
+    }))
     expect(res.body).toMatchObject({
       ok: true,
       tombstoned: true,
@@ -811,12 +971,12 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/workspace_file/${ROW}`)
 
     expect(res.status).toBe(200)
-    expect(mockDeleteBrainInboxRow).toHaveBeenCalledWith({
+    expect(mockDeleteBrainInboxRow).toHaveBeenCalledWith(expect.objectContaining({
       primitive: 'workspace_file',
       rowId: ROW,
       workspaceId: WS,
       deletedByUserId: 'u_caller',
-    })
+    }))
   })
 
   it('DELETE of a non-task primitive runs no goal cascade, and a non-file primitive no segment cascade', async () => {
@@ -824,12 +984,12 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/memory/${ROW}`)
 
     expect(res.status).toBe(200)
-    expect(mockDeleteBrainInboxRow).toHaveBeenCalledWith({
+    expect(mockDeleteBrainInboxRow).toHaveBeenCalledWith(expect.objectContaining({
       primitive: 'memory',
       rowId: ROW,
       workspaceId: WS,
       deletedByUserId: 'u_caller',
-    })
+    }))
     for (const call of mockQuery.mock.calls) {
       expect(String(call[0])).not.toMatch(/UPDATE goals/)
       expect(String(call[0])).not.toMatch(/UPDATE file_segments/)
