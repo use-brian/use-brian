@@ -323,8 +323,8 @@ export type SlackSenderResolution = {
  * same gate RLS applies downstream, so honouring the link cannot widen
  * what the sender can read.
  *
- * Any failure falls back to the owner (prior behaviour) and logs; the
- * turn still runs.
+ * An unresolved sender retains the legacy owner session key for ordinary
+ * anonymous chat, but that fallback is NEVER a verified workflow identity.
  * See docs/architecture/channels/channel-user-identity.md → "Slack".
  */
 export async function resolveSlackSender(params: {
@@ -381,7 +381,7 @@ export async function resolveSlackSender(params: {
     }
   }
 
-  return { userId: ownerId, isIdentified: true, viaLink: false }
+  return { userId: ownerId, isIdentified: false, viaLink: false }
 }
 
 export function slackRoutes(options: SlackRouteOptions): Router {
@@ -765,7 +765,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     //     the person actually uses), then the profile-email path.
     //     See docs/architecture/channels/channel-user-identity.md → "Slack".
     let channelUserId = ownerId
-    let isIdentified = true
+    let isIdentified = false
     if (incoming.userId) {
       const sender = await resolveSlackSender({
         slackUserId: incoming.userId,

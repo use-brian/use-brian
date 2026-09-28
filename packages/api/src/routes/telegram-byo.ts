@@ -929,7 +929,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       //    (@use_brian_bot) instead. The owner onboards by linking via a
       //    6-char code from the web UI.
       let channelUserId = ownerId
-      let isIdentified = true
+      let isIdentified = false
       let externalGuest = false
       let privateChatRedirect = false
       // Tracks whether Step 1 found a linked-account row. Cannot be inferred
@@ -937,7 +937,6 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // own Telegram would have found.id === ownerId, which would otherwise
       // cause Step 2 to re-run and (in a private chat) incorrectly redirect
       // the owner to the shared @use_brian_bot.
-      let identityResolutionFailed = false
       let foundLinked = false
       let foundLinkedOwner = false
       const telegramUserId = incoming.userId
@@ -1023,12 +1022,13 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
             }
           }
         } catch (err) {
-          identityResolutionFailed = true
           console.error('[telegram-byo] channel user resolution failed:', err)
-          if (actionData || workflowCallback) return
-          // On resolution failure in a private chat, redirect rather than
-          // leak memory to the owner.
-          if (!incoming.isGroupChat) privateChatRedirect = true
+          // An outage is not an anonymous identity and must never resume a
+          // parked owner action or enter workflow interpretation as the owner.
+          await adapter.sendMessage(incoming.channelId, {
+            text: 'Your identity could not be verified. Please try again shortly.',
+          }).catch(() => {})
+          return
         }
       }
 
@@ -1097,6 +1097,10 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         }
       }
 
+      // Legacy installations without identity services can still chat, but
+      // ownerId is only a storage fallback, never evidence of sender identity.
+      if (!isIdentified) externalGuest = true
+
       const interactionScope: ChannelInteractionScope = {
         channelType: 'telegram', integrationId: boundIntegration.channelId!,
         conversationId: incoming.channelId, senderId: incoming.userId,
@@ -1148,6 +1152,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           externalGuest,
           externalGuestConnectorTools:
             externalGuest
+            && !!options.linkedAccountStore && !!options.channelUserStore
             && explicitAllowlistGrant
             && integrationConfig.allowGuestConnectorTools === true,
           archiveConnectorInstanceId: boundIntegration.connectorInstanceId,

@@ -633,6 +633,8 @@ describe('[COMP:api/telegram-byo-route] recording intake', () => {
           capabilityStore: {} as never,
           apiUrl: 'http://test',
           recordingIngest: recordingIngest as never,
+          linkedAccountStore: { findByProvider: vi.fn(async () => ({ userId: 'owner_1', assistantId: 'assistant_1' })) } as never,
+          channelUserStore: {} as never,
         }),
       )
       await postUpdate(app, {
@@ -1132,6 +1134,8 @@ describe('[COMP:api/telegram-byo-route] media-group buffering', () => {
           capabilityStore: {} as never,
           apiUrl: 'http://test',
           fileStore: fileStore as never,
+          linkedAccountStore: { findByProvider: vi.fn(async () => ({ userId: 'owner_1', assistantId: 'assistant_1' })) } as never,
+          channelUserStore: {} as never,
         }),
       )
 
@@ -2834,5 +2838,39 @@ describe('[COMP:api/telegram-byo-route] durable workflow pipeline handoff', () =
     if (kind === 'typed') expect(pipelineCalls[0]?.incomingMessage?.replyToMessageId).toBe('42')
     else expect(pipelineCalls[0]?.workflowCallback).toEqual({ data, messageId: '42' })
     expect(store.find).not.toHaveBeenCalled() // route does not own workflow interpretation
+  })
+})
+
+
+describe('[COMP:api/telegram-byo-route] unverified workflow authority', () => {
+  it.each(['approve abc123', 'durable answer'])('never verifies owner fallback for %s with absent identity services', async text => {
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore({ requireMention: false }) as never,
+      capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    await postUpdate(app, { update_id: 991, message: {
+      message_id: 991, from: { id: 42 }, chat: { id: -100, type: 'supergroup' }, date: 1, text,
+      ...(text === 'durable answer' ? { reply_to_message: { message_id: 50, text: 'Which?', from: { id: 1, is_bot: true } } } : {}),
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({ userId: 'owner_1', isIdentified: false, externalGuest: true })
+  })
+
+  it.each(['approve abc123', 'durable answer', 'ordinary chat'])('refuses %s when group sender identity lookup fails', async text => {
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore({ requireMention: false }) as never,
+      linkedAccountStore: { findByProvider: vi.fn(async () => { throw new Error('identity offline') }) } as never,
+      channelUserStore: {} as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    await postUpdate(app, { update_id: 992, message: {
+      message_id: 992, from: { id: 42 }, chat: { id: -100, type: 'supergroup' }, date: 1, text,
+      ...(text === 'durable answer' ? { reply_to_message: { message_id: 50, text: 'Which?', from: { id: 1, is_bot: true } } } : {}),
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(0)
+    expect(adapterSendCalls.at(-1)?.text).toContain('identity could not be verified')
   })
 })
