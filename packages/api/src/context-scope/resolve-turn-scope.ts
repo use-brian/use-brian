@@ -18,6 +18,7 @@ import {
   type TurnScope,
   type ScopeGrant,
   type AccessCeiling,
+  type ResourceScope,
   type ScopeSource,
 } from '@use-brian/core'
 import {
@@ -67,6 +68,27 @@ export class ContextNotAvailableError extends Error {
   ) {
     super(`Requested ${axis} context is not available (${reason}).`)
     this.name = 'ContextNotAvailableError'
+  }
+}
+
+/** Canonical envelope for newly persisted human/session input. */
+export function sessionMessageInputScope(params: {
+  scope: ResolvedTurnScope
+  workspaceId: string | null | undefined
+  userId: string
+  assistantId: string
+  sharedAudience?: boolean
+}): ResourceScope | undefined {
+  if (!params.workspaceId) return undefined
+  return {
+    workspaceId: params.workspaceId,
+    userId: params.sharedAudience ? null : params.userId,
+    assistantId: params.assistantId,
+    // Conversation text has no user-controlled sensitivity selector. Use the
+    // resolved execution ceiling as a conservative server-owned floor.
+    sensitivity: params.scope.access.clearance ?? 'internal',
+    compartments: [...(params.scope.writeCompartments ?? [])],
+    projectIds: [...(params.scope.writeProjectIds ?? [])],
   }
 }
 

@@ -79,6 +79,7 @@ import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
   resolveTurnScopeSystem,
+  sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
 import {
   createSessionAuthorityLease,
@@ -106,6 +107,7 @@ import {
   findOrCreateSession,
   findSessionByChannel,
   addSessionMessage,
+  readSessionMessageScopeSource,
   getSessionMessages,
   truncateMessagesFrom,
 } from '../db/sessions.js'
@@ -724,6 +726,16 @@ export async function executePublicTurn(
     compartments: turnScope.writeCompartments,
     projectIds: turnScope.writeProjectIds,
   })
+  const inputMessageScope = sessionMessageInputScope({
+    scope: turnScope,
+    workspaceId: assistant.workspaceId,
+    userId: user.id,
+    assistantId: assistant.id,
+  })
+  const currentTurnDerivation = () => ({
+    producer: 'turn:public-api',
+    sources: scopeAccumulator.evidence.sources ?? [],
+  })
   const authority = createSessionAuthorityLease({
     starting: pinAccessCeiling(turnScope.access),
     session,
@@ -845,7 +857,13 @@ export async function executePublicTurn(
     sessionId: session.id,
     role: 'user',
     content: userContent,
+    scope: inputMessageScope,
   })
+  const storedUserSource = await readSessionMessageScopeSource(
+    assistant.workspaceId,
+    storedUserMsg.id,
+  )
+  if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
 
   // ── 8. Tools — mirror web chat ───────────────────────────
   // Same shape as `chat.ts`: capability filter → MCP injection (which
@@ -1258,6 +1276,7 @@ export async function executePublicTurn(
   const dbMessages = await getSessionMessages(session.id, {
     fromSequence: session.compactBoundarySequence,
   })
+  noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
   await assertDeliveryAudience()
   const compactionResult = await runProactiveCompaction({
     sessionMessages: dbMessages,
@@ -1467,6 +1486,7 @@ export async function executePublicTurn(
             sessionId: session.id,
             role: 'assistant',
             content: event.response.content,
+            derivation: currentTurnDerivation(),
           })
           assistantMessageId = stored.id
         }

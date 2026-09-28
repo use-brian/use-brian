@@ -90,6 +90,9 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
   // workspace-channels migration (C2). See docs/architecture/channels/adapter-pattern.md.
   const channelType = params.channelType ?? 'web'
   const channelId = params.channelId ?? 'default'
+  const messageDerivation = params.scopeEvidence?.sources?.length
+    ? { producer: 'delivery:relay', sources: params.scopeEvidence.sources }
+    : undefined
 
   if (params.scopeEvidence !== undefined) {
     if (!params.workspaceId) {
@@ -132,6 +135,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
       sessionId: notifSession.id,
       role: 'assistant',
       content: [{ type: 'text', text }],
+      derivation: messageDerivation,
     })
   }
 
@@ -141,6 +145,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
       sessionId: params.sessionId,
       role: 'assistant',
       content: [{ type: 'text', text }],
+      derivation: messageDerivation,
     })
   }
 
@@ -259,6 +264,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
         sessionId: notifSession.id,
         role: 'assistant',
         content: [{ type: 'text', text }],
+        derivation: messageDerivation,
       })
       salvaged = true
     } catch (fallbackErr) {

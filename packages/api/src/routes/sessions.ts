@@ -14,6 +14,7 @@ import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
   resolveTurnScopeSystem,
+  sessionMessageInputScope,
   type TurnScopeAssistant,
 } from '../context-scope/resolve-turn-scope.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
@@ -1151,12 +1152,40 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
+      const assistantResult = await query<TurnScopeAssistant>(
+        `SELECT id, workspace_id AS "workspaceId", kind, clearance, compartments,
+                default_compartments AS "defaultCompartments",
+                team_scope_mode AS "teamScopeMode",
+                default_workspace_group_id AS "defaultWorkspaceGroupId",
+                project_scope_mode AS "projectScopeMode",
+                default_project_id AS "defaultProjectId"
+           FROM assistants WHERE id = $1`,
+        [session.assistantId],
+      )
+      const scopedAssistant = assistantResult.rows[0]
+      const workspaceId = scopedAssistant?.workspaceId ?? null
+      const messageScope = scopedAssistant && workspaceId
+        ? sessionMessageInputScope({
+            scope: await resolveTurnScopeSystem({
+              userId: user.id,
+              assistant: scopedAssistant,
+              workspaceId,
+              session,
+            }),
+            workspaceId,
+            userId: user.id,
+            assistantId: scopedAssistant.id,
+            sharedAudience: true,
+          })
+        : undefined
+
       const stored = await addSessionMessage({
         sessionId: session.id,
         role: 'user',
         content: [{ type: 'text', text }],
         replyToText,
         senderUserId: user.id,
+        scope: messageScope,
       })
       publishSessionEvent({
         kind: 'user_message_saved',
@@ -1173,12 +1202,6 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // hook below and room-mention recording (docs/plans/room-human-mentions.md
       // T-H1/T-H2), which the onRoomPost lookup used to compute for itself
       // alone.
-      const wsRow = await query<{ workspaceId: string | null }>(
-        `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
-        [session.assistantId],
-      ).catch(() => null)
-      const workspaceId = wsRow?.rows[0]?.workspaceId ?? null
-
       // Room human @mentions — a silent post still writes an Inbox row for
       // any mentioned teammate (D-H1). No turn runs on this path (D-H2);
       // this only persists a durable notification. A recording failure must

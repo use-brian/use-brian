@@ -347,7 +347,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
            -- explanation when they provided one (web feedback modal, or the
            -- normalised emoji label from the reaction handler).
            SELECT ae.id,
-                  NULL::text AS "sourceKind",
+                  'feedback_event'::text AS "sourceKind",
                   'negative_feedback'::text AS action,
                   'memory'::text AS primitive,
                   mre.memory_id AS "rowId",
@@ -371,7 +371,9 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       )
       const events: Awaited<ReturnType<MemoryStore['listForReflection']>> = []
       for (const row of result.rows) {
-        const verified = row.sourceKind && await readReflectionReceipt(workspaceId,row.sourceKind,row.id)
+        const verified = row.sourceKind && await readReflectionReceipt(
+          workspaceId,row.sourceKind,row.id,row.rowId,
+        )
         // Missing/legacy evidence is deliberately left unproven. The phase
         // counts and withholds it before any model call.
         events.push(verified || row)

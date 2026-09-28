@@ -23,7 +23,8 @@ vi.mock('../../db/users.js', () => ({
   findAssistantById: mocks.findAssistantById,
 }))
 
-vi.mock('../resolve-turn-scope.js', () => ({
+vi.mock('../resolve-turn-scope.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../resolve-turn-scope.js')>()),
   formatActiveWorkspaceContext: vi.fn(() => ''),
   resolveLiveAccessCeilingSystem: mocks.resolveLiveAccessCeilingSystem,
   resolveTurnScopeSystem: mocks.resolveTurnScopeSystem,

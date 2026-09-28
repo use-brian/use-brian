@@ -8,6 +8,8 @@ import { createDbMemoryStore } from '../memory-store.js'
 import { createMemoryRetractionStore } from '../retraction-store.js'
 import { createSoftDeleteStore } from '../soft-delete-store.js'
 import { readReflectionReceipt } from '../reflection-evidence.js'
+import { addSessionMessage, readSessionMessageScopeSource } from '../sessions.js'
+import { recordFeedback } from '../../feedback/record.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
@@ -46,6 +48,32 @@ describe('[COMP:api/reflection-evidence] verification receipt provenance',()=>{
       expect.objectContaining({summary:'Finance pattern',sensitivity:'confidential',compartments:['finance'],user_id:f.userId,assistant_id:f.assistantId}),
     ]))
     expect((await pool.query('SELECT count(*)::int count FROM scope_derivation_sources WHERE workspace_id=$1',[f.workspaceId])).rows[0].count).toBe(6)
+  })
+  it('retains complete whole-turn feedback lineage and holds it on message narrowing',async()=>{
+    const f=await fixture(),sessionId=randomUUID()
+    await pool.query("INSERT INTO sessions(id,assistant_id,user_id,workspace_id,channel_type,channel_id) VALUES($1,$2,$3,$4,'web',$1::uuid::text)",[sessionId,f.assistantId,f.userId,f.workspaceId])
+    const input=await addSessionMessage({sessionId,role:'user',content:[{type:'text',text:'Use the product forecast'}],scope:{
+      workspaceId:f.workspaceId,userId:f.userId,assistantId:f.assistantId,
+      sensitivity:'confidential',compartments:['product'],projectIds:[],
+    }})
+    const inputSource=(await readSessionMessageScopeSource(f.workspaceId,input.id))!
+    const answer=await addSessionMessage({sessionId,role:'assistant',content:[{type:'text',text:'Forecast answer'}],
+      derivation:{producer:'fixture:turn',sources:[inputSource]}})
+    await pool.query("INSERT INTO memory_recall_events(memory_id,session_id,assistant_message_id,workspace_id,user_id,recall_kind) VALUES($1,$2,$3,$4,$5,'index_inject')",
+      [f.memory.id,sessionId,answer.id,f.workspaceId,f.userId])
+    const feedback=await recordFeedback({userId:f.userId,messageId:answer.id,sessionId,kind:'negative',details:':down:',source:'web'})
+    const event=(await readReflectionReceipt(f.workspaceId,'feedback_event',feedback.analyticsId!,f.memory.id))!
+    expect(event.scopeSources).toEqual(expect.arrayContaining([
+      expect.objectContaining({resourceKind:'feedback_event',compartments:['product']}),
+      expect.objectContaining({resourceKind:'memory',compartments:['product']}),
+    ]))
+    const learned=await f.derive(event.scopeSources!)
+    await pool.query("UPDATE session_messages SET content='[{\"type\":\"text\",\"text\":\"Changed input\"}]'::jsonb WHERE id=$1",[input.id])
+    expect((await pool.query('SELECT scope_held FROM session_messages WHERE id=$1',[answer.id])).rows[0].scope_held).toBe(true)
+    expect((await pool.query('SELECT scope_held FROM analytics_events WHERE id=$1',[feedback.analyticsId])).rows[0].scope_held).toBe(true)
+    expect((await pool.query('SELECT scope_held FROM memories WHERE id=$1',[learned.id])).rows[0].scope_held).toBe(true)
+    expect(await readReflectionReceipt(f.workspaceId,'feedback_event',feedback.analyticsId!,f.memory.id)).toBeNull()
+    await expect(f.derive(event.scopeSources!)).rejects.toThrow('scope_source_changed')
   })
   it('does not combine small departments to reach the model threshold',async()=>{
     const f=await fixture(),other=await createMemory({workspaceId:f.workspaceId,userId:f.userId,assistantId:f.assistantId,createdByUserId:f.userId,summary:'Other source',sensitivity:'confidential',compartments:['finance']})
@@ -143,7 +171,7 @@ describe('[COMP:api/reflection-evidence] verification receipt provenance',()=>{
       await client.query("INSERT INTO memory_verifications(id,workspace_id,memory_id,verified_by,action,reason) VALUES($1,$2,$3,$4,'edit_summary','Unclassified legacy correction')",[legacy,f.workspaceId,f.memory.id,f.userId])
       await client.query("INSERT INTO memory_verifications(id,workspace_id,memory_id,verified_by,action,source_scope) VALUES($1,$2,$3,$4,'edit_summary',$5)",[malformed,f.workspaceId,f.memory.id,f.userId,JSON.stringify({...before,sensitivity:undefined})])
       await client.query('ALTER TABLE memory_verifications ENABLE TRIGGER memory_verification_scope')
-      await client.query("DELETE FROM scope_derivation_sources WHERE source_kind='correction_audit'")
+      await client.query("DELETE FROM scope_derivation_sources WHERE source_kind IN('correction_audit','session_message','feedback_event')")
       await client.query(migration)
       expect((await client.query('SELECT source_scope FROM memory_verifications WHERE id=$1',[id])).rows[0].source_scope).toEqual(before)
       expect((await client.query("SELECT read_scope_source($1,'memory_verification',$2) AS source",[f.workspaceId,id])).rows[0].source).toMatchObject({compartments:['product'],sensitivity:'confidential'})
@@ -223,6 +251,7 @@ describe('[COMP:api/reflection-evidence] verification receipt provenance',()=>{
     try {
       await client.query('BEGIN')
       await client.query('DROP TRIGGER a_correction_scope ON correction_audit; DROP TRIGGER canonical_scope_version ON correction_audit; DROP POLICY correction_scope_read ON correction_audit; DROP FUNCTION capture_correction_scope(); ALTER TABLE correction_audit DROP COLUMN source_scope,DROP COLUMN scope_version,DROP COLUMN scope_held')
+      await client.query("DELETE FROM scope_derivation_sources WHERE source_kind IN('session_message','feedback_event')")
       await client.query("INSERT INTO correction_audit(id,workspace_id,primitive,row_id,action,reason) VALUES($1,$2,'memory',$3,'retract','Legacy reason')",[id,f.workspaceId,f.memory.id])
       await client.query(migration)
       expect((await client.query("SELECT read_scope_source($1,'correction_audit',$2) AS source",[f.workspaceId,id])).rows[0].source).toBeNull()

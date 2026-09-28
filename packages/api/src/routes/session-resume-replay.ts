@@ -33,6 +33,7 @@ import {
   ensureToolResultPairing,
   SensitivityAccumulator,
   ContextScopeAccumulator,
+  boundScopeSource,
   INTERACTIVE_CHANNEL_TYPES,
   accessCeilingContains,
   intersectAccessCeilings,
@@ -58,8 +59,10 @@ import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
 import { MODEL_MAP, chatTierBudget, tierForModel } from '../model-resolution.js'
 import {
   formatActiveWorkspaceContext,
+  noteAutomaticScopeEvidence,
   resolveLiveAccessCeilingSystem,
   resolveTurnScopeSystem,
+  sessionMessageInputScope,
   type ResolvedTurnScope,
 } from '../context-scope/resolve-turn-scope.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
@@ -471,6 +474,8 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
 
       // ── 2. Rebuild the conversation, append the outcome note ──
       const dbMessages = await getSessionMessages(sessionId)
+      const scopeAccumulator = context.scopeAccumulator as ContextScopeAccumulator
+      noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
       await assertCurrentAuthority()
       const history = ensureToolResultPairing(toStampedMessages(dbMessages, 'UTC') as Message[])
       const messages: Message[] = [
@@ -478,11 +483,24 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         { role: 'user', content: [{ type: 'text', text: outcomeNote }] },
       ]
 
-      await executeWithCurrentAuthority(() => addSessionMessage({
+      const outcomeSources = scopeAccumulator.evidence.sources ?? []
+      const storedOutcome = await executeWithCurrentAuthority(() => addSessionMessage({
         sessionId,
         role: 'system',
         content: [{ type: 'text', text: outcomeNote }],
+        ...(outcomeSources.length > 0
+          ? { derivation: { producer: 'turn:resume-outcome', sources: outcomeSources } }
+          : {
+              scope: sessionMessageInputScope({
+                scope: turnScope,
+                workspaceId: assistant.workspaceId,
+                userId: session.userId,
+                assistantId: assistant.id,
+              }),
+            }),
       }))
+      const outcomeSource = boundScopeSource(storedOutcome)
+      if (outcomeSource) scopeAccumulator.noteSource(outcomeSource)
 
       // ── 3. Drive the continuation turn ──
       const baseSystemPrompt = assistant.systemPrompt
@@ -522,10 +540,14 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         // accepted or persisted after authority changes.
         await assertCurrentAuthority()
         if (event.type === 'turn_complete') {
+          const outputSources = scopeAccumulator.evidence.sources ?? []
           await executeWithCurrentAuthority(() => addSessionMessage({
             sessionId,
             role: 'assistant',
             content: event.response.content,
+            ...(outputSources.length > 0
+              ? { derivation: { producer: 'turn:resume-output', sources: outputSources } }
+              : {}),
           }))
           if (deps.usageStore && event.totalUsage) {
             const usage = event.totalUsage

@@ -14,7 +14,7 @@ type CanonicalEvidenceRow = ResourceScope & {
 
 /** Must run inside the SAME transaction as the canonical writer. */
 export async function validateDerivedMemoryInputs(
-  client: pg.PoolClient,
+  client: Pick<pg.PoolClient, 'query'>,
   evidence: DerivedWriteEvidence,
 ): Promise<ResourceScope> {
   const floor = deriveResourceScope(evidence)
@@ -36,8 +36,8 @@ export async function validateDerivedMemoryInputs(
 }
 
 /** The database validates the output reference and envelope again. */
-export async function recordMemoryDerivation(
-  client: pg.PoolClient,
+export async function recordDerivedResource(
+  client: Pick<pg.PoolClient, 'query'>,
   evidence: DerivedWriteEvidence,
   output: ScopeSource,
 ): Promise<void> {
@@ -49,9 +49,9 @@ export async function recordMemoryDerivation(
   const { rows } = await client.query<{ id: string }>(
     `INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,
        user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
-     SELECT $1,'memory',$2,$3,$4,$5,$6,$7,$8,$9,revision FROM workspace_access_policies WHERE workspace_id = $1
+     SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,revision FROM workspace_access_policies WHERE workspace_id = $1
      RETURNING id`,
-    [output.workspaceId, output.resourceId, output.version, evidence.producer,
+    [output.workspaceId, output.resourceKind, output.resourceId, output.version, evidence.producer,
       output.userId, output.assistantId, output.sensitivity, output.compartments, output.projectIds],
   )
   const unique = new Map(evidence.sources.map((source) => [`${source.resourceKind}:${source.resourceId}`, source]))
@@ -63,3 +63,6 @@ export async function recordMemoryDerivation(
     )
   }
 }
+
+/** Backward-compatible memory writer name used by canonical memory stores. */
+export const recordMemoryDerivation = recordDerivedResource

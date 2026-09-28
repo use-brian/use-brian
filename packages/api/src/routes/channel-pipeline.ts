@@ -84,7 +84,7 @@ import {
   publishTurnCompleted,
 } from '../session-live-publisher.js'
 import {
-  findOrCreateSession, addSessionMessage, setSessionMessageChannelId,
+  findOrCreateSession, addSessionMessage, readSessionMessageScopeSource, setSessionMessageChannelId,
   getSessionMessages, updateSessionStatus, getPreferredChannel,
   getGroupChatContext, buildGroupChatContextPrompt, getSessionTopicLabels,
   markDowngradeNoticeSent, clearDowngradeNotice,
@@ -107,6 +107,7 @@ import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
   resolveTurnScopeSystem,
+  sessionMessageInputScope,
   type ResolvedTurnScope,
   type ResolveTurnScopeInput,
 } from '../context-scope/resolve-turn-scope.js'
@@ -1087,6 +1088,17 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
   })
+  const inputMessageScope = sessionMessageInputScope({
+    scope: dataTurnScope,
+    workspaceId: assistant.workspaceId,
+    userId,
+    assistantId: assistant.id,
+    sharedAudience: isGroupChat,
+  })
+  const currentTurnDerivation = () => ({
+    producer: `turn:${channelType}`,
+    sources: scopeAccumulator.evidence.sources ?? [],
+  })
   const authority = createSessionAuthorityLease({
     starting: pinAccessCeiling(dataTurnScope.access),
     session,
@@ -1429,6 +1441,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       // Per-message author for collaborative draft sessions. Other
       // channels and personal sessions pass null/undefined.
       senderUserId: senderUserId ?? null,
+      scope: inputMessageScope,
     }, client)
   const userMessageRow = params.archiveIncoming && !params.archiveInboundAlreadyPersisted
     ? await persistInboundChatArchive({
@@ -1448,6 +1461,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         message: params.archiveIncoming,
       }, persistUserMessage)
     : await persistUserMessage()
+  const storedUserSource = await readSessionMessageScopeSource(
+    assistant.workspaceId,
+    userMessageRow.id,
+  )
+  if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
 
   // Surface the persisted user-message row to streaming channels so
   // the client can attach feedback / edit / retry actions to it, and
@@ -1507,6 +1525,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const dbMessages = await getSessionMessages(session.id, {
     fromSequence: session.compactBoundarySequence,
   })
+  noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
   const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
   // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
@@ -2200,6 +2219,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         // the turn that produced this assistant message.
         senderUserId: senderUserId ?? null,
         attachments: turnIdx === lastContentIdx && attachments?.length ? attachments : undefined,
+        derivation: currentTurnDerivation(),
       })
       lastFlushedAssistantRowId = assistantRow.id
       // Streaming channels surface the persisted row so the client
@@ -2216,7 +2236,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       const missing = synthesizeMissingToolResults(turn.content, turn.toolResults, reason)
       const allResults = [...turn.toolResults, ...missing]
       if (allResults.length > 0) {
-        await addSessionMessage({ sessionId: session.id, role: 'user', content: allResults })
+        await addSessionMessage({
+          sessionId: session.id,
+          role: 'user',
+          content: allResults,
+          derivation: currentTurnDerivation(),
+        })
       }
     }
   }

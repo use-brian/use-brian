@@ -61,6 +61,7 @@ import {
   DOC_MUTATION_TOOLS,
   unionCompartments,
   intersectAccessCeilings, accessCeilingContains,
+  boundScopeSource,
 } from '@use-brian/core'
 import type { SavedViewStore, EngineHooks } from '@use-brian/core'
 import type { ResearchSynthesizeFn } from '../synthesis/research-synthesizer.js'
@@ -94,6 +95,7 @@ import {
   noteAutomaticScopeEvidence,
   resolveTurnScopeSystem,
   resolveLiveAccessCeilingSystem,
+  sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -1679,17 +1681,31 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // consult with no replay.
     const userContent: Message['content'] = [{ type: 'text', text: params.question }]
     await assertCurrentAuthority()
+    const inheritedQuestionSources = scopeAccumulator.evidence.sources ?? []
     const userMessageRow = await addSessionMessage({
       sessionId: session.id,
       role: 'user',
       content: userContent,
+      ...(inheritedQuestionSources.length > 0
+        ? { derivation: { producer: 'turn:delegated-input', sources: inheritedQuestionSources } }
+        : {
+            scope: sessionMessageInputScope({
+              scope: turnScope,
+              workspaceId: calleeAssistant.workspaceId,
+              userId: session.userId,
+              assistantId: calleeAssistant.id,
+            }),
+          }),
     })
+    const userMessageSource = boundScopeSource(userMessageRow)
+    if (userMessageSource) scopeAccumulator.noteSource(userMessageSource)
 
     const messages: Message[] = []
     if (params.sessionKey) {
       const priorRows = await getSessionMessages(session.id, {
         fromSequence: session.compactBoundarySequence,
       })
+      noteAutomaticScopeEvidence(scopeAccumulator, priorRows)
       const compacted = await executeWithCurrentAuthority(() => runProactiveCompaction({
         sessionMessages: priorRows,
         timezone: calleeActor.timezone || 'UTC',
@@ -2279,10 +2295,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             )
           }
         } else if (event.type === 'turn_complete') {
+          const outputSources = scopeAccumulator.evidence.sources ?? []
           await addSessionMessage({
             sessionId: session.id,
             role: 'assistant',
             content: event.response.content,
+            ...(outputSources.length > 0
+              ? { derivation: { producer: 'turn:delegated-output', sources: outputSources } }
+              : {}),
           })
           // Record the callee turn's LLM cost. Without this, every A2A /
           // workflow `assistant_call` / scheduled-job turn ran the model but

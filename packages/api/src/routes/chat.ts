@@ -12,7 +12,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query } from '../db/client.js'
@@ -100,6 +100,7 @@ import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
   resolveTurnScopeSystem,
+  sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
@@ -3052,6 +3053,17 @@ export function chatRoutes(options: WebChatOptions): Router {
         compartments: turnScope.writeCompartments,
         projectIds: turnScope.writeProjectIds,
       })
+      const inputMessageScope = sessionMessageInputScope({
+        scope: turnScope,
+        workspaceId: assistant.workspaceId,
+        userId: user.id,
+        assistantId: assistant.id,
+        sharedAudience: isRoomSession,
+      })
+      const currentTurnDerivation = () => ({
+        producer: 'turn:web',
+        sources: scopeAccumulator.evidence.sources ?? [],
+      })
       const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
       const assertDeliveryAudience = async (): Promise<void> => {
         await authority.assertCurrent()
@@ -3393,6 +3405,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             content: [{ type: 'text', text: message }],
             replyToText: replyTo?.text ?? null,
             senderUserId: user.id,
+            scope: inputMessageScope,
           })
           sendEvent('user_message_saved', { id: stored.id, senderUserId: user.id })
           publishSessionEvent({
@@ -3984,7 +3997,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         // without it "the user" is several people and the reply cannot tell
         // them apart.
         senderUserId: isMultiParticipantSession(session) ? user.id : null,
+        scope: inputMessageScope,
       })
+      const storedUserSource = await readSessionMessageScopeSource(
+        assistant.workspaceId,
+        storedUserMsg.id,
+      )
+      if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
       if (!prePersistedUserMsg) {
         sendEvent('user_message_saved', {
           id: storedUserMsg.id,
@@ -4145,6 +4164,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const dbMessages = await getSessionMessages(session.id, {
         fromSequence: session.compactBoundarySequence,
       })
+      noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
       const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
       // Speaker attribution for a workspace-shared chat (chat-app.md →
@@ -6784,6 +6804,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               turnIdx === lastNonEmptyIdx && outboundAttachments.length > 0
                 ? outboundAttachments
                 : undefined,
+            derivation: currentTurnDerivation(),
           }))
           await assertDeliveryAudience()
           lastAssistantMessageId = storedAssistantMsg.id
@@ -6834,6 +6855,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               sessionId: session.id,
               role: 'user',
               content: allResults,
+              derivation: currentTurnDerivation(),
             }))
           }
         }
@@ -7595,7 +7617,13 @@ export function chatRoutes(options: WebChatOptions): Router {
                   ...(isMultiParticipantSession(session)
                     ? { senderUserId: user.id }
                     : {}),
+                  scope: inputMessageScope,
                 }))
+                const queuedSource = await readSessionMessageScopeSource(
+                  assistant.workspaceId,
+                  storedQueued.id,
+                )
+                if (queuedSource) scopeAccumulator.noteSource(queuedSource)
                 await assertDeliveryAudience()
                 // The client finalises its streaming bubble on this event,
                 // promotes the queued chip to a real user bubble, and starts a
@@ -7965,6 +7993,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   role: 'assistant',
                   content: [{ type: 'text', text }],
                   senderAssistantId: assistant.id,
+                  derivation: currentTurnDerivation(),
                 }))
                 await assertDeliveryAudience()
                 closingPersisted = true
@@ -8233,6 +8262,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 // @CFO turn and then inherited "I'd need QuickBooks" as its
                 // own position. See db/sessions.ts → `assistantVoices`.
                 senderAssistantId: assistant.id,
+                derivation: currentTurnDerivation(),
               }))
             } else {
               await assertDeliveryAudience()
@@ -8297,6 +8327,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               content: [{ type: 'text', text: recovered.text }],
               // Same attribution contract as the empty-turn synthesis above.
               senderAssistantId: assistant.id,
+              derivation: currentTurnDerivation(),
             }))
             await recordOverheadUsage({
               usageStore: options.usageStore,

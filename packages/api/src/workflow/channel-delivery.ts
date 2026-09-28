@@ -122,6 +122,9 @@ export function createWorkflowChannelDelivery(
     // Keep every option in the portable fallback, including on non-interactive channels.
     const deliverable = question ? formatAssistantQuestion(question) : sanitizeDeliveryText(text)
     if (!deliverable) return { status: 'skipped', channelType, reason: 'empty_text' }
+    const messageDerivation = scopeEvidence?.sources?.length
+      ? { producer: 'delivery:workflow', sources: scopeEvidence.sources }
+      : undefined
 
     // Web is not a delivery target — drop it (see the file header). The web UI
     // is a pull surface; persisting here would re-introduce the scheduled-job
@@ -219,6 +222,7 @@ export function createWorkflowChannelDelivery(
         sessionId: session.id,
         role: 'assistant',
         content: [{ type: 'text', text: deliverable }],
+        derivation: messageDerivation,
       })
       const messageId = await createWhatsAppCloudAdapter({
         accessToken: credentials.access_token,
@@ -248,6 +252,7 @@ export function createWorkflowChannelDelivery(
       sessionId: session.id,
       role: 'assistant',
       content: [{ type: 'text', text: deliverable }],
+      derivation: messageDerivation,
     })
 
     if (channelType === 'telegram') {
