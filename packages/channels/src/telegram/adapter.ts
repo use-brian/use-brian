@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 import type { ChannelAdapter, IncomingFile, IncomingMessage, OutgoingAction, OutgoingMessage } from '../types.js'
 import { chunkText } from '../chunking.js'
 import { createTelegramApi, isTelegramThreadNotFoundError, type TelegramApi } from './api.js'
@@ -85,13 +86,13 @@ type InlineKeyboardButton =
 function buildInlineKeyboard(actions: OutgoingAction[]): InlineKeyboardButton[][] {
   const rows: InlineKeyboardButton[][] = []
   let callbackRow: InlineKeyboardButton[] | null = null
-  for (const a of actions) {
+  for (const a of actions.slice(0, 100)) {
     if (a.kind === 'web_app') {
       callbackRow = null
       rows.push([{ text: a.label, web_app: { url: a.url } }])
     } else {
       const btn: InlineKeyboardButton = { text: a.label, callback_data: a.data }
-      if (!callbackRow) {
+      if (!callbackRow || callbackRow.length >= 8) {
         callbackRow = [btn]
         rows.push(callbackRow)
       } else {
@@ -944,6 +945,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     },
 
     async sendMessage(channelId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<string> {
+      response = denormalizeActions(response)
       const { chatId, messageThreadId, discussionRootId } = parseTopicChannelId(channelId)
       const topicId = outboundThreadId(messageThreadId)
       // Telegram rejects empty text with a 400 — a documents-only send
@@ -993,7 +995,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
               replyMarkup,
             })
           } catch {
-            // Edit failed — buttons just won't show
+            // The text alternative was already delivered; buttons are best-effort.
           }
         }
       }
@@ -1036,7 +1038,12 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       return String(lastMessageId)
     },
 
-    async editMessage(channelId: string, messageId: string, response: OutgoingMessage): Promise<void> {
+    async editMessage(channelId: string, messageId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<void> {
+      if (response.actions?.length && denormalizeActions(response).text.length > this.maxMessageLength) {
+        await this.sendMessage(channelId, response, opts)
+        return
+      }
+      response = denormalizeActions(response)
       // editMessageText is keyed by (chat_id, message_id) — no message_thread_id.
       const { chatId } = parseTopicChannelId(channelId)
       const raw = response.text.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH)
@@ -1045,13 +1052,16 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       try {
         await api.editMessageText(chatId, Number(messageId), body, {
           parseMode: isMarkdown ? 'HTML' : undefined,
+          ...(response.actions ? { replyMarkup: { inline_keyboard: buildInlineKeyboard(response.actions) } } : {}),
         })
       } catch {
         try {
           const plain = stripMarkdown(raw)
           await api.editMessageText(chatId, Number(messageId), plain)
         } catch {
-          // Give up on edit
+          if (response.actions?.length) {
+            await this.sendMessage(channelId, { ...response, actions: undefined }, opts)
+          }
         }
       }
     },

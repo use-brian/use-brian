@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 import type { ChannelAdapter, IncomingMessage, OutgoingMessage } from '../types.js'
 import { chunkText } from '../chunking.js'
 import { createSlackApi, type SlackApi, type SlackOutboundAudit } from './api.js'
@@ -281,6 +282,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): ChannelAdapter
     },
 
     async sendMessage(channelId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<string> {
+      response = denormalizeActions(response)
       // Never send empty messages — Slack renders them as blank bubbles.
       // Documents still deliver when present (a docs-only send is legal).
       if (!response.text.trim() && !response.documents?.length) return ''
@@ -329,6 +331,11 @@ export function createSlackAdapter(options: SlackAdapterOptions): ChannelAdapter
     },
 
     async editMessage(channelId: string, messageId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<void> {
+      if (response.actions?.length && denormalizeActions(response).text.length > this.maxMessageLength) {
+        await this.sendMessage(channelId, response, opts)
+        return
+      }
+      response = denormalizeActions(response)
       const converted = response.format === 'markdown' ? markdownToMrkdwn(response.text) : response.text
       const raw = await resolveMentionsCached(converted, options.botToken, async () => (await api.usersList()).members)
       const text = raw.slice(0, SLACK_MAX_MESSAGE_LENGTH)

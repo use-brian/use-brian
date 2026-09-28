@@ -81,8 +81,10 @@ export type IncomingMessage = {
 
 // ── Outgoing ───────────────────────────────────────────────────
 
+/** Callback data is opaque transport data. replyText is an optional core-recognized
+ * text reply token; without it the visible label is offered as the reply. */
 export type OutgoingAction =
-  | { kind?: 'callback'; id: string; label: string; data: string }
+  | { kind?: 'callback'; id: string; label: string; data: string; replyText?: string }
   | { kind: 'web_app'; label: string; url: string }
 
 /**

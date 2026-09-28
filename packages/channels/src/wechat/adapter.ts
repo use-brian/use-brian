@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 /**
  * WeChat (iLink bot) channel adapter.
  *
@@ -218,6 +219,7 @@ export function createWechatAdapter(options: WechatAdapterOptions): ChannelAdapt
     },
 
     async sendMessage(channelId: string, response: OutgoingMessage): Promise<string> {
+      response = denormalizeActions(response)
       if (!response.text.trim()) return ''
       const text = response.format === 'markdown' ? markdownToWechat(response.text) : response.text
       const contextToken = await options.getContextToken?.(channelId)
