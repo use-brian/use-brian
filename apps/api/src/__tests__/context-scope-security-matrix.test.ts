@@ -256,7 +256,7 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
   it('fresh, 591 and predecessor migration lifecycles preserve data and enforce completion guards',async()=>{
     const directory=fileURLToPath(new URL('../../../../packages/api/migrations',import.meta.url))
     assert.equal((await db.query<{name:string}>("SELECT name FROM public._migrations WHERE name='603_complete_scope_inventory.sql'")).rows[0].name,'603_complete_scope_inventory.sql')
-    assert.equal((await db.query<{revision:number}>('SELECT scope_review_registry_revision()::int AS revision')).rows[0].revision,1)
+    assert.equal((await db.query<{revision:number}>('SELECT scope_review_registry_revision()::int AS revision')).rows[0].revision,2)
     for(const [through,last] of [['591_organization_command_reviews.sql','1'],['602_procedural_skill_scope.sql','2']] as const){
       const previous=new PGlite({extensions:{vector,pg_trgm}})
       try{
@@ -278,6 +278,8 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
         assert.deepEqual((await previous.query('SELECT context_binding_origin FROM assistants WHERE id=$1',[assistant])).rows,[{context_binding_origin:'legacy'}])
         assert.deepEqual((await previous.query('SELECT context_binding_origin FROM sessions WHERE id=$1',[session])).rows,[{context_binding_origin:'legacy'}])
         assert.equal((await previous.query<{name:string}>("SELECT name FROM public._migrations WHERE name='603_complete_scope_inventory.sql'")).rows[0].name,'603_complete_scope_inventory.sql')
+        assert.equal((await previous.query<{revision:number}>('SELECT scope_review_registry_revision()::int AS revision')).rows[0].revision,2)
+        assert.equal((await previous.query<{revision:number}>('SELECT reviewed_inventory_revision::int AS revision FROM workspace_access_policies WHERE workspace_id=$1',[workspace])).rows[0].revision,1)
         await assert.rejects(previous.query("UPDATE assistants SET context_binding_origin='invented' WHERE id=$1",[assistant]))
         assert.deepEqual((await previous.query('SELECT context_binding_origin FROM assistants WHERE id=$1',[assistant])).rows,[{context_binding_origin:'legacy'}])
       }finally{await previous.close()}

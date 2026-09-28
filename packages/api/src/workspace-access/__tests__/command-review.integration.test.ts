@@ -31,11 +31,11 @@ describe('[COMP:api/workspace-access] immutable command review and application',
   afterAll(async()=>{await getAppPool().end();await pool.end()})
   it('activates strict classification only through an administrator saved command bound to live policy, inventory and readiness',async()=>{
     const f=await fixture()
-    await pool.query("UPDATE workspace_access_policies SET classification_mode='review',reviewed_inventory_revision=1 WHERE workspace_id=$1",[f.workspaceId])
+    await pool.query("UPDATE workspace_access_policies SET classification_mode='review',reviewed_inventory_revision=2 WHERE workspace_id=$1",[f.workspaceId])
     const current=await getWorkspaceAccess(f.workspaceId,f.owner)
-    const command={type:'workspace.classification.set' as const,mode:'strict' as const,expectedPolicyRevision:current.policyRevision,expectedInventoryRevision:'1'}
+    const command={type:'workspace.classification.set' as const,mode:'strict' as const,expectedPolicyRevision:current.policyRevision,expectedInventoryRevision:'2'}
     await expect(prepareDepartmentCommand(f.workspaceId,f.member,{command,expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'admin_required'})
-    await expect(prepareDepartmentCommand(f.workspaceId,f.owner,{command:{...command,expectedInventoryRevision:'2'},expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'scope_review_changed'})
+    await expect(prepareDepartmentCommand(f.workspaceId,f.owner,{command:{...command,expectedInventoryRevision:'3'},expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'scope_review_changed'})
     mocks.readiness.mockResolvedValueOnce({ready:false,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:['operation_separation']}).mockResolvedValueOnce({ready:false,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:['operation_separation']})
     await expect(prepareDepartmentCommand(f.workspaceId,f.owner,{command,expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'departmental_enforcement_incomplete'})
     const review=await prepareDepartmentCommand(f.workspaceId,f.owner,{command,expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})

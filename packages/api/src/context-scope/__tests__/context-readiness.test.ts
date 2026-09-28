@@ -62,7 +62,7 @@ function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string;
     if (sql.includes('pg_proc')) {
       return {rows:functions.filter(name=>name!==opts.withoutFunction).map(name=>({name})) as unknown as T[]}
     }
-    if(sql.includes('reviewed_inventory_revision'))return {rows:[{revision:'1'}] as unknown as T[]}
+    if(sql.includes('reviewed_inventory_revision'))return {rows:[{revision:'2'}] as unknown as T[]}
     if(sql.includes(' AS total')||sql.includes(' total,'))return {rows:[{total:'0',unresolved:'0',held:'0'}] as unknown as T[]}
     return { rows: [{ count: '3' }] as unknown as T[] }
   }

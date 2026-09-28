@@ -17,7 +17,7 @@ async function fixture(){
   await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Isolation lifecycle fixture',$2)",[workspaceId,owner])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')",[workspaceId,owner,member])
   await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind) VALUES($1,'Lifecycle assistant',$2,$3,'standard')",[assistantId,owner,workspaceId])
-  await pool.query("UPDATE workspace_access_policies SET classification_mode='review',reviewed_inventory_revision=1 WHERE workspace_id=$1",[workspaceId])
+  await pool.query("UPDATE workspace_access_policies SET classification_mode='review',reviewed_inventory_revision=2 WHERE workspace_id=$1",[workspaceId])
   return{workspaceId,owner,member,assistantId}
 }
 
@@ -29,7 +29,7 @@ describe('[COMP:api/department-isolation-lifecycle] strict activation against th
     const readiness=await getDepartmentalReadinessSystem(f.workspaceId)
     expect(readiness).toEqual({ready:true,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:[]})
     const inventory=await getWorkspaceScopeInventory(f.workspaceId,f.owner)
-    expect(inventory).toMatchObject({completeCoverage:true,canActivateStrict:true,classificationMode:'review',policyRevision:expect.any(String),registryRevision:'1',reviewedInventoryRevision:'1'})
+    expect(inventory).toMatchObject({completeCoverage:true,canActivateStrict:true,classificationMode:'review',policyRevision:expect.any(String),registryRevision:'2',reviewedInventoryRevision:'2'})
     const command={type:'workspace.classification.set' as const,mode:'strict' as const,expectedPolicyRevision:inventory.policyRevision,expectedInventoryRevision:inventory.registryRevision}
     await expect(prepareDepartmentCommand(f.workspaceId,f.member,{command,expectedPolicyRevision:inventory.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'admin_required'})
     expect((await pool.query('SELECT classification_mode FROM workspace_access_policies WHERE workspace_id=$1',[f.workspaceId])).rows[0].classification_mode).toBe('review')
@@ -45,7 +45,7 @@ describe('[COMP:api/department-isolation-lifecycle] strict activation against th
   it('refuses stale inventory and incomplete live coverage without changing classification mode',async()=>{
     const stale=await fixture(),staleView=await getWorkspaceAccess(stale.workspaceId,stale.owner)
     await pool.query('UPDATE workspace_access_policies SET reviewed_inventory_revision=NULL WHERE workspace_id=$1',[stale.workspaceId])
-    await expect(prepareDepartmentCommand(stale.workspaceId,stale.owner,{command:{type:'workspace.classification.set',mode:'strict',expectedPolicyRevision:staleView.policyRevision,expectedInventoryRevision:'1'},expectedPolicyRevision:staleView.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'scope_review_changed'})
+    await expect(prepareDepartmentCommand(stale.workspaceId,stale.owner,{command:{type:'workspace.classification.set',mode:'strict',expectedPolicyRevision:staleView.policyRevision,expectedInventoryRevision:'2'},expectedPolicyRevision:staleView.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'scope_review_changed'})
 
     const unresolved=await fixture()
     await createMemory({workspaceId:unresolved.workspaceId,userId:unresolved.owner,assistantId:unresolved.assistantId,createdByUserId:unresolved.owner,summary:'Unreviewed fixture content',sensitivity:'confidential'})
@@ -54,7 +54,7 @@ describe('[COMP:api/department-isolation-lifecycle] strict activation against th
     const inventory=await getWorkspaceScopeInventory(unresolved.workspaceId,unresolved.owner)
     expect(inventory).toMatchObject({completeCoverage:false,canActivateStrict:false,classificationMode:'review'})
     expect(inventory.readiness.ready).toBe(false)
-    await expect(prepareDepartmentCommand(unresolved.workspaceId,unresolved.owner,{command:{type:'workspace.classification.set',mode:'strict',expectedPolicyRevision:inventory.policyRevision,expectedInventoryRevision:'1'},expectedPolicyRevision:inventory.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'departmental_enforcement_incomplete'})
+    await expect(prepareDepartmentCommand(unresolved.workspaceId,unresolved.owner,{command:{type:'workspace.classification.set',mode:'strict',expectedPolicyRevision:inventory.policyRevision,expectedInventoryRevision:'2'},expectedPolicyRevision:inventory.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'departmental_enforcement_incomplete'})
     for(const workspaceId of [stale.workspaceId,unresolved.workspaceId])expect((await pool.query('SELECT classification_mode FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0].classification_mode).toBe('review')
   })
 })
