@@ -38,6 +38,19 @@ const NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/;
 /** A UUID bounds the reconnect-target segment at the parse boundary. */
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
+export function parseConnectorAuthorizationContinuation(search: string): {
+  sessionId: string;
+  approvalId: string;
+} | undefined {
+  const params = new URLSearchParams(search);
+  const sessionId = params.get("setupSession");
+  const approvalId = params.get("setupApproval");
+  if (!sessionId || !approvalId || !UUID_RE.test(sessionId) || !UUID_RE.test(approvalId)) {
+    return undefined;
+  }
+  return { sessionId, approvalId };
+}
+
 export type ConnectorOauthState = {
   /** Provider slug — `gcal` | `gmail` | `gdrive` | `notion` | `fathom`. */
   connector: string;
@@ -54,6 +67,11 @@ export type ConnectorOauthState = {
   instanceId: string | undefined;
   /** The CSRF nonce; matched against the companion cookie in the callback. */
   nonce: string | undefined;
+  /** Durable web-chat continuation; present only when both UUIDs validate. */
+  continuation: {
+    sessionId: string;
+    approvalId: string;
+  } | undefined;
 };
 
 /**
@@ -70,13 +88,19 @@ export function buildConnectorState(input: {
   createNew?: boolean;
   instanceId?: string;
   nonce: string;
+  continuation?: { sessionId: string; approvalId: string };
 }): string {
+  const continuation = input.continuation &&
+    UUID_RE.test(input.continuation.sessionId) &&
+    UUID_RE.test(input.continuation.approvalId)
+    ? `:c:${input.continuation.sessionId}:${input.continuation.approvalId}`
+    : "";
   // Reconnect wins over add-another — they are mutually exclusive intents.
   if (input.instanceId) {
-    return `${input.connector}:re:${input.instanceId}:${input.workspaceId}:${input.nonce}`;
+    return `${input.connector}:re:${input.instanceId}:${input.workspaceId}:${input.nonce}${continuation}`;
   }
   const add = input.createNew ? ":add" : "";
-  return `${input.connector}${add}:${input.workspaceId}:${input.nonce}`;
+  return `${input.connector}${add}:${input.workspaceId}:${input.nonce}${continuation}`;
 }
 
 /**
@@ -88,7 +112,7 @@ export function buildConnectorState(input: {
 export function parseConnectorState(raw: string): ConnectorOauthState {
   const parts = raw.split(":");
   if (parts.length === 0 || !parts[0]) {
-    return { connector: "", workspaceId: undefined, createNew: false, instanceId: undefined, nonce: undefined };
+    return { connector: "", workspaceId: undefined, createNew: false, instanceId: undefined, nonce: undefined, continuation: undefined };
   }
   const connector = parts[0];
   let idx = 1;
@@ -107,8 +131,13 @@ export function parseConnectorState(raw: string): ConnectorOauthState {
   const workspaceId = parts[idx] || undefined;
   const nonceRaw = parts[idx + 1];
   const nonce = nonceRaw && NONCE_RE.test(nonceRaw) ? nonceRaw : undefined;
+  const continuation = parts[idx + 2] === "c" &&
+    parts[idx + 3] && UUID_RE.test(parts[idx + 3]) &&
+    parts[idx + 4] && UUID_RE.test(parts[idx + 4])
+    ? { sessionId: parts[idx + 3], approvalId: parts[idx + 4] }
+    : undefined;
 
-  return { connector, workspaceId, createNew, instanceId, nonce };
+  return { connector, workspaceId, createNew, instanceId, nonce, continuation };
 }
 
 /**

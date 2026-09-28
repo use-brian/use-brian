@@ -114,6 +114,7 @@ import type { SessionResumeStore } from '../db/session-resume-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import { deploymentCapabilities } from '../edition.js'
 import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
+import { connectorAuthorizationEntry } from '../agent-surface/connector-authorization.js'
 
 // Module-level map of active confirmation resolvers, keyed by sessionId.
 // Cleaned up on turn_complete or stream close.
@@ -7083,7 +7084,12 @@ export function chatRoutes(options: WebChatOptions): Router {
             // docs/architecture/engine/askquestion-suspend-resume.md.
             createPendingQuestion:
               assistant.workspaceId
-                ? async ({ question, toolUseId, expiresAt }) => {
+                ? async ({ question, toolUseId, actionId, version, context, allowCustom, options: questionOptions, expiresAt }) => {
+                    const safeActionId = actionId?.startsWith('connector_authorization:')
+                      ? activeCapabilities.has('configure') && connectorAuthorizationEntry(actionId)
+                        ? actionId
+                        : undefined
+                      : actionId
                     const row = await options.pendingApprovalsStore.createQuestion({
                       workspaceId: assistant.workspaceId!,
                       blockingSessionId: session.id,
@@ -7091,6 +7097,11 @@ export function chatRoutes(options: WebChatOptions): Router {
                       approverUserId: user.id,
                       question,
                       toolUseId,
+                      ...(safeActionId ? { actionId: safeActionId } : {}),
+                      ...(version !== undefined ? { version } : {}),
+                      ...(context !== undefined ? { context } : {}),
+                      ...(allowCustom !== undefined ? { allowCustom } : {}),
+                      ...(questionOptions !== undefined ? { options: questionOptions } : {}),
                       deliveryChannelType: 'web',
                       deliveryChannelId: null,
                       expiresAt,

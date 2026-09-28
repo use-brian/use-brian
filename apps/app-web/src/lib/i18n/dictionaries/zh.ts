@@ -1990,6 +1990,8 @@ export const zh: Dictionary = {
       cancelConfirm: "取消並捨棄進行中的作業？",
       cancelConfirmKeep: "繼續等待",
       resuming: "處理中…",
+      connect: "連接 {connector}",
+      connectHelp: "請在服務提供者視窗中授權 {connector}。連接完成後，我會自動繼續此工作。",
     },
     toolNarration: {
       generic: "正在執行 {name}",
@@ -10521,7 +10523,7 @@ export const zh: Dictionary = {
         goalsLabel: "目標",
         goalsDesc: "附加在任務上的成果。讓助理能草擬目標、與你確認後，再依該目標推進任務。",
         configureLabel: "代理設定",
-        configureDesc: "開啟後，以此助理身分運作的程式化代理（當此助理為主助理時的大腦 MCP 金鑰，或此助理自己的 API 金鑰 MCP 端點）可以變更工作空間的機制：工作流程、排程、擷取規則、技能與連接器。重大變更仍需在「核准」中由人工核准。預設為關閉。",
+        configureDesc: "開啟後，以此助理身分運作的代理可以設定工作流程、排程、擷取規則、技能、助理與連接器。對於支援的 OAuth 連接器，代理會準備設定，只在需要您於服務提供者同意時暫停，並在驗證連接後繼續工作。重大變更仍需在「核准」中由人工核准。帳單、存取授權與此功能本身仍由人管理。預設為關閉。",
         configureAdminOnly: "只有工作空間擁有者或管理員可以變更此設定",
       },
       // Team section

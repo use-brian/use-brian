@@ -360,6 +360,11 @@ export type CreateQuestionParams = {
    *  synthesizes a tool_result keyed by this id so the queryLoop pairing
    *  invariant holds when it re-enters at `session_resume_points.loop_step_index`. */
   toolUseId: string
+  actionId?: string
+  version?: string | number
+  context?: string
+  allowCustom?: boolean
+  options?: string[]
   deliveryChannelType: ApprovalDeliveryChannel
   deliveryChannelId?: string | null
   /** Optional. Default policy: now + 24h (chat-route-side). NULL = never expire. */
@@ -1113,6 +1118,11 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       const payload = {
         question: params.question,
         toolUseId: params.toolUseId,
+        ...(params.actionId !== undefined ? { actionId: params.actionId } : {}),
+        ...(params.version !== undefined ? { version: params.version } : {}),
+        ...(params.context !== undefined ? { context: params.context } : {}),
+        ...(params.allowCustom !== undefined ? { allowCustom: params.allowCustom } : {}),
+        ...(params.options !== undefined ? { options: params.options } : {}),
       }
       const result = await query(
         `INSERT INTO pending_approvals (

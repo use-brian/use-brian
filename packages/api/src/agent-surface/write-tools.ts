@@ -7,6 +7,8 @@
  *                                 never creates an active skill directly.
  *   enableSkill / disableSkill  — per-assistant workspace-skill enablement.
  *   setConnectorPolicy          — L2 allow/ask/block on one connector tool.
+ *   requestConnectorAuthorization — prepare the human OAuth checkpoint and
+ *                                 one-click Studio URL; never receives tokens.
  *   addPatConnector             — personal connector instance with a PAT/token
  *                                 credential (the headless-completable kind),
  *                                 auto-shared with the bound workspace via a
@@ -53,6 +55,10 @@ import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import { materialiseAllAssistants } from '../skills/all-assistants.js'
+import {
+  connectorAuthorizationActionId,
+  connectorAuthorizationPath,
+} from './connector-authorization.js'
 
 export type AgentWriteToolDeps = {
   approvalsStore: PendingApprovalsStore
@@ -82,6 +88,8 @@ export type AgentWriteToolDeps = {
    * `scope='workspace'` creation is retired.
    */
   connectorGrantStore: ConnectorGrantStore
+  /** Authenticated app origin used for agent-facing one-click setup URLs. */
+  appOrigin?: string
   /**
    * Resolve the human approver for a staged row created from this context —
    * the credential's creator when known, else the workspace owner (the
@@ -453,6 +461,87 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     },
   })
 
+  const requestConnectorAuthorization = buildTool({
+    name: 'requestConnectorAuthorization',
+    description:
+      'Prepare the human authorization checkpoint for an official OAuth connector. ' +
+      'Use listConnectors first. If this returns human_authorization_required in an ' +
+      'interactive chat, call askQuestion as the SOLE next tool with the exact actionId ' +
+      'and question supplied here; do not ask in prose. On MCP/API surfaces, give the ' +
+      'user the connectUrl, wait for them, then call listConnectors to verify connected=true. ' +
+      'This tool never receives or mints credentials.',
+    inputSchema: z.object({
+      provider: z.string().min(1).max(80).describe("official provider id from listConnectors, for example 'gcal'"),
+    }),
+    requiresCapability: CONFIGURE_CAPABILITY,
+    async execute(input, ctx) {
+      const workspaceId = requireWorkspace(ctx, 'requestConnectorAuthorization')
+      if (typeof workspaceId !== 'string') return workspaceId
+      const entry = OFFICIAL_CONNECTORS.find((candidate) => candidate.id === input.provider)
+      if (!entry || !entry.enabled) {
+        return {
+          data:
+            `requestConnectorAuthorization cannot prepare '${input.provider}': it is not an enabled ` +
+            'official connector. Call listConnectors and use an exact provider value from that result; ' +
+            'retrying this value will fail identically.',
+          isError: true,
+        }
+      }
+      if (entry.agent_authorization_handoff !== true) {
+        const alternative = entry.auth_type === 'api_key' && !entry.oauth_required
+          ? 'Use addPatConnector when the user has supplied the token through an authorized secret-input path.'
+          : 'Open Studio → Connectors and complete its provider-specific setup form.'
+        return {
+          data:
+            `requestConnectorAuthorization cannot prepare '${entry.id}': its setup flow does not support ` +
+            `the resumable OAuth handoff. ${alternative} Do not retry this tool for the same provider.`,
+          isError: true,
+        }
+      }
+
+      const [teamNative, grants] = await Promise.all([
+        deps.connectorInstanceStore.listByWorkspace(ctx.userId, workspaceId),
+        deps.connectorGrantStore.listForTargetSystem('workspace', workspaceId),
+      ])
+      const existing = [
+        ...teamNative,
+        ...grants.map((grant) => grant.instance),
+      ].find((instance) => instance.provider === entry.id && instance.connected)
+      if (existing) {
+        return {
+          data: {
+            status: 'already_connected',
+            provider: entry.id,
+            name: entry.name,
+            instanceId: existing.id,
+            message: `${entry.name} is already connected to this workspace. Continue the requested task without asking the user to reconnect.`,
+          },
+        }
+      }
+
+      const connectPath = connectorAuthorizationPath({ workspaceId, provider: entry.id })
+      const origin = deps.appOrigin?.replace(/\/$/, '')
+      const connectUrl = origin ? `${origin}${connectPath}` : connectPath
+      const actionId = connectorAuthorizationActionId(entry.id)
+      const question = `Connect ${entry.name} so I can continue this task.`
+      return {
+        data: {
+          status: 'human_authorization_required',
+          provider: entry.id,
+          name: entry.name,
+          connectUrl,
+          connectPath,
+          actionId,
+          question,
+          next:
+            `Interactive chat: call askQuestion as the sole next tool with question=${JSON.stringify(question)}, ` +
+            `actionId=${JSON.stringify(actionId)}, version=1, allowCustom=false, and options=['Connect now','Cancel']. ` +
+            'MCP/API: show connectUrl to the user, then verify completion with listConnectors.',
+        },
+      }
+    },
+  })
+
   const configureConnectorInstance = buildTool({
     name: 'configureConnectorInstance',
     description:
@@ -624,6 +713,7 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     enableSkill,
     disableSkill,
     setConnectorPolicy,
+    requestConnectorAuthorization,
     addPatConnector,
     configureConnectorInstance,
     createAssistant,

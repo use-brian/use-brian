@@ -4967,6 +4967,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       mcpSettingsStore,
       connectorInstanceStore,
       connectorGrantStore,
+      appOrigin: env.AUTHED_APP_URL ?? env.APP_URL,
       resolveApprover: resolveAgentApprover,
     },
   })
@@ -5368,6 +5369,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       tryResolveLive: tryResolveLiveToolApproval,
     },
     workerRunsStore,
+    capabilityStore,
+    connectorInstanceStore,
+    connectorGrantStore,
   }))
 
   let supportDiagnosticsManager: SupportDiagnosticsCaptureManager | undefined

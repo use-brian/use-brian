@@ -13,6 +13,12 @@ export const ConnectorEntrySchema = z.object({
   mcp_url: z.string().optional(),
   auth_type: z.enum(['none', 'oauth', 'api_key']).default('none'),
   oauth_required: z.boolean().default(false),
+  /**
+   * The web OAuth callback can carry a durable chat continuation for this
+   * provider. Agent configuration derives its human-authorization handoff
+   * from this flag; consumers must never maintain a second provider list.
+   */
+  agent_authorization_handoff: z.boolean().optional(),
   author: z.string().optional(),
   author_url: z.string().optional(),
   tags: z.array(z.string()).default([]),
@@ -68,6 +74,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     category: 'official',
     auth_type: 'oauth',
     oauth_required: true,
+    agent_authorization_handoff: true,
     enabled: true,
     tags: ['productivity', 'google'],
   },
@@ -78,6 +85,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     category: 'official',
     auth_type: 'oauth',
     oauth_required: true,
+    agent_authorization_handoff: true,
     enabled: true,
     tags: ['productivity', 'google'],
   },
@@ -88,6 +96,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     category: 'official',
     auth_type: 'oauth',
     oauth_required: true,
+    agent_authorization_handoff: true,
     enabled: true,
     tags: ['productivity', 'workspace'],
   },
@@ -98,6 +107,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     category: 'official',
     auth_type: 'oauth',
     oauth_required: true,
+    agent_authorization_handoff: true,
     enabled: true,
     tags: ['productivity', 'google'],
   },
@@ -118,6 +128,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     category: 'official',
     auth_type: 'oauth',
     oauth_required: true,
+    agent_authorization_handoff: true,
     enabled: true,
     tags: ['productivity', 'meetings'],
   },
@@ -190,6 +201,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     // See docs/architecture/integrations/msgraph.md §2, §6.
     auth_type: 'oauth',
     oauth_required: true,
+    agent_authorization_handoff: true,
     enabled: true,
     tags: ['productivity', 'microsoft'],
     // One Microsoft identity per user — a deliberate v1 boundary, NOT a

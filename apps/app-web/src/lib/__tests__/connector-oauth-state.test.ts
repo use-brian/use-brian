@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildConnectorState,
+  parseConnectorAuthorizationContinuation,
   parseConnectorState,
   verifyConnectorState,
   CONNECTOR_OAUTH_STATE_COOKIE,
@@ -28,7 +29,44 @@ describe("[COMP:app-web/connector-oauth-state] Connector OAuth state CSRF", () =
         connector: "gcal",
         workspaceId: WS,
         createNew: false,
+        instanceId: undefined,
         nonce: NONCE,
+        continuation: undefined,
+      });
+    });
+
+    it("round-trips a bounded chat continuation", () => {
+      const continuation = {
+        sessionId: "22222222-2222-4222-8222-222222222222",
+        approvalId: "33333333-3333-4333-8333-333333333333",
+      };
+      const state = buildConnectorState({
+        connector: "gcal",
+        workspaceId: WS,
+        nonce: NONCE,
+        continuation,
+      });
+      expect(parseConnectorState(state).continuation).toEqual(continuation);
+    });
+
+    it("rejects malformed continuation identifiers in both query and state", () => {
+      expect(
+        parseConnectorAuthorizationContinuation(
+          "?setupSession=not-a-uuid&setupApproval=33333333-3333-4333-8333-333333333333",
+        ),
+      ).toBeUndefined();
+      const state = `${buildConnectorState({ connector: "gcal", workspaceId: WS, nonce: NONCE })}:c:not-a-uuid:also-bad`;
+      expect(parseConnectorState(state).continuation).toBeUndefined();
+    });
+
+    it("accepts a valid continuation from the connector page query", () => {
+      expect(
+        parseConnectorAuthorizationContinuation(
+          "?connect=gcal&setupSession=22222222-2222-4222-8222-222222222222&setupApproval=33333333-3333-4333-8333-333333333333",
+        ),
+      ).toEqual({
+        sessionId: "22222222-2222-4222-8222-222222222222",
+        approvalId: "33333333-3333-4333-8333-333333333333",
       });
     });
 

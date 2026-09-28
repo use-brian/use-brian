@@ -1995,6 +1995,8 @@ export const zhCN: Dictionary = {
       cancelConfirm: "取消并舍弃进行中的作业？",
       cancelConfirmKeep: "继续等待",
       resuming: "处理中…",
+      connect: "连接 {connector}",
+      connectHelp: "请在服务提供商窗口中授权 {connector}。连接完成后，我会自动继续此任务。",
     },
     toolNarration: {
       generic: "正在运行 {name}",
@@ -10666,7 +10668,7 @@ export const zhCN: Dictionary = {
         goalsLabel: "目标",
         goalsDesc: "附加在任务上的成果。让助理能草拟目标、与你确认后，再依该目标推进任务。",
         configureLabel: "代理设置",
-        configureDesc: "打开后，以此助理身分运作的程序化代理（当此助理为主助理时的大脑 MCP 密钥，或此助理自己的 API 密钥 MCP 端点）可以变更工作空间的机制：工作流程、调度、截取规则、技能与连接器。重大变更仍需在“核准”中由人工核准。默认为关闭。",
+        configureDesc: "打开后，以此助理身份运行的代理可以设置工作流、调度、截取规则、技能、助理和连接器。对于支持的 OAuth 连接器，代理会准备设置，只在需要您于服务提供商同意时暂停，并在验证连接后继续工作。重大变更仍需在“核准”中由人工核准。账单、访问授权和此功能本身仍由人管理。默认为关闭。",
         configureAdminOnly: "只有工作空间拥有者或管理员可以变更此设置",
       },
       teamFallback: "工作空间",

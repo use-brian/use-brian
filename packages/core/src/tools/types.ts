@@ -24,6 +24,13 @@ type TaskAuthorityContext = {
   expiresAt: string
 }
 
+/** Host-owned live authorization boundary for a running model/tool turn. */
+export type CurrentAuthorityBoundary = {
+  assertCurrent(): Promise<void>
+  /** Check both sides of an operation; post-check failure may be ambiguous. */
+  execute<T>(operation: () => Promise<T>): Promise<T>
+}
+
 // ── Tool context ───────────────────────────────────────────────
 
 export type ToolContext = {
@@ -144,6 +151,8 @@ export type ToolContext = {
    */
   workflowRunId?: string | null
   abortSignal: AbortSignal
+  /** Sticky live authority. Once invalidated, this turn can never revive. */
+  authority?: CurrentAuthorityBoundary
   /**
    * The enclosing loop's liveness clock. A long-running tool calls
    * `progress?.touch('<what>')` while it works so the loop's stall watchdog
@@ -212,6 +221,12 @@ export type ToolContext = {
      *  tool_result by this id so the queryLoop tool_use/tool_result pairing
      *  invariant holds at re-entry. */
     toolUseId: string
+    /** Optional structured interaction metadata from askQuestion. */
+    actionId?: string
+    version?: string | number
+    context?: string
+    allowCustom?: boolean
+    options?: string[]
     /** Defaults to now + 24h at the route layer. */
     expiresAt: Date
   }) => Promise<string>

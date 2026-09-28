@@ -24,6 +24,10 @@ import type {
   ControlPlaneSkill,
 } from '@use-brian/core'
 import { OFFICIAL_CONNECTORS } from '@use-brian/shared'
+import {
+  availableOfficialConnectorRows,
+  connectorAuthorizationPath,
+} from './connector-authorization.js'
 import { listAccessibleAssistants, getUserAssistant, getWorkspacePrimaryAssistant } from '../db/users.js'
 import { listChannelsForWorkspace } from '../db/channels-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
@@ -43,6 +47,7 @@ export type ControlPlaneReaderDeps = {
 function projectInstance(
   instance: ConnectorInstance,
   scope: 'team-native' | 'team-grant',
+  workspaceId: string,
 ): ControlPlaneConnector {
   const registryEntry = OFFICIAL_CONNECTORS.find((c) => c.id === instance.provider)
   // Custom MCP connectors carry their own credentialsType; built-ins derive
@@ -53,10 +58,17 @@ function projectInstance(
   const authType = registryEntry ? registryEntry.auth_type : instance.credentialsType
   return {
     provider: instance.provider,
+    name: registryEntry?.name ?? instance.label,
+    description: registryEntry?.description ?? null,
     instanceId: instance.id,
     label: instance.label,
     connected: instance.connected,
+    availability: instance.connected ? 'connected' : 'available',
     oauthRequired,
+    authorizationHandoff: registryEntry?.agent_authorization_handoff === true,
+    connectPath: registryEntry
+      ? connectorAuthorizationPath({ workspaceId, provider: instance.provider })
+      : null,
     authType,
     scope,
     sensitivity: instance.sensitivity,
@@ -104,10 +116,13 @@ export function createControlPlaneReader(deps: ControlPlaneReaderDeps): ControlP
       if (!memberProbe) return []
       const teamNative = await deps.connectorInstanceStore.listByWorkspace(userId, workspaceId)
       const grants = await deps.connectorGrantStore.listForTargetSystem('workspace', workspaceId)
-      return [
-        ...teamNative.map((i) => projectInstance(i, 'team-native')),
-        ...grants.map((g) => projectInstance(g.instance, 'team-grant')),
+      const configured = [
+        ...teamNative.map((i) => projectInstance(i, 'team-native', workspaceId)),
+        ...grants.map((g) => projectInstance(g.instance, 'team-grant', workspaceId)),
       ]
+      const configuredProviders = new Set(configured.map((row) => row.provider))
+      const available = availableOfficialConnectorRows(configuredProviders, workspaceId)
+      return [...configured, ...available]
     },
 
     async listSkills(userId, workspaceId): Promise<ControlPlaneSkill[]> {

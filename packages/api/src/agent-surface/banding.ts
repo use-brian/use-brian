@@ -54,6 +54,7 @@ export const TIER2_WRITE_BANDS: Readonly<Record<string, WriteBand>> = {
   //    change what the workspace can reach (approve). OAuth connectors are
   //    never completable headless — scaffold + connect-link only.
   setConnectorPolicy: 'auto',
+  requestConnectorAuthorization: 'auto',
   addPatConnector: 'approve',
   configureConnectorInstance: 'approve',
 

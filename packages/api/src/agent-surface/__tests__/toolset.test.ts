@@ -9,6 +9,7 @@ import { z } from 'zod'
 import {
   buildTool,
   CONFIGURE_CAPABILITY,
+  filterToolsByCapabilities,
   OPERATOR_AUTOMATION_CAPABILITY,
   type ControlPlaneReader,
   type Tool,
@@ -216,6 +217,20 @@ describe('[COMP:agent-surface/toolset] buildAgentToolset', () => {
       expect(tool, name).toBeDefined()
       expect(tool!.requiresCapability, name).toBe(CONFIGURE_CAPABILITY)
     }
+  })
+
+  it('hides connector authorization until Agent configuration is granted', () => {
+    const { toolset } = makeToolset()
+    expect(toolset.writes.has('requestConnectorAuthorization')).toBe(true)
+    expect(
+      filterToolsByCapabilities(toolset.writes, new Set()).has('requestConnectorAuthorization'),
+    ).toBe(false)
+    expect(
+      filterToolsByCapabilities(
+        toolset.writes,
+        new Set([CONFIGURE_CAPABILITY]),
+      ).has('requestConnectorAuthorization'),
+    ).toBe(true)
   })
 })
 

@@ -6,6 +6,7 @@ import {
   parseConnectorState,
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
+import { completeConnectorAuthorizationAfterOAuth } from "@/lib/connector-authorization-completion";
 
 /**
  * Microsoft Graph OAuth callback for the `msgraph` (Microsoft Teams) connector.
@@ -37,7 +38,7 @@ export async function GET(request: Request) {
   const stateRaw = url.searchParams.get("state") ?? ""; // "msgraph[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
 
-  const { connector: intent, createNew, instanceId, workspaceId, nonce } = parseConnectorState(stateRaw);
+  const { connector: intent, createNew, instanceId, workspaceId, nonce, continuation } = parseConnectorState(stateRaw);
   const validIntent = intent === "msgraph";
 
   if (error || !code || !validIntent) {
@@ -105,6 +106,15 @@ export async function GET(request: Request) {
     const stored = (await exchangeRes.json().catch(() => ({}))) as {
       connectorInstanceId?: string;
     };
+
+    const resumedPath = await completeConnectorAuthorizationAfterOAuth({
+      accessToken,
+      workspaceId,
+      continuation,
+      provider: "msgraph",
+      connectorInstanceId: stored.connectorInstanceId,
+    });
+    if (resumedPath) return NextResponse.redirect(new URL(resumedPath, request.url));
 
     return NextResponse.redirect(
       new URL(

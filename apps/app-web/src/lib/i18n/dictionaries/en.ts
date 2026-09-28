@@ -2043,6 +2043,8 @@ export const en = {
       cancelConfirm: "Cancel and discard any in-progress work?",
       cancelConfirmKeep: "Keep waiting",
       resuming: "Working on it…",
+      connect: "Connect {connector}",
+      connectHelp: "Authorize {connector} in the provider window. I’ll continue this task automatically when it is connected.",
     },
     // Tool timeline labels — mirrors apps/web's toolNarration map. Kept
     // wide so unfamiliar tools surfacing in app-web still get a
@@ -10845,7 +10847,7 @@ export const en = {
         goalsLabel: "Goals",
         goalsDesc: "Outcomes attached to tasks. Lets the assistant draft a goal, confirm it with you, and work the task against it.",
         configureLabel: "Agent configuration",
-        configureDesc: "When on, programmatic agents acting as this assistant (brain MCP keys when this is the primary assistant, or this assistant's own API-key MCP endpoint) can change workspace apparatus: workflows, schedules, ingest rules, skills, and connectors. Consequential changes still require human approval in Approvals. Off by default.",
+        configureDesc: "When on, agents acting as this assistant can set up workflows, schedules, ingest rules, skills, assistants, and connectors. For supported OAuth connectors, the agent prepares setup, pauses only for your provider consent, and continues after the connection is verified. Consequential changes still require human approval in Approvals. Billing, access grants, and this capability remain human-controlled. Off by default.",
         configureAdminOnly: "Only a workspace owner or admin can change this",
       },
       // Team section
