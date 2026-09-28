@@ -14,15 +14,17 @@ describe('[COMP:api/connector-context] connectorExposureAllowed', () => {
     )).toBe(false)
   })
 
-  it('requires every finite exposure requirement to fit both turn axes', () => {
+  it('withholds generic provider catalogs from finite turns even when bindings fit', () => {
     const turn = {
       effectiveCompartments: ['team:sales', 'team:strategy'],
       effectiveProjectIds: ['11111111-1111-4111-8111-111111111111'],
     }
-    expect(connectorExposureAllowed(turn, {
+    const binding = {
       compartments: ['team:sales'],
       projectIds: ['11111111-1111-4111-8111-111111111111'],
-    })).toBe(true)
+    }
+    expect(connectorExposureAllowed(turn, binding)).toBe(false)
+    expect(connectorExposureAllowed(turn, binding, 'fixed-operation')).toBe(true)
     expect(connectorExposureAllowed(turn, {
       compartments: ['team:accounting'],
       projectIds: ['11111111-1111-4111-8111-111111111111'],
@@ -46,7 +48,9 @@ describe('[COMP:api/connector-context] independent connector mutation authority'
   it('withholds an entire connector accessible only by a read grant', () => {
     expect(connectorExposureAllowed(readGrant, binding)).toBe(false)
     expect(connectorExposureAllowed({ ...readGrant,
-      access: { mutationCompartments: ['team:product'] } }, binding)).toBe(true)
+      access: { mutationCompartments: ['team:product'] } }, binding)).toBe(false)
+    expect(connectorExposureAllowed({ ...readGrant,
+      access: { mutationCompartments: ['team:product'] } }, binding, 'fixed-operation')).toBe(true)
     expect(connectorExposureAllowed({ ...readGrant,
       effectiveCompartments: [], access: { mutationCompartments: null } }, binding)).toBe(false)
     expect(connectorExposureAllowed({ effectiveCompartments: null, effectiveProjectIds: null,
@@ -61,7 +65,9 @@ describe('[COMP:api/connector-context] independent connector mutation authority'
       expect(connectorExposureAllowed({ effectiveCompartments: null, effectiveProjectIds: null,
         access: { mutationCompartments: null } }, binding)).toBe(false)
       expect(connectorExposureAllowed(undefined,
-        { compartments: ['team:marketing'], projectIds: ['project'] })).toBe(true)
+        { compartments: ['team:marketing'], projectIds: ['project'] })).toBe(false)
+      expect(connectorExposureAllowed(undefined,
+        { compartments: ['team:marketing'], projectIds: ['project'] }, 'fixed-operation')).toBe(true)
       await runWithAgentAccess({ clearance: 'confidential', compartments: null,
         mutationCompartments: null, projectIds: null }, async () => {
         expect(connectorExposureAllowed(undefined, binding)).toBe(false)

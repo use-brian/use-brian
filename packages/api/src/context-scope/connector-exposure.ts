@@ -25,6 +25,8 @@ export type ConnectorTurnGrant = {
   access?: { mutationCompartments?: ScopeGrant }
 }
 
+export type ConnectorOperationBoundary = 'provider-catalog' | 'fixed-operation'
+
 function axisExposureAllowed(
   turnGrant: ScopeGrant,
   exposure: readonly string[],
@@ -37,6 +39,7 @@ function axisExposureAllowed(
 export function connectorExposureAllowed(
   turn: ConnectorTurnGrant | null | undefined,
   binding: ConnectorContextBinding,
+  boundary: ConnectorOperationBoundary = 'provider-catalog',
 ): boolean {
   const ambient = currentAgentAccess()
   // Only non-agent administrative callers may omit a trusted execution scope.
@@ -57,6 +60,11 @@ export function connectorExposureAllowed(
     turn?.effectiveProjectIds ?? null,
     ambient ? ambient.projectIds === undefined ? [] : ambient.projectIds : null,
   )
-  return axisExposureAllowed(mutation, binding.compartments)
-    && axisExposureAllowed(projects, binding.projectIds)
+  if (!axisExposureAllowed(mutation, binding.compartments)
+      || !axisExposureAllowed(projects, binding.projectIds)) return false
+  // Team/Project bindings prove Brian-side reach, not a provider-native root.
+  // Generic provider catalogs therefore require company-wide authority. The
+  // fixed-operation exception is selected by audited code, never tool metadata.
+  return boundary === 'fixed-operation'
+    || (read === null && mutation === null && projects === null)
 }
