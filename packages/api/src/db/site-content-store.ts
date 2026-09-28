@@ -1,8 +1,9 @@
 /** Transactional draft/publication authority for website content collections. [COMP:crm/site-content] */
 import type { Pool, PoolClient } from 'pg'
-import { AssociationError, parseSiteContent, resolveSiteContent, siteContentPublicationIssueDetails, siteContentPublicationIssues, SITE_CONTENT_COLLECTIONS, SITE_CONTENT_READERS,
-  type AssociationActor, type SiteContentCollection, type SiteContentDocument, type SiteContentSite } from '@use-brian/core'
+import { AssociationError, applySiteContentOperations, parseSiteContent, resolveSiteContent, siteContentMediaIds, siteContentPublicationIssueDetails, siteContentSchema, SITE_CONTENT_COLLECTIONS, SITE_CONTENT_READERS,
+  type AssociationActor, type SiteContentCollection, type SiteContentDocument, type SiteContentIssue, type SiteContentOperation, type SiteContentSite } from '@use-brian/core'
 import { getPool } from './client.js'
+import { WEBSITE_MEDIA_MIME, WEBSITE_MEDIA_PREFIX } from './website-media-store.js'
 
 type Observations = Record<string, { revision: number; observedAt: string }>
 type State = { draft_version: number; draft: SiteContentDocument | null; published_revision: number; observations: Observations }
@@ -29,6 +30,32 @@ export function createSiteContentStore(pool: Pool = getPool()) {
       [workspaceId, collection, revision])).rows[0]
     return row ? parseSiteContent(collection, row.document) : null
   }
+  /** Library ids (of those given) that are live website media; anything else would 404 on the site. */
+  async function libraryIds(client: Pool | PoolClient, workspaceId: string, ids: string[]): Promise<Set<string>> {
+    if (!ids.length) return new Set()
+    const rows = (await client.query<{ id: string }>(`SELECT id FROM workspace_files WHERE workspace_id=$1 AND id = ANY($2::uuid[])
+      AND valid_to IS NULL AND retracted_at IS NULL AND path LIKE $3 AND mime = ANY($4::text[])`,
+      [workspaceId, ids, `${WEBSITE_MEDIA_PREFIX}%`, [...WEBSITE_MEDIA_MIME]])).rows
+    return new Set(rows.map(row => row.id))
+  }
+  const mediaIssues = (document: SiteContentDocument, known: Set<string>): SiteContentIssue[] => siteContentMediaIds(document).filter(id => !known.has(id))
+    .map(media => ({ code: 'media_missing', params: { media }, message: `Image or file ${media} is not in the website media library` }))
+  async function issueDetails(client: Pool | PoolClient, workspaceId: string, collection: SiteContentCollection, document: SiteContentDocument) {
+    return [...siteContentPublicationIssueDetails(collection, document), ...mediaIssues(document, await libraryIds(client, workspaceId, siteContentMediaIds(document)))]
+  }
+  async function described(client: Pool | PoolClient, workspaceId: string, collection: SiteContentCollection, document: SiteContentDocument | null) {
+    const details = document ? await issueDetails(client, workspaceId, collection, document) : []
+    return { issues: details.map(issue => issue.message), issueDetails: details }
+  }
+  async function write(client: PoolClient, workspaceId: string, collection: SiteContentCollection, expectedVersion: number, document: SiteContentDocument, actor: AssociationActor) {
+    const current = await state(client, workspaceId, collection)
+    if (current.draft_version !== expectedVersion) throw new AssociationError('conflict', 'The draft changed. Reload before saving.')
+    const version = expectedVersion + 1
+    await client.query(`INSERT INTO association_site_content(workspace_id,collection,draft_version,draft) VALUES($1,$2,$3,$4)
+      ON CONFLICT(workspace_id,collection) DO UPDATE SET draft_version=$3,draft=$4,updated_at=now()`, [workspaceId, collection, version, document])
+    await audit(client, workspaceId, 'site_content.draft_saved', collection, version, actor)
+    return { collection, version, ...(await described(client, workspaceId, collection, document)) }
+  }
   async function audit(client: PoolClient, workspaceId: string, action: string, collection: SiteContentCollection, version: number, actor: AssociationActor) {
     await client.query(`INSERT INTO association_audit_log (workspace_id,action,subject_kind,subject_id,actor_kind,actor_credential_id,acting_user_id,metadata)
       VALUES ($1,$2,'site_content',$1,$3,$4,$5,$6)`, [workspaceId, action, actor.credentialKind, actor.credentialId, actor.actingUserId ?? null, { collection, version }])
@@ -39,21 +66,22 @@ export function createSiteContentStore(pool: Pool = getPool()) {
         const row = await state(client, workspaceId, collection)
         return { collection, version: row.draft_version, document: row.draft, publishedRevision: row.published_revision,
           published: await published(client, workspaceId, collection, row.published_revision), observations: row.observations,
-          readers: SITE_CONTENT_READERS[collection], issues: row.draft ? siteContentPublicationIssues(collection, row.draft) : [],
-          issueDetails: row.draft ? siteContentPublicationIssueDetails(collection, row.draft) : [] }
+          readers: SITE_CONTENT_READERS[collection], ...(await described(client, workspaceId, collection, row.draft)) }
       })
     },
     async save(workspaceId: string, collection: SiteContentCollection, expectedVersion: number, raw: unknown, actor: AssociationActor) {
       const document = parseSiteContent(collection, raw)
+      return transaction(workspaceId, collection, client => write(client, workspaceId, collection, expectedVersion, document, actor))
+    },
+    /** Apply item-level operations to the current draft; the result must still satisfy the collection schema. */
+    async update(workspaceId: string, collection: SiteContentCollection, expectedVersion: number, operations: readonly SiteContentOperation[], actor: AssociationActor) {
       return transaction(workspaceId, collection, async client => {
         const current = await state(client, workspaceId, collection)
-        if (current.draft_version !== expectedVersion) throw new AssociationError('conflict', 'The draft changed. Reload before saving.')
-        const version = expectedVersion + 1
-        await client.query(`INSERT INTO association_site_content(workspace_id,collection,draft_version,draft) VALUES($1,$2,$3,$4)
-          ON CONFLICT(workspace_id,collection) DO UPDATE SET draft_version=$3,draft=$4,updated_at=now()`, [workspaceId, collection, version, document])
-        await audit(client, workspaceId, 'site_content.draft_saved', collection, version, actor)
-        const issueDetails = siteContentPublicationIssueDetails(collection, document)
-        return { collection, version, issues: issueDetails.map(issue => issue.message), issueDetails }
+        if (current.draft_version !== expectedVersion) throw new AssociationError('conflict', 'The draft changed. Read it again before editing.')
+        const edited = applySiteContentOperations(collection, current.draft, operations)
+        const parsed = siteContentSchema(collection).safeParse(edited.document)
+        if (!parsed.success) throw new AssociationError('invalid_edit', `The edit does not fit this page: ${parsed.error.issues.slice(0, 5).map(issue => `${issue.path.join('/') || 'document'}: ${issue.message}`).join('; ')}`)
+        return { ...(await write(client, workspaceId, collection, expectedVersion, parsed.data, actor)), changed: edited.changed }
       })
     },
     async publish(workspaceId: string, collection: SiteContentCollection, expectedVersion: number, actor: AssociationActor) {
@@ -62,7 +90,7 @@ export function createSiteContentStore(pool: Pool = getPool()) {
         if (current.draft_version !== expectedVersion || !current.draft) throw new AssociationError('conflict', 'The draft changed. Preview it again before publishing.')
         if (current.published_revision === expectedVersion) return { collection, revision: expectedVersion, synchronization: 'pending', observations: current.observations }
         const document = parseSiteContent(collection, current.draft)
-        const issues = siteContentPublicationIssues(collection, document)
+        const { issues } = await described(client, workspaceId, collection, document)
         if (issues.length) throw new AssociationError('conflict', issues.join('; '))
         await client.query('INSERT INTO association_site_content_revisions(workspace_id,collection,revision,document,actor) VALUES($1,$2,$3,$4,$5)',
           [workspaceId, collection, expectedVersion, document, actor])
@@ -87,11 +115,12 @@ export function createSiteContentStore(pool: Pool = getPool()) {
         `SELECT c.*, r.published_at FROM association_site_content c
            LEFT JOIN association_site_content_revisions r ON r.workspace_id=c.workspace_id AND r.collection=c.collection AND r.revision=c.published_revision
           WHERE c.workspace_id=$1`, [workspaceId])).rows
+      const known = await libraryIds(pool, workspaceId, [...new Set(rows.flatMap(row => row.draft ? siteContentMediaIds(row.draft) : []))])
       return SITE_CONTENT_COLLECTIONS.map(collection => {
         const row = rows.find(candidate => candidate.collection === collection)
         return { collection, readers: SITE_CONTENT_READERS[collection], version: row?.draft_version ?? 0, publishedRevision: row?.published_revision ?? 0,
           publishedAt: row?.published_at?.toISOString() ?? null, updatedAt: row?.updated_at?.toISOString() ?? null, observations: row?.observations ?? {},
-          issueCount: row?.draft ? siteContentPublicationIssues(collection, row.draft).length : 0 }
+          issueCount: row?.draft ? siteContentPublicationIssueDetails(collection, row.draft).length + mediaIssues(row.draft, known).length : 0 }
       })
     },
     async observe(workspaceId: string, collection: SiteContentCollection, site: SiteContentSite, revision: number) {

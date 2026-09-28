@@ -541,7 +541,7 @@ export const zh: Dictionary = {
       "mediaHelp": "網站頁面使用的圖片和 PDF。",
       "backToPages": "所有頁面與內容",
       "publishDone": "已發佈。網站會在下次載入頁面時顯示。",
-      "issues": {"duplicate_group": "組別代號 {group} 重複使用", "group_needs_title": "組別 {group} 需要英文標題", "duplicate_person": "{person} 在 {group} 中重複列出", "person_needs_name": "{group} 中有人員未填姓名", "duplicate_partner": "合作夥伴 {partner} 重複列出", "partner_needs_name": "有合作夥伴未填名稱", "settings_need_site": "請至少為一個網站加入設定", "site_needs_address": "{site}：請加入聯絡地址", "site_needs_legal_line": "{site}：請加入法律聲明", "duplicate_directory_entry": "{site}：聯絡人 {entry} 重複列出", "duplicate_news": "新聞項目 {item} 重複列出", "news_needs_title": "有新聞項目需要標題", "news_link_or_file": "有新聞項目同時有連結和檔案，請只保留一項", "hero_needs_title": "請加入主標題", "duplicate_audience": "對象 {audience} 重複列出", "duplicate_featured_programme": "課程 {programme} 重複精選", "chairman_message_needed": "請加入主席的話"},
+      "issues": {"duplicate_group": "組別代號 {group} 重複使用", "group_needs_title": "組別 {group} 需要英文標題", "duplicate_person": "{person} 在 {group} 中重複列出", "person_needs_name": "{group} 中有人員未填姓名", "duplicate_partner": "合作夥伴 {partner} 重複列出", "partner_needs_name": "有合作夥伴未填名稱", "settings_need_site": "請至少為一個網站加入設定", "site_needs_address": "{site}：請加入聯絡地址", "site_needs_legal_line": "{site}：請加入法律聲明", "duplicate_directory_entry": "{site}：聯絡人 {entry} 重複列出", "duplicate_news": "新聞項目 {item} 重複列出", "news_needs_title": "有新聞項目需要標題", "news_link_or_file": "有新聞項目同時有連結和檔案，請只保留一項", "hero_needs_title": "請加入主標題", "duplicate_audience": "對象 {audience} 重複列出", "duplicate_featured_programme": "課程 {programme} 重複精選", "chairman_message_needed": "請加入主席的話", "media_missing": "有圖片或檔案已不在媒體庫中，請重新選擇"},
       "create": "建立內容",
       "edit": "編輯",
       "save": "儲存變更",

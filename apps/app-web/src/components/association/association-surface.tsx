@@ -39,7 +39,7 @@ export function AssociationSurface({ workspaceId }: { workspaceId: string }) {
   const section = resolveAssociationSection(search);
   const current = associationNavItem(section);
   const href = (id: AssociationSection) => associationHref(workspaceId, id);
-  const eventId = search?.get("eventId") ?? "", wantsNew = search?.get("new") === "1", tab = search?.get("tab") ?? undefined;
+  const eventId = search?.get("eventId") ?? "", eventSlug = search?.get("eventSlug") ?? "", wantsNew = search?.get("new") === "1", tab = search?.get("tab") ?? undefined;
   const locked = !!current.requires && access.resolved && !access.canManage;
   const waiting = !!current.requires && !access.resolved;
   const CurrentIcon = current.icon;
@@ -74,7 +74,7 @@ export function AssociationSurface({ workspaceId }: { workspaceId: string }) {
             {section === "memberships" && <AssociationMembersPanel key={`${workspaceId}:${wantsNew}`} workspaceId={workspaceId} initialNew={wantsNew} />}
             {section === "plans" && <AssociationPlansPanel key={`${workspaceId}:${wantsNew}`} workspaceId={workspaceId} initialNew={wantsNew} />}
             {section === "sponsorships" && <AssociationSponsorshipsSection key={workspaceId} workspaceId={workspaceId} />}
-            {section === "events" && <AssociationEventsPanel key={`${workspaceId}:${eventId}:${wantsNew}`} workspaceId={workspaceId} initialEventId={eventId} initialNew={wantsNew} />}
+            {section === "events" && <AssociationEventsPanel key={`${workspaceId}:${eventId}:${eventSlug}:${wantsNew}`} workspaceId={workspaceId} initialEventId={eventId} initialEventSlug={eventSlug} initialNew={wantsNew} />}
             {section === "promotions" && <AssociationPromotionsPanel key={`${workspaceId}:${wantsNew}`} workspaceId={workspaceId} initialNew={wantsNew} />}
             {section === "orders" && <AssociationOrdersPanel key={`${workspaceId}:${eventId}`} workspaceId={workspaceId} initialEventId={eventId} />}
             {section === "waitlist" && <AssociationWaitlistPanel key={workspaceId} workspaceId={workspaceId} />}

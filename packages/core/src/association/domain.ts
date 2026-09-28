@@ -746,6 +746,7 @@ export type AssociationErrorCode =
   | 'promotion_invalid'
   | 'promotion_not_applicable'
   | 'promotion_exhausted'
+  | 'invalid_edit'
 
 export class AssociationError extends Error {
   constructor(

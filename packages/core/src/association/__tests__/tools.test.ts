@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { WorkspaceModuleError } from '@use-brian/shared'
 import { createAssociationTools } from '../tools.js'
+import { SiteContentCollectionSchema } from '../site-content.js'
 import type { AssociationServicePort } from '../operations.js'
 import type { Tool, ToolContext } from '../../tools/types.js'
 import { filterToolsByCapabilities } from '../../tools/capability-gate.js'
@@ -26,7 +27,7 @@ function fixture() {
 describe('[COMP:crm/association-tools] canonical native Association adapters', () => {
   it('publishes bounded object schemas without module or provider mutation tools', () => {
     const { tools } = fixture()
-    expect(Object.keys(tools)).toHaveLength(23)
+    expect(Object.keys(tools)).toHaveLength(29)
     for (const tool of Object.values(tools)) expect('shape' in tool.inputSchema).toBe(true)
     expect(Object.keys(tools).filter(name => /enable|disable|reconcile|bind.*provider|mark.*paid/i.test(name))).toEqual([])
     expect(tools.confirmFreeAssociationOrder.requiresConfirmation).toBe(true)
@@ -90,5 +91,54 @@ describe('[COMP:crm/association-tools] canonical native Association adapters', (
     expect(await tools.createAssociationOrder.execute({ order: { ...order, lines: [{ ...order.lines[0], quantity: 2 }] } } as never, context()))
       .toMatchObject({ isError: true, data: { error: 'invalid_input' } })
     expect(execute).not.toHaveBeenCalled()
+  })
+
+})
+
+describe('[COMP:crm/site-content] website content tools', () => {
+  const configure = new Set([...capabilities, 'configure'])
+  const draft = { collection: 'event-pages', version: 4, readers: ['north', 'south'], issues: [],
+    published: { schemaVersion: 1, pages: [{ event: 'space-night', sections: [] }] },
+    document: { schemaVersion: 1, pages: [{ event: 'space-night', summary: { en: 'Non\\u{2011}stop' }, sections: [] }] } }
+  function content() {
+    const execute = vi.fn<AssociationServicePort['execute']>(async (_context, command) => ({ command: command.kind, record: command.kind === 'site_content_draft' ? structuredClone(draft) : { version: 5, changed: [] } }))
+    return { tools: createAssociationTools({ execute }), execute }
+  }
+  it('stay hidden without the configure grant and never confirm draft edits', () => {
+    const { tools } = content()
+    const map = new Map<string, Tool>(Object.values(tools).map(tool => [tool.name, tool]))
+    for (const name of ['getWebsiteStatus', 'updateWebsiteContent', 'updateEventPage', 'listWebsiteMedia', 'addWebsiteMediaFromAttachment', 'getWebsitePreviewLink']) {
+      expect(filterToolsByCapabilities(map, new Set(capabilities)).has(name)).toBe(false)
+      expect(filterToolsByCapabilities(map, configure).has(name)).toBe(true)
+    }
+    expect(tools.updateWebsiteContent.requiresConfirmation).toBe(false)
+    expect(tools.publishWebsiteContent.requiresConfirmation).toBe(true)
+    expect(tools.publishMembershipCatalogue.requiresConfirmation).toBe(true)
+    // Descriptions name no site: the site keys come from the home page collection names.
+    const siteKeys = SiteContentCollectionSchema.options.filter(name => name.startsWith('home-')).map(name => name.slice(5))
+    for (const site of siteKeys) expect(JSON.stringify(Object.values(tools).map(tool => tool.description))).not.toMatch(new RegExp(`\\b${site}\\b`, 'i'))
+  })
+  it('reads one entry with real characters and writes escapes back', async () => {
+    const { tools, execute } = content()
+    const read = await tools.previewWebsiteContent.execute({ collection: 'event-pages', path: 'pages/space-night/summary' }, context({ activeCapabilities: configure }))
+    expect(read.data).toMatchObject({ version: 4, value: { en: 'Non\u2011stop' }, publishedValue: null })
+    await tools.updateWebsiteContent.execute({ collection: 'event-pages', expectedVersion: 4, operations: [{ op: 'set', path: 'pages/space-night/summary', value: { en: 'Non\u2011stop again' } }] }, context({ activeCapabilities: configure }))
+    expect(execute.mock.calls[1]![0].authority).toMatchObject({ canConfigure: true })
+    expect(execute.mock.calls[1]![1]).toEqual({ kind: 'update_site_content', collection: 'event-pages', expectedVersion: 4,
+      operations: [{ op: 'set', path: 'pages/space-night/summary', value: { en: 'Non\\u{2011}stop again' } }] })
+  })
+  it('turns an event page edit into item operations against the current draft', async () => {
+    const { tools, execute } = content()
+    await tools.updateEventPage.execute({ eventSlug: 'space-night', expectedVersion: 4, sections: [{ op: 'add', section: { id: 'faq', kind: 'faq', items: [] } }] } as never, context({ activeCapabilities: configure }))
+    expect(execute.mock.calls[1]![1]).toMatchObject({ kind: 'update_site_content', expectedVersion: 4, operations: [{ op: 'insert', path: 'pages/space-night/sections', index: 0 }] })
+    expect(await tools.updateEventPage.execute({ eventSlug: 'space-night', expectedVersion: 3, summary: { en: 'x' } } as never, context({ activeCapabilities: configure })))
+      .toMatchObject({ isError: true, data: { error: 'conflict' } })
+  })
+  it('shows the person what publishing changes before they confirm', async () => {
+    const { tools } = content()
+    expect(await tools.publishWebsiteContent.describeConfirmation!({ collection: 'event-pages', expectedVersion: 4 }, context({ activeCapabilities: configure })))
+      .toEqual(['Publish event-pages (draft version 4) to NORTH, SOUTH:', 'changed pages/space-night'])
+    expect(await tools.getWebsitePreviewLink.execute({ collection: 'event-pages', eventSlug: 'space-night' }, context({ activeCapabilities: configure })))
+      .toMatchObject({ data: { consolePath: `/w/${id(1)}/association?section=events&eventSlug=space-night` } })
   })
 })

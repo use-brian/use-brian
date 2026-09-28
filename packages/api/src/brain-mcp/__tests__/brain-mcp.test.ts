@@ -341,7 +341,11 @@ describe('[COMP:api/brain-mcp] buildBrainTools — scope gating', () => {
     const all = new Set([...appRead, 'configure', 'home_app:association:write', 'crm', 'home_app:crm:read', 'home_app:crm:write'])
     const names = buildBrainTools({ ...base, scope: 'read', agentActiveCapabilities: all }).map(tool => tool.name)
     for (const tool of Object.values(associationTools)) expect(names.includes(tool.name)).toBe(tool.isReadOnly)
-    expect(buildBrainTools({ ...base, scope: 'read_write', agentActiveCapabilities: all }).filter(tool => tool.name.includes('Association'))).toHaveLength(14)
+    const readWrite = buildBrainTools({ ...base, scope: 'read_write', agentActiveCapabilities: all }).map(tool => tool.name)
+    // Tools that need a person's confirmation in chat are not offered over MCP, where nobody confirms.
+    for (const tool of Object.values(associationTools)) expect(readWrite.includes(tool.name)).toBe(!tool.requiresConfirmation)
+    expect(readWrite).not.toContain('publishWebsiteContent')
+    expect(readWrite).toContain('updateWebsiteContent')
   })
 
   it('rechecks Association permission in a direct MCP call after discovery', async () => {

@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
+import { SITE_CONTENT_COLLECTIONS } from '@use-brian/core'
 import { createSiteContentStore } from '../site-content-store.js'
 import { createAssociationWorkspaceModulesStore } from '../../association/workspace-module.js'
 const url=process.env.MEMBERSHIP_TEST_DATABASE_URL
@@ -57,10 +58,28 @@ describe.skipIf(!pool)('[COMP:crm/site-content] actual PostgreSQL publication',(
   await store.publish(workspace,'partners',1,actor)
   expect((await store.read(workspace,'partners','sea')).revision).toBe(1)
   const status=await store.status(workspace)
-  expect(status.map(row=>row.collection)).toEqual(['people','partners','settings','news','home-oasa','home-sea'])
+  expect(status.map(row=>row.collection)).toEqual([...SITE_CONTENT_COLLECTIONS])
   expect(status.find(row=>row.collection==='partners')).toMatchObject({version:1,publishedRevision:1,issueCount:0})
   expect(status.find(row=>row.collection==='partners')!.publishedAt).toMatch(/^\d{4}-/)
   expect(status.find(row=>row.collection==='people')).toMatchObject({version:0,publishedRevision:0,publishedAt:null})
   const draft=await store.draft(workspace,'partners');expect(draft.issueDetails).toEqual([])
+ })
+ it('applies item edits inside the version check and blocks publishing images outside the media library',async()=>{
+  const {workspace,actor,store}=await fixture()
+  const edited=await store.update(workspace,'event-pages',0,[{op:'insert',path:'pages',value:{event:'space-night',sections:[]}},
+   {op:'insert',path:'pages/space-night/sections',value:{id:'intro',kind:'text',body:L('Welcome')}}],actor)
+  expect(edited).toMatchObject({version:1,issues:[],changed:['insert pages','insert pages/space-night/sections']})
+  await expect(store.update(workspace,'event-pages',0,[{op:'remove',path:'pages/space-night'}],actor)).rejects.toMatchObject({code:'conflict'})
+  await expect(store.update(workspace,'event-pages',1,[{op:'set',path:'pages/space-night/sections/intro/kind',value:'unknown'}],actor)).rejects.toMatchObject({code:'invalid_edit'})
+  expect((await store.draft(workspace,'event-pages')).version).toBe(1)
+  const missing=randomUUID()
+  const withImage=await store.update(workspace,'event-pages',1,[{op:'set',path:'pages/space-night/cover',value:{mediaId:missing,alt:L('Stage')}}],actor)
+  expect(withImage.issueDetails).toEqual([{code:'media_missing',params:{media:missing},message:expect.stringContaining(missing)}])
+  expect((await store.status(workspace)).find(row=>row.collection==='event-pages')).toMatchObject({issueCount:1})
+  await expect(store.publish(workspace,'event-pages',2,actor)).rejects.toMatchObject({code:'conflict'})
+  const file=(await pool!.query(`INSERT INTO workspace_files(workspace_id,path,parent_path,name,mime,size_bytes,storage_uri,created_by_user_id)
+   VALUES($1,'/doc/website-media/x-stage.png','/doc/website-media','x-stage.png','image/png',3,'file://x',$2) RETURNING id`,[workspace,actor.credentialId])).rows[0].id
+  await store.update(workspace,'event-pages',2,[{op:'set',path:'pages/space-night/cover/mediaId',value:file}],actor)
+  await expect(store.publish(workspace,'event-pages',3,actor)).resolves.toMatchObject({revision:3})
  })
 })

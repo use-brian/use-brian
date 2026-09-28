@@ -14,6 +14,7 @@ import { createMembershipCatalogueStore } from '../db/membership-catalogue-store
 import { createProgrammeCatalogueStore } from '../db/programme-catalogue-store.js'
 import { createSiteContentStore } from '../db/site-content-store.js'
 import { createAssociationStore, type AssociationStore } from '../db/association-store.js'
+import { getWorkspaceMembershipSystem } from '../db/workspace-store.js'
 import type { WorkspaceModulesStore } from '../db/workspace-modules-store.js'
 import {
   ASSOCIATION_MODULE_KEY,
@@ -28,6 +29,16 @@ function actor(context: AssociationContext): AssociationActor {
     ...(context.authority.integration ? { integration: context.authority.integration } : {}) }
 }
 
+/** The website media library as assistant tools reach it; wired at boot once the files API exists. */
+export type AssociationWebsiteMediaPort = {
+  list(workspaceId: string): Promise<Array<{ id: string; name: string; title: string | null; mime: string; sizeBytes: number; updatedAt: string }>>
+  /** Copy a chat upload the acting person can read into the library. */
+  importUpload(input: { workspaceId: string; userId: string; assistantId: string | null; fileId: string; name?: string }):
+    Promise<{ id: string; name: string; mime: string; sizeBytes: number } | { error: 'upload_not_found' | 'unsupported_type' | 'not_stored' | string }>
+  audit(workspaceId: string, mediaId: string, actor: AssociationActor): Promise<void>
+}
+const MANAGERS = ['owner', 'admin']
+
 export function createAssociationService(options: {
   crmService: CrmOperationsServicePort
   store?: AssociationStore
@@ -35,6 +46,10 @@ export function createAssociationService(options: {
   programmeCatalogue?: ReturnType<typeof createProgrammeCatalogueStore>
   siteContent?: ReturnType<typeof createSiteContentStore>
   modules?: WorkspaceModulesStore
+  /** Late-bound: the files API is created after the service at boot. */
+  websiteMedia?: () => AssociationWebsiteMediaPort | null
+  /** The workspace role of the person an assistant acts for. */
+  memberRole?: (userId: string, workspaceId: string) => Promise<string | null>
 }): AssociationServicePort & AssociationSourceOrderImportPort & AssociationPromotionImportPort & AssociationSourceMembershipImportPort {
   const store = options.store ?? createAssociationStore()
   // Resolve the default lazily so pure command tests never open a database.
@@ -42,6 +57,21 @@ export function createAssociationService(options: {
   const programmeCatalogue = () => options.programmeCatalogue ?? createProgrammeCatalogueStore()
   const siteContent = () => options.siteContent ?? createSiteContentStore()
   const modules = () => options.modules ?? createAssociationWorkspaceModulesStore()
+  const memberRole = options.memberRole ?? (async (userId: string, workspaceId: string) => (await getWorkspaceMembershipSystem(userId, workspaceId))?.role ?? null)
+  /**
+   * Website and catalogue editing is owner/admin work, like the console. An assistant or app holding the
+   * configure grant acts for a person, so that person must be an owner or admin too; otherwise any member
+   * chatting with a configured assistant could publish. Integration keys never edit.
+   */
+  async function requireContentManager(context: AssociationContext, message: string) {
+    const { actor, authority } = context
+    if (!authority.canConfigure || actor.kind === 'integration_key') throw new CrmOperationsError('not_authorized', message)
+    if (actor.kind === 'user') { if (!MANAGERS.includes(authority.role)) throw new CrmOperationsError('not_authorized', message); return }
+    if (actor.kind === 'assistant' || actor.kind === 'workflow' || actor.kind === 'oauth_token' || actor.kind === 'home_app') {
+      const role = actor.userId ? await memberRole(actor.userId, context.workspaceId) : null
+      if (!role || !MANAGERS.includes(role)) throw new CrmOperationsError('not_authorized', `${message} The person asking must be a workspace owner or admin.`)
+    }
+  }
   return {
     async importSourceMembership(rawContext, rawInput) {
       const context = AssociationContextSchema.parse(rawContext)
@@ -123,9 +153,7 @@ export function createAssociationService(options: {
         case 'membership_catalogue_draft':
         case 'save_membership_catalogue':
         case 'publish_membership_catalogue': {
-          if (!authority.canConfigure || (context.actor.kind === 'user' && !['owner', 'admin'].includes(authority.role)) || context.actor.kind === 'integration_key') {
-            throw new CrmOperationsError('not_authorized', 'Membership publishing requires workspace configuration authority.')
-          }
+          await requireContentManager(context, 'Membership publishing requires workspace configuration authority.')
           const catalogue = membershipCatalogue()
           const record = command.kind === 'membership_catalogue_draft' ? await catalogue.draft(workspaceId)
             : command.kind === 'save_membership_catalogue' ? await catalogue.save(workspaceId, command.expectedVersion, command.document, dbActor)
@@ -145,9 +173,7 @@ export function createAssociationService(options: {
         case 'programme_catalogue_draft':
         case 'save_programme_catalogue':
         case 'publish_programme_catalogue': {
-          if (!authority.canConfigure || (context.actor.kind === 'user' && !['owner', 'admin'].includes(authority.role)) || context.actor.kind === 'integration_key') {
-            throw new CrmOperationsError('not_authorized', 'Programme publishing requires workspace configuration authority.')
-          }
+          await requireContentManager(context, 'Programme publishing requires workspace configuration authority.')
           const catalogue = programmeCatalogue()
           const record = command.kind === 'programme_catalogue_draft' ? await catalogue.draft(workspaceId)
             : command.kind === 'save_programme_catalogue' ? await catalogue.save(workspaceId, command.expectedVersion, command.document, dbActor)
@@ -166,15 +192,36 @@ export function createAssociationService(options: {
         }
         case 'site_content_draft':
         case 'save_site_content':
+        case 'update_site_content':
         case 'publish_site_content': {
-          if (!authority.canConfigure || (context.actor.kind === 'user' && !['owner', 'admin'].includes(authority.role)) || context.actor.kind === 'integration_key') {
-            throw new CrmOperationsError('not_authorized', 'Website content publishing requires workspace configuration authority.')
-          }
+          await requireContentManager(context, 'Website content publishing requires workspace configuration authority.')
           const store = siteContent()
           const record = command.kind === 'site_content_draft' ? await store.draft(workspaceId, command.collection)
             : command.kind === 'save_site_content' ? await store.save(workspaceId, command.collection, command.expectedVersion, command.document, dbActor)
+            : command.kind === 'update_site_content' ? await store.update(workspaceId, command.collection, command.expectedVersion, command.operations, dbActor)
             : await store.publish(workspaceId, command.collection, command.expectedVersion, dbActor)
           return { ...output, record }
+        }
+        case 'list_website_media':
+        case 'add_website_media': {
+          await requireContentManager(context, 'The website media library requires workspace configuration authority.')
+          const media = options.websiteMedia?.()
+          if (!media) throw new AssociationError('not_available', 'The website media library is not available on this deployment.')
+          if (command.kind === 'list_website_media') {
+            const needle = command.query?.toLowerCase()
+            const files = (await media.list(workspaceId)).filter(file => !needle || `${file.title ?? ''} ${file.name}`.toLowerCase().includes(needle))
+            return { ...output, items: files.slice(0, 100).map(file => ({ mediaId: file.id, name: file.title ?? file.name, mime: file.mime, sizeBytes: file.sizeBytes, updatedAt: file.updatedAt })),
+              nextCursor: null, record: { total: files.length } }
+          }
+          const actor = context.actor
+          const userId = actor.kind === 'user' || actor.kind === 'assistant' || actor.kind === 'workflow' || actor.kind === 'oauth_token' || actor.kind === 'home_app' ? actor.userId : undefined
+          if (!userId) throw new CrmOperationsError('not_authorized', 'Adding website media needs the person who uploaded the file.')
+          const added = await media.importUpload({ workspaceId, userId, assistantId: actor.kind === 'assistant' ? actor.assistantId : null, fileId: command.fileId, name: command.name })
+          if ('error' in added) throw new AssociationError(added.error === 'upload_not_found' ? 'not_found' : 'invalid_edit',
+            added.error === 'upload_not_found' ? 'No uploaded file with that id is available; it may have expired. Ask for the file again.'
+              : added.error === 'unsupported_type' ? 'Website media must be a JPEG, PNG, WebP, GIF, AVIF image or a PDF.' : 'The file could not be stored.')
+          await media.audit(workspaceId, added.id, dbActor)
+          return { ...output, record: { mediaId: added.id, name: added.name, mime: added.mime, sizeBytes: added.sizeBytes } }
         }
         case 'published_site_content': {
           // Public website content: the generic Association read grant, no resource dimension.
@@ -188,7 +235,7 @@ export function createAssociationService(options: {
         }
         case 'website_status': {
           // Publication summaries only (no document bodies), readable by every workspace member for the console Home.
-          if (context.actor.kind !== 'user') throw new CrmOperationsError('not_authorized', 'Website status is a workspace member read.')
+          if (context.actor.kind !== 'user' && context.actor.kind !== 'assistant') throw new CrmOperationsError('not_authorized', 'Website status is a workspace member read.')
           const [collections, programmes, membership] = await Promise.all([siteContent().status(workspaceId), programmeCatalogue().status(workspaceId), membershipCatalogue().status(workspaceId)])
           return { ...output, record: { collections, programmes, membership } }
         }

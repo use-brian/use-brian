@@ -202,6 +202,21 @@ function makeFakeAudit(): WorkspaceAuditStore & { events: Array<{ eventType: str
 const ctx = { workspaceId: 'workspace_1', userId: 'user_1', assistantId: 'assistant_1' }
 
 describe('[COMP:files/api] createFilesApi.write', () => {
+  it('keeps assistants out of the public website media library but lets the person-scoped media route write it', async () => {
+    const gcs = makeFakeGcs()
+    const api = createFilesApi({ gcs, store: makeFakeStore(), auditStore: makeFakeAudit(), bucket: 'b' })
+    const path = '/doc/website-media/x-photo.png'
+    const blocked = await api.writeBytes(ctx, { path, bytes: Buffer.from('png'), mime: 'image/png' })
+    expect(blocked).toMatchObject({ ok: false, error: { kind: 'read_only' } })
+    expect(gcs.blobs.size).toBe(0)
+    const person = { ...ctx, assistantId: null }
+    const written = await api.writeBytes(person, { path, bytes: Buffer.from('png'), mime: 'image/png' })
+    expect(written.ok).toBe(true)
+    expect(await api.delete(ctx, path)).toMatchObject({ ok: false, error: { kind: 'read_only' } })
+    expect(await api.setMeta(ctx, path, { title: 'renamed' })).toMatchObject({ ok: false, error: { kind: 'read_only' } })
+    expect((await api.write(ctx, { path: '/doc/website-media-notes.md', content: 'not the library' })).ok).toBe(true)
+  })
+
   it('writes blob, inserts row, emits audit', async () => {
     const gcs = makeFakeGcs()
     const store = makeFakeStore()
