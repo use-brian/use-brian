@@ -59,11 +59,17 @@ preapproveInput.addEventListener('change', () => {
 
 el<HTMLButtonElement>('connect').addEventListener('click', () => {
   void (async () => {
-    await chrome.runtime.sendMessage({
+    const result = await chrome.runtime.sendMessage({
       type: 'configure',
       relayUrl: relayUrlInput.value.trim(),
       pairingToken: tokenInput.value.trim() || undefined,
     })
+    if (!result?.ok) {
+      protectedError = 'Connect denied. A locked task can only be re-paired to the same account, workspace and profile.'
+      void refreshProtected()
+      return
+    }
+    protectedError = ''
     tokenInput.value = ''
     setTimeout(() => void refreshStatus(), 400)
   })()
@@ -86,3 +92,71 @@ el<HTMLButtonElement>('stop').addEventListener('click', () => {
 void loadStored()
 void refreshStatus()
 setInterval(() => void refreshStatus(), 2_000)
+
+// This configuration is human-entered extension UI state, never a relay argument.
+void chrome.storage.local.get('protectedApiBase').then(s => {
+  el<HTMLInputElement>('protected-api').value = s.protectedApiBase ?? ''
+})
+el('protected-save').addEventListener('click', () => {
+  void chrome.runtime.sendMessage({type:'protected-configure', protectedApiBase:el<HTMLInputElement>('protected-api').value.trim()}).then(r => {
+    protectedError = r?.ok ? '' : 'Configuration denied. Use a canonical HTTPS API origin; a locked task cannot change its pinned origin.'
+    void refreshProtected()
+  })
+})
+let protectedError = ''
+async function refreshProtected(): Promise<void> {
+  const s = await chrome.runtime.sendMessage({type:'protected-status'})
+  el('protected-status').textContent = s?.pending ? 'Explicit disclosure approval required.' : s?.locked ?
+    'Task locked (including denied or failed fills). Finish in the browser if needed, then clean up here.' : 'No protected fill pending.'
+  if (protectedError) el('protected-status').textContent = protectedError
+  el('protected-setup').hidden = s?.apiConfigured === true
+  el('protected-renewal').hidden = s?.needsRenewal !== true
+  el('protected-details').textContent = s?.pending ? `Destination: ${s.pending.destinationOrigin} · Profile: ${s.pending.browserProfileId} · Target text fields: ${s.pending.refs.join(', ')}` : ''
+  el('protected-approve').hidden = !s?.pending
+  el('protected-deny').hidden = !s?.pending
+  el('protected-complete').hidden = !s?.locked || !!s?.pending || s?.needsSessionRecovery === true
+  el('protected-session-recovery').hidden = s?.needsSessionRecovery !== true
+  el('protected-recover-server').hidden = !!s?.locked
+  el('protected-server-help').hidden = !!s?.locked
+}
+for (const [id, allowed] of [['protected-approve',true],['protected-deny',false]] as const) {
+  el(id).addEventListener('click', () => { void chrome.runtime.sendMessage({type:'protected-approval', allowed}).then(refreshProtected) })
+}
+el('protected-complete').addEventListener('click', () => {
+  protectedError = ''
+  void chrome.runtime.sendMessage({type:'protected-complete'}).then(r => {
+    if (!r?.ok) protectedError = 'Cleanup incomplete. Lock retained. Check trusted API setup, renew pairing if expired, then retry.'
+    void refreshProtected()
+  })
+})
+void refreshProtected()
+setInterval(() => void refreshProtected(), 1000)
+
+const recoveryConsent = el<HTMLInputElement>('protected-recovery-consent')
+const recoverAll = el<HTMLButtonElement>('protected-recover-all')
+recoveryConsent.addEventListener('change', () => { recoverAll.disabled = !recoveryConsent.checked })
+recoverAll.addEventListener('click', () => {
+  if (!recoveryConsent.checked || !window.confirm('Close ALL tabs accessible to this extension in this Chrome profile, including unrelated and pinned tabs in every window? Unsaved work may be lost. Only a new extension cleanup window will remain.')) return
+  recoverAll.disabled = true
+  recoveryConsent.checked = false
+  protectedError = ''
+  void chrome.runtime.sendMessage({type:'protected-recover-all-tabs', allowed:true}).then(r => {
+    if (!r?.ok) protectedError = 'Broad cleanup incomplete. Lock retained. Save your work and explicitly approve recovery again to retry.'
+    void refreshProtected()
+  })
+})
+
+
+el('protected-recover-server').addEventListener('click', () => {
+  if (!window.confirm('Recover this paired profile’s server reservation? References that have not started resolution will be invalidated and cancelled. If disclosure is uncertain, recovery will require a separate approval to close ALL accessible browser tabs.')) return
+  const button = el<HTMLButtonElement>('protected-recover-server')
+  button.disabled = true
+  protectedError = ''
+  void chrome.runtime.sendMessage({type:'protected-recover-server', allowed:true}).then(r => {
+    if (!r?.ok) protectedError = 'Server recovery failed. Check trusted API setup and pairing, then retry. No local lock was cleared.'
+    else if (r.status === 'cancelled') protectedError = 'Undisclosed reservation cancelled; old references are invalid. Create fresh references to retry.'
+    else if (r.status === 'none') protectedError = 'No server reservation found. Any local disclosure lock still requires cleanup.'
+    button.disabled = false
+    void refreshProtected()
+  })
+})

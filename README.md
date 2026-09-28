@@ -203,7 +203,7 @@ Every channel is configured in the app under **Studio → Channels**.
 | Channel | Setup |
 |---|---|
 | Web + desktop app | Ships in the box |
-| Telegram | Your own bot token; webhook needs a public HTTPS tunnel |
+| Telegram | Your own bot token; webhook needs a public HTTPS tunnel. [Channels and linked discussions](docs/telegram-channels.md) |
 | Slack | Your own Slack app; same tunnel |
 | Discord | Your own bot; no tunnel, a local Gateway bridge ships in the box |
 | WhatsApp | Personal number via a QR-paired local bridge, or the official Cloud API with your Meta app |

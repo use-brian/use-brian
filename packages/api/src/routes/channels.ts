@@ -314,7 +314,7 @@ const wechatVerifyCodeSchema = z.object({
  * server-side keeps them out of every consumer, including stale clients.
  * WhatsApp JID shapes vary too much to police — they pass through unfiltered.
  */
-const TELEGRAM_DESTINATION_ID_PATTERN = /^(-?\d+)(?::topic:([1-9]\d*))?$/
+const TELEGRAM_DESTINATION_ID_PATTERN = /^(-?\d+)(?::(?:topic|discussion):([1-9]\d*))?$/
 
 const DESTINATION_ID_SHAPE: Record<string, RegExp> = {
   telegram: TELEGRAM_DESTINATION_ID_PATTERN,
@@ -608,7 +608,7 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         continue
       }
       const topicName = seen?.topics.find((topic) => topic.topicId === topicId)?.name
-      names.set(channelId, `${chatTitle ?? chatId} › ${topicName ?? `#${topicId}`}`)
+      names.set(channelId, `${chatTitle ?? chatId} › ${channelId.includes(':discussion:') ? `discussion #${topicId}` : topicName ?? `#${topicId}`}`)
     }
     return names
   }

@@ -30,7 +30,7 @@ import { releaseCrmAddressSuppression } from '../crm-operations/suppression-tomb
 import { saveCrmManagedMailboxPolicy, saveCrmMailboxIntegrationGrant } from '../crm-operations/delivery-policy.js'
 import { saveCrmEntitlementPlanRecord, saveCrmEventRecord } from './association-store.js'
 import { prepareProviderEntitlementPeriod, requireProviderEntitlementActor } from '../crm-operations/entitlement-periods.js'
-import { actorAuditIdentity } from '@use-brian/core'
+import { actorAuditIdentity, isUnverifiedIdentityPolicy } from '@use-brian/core'
 import { lockAssociationInventory, refreshAssociationInventory } from '../association/inventory.js'
 import type { PlanInput, EventInput } from '../association/domain.js'
 import { authorizeCrmIntegrationCommand } from '../crm-operations/integration-authority.js'
@@ -164,6 +164,9 @@ export type CrmOperationsTransaction = {
     createdByAssistantId: string | null
   }): Promise<CrmOperationsRecord>
   updateContact(contactId: string, input: ContactWrite): Promise<CrmOperationsRecord>
+  /** Unverified claims (`existing_or_new`): set only what the contact lacks. A
+   *  populated name, phone or custom field is never replaced; tags are added. */
+  fillContactGaps(contactId: string, input: ContactWrite): Promise<CrmOperationsRecord>
   bindExternalIdentity(contactId: string, provider: string, subject: string): Promise<void>
   createSubmission(params: {
     definition: StoredIntakeDefinition
@@ -583,6 +586,44 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
       return first(result)
     },
 
+    async fillContactGaps(contactId, input) {
+      const result = await client.query<DbRecord>(
+        `UPDATE entities
+            SET display_name = CASE
+                  WHEN NULLIF(btrim(display_name),'') IS NULL
+                    OR lower(btrim(display_name)) = lower(btrim(COALESCE(NULLIF(btrim(attributes->>'email'),''),canonical_id,'')))
+                  THEN COALESCE(NULLIF(btrim($3),''), display_name)
+                  ELSE display_name END,
+                attributes = attributes
+                  || CASE WHEN NULLIF(btrim(attributes->>'phone'),'') IS NULL AND NULLIF(btrim($4),'') IS NOT NULL
+                       THEN jsonb_build_object('phone',$4::text) ELSE '{}'::jsonb END
+                  || CASE WHEN cardinality($5::text[]) > 0
+                       THEN jsonb_build_object('tags', (
+                         SELECT jsonb_agg(tag ORDER BY position)
+                           FROM (SELECT tag, min(position) AS position FROM (
+                                   SELECT value AS tag, ordinality AS position
+                                     FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(attributes->'tags')='array' THEN attributes->'tags' ELSE '[]'::jsonb END)
+                                          WITH ORDINALITY
+                                   UNION ALL
+                                   SELECT tag, 1000000 + position FROM unnest($5::text[]) WITH ORDINALITY AS added(tag, position)
+                                 ) merged GROUP BY tag) ordered))
+                       ELSE '{}'::jsonb END
+                  || CASE WHEN $6::jsonb <> '{}'::jsonb
+                       THEN jsonb_build_object('custom_fields', $6::jsonb
+                         || CASE WHEN jsonb_typeof(attributes->'custom_fields')='object' THEN attributes->'custom_fields' ELSE '{}'::jsonb END)
+                       ELSE '{}'::jsonb END,
+                updated_at = now()
+          WHERE workspace_id = $1 AND id = $2 AND kind = 'person'
+            AND valid_to IS NULL AND retracted_at IS NULL
+         RETURNING id, workspace_id AS "workspaceId", display_name AS name,
+                   canonical_id AS email, attributes, created_at AS "createdAt",
+                   updated_at AS "updatedAt"`,
+        [workspaceId, contactId, input.name, input.phone, input.tags, JSON.stringify(input.customFields)],
+      )
+      if (!result.rows[0]) throw new Error('crm contact not found in workspace')
+      return first(result)
+    },
+
     async bindExternalIdentity(contactId, provider, subject) {
       const result = await client.query<{ contactId: string }>(
         `INSERT INTO association_external_identities (
@@ -856,7 +897,7 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
     },
 
     async saveIntakeDefinition(params) {
-      if (params.definition.identityPolicy !== 'new_or_review') {
+      if (!isUnverifiedIdentityPolicy(params.definition.identityPolicy)) {
         const member = context.actor.kind === 'user' ? await client.query(
           `SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND role IN ('owner','admin') FOR SHARE`,
           [workspaceId, context.actor.userId],

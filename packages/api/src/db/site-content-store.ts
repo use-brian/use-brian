@@ -1,20 +1,19 @@
 /** Transactional draft/publication authority for website content collections. [COMP:crm/site-content] */
 import type { Pool, PoolClient } from 'pg'
-import { AssociationError, parseSiteContent, resolveSiteContent, siteContentPublicationIssues, SITE_CONTENT_READERS,
+import { AssociationError, parseSiteContent, resolveSiteContent, siteContentPublicationIssueDetails, siteContentPublicationIssues, SITE_CONTENT_COLLECTIONS, SITE_CONTENT_READERS,
   type AssociationActor, type SiteContentCollection, type SiteContentDocument, type SiteContentSite } from '@use-brian/core'
 import { getPool } from './client.js'
-import { lockAssociationModule, requireAssociationAdmission } from '../association/workspace-module.js'
 
 type Observations = Record<string, { revision: number; observedAt: string }>
 type State = { draft_version: number; draft: SiteContentDocument | null; published_revision: number; observations: Observations }
 const empty: State = { draft_version: 0, draft: null, published_revision: 0, observations: {} }
 
 export function createSiteContentStore(pool: Pool = getPool()) {
-  async function transaction<T>(workspaceId: string, collection: SiteContentCollection, fn: (client: PoolClient) => Promise<T>, write = false) {
+  // Website content is not commerce: the Association module state never freezes editing (owner/admin is checked by the service).
+  async function transaction<T>(workspaceId: string, collection: SiteContentCollection, fn: (client: PoolClient) => Promise<T>) {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      if (write) requireAssociationAdmission(await lockAssociationModule(client, workspaceId))
       // One lock per collection: publishing news never waits on the home page, and never on checkouts.
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended('site-content:'||$1||':'||$2,0))", [workspaceId, collection])
       const result = await fn(client)
@@ -40,7 +39,8 @@ export function createSiteContentStore(pool: Pool = getPool()) {
         const row = await state(client, workspaceId, collection)
         return { collection, version: row.draft_version, document: row.draft, publishedRevision: row.published_revision,
           published: await published(client, workspaceId, collection, row.published_revision), observations: row.observations,
-          readers: SITE_CONTENT_READERS[collection], issues: row.draft ? siteContentPublicationIssues(collection, row.draft) : [] }
+          readers: SITE_CONTENT_READERS[collection], issues: row.draft ? siteContentPublicationIssues(collection, row.draft) : [],
+          issueDetails: row.draft ? siteContentPublicationIssueDetails(collection, row.draft) : [] }
       })
     },
     async save(workspaceId: string, collection: SiteContentCollection, expectedVersion: number, raw: unknown, actor: AssociationActor) {
@@ -52,8 +52,9 @@ export function createSiteContentStore(pool: Pool = getPool()) {
         await client.query(`INSERT INTO association_site_content(workspace_id,collection,draft_version,draft) VALUES($1,$2,$3,$4)
           ON CONFLICT(workspace_id,collection) DO UPDATE SET draft_version=$3,draft=$4,updated_at=now()`, [workspaceId, collection, version, document])
         await audit(client, workspaceId, 'site_content.draft_saved', collection, version, actor)
-        return { collection, version, issues: siteContentPublicationIssues(collection, document) }
-      }, true)
+        const issueDetails = siteContentPublicationIssueDetails(collection, document)
+        return { collection, version, issues: issueDetails.map(issue => issue.message), issueDetails }
+      })
     },
     async publish(workspaceId: string, collection: SiteContentCollection, expectedVersion: number, actor: AssociationActor) {
       return transaction(workspaceId, collection, async client => {
@@ -69,7 +70,7 @@ export function createSiteContentStore(pool: Pool = getPool()) {
           [workspaceId, collection, expectedVersion])
         await audit(client, workspaceId, 'site_content.published', collection, expectedVersion, actor)
         return { collection, revision: expectedVersion, synchronization: 'pending', observations: {} }
-      }, true)
+      })
     },
     async read(workspaceId: string, collection: SiteContentCollection, site: SiteContentSite) {
       if (!SITE_CONTENT_READERS[collection].includes(site)) throw new AssociationError('not_available', `${collection} is not published for ${site}.`)
@@ -78,6 +79,19 @@ export function createSiteContentStore(pool: Pool = getPool()) {
         const document = await published(client, workspaceId, collection, row.published_revision)
         if (!document) throw new AssociationError('not_available', `Website ${collection} content has not been published.`)
         return { collection, revision: row.published_revision, source: 'brian', site, document: resolveSiteContent(collection, document, site) }
+      })
+    },
+    /** Summaries for every collection (no document bodies): what the console Home and Pages & sections show. */
+    async status(workspaceId: string) {
+      const rows = (await pool.query<State & { collection: SiteContentCollection; updated_at: Date; published_at: Date | null }>(
+        `SELECT c.*, r.published_at FROM association_site_content c
+           LEFT JOIN association_site_content_revisions r ON r.workspace_id=c.workspace_id AND r.collection=c.collection AND r.revision=c.published_revision
+          WHERE c.workspace_id=$1`, [workspaceId])).rows
+      return SITE_CONTENT_COLLECTIONS.map(collection => {
+        const row = rows.find(candidate => candidate.collection === collection)
+        return { collection, readers: SITE_CONTENT_READERS[collection], version: row?.draft_version ?? 0, publishedRevision: row?.published_revision ?? 0,
+          publishedAt: row?.published_at?.toISOString() ?? null, updatedAt: row?.updated_at?.toISOString() ?? null, observations: row?.observations ?? {},
+          issueCount: row?.draft ? siteContentPublicationIssues(collection, row.draft).length : 0 }
       })
     },
     async observe(workspaceId: string, collection: SiteContentCollection, site: SiteContentSite, revision: number) {

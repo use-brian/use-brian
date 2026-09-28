@@ -22,6 +22,66 @@
 //       docs/plans/canvas-desktop-bundled-offline.md → Phase 1 ("Remaining wiring").
 const { contextBridge, ipcRenderer, webFrame } = require("electron");
 
+// Main sends this only to the app webContents, never the embedded browser.
+// Keep everything here: sandboxed preloads cannot require local helpers.
+const dockStyleId = "usebrian-native-browser-dock-style";
+const maxDockContentWidth = 100000; // DIP; reject corrupt/unbounded host geometry.
+let dockLayout = null;
+let publishedDockWidth = null;
+
+function applyBrowserDockLayout() {
+  const root = document.documentElement;
+  if (!root || !dockLayout) return;
+  let width = null;
+  if (dockLayout.reservedWidth > 0) {
+    const zoom = webFrame.getZoomFactor();
+    if (!Number.isFinite(zoom) || zoom <= 0) return;
+    width = (dockLayout.contentWidth - dockLayout.reservedWidth) / zoom;
+    if (!Number.isFinite(width)) return;
+    let style = document.getElementById(dockStyleId);
+    if (!style) {
+      style = document.createElement("style");
+      style.id = dockStyleId;
+      style.textContent = `html[data-native-browser-docked] > body {
+        box-sizing: border-box !important;
+        margin: 0 !important;
+        width: var(--native-app-width) !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        height: 100vh !important;
+        min-height: 0 !important;
+        contain: layout paint !important;
+      }`;
+      // Outside the React root AND head, so head replacement cannot remove it.
+      root.appendChild(style);
+    }
+    root.style.setProperty("--native-app-width", `${width}px`);
+    root.setAttribute("data-native-browser-docked", "");
+  } else {
+    root.removeAttribute("data-native-browser-docked");
+    root.style.removeProperty("--native-app-width");
+  }
+  if (width !== publishedDockWidth) {
+    // Update before dispatch: measuring hooks may synchronously trigger resize.
+    publishedDockWidth = width;
+    window.dispatchEvent(new CustomEvent("usebrian:browser-dock-layout"));
+  }
+}
+
+ipcRenderer.on("embedded-browser:dock-layout", (_event, payload) => {
+  if (!payload || typeof payload !== "object") return;
+  const { reservedWidth, contentWidth } = payload;
+  if (!Number.isFinite(reservedWidth) || !Number.isFinite(contentWidth)
+      || contentWidth <= 0 || contentWidth > maxDockContentWidth
+      || reservedWidth < 0 || reservedWidth >= contentWidth) return;
+  dockLayout = { reservedWidth, contentWidth };
+  applyBrowserDockLayout();
+});
+// IPC may precede document creation. Chromium also resizes the CSS viewport
+// when page zoom changes; always read the current zoom rather than caching it.
+document.addEventListener("DOMContentLoaded", applyBrowserDockLayout);
+window.addEventListener("resize", applyBrowserDockLayout);
+
 const deploymentListeners = new Set();
 let pendingDeployment = null;
 ipcRenderer.on("Use Brian:choose-deployment", (_event, url) => {
@@ -76,6 +136,8 @@ const bridge = {
   // The host OS, so app-web can gate macOS-only chrome (e.g. the traffic-light
   // inset in `.is-canvas-desktop`) without shipping a new desktop build.
   platform: process.platform,
+  // Main validates the trusted sender; websites never receive this preload.
+  browserControl: (message) => ipcRenderer.invoke("Use Brian:browser-control", message),
   // Native macOS traffic lights stay in window coordinates while page zoom
   // scales app-web's CSS pixels. Expose only the current numeric factor so the
   // workspace chrome can keep its 76px clearance invariant. `webFrame` is used

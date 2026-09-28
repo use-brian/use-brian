@@ -4,7 +4,16 @@ import { DeploymentAccounts, deploymentAccountKey, deploymentKey, type AccountTa
 import { serializePersistedTarget } from "../target-store.js";
 import type { StoredTokens } from "../desktop-token-store.js";
 
-const state = vi.hoisted(() => ({ files: new Map<string, Buffer>(), handlers: new Map<string, Function>(), windows: [] as any[], app: null as any, partitions: new Map<string, any>(), makeSession: null as null | (() => any), refresh: vi.fn(), request: vi.fn() }));
+const state = vi.hoisted(() => ({ browserOptions: undefined as undefined | ConstructorParameters<typeof import("../embedded-browser.js").EmbeddedBrowser>[0], files: new Map<string, Buffer>(), handlers: new Map<string, Function>(), windows: [] as any[], app: null as any, partitions: new Map<string, any>(), makeSession: null as null | (() => any), refresh: vi.fn(), request: vi.fn() }));
+vi.mock("../embedded-browser.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../embedded-browser.js")>();
+  return { ...original, EmbeddedBrowser: class extends original.EmbeddedBrowser {
+    constructor(options?: ConstructorParameters<typeof original.EmbeddedBrowser>[0]) {
+      super(options);
+      state.browserOptions = options;
+    }
+  } };
+});
 vi.mock("electron-updater", () => ({ default: { autoUpdater: {} } }));
 vi.mock("../desktop-auth.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../desktop-auth.js")>(), refreshSession: state.refresh }));
 vi.mock("node:fs", async (importOriginal) => ({
@@ -14,6 +23,7 @@ vi.mock("node:fs", async (importOriginal) => ({
     if (!value) throw new Error("ENOENT");
     return encoding ? value.toString() : value;
   },
+  mkdirSync: vi.fn(),
   writeFileSync: (path: string, data: string | Buffer) => state.files.set(String(path), Buffer.from(data)),
   renameSync: (from: string, to: string) => { state.files.set(to, state.files.get(from)!); state.files.delete(from); },
   rmSync: (path: string) => state.files.delete(String(path)),
@@ -61,6 +71,7 @@ vi.mock("electron", async () => {
       });
       state.windows.push(this);
     }
+    destroy() { this.destroyed = true; this.emit("closed"); }
     isDestroyed() { return this.destroyed; }
     isMinimized() { return false; }
     getBounds() { return this.bounds; }
@@ -72,7 +83,7 @@ vi.mock("electron", async () => {
     safeStorage: { isEncryptionAvailable: () => true, encryptString: (s: string) => Buffer.from(s), decryptString: (b: Buffer) => b.toString() },
     session: { defaultSession: makeSession(), fromPartition: (key: string) => { if (!state.partitions.has(key)) state.partitions.set(key, makeSession()); return state.partitions.get(key); } },
     Menu: { buildFromTemplate: (template: unknown) => template, setApplicationMenu: vi.fn() },
-    dialog: { showErrorBox: vi.fn() }, net: { fetch: vi.fn(), request: state.request, isOnline: () => true },
+    dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() }, net: { fetch: vi.fn(), request: state.request, isOnline: () => true },
     powerMonitor: new EventEmitter(), powerSaveBlocker: {}, globalShortcut: {}, shell: {},
     screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } }) },
     systemPreferences: {}, Tray: class {}, Notification: class {}, nativeImage: {}, desktopCapturer: {},
@@ -104,8 +115,104 @@ async function setup(auth: AccountTarget["auth"] = "pkce", bundled = true) {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 beforeEach(() => setup());
-afterEach(() => { vi.unstubAllEnvs(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 const sender = () => ({ sender: state.windows.at(-1).webContents, senderFrame: state.windows.at(-1).webContents.mainFrame });
+
+describe("[COMP:app-desktop/main] embedded browser IPC", () => {
+  const invoke = (event: unknown, input: unknown) => state.handlers.get("Use Brian:browser-control")!(event, input);
+  const pairInput = (userId = "same-user") => ({ type: "pair", relayUrl: "wss://relay.example/browser",
+    pairingToken: `header.${Buffer.from(JSON.stringify({ kind: "browser-ext-pair", exp: 4_000_000_000,
+      userId, workspaceId: "workspace", browserProfileId: "profile" })).toString("base64url")}.signature` });
+
+  it("supplies the current main window factory and preserves docked browser focus", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const main = state.windows[0];
+    expect(state.browserOptions?.getDockWindow).toBeTypeOf("function");
+    expect(state.browserOptions!.getDockWindow!()).toBe(main);
+    expect(state.windows).toHaveLength(1);
+    const dockFocused = vi.spyOn(EmbeddedBrowser.prototype, "isDockedFocused").mockReturnValue(true);
+    main.webContents.focus.mockClear();
+    main.emit("focus");
+    expect(dockFocused).toHaveBeenCalledOnce();
+    expect(main.webContents.focus).not.toHaveBeenCalled();
+    dockFocused.mockReturnValue(false);
+    main.emit("focus");
+    expect(main.webContents.focus).toHaveBeenCalledOnce();
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
+    main.close();
+    expect(dispose).toHaveBeenCalledOnce();
+    const replacement = state.browserOptions!.getDockWindow!();
+    expect(replacement).toBe(state.windows[1]);
+    expect(replacement).not.toBe(main);
+  });
+
+  it("cancels pending native pairing when the main window closes", async () => {
+    const { dialog } = await import("electron");
+    let approve!: (answer: Electron.MessageBoxReturnValue) => void;
+    const consent = vi.spyOn(dialog, "showMessageBox").mockReturnValueOnce(
+      new Promise(resolve => { approve = resolve; }),
+    );
+    const pending = invoke(sender(), pairInput());
+    expect(consent).toHaveBeenCalledOnce();
+    state.windows[0].close();
+    approve({ response: 1, checkboxChecked: false });
+    expect(await pending).toEqual({ ok: false });
+    expect(state.windows).toHaveLength(1);
+    expect(state.windows[0].destroyed).toBe(true);
+  });
+
+  it.each(["status", "request-control", "pair", "show", "cancel", "disconnect"])("validates the sender and main frame for %s", async (type) => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
+    const status = vi.spyOn(EmbeddedBrowser.prototype, "status");
+    const actions = ["show", "cancelPending", "dispose"].map(method => vi.spyOn(EmbeddedBrowser.prototype, method as "show"));
+    const input = type === "pair" ? pairInput() : { type };
+    const foreignContents = { id: 999, isDestroyed: () => false, mainFrame: {} };
+    expect(await invoke({ sender: foreignContents, senderFrame: foreignContents.mainFrame }, input)).toEqual({ ok: false });
+    expect(await invoke({ ...sender(), senderFrame: {} }, input)).toEqual({ ok: false });
+    await state.windows.at(-1).webContents.loadURL("https://untrusted.example.com/");
+    expect(await invoke(sender(), input)).toEqual({ ok: false });
+    expect(pair).not.toHaveBeenCalled();
+    expect(status).not.toHaveBeenCalled();
+    for (const action of actions) expect(action).not.toHaveBeenCalled();
+  });
+
+  it("reports capability to the trusted renderer and pairs only matching user claims", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
+    for (const type of ["status", "request-control"]) {
+      expect(await invoke(sender(), { type })).toEqual({ ok: true, hasControl: true, connected: false, automaticBlocked: false, controlEpoch: 0 });
+    }
+    expect(await invoke(sender(), pairInput("other-user"))).toEqual({ ok: false });
+    expect(pair).not.toHaveBeenCalled();
+    expect(await invoke(sender(), pairInput())).toEqual({ ok: true });
+    expect(pair).toHaveBeenCalledExactlyOnceWith(pairInput(), JSON.stringify([local.appUrl, "same-user"]));
+  });
+
+  it.each([['show', 'show'], ['cancel', 'cancelPending'], ['disconnect', 'dispose']] as const)('delegates trusted %s requests', async (type, method) => {
+    const { EmbeddedBrowser } = await import('../embedded-browser.js');
+    const action = vi.spyOn(EmbeddedBrowser.prototype, method).mockImplementation(() => {});
+    expect(await invoke(sender(), { type })).toEqual({ ok: true });
+    expect(action).toHaveBeenCalledExactlyOnceWith(...(type === 'disconnect' ? [true] : []));
+  });
+
+  it.each(["sign-out", "clear-tokens"])("disposes browser control on %s", async (action) => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
+    state.handlers.get(`Use Brian:${action}`)!(sender());
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalled());
+  });
+
+  it("disposes browser control when renderer tokens change account identity", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
+    state.handlers.get("Use Brian:set-tokens")!(sender(), tokens("renewed"));
+    expect(dispose).not.toHaveBeenCalled();
+    state.handlers.get("Use Brian:set-tokens")!(sender(), { ...tokens("other"), user: { ...tokens("other").user, id: "other-user" } });
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(store.current(local)?.user?.id).toBe("other-user");
+  });
+});
 
 describe("[COMP:app-desktop/main] deployment switching", () => {
   it("allows presentation changes only from a current main frame without changing sessions", async () => {
@@ -138,10 +245,13 @@ describe("[COMP:app-desktop/main] deployment switching", () => {
   });
 
   it("switches local to cloud and back without restarting, preserving sessions and isolated caches", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
     const first = state.windows[0];
     const key = deploymentAccountKey({ target: cloud, tokens: tokens("cloud") });
     const result = await state.handlers.get("Use Brian:select-account")!(sender(), key);
     expect(result).toEqual({ ok: true });
+    expect(dispose).toHaveBeenCalled();
     expect(state.refresh).toHaveBeenCalledWith(cloud.apiUrl, "cloud-refresh", undefined);
     expect(first.destroyed).toBe(true);
     expect(state.windows).toHaveLength(2);
@@ -226,7 +336,7 @@ function sessionJwt(seconds: number, suffix: string) {
 const ownerTarget = { ...local, auth: "local-session" as const };
 
 /** Model actual Chromium behavior: cookie events precede response/redirect. */
-async function mockAppBridge(options: { status?: number; error?: string; pause?: Promise<void>; omitCookies?: boolean; location?: string } = {}) {
+async function mockAppBridge(options: { status?: number; error?: string; pause?: Promise<void>; omitCookies?: boolean; location?: string; appUrl?: string } = {}) {
   const { EventEmitter } = await import("node:events");
   const pair = { accessToken: sessionJwt(3600, "fresh-access"), refreshToken: sessionJwt(2592000, "fresh-refresh") };
   state.request.mockImplementation((requestOptions: any) => {
@@ -237,7 +347,7 @@ async function mockAppBridge(options: { status?: number; error?: string; pause?:
         if ((status === 200 || status === 307) && !options.omitCookies) {
           for (const [name, value] of Object.entries({ access_token: pair.accessToken, refresh_token: pair.refreshToken,
             user: encodeURIComponent(JSON.stringify({ id: "same-user", name: "You", email: "owner@local" })) })) {
-            await requestOptions.session.cookies.set({ url: ownerTarget.appUrl, name, value });
+            await requestOptions.session.cookies.set({ url: options.appUrl ?? ownerTarget.appUrl, name, value });
           }
         }
         if (options.location) {
@@ -296,8 +406,11 @@ describe("[COMP:app-desktop/main] bundled owner session refresh", () => {
   });
 
   it("clears only a definitively rejected owner session", async () => {
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
     await mockAppBridge({ status: 401, error: "refresh_rejected" });
     expect(await refresh()).toEqual({ kind: "unauthenticated" });
+    expect(dispose).toHaveBeenCalled();
     expect(store.current(ownerTarget)).toBeNull();
     expect(store.current(cloud)?.refreshToken).toBe("cloud-refresh");
   });
@@ -423,4 +536,58 @@ describe("[COMP:app-desktop/main] add self-hosted account in place", () => {
     expect(store.current(ownerTarget)).toBeNull();
   });
 
+});
+
+
+describe("[COMP:app-desktop/main] destination gateway validation", () => {
+  it.each([false, true])("uses the final destination jar for login, probes and owner exchange (discovered API: %s)", async (differentApi) => {
+    const { localTarget } = await import("../target-store.js");
+    const appUrl = "https://brain.example.com";
+    const guessed = { ...localTarget(appUrl)!, kind: "local" as const };
+    const destination = { ...guessed, apiUrl: differentApi ? "https://service.example.com" : guessed.apiUrl };
+    const active = targetJar(local);
+    const activeCalls = active.fetch.mock.calls.length;
+    const activeCookies = await active.cookies.get({});
+    const persisted = state.files.get("/tmp/desktop-switch-test/target.json")!.toString();
+    const pair = await mockAppBridge({ appUrl, status: 307, location: appUrl + "/" });
+    for (const target of [guessed, destination]) {
+      const jar = targetJar(target);
+      jar.fetch.mockImplementation(async (url: string) => {
+        const authenticated = (await jar.cookies.get({ name: "CF_Authorization" })).length > 0;
+        return authenticated
+          ? new Response(JSON.stringify(url.endsWith("/health") ? { status: "ok" } : { apiUrl: destination.apiUrl, edition: "oss" }))
+          : new Response("gateway login", { status: 403 });
+      });
+    }
+    const event = sender();
+    const connecting = state.handlers.get("Use Brian:run-local")!(event, appUrl);
+    for (const target of differentApi ? [guessed, destination] : [destination]) {
+      const jar = targetJar(target);
+      await vi.waitFor(() => expect(state.windows.some((win) => !win.destroyed && win.options.title === "Authenticate to Local Brain" && win.options.webPreferences.session === jar)).toBe(true));
+      const login = state.windows.find((win) => !win.destroyed && win.options.title === "Authenticate to Local Brain" && win.options.webPreferences.session === jar);
+      expect(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).toBe(persisted);
+      await jar.cookies.set({ url: appUrl, name: "CF_Authorization", value: "destination-only", httpOnly: true });
+      login.webContents.emit("did-navigate", {}, appUrl, 200);
+    }
+    expect(await connecting).toEqual({ ok: true, url: appUrl });
+    expect(state.request.mock.calls[0][0].session).toBe(targetJar(destination));
+    expect(store.current(destination)?.accessToken).toBe(pair.accessToken);
+    expect(active.fetch.mock.calls.length).toBe(activeCalls);
+    expect(await active.cookies.get({})).toEqual(activeCookies);
+    expect(await targetJar(destination).cookies.get({ name: "CF_Authorization" })).toHaveLength(1);
+  });
+
+  it("cancelling destination gateway login leaves the current deployment unchanged", async () => {
+    const { localTarget } = await import("../target-store.js");
+    const target = { ...localTarget("https://cancel.example.com")!, kind: "local" as const };
+    targetJar(target).fetch.mockResolvedValue(new Response("login", { status: 403 }));
+    const persisted = state.files.get("/tmp/desktop-switch-test/target.json")!.toString();
+    const connecting = state.handlers.get("Use Brian:run-local")!(sender(), target.appUrl);
+    await vi.waitFor(() => expect(state.windows.at(-1).options.title).toBe("Authenticate to Local Brain"));
+    state.windows.at(-1).close();
+    expect(await connecting).toMatchObject({ ok: false, error: "gateway-auth" });
+    expect(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).toBe(persisted);
+    expect(state.request).not.toHaveBeenCalled();
+    expect(store.current(local)?.accessToken).toBe("local-access");
+  });
 });

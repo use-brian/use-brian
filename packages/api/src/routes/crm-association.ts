@@ -67,6 +67,7 @@ export function crmAssociationRoutes(options: { service: AssociationServicePort;
   route('post', '/site-content/:collection/publish', req => ({ ...req.body, kind: 'publish_site_content', collection: req.params.collection }), 'content')
   route('get', '/site-content/:collection/:site', req => ({ kind: 'published_site_content', collection: req.params.collection, site: req.params.site }), 'content')
   route('post', '/site-content/:collection/:site/observed', req => ({ ...req.body, kind: 'observe_site_content', collection: req.params.collection, site: req.params.site }), 'content')
+  route('get', '/website-status', () => ({ kind: 'website_status' }), 'status')
   route('get', '/module', () => ({ kind: 'module_status' }), 'module')
   route('get', '/module-blockers', (req) => ({ ...req.query, kind: 'module_blockers' }), 'orders')
   route('get', '/events/:eventId/tickets', (req) => ({ kind: 'list_tickets', eventId: req.params.eventId }), 'tickets')

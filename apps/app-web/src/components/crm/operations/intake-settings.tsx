@@ -29,6 +29,10 @@ import { CrmPrivacyPolicySettings } from "./privacy-policy-settings";
 const stableKey = (label: string) => label.trim().toLowerCase()
   .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 63);
 
+/** Policies that take a claimed email without a verification key. */
+const unverifiedPolicy = (policy: CrmIntakeDefinition["identityPolicy"]) =>
+  policy === "new_or_review" || policy === "existing_or_new";
+
 export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
   const t = useT().crmPage.operations;
   const [definitions, setDefinitions] = useState<CrmIntakeDefinition[]>([]);
@@ -37,6 +41,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
   const [definitionLabel, setDefinitionLabel] = useState("");
   const [definitionKey, setDefinitionKey] = useState("");
   const [identityPolicy, setIdentityPolicy] = useState<CrmIntakeDefinition["identityPolicy"]>("new_or_review");
+  const needsVerification = !unverifiedPolicy(identityPolicy);
   const [editingDefinition, setEditingDefinition] = useState<CrmIntakeDefinition | null>(null);
   const [identityProvider, setIdentityProvider] = useState("");
   const [verificationKeyId, setVerificationKeyId] = useState("");
@@ -87,7 +92,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
   }, [workspaceId]);
 
   async function createDefinition() {
-    if (!definitionLabel.trim() || !definitionKey.trim() || busy || (identityPolicy !== "new_or_review" && !verificationAcknowledged)) return;
+    if (!definitionLabel.trim() || !definitionKey.trim() || busy || (needsVerification && !verificationAcknowledged)) return;
     setBusy(true);
     setError(null);
     try {
@@ -99,7 +104,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
         definition: {
           fields,
           identityPolicy,
-          ...(identityPolicy !== "new_or_review" ? { identityVerification: {
+          ...(needsVerification ? { identityVerification: {
             keyId: verificationKeyId.trim(), publicKey: verificationPublicKey.trim(),
             maxAgeSeconds: Number(verificationMaxAge), acknowledged: true as const,
           } } : {}),
@@ -250,12 +255,13 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
                 <SelectContent>
                   <SelectItem value="trusted_verified_email">{t.identityTrustedEmail}</SelectItem>
                   <SelectItem value="new_or_review">{t.identityNewReview}</SelectItem>
+                  <SelectItem value="existing_or_new">{t.identityExistingOrNew}</SelectItem>
                   <SelectItem value="external_subject">{t.identityExternalSubject}</SelectItem>
                 </SelectContent>
               </Select>
             </label>
             {identityPolicy === "external_subject" && <label className="text-xs sm:col-span-2"><span className="mb-1 block text-muted-foreground">{t.identityProvider}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-[16px] md:text-xs" value={identityProvider} onChange={(event) => setIdentityProvider(event.target.value)} /></label>}
-            {identityPolicy !== "new_or_review" && <div className="space-y-2 rounded-md border border-border p-2 sm:col-span-2">
+            {needsVerification && <div className="space-y-2 rounded-md border border-border p-2 sm:col-span-2">
               <p className="text-xs text-muted-foreground">{t.verificationHelp}</p>
               <label className="block text-xs"><span>{t.verificationKeyId}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-[16px] md:text-xs" value={verificationKeyId} onChange={(event) => setVerificationKeyId(event.target.value)} /></label>
               <label className="block text-xs"><span>{t.verificationPublicKey}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 font-mono text-[16px] md:text-xs" value={verificationPublicKey} onChange={(event) => setVerificationPublicKey(event.target.value)} /></label>
@@ -266,10 +272,10 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
           </div>
           <label className="mt-2 block text-xs"><span className="mb-1 block text-muted-foreground">{t.consentMappings}</span><textarea aria-label={t.consentMappings} rows={4} spellCheck={false} className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-[16px] md:text-[11px]" value={consentMappingsText} onChange={(event) => setConsentMappingsText(event.target.value)} /></label>
           <p className="text-[11px] text-muted-foreground">{t.consentMappingsHelp}</p>
-          <Button className="mt-2" size="sm" disabled={busy || !definitionLabel.trim() || !definitionKey.trim() || (identityPolicy !== "new_or_review" && (!verificationAcknowledged || !verificationKeyId.trim() || !verificationPublicKey.trim() || !verificationMaxAge))} onClick={() => void createDefinition()}><Plus aria-hidden />{editingDefinition ? t.saveDefinitionVersion : t.createDefinition}</Button>
+          <Button className="mt-2" size="sm" disabled={busy || !definitionLabel.trim() || !definitionKey.trim() || (needsVerification && (!verificationAcknowledged || !verificationKeyId.trim() || !verificationPublicKey.trim() || !verificationMaxAge))} onClick={() => void createDefinition()}><Plus aria-hidden />{editingDefinition ? t.saveDefinitionVersion : t.createDefinition}</Button>
           {editingDefinition && <Button className="ml-2 mt-2" size="sm" variant="ghost" disabled={busy} onClick={() => selectDefinition(null)}>{t.cancel}</Button>}
           <div className="mt-3 space-y-2">
-            {definitions.map((definition) => <div key={definition.id} className="rounded-lg bg-muted/30 px-3 py-2 text-xs"><div className="font-medium">{definition.label}</div><div className="font-mono text-[10px] text-muted-foreground">{definition.definitionKey} · v{definition.currentVersion}</div>{definition.identityPolicy !== "new_or_review" && (!definition.identityVerification || !definition.verificationAcknowledgedByUserId) && <p className="mt-1 text-amber-600">{t.verificationUnconfigured}</p>}<Button size="xs" variant="outline" disabled={busy} onClick={() => selectDefinition(definition)}>{t.editDefinition}</Button></div>)}
+            {definitions.map((definition) => <div key={definition.id} className="rounded-lg bg-muted/30 px-3 py-2 text-xs"><div className="font-medium">{definition.label}</div><div className="font-mono text-[10px] text-muted-foreground">{definition.definitionKey} · v{definition.currentVersion}</div>{!unverifiedPolicy(definition.identityPolicy) && (!definition.identityVerification || !definition.verificationAcknowledgedByUserId) && <p className="mt-1 text-amber-600">{t.verificationUnconfigured}</p>}<Button size="xs" variant="outline" disabled={busy} onClick={() => selectDefinition(definition)}>{t.editDefinition}</Button></div>)}
             {definitions.length === 0 && <div className="text-xs text-muted-foreground">{t.noDefinitions}</div>}
           </div>
         </div>

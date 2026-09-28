@@ -1,5 +1,7 @@
 "use client"
 
+import { useAppPopupBoundary } from "@/lib/app-viewport";
+
 import * as React from "react"
 import { Select as SelectPrimitive } from "@base-ui/react/select"
 
@@ -60,9 +62,11 @@ function SelectContent({
     SelectPrimitive.Positioner.Props,
     "align" | "alignOffset" | "side" | "sideOffset" | "alignItemWithTrigger"
   >) {
+  const collisionBoundary = useAppPopupBoundary();
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Positioner
+        collisionBoundary={collisionBoundary}
         side={side}
         sideOffset={sideOffset}
         align={align}

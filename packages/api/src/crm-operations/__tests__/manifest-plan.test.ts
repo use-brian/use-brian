@@ -88,4 +88,24 @@ describe('[COMP:crm/manifest] Pure identity resolution and command planning', ()
       ...catalog, intakeDefinitions: [missing],
     }).changes).toMatchObject([{ resource: 'intakeDefinitions', ref: 'community_application', action: 'update' }])
   })
+
+  it('updates an unverified intake definition in either direction but leaves a trusted one to its owner', () => {
+    const parsed = parseManifest(fixture)
+    const value = parsed.intakeDefinitions[0].value
+    const catalog = {
+      ...empty(),
+      recordFields: [{ id: randomUUID(), ...fixture.recordFields[0].value, isRequired: false, archivedAt: null }],
+      consentPurposes: [{ id: randomUUID(), description: '', archivedAt: null, ...fixture.consentPurposes[0].value }],
+    }
+    const row = (identityPolicy: string) => ({
+      id: randomUUID(), definitionKey: value.definitionKey, label: value.label, active: true,
+      currentVersion: 1, ...value.definition, identityPolicy,
+    })
+    const reuse = [{ ...parsed.intakeDefinitions[0], value: { ...value, definition: { ...value.definition, identityPolicy: 'existing_or_new' } } }]
+    expect(planManifest({ ...base, intakeDefinitions: reuse }, { ...catalog, intakeDefinitions: [row('new_or_review')] }).changes)
+      .toMatchObject([{ resource: 'intakeDefinitions', action: 'update' }])
+    expect(planManifest({ ...base, intakeDefinitions: reuse }, { ...catalog, intakeDefinitions: [row('existing_or_new')] }).changes).toEqual([])
+    expect(() => planManifest({ ...base, intakeDefinitions: reuse }, { ...catalog, intakeDefinitions: [row('trusted_verified_email')] }))
+      .toThrow('trusted_definition_requires_owner')
+  })
 })

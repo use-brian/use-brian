@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { useAssociationModule } from "./module-controls";
 import { AssociationField,AssociationToggle,AssociationListState,AssociationIntentNotice,useAssociationPage,useAssociationIntent,useAssociationAction } from "./operator-controls";
 import { AssociationEditor } from "./workspace-ui";
-import { associationHref } from "./association-surface";
+import { associationHref } from "./navigation";
 import { EmptyState, FormFooter, InlineNotice, PageHeader, ResponsiveTable, StatusPill, SwitchField, associationDate } from "./ui";
 
 export function AssociationWaitlistOffer({workspaceId,row,enabled}:{workspaceId:string;row:AssociationWaitlistRow;enabled:boolean}) {

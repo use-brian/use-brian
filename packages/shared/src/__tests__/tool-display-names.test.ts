@@ -3,6 +3,7 @@ import {
   buildConfirmationPreview,
   describeToolInput,
   formatConfirmationInput,
+  getToolDisplayName,
   humanizeToolName,
 } from '../tool-display-names.js'
 
@@ -33,6 +34,9 @@ describe('[COMP:shared/tool-display-names] channel tool-status labels', () => {
       // describer declines and the present-participle status label is used.
       expect(describeToolInput('browserClick', { ref: '@e2' })).toBeUndefined()
       expect(describeToolInput('browserType', { ref: '@e1', text: 'hello' })).toBeUndefined()
+      expect(describeToolInput('browserFillForm', {
+        fields: [{ action: 'fill', ref: '@e1', value: 'private draft' }],
+      })).toBeUndefined()
     })
   })
 
@@ -40,6 +44,8 @@ describe('[COMP:shared/tool-display-names] channel tool-status labels', () => {
     it('maps the acting browser tools to present-participle phrases', () => {
       expect(humanizeToolName('browserClick')).toBe('Clicking in the browser')
       expect(humanizeToolName('browserType')).toBe('Typing in the browser')
+      expect(humanizeToolName('browserFillForm')).toBe('Filling a form in the browser')
+      expect(getToolDisplayName('browserFillForm')).toBe('Fill a form in the browser')
       expect(humanizeToolName('browserNavigate')).toBe('Opening a page')
       expect(humanizeToolName('browserSnapshot')).toBe('Reading the page')
     })

@@ -809,7 +809,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
       externalSurfaceId,
     ) {
       const parsedSurface = parseTopicChannelId(externalSurfaceId)
-      const parentSurfaceId = parsedSurface.messageThreadId == null
+      const parentSurfaceId = (parsedSurface.messageThreadId ?? parsedSurface.discussionRootId) == null
         ? externalSurfaceId
         : parsedSurface.chatId
       const result = await query<CiRow & { credentials: Buffer }>(
@@ -874,7 +874,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
       externalSurfaceId,
     ) {
       const parsedSurface = parseTopicChannelId(externalSurfaceId)
-      const parentSurfaceId = parsedSurface.messageThreadId == null
+      const parentSurfaceId = (parsedSurface.messageThreadId ?? parsedSurface.discussionRootId) == null
         ? externalSurfaceId
         : parsedSurface.chatId
       const result = await query<{

@@ -1,3 +1,5 @@
+import { z } from 'zod'
+import type { ProtectedFillService } from '@use-brian/core'
 import type {
   LocalBrowserControlMode,
   RelayCommandResult,
@@ -20,19 +22,39 @@ export function createRelayCommandTransport(opts: {
   relayUrl: string
   relaySecret: string
   fetchImpl?: typeof fetch
+  protectedFill?: ProtectedFillService | null
   /** Server-owned profile policy, resolved afresh for every command. */
   resolveLocalControlMode?: (browserProfileId: string) => Promise<LocalBrowserControlMode>
 }): RelayCommandTransport {
   const fetchImpl = opts.fetchImpl ?? fetch
   const base = opts.relayUrl.replace(/\/$/, '')
+  const denied = (): RelayCommandResult => ({ ok: false, error: 'Protected fill unavailable', code: 'protected_fill_denied' })
+  const fillSchema = z.object({
+    workspaceId: z.string().min(1), sessionId: z.string().min(1), taskId: z.string().min(1),
+    browserProfileId: z.string().min(1), destinationOrigin: z.string().min(1),
+    items: z.array(z.object({ referenceId: z.string(), ref: z.string() }).strict()).min(1).max(20),
+  }).strict()
   return {
     async send(params): Promise<RelayCommandResult> {
+      const identity = { userId: params.userId, browserProfileId: params.browserProfileId }
+      const protectedOp = params.op === 'browserFillReference'
+      const epoch = opts.protectedFill?.epoch(identity)
+      const blocked = () => opts.protectedFill?.isLocked(identity) || opts.protectedFill?.epoch(identity) !== epoch
+      if (protectedOp) {
+        try {
+          const parsed = fillSchema.parse(params.args)
+          if (!opts.protectedFill || parsed.browserProfileId !== params.browserProfileId) return denied()
+          const { items, ...scope } = parsed
+          await opts.protectedFill.reserve({ ...scope, userId: params.userId }, items)
+        } catch { return denied() }
+      } else if (params.op !== 'stop' && blocked()) return denied()
       let controlMode: LocalBrowserControlMode
       try {
         controlMode = opts.resolveLocalControlMode
           ? await opts.resolveLocalControlMode(params.browserProfileId)
           : 'task_tabs'
       } catch {
+        if (protectedOp || blocked()) return denied()
         return {
           ok: false,
           error: 'Could not read the Browser profile local-control policy.',
@@ -40,6 +62,7 @@ export function createRelayCommandTransport(opts: {
         }
       }
       try {
+        if (!protectedOp && params.op !== 'stop' && blocked()) return denied()
         const res = await fetchImpl(`${base}/internal/browser/command`, {
           method: 'POST',
           headers: {
@@ -53,8 +76,10 @@ export function createRelayCommandTransport(opts: {
             op: params.op,
             args: params.args ?? {},
           }),
-          signal: AbortSignal.timeout(RELAY_HTTP_TIMEOUT_MS),
+          signal: AbortSignal.timeout(protectedOp ? 125_000 : RELAY_HTTP_TIMEOUT_MS),
         })
+        if (protectedOp && !res.ok) return denied()
+        if (!protectedOp && blocked()) return denied()
         if (!res.ok) {
           return {
             ok: false,
@@ -63,11 +88,21 @@ export function createRelayCommandTransport(opts: {
           }
         }
         const body = (await res.json()) as RelayCommandResult
+        if (protectedOp) {
+          const result = z.object({ ok: z.literal(true), data: z.object({
+            status: z.literal('filled'), filledCount: z.number().int().min(1).max(20),
+            requiresHumanCompletion: z.literal(true),
+          }).strict() }).strict().safeParse(body)
+          if (!result.success || result.data.data.filledCount !== (params.args?.items as unknown[])?.length) return denied()
+          return result.data
+        }
+        if (blocked()) return denied()
         if (typeof body !== 'object' || body === null || typeof (body as { ok?: unknown }).ok !== 'boolean') {
           return { ok: false, error: 'The browser relay returned a malformed response.', code: 'backend_error' }
         }
         return body
       } catch (err) {
+        if (protectedOp || blocked()) return denied()
         const timedOut = err instanceof Error && err.name === 'TimeoutError'
         return {
           ok: false,
@@ -82,6 +117,8 @@ export function createRelayCommandTransport(opts: {
 }
 
 export type RelayExtensionStatus = {
+  capabilities: { protectedFillV1: boolean }
+  extensionOrigin: string | null
   connected: boolean
   terminalEvent: 'stopped' | 'tab_closed' | null
   /** Source fingerprint the connected extension reported; null when it reported none. */
@@ -114,6 +151,8 @@ export async function relayExtensionStatus(opts: {
     if (!res.ok) return null
     const body = (await res.json()) as {
       connected?: unknown
+      extensionOrigin?: unknown
+      capabilities?: { protectedFillV1?: unknown } | null
       terminalEvent?: unknown
       build?: unknown
       staleBuild?: unknown
@@ -122,6 +161,8 @@ export async function relayExtensionStatus(opts: {
     const terminalEvent = body.terminalEvent
     return {
       connected: body.connected,
+      capabilities: { protectedFillV1: body.capabilities?.protectedFillV1 === true },
+      extensionOrigin: typeof body.extensionOrigin === 'string' ? body.extensionOrigin : null,
       terminalEvent: terminalEvent === 'stopped' || terminalEvent === 'tab_closed' ? terminalEvent : null,
       // Absent from a relay that predates build reporting. Read as "nothing to
       // say", never as "up to date" — a missing field is not a verdict.
@@ -131,4 +172,10 @@ export async function relayExtensionStatus(opts: {
   } catch {
     return null
   }
+}
+
+/** Absence/false/old relay metadata never means protocol support. */
+export function supportsProtectedFill(status: RelayExtensionStatus | null, origins: ReadonlySet<string>): boolean {
+  return Boolean(status?.connected && status.capabilities.protectedFillV1 === true &&
+    status.extensionOrigin && origins.has(status.extensionOrigin))
 }

@@ -28,6 +28,15 @@ vi.mock('../../workflow/channel-questions.js', async (importOriginal) => ({
   createChannelQuestionStore: () => ({ find: async () => [], isQuestionMessage: async () => false }),
 }))
 
+const { discussionStore } = vi.hoisted(() => ({ discussionStore: {
+  savePost: vi.fn(async () => {}), saveRoot: vi.fn(async () => {}),
+  read: vi.fn<() => Promise<string | null>>(async () => null),
+} }))
+vi.mock('../../telegram-discussion-context.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../telegram-discussion-context.js')>(),
+  createTelegramDiscussionStore: () => discussionStore,
+}))
+
 // ── Mocks ───────────────────────────────────────────────────────
 
 // Capture adapter.leaveChat calls for the group add-protection tests.
@@ -35,6 +44,8 @@ const leaveChatCalls: string[] = []
 
 // Capture createTelegramApi().setWebhook calls so the legacy-URL self-heal
 // path can be asserted without touching api.telegram.org.
+let linkedDiscussionChatId: number | undefined
+let chatLookupFails = false
 const setWebhookCalls: Array<{ url: string; secret: string }> = []
 
 // Overridable so a test can fail the DOWNLOAD leg the way Telegram actually
@@ -70,6 +81,10 @@ vi.mock('@use-brian/channels', async () => {
     // api.telegram.org which fails in unit tests; capture the calls so
     // tests can assert the new URL was issued.
     createTelegramApi: vi.fn(() => ({
+      getChat: vi.fn(async (id: string) => {
+        if (chatLookupFails) throw new Error('chat metadata unavailable')
+        return { id: Number(id), type: 'supergroup', linked_chat_id: linkedDiscussionChatId }
+      }),
       setWebhook: vi.fn(async (url: string, secret: string) => {
         setWebhookCalls.push({ url, secret })
       }),
@@ -140,10 +155,13 @@ vi.mock('../../db/chat-lock.js', () => ({
 const pipelineCalls: Array<{
   channelId: string
   userId: string
+  actorChannelId?: string | null
   isIdentified: boolean
   externalGuest: boolean
   externalGuestConnectorTools: boolean
   isGroupChat: boolean
+  replyRaw?: unknown
+  providerVisibleContext?: string | null
   messageText?: string
   userContentBlocks?: Array<{ type: string; mimeType?: string }>
 }> = []
@@ -161,10 +179,13 @@ vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
     channelId: string
     userId: string
+    actorChannelId?: string | null
     isIdentified: boolean
     externalGuest?: boolean
     externalGuestConnectorTools?: boolean
     isGroupChat: boolean
+    replyRaw?: unknown
+    providerVisibleContext?: string | null
     messageText?: string
     userContentBlocks?: Array<{ type: string; mimeType?: string }>
     hooks: {
@@ -175,10 +196,13 @@ vi.mock('../channel-pipeline.js', () => ({
     pipelineCalls.push({
       channelId: params.channelId,
       userId: params.userId,
+      actorChannelId: params.actorChannelId,
       isIdentified: params.isIdentified,
       externalGuest: params.externalGuest === true,
       externalGuestConnectorTools: params.externalGuestConnectorTools === true,
       isGroupChat: params.isGroupChat,
+      replyRaw: params.replyRaw,
+      providerVisibleContext: params.providerVisibleContext,
       messageText: params.messageText,
       userContentBlocks: params.userContentBlocks,
     })
@@ -350,6 +374,11 @@ function flushMicrotasks(): Promise<void> {
 }
 
 beforeEach(() => {
+  discussionStore.savePost.mockClear()
+  discussionStore.saveRoot.mockClear()
+  discussionStore.read.mockReset().mockResolvedValue(null)
+  chatLookupFails = false
+  linkedDiscussionChatId = undefined
   chatLockCalls.length = 0
   pipelineCalls.length = 0
   adapterSendCalls.length = 0
@@ -1453,6 +1482,170 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
       }),
     )
   }
+
+  it('captures privacy-disabled auto-forwards without a turn, then supplies nested discussion context', async () => {
+    linkedDiscussionChatId = -10010
+    const app = makeGuestApp([], null, false, 'allow_all')
+    await postUpdate(app, { message: {
+      message_id: 30, chat: { id: -10020, type: 'supergroup' }, is_automatic_forward: true,
+      forward_origin: { type: 'channel', chat: { id: -10010 }, message_id: 7 }, caption: 'Broadcast caption',
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(discussionStore.saveRoot).toHaveBeenCalledWith(expect.any(String), '-10020', '30', '-10010', '7', 'Broadcast caption')
+    expect(pipelineCalls).toHaveLength(0)
+    expect(adapterSendCalls).toHaveLength(0)
+    discussionStore.read.mockResolvedValue('Broadcast caption')
+    await postUpdate(makeGuestApp([], null, false, 'allow_all'), { message: {
+      message_id: 32, chat: { id: -10020, type: 'supergroup' }, message_thread_id: 30,
+      from: { id: 42 }, reply_to_message: { message_id: 31, text: 'Not the original' },
+      text: '@testbot explain', entities: [{ type: 'mention', offset: 0, length: 8 }],
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].providerVisibleContext).toContain('Broadcast caption')
+    expect(pipelineCalls[0].messageText).not.toContain('Broadcast caption')
+    expect(discussionStore.read).toHaveBeenCalledWith(expect.any(String), '-10020', '30')
+  })
+
+  it('captures privacy-enabled direct reply snapshots before processing the comment', async () => {
+    const app = makeGuestApp([], null, false, 'allow_all')
+    discussionStore.read.mockResolvedValue('Old post')
+    await postUpdate(app, { message: {
+      message_id: 32, chat: { id: -10020, type: 'supergroup' }, from: { id: 42 },
+      reply_to_message: { message_id: 30, is_automatic_forward: true,
+        sender_chat: { id: -10010 }, text: 'Old post' },
+      text: '@testbot explain', entities: [{ type: 'mention', offset: 0, length: 8 }],
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(discussionStore.saveRoot).toHaveBeenCalledWith(expect.any(String), '-10020', '30', '-10010', null, 'Old post')
+    expect(pipelineCalls[0].providerVisibleContext).toContain('Old post')
+    expect(pipelineCalls[0].channelId).toBe('-10020:discussion:30')
+    expect(pipelineCalls[0].replyRaw).toHaveProperty('reply_to_message', undefined)
+  })
+
+  it('rejects unauthenticated webhooks before context writes', async () => {
+    const { verifyTelegramWebhook } = await import('@use-brian/channels')
+    vi.mocked(verifyTelegramWebhook).mockReturnValueOnce(false)
+    await postUpdate(makeGuestApp([], null, false, 'allow_all'), { channel_post: {
+      message_id: 7, chat: { id: -10010, type: 'channel' }, text: 'Do not store',
+    } })
+    await flushMicrotasks()
+    expect(discussionStore.savePost).not.toHaveBeenCalled()
+    expect(discussionStore.saveRoot).not.toHaveBeenCalled()
+  })
+
+  it('does not persist context for an inactive channel', async () => {
+    const { getChannelForWebhook } = await import('../../db/channels-store.js')
+    vi.mocked(getChannelForWebhook).mockResolvedValueOnce(null)
+    await postUpdate(makeGuestApp([], null, false, 'allow_all'), { channel_post: {
+      message_id: 7, chat: { id: -10010, type: 'channel' }, text: 'Do not store',
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(discussionStore.savePost).not.toHaveBeenCalled()
+  })
+
+  it('fails closed on context read failure, then supplies context on the next attempt', async () => {
+    linkedDiscussionChatId = -10010
+    discussionStore.read.mockRejectedValueOnce(new Error('context DB offline')).mockResolvedValue('Retained original')
+    const app = makeGuestApp([], null, false, 'allow_all')
+    const message = { message_id: 32, chat: { id: -10020, type: 'supergroup' }, from: { id: 42 },
+      message_thread_id: 30, reply_to_message: { message_id: 31, text: 'Nested comment' },
+      text: '@testbot explain', entities: [{ type: 'mention', offset: 0, length: 8 }] }
+    await postUpdate(app, { message })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(0)
+    await postUpdate(app, { message: { ...message, message_id: 33 } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].providerVisibleContext).toContain('Retained original')
+    expect(pipelineCalls[0].replyRaw).toMatchObject({ reply_to_message: { text: 'Nested comment' } })
+  })
+
+  it('handles channel posts as isolated chat shadows, never a linked or trusted human', async () => {
+    const { resolveChannelUser } = await import('../../db/channel-user-store.js')
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({ user: { id: 'shadow_channel' } as never, isIdentified: false })
+    const app = makeGuestApp(['42', '@friend'], { userId: 'owner_1', assistantId: 'asst_1' }, true, 'allow_all', true)
+    await postUpdate(app, { update_id: 901, channel_post: {
+      message_id: 901, date: 100, chat: { id: -10010, type: 'channel', title: 'News' },
+      sender_chat: { id: -10010, title: 'News' }, from: { id: 42, username: 'friend' },
+      text: '@testbot summarize', entities: [{ type: 'mention', offset: 0, length: 8 }],
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({ userId: 'shadow_channel', actorChannelId: null, isIdentified: false, isGroupChat: true, externalGuest: true, externalGuestConnectorTools: false })
+    expect(resolveChannelUser).toHaveBeenLastCalledWith(expect.anything(), 'telegram', 'chat:-10010', expect.anything(), expect.any(Function))
+  })
+
+  it('uses verified linked-chat metadata to scope nested comments and outbound replies', async () => {
+    linkedDiscussionChatId = -10010
+    const app = makeGuestApp([], null, false, 'allow_all')
+    for (const root of [30, 40]) {
+      await postUpdate(app, { update_id: 902 + root, message: {
+        message_id: 902 + root, date: 100, chat: { id: -10020, type: 'supergroup' },
+        from: { id: 42, first_name: 'Casey' }, message_thread_id: root,
+        reply_to_message: { message_id: root + 1 },
+        text: '@testbot hello', entities: [{ type: 'mention', offset: 0, length: 8 }],
+      } })
+      await flushMicrotasks(); await flushMicrotasks()
+    }
+    expect(pipelineCalls).toHaveLength(2)
+    expect(adapterSendCalls.map(c => c.channelId)).toEqual(expect.arrayContaining(['-10020:discussion:30', '-10020:discussion:40']))
+  })
+
+  it('does not answer automatic forwards or edited broadcast posts', async () => {
+    const app = makeGuestApp([], null, false, 'allow_all')
+    const post = { message_id: 910, date: 100, chat: { id: -10010, type: 'channel' },
+      text: '@testbot hello', entities: [{ type: 'mention', offset: 0, length: 8 }] }
+    await postUpdate(app, { update_id: 910, edited_channel_post: post })
+    await postUpdate(app, { update_id: 911, message: { ...post,
+      chat: { id: -10020, type: 'supergroup' }, is_automatic_forward: true, media_group_id: 'album',
+      photo: [{ file_id: 'copy' }],
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(0)
+    expect(adapterSendCalls).toHaveLength(0)
+  })
+
+  it('denies anonymous senders in human allowlist mode even if their synthetic from matches', async () => {
+    const app = makeGuestApp(['42', '@friend'], { userId: 'owner_1', assistantId: 'assistant_1' }, true, 'allowlist', true)
+    await postUpdate(app, { update_id: 912, message: {
+      message_id: 912, date: 100, chat: { id: -10020, type: 'supergroup' },
+      sender_chat: { id: -10020 }, from: { id: 42, username: 'friend', is_bot: true },
+      text: '@testbot hello', entities: [{ type: 'mention', offset: 0, length: 8 }],
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(0)
+  })
+
+  it('fails closed rather than collapsing a discussion into the room when getChat fails', async () => {
+    chatLookupFails = true
+    await postUpdate(makeGuestApp([], null, false, 'allow_all'), { update_id: 913, message: {
+      message_id: 913, date: 100, chat: { id: -10020, type: 'supergroup' },
+      from: { id: 42 }, message_thread_id: 30,
+      text: '@testbot hello', entities: [{ type: 'mention', offset: 0, length: 8 }],
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(0)
+    expect(adapterSendCalls).toHaveLength(0)
+  })
+
+  it('merges channel-post albums once without processing their automatic discussion copies', async () => {
+    const app = makeGuestApp([], null, false, 'allow_all')
+    for (const id of [920, 921]) {
+      const post = { message_id: id, date: 100, chat: { id: -10010, type: 'channel' },
+        media_group_id: 'channel-album', photo: [{ file_id: `photo_${id}` }],
+        ...(id === 920 ? { caption: '@testbot describe', caption_entities: [{ type: 'mention', offset: 0, length: 8 }] } : {}),
+      }
+      await postUpdate(app, { update_id: id, channel_post: post })
+      await postUpdate(app, { update_id: id + 100, message: { ...post,
+        chat: { id: -10020, type: 'supergroup' }, is_automatic_forward: true,
+      } })
+    }
+    await new Promise(resolve => setTimeout(resolve, 700))
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({ channelId: '-10010', externalGuest: true })
+    expect(pipelineCalls[0].userContentBlocks?.filter(b => b.type === 'image')).toHaveLength(2)
+  })
 
   it('treats a case-insensitive @handle match as an isolated guest grant', async () => {
     const { resolveChannelUser } = await import('../../db/channel-user-store.js')

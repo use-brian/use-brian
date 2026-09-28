@@ -168,7 +168,6 @@ import { isPhoneViewport } from "@/lib/viewport";
 import { Skeleton } from "@/components/skeleton";
 import { type WorkspaceAssistantSummary } from "@/lib/api/views";
 import {
-  loadTranscriptCache,
   patchSharedChatSessions,
   readCachedTranscript,
   useChatSessionsData,
@@ -652,6 +651,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    * the assistant takes it, so rooms keep their own follow-up-turn path.
    * See docs/architecture/engine/mid-turn-input.md.
    */
+  /** The id the next turn should resume, read by the queue during render. */
+  const sessionIdRef = useRef<string | null>(null);
   const midTurn = useMidTurnQueue({
     stream,
     getSessionId: () => sessionIdRef.current,
@@ -682,9 +683,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       ?.querySelector(`[data-goal-pursuit-id="${CSS.escape(goalId)}"]`)
       ?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, []);
-  /** The id the next turn should resume. Kept in a ref so the send closure
-   *  reads the value at send time, not at render time. */
-  const sessionIdRef = useRef<string | null>(null);
+  // A session ID alone cannot distinguish A -> B -> A. Invalidate work on
+  // every navigation, before aborting streams (abort can run callbacks).
+  const sessionEpochRef = useRef(0);
+  const transcriptRequestRef = useRef(0);
+  const pendingInputRequestRef = useRef(0);
   // Upload and first send share this identity until the server ID is adopted.
   const freshChannelIdRef = useRef<string | null>(null);
   /** The thread currently painted. Guards the hydrate effect from re-fetching
@@ -816,8 +819,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    * written before it arrived, drop the user's bubble in, start a fresh one.
    */
   const applyQueuedInput = useCallback(
-    (inputId: string, messageId: string) => {
-      const entry = midTurn.take(inputId);
+    (inputId: string, messageId: string, owningSessionId: string) => {
+      const entry = midTurn.take(inputId, owningSessionId);
       if (!entry) return;
       const segment = buildStreamedTurnMessage(turnAssistantRef.current);
       if (segment) chat.dispatch({ type: "message/append", message: segment });
@@ -840,11 +843,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    * Deferred a tick: `sendRef` refuses to start while the stream's abort
    * registration is still live inside `onDone`.
    */
-  const flushQueuedInputs = useCallback(() => {
-    const stillWaiting = midTurn.drain();
-    if (stillWaiting.length === 0) return;
-    const joined = joinQueuedInputs(stillWaiting);
-    setTimeout(() => sendRef.current?.(joined), 0);
+  const flushQueuedInputs = useCallback((owningSessionId: string | null) => {
+    const epoch = sessionEpochRef.current;
+    if (!owningSessionId || sessionIdRef.current !== owningSessionId) return;
+    setTimeout(() => {
+      // Do not drain until the deferred send can actually use this owner.
+      // Switching away abandons its retry queue, never forwards it elsewhere.
+      if (sessionEpochRef.current !== epoch || sessionIdRef.current !== owningSessionId) return;
+      if (!sendRef.current) return;
+      const stillWaiting = midTurn.drain(owningSessionId);
+      if (stillWaiting.length) sendRef.current(joinQueuedInputs(stillWaiting));
+    }, 0);
   }, [midTurn]);
 
   const buildHref = useCallback(
@@ -1193,18 +1202,31 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Load a thread's persisted transcript into the reducer through the
    *  per-session `chat-transcript:` cache key. `force` is the refetch the
    *  live-read path runs when a teammate's turn lands (the SSE payload is a
-   *  SIGNAL, never the data) - it bypasses the in-flight dedupe so it cannot
-   *  join a hydrate request that started before the turn ended. A failed
-   *  fetch with nothing cached leaves the reducer alone. */
+   *  SIGNAL, never the data). Each refresh supersedes the previous request,
+   *  so a settle read cannot join an older hydrate request. A failed fetch
+   *  leaves the already-painted cache and reducer alone. */
   const loadTranscript = useCallback(
-    async (sessionId: string, options?: { force?: boolean }) => {
-      const rows = await loadTranscriptCache<SurfaceMessage>(
-        sessionId,
-        () => fetchSessionMessages(sessionId).then(mapTranscriptRows),
-        options,
-      );
-      if (rows) chat.loadMessages(rows);
-      return rows;
+    async (sessionId: string, _options?: { force?: boolean }) => {
+      const epoch = sessionEpochRef.current;
+      if (sessionIdRef.current !== sessionId) return;
+      const request = ++transcriptRequestRef.current;
+      // Fetch outside the cache loader: it publishes before returning, which
+      // would let a superseded force refresh overwrite a newer cached turn.
+      // Publish to the shared cache only after both ownership checks pass.
+      try {
+        const rows = mapTranscriptRows(await fetchSessionMessages(sessionId));
+        if (
+          sessionEpochRef.current !== epoch ||
+          sessionIdRef.current !== sessionId ||
+          transcriptRequestRef.current !== request
+        ) return;
+        writeTranscriptCache(sessionId, rows);
+        chat.loadMessages(rows);
+        return rows;
+      } catch {
+        // Keep the already-painted cache on a failed revalidation.
+        return undefined;
+      }
     },
     // `chat.loadMessages` is a stable useCallback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1230,6 +1252,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     if (activeSessionId === hydratedRef.current) return;
+    sessionEpochRef.current += 1;
+    setPendingQuestion(null);
+    setStartingShared(false);
     // Thread switches now arrive from the sidebar panel via the URL, so the
     // in-flight stream (if any) belongs to the OLD thread — kill it before
     // painting the new one, exactly what the old in-surface rail did on
@@ -1349,8 +1374,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   const refreshPendingInput = useCallback(
     (sessionId: string) => {
+      const epoch = sessionEpochRef.current;
+      if (sessionIdRef.current !== sessionId) return;
+      const request = ++pendingInputRequestRef.current;
       void fetchPendingSessionInput(sessionId)
         .then(({ pending, toolConfirmation }) => {
+          if (
+            sessionEpochRef.current !== epoch ||
+            sessionIdRef.current !== sessionId ||
+            pendingInputRequestRef.current !== request
+          ) return;
           setPendingQuestion(
             pending
               ? {
@@ -1406,6 +1439,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const noticeShowing = reconnectNotice;
     const controller = new AbortController();
     const sessionId = activeSessionId;
+    const epoch = sessionEpochRef.current;
+    const ownsFollow = () =>
+      !cancelled && sessionEpochRef.current === epoch && sessionIdRef.current === sessionId;
     const mintRemoteId = () => `rev-${remoteSeqRef.current++}`;
     // A fresh room starts with a clean typing set; the stream's initial
     // presence frame repopulates it.
@@ -1419,6 +1455,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     refreshPendingInput(sessionId);
 
     const handleRoomEvent = (event: string, payload: Record<string, unknown>) => {
+      if (!ownsFollow()) return;
       const sender = typeof payload.senderUserId === "string" ? payload.senderUserId : null;
       const acceptsMirror = shouldAcceptRoomMirror({
         senderUserId: sender,
@@ -1736,7 +1773,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // queue's "client is the durable holder" fallback).
           if (sawRunning) {
             setQueuedNotice(false);
-            flushQueuedInputs();
+            flushQueuedInputs(sessionId);
           }
           break;
         }
@@ -1751,6 +1788,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/stream`,
           { signal: controller.signal },
         );
+        if (!ownsFollow()) return;
         if (!res.ok || !res.body) {
           // A rejected open is not something a retry fixes. A room keeps
           // its retry cadence as before; a reconnecting personal session
@@ -1783,10 +1821,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // closed WITHOUT `done` (the transport gave up on a turn that may
         // still be running); after `done` the server has nothing more.
         if (
+          ownsFollow() &&
           shouldReopenSessionStream({ isRoom: isSharedOpen, sawDone, cancelled })
         ) {
           setTimeout(() => {
-            if (!cancelled) setSubscribeEpoch((n) => n + 1);
+            if (ownsFollow()) setSubscribeEpoch((n) => n + 1);
           }, 3_000);
         }
       }
@@ -1868,6 +1907,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   ]);
 
   const resetPane = useCallback(() => {
+    sessionEpochRef.current += 1;
+    setPendingQuestion(null);
+    setStartingShared(false);
     responseGroupAbortRef.current = true;
     directTurnSessionRef.current = null;
     stream.abort();
@@ -1951,14 +1993,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // too: the queued text is usually WHY the user reached for Stop. It
     // waits for the stop to land, because a flush racing the still-running
     // turn is answered `turn_in_flight`. No session id means nothing is
-    // running server-side, so the flush goes straight out.
-    if (!sessionId) {
-      flushQueuedInputs();
-      return;
-    }
+    // running server-side and no session-owned queue to flush.
+    if (!sessionId) return;
+    const epoch = sessionEpochRef.current;
+    const ownsStop = () => sessionEpochRef.current === epoch && sessionIdRef.current === sessionId;
     void stopTurn(sessionId)
-      .catch(() => setError(t.stopTurnFailed))
-      .finally(flushQueuedInputs);
+      .catch(() => { if (ownsStop()) setError(t.stopTurnFailed); })
+      .finally(() => { if (ownsStop()) flushQueuedInputs(sessionId); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stream, resetTurnActivity, flushQueuedInputs, t.stopTurnFailed]);
 
@@ -2119,6 +2160,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
      *  replays a message that already chose its responders. */
     resolveMentions?: boolean;
   }) => {
+    const sendEpoch = sessionEpochRef.current;
+    let owningSessionId = sessionIdRef.current;
+    const ownsSend = () =>
+      sessionEpochRef.current === sendEpoch && sessionIdRef.current === owningSessionId;
     const trimmed = (override?.text ?? input).trim();
     const usesComposerTray = override?.fileIds === undefined;
     const turnFileIds = override?.fileIds ?? att.fileIds();
@@ -2214,6 +2259,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           contextGroupId: pickedContextGroupId,
           contextProjectId: pickedContextProjectId,
         });
+        if (!ownsSend()) return false;
+        owningSessionId = created.id;
         sessionIdRef.current = created.id;
         hydratedRef.current = created.id;
         patchSharedChatSessions(
@@ -2226,10 +2273,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         selectSession(created.id, "workspace");
         dispatchChatSessionsRefresh(workspaceId);
       } catch {
-        setError(t.newWorkspaceChatFailed);
+        if (ownsSend()) setError(t.newWorkspaceChatFailed);
         return false;
       } finally {
-        setStartingShared(false);
+        if (ownsSend()) setStartingShared(false);
       }
     }
 
@@ -2257,11 +2304,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           reply ? { text: reply.text } : undefined,
         );
         // D-H4 — the message still posted; this is a heads-up, not an error.
-        if (posted.unreachableMentions.length > 0) {
+        if (ownsSend() && posted.unreachableMentions.length > 0) {
           setUnreachableNote(posted.unreachableMentions);
         }
       } catch {
-        setError(t.postFailed);
+        if (ownsSend()) setError(t.postFailed);
       }
       return true;
     }
@@ -2314,7 +2361,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // assistant. The first request persists the message and returns its id;
     // every later request reuses that row as a validated continuation.
     for (const [targetIndex, target] of targets.entries()) {
-      if (responseGroupAbortRef.current) break;
+      if (!ownsSend() || responseGroupAbortRef.current) break;
       if (targetIndex > 0 && !sourceMessageId) break;
 
       askedQuestionRef.current = false;
@@ -2330,7 +2377,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       // `shouldAcceptRoomMirror` is what keeps our own mirror quiet while
       // this POST is still painting. A fresh pane has no id yet; the
       // `session` event below adopts it.
-      const directSessionId = sessionIdRef.current;
+      const directSessionId = owningSessionId;
       directTurnSessionRef.current = directSessionId;
       if (directSessionId) {
         dispatchChatSessionActivity({
@@ -2396,10 +2443,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       },
       onEvent: (event) => {
         const payload = coercePayload(event.data);
+        if (!ownsSend()) {
+          // A taken input is durable even if its stream no longer owns the
+          // pane. Acknowledge it without splicing into a different visit.
+          if (event.event === "input_applied" && owningSessionId && typeof payload.inputId === "string") {
+            midTurn.take(payload.inputId, owningSessionId);
+          }
+          return;
+        }
         switch (event.event) {
           case "session": {
             const id = typeof payload.sessionId === "string" ? payload.sessionId : null;
-            if (id && id !== sessionIdRef.current) {
+            if (id && !owningSessionId) {
+              owningSessionId = id;
               // Adopt BEFORE the URL write: `hydratedRef` is what stops the
               // hydrate effect from re-fetching this thread and wiping the
               // reply that is streaming into it right now.
@@ -2455,7 +2511,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               typeof payload.messageId === "string"
                 ? payload.messageId
                 : `queued-${inputId}`;
-            applyQueuedInput(inputId, messageId);
+            if (owningSessionId) applyQueuedInput(inputId, messageId, owningSessionId);
             break;
           }
           case "text_delta": {
@@ -2849,7 +2905,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
       },
       onDone: () => {
-        const settledSessionId = directTurnSessionRef.current;
+        if (!ownsSend()) return;
+        const settledSessionId = owningSessionId;
         directTurnSessionRef.current = null;
         if (settledSessionId) {
           dispatchChatSessionActivity({
@@ -2868,29 +2925,30 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         resetTurnActivity();
         // Anything still queued was never taken by this turn — send it as an
         // ordinary one. See mid-turn-input.md → "the client is the holder".
-        flushQueuedInputs();
+        flushQueuedInputs(owningSessionId);
         setQueuedNotice(false);
         chat.dispatch({ type: "confirmation/clear" });
         // Suspended on a question this turn — fetch the pending row so the
         // answer panel + composer gate surface immediately (dock recipe).
-        if (askedQuestionRef.current && sessionIdRef.current) {
-          refreshPendingInput(sessionIdRef.current);
+        if (askedQuestionRef.current && owningSessionId) {
+          refreshPendingInput(owningSessionId);
         }
-        if (isRoom && sessionIdRef.current) {
-          markRoomSeen(workspaceId, sessionIdRef.current);
+        if (isRoom && owningSessionId) {
+          markRoomSeen(workspaceId, owningSessionId);
         }
         void reloadShared();
         // The turn may have auto-titled the thread — refresh the rail.
         dispatchChatSessionsRefresh(workspaceId);
       },
       onDisconnect: () => {
+        if (!ownsSend()) return;
         // The transport closed with no `done` / `error`: a request-timeout
         // cut, a deploy, a network blip. The server no longer reads a client
         // close as Stop (2026-08-24), so the turn is still running and its
         // reply lands in the transcript when it finishes. Hand the paint to
         // the mirror machinery and re-attach over the session stream.
         turnDisconnected = true;
-        const sessionId = sessionIdRef.current;
+        const sessionId = owningSessionId;
         const streamedText = turnTextRef.current;
         const startedAt = turnStartedAtRef.current;
         directTurnSessionRef.current = null;
@@ -2920,11 +2978,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         setReconnectNotice(true);
       },
       onError: () => {
+        if (!ownsSend()) return;
         turnFailed = true;
         directTurnSessionRef.current = null;
         chat.dispatch({ type: "stream/abort" });
         resetTurnActivity();
-        flushQueuedInputs();
+        flushQueuedInputs(owningSessionId);
         setQueuedNotice(false);
         setError(t.errorGeneric);
         // The room backend may still be running after a transport failure.
@@ -2933,6 +2992,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         dispatchChatSessionsRefresh(workspaceId);
       },
       });
+      if (!ownsSend()) return false;
       if (
         turnFailed ||
         turnDisconnected ||
@@ -2947,8 +3007,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // an earlier fetch erase a later assistant's live/final row. It also
     // catches teammate posts that arrived while this direct stream owned the
     // room mirror and viewer identity had not hydrated yet.
-    if (isRoom && sourceMessageId && sessionIdRef.current) {
-      await loadTranscript(sessionIdRef.current, { force: true });
+    if (ownsSend() && isRoom && sourceMessageId && owningSessionId) {
+      await loadTranscript(owningSessionId, { force: true });
     }
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3280,6 +3340,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    */
   const stopActiveTurn = useCallback(async () => {
     const sessionId = activeSessionId;
+    const epoch = sessionEpochRef.current;
     if (!sessionId) return;
     try {
       await stopTurn(sessionId);
@@ -3288,7 +3349,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       // gets — clearing optimistically would make this tab disagree with the
       // others if the stop lands on a turn in another process.
     } catch {
-      setError(t.stopTurnFailed);
+      if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId) setError(t.stopTurnFailed);
     }
   }, [activeSessionId, t.stopTurnFailed]);
 

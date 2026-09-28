@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createRelayCommandTransport } from '../relay-transport.js'
+import { createRelayCommandTransport, relayExtensionStatus, supportsProtectedFill } from '../relay-transport.js'
 import type { LocalBrowserControlMode } from '@use-brian/core'
 
 describe('[COMP:sandbox/local-browser] Relay command profile policy', () => {
@@ -34,5 +34,18 @@ describe('[COMP:sandbox/local-browser] Relay command profile policy', () => {
 
     expect(bodies.map((body) => body.controlMode)).toEqual(['task_tabs', 'full_browser'])
     expect(bodies.every((body) => body.browserProfileId === 'profile-1')).toBe(true)
+  })
+})
+
+
+describe('protected fill explicit capability eligibility', () => {
+  it.each([undefined, { protectedFillV1: false }, { protectedFillV1: 'true' }, { protectedFillV1: true }])('requires a true capability, not origin/build alone: %j', async capabilities => {
+    const origin = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const status = await relayExtensionStatus({ relayUrl: 'https://relay.example', relaySecret: 'secret', userId: 'u',
+      fetchImpl: async () => new Response(JSON.stringify({ connected: true, extensionOrigin: origin, build: 'current', staleBuild: false, capabilities })),
+    })
+    expect(supportsProtectedFill(status, new Set([origin]))).toBe(capabilities?.protectedFillV1 === true)
+    expect(supportsProtectedFill(status, new Set())).toBe(false)
+    expect(supportsProtectedFill(status && { ...status, connected: false }, new Set([origin]))).toBe(false)
   })
 })

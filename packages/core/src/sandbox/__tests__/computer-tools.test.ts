@@ -130,12 +130,12 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     expect(tools.browserCloseTab.requiresConfirmation).toBe(true)
     expect(local.calls).toEqual([
       'navigate:https://first.example/',
-      'snapshot',
+      'snapshot:full',
       'openTab:https://second.example/',
-      'snapshot',
+      'snapshot:full',
       'listTabs',
       'switchTab:tab-2',
-      'snapshot',
+      'snapshot:full',
       'closeTab:tab-2',
     ])
   })
@@ -181,7 +181,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
 
     await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' })
     // Navigate carries its own follow-up snapshot (one model turn per step).
-    expect(local.calls).toEqual(['navigate:https://www.linkedin.com/messaging/', 'snapshot'])
+    expect(local.calls).toEqual(['navigate:https://www.linkedin.com/messaging/', 'snapshot:full'])
     expect(cloud.calls).toEqual([])
   })
 
@@ -190,7 +190,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     const cloud = fakeProvider('cloud')
     const tools = createComputerTools({ local, cloud, cloudAvailable: () => true })
     await run(tools.browserNavigate, { url: 'https://news.ycombinator.com/' })
-    expect(cloud.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot'])
+    expect(cloud.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot:full'])
     expect(local.calls).toEqual([])
   })
 
@@ -257,7 +257,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     })
     tools.setSessionBackendOverride('sess-1', 'local')
     await run(tools.browserNavigate, { url: 'https://news.ycombinator.com/' })
-    expect(local.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot'])
+    expect(local.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot:full'])
     expect(cloud.calls).toEqual([])
     expect(tools.getSessionBackend('sess-1')).toBe('local')
   })
@@ -283,7 +283,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
 
     const named = await run(tools.browserNavigate, { url: 'https://www.instagram.com/', profile: 'Personal IG' })
     expect(named.isError ?? false).toBe(false)
-    expect(local.calls).toEqual(['navigate:https://www.instagram.com/', 'snapshot'])
+    expect(local.calls).toEqual(['navigate:https://www.instagram.com/', 'snapshot:full'])
   })
 
   it('keeps follow-up ops on the backend the last navigation picked', async () => {
@@ -296,11 +296,13 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       profiles: await profilesWith([{ name: 'Personal', defaultBackend: 'local' }]),
     })
     await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' })
-    await run(tools.browserSnapshot, {})
-    await run(tools.browserType, { ref: '@e1', text: 'hello' })
+    const latest = await run(tools.browserSnapshot, {})
+    const ref = String(latest.data).match(/(@e\d+) textbox "Write a message"/)?.[1]
+    expect(ref).toBeDefined()
+    expect((await run(tools.browserType, { ref, text: 'hello' })).isError).toBeUndefined()
     expect(local.calls).toEqual([
       'navigate:https://www.linkedin.com/messaging/',
-      'snapshot', // navigate's inline snapshot
+      'snapshot:full', // navigate's inline snapshot
       'snapshot',
       'type:@e1:hello',
     ])
@@ -337,8 +339,10 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       profiles: await profilesWith([{ name: 'Personal', defaultBackend: 'local' }]),
     })
     await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' })
-    await run(tools.browserSnapshot, {})
-    await run(tools.browserType, { ref: '@e1', text: 'hi there' })
+    const latest = await run(tools.browserSnapshot, {})
+    const ref = String(latest.data).match(/(@e\d+) button "Send"/)?.[1]
+    expect(ref).toBeDefined()
+    expect((await run(tools.browserType, { ref, text: 'hi there' })).isError).toBeUndefined()
     await run(tools.browserCurrentUrl, {})
     expect(sent.map((s) => s.op)).toEqual(['navigate', 'snapshot', 'snapshot', 'type', 'currentUrl'])
     expect(sent[0]).toMatchObject({
@@ -927,5 +931,95 @@ describe('[COMP:sandbox/browser-tools] capability tag', () => {
     expect(BOOT_INJECTED_BUILTIN_TOOLS.computer.length).toBeGreaterThan(
       factoryTools.length,
     )
+  })
+})
+
+describe('protected browser fill tool', () => {
+  const input = { destinationOrigin: 'https://example.com', items: [
+    { referenceId: 'a'.repeat(43), ref: '@e1' }, { referenceId: 'b'.repeat(43), ref: '@e2' },
+  ] }
+  it('passes one batch with trusted scope, records no fill and blocks observations/raw actions after disclosure', async () => {
+    let locked = false
+    const local = fakeProvider('local')
+    let fills = 0
+    local.fillReference = async (scope, items) => {
+      expect(scope.userId).toBe('user-1')
+      expect(scope.taskId).toBe('server-task')
+      expect(items).toEqual(input.items)
+      fills++
+      locked = true
+    }
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud'), profiles: await profilesWith([{ name: 'Local', defaultBackend: 'local' }]),
+      protectedFill: { blocked: () => locked, scope: async (ctx, browserProfileId, destinationOrigin) => ({
+        userId: ctx.userId, workspaceId: ctx.workspaceId!, sessionId: ctx.sessionId, browserProfileId, destinationOrigin, taskId: 'server-task',
+      }) },
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com' })
+    const traceBefore = tools.getSessionTrace('sess-1')
+    const latest = await run(tools.browserSnapshot, {})
+    const refs = [...String(latest.data).matchAll(/(@e\d+) /g)].map(match => match[1]!)
+    expect(refs.slice(0, 2)).toEqual(['@e4', '@e5'])
+    const result = await run(tools.browserFillReference, {
+      ...input, items: input.items.map((item, index) => ({ ...item, ref: refs[index] })),
+    })
+    expect(result.isError).not.toBe(true)
+    expect(fills).toBe(1)
+    expect(tools.getSessionTrace('sess-1')).toEqual(traceBefore)
+    const calls = local.calls.length
+    for (const [tool, args] of [
+      [tools.browserSnapshot, {}], [tools.browserCurrentUrl, {}], [tools.browserListTabs, {}],
+      [tools.browserNavigate, { url: 'https://example.com' }], [tools.browserType, { ref: '@e1', text: 'raw' }],
+      [tools.browserClick, { ref: '@e1' }], [tools.browserFillReference, input],
+      [tools.browserFillForm, { fields: [{ action: 'fill', ref: '@e1', value: 'raw' }] }],
+    ] as [Tool, Record<string, unknown>][]) expect((await run(tool, args)).isError).toBe(true)
+    expect(local.calls.length).toBe(calls)
+  })
+  it('refuses missing integration and sanitizes provider exceptions', async () => {
+    const local = fakeProvider('local')
+    const cloud = fakeProvider('cloud')
+    const disabled = createComputerTools({ local, cloud })
+    expect((await run(disabled.browserFillReference, input)).isError).toBe(true)
+    local.fillReference = async () => { throw new Error('SECRET_SENTINEL') }
+    const tools = createComputerTools({ local, cloud, profiles: await profilesWith([{ name: 'Local', defaultBackend: 'local' }]),
+      protectedFill: { blocked: () => false, scope: async (ctx, browserProfileId, destinationOrigin) => ({ userId: ctx.userId,
+        workspaceId: ctx.workspaceId!, sessionId: ctx.sessionId, browserProfileId, destinationOrigin, taskId: 'server-task' }) },
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com' })
+    const result = await run(tools.browserFillReference, input)
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result)).not.toContain('SECRET_SENTINEL')
+  })
+})
+
+
+describe('protected fill live assistant/profile scope', () => {
+  it('rechecks assistant enablement after navigation and refuses stale profile grants', async () => {
+    const local = fakeProvider('local')
+    let fills = 0
+    local.fillReference = async () => { fills++ }
+    const profiles = await profilesWith([{ name: 'Local', defaultBackend: 'local' }])
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud'), profiles,
+      protectedFill: { blocked: () => false, scope: async (ctx, browserProfileId, destinationOrigin) => ({
+        userId: ctx.userId, workspaceId: ctx.workspaceId!, sessionId: ctx.sessionId, taskId: 'task', browserProfileId, destinationOrigin,
+      }) },
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com' })
+    const profile = (await profiles.store.list({ workspaceId: 'ws-1' }))[0]!
+    await profiles.store.update(profile.id, { enabledAssistantIds: [] })
+    expect((await run(tools.browserFillReference, { destinationOrigin: 'https://example.com', items: [{ referenceId: 'a'.repeat(43), ref: '@e1' }] })).isError).toBe(true)
+    expect(fills).toBe(0)
+  })
+  it.each(['userId', 'workspaceId', 'sessionId', 'browserProfileId', 'destinationOrigin'])('refuses a mismatched runtime %s before dispatch', async field => {
+    const local = fakeProvider('local')
+    let fills = 0
+    local.fillReference = async () => { fills++ }
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud'), profiles: await profilesWith([{ name: 'Local', defaultBackend: 'local' }]),
+      protectedFill: { blocked: () => false, scope: async (ctx, browserProfileId, destinationOrigin) => ({
+        userId: ctx.userId, workspaceId: ctx.workspaceId!, sessionId: ctx.sessionId, taskId: 'task', browserProfileId, destinationOrigin, [field]: 'other',
+      }) },
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com' })
+    expect((await run(tools.browserFillReference, { destinationOrigin: 'https://example.com', items: [{ referenceId: 'a'.repeat(43), ref: '@e1' }] })).isError).toBe(true)
+    expect(fills).toBe(0)
   })
 })

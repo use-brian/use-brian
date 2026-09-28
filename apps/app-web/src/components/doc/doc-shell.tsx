@@ -36,6 +36,7 @@
  */
 
 import { MeetingTagsPanel } from "@/components/recordings/meeting-tags-panel";
+import { availableAppWidth, subscribeAppViewport } from "@/lib/app-viewport";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -578,10 +579,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   const [viewportWidth, setViewportWidth] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const onResize = () => setViewportWidth(window.innerWidth);
+    const onResize = () => setViewportWidth(availableAppWidth());
     onResize();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    return subscribeAppViewport(onResize);
   }, []);
   const commentGutter =
     pageHasComments && pageView && !pageView.fullWidth

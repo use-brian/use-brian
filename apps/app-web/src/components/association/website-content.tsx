@@ -1,27 +1,29 @@
 "use client";
-/** Settings → Website content: the media library, programmes and every content collection. [COMP:app-web/site-content] */
-import { useState } from "react";
+/** Website (owner/admin): Pages & sections, then one page, the membership page, programmes or the media library. [COMP:app-web/site-content] */
+import { useSearchParams } from "next/navigation";
 import { SITE_CONTENT_COLLECTIONS, type SiteContentCollection } from "@/lib/api/association";
 import { useT } from "@/lib/i18n/client";
+import { MembershipPublishingPanel } from "./membership-publishing";
 import { ProgrammePublishingPanel } from "./programme-publishing";
 import { SiteContentPanel } from "./site-content/site-content-panel";
 import { WebsiteMediaPanel } from "./website-media";
-import { Segmented } from "./ui";
+import { WebsitePagesHome } from "./website/website-home";
+import { associationHref } from "./navigation";
+import { PageHeader } from "./ui";
 
-type Section = "media" | "programmes" | SiteContentCollection;
+type WebsitePage = "pages" | "programmes" | "membership" | "media";
 
-export function WebsiteContentPanel({ workspaceId }: { workspaceId: string }) {
+export function AssociationWebsiteSection({ workspaceId }: { workspaceId: string }) {
   const c = useT().associationPage.content;
-  const [section, setSection] = useState<Section>("media");
-  const titles = c.collections as Record<SiteContentCollection, { title: string }>;
-  const options: { value: Section; label: string }[] = [
-    { value: "media", label: c.sections.media }, { value: "programmes", label: c.sections.programmes },
-    ...SITE_CONTENT_COLLECTIONS.map(collection => ({ value: collection as Section, label: titles[collection].title })),
-  ];
-  return <div className="space-y-6">
-    <Segmented label={c.sections.label} value={section} options={options} onChange={setSection} className="flex-wrap"/>
-    {section === "media" ? <WebsiteMediaPanel workspaceId={workspaceId}/>
-      : section === "programmes" ? <ProgrammePublishingPanel workspaceId={workspaceId}/>
-      : <SiteContentPanel key={section} workspaceId={workspaceId} collection={section}/>}
-  </div>;
+  const search = useSearchParams();
+  const collection = search?.get("collection") ?? "";
+  const page = search?.get("page") as WebsitePage | null;
+  const back = { label: c.backToPages, href: associationHref(workspaceId, "website") };
+  if ((SITE_CONTENT_COLLECTIONS as readonly string[]).includes(collection)) {
+    return <div className="space-y-5"><SiteContentPanel key={collection} workspaceId={workspaceId} collection={collection as SiteContentCollection} back={back} /></div>;
+  }
+  if (page === "membership") return <div className="space-y-5"><PageHeader title={c.membershipPage} description={c.membershipPageHelp} back={back} /><MembershipPublishingPanel workspaceId={workspaceId} /></div>;
+  if (page === "programmes") return <div className="space-y-5"><PageHeader title={c.sections.programmes} description={c.programmesHelp} back={back} /><ProgrammePublishingPanel workspaceId={workspaceId} /></div>;
+  if (page === "media") return <div className="space-y-5"><PageHeader title={c.sections.media} description={c.mediaHelp} back={back} /><WebsiteMediaPanel workspaceId={workspaceId} /></div>;
+  return <WebsitePagesHome workspaceId={workspaceId} />;
 }

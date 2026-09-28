@@ -513,6 +513,8 @@ export const TuningChatPanel = forwardRef<
     ...(workspaceId ? { workspaceId } : {}),
     getAssistantId: () => assistantId,
   });
+  const selectedSessionIdRef = useRef(fixedSessionId ?? sessionIdRef.current);
+  selectedSessionIdRef.current = fixedSessionId ?? sessionIdRef.current;
   /** `sendMessage` is called from inside its own `onDone` (the flush). */
   const sendMessageRef = useRef<
     ((text: string, fileIds: string[], truncateFromMessageId?: string, localAttachments?: MessageAttachment[], reply?: ReplyTo | null, attachSelection?: boolean, retryTarget?: import('@use-brian/shared').FeedChatTarget) => Promise<boolean>) | null
@@ -525,9 +527,9 @@ export const TuningChatPanel = forwardRef<
    * answer.
    */
   const applyQueuedInput = useCallback(
-    (inputId: string, messageId: string) => {
+    (inputId: string, messageId: string, owningSessionId: string) => {
       if (appliedInputIdsRef.current.has(inputId)) return false;
-      const entry = midTurn.take(inputId);
+      const entry = midTurn.take(inputId, owningSessionId);
       if (!entry) return false;
       appliedInputIdsRef.current.add(inputId);
       const previousReply = feedTurnMessage(turnRef.current);
@@ -545,13 +547,12 @@ export const TuningChatPanel = forwardRef<
   );
 
   /** Stream ended with messages still queued — send them as an ordinary turn. */
-  const flushQueuedInputs = useCallback(() => {
-    const stillWaiting = midTurn.drain().filter(entry => !appliedInputIdsRef.current.has(entry.inputId));
-    if (stillWaiting.length === 0) return;
-    const joined = joinQueuedInputs(stillWaiting);
+  const flushQueuedInputs = useCallback((owningSessionId: string | null) => {
     const epoch = epochRef.current;
     setTimeout(() => {
-      if (epoch === epochRef.current) void sendMessageRef.current?.(joined, []);
+      if (!owningSessionId || epoch !== epochRef.current || selectedSessionIdRef.current !== owningSessionId) return;
+      const stillWaiting = midTurn.drain(owningSessionId).filter(entry => !appliedInputIdsRef.current.has(entry.inputId));
+      if (stillWaiting.length > 0) void sendMessageRef.current?.(joinQueuedInputs(stillWaiting), []);
     }, 0);
   }, [midTurn]);
 
@@ -615,9 +616,9 @@ export const TuningChatPanel = forwardRef<
   const extraEventRef = useRef(handleExtraEvent);
   extraEventRef.current = handleExtraEvent;
 
-  const consumeEvent = (event: string, payload: Record<string, unknown>) => {
+  const consumeEvent = (event: string, payload: Record<string, unknown>, owningSessionId: string | null) => {
     if (event === "input_applied" && typeof payload.inputId === "string") {
-      if (applyQueuedInput(payload.inputId, typeof payload.messageId === "string" ? payload.messageId : `queued-${payload.inputId}`)) updateTurn(newFeedChatTurn());
+      if (owningSessionId && applyQueuedInput(payload.inputId, typeof payload.messageId === "string" ? payload.messageId : `queued-${payload.inputId}`, owningSessionId)) updateTurn(newFeedChatTurn());
       return;
     }
     updateTurn(foldFeedChatEvent(turnRef.current, event, payload, tChat.toolNarration));
@@ -661,9 +662,9 @@ export const TuningChatPanel = forwardRef<
         } else if (event === "snapshot") {
           sawRunning = true;
           setReconnecting(false);
-          consumeEventRef.current(event, payload);
+          consumeEventRef.current(event, payload, sid);
         } else if (event === "activity") {
-          consumeEventRef.current(String(payload.event), payload);
+          consumeEventRef.current(String(payload.event), payload, sid);
         } else if (event === "error") {
           extraEventRef.current(event, payload);
         }
@@ -684,7 +685,7 @@ export const TuningChatPanel = forwardRef<
       clearActivity();
       await refreshPending(sid, epoch);
       if (!current()) return;
-      if (sawRunning) { flushQueuedInputs(); onTurnComplete?.(); }
+      if (sawRunning) { flushQueuedInputs(sid); onTurnComplete?.(); }
     }).catch(() => {
       if (!current()) return;
       // Preserve queue and partial output. No retry POST after an unknown outcome.
@@ -703,7 +704,8 @@ export const TuningChatPanel = forwardRef<
       if (!trimmed && fileIds.length === 0) return false;
       recoveryRef.current?.abort();
       const epoch = ++epochRef.current;
-      const current = () => epochRef.current === epoch;
+      let owningSessionId = fixedSessionId ?? sessionIdRef.current;
+      const current = () => epochRef.current === epoch && selectedSessionIdRef.current === owningSessionId;
       busyRef.current = true;
       appliedInputIdsRef.current.clear();
       followBottomRef.current = true;
@@ -724,7 +726,7 @@ export const TuningChatPanel = forwardRef<
         body: {
           message: trimmed, ...(feedTarget ? { feedTarget } : {}), assistantId,
           ...(reply?.id ? { replyTo: { id: reply.id, text: reply.text } } : {}),
-          sessionId: fixedSessionId ?? sessionIdRef.current ?? undefined,
+          sessionId: owningSessionId ?? undefined,
           ...(fixedSessionId ? {} : { channelId }), model, ...(researchMode ? { mode: "research" } : {}),
           ...(workspaceId ? { workspaceId } : {}), ...(fileIds.length ? { fileIds } : {}),
           ...(truncateFromMessageId ? { truncateFromMessageId } : {}),
@@ -733,13 +735,15 @@ export const TuningChatPanel = forwardRef<
           if (!current()) return;
           const payload = feedEventPayload(data);
           if (event === "session" && typeof payload.sessionId === "string") {
+            owningSessionId = payload.sessionId;
+            selectedSessionIdRef.current = payload.sessionId;
             sessionIdRef.current = payload.sessionId;
             session.setSession(payload.sessionId);
           } else if (event === "user_message_saved" && typeof payload.id === "string") {
             sentTargetsRef.current.set(payload.id, sentTargetsRef.current.get(userMessage.id));
             sentTargetsRef.current.delete(userMessage.id);
             session.dispatch({ type: "message/rekey", messageId: userMessage.id, id: payload.id });
-          } else consumeEventRef.current(event, payload);
+          } else consumeEventRef.current(event, payload, owningSessionId);
         },
         onDone: () => {
           if (!current()) return;
@@ -747,19 +751,19 @@ export const TuningChatPanel = forwardRef<
           if (finalMessage) session.dispatch({ type: "stream/finalize", finalMessage });
           clearActivity();
           session.clearConfirmations();
-          const sid = sessionIdRef.current;
+          const sid = owningSessionId;
           if (sid) void refreshPending(sid, epoch);
-          flushQueuedInputs(); onTurnComplete?.();
+          flushQueuedInputs(owningSessionId); onTurnComplete?.();
         },
         onDisconnect: () => {
           if (!current()) return;
-          const sid = sessionIdRef.current;
+          const sid = owningSessionId;
           if (sid) recoverSessionRef.current(sid);
           else { setError(tChat.turnReconnectFailed); setReconnecting(false); }
         },
         onError: (err) => {
           if (!current()) return;
-          const sid = sessionIdRef.current;
+          const sid = owningSessionId;
           if (sid) recoverSessionRef.current(sid);
           else { clearActivity(); setError(err instanceof Error ? err.message : t.streamFailed); }
         },

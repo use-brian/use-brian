@@ -145,6 +145,8 @@ export const EntitlementsQuery = CrmPageQuerySchema.extend({
 }).strict()
 export const EventsQuery = CrmPageQuerySchema.extend({
   status: z.enum(['draft', 'published', 'cancelled', 'completed']).optional(),
+  when: z.enum(['upcoming', 'past']).optional(),
+  id: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 }).strict()
 export const ParticipationQuery = CrmPageQuerySchema.extend({

@@ -185,3 +185,66 @@ export const LOCAL_ONLY_KEYS = new Set([
   "Process",
   "Unidentified",
 ]);
+
+/**
+ * API-only viewer clock. Delivered input buys a 2s burst (180ms vs 1200ms
+ * idle); repeated input coalesces into one refresh, never parallel requests.
+ * Delays are completion-based, with a minimum start spacing even for nudges.
+ * Hidden viewers use 5s cadence and refresh on return. The caller must ignore
+ * aborted results as well as passing the signal to its network request.
+ * Also used without input nudges for the independent task/lock metadata clock.
+ */
+export function createTakeoverPoller(opts: {
+  poll: (signal: AbortSignal) => Promise<void>;
+  hidden: () => boolean;
+}) {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let running = false;
+  let pending = false;
+  let burstUntil = 0;
+  let lastStart = -Infinity;
+  const cadence = () => opts.hidden() ? 5_000 : Date.now() < burstUntil ? 180 : 1_200;
+  const schedule = (delay: number) => {
+    clearTimeout(timer);
+    if (!controller.signal.aborted) timer = setTimeout(() => void tick(), delay);
+  };
+  const tick = async () => {
+    if (controller.signal.aborted || running) return;
+    running = true;
+    pending = false;
+    lastStart = Date.now();
+    try {
+      await opts.poll(controller.signal);
+    } catch {
+      // A failed request must not kill the clock or produce an unhandled rejection.
+    } finally {
+      running = false;
+      schedule(pending && !opts.hidden() ? Math.max(0, 180 - (Date.now() - lastStart)) : cadence());
+    }
+  };
+  const refresh = () => {
+    if (controller.signal.aborted) return;
+    if (running) pending = true;
+    else schedule(Math.max(0, 180 - (Date.now() - lastStart)));
+  };
+  schedule(opts.hidden() ? 5_000 : 0);
+  return {
+    inputDelivered() {
+      if (controller.signal.aborted || opts.hidden()) return;
+      burstUntil = Date.now() + 2_000;
+      refresh();
+    },
+    visibilityChanged() {
+      if (opts.hidden()) {
+        burstUntil = 0;
+        pending = false;
+        if (!running) schedule(5_000);
+      } else refresh();
+    },
+    dispose() {
+      controller.abort();
+      clearTimeout(timer);
+    },
+  };
+}

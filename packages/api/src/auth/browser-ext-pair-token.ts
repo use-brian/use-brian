@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 
 /**
  * Short-lived pairing token for the browser extension (computer-use local
@@ -139,9 +139,11 @@ function verifyKind(
     .update(`${header}.${body}`)
     .digest('base64url')
 
-  if (signature !== expected) return null
+  if (!/^[A-Za-z0-9_-]{43}$/.test(signature) || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null
 
   try {
+    const decodedHeader = JSON.parse(Buffer.from(header, 'base64url').toString()) as { alg?: string; typ?: string }
+    if (decodedHeader.alg !== 'HS256' || decodedHeader.typ !== 'JWT') return null
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString()) as {
       kind?: string
       userId?: string
@@ -154,7 +156,7 @@ function verifyKind(
     if (typeof payload.userId !== 'string' || payload.userId.length === 0) return null
     if (typeof payload.workspaceId !== 'string' || payload.workspaceId.length === 0) return null
     if (typeof payload.browserProfileId !== 'string' || payload.browserProfileId.length === 0) return null
-    if (typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) return null
+    if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null
     return payload as {
       kind: typeof kind
       userId: string

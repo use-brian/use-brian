@@ -186,3 +186,12 @@ describe("[COMP:ext/firefox-companion] Firefox BiDi executor", () => {
     await expect(executor.execute("currentUrl", {})).rejects.toBeInstanceOf(FirefoxBidiError);
   });
 });
+
+it("explicitly refuses batch filling without sending browser input", async () => {
+  const socket = new FakeSocket();
+  const executor = new FirefoxBidiExecutor("ws://127.0.0.1:9222/session", () => socket);
+  await expect(executor.execute("fillForm", {
+    fields: [{ action: "fill", ref: "@e1", value: "hello" }],
+  })).rejects.toMatchObject({ code: "unsupported_browser" });
+  expect(socket.sent).toEqual([]);
+});

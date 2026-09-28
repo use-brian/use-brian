@@ -10,6 +10,8 @@
 import { STALE_EXTENSION_REMEDY } from '@use-brian/shared'
 import {
   BrowserBackendError,
+  BrowserFormFieldsSchema,
+  BrowserFillFormResultSchema,
   BROWSER_BACKEND_ERROR_CODES,
   BrowserCaptureResultSchema,
   BrowserNavigateResultSchema,
@@ -62,6 +64,7 @@ function toBackendError(error: string, code?: string, staleBuild?: boolean): Bro
 export function createLocalBrowserProvider(deps: {
   /** Null when no relay is configured (open-core boot without the platform relay). */
   transport: RelayCommandTransport | null
+  onDestination?: (ctx: BrowserCallContext, origin: string | null) => void
 }): BrowserProvider {
   async function send(ctx: BrowserCallContext, op: string, args?: Record<string, unknown>): Promise<unknown> {
     if (!deps.transport) {
@@ -76,6 +79,9 @@ export function createLocalBrowserProvider(deps: {
         'profile_required',
       )
     }
+    if (['navigate', 'click', 'type', 'openTab', 'switchTab', 'closeTab', 'takeoverInput', 'stop'].includes(op)) {
+      deps.onDestination?.(ctx, null)
+    }
     const res = await deps.transport.send({
       userId: ctx.userId,
       browserProfileId: ctx.profileId,
@@ -83,11 +89,27 @@ export function createLocalBrowserProvider(deps: {
       args,
     })
     if (!res.ok) throw toBackendError(res.error, res.code, res.staleBuild)
+    if (['navigate', 'snapshot', 'currentUrl', 'openTab', 'switchTab'].includes(op)) {
+      const result = BrowserNavigateResultSchema.safeParse(res.data)
+      let origin: string | null = null
+      try { const url = new URL(result.success ? result.data.url : ''); if (url.protocol === 'https:') origin = url.origin } catch { /* unknown destination */ }
+      deps.onDestination?.(ctx, origin)
+    }
     return res.data
   }
 
   return {
     kind: 'local',
+    async fillReference(scope, items) {
+      try {
+        const data = await send({ userId: scope.userId, workspaceId: scope.workspaceId,
+          sessionId: scope.sessionId, taskId: scope.taskId, profileId: scope.browserProfileId },
+          'browserFillReference', { workspaceId: scope.workspaceId, sessionId: scope.sessionId,
+            taskId: scope.taskId, browserProfileId: scope.browserProfileId, destinationOrigin: scope.destinationOrigin, items })
+        const result = data as { status?: unknown; filledCount?: unknown; requiresHumanCompletion?: unknown } | null
+        if (!result || result.status !== 'filled' || result.filledCount !== items.length || result.requiresHumanCompletion !== true) throw new Error()
+      } catch { throw new BrowserBackendError('Protected fill unavailable', 'protected_fill_denied') }
+    },
     async navigate(ctx, url) {
       return BrowserNavigateResultSchema.parse(await send(ctx, 'navigate', { url }))
     },
@@ -99,6 +121,10 @@ export function createLocalBrowserProvider(deps: {
     },
     async type(ctx, ref, text) {
       await send(ctx, 'type', { ref, text })
+    },
+    async fillForm(ctx, fields) {
+      const validated = BrowserFormFieldsSchema.parse(fields)
+      return BrowserFillFormResultSchema.parse(await send(ctx, 'fillForm', { fields: validated }))
     },
     async currentUrl(ctx) {
       return BrowserUrlResultSchema.parse(await send(ctx, 'currentUrl'))

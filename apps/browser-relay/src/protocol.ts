@@ -15,6 +15,7 @@ import { z } from 'zod'
 // ── Extension → relay ──────────────────────────────────────────
 
 const HelloMessageSchema = z.object({
+  clientKind: z.literal('electron').optional(),
   type: z.literal('hello'),
   pairingToken: z.string().min(1),
   /**
@@ -25,6 +26,7 @@ const HelloMessageSchema = z.object({
    * extension simply drops the field instead of rejecting the frame.
    */
   build: z.string().max(64).optional(),
+  capabilities: z.object({ protectedFillV1: z.boolean().optional() }).optional(),
 })
 
 const ResultMessageSchema = z.object({

@@ -80,6 +80,10 @@ export type CrmOperationsReadPort = {
   }): Promise<CrmPage<'entitlements'>>
   listEvents(workspaceId: string, filters?: CrmPageQuery & {
     status?: 'draft' | 'published' | 'cancelled' | 'completed'
+    /** `upcoming`: still running or ahead (ends now or later); `past`: already ended. */
+    when?: 'upcoming' | 'past'
+    /** One event by id (deep links). */
+    id?: string
     limit?: number
   }): Promise<CrmPage<'events'>>
   listParticipation(workspaceId: string, filters?: CrmPageQuery & {

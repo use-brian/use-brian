@@ -13,6 +13,8 @@
  * [COMP:app-web/tooltip]
  */
 
+import { useAppPopupBoundary } from "@/lib/app-viewport";
+
 import * as React from "react";
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
 
@@ -49,12 +51,14 @@ export function Tooltip({
   // lifetime.
   const rootControlProps =
     open === undefined ? {} : { open, onOpenChange };
+  const collisionBoundary = useAppPopupBoundary();
   return (
     <TooltipPrimitive.Provider delay={delay} closeDelay={0}>
       <TooltipPrimitive.Root {...rootControlProps}>
         <TooltipPrimitive.Trigger render={children} closeOnClick={closeOnClick} />
         <TooltipPrimitive.Portal>
           <TooltipPrimitive.Positioner
+            collisionBoundary={collisionBoundary}
             side={side}
             sideOffset={sideOffset}
             className="z-50"

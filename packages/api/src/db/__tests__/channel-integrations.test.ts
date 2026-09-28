@@ -25,7 +25,7 @@ import {
   trustedGuestAuthorityChanged,
   deliveryAudienceAuthorityChanged,
 } from '../channel-integrations.js'
-import { getPool } from '../client.js'
+import { getPool, query } from '../client.js'
 
 function makeKey(): Buffer {
   return randomBytes(32)
@@ -218,5 +218,22 @@ describe('[COMP:api/channel-integrations-store] tampering detection', () => {
 
   it('fails on a too-short blob', () => {
     expect(() => decryptCredentials(Buffer.alloc(10), key)).toThrow(/too short/)
+  })
+})
+
+
+describe('[COMP:api/channel-integrations-store] Telegram discussion inheritance', () => {
+  it('passes the base group to credential selection and routing diagnostics', async () => {
+    vi.mocked(query).mockResolvedValue({ rows: [] } as never)
+    const store = createDbChannelIntegrationStore(makeKey())
+    const args = ['ws', 'assistant', 'integration', 'telegram', '-10020:discussion:30'] as const
+    await store.getCredentialsForAssistantIntegrationSystem(...args)
+    expect(query).toHaveBeenLastCalledWith(expect.any(String), [
+      'assistant', 'integration', 'telegram', '-10020:discussion:30', '-10020', 'ws',
+    ])
+    await store.diagnoseAssistantIntegrationRoutingSystem(...args)
+    expect(query).toHaveBeenLastCalledWith(expect.any(String), [
+      'assistant', 'integration', 'telegram', '-10020:discussion:30', '-10020', 'ws',
+    ])
   })
 })

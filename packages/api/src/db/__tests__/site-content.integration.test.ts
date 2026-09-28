@@ -49,4 +49,18 @@ describe.skipIf(!pool)('[COMP:crm/site-content] actual PostgreSQL publication',(
   await expect(store.publish(workspace,'settings',1,actor)).rejects.toMatchObject({code:'conflict'})
   await expect(store.read(workspace,'home-sea','oasa')).rejects.toMatchObject({code:'not_available'})
  })
+ it('edits and publishes website content while commerce is switched off and summarises every collection',async()=>{
+  const {workspace,actor,store}=await fixture()
+  const user=actor.credentialId
+  await createAssociationWorkspaceModulesStore(pool!).act(workspace,user,'association',{action:'request_disable',expectedVersion:2})
+  await store.save(workspace,'partners',0,partners('Acme'),actor)
+  await store.publish(workspace,'partners',1,actor)
+  expect((await store.read(workspace,'partners','sea')).revision).toBe(1)
+  const status=await store.status(workspace)
+  expect(status.map(row=>row.collection)).toEqual(['people','partners','settings','news','home-oasa','home-sea'])
+  expect(status.find(row=>row.collection==='partners')).toMatchObject({version:1,publishedRevision:1,issueCount:0})
+  expect(status.find(row=>row.collection==='partners')!.publishedAt).toMatch(/^\d{4}-/)
+  expect(status.find(row=>row.collection==='people')).toMatchObject({version:0,publishedRevision:0,publishedAt:null})
+  const draft=await store.draft(workspace,'partners');expect(draft.issueDetails).toEqual([])
+ })
 })

@@ -71,8 +71,8 @@ app.get('/internal/browser/status/:userId', (req, res) => {
 const server = createServer(app)
 const wss = new WebSocketServer({ server, path: '/ext', maxPayload: 8 * 1024 * 1024 })
 
-wss.on('connection', (socket: WebSocket) => {
-  socket.on('message', (raw) => relay.handleMessage(socket, raw as Buffer))
+wss.on('connection', (socket: WebSocket, request) => {
+  socket.on('message', (raw) => relay.handleMessage(socket, raw as Buffer, request.headers.origin))
   socket.on('close', () => relay.handleDisconnect(socket))
   socket.on('error', () => relay.handleDisconnect(socket))
 })
