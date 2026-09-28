@@ -38,11 +38,13 @@ import { seedBuiltinPrimitiveCapabilities } from '../db/capability-seed.js'
 import { z } from 'zod'
 import {
   buildTool,
+  boundScopeSource,
   classifyTool,
   CONFIGURE_CAPABILITY,
   minSensitivity,
   notFoundFailure,
   type McpSettingsStore,
+  type DerivedWriteEvidence,
   type Sensitivity,
   type Tool,
   type ToolContext,
@@ -55,6 +57,7 @@ import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import { materialiseAllAssistants } from '../skills/all-assistants.js'
+import { getRecentSessionMessages } from '../db/sessions.js'
 import {
   connectorAuthorizationActionId,
   connectorAuthorizationPath,
@@ -97,6 +100,9 @@ export type AgentWriteToolDeps = {
    * docs/architecture/integrations/agent-capability-surface.md §11.3.
    */
   resolveApprover: (ctx: ToolContext) => Promise<string>
+  /** Test/alternate-lane seam. The default reads the persisted canonical
+   * transcript window; missing or legacy evidence withholds the proposal. */
+  resolveProceduralEvidence?: (ctx: ToolContext) => Promise<DerivedWriteEvidence | null>
 }
 
 const CLEARANCE = z.enum(['public', 'internal', 'confidential'])
@@ -107,6 +113,16 @@ function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 60)
+}
+
+async function defaultProceduralEvidence(ctx: ToolContext): Promise<DerivedWriteEvidence | null> {
+  const messages = await getRecentSessionMessages(ctx.sessionId, 30)
+  const sources = messages.map((message) => boundScopeSource(message))
+  if (sources.length === 0 || sources.some((source) => !source)) return null
+  return {
+    producer: 'agent-surface:propose-skill',
+    sources: sources as NonNullable<(typeof sources)[number]>[],
+  }
 }
 
 /**
@@ -252,6 +268,14 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
         }
       }
       const approverUserId = await deps.resolveApprover(ctx)
+      const derivation = await (deps.resolveProceduralEvidence ?? defaultProceduralEvidence)(ctx)
+      if (!derivation?.sources.length) {
+        return {
+          data:
+            'proposeSkill did not stage anything: scope_evidence_missing. The current session has no complete canonical transcript evidence, so approval cannot safely classify the derived procedure. Start from a scoped workspace conversation and try once there is persisted evidence.',
+          isError: true,
+        }
+      }
       const approval = await deps.approvalsStore.createStagedSkillCreation({
         workspaceId,
         proposedUmbrella: {
@@ -263,6 +287,7 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
         },
         approverUserId,
         originatingAssistantId: ctx.assistantId,
+        derivation,
       })
       return {
         data:

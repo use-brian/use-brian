@@ -13,6 +13,7 @@
 import { getPool, query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { appendDecisionEvent } from './decision-event-store.js'
+import type { DerivedWriteEvidence } from '@use-brian/core'
 
 export type PendingApprovalStatus =
   | 'pending'
@@ -243,6 +244,7 @@ export type CreateStagedSkillUpdateParams = {
   approverUserId: string
   /** Originating assistant from the worker context. */
   originatingAssistantId: string | null
+  derivation?: DerivedWriteEvidence
 }
 
 /**
@@ -290,6 +292,7 @@ export type CreateStagedSkillCreationParams = {
    * absent, the card lets the approver pick a step. Rides `approval_payload`.
    */
   attachTo?: { workflowId: string; stepId?: string }
+  derivation?: DerivedWriteEvidence
 }
 
 /**
@@ -785,6 +788,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           JSON.stringify({
             targetSkillId: params.targetSkillId,
             patch: params.proposedPatch,
+            derivation: params.derivation,
           }),
           JSON.stringify({
             kind: 'staged_skill_update',
@@ -813,7 +817,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
         [
           params.workspaceId,
           params.approverUserId,
-          JSON.stringify({ umbrella: params.proposedUmbrella }),
+          JSON.stringify({ umbrella: params.proposedUmbrella, derivation: params.derivation }),
           JSON.stringify({
             kind: 'staged_skill_creation',
             originatingAssistantId: params.originatingAssistantId,

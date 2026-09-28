@@ -49,7 +49,19 @@
  */
 
 import { query } from '../db/client.js'
-import { sanitize, matchSkillAgainstWorkflows, type AnalyticsStore } from '@use-brian/core'
+import {
+  boundScopeSource,
+  resourceScopeKey,
+  sanitize,
+  type AnalyticsStore,
+  type DerivedWriteEvidence,
+  type ScopeSource,
+} from '@use-brian/core'
+import { getRecentSessionMessages, type SessionMessage } from '../db/sessions.js'
+import {
+  applyDerivedSkillPatch,
+  applyDerivedSkillSupportFile,
+} from '../db/skill-derived-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import type {
   WorkspaceSkillFilesStore,
@@ -400,6 +412,18 @@ export async function fetchTranscriptExcerpt(
     .slice(0, 16_000) // Hard cap so we don't blow the LLM context.
 }
 
+function renderTranscript(messages: SessionMessage[]): string {
+  return messages.map((m) => {
+    if (!m || typeof m.role !== 'string') return ''
+    const text = typeof m.content === 'string'
+      ? m.content
+      : Array.isArray(m.content)
+        ? m.content.map((c) => (typeof c === 'string' ? c : JSON.stringify(c))).join(' ')
+        : JSON.stringify(m.content)
+    return `${m.role.toUpperCase()}: ${text}`
+  }).filter(Boolean).join('\n').slice(0, 16_000)
+}
+
 /**
  * Mark the session as reviewed at the current turn count so the next tick
  * waits another N turns before re-reviewing.
@@ -643,14 +667,50 @@ export async function reviewSession(
     return 'skipped'
   }
 
+  if (candidate.origin === 'workflow') {
+    // Workflow definitions do not yet carry a canonical output envelope. Do
+    // not quote one into a skill/workflow proposal and rely on approval as a
+    // declassification mechanism.
+    await markSessionReviewed(candidate.sessionId, candidate.currentTurnCount)
+    deps.onEvent?.({ type: 'session_skipped', sessionId: candidate.sessionId, reason: 'workflow_scope_unavailable' })
+    return 'skipped'
+  }
+
   // ── Fetch transcript + loaded skills ──
-  const [transcriptExcerpt, workspaceSkills] = await Promise.all([
-    fetchTranscriptExcerpt(candidate.sessionId, 30),
-    deps.workspaceSkillStore.listForWorkspace(candidate.workspaceId),
+  const [transcriptRows, workspaceSkills] = await Promise.all([
+    getRecentSessionMessages(candidate.sessionId, 30),
+    deps.workspaceSkillStore.listScopedForWorkspace(candidate.workspaceId),
   ])
-  const loadedSkills = workspaceSkills
-    .filter((s) => s.state !== 'archived')
+  const transcriptSources = transcriptRows.map((row) => boundScopeSource(row))
+  const latestSource = transcriptSources.at(-1)
+  if (!latestSource || transcriptSources.some((source) => !source)) {
+    await markSessionReviewed(candidate.sessionId, candidate.currentTurnCount)
+    deps.onEvent?.({ type: 'session_skipped', sessionId: candidate.sessionId, reason: 'scope_evidence_missing' })
+    return 'skipped'
+  }
+  const bucketKey = resourceScopeKey(latestSource)
+  const selectedTranscript = transcriptRows.filter((row) => {
+    const source = boundScopeSource(row)
+    return source ? resourceScopeKey(source) === bucketKey : false
+  })
+  const selectedTranscriptSources = selectedTranscript
+    .map((row) => boundScopeSource(row))
+    .filter((source): source is ScopeSource => source !== undefined)
+  const scopedSkills = workspaceSkills.filter((skill) => {
+    const source = boundScopeSource(skill)
+    return source ? resourceScopeKey(source) === bucketKey : false
+  })
+  const activeScopedSkills = scopedSkills.filter((s) => s.state !== 'archived')
+  const loadedSkills = activeScopedSkills
     .map((s) => ({ id: s.rowId, name: s.name, description: s.description, content: s.content }))
+  const skillSources = activeScopedSkills
+    .map((skill) => boundScopeSource(skill))
+    .filter((source): source is ScopeSource => source !== undefined)
+  const derivation: DerivedWriteEvidence = {
+    producer: 'skill:procedural-review',
+    sources: [...selectedTranscriptSources, ...skillSources],
+  }
+  const transcriptExcerpt = renderTranscript(selectedTranscript)
   // Tenant-safety set: the model is shown only THIS workspace's skills, so a
   // target skillId that isn't among them is a hallucination (or, worse, a
   // valid UUID from another tenant). Drop those before any lease is touched so
@@ -658,36 +718,11 @@ export async function reviewSession(
   // (`acquireReviewLease` keys on `id` alone). `create_umbrella` has no target.
   const knownSkillIds = new Set(loadedSkills.map((s) => s.id))
 
-  // ── Workflow-origin context (origin-aware induction) ──
-  // Resolve the source workflow definition + the active-workflow corpus for
-  // the subsumption gate. Fail-open: a port read that throws degrades to
-  // "no context" — the deviation objective still applies, the gate simply
-  // has no corpus (the human queue remains the backstop).
-  let sourceWorkflow: SourceWorkflowForReview | null = null
-  let workflowCorpus: Array<{ id: string; name: string }> = []
-  if (candidate.origin === 'workflow' && deps.workflowPort) {
-    try {
-      if (candidate.sourceWorkflowId) {
-        sourceWorkflow = await deps.workflowPort.getWorkflowForReview(
-          candidate.userId,
-          candidate.workspaceId,
-          candidate.sourceWorkflowId,
-        )
-      }
-      workflowCorpus = await deps.workflowPort.listActiveWorkflows(
-        candidate.userId,
-        candidate.workspaceId,
-      )
-    } catch (err) {
-      console.warn(
-        `[skill-review] workflow context read failed for session ${candidate.sessionId}:`,
-        err,
-      )
-    }
-    if (sourceWorkflow && !workflowCorpus.some((w) => w.id === sourceWorkflow!.id)) {
-      workflowCorpus.push({ id: sourceWorkflow.id, name: sourceWorkflow.name })
-    }
-  }
+  // Workflow-origin sessions have already returned above. Their workflow
+  // definitions and step outputs do not yet expose canonical scope receipts,
+  // and approval is not a declassification boundary. Keep the legacy plan
+  // input shape stable while the only admitted path is interactive.
+  const sourceWorkflow: SourceWorkflowForReview | null = null
 
   // ── Plan via the LLM (with at most one corrective retry) ──
   let plan: SkillReviewActionPlan
@@ -765,21 +800,9 @@ export async function reviewSession(
     return heldSet.has(a.skillId)
   })
 
-  // Origin-aware induction: the attach offer + provenance stamped onto any
-  // create_umbrella staged from this workflow-origin cycle.
-  const stagingContext =
-    candidate.origin === 'workflow' && candidate.sourceWorkflowId
-      ? {
-          origin: 'workflow-session',
-          sourceWorkflowIds: [candidate.sourceWorkflowId],
-          attachTo: {
-            workflowId: candidate.sourceWorkflowId,
-            ...(candidate.sourceWorkflowStepId
-              ? { stepId: candidate.sourceWorkflowStepId }
-              : {}),
-          },
-        }
-      : undefined
+  // Workflow-origin review is withheld above; interactive review carries no
+  // workflow attachment context.
+  const stagingContext = undefined
 
   // ── Apply actions; collect outcome counts ──
   let succeeded = 0
@@ -868,37 +891,6 @@ export async function reviewSession(
         continue
       }
 
-      // ── Subsumption gate (origin-aware induction, the novelty gate) ──
-      // A workflow-origin create whose name mirrors an active workflow is
-      // the definition echoed back as prose — suppress it before staging.
-      // Not an op (no cap spend), not a failure; logged under its own event.
-      if (action.action === 'create_umbrella' && candidate.origin === 'workflow') {
-        const subsumedBy = matchSkillAgainstWorkflows(
-          { name: action.umbrella.name },
-          workflowCorpus,
-        )
-        if (subsumedBy) {
-          deps.onEvent?.({
-            type: 'action_subsumed',
-            sessionId: candidate.sessionId,
-            workflowId: subsumedBy.id,
-            candidateName: action.umbrella.name,
-          })
-          await deps.analyticsStore.record({
-            userId: candidate.userId,
-            assistantId: candidate.assistantId,
-            sessionId: candidate.sessionId,
-            eventName: 'skill_review_subsumed_by_workflow',
-            metadata: {
-              workspace_id: sanitize(candidate.workspaceId),
-              workflow_id: sanitize(subsumedBy.id),
-              candidate_name: sanitize(action.umbrella.name),
-            },
-          })
-          continue
-        }
-      }
-
       try {
         const applied = await applyAction(action, {
           workspaceId: candidate.workspaceId,
@@ -908,6 +900,7 @@ export async function reviewSession(
           workspaceSkillStore: deps.workspaceSkillStore,
           fileStore: deps.fileStore,
           approvalsStore: deps.approvalsStore,
+          derivation,
           stagingContext,
         })
         if (applied.actionTaken === 'skipped_pending_approval') {
@@ -1052,6 +1045,7 @@ type ApplyActionDeps = {
   workspaceSkillStore: WorkspaceSkillStore
   fileStore: WorkspaceSkillFilesStore
   approvalsStore: PendingApprovalsStore
+  derivation: DerivedWriteEvidence
   /** Origin-aware induction passthrough for create_umbrella staging. */
   stagingContext?: {
     origin?: string
@@ -1079,9 +1073,13 @@ async function applyAction(
     leaseHolderId: deps.leaseHolderId,
     systemActorUserId: deps.systemActorUserId,
     stagingContext: deps.stagingContext,
-    workspaceSkillStore: skillStorePort(deps.workspaceSkillStore),
-    fileStore: fileStorePort(deps.fileStore, deps.systemActorUserId),
-    approvalsStore: approvalsPort(deps.approvalsStore, deps.systemActorUserId),
+    workspaceSkillStore: skillStorePort(deps.workspaceSkillStore, deps.derivation),
+    fileStore: fileStorePort(
+      deps.fileStore,
+      deps.workspaceId,
+      deps.derivation,
+    ),
+    approvalsStore: approvalsPort(deps.approvalsStore, deps.systemActorUserId, deps.derivation),
     enablementStore: enablementPortStub(),
   })
 
@@ -1111,7 +1109,7 @@ async function applyAction(
 // expose extra methods the tool doesn't need. These adapters narrow them
 // to the tool's port shape and rebind any minor signature deltas.
 
-function skillStorePort(ws: WorkspaceSkillStore) {
+function skillStorePort(ws: WorkspaceSkillStore, derivation: DerivedWriteEvidence) {
   return {
     async getSkillForWorkspace(workspaceId: string, rowId: string) {
       const row = await ws.getByIdSystem(rowId)
@@ -1138,30 +1136,14 @@ function skillStorePort(ws: WorkspaceSkillStore) {
       // updates 0 rows and the change is dropped, which surfaces upward as
       // a generic "no rows updated" failure. The worker treats it as a
       // skip on the offending action.
-      const result = await query<{ id: string }>(
-        `UPDATE workspace_skills
-         SET content = $1,
-             last_patch_diff = $2,
-             last_patch_diff_at = now(),
-             updated_at = now()
-         WHERE id = $3
-           AND workspace_id = $4
-           AND review_lease_held_by = $5
-           AND review_lease_until > now()
-         RETURNING id`,
-        [
-          params.newContent,
-          params.diff,
-          params.rowId,
-          params.workspaceId,
-          params.leaseHolderId,
-        ],
-      )
-      if ((result.rowCount ?? 0) === 0) {
-        throw new Error(
-          `applyPatch: no rows updated (skill ${params.rowId} — lease or row state changed during cycle)`,
-        )
-      }
+      await applyDerivedSkillPatch({
+        workspaceId: params.workspaceId,
+        skillId: params.rowId,
+        content: params.newContent,
+        diff: params.diff,
+        leaseHolderId: params.leaseHolderId,
+        evidence: derivation,
+      })
     },
     async createAutoGenerated() {
       // Never called from the worker path — every create routes through
@@ -1171,7 +1153,11 @@ function skillStorePort(ws: WorkspaceSkillStore) {
   }
 }
 
-function fileStorePort(fs: WorkspaceSkillFilesStore, actingUserId: string) {
+function fileStorePort(
+  fs: WorkspaceSkillFilesStore,
+  workspaceId: string,
+  derivation: DerivedWriteEvidence,
+) {
   return {
     async list(workspaceSkillId: string) {
       const rows = await fs.list(workspaceSkillId)
@@ -1195,18 +1181,25 @@ function fileStorePort(fs: WorkspaceSkillFilesStore, actingUserId: string) {
       // system_bypass escape, so an all-zeros UUID would fail the policy with
       // "new row violates row-level security policy". The owner satisfies the
       // workspace-member predicate.
-      await fs.upsert(actingUserId, {
-        workspaceSkillId: params.workspaceSkillId,
+      await applyDerivedSkillSupportFile({
+        workspaceId,
+        skillId: params.workspaceSkillId,
         kind: params.kind,
         name: params.name,
         content: params.content,
         description: params.description ?? null,
+        leaseHolderId: params.leaseHolderId,
+        evidence: derivation,
       })
     },
   }
 }
 
-function approvalsPort(approvals: PendingApprovalsStore, approverUserId: string) {
+function approvalsPort(
+  approvals: PendingApprovalsStore,
+  approverUserId: string,
+  derivation: DerivedWriteEvidence,
+) {
   return {
     async createStagedSkillUpdate(params: {
       workspaceId: string
@@ -1225,6 +1218,7 @@ function approvalsPort(approvals: PendingApprovalsStore, approverUserId: string)
         proposedPatch: params.proposedPatch,
         approverUserId: params.requestedByUserId ?? approverUserId,
         originatingAssistantId: params.originatingAssistantId,
+        derivation,
       })
       return { approvalId: row.id }
     },
@@ -1253,6 +1247,7 @@ function approvalsPort(approvals: PendingApprovalsStore, approverUserId: string)
         origin: params.origin,
         sourceWorkflowIds: params.sourceWorkflowIds,
         attachTo: params.attachTo,
+        derivation,
       })
       return { approvalId: row.id }
     },

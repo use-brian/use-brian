@@ -8,7 +8,7 @@ import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getPool, query } from './client.js'
 import { emitMentionedEdges } from './edge-hooks.js'
 import { excludeExternalPrincipalsSql } from './external-principal.js'
-import { validateDerivedMemoryInputs, recordMemoryDerivation } from './derived-scope-store.js'
+import { validateDerivedMemoryInputs, recordDerivedResource } from './derived-scope-store.js'
 
 export type { AccessContext }
 
@@ -295,7 +295,7 @@ export async function createMemory(
   )
   const memory = result.rows[0]
   if (params.derivation) {
-    await recordMemoryDerivation(transactionClient!, params.derivation, {
+    await recordDerivedResource(transactionClient!, params.derivation, {
       ...memory, workspaceId: memory.workspaceId!, resourceKind: 'memory', resourceId: memory.id, version: memory.scopeVersion,
     })
   }
@@ -498,7 +498,7 @@ export async function updateMemory(
       )
       const newRow = insertResult.rows[0]
 
-      if (derivation) await recordMemoryDerivation(client, derivation, {
+      if (derivation) await recordDerivedResource(client, derivation, {
         ...newRow, workspaceId: newRow.workspaceId!, resourceKind: 'memory', resourceId: newRow.id, version: newRow.scopeVersion,
       })
 

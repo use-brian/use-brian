@@ -23,6 +23,7 @@
  */
 
 import type { UmbrellaSkill } from './skill-umbrella.js'
+import { boundScopeSource, type ScopeSource } from '../security/index.js'
 
 // ── Demote rule thresholds ───────────────────────────────────────
 
@@ -94,7 +95,7 @@ export type SkillDecayStore = {
    *  row already past valid_to is a no-op. The wiring layer also stamps
    *  the reason onto a paired audit row, but that's a follow-up; for V2
    *  the reason lives only in the event stream. */
-  softDeprecate(skillRowId: string, reason: SkillDecayReason): Promise<void>
+  softDeprecate(skillRowId: string, reason: SkillDecayReason, source: ScopeSource): Promise<void>
 }
 
 // ── Event hook ───────────────────────────────────────────────────
@@ -256,9 +257,11 @@ export async function runSkillDecay(
 
     const reason = evaluateDemoteRule(skill, currentTime, thresholds)
     if (!reason) continue
+    const source = boundScopeSource(skill)
+    if (!source) continue
 
     try {
-      await store.softDeprecate(skill.rowId, reason)
+      await store.softDeprecate(skill.rowId, reason, source)
       reasons.push({ skillRowId: skill.rowId, reason })
       deprecated++
       onEvent?.({

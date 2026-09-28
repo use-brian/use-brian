@@ -136,6 +136,34 @@ export type SessionMessage = {
   attachments: SessionMessageAttachment[]
 }
 
+type ScopedSessionMessageRow = SessionMessage & {
+  scopeWorkspaceId: string | null
+  scopeUserId: string | null
+  scopeAssistantId: string | null
+  scopeSensitivity: ResourceScope['sensitivity'] | null
+  scopeCompartments: string[] | null
+  scopeProjectIds: string[] | null
+  scopeVersion: string | null
+  scopeHeld: boolean | null
+}
+
+function bindStoredMessageScope(row: ScopedSessionMessageRow): SessionMessage {
+  const {
+    scopeWorkspaceId, scopeUserId, scopeAssistantId, scopeSensitivity,
+    scopeCompartments, scopeProjectIds, scopeVersion, scopeHeld, ...message
+  } = row
+  if (scopeWorkspaceId && scopeAssistantId && scopeSensitivity && scopeCompartments
+    && scopeProjectIds && scopeVersion && scopeHeld === false) {
+    return bindScopeSource(message, {
+      workspaceId: scopeWorkspaceId, userId: scopeUserId, assistantId: scopeAssistantId,
+      sensitivity: scopeSensitivity, compartments: scopeCompartments,
+      projectIds: scopeProjectIds, resourceKind: 'session_message',
+      resourceId: message.id, version: scopeVersion,
+    })
+  }
+  return message
+}
+
 /** One outbound attachment — mirrors `OutboundAttachment` in @use-brian/core. */
 export type SessionMessageAttachment = {
   fileId: string
@@ -1010,16 +1038,6 @@ export async function getSessionMessages(
   const limitClause = opts?.limit ? `LIMIT $${paramIdx}` : ''
   if (opts?.limit) values.push(opts.limit)
 
-  type ScopedSessionMessageRow = SessionMessage & {
-    scopeWorkspaceId: string | null
-    scopeUserId: string | null
-    scopeAssistantId: string | null
-    scopeSensitivity: ResourceScope['sensitivity'] | null
-    scopeCompartments: string[] | null
-    scopeProjectIds: string[] | null
-    scopeVersion: string | null
-    scopeHeld: boolean | null
-  }
   const result = await query<ScopedSessionMessageRow>(
     `SELECT id, session_id as "sessionId", role, content,
             sequence_num as "sequenceNum", created_at as "createdAt",
@@ -1043,41 +1061,31 @@ export async function getSessionMessages(
     values,
   )
 
-  return result.rows.map((row) => {
-    const {
-      scopeWorkspaceId,
-      scopeUserId,
-      scopeAssistantId,
-      scopeSensitivity,
-      scopeCompartments,
-      scopeProjectIds,
-      scopeVersion,
-      scopeHeld,
-      ...message
-    } = row
-    if (
-      scopeWorkspaceId
-      && scopeAssistantId
-      && scopeSensitivity
-      && scopeCompartments
-      && scopeProjectIds
-      && scopeVersion
-      && scopeHeld === false
-    ) {
-      return bindScopeSource(message, {
-        workspaceId: scopeWorkspaceId,
-        userId: scopeUserId,
-        assistantId: scopeAssistantId,
-        sensitivity: scopeSensitivity,
-        compartments: scopeCompartments,
-        projectIds: scopeProjectIds,
-        resourceKind: 'session_message',
-        resourceId: message.id,
-        version: scopeVersion,
-      })
-    }
-    return message
-  })
+  return result.rows.map(bindStoredMessageScope)
+}
+
+/** Recent canonical transcript window for background procedural review. */
+export async function getRecentSessionMessages(
+  sessionId: string,
+  limit: number,
+): Promise<SessionMessage[]> {
+  const result = await query<ScopedSessionMessageRow>(
+    `SELECT * FROM (
+       SELECT id,session_id AS "sessionId",role,content,sequence_num AS "sequenceNum",
+              created_at AS "createdAt",reply_to_text AS "replyToText",
+              topic_label AS "topicLabel",topic_confidence AS "topicConfidence",
+              channel_message_id AS "channelMessageId",sender_user_id AS "senderUserId",
+              sender_assistant_id AS "senderAssistantId",attachments,
+              workspace_id AS "scopeWorkspaceId",user_id AS "scopeUserId",
+              assistant_id AS "scopeAssistantId",sensitivity AS "scopeSensitivity",
+              compartments AS "scopeCompartments",project_ids AS "scopeProjectIds",
+              scope_version::text AS "scopeVersion",scope_held AS "scopeHeld"
+         FROM session_messages WHERE session_id=$1
+         ORDER BY sequence_num DESC LIMIT $2
+     ) recent ORDER BY "sequenceNum" ASC`,
+    [sessionId, limit],
+  )
+  return result.rows.map(bindStoredMessageScope)
 }
 
 /** One stored message, by id. */

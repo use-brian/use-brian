@@ -63,6 +63,3 @@ export async function recordDerivedResource(
     )
   }
 }
-
-/** Backward-compatible memory writer name used by canonical memory stores. */
-export const recordMemoryDerivation = recordDerivedResource

@@ -31,7 +31,7 @@ async function fixture() {
   const derive=async(sources:ScopeSource[])=>createMemory({workspaceId,userId,assistantId,createdByUserId:userId,summary:'Learned pattern',sensitivity:'public',derivation:{producer:'fixture:reflection',sources}})
   return{workspaceId,userId,assistantId,memory,receipt,read,derive}
 }
-describe('[COMP:api/reflection-evidence] verification receipt provenance',()=>{
+describe('[COMP:api/reflection-evidence] [COMP:api/conversation-feedback-evidence] verification receipt provenance',()=>{
   afterAll(async()=>{await getAppPool().end();await pool.end()})
   it('runs real reflection per exact department bucket with actual canonical writes',async()=>{
     const f=await fixture()
