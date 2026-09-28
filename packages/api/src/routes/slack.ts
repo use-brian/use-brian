@@ -852,6 +852,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
           channelUserId,
           ownerId,
           isIdentified,
+          integrationId: integration.id,
           archiveConnectorInstanceId: integration.connectorInstanceId,
           threadTs,
           sessionChannelId,
@@ -1203,6 +1204,7 @@ type ProcessMessageParams = {
   channelUserId: string
   ownerId: string
   isIdentified: boolean
+  integrationId: string
   archiveConnectorInstanceId?: string | null
   threadTs?: string
   /** Thread-qualified Brian conversation id; never sent to the Slack API. */
@@ -1222,6 +1224,7 @@ type ProcessMessageParams = {
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   workerManager?: import('@use-brian/core').WorkerManager
   connectorStore?: ConnectorStore
+  integrationStore: ChannelIntegrationStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: import('../db/assistant-connector-store.js').AssistantConnectorStore
   /** Stage 4 of the team-connector promotion: enables team-exposure grant consumption. */
@@ -1836,6 +1839,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     isIdentified,
     channelType: 'slack',
     channelId: incoming.channelId,
+    channelIntegrationId: params.integrationId,
+    channelIntegrationStore: params.integrationStore,
     sessionChannelId: params.sessionChannelId,
     realtimeThreadTarget: params.realtimeThreadTarget,
     actorChannelId: incoming.userId, // Slack user id (e.g. U0123) → X-Sidanclaw-Actor-Id

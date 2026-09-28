@@ -213,6 +213,20 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
     expect(input.toolPolicy).toBe('public_research')
   })
 
+  it('revalidates the exact key during the turn and observes revocation or policy drift', async () => {
+    const row = keyRow()
+    await authedPost(row, {})
+    const credentialCurrent = mockTurn.mock.calls[0][1].credentialCurrent
+    expect(credentialCurrent).toBeTypeOf('function')
+
+    apiKeyStore.getByIdSystem.mockResolvedValueOnce(row)
+    await expect(credentialCurrent!()).resolves.toBe(true)
+    apiKeyStore.getByIdSystem.mockResolvedValueOnce({ ...row, status: 'revoked' })
+    await expect(credentialCurrent!()).resolves.toBe(false)
+    apiKeyStore.getByIdSystem.mockResolvedValueOnce({ ...row, toolPolicy: 'assistant' })
+    await expect(credentialCurrent!()).resolves.toBe(false)
+  })
+
   it('forwards explicit SSE delivery without changing lane derivation', async () => {
     const req = authedPost(keyRow(), {})
     req.set('Accept', 'text/event-stream')

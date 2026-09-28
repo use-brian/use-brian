@@ -315,6 +315,16 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
       // ── 1. Auth ──────────────────────────────────────────────
       const keyRow = await authenticateKey(req, res, req.params.assistantId)
       if (!keyRow) return
+      const credentialCurrent = async (): Promise<boolean> => {
+        const current = await options.apiKeyStore.getByIdSystem(keyRow.id)
+        return !!current
+          && current.status === 'active'
+          && current.assistantId === keyRow.assistantId
+          && current.audience === keyRow.audience
+          && current.anonymousContext === keyRow.anonymousContext
+          && current.toolPolicy === keyRow.toolPolicy
+          && current.createdBy === keyRow.createdBy
+      }
 
       // Fire-and-forget: surface "last used" in the owner UI.
       options.apiKeyStore.touchLastUsedAt(keyRow.id).catch((err) => {
@@ -373,6 +383,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
             delivery: acceptsPublicAssistantSse(req.headers.accept) ? 'sse' : 'json',
             analyticsMeta: { api_key_id: keyRow.id, context_scope: 'internal-member' },
             toolPolicy: keyRow.toolPolicy,
+            credentialCurrent,
           },
           req,
           res,
@@ -409,6 +420,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           toolPolicy: keyRow.toolPolicy,
           delivery: acceptsPublicAssistantSse(req.headers.accept) ? 'sse' : 'json',
           analyticsMeta: { api_key_id: keyRow.id, context_scope: fullAnonymousLane ? 'assistant-full' : 'external-client' },
+          credentialCurrent,
         },
         req,
         res,

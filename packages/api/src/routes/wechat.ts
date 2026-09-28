@@ -439,6 +439,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
           ownerId,
           isIdentified,
           routing,
+          integrationId: integration.id,
           channelId,
           creds,
           confirmKey,
@@ -458,6 +459,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
     ownerId: string
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
+    integrationId: string
     channelId: string
     creds: WechatCredentials
     confirmKey: string
@@ -667,6 +669,8 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
       isIdentified,
       channelType: 'wechat',
       channelId: peerId,
+      channelIntegrationId: params.integrationId,
+      channelIntegrationStore: options.integrationStore,
       messageText: incoming.text,
       userContentBlocks,
       // Raw paste for the large-paste intercept (WeChat has no prefix wrapper).

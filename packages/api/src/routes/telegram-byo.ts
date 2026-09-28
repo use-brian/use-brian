@@ -1276,6 +1276,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 type ProcessMessageParams = {
   questions: TelegramQuestions
   integrationId: string
+  integrationStore: ChannelIntegrationStore
   /** Servable background-lane model, threaded from the route options. */
   backgroundModel?: string
   decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
@@ -1770,6 +1771,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     externalGuestConnectorTools,
     channelType: 'telegram',
     channelId: incoming.channelId,
+    channelIntegrationId: params.integrationId,
+    channelIntegrationStore: params.integrationStore,
     actorChannelId: byoUsername ? `@${byoUsername}` : null,
     messageText: combinedText,
     userContentBlocks,

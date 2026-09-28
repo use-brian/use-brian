@@ -33,6 +33,7 @@ import {
   prepareSlashCommand, resolveNativeSlashCommand,
   buildSlashCommandBlock, buildWorkflowSlashCommandBlock,
   buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, formatAssistantQuestion,
+  pinAccessCeiling,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -110,6 +111,16 @@ import {
   type ResolveTurnScopeInput,
 } from '../context-scope/resolve-turn-scope.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
+import {
+  createSessionAuthorityLease,
+  isAuthorityChangedError,
+} from '../context-scope/authority-lease.js'
+import {
+  createDeliveryAudienceAuthorizer,
+  DeliveryAudienceUnverifiedError,
+  isDeliveryAudienceUnverifiedError,
+} from '../context-scope/delivery-authority.js'
+import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import {
   buildChannelSessionKey,
   listPendingRecordingConfirmationsForSession,
@@ -501,6 +512,10 @@ export type ChannelPipelineParams = {
   archiveInboundAlreadyPersisted?: boolean
   /** Exact connector backing this route, when known. */
   archiveConnectorInstanceId?: string | null
+  /** Exact active channel integration used by this inbound conversation. */
+  channelIntegrationId?: string
+  /** Store used to revalidate the integration's external audience binding. */
+  channelIntegrationStore?: ChannelIntegrationStore
   /**
    * Per-channel-instance document capability (custom bridges declare it in
    * their state report). Threaded onto ToolContext so the `sendFile` gate can
@@ -1072,6 +1087,28 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
   })
+  const authority = createSessionAuthorityLease({
+    starting: pinAccessCeiling(dataTurnScope.access),
+    session,
+  })
+  const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
+    integrationStore: params.channelIntegrationStore,
+  })
+  const assertDeliveryAudience = async (): Promise<void> => {
+    await authority.assertCurrent()
+    const decision = await authorizeDeliveryAudience({
+      workspaceId: assistant.workspaceId ?? '',
+      assistantId: assistant.id,
+      userId,
+      channelType,
+      channelId,
+      channelIntegrationId: params.channelIntegrationId,
+      sessionId: session.id,
+      recipientType: isGroupChat ? 'group' : 'individual',
+      scopeEvidence: scopeAccumulator.evidence,
+    })
+    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
+  }
 
   // Expose session ID to channel hooks (e.g., WhatsApp confirmation store)
   if (params.sessionRef) params.sessionRef.id = session.id
@@ -1475,6 +1512,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
   // runProactiveCompaction owns stamping + tool-result pairing + summary
   // prepending internally. See docs/architecture/context-engine/compaction.md.
+  await assertDeliveryAudience()
   const compactionResult = await runProactiveCompaction({
     sessionMessages: dbMessages,
     timezone: userTimezone,
@@ -1505,6 +1543,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     persistLongTermContext: !externalGuest,
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
+    authority,
   })
   let messages: Message[] = compactionResult.messages
 
@@ -2080,6 +2119,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   // ── Processing start ──
+  try {
+    await assertDeliveryAudience()
+  } catch (err) {
+    if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
+    console.warn(`[${channelType}] channel turn refused before generation:`, (err as Error).name)
+    await hooks.onCleanup?.()
+    return
+  }
   await hooks.onProcessingStart?.()
 
   await updateSessionStatus(session.id, 'running')
@@ -2132,6 +2179,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   let lastFlushedAssistantRowId: string | null = null
   const flushBufferedTurns = async (reason: string, attachments?: OutboundAttachment[]) => {
     if (flushed) return
+    await assertDeliveryAudience()
     flushed = true
     // Attachments (sendFile) belong to the final reply — the last turn
     // with content. Intermediate tool_use turns never carry them.
@@ -2182,6 +2230,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   let terminalQuestion: ChannelQuestion | undefined
   let endpointFallbackAnnounced = false
   const sendResponseAndStampChannelId = async (text: string, documents?: OutgoingDocument[]): Promise<void> => {
+    await assertDeliveryAudience()
     // A channel has no `notice` lane, so an announced fallback has to travel
     // in the message itself - once, on the first thing the user sees, then
     // cleared so a multi-part reply does not repeat it.
@@ -2392,6 +2441,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         assistantDefaultCompartments: dataTurnScope.writeCompartments,
         assistantProjectIds: dataTurnScope.effectiveProjectIds,
         assistantDefaultProjectIds: dataTurnScope.writeProjectIds,
+        authority,
       },
       confirmationResolver,
       confirmationTimeoutMs: 300_000,
@@ -2407,6 +2457,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         ? { maxTurns: tierBudget.maxTurns, maxToolCalls: tierBudget.maxToolCalls }
         : {}),
     })) {
+      await assertDeliveryAudience()
       switch (event.type) {
         case 'question':
           terminalQuestion = { question: event.question, options: event.options }
@@ -2881,6 +2932,18 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         .catch((err) => console.debug(`[${channelType}] memory nudge failed:`, err))
     }
   } catch (err) {
+    if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) {
+      console.warn(`[${channelType}] channel turn stopped by live authority:`, (err as Error).name)
+      analytics?.logEvent({
+        userId, assistantId: assistant.id, sessionId: session.id,
+        eventName: 'chat_route_error', channelType,
+        metadata: {
+          error_type: sanitizeAnalytics((err as Error).name),
+          stage: sanitizeAnalytics('live_authority'),
+        },
+      })
+      return
+    }
     await flushBufferedTurns('[Stream terminated unexpectedly before the tool result was recorded.]')
     console.error(`[${channelType}] unexpected query loop error:`, err)
     analytics?.logEvent({

@@ -410,6 +410,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
           ownerId,
           isIdentified,
           routing,
+          integrationId: integration.id,
           ingestChannelMediaRef: options.ingestChannelMediaRef,
           archiveConnectorInstanceId: integration.connectorInstanceId,
         }),
@@ -477,6 +478,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     ownerId: string
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
+    integrationId: string
     ingestChannelMediaRef?: DiscordRouteOptions['ingestChannelMediaRef']
     archiveConnectorInstanceId?: string | null
   }): Promise<void> {
@@ -646,6 +648,8 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       isIdentified,
       channelType: 'discord',
       channelId,
+      channelIntegrationId: params.integrationId,
+      channelIntegrationStore: options.integrationStore,
       messageText: incoming.text,
       userContentBlocks,
       // Raw paste for the large-paste intercept (Discord has no prefix wrapper).

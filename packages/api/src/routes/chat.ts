@@ -72,7 +72,7 @@ import { acceptedGoalIdsFromToolResults } from '../goals/acknowledgement.js'
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
 import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
-import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
+import { resolveModel, ensureServableModel, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
@@ -115,6 +115,15 @@ import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import { deploymentCapabilities } from '../edition.js'
 import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 import { connectorAuthorizationEntry } from '../agent-surface/connector-authorization.js'
+import {
+  createSessionAuthorityLease,
+  isAuthorityChangedError,
+} from '../context-scope/authority-lease.js'
+import {
+  createDeliveryAudienceAuthorizer,
+  DeliveryAudienceUnverifiedError,
+  isDeliveryAudienceUnverifiedError,
+} from '../context-scope/delivery-authority.js'
 
 // Module-level map of active confirmation resolvers, keyed by sessionId.
 // Cleaned up on turn_complete or stream close.
@@ -1763,6 +1772,16 @@ export class ChatTurnRefusal extends Error {
  * distinction is testable without standing up the streaming handler.
  */
 export function chatTurnErrorEvent(err: unknown): Record<string, unknown> {
+  if (isAuthorityChangedError(err)) {
+    return {
+      code: 'authority_changed',
+      error: err.message,
+      operationMayHaveExecuted: err.operationMayHaveExecuted,
+    }
+  }
+  if (isDeliveryAudienceUnverifiedError(err)) {
+    return { code: err.reason, error: err.message }
+  }
   if (err instanceof ChatTurnRefusal) {
     return { code: err.code, error: err.message, ...err.detail }
   }
@@ -2991,6 +3010,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           ? { ...session, contextLockedAt: null }
           : session,
       })
+      const authority = createSessionAuthorityLease({
+        starting: pinAccessCeiling(turnScope.access),
+        session,
+        userId: user.id,
+      })
 
       // Giant-paste promotion writes a durable artifact, so it runs only
       // after the immutable session scope is known and stamps that scope on
@@ -3024,6 +3048,25 @@ export function chatRoutes(options: WebChatOptions): Router {
       sessionIdForError = session.id
 
       const isRoomSession = isSharedChatSession(session)
+      const scopeAccumulator = new ContextScopeAccumulator({
+        compartments: turnScope.writeCompartments,
+        projectIds: turnScope.writeProjectIds,
+      })
+      const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
+      const assertDeliveryAudience = async (): Promise<void> => {
+        await authority.assertCurrent()
+        const decision = await authorizeDeliveryAudience({
+          workspaceId: assistant.workspaceId ?? '',
+          assistantId: assistant.id,
+          userId: user.id,
+          channelType: 'web',
+          channelId: session.channelId,
+          sessionId: session.id,
+          recipientType: isRoomSession ? 'group' : 'individual',
+          scopeEvidence: scopeAccumulator.evidence,
+        })
+        if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
+      }
       // A proxy can sever the browser stream while its upstream POST stays open.
       // Publish every turn's capped activity so an authenticated reconnect sees
       // ongoing tools even when this server never observed a disconnect.
@@ -4168,6 +4211,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // internally. We apply web-only post-transforms (stripUnsignedToolUses,
       // retryHint injection) to the returned message array before the query
       // loop.
+      await assertDeliveryAudience()
       const compactionResult = await runProactiveCompaction({
         sessionMessages: dbMessages,
         timezone: user.timezone ?? 'UTC',
@@ -4198,6 +4242,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         chatEpisodeIngestor: options.chatEpisodeIngestor,
         compartments: turnScope.writeCompartments,
         projectIds: turnScope.writeProjectIds,
+        authority,
       })
       // Gate on the serving provider: the signature strip is a Gemini-only
       // workaround and would erase a Qwen (openai-compat) turn's tool calls
@@ -4280,10 +4325,6 @@ export function chatRoutes(options: WebChatOptions): Router {
       const readClearance = turnScope.access.clearance ?? assistant.clearance
       const readCompartments = turnScope.effectiveCompartments
       const viewerCtx = turnScope.access
-      const scopeAccumulator = new ContextScopeAccumulator({
-        compartments: turnScope.writeCompartments,
-        projectIds: turnScope.writeProjectIds,
-      })
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
         options.memoryStore.getIdentity(viewerCtx),
@@ -6678,6 +6719,7 @@ export function chatRoutes(options: WebChatOptions): Router {
        */
       const flushBufferedTurns = async (synthesisReason: string) => {
         if (flushed) return
+        await assertDeliveryAudience()
         flushed = true
 
         console.log(
@@ -6697,6 +6739,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         })()
 
         for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
+          await assertDeliveryAudience()
           const turn = pendingAssistantTurns[turnIdx]
           // Pure empty response (safety filter / MAX_TOKENS with zero
           // content). Nothing to persist for this turn — the loop just exits
@@ -6729,7 +6772,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // The turn was nothing but a chip tag (no real answer / tool calls).
           if (content.length === 0) continue
 
-          const storedAssistantMsg = await addSessionMessage({
+          const storedAssistantMsg = await authority.execute(() => addSessionMessage({
             sessionId: session.id,
             role: 'assistant',
             content,
@@ -6741,7 +6784,8 @@ export function chatRoutes(options: WebChatOptions): Router {
               turnIdx === lastNonEmptyIdx && outboundAttachments.length > 0
                 ? outboundAttachments
                 : undefined,
-          })
+          }))
+          await assertDeliveryAudience()
           lastAssistantMessageId = storedAssistantMsg.id
           turnLedgerHandle.bindAssistantMessageId(storedAssistantMsg.id)
 
@@ -6786,11 +6830,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           )
           const allResults = [...turn.toolResults, ...missing]
           if (allResults.length > 0) {
-            await addSessionMessage({
+            await authority.execute(() => addSessionMessage({
               sessionId: session.id,
               role: 'user',
               content: allResults,
-            })
+            }))
           }
         }
 
@@ -6809,8 +6853,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         // store; the rows themselves are superseded on the next reply.
         if (pendingClaimLedger && lastAssistantMessageId) {
           try {
-            await insertClaimProvenance(lastAssistantMessageId, pendingClaimLedger)
+            await authority.execute(() => insertClaimProvenance(lastAssistantMessageId!, pendingClaimLedger!))
           } catch (err) {
+            if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
             console.warn('[chat] claim ledger persist failed:', err)
           }
           options.analytics?.logEvent({
@@ -6826,8 +6871,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
         if (recallBuffer && lastAssistantMessageId) {
           try {
-            await recallBuffer.flush(lastAssistantMessageId)
+            await authority.execute(() => recallBuffer!.flush(lastAssistantMessageId!))
           } catch (err) {
+            if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
             console.error('[chat] memory recall buffer flush failed:', err)
           }
         } else if (recallBuffer) {
@@ -6945,6 +6991,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (isRoomSession) roomTurnAddressers.set(session.id, user.id)
 
       try {
+        // Resolve the current recipient before any provider work. The same
+        // high-water evidence is checked again before each streamed event.
+        await assertDeliveryAudience()
         const presentedDocumentInputs = new Map<string, PresentedDocumentInput>()
         const scopedLoopTools = bindToolsToAgentAccess(loopTools, {
           clearance: readClearance,
@@ -6996,6 +7045,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             userMessageText:
               typeof message === 'string' && message.trim() ? message.trim() : undefined,
             abortSignal: abortController.signal,
+            authority,
             cacheStore: options.cacheStore,
             sessionStateStore: options.sessionStateStore,
             requestTools: allTools,
@@ -7234,6 +7284,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // is inert there. See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
         })) {
+          await assertDeliveryAudience()
           if (abortController.signal.aborted) break
 
           if (event.type === 'text_delta') {
@@ -7507,8 +7558,12 @@ export function chatRoutes(options: WebChatOptions): Router {
             )) {
               if (acknowledgedGoalIds.has(goalId)) continue
               acknowledgedGoalIds.add(goalId)
-              const goal = await getGoalByIdSystem(goalId).catch(() => null)
+              const goal = await authority.execute(() => getGoalByIdSystem(goalId)).catch((err) => {
+                if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+                return null
+              })
               if (!goal || goal.workspaceId !== assistant.workspaceId) continue
+              await assertDeliveryAudience()
               sendEvent('goal_accepted', {
                 goalId,
                 outcome: goal.outcome,
@@ -7533,14 +7588,15 @@ export function chatRoutes(options: WebChatOptions): Router {
             // See docs/architecture/engine/mid-turn-input.md.
             for (const queuedInput of event.inputs) {
               try {
-                const storedQueued = await addSessionMessage({
+                const storedQueued = await authority.execute(() => addSessionMessage({
                   sessionId: session.id,
                   role: 'user',
                   content: [{ type: 'text', text: queuedInput.text }],
                   ...(isMultiParticipantSession(session)
                     ? { senderUserId: user.id }
                     : {}),
-                })
+                }))
+                await assertDeliveryAudience()
                 // The client finalises its streaming bubble on this event,
                 // promotes the queued chip to a real user bubble, and starts a
                 // fresh assistant bubble — without it the reply written BEFORE
@@ -7564,6 +7620,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   })
                 }
               } catch (err) {
+                if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
                 // The model has already been handed the text by the time this
                 // runs, so a persistence failure must not abort the turn — it
                 // costs the transcript one row, not the reply.
@@ -7646,7 +7703,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // (in-memory only) rather than blocking the user.
             if (options.sessionResumeStore) {
               try {
-                await options.sessionResumeStore.create({
+                await authority.execute(() => options.sessionResumeStore!.create({
                   sessionId: session.id,
                   approvalId: event.approvalId,
                   suspendedToolName: event.toolName,
@@ -7657,8 +7714,9 @@ export function chatRoutes(options: WebChatOptions): Router {
                   selectedMeteredModel: meteredTurn?.alias,
                   startingAccessCeiling: pinAccessCeiling(turnScope.access),
                   loopStepIndex: event.loopStepIndex,
-                })
+                }))
               } catch (err) {
+                if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
                 console.warn(
                   `[chat] session_resume_points checkpoint failed for approval ${event.approvalId}; Path A fallback in effect:`,
                   err,
@@ -7894,18 +7952,21 @@ export function chatRoutes(options: WebChatOptions): Router {
               alreadyDelivered: recoveryDelivered,
               signal: abortController.signal,
               canWrite: async () => {
+                await assertDeliveryAudience()
                 if (!turnLeaseToken) return false
                 const { held, cancelRequested } = await touchTurnLease(session.id, turnLeaseToken)
                 if (!held || cancelRequested) abortController.abort()
                 return held && !cancelRequested
               },
               persist: async (text) => {
-                const saved = await addSessionMessage({
+                await assertDeliveryAudience()
+                const saved = await authority.execute(() => addSessionMessage({
                   sessionId: session.id,
                   role: 'assistant',
                   content: [{ type: 'text', text }],
                   senderAssistantId: assistant.id,
-                })
+                }))
+                await assertDeliveryAudience()
                 closingPersisted = true
                 lastAssistantMessageId = saved.id
                 sendEvent('assistant_message_saved', { id: saved.id })
@@ -7956,13 +8017,14 @@ export function chatRoutes(options: WebChatOptions): Router {
         // the buffer's `getNextUserMessage` hook for a follow-up patch.
         if (skillInvocationBuffer) {
           try {
-            await skillInvocationBuffer.flush(queryLoopError ? 'error' : 'success')
+            await authority.execute(() => skillInvocationBuffer!.flush(queryLoopError ? 'error' : 'success'))
           } catch (err) {
+            if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
             console.error('[chat] CL-8 skill invocation buffer flush failed:', err)
           }
         }
 
-        // Session-state diff pass (fire-and-forget safety net). Watches
+        // Session-state diff pass. Watches
         // the last exchange for commitments the model forgot to track with
         // `trackCommitment`, and auto-resolves ones it forgot to close. See
         // docs/architecture/context-engine/session-state.md.
@@ -7982,10 +8044,9 @@ export function chatRoutes(options: WebChatOptions): Router {
               { role: 'assistant', content: assistantLastText },
             )
           }
-          stateStore
-            .listOpenBySession(session.id)
-            .then((open: SessionStateRecord[]) =>
-              runSessionStateDiff({
+          try {
+            const open = await authority.execute(() => stateStore.listOpenBySession(session.id))
+            const result = await authority.execute(() => runSessionStateDiff({
                 provider: backgroundProvider,
                 model: backgroundModel,
                 sessionId: session.id,
@@ -7994,41 +8055,42 @@ export function chatRoutes(options: WebChatOptions): Router {
                 store: stateStore,
                 recentTurns: diffRecentTurns,
                 openCommitments: open,
-              }),
-            )
-            .then((result) => {
-              options.analytics?.logEvent({
-                userId: user.id, assistantId: assistant.id, sessionId: session.id,
-                eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
-                channelType: 'web',
-                metadata: {
-                  upserts: result.upserts,
-                  resolves: result.resolves,
-                  error: result.errorMessage ? sanitize(result.errorMessage) : undefined,
-                },
-              })
-              return recordOverheadUsage({
-                usageStore: options.usageStore,
-                userId: user.id,
-                assistantId: assistant.id,
-                sessionId: session.id,
-                userMessageId: storedUserMsg.id,
-                model: result.model,
-                usage: result.usage,
-                source: 'overhead:session-state-diff',
-                triggerKey: 'session_state_diff',
-                ...backgroundUsageAttribution,
-              })
+              }))
+            options.analytics?.logEvent({
+              userId: user.id, assistantId: assistant.id, sessionId: session.id,
+              eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
+              channelType: 'web',
+              metadata: {
+                upserts: result.upserts,
+                resolves: result.resolves,
+                error: result.errorMessage ? sanitize(result.errorMessage) : undefined,
+              },
             })
-            .catch((err) => console.debug('[chat] session-state diff failed:', err))
+            await authority.execute(() => recordOverheadUsage({
+              usageStore: options.usageStore,
+              userId: user.id,
+              assistantId: assistant.id,
+              sessionId: session.id,
+              userMessageId: storedUserMsg.id,
+              model: result.model,
+              usage: result.usage,
+              source: 'overhead:session-state-diff',
+              triggerKey: 'session_state_diff',
+              ...backgroundUsageAttribution,
+            }))
+          } catch (err) {
+            if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+            console.debug('[chat] session-state diff failed:', err)
+          }
         }
 
-        // Memory nudge: judge utility of any getMemory calls (fire-and-forget).
+        // Memory nudge: judge utility of any getMemory calls.
         // Records usage as `overhead:nudge` once the judge call returns.
         // Standard tier per docs/architecture/platform/cost-and-pricing.md
         // → Model routing (extraction / classification / structured-output bucket).
         const nudgeModel = backgroundModel
-        runMemoryNudge({
+        try {
+          const nudgeResult = await authority.execute(() => runMemoryNudge({
           turns: pendingAssistantTurns,
           callModel: async (prompt, llm) => {
             const nudgeProvider = llm?.provider ?? backgroundProvider
@@ -8050,20 +8112,23 @@ export function chatRoutes(options: WebChatOptions): Router {
           llm: { provider: backgroundProvider, modelId: nudgeModel },
           workspaceId: assistant.workspaceId ?? undefined,
           runId: `memory-usefulness-${storedUserMsg.id}`,
-        })
-          .then((result) => recordOverheadUsage({
+          }))
+          await authority.execute(() => recordOverheadUsage({
             usageStore: options.usageStore,
             userId: user.id,
             assistantId: assistant.id,
             sessionId: session.id,
             userMessageId: storedUserMsg.id,
-            model: result.model,
-            usage: result.usage,
+            model: nudgeResult.model,
+            usage: nudgeResult.usage,
             source: 'overhead:nudge',
             triggerKey: 'memory_nudge',
             ...backgroundUsageAttribution,
           }))
-          .catch((err) => console.debug('[chat] memory nudge failed:', err))
+        } catch (err) {
+          if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+          console.debug('[chat] memory nudge failed:', err)
+        }
 
         // If the final buffered turn had no text and no tool_use, the
         // model produced nothing useful on the follow-up — surface a
@@ -8126,13 +8191,13 @@ export function chatRoutes(options: WebChatOptions): Router {
             })
             let synthesised: string | null = null
             try {
-              const result = await composeEmptyTurnSynthesis({
+              const result = await authority.execute(() => composeEmptyTurnSynthesis({
                 provider: backgroundProvider,
                 pendingAssistantTurns,
                 userText: userMessageText,
                 conversationHistory: messages.slice(0, -1),
                 channelType: 'web',
-              })
+              }))
               if (result) {
                 synthesised = result.text
                 await recordOverheadUsage({
@@ -8152,8 +8217,9 @@ export function chatRoutes(options: WebChatOptions): Router {
               console.warn('[chat] empty-turn synthesis raised:', synthErr)
             }
             if (synthesised) {
+              await assertDeliveryAudience()
               sendEvent('text_delta', { text: synthesised })
-              await addSessionMessage({
+              await authority.execute(() => addSessionMessage({
                 sessionId: session.id,
                 role: 'assistant',
                 content: [{ type: 'text', text: synthesised }],
@@ -8167,8 +8233,9 @@ export function chatRoutes(options: WebChatOptions): Router {
                 // @CFO turn and then inherited "I'd need QuickBooks" as its
                 // own position. See db/sessions.ts → `assistantVoices`.
                 senderAssistantId: assistant.id,
-              })
+              }))
             } else {
+              await assertDeliveryAudience()
               sendEvent('text_delta', {
                 text:
                   "Sorry — I couldn't compose a reply for that. The model spent its turn thinking but produced no answer. " +
@@ -8178,6 +8245,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           }
         }
       } catch (err) {
+        // Live authority and recipient refusals are structural. Persisting a
+        // partial buffer or synthesizing recovery text would cross the very
+        // boundary that refused this turn.
+        if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
         // Any throw from the loop — flush whatever we have so the DB
         // stays well-paired, then rethrow to the outer handler.
         await flushBufferedTurns(
@@ -8191,8 +8262,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         // skill is recorded as picked-but-not-succeeded.
         if (skillInvocationBuffer) {
           try {
-            await skillInvocationBuffer.flush('error')
+            await authority.execute(() => skillInvocationBuffer!.flush('error'))
           } catch (flushErr) {
+            if (isAuthorityChangedError(flushErr) || isDeliveryAudienceUnverifiedError(flushErr)) throw flushErr
             console.error('[chat] CL-8 skill invocation buffer error-flush failed:', flushErr)
           }
         }
@@ -8205,26 +8277,27 @@ export function chatRoutes(options: WebChatOptions): Router {
         // fall through to the outer catch's generic `error` event.
         try {
           const recovered = !queryLoopError && !abortController.signal.aborted && !recoveryDelivered
-            ? await composeRecoveryMessage({
+            ? await authority.execute(() => composeRecoveryMessage({
                 provider: backgroundProvider,
                 pendingAssistantTurns,
                 userText: userMessageText,
                 channelType: 'web',
-              }) : null
+              })) : null
           if (recovered) {
+            await assertDeliveryAudience()
             sendEvent('text_delta', { text: recovered.text })
             // Persist as a real assistant message so the recovery is
             // part of the conversation history on next page load —
             // without this the chat scroll-back would show
             // tool_use + tool_result with no narration, exactly the
             // ambiguous state the helper was added to avoid.
-            await addSessionMessage({
+            await authority.execute(() => addSessionMessage({
               sessionId: session.id,
               role: 'assistant',
               content: [{ type: 'text', text: recovered.text }],
               // Same attribution contract as the empty-turn synthesis above.
               senderAssistantId: assistant.id,
-            })
+            }))
             await recordOverheadUsage({
               usageStore: options.usageStore,
               userId: user.id,
@@ -8239,6 +8312,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             recoveryDelivered = true
           }
         } catch (recoverErr) {
+          if (isAuthorityChangedError(recoverErr) || isDeliveryAudienceUnverifiedError(recoverErr)) throw recoverErr
           console.warn('[chat] recovery message delivery failed:', recoverErr)
         }
 
@@ -8310,32 +8384,27 @@ export function chatRoutes(options: WebChatOptions): Router {
       const isNotification = session.channelType === 'notification'
       let shouldTitle = needsFirstTitle && !isNotification
       if (!shouldTitle && !isNotification) {
-        const msgCount = await countSessionTurns(session.id)
+        const msgCount = await authority.execute(() => countSessionTurns(session.id))
         // Count only 'user' role messages that are actual human messages
         // (tool_result messages are also role=user, but this is a rough heuristic)
         const turnCount = Math.floor(msgCount / 2)
         shouldTitle = turnCount > 1 && turnCount % 10 === 0
       }
       if (shouldTitle) {
-        // Bounded so a slow title LLM call can never hold the SSE stream open
-        // and starve the client of the terminal `done` event. If the timeout
-        // fires, the title write is still in flight — it'll land in DB and
-        // show on the next sessions fetch, just without an in-stream
-        // `title_update` event for this turn.
-        // Resolved once: the same model drives the call and its latency budget,
-        // so a slower serving provider can never be given the Gemini deadline.
+        // This derived read/write stays inside the request's live authority
+        // lease. The provider applies its own configured latency policy; the
+        // route does not detach a timed promise that could commit after revoke.
         const autoTitleModel = backgroundModel
-        const AUTO_TITLE_TIMEOUT_MS = backgroundLatencyBudgetMs(autoTitleModel)
         const autoTitle = (async () => {
           try {
             // Reload messages from DB so we get the assistant response that was
             // just flushed — the in-memory `messages` array is stale.
-            const freshDbMessages = await getSessionMessages(session.id, { limit: 10 })
+            const freshDbMessages = await authority.execute(() => getSessionMessages(session.id, { limit: 10 }))
             const freshMessages: Message[] = freshDbMessages.map((m) => ({
               role: m.role as 'user' | 'assistant' | 'system',
               content: m.content as Message['content'],
             }))
-            const titleResult = await generateTitle(backgroundProvider, freshMessages, autoTitleModel)
+            const titleResult = await authority.execute(() => generateTitle(backgroundProvider, freshMessages, autoTitleModel))
             // generateTitle returns `title: null` when it can't produce a
             // meaningful title (empty excerpt, model returned blank). Keep the
             // existing title in that case — overwriting with a generic fallback
@@ -8365,8 +8434,9 @@ export function chatRoutes(options: WebChatOptions): Router {
             const finalTitle = channelPrefix && !titleResult.title.startsWith('[')
               ? `${channelPrefix} ${titleResult.title}`
               : titleResult.title
-            const written = await updateSessionTitle(session.id, finalTitle)
+            const written = await authority.execute(() => updateSessionTitle(session.id, finalTitle))
             if (written && !res.writableEnded) {
+              await assertDeliveryAudience()
               sendEvent('title_update', { sessionId: session.id, title: finalTitle })
             }
             await recordOverheadUsage({
@@ -8382,6 +8452,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               ...backgroundUsageAttribution,
             })
           } catch (err) {
+            if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
             console.error('Auto-title failed:', err)
             options.analytics?.logEvent({
               userId: user.id, assistantId: assistant.id, sessionId: session.id,
@@ -8390,18 +8461,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             })
           }
         })()
-        await Promise.race([
-          autoTitle,
-          new Promise<void>((resolve) => setTimeout(() => {
-            console.warn(`[chat] auto-title exceeded ${AUTO_TITLE_TIMEOUT_MS}ms; closing stream and letting it finish in the background for session ${session.id}`)
-            options.analytics?.logEvent({
-              userId: user.id, assistantId: assistant.id, sessionId: session.id,
-              eventName: 'auto_title_error', channelType: 'web',
-              metadata: { error_type: sanitize('timeout') },
-            })
-            resolve()
-          }, AUTO_TITLE_TIMEOUT_MS)),
-        ])
+        await autoTitle
       }
 
       // Doc reply-to-page safety net — the "New draft" build never answers
@@ -8432,10 +8492,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           const delegateDocEdit = allTools.get('delegateDocEdit')
           if (replyText.trim() && delegateDocEdit) {
             const { createDbDocPageStore } = await import('../db/doc-page-store.js')
-            const current = await createDbDocPageStore().getVersionedPage(
+            const current = await authority.execute(() => createDbDocPageStore().getVersionedPage(
               user.id,
               requestedDocViewId,
-            )
+            ))
             const fallbackContext = {
               userId: user.id,
               assistantId: assistant.id,
@@ -8460,7 +8520,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               const placement = anchorBlockId
                 ? `Insert the content immediately after block ${anchorBlockId}.`
                 : 'The open page is empty; build it in place.'
-              const result = await delegateDocEdit.execute({
+              const result = await authority.execute(() => delegateDocEdit.execute({
                 intent: 'edit',
                 pageId: requestedDocViewId,
                 instruction: [
@@ -8470,7 +8530,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   '',
                   replyText,
                 ].join('\n'),
-              }, fallbackContext)
+              }, fallbackContext))
               options.analytics?.logEvent({
                 userId: user.id, assistantId: assistant.id, sessionId: session.id,
                 eventName: 'doc_reply_to_page', channelType: 'web',
@@ -8483,6 +8543,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             }
           }
         } catch (err) {
+          if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
           console.error('[chat] doc reply-to-page fallback failed:', err)
         }
       }
@@ -8494,14 +8555,13 @@ export function chatRoutes(options: WebChatOptions): Router {
       // the guarded `setAutoTitle`, so this no-ops for already-titled pages
       // and for the AI's own explicit `setTitle` (which froze name_origin to
       // 'user'). The `doc_title_update` SSE event lands the new name in the
-      // open editor + sidebar live. Bounded like the session auto-title so a
-      // slow call can't hold the stream open. See doc.md → "Auto-title".
+      // open editor + sidebar live. It remains inside the same live authority
+      // lease as the parent turn. See doc.md → "Auto-title".
       if (
         docToolsTurn &&
         docWrittenPageIds.size > 0 &&
         !res.writableEnded
       ) {
-        const DOC_TITLE_TIMEOUT_MS = 8_000
         const docTitle = (async () => {
           try {
             const [{ createDbDocPageStore }, { createDbSavedViewStore }, { runDocAutoTitle }] =
@@ -8513,7 +8573,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             const docPageStore = createDbDocPageStore()
             const savedViewStore = createDbSavedViewStore()
             for (const pageId of docWrittenPageIds) {
-              const result = await runDocAutoTitle({
+              const result = await authority.execute(() => runDocAutoTitle({
                 userId: user.id,
                 pageId,
                 provider: backgroundProvider,
@@ -8521,11 +8581,12 @@ export function chatRoutes(options: WebChatOptions): Router {
                 savedViewStore,
                 minChars: AUTO_TITLE_AI_MIN_CHARS,
                 backgroundModel,
-              })
+              }))
               if (result.applied && result.title && !res.writableEnded) {
                 // `icon` is the emoji the generator suggested + the commit
                 // landed (null when none / the user already had an icon). The
                 // client swaps both the title and the icon live.
+                await assertDeliveryAudience()
                 sendEvent('doc_title_update', {
                   pageId,
                   title: result.title,
@@ -8546,13 +8607,11 @@ export function chatRoutes(options: WebChatOptions): Router {
               })
             }
           } catch (err) {
+            if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
             console.error('Doc auto-title failed:', err)
           }
         })()
-        await Promise.race([
-          docTitle,
-          new Promise<void>((resolve) => setTimeout(resolve, DOC_TITLE_TIMEOUT_MS)),
-        ])
+        await docTitle
       }
 
       sendEvent('done', {})

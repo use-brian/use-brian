@@ -33,6 +33,22 @@ export type AuthorizeDeliveryAudience = (
   input: DeliveryAudienceInput,
 ) => Promise<DeliveryAudienceDecision>
 
+export class DeliveryAudienceUnverifiedError extends Error {
+  readonly reason = 'delivery_audience_unverified'
+  readonly retrySafe = false
+  constructor() {
+    super('The current destination is not authorized for this response.')
+    this.name = 'DeliveryAudienceUnverifiedError'
+  }
+}
+
+export function isDeliveryAudienceUnverifiedError(
+  error: unknown,
+): error is DeliveryAudienceUnverifiedError {
+  return typeof error === 'object' && error !== null
+    && (error as { reason?: unknown }).reason === 'delivery_audience_unverified'
+}
+
 type Dependencies = {
   integrationStore?: ChannelIntegrationStore
   now?: () => number
@@ -81,7 +97,7 @@ async function memberCeiling(
   deps: Required<Pick<Dependencies, 'findAssistant' | 'resolveLiveAccess'>>,
 ): Promise<AccessCeiling | null> {
   const assistant = await deps.findAssistant(assistantId)
-  if (!assistant || assistant.workspaceId !== workspaceId) return null
+  if (!assistant || (assistant.workspaceId ?? '') !== workspaceId) return null
   try {
     return await deps.resolveLiveAccess({ userId, assistant, workspaceId })
   } catch {
@@ -143,7 +159,7 @@ export function createDeliveryAudienceAuthorizer(dependencies: Dependencies = {}
       const session = await deps.findSession(input.sessionId)
       if (!session) return denied()
       const owner = await deps.findAssistant(session.assistantId)
-      if (!owner || owner.workspaceId !== input.workspaceId) return denied()
+      if (!owner || (owner.workspaceId ?? '') !== input.workspaceId) return denied()
       const shared = session.visibility === 'workspace' || session.mode === 'draft'
       const ceiling = shared
         ? roomAudienceCeiling(input.workspaceId, session)

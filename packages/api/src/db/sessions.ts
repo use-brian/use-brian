@@ -546,6 +546,23 @@ export async function findSessionById(id: string): Promise<Session | null> {
   return result.rows[0]
 }
 
+/** Read-only session identity/binding snapshot for per-boundary authority renewal. */
+export async function findSessionAuthorityById(id: string): Promise<Pick<Session,
+  'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
+> | null> {
+  const result = await query<Pick<Session,
+    'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
+  >>(
+    `SELECT id, assistant_id as "assistantId", user_id as "userId",
+            context_group_id as "contextGroupId",
+            context_project_id as "contextProjectId",
+            context_locked_at as "contextLockedAt"
+       FROM sessions WHERE id = $1`,
+    [id],
+  )
+  return result.rows[0] ?? null
+}
+
 /**
  * Internal-only current-turn identity used to correlate durable pending input.
  * Kept separate from `Session` so ordinary readers cannot accidentally

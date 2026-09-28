@@ -294,6 +294,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
           ownerId,
           isIdentified,
           routing,
+          integrationId: integration.id,
           archiveConnectorInstanceId: integration.connectorInstanceId,
         }),
       )
@@ -310,6 +311,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
     ownerId: string
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
+    integrationId: string
     archiveConnectorInstanceId?: string | null
   }): Promise<void> {
     const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing } = params
@@ -426,6 +428,8 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       isIdentified,
       channelType: 'msteams',
       channelId,
+      channelIntegrationId: params.integrationId,
+      channelIntegrationStore: options.integrationStore,
       messageText: incoming.text,
       userContentBlocks,
       rawUserText: incoming.text ?? '',

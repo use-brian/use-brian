@@ -28,6 +28,7 @@ import type {
   CompactionTier, CompactionProfile, ChannelClass, EpisodeSection,
   EpisodicStore, EpisodicMemoryRecord, UsageStore,
   SessionStateStore,
+  CurrentAuthorityBoundary,
 } from '@use-brian/core'
 import {
   setCompactSummaryAndBoundary, toStampedMessages, findSessionById,
@@ -44,6 +45,7 @@ const SESSION_STATE_RESOLVED_TTL_MS = 24 * 60 * 60 * 1000
 import type { Session, SessionMessage } from '../db/sessions.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
+import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 
 /**
  * Hard cap on the persisted `sessions.compact_summary` text. Acts as a
@@ -304,6 +306,8 @@ export type ProactiveCompactionParams = {
    * brain Episodes, or persist/promote episodic rows.
    */
   persistLongTermContext?: boolean
+  /** Sticky live turn authority for every derived read/write boundary. */
+  authority?: CurrentAuthorityBoundary
 }
 
 export type ProactiveCompactionResult = {
@@ -364,6 +368,11 @@ export async function runProactiveCompaction(
   } = params
   const persistLongTermContext = params.persistLongTermContext !== false
   const compactionModel = params.model ?? 'gemini-flash'
+  const guarded = <T>(operation: () => Promise<T>): Promise<T> => params.authority
+    ? params.authority.execute(operation)
+    : operation()
+
+  await params.authority?.assertCurrent()
 
   const breaker = params.circuitBreaker ?? defaultCompactionBreaker
   const sessionId = session.id
@@ -477,26 +486,27 @@ export async function runProactiveCompaction(
 
     // 7. Pre-compaction memory extraction — safety net for facts not
     // yet saved via saveMemory. Runs regex + cheap LLM pass.
-    // Fire-and-forget: extraction failure must not block compaction.
+    // Best-effort: extraction failure must not block compaction, except
+    // authority loss, which always aborts the turn.
     if (persistLongTermContext) {
       try {
         // System-level read — pre-compaction extraction runs across the
         // entire memory set for the (assistant, user) pair, so it uses
         // the privileged-service-exception path (no per-viewer
         // projection).
-        const existingIndex = await memoryStore.getIndexSystem(assistantId, userId)
+        const existingIndex = await guarded(() => memoryStore.getIndexSystem(assistantId, userId))
         const existingSummaries = existingIndex.map((m) => m.summary)
-        const extracted = await extractMemoriesBeforeCompaction({
+        const extracted = await guarded(() => extractMemoriesBeforeCompaction({
           provider,
           model: compactionModel,
           messages: compactableForLLM,
           existingMemories: existingSummaries,
-        })
+        }))
         for (const fact of extracted.facts) {
           // Post-Phase-4 (retire-memory-type): no `type` field on the
           // memory write. The fact's categorical signal (if any) can
           // be moved to tags on a future extractor pass.
-          await memoryStore.create({
+          await guarded(() => memoryStore.create({
             assistantId,
             userId,
             summary: fact.summary,
@@ -506,7 +516,7 @@ export async function runProactiveCompaction(
             sensitivity: 'internal',
             createdByUserId: userId,
             createdByAssistantId: assistantId,
-          })
+          }))
         }
         if (extracted.facts.length > 0) {
           analytics?.logEvent({
@@ -515,7 +525,7 @@ export async function runProactiveCompaction(
             metadata: { count: extracted.facts.length },
           })
         }
-        await recordOverheadUsage({
+        await guarded(() => recordOverheadUsage({
           usageStore, userId: ownerId, actorUserId: userId,
           assistantId, sessionId, userMessageId,
           model: extracted.model, usage: extracted.usage,
@@ -523,22 +533,23 @@ export async function runProactiveCompaction(
           triggerKey: 'pattern_extractor',
           modelTier: params.modelTier,
           providerKeySource: params.providerKeySource,
-        })
+        }))
       } catch (err) {
+        if (isAuthorityChangedError(err)) throw err
         console.error('[pre-compaction extraction] Failed:', err)
       }
     }
 
     // 8. Summarize.
-    const compactResult = await compactConversation({
+    const compactResult = await guarded(() => compactConversation({
       provider,
       model: compactionModel,
       messages: compactableForLLM,
       systemPrompt,
       profile,
       channelClass,
-    })
-    await recordOverheadUsage({
+    }))
+    await guarded(() => recordOverheadUsage({
       usageStore, userId: ownerId, actorUserId: userId,
       assistantId, sessionId, userMessageId,
       model: compactResult.model, usage: compactResult.usage,
@@ -546,7 +557,7 @@ export async function runProactiveCompaction(
       triggerKey: 'compaction_full',
       modelTier: params.modelTier,
       providerKeySource: params.providerKeySource,
-    })
+    }))
 
     // Defensive cap: if the summarizer exceeded the budget (unusual for
     // a 4K-token output cap but possible with CJK + multi-topic), hard-
@@ -563,12 +574,12 @@ export async function runProactiveCompaction(
     // fails (someone else compacted the same session between our read
     // and write), discard our summary and fall through with the
     // pass-through — the other compaction already trimmed the history.
-    const claimed = await setCompactSummaryAndBoundary(
+    const claimed = await guarded(() => setCompactSummaryAndBoundary(
       sessionId,
       summaryText,
       newCursor,
       session.compactBoundarySequence,
-    )
+    ))
     if (!claimed) {
       console.warn(`[compaction] lost race for session ${sessionId} (cursor moved by concurrent turn)`)
       analytics?.logEvent({
@@ -582,7 +593,7 @@ export async function runProactiveCompaction(
       // Reload the session to pick up the winner's summary; re-prepend
       // and return as pass-through. We skip episodic persistence too
       // since the winner has already done it.
-      const refreshed = await findSessionById(sessionId)
+      const refreshed = await guarded(() => findSessionById(sessionId))
       const refreshedSummary = refreshed?.compactSummary ?? null
       const pairedAll = ensureToolResultPairing(stamped)
       const messagesForFallback: Message[] = refreshedSummary
@@ -594,10 +605,10 @@ export async function runProactiveCompaction(
     // 9b. Company-brain ingest — extract a `web_chat` Episode from the
     // just-compacted window so the brain learns from live chat, not only
     // the connector batch poller (ingest.md §"Pipeline A — chat
-    // compaction checkpoint"). Fire-and-forget: Pipeline B runs in the
-    // background and never blocks the turn; a failure is logged, not
-    // surfaced. Mirrors the pre-compaction memory extraction's
-    // best-effort discipline. Only runs for a workspace-scoped assistant.
+    // compaction checkpoint"). This is awaited so the live authority
+    // boundary encloses every derived write. Ordinary failures remain
+    // best-effort; authority loss always aborts. Only runs for a
+    // workspace-scoped assistant.
     if (persistLongTermContext && chatEpisodeIngestor && workspaceId) {
       const compactedRows = sessionMessages.filter((m) => m.sequenceNum < newCursor)
       if (compactedRows.length > 0) {
@@ -606,7 +617,8 @@ export async function runProactiveCompaction(
           .filter((t) => t.trim().length > 0)
           .join('\n\n')
         if (content.trim().length > 0) {
-          void chatEpisodeIngestor({
+          try {
+            await guarded(() => chatEpisodeIngestor({
             workspaceId,
             userId,
             assistantId,
@@ -625,9 +637,11 @@ export async function runProactiveCompaction(
               modelTier: params.modelTier,
               providerKeySource: params.providerKeySource,
             },
-          }).catch((err) => {
+            }))
+          } catch (err) {
+            if (isAuthorityChangedError(err)) throw err
             console.error('[compaction] chat episode ingest failed:', err)
-          })
+          }
         }
       }
     }
@@ -640,8 +654,10 @@ export async function runProactiveCompaction(
         housekeepingStats = await houseKeepEpisodic({
           episodicStore, memoryStore,
           sessionId, assistantId, userId,
+          authority: params.authority,
         })
       } catch (err) {
+        if (isAuthorityChangedError(err)) throw err
         console.error('[compaction] episodic housekeeping failed:', err)
       }
     }
@@ -652,7 +668,7 @@ export async function runProactiveCompaction(
     if (sessionStateStore) {
       try {
         const cutoff = new Date(Date.now() - SESSION_STATE_RESOLVED_TTL_MS)
-        const purged = await sessionStateStore.purgeResolvedOlderThan(sessionId, cutoff)
+        const purged = await guarded(() => sessionStateStore.purgeResolvedOlderThan(sessionId, cutoff))
         if (purged > 0) {
           analytics?.logEvent({
             userId, assistantId, sessionId,
@@ -661,6 +677,7 @@ export async function runProactiveCompaction(
           })
         }
       } catch (err) {
+        if (isAuthorityChangedError(err)) throw err
         console.error('[compaction] session-state decay failed:', err)
       }
     }
@@ -669,7 +686,7 @@ export async function runProactiveCompaction(
     if (episodes.length > 0 && episodicStore) {
       for (const ep of episodes) {
         try {
-          await episodicStore.create({
+          await guarded(() => episodicStore.create({
             userId, assistantId, sessionId,
             topicLabel: ep.topicLabel,
             summary: ep.summary,
@@ -678,8 +695,9 @@ export async function runProactiveCompaction(
               toSequence: ep.messageSpan.toSequence,
               turnCount: ep.messageSpan.turnCount,
             },
-          })
+          }))
         } catch (err) {
+          if (isAuthorityChangedError(err)) throw err
           console.error('[compaction] Failed to persist episodic row for topic', ep.topicLabel, err)
         }
       }
@@ -730,8 +748,10 @@ export async function runProactiveCompaction(
 
     breaker.recordSuccess()
     emitAutohealIfOverLimit('compaction', true)
+    await params.authority?.assertCurrent()
     return { messages: compactedMessages, compacted: true, episodes }
   } catch (err) {
+    if (isAuthorityChangedError(err)) throw err
     console.error('[compaction] Failed:', err)
     // Overflow failures are handled deterministically by the budget wrapper +
     // the trim fallback below — not a systemic outage, so they must NOT open
@@ -781,6 +801,7 @@ type HouseKeepParams = {
   sessionId: string
   assistantId: string
   userId: string
+  authority?: CurrentAuthorityBoundary
 }
 
 type HouseKeepStats = {
@@ -812,7 +833,9 @@ type HouseKeepStats = {
 export async function houseKeepEpisodic(
   params: HouseKeepParams,
 ): Promise<HouseKeepStats> {
-  const rows = await params.episodicStore.listBySession(params.sessionId)
+  const guarded = async <T>(operation: () => Promise<T>): Promise<T> =>
+    params.authority ? params.authority.execute(operation) : operation()
+  const rows = await guarded(() => params.episodicStore.listBySession(params.sessionId))
   const toEvict: EpisodicMemoryRecord[] = []
   const toPromote: EpisodicMemoryRecord[] = []
   const toKeep: EpisodicMemoryRecord[] = []
@@ -833,7 +856,7 @@ export async function houseKeepEpisodic(
   let promoted = 0
   for (const row of toPromote) {
     try {
-      await params.memoryStore.create({
+      await guarded(() => params.memoryStore.create({
         assistantId: params.assistantId,
         userId: params.userId,
         scope: 'shared',
@@ -846,10 +869,11 @@ export async function houseKeepEpisodic(
         sensitivity: 'internal',
         createdByUserId: params.userId,
         createdByAssistantId: params.assistantId,
-      })
-      await params.episodicStore.deleteById(row.id)
+      }))
+      await guarded(() => params.episodicStore.deleteById(row.id))
       promoted++
     } catch (err) {
+      if (isAuthorityChangedError(err)) throw err
       console.error('[compaction] Failed to promote episodic row', row.id, err)
     }
   }
@@ -859,17 +883,19 @@ export async function houseKeepEpisodic(
   let evicted = 0
   for (const row of toEvict) {
     try {
-      await params.episodicStore.deleteById(row.id)
+      await guarded(() => params.episodicStore.deleteById(row.id))
       evicted++
     } catch (err) {
+      if (isAuthorityChangedError(err)) throw err
       console.error('[compaction] Failed to evict episodic row', row.id, err)
     }
   }
 
   // Bump survival on kept rows (batched).
   try {
-    await params.episodicStore.incrementSurvivalCount(toKeep.map((r) => r.id))
+    await guarded(() => params.episodicStore.incrementSurvivalCount(toKeep.map((r) => r.id)))
   } catch (err) {
+    if (isAuthorityChangedError(err)) throw err
     console.error('[compaction] Failed to bump survival_count:', err)
   }
 

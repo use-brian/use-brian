@@ -325,6 +325,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
 
       await withChatLock(`whatsapp-cloud:${conversationKey}`, () => processMessage({
         credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
+        channelIntegrationId,
         externalConnectorToolsAllowed: whatsappCloudExternalConnectorToolsAllowed(config, isIdentified, incoming.userId),
         routing, confirmKey,
       }))
@@ -349,6 +350,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
     ownerId: string
     channelUserId: string
     isIdentified: boolean
+    channelIntegrationId: string
     externalConnectorToolsAllowed: boolean
     routing: { modelAlias: string }
     confirmKey: string
@@ -413,6 +415,8 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       externalGuestConnectorTools: externalConnectorToolsAllowed,
       channelType: 'whatsapp',
       channelId: incoming.channelId,
+      channelIntegrationId: params.channelIntegrationId,
+      channelIntegrationStore: options.integrationStore,
       actorChannelId: incoming.userId,
       messageText: incoming.text,
       rawUserText: incoming.text,

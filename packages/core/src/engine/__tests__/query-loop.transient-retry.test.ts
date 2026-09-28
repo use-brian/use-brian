@@ -114,6 +114,40 @@ async function runLoop(provider: LLMProvider): Promise<QueryEvent[]> {
 }
 
 describe('[COMP:engine/query-loop] Transient stream retry', () => {
+  it('checks live authority before exposing a streamed event and does not retry', async () => {
+    const { provider, calls } = scriptedProvider([
+      { kind: 'chunks', chunks: textChunks('restricted') },
+    ])
+    let checks = 0
+    const events: QueryEvent[] = []
+    const run = async () => {
+      for await (const event of queryLoop({
+        ledger: NOOP_TURN_LEDGER,
+        provider,
+        model: 'mock-model',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'hello' }],
+        tools: new Map(),
+        context: {
+          ...baseContext,
+          authority: {
+            async assertCurrent() {
+              checks++
+              if (checks > 1) {
+                throw Object.assign(new Error('authority changed'), { reason: 'authority_changed' })
+              }
+            },
+            async execute<T>(operation: () => Promise<T>) { return operation() },
+          },
+        },
+      })) events.push(event)
+    }
+
+    await expect(run()).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(events).toEqual([])
+    expect(calls).toHaveLength(1)
+  })
+
   it('retries once on "Stream idle" and recovers', async () => {
     // Repro: production incident 2026-05-06 — Gemini fetch hung 30s,
     // wrapIdleTimeout threw, the chat route surfaced "I couldn't generate

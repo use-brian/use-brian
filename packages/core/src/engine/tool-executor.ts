@@ -266,6 +266,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
   const deniedTools = options.deniedTools ?? new Set<string>()
   let siblingAbort = new AbortController()
   let hasErrored = false
+  let fatalError: unknown
   let nudgeDetected = false
   // Multi-waiter wake — every state change releases every waiter so each
   // can re-check its own condition. Single-slot waker (the prior
@@ -862,7 +863,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         }
       }
 
-      const result = await raceAbandon(
+      const invoke = () => raceAbandon(
         toolDef.execute(validated, {
           ...options.context,
           abortSignal: mergedSignal,
@@ -874,6 +875,9 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         abandonSignal,
         t.name,
       )
+      const result = options.context.authority
+        ? await options.context.authority.execute(invoke)
+        : await invoke()
 
       if (timer) clearTimeout(timer)
       options.onToolEnd?.(t.id, t.name, result)
@@ -935,6 +939,12 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     } catch (err) {
       debugDocumentFlow('tool_completion', { toolName: t.name, sessionId: options.context.sessionId, error: true, timeout: timeoutController.signal.aborted, aborted: mergedSignal.aborted })
       if (timer) clearTimeout(timer)
+      if (isAuthorityBoundaryError(err)) {
+        t.status = 'completed'
+        fatalError = err
+        wake()
+        return
+      }
       // Same cap as the success path — a thrown error is tool-produced,
       // unbounded content too. The pathological case is a `ZodError` (from
       // the `inputSchema.parse` above or a tool's own internal validation):
@@ -956,6 +966,11 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     }
 
     wake()
+  }
+
+  function isAuthorityBoundaryError(error: unknown): boolean {
+    return typeof error === 'object' && error !== null
+      && (error as { reason?: unknown }).reason === 'authority_changed'
   }
 
   function tryStartQueued() {
@@ -990,6 +1005,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
      * observability — not serialized to the model).
      */
     getCompletedResults(): CompletedResults {
+      if (fatalError) throw fatalError
       const blocks: ContentBlock[] = []
       const metaByToolUseId: Record<string, ToolResultMeta> = {}
       for (const t of tracked) {

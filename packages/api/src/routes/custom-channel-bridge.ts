@@ -785,6 +785,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
           ownerId,
           isIdentified,
           routing,
+          integrationId: integration.id,
           channelId,
           confirmKey,
           archiveConnectorInstanceId: integration.connectorInstanceId,
@@ -945,6 +946,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     ownerId: string
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
+    integrationId: string
     channelId: string
     confirmKey: string
     archiveConnectorInstanceId?: string | null
@@ -1166,6 +1168,8 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       isIdentified,
       channelType: 'custom',
       channelId: peerId,
+      channelIntegrationId: params.integrationId,
+      channelIntegrationStore: options.integrationStore,
       actorChannelId: bridgeMessage.senderId,
       messageText: incoming.text,
       userContentBlocks,
