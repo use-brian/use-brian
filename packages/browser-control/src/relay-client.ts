@@ -35,6 +35,7 @@ export type RelayClientDeps = {
     op: string
     args: Record<string, unknown>
     controlMode: LocalControlMode
+    controlEpoch?: number
   }) => void
   onStateChange?: (state: RelayClientState) => void
   /** Injected timers so tests can drive time. */
@@ -162,8 +163,8 @@ export class RelayClient {
     this.send({ type: 'result', ...result })
   }
 
-  sendEvent(kind: 'stopped' | 'tab_closed' | 'detached'): void {
-    this.send({ type: 'event', kind })
+  sendEvent(kind: 'stopped' | 'tab_closed' | 'detached', controlEpoch?: number): void {
+    this.send({ type: 'event', kind, ...(controlEpoch !== undefined ? { controlEpoch } : {}) })
   }
 
   private async open(): Promise<void> {
