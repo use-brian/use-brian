@@ -2276,8 +2276,9 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
   })
 
   it.each(['owned', 'exposed'] as const)('withholds %s provider catalogs from finite turns before credentials', async lane => {
+    const diagnostics = vi.spyOn(console, 'info').mockImplementation(() => {})
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
-    const instance = { ...exposedInstance, compartments: ['team:product'], projectIds: ['project'] }
+    const instance = { ...exposedInstance, label: 'PRIVATE-CONNECTOR-LABEL', compartments: ['team:product'], projectIds: ['project'] }
     if (lane === 'owned') connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue([
       { ...instance, scope: 'workspace', userId: null, workspaceId: 'ws-1' },
     ])
@@ -2286,7 +2287,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     ])
     const inject = async (mutationCompartments: string[]) => {
       const tools = new Map()
-      await injectMcpTools({
+      const result = await injectMcpTools({
         userId: 'owner-1', assistantId: 'a-1', tools,
         connectorStore: connectorStore as never, settingsStore: settingsStoreStub() as never,
         connectorInstanceStore: connectorInstanceStore as never,
@@ -2295,6 +2296,12 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
         contextScope: { effectiveCompartments: ['team:product', 'team:marketing'],
           effectiveProjectIds: ['project'], access: { mutationCompartments } },
       })
+      expect(result.unavailable.filter(message => message.includes('current execution scope'))).toEqual([
+        'Connector discovery is limited by the current execution scope. Provider catalogs require unrestricted scope; searching again cannot bypass this restriction.',
+      ])
+      expect(JSON.stringify(result.unavailable)).not.toContain(instance.id)
+      expect(JSON.stringify(result.unavailable)).not.toContain(instance.label)
+      expect(JSON.stringify(result.unavailable)).not.toContain('team:product')
       return tools
     }
     const denied = await inject(['team:marketing'])
@@ -2305,10 +2312,17 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     for (const name of PROBE_TOOLS) expect(matching.has(name)).toBe(false)
     expect(msGraphTokenResolvers).toHaveLength(0)
     expect(connectorInstanceStore.getCredentialsSystem).not.toHaveBeenCalled()
+    // Two injections, each visiting multiple discovery lanes: one safe log each.
+    expect(diagnostics.mock.calls).toEqual(Array.from({ length: 2 }, () => [
+      '[mcp-inject] connector discovery scope restriction',
+      { assistantId: 'a-1', workspaceId: 'ws-1', reason: 'connector_exposure_outside_execution_scope' },
+    ]))
+    diagnostics.mockRestore()
   })
 
   it.each(['owned', 'exposed'] as const)('injects %s provider catalogs only for a company-wide turn', async lane => {
     const tools = new Map()
+    const diagnostics = vi.spyOn(console, 'info').mockImplementation(() => {})
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
     const instance = { ...exposedInstance, compartments: ['team:product'], projectIds: ['project'] }
     if (lane === 'owned') connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue([
@@ -2318,7 +2332,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
       { grantedByUserId: 'grantor-1', instance, compartments: ['team:product'], projectIds: ['project'] },
     ])
 
-    await injectMcpTools({
+    const result = await injectMcpTools({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never, settingsStore: settingsStoreStub() as never,
       connectorInstanceStore: connectorInstanceStore as never,
@@ -2331,6 +2345,9 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     for (const name of PROBE_TOOLS) expect(tools.has(name)).toBe(true)
     expect(msGraphTokenResolvers.length).toBeGreaterThan(0)
     expect(connectorInstanceStore.getCredentialsSystem).toHaveBeenCalled()
+    expect(result.unavailable.some(message => message.includes('execution scope'))).toBe(false)
+    expect(diagnostics).not.toHaveBeenCalled()
+    diagnostics.mockRestore()
   })
 
   it('injects Teams tools for a workspace assistant through a member-exposure grant', async () => {

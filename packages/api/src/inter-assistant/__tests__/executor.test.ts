@@ -1275,6 +1275,37 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     })
   }
 
+  it('preserves discovery diagnostics for unknown pins without attributing every pin to scope', async () => {
+    const diagnostic = 'Connector discovery is limited by the current execution scope. Provider catalogs require unrestricted scope; searching again cannot bypass this restriction.'
+    mockInjectMcp.mockResolvedValueOnce({
+      enrichConfirmation: async (_t: string, i: unknown) => i,
+      unavailable: [diagnostic],
+      searchableSources: [],
+    })
+
+    await expect(injectingExecutor(new Map())({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['gcalListEvents', 'misspelledTool'],
+    })).rejects.toMatchObject({
+      reason: 'tools_unavailable',
+      message: `None of the step's pinned tools are available to the callee. gcalListEvents, misspelledTool: not available to this assistant (check tool names and exposure); Discovery diagnostics: ${diagnostic}.`,
+    })
+    expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+
+  it('fails unknown pins without inventing discovery diagnostics when injection reports none', async () => {
+    await expect(injectingExecutor(new Map())({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['misspelledTool'],
+    })).rejects.toMatchObject({
+      reason: 'tools_unavailable',
+      message: "None of the step's pinned tools are available to the callee. misspelledTool: not available to this assistant (check tool names and exposure).",
+    })
+    expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+
   it('keeps built-ins direct when the caller pins an allow-list', async () => {
     yieldsText()
     const tools = new Map<string, unknown>([
