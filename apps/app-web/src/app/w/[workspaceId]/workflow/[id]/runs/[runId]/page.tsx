@@ -30,6 +30,7 @@
  * [COMP:app-web/workflow]
  */
 
+import { DeliveryOutcomeFeedback } from "@/components/workflow/delivery-feedback";
 import { use, useEffect } from "react";
 import { BackButton } from "@/components/ui/back-button";
 import { useT } from "@/lib/i18n/client";
@@ -229,6 +230,7 @@ export default function WorkflowRunDetailPage({
             {run.steps.map((step, i) => (
               <StepRow
                 key={step.id}
+                workspaceId={workspaceId}
                 index={i}
                 step={step}
                 runStatus={run.status}
@@ -335,12 +337,14 @@ function RunEntrySkeleton({
 // ── Step row ──────────────────────────────────────────────────────────────
 
 function StepRow({
+  workspaceId,
   index,
   step,
   runStatus,
   workflowId: _workflowId,
   runId: _runId,
 }: {
+  workspaceId: string;
   index: number;
   step: WorkflowStepRunDetail;
   runStatus: WorkflowRunDetail["status"];
@@ -414,6 +418,8 @@ function StepRow({
         </div>
       )}
 
+      <DeliveryOutcomeFeedback output={step.output} workspaceId={workspaceId} />
+
       {/* Input / output / error — collapsed by default to keep the trail
           scannable; users open them as needed. */}
       <details className="text-xs">
@@ -422,7 +428,7 @@ function StepRow({
         </summary>
         <JsonBlock data={step.input} />
       </details>
-      {step.output !== null && step.status === "completed" && (
+      {step.output != null && (
         <details className="text-xs">
           <summary className="cursor-pointer text-muted-foreground">
             {t.workflowPage.builder.runDetail.stepOutputLabel}
