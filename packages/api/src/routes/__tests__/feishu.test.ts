@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
     addReaction: vi.fn(),
     removeReactionByEmoji: vi.fn(),
     getMessageChatId: vi.fn(),
+    getUserProfile: vi.fn(),
     downloadResource: vi.fn(),
   },
   claimChannelEvent: vi.fn(),
@@ -187,6 +188,7 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     mocks.api.updateCard.mockResolvedValue(undefined)
     mocks.api.addReaction.mockResolvedValue('reaction-1')
     mocks.api.getMessageChatId.mockResolvedValue('oc_chat')
+    mocks.api.getUserProfile.mockResolvedValue({ email: null, displayName: null })
     mocks.api.downloadResource.mockResolvedValue({
       data: new Uint8Array([1, 2, 3]),
       contentType: 'image/png',
@@ -718,6 +720,72 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       expect(dispatcher.dispatch).not.toHaveBeenCalled()
     },
   )
+
+  it('passes the Feishu profile email into channel identity resolution', async () => {
+    const channelUserStore = { cache: vi.fn() }
+    mocks.api.getUserProfile.mockResolvedValueOnce({
+      email: 'member@company.example',
+      displayName: 'Workspace Member',
+    })
+    mocks.resolveChannelUser.mockImplementationOnce(async (
+      _store,
+      _provider,
+      _providerUserId,
+      _assistantId,
+      fetchProfile,
+    ) => {
+      expect(await fetchProfile()).toEqual({
+        email: 'member@company.example',
+        displayName: 'Workspace Member',
+      })
+      return { user: { id: 'workspace-member-1' }, isIdentified: true }
+    })
+    const { app } = setup({ route: { channelUserStore } as never })
+
+    await request(app)
+      .post('/internal/feishu/inbound')
+      .set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() })
+      .expect(202)
+
+    await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledOnce())
+    expect(mocks.api.getUserProfile).toHaveBeenCalledWith('ou_sender')
+    expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'workspace-member-1',
+      isIdentified: true,
+    }))
+  })
+
+  it('keeps chat on the anonymous lane when Feishu email permission is unavailable', async () => {
+    const channelUserStore = { cache: vi.fn() }
+    mocks.api.getUserProfile.mockRejectedValueOnce(new Error('Access denied'))
+    mocks.resolveChannelUser.mockImplementationOnce(async (
+      _store,
+      _provider,
+      _providerUserId,
+      _assistantId,
+      fetchProfile,
+    ) => {
+      expect(await fetchProfile()).toEqual({ email: null, displayName: 'Sender' })
+      return { user: { id: 'anonymous-shadow-1' }, isIdentified: false }
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { app } = setup({ route: { channelUserStore } as never })
+    try {
+      await request(app)
+        .post('/internal/feishu/inbound')
+        .set('X-Connector-Secret', 'shared-secret')
+        .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() })
+        .expect(202)
+      await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledOnce())
+    } finally {
+      warn.mockRestore()
+    }
+    expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'anonymous-shadow-1',
+      isIdentified: false,
+    }))
+  })
 
   it.each(['missing', 'failed'])('does not identify an owner-fallback sender when resolution is %s', async mode => {
     mocks.resolveChannelUser.mockRejectedValueOnce(new Error('resolution failed'))

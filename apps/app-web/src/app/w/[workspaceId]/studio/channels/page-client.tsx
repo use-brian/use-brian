@@ -164,6 +164,9 @@ export const FEISHU_PERMISSION_IMPORT = JSON.stringify(
   {
     scopes: {
       tenant: [
+        "contact:contact:readonly_as_app",
+        "contact:user.base:readonly",
+        "contact:user.email:readonly",
         "im:message:send_as_bot",
         "im:message:readonly",
         "im:message:update",

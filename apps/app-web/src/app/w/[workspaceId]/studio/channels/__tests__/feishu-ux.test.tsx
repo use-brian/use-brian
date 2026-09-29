@@ -115,6 +115,9 @@ describe("[COMP:app-web/studio-channels] Feishu/Lark UX", () => {
 
     expect(imported.scopes.tenant).toEqual(
       expect.arrayContaining([
+        "contact:contact:readonly_as_app",
+        "contact:user.base:readonly",
+        "contact:user.email:readonly",
         "im:message:send_as_bot",
         "im:message:update",
         "im:message.reactions:write_only",

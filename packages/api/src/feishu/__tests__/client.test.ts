@@ -83,6 +83,34 @@ describe('[COMP:channels/feishu] official SDK client', () => {
     expect(downloaded.contentType).toBe('text/plain')
   })
 
+  it('resolves an open_id to a normalized email through the Contact API', async () => {
+    const { factory, channel } = fakeFactory({
+      code: 0,
+      data: { user: { email: 'Member@Company.Example', name: 'Workspace Member' } },
+    })
+    const api = createFeishuApi({ appId: 'cli', appSecret: 's', brand: 'feishu' }, factory)
+
+    await expect(api.getUserProfile('ou_sender')).resolves.toEqual({
+      email: 'member@company.example',
+      displayName: 'Workspace Member',
+    })
+    expect(channel.rawClient.request).toHaveBeenCalledWith({
+      url: '/open-apis/contact/v3/users/ou_sender?user_id_type=open_id',
+      method: 'GET',
+    })
+  })
+
+  it('surfaces a Contact API permission refusal as a sanitized provider error', async () => {
+    const { factory } = fakeFactory({ code: 99991672, msg: 'Access denied' })
+    const api = createFeishuApi({ appId: 'cli', appSecret: 's', brand: 'lark' }, factory)
+    await expect(api.getUserProfile('ou_sender')).rejects.toMatchObject({
+      name: 'FeishuApiError',
+      operation: 'fetch_user_profile',
+      providerCode: 99991672,
+      message: 'Access denied',
+    })
+  })
+
   it('rethrows rejected SDK calls without credential-bearing request state', async () => {
     const { factory, channel } = fakeFactory()
     const transportError = Object.assign(new Error('Request failed with status code 400'), {

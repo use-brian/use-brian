@@ -1031,6 +1031,17 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     ownerUserId: assistant.workspaceId ? null : ownerId,
     workspaceId: assistant.workspaceId ?? null,
   })
+  const senderWorkspaceRole = assistant.workspaceId
+    ? await getWorkspaceRoleSystem(userId, assistant.workspaceId, true)
+    : null
+  const memberMode = assistant.workspaceId === null
+    ? undefined
+    : senderWorkspaceRole === null
+      ? 'external' as const
+      : 'member' as const
+  const senderIsWorkspaceMember = assistant.workspaceId === null
+    ? isIdentified
+    : senderWorkspaceRole !== null
   let dataTurnScope
   let executionContext
   try {
@@ -1042,7 +1053,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       },
       workspaceId: assistant.workspaceId,
       session,
-      identity: isIdentified
+      memberMode,
+      identity: senderIsWorkspaceMember
         ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
         : {
             kind: 'attended',
@@ -1815,8 +1827,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // See docs/architecture/channels/channel-user-identity.md → "Non-member
   // senders".
   if (assistant.workspaceId && !externalGuest) {
-    const senderRole = await getWorkspaceRoleSystem(userId, assistant.workspaceId)
-    if (senderRole === null) {
+    if (senderWorkspaceRole === null) {
       privateRuntimeContextParts.push(
         buildNonMemberSenderBlock({
           channelType,

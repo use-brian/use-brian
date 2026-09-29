@@ -73,6 +73,7 @@ export async function resolveExecutionContextSystem(
   const scopeDeps: ResolveTurnScopeDeps = {
     store: deps.store,
     resolveReadCeilings: deps.resolveReadCeilings,
+    resolveWorkspaceRole: deps.resolveWorkspaceRole,
   }
   const turnScope = await resolveScope(input, scopeDeps)
   const access: ResolvedExecutionAccess = {

@@ -395,6 +395,7 @@ export async function getConnectorUserId(
 export async function getWorkspaceRoleSystem(
   userId: string,
   workspaceId: string,
+  propagateFailure = false,
 ): Promise<'owner' | 'admin' | 'member' | null> {
   try {
     const result = await query<{ role: 'owner' | 'admin' | 'member' }>(
@@ -404,6 +405,7 @@ export async function getWorkspaceRoleSystem(
     return result.rows[0]?.role ?? null
   } catch (err) {
     console.error('[workspace-store] getWorkspaceRoleSystem failed:', err)
+    if (propagateFailure) throw err
     return null
   }
 }

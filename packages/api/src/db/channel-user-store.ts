@@ -1,7 +1,7 @@
 /**
  * Channel user identity resolution store.
  *
- * Maps channel provider user IDs (Slack U12345, Telegram numeric ID) to
+ * Maps channel provider user IDs (Slack U12345, Feishu ou_*, Telegram numeric ID) to
  * platform user records. Caches the provider API lookup so we don't call
  * Slack users.info on every message.
  *
@@ -40,7 +40,8 @@ export type ResolvedChannelUser = {
 
 export type ChannelUserStore = {
   /**
-   * Look up cached resolution. Returns null on miss or expired (>24h).
+   * Look up cached resolution. Returns null on miss or expiry (24h normally;
+   * five minutes for anonymous Feishu rows so newly granted email access heals).
    * No RLS — used by webhook handlers before user is known.
    */
   resolve(provider: string, providerUserId: string, assistantId: string): Promise<CachedChannelUser | null>
@@ -95,7 +96,10 @@ export function createDbChannelUserStore(): ChannelUserStore {
         `SELECT ${CUC_COLS}
          FROM channel_user_cache
          WHERE provider = $1 AND provider_user_id = $2 AND assistant_id = $3
-           AND cached_at > now() - INTERVAL '24 hours'
+           AND cached_at > now() - CASE
+             WHEN provider = 'feishu' AND email IS NULL THEN INTERVAL '5 minutes'
+             ELSE INTERVAL '24 hours'
+           END
          LIMIT 1`,
         [provider, providerUserId, assistantId],
       )
@@ -290,13 +294,14 @@ export async function resolveChannelUser(
 
   // 2. Fetch profile from provider
   const profile = await fetchProfile()
+  const profileEmail = profile.email?.trim().toLowerCase() || null
 
   // 3. Match by email or create shadow user
   let user: User
   let isIdentified = false
 
-  if (profile.email) {
-    const existing = await findUserByEmail(profile.email)
+  if (profileEmail) {
+    const existing = await findUserByEmail(profileEmail)
     if (existing) {
       // Email discovery healing: an orphan shadow for this provider user
       // may pre-exist (e.g. created before the email scope was granted, or
@@ -307,7 +312,7 @@ export async function resolveChannelUser(
       try {
         await mergeShadowUser(existing.id, providerUserId, provider, {
           reason: 'email-discovery',
-          evidence: { email: profile.email, assistantId },
+          evidence: { email: profileEmail, assistantId },
         })
       } catch (err) {
         console.error(
@@ -321,7 +326,7 @@ export async function resolveChannelUser(
       ;({ user } = await findOrCreateUser({
         authProvider: 'channel',
         authProviderId: `${provider}:${providerUserId}`,
-        email: profile.email,
+        email: profileEmail,
         name: profile.displayName ?? undefined,
       }))
     }
@@ -371,7 +376,7 @@ export async function resolveChannelUser(
     provider,
     providerUserId,
     assistantId,
-    email: profile.email,
+    email: profileEmail,
     displayName: profile.displayName,
     userId: user.id,
   })

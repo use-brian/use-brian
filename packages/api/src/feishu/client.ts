@@ -283,6 +283,30 @@ export function createFeishuApi(
       )
       return result?.chatId ?? null
     },
+    async getUserProfile(userId) {
+      const endpoint = '/open-apis/contact/v3/users/:user_id'
+      const response = await callFeishuSdk(
+        'fetch_user_profile',
+        endpoint,
+        () => channel.rawClient.request({
+          url: `/open-apis/contact/v3/users/${encodeURIComponent(userId)}?user_id_type=open_id`,
+          method: 'GET',
+        }),
+      ) as {
+        code?: number
+        msg?: string
+        data?: { user?: { email?: string; enterprise_email?: string; name?: string } }
+      }
+      if (response.code != null && response.code !== 0) {
+        throw new FeishuApiError({ response: { data: response } }, 'fetch_user_profile', endpoint)
+      }
+      const user = response.data?.user
+      const email = stringValue(user?.email) ?? stringValue(user?.enterprise_email)
+      return {
+        email: email?.toLowerCase() ?? null,
+        displayName: stringValue(user?.name) ?? null,
+      }
+    },
     async downloadResource(messageId, fileKey, type) {
       const result = await callFeishuSdk(
         'download_resource',

@@ -1,6 +1,7 @@
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { describe, expect, it, vi } from 'vitest'
 import type { ContextScopeStore, ContextTeam, WorkspaceProject } from '../../db/context-scope-store.js'
+import { resolveExecutionContextSystem } from '../execution-context.js'
 import {
   ContextNotAvailableError,
   formatActiveWorkspaceContext,
@@ -250,5 +251,114 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
     expect(resolveReadCeilings).not.toHaveBeenCalled()
     expect(resolved.effectiveCompartments).toEqual([`team:${TEAM_ID}`])
     expect(resolved.access.compartments).toEqual([`team:${TEAM_ID}`])
+  })
+
+  it('builds an external channel execution context with no workspace read or write grants', async () => {
+    const resolveWorkspaceRole = vi.fn(async () => null)
+    const authority = {
+      async assertCurrent() {},
+      async execute<T>(operation: () => Promise<T>) { return operation() },
+    }
+    const createSessionLease = vi.fn(() => authority)
+    const result = await resolveExecutionContextSystem({
+      userId: 'external-user',
+      assistant,
+      memberMode: 'external',
+      session: { contextGroupId: null, contextProjectId: null },
+      identity: {
+        kind: 'attended',
+        principal: {
+          kind: 'verified_channel_guest',
+          userId: 'external-user',
+          provider: 'feishu',
+          externalId: 'channel-user-1',
+        },
+      },
+      ownership: { kind: 'workspace', workspaceId: 'workspace-1' },
+      lifecycle: {
+        abortSignal: new AbortController().signal,
+        sessionId: 'session-1',
+        channelType: 'feishu',
+        channelId: 'conversation-1',
+      },
+      sessionAuthority: {
+        id: 'session-1',
+        assistantId: assistant.id,
+        userId: 'external-user',
+        contextGroupId: null,
+        contextProjectId: null,
+        contextLockedAt: null,
+      },
+    }, {
+      store: store(),
+      resolveWorkspaceRole,
+      createSessionLease,
+    })
+
+    expect(resolveWorkspaceRole).toHaveBeenCalledWith('external-user', 'workspace-1', true)
+    expect(result.turnScope).toMatchObject({
+      effectiveCompartments: [],
+      effectiveProjectIds: [],
+      writeCompartments: [],
+      writeProjectIds: [],
+    })
+    expect(result.executionContext.security.access).toMatchObject({
+      clearance: 'public',
+      compartments: [],
+      mutationCompartments: [],
+      projectIds: [],
+    })
+    expect(result.executionContext.security.writeDefaults).toEqual({
+      compartments: [],
+      projectIds: [],
+    })
+    expect(createSessionLease).toHaveBeenCalledWith(expect.objectContaining({
+      memberMode: 'external',
+      userId: 'external-user',
+    }))
+  })
+
+  it('keeps external renewal only while strict membership remains absent', async () => {
+    let role: 'member' | null = null
+    const resolveWorkspaceRole = vi.fn(async () => role)
+    const input = {
+      userId: 'external-user',
+      assistant,
+      memberMode: 'external' as const,
+    }
+
+    await expect(resolveLiveAccessCeilingSystem(input, {
+      store: store(),
+      resolveWorkspaceRole,
+    })).resolves.toMatchObject({
+      clearance: 'public',
+      compartments: [],
+      mutationCompartments: [],
+      projectIds: [],
+    })
+    role = 'member'
+    await expect(resolveLiveAccessCeilingSystem(input, {
+      store: store(),
+      resolveWorkspaceRole,
+    })).rejects.toThrow('authority_unavailable')
+  })
+
+  it('requires strict membership when renewing an ordinary member lease', async () => {
+    const resolveReadCeilings = vi.fn().mockResolvedValue({
+      clearance: 'internal',
+      compartments: [],
+      mutationCompartments: [],
+    })
+    await resolveLiveAccessCeilingSystem({
+      userId: 'user-1',
+      assistant: { ...assistant, teamScopeMode: 'legacy', projectScopeMode: 'all' },
+    }, { resolveReadCeilings })
+    expect(resolveReadCeilings).toHaveBeenCalledWith(
+      'user-1',
+      'workspace-1',
+      'confidential',
+      null,
+      true,
+    )
   })
 })

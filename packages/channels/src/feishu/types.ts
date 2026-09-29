@@ -93,6 +93,8 @@ export type FeishuApi = {
   removeReactionByEmoji(messageId: string, emojiType: string): Promise<boolean>
   /** Resolve the provider chat for a reaction event, which omits chatId. */
   getMessageChatId(messageId: string): Promise<string | null>
+  /** Resolve a sender profile from their app-scoped open_id. */
+  getUserProfile(userId: string): Promise<{ email: string | null; displayName: string | null }>
   downloadResource(
     messageId: string,
     fileKey: string,

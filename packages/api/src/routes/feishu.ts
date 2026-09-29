@@ -186,6 +186,25 @@ function credentialsForApi(credentials: FeishuCredentials) {
   }
 }
 
+async function fetchFeishuSenderProfile(
+  api: ReturnType<typeof createFeishuApi>,
+  openId: string,
+  fallbackName: string | null,
+): Promise<{ email: string | null; displayName: string | null }> {
+  try {
+    const profile = await api.getUserProfile(openId)
+    return {
+      email: profile.email,
+      displayName: profile.displayName ?? fallbackName,
+    }
+  } catch (error) {
+    // Existing installations may not have approved the new contact scopes yet.
+    // Keep chat available on the isolated shadow lane until they do.
+    console.warn('[feishu] sender profile lookup unavailable; using anonymous identity:', error)
+    return { email: null, displayName: fallbackName }
+  }
+}
+
 function actionData(action: FeishuCardAction): string | null {
   if (typeof action.action.value === 'string') return action.action.value
   if (action.action.value && typeof action.action.value === 'object') {
@@ -506,11 +525,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             'feishu',
             reaction.operator.openId,
             assistantId,
-            async () => ({
-              providerUserId: reaction.operator.openId,
-              email: null,
-              displayName: null,
-            }),
+            () => fetchFeishuSenderProfile(api, reaction.operator.openId, null),
           )
           return resolved.user.id
         } catch (error) {
@@ -706,11 +721,11 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           'feishu',
           incoming.userId,
           routing.assistantId,
-          async () => ({
-            providerUserId: incoming.userId,
-            email: null,
-            displayName: incoming.senderDisplay ?? null,
-          }),
+          () => fetchFeishuSenderProfile(
+            api,
+            incoming.userId,
+            incoming.senderDisplay ?? null,
+          ),
         )
         channelUserId = resolved.user.id
         isIdentified = resolved.isIdentified

@@ -100,6 +100,7 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
     const createSessionLease = vi.fn(() => authority)
     await resolveExecutionContextSystem({
       ...base(),
+      memberMode: 'external',
       sessionAuthority: {
         id: 'session-1',
         assistantId: 'assistant-1',
@@ -116,6 +117,7 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
     expect(createSessionLease).toHaveBeenCalledWith(expect.objectContaining({
       credentialCurrent,
       userId: 'actor-1',
+      memberMode: 'external',
     }))
   })
 

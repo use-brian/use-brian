@@ -18,6 +18,10 @@ function makeApi() {
     addReaction: vi.fn<FeishuApi['addReaction']>(async () => 'reaction_1'),
     removeReactionByEmoji: vi.fn<FeishuApi['removeReactionByEmoji']>(async () => true),
     getMessageChatId: vi.fn<FeishuApi['getMessageChatId']>(async () => 'oc_chat'),
+    getUserProfile: vi.fn<FeishuApi['getUserProfile']>(async () => ({
+      email: null,
+      displayName: null,
+    })),
     downloadResource: vi.fn<FeishuApi['downloadResource']>(async () => ({
       data: new Uint8Array([1, 2, 3]),
     })),

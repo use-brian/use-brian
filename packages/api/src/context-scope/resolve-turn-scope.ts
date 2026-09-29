@@ -28,7 +28,7 @@ import {
   type WorkspaceProject,
 } from '../db/context-scope-store.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
-import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
+import { getWorkspaceRoleSystem, resolveOperationCeilingsSystem } from '../db/workspace-store.js'
 
 export type TurnScopeAssistant = {
   id: string
@@ -99,13 +99,14 @@ export type ResolveTurnScopeInput = {
   session?: TurnScopeBinding
   key?: TurnScopeBinding
   /** Trusted public-share/key lanes may intentionally publish assistant scope. */
-  memberMode?: 'enforce' | 'assistant'
+  memberMode?: 'enforce' | 'assistant' | 'member' | 'external'
   systemRead?: boolean
 }
 
 export type ResolveTurnScopeDeps = {
   store?: ContextScopeStore
   resolveReadCeilings?: typeof resolveOperationCeilingsSystem
+  resolveWorkspaceRole?: typeof getWorkspaceRoleSystem
 }
 
 function selectedBinding(input: ResolveTurnScopeInput): {
@@ -186,7 +187,10 @@ export async function resolveLiveAccessCeilingSystem(
     resolveReadCeilings: deps.resolveReadCeilings ?? ((userId, workspaceId, clearance, compartments) =>
       resolveOperationCeilingsSystem(userId, workspaceId, clearance, compartments, true)),
   }
-  return pinAccessCeiling((await resolveScope(input, strictDeps, scope => scope)).access)
+  const memberMode = input.memberMode === 'assistant' || input.memberMode === 'external'
+    ? input.memberMode
+    : 'member'
+  return pinAccessCeiling((await resolveScope({ ...input, memberMode }, strictDeps, scope => scope)).access)
 }
 
 async function resolveScope(
@@ -197,6 +201,7 @@ async function resolveScope(
   const workspaceId = input.workspaceId ?? input.assistant.workspaceId
   const binding = selectedBinding(input)
   const resolveReadCeilings = deps.resolveReadCeilings ?? resolveOperationCeilingsSystem
+  const externalPrincipal = input.memberMode === 'external'
 
   if (!workspaceId) {
     return applyProjection({
@@ -234,12 +239,34 @@ async function resolveScope(
           ? null as ScopeGrant
           : input.assistant.compartments,
       }
-    : await resolveReadCeilings(
-        input.userId,
-        workspaceId,
-        input.assistant.clearance,
-        input.assistant.teamScopeMode === 'all' ? null : input.assistant.compartments,
-      )
+    : externalPrincipal
+      ? await (async () => {
+          const role = await (deps.resolveWorkspaceRole ?? getWorkspaceRoleSystem)(
+            input.userId,
+            workspaceId,
+            true,
+          )
+          if (role !== null) throw new Error('authority_unavailable')
+          return {
+            clearance: 'public' as const,
+            compartments: [] as string[],
+            mutationCompartments: [] as string[],
+          }
+        })()
+      : input.memberMode === 'member'
+        ? await resolveReadCeilings(
+          input.userId,
+          workspaceId,
+          input.assistant.clearance,
+          input.assistant.teamScopeMode === 'all' ? null : input.assistant.compartments,
+          true,
+        )
+        : await resolveReadCeilings(
+          input.userId,
+          workspaceId,
+          input.assistant.clearance,
+          input.assistant.teamScopeMode === 'all' ? null : input.assistant.compartments,
+        )
 
   // The legacy fused resolver returns the empty grant for non-members. That is
   // a valid external-client projection, so the typed membership refusal is
@@ -248,7 +275,7 @@ async function resolveScope(
   let effectiveCompartments = canonicalScopeGrant(oldCeilings.compartments)
   let mutationCompartments = intersectScopeGrants(effectiveCompartments,
     canonicalScopeGrant(oldCeilings.mutationCompartments))
-  let assistantProjectGrant: ScopeGrant = null
+  let assistantProjectGrant: ScopeGrant = externalPrincipal ? [] : null
   const needsStore =
     input.assistant.teamScopeMode === 'assigned'
     || input.assistant.projectScopeMode === 'assigned'
@@ -261,11 +288,11 @@ async function resolveScope(
     if (!principal) throw new ContextNotAvailableError('workspace', 'not_found')
     effectiveCompartments = intersectScopeGrants(effectiveCompartments, principal.teamGrant)
     mutationCompartments = intersectScopeGrants(mutationCompartments, principal.teamGrant)
-    assistantProjectGrant = principal.projectGrant
+    assistantProjectGrant = externalPrincipal ? [] : principal.projectGrant
   } else if (input.assistant.projectScopeMode === 'assigned') {
     const principal = await store!.resolveAssistantPrincipalSystem(input.assistant.id, workspaceId)
     if (!principal) throw new ContextNotAvailableError('workspace', 'not_found')
-    assistantProjectGrant = principal.projectGrant
+    assistantProjectGrant = externalPrincipal ? [] : principal.projectGrant
   }
 
   let activeTeam: ResolvedTurnScope['activeTeam'] = null
@@ -316,10 +343,12 @@ async function resolveScope(
     activeProjectId: activeProject?.id ?? null,
     effectiveCompartments,
     effectiveProjectIds,
-    writeCompartments: activeTeam
-      ? [activeTeam.compartmentKey]
-      : [...new Set(input.assistant.defaultCompartments ?? [])].sort(),
-    writeProjectIds: activeProject ? [activeProject.id] : [],
+    writeCompartments: externalPrincipal
+      ? []
+      : activeTeam
+        ? [activeTeam.compartmentKey]
+        : [...new Set(input.assistant.defaultCompartments ?? [])].sort(),
+    writeProjectIds: externalPrincipal ? [] : activeProject ? [activeProject.id] : [],
     activeTeam,
     activeProject,
   })

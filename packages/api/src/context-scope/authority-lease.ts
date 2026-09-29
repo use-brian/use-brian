@@ -76,7 +76,7 @@ export function createSessionAuthorityLease(input: {
   session: SessionAuthoritySnapshot
   /** Current caller; differs from the session starter in shared rooms. */
   userId?: string
-  memberMode?: 'enforce' | 'assistant'
+  memberMode?: 'enforce' | 'assistant' | 'member' | 'external'
   systemRead?: boolean
   credentialCurrent?: () => Promise<boolean>
 }): AuthorityLease {
