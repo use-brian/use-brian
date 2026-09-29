@@ -28,9 +28,12 @@ import {
   EmptySearchResults,
 } from "../empty-states";
 import {
+  buildPageLoadDiagnostics,
   CollabStatusIndicator,
   ErrorBoundary,
+  isServerUnavailableError,
   NetworkErrorBanner,
+  PageLoadErrorState,
 } from "../error-states";
 
 const dict = en as unknown as Dictionary;
@@ -161,6 +164,65 @@ describe("[COMP:app-web/empty-states] copy + structure", () => {
 // ── Error states ────────────────────────────────────────────────────────
 
 describe("[COMP:app-web/error-states] copy + structure", () => {
+  it("replaces an upstream 5xx body with the calm Brian recovery state", () => {
+    const html = wrap(
+      <PageLoadErrorState
+        error={'HTTP 522: <!DOCTYPE html><title>Connection timed out</title>'}
+        occurredAt="2026-09-29T07:51:22.000Z"
+        path="/w/ws_1/p/page_1"
+        onRetry={() => {}}
+      />,
+    );
+
+    expect(html).toMatch(/Brian is temporarily unavailable/);
+    expect(html).toMatch(/Your page is still safe/);
+    expect(html).toMatch(/Try again/);
+    expect(html).toMatch(/Copy diagnostics/);
+    expect(html).toMatch(/Technical details/);
+    expect(html).toMatch(/HTTP 522/);
+    expect(html).not.toMatch(/DOCTYPE|Connection timed out/);
+    expect(html).toMatch(/min-h-11/);
+  });
+
+  it("uses generic recovery copy for a non-server page failure", () => {
+    const html = wrap(
+      <PageLoadErrorState
+        error="HTTP 404: missing"
+        occurredAt="2026-09-29T07:51:22.000Z"
+        path="/w/ws_1/p/missing"
+        onRetry={() => {}}
+      />,
+    );
+
+    expect(html).toMatch(/This page couldn&#x27;t load/);
+    expect(html).not.toMatch(/Brian is temporarily unavailable/);
+    expect(html).not.toMatch(/HTTP 404: missing/);
+  });
+
+  it("classifies transport failures without treating 4xx responses as downtime", () => {
+    expect(isServerUnavailableError("HTTP 522: proxy html")).toBe(true);
+    expect(isServerUnavailableError("Failed to fetch")).toBe(true);
+    expect(isServerUnavailableError("HTTP 404: missing")).toBe(false);
+  });
+
+  it("keeps the raw response in the copied diagnostic bundle", () => {
+    const diagnostics = buildPageLoadDiagnostics(
+      "HTTP 522: upstream response",
+      {
+        occurredAt: "2026-09-29T07:51:22.000Z",
+        path: "/w/ws_1/p/page_1",
+        online: true,
+        userAgent: "Test Browser",
+      },
+      en.docPage.errors,
+    );
+
+    expect(diagnostics).toContain("HTTP 522: upstream response");
+    expect(diagnostics).toContain("/w/ws_1/p/page_1");
+    expect(diagnostics).toContain("Browser online: yes");
+    expect(diagnostics).toContain("User agent: Test Browser");
+  });
+
   it("NetworkErrorBanner shows the retrying copy + retry button when wired", () => {
     const html = wrap(<NetworkErrorBanner onRetry={() => {}} />);
     expect(html).toMatch(/Connection lost\. Retrying/);
