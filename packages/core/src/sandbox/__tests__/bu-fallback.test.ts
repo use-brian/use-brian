@@ -4,7 +4,7 @@
  * gated; the agentic loop is cloud-only — unattended-on-local is an outright
  * refusal, and a local-default profile is never silently re-routed.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createBuFallbackTool } from '../bu-fallback.js'
 import { createSkillRunnerTools } from '../skill-runner.js'
 import { distillTrace } from '../self-heal.js'
@@ -13,7 +13,7 @@ import { createInMemoryBrowserSkillStore, createInMemoryBlockApprovals } from '.
 import { createInMemoryBrowserProfileStore, createInMemorySessionVault } from '../profiles.js'
 import { createInMemorySandboxTaskStore, createSandboxOrchestrator } from '../orchestrator.js'
 import { StubSandboxProvider } from '../providers/stub.js'
-import type { BuTraceStep } from '../types.js'
+import type { BrowserAgentUsage, BrowserUseLlmConfig, BuTraceStep } from '../types.js'
 import type { ToolContext } from '../../tools/types.js'
 
 function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
@@ -38,7 +38,13 @@ const DM_TRACE: BuTraceStep[] = [
   { step: 5, action: 'done', text: 'DM sent to Jane' },
 ]
 
-async function build(opts: { backend?: 'local' | 'cloud'; unattended?: boolean; noProfile?: boolean } = {}) {
+async function build(opts: {
+  backend?: 'local' | 'cloud'
+  unattended?: boolean
+  noProfile?: boolean
+  resolveLlm?: (workspaceId: string) => Promise<BrowserUseLlmConfig | null>
+  onUsage?: (usage: BrowserAgentUsage[], context: ToolContext) => void | Promise<void>
+} = {}) {
   const provider = new StubSandboxProvider()
   const profileStore = createInMemoryBrowserProfileStore()
   const skillStore = createInMemoryBrowserSkillStore()
@@ -66,6 +72,8 @@ async function build(opts: { backend?: 'local' | 'cloud'; unattended?: boolean; 
     profiles,
     unattendedEnabled: () => opts.unattended ?? false,
     getWorkspacePlan: async () => 'pro',
+    resolveLlm: opts.resolveLlm,
+    onUsage: opts.onUsage,
   })
   return { provider, skillStore, profiles, orchestrator, browserExplore }
 }
@@ -134,7 +142,8 @@ describe('[COMP:sandbox/bu-fallback] Watched agentic fallback (R2-1/R2-7)', () =
     await run(browserExplore, { goal: 'browse', url: 'https://www.instagram.com/' })
     const task = await orchestrator.getActiveTask('sess-1')
     expect(task?.profileId).toBeTruthy()
-    expect(provider.buGoals[0]).toContain('https://www.instagram.com/')
+    expect(provider.buGoals[0]).toBe('browse')
+    expect(provider.buUrls[0]).toBe('https://www.instagram.com/')
   })
 
   it('zero profiles → explores IDENTITY-LESS (R2-10): a public flow never needs a profile', async () => {
@@ -167,6 +176,57 @@ describe('[COMP:sandbox/bu-fallback] Watched agentic fallback (R2-1/R2-7)', () =
     provider.scriptBrowserUse({ trace: [], output: 'looked around' })
     const result = await run(browserExplore, { goal: 'browse', url: 'https://example.com/' })
     expect(result.isError ?? false).toBe(false)
+  })
+
+  it('records Jev and helper receipts and charges a pooled helper lease once', async () => {
+    const recordSpend = vi.fn(async () => {})
+    const onUsage = vi.fn(async () => {})
+    const { provider, browserExplore } = await build({
+      resolveLlm: async () => ({
+        apiKeyEnvName: 'GOOGLE_API_KEY',
+        apiKey: 'fixture-key',
+        model: 'gemini-3-flash-preview',
+        providerKeySource: 'platform',
+        recordSpend,
+      }),
+      onUsage,
+    })
+    provider.scriptBrowserAgent({
+      trace: [],
+      output: 'done',
+      backend: 'jev-ultrafast',
+      status: 'completed',
+      usage: [
+        { kind: 'jev', model: 'jev-1.13.0', inputTokens: 100, outputTokens: 0, providerKeySource: 'platform' },
+        { kind: 'text_helper', model: 'gemini-3-flash-preview', inputTokens: 20, outputTokens: 5, providerKeySource: 'platform' },
+      ],
+    })
+
+    await run(browserExplore, { goal: 'browse', url: 'https://example.com/' })
+
+    expect(onUsage).toHaveBeenCalledOnce()
+    expect(recordSpend).toHaveBeenCalledOnce()
+    expect(recordSpend).toHaveBeenCalledWith('gemini-3-flash-preview', {
+      inputTokens: 20,
+      outputTokens: 5,
+    })
+  })
+
+  it('marks post-action partial failures as errors while retaining the draft trace', async () => {
+    const { provider, skillStore, browserExplore } = await build()
+    provider.scriptBrowserAgent({
+      trace: DM_TRACE.slice(0, 3),
+      output: 'Jev Ultrafast stopped after 2 executed actions (error).',
+      backend: 'jev-ultrafast',
+      status: 'partial_failure',
+      usage: [],
+    })
+
+    const result = await run(browserExplore, { goal: 'browse', url: 'https://www.instagram.com/' })
+
+    expect(result.isError).toBe(true)
+    expect(result.meta).toMatchObject({ backend: 'jev-ultrafast', status: 'partial_failure' })
+    expect(await skillStore.list({ workspaceId: 'ws-1' })).toHaveLength(1)
   })
 
   it('a named profile that does not exist still errors honestly (no silent identity swap)', async () => {

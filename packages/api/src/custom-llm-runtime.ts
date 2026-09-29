@@ -650,6 +650,7 @@ export function createWorkspaceCustomLlmResolver(
         apiKey: selectedProfile.apiKey?.trim() || 'not-required',
         model: selectedProfile.modelId,
         baseUrl: selectedProfile.baseUrl,
+        providerKeySource: 'user',
       },
     }
   }

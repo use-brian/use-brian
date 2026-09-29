@@ -151,6 +151,7 @@ const env: OpenApiEnv = {
   PROTECTED_BROWSER_FILL_EXTENSION_ORIGINS: process.env.PROTECTED_BROWSER_FILL_EXTENSION_ORIGINS,
   E2B_API_KEY: process.env.E2B_API_KEY,
   E2B_TEMPLATE_ID: process.env.E2B_TEMPLATE_ID,
+  JEV_ULTRAFAST_MODEL: process.env.JEV_ULTRAFAST_MODEL,
   BROWSER_USE_MODEL: process.env.BROWSER_USE_MODEL,
   COMPUTER_USE_UNATTENDED_ENABLED: process.env.COMPUTER_USE_UNATTENDED_ENABLED === 'true',
   // AES-GCM key for connector credentials at rest. The launcher generates +

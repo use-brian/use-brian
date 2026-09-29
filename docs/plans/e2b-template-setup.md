@@ -33,9 +33,11 @@ BROWSER_CREDENTIAL_ENCRYPTION_KEY=another-base64-32-byte-key
 For a separately deployed API, generate each with `openssl rand -base64 32`.
 Do not rotate either key without intentionally discarding the data it protects.
 
-`BROWSER_USE_MODEL` optionally selects the watched `browserExplore` model. The
-API otherwise chooses a low-cost model for the configured Anthropic or Gemini
-credential.
+`JEV_ULTRAFAST_MODEL` optionally selects the TypeSafe wire model used by the
+primary watched explorer (default `jev-1.13.0`). `BROWSER_USE_MODEL` optionally
+selects the Jev text-helper and Browser Use fallback model. The API otherwise
+prefers a low-cost OpenAI-compatible Gemini or DashScope credential so both
+paths work; Anthropic remains a Browser Use-only fallback.
 
 ## Verify
 
@@ -45,8 +47,13 @@ After any image or agent-browser update, create a sandbox and verify:
 2. `HOME=/home/user AGENT_BROWSER_SESSION_NAME=main agent-browser open about:blank`
    starts Chromium; a following `agent-browser get url` returns `about:blank`.
 3. `unshare -rn python3 -I` cannot reach the network.
-4. Plain Python imports `pandas`, `numpy`, and `browser_use`.
-5. `agent-browser snapshot -i`, click, type, screenshot, state save, and state
+4. Python is 3.12+ and plain Python imports `pandas`, `numpy`, `jev_ultrafast`,
+   and `browser_use`.
+5. With `BU_CDP_URL` set from `agent-browser get cdp-url`, Jev Ultrafast's
+   Browser Harness attaches to that Chromium rather than starting another one.
+6. A Jev failure before any action invokes Browser Use; a failure after an
+   executed action returns partial failure without replaying the goal.
+7. `agent-browser snapshot -i`, click, type, screenshot, state save, and state
    restore match `packages/core/src/sandbox/providers/e2b/agent-browser-cli.ts`.
 
 ## Smoke Test

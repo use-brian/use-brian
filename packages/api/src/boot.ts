@@ -753,6 +753,7 @@ import {
   createWorkspaceDecisionRouteResolver,
   parseOperatorDecisionDefault,
 } from './workspace-decision-routing.js'
+import { createBrowserAgentUsageRecorder } from './browser-agent-metering.js'
 
 // ════════════════════════════════════════════════════════════════════
 // Public types
@@ -928,8 +929,9 @@ export interface OpenApiEnv {
   // backend reports not_configured and routing falls back to local.
   E2B_API_KEY?: string
   E2B_TEMPLATE_ID?: string
-  // The watched browser-use exploration's model (§4 — the browser-grounding
-  // leg rides a cheap tier). Optional; defaults per available key below.
+  // Jev Ultrafast is the watched-browser primary; Browser Use remains its
+  // pre-action fallback. Both ids stay host-selected, never sandbox-owned.
+  JEV_ULTRAFAST_MODEL?: string
   BROWSER_USE_MODEL?: string
   // Barrier 2 (§4.9): the deploy flag for the unattended acting path. The
   // flag is necessary but NOT sufficient — boot also requires live metering
@@ -4654,36 +4656,35 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : null
   // Cloud mode (§5): E2B behind the SandboxProvider seam. providers/e2b is
   // the only E2B-SDK importer; everything here talks to the interface.
-  // The watched exploration's LLM (browserExplore → provider runBrowserUse)
-  // threads from HERE — no model id lives in the sandbox tree (§4.14). The
-  // browser-grounding leg rides a cheap tier: Haiku when the Anthropic key
-  // exists, else Gemini Flash, else DashScope through its OpenAI-compatible
-  // endpoint. Qwen chat rows are text-only, so that last path uses the DOM /
-  // accessibility state without screenshot vision.
+  // Browser Use fallback + Jev TYPE_TEXT helper. Prefer an OpenAI-compatible
+  // key (Gemini, then DashScope) so one scoped credential serves both. An
+  // Anthropic-only deploy still has Browser Use fallback, while Jev safely
+  // hands off if it needs generated field text before acting.
   const browserAnthropicKey = bootAnthropicCredential?.secret ?? env.ANTHROPIC_API_KEY
   const browserGeminiKey = bootGeminiCredential?.secret ?? env.GEMINI_API_KEY
   const browserDashscopeKey = bootDashscopeCredential?.secret ?? env.DASHSCOPE_API_KEY
-  const browserUseLlm = browserAnthropicKey
+  const browserUseLlm = browserGeminiKey
     ? {
-        apiKeyEnvName: 'ANTHROPIC_API_KEY' as const,
-        apiKey: browserAnthropicKey,
-        model: env.BROWSER_USE_MODEL || 'claude-haiku-4-5-20251001',
-      }
-    : browserGeminiKey
-      ? {
           apiKeyEnvName: 'GOOGLE_API_KEY' as const,
           apiKey: browserGeminiKey,
-          // The REAL Google API id (browser-use bypasses our provider layer,
-          // so no alias resolution) — Flash 3, the cheap-leg tier.
           model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
+          providerKeySource: 'platform' as const,
         }
-      : browserDashscopeKey
-        ? {
+    : browserDashscopeKey
+      ? {
             apiKeyEnvName: 'OPENAI_API_KEY' as const,
             apiKey: browserDashscopeKey,
             baseUrl: dashscopeBaseUrl,
             model: env.BROWSER_USE_MODEL || 'qwen3.5-flash',
             useVision: false,
+            providerKeySource: 'platform' as const,
+          }
+      : browserAnthropicKey
+        ? {
+            apiKeyEnvName: 'ANTHROPIC_API_KEY' as const,
+            apiKey: browserAnthropicKey,
+            model: env.BROWSER_USE_MODEL || 'claude-haiku-4-5-20251001',
+            providerKeySource: 'platform' as const,
           }
         : undefined
   const sandboxProvider: SandboxProvider | null = env.E2B_API_KEY
@@ -4693,7 +4694,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // beginning of each exploration below. Do not retain the boot-time
         // lease here: a disabled, expired, or exhausted key must not remain
         // usable through a long-lived sandbox provider instance.
-        externalCredentialPool ? {} : { browserUse: browserUseLlm },
+        {
+          ...(env.TYPESAFE_API_KEY
+            ? {
+                jevUltrafast: {
+                  apiKey: env.TYPESAFE_API_KEY,
+                  model: env.JEV_ULTRAFAST_MODEL || 'jev-1.13.0',
+                },
+              }
+            : {}),
+          ...(!externalCredentialPool && browserUseLlm ? { browserUse: browserUseLlm } : {}),
+        },
       )
     : null
   // The §4.9 meter: all three COGS lines record through the usage spine, and
@@ -5123,20 +5134,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           }
           if (!externalCredentialPool) return null
 
-          const anthropic = await externalCredentialPool.resolve('anthropic', env.ANTHROPIC_API_KEY)
-          if (anthropic) {
-            return {
-              apiKeyEnvName: 'ANTHROPIC_API_KEY' as const,
-              apiKey: anthropic.secret,
-              model: env.BROWSER_USE_MODEL || 'claude-haiku-4-5-20251001',
-            }
-          }
           const gemini = await externalCredentialPool.resolve('gemini', env.GEMINI_API_KEY)
           if (gemini) {
             return {
               apiKeyEnvName: 'GOOGLE_API_KEY' as const,
               apiKey: gemini.secret,
               model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
+              providerKeySource: 'platform' as const,
+              recordSpend: async (model: string, usage: TokenUsage) => {
+                await gemini.recordSpend(calculateCost(model, usage))
+              },
             }
           }
           const dashscope = await externalCredentialPool.resolve('dashscope', env.DASHSCOPE_API_KEY)
@@ -5147,11 +5154,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               baseUrl: dashscopeBaseUrl,
               model: env.BROWSER_USE_MODEL || 'qwen3.5-flash',
               useVision: false,
+              providerKeySource: 'platform' as const,
+              recordSpend: async (model: string, usage: TokenUsage) => {
+                await dashscope.recordSpend(calculateCost(model, usage))
+              },
+            }
+          }
+          const anthropic = await externalCredentialPool.resolve('anthropic', env.ANTHROPIC_API_KEY)
+          if (anthropic) {
+            return {
+              apiKeyEnvName: 'ANTHROPIC_API_KEY' as const,
+              apiKey: anthropic.secret,
+              model: env.BROWSER_USE_MODEL || 'claude-haiku-4-5-20251001',
+              providerKeySource: 'platform' as const,
             }
           }
           return null
         }
       : undefined,
+    onUsage: createBrowserAgentUsageRecorder(usageStore),
     onEvent: (evt, ctx) => {
       analytics.logEvent({
         userId: ctx.userId,
@@ -5164,6 +5185,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           steps: evt.steps,
           distilled: evt.distilled,
           ok: evt.ok,
+          backend: sanitizeAnalytics(evt.backend ?? 'unavailable'),
+          fallback: evt.fallback,
           ...(evt.skillName ? { skill: sanitizeAnalytics(evt.skillName) } : {}),
         },
       })

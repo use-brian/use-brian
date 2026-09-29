@@ -20,16 +20,18 @@ RUN npm install -g agent-browser@0.31.1 \
     && HOME=/home/user agent-browser install --with-deps \
     && chown -R user:user /home/user/.agent-browser
 
-# runPython uses the isolated unshare lane. browserExplore attaches browser-use
-# to the same Chromium instance over CDP; no second browser is installed.
+# runPython uses the isolated unshare lane. browserExplore attaches Jev
+# Ultrafast first and Browser Use only as a pre-action fallback; both reuse the
+# same Chromium over CDP and install no second browser.
 RUN pip install --no-cache-dir \
       pandas \
       numpy \
-      browser-use==0.13.4
+      browser-use==0.13.4 \
+      "git+https://github.com/browser-use/jev-ultrafast.git@1231850a0bf1a0c0341fe408ef1668dbbfdfac46"
 
 RUN mkdir -p /home/user/scratch /home/user/downloads \
     && chmod -R 777 /home/user/scratch /home/user/downloads
 
 RUN command -v unshare && command -v agent-browser \
     && ls /home/user/.agent-browser/browsers/chrome-*/chrome \
-    && python3 -c "import pandas, numpy, browser_use"
+    && python3 -c "import sys, pandas, numpy, browser_use, jev_ultrafast; assert sys.version_info >= (3, 12)"

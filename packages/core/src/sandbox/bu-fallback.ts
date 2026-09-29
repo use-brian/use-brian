@@ -1,10 +1,9 @@
 /**
- * The browser-use WATCHED fallback (R2-1/R2-7): `browserExplore` runs an
- * agentic browsing loop for a NOVEL flow — one no logic-block covers yet —
- * inside the cloud micro-VM, and ALWAYS self-heals the run into a draft
- * logic-block (R2-5, v0 distiller). Autonomy lives in the navigation, never
- * in skipping the send: the draft's terminal verbs gate exactly like any
- * block's.
+ * The watched browser-agent path (R2-1/R2-7): `browserExplore` runs Jev
+ * Ultrafast for a NOVEL flow inside the cloud micro-VM, with Browser Use as a
+ * pre-action-only fallback, and self-heals the trace into a draft logic-block
+ * (R2-5, v0 distiller). Autonomy lives in navigation, never in skipping the
+ * send: the draft's terminal verbs gate exactly like any block's.
  *
  * Governance edges, held hard:
  *  - CLOUD-ONLY for the agentic loop (R2-7): the local (real-Chrome) backend
@@ -32,7 +31,7 @@ import type { SandboxTaskBinding } from './cloud-browser-provider.js'
 import { registrableSiteOf } from './orchestrator.js'
 import { distillTrace, skillNameFromGoal } from './self-heal.js'
 import type { ResolveComputerToolPolicy } from './tools.js'
-import type { BrowserUseLlmConfig, SandboxProvider, SessionVault } from './types.js'
+import type { BrowserAgentUsage, BrowserUseLlmConfig, SandboxProvider, SessionVault } from './types.js'
 
 export type BuFallbackEvent = {
   type: 'browser_explore'
@@ -41,6 +40,8 @@ export type BuFallbackEvent = {
   distilled: boolean
   skillName: string | null
   ok: boolean
+  backend: 'jev-ultrafast' | 'browser-use' | null
+  fallback: boolean
 }
 
 export type CreateBuFallbackToolOptions = {
@@ -57,6 +58,7 @@ export type CreateBuFallbackToolOptions = {
   getWorkspacePlan?: (workspaceId: string) => Promise<string>
   resolveLlm?: (workspaceId: string) => Promise<BrowserUseLlmConfig | null>
   onEvent?: (event: BuFallbackEvent, context: ToolContext) => void
+  onUsage?: (usage: BrowserAgentUsage[], context: ToolContext) => void | Promise<void>
   maxSteps?: number
   timeoutMs?: number
 }
@@ -90,7 +92,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
     name: 'browserExplore',
     requiresCapability: 'computer',
     description:
-      'Explore a NOVEL browsing flow with the watched agentic fallback when no saved browser skill covers it (check listBrowserSkills first). Runs in the cloud browser — as a browser profile when one is enabled (signed-in flows), or identity-less otherwise; public sites need NO profile. Always distills the successful run into a draft browser skill for deterministic reuse. Terminal sends in the draft stay approval-gated. Prefer runBrowserSkill whenever a skill already exists. Use this for multi-step research on a site (finding exact prices, availability, listings) when plain web search cannot produce the exact data.',
+      'Explore a NOVEL browsing flow with the watched agentic browser when no saved browser skill covers it (check listBrowserSkills first). Jev Ultrafast runs first; Browser Use is a pre-action-only fallback. Runs in the cloud browser — as a browser profile when one is enabled (signed-in flows), or identity-less otherwise; public sites need NO profile. Distills the trace into a draft browser skill for deterministic reuse. Terminal sends in the draft stay approval-gated. Prefer runBrowserSkill whenever a skill already exists. Use this for multi-step research on a site (finding exact prices, availability, listings) when plain web search cannot produce the exact data.',
     inputSchema: z.object({
       goal: z.string().min(1).max(2_000).describe('What to accomplish, concretely (site, action, content)'),
       url: z.string().min(1).describe('Absolute http(s) URL to start from'),
@@ -217,14 +219,27 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
           },
           { url: input.url, browser: true },
         )
-        const goal = `Start at ${input.url}. ${input.goal}`
         const llm = await opts.resolveLlm?.(context.workspaceId)
-        const { trace, output } = await opts.provider.runBrowserUse(sandboxId, {
-          goal,
+        const result = await opts.provider.runBrowserAgent(sandboxId, {
+          url: input.url,
+          goal: input.goal,
           maxSteps: opts.maxSteps ?? DEFAULT_MAX_STEPS,
           timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
           ...(llm ? { llm } : {}),
         })
+        const { trace, output } = result
+        for (const line of result.usage) {
+          if (line.kind !== 'text_helper' || !llm?.recordSpend) continue
+          await llm.recordSpend(line.model, {
+            inputTokens: line.inputTokens,
+            outputTokens: line.outputTokens,
+          }).catch(() => {})
+        }
+        try {
+          await opts.onUsage?.(result.usage, context)
+        } catch {
+          /* usage recording is best-effort and must not change browser outcome */
+        }
 
         // Self-heal is ALWAYS automatic (R2-5): distill the watched run into
         // a draft block, immediately usable and gated by default.
@@ -257,7 +272,9 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
               steps: trace.length,
               distilled: skillName !== null,
               skillName,
-              ok: true,
+              ok: result.status === 'completed',
+              backend: result.backend,
+              fallback: result.backend === 'browser-use',
             },
             context,
           )
@@ -266,6 +283,9 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
         }
 
         const lines = [output || `Explored ${site} (${trace.length} steps).`]
+        if (result.backend === 'browser-use') {
+          lines.push('Browser Use completed this run after Jev Ultrafast stopped before taking a page action.')
+        }
         if (skillName) {
           lines.push(
             `Distilled this run into the draft browser skill "${skillName}" - runBrowserSkill can now replay it deterministically. Its send/submit steps stay approval-gated until the user grants the skill on the profile; rehearse first with rehearsal:true.`,
@@ -273,12 +293,24 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
         }
         return {
           data: lines.join('\n'),
-          meta: { site, steps: trace.length, ...(skillName ? { skill: skillName } : {}) },
+          ...(result.status === 'partial_failure' ? { isError: true } : {}),
+          meta: {
+            site,
+            steps: trace.length,
+            backend: result.backend,
+            status: result.status,
+            fallback: result.backend === 'browser-use',
+            ...(result.fallbackReason ? { fallbackReason: result.fallbackReason } : {}),
+            ...(skillName ? { skill: skillName } : {}),
+          },
         }
       } catch (err) {
         try {
           opts.onEvent?.(
-            { type: 'browser_explore', site, steps: 0, distilled: false, skillName: null, ok: false },
+            {
+              type: 'browser_explore', site, steps: 0, distilled: false,
+              skillName: null, ok: false, backend: null, fallback: false,
+            },
             context,
           )
         } catch {
