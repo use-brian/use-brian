@@ -179,7 +179,7 @@ describe("[COMP:app-web/error-states] copy + structure", () => {
     expect(html).toMatch(/Try again/);
     expect(html).toMatch(/Copy diagnostics/);
     expect(html).toMatch(/Technical details/);
-    expect(html).toMatch(/HTTP 522/);
+    expect(html).toMatch(/HTTP (?:<!-- -->)?522/);
     expect(html).not.toMatch(/DOCTYPE|Connection timed out/);
     expect(html).toMatch(/min-h-11/);
   });
