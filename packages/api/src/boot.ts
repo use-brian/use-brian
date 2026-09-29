@@ -326,6 +326,8 @@ import { assistantRoutes } from './routes/assistants.js'
 import { assistantConnectorGrantsRoutes } from './routes/assistant-connector-grants.js'
 import { skillRoutes } from './routes/skills.js'
 import { workspaceRoutes } from './routes/workspaces.js'
+import { externalAppCalendarRoutes } from './external-app-calendar/routes.js'
+import { createCalendarCredentials } from './external-app-calendar/credentials.js'
 import { workspaceIconPublicRoutes, workspaceIconRoutes } from './routes/workspace-icon.js'
 import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
@@ -6125,6 +6127,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     filesResolver: filesResolver ?? undefined,
   }))
   app.use('/api/workspaces', requireAuth(env.JWT_SECRET), workspaceRouter)
+  app.use('/api/external-app', externalAppCalendarRoutes({
+    jwtSecret: env.JWT_SECRET,
+    withCalendar: createCalendarCredentials({
+      workspaceStore,
+      instances: connectorInstanceStore,
+      listUsable: (userId, workspaceId) => listUsableWorkspaceConnectors({ connectorInstanceStore, connectorGrantStore, userId, workspaceId }),
+    }),
+  }))
 
   const invitationRouter = invitationRoutes({
     invitationStore: workspaceInvitationStore,
