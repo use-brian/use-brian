@@ -5,7 +5,7 @@ import {beforeEach,afterEach,describe,it,expect,vi} from 'vitest';
 import {snapshotToYDoc,appendOfficeCommand,type OfficeArtifactSnapshot,type OfficeCommand} from '@use-brian/office-model';
 import type {Doc} from 'yjs';
 import {OfficeEditorShell} from '../office-editor-shell';
-import {documentFixture,presentationFixture,uid} from './editor-fixtures';
+import {documentFixture,presentationFixture,spreadsheetFixture,uid} from './editor-fixtures';
 import {I18nProvider} from '@/lib/i18n/client';
 import {en} from '@/lib/i18n/dictionaries/en';
 import {loadSurfaceCache,readSurfaceCache,resetSurfaceCache,markSurfaceCacheStale,invalidateSurfaceCache} from '@/lib/surface-cache';
@@ -30,7 +30,6 @@ vi.mock('@/lib/chat-dock-suppress',()=>({chatDockSuppression:{suppress:()=>()=>{
 // real; rich-editor rendering and socket/device transport are separate adapters.
 vi.mock('../document-editor',()=>({DocumentEditor:({snapshot,onCommand,onSelectTargets}:{snapshot:OfficeArtifactSnapshot;onCommand:(command:OfficeCommand)=>void;onSelectTargets:(ids:string[])=>void})=>{state.command=onCommand;return <div data-editor>{snapshot.title}{snapshot.family==='document'?JSON.stringify(snapshot.sections):null}<button onClick={()=>onSelectTargets(['block-a'])}>Select block</button></div>;}}));
 vi.mock('../presentation-editor',()=>({PresentationEditor:({snapshot}:{snapshot:OfficeArtifactSnapshot})=><div data-editor>{snapshot.title}</div>}));
-vi.mock('../spreadsheet-editor',()=>({SpreadsheetEditor:()=>null}));
 vi.mock('../presentation-presenter',()=>({PresentationPresenter:({snapshot}:{snapshot:OfficeArtifactSnapshot})=><div data-presenter>{snapshot.title}</div>}));
 vi.mock('../office-review',()=>({OfficeReview:({onPresent}:{onPresent:()=>void})=><button onClick={onPresent}>Present fixture</button>}));
 vi.mock('../job-activity',()=>({OfficeJobActivity:({targetIds}:{targetIds:string[]})=><div data-selection>{targetIds.join('|')}</div>}));
@@ -61,6 +60,48 @@ async function advance(ms:number){await act(async()=>vi.advanceTimersByTime(ms))
 async function click(label:string){await act(async()=>{const button=[...host.querySelectorAll('button')].find(row=>row.textContent===label);expect(button).toBeDefined();button!.click();});}
 
 describe('[COMP:app-web/office-editor-shell] bounded online editor reads',()=>{
+  it.each(['focus','visibilitychange'])('retains the mounted editor and selection during %s revalidation',async event=>{
+    setup();await render();await click('Select block');
+    const editor=host.querySelector('[data-editor]');
+    const normal=state.fetch.getMockImplementation()!;
+    const finish:Array<()=>void>=[];
+    state.fetch.mockImplementation((...args)=>new Promise(resolve=>finish.push(()=>resolve(normal(...args)))));
+    await act(async()=>{(event==='focus'?window:document).dispatchEvent(new Event(event));});
+    expect(host.querySelector('[data-editor]')).toBe(editor);
+    expect(host.querySelector('[data-selection]')?.textContent).toBe('block-a');
+    expect(state.collabTarget).toBe(`office:${uid(1)}`);
+    await act(async()=>{finish.forEach(resolve=>resolve());});
+    expect(host.querySelector('[data-editor]')).toBe(editor);
+    expect(host.querySelector('[data-selection]')?.textContent).toBe('block-a');
+  });
+  it.each(['focus','visibilitychange'])('preserves the real spreadsheet cell and worksheet selection on %s',async event=>{
+    const workbook=spreadsheetFixture();
+    workbook.worksheets.push({...workbook.worksheets[0],id:uid(190),name:'Second sheet',cells:workbook.worksheets[0].cells.map((cell,index)=>({...cell,id:uid(200+index)}))});
+    setup();const normal=state.fetch.getMockImplementation()!;
+    const read=async(url:string)=>url.endsWith('/snapshot')?response({snapshot:workbook,seq:1,baseVersion:0})
+      :url.endsWith(`/artifacts/${uid(1)}`)?response({artifact:{...artifact(),family:'spreadsheet',version:0,mode:'template'}}):normal(url);
+    state.fetch.mockImplementation(read);await render();
+    await click('Second sheet');
+    await act(async()=>{host.querySelector<HTMLElement>('[data-cell-address="A2"]')!.click();});
+    const grid=host.querySelector('[role="grid"]');
+    const selected=()=>host.querySelector(`[aria-label="${en.office.cellReference}"]`)?.textContent;
+    expect(selected()).toBe('A2');
+    const finish:Array<()=>void>=[];
+    state.fetch.mockImplementation((url:string)=>new Promise(resolve=>finish.push(()=>resolve(read(url)))));
+    await act(async()=>{(event==='focus'?window:document).dispatchEvent(new Event(event));});
+    expect(host.querySelector('[role="grid"]')).toBe(grid);expect(selected()).toBe('A2');
+    await act(async()=>{finish.forEach(resolve=>resolve());});
+    expect(host.querySelector('[role="grid"]')).toBe(grid);expect(selected()).toBe('A2');
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('Second sheet');
+  });
+  it('does not let repeated focus renew a stalled projection deadline',async()=>{
+    setup('800');await render();state.fetch.mockImplementation(pending);
+    await act(async()=>window.dispatchEvent(new Event('focus')));
+    await advance(400);await act(async()=>window.dispatchEvent(new Event('focus')));
+    expect(host.querySelector('[data-editor]')).not.toBeNull();
+    await advance(401);expect(host.querySelector('[data-editor]')).toBeNull();
+    expect(state.collabTarget).toBeNull();
+  });
   it.each(['artifact','snapshot'])('removes working content and collaboration when the %s expires, and clears selection before renewal',async kind=>{
     setup(kind==='artifact'?'800':'6000',kind==='snapshot'?'800':'6000');await render();await click('Select block');expect(host.querySelector('[data-selection]')?.textContent).toBe('block-a');
     const oldCommand=state.command!;state.fetch.mockImplementation(pending);await advance(801);

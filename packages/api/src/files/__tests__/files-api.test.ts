@@ -329,6 +329,16 @@ describe('[COMP:files/api] createFilesApi.write', () => {
 })
 
 describe('[COMP:files/api] createFilesApi.writeBytes', () => {
+  it('marks protected Office anchors noIndex at insertion, leaving ordinary files unchanged', async () => {
+    const store=makeFakeStore(), gcs=makeFakeGcs()
+    const api=createFilesApi({gcs,store,auditStore:makeFakeAudit(),bucket:'b'})
+    for(const prefix of ['/office/anchors/10000000-0000-4000-8000-000000000001','/ordinary']) {
+      const saved=await api.writeBytes(ctx,{path:`${prefix}/snapshot.json`,bytes:new Uint8Array([1]),mime:'application/json',sensitivity:'public'})
+      expect(saved.ok).toBe(true)
+      if(saved.ok)expect(saved.value.metadata.noIndex).toBe(prefix.startsWith('/office/anchors/')?true:undefined)
+    }
+  })
+
   it('stores raw binary bytes verbatim with the given mime', async () => {
     const gcs = makeFakeGcs()
     const store = makeFakeStore()

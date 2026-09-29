@@ -25,6 +25,7 @@ export type OfficeCollaborationRouteDeps = {
   listThreads(userId: string, artifactId: string): Promise<Array<Record<string, unknown>>>
   getThreadContext(userId: string, threadId: string): Promise<{ artifactId: string; workspaceId: string; status: 'open' | 'resolved' | 'detached' } | null>
   getMessageContext(userId: string, messageId: string): Promise<{ artifactId: string; workspaceId: string } | null>
+  ensureCommentVersion?(userId: string, artifact: OfficeArtifactRow): Promise<string | null>
   createThread(params: { userId: string; workspaceId: string; artifactId: string; artifactVersionId: string; anchor: OfficeCommentAnchor; body: string; mentions?: string[]; brianTriggerKey?: string }): Promise<{ threadId: string; messageId: string }>
   reply(params: { userId: string; workspaceId: string; threadId: string; body: string; mentions?: string[]; brianTriggerKey?: string }): Promise<{ id: string } | null>
   resolve(params: { userId: string; threadId: string; resolved: boolean }): Promise<boolean>
@@ -103,9 +104,14 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     if (!body.success) return void res.status(400).json({ error: 'Invalid Office comment', issues: body.error.issues })
     const artifactId = String(req.params.artifactId)
     const [artifact, access] = await Promise.all([deps.getArtifact(userId, artifactId), resolveCollaborationAccess(userId, artifactId)])
-    if (!artifact || !access || !access.canComment || !artifact.headVersionId) return void res.status(404).json({ error: 'Office artifact not found' })
+    if (!artifact || !access?.canComment) return void res.status(404).json({ error: 'Office artifact not found' })
+    const artifactVersionId = artifact.headVersionId ?? await deps.ensureCommentVersion?.(userId, artifact)
+    // Persistence can take time. Never carry an old collaboration grant across it.
+    if (!artifact.headVersionId && !(await resolveCollaborationAccess(userId, artifactId))?.canComment)
+      return void res.status(404).json({ error: 'Office artifact not found' })
+    if (!artifactVersionId) return void res.status(409).json({ error: 'artifact_not_ready' })
     const brianTriggerKey = body.data.invokeBrian?.idempotencyKey
-    const created = await deps.createThread({ userId, workspaceId: artifact.workspaceId, artifactId, artifactVersionId: artifact.headVersionId, anchor: body.data.anchor, body: body.data.body, mentions: body.data.mentions, brianTriggerKey })
+    const created = await deps.createThread({ userId, workspaceId: artifact.workspaceId, artifactId, artifactVersionId, anchor: body.data.anchor, body: body.data.body, mentions: body.data.mentions, brianTriggerKey })
     const revision = body.data.invokeBrian ? await deps.service.revise({
       userId,
       assistantId: body.data.invokeBrian.assistantId,
