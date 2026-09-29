@@ -412,6 +412,21 @@ export function createWorkerManager(options: WorkerOptions) {
     return active
   }
 
+  function reserveRehydratedWorkerId(persistedWorkerId: string): string {
+    const match = persistedWorkerId.match(/^worker_(\d+)$/)
+    if (match) {
+      const n = parseInt(match[1], 10)
+      if (Number.isFinite(n) && n > workerCounter) workerCounter = n
+    }
+    if (!workers.has(persistedWorkerId)) return persistedWorkerId
+
+    let candidate: string
+    do {
+      candidate = `worker_${++workerCounter}`
+    } while (workers.has(candidate))
+    return candidate
+  }
+
   // ── Notification queue + wake/wait (same pattern as tool-executor.ts) ──
 
   const notifications: WorkerResult[] = []
@@ -999,6 +1014,10 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
         }
       }
       for (const row of rows) {
+        // Persisted worker ids are display labels, not process-wide identities.
+        // Two sessions can both contain (for example) `worker_1`; preserve the
+        // label when free, otherwise remap it before touching the shared Map.
+        const runtimeWorkerId = reserveRehydratedWorkerId(row.workerId)
         if (row.status === 'running') {
           // Snapshot the per-request research flags so the spawn picks
           // the same prompt + budget as the original. The chat route
@@ -1019,7 +1038,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
                 }
               : context
             runWorker(
-              row.workerId,
+              runtimeWorkerId,
               row.prompt,
               rowContext,
               requestTools,
@@ -1038,13 +1057,13 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
           // had just finished, so Phase 4b's drain sees no difference
           // between a same-process worker and a rehydrated one.
           const result: WorkerResult = {
-            workerId: row.workerId,
+            workerId: runtimeWorkerId,
             description: row.description,
             status: row.status,
             result: row.result ?? '',
             ownerSessionId: sessionId,
           }
-          workers.set(row.workerId, {
+          workers.set(runtimeWorkerId, {
             status: row.status,
             description: row.description,
             result: row.result ?? undefined,
@@ -1130,6 +1149,27 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
 
     clearSessionConfig(sessionId: string) {
       sessionConfigs.delete(sessionId)
+    },
+
+    /** Release request-scoped configuration and drained terminal entries.
+     * Running workers and undrained notifications remain available for a
+     * suspended request to resume. */
+    releaseSession(sessionId: string) {
+      sessionConfigs.delete(sessionId)
+      const queuedWorkerIds = new Set(
+        notifications
+          .filter((result) => result.ownerSessionId === sessionId)
+          .map((result) => result.workerId),
+      )
+      for (const [workerId, entry] of workers) {
+        if (
+          entry.ownerSessionId === sessionId
+          && entry.status !== 'running'
+          && !queuedWorkerIds.has(workerId)
+        ) {
+          workers.delete(workerId)
+        }
+      }
     },
 
     /**

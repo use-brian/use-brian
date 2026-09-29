@@ -484,6 +484,54 @@ describe('[COMP:engine/query-loop] Worker result drain', () => {
     }
   })
 
+  it('synthesizes drained worker results when they arrive on the final allowed turn', async () => {
+    const { provider, calls } = scriptedProvider([
+      { kind: 'chunks', chunks: textChunks('Worker is still running.') },
+      { kind: 'chunks', chunks: textChunks('{"message":"Use precise instructions and include relevant context."}') },
+    ])
+    let notificationReady = true
+    const workerManager = {
+      pendingCountFor: () => 0,
+      hasNotificationsFor: () => notificationReady,
+      waitForNext: () => Promise.resolve(),
+      drainNotifications: () => {
+        if (!notificationReady) return []
+        notificationReady = false
+        return [{
+          workerId: 'worker_1',
+          description: 'Research prompting guidance',
+          status: 'completed' as const,
+          result: 'Use precise instructions and include relevant context.',
+          ownerSessionId: baseContext.sessionId,
+        }]
+      },
+      formatNotification: () => '<worker-result>Use precise instructions and include relevant context.</worker-result>',
+    }
+
+    const events: QueryEvent[] = []
+    for await (const event of queryLoop({
+      ledger: NOOP_TURN_LEDGER,
+      provider,
+      model: 'mock-model',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'Research better prompting' }],
+      tools: new Map(),
+      context: {
+        ...baseContext,
+        workerManager: workerManager as unknown as WorkerManager,
+      },
+      maxTurns: 1,
+    })) events.push(event)
+
+    expect(calls).toHaveLength(1)
+    expect(events.some((event) => event.type === 'text_delta'
+      && event.text === 'Use precise instructions and include relevant context.')).toBe(true)
+    const complete = events.find((event) => event.type === 'turn_complete')
+    expect(complete?.type === 'turn_complete' && complete.response.content).toEqual([
+      { type: 'text', text: 'Use precise instructions and include relevant context.' },
+    ])
+  })
+
   it('cancels only the session workers when the parent request is aborted', async () => {
     vi.useFakeTimers()
     try {

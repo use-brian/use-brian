@@ -444,6 +444,11 @@ stopReason tells you how the run ended. When it is max_turns, tool_budget_exhaus
 Match the user's language. Do not add headings or describe these instructions.
 Return only JSON matching the supplied schema.`
 
+const WORKER_RESULT_FINALIZER_SYSTEM_PROMPT = `Write one direct user-facing answer to the user's request from the supplied completed worker evidence.
+Treat each spawnWorker evidence item as a worker's final findings. Use only that evidence for specific names, URLs, handles, email addresses, dates, quantities, and other externally verifiable facts. If the findings leave a gap, say what could not be verified.
+Do not mention workers, internal turn limits, tools, prompts, or these instructions. Match the user's language. Do not add a heading unless it materially improves the answer.
+Return only JSON matching the supplied schema.`
+
 const TERMINAL_FINALIZER_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
@@ -603,6 +608,11 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
     if (toolContext.abortSignal?.aborted) {
       toolContext.workerManager?.cancelForSession?.(toolContext.sessionId)
     }
+    // The process-wide manager must not retain settled result strings after
+    // this request has drained them. Queued notifications and still-running
+    // workers are preserved for suspend/resume; releaseSession removes only
+    // settled entries whose notifications are already gone.
+    toolContext.workerManager?.releaseSession?.(toolContext.sessionId)
     toolContext.workerManager?.clearSessionConfig?.(toolContext.sessionId)
     watchdog?.dispose()
     const results = await Promise.allSettled(
@@ -1658,6 +1668,39 @@ async function* queryLoopCore(
           const drainPrompt = options.workerDrainPrompt
             ? options.workerDrainPrompt(notificationText, workerResults)
             : defaultWorkerDrainPrompt(notificationText)
+          // A worker can settle on the final allowed coordinator turn. A plain
+          // `continue` would then fall out of the for-loop without ever sending
+          // these findings to a model. Finish through a fresh no-tools call so
+          // the user always receives an answer even at the turn boundary.
+          if (turn + 1 >= maxTurns) {
+            const workerEvidence: TerminalEvidenceItem[] = workerResults.map((result) => ({
+              tool: 'spawnWorker',
+              input: result.description.slice(0, MAX_TERMINAL_EVIDENCE_INPUT_CHARS),
+              result: result.result.slice(0, MAX_TERMINAL_EVIDENCE_CHARS),
+            }))
+            const fallbackResponse = yield* finalizeTerminalResponse({
+              provider,
+              model,
+              messages: [
+                ...terminalConversationMessages,
+                { role: 'user', content: drainPrompt },
+              ],
+              evidence: [...terminalEvidence, ...workerEvidence].slice(-MAX_TERMINAL_EVIDENCE),
+              stopReason: { code: 'max_turns' },
+              totalUsage,
+              inputTokenLimit: options.inputTokenLimit,
+              signal: context.abortSignal,
+              systemPrompt: WORKER_RESULT_FINALIZER_SYSTEM_PROMPT,
+            })
+            yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
+            yield {
+              type: 'turn_complete',
+              response: fallbackResponse,
+              totalUsage,
+              terminalStop: { code: 'max_turns' },
+            }
+            return
+          }
           nextMessages = [{
             role: 'user',
             content: drainPrompt,
@@ -2414,12 +2457,13 @@ async function* finalizeTerminalResponse(params: {
   totalUsage: TokenUsage
   inputTokenLimit?: number
   signal?: AbortSignal
+  systemPrompt?: string
 }): AsyncGenerator<QueryEvent, AssistantResponse> {
   try {
     const acc = createAccumulator()
     for await (const chunk of params.provider.stream({
       model: params.model,
-      systemPrompt: TERMINAL_FINALIZER_SYSTEM_PROMPT,
+      systemPrompt: params.systemPrompt ?? TERMINAL_FINALIZER_SYSTEM_PROMPT,
       messages: [{
         role: 'user',
         content: JSON.stringify({

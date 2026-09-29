@@ -153,6 +153,22 @@ describe('[COMP:core/worker-manager-persist] setPersistence + spawn lifecycle', 
     expect(store.completions).toHaveLength(0)
   })
 
+  it('discards settled manager entries when their notifications are drained', async () => {
+    const manager = createWorkerManager({
+      provider: makeFakeProvider('done'),
+      model: 'gemini-flash',
+      tools: new Map(),
+    })
+    const { workerId } = manager.spawn('finish this', ctx)!
+    await manager.waitForNext('s1')
+
+    expect(manager.getStatus(workerId, 's1')).toBe('completed')
+    expect(manager.drainNotifications('s1')).toHaveLength(1)
+    manager.releaseSession('s1')
+    expect(manager.getStatus(workerId, 's1')).toBeNull()
+    expect(manager.getResult(workerId, 's1')).toBeNull()
+  })
+
   it('reset() clears persistence — no writes for subsequent spawns', async () => {
     const store = makeStore()
     const manager = createWorkerManager({
@@ -355,6 +371,54 @@ describe('[COMP:core/worker-manager-persist] rehydrate', () => {
     const fresh = manager.spawn('new gap', ctx)!
     // Should not collide with worker_5 — counter must be >5.
     expect(fresh.workerId).toBe('worker_6')
+  })
+
+  it('remaps duplicate persisted worker ids across concurrent sessions', async () => {
+    const storeA = makeStore()
+    const storeB = makeStore()
+    storeA.loadResult.push({
+      runId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      workerId: 'worker_1',
+      status: 'completed',
+      description: 'session A research',
+      prompt: 'A',
+      researchMode: false,
+      model: 'gemini-flash',
+      turnCount: 1,
+      result: 'result A',
+      history: [],
+    })
+    storeB.loadResult.push({
+      runId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      workerId: 'worker_1',
+      status: 'completed',
+      description: 'session B research',
+      prompt: 'B',
+      researchMode: false,
+      model: 'gemini-flash',
+      turnCount: 1,
+      result: 'result B',
+      history: [],
+    })
+    const manager = createWorkerManager({
+      provider: makeFakeProvider('unused'),
+      model: 'gemini-flash',
+      tools: new Map(),
+    })
+    const ctxA = { ...ctx, sessionId: 'session-A' }
+    const ctxB = { ...ctx, sessionId: 'session-B' }
+    manager.setPersistence({ store: storeA, sessionId: 'session-A', workspaceId: 'ws1' })
+    manager.setPersistence({ store: storeB, sessionId: 'session-B', workspaceId: 'ws1' })
+
+    await manager.rehydrate('session-A', ctxA)
+    await manager.rehydrate('session-B', ctxB)
+
+    const [resultA] = manager.drainNotifications('session-A')
+    const [resultB] = manager.drainNotifications('session-B')
+    expect(resultA.result).toBe('result A')
+    expect(resultB.result).toBe('result B')
+    expect(resultA.workerId).toBe('worker_1')
+    expect(resultB.workerId).not.toBe(resultA.workerId)
   })
 
   it('is a no-op when no persistence store is set', async () => {
