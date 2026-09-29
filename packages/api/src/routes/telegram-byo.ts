@@ -59,8 +59,8 @@ import type { ChannelIntegrationStore, ChannelIntegrationConfig, TelegramCredent
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import { humanizeToolName, describeToolInput } from '@use-brian/shared'
-import { processChannelMessage, type ChannelPipelineParams } from './channel-pipeline.js'
-import { admitChannelMessage, type AdmittedChannelMessage } from './channel-message-admission.js'
+import { processChannelMessage } from './channel-pipeline.js'
+import { admitChannelMessage } from './channel-message-admission.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImage } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
@@ -1790,7 +1790,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // supply it only through the source-labelled provider context, once per turn.
   const replyRaw = providerVisibleContext && rawReply.reply_to_message?.is_automatic_forward
     ? { ...rawReply, reply_to_message: undefined } : incoming.raw
-  const pipelineParams: ChannelPipelineParams & AdmittedChannelMessage = {
+  await processChannelMessage({
     admittedAnswerContext: admission,
     interactionScope: params.interactionScope,
     incomingMessage: incoming,
@@ -1957,8 +1957,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         })
       },
     },
-  }
-  await processChannelMessage(pipelineParams)
+  })
 }
 
 // ── Seen-chat observation ──────────────────────────────────────

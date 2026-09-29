@@ -2,9 +2,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { buildTool } from '@use-brian/core'
 vi.mock('../../db/workspace-store.js', () => ({ getWorkspaceRoleSystem: vi.fn(async () => 'member') }))
-vi.mock('../../context-scope/resolve-turn-scope.js', () => ({ resolveTurnScopeSystem: vi.fn(async () => ({
-  access: { clearance: 'internal' }, effectiveCompartments: [], effectiveProjectIds: [], writeCompartments: [], writeProjectIds: [],
-})) }))
+vi.mock('../../context-scope/resolve-turn-scope.js', () => {
+  const access = (input: { userId: string; workspaceId: string; assistant: { id: string } }) => ({
+    userId: input.userId, workspaceId: input.workspaceId, assistantId: input.assistant.id,
+    assistantKind: 'standard', clearance: 'internal', compartments: [], mutationCompartments: [],
+    projectIds: [], visibilityAssistantIds: [input.assistant.id],
+  })
+  return {
+    resolveTurnScopeSystem: async (input: Parameters<typeof access>[0]) => ({ access: access(input),
+      effectiveCompartments: [], writeCompartments: [], effectiveProjectIds: [], writeProjectIds: [] }),
+    resolveLiveAccessCeilingSystem: async (input: Parameters<typeof access>[0]) => access(input),
+  }
+})
 vi.mock('../../workflow/mcp-bridge.js', () => ({ buildWorkflowToolRegistry: vi.fn() }))
 import { getWorkspaceRoleSystem } from '../../db/workspace-store.js'
 import { buildWorkflowToolRegistry } from '../../workflow/mcp-bridge.js'
@@ -39,7 +48,8 @@ describe('pipeline workflow response cancellation', () => {
     const sendResponse = vi.fn(async () => {})
     const turn = processChannelMessage({
       interactionScope: scope, abortController, userId: 'actor', isIdentified: true,
-      assistant: { id: 'assistant', workspaceId: 'workspace' },
+      assistant: { id: 'assistant', workspaceId: 'workspace', ownerUserId: 'actor', name: 'Assistant',
+        kind: 'standard', clearance: 'internal', compartments: [], systemPrompt: null },
       channelType: 'slack', channelId: 'channel', questionIntegrationId: 'integration',
       incomingMessage: { text: `wq:${row.token} prod`, userId: 'sender', channelId: 'channel', messageId: 'answer', raw: null },
       messageText: `wq:${row.token} prod`, questionStore: store, connectorStore: {}, mcpSettingsStore: {},

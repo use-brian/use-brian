@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { buildTool, type ToolContext } from '@use-brian/core'
+import { buildTool, createExecutionContext, executionToolContext, type ToolContext } from '@use-brian/core'
+import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { dispatchQuestionResponse } from '../question-response.js'
 import type { ChannelQuestion } from '../channel-questions.js'
 
@@ -28,8 +29,16 @@ describe('workflow response cancellation boundaries', () => {
       return false
     }
     const claim = vi.fn(async () => { if (stage === 'claim') await pause(); return true })
-    const context: ToolContext = { userId: 'actor', assistantId: 'assistant', workspaceId: 'workspace', sessionId: 'question:token',
-      appId: 'Use Brian', channelType: 'slack', channelId: 'channel', abortSignal: controller.signal }
+    const access = { userId: 'actor', workspaceId: 'workspace', assistantId: 'assistant',
+      assistantKind: 'standard' as const, clearance: 'internal' as const, compartments: [],
+      mutationCompartments: [], projectIds: [], visibilityAssistantIds: ['assistant'] }
+    const context: ToolContext = executionToolContext(createExecutionContext({
+      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'actor' } },
+      ownership: { kind: 'workspace', workspaceId: 'workspace' }, access,
+      writeDefaults: { compartments: [], projectIds: [] },
+      authority: createAuthorityLease(access, async () => access),
+      lifecycle: { sessionId: 'question:token', channelType: 'slack', channelId: 'channel', abortSignal: controller.signal },
+    }), { appId: 'Use Brian' })
     const result = dispatchQuestionResponse(binding, 'prod', new Map([[tool.name, tool]]), context, claim)
     await entered
     controller.abort()

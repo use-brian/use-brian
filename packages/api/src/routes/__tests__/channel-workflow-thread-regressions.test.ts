@@ -9,11 +9,23 @@ import { maybeHandleChannelWorkflowContext, type ChannelWorkflowContextParams } 
 import { resolveSlackThreadScope } from '../slack.js'
 import { resolveFeishuThreadScope } from '../feishu.js'
 
-const mocks = vi.hoisted(() => ({ registry: vi.fn(), execute: vi.fn() }))
+const mocks = vi.hoisted(() => ({ registry: vi.fn(), execute: vi.fn(), revoked: false }))
 vi.mock('../../db/workspace-store.js', () => ({ getWorkspaceRoleSystem: async () => 'member' }))
-vi.mock('../../context-scope/resolve-turn-scope.js', () => ({ resolveTurnScopeSystem: async () => ({
-  access: { clearance: 'internal' }, effectiveCompartments: [], writeCompartments: [], effectiveProjectIds: [], writeProjectIds: [],
-}) }))
+vi.mock('../../context-scope/resolve-turn-scope.js', () => {
+  const access = (input: { userId: string; workspaceId: string; assistant: { id: string } }) => ({
+    userId: input.userId, workspaceId: input.workspaceId, assistantId: input.assistant.id,
+    assistantKind: 'standard', clearance: 'internal', compartments: [], mutationCompartments: [],
+    projectIds: [], visibilityAssistantIds: [input.assistant.id],
+  })
+  return {
+    resolveTurnScopeSystem: async (input: Parameters<typeof access>[0]) => ({ access: access(input),
+      effectiveCompartments: [], writeCompartments: [], effectiveProjectIds: [], writeProjectIds: [] }),
+    resolveLiveAccessCeilingSystem: async (input: Parameters<typeof access>[0]) => {
+      if (mocks.revoked) throw new Error('membership revoked')
+      return access(input)
+    },
+  }
+})
 vi.mock('../../workflow/mcp-bridge.js', () => ({ buildWorkflowToolRegistry: mocks.registry }))
 const address = {
   integrationId: '00000000-0000-4000-8000-000000000001', workspaceId: '00000000-0000-4000-8000-000000000002',
@@ -34,6 +46,7 @@ afterAll(async () => { await db?.close() })
 beforeEach(async () => {
   await db.exec('TRUNCATE workflow_channel_questions')
   vi.clearAllMocks()
+  mocks.revoked = false
   mocks.execute.mockResolvedValue({ data: 'ok' })
   mocks.registry.mockResolvedValue(new Map([['answer', buildTool({ name: 'answer', description: '',
     inputSchema: z.object({ questionId: z.string(), answer: z.string() }),
@@ -82,4 +95,41 @@ describe('native inbound thread → durable SQL → response action', () => {
     expect(await maybeHandleChannelWorkflowContext(input('feishu', 'root-question'))).toContain('expired or was already answered')
     expect(mocks.execute).not.toHaveBeenCalled()
   })
+})
+
+describe('request-scoped live workflow response authority', () => {
+  it.each(['preflight policy', 'claim', 'execution policy'] as const)(
+    'revocation during %s prevents execution and preserves the claim tombstone', async stage => {
+      const row = await question('prompt')
+      let policyCalls = 0
+      const tool = buildTool({ name: 'answer', description: '',
+        inputSchema: z.object({ questionId: z.string(), answer: z.string() }),
+        isConcurrencySafe: false, isReadOnly: false, requiresConfirmation: false, execute: mocks.execute })
+      tool.resolveConfirmation = async () => {
+        policyCalls++
+        if ((stage === 'preflight policy' && policyCalls === 1)
+          || (stage === 'execution policy' && policyCalls === 2)) mocks.revoked = true
+        return false
+      }
+      mocks.registry.mockResolvedValue(new Map([[tool.name, tool]]))
+      const consume = vi.fn(async (...args: Parameters<typeof store.consume>) => {
+        const claimed = await store.consume(...args)
+        if (stage === 'claim') mocks.revoked = true
+        return claimed
+      })
+      const params = { ...input('feishu', 'prompt'), questionStore: { ...store, consume } }
+      expect(await maybeHandleChannelWorkflowContext(params)).not.toBe('Your answer was sent.')
+      expect(mocks.execute).not.toHaveBeenCalled()
+      expect(consume).toHaveBeenCalledTimes(stage === 'preflight policy' ? 0 : 1)
+      if (stage !== 'preflight policy') {
+        // Regranting cannot replay a claimed answer, even with a fresh request lease.
+        mocks.revoked = false
+        expect(await maybeHandleChannelWorkflowContext(params)).toContain('expired or was already answered')
+        expect(await store.isQuestionMessage(address.integrationId, address.channelId, 'prompt')).toBe(true)
+        expect(await store.consume(row, 'second-answer')).toBe(false)
+        expect(consume).toHaveBeenCalledTimes(1)
+        expect(mocks.execute).not.toHaveBeenCalled()
+      }
+    },
+  )
 })

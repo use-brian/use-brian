@@ -1,9 +1,11 @@
+import { executionToolContext } from '@use-brian/core'
+import { runWithAgentAccess } from '../db/client.js'
 import type { IncomingMessage } from '@use-brian/channels'
 import type { ChannelPipelineParams } from './channel-pipeline.js'
 import type { ApprovalBridgeDeps } from '../workflow/approval.js'
 import { createChannelQuestionStore, type ChannelQuestionStore } from '../workflow/channel-questions.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
-import { resolveTurnScopeSystem } from '../context-scope/resolve-turn-scope.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { buildWorkflowToolRegistry } from '../workflow/mcp-bridge.js'
 import { createDeferredConfirmationStore, type DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import { maybeHandleChannelDeferredConfirmation } from './channel-deferred-confirmations.js'
@@ -106,27 +108,33 @@ export async function maybeHandleChannelWorkflowContext(params: ChannelWorkflowC
     allowUnthreaded: params.allowUnthreaded, questionRepliesAvailable: !systemIntegration,
     authorized, abortSignal,
     loadResponseContext: async (binding) => {
-      if (!params.connectorStore || !params.mcpSettingsStore || params.connectorAuthority === 'disabled') {
+      const { connectorStore, mcpSettingsStore } = params
+      if (!connectorStore || !mcpSettingsStore || params.connectorAuthority === 'disabled') {
         throw new Error('Response action service unavailable')
       }
       // Always sender scope, even if conversational connectorAuthority is assistant.
-      const scope = await resolveTurnScopeSystem({ userId: params.userId, assistant: { ...params.assistant,
+      abortSignal?.throwIfAborted()
+      const { turnScope: scope, executionContext } = await resolveExecutionContextSystem({ userId: params.userId, assistant: { ...params.assistant,
         compartments: params.assistant.compartments === undefined ? [] : params.assistant.compartments,
-      }, workspaceId })
-      const tools = await buildWorkflowToolRegistry({
-        firstParty: new Map(), connectorStore: params.connectorStore, settingsStore: params.mcpSettingsStore,
-        assistantConnectorStore: params.assistantConnectorStore, connectorGrantStore: params.connectorGrantStore,
-        connectorInstanceStore: params.connectorInstanceStore, workspaceToolPolicyStore: params.workspaceToolPolicyStore,
-      }, { workspaceId, assistantId: params.assistant.id, userId: params.userId, turnScope: scope })
+      }, workspaceId,
+        identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: params.userId } },
+        ownership: { kind: 'workspace', workspaceId },
+        // Synthetic correlation ID only: no conversational session is created.
+        lifecycle: { sessionId: `question:${binding.token}`, channelType: params.channelType,
+          channelId: binding.channelId, abortSignal: abortSignal ?? new AbortController().signal },
+      })
+      const tools = await runWithAgentAccess(executionContext.security.ceiling, () =>
+        executionContext.security.authority.execute(async () => {
+          executionContext.lifecycle.abortSignal.throwIfAborted()
+          return buildWorkflowToolRegistry({
+            firstParty: new Map(), connectorStore, settingsStore: mcpSettingsStore,
+            assistantConnectorStore: params.assistantConnectorStore, connectorGrantStore: params.connectorGrantStore,
+            connectorInstanceStore: params.connectorInstanceStore, workspaceToolPolicyStore: params.workspaceToolPolicyStore,
+          }, { workspaceId, assistantId: params.assistant.id, userId: params.userId, turnScope: scope })
+        }))
       return { tools, context: {
-        userId: params.userId, assistantId: params.assistant.id, workspaceId,
-        sessionId: `question:${binding.token}`, appId: 'Use Brian', channelType: params.channelType,
-        channelId: binding.channelId, assistantKind: params.assistant.kind, abortSignal: abortSignal ?? new AbortController().signal,
-        clearance: scope.access.clearance, compartments: scope.effectiveCompartments,
-        projectIds: scope.effectiveProjectIds, activeGroupId: scope.activeGroupId, activeProjectId: scope.activeProjectId,
-        assistantClearance: params.assistant.clearance, assistantCompartments: scope.effectiveCompartments,
-        assistantDefaultCompartments: scope.writeCompartments, assistantProjectIds: scope.effectiveProjectIds,
-        assistantDefaultProjectIds: scope.writeProjectIds,
+        ...executionToolContext(executionContext, { appId: 'Use Brian' }),
+        activeGroupId: scope.activeGroupId, activeProjectId: scope.activeProjectId,
       } }
     },
   })

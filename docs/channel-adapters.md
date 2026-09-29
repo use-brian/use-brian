@@ -33,7 +33,12 @@ not depend on whether the user pressed a button or typed a reply.
   unavailable. Scheduled confirmations use verified outbound delivery
   provenance, not a lookup for an arbitrary pending row in the channel.
   Workspace membership, assigned approver, assistant and current tool policy
-  are checked again; a question answer does not grant tool approval.
+  are checked again; a question answer does not grant tool approval. Response
+  actions use a sender-scoped execution context with live authority checks at
+  registry, policy, claim and execution boundaries, even before a chat session
+  exists. A claimed reply stays consumed if access changes during execution.
+  Outbound prompts authorize the resolved destination before binding replies;
+  system-transport reply identifiers are not database integration UUIDs.
 - **Thread provenance:** workflow selection uses the incoming native thread,
   never a new outbound thread allocated for a top-level reply. Slack `thread_ts`
   identifies a thread, not an exact quoted question; multiple active questions
