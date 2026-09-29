@@ -1116,6 +1116,9 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         if (binding.audienceType !== 'group' || !binding.recipientUserId) continue
         // The UI re-sends every binding on any edit; a personal group the
         // recipient already declared stays valid when another admin saves.
+        // Only the recipient is compared: another admin changing its clearance
+        // still cannot widen it, because delivery intersects the binding with
+        // the recipient's own live ceiling.
         const unchanged = integration.config.deliveryAudienceBindings?.some((current) =>
           current.channelId === binding.channelId
           && current.audienceType === 'group'

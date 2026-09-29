@@ -150,7 +150,14 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
     const channelId = draft.channelId.trim();
     const compartments = list(draft.compartments);
     const projectIds = list(draft.projects);
-    const recipientUserId = draft.audienceType === "individual" ? draft.recipient.trim() || null : null;
+    // A group edited here is saved as an ordinary shared group. Personal
+    // groups are managed from the Telegram "Group reply access" control, which
+    // proves self-declaration; keep an existing personal recipient untouched.
+    const recipientUserId = draft.audienceType === "individual"
+      ? draft.recipient.trim() || null
+      : (draft.index !== null && bindings[draft.index]?.channelId === draft.channelId.trim()
+        ? bindings[draft.index]?.recipientUserId ?? null
+        : null);
     const expires = draft.expires.trim();
     const expiry = expires ? Date.parse(expires) : null;
     const telegramId = channelId.match(/^(-?\d+)(?::(?:topic:\d+|discussion:[1-9]\d*))?$/);

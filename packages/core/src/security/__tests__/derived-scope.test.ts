@@ -117,3 +117,14 @@ describe('[COMP:security/derived-scope] complete evidence for derived content', 
     } })).toEqual({ sensitivity: 'confidential',compartments: ['team:finance'],projectIds: [] })
   })
 })
+
+describe('[COMP:security/derived-scope] shared and personal sources together', () => {
+  // A personal Telegram group reads audience-owned (unowned) group history and
+  // the member's own memories in one turn. An unowned source is "no owner",
+  // not a different owner, so the pair derives to that member.
+  it('derives an unowned source plus one member source to that member', () => {
+    const member = source({ resourceId: 'memory-1', userId: 'member-1' })
+    const shared = source({ resourceId: 'message-1', userId: null })
+    expect(deriveResourceScope({ producer: 'consult', sources: [shared, member] }).userId).toBe('member-1')
+  })
+})

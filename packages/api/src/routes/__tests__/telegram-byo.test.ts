@@ -521,7 +521,7 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
     expect(telegramIncomingFailureText('-1002000000001', {
       reason: 'delivery_audience_unverified',
       detail: 'personal_group_unverified',
-    })).toContain('could not confirm that you are the only person')
+    })).toMatch(/could not confirm that you are the only person.*bot is a group admin/)
   })
 })
 
