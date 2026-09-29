@@ -315,6 +315,37 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows[0] ?? null
     },
 
+    /** Persist a real version-zero anchor without rebasing connected Y.Docs. */
+    async anchorDraft(params: {
+      userId: string; artifactId: string; expectedSeq: number; expectedUpdate: Uint8Array;
+      snapshotFileId: string; snapshotHash: string; operationClock: Uint8Array;
+      schemaVersion: number; capabilityVersion: number;
+    }): Promise<{ id: string } | null> {
+      const result = await db<{ id: string }>(params.userId, `
+        WITH draft AS (
+          SELECT a.id, a.workspace_id FROM office_artifacts a
+          JOIN office_collab_documents d ON d.artifact_id=a.id
+          WHERE a.id=$1 AND a.head_version=0 AND a.head_version_id IS NULL
+            AND a.lifecycle_state='active' AND a.mode IN ('artifact','template')
+            AND d.base_version=0 AND d.seq=$2 AND d.ydoc=$9
+          FOR UPDATE OF a, d
+        ), version AS (
+          INSERT INTO office_artifact_versions
+            (artifact_id,workspace_id,version,snapshot_file_id,snapshot_hash,
+             operation_clock,schema_version,capability_version,
+             author_type,author_user_id,origin,summary)
+          SELECT id,workspace_id,0,$3,$4,$5,$6,$7,'user',$8,'manual',
+                 'Initial draft comment anchor' FROM draft
+          RETURNING id,artifact_id
+        )
+        UPDATE office_artifacts a SET head_version_id=v.id
+          FROM version v WHERE a.id=v.artifact_id RETURNING v.id
+      `, [params.artifactId, params.expectedSeq, params.snapshotFileId,
+        params.snapshotHash, Buffer.from(params.operationClock), params.schemaVersion,
+        params.capabilityVersion, params.userId, Buffer.from(params.expectedUpdate)])
+      return result.rows[0] ?? null
+    },
+
     async restoreVersion(params: {
       userId: string
       artifactId: string

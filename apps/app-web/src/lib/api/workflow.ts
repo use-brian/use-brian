@@ -966,11 +966,15 @@ export type WorkspaceMemberOption = {
  */
 export async function listWorkspaceMemberOptions(
   workspaceId: string,
+  options?: { throwOnError?: boolean },
 ): Promise<WorkspaceMemberOption[]> {
   const res = await authFetch(
     `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}`,
   );
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (options?.throwOnError) throw new Error(`Member options unavailable (${res.status})`);
+    return [];
+  }
   type Row = { userId: string; userName: string | null; email: string | null };
   const data = (await res.json()) as { members?: Row[] } | null;
   const rows = Array.isArray(data?.members) ? data!.members : [];
@@ -996,11 +1000,15 @@ export type ChannelDestination = {
 
 export async function listChannelDestinations(
   workspaceId: string,
+  options?: { throwOnError?: boolean },
 ): Promise<ChannelDestination[]> {
   const res = await authFetch(
     `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channel-destinations`,
   );
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (options?.throwOnError) throw new Error(`Destination options unavailable (${res.status})`);
+    return [];
+  }
   const data = (await res.json()) as { destinations?: ChannelDestination[] };
   return Array.isArray(data.destinations) ? data.destinations : [];
 }

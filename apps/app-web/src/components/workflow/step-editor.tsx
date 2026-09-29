@@ -24,6 +24,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Plus, Search } from "lucide-react";
+import { DeliveryAudienceGuidance } from "./delivery-feedback";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import type { StudioAssistantSummary } from "@/lib/api/studio";
@@ -1543,6 +1544,7 @@ export function WorkflowDeliveryField({
         <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           {b.deliverReplyToTrigger}
         </div>
+        <DeliveryAudienceGuidance />
       </div>
     );
   }
@@ -1554,7 +1556,7 @@ export function WorkflowDeliveryField({
   // back to the sessions-derived recent chats, which the server shape-filters
   // per type and (for Telegram) names via Bot API `getChat` — `title` carries
   // the chat/person name, so the label is human-readable with the raw id as
-  // hint. 'web' has no destination surface — the custom-ID input takes over.
+  // hint. Legacy web targets are displayed read-only until changed or disabled.
   const isSlack = channelType === "slack";
   const allRelevant = destinations.filter((d) => d.channelType === channelType);
   const telegramChannels = channelOptions.filter((channel) => channel.channelType === "telegram");
@@ -1657,9 +1659,19 @@ export function WorkflowDeliveryField({
               <SelectItem value="slack">{b.deliverChannelSlack}</SelectItem>
               <SelectItem value="feishu">{b.deliverChannelFeishu}</SelectItem>
               <SelectItem value="whatsapp">{b.deliverChannelWhatsApp}</SelectItem>
-              <SelectItem value="web">{b.deliverChannelWeb}</SelectItem>
+              {channelType === "web" && (
+                <SelectItem value="web" disabled>{b.deliverChannelWeb}</SelectItem>
+              )}
             </SelectContent>
           </Select>
+
+          <DeliveryAudienceGuidance />
+          {channelType === "web" && (
+            <div className="rounded-md border border-amber-500/40 p-3 text-sm">
+              <p>{b.deliveryFeedback.legacyWeb}</p>
+              <code className="break-all">{channelId}</code>
+            </div>
+          )}
 
           {channelType === "telegram" && telegramChannels.length > 0 && (
             <div className="flex flex-col gap-1.5">
@@ -1705,7 +1717,7 @@ export function WorkflowDeliveryField({
             </div>
           )}
 
-          <div className="flex flex-col gap-1.5">
+          {channelType !== "web" && <div className="flex flex-col gap-1.5">
             <FieldLabel label={b.deliverDestinationLabel} />
             <SearchableSelect
               value={selectValue}
@@ -1744,18 +1756,18 @@ export function WorkflowDeliveryField({
                   ? b.deliverDestinationSlackEmpty
                   : b.deliverDestinationEmpty
               }
-              disabled={disabled || channelType === "web"}
+              disabled={disabled}
             />
-            {known.length === 0 && channelType !== "web" && (
+            {known.length === 0 && (
               <div className="text-[11px] text-muted-foreground/80">
                 {isSlack
                   ? b.deliverDestinationSlackEmpty
                   : b.deliverDestinationEmpty}
               </div>
             )}
-          </div>
+          </div>}
 
-          {(showCustom || channelType === "web") && (
+          {showCustom && channelType !== "web" && (
             <div className="flex flex-col gap-1.5">
               <FieldLabel
                 label={b.deliverDestinationCustomLabel}

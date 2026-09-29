@@ -53,34 +53,26 @@ export type SeenChat = {
 /** A per-chat / per-topic flip of the `requireMention` default (Telegram). */
 export type RequireMentionOverride = { chatId: string; topicId?: number | null };
 
-/** Owner/admin-attested ceiling for replies sent to an external conversation. */
-export type DeliveryAudienceBinding = {
-  version: 1;
+/** Admin-approved destination policy. Approval metadata is server-owned. */
+export type DeliveryAudienceBindingInput = {
   channelId: string;
   audienceType: "individual" | "group";
   clearance: ChannelClearance;
   compartments: string[];
   projectIds: string[];
+  recipientUserId?: string | null;
+  expiresAt?: string | null;
+};
+export type DeliveryAudienceBinding = DeliveryAudienceBindingInput & {
+  version: 1;
   recipientUserId: string | null;
   expiresAt: string | null;
   approvedByUserId: string;
   approvedAt: string;
 };
 
-/** Client-writable binding fields. Approval metadata is stamped by the API. */
-export type DeliveryAudienceBindingInput = Pick<
-  DeliveryAudienceBinding,
-  | "channelId"
-  | "audienceType"
-  | "clearance"
-  | "compartments"
-  | "projectIds"
-  | "recipientUserId"
-  | "expiresAt"
->;
-
 /**
- * Per-integration behavior config — the `channel_integrations.config` JSONB.
+ * Per-integration behavior config - the `channel_integrations.config` JSONB.
  * Mirrors `ChannelIntegrationConfig` in packages/api. Not every field applies
  * to every channel: `replyInThread` applies to Slack and Feishu, while topic
  * fields inside `seenChats` are Telegram-only.
@@ -115,7 +107,7 @@ export type ChannelIntegrationConfig = {
 export type ChannelConfigPatch = Partial<
   Omit<
     ChannelIntegrationConfig,
-    "seenChats" | "ambientIngestChatIds" | "deliveryAudienceBindings"
+    "seenChats" | "ambientIngestChatIds" | "deliveryAudienceBindings" | "whatsappDisplayPhoneNumber"
   >
 > & { deliveryAudienceBindings?: DeliveryAudienceBindingInput[] };
 
@@ -197,6 +189,13 @@ export async function updateChannel(
  * the server merges them into the stored config. Returns the channel with
  * its refreshed `config`.
  */
+export class ChannelConfigUpdateError extends Error {
+  constructor(readonly status: number, readonly code: string | null, readonly fields: string[]) {
+    super(`Config update failed (${status})`);
+    this.name = "ChannelConfigUpdateError";
+  }
+}
+
 export async function updateChannelConfig(
   workspaceId: string,
   channelId: string,
@@ -210,7 +209,22 @@ export async function updateChannelConfig(
       body: JSON.stringify(patch),
     },
   );
-  if (!res.ok) throw new Error(`Config update failed (${res.status})`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { error?: unknown; detail?: unknown } | null;
+    let fields: string[] = [];
+    // Zod's error.message is JSON. Preserve field identifiers, not arbitrary
+    // backend prose or rejected values, for localized actionable UI feedback.
+    if (typeof body?.detail === "string") {
+      try {
+        const issues: unknown = JSON.parse(body.detail);
+        if (Array.isArray(issues)) fields = issues.flatMap((issue) => {
+          if (!issue || !Array.isArray(issue.path)) return [];
+          return issue.path.filter((part: unknown): part is string => typeof part === "string");
+        });
+      } catch { /* Non-validation server detail stays out of caller-facing copy. */ }
+    }
+    throw new ChannelConfigUpdateError(res.status, typeof body?.error === "string" ? body.error : null, [...new Set(fields)]);
+  }
   const data = (await res.json()) as { channel: Channel };
   return data.channel;
 }
