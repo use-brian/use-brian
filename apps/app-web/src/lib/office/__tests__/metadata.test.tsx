@@ -12,7 +12,7 @@ import {en} from '@/lib/i18n/dictionaries/en';
 import {documentFixture} from '@/components/office/__tests__/editor-fixtures';
 import {applySpineEventToSurfaceCache} from '@/lib/surface-cache-invalidation';
 import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
-import {loadSurfaceCache,readSurfaceCache,resetSurfaceCache} from '@/lib/surface-cache';
+import {invalidateSurfaceCache,loadSurfaceCache,readSurfaceCache,resetSurfaceCache} from '@/lib/surface-cache';
 import {officeListCacheKey,officePreviewCacheKey,warmTargetFor} from '@/lib/surface-prefetch';
 const state=vi.hoisted(()=>({viewer:'viewer-a',fetch:vi.fn()}));
 vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer})}));
@@ -120,13 +120,12 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     await act(async()=>vi.advanceTimersByTime(3001));await flush();expect(host.textContent).toContain(row.title);
     await act(async()=>vi.advanceTimersByTime(3000));expect(host.textContent).not.toContain(row.title);
   });
-  it.each(['focus','visibilitychange'])('purges on %s and refuses a late old request after the new read wins',async event=>{
+  it.each(['focus','visibilitychange'])('joins an in-flight cold read on %s without replacing its generation',async event=>{
     let old:(value:Response)=>void=()=>{};
     state.fetch.mockImplementationOnce(()=>new Promise(resolve=>{old=resolve}));await act(async()=>root.render(<Harness/>));
-    state.fetch.mockResolvedValueOnce(response({artifacts:[{...row,title:'Fresh report'}]}));
     await act(async()=>{(event==='focus'?window:document).dispatchEvent(new Event(event));});await flush();
     await act(async()=>old(response({artifacts:[row]})));await flush();
-    expect(host.textContent).toContain('Fresh report');expect(host.textContent).not.toContain(row.title);
+    expect(state.fetch).toHaveBeenCalledTimes(1);expect(host.textContent).toContain(row.title);
   });
   it('removes real home cards and lazy preview content at their separate deadlines',async()=>{
     state.fetch.mockImplementation(async(url:string)=>url.endsWith('/snapshot')
@@ -148,7 +147,7 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     state.fetch.mockImplementation(()=>new Promise(()=>{}));await act(async()=>vi.advanceTimersByTime(801));
     expect(host.textContent).not.toContain(template.name);expect(host.querySelector('input')).toBeNull();
     state.fetch.mockResolvedValue(response({templates:[template]},'800'));
-    await act(async()=>window.dispatchEvent(new Event('focus')));await flush();
+    await act(async()=>invalidateSurfaceCache(`office-templates:workspace-a:${state.viewer}`));await flush();
     expect(host.querySelector('input')?.value).toBe('');
   });
   it('does not resurrect an initial seed after an authority event while a new read is pending',async()=>{

@@ -44,12 +44,14 @@ export function useOfficeMetadataResource<T>(key: string | null, viewerId: strin
   const retained = cache.data ?? (cache.error === undefined ? initialSeed : undefined);
   useEffect(() => {
     if (!key) return;
-    const purge = () => invalidateSurfaceCache(key);
-    const visible = () => {if (document.visibilityState === 'visible') purge();};
-    window.addEventListener('focus', purge);
+    // Refresh joins in-flight reads and retains data only until its original TTL.
+    // Authority events and expiry still invalidate (and fence late responses).
+    const revalidate = () => { void cache.refresh(); };
+    const visible = () => {if (document.visibilityState === 'visible') revalidate();};
+    window.addEventListener('focus', revalidate);
     document.addEventListener('visibilitychange', visible);
-    return () => {window.removeEventListener('focus', purge);document.removeEventListener('visibilitychange', visible);};
-  }, [key]);
+    return () => {window.removeEventListener('focus', revalidate);document.removeEventListener('visibilitychange', visible);};
+  }, [key, cache.refresh]);
   useEffect(() => {
     if (!key || !retained) return;
     const ttl = officeMetadataRemaining(retained, viewerId);
