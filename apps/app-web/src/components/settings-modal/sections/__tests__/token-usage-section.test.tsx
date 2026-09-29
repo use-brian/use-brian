@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { TokenUsageSection } from "../token-usage-section";
@@ -13,6 +13,8 @@ vi.mock("@/lib/workspace-context", () => ({ useWorkspaceContext: () => ({ worksp
 vi.mock("@/lib/surface-cache", () => ({ useCachedResource: () => state, SurfaceCacheEvictionError: Error }));
 vi.mock("@/lib/surface-prefetch", () => ({ tokenUsageCacheKey: (id: string) => `usage:${id}` }));
 const render = () => renderToString(<I18nProvider locale="en" dict={en}><TokenUsageSection /></I18nProvider>);
+
+beforeEach(() => { state.data = undefined; state.error = undefined; state.loading = true; state.revalidating = false; });
 
 describe("[COMP:app-web/token-usage] standalone telemetry", () => {
   it("renders a loading skeleton without billing actions", () => {
@@ -28,15 +30,29 @@ describe("[COMP:app-web/token-usage] standalone telemetry", () => {
     expect(html).toContain('Refresh');
     expect(html).not.toContain(en.tokenUsage.empty);
   });
-  it("shows all recorded counters and the reporting window", () => {
-    state.error = undefined;
-    state.data = { from: '2026-08-01T00:00:00Z', to: '2026-08-31T00:00:00Z', inputTokens: 1234, outputTokens: 50, cacheReadTokens: 20, cacheWriteTokens: 5 };
+  it("shows model names, tokens, USD costs and the reporting window without cache cards", () => {
+    state.loading = false;
+    state.data = { from: '2026-08-01T00:00:00Z', to: '2026-08-31T00:00:00Z', estimatedCostUsd: 0.125, hasUnpricedUsage: false,
+      models: [{ model: 'model-a', modelName: 'Model A', tokens: 1234, estimatedCostUsd: 0.125, hasUnpricedUsage: false }] };
     const html = render();
-    for (const text of ['1,234', '50', '20', '5', en.tokenUsage.period, en.tokenUsage.cacheWriteTokens]) expect(html).toContain(text);
+    for (const text of ['Model A', '1,234', 'USD', '0.125', en.tokenUsage.period, en.tokenUsage.total]) expect(html).toContain(text);
+    expect(html).toContain('<table');
+    expect(html).not.toContain('Cache read tokens');
     expect(html).not.toContain(en.tokenUsage.empty);
   });
+  it("labels unknown and partial pricing rather than implying custom endpoints are free", () => {
+    state.loading = false;
+    state.data = { from: '2026-08-01T00:00:00Z', to: '2026-08-31T00:00:00Z', estimatedCostUsd: 0.01, hasUnpricedUsage: true,
+      models: [
+        { model: 'mixed', modelName: 'Mixed model', tokens: 100, estimatedCostUsd: 0.01, hasUnpricedUsage: true },
+        { model: 'custom', modelName: 'Custom endpoint', tokens: 50, estimatedCostUsd: null, hasUnpricedUsage: true },
+      ] };
+    const html = render();
+    for (const text of [en.tokenUsage.unavailable, en.tokenUsage.partial, en.tokenUsage.partialCost, en.tokenUsage.description]) expect(html).toContain(text);
+  });
   it("distinguishes an empty period", () => {
-    state.data = { from: '2026-08-01T00:00:00Z', to: '2026-08-31T00:00:00Z', inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    state.loading = false;
+    state.data = { from: '2026-08-01T00:00:00Z', to: '2026-08-31T00:00:00Z', models: [], estimatedCostUsd: 0, hasUnpricedUsage: false };
     expect(render()).toContain(en.tokenUsage.empty);
   });
 });

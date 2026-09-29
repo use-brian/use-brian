@@ -1016,5 +1016,5 @@ export function pageDirectoryCacheKey(workspaceId: string, viewerId: string): st
 
 /** Settings telemetry is isolated by workspace and signed-in viewer. */
 export function tokenUsageCacheKey(workspaceId: string): string {
-  return `token-usage:${workspaceId}${viewerSuffix()}`;
+  return `token-usage:models:${workspaceId}${viewerSuffix()}`;
 }

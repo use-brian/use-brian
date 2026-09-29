@@ -11,8 +11,9 @@ import { SurfaceCacheEvictionError, useCachedResource } from "@/lib/surface-cach
 import { tokenUsageCacheKey } from "@/lib/surface-prefetch";
 
 type TokenUsage = {
-  from: string; to: string; inputTokens: number; outputTokens: number;
-  cacheReadTokens: number; cacheWriteTokens: number;
+  from: string; to: string; estimatedCostUsd: number | null; hasUnpricedUsage: boolean;
+  models: Array<{ model: string; modelName: string; tokens: number;
+    estimatedCostUsd: number | null; hasUnpricedUsage: boolean }>;
 };
 
 export function TokenUsageSection() {
@@ -33,7 +34,9 @@ export function TokenUsageSection() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
-  const fields = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
+  const usd = new Intl.NumberFormat(locale, { style: "currency", currency: "USD", currencyDisplay: "code", maximumFractionDigits: 6 });
+  const cost = (value: number | null) => value === null ? t.unavailable
+    : value > 0 && value < 0.000001 ? `< ${usd.format(0.000001)}` : usd.format(value);
   return <section className="space-y-4" aria-busy={loading || revalidating}>
     <div className="flex items-center justify-between gap-3">
       <h2 className="text-lg font-semibold">{t.title}</h2>
@@ -42,16 +45,30 @@ export function TokenUsageSection() {
     <p className="text-sm text-muted-foreground">{t.period}</p>
     <p className="text-sm text-muted-foreground">{t.description}</p>
     {error != null && <p role="alert" className="text-sm text-destructive">{t.error}</p>}
-    {loading && <GridSurfaceSkeleton cards={4} chrome={false} />}
+    {loading && <GridSurfaceSkeleton cards={1} chrome={false} />}
     {data && <>
       <p className="text-xs text-muted-foreground">{new Date(data.from).toLocaleString(locale)} – {new Date(data.to).toLocaleString(locale)}</p>
-      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {fields.map((field) => <div key={field} className="rounded-lg border border-border p-4">
-          <dt className="text-sm text-muted-foreground">{t[field]}</dt>
-          <dd className="text-2xl font-semibold tabular-nums">{data[field].toLocaleString(locale)}</dd>
-        </div>)}
-      </dl>
-      {fields.every((field) => data[field] === 0) && <p className="text-sm text-muted-foreground">{t.empty}</p>}
+      <div className="rounded-lg border border-border p-4">
+        <p className="text-sm text-muted-foreground">{t.total}</p>
+        <p className="text-2xl font-semibold tabular-nums">{cost(data.estimatedCostUsd)}</p>
+        {data.hasUnpricedUsage && <p className="text-sm text-muted-foreground">{t.partial}</p>}
+      </div>
+      {data.models.length === 0 ? <p className="text-sm text-muted-foreground">{t.empty}</p> :
+        <table className="w-full table-fixed text-sm">
+          <thead><tr className="border-b border-border text-left">
+            <th scope="col" className="py-3 pr-2 w-2/5">{t.model}</th>
+            <th scope="col" className="py-3 pr-2 text-right">{t.tokens}</th>
+            <th scope="col" className="py-3 text-right">{t.cost}</th>
+          </tr></thead>
+          <tbody>{data.models.map((model) => <tr key={model.model} className="border-b border-border">
+            <th scope="row" className="py-3 pr-2 text-left font-medium break-words" title={model.model}>{model.modelName}</th>
+            <td className="py-3 pr-2 text-right tabular-nums break-words">{model.tokens.toLocaleString(locale)}</td>
+            <td className="py-3 text-right tabular-nums break-words">
+              {cost(model.estimatedCostUsd)}
+              {model.hasUnpricedUsage && model.estimatedCostUsd !== null && <span className="block text-xs text-muted-foreground">{t.partialCost}</span>}
+            </td>
+          </tr>)}</tbody>
+        </table>}
     </>}
   </section>;
 }
