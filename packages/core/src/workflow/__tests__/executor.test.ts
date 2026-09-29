@@ -1734,14 +1734,14 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(updated?.status).toBe('failed')
   })
 
-  it('fails when a tool_call references an unknown tool', async () => {
+  it.each([{ discoveryWarnings: [] }, { discoveryWarnings: ['Connector discovery is limited by the current execution scope.'] }])('reports discovery warnings for an unknown tool: %j', async ({ discoveryWarnings }) => {
     const stores = makeFakeStores()
     const deps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       consultTransport: makeConsultTransport(),
       resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
-      buildToolRegistry: async () => new Map(),
+      buildToolRegistry: async () => Object.assign(new Map(), { discoveryWarnings }),
     }
     const { run } = await seedWorkflowAndRun(deps, {
       startStepId: 's',
@@ -1751,6 +1751,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(outcome.kind).toBe('failed')
     if (outcome.kind === 'failed') {
       expect(outcome.error.reason).toBe('tool_not_found')
+      for (const warning of discoveryWarnings) expect(outcome.error.message).toContain(warning)
     }
   })
 

@@ -88,7 +88,7 @@ export async function buildWorkflowToolRegistry(
     userTimezone?: string
     turnScope?: TurnScope
   },
-): Promise<Map<string, Tool>> {
+): Promise<Map<string, Tool> & { discoveryWarnings?: readonly string[] }> {
   // Start from a fresh shallow copy so first-party tool entries aren't
   // mutated (injectMcpTools attaches a `resolveConfirmation` closure to
   // any tool it touches; we never want that on the boot-time entries).
@@ -122,7 +122,7 @@ export async function buildWorkflowToolRegistry(
   // exposing the metadata the workflow approval gate needs. See
   // docs/architecture/integrations/mcp.md → "Tool search pattern" and
   // docs/architecture/features/workflow.md → "Unified approvals".
-  await injectMcpTools({
+  const injection = await injectMcpTools({
     userId: scope.userId,
     assistantId: scope.assistantId,
     tools,
@@ -166,11 +166,14 @@ export async function buildWorkflowToolRegistry(
   })
 
   stripOrchestrationTools(tools)
-  return scope.turnScope ? bindToolsToAgentAccess(tools, {
+  const registry = scope.turnScope ? bindToolsToAgentAccess(tools, {
     clearance: scope.turnScope.access.clearance,
     compartments: scope.turnScope.effectiveCompartments,
     mutationCompartments: scope.turnScope.access.mutationCompartments,
     projectIds: scope.turnScope.effectiveProjectIds,
     visibilityAssistantIds: scope.turnScope.access.visibilityAssistantIds,
   }) : tools
+  // Preserve discovery diagnostics through access binding so a missing tool
+  // reports the scope/policy limitation rather than suggesting reconnection.
+  return Object.assign(registry, { discoveryWarnings: injection.unavailable })
 }
