@@ -242,7 +242,6 @@ export class EmbeddedBrowserHost {
           }
           break;
         case "stop":
-          this.setStatus("Brian disconnected — manual browsing remains available");
           this.notify(() => this.callbacks.stop());
           break;
         case "new": void this.createTab(DEFAULT_URL, false).catch(() => this.setStatus("Could not create tab")); break;

@@ -32,7 +32,7 @@ export function browserPairing(input: unknown, accountScope: string) {
     partition: `persist:embedded-browser-${key}` };
 }
 
-type Command = { id: string; op: string; args: Record<string, unknown>; controlMode: LocalControlMode };
+type Command = { id: string; op: string; args: Record<string, unknown>; controlMode: LocalControlMode; controlEpoch?: number };
 const text = (value: unknown): string => {
   if (typeof value !== "string") throw new Error("Expected text");
   return value;
@@ -55,6 +55,9 @@ export class EmbeddedBrowser {
   private approvingTab = false;
 
   private automaticBlocked = false;
+  // Keep only the approved control channel while the browser renderers are shut down.
+  private partition: string | null = null;
+  private commandEpoch: number | undefined;
   private readonly approvals: Pick<BrowserApprovals, "has" | "grant">;
 
   constructor(private readonly options: {
@@ -64,7 +67,12 @@ export class EmbeddedBrowser {
     this.approvals = options.approvals ?? new BrowserApprovals(() => join(app.getPath("userData"), "browser-approvals.json"));
   }
 
-  show(): void { this.host?.show(); }
+  show(): void {
+    if (!this.host && this.partition && this.relay?.getState() === "ready") {
+      this.generation++;
+      this.startHost(this.partition);
+    } else this.host?.show();
+  }
   cancelPending(): void { if (this.pairing) this.dispose(); }
 
   isDockedFocused(): boolean { return this.host?.isDockedFocused() ?? false; }
@@ -89,7 +97,7 @@ export class EmbeddedBrowser {
     try {
       if (!this.approvals.has(pair.partition)) {
         const answer = await dialog.showMessageBox({ type: "question", title: "Set up Brian Browser", message: "Allow this browser profile to start automatically?",
-          detail: `Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with its task tabs, including sites you sign in to. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian pauses automatic sessions for this app launch until you choose Resume. Manual tabs still need separate approval. Downloads and protected credential filling are not supported. This replaces any browser already paired to this profile.`,
+          detail: `Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with its task tabs, including sites you sign in to. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian closes all in-app browser tabs. The browser button or a new Brian navigation request can start it again. Manual tabs still need separate approval. Downloads and protected credential filling are not supported. This replaces any browser already paired to this profile.`,
           buttons: ["Not now", "Allow automatic sessions"], defaultId: 0, cancelId: 0 });
         if (generation !== this.generation) return false;
         if (answer.response !== 1) { this.automaticBlocked = true; return false; }
@@ -105,12 +113,14 @@ export class EmbeddedBrowser {
         connect: url => new WebSocket(url) as unknown as WebSocketLike,
         onSessionToken: async next => { token = next; },
         onStateChange: state => {
-          if (generation !== this.generation) return;
+          if (this.relay !== relay) return;
           if (state === "ready") settle(true);
           else if (state === "unpaired" || state === "replaced") { settle(false); this.stop(); }
-          else if (this.active && state === "disconnected") this.stop(false);
+          else if (state === "disconnected") this.stop(false);
         },
-        onCommand: cmd => this.receive(cmd, generation),
+        onCommand: cmd => {
+          if (this.relay === relay) this.receive(cmd, this.generation);
+        },
       });
       this.relay = relay;
       const timeout = setTimeout(() => settle(false), 15_000);
@@ -119,23 +129,8 @@ export class EmbeddedBrowser {
       clearTimeout(timeout);
       this.cancelReady = null;
       if (!connected || generation !== this.generation) { if (generation === this.generation) this.dispose(); return false; }
-      this.host = new EmbeddedBrowserHost(pair.partition, {
-        stop: () => this.stop(),
-        closed: () => this.dispose(),
-        approveTab: id => { void this.approveTab(id, generation); },
-        tabClosed: id => {
-          if (this.executor?.attachedTab() === id) { this.executor.onDetached(id); this.relay?.sendEvent("tab_closed"); }
-        },
-        detached: id => {
-          if (this.executor?.onDetached(id)) this.stop();
-        },
-      }, { dockWindow: this.options.getDockWindow?.() });
       this.approvals.grant(pair.partition);
-      this.active = true;
-      this.identity = { workspaceId: pair.workspaceId, browserProfileId: pair.browserProfileId };
-      this.executor = new TabExecutor(this.platform(generation));
-      this.host.setStatus("Brian ready. Task tabs only.");
-      this.host.show();
+      this.startHost(pair.partition);
       return true;
     } catch {
       if (generation === this.generation) this.dispose();
@@ -143,17 +138,47 @@ export class EmbeddedBrowser {
     } finally { this.pairing = false; }
   }
 
+  private startHost(partition: string): void {
+    const generation = this.generation;
+    this.host = new EmbeddedBrowserHost(partition, {
+      stop: () => { if (generation === this.generation) this.shutdown(); },
+      closed: () => { if (generation === this.generation) this.dispose(); },
+      approveTab: id => { void this.approveTab(id, generation); },
+      tabClosed: id => {
+        if (generation === this.generation && this.executor?.attachedTab() === id) {
+          this.executor.onDetached(id); this.relay?.sendEvent("tab_closed");
+        }
+      },
+      detached: id => {
+        if (generation === this.generation && this.executor?.onDetached(id)) this.stop();
+      },
+    }, { dockWindow: this.options.getDockWindow?.() });
+    this.partition = partition;
+    this.automaticBlocked = false;
+    this.active = true;
+    this.executor = new TabExecutor(this.platform(generation));
+    this.host.setStatus("Brian ready. Task tabs only.");
+    this.host.show();
+  }
+
+  /** Close every renderer, but retain the approved relay for an explicit new browser task. */
+  private shutdown(): void { this.stop(true, true); }
+
   /** Synchronous revocation before any async detach. Queued/in-flight CDP calls are fenced. */
-  stop(blockAutomatic = true): void {
+  stop(blockAutomatic = true, keepControlChannel = false): void {
     if (blockAutomatic) this.automaticBlocked = true;
     this.active = false;
     this.generation++;
     this.cancelReady?.();
     this.cancelReady = null;
     const relay = this.relay;
-    this.relay = null;
-    relay?.sendEvent("stopped");
-    relay?.stop();
+    if (!keepControlChannel) this.relay = null;
+    this.commandEpoch = keepControlChannel ? this.generation : undefined;
+    relay?.sendEvent("stopped", this.commandEpoch);
+    if (!keepControlChannel) {
+      relay?.stop();
+      this.partition = null;
+    }
     const executor = this.executor;
     this.executor = null;
     void executor?.detach().catch(() => undefined);
@@ -167,17 +192,16 @@ export class EmbeddedBrowser {
       } catch { /* A renderer/debugger can disappear during teardown; revocation still wins. */ }
     }
     this.fullBrowserApproved = false;
-    this.host?.setStatus("Brian paused. Manual browsing only. Resume from Browsers.");
+    const host = this.host;
+    this.host = null;
+    host?.destroy();
+    this.queue = Promise.resolve();
   }
 
   dispose(preserveAutomaticBlock = false): void {
     this.stop(false);
     if (!preserveAutomaticBlock) this.automaticBlocked = false;
     this.identity = null;
-    const host = this.host;
-    this.host = null;
-    host?.destroy();
-    this.queue = Promise.resolve();
   }
 
   private async approveTab(id: number, generation: number): Promise<void> {
@@ -197,7 +221,7 @@ export class EmbeddedBrowser {
   }
 
   private check(generation: number): void {
-    if (!this.active || generation !== this.generation) throw new ExecutorError("Browser control was paused. Resume from Browsers.", "user_stopped");
+    if (!this.active || generation !== this.generation) throw new ExecutorError("Browser is stopped. Open it from Browsers or start a new navigation.", "user_stopped");
   }
 
   private platform(generation: number): ExecutorPlatform {
@@ -243,7 +267,23 @@ export class EmbeddedBrowser {
 
   private receive(cmd: Command, generation: number): void {
     const relay = this.relay;
-    if (cmd.op === "stop") { relay?.sendResult({ id: cmd.id, ok: true, data: { stopped: true } }); this.stop(); return; }
+    if (this.commandEpoch !== undefined && cmd.controlEpoch !== this.commandEpoch) {
+      relay?.sendResult({ id: cmd.id, ok: false, error: "Command predates browser shutdown. Start a new navigation with an updated browser relay.", code: "user_stopped" });
+      return;
+    }
+    if (cmd.op === "stop") { relay?.sendResult({ id: cmd.id, ok: true, data: { stopped: true } }); this.shutdown(); return; }
+    // Follow-up reads/clicks from the stopped task must not reopen the browser.
+    // Only a URL-bearing starter can create a fresh task session.
+    if (!this.active && this.partition && (cmd.op === "navigate" || cmd.op === "openTab")) {
+      try {
+        browserUrl(cmd.args.url);
+        generation = ++this.generation;
+        this.startHost(this.partition);
+      } catch (error) {
+        relay?.sendResult({ id: cmd.id, ok: false, error: error instanceof Error ? error.message : "Could not start browser", code: "backend_error" });
+        return;
+      }
+    }
     this.queue = this.queue.then(async () => {
       try {
         this.check(generation);
@@ -251,6 +291,7 @@ export class EmbeddedBrowser {
         this.check(generation);
         relay?.sendResult({ id: cmd.id, ok: true, data });
       } catch (error) {
+        if (generation !== this.generation) return;
         relay?.sendResult({ id: cmd.id, ok: false, error: error instanceof Error ? error.message : "Browser command failed", code: error instanceof ExecutorError ? error.code : "backend_error" });
       }
     });

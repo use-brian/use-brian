@@ -22,7 +22,7 @@ type ResultMessage = {
   code?: string
 }
 type EventKind = 'stopped' | 'tab_closed' | 'detached'
-type EventMessage = { type: 'event'; kind: EventKind }
+type EventMessage = { type: 'event'; kind: EventKind; controlEpoch?: number }
 type PingMessage = { type: 'ping' }
 export type ExtensionToRelay = HelloMessage | ResultMessage | EventMessage | PingMessage
 
@@ -35,6 +35,8 @@ type CommandMessage = {
   op: string
   args: Record<string, unknown>
   controlMode: LocalControlMode
+  /** Echoes the last Stop fence processed by the relay. */
+  controlEpoch?: number
 }
 type PongMessage = { type: 'pong' }
 type ErrorMessage = { type: 'error'; message: string }
@@ -60,6 +62,7 @@ export function parseRelayMessage(raw: unknown): RelayToExtension | null {
         op: c.op,
         args: c.args ?? {},
         controlMode: c.controlMode === 'full_browser' ? 'full_browser' : 'task_tabs',
+        ...(Number.isSafeInteger(c.controlEpoch) && c.controlEpoch! >= 0 ? { controlEpoch: c.controlEpoch } : {}),
       }
     }
   }
