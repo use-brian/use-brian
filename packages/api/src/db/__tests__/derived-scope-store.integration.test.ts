@@ -40,7 +40,7 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
   it('persists delegated input/output from workspace-wide sources and holds them when a source changes', async () => {
     const f = await fixture(), sessionId = randomUUID()
     await pool.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id)
-      VALUES($1,$2,$3,'web',$1::text)`, [sessionId,f.assistantId,f.userId])
+      VALUES($1::uuid,$2,$3,'web',$1::uuid::text)`, [sessionId,f.assistantId,f.userId])
     const input = await f.create({ userId: null,
       sensitivity: 'confidential', compartments: ['finance'], projectIds: [f.projectId] })
     await pool.query('UPDATE memories SET assistant_id=NULL WHERE id=$1', [input.id])
@@ -69,7 +69,7 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
   it('still rejects partial conversation scope while accepting legacy unscoped messages', async () => {
     const f = await fixture(), sessionId = randomUUID()
     await pool.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id)
-      VALUES($1,$2,$3,'web',$1::text)`, [sessionId,f.assistantId,f.userId])
+      VALUES($1::uuid,$2,$3,'web',$1::uuid::text)`, [sessionId,f.assistantId,f.userId])
     await expect(addSessionMessage({ sessionId, role: 'user', content: 'Legacy' })).resolves.toBeDefined()
     const complete = { workspace_id: f.workspaceId, sensitivity: 'internal', compartments: [],
       project_ids: [], scope_version: 1, scope_held: false }
