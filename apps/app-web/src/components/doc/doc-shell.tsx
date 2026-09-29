@@ -133,6 +133,7 @@ import {
   takePendingBuild,
 } from "@/lib/pending-build";
 import { PageBuildIndicator } from "./page-build-indicator";
+import { PageLoadErrorState } from "./error-states";
 import { subscribeBuildActivity, buildIndicatorTransition } from "@/lib/build-activity";
 import { offlineWrite } from "@/lib/offline/offline-writes";
 import {
@@ -349,7 +350,8 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     suggestedOpen,
   );
 
-  const [activeError, setActiveError] = useState<string | null>(null);
+  const [activeError, setActiveError] = useState<{ message: string; occurredAt: string } | null>(null);
+  const [activeLoadAttempt, setActiveLoadAttempt] = useState(0);
   // Centre-pane errors (build / full-width / clearance) route through the
   // provider's single `topError` channel so there's one banner; `setTopError`
   // here is the provider's setter (aliased `setSidebarTopError` above).
@@ -742,14 +744,17 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         // user reading it rather than replacing a working page with an error.
         if (cached) return;
         const err = readSurfaceCache(cacheKey).error;
-        setActiveError(err instanceof Error ? err.message : String(err));
+        setActiveError({
+          message: err instanceof Error ? err.message : String(err),
+          occurredAt: new Date().toISOString(),
+        });
         setActiveView(null);
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [urlViewId, pushRecent, recordPrune]);
+  }, [urlViewId, pushRecent, recordPrune, activeLoadAttempt]);
 
   function navigateToView(id: string | null) {
     // Navigate the ACTIVE tab; the canonical `/p/<id>` URL follows via the
@@ -1354,9 +1359,12 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
           </div>
         )}
         {!urlPanel && activeError && (
-          <div className="m-6 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            {activeError}
-          </div>
+          <PageLoadErrorState
+            error={activeError.message}
+            occurredAt={activeError.occurredAt}
+            path={pathname}
+            onRetry={() => setActiveLoadAttempt((attempt) => attempt + 1)}
+          />
         )}
         {!suggestedOpen && urlViewId && !activeError && (
           <>

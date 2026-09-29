@@ -438,12 +438,15 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
       tools: new Map(),
     })
 
-    // Default — constrained prompt, no urlReader nudge, 1-2 search cap.
+    // Default — capability-neutral prompt, no urlReader nudge, and a compact
+    // retrieval budget that works for connector reads as well as web search.
     // User message is the raw prompt without any RESEARCH MODE preamble.
     manager.spawn('default task', ctx)
     await manager.waitAll()
     expect(seenPrompts).toHaveLength(1)
-    expect(seenPrompts[0]).toContain('1-2 web searches maximum')
+    expect(seenPrompts[0]).toContain('isolated read-only worker')
+    expect(seenPrompts[0]).toContain('1-2 focused retrieval operations')
+    expect(seenPrompts[0]).toContain('batch/list/search operation')
     expect(seenPrompts[0]).not.toContain('urlReader')
     expect(seenUserMessages[0]).toBe('default task')
 
@@ -462,7 +465,7 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     expect(seenPrompts[1]).toContain('<self-critique>')
     expect(seenPrompts[1]).toContain('<failed-sources>')
     expect(seenPrompts[1]).toContain('Failure codes')
-    expect(seenPrompts[1]).not.toContain('1-2 web searches maximum')
+    expect(seenPrompts[1]).not.toContain('1-2 focused retrieval operations')
     expect(seenUserMessages[1]).toContain('Research protocol')
     expect(seenUserMessages[1]).toContain('Forbidden')
     expect(seenUserMessages[1]).toContain('research task') // original prompt still appended
@@ -473,7 +476,7 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     manager.spawn('post-reset task', ctx)
     await manager.waitAll()
     expect(seenPrompts).toHaveLength(3)
-    expect(seenPrompts[2]).toContain('1-2 web searches maximum')
+    expect(seenPrompts[2]).toContain('1-2 focused retrieval operations')
     expect(seenUserMessages[2]).toBe('post-reset task')
   })
 

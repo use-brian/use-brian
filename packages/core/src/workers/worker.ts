@@ -184,7 +184,7 @@ export type WorkerOptions = {
   onUsage?: (usage: WorkerUsageEvent) => void
 }
 
-const WORKER_SYSTEM_PROMPT = `You are a research assistant. Your job is to find specific information and return it concisely.
+const WORKER_SYSTEM_PROMPT = `You are an isolated read-only worker. Your job is to complete one self-contained task and return the result concisely.
 
 Rules:
 - Answer the question directly, no preamble
@@ -193,13 +193,13 @@ Rules:
 - Format as a structured list when returning multiple items
 - If you can't find what's asked, say so clearly
 - Do NOT interact with the user — return your findings to the main assistant
-- Use 1-2 web searches maximum per task. A single well-crafted search is almost always enough. Do NOT search for each individual item separately — search for a list/roundup instead.
+- Use 1-2 focused retrieval operations by default; use more only when the brief clearly requires them. Prefer one batch/list/search operation over reading each item separately.
 - Stop searching once you have enough to answer. Don't seek exhaustive coverage.`
 
 /**
  * Research-mode prompt — used when the parent loop is in deep-research mode
- * (Research toggle on + max-tier model). The default prompt caps web searches
- * at 1-2 and never mentions urlReader, which causes workers to return raw
+ * (Research toggle on + max-tier model). The default prompt keeps retrieval
+ * brief and never mandates urlReader, which can cause workers to return raw
  * search snippets instead of actual page content. For research turns the
  * user has explicitly asked for thoroughness, so we mandate the search →
  * read → cite chain that webSearch's own tool description already documents.
@@ -345,7 +345,7 @@ export function createWorkerManager(options: WorkerOptions) {
   // model so it knows to wait for completions before spawning more. Null
   // means unlimited (the default). Reset to null in `reset()`.
   //
-  // Research mode sets this to 10 so the coordinator can fan out broadly
+  // Research mode sets this to 5 so the coordinator can fan out broadly
   // on initial waves and refill the pool after a wave drains. Non-research
   // paths (splitter-triggered parallel research) leave it null because
   // their fan-outs are small (2-3 workers) and bounded by the classifier.
@@ -1150,7 +1150,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * the model) when at capacity. Pass `null` for unlimited. Reset to null
      * in `reset()`.
      *
-     * Research mode sets this to 10 so the coordinator can fan out broadly
+     * Research mode sets this to 5 so the coordinator can fan out broadly
      * on the initial wave and refill the pool after Phase 4b drains workers
      * between waves.
      */

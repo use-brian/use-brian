@@ -13,6 +13,7 @@ function makeFakeManager(options?: { cap?: number | null }): FakeManager {
   const stopped: string[] = []
   const results = new Map<string, string>()
   const statuses = new Map<string, WorkerStatus>()
+  const owners = new Map<string, string>()
   let counter = 0
   let cap: number | null = options?.cap ?? null
   function active(): number {
@@ -23,11 +24,12 @@ function makeFakeManager(options?: { cap?: number | null }): FakeManager {
   return {
     spawned,
     stopped,
-    spawn(prompt: string, _context: unknown, _requestTools?: unknown, description?: string) {
+    spawn(prompt: string, context: { sessionId: string }, _requestTools?: unknown, description?: string) {
       if (cap !== null && active() >= cap) return null
       const workerId = `worker_${++counter}`
       spawned.push({ prompt, description })
       statuses.set(workerId, 'running')
+      owners.set(workerId, context.sessionId)
       return { workerId }
     },
     setMaxConcurrent(n: number | null) {
@@ -57,6 +59,13 @@ function makeFakeManager(options?: { cap?: number | null }): FakeManager {
       return results.get(workerId) ?? null
     },
     get pendingCount(): number { return active() },
+    pendingCountFor(sessionId: string): number {
+      let count = 0
+      for (const [workerId, status] of statuses) {
+        if (status === 'running' && owners.get(workerId) === sessionId) count++
+      }
+      return count
+    },
     drainNotifications(): WorkerResult[] { return [] },
     async waitForNext(): Promise<void> {},
     async waitAll(): Promise<WorkerResult[]> { return [] },
@@ -133,9 +142,46 @@ describe('[COMP:workers/tools] spawnWorker', () => {
     expect(spawnWorker.isReadOnly).toBe(false)
   })
 
+  it('describes opportunistic delegation and its lower-overhead alternatives', () => {
+    const { spawnWorker } = createWorkerTools(makeFakeManager())
+    expect(spawnWorker.description).toContain('2 or more self-contained subtasks')
+    expect(spawnWorker.description).toContain('connector batch operation')
+    expect(spawnWorker.description).toContain('not limited to web research')
+    expect(spawnWorker.description).toContain('up to 4 active workers per parent session')
+  })
+
+  it('caps ordinary fan-out at four active workers in the same session', async () => {
+    const manager = makeFakeManager()
+    const { spawnWorker } = createWorkerTools(manager)
+    for (let i = 1; i <= 4; i++) {
+      const result = await spawnWorker.execute({ description: `w${i}`, prompt: `task ${i}` }, ctx)
+      expect(result.isError).toBeFalsy()
+    }
+
+    const rejected = await spawnWorker.execute({ description: 'w5', prompt: 'task 5' }, ctx)
+    expect(rejected.isError).toBe(true)
+    expect(String(rejected.data)).toContain('4/4')
+    expect(manager.spawned).toHaveLength(4)
+  })
+
+  it('does not charge another session against the ordinary per-session cap', async () => {
+    const manager = makeFakeManager()
+    const { spawnWorker } = createWorkerTools(manager)
+    for (let i = 1; i <= 4; i++) {
+      await spawnWorker.execute({ description: `s1-${i}`, prompt: `task ${i}` }, ctx)
+    }
+
+    const otherSessionResult = await spawnWorker.execute(
+      { description: 's2-1', prompt: 'other session task' },
+      { ...ctx, sessionId: 's2' },
+    )
+    expect(otherSessionResult.isError).toBeFalsy()
+    expect(manager.spawned).toHaveLength(5)
+  })
+
   it('returns a structured at-capacity error when the manager rejects the spawn', async () => {
     // Concurrency cap: when the manager refuses to spawn (e.g. research mode
-    // is at 10/10 active workers), the tool surfaces a structured error
+    // is at its configured active-worker limit), the tool surfaces an error
     // tool_result so the model sees clear feedback to stop spawning this
     // turn and let Phase 4b drain. Without this, the model could silently
     // burn budget asking for workers that never started.
@@ -226,6 +272,7 @@ describe('[COMP:workers/tools] sendWorkerMessage', () => {
     expect(result.isError).toBeFalsy()
     expect(result.data).toBe('The answer is 42')
   })
+
 })
 
 describe('[COMP:workers/tools] stopWorker', () => {

@@ -176,7 +176,7 @@ describe('[COMP:api/session-resume-store] create', () => {
     } as never)
 
     const row = await store.getBySessionId('sess-1')
-    expect(row.workerRunIds).toEqual([])
+    expect(row).toMatchObject({ workerRunIds: [] })
   })
 })
 
