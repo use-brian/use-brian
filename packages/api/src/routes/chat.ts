@@ -6179,8 +6179,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
-      // Reset worker manager — prevents stale workers from prior requests blocking Phase 4b
-      options.workerManager?.reset()
+      // Reset only this session's stale worker state. The manager is shared
+      // process-wide, so a global reset here would abort concurrent users'
+      // workers and allow late old completions to collide with reused ids.
+      options.workerManager?.resetForSession(session.id)
       // Phase 3 of askQuestion suspend-resume — wire per-turn worker
       // persistence so a Cloud Run rotation between a suspend and the
       // user's answer can rehydrate worker results on the new instance.
@@ -6195,9 +6197,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
       // Per-request research flag: workers spawned during a Research-mode turn
       // get a loosened system prompt (chain webSearch → urlReader, up to 5
-      // searches, surface blocked URLs) and a higher turn budget. Reset back
-      // to false above via `reset()`, so this only widens the current turn.
-      options.workerManager?.setResearchMode(researchMode)
+      // searches, surface blocked URLs) and a higher turn budget. The
+      // session-scoped reset above clears this binding on the next turn.
+      options.workerManager?.setResearchMode(researchMode, session.id)
       // Upgrade research workers to the coordinator's model. Without this they
       // run on boot-time Flash, which treats "Search for X" prompts as one-shot
       // and skips urlReader entirely — defeating the deep-research wedge.
@@ -6206,7 +6208,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // routing provider reapplies the live application preference on spawn
         // and durable rehydrate. Explicit custom selectors still ride
         // workerRuntime and remain pinned authoritatively.
-        options.workerManager?.setResearchModel(logicalModel)
+        options.workerManager?.setResearchModel(logicalModel, session.id)
         // Cap concurrent workers at 5 for the research session. Lowered
         // from 10 after sustained 4GB OOM crashes — 10 concurrent worker
         // queryLoops at HIGH thinking + their statelessHistory growth +
@@ -6215,7 +6217,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // coordinator real fan-out. The coordinator can refill the pool
         // after Phase 4b drains between waves, so total worker output
         // across multi-wave is comparable to the 10-cap setup.
-        options.workerManager?.setMaxConcurrent(5)
+        options.workerManager?.setMaxConcurrent(5, session.id)
       }
 
       // ── Pre-flight: automatic parallel research ──────────────
@@ -6401,7 +6403,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   sendEvent('citation', { sources: newSources })
                 }
               }
-            })
+            }, session.id)
           }
         } else if (!isDocResearchTurn && !operateSiteIntent) {
           // Standard: application-layer pre-flight.

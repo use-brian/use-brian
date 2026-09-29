@@ -132,6 +132,23 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     expect(bEvents).toHaveLength(0)
   })
 
+  it('keeps concurrent sessions\' onEvent bindings isolated', async () => {
+    const manager = createWorkerManager({ provider: makeFakeProvider('x'), model: 'gemini-flash', tools: new Map() })
+    const aEvents: string[] = []
+    const bEvents: string[] = []
+    manager.setOnEvent(() => { aEvents.push('a') }, 'sess-A')
+    manager.setOnEvent(() => { bEvents.push('b') }, 'sess-B')
+
+    manager.spawn('do A', { ...ctx, sessionId: 'sess-A' })
+    manager.spawn('do B', { ...ctx, sessionId: 'sess-B' })
+    await manager.waitAll()
+
+    expect(aEvents.length).toBeGreaterThan(0)
+    expect(bEvents.length).toBeGreaterThan(0)
+    expect(aEvents.every((event) => event === 'a')).toBe(true)
+    expect(bEvents.every((event) => event === 'b')).toBe(true)
+  })
+
   it('forwards a worker run\'s accumulated usage to onUsage with the spawn billing identity', async () => {
     const usages: WorkerUsageEvent[] = []
     const manager = createWorkerManager({
@@ -270,6 +287,56 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     expect(manager.hasNotificationsFor('s1')).toBe(false)
 
     manager.reset()
+  })
+
+  it('resetForSession preserves another session worker and keeps ids collision-free', async () => {
+    let releaseFirst!: () => void
+    let firstStarted!: () => void
+    let firstAborted = false
+    const release = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const started = new Promise<void>((resolve) => { firstStarted = resolve })
+    let streamCount = 0
+    const provider: LLMProvider = {
+      name: 'fake',
+      models: ['gemini-flash'],
+      async *stream(req: ProviderRequest) {
+        streamCount++
+        if (streamCount === 1) {
+          req.signal?.addEventListener('abort', () => { firstAborted = true }, { once: true })
+          firstStarted()
+          await release
+        }
+        const result = `result-${streamCount}`
+        yield { type: 'message_start', model: 'gemini-flash' }
+        yield { type: 'text_delta', text: result }
+        yield {
+          type: 'message_end',
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: result.length },
+        }
+      },
+      createSession(): ProviderSession {
+        throw new Error('stateless worker should use provider.stream')
+      },
+    }
+    const manager = createWorkerManager({ provider, model: 'gemini-flash', tools: new Map() })
+    const first = manager.spawn('session A', { ...ctx, sessionId: 'sess-A' })!
+    await started
+
+    manager.resetForSession('sess-B')
+    const second = manager.spawn('session B', { ...ctx, sessionId: 'sess-B' })!
+    expect(first.workerId).toBe('worker_1')
+    expect(second.workerId).toBe('worker_2')
+    expect(manager.pendingCountFor('sess-A')).toBe(1)
+    expect(firstAborted).toBe(false)
+    expect(manager.getStatus(first.workerId, 'sess-B')).toBeNull()
+    expect(manager.stop(first.workerId, 'sess-B')).toBe(false)
+
+    releaseFirst()
+    await manager.waitAll()
+    expect(manager.getResult(first.workerId, 'sess-B')).toBeNull()
+    expect(manager.drainNotifications('sess-A')).toHaveLength(1)
+    expect(manager.drainNotifications('sess-B')).toHaveLength(1)
   })
 
   it('pendingCount tracks running workers', async () => {

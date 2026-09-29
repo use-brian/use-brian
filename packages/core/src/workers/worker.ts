@@ -50,8 +50,8 @@ export type WorkerResult = {
  *
  * Row identity is the caller-generated `runId` (a UUID). Migration 190
  * originally keyed rows by (session_id, worker_id) UNIQUE, but the
- * in-process worker_id is a per-request monotonic counter that resets
- * on every reset(); cross-request collisions silently merged two
+ * in-process worker_id was a per-request counter that reset on every
+ * reset(); cross-request collisions silently merged two
  * different workers' state into one row. Migration 194 dropped the
  * UNIQUE; runIds are now the addressable identity (worker_id stays as
  * a display label only).
@@ -364,6 +364,30 @@ export function createWorkerManager(options: WorkerOptions) {
   let persistenceSessionId: string | null = null
   let persistenceWorkspaceId: string | null = null
 
+  type SessionWorkerConfig = {
+    onEvent?: (workerId: string, event: QueryEvent) => void
+    researchMode: boolean
+    researchModel: string | null
+    maxConcurrent: number | null
+    persistenceStore: WorkerRunsStore | null
+    workspaceId: string | null
+  }
+  const sessionConfigs = new Map<string, SessionWorkerConfig>()
+
+  function getOrCreateSessionConfig(sessionId: string): SessionWorkerConfig {
+    const existing = sessionConfigs.get(sessionId)
+    if (existing) return existing
+    const created: SessionWorkerConfig = {
+      researchMode: false,
+      researchModel: null,
+      maxConcurrent: null,
+      persistenceStore: null,
+      workspaceId: null,
+    }
+    sessionConfigs.set(sessionId, created)
+    return created
+  }
+
   function persistFireAndForget(p: Promise<void>, op: string, workerId: string) {
     p.catch((err) => {
       console.warn(
@@ -376,6 +400,14 @@ export function createWorkerManager(options: WorkerOptions) {
     let active = 0
     for (const w of workers.values()) {
       if (w.status === 'running') active++
+    }
+    return active
+  }
+
+  function countActiveWorkersFor(sessionId: string): number {
+    let active = 0
+    for (const worker of workers.values()) {
+      if (worker.status === 'running' && worker.ownerSessionId === sessionId) active++
     }
     return active
   }
@@ -434,10 +466,14 @@ export function createWorkerManager(options: WorkerOptions) {
       ? new Map([...requestTools].filter(([_, t]) => t.isReadOnly))
       : options.tools
 
+    const sessionConfig = context.sessionId
+      ? sessionConfigs.get(context.sessionId)
+      : undefined
+
     // Pick the prompt + budget + model at spawn time. Per-spawn snapshot —
     // flipping `researchMode` mid-turn doesn't retroactively change a worker
     // already running, which matches `setOnEvent`'s semantics.
-    const isResearch = researchMode
+    const isResearch = sessionConfig?.researchMode ?? researchMode
     // Research workers additionally get the governed read-browse tools
     // (sends-forbidden by construction — see setResearchBrowseTools). Standard
     // preflight workers and non-research spawns never see them: a cheap
@@ -471,8 +507,9 @@ export function createWorkerManager(options: WorkerOptions) {
     const userPrompt = isResearch
       ? `${RESEARCH_USER_PROMPT_PREAMBLE}${prompt}`
       : prompt
+    const configuredResearchModel = sessionConfig?.researchModel ?? researchModel
     const model = context.workerRuntime?.model
-      ?? (isResearch && researchModel ? researchModel : options.model)
+      ?? (isResearch && configuredResearchModel ? configuredResearchModel : options.model)
     const workerProvider = context.workerRuntime?.provider ?? options.provider
 
     // Capture per-spawn refs from the SPAWNING TURN's `context` (stable per
@@ -488,11 +525,14 @@ export function createWorkerManager(options: WorkerOptions) {
     // concurrent setOnEvent() must not redirect THIS worker's events
     // (queries / URLs / findings) and its tool-cost + analytics into another
     // user's live SSE stream.
-    const ownStore = persistenceStore
+    const ownStore = sessionConfig?.persistenceStore ?? persistenceStore
     const ownSessionId: string | null = context.sessionId ?? persistenceSessionId ?? null
-    const ownWorkspaceId: string | null = context.workspaceId ?? persistenceWorkspaceId ?? null
+    const ownWorkspaceId: string | null = context.workspaceId
+      ?? sessionConfig?.workspaceId
+      ?? persistenceWorkspaceId
+      ?? null
     const ownerSessionId: string | null = ownSessionId
-    const ownOnEvent = options.onEvent
+    const ownOnEvent = sessionConfig?.onEvent ?? options.onEvent
     const ownOnUsage = options.onUsage
 
     // Persistence — record spawn (skip when rehydrating; the row already
@@ -845,19 +885,19 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
   }
 
   return {
-    /**
-     * Reset the manager for a new request — abort stale workers, clear state.
-     * Call at the start of each request to prevent cross-request contamination.
-     */
+    /** Fully reset a request-local manager. Shared web paths use
+     * `resetForSession` so concurrent sessions are never disturbed. */
     reset() {
-      for (const entry of workers.values()) {
+      for (const [workerId, entry] of workers) {
         if (entry.status === 'running') {
+          entry.status = 'stopped'
+          entry.suppressNotification = true
           entry.abortController?.abort()
+        } else {
+          workers.delete(workerId)
         }
       }
-      workers.clear()
       notifications.length = 0
-      workerCounter = 0
       options.onEvent = undefined
       researchMode = false
       researchModel = null
@@ -865,6 +905,28 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       persistenceStore = null
       persistenceSessionId = null
       persistenceWorkspaceId = null
+      sessionConfigs.clear()
+    },
+
+    /** Reset stale state owned by one web session without touching any other
+     * request sharing this process-wide manager. Worker ids stay monotonic so
+     * a late cancelled promise cannot collide with a newer entry. */
+    resetForSession(sessionId: string) {
+      for (const [workerId, entry] of workers) {
+        if (entry.ownerSessionId !== sessionId) continue
+        if (entry.status === 'running') {
+          entry.status = 'stopped'
+          entry.suppressNotification = true
+          entry.abortController?.abort()
+        } else if (entry.promise === undefined) {
+          workers.delete(workerId)
+        }
+      }
+      for (let i = notifications.length - 1; i >= 0; i--) {
+        if (notifications[i]?.ownerSessionId === sessionId) notifications.splice(i, 1)
+      }
+      sessionConfigs.delete(sessionId)
+      wake()
     },
 
     /**
@@ -879,6 +941,12 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       sessionId: string | null
       workspaceId: string | null
     }) {
+      if (params.sessionId) {
+        const config = getOrCreateSessionConfig(params.sessionId)
+        config.persistenceStore = params.store
+        config.workspaceId = params.workspaceId
+        return
+      }
       persistenceStore = params.store
       persistenceSessionId = params.sessionId
       persistenceWorkspaceId = params.workspaceId
@@ -912,10 +980,12 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       context: ToolContext,
       requestTools?: Map<string, Tool>,
     ): Promise<{ respawned: number; notificationsReady: number }> {
-      if (!persistenceStore) {
+      const sessionConfig = sessionConfigs.get(sessionId)
+      const store = sessionConfig?.persistenceStore ?? persistenceStore
+      if (!store) {
         return { respawned: 0, notificationsReady: 0 }
       }
-      const rows = await persistenceStore.loadForSession(sessionId)
+      const rows = await store.loadForSession(sessionId)
       let respawned = 0
       let notificationsReady = 0
       // Drive the workerCounter past the highest known id so a follow-up
@@ -936,10 +1006,11 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
           // but be defensive: if a row says research_mode=true and the
           // current setting differs, the row's value wins for that
           // single respawn (we toggle, spawn, restore).
-          const savedResearch = researchMode
-          const savedModel = researchModel
-          researchMode = row.researchMode
-          researchModel = row.researchMode ? row.model : null
+          const config = getOrCreateSessionConfig(sessionId)
+          const savedResearch = config.researchMode
+          const savedModel = config.researchModel
+          config.researchMode = row.researchMode
+          config.researchModel = row.researchMode ? row.model : null
           try {
             const rowContext = context.workerRuntime
               ? {
@@ -958,8 +1029,8 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
             )
             respawned++
           } finally {
-            researchMode = savedResearch
-            researchModel = savedModel
+            config.researchMode = savedResearch
+            config.researchModel = savedModel
           }
         } else {
           // Pre-completed (completed | failed | stopped). Surface the
@@ -996,8 +1067,16 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * Set the event handler for the current request.
      * Allows the singleton manager to forward worker events to the active SSE stream.
      */
-    setOnEvent(handler: ((workerId: string, event: QueryEvent) => void) | undefined) {
+    setOnEvent(
+      handler: ((workerId: string, event: QueryEvent) => void) | undefined,
+      sessionId?: string,
+    ) {
+      if (sessionId) {
+        getOrCreateSessionConfig(sessionId).onEvent = handler
+        return
+      }
       options.onEvent = handler
+      for (const config of sessionConfigs.values()) config.onEvent = handler
     },
 
     /**
@@ -1006,8 +1085,13 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * webSearch → urlReader, up to 5 searches, surface blocked sources) and a
      * higher per-worker turn budget. Reset back to false in `reset()`.
      */
-    setResearchMode(enabled: boolean) {
+    setResearchMode(enabled: boolean, sessionId?: string) {
+      if (sessionId) {
+        getOrCreateSessionConfig(sessionId).researchMode = enabled
+        return
+      }
       researchMode = enabled
+      for (const config of sessionConfigs.values()) config.researchMode = enabled
     },
 
     /**
@@ -1016,8 +1100,13 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * max-tier model so worker intelligence matches the coordinator's. Pass
      * `null` to fall back to `options.model`. Reset to null in `reset()`.
      */
-    setResearchModel(model: string | null) {
+    setResearchModel(model: string | null, sessionId?: string) {
+      if (sessionId) {
+        getOrCreateSessionConfig(sessionId).researchModel = model
+        return
+      }
       researchModel = model
+      for (const config of sessionConfigs.values()) config.researchModel = model
     },
 
     /**
@@ -1030,8 +1119,17 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * on the initial wave and refill the pool after Phase 4b drains workers
      * between waves.
      */
-    setMaxConcurrent(n: number | null) {
+    setMaxConcurrent(n: number | null, sessionId?: string) {
+      if (sessionId) {
+        getOrCreateSessionConfig(sessionId).maxConcurrent = n
+        return
+      }
       maxConcurrent = n
+      for (const config of sessionConfigs.values()) config.maxConcurrent = n
+    },
+
+    clearSessionConfig(sessionId: string) {
+      sessionConfigs.delete(sessionId)
     },
 
     /**
@@ -1055,7 +1153,13 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * telling the model to wait for some workers to complete first.
      */
     spawn(prompt: string, context: ToolContext, requestTools?: Map<string, Tool>, description?: string): { workerId: string } | null {
-      if (maxConcurrent !== null && countActiveWorkers() >= maxConcurrent) {
+      const cap = context.sessionId
+        ? sessionConfigs.get(context.sessionId)?.maxConcurrent ?? maxConcurrent
+        : maxConcurrent
+      const active = context.sessionId
+        ? countActiveWorkersFor(context.sessionId)
+        : countActiveWorkers()
+      if (cap !== null && active >= cap) {
         return null
       }
       const workerId = `worker_${++workerCounter}`
@@ -1066,9 +1170,13 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     /**
      * Stop a running worker.
      */
-    stop(workerId: string): boolean {
+    stop(workerId: string, sessionId?: string): boolean {
       const entry = workers.get(workerId)
-      if (!entry || entry.status !== 'running') return false
+      if (
+        !entry
+        || entry.status !== 'running'
+        || (sessionId !== undefined && entry.ownerSessionId !== sessionId)
+      ) return false
       entry.abortController?.abort()
       entry.status = 'stopped'
       return true
@@ -1086,7 +1194,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       for (const entry of workers.values()) {
         if (
           entry.status === 'running'
-          && (entry.ownerSessionId == null || entry.ownerSessionId === sessionId)
+          && entry.ownerSessionId === sessionId
         ) {
           entry.status = 'stopped'
           entry.suppressNotification = true
@@ -1096,7 +1204,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       }
       for (let i = notifications.length - 1; i >= 0; i--) {
         const owner = notifications[i]?.ownerSessionId
-        if (owner == null || owner === sessionId) notifications.splice(i, 1)
+        if (owner === sessionId) notifications.splice(i, 1)
       }
       wake()
       return cancelled
@@ -1105,22 +1213,28 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     /**
      * Get the status of a worker.
      */
-    getStatus(workerId: string): WorkerStatus | null {
-      return workers.get(workerId)?.status ?? null
+    getStatus(workerId: string, sessionId?: string): WorkerStatus | null {
+      const entry = workers.get(workerId)
+      if (!entry || (sessionId !== undefined && entry.ownerSessionId !== sessionId)) return null
+      return entry.status
     },
 
     /**
      * Get the short description of a worker (first 100 chars of its prompt).
      */
-    getDescription(workerId: string): string | null {
-      return workers.get(workerId)?.description ?? null
+    getDescription(workerId: string, sessionId?: string): string | null {
+      const entry = workers.get(workerId)
+      if (!entry || (sessionId !== undefined && entry.ownerSessionId !== sessionId)) return null
+      return entry.description
     },
 
     /**
      * Get the result of a completed worker.
      */
-    getResult(workerId: string): string | null {
-      return workers.get(workerId)?.result ?? null
+    getResult(workerId: string, sessionId?: string): string | null {
+      const entry = workers.get(workerId)
+      if (!entry || (sessionId !== undefined && entry.ownerSessionId !== sessionId)) return null
+      return entry.result ?? null
     },
 
     /**

@@ -600,6 +600,10 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       yield event
     }
   } finally {
+    if (toolContext.abortSignal?.aborted) {
+      toolContext.workerManager?.cancelForSession?.(toolContext.sessionId)
+    }
+    toolContext.workerManager?.clearSessionConfig?.(toolContext.sessionId)
     watchdog?.dispose()
     const results = await Promise.allSettled(
       [...invocationFinalizers.values()].map((finalize) => finalize()),
@@ -1636,10 +1640,7 @@ async function* queryLoopCore(
             }
           }
           if (context.abortSignal?.aborted) {
-            const cancelledWorkers = wm.cancelForSession(wmSid)
-            console.log(
-              `[query-loop] Phase 4b: request aborted; cancelled ${cancelledWorkers} worker(s) for session`,
-            )
+            console.log('[query-loop] Phase 4b: request aborted; session workers will be cancelled')
             return
           }
         }

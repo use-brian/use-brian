@@ -6,13 +6,10 @@ import type { WorkerManager } from './worker.js'
  * Create the three worker tools backed by a WorkerManager.
  */
 /**
- * Worker ids are per-request and in-memory: `spawn()` mints `worker_<n>` from
- * a counter that `reset()` zeroes at the end of every request, and the map
- * itself is cleared with it. So an id from an earlier turn does not resolve —
- * and there is deliberately NO listing tool to re-resolve it from, because the
- * only valid source is a `spawnWorker` result inside the SAME turn. Say that,
- * rather than sending the model hunting for a discovery tool that does not
- * exist (the exact loop this copy standard is closing).
+ * Worker ids are in-memory and manager-lifetime monotonic so late completion
+ * from one request cannot collide with a newer worker. Tool lookups are also
+ * session-scoped. There is deliberately NO listing tool: the only valid source
+ * is a `spawnWorker` result inside the SAME turn.
  */
 function workerNotFound(workerId: string): string {
   return (
@@ -72,8 +69,8 @@ export function createWorkerTools(manager: WorkerManager): {
       message: z.string().describe('Follow-up message for the worker'),
     }),
 
-    async execute(input) {
-      const status = manager.getStatus(input.workerId)
+    async execute(input, context) {
+      const status = manager.getStatus(input.workerId, context.sessionId)
       if (!status) {
         return { data: workerNotFound(input.workerId), isError: true }
       }
@@ -88,7 +85,7 @@ export function createWorkerTools(manager: WorkerManager): {
         }
       }
       // For now, return the existing result — full re-query with context is a future enhancement
-      const result = manager.getResult(input.workerId)
+      const result = manager.getResult(input.workerId, context.sessionId)
       return { data: result ?? 'No result available' }
     },
   })
@@ -100,10 +97,10 @@ export function createWorkerTools(manager: WorkerManager): {
       workerId: z.string().describe('Worker ID to stop'),
     }),
 
-    async execute(input) {
-      const stopped = manager.stop(input.workerId)
+    async execute(input, context) {
+      const stopped = manager.stop(input.workerId, context.sessionId)
       if (!stopped) {
-        const status = manager.getStatus(input.workerId)
+        const status = manager.getStatus(input.workerId, context.sessionId)
         if (!status) return { data: workerNotFound(input.workerId), isError: true }
         return {
           data:

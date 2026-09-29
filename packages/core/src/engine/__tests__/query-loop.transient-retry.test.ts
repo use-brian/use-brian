@@ -536,6 +536,67 @@ describe('[COMP:engine/query-loop] Worker result drain', () => {
       vi.useRealTimers()
     }
   })
+
+  it('cancels session workers when abort happens before Phase 4b', async () => {
+    const abortController = new AbortController()
+    let streamStarted!: () => void
+    const started = new Promise<void>((resolve) => { streamStarted = resolve })
+    const provider: LLMProvider = {
+      name: 'abort-before-drain',
+      models: ['mock-model'],
+      async *stream(req) {
+        streamStarted()
+        await new Promise<void>((_resolve, reject) => {
+          req.signal?.addEventListener('abort', () => {
+            const error = new Error('Aborted')
+            error.name = 'AbortError'
+            reject(error)
+          }, { once: true })
+        })
+      },
+      createSession() {
+        throw new Error('stateless stream expected')
+      },
+    }
+    const cancelForSession = vi.fn(() => 1)
+    const clearSessionConfig = vi.fn()
+    const workerManager = {
+      pendingCountFor: () => 1,
+      hasNotificationsFor: () => false,
+      waitForNext: () => new Promise<void>(() => {}),
+      drainNotifications: () => [],
+      formatNotification: () => '',
+      cancelForSession,
+      clearSessionConfig,
+    }
+
+    const eventsPromise = (async () => {
+      const events: QueryEvent[] = []
+      for await (const event of queryLoop({
+        ledger: NOOP_TURN_LEDGER,
+        provider,
+        model: 'mock-model',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'Research better prompting' }],
+        tools: new Map(),
+        context: {
+          ...baseContext,
+          abortSignal: abortController.signal,
+          workerManager: workerManager as unknown as WorkerManager,
+        },
+        maxTurns: 5,
+        stateless: true,
+      })) events.push(event)
+      return events
+    })()
+
+    await started
+    abortController.abort()
+    await eventsPromise
+
+    expect(cancelForSession).toHaveBeenCalledWith(baseContext.sessionId)
+    expect(clearSessionConfig).toHaveBeenCalledWith(baseContext.sessionId)
+  })
 })
 
 it.each([false, true])('does not amplify wrapped Gemini HTTP 429 retries into query-loop replays (late=%s)', async late => {
