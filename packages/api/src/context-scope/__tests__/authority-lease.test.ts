@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling } from '@use-brian/core'
-import { createAuthorityLease, runWithAuthorityLease, assertCurrentAuthority, executeWithCurrentAuthority } from '../authority-lease.js'
+import { createAuthorityLease, createSessionAuthorityLease, runWithAuthorityLease, assertCurrentAuthority, executeWithCurrentAuthority } from '../authority-lease.js'
+
+const liveSession = vi.hoisted(() => ({ row: null as Record<string, unknown> | null }))
+vi.mock('../../db/sessions.js', () => ({ findSessionAuthorityById: async () => liveSession.row }))
+vi.mock('../../db/users.js', () => ({ findAssistantById: async () => ({ id: 'assistant', workspaceId: 'workspace' }) }))
+vi.mock('../resolve-turn-scope.js', () => ({ resolveLiveAccessCeilingSystem: async () => initial }))
 
 const initial: AccessCeiling = { workspaceId: 'workspace', userId: 'actor',
   clearance: 'internal', compartments: ['product'], mutationCompartments:['product'], projectIds: [], visibilityAssistantIds: ['assistant'] }
@@ -79,5 +84,33 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
     await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
     release(initial)
     await expect(first).rejects.toMatchObject({ reason: 'authority_changed' })
+  })
+
+  describe('session lease', () => {
+    const base = { id: 'session', assistantId: 'assistant', userId: 'actor',
+      contextGroupId: 'team', contextProjectId: null, contextLockedAt: null as Date | null }
+
+    it('survives the first message locking an unlocked session mid-turn', async () => {
+      liveSession.row = { ...base }
+      const lease = createSessionAuthorityLease({ starting: initial, session: base })
+      await lease.assertCurrent()
+      // session_messages_lock_context stamps the lock on the first insert.
+      liveSession.row = { ...base, contextLockedAt: new Date('2026-09-29T00:00:00Z') }
+      await expect(lease.assertCurrent()).resolves.toBeUndefined()
+    })
+
+    it('still invalidates when the context itself changes', async () => {
+      liveSession.row = { ...base }
+      const lease = createSessionAuthorityLease({ starting: initial, session: base })
+      liveSession.row = { ...base, contextGroupId: 'other-team' }
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    })
+
+    it('invalidates when a pinned lock moves', async () => {
+      const locked = { ...base, contextLockedAt: new Date('2026-09-29T00:00:00Z') }
+      liveSession.row = { ...locked, contextLockedAt: new Date('2026-09-29T01:00:00Z') }
+      const lease = createSessionAuthorityLease({ starting: initial, session: locked })
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    })
   })
 })
