@@ -449,6 +449,18 @@ export const en = {
     "expired": "References expired. Create new references.",
     "completion": "Pending human completion after filling: finish and submit manually in the browser. Then use the extension completion control. All controlled task tabs and any full-browser tabs that received protected values must be closed and detached before unlocking. This panel cannot unlock the browser."
 },
+  tokenUsage: {
+    title: "Token usage",
+    period: "Last 30 days",
+    description: "Recorded workspace tokens across all sources. Cache tokens are shown separately. This is not a provider invoice.",
+    refresh: "Refresh",
+    error: "Could not load token usage. Try refreshing.",
+    empty: "No tokens recorded in this period.",
+    inputTokens: "Input tokens",
+    outputTokens: "Output tokens",
+    cacheReadTokens: "Cache read tokens",
+    cacheWriteTokens: "Cache write tokens",
+  },
   internalLinks: {
     recoveryTitle: "Open shared page",
     received: "Preparing this link...",

@@ -1013,3 +1013,8 @@ export function workspaceMemberDirectoryCacheKey(workspaceId: string, viewerId: 
 export function pageDirectoryCacheKey(workspaceId: string, viewerId: string): string {
   return `page-directory:${workspaceId}:${viewerId}`;
 }
+
+/** Settings telemetry is isolated by workspace and signed-in viewer. */
+export function tokenUsageCacheKey(workspaceId: string): string {
+  return `token-usage:${workspaceId}${viewerSuffix()}`;
+}

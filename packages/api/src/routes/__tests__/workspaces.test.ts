@@ -640,3 +640,42 @@ describe('[COMP:api/workspaces-route] PATCH /:workspaceId transcription preferen
     })
   })
 })
+
+
+describe('[COMP:api/workspaces-route] standalone token usage', () => {
+  const wid = '00000000-0000-4000-8000-000000000001'
+  const path = `/api/workspaces/${wid}/token-usage`
+  beforeEach(() => { process.env.USEBRIAN_EDITION = 'outpost' })
+  it('rejects unauthenticated requests without reading usage', async () => {
+    expect((await request(app()).get(path)).status).toBe(401)
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+  it('rejects nonmembers before aggregation', async () => {
+    workspaceStore.getRole.mockResolvedValue(null)
+    expect((await request(app('u1')).get(path)).status).toBe(403)
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+  it('validates ids and keeps hosted billing separate', async () => {
+    expect((await request(app('u1')).get('/api/workspaces/bad/token-usage')).status).toBe(400)
+    process.env.USEBRIAN_EDITION = 'hosted'
+    expect((await request(app('u1')).get(path)).status).toBe(404)
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+  it('scopes the aggregate to the member workspace and bounded server window', async () => {
+    workspaceStore.getRole.mockResolvedValue('member')
+    mockQuery.mockResolvedValue({ rows: [{ input: '1234', output: '50', cache_read: '20', cache_write: '5' }] } as never)
+    const res = await request(app('u1')).get(path + '?workspace_id=other&from=1900-01-01')
+    expect(res.status).toBe(200)
+    expect(workspaceStore.getRole).toHaveBeenCalledWith('u1', wid)
+    expect(res.body).toMatchObject({ inputTokens: 1234, outputTokens: 50, cacheReadTokens: 20, cacheWriteTokens: 5 })
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('WHERE workspace_id = $1 AND created_at >= $2 AND created_at < $3'), [wid, res.body.from, res.body.to])
+    expect(Date.parse(res.body.to) - Date.parse(res.body.from)).toBe(30 * 86400000)
+  })
+  it('returns zeros for an empty window and an error for database failure', async () => {
+    workspaceStore.getRole.mockResolvedValue('member')
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+    expect((await request(app('u1')).get(path)).body.inputTokens).toBe(0)
+    mockQuery.mockRejectedValueOnce(new Error('database unavailable'))
+    expect((await request(app('u1')).get(path)).status).toBe(500)
+  })
+})

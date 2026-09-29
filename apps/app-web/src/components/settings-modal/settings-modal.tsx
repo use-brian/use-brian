@@ -38,6 +38,7 @@ import type { DeploymentCapabilities } from "@use-brian/shared/deployment-capabi
 import { AccountSection } from "./sections/account-section";
 import { GeneralSection } from "./sections/general-section";
 import { PrivacySection } from "./sections/privacy-section";
+import { TokenUsageSection } from "./sections/token-usage-section";
 import { BillingSection } from "./sections/billing-section";
 import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
@@ -81,16 +82,16 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   // Billing sits last in the group: day-to-day workspace config first.
   "ws-plan",
 ];
-// The OSS single-player edition has no billing: drop the Plan + Usage sections
-// entirely. People and department administration share the Organization shortcut.
-// Browser profiles live in the
-// Browsers mini app in both editions.
+// Standalone editions expose token usage, not hosted billing. People and
+// department administration share the Organization shortcut. Browser profiles
+// live in the Browsers mini app in both editions.
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-organization",
   "ws-general",
   "ws-projects",
   "ws-models",
   "ws-domains",
+  "ws-usage",
 ];
 
 const OSS_SOURCE_URL = "https://github.com/use-brian/use-brian";
@@ -111,7 +112,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [memberTarget,setMemberTarget]=useState(initialMemberTarget);
-  const activeSection = section === "ws-usage" ? "ws-plan"
+  const activeSection = section === "ws-usage" && deploymentCapabilities().billing ? "ws-plan"
     : section === "ws-llm-key" ? "ws-models" : section;
   const labels: Record<SettingsSection, string> = {
     "ws-organization": t.organization.title,
@@ -399,11 +400,8 @@ function SectionBody({
       if (deploymentCapabilities().billing) return <BillingSection />;
       return deploymentCapabilities().hostedUpgradePrompts ? <HostedUpgradeSection /> : null;
     case "ws-usage":
-      // Alias: Usage merged into the Plan section ("Plan & usage"). Kept so
-      // openWorkspaceSettings("ws-usage") deep links still land somewhere
-      // sensible. OSS has no billing; defensive upgrade pitch.
-      if (deploymentCapabilities().billing) return <BillingSection />;
-      return deploymentCapabilities().hostedUpgradePrompts ? <HostedUpgradeSection /> : null;
+      // Hosted keeps its historical alias; standalone reads local token telemetry.
+      return deploymentCapabilities().billing ? <BillingSection /> : <TokenUsageSection />;
     case "ws-models":
       // Custom endpoint profiles and tier assignments work in both editions.
       // Hosted additionally exposes metered profiles and billing estimates.

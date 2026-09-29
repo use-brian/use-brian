@@ -27,6 +27,7 @@ import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
  */
 
 import { Router } from 'express'
+import { getWorkspaceTokenUsage } from '../db/oss-usage-store.js'
 import { seedBuiltinPrimitiveCapabilities } from '../db/capability-seed.js'
 import { z } from 'zod'
 import {
@@ -277,6 +278,21 @@ export function workspaceRoutes({
     } catch (error) {
       console.error('[workspaces] member directory failed:', error)
       send(500, { error: 'member_directory_unavailable' })
+    }
+  })
+
+  router.get('/:workspaceId/token-usage', async (req, res) => {
+    if (!req.userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    if (deploymentCapabilities().billing) { res.sendStatus(404); return }
+    if (!z.string().uuid().safeParse(req.params.workspaceId).success) {
+      res.status(400).json({ error: 'Invalid workspace id' }); return
+    }
+    try {
+      if (!await requireWorkspaceRole(req as any, res, 'member')) return
+      res.json(await getWorkspaceTokenUsage(req.params.workspaceId))
+    } catch (error) {
+      console.error('[workspaces] token usage failed', error)
+      res.status(500).json({ error: 'Failed to load token usage' })
     }
   })
 
