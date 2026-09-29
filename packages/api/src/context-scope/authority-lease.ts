@@ -102,7 +102,7 @@ export function createSessionAuthorityLease(input: {
       || session.userId !== expected.userId
       || session.contextGroupId !== expected.contextGroupId
       || session.contextProjectId !== expected.contextProjectId
-      || (session.contextLockedAt?.toISOString() ?? null) !== expected.contextLockedAt
+      || !contextLockCurrent(expected.contextLockedAt, session.contextLockedAt?.toISOString() ?? null)
       || (assistant.workspaceId ?? '') !== expected.workspaceId
     ) return null
     return resolveLiveAccessCeilingSystem({
@@ -114,6 +114,17 @@ export function createSessionAuthorityLease(input: {
       systemRead: input.systemRead,
     })
   })
+}
+
+/**
+ * A session that started unlocked is locked by its own first message (the
+ * `session_messages_lock_context` trigger), mid-turn, with the same Team and
+ * Project. That null → set step is the lock being taken, not access changing;
+ * the context ids themselves are compared separately. Once pinned, the lock
+ * timestamp must not move.
+ */
+function contextLockCurrent(expected: string | null, current: string | null): boolean {
+  return expected === null || current === expected
 }
 
 export function runWithAuthorityLease<T>(lease: AuthorityLease, fn: () => T): T {
