@@ -262,6 +262,7 @@ describe('[COMP:api/office-suggestions] Office comment and suggestion workflow',
       getSnapshot: vi.fn(async () => ({ snapshot: { id: JOB }, seq: 1, baseVersion: 1 })), appendCommand: vi.fn(), listThreads: vi.fn(async () => []),
       getThreadContext: vi.fn(async () => ({ artifactId: ARTIFACT, workspaceId: WORKSPACE, status: 'open' as const })),
       getMessageContext: vi.fn(async () => ({ artifactId: ARTIFACT, workspaceId: WORKSPACE })),
+      ensureCommentVersion: vi.fn<() => Promise<string | null>>(async () => RESOURCE),
       createThread: vi.fn(), reply: vi.fn(async () => ({ id: JOB })), resolve: vi.fn(async () => true),
       updateThread: vi.fn(async () => true), react: vi.fn(async () => true), detachMissingTargets: vi.fn(async () => 0),
       listSuggestions: vi.fn(async () => [suggestion]), getSuggestion: vi.fn(async () => suggestion),
@@ -285,6 +286,33 @@ describe('[COMP:api/office-suggestions] Office comment and suggestion workflow',
     const test = collaboration(); test.deps.applySuggestion.mockResolvedValue('conflict')
     await request(test.server).post(`/api/office/suggestions/${RESOURCE}/decision`).send({ decision: 'accepted' }).expect(409, { error: 'suggestion_conflict' })
     expect(test.deps.decideSuggestion).toHaveBeenCalledWith({ userId: USER, suggestionId: RESOURCE, decision: 'conflicted', expectedStatus: 'open' })
+  })
+
+  it.each([true, false])('anchors a live-only draft with Comment access (canEdit=%s)', async canEdit => {
+    const test = collaboration()
+    test.deps.resolveAccess.mockResolvedValue({ canComment: true, canEdit } as never)
+    test.deps.getArtifact.mockResolvedValue({ id: ARTIFACT, workspaceId: WORKSPACE, headVersionId: null } as never)
+    await request(test.server).post(`/api/office/artifacts/${ARTIFACT}/comments`)
+      .send({ anchor: { kind: 'block', targetIds: [JOB] }, body: 'Review this draft' }).expect(201)
+    expect(test.deps.ensureCommentVersion).toHaveBeenCalledWith(USER, expect.objectContaining({ id: ARTIFACT }))
+    expect(test.deps.createThread).toHaveBeenCalledWith(expect.objectContaining({ artifactVersionId: RESOURCE, workspaceId: WORKSPACE, userId: USER }))
+  })
+
+  it.each(['denied', 'missing', 'not-ready', 'revoked', 'existing'] as const)('handles %s comment anchoring without bypassing authority', async mode => {
+    const test = collaboration()
+    test.deps.getArtifact.mockResolvedValue(mode === 'missing' ? null as never : { id: ARTIFACT, workspaceId: WORKSPACE, headVersionId: mode === 'existing' ? JOB : null } as never)
+    if (mode === 'denied') test.deps.resolveAccess.mockResolvedValue({ canComment: false } as never)
+    if (mode === 'revoked') test.deps.resolveAccess.mockResolvedValueOnce({ canComment: true } as never).mockResolvedValue({ canComment: false } as never)
+    if (mode === 'not-ready') test.deps.ensureCommentVersion.mockResolvedValue(null)
+    await request(test.server).post(`/api/office/artifacts/${ARTIFACT}/comments`)
+      .send({ anchor: { kind: 'block', targetIds: [JOB] }, body: 'Review' })
+      .expect(mode === 'existing' ? 201 : mode === 'not-ready' ? 409 : 404)
+    if (mode === 'existing') expect(test.deps.createThread).toHaveBeenCalledWith(expect.objectContaining({ artifactVersionId: JOB }))
+    else {
+      expect(test.deps.createThread).not.toHaveBeenCalled()
+      expect(test.deps.service.revise).not.toHaveBeenCalled()
+    }
+    if (['denied', 'missing', 'existing'].includes(mode)) expect(test.deps.ensureCommentVersion).not.toHaveBeenCalled()
   })
 
   it('enforces Viewer, Commenter and Editor command roles', async () => {

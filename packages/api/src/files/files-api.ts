@@ -414,7 +414,8 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
         sensitivity: maxSensitivity(p.sensitivity ?? 'internal', ctx.writeSensitivity ?? 'public'),
         compartments: ctx.writeCompartments,
         projectIds: ctx.writeProjectIds,
-        metadata: p.sessionOwned ? { officeSession: true, noIndex: true } : undefined,
+        metadata: p.sessionOwned ? { officeSession: true, noIndex: true }
+          : path.startsWith('/office/anchors/') ? { noIndex: true } : undefined,
         userId: p.sessionOwned ? ctx.userId : null,
         createdByUserId: ctx.userId,
         createdByAssistantId: ctx.assistantId ?? null,
