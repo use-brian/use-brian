@@ -1278,7 +1278,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
   it('preserves discovery diagnostics for unknown pins without attributing every pin to scope', async () => {
     const diagnostic = 'Connector discovery is limited by the current execution scope. Provider catalogs require unrestricted scope; searching again cannot bypass this restriction.'
     mockInjectMcp.mockResolvedValueOnce({
-      enrichConfirmation: async (_t: string, i: unknown) => i,
+      enrichConfirmation: async (_toolName, input) => input,
       unavailable: [diagnostic],
       searchableSources: [],
     })
