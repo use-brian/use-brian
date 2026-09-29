@@ -59,7 +59,8 @@ import type { ChannelIntegrationStore, ChannelIntegrationConfig, TelegramCredent
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import { humanizeToolName, describeToolInput } from '@use-brian/shared'
-import { processChannelMessage } from './channel-pipeline.js'
+import { processChannelMessage, type ChannelPipelineParams } from './channel-pipeline.js'
+import { admitChannelMessage, type AdmittedChannelMessage } from './channel-message-admission.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImage } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
@@ -1118,20 +1119,6 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       } else if (!workflowCallback && !actionData
         && channelConfirmations.handle(interactionScope, { kind: 'text', text: incoming.text }).handled) return
 
-      // 5b. Audio FILE → recording-to-brain pipeline instead of normal chat.
-      //     A deliberate recording (msg.audio), routed to transcription + brain
-      //     ingest with the duration surcharge. Voice notes stay on the existing
-      //     voice-transcription-to-chat path. See docs/architecture/media/transcription.md.
-      if (options.recordingIngest && incoming.mediaType === 'audio' && !externalGuest) {
-        await handleTelegramRecordingIntake(
-          incoming,
-          routedAssistant.id,
-          routedAssistant.workspaceId ?? null,
-          routedOwnerId,
-        )
-        return
-      }
-
       // 6. Sequentialize per chat via Postgres advisory lock
       await withChatLock(`tg-byo:${incoming.channelId}`, async () => {
         if (actionData) {
@@ -1160,6 +1147,9 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           interactionScope,
           workflowCallback,
           conversationalAnswer: actionData !== undefined,
+          recordingIntake: options.recordingIngest && incoming.mediaType === 'audio' && !externalGuest
+            ? () => handleTelegramRecordingIntake(incoming, routedAssistant.id, routedAssistant.workspaceId ?? null, routedOwnerId)
+            : undefined,
           questionStore: options.questionStore,
           integrationId: boundIntegration.id,
           discussionStore,
@@ -1271,6 +1261,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 // ── Per-message handler ─────────────────────────────────────────
 
 type ProcessMessageParams = {
+  recordingIntake?: () => Promise<void>
   discussionStore: TelegramDiscussionStore
   interactionScope: ChannelInteractionScope
   workflowCallback?: { data: string; messageId: string }
@@ -1361,6 +1352,37 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     externalGuest,
     externalGuestConnectorTools,
   } = params
+
+  // Admission must precede ALL media side effects, including the hosted audio
+  // lane. Use the common interpreter so native conversational choices retain
+  // precedence over labels that happen to look like workflow commands.
+  const abortController = new AbortController()
+  // Voice notes are not recording/brain intake. Their answer text does not
+  // exist until transcription below; let the pipeline admit those once then.
+  const admission = incoming.mediaType === 'voice' ? undefined : await admitChannelMessage({
+    ...params,
+    assistant: { ...assistant, ownerUserId: ownerId },
+    userId: channelUserId,
+    channelType: 'telegram',
+    channelId: incoming.channelId,
+    incomingMessage: incoming,
+    questionIntegrationId: params.integrationId,
+    messageText: incoming.text ?? '',
+    userContentBlocks: [],
+    isGroupChat: incoming.isGroupChat,
+    modelAlias: assistant.defaultModelAlias,
+    abortController,
+    hooks: {
+      sendResponse: async (text) => { await adapter.sendMessage(incoming.channelId, { text }) },
+      sendError: async () => {},
+      onConfirmationRequired: async () => {},
+    },
+  })
+  if (admission?.kind === 'handled' || abortController.signal.aborted) return
+  if (params.recordingIntake) {
+    await params.recordingIntake()
+    return
+  }
 
   // Over-limit inbound media: a file above Telegram's 20MB bot download cap
   // (TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES) cannot be pulled via getFile, so a long
@@ -1768,7 +1790,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // supply it only through the source-labelled provider context, once per turn.
   const replyRaw = providerVisibleContext && rawReply.reply_to_message?.is_automatic_forward
     ? { ...rawReply, reply_to_message: undefined } : incoming.raw
-  await processChannelMessage({
+  const pipelineParams: ChannelPipelineParams & AdmittedChannelMessage = {
+    admittedAnswerContext: admission,
     interactionScope: params.interactionScope,
     incomingMessage: incoming,
     questionIntegrationId: params.integrationId,
@@ -1803,7 +1826,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     archiveConnectorInstanceId: params.archiveConnectorInstanceId,
     modelAlias: assistant.defaultModelAlias,
     adaptiveResearchEnabled: true,
-    abortController: new AbortController(),
+    abortController,
     provider: params.provider,
     configuredProviders: params.configuredProviders,
     resolveWorkspaceCustomLlm: params.resolveWorkspaceCustomLlm,
@@ -1934,7 +1957,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         })
       },
     },
-  })
+  }
+  await processChannelMessage(pipelineParams)
 }
 
 // ── Seen-chat observation ──────────────────────────────────────

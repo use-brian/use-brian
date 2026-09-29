@@ -53,7 +53,8 @@ describe('pipeline workflow response cancellation', () => {
     } finally { release(); await turn }
     expect(store.consume).not.toHaveBeenCalled()
     expect(execute).not.toHaveBeenCalled()
-    expect(sendResponse).toHaveBeenLastCalledWith('Stopped. No response action was run.')
+    // The pre-lock Stop acknowledgement is the only reply; no late duplicate.
+    expect(sendResponse).toHaveBeenCalledExactlyOnceWith('Stopped.')
     expect(channelConfirmations.handle(scope, { kind: 'text', text: '/stop' }).handled).toBe(false)
   })
 })

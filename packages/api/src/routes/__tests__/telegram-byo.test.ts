@@ -1,3 +1,4 @@
+import type { ChannelQuestionStore } from '../../workflow/channel-questions.js'
 import { channelQuestionActions, resolveChannelQuestion } from '../channel-questions.js'
 import { channelConfirmations, type ChannelInteractionScope } from '../channel-interactions.js'
 import type { IncomingMessage, OutgoingAction } from '@use-brian/channels'
@@ -44,6 +45,8 @@ vi.mock('../../telegram-discussion-context.js', async (importOriginal) => ({
 
 // Capture adapter.leaveChat calls for the group add-protection tests.
 const leaveChatCalls: string[] = []
+const mediaDownloadCalls: string[] = []
+const mediaResolveCalls: string[] = []
 const confirmationOrder: string[] = []
 
 // Capture createTelegramApi().setWebhook calls so the legacy-URL self-heal
@@ -115,11 +118,14 @@ vi.mock('@use-brian/channels', async () => {
         // `downloadMedia` echoes the file_id into the buffer so tests can
         // assert each photo of a media group flowed through independently.
         downloadVoice: vi.fn(() => downloadVoiceImpl()),
-        downloadMedia: vi.fn(async (fileId: string) => ({
-          buffer: Buffer.from(`bytes-of-${fileId}`),
-          mime: 'image/jpeg',
-          name: `${fileId}.jpg`,
-        })),
+        resolveFileUrl: vi.fn(async (fileId: string) => {
+          mediaResolveCalls.push(fileId)
+          return `https://telegram.test/${fileId}`
+        }),
+        downloadMedia: vi.fn(async (fileId: string) => {
+          mediaDownloadCalls.push(fileId)
+          return { buffer: Buffer.from(`bytes-of-${fileId}`), mime: 'image/jpeg', name: `${fileId}.jpg` }
+        }),
       })
     },
   }
@@ -157,6 +163,7 @@ vi.mock('../../db/chat-lock.js', () => ({
 // Capture processChannelMessage calls and invoke sendResponse so we can
 // verify the adapter is called with a topic-qualified channel id on reply.
 const pipelineCalls: Array<{
+  admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
   channelId: string
   interactionScope?: ChannelInteractionScope
   incomingMessage?: IncomingMessage
@@ -187,6 +194,7 @@ beforeAll(async () => {
 
 vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
+    admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
     interactionScope?: ChannelInteractionScope
     incomingMessage?: IncomingMessage
     questionIntegrationId?: string
@@ -215,8 +223,9 @@ vi.mock('../channel-pipeline.js', () => ({
       userId: params.userId, incoming: params.incomingMessage,
     } : undefined
     // The real central pipeline owns typed-answer resolution and action registration.
-    if (binding && !params.workflowCallback) resolveChannelQuestion(binding)
+    if (!params.admittedAnswerContext && binding && !params.workflowCallback) resolveChannelQuestion(binding)
     pipelineCalls.push({
+      admittedAnswerContext: params.admittedAnswerContext,
       interactionScope: params.interactionScope,
       incomingMessage: params.incomingMessage,
       questionIntegrationId: params.questionIntegrationId,
@@ -417,6 +426,8 @@ beforeEach(() => {
   pipelineDocuments = undefined
   pipelineError = undefined
   leaveChatCalls.length = 0
+  mediaDownloadCalls.length = 0
+  mediaResolveCalls.length = 0
   teamRoleCalls.length = 0
   teamRoleResponse = null
   setWebhookCalls.length = 0
@@ -610,7 +621,10 @@ describe('[COMP:api/telegram-byo-route] recording intake', () => {
   async function runAudioIntake(recordingIngest: {
     surchargeCredits: ReturnType<typeof vi.fn>
     run: ReturnType<typeof vi.fn>
-  }) {
+  }, caption?: string, mediaType: 'audio' | 'document' = 'audio',
+    ingestChannelMediaRef: Parameters<typeof telegramByoRoutes>[0]['ingestChannelMediaRef'] = vi.fn(),
+    admissionOptions?: { questionStore: ChannelQuestionStore; duringAdmission?: (app: ReturnType<typeof createTestApp>) => Promise<void> },
+  ) {
     const { findAssistantById } = await import('../../db/users.js')
     const prevImpl = vi.mocked(findAssistantById).getMockImplementation()
     vi.mocked(findAssistantById).mockResolvedValue({
@@ -633,6 +647,8 @@ describe('[COMP:api/telegram-byo-route] recording intake', () => {
           capabilityStore: {} as never,
           apiUrl: 'http://test',
           recordingIngest: recordingIngest as never,
+          ingestChannelMediaRef,
+          questionStore: admissionOptions?.questionStore,
           linkedAccountStore: { findByProvider: vi.fn(async () => ({ userId: 'owner_1', assistantId: 'assistant_1' })) } as never,
           channelUserStore: {} as never,
         }),
@@ -644,7 +660,8 @@ describe('[COMP:api/telegram-byo-route] recording intake', () => {
           from: { id: 42, first_name: 'Casey', username: 'casey' },
           chat: { id: 42, type: 'private' },
           date: Math.floor(Date.now() / 1000),
-          audio: {
+          caption,
+          [mediaType]: {
             file_id: 'standup_audio_id',
             duration: 90, // under the surcharge threshold — transcribes inline
             mime_type: 'audio/mpeg',
@@ -653,12 +670,71 @@ describe('[COMP:api/telegram-byo-route] recording intake', () => {
           },
         },
       })
+      await admissionOptions?.duringAdmission?.(app)
       await flushMicrotasks()
       await flushMicrotasks()
     } finally {
       vi.mocked(findAssistantById).mockImplementation(prevImpl!)
     }
   }
+
+  it.each(['audio', 'document'] as const)('intercepts a %s workflow caption before downloading or ingesting', async mediaType => {
+    const recording = { surchargeCredits: vi.fn(() => 0), run: vi.fn() }
+    const ingest = vi.fn()
+    await runAudioIntake(recording, `wq:${'a'.repeat(24)} yes`, mediaType, ingest)
+    expect(adapterSendCalls.at(-1)?.text).toContain('question is unavailable')
+    expect(mediaDownloadCalls).toEqual([])
+    expect(mediaResolveCalls).toEqual([])
+    expect(recording.surchargeCredits).not.toHaveBeenCalled()
+    expect(recording.run).not.toHaveBeenCalled()
+    expect(ingest).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(0)
+  })
+
+  it.each(['audio', 'document'] as const)('Stop during %s admission prevents all media work', async mediaType => {
+    let entered!: () => void
+    let release!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const store = {
+      find: vi.fn(async () => { entered(); await pending; return [] }),
+      isQuestionMessage: vi.fn(async () => false), consume: vi.fn(),
+      create: vi.fn(), attach: vi.fn(),
+    } satisfies ChannelQuestionStore
+    const recording = { surchargeCredits: vi.fn(() => 0), run: vi.fn() }
+    const ingest = vi.fn()
+    await runAudioIntake(recording, 'Please file this', mediaType, ingest, {
+      questionStore: store,
+      duringAdmission: async app => {
+        await started
+        await postUpdate(app, { update_id: 901, message: {
+          message_id: 901, from: { id: 42, first_name: 'Casey' },
+          chat: { id: 42, type: 'private' }, date: Math.floor(Date.now() / 1000), text: 'Stop',
+        } })
+        await flushMicrotasks()
+        release()
+      },
+    })
+    expect(store.find).toHaveBeenCalledTimes(1)
+    expect(adapterSendCalls.filter(call => call.text === 'Stopped.')).toHaveLength(1)
+    expect(store.consume).not.toHaveBeenCalled()
+    expect(mediaDownloadCalls).toEqual([])
+    expect(mediaResolveCalls).toEqual([])
+    expect(recording.surchargeCredits).not.toHaveBeenCalled()
+    expect(recording.run).not.toHaveBeenCalled()
+    expect(ingest).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(0)
+  })
+
+  it('keeps ordinary document captions on the media intake path', async () => {
+    const recording = { surchargeCredits: vi.fn(() => 0), run: vi.fn() }
+    const ingest = vi.fn(async () => ({ status: 'ingested' as const, kind: 'document' as const, episodeId: null, fileName: 'standup.mp3' }))
+    await runAudioIntake(recording, 'Please file this', 'document', ingest)
+    expect(ingest).toHaveBeenCalledTimes(1)
+    expect(mediaDownloadCalls).toContain('standup_audio_id')
+    expect(recording.run).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(1)
+  })
 
   it('hands the uploaded file name to the ingest port so the recording is nameable', async () => {
     const recordingIngest = {
@@ -733,7 +809,7 @@ describe('[COMP:api/telegram-byo-route] voice note without a transcript', () => 
     }
   }
 
-  function appWith(voiceTranscription?: { enabled: boolean; apiKey: string; model?: string }) {
+  function appWith(voiceTranscription?: { enabled: boolean; apiKey: string; model?: string }, questionStore?: ChannelQuestionStore) {
     return createTestApp(
       '/webhook/telegram-byo',
       telegramByoRoutes({
@@ -745,9 +821,30 @@ describe('[COMP:api/telegram-byo-route] voice note without a transcript', () => 
         capabilityStore: {} as never,
         apiUrl: 'http://test',
         ...(voiceTranscription ? { voiceTranscription } : {}),
+        questionStore,
       }),
     )
   }
+
+  it('defers voice question admission until transcription instead of rejecting an empty answer', async () => {
+    const core = await import('@use-brian/core')
+    const transcribe = vi.spyOn(core, 'transcribeFirstAudio').mockResolvedValue({ text: 'spoken answer', usage: null, model: 'test' })
+    const store = { find: vi.fn(async () => []), isQuestionMessage: vi.fn(async () => true),
+      create: vi.fn(), attach: vi.fn(), consume: vi.fn() } satisfies ChannelQuestionStore
+    const update = buildVoiceUpdate() as { message: Record<string, unknown> }
+    update.message.reply_to_message = { message_id: 800, from: { id: 1, is_bot: true },
+      text: `Where?\nQuestion reference: wq:${'a'.repeat(24)}` }
+    try {
+      await postUpdate(appWith({ enabled: true, apiKey: 'k' }, store), update)
+      await vi.waitFor(() => expect(pipelineCalls).toHaveLength(1))
+      expect(transcribe).toHaveBeenCalledOnce()
+      expect(store.find).not.toHaveBeenCalled()
+      expect(pipelineCalls[0].admittedAnswerContext).toBeUndefined()
+      expect(pipelineCalls[0].incomingMessage?.text).toContain('spoken answer')
+      expect(pipelineCalls[0].incomingMessage?.replyToMessageId).toBe('800')
+      expect(adapterSendCalls.some(call => /valid answer|question.*unavailable/.test(call.text))).toBe(false)
+    } finally { transcribe.mockRestore() }
+  })
 
   it('tells the model the voice note arrived when the kill switch is off', async () => {
     await postUpdate(appWith({ enabled: false, apiKey: 'k' }), buildVoiceUpdate())
@@ -2829,6 +2926,11 @@ describe('[COMP:api/telegram-byo-route] durable workflow pipeline handoff', () =
         reply_to_message: { message_id: 42, from: { id: 1, is_bot: true, username: 'testbot' }, text: 'Which?' } },
     })
     await flushMicrotasks(); await flushMicrotasks()
+    if (kind !== 'typed') {
+      expect(pipelineCalls).toHaveLength(0)
+      expect(adapterSendCalls.at(-1)?.text).toContain('unavailable')
+      return
+    }
     expect(pipelineCalls).toHaveLength(1)
     expect(pipelineCalls[0]).toMatchObject({
       questionIntegrationId: 'integ_1', questionStore: store,
@@ -2854,8 +2956,13 @@ describe('[COMP:api/telegram-byo-route] unverified workflow authority', () => {
       ...(text === 'durable answer' ? { reply_to_message: { message_id: 50, text: 'Which?', from: { id: 1, is_bot: true } } } : {}),
     } })
     await flushMicrotasks(); await flushMicrotasks()
-    expect(pipelineCalls).toHaveLength(1)
-    expect(pipelineCalls[0]).toMatchObject({ userId: 'owner_1', isIdentified: false, externalGuest: true })
+    if (text === 'approve abc123') {
+      expect(pipelineCalls).toHaveLength(0)
+      expect(adapterSendCalls.at(-1)?.text).toContain('unavailable')
+    } else {
+      expect(pipelineCalls).toHaveLength(1)
+      expect(pipelineCalls[0]).toMatchObject({ userId: 'owner_1', isIdentified: false, externalGuest: true })
+    }
   })
 
   it.each(['approve abc123', 'durable answer', 'ordinary chat'])('refuses %s when group sender identity lookup fails', async text => {

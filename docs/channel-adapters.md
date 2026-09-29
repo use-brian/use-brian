@@ -47,6 +47,13 @@ replies, and binds conversational choices. Routes supply `interactionScope`,
 the actual `questionIntegrationId`, original incoming metadata, and forward
 core's outgoing actions. Provider ACK deadlines, signature checks, credentials,
 media acquisition and native threading remain transport responsibilities.
+Telegram uses `admitChannelMessage` before media download/ingestion because its
+recording path can finish without entering the conversational pipeline. Admission
+runs under the conversation lock with active-turn cancellation, and forwards its
+entire `admittedAnswerContext` and abort controller to the pipeline on continuation;
+the pipeline must not interpret or consume that answer a second time. Voice notes
+are not recording intake; they retain pipeline admission after transcription so
+spoken answers are not interpreted as empty messages.
 
 Email has an outbound adapter but no inbound chat route in the OSS composition;
 its host must use the common pipeline to support interactive replies. The

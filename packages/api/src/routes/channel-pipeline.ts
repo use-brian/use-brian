@@ -43,7 +43,7 @@ import type { ChannelInteractionScope } from '@use-brian/core'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 import { channelConfirmations } from './channel-interactions.js'
 import { channelQuestionActions } from './channel-questions.js'
-import { resolveChannelAnswerContext } from './channel-answer-context.js'
+import { resolveChannelAnswerContext, type AdmittedChannelMessage } from './channel-message-admission.js'
 import { parseFollowUps, resolveCharter } from '@use-brian/shared'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -348,7 +348,7 @@ export type ChannelHooks = {
 
 // ── Pipeline params ──────────────────────────────────────────────
 
-export type ChannelPipelineParams = {
+export type ChannelPipelineParams = AdmittedChannelMessage & {
   /**
    * Background-lane model, resolved once at boot against the configured
    * providers. Omitted = fall back to the literal, which is only servable
@@ -940,6 +940,9 @@ export function recordChannelToolResults(input: {
 }
 
 export async function processChannelMessage(params: ChannelPipelineParams): Promise<void> {
+  // Split-admission routes have already sent handled replies. A stopped turn
+  // must not re-enter admission or start conversational work after media intake.
+  if (params.admittedAnswerContext?.kind === 'handled' || params.abortController.signal.aborted) return
   const messageId = params.incomingMessage?.messageId ?? params.incomingChannelMessageId
   const unregister = params.interactionScope ? channelConfirmations.registerTurn(
     params.interactionScope, params.abortController, {
@@ -977,6 +980,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     sessionId: params.interactionScope.sessionId,
   } : undefined
   const answerContext = await resolveChannelAnswerContext(params, questionBinding)
+  if (abortController.signal.aborted) return
   if (answerContext.kind === 'handled') { await hooks.sendResponse(answerContext.reply); return }
   const questionAnswer = answerContext.questionAnswer
   const externalGuest = params.externalGuest === true
