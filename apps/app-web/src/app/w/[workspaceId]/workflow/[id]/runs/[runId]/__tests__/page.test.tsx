@@ -218,3 +218,44 @@ describe("[COMP:app-web/workflow-detail-cache] run page", () => {
     expect(container.textContent).toContain(en.workflowPage.builder.runStatus.completed);
   });
 });
+
+
+describe("[COMP:app-web/workflow] delivery outcomes", () => {
+  const copy = en.workflowPage.builder.deliveryFeedback;
+  it.each([
+    [{ status: "delivered", channelType: "slack", channelId: "fictional" }, "delivered"],
+    [{ status: "skipped", channelType: "slack", reason: "delivery_audience_unverified" }, "skipped"],
+    [{ status: "skipped", channelType: "slack", reason: "private_reason" }, "skipped"],
+    [{ status: "failed", channelType: "slack", error: "private_error" }, "failed"],
+    [null, "unknown"], [[], "unknown"], ["delivered", "unknown"],
+    [{ status: "future" }, "unknown"], [{ status: {}, channelType: "slack" }, "unknown"], [{ status: "delivered" }, "unknown"],
+    [{ status: "skipped", channelType: "slack", reason: {} }, "unknown"],
+  ] as const)("shows safe feedback for %j outside raw output", async (outcome, status) => {
+    const output = { text: "generated", __delivery: outcome };
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => ({ ...RUN, steps: [{ ...RUN.steps[0], output }] }));
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    await render();
+    const row = container.querySelector("ol li")!;
+    expect(row.textContent).toContain(copy[status]);
+    const raw = [...row.querySelectorAll("details")].find(d => d.textContent?.includes("__delivery"))!;
+    expect(raw.open).toBe(false);
+    expect(raw.textContent).toContain("__delivery");
+    expect(raw.querySelector("pre")?.textContent).toBe(JSON.stringify(output, null, 2));
+    const visible = row.cloneNode(true) as HTMLElement;
+    visible.querySelectorAll("details").forEach(d => d.remove());
+    expect(visible.textContent).toContain(copy[status]);
+    expect(visible.textContent).toContain(copy.generationNote);
+    expect(visible.textContent).not.toContain("private_reason");
+    expect(visible.textContent).not.toContain("private_error");
+    const unverified = outcome && typeof outcome === "object" && "reason" in outcome && outcome.reason === "delivery_audience_unverified";
+    expect(visible.textContent?.includes(copy.unverified)).toBe(!!unverified);
+    expect(visible.querySelector('a[href="/w/w1/studio/channels"]') !== null).toBe(!!unverified);
+  });
+  it.each([null, [], "generated", { text: "done" }])("does not infer delivery from completed generation with output %j", async (output) => {
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => ({ ...RUN, steps: [{ ...RUN.steps[0], output }] }));
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    await render();
+    expect(container.textContent).not.toContain(copy.delivered);
+    expect(container.textContent).not.toContain(copy.unknown);
+  });
+});

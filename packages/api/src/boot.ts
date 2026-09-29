@@ -570,6 +570,8 @@ import { officeArtifactRoutes } from './routes/office-artifacts.js'
 import { officePdfSessionRoutes } from './routes/office-pdf-sessions.js'
 import { officeJobRoutes } from './routes/office-jobs.js'
 import { officeTemplateRoutes } from './routes/office-templates.js'
+import { createOfficeCommentAnchorWriter } from './office/comment-anchor-storage.js'
+import { createOfficeCommentVersionResolver } from './office/comment-version.js'
 import { officeCollaborationRoutes } from './routes/office-collaboration.js'
 import { createStructuredDocumentRuntime } from './structured-documents/runtime.js'
 import { createStructuredOcrConnectorResolver } from './structured-documents/connector.js'
@@ -7317,6 +7319,21 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     listThreads: officeCommentStore.listThreads,
     getThreadContext: officeCommentStore.getThreadContext,
     getMessageContext: officeCommentStore.getMessageContext,
+    ensureCommentVersion: createOfficeCommentVersionResolver({
+      getLive: officeLiveStore.getOfflineSource,
+      getArtifact: officeArtifactStore.get,
+      anchorDraft: officeArtifactStore.anchorDraft,
+      canComment: async (userId, artifactId) => Boolean((await resolveDurableOfficeAccess(userId, artifactId))?.canComment),
+      persist: createOfficeCommentAnchorWriter({
+        filesApi,
+        membership: getWorkspaceMembershipWithClearanceSystem,
+        authorizePath: async (userId, workspaceId, path) => {
+          const result = await queryWithRLS<{ allowed: boolean }>(userId,
+            'SELECT office_anchor_file_scope_allows($1,$2,true) AS allowed', [workspaceId, path])
+          return result.rows[0]?.allowed === true
+        },
+      }),
+    }),
     createThread: officeCommentStore.createThread,
     reply: officeCommentStore.reply,
     resolve: officeCommentStore.resolve,

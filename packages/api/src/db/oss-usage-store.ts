@@ -8,6 +8,7 @@
  *
  * [COMP:goals/oss-metering]
  */
+import { registryRowForPricing } from '@use-brian/shared/model-registry'
 import type { UsageStore } from '@use-brian/core'
 import { tierForModel } from '../model-resolution.js'
 import { query } from './client.js'
@@ -185,23 +186,34 @@ export function createOssUsageStore(): UsageStore {
   }
 }
 
-/** Recorded tokens across all sources, not the goal-budget overhead filter. */
+/** Workspace telemetry, including overhead. Zero COGS is not proof of free BYO usage. */
 export async function getWorkspaceTokenUsage(workspaceId: string, now = new Date()) {
   const to = now.toISOString()
   const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString()
   const result = await query<{
-    input: string; output: string; cache_read: string; cache_write: string
+    model: string; tokens: string; estimated_cost_usd: string | null; has_unpriced_usage: boolean
   }>(
-    `SELECT COALESCE(SUM(input_tokens), 0) AS input,
-            COALESCE(SUM(output_tokens), 0) AS output,
-            COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
-            COALESCE(SUM(cache_write_tokens), 0) AS cache_write
+    `SELECT model, SUM(input_tokens + output_tokens) AS tokens,
+            SUM(NULLIF(actual_cost_usd, 0)) AS estimated_cost_usd,
+            BOOL_OR(actual_cost_usd = 0) AS has_unpriced_usage
        FROM oss_usage_tracking
-      WHERE workspace_id = $1 AND created_at >= $2 AND created_at < $3`,
+      WHERE workspace_id = $1 AND created_at >= $2 AND created_at < $3
+      GROUP BY model
+      ORDER BY estimated_cost_usd DESC NULLS LAST, tokens DESC, model ASC`,
     [workspaceId, from, to],
   )
-  const row = result.rows[0]
-  return { from, to, inputTokens: Number(row?.input ?? 0),
-    outputTokens: Number(row?.output ?? 0), cacheReadTokens: Number(row?.cache_read ?? 0),
-    cacheWriteTokens: Number(row?.cache_write ?? 0) }
+  const models = result.rows.map((row) => ({
+    model: row.model,
+    modelName: registryRowForPricing(row.model)?.displayName ?? row.model,
+    tokens: Number(row.tokens),
+    estimatedCostUsd: row.estimated_cost_usd === null ? null : Number(row.estimated_cost_usd),
+    hasUnpricedUsage: row.has_unpriced_usage,
+  }))
+  const priced = models.filter((model) => model.estimatedCostUsd !== null)
+  return {
+    from, to, models,
+    estimatedCostUsd: models.length > 0 && priced.length === 0
+      ? null : priced.reduce((sum, model) => sum + model.estimatedCostUsd!, 0),
+    hasUnpricedUsage: models.some((model) => model.hasUnpricedUsage),
+  }
 }
