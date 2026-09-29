@@ -1091,7 +1091,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     ? await resolveDeliveryAudienceEnvelope(audienceInput)
     : null
   if (audienceEnvelope && !audienceEnvelope.allowed) {
-    throw new DeliveryAudienceUnverifiedError()
+    throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail)
   }
   const publicAudienceTurn = audienceEnvelope?.allowed === true
     && audienceEnvelope.source === 'public'
@@ -1197,7 +1197,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
     })
-    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
+    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail)
   }
 
   const filterHistoryForAudience = async <T extends {

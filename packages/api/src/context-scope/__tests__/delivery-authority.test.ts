@@ -193,7 +193,7 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
       channelType: 'slack',
       channelId: 'C-FICTIONAL',
       scopeEvidence: { sensitivity: 'internal', compartments: [], projectIds: [] },
-    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified' })
+    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', detail: 'unbound' })
   })
 
   it('rechecks an exact owner-approved binding and its current approver role', async () => {
@@ -256,7 +256,7 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
       channelType: 'slack',
       channelId: 'D-FICTIONAL',
       scopeEvidence: { sensitivity: 'internal', compartments: ['finance'], projectIds: [] },
-    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified' })
+    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', detail: 'evidence_exceeds_audience' })
   })
 
   it('refuses an expired binding even when its former approver is still admin', async () => {
@@ -317,5 +317,107 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
       sessionId: '66666666-6666-4666-8666-666666666666',
       scopeEvidence: { sensitivity: 'internal', compartments: ['legal'], projectIds: [PROJECT] },
     })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified' })
+  })
+})
+
+// ── Personal groups (a group binding that names its only human) ──
+
+function personalGroupIntegration(channelType = 'telegram') {
+  return {
+    channelType,
+    credentials: { bot_token: '1000001:FICTIONAL', webhook_secret: 'x' },
+    config: {
+      deliveryAudienceBindings: [{
+        version: 1,
+        channelId: '-100777',
+        audienceType: 'group',
+        clearance: 'internal',
+        compartments: [],
+        projectIds: [],
+        recipientUserId: USER,
+        expiresAt: null,
+        approvedByUserId: USER,
+        approvedAt: '2026-09-29T00:00:00.000Z',
+      }],
+    },
+  }
+}
+
+function personalGroupAuthorizer(verified: boolean, channelType = 'telegram') {
+  const verifyPersonalGroup = vi.fn(async () => verified)
+  const deps = {
+    integrationStore: {
+      getCredentialsForAssistantSystem: vi.fn(async () => personalGroupIntegration(channelType)),
+      getCredentialsForAssistantIntegrationSystem: vi.fn(async () => personalGroupIntegration(channelType)),
+    } as unknown as ChannelIntegrationStore,
+    findAssistant: vi.fn(async () => ({ id: ASSISTANT, workspaceId: WS })) as never,
+    findSession: vi.fn(async () => null),
+    findChannelSession: vi.fn(async () => null),
+    getWorkspaceRole: vi.fn(async () => 'owner' as const),
+    resolveLiveAccess: vi.fn(async () => ceiling({ compartments: [], mutationCompartments: [], projectIds: [] })),
+    verifyPersonalGroup,
+  }
+  return { deps, verifyPersonalGroup }
+}
+
+const personalGroupInput = {
+  workspaceId: WS,
+  assistantId: ASSISTANT,
+  userId: USER,
+  channelType: 'telegram',
+  channelId: '-100777:topic:15',
+  recipientType: 'group' as const,
+}
+
+describe('[COMP:api/delivery-authority] personal group bindings', () => {
+  // 2026-09-29: an owner's single-person Telegram hub was refused on every
+  // turn because group bindings could never carry personal context.
+  it('delivers the recipient personal context while membership is verified', async () => {
+    const { deps, verifyPersonalGroup } = personalGroupAuthorizer(true)
+    await expect(createDeliveryAudienceAuthorizer(deps)({
+      ...personalGroupInput,
+      scopeEvidence: {
+        sensitivity: 'internal',
+        compartments: [],
+        projectIds: [],
+      },
+    })).resolves.toMatchObject({ allowed: true })
+    expect(verifyPersonalGroup).toHaveBeenCalledWith({
+      channelType: 'telegram',
+      chatId: '-100777',
+      recipientUserId: USER,
+      botToken: '1000001:FICTIONAL',
+    })
+    await expect(createDeliveryAudienceEnvelopeResolver(deps)(personalGroupInput))
+      .resolves.toMatchObject({ allowed: true, source: 'binding', ceiling: { userId: USER } })
+  })
+
+  it('refuses with a personal-group reason when membership cannot be proven', async () => {
+    const { deps } = personalGroupAuthorizer(false)
+    await expect(createDeliveryAudienceEnvelopeResolver(deps)(personalGroupInput)).resolves.toEqual({
+      allowed: false,
+      reason: 'delivery_audience_unverified',
+      detail: 'personal_group_unverified',
+    })
+    await expect(createDeliveryAudienceAuthorizer(deps)({
+      ...personalGroupInput,
+      scopeEvidence: { sensitivity: 'public', compartments: [], projectIds: [] },
+    })).resolves.toEqual({
+      allowed: false,
+      reason: 'delivery_audience_unverified',
+      detail: 'personal_group_unverified',
+    })
+  })
+
+  it('never widens past the recipient own live access', async () => {
+    const { deps } = personalGroupAuthorizer(true)
+    await expect(createDeliveryAudienceAuthorizer(deps)({
+      ...personalGroupInput,
+      scopeEvidence: { sensitivity: 'confidential', compartments: [], projectIds: [] },
+    })).resolves.toEqual({
+      allowed: false,
+      reason: 'delivery_audience_unverified',
+      detail: 'evidence_exceeds_audience',
+    })
   })
 })
