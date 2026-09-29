@@ -7,6 +7,8 @@ import regressions. The opt-in browser test uses the live official catalog.
 
 | COMP tag | doc path | source path | test path |
 | --- | --- | --- | --- |
+| app-web/channel-delivery-audiences | docs/channel-delivery-audiences.md | apps/app-web/src/app/w/[workspaceId]/studio/channels/delivery-audience-section.tsx; apps/app-web/src/lib/api/channels.ts | apps/app-web/src/app/w/[workspaceId]/studio/channels/__tests__/delivery-audience.test.tsx; apps/app-web/src/lib/api/__tests__/channel-config.test.ts |
+| app-web/workflow-delivery-feedback | docs/workflow-delivery-feedback.md | apps/app-web/src/components/workflow/delivery-feedback.tsx; apps/app-web/src/components/workflow/step-editor.tsx; apps/app-web/src/components/workflow/schedule-trigger-fields.tsx; apps/app-web/src/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page.tsx | apps/app-web/src/components/workflow/__tests__/delivery-feedback.test.tsx; apps/app-web/src/app/w/[workspaceId]/workflow/[id]/runs/[runId]/__tests__/page.test.tsx |
 | app-web/automatic-desktop-browser | docs/embedded-desktop-browser.md | apps/app-web/src/lib/automatic-desktop-browser.ts; apps/app-web/src/components/computer/desktop-browser-coordinator.tsx | apps/app-web/src/lib/__tests__/automatic-desktop-browser.test.ts; apps/app-web/src/components/computer/__tests__/desktop-browser-coordinator.test.tsx; apps/app-web/src/lib/api/__tests__/computer.test.ts |
 | app/outpost-auth | docs/outpost-logout.md | apps/auth-web/src/app/api/auth/logout/route.ts | apps/auth-web/src/app/api/auth/logout/route.test.ts |
 | api/auth | docs/outpost-logout.md | packages/api/src/routes/auth.ts | packages/api/src/routes/__tests__/auth-logout.test.ts |

@@ -23,6 +23,7 @@
  * [COMP:app-web/workflow]
  */
 
+import { DeliveryAudienceGuidance } from "./delivery-feedback";
 import { useMemo } from "react";
 import { useT } from "@/lib/i18n/client";
 import { format as fmt } from "@/lib/i18n";
@@ -298,7 +299,9 @@ export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
                   ? b.deliverChannelTelegram
                   : trigger.delivery.channel === "slack"
                     ? b.deliverChannelSlack
-                    : b.deliverChannelWhatsApp}
+                    : trigger.delivery.channel === "feishu"
+                      ? b.deliverChannelFeishu
+                      : b.deliverChannelWhatsApp}
               </SummaryChip>
             )}
             {trigger.policy?.silentUntilFire && (
@@ -388,6 +391,8 @@ export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
               </Select>
             </div>
           </div>
+
+          {trigger.delivery && <DeliveryAudienceGuidance />}
 
           {/* Reminder behavior — silent-until-fire + nag policy (trigger-row). */}
           <div className="rounded-lg bg-muted/40 px-3 py-2.5 flex flex-col gap-2">

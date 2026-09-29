@@ -111,6 +111,7 @@ import { BackButton } from "@/components/ui/back-button";
 import { RailSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 import { isPhoneViewport } from "@/lib/viewport";
 import { useChannelsData } from "./use-channels-data";
+import { DeliveryAudienceSection } from "./delivery-audience-section";
 import {
   probeEmailInboxes,
   createEmailInbox,
@@ -615,6 +616,7 @@ export default function StudioChannelsPage() {
                 assistants={assistants}
                 myClearance={myClearance}
                 canRename={myRole === "owner" || myRole === "admin"}
+                canManageAudiences={myRole === "owner" || myRole === "admin"}
                 onUpdated={onChannelUpdated}
                 onRoutingChanged={() => refreshRouting(sel.channel.id)}
                 onDeleted={onChannelDeleted}
@@ -651,6 +653,7 @@ export function ChannelDetail({
   assistants,
   myClearance,
   canRename,
+  canManageAudiences = false,
   onUpdated,
   onRoutingChanged,
   onDeleted,
@@ -664,10 +667,12 @@ export function ChannelDetail({
   myClearance: ChannelClearance;
   /**
    * Whether the caller may rename the channel — workspace owner or admin only,
-   * mirroring the `rename_requires_admin` gate on the PATCH route. Everything
-   * else in this panel stays open to any member.
+   * mirroring the `rename_requires_admin` gate on the PATCH route. Destination
+   * approvals have their own explicit admin gate below.
    */
   canRename: boolean;
+  /** Explicit owner/admin gate for destination approval, fail closed while loading. */
+  canManageAudiences?: boolean;
   onUpdated: (c: Channel) => void;
   onRoutingChanged: () => void;
   onDeleted: (channelId: string) => void;
@@ -1074,6 +1079,15 @@ export function ChannelDetail({
             onUpdated={onUpdated}
           />
         )}
+
+      {channel.integrationId && channel.channelType !== "email" && (
+        <DeliveryAudienceSection
+          workspaceId={workspaceId}
+          channel={channel}
+          canManage={canManageAudiences}
+          onUpdated={onUpdated}
+        />
+      )}
 
       {/* WhatsApp config — connection state (surfaces a phone-side logout) +
           per-group ingest list + the replies (bot) section, like the other
@@ -1594,7 +1608,7 @@ export function ChannelConfigSection({
     setConfig(channel.config ?? {});
   }, [channel.config]);
 
-  async function save(patch: ChannelConfigPatch): Promise<void> {
+  async function save(patch: Omit<ChannelConfigPatch, "deliveryAudienceBindings">): Promise<void> {
     setConfig((c) => ({ ...c, ...patch }));
     setSaving(true);
     setSaveError(false);
