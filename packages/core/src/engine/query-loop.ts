@@ -29,6 +29,7 @@ import {
 import { compactConversation } from '../compaction/compact.js'
 import { isContextOverflowError } from '../providers/context-budget.js'
 import { calculateCost } from '../billing/cost-tracker.js'
+import { sanitizeUnicode } from '../security/sanitize.js'
 
 /**
  * Heap-pressure threshold for graceful loop abort. When the V8 heap exceeds
@@ -61,6 +62,10 @@ function isUnderHeapPressure(): boolean {
 function isAuthorityBoundaryError(error: unknown): boolean {
   return typeof error === 'object' && error !== null
     && (error as { reason?: unknown }).reason === 'authority_changed'
+}
+
+function hasVisibleText(text: string): boolean {
+  return sanitizeUnicode(text).trim().length > 0
 }
 
 // One-shot boot-time confirmation that the OOM-defense build is loaded. If
@@ -1175,6 +1180,9 @@ async function* queryLoopCore(
       if (strippedPrimer) {
         console.warn(`[query-loop] turn ${turn} scaffold-primer prefix stripped`)
       }
+      response.content = response.content.filter(
+        (block) => block.type !== 'text' || !('text' in block) || hasVisibleText(block.text),
+      )
       const textBlocks = response.content.filter(
         (b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b,
       )
@@ -1282,7 +1290,7 @@ async function* queryLoopCore(
         ? (askQuestionToolUse.input as { question?: unknown }).question
         : undefined
       const hasUserVisibleText = response.content.some(
-        (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
+        (b) => b.type === 'text' && 'text' in b && hasVisibleText((b as { text: string }).text),
       )
       if (typeof question === 'string' && question.length > 0 && !hasUserVisibleText) {
         // Live-stream the question for the SSE consumer (frontend renders
@@ -1388,7 +1396,7 @@ async function* queryLoopCore(
     // ── Phase 4: Check if done ─────────────────────────────────
     const hasToolUse = response.content.some((b) => b.type === 'tool_use')
     const hasText = response.content.some(
-      (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
+      (b) => b.type === 'text' && 'text' in b && hasVisibleText((b as { text: string }).text),
     )
 
     // Empty-response recovery: model produced only thinking tokens with no
@@ -2315,7 +2323,7 @@ function hasDeliverableText(response: AssistantResponse | undefined): boolean {
   if (!response) return false
   if (response.content.some((b) => b.type === 'tool_use')) return false
   return response.content.some(
-    (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
+    (b) => b.type === 'text' && 'text' in b && hasVisibleText((b as { text: string }).text),
   )
 }
 
