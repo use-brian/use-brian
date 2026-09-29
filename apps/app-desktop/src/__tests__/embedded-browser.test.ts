@@ -68,7 +68,8 @@ async function connect() {
 }
 async function command(op: string, args: unknown = {}, controlMode = 'task_tabs') {
   const id = `command-${++sequence}`;
-  socket().message({ type: 'command', id, op, args, controlMode });
+  const controlEpoch = socket().sent.filter(m => m.type === 'event' && m.kind === 'stopped').at(-1)?.controlEpoch;
+  socket().message({ type: 'command', id, op, args, controlMode, controlEpoch });
   await flush();
   return socket().sent.find(m => m.type === 'result' && m.id === id);
 }
@@ -217,8 +218,7 @@ describe('native pairing lifecycle with the real RelayClient', () => {
     socket().drop(code); await vi.advanceTimersByTimeAsync(60000);
     expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: code === 4000, ...identity });
     expect(wc.stop).toHaveBeenCalled(); expect(wc.debugger.isAttached()).toBe(false);
-    expect(Socket.all).toHaveLength(1); expect(host().destroy).not.toHaveBeenCalled();
-    expect(host().setStatus).toHaveBeenLastCalledWith(expect.stringContaining('Manual browsing only'));
+    expect(Socket.all).toHaveLength(1); expect(host().destroy).toHaveBeenCalledOnce();
   });
 });
 
@@ -281,17 +281,17 @@ describe('standing approval and automatic lifecycle', () => {
     await ready(browser.pair(automatic(), 'account'));
     expect(mocks.consent).toHaveBeenCalledTimes(2);
   });
-  it('Stop blocks repeated automatic pairs without destroying manual browsing until explicit resume', async () => {
+  it('Stop destroys the browser and blocks repeated automatic pairs until explicit resume', async () => {
     await connect(); const stoppedHost = host(); browser.stop();
     for (let i = 0; i < 3; i++) expect(await browser.pair(automatic(), 'account')).toBe(false);
     expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: true, ...identity });
-    expect(stoppedHost.destroy).not.toHaveBeenCalled(); expect(Socket.all).toHaveLength(1);
+    expect(stoppedHost.destroy).toHaveBeenCalledOnce(); expect(Socket.all).toHaveLength(1);
     await connect();
     expect(stoppedHost.destroy).toHaveBeenCalledOnce();
     expect(mocks.consent).toHaveBeenCalledOnce();
     expect(browser.status()).toEqual({ controlEpoch: 3, connected: true, automaticBlocked: false, ...identity });
   });
-  it.each(['during minting', 'immediately before pair'])('rejects explicit Resume after a newer Stop %s without disposing the paused host', async timing => {
+  it.each(['during minting', 'immediately before pair'])('rejects explicit Resume after a newer Stop %s without recreating the closed host', async timing => {
     await connect(); browser.stop();
     const pausedHost = host();
     const expectedControlEpoch = browser.status().controlEpoch;
@@ -309,7 +309,7 @@ describe('standing approval and automatic lifecycle', () => {
     expect(await pending).toBe(false);
     expect(dispose).not.toHaveBeenCalled();
     expect(browser.status()).toEqual({ connected: false, automaticBlocked: true, controlEpoch: 3, ...identity });
-    expect(pausedHost.destroy).not.toHaveBeenCalled();
+    expect(pausedHost.destroy).toHaveBeenCalledOnce();
     expect(Socket.all).toHaveLength(1); expect(mocks.hosts).toHaveLength(1);
     expect(mocks.consent).toHaveBeenCalledOnce();
     expect(await browser.pair(automatic({ browserProfileId: 'replacement' }), 'account')).toBe(false);
@@ -360,6 +360,91 @@ describe('standing approval and automatic lifecycle', () => {
     expect(approvals.grant).not.toHaveBeenCalled(); browser.cancelPending();
     expect(await retry).toBe(false); socket().message({ type: 'ready' }); await flush();
     expect(approvals.grant).not.toHaveBeenCalled(); expect(mocks.hosts).toHaveLength(0);
+  });
+});
+
+describe('browser shutdown and restart', () => {
+  it('toolbar Stop closes the host, keeps only the relay, and show starts an empty browser', async () => {
+    await connect();
+    await command('openTab', { url: 'https://task.example/' });
+    await host().createTab('https://manual.example/', false);
+    const previous = host();
+    previous.callbacks.stop();
+    expect(previous.destroy).toHaveBeenCalledOnce();
+    expect(browser.isDockedFocused()).toBe(false);
+    expect(browser.status()).toMatchObject({ connected: false, automaticBlocked: true });
+    expect(socket().close).not.toHaveBeenCalled();
+    expect(await browser.pair({ ...input(), automatic: true }, 'account')).toBe(false);
+    expect(mocks.hosts).toHaveLength(1);
+    browser.show();
+    expect(mocks.hosts).toHaveLength(2);
+    expect(host().partition).toBe(previous.partition);
+    expect(host().tabs()).toEqual([]);
+    expect(browser.status()).toMatchObject({ connected: true, automaticBlocked: false });
+    expect(mocks.consent).toHaveBeenCalledOnce();
+    expect(await command('openTab', { url: 'https://new.example/' })).toMatchObject({ ok: true });
+  });
+  it.each(['navigate', 'openTab'])('Brian can restart with %s, but reads, clicks and invalid URLs cannot', async op => {
+    await connect();
+    expect(await command('stop')).toMatchObject({ ok: true });
+    expect(host().destroy).toHaveBeenCalledOnce();
+    for (const followup of ['snapshot', 'click', 'listTabs']) {
+      expect(await command(followup)).toMatchObject({ ok: false, code: 'user_stopped' });
+    }
+    expect(await command(op, { url: 'file:///secret' })).toMatchObject({ ok: false });
+    expect(mocks.hosts).toHaveLength(1);
+    expect(await command(op, { url: 'https://new.example/' })).toMatchObject({ ok: true });
+    expect(mocks.hosts).toHaveLength(2);
+    expect(host().tabs()).toHaveLength(1);
+    expect(browser.status()).toMatchObject({ connected: true, automaticBlocked: false });
+    expect(Socket.all).toHaveLength(1);
+    expect(mocks.consent).toHaveBeenCalledOnce();
+  });
+  it('rejects pre-Stop commands still in transit, including after a fresh restart', async () => {
+    await connect();
+    const oldHost = host();
+    oldHost.callbacks.stop();
+    socket().message({ type: 'command', id: 'late-start', op: 'navigate', args: { url: 'https://stale.example/' } });
+    await flush();
+    expect(mocks.hosts).toHaveLength(1);
+    expect(socket().sent).toContainEqual(expect.objectContaining({ id: 'late-start', ok: false, code: 'user_stopped' }));
+    expect(await command('navigate', { url: 'https://new.example/' })).toMatchObject({ ok: true });
+    const freshHost = host();
+    socket().message({ type: 'command', id: 'late-input', op: 'type', args: { ref: 'a', text: 'stale' } });
+    oldHost.callbacks.detached(freshHost.tabs()[0].id);
+    oldHost.callbacks.closed();
+    oldHost.callbacks.stop();
+    await flush();
+    expect(socket().sent).toContainEqual(expect.objectContaining({ id: 'late-input', ok: false, code: 'user_stopped' }));
+    expect(freshHost.destroy).not.toHaveBeenCalled();
+    expect(browser.status().connected).toBe(true);
+    freshHost.callbacks.stop();
+    socket().message({ type: 'command', id: 'older-epoch', op: 'openTab', args: { url: 'https://stale.example/' }, controlEpoch: 2 });
+    await flush();
+    expect(mocks.hosts).toHaveLength(2);
+    expect(await command('navigate', { url: 'https://latest.example/' })).toMatchObject({ ok: true });
+  });
+  it.each(['dispose', 'disconnect', 'replacement'])('%s discards the dormant restart capability', async action => {
+    await connect(); host().callbacks.stop();
+    if (action === 'dispose') browser.dispose();
+    else socket().drop(action === 'replacement' ? 4000 : 1006);
+    browser.show();
+    await command('openTab', { url: 'https://late.example/' });
+    expect(mocks.hosts).toHaveLength(1);
+    expect(browser.status().connected).toBe(false);
+  });
+  it('new navigation is not blocked by an old unresolved debugger command', async () => {
+    await connect(); await command('openTab', { url: 'https://old.example/' });
+    const pending = deferred<unknown>();
+    host().tabs()[0].contents.debugger.sendCommand.mockImplementation(() => pending.promise);
+    socket().message({ type: 'command', id: 'old', op: 'captureFrame', args: {} });
+    await flush();
+    socket().message({ type: 'command', id: 'queued', op: 'openTab', args: { url: 'https://queued.example/' } });
+    host().callbacks.stop();
+    expect(await command('navigate', { url: 'https://new.example/' })).toMatchObject({ ok: true });
+    pending.resolve({}); await flush();
+    expect(host().tabs()).toHaveLength(1);
+    expect(socket().sent.filter(m => ['old', 'queued'].includes(m.id))).toEqual([]);
   });
 });
 
@@ -476,7 +561,7 @@ describe('operations and revocation with the real TabExecutor', () => {
     expect(host().tabs()).toHaveLength(1); expect(wc.debugger.sendCommand).toHaveBeenCalledTimes(calls);
     expect(wc.stop).toHaveBeenCalled(); expect(wc.debugger.isAttached()).toBe(false);
     expect(socket().sent.filter(m => ['inflight', 'queued'].includes(m.id))).toEqual([]);
-    expect(socket().sent).toContainEqual({ type: 'event', kind: 'stopped' });
+    expect(socket().sent).toContainEqual({ type: 'event', kind: 'stopped', controlEpoch: 2 });
   });
   it('late full-browser approval cannot revive disposed control', async () => {
     await connect(); const consent = deferred<{ response: number }>(); mocks.consent.mockReturnValue(consent.promise);
