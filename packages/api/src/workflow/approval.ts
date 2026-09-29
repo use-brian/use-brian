@@ -28,6 +28,7 @@ import type {
 } from '@use-brian/core'
 import {
   advanceWorkflowRun,
+  executionToolContext,
   resolveExternalClientWorkflowPrincipal,
   ContextScopeAccumulator,
   stepSuccessors,
@@ -362,6 +363,11 @@ export async function resumeFromApproval(
     return { status: 'failed', runId: run.id }
   }
 
+  const execution = runtimeScope?.executionContext
+  const resumedExecution = execution && abortSignal
+    ? { ...execution, lifecycle: { ...execution.lifecycle,
+        abortSignal: AbortSignal.any([execution.lifecycle.abortSignal, abortSignal]) } }
+    : execution
   const toolContext: ToolContext = {
     userId: run.triggeredBy ?? workflow.createdBy,
     assistantId: toolAssistantId,
@@ -384,12 +390,17 @@ export async function resumeFromApproval(
     assistantDefaultProjectIds: runtimeScope?.turnScope.writeProjectIds,
     scopeAccumulator,
     abortSignal: abortSignal ?? new AbortController().signal,
+    ...(resumedExecution ? executionToolContext(resumedExecution, { appId: 'Use Brian' }) : {}),
   }
 
   let result
   if (abortSignal?.aborted) return cancelResume()
   try {
-    const execute = () => tool.execute(validatedInput, toolContext)
+    const execute = () => {
+      // Live authority renewal awaits I/O; Stop may arrive after the outer check.
+      toolContext.abortSignal.throwIfAborted()
+      return tool.execute(validatedInput, toolContext)
+    }
     result = await (runtimeScope?.executeWithAuthority ? runtimeScope.executeWithAuthority(execute) : execute())
   } catch (err) {
     if (abortSignal?.aborted) return cancelResume()

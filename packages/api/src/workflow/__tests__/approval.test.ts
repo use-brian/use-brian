@@ -13,7 +13,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { advanceWorkflowRun, type ExecutorDeps } from '@use-brian/core'
+import { advanceWorkflowRun, createExecutionContext, type ExecutorDeps } from '@use-brian/core'
 import { buildTool, type Tool } from '@use-brian/core'
 import type {
   WorkflowDefinition,
@@ -380,7 +380,45 @@ function deferred() {
   return { promise, release }
 }
 
-it.each(['claim', 'scope', 'registry', 'tool', 'downstream_registry', 'downstream_tool'] as const)(
+function cancellationRunScope(signal = new AbortController().signal) {
+  const access = { workspaceId: WORKSPACE_ID, userId: USER_ID, assistantId: PRIMARY_ASSISTANT_ID,
+    assistantKind: 'primary' as const, clearance: 'internal' as const, compartments: ['product'],
+    mutationCompartments: ['product'], projectIds: [], visibilityAssistantIds: null }
+  const authority = createAuthorityLease(access, async () => access)
+  return {
+    assistantClearance: 'internal' as const,
+    turnScope: { access, activeGroupId: null, activeProjectId: null, effectiveCompartments: ['product'],
+      effectiveProjectIds: [], writeCompartments: ['product'], writeProjectIds: [] },
+    executionContext: createExecutionContext({
+      identity: { kind: 'system', purpose: 'workflow', jobId: 'run-fixture' },
+      ownership: { kind: 'workspace', workspaceId: WORKSPACE_ID }, access, authority,
+      writeDefaults: { compartments: ['product'], projectIds: [] },
+      lifecycle: { abortSignal: signal, sessionId: 'run-fixture', channelType: 'workflow', channelId: 'run-fixture' },
+    }),
+  }
+}
+
+it.each(['none', 'stop', 'lifecycle'] as const)('projects live execution authority while preserving %s cancellation on approval resume', async source => {
+  const f = await cancellationFixture()
+  const stop = new AbortController(), lifecycle = new AbortController()
+  const scope = cancellationRunScope(lifecycle.signal)
+  f.deps.executorDeps.resolveRunScope = async () => scope
+  expect(await resumeFromApproval(f.deps, f.approval.id, 'approved', USER_ID, undefined,
+    source === 'none' ? undefined : stop.signal)).toMatchObject({ status: 'completed' })
+  const context = f.execute.mock.calls[0][1] as import('@use-brian/core').ToolContext
+  expect(context.authority).toBe(scope.executionContext.security.authority)
+  expect(context.mutationCompartments).toEqual(['product'])
+  expect(context.executionContext?.lifecycle.abortSignal).toBe(context.abortSignal)
+  if (source === 'none') expect(context.executionContext).toBe(scope.executionContext)
+  else {
+    expect(context.abortSignal.aborted).toBe(false)
+    if (source === 'stop') stop.abort()
+    else lifecycle.abort()
+    expect(context.abortSignal.aborted).toBe(true)
+  }
+})
+
+it.each(['claim', 'scope', 'registry', 'authority', 'tool', 'downstream_registry', 'downstream_tool'] as const)(
   'Stop during %s preserves the submitted decision and terminates continuation', async stage => {
     const f = await cancellationFixture()
     const controller = new AbortController()
@@ -392,6 +430,10 @@ it.each(['claim', 'scope', 'registry', 'tool', 'downstream_registry', 'downstrea
     }
     if (stage === 'scope') f.deps.executorDeps.resolveRunScope = async () => { await pause(); throw new Error('scope cancelled') }
     if (stage === 'registry') f.deps.buildToolRegistry = async () => { await pause(); return f.registry }
+    if (stage === 'authority') f.deps.executorDeps.resolveRunScope = async () => ({
+      ...cancellationRunScope(),
+      executeWithAuthority: async operation => { await pause(); return operation() },
+    })
     if (stage === 'downstream_registry') f.deps.executorDeps.buildToolRegistry = async () => { await pause(); return f.registry }
     if (stage === 'tool') f.execute.mockImplementation(async (_input, ctx) => {
       expect(ctx.abortSignal).toBe(controller.signal)
@@ -423,7 +465,7 @@ it.each(['claim', 'scope', 'registry', 'tool', 'downstream_registry', 'downstrea
       reason: stage.startsWith('downstream') ? 'workflow_cancelled' : 'approval_resume_cancelled',
     } })
     expect(f.stepRuns[0].status).toBe(['tool', 'downstream_registry', 'downstream_tool'].includes(stage) ? 'completed' : 'failed')
-    if (['claim', 'scope', 'registry'].includes(stage)) expect(f.execute).not.toHaveBeenCalled()
+    if (['claim', 'scope', 'registry', 'authority'].includes(stage)) expect(f.execute).not.toHaveBeenCalled()
     if (stage !== 'downstream_tool') expect(f.downstream).not.toHaveBeenCalled()
   },
 )

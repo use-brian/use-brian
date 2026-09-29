@@ -348,7 +348,8 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       clearance:'internal',compartments:['product'],mutationCompartments:['product'],projectIds:[],visibilityAssistantIds:[]})
     expect(requests[0].callerScopeEvidence).toMatchObject({compartments:['product'],projectIds:[],sources:[source]})
   })
-  it('projects the validated run context into direct workflow tool execution', async () => {
+  it.each(['none', 'stop', 'lifecycle'] as const)('projects the validated run context with %s cancellation into workflow tools', async source => {
+    const stop = new AbortController(), lifecycle = new AbortController()
     let received: ToolContext | undefined
     const tool = buildTool({
       name: 'validatedWorkflowTool',
@@ -390,13 +391,14 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       writeDefaults: { compartments: ['product'], projectIds: [] },
       authority,
       lifecycle: {
-        abortSignal: new AbortController().signal,
+        abortSignal: lifecycle.signal,
         sessionId: 'run-fixture',
         channelType: 'workflow',
         channelId: 'run-fixture',
       },
     })
     const deps = makeDeps({
+      abortSignal: source === 'none' ? undefined : stop.signal,
       buildToolRegistry: async () => new Map([[tool.name, tool]]),
       resolveRunScope: async () => ({
         assistantClearance: 'internal',
@@ -410,8 +412,15 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     })
 
     expect((await advanceWorkflowRun(deps, run.id)).kind).toBe('completed')
-    expect(received?.executionContext).toBe(executionContext)
     expect(received?.authority).toBe(authority)
+    expect(received?.executionContext?.lifecycle.abortSignal).toBe(received?.abortSignal)
+    if (source === 'none') expect(received?.executionContext).toBe(executionContext)
+    else {
+      expect(received?.abortSignal.aborted).toBe(false)
+      if (source === 'stop') stop.abort()
+      else lifecycle.abort()
+      expect(received?.abortSignal.aborted).toBe(true)
+    }
   })
   it('fails before building tools when the persisted run authority cannot be renewed', async () => {
     const buildToolRegistry=vi.fn(async()=>new Map())
