@@ -82,6 +82,96 @@ ipcRenderer.on("embedded-browser:dock-layout", (_event, payload) => {
 document.addEventListener("DOMContentLoaded", applyBrowserDockLayout);
 window.addEventListener("resize", applyBrowserDockLayout);
 
+// Publish only resolved, allowlisted app tokens, never stylesheet text or URLs.
+const browserThemeTokens = [
+  "background", "foreground", "sidebar", "sidebar-foreground",
+  "muted-foreground", "border", "primary", "accent", "accent-foreground",
+  "destructive", "ring", "sidebar-accent", "sidebar-accent-foreground",
+];
+let themeFramePending = false;
+let publishedTheme = null;
+let themeReady = false;
+
+function publishBrowserTheme() {
+  if (!themeReady || typeof window.getComputedStyle !== "function") return;
+  const root = document.documentElement;
+  if (!root || !document.body) return;
+  const rootStyle = window.getComputedStyle(root);
+  // Sign-in/offline landings do not have app tokens. Do not replace the host's
+  // theme with inherited browser defaults while navigating through them.
+  if (!rootStyle.getPropertyValue("--background").trim()) return;
+  const probe = document.createElement("span");
+  probe.setAttribute("aria-hidden", "true");
+  probe.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;width:0;height:0;transition:none!important;animation:none!important;";
+  document.body.appendChild(probe);
+  try {
+    const colors = {};
+    for (const token of browserThemeTokens) {
+      probe.style.setProperty("color", `var(--${token})`, "important");
+      colors[token] = window.getComputedStyle(probe).color;
+    }
+    probe.style.setProperty("border-radius", "var(--radius)", "important");
+    const theme = {
+      colors,
+      // The app applies its resolved mode on html. A forced light mode must
+      // remain light even when prefers-color-scheme says dark (and vice versa).
+      colorScheme: root.classList.contains("dark") || rootStyle.colorScheme === "dark" ? "dark" : "light",
+      radius: window.getComputedStyle(probe).borderRadius,
+      fontFamily: window.getComputedStyle(document.body).fontFamily,
+    };
+    const serialized = JSON.stringify(theme);
+    if (serialized !== publishedTheme) {
+      ipcRenderer.send("embedded-browser:theme", theme);
+      publishedTheme = serialized;
+    }
+  } finally {
+    probe.remove();
+  }
+}
+
+function scheduleBrowserTheme() {
+  if (!themeReady || themeFramePending) return;
+  themeFramePending = true;
+  const publish = () => {
+    themeFramePending = false;
+    publishBrowserTheme();
+  };
+  if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(publish);
+  else publish();
+}
+
+function startBrowserTheme() {
+  if (themeReady) return;
+  themeReady = true;
+  if (typeof MutationObserver === "function") {
+    const observer = new MutationObserver(scheduleBrowserTheme);
+    if (document.documentElement) observer.observe(document.documentElement, {
+      attributes: true, attributeFilter: ["class", "style", "data-palette"],
+    });
+    if (document.head) observer.observe(document.head, {
+      subtree: true, childList: true, characterData: true, attributes: true,
+    });
+    // Deliberately no body/subtree observer: the probe must not feed back.
+  }
+  // A newly inserted stylesheet may finish loading after its head mutation.
+  if (document.head && typeof document.head.addEventListener === "function") {
+    document.head.addEventListener("load", scheduleBrowserTheme, true);
+  }
+  if (typeof window.matchMedia === "function") {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    if (typeof media.addEventListener === "function") media.addEventListener("change", scheduleBrowserTheme);
+    else if (typeof media.addListener === "function") media.addListener(scheduleBrowserTheme);
+  }
+  scheduleBrowserTheme();
+}
+ipcRenderer.on("embedded-browser:request-theme", () => {
+  // A newly created/restarted host has not seen the last published theme.
+  publishedTheme = null;
+  scheduleBrowserTheme();
+});
+document.addEventListener("DOMContentLoaded", startBrowserTheme);
+if (document.readyState === "interactive" || document.readyState === "complete") startBrowserTheme();
+
 const deploymentListeners = new Set();
 let pendingDeployment = null;
 ipcRenderer.on("Use Brian:choose-deployment", (_event, url) => {

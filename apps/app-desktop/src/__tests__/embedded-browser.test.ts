@@ -1,3 +1,4 @@
+import { browserThemeColors, type BrowserTheme } from '../browser-theme.js';
 import type { BrowserWindow } from 'electron';
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,7 +9,7 @@ vi.mock('../embedded-browser-host.js', () => ({
   EmbeddedBrowserHost: class {
     entries: any[] = [];
     selected: number | null = null;
-    show = vi.fn(); destroy = vi.fn(); setStatus = vi.fn();
+    show = vi.fn(); destroy = vi.fn(); setStatus = vi.fn(); setTheme = vi.fn();
     isDockedFocused = vi.fn(() => false);
     constructor(public partition: string, public callbacks: any, public options?: { dockWindow?: BrowserWindow | null }) { mocks.hosts.push(this); }
     tabs() { return this.entries; }
@@ -80,6 +81,36 @@ beforeEach(() => {
   browser = new EmbeddedBrowser({ approvals }); sequence = 0;
 });
 afterEach(() => { browser.dispose(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+const theme = (colorScheme: 'light' | 'dark') => ({
+  colors: Object.fromEntries(browserThemeColors.map((key, index) => [key,
+    colorScheme === 'dark' ? `rgb(${index}, 20, 30)` : `rgb(240, ${index}, 250)`])) as BrowserTheme['colors'],
+  colorScheme, radius: colorScheme === 'dark' ? '12px' : '4px',
+  fontFamily: colorScheme === 'dark' ? 'Georgia, serif' : 'Arial, sans-serif',
+});
+
+describe('live app theme validation', () => {
+  it('validates unknown payloads before forwarding to the current host', async () => {
+    expect(() => browser.setTheme(theme('light'))).not.toThrow();
+    expect(mocks.hosts).toHaveLength(0);
+    await connect();
+    const current = host();
+    for (const invalid of [undefined, null, 42, {}, { ...theme('light'), colors: {} },
+      { ...theme('light'), radius: 'url(https://attacker.example)' }]) browser.setTheme(invalid);
+    expect(current.setTheme).not.toHaveBeenCalled();
+    for (const mode of ['light', 'dark'] as const) {
+      const appearance = theme(mode);
+      browser.setTheme({ ...appearance, extra: 'not forwarded', colors: { ...appearance.colors, extra: 'red' } });
+      expect(current.setTheme).toHaveBeenLastCalledWith(appearance);
+      expect(current.setTheme.mock.lastCall[0]).not.toHaveProperty('extra');
+      expect(current.setTheme.mock.lastCall[0].colors).not.toHaveProperty('extra');
+    }
+    expect(current.setTheme).toHaveBeenCalledTimes(2);
+    browser.dispose();
+    browser.setTheme(theme('light'));
+    expect(current.setTheme).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe('pairing validation and storage isolation', () => {
   it('uses stable opaque partitions scoped to account, relay, user, workspace and profile', () => {

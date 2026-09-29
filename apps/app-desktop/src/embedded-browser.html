@@ -6,27 +6,27 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Brian Browser</title>
   <style>
-    :root { color-scheme: light dark; --background: #fff; --sidebar: #f7f7f5; --foreground: #37352f; --muted: #787774; --border: #e9e9e7; --hover: #efefed; --primary: #2383e2; --selected: #eaf3fe; --danger: #b42318; --danger-bg: #fff0ee; }
-    @media (prefers-color-scheme: dark) { :root { --background: #191919; --sidebar: #202020; --foreground: #d4d4d4; --muted: #9b9b9b; --border: #353535; --hover: #2c2c2c; --primary: #529cca; --selected: #203748; --danger: #ff9b92; --danger-bg: #3c2525; } }
+    /* Fallback only until the app publishes its resolved built-in/custom theme. */
+    :root { color-scheme: light; --background: #fff; --sidebar: #f7f7f5; --foreground: #37352f; --sidebar-foreground: #37352f; --muted-foreground: #787774; --border: #e9e9e7; --primary: #2383e2; --accent: #efefee; --accent-foreground: #37352f; --sidebar-accent: #eaeae8; --sidebar-accent-foreground: #37352f; --destructive: #eb5757; --ring: #2383e2; --radius: 12px; --browser-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; --muted: var(--muted-foreground); --hover: var(--sidebar-accent); --selected: color-mix(in srgb, var(--primary) 12%, var(--background)); --danger: var(--destructive); --danger-bg: color-mix(in srgb, var(--destructive) 10%, var(--background)); }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--background); color: var(--foreground); font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; overflow: hidden; }
-    header { height: 128px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--border); background: var(--sidebar); display: flex; flex-direction: column; gap: 8px; }
+    body { margin: 0; background: var(--background); color: var(--foreground); font: 13px var(--browser-font-family); overflow: hidden; }
+    header { height: 128px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--border); background: var(--sidebar); color: var(--sidebar-foreground); display: flex; flex-direction: column; gap: 8px; }
     .row { display: flex; align-items: center; gap: 4px; min-height: 32px; }
-    button, input { font: inherit; height: 32px; border: 1px solid transparent; border-radius: 6px; padding: 5px 8px; background: transparent; color: inherit; }
+    button, input { font: inherit; height: 32px; border: 1px solid transparent; border-radius: calc(var(--radius) * .8); padding: 5px 8px; background: transparent; color: inherit; }
     button { cursor: pointer; white-space: nowrap; }
-    button:hover:not(:disabled) { background: var(--hover); }
+    button:hover:not(:disabled) { background: var(--hover); color: var(--sidebar-accent-foreground); }
     button:active:not(:disabled) { background: var(--selected); }
     button:disabled { opacity: .4; cursor: default; }
-    button:focus-visible, input:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
     #stop { color: var(--danger); background: var(--danger-bg); font-size: 12px; font-weight: 600; }
-    #stop:hover { border-color: var(--danger); }
+    #stop:hover { border-color: var(--danger); color: var(--danger); }
     .icon-button { width: 32px; height: 32px; flex: 0 0 32px; display: inline-flex; align-items: center; justify-content: center; padding: 7px; color: var(--muted); }
     .icon-button svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
     #status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; color: var(--muted); }
-    #address { flex: 1; min-width: 0; width: 0; background: var(--background); border-color: var(--border); }
+    #address { flex: 1; min-width: 0; width: 0; background: var(--background); color: var(--foreground); border-color: var(--border); }
     #address::placeholder { color: var(--muted); }
     #tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: none; }
-    .tab { display: flex; flex-shrink: 0; align-items: center; border-radius: 6px; }
+    .tab { display: flex; flex-shrink: 0; align-items: center; border-radius: calc(var(--radius) * .8); }
     .tab:has([aria-selected="true"]) { background: var(--selected); color: var(--primary); }
     .tab button:first-child { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
     .tab button:last-child { width: 26px; padding: 4px; color: var(--muted); }
@@ -36,7 +36,7 @@
     #separator::after { content: ""; position: absolute; left: 2px; top: calc(50% - 18px); width: 3px; height: 36px; border-radius: 3px; background: var(--border); }
     #separator:hover::after, #separator:focus-visible::after { background: var(--primary); }
     #separator:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
-    #rail { height: 100vh; padding: 8px 6px; display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--sidebar); border-left: 1px solid var(--border); }
+    #rail { height: 100vh; padding: 8px 6px; display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--sidebar); color: var(--sidebar-foreground); border-left: 1px solid var(--border); }
     #rail .icon-button { width: 36px; height: 36px; flex-basis: 36px; }
     #expand { background: var(--background); border-color: var(--border); }
     #rail-stop { width: 42px; min-height: 44px; height: auto; padding: 5px 2px; white-space: normal; font-size: 11px; line-height: 15px; font-weight: 600; color: var(--danger); background: var(--danger-bg); }

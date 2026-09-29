@@ -1,3 +1,4 @@
+import { browserThemeColors, type BrowserTheme } from '../browser-theme.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -66,6 +67,13 @@ beforeEach(() => {
   callbacks = { stop: vi.fn(), closed: vi.fn(), tabClosed: vi.fn(), detached: vi.fn() };
 });
 afterEach(() => { for (const h of hosts) h.destroy(); });
+
+const theme = (colorScheme: 'light' | 'dark') => ({
+  colors: Object.fromEntries(browserThemeColors.map((key, index) => [key,
+    colorScheme === 'dark' ? `rgb(${index}, 20, 30)` : `rgb(240, ${index}, 250)`])) as BrowserTheme['colors'],
+  colorScheme, radius: colorScheme === 'dark' ? '12px' : '4px',
+  fontFamily: colorScheme === 'dark' ? 'Georgia, serif' : 'Arial, sans-serif',
+});
 
 describe('typed browser addresses', () => {
   it.each([
@@ -239,6 +247,28 @@ describe('docked view ownership and layout', () => {
     hosts.push(h);
     return { h, main };
   };
+  it('requests the app theme on creation and publishes live updates across presentation changes', () => {
+    const { h, main } = setup();
+    expect(main.webContents.send.mock.calls.filter(([channel]: [string]) => channel === 'embedded-browser:request-theme')).toEqual([
+      ['embedded-browser:request-theme'],
+    ]);
+    const contents = toolbar();
+    contents.emit('did-finish-load');
+    expect(contents.send.mock.lastCall).toEqual(['embedded-browser:state', expect.objectContaining({ theme: null })]);
+    for (const mode of ['light', 'dark'] as const) {
+      const appearance = theme(mode);
+      h.setTheme(appearance);
+      expect(contents.send.mock.lastCall).toEqual(['embedded-browser:state', expect.objectContaining({ theme: appearance })]);
+      ipc(mode === 'light' ? 'detach' : 'dock');
+      contents.emit('did-finish-load');
+      expect(contents.send.mock.lastCall[1]).toMatchObject({ theme: appearance,
+        presentation: { mode: mode === 'light' ? 'detached' : 'docked' } });
+    }
+    h.destroy();
+    contents.send.mockClear();
+    expect(() => h.setTheme(theme('light'))).not.toThrow();
+    expect(contents.send).not.toHaveBeenCalled();
+  });
   it('lazily detaches and redocks identical live views without navigating or closing', async () => {
     const { h, main } = setup();
     const id = await h.createTab('https://example.com', true);

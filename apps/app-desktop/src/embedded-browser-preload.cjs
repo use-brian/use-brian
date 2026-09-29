@@ -51,6 +51,16 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   ipcRenderer.on("embedded-browser:focus-address", focusAddress);
   ipcRenderer.on("embedded-browser:state", (_event, state) => {
+    if (state.theme) {
+      // Main validates this appearance-only payload. Never inject stylesheets or resource URLs.
+      const root = document.documentElement;
+      for (const key of ["background", "foreground", "sidebar", "sidebar-foreground", "muted-foreground", "border", "primary", "accent", "accent-foreground", "destructive", "ring", "sidebar-accent", "sidebar-accent-foreground"]) {
+        root.style.setProperty(`--${key}`, state.theme.colors[key]);
+      }
+      root.style.setProperty("--radius", state.theme.radius);
+      root.style.setProperty("--browser-font-family", state.theme.fontFamily);
+      root.style.colorScheme = state.theme.colorScheme;
+    }
     presentation = state.presentation;
     if (presentation) {
       if (presentation.collapsed || presentation.mode !== "docked") endDrag();

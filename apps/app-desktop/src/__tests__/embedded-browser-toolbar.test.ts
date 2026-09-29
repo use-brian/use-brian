@@ -1,15 +1,23 @@
+import { browserThemeColors, type BrowserTheme } from '../browser-theme.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
 const html = readFileSync(new URL('../embedded-browser.html', import.meta.url), 'utf8');
 
+const theme = (colorScheme: 'light' | 'dark') => ({
+  colors: Object.fromEntries(browserThemeColors.map((key, index) => [key,
+    colorScheme === 'dark' ? `rgb(${index}, 20, 30)` : `rgb(240, ${index}, 250)`])) as BrowserTheme['colors'],
+  colorScheme, radius: colorScheme === 'dark' ? '12px' : '4px',
+  fontFamily: colorScheme === 'dark' ? 'Georgia, serif' : 'Arial, sans-serif',
+});
+
 describe('compact browser panel controls', () => {
-  it('uses compact app colors with dark-mode support and no per-tab permission row', () => {
+  it('uses compact app colors with explicit app theme support and no per-tab permission row', () => {
     expect(html).toContain('header { height: 128px;');
     expect(html).toContain('--sidebar: #f7f7f5');
     expect(html).toContain('--primary: #2383e2');
-    expect(html).toContain('prefers-color-scheme: dark');
+    expect(html).not.toContain('prefers-color-scheme');
     expect(html).toContain('placeholder="example.com"');
     expect(html).not.toContain('id="approve"');
     expect(html).not.toContain('Enter a complete');
@@ -29,6 +37,35 @@ describe('compact browser panel controls', () => {
     for (const id of ['stop', 'rail-stop']) {
       expect(html).toMatch(new RegExp(`<button id="${id}"[^>]*>Stop Brian</button>`));
     }
+  });
+
+  it('applies live explicit app themes without consulting the OS preference', () => {
+    const properties = new Map<string, string>();
+    const style = { colorScheme: '', setProperty: vi.fn((key: string, value: string) => properties.set(key, value)) };
+    const element = () => ({ addEventListener: vi.fn(), setAttribute: vi.fn(), replaceChildren: vi.fn() });
+    const document = { documentElement: { style }, getElementById: element };
+    const window = { addEventListener: vi.fn(), matchMedia: vi.fn(() => ({ matches: true })) };
+    const ipcRenderer = { send: vi.fn(), on: vi.fn() };
+    runInNewContext(readFileSync(new URL('../embedded-browser-preload.cjs', import.meta.url), 'utf8'), {
+      document, window, require: () => ({ ipcRenderer }),
+    });
+    window.addEventListener.mock.calls.find(([name]) => name === 'DOMContentLoaded')![1]();
+    const update = ipcRenderer.on.mock.calls.find(([name]) => name === 'embedded-browser:state')![1];
+    for (const mode of ['light', 'dark', 'light'] as const) {
+      const appearance = theme(mode);
+      style.setProperty.mockClear();
+      update({}, { tabs: [], selected: null, status: '', theme: appearance });
+      expect(style.setProperty).toHaveBeenCalledTimes(browserThemeColors.length + 2);
+      for (const key of browserThemeColors) expect(properties.get(`--${key}`)).toBe(appearance.colors[key]);
+      expect(properties.get('--radius')).toBe(appearance.radius);
+      expect(properties.get('--browser-font-family')).toBe(appearance.fontFamily);
+      expect(style.colorScheme).toBe(mode);
+    }
+    style.setProperty.mockClear();
+    update({}, { tabs: [], selected: null, status: '', theme: null });
+    expect(style.setProperty).not.toHaveBeenCalled();
+    expect(style.colorScheme).toBe('light');
+    expect(window.matchMedia).not.toHaveBeenCalled();
   });
 
   it('preserves commands and transfers focus between the toolbar and collapsed rail', () => {

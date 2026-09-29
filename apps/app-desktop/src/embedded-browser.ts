@@ -6,6 +6,7 @@ import { TabExecutor, ExecutorError, type ExecutorPlatform, type ExecutorTabUpda
 import { RelayClient, type WebSocketLike } from "@use-brian/browser-control/relay-client.js";
 import type { LocalControlMode } from "@use-brian/browser-control/protocol.js";
 import { EmbeddedBrowserHost } from "./embedded-browser-host.js";
+import { parseBrowserTheme } from "./browser-theme.js";
 
 export function browserUrl(value: unknown): string {
   if (typeof value !== "string" || value.length > 16_384) throw new Error("Invalid browser URL");
@@ -72,6 +73,10 @@ export class EmbeddedBrowser {
     } else this.host?.show();
   }
   cancelPending(): void { if (this.pairing) this.dispose(); }
+  setTheme(input: unknown): void {
+    const theme = parseBrowserTheme(input);
+    if (theme) this.host?.setTheme(theme);
+  }
 
   isDockedFocused(): boolean { return this.host?.isDockedFocused() ?? false; }
 

@@ -4462,6 +4462,11 @@ if (!gotLock) {
     });
   }
 
+  ipcMain.on("embedded-browser:theme", (event, input: unknown) => {
+    if (changingTarget || selectingAccount || removingAccount || browserIdentityChanging || !trustedTokenSender(event)) return;
+    embeddedBrowser.setTheme(input);
+  });
+
   ipcMain.handle("Use Brian:browser-control", async (event, input: unknown) => {
     const trusted = () => !changingTarget && !selectingAccount && !removingAccount &&
       !browserIdentityChanging && trustedTokenSender(event);
