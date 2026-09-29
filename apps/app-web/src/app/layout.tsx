@@ -80,12 +80,14 @@ export const metadata: Metadata = {
 // chrome in globals.css (a draggable title-bar strip that clears the macOS
 // traffic lights + non-selectable app chrome) and is a no-op in the browser.
 // Off macOS the window keeps a standard OS frame with no traffic lights, so
-// `is-canvas-desktop-standard-frame` zeroes the title-bar inset. On macOS the
+// `is-canvas-desktop-standard-frame` zeroes the title-bar inset; Windows also
+// gets `is-canvas-desktop-win` (min/max/close overlay the top row's
+// right edge). On macOS the
 // native buttons do not page-zoom, so convert the 76 window-pixel clearance to
 // CSS pixels before the first frame. New shells report the exact zoom factor;
 // the outer/inner ratio keeps older frameless shells compatible.
 // Same run-before-paint, no-flash shape as THEME_PREPAINT_SCRIPT; no user input.
-const DESKTOP_SHELL_PREPAINT_SCRIPT = `(()=>{try{var d=window.usebrianDesktop||window.sidanclawDesktop;if(!d)return;var r=document.documentElement,c=r.classList;c.add("is-canvas-desktop");if(d.platform&&d.platform!=="darwin"){c.add("is-canvas-desktop-standard-frame");return;}var z=0;if(typeof d.getZoomFactor==="function"){try{z=d.getZoomFactor();}catch(_){}}if(!(Number.isFinite(z)&&z>0)){z=window.outerWidth/window.innerWidth;}if(!(Number.isFinite(z)&&z>0))z=1;r.style.setProperty("--doc-titlebar-lights",(${MACOS_TRAFFIC_LIGHT_CLEARANCE_PX}/z)+"px");}catch(e){}})();`;
+const DESKTOP_SHELL_PREPAINT_SCRIPT = `(()=>{try{var d=window.usebrianDesktop||window.sidanclawDesktop;if(!d)return;var r=document.documentElement,c=r.classList;c.add("is-canvas-desktop");if(d.platform&&d.platform!=="darwin"){c.add("is-canvas-desktop-standard-frame");if(d.platform==="win32")c.add("is-canvas-desktop-win");return;}var z=0;if(typeof d.getZoomFactor==="function"){try{z=d.getZoomFactor();}catch(_){}}if(!(Number.isFinite(z)&&z>0)){z=window.outerWidth/window.innerWidth;}if(!(Number.isFinite(z)&&z>0))z=1;r.style.setProperty("--doc-titlebar-lights",(${MACOS_TRAFFIC_LIGHT_CLEARANCE_PX}/z)+"px");}catch(e){}})();`;
 
 // iOS Safari zooms the page when a form control with a computed font-size
 // under 16px receives focus, and the zoom persists after blur — the app then

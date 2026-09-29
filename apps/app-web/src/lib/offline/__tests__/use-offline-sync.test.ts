@@ -26,6 +26,8 @@ import {
   useOfflineSync,
   publishCollabConnected,
   getCollabConnected,
+  publishCollabLive,
+  RECONNECTING_GRACE_MS,
   initialNavigatorOnline,
 } from "../use-offline-sync";
 
@@ -70,5 +72,31 @@ describe('[COMP:app-web/use-offline-sync] Feed save status', () => {
       await act(async () => { window.dispatchEvent(new Event('feed:local-changed')); });
       expect(container.textContent).toBe('1:0');
     } finally { await act(async () => root.unmount()); }
+  });
+});
+
+describe('[COMP:app-web/use-offline-sync] Reconnecting status', () => {
+  it('reports reconnecting only after the grace while the socket is connecting, not as Online', async () => {
+    (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    state.posts = [];
+    vi.useFakeTimers();
+    const container = document.createElement('div'); const root = createRoot(container);
+    function Probe() { const s = useOfflineSync(); return createElement('span', null, `${s.connectivity}:${s.reconnecting}`); }
+    try {
+      await act(async () => { root.render(createElement(Probe)); });
+      expect(container.textContent).toBe('online:false');
+      // A re-dialing socket is still "connected" for write queueing...
+      await act(async () => { publishCollabLive(false); });
+      expect(container.textContent).toBe('online:false');
+      await act(async () => { vi.advanceTimersByTime(RECONNECTING_GRACE_MS); });
+      // ...but the status bar must say Reconnecting, not Online.
+      expect(container.textContent).toBe('online:true');
+      await act(async () => { publishCollabLive(true); });
+      expect(container.textContent).toBe('online:false');
+    } finally {
+      await act(async () => root.unmount());
+      publishCollabLive(true);
+      vi.useRealTimers();
+    }
   });
 });

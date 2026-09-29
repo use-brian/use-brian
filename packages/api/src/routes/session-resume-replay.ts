@@ -63,6 +63,7 @@ import {
   resolveLiveAccessCeilingSystem,
   resolveTurnScopeSystem,
   sessionMessageInputScope,
+  turnOutputWrite,
   type ResolvedTurnScope,
 } from '../context-scope/resolve-turn-scope.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
@@ -490,21 +491,21 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         { role: 'user', content: [{ type: 'text', text: outcomeNote }] },
       ]
 
-      const outcomeSources = scopeAccumulator.evidence.sources ?? []
+      const resumeEnvelope = sessionMessageInputScope({
+        scope: turnScope,
+        workspaceId: assistant.workspaceId,
+        userId: session.userId,
+        assistantId: assistant.id,
+      })
       const storedOutcome = await executeWithCurrentAuthority(() => addSessionMessage({
         sessionId,
         role: 'system',
         content: [{ type: 'text', text: outcomeNote }],
-        ...(outcomeSources.length > 0
-          ? { derivation: { producer: 'turn:resume-outcome', sources: outcomeSources } }
-          : {
-              scope: sessionMessageInputScope({
-                scope: turnScope,
-                workspaceId: assistant.workspaceId,
-                userId: session.userId,
-                assistantId: assistant.id,
-              }),
-            }),
+        ...turnOutputWrite({
+          producer: 'turn:resume-outcome',
+          accumulator: scopeAccumulator,
+          envelope: resumeEnvelope,
+        }),
       }))
       const outcomeSource = boundScopeSource(storedOutcome)
       if (outcomeSource) scopeAccumulator.noteSource(outcomeSource)
@@ -547,14 +548,15 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         // accepted or persisted after authority changes.
         await assertCurrentAuthority()
         if (event.type === 'turn_complete') {
-          const outputSources = scopeAccumulator.evidence.sources ?? []
           await executeWithCurrentAuthority(() => addSessionMessage({
             sessionId,
             role: 'assistant',
             content: event.response.content,
-            ...(outputSources.length > 0
-              ? { derivation: { producer: 'turn:resume-output', sources: outputSources } }
-              : {}),
+            ...turnOutputWrite({
+              producer: 'turn:resume-output',
+              accumulator: scopeAccumulator,
+              envelope: resumeEnvelope,
+            }),
           }))
           if (deps.usageStore && event.totalUsage) {
             const usage = event.totalUsage

@@ -3867,6 +3867,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowStore,
     runStore: workflowRunStore,
     executorDeps: workflowExecutorDeps,
+    // Signs proposal receipts: stateless MCP surfaces pass them back verbatim,
+    // and every instance must verify what another instance signed.
+    proposalReceiptSecret: env.JWT_SECRET,
     listCrmWorkflowEventFilterKeys: async (workspaceId) =>
       (await crmIntakeReadStore.listCrmEventFilterCatalog(workspaceId)).stableKeys.map((item) => item.key),
     validateDeliveryTarget: workflowDependencyPreflight.validateDeliveryTarget,

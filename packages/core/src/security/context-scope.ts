@@ -1,6 +1,6 @@
 import type { AccessContext } from './access-context.js'
 import { isSensitivity, maxSensitivity, type Sensitivity } from './sensitivity.js'
-import { deriveResourceScope, type ScopeSource } from './derived-scope.js'
+import { deriveContextFloor, deriveResourceScope, type ScopeSource } from './derived-scope.js'
 import { boundScopeSource } from './source-evidence.js'
 
 /** A finite set is a ceiling; null is the universe grant. */
@@ -122,7 +122,10 @@ export class ContextScopeAccumulator {
     // Validate first so an invalid batch cannot leave half-applied evidence.
     if (evidence.sources?.length) {
       const sources = [...this.#sources, ...evidence.sources]
-      const floor = deriveResourceScope({ producer: 'context', sources })
+      // Label floor only: context may span visibility partitions (a primary
+      // reads other authors' rows). The derived write decides whether those
+      // sources can certify one envelope — see `sourcesShareVisibility`.
+      const floor = deriveContextFloor({ producer: 'context', sources })
       this.#sources.push(...structuredClone(evidence.sources))
       this.note({ sensitivity: floor.sensitivity, compartments: floor.compartments, projectIds: floor.projectIds })
     }

@@ -3,7 +3,7 @@
 /**
  * Page top bar — Row 2, the Notion-style **navbar** (location + actions).
  *
- *   [ Teamspace › Ancestor › 📄 Current ]         [sync?] [avatars] [Share] [★] [⋯]
+ *   [ Teamspace › Ancestor › 📄 Current ]         [saved?] [avatars] [Share] [★] [⋯]
  *
  * Left: the location **breadcrumb** (teamspace → ancestors → current page);
  * the current crumb is click-to-rename (`onRenameValue`), followed by a
@@ -11,10 +11,9 @@
  * cascade-aware `view.published`; links to `/share/p/<id>`; refreshed via
  * `getView` when the Share dialog reports a publish change). Right, an action
  * cluster that mirrors Notion:
- *   - **Sync pill** — `CollabStatusIndicator`, LEFTMOST so it only extends the
- *     right-anchored cluster into empty space when it appears; shown only
- *     after the connection has been unhealthy for >1s (debounced — a
- *     page-switch reconnect never flashes it). Quiet when healthy.
+ *   - **Saved chip** — LEFTMOST, shown only while the doc is connected +
+ *     synced. Reconnecting / Offline live in the workspace bottom status bar
+ *     (`workspace-chrome.tsx`), fed by `publishCollabLive`.
  *   - **Presence face-pile** — live collaborators from the shared Yjs
  *     awareness (`usePresence` over the lifted `provider`).
  *   - **Share** — opens the internal sharing controls; Copy link chooses the
@@ -65,7 +64,6 @@ import type { CollabStatus } from "@/lib/collab/use-collab-provider";
 import { usePresence } from "@/lib/collab/use-presence";
 import { useT, format } from "@/lib/i18n/client";
 import { Breadcrumb, type BreadcrumbTeamspace } from "./breadcrumb";
-import { CollabStatusIndicator } from "./error-states";
 import { PresenceAvatars } from "./presence-avatars";
 import { ScheduleBadge, ScheduleMenuSection } from "./schedule-badge";
 import { PageWorkflowRuns, PageWorkflowRunsMenuSection } from "./page-workflow-runs";
@@ -136,11 +134,6 @@ const CLEARANCE_RANK: Record<Clearance, number> = {
   confidential: 3,
 };
 const CLEARANCE_ORDER: Clearance[] = ["public", "internal", "confidential"];
-
-/** How long the connection must stay unhealthy before we surface the sync
- * indicator. Below this, a reconnect (e.g. a page switch re-dialing the
- * socket) resolves silently — no flash. */
-const CONNECTING_GRACE_MS = 1000;
 
 export function PageHeader({
   view,
@@ -219,22 +212,6 @@ export function PageHeader({
     }
   }
 
-  // Debounced "connecting" flag: surface the sync indicator only once the
-  // connection has been unhealthy for >1s. A quick reconnect — notably a
-  // page switch, which re-dials the socket — clears the timer before it
-  // fires, so the indicator never flashes.
-  const [showConnecting, setShowConnecting] = useState(false);
-  useEffect(() => {
-    if (live) {
-      setShowConnecting(false);
-      return;
-    }
-    const id = window.setTimeout(
-      () => setShowConnecting(true),
-      CONNECTING_GRACE_MS,
-    );
-    return () => window.clearTimeout(id);
-  }, [live]);
 
   async function toggleFavorite() {
     setBusy(true);
@@ -413,17 +390,11 @@ export function PageHeader({
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
-          {/* Save-state indicator — LEFTMOST. A calm always-on "Saved" chip
-              when the doc is connected + synced (PAGE-1: Notion always affirms
-              the page is persisted); the reconnecting pill only once unhealthy
-              for >1s (the debounce keeps a page-switch reconnect silent). */}
-          {showConnecting ? (
-            <CollabStatusIndicator
-              status={status}
-              synced={synced}
-              className="hidden sm:inline-flex"
-            />
-          ) : live ? (
+          {/* Save-state indicator - LEFTMOST. A calm "Saved" chip when the
+              doc is connected + synced (PAGE-1: Notion always affirms the page
+              is persisted). The unhealthy states (Reconnecting / Offline) are
+              reported by the workspace bottom status bar, not here. */}
+          {live ? (
             <span
               className="hidden items-center gap-1 px-1.5 text-xs text-muted-foreground sm:inline-flex"
               aria-label={t.headerSaved}

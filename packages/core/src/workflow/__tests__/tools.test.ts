@@ -323,6 +323,7 @@ function makeAllTools(opts?: {
   listCrmWorkflowEventFilterKeys?: WorkflowToolDeps['listCrmWorkflowEventFilterKeys']
   resolveViewWorkspace?: (args: { userId: string; viewId: string }) => Promise<string | null>
   allowLegacyDirectWrites?: boolean
+  proposalReceiptSecret?: string
 }) {
   const events: WorkflowToolEvent[] = []
   const stores = fakeStores()
@@ -354,6 +355,7 @@ function makeAllTools(opts?: {
     listAuthorableClientApiKeys: opts?.listAuthorableClientApiKeys,
     listCrmWorkflowEventFilterKeys: opts?.listCrmWorkflowEventFilterKeys,
     allowLegacyDirectWrites: opts?.allowLegacyDirectWrites ?? true,
+    proposalReceiptSecret: opts?.proposalReceiptSecret,
   })
   return { tools, stores, events, jobStore }
 }
@@ -1021,12 +1023,89 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       { content: [{ type: 'tool_result', toolUseId: 'create-1', name: 'createWorkflow', content: JSON.stringify(created.data) }] },
     ])).toBeUndefined()
 
-    expect(tools.createWorkflow.description).toContain('call it immediately with {}')
+    expect(tools.createWorkflow.description).toContain('In a chat session call it with {}')
+    expect(tools.createWorkflow.description).toContain('pass { proposalReceipt }')
     expect(tools.updateWorkflow.description).toContain('runtime recovers the exact validated receipt')
 
     const builder = loadBuiltinSkills().find((skill) => skill.id === 'workflow-builder')
     expect(builder?.content).toMatch(/Treat approval as continuation, not a restart/)
     expect(builder?.content).toMatch(/call the matching write tool with no arguments/)
+  })
+
+  it('applies an explicitly passed receipt on a stateless surface with no session history', async () => {
+    const { tools, stores } = makeAllTools({ allowLegacyDirectWrites: false })
+    const proposed = await tools.proposeWorkflow.execute(
+      { name: 'Stateless create', definition: SIMPLE_DEF },
+      makeContext(),
+    )
+    const receipt = (proposed.data as { proposalReceipt: string }).proposalReceipt
+    expect(receipt.startsWith('wf2.')).toBe(true)
+
+    // A fresh per-request context, as the brain MCP builds: nothing recovered.
+    expect(tools.createWorkflow.inputSchema.safeParse({ proposalReceipt: receipt }).success).toBe(true)
+    expect(tools.createWorkflow.inputSchema.safeParse({ proposalReceipt: receipt, name: 'x' }).success).toBe(false)
+    const created = await tools.createWorkflow.execute({ proposalReceipt: receipt }, makeContext())
+    expect(created.isError).toBeFalsy()
+    const workflowId = (created.data as { id: string }).id
+    expect(stores.workflows.get(workflowId)?.name).toBe('Stateless create')
+
+    const edited: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'tool_call', toolName: 'echo', arguments: { hello: 'edited' } }],
+    }
+    const proposedEdit = await tools.proposeWorkflow.execute(
+      { workflowId, name: 'Stateless create', definition: edited },
+      makeContext(),
+    )
+    const editReceipt = (proposedEdit.data as { proposalReceipt: string }).proposalReceipt
+    const updated = await tools.updateWorkflow.execute({ proposalReceipt: editReceipt }, makeContext())
+    expect(updated.isError).toBeFalsy()
+    expect(stores.workflows.get(workflowId)?.definition.steps[0]).toMatchObject({ arguments: { hello: 'edited' } })
+  })
+
+  it('lets an explicit receipt win over a recovered one', async () => {
+    const { tools, stores } = makeAllTools({ allowLegacyDirectWrites: false })
+    const first = await tools.proposeWorkflow.execute({ name: 'Recovered', definition: SIMPLE_DEF }, makeContext())
+    const second = await tools.proposeWorkflow.execute({ name: 'Explicit', definition: SIMPLE_DEF }, makeContext())
+    const created = await tools.createWorkflow.execute(
+      { proposalReceipt: (second.data as { proposalReceipt: string }).proposalReceipt },
+      makeContext({ workflowProposalReceipt: (first.data as { proposalReceipt: string }).proposalReceipt }),
+    )
+    expect(created.isError).toBeFalsy()
+    expect(stores.workflows.get((created.data as { id: string }).id)?.name).toBe('Explicit')
+  })
+
+  it('verifies receipts across instances sharing the secret and rejects forged or foreign ones', async () => {
+    const { createHash } = await import('node:crypto')
+    const { deflateRawSync, inflateRawSync } = await import('node:zlib')
+    const a = makeAllTools({ allowLegacyDirectWrites: false, proposalReceiptSecret: 'shared-secret' })
+    const b = makeAllTools({ allowLegacyDirectWrites: false, proposalReceiptSecret: 'shared-secret' })
+    const foreign = makeAllTools({ allowLegacyDirectWrites: false, proposalReceiptSecret: 'other-secret' })
+    const proposed = await a.tools.proposeWorkflow.execute({ name: 'Signed', definition: SIMPLE_DEF }, makeContext())
+    const receipt = (proposed.data as { proposalReceipt: string }).proposalReceipt
+
+    // Another instance with the same secret (multi-instance deploy) accepts it.
+    const onB = await b.tools.createWorkflow.execute({ proposalReceipt: receipt }, makeContext())
+    expect(onB.isError).toBeFalsy()
+
+    // An instance keyed differently rejects it.
+    const onForeign = await foreign.tools.createWorkflow.execute({ proposalReceipt: receipt }, makeContext())
+    expect(onForeign.isError).toBe(true)
+    expect(onForeign.data).toContain('receipt changed after validation')
+
+    // Tampered payload with a recomputed plain checksum (the old wf1 integrity
+    // scheme) cannot pass: the signature needs the server key.
+    const [, body] = receipt.split('.')
+    const json = JSON.parse(inflateRawSync(Buffer.from(body!, 'base64url')).toString('utf8'))
+    json.input.name = 'Forged'
+    const forgedBody = deflateRawSync(Buffer.from(JSON.stringify(json), 'utf8'))
+    const forgedChecksum = createHash('sha256').update(forgedBody).digest('base64url')
+    for (const prefix of ['wf2', 'wf1']) {
+      const forged = `${prefix}.${forgedBody.toString('base64url')}.${forgedChecksum}`
+      const result = await b.tools.createWorkflow.execute({ proposalReceipt: forged }, makeContext())
+      expect(result.isError).toBe(true)
+    }
+    expect([...b.stores.workflows.values()].some((w) => w.name === 'Forged')).toBe(false)
   })
 
   it('pins proposal-time authoring authority, ignores later expansion, and refuses contraction', async () => {

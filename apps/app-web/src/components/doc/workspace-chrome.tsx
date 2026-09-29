@@ -39,6 +39,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { RefreshCw } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   docPagePath,
@@ -181,6 +182,8 @@ export function WorkspaceChrome({
     root.classList.add("is-canvas-desktop");
     if (desktop.platform && desktop.platform !== "darwin") {
       root.classList.add("is-canvas-desktop-standard-frame");
+      // Windows draws min/max/close over the top row's right edge.
+      root.classList.toggle("is-canvas-desktop-win", desktop.platform === "win32");
       root.style.removeProperty("--doc-titlebar-lights");
       return;
     }
@@ -606,9 +609,10 @@ export function WorkspaceChrome({
     return () => window.removeEventListener("keydown", onKey);
   }, [router, workspaceId, homeHref]);
 
-  const hasSyncNotice = offlineState.offline || offlineState.pending > 0;
+  const hasSyncNotice = offlineState.offline || offlineState.pending > 0 || offlineState.reconnecting;
   const syncTitle = offlineState.paused > 0 ? t.offlineSyncPausedTitle
     : offlineState.offline ? t.offlineBannerTitle
+    : offlineState.reconnecting ? t.errors.collabReconnecting
     : offlineState.pending > 0 ? t.offlineSyncPendingTitle : t.offlineStatusOnline;
   const syncDescription = offlineState.paused > 0
     ? format(t.offlineSyncPausedBody, { count: offlineState.paused })
@@ -853,7 +857,11 @@ export function WorkspaceChrome({
           hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
         )}
       >
-        <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
+        {offlineState.reconnecting && !offlineState.offline && offlineState.paused === 0 ? (
+          <RefreshCw aria-hidden className="size-3 shrink-0 animate-spin" />
+        ) : (
+          <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
+        )}
         <span className="shrink-0 font-medium">{syncTitle}</span>
         {syncDescription ? <span className="sr-only min-w-0 opacity-80 md:not-sr-only md:truncate">{syncDescription}</span> : null}
       </div>

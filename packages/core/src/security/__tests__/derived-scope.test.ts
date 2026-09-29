@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ContextScopeAccumulator, resolveWriteScope } from '../context-scope.js'
-import { deriveResourceScope, resourceScopeKey, type ScopeSource } from '../derived-scope.js'
+import { deriveResourceScope, resourceScopeKey, sourcesShareVisibility, type ScopeSource } from '../derived-scope.js'
 
 const source = (overrides: Partial<ScopeSource> = {}): ScopeSource => ({
   resourceKind: 'memory', resourceId: 'source-a', version: 'v1',
@@ -77,14 +77,33 @@ describe('[COMP:security/derived-scope] complete evidence for derived content', 
     ]) expect(resourceScopeKey(variant)).not.toEqual(resourceScopeKey(source()))
   })
 
-  it('snapshots accumulated evidence and fails atomically on incompatible input', () => {
+  it('reads across visibility partitions: keeps the label floor and leaves the refusal to the write', () => {
+    // A primary assistant reads rows other assistants and users authored.
+    // Reading them is not deriving; only a derived write must refuse.
     const accumulator = new ContextScopeAccumulator()
     const original = source({ userId: 'a', compartments: ['team:finance'] })
     accumulator.noteSource(original)
     original.compartments.length = 0
     expect(accumulator.evidence.sources?.[0].compartments).toEqual(['team:finance'])
-    expect(() => accumulator.noteSource(source({ resourceId: 'b', userId: 'b', sensitivity: 'confidential' })))
+    accumulator.noteSource(source({ resourceId: 'b', userId: 'b', assistantId: 'other-assistant', sensitivity: 'confidential', projectIds: ['project-b'] }))
+    expect(accumulator.sensitivity).toBe('confidential')
+    expect(accumulator.compartments).toEqual(['team:finance'])
+    expect(accumulator.projectIds).toEqual(['project-b'])
+    expect(accumulator.evidence.sources).toHaveLength(2)
+    expect(sourcesShareVisibility(accumulator.evidence.sources!)).toBe(false)
+    expect(() => deriveResourceScope({ producer: 'turn', sources: accumulator.evidence.sources! }))
       .toThrow('scope_visibility_incompatible')
+    expect(sourcesShareVisibility([source(), source({ resourceId: 'c', userId: 'a' })])).toBe(true)
+  })
+
+  it('snapshots accumulated evidence and fails atomically on a changed source', () => {
+    const accumulator = new ContextScopeAccumulator()
+    const original = source({ userId: 'a', compartments: ['team:finance'] })
+    accumulator.noteSource(original)
+    original.compartments.length = 0
+    expect(accumulator.evidence.sources?.[0].compartments).toEqual(['team:finance'])
+    expect(() => accumulator.noteSource(source({ userId: 'a', version: 'v2', sensitivity: 'confidential' })))
+      .toThrow('scope_source_changed')
     expect(accumulator.sensitivity).toBe('internal')
     expect(accumulator.evidence.sources).toHaveLength(1)
     const snapshot = accumulator.evidence

@@ -8,8 +8,10 @@ import {
   resolveTurnScopeSystem,
   resolveLiveAccessCeilingSystem,
   sessionMessageInputScope,
+  turnOutputWrite,
   type TurnScopeAssistant,
 } from '../resolve-turn-scope.js'
+import { ContextScopeAccumulator, type ResourceScope, type ScopeSource } from '@use-brian/core'
 
 const TEAM_ID = '11111111-1111-4111-8111-111111111111'
 const PROJECT_ID = '22222222-2222-4222-8222-222222222222'
@@ -453,5 +455,46 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
       null,
       true,
     )
+  })
+})
+
+describe('[COMP:api/context-scope-resolver] turnOutputWrite', () => {
+  const envelope: ResourceScope = {
+    workspaceId: 'workspace-1', userId: 'user-1', assistantId: 'primary-1',
+    sensitivity: 'internal', compartments: ['assistant-default'], projectIds: [],
+  }
+  const source = (overrides: Partial<ScopeSource>): ScopeSource => ({
+    resourceKind: 'memory', resourceId: 'memory-1', version: '1',
+    workspaceId: 'workspace-1', userId: null, assistantId: null,
+    sensitivity: 'internal', compartments: [], projectIds: [], ...overrides,
+  })
+
+  it('certifies a derivation when every source shares one partition', () => {
+    const accumulator = new ContextScopeAccumulator()
+    accumulator.noteSource(source({ resourceKind: 'session_message', userId: 'user-1', assistantId: 'primary-1' }))
+    accumulator.noteSource(source({ resourceId: 'memory-2' }))
+    const write = turnOutputWrite({ producer: 'turn:web', accumulator, envelope })
+    expect(write).toEqual({ derivation: { producer: 'turn:web', sources: accumulator.evidence.sources } })
+  })
+
+  it('stamps the session envelope, raised to the label floor, when a primary read across partitions', () => {
+    // The turn's own message plus a workspace memory another assistant authored.
+    const accumulator = new ContextScopeAccumulator()
+    accumulator.noteSource(source({ resourceKind: 'session_message', userId: 'user-1', assistantId: 'primary-1' }))
+    accumulator.noteSource(source({ resourceId: 'memory-2', userId: 'user-2', assistantId: 'other-assistant',
+      sensitivity: 'confidential', compartments: ['team:finance'], projectIds: ['project-a'] }))
+    expect(turnOutputWrite({ producer: 'turn:web', accumulator, envelope })).toEqual({
+      scope: {
+        workspaceId: 'workspace-1', userId: 'user-1', assistantId: 'primary-1',
+        sensitivity: 'confidential', compartments: ['assistant-default', 'team:finance'], projectIds: ['project-a'],
+      },
+    })
+  })
+
+  it('uses the envelope when nothing bound was read, and keeps legacy unscoped turns unchanged', () => {
+    const accumulator = new ContextScopeAccumulator()
+    expect(turnOutputWrite({ producer: 'turn:web', accumulator, envelope })).toEqual({ scope: envelope })
+    expect(turnOutputWrite({ producer: 'turn:web', accumulator, envelope: undefined }))
+      .toEqual({ derivation: { producer: 'turn:web', sources: [] } })
   })
 })

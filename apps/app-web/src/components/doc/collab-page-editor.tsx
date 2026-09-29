@@ -82,6 +82,7 @@ import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
 import { DrawingToolbarProvider, FloatingToolbar } from "./floating-toolbar";
 import { DocFindBar } from "./find-bar";
 import { docFindExtension } from "./find-in-page";
+import { createRemoteFocusExtension, remoteCaret } from "./remote-focus";
 import { DocDragHandle } from "./drag-handle";
 import { findBlockPos, ensureBlockId } from "./block-actions";
 import { blockIdFromHash } from "@/lib/doc-page-url";
@@ -753,7 +754,12 @@ function CollabEditorInner({
             avatarUrl: user?.avatarUrl,
             color: colorForUserId(user?.id ?? "me"),
           },
+          // A thin caret with no inline name label: the peer's face sits in
+          // the block gutter instead (remote-focus.ts).
+          render: remoteCaret,
         }),
+        // Subtle tint + gutter avatar on the block each peer is focused in.
+        createRemoteFocusExtension(provider),
       ],
     },
     // `recordingPlayer.recordingId` is load-bearing here: the timecode
