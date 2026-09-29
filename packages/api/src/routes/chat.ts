@@ -1995,6 +1995,8 @@ export type ResumeReplayParams = {
   selectedTier?: string
   selectedLegacyByo?: boolean
   selectedMeteredModel?: string
+  /** Exact durable worker runs captured with this suspension checkpoint. */
+  workerRunIds?: string[]
   /** Pinned original authoring/security principal for durable replay. */
   startingAccessCeiling?: import('@use-brian/core').AccessCeiling
   approvalStatus: ResumeReplayApprovalStatus
@@ -2113,6 +2115,7 @@ export async function runSessionResume(
       ...(point.selectedTier ? { selectedTier: point.selectedTier } : {}),
       ...(point.selectedLegacyByo !== undefined ? { selectedLegacyByo: point.selectedLegacyByo } : {}),
       ...(point.selectedMeteredModel ? { selectedMeteredModel: point.selectedMeteredModel } : {}),
+      ...(point.workerRunIds !== undefined ? { workerRunIds: point.workerRunIds } : {}),
       ...(point.startingAccessCeiling ? { startingAccessCeiling: point.startingAccessCeiling } : {}),
       approvalStatus: approval.status,
       rejectReason: approval.rejectReason,
@@ -7215,6 +7218,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   selectedLegacyByo: usedLegacyByoKey,
                   selectedMeteredModel: meteredTurn?.alias,
                   startingAccessCeiling: pinAccessCeiling(turnScope.access),
+                  workerRunIds: options.workerManager?.runIdsForSession(session.id) ?? [],
                   // `mcp_call` is the loop step being executed; replay
                   // re-enters that same step and the dispatcher's fast
                   // path picks up the resolved approval.
@@ -7750,6 +7754,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   selectedLegacyByo: usedLegacyByoKey,
                   selectedMeteredModel: meteredTurn?.alias,
                   startingAccessCeiling: pinAccessCeiling(turnScope.access),
+                  workerRunIds: options.workerManager?.runIdsForSession(session.id) ?? [],
                   loopStepIndex: event.loopStepIndex,
                 }))
               } catch (err) {

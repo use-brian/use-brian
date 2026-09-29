@@ -81,7 +81,11 @@ function makeStore(): WorkerRunsStore & {
     async recordSpawn(params) { spawns.push(params) },
     async recordTurn(params) { turns.push(params) },
     async recordCompletion(params) { completions.push(params) },
-    async loadForSession() { return loadResult },
+    async loadForSession(_sessionId, runIds) {
+      if (!runIds) return loadResult
+      const selected = new Set(runIds)
+      return loadResult.filter((row) => selected.has(row.runId))
+    },
     async deleteTerminalOlderThan() { return 0 },
     async listRecentForWorkspace() { return [] },
   }
@@ -483,6 +487,97 @@ describe('[COMP:core/worker-manager-persist] rehydrate', () => {
       notificationsReady: 0,
     })
     expect(manager.drainNotifications('s1')).toHaveLength(1)
+  })
+
+  it('does not replay a delivered result in a later suspension for the same session', async () => {
+    const store = makeStore()
+    store.loadResult.push(
+      {
+        runId: '11111111-1111-4111-8111-111111111111',
+        workerId: 'worker_1',
+        status: 'completed',
+        description: 'first suspension research',
+        prompt: 'first',
+        researchMode: false,
+        model: 'gemini-flash',
+        turnCount: 1,
+        result: 'first result',
+        history: [],
+      },
+      {
+        runId: '22222222-2222-4222-8222-222222222222',
+        workerId: 'worker_2',
+        status: 'completed',
+        description: 'second suspension research',
+        prompt: 'second',
+        researchMode: false,
+        model: 'gemini-flash',
+        turnCount: 1,
+        result: 'second result',
+        history: [],
+      },
+    )
+    const manager = createWorkerManager({
+      provider: makeFakeProvider('unused'),
+      model: 'gemini-flash',
+      tools: new Map(),
+    })
+    manager.setPersistence({ store, sessionId: 's1', workspaceId: 'ws1' })
+
+    await manager.rehydrate('s1', ctx, undefined, [
+      '11111111-1111-4111-8111-111111111111',
+    ])
+    expect(manager.drainNotifications('s1').map((result) => result.result)).toEqual([
+      'first result',
+    ])
+    manager.releaseSession('s1')
+
+    manager.setPersistence({ store, sessionId: 's1', workspaceId: 'ws1' })
+    await manager.rehydrate('s1', ctx, undefined, [
+      '22222222-2222-4222-8222-222222222222',
+    ])
+    expect(manager.drainNotifications('s1').map((result) => result.result)).toEqual([
+      'second result',
+    ])
+  })
+
+  it('omits an already-drained terminal run from the next suspension snapshot', async () => {
+    const store = makeStore()
+    const manager = createWorkerManager({
+      provider: makeFakeProvider('delivered result'),
+      model: 'gemini-flash',
+      tools: new Map(),
+    })
+    manager.setPersistence({ store, sessionId: 's1', workspaceId: 'ws1' })
+    manager.spawn('first cycle', ctx)
+    await manager.waitForNext('s1')
+    await new Promise((resolve) => setImmediate(resolve))
+
+    const [runId] = manager.runIdsForSession('s1')
+    expect(runId).toBe(store.spawns[0].runId)
+    expect(manager.drainNotifications('s1')).toHaveLength(1)
+    expect(manager.runIdsForSession('s1')).toEqual([])
+
+    store.loadResult.push({
+      runId,
+      workerId: store.spawns[0].workerId,
+      status: 'completed',
+      description: 'first cycle',
+      prompt: 'first cycle',
+      researchMode: false,
+      model: 'gemini-flash',
+      turnCount: 1,
+      result: 'delivered result',
+      history: [],
+    })
+    manager.releaseSession('s1')
+    manager.setPersistence({ store, sessionId: 's1', workspaceId: 'ws1' })
+
+    await expect(manager.rehydrate('s1', ctx, undefined, [])).resolves.toEqual({
+      respawned: 0,
+      notificationsReady: 0,
+    })
+    expect(manager.drainNotifications('s1')).toEqual([])
   })
 
   it('is a no-op when no persistence store is set', async () => {

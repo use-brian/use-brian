@@ -90,15 +90,18 @@ export type WorkerRunsStore = {
     turnCount: number
   }): Promise<void>
   /**
-   * Load every worker row for the session — used by `rehydrate()` on
-   * chat-route resume entry. The manager respawns rows with
+   * Load worker rows for the session — used by `rehydrate()` on chat-route
+   * resume entry. When `runIds` is present, only those runs belong to this
+   * suspension; an empty list intentionally loads nothing. Legacy resume
+   * checkpoints omit the filter and retain the historical all-session read.
+   * The manager respawns rows with
    * status='running' (seeded with `history`) and pushes rows with
    * status='completed'|'failed'|'stopped' into the notifications queue
    * for Phase 4b drain. The `runId` flows back to `recordTurn` /
    * `recordCompletion` so respawned workers update the existing row
    * instead of inserting a new one.
    */
-  loadForSession(sessionId: string): Promise<Array<{
+  loadForSession(sessionId: string, runIds?: readonly string[]): Promise<Array<{
     runId: string
     workerId: string
     status: WorkerStatus
@@ -984,8 +987,8 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     },
 
     /**
-     * Phase 3 of askQuestion suspend-resume — load every persisted worker
-     * row for a session and reconstitute the manager state. Completed /
+     * Phase 3 of askQuestion suspend-resume — load the persisted workers
+     * captured by this suspension and reconstitute the manager state. Completed /
      * failed / stopped rows go straight into the notifications queue so
      * Phase 4b drains them on the next turn boundary. Running rows are
      * respawned with their saved history so they continue from the last
@@ -998,13 +1001,14 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       sessionId: string,
       context: ToolContext,
       requestTools?: Map<string, Tool>,
+      runIds?: readonly string[],
     ): Promise<{ respawned: number; notificationsReady: number }> {
       const sessionConfig = sessionConfigs.get(sessionId)
       const store = sessionConfig?.persistenceStore ?? persistenceStore
       if (!store) {
         return { respawned: 0, notificationsReady: 0 }
       }
-      const rows = await store.loadForSession(sessionId)
+      const rows = await store.loadForSession(sessionId, runIds)
       let respawned = 0
       let notificationsReady = 0
       // Drive the workerCounter past the highest known id so a follow-up
@@ -1332,6 +1336,24 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     /** Whether an undrained notification is owned by `sessionId` (or session-less). */
     hasNotificationsFor(sessionId: string): boolean {
       return notifications.some((n) => n.ownerSessionId == null || n.ownerSessionId === sessionId)
+    },
+
+    /**
+     * Durable identities for the workers currently owned by `sessionId`.
+     * A suspension checkpoint stores this exact set so a later replay loads
+     * only work belonging to that suspension, never terminal rows retained
+     * from an older turn in the same chat.
+     */
+    runIdsForSession(sessionId: string): string[] {
+      return [...workers.entries()]
+        .filter(([workerId, entry]) => {
+          if (entry.ownerSessionId !== sessionId) return false
+          if (entry.status === 'running') return true
+          return notifications.some(
+            (result) => result.ownerSessionId === sessionId && result.workerId === workerId,
+          )
+        })
+        .map(([, entry]) => entry.runId)
     },
 
     /**
