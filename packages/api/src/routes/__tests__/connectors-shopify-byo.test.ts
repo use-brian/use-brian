@@ -35,6 +35,9 @@ function makeApp(over: { storedBlob?: string } = {}) {
     connectorInstanceStore: {
       listForUser: vi.fn().mockResolvedValue([]),
       listByUser: vi.fn().mockResolvedValue([]),
+      get: vi.fn().mockResolvedValue({
+        id: IID, provider: 'shopify', scope: 'user', userId: 'u1', workspaceId: null,
+      }),
       createUserInstance,
       update,
       getAuthCredentialsSystem,

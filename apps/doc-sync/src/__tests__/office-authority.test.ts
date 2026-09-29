@@ -3,7 +3,7 @@ import type { ResolvedOfficeAccess } from '@use-brian/api/office/access.js'
 import { revalidateOfficeConnection, revalidateOfficeRoom, sweepOfficeRooms, type OfficeRoomConnection } from '../office-authority.js'
 
 const access = (canEdit: boolean): ResolvedOfficeAccess => ({
-  artifactId: 'artifact', workspaceId: 'workspace', role: canEdit ? 'edit' : 'view',
+  artifactId: 'artifact', workspaceId: 'workspace', mode: 'artifact', role: canEdit ? 'edit' : 'view',
   workspaceRole: 'member', lifecycleState: 'active', canView: true,
   canComment: canEdit, canEdit, canRestore: false, canDeletePermanently: false,
   canElevate: false, canManageSharing: false,
