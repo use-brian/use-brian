@@ -726,7 +726,8 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       if (answer && answer.kind !== 'answer') return
       // Resume the question's native topic, not a new session rooted at its card.
       const questionSource = answer?.kind === 'answer' ? workflowEventMessage(answer.binding.incoming.raw) : null
-      const targetSession = questionSource ? resolveFeishuThreadScope(questionSource, replyInThread).sessionChannelId : sessionChannelId
+      const targetSession = (answer?.kind === 'answer' ? answer.binding.sessionId : undefined)
+        ?? (questionSource ? resolveFeishuThreadScope(questionSource, replyInThread).sessionChannelId : sessionChannelId)
       const run = () => runTurn({
         scope: { ...scope, sessionId: targetSession },
         questionIntegrationId: integration.id,
