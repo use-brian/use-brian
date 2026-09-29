@@ -14,12 +14,12 @@ import { resetSurfaceCache } from '@/lib/surface-cache';
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => navigation }));
 
-const edition = vi.hoisted(() => ({ teammateManagement: true }));
+const edition = vi.hoisted(() => ({ teammateManagement: true, billing: true }));
 
 vi.mock("@/lib/edition", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/edition")>(),
   isOssEdition: () => !edition.teammateManagement,
-  deploymentCapabilities: () => ({ teammateManagement: edition.teammateManagement, billing: edition.teammateManagement }),
+  deploymentCapabilities: () => ({ teammateManagement: edition.teammateManagement, billing: edition.billing }),
 }));
 vi.mock("@/lib/workspace-context", () => ({
   useWorkspaceContext: () => ({ workspaceId: "workspace-1" }),
@@ -40,6 +40,7 @@ vi.mock("@/lib/auth-fetch", () => ({
   })),
 }));
 // Other sections do not participate in invitation loading or navigation.
+vi.mock("../sections/token-usage-section", () => ({ TokenUsageSection: () => <h2>Token usage</h2> }));
 vi.mock("../sections/account-section", () => ({ AccountSection: () => <h2>Profile</h2> }));
 vi.mock("../sections/general-section", () => ({ GeneralSection: () => <h2>Preferences</h2> }));
 vi.mock("../sections/privacy-section", () => ({ PrivacySection: () => <h2>Privacy</h2> }));
@@ -57,6 +58,7 @@ const onClose = vi.fn();
 
 beforeEach(() => {
   edition.teammateManagement = true;
+  edition.billing = true;
   resetSurfaceCache();
   onClose.mockClear();
   navigation.push.mockClear();
@@ -161,5 +163,19 @@ describe("[COMP:app-web/settings-modal] mobile section navigation", () => {
       expect(document.querySelector("h2")?.textContent).toBe(label);
       expectVisible(document.querySelector("h2"));
     }
+  });
+});
+
+
+describe("[COMP:app-web/settings-modal] Outpost usage navigation", () => {
+  it("opens standalone usage rather than the hosted alias in both rails", async () => {
+    edition.billing = false;
+    await render(true, "ws-usage");
+    expect(document.querySelector("h2")?.textContent).toBe("Token usage");
+    expect(picker().textContent).toContain(en.chrome.settingsModal.workspace.usage);
+    const nav = document.querySelector("nav")!;
+    expect(nav.textContent).toContain(en.chrome.settingsModal.workspace.usage);
+    expect(nav.textContent).not.toContain(en.chrome.settingsModal.workspace.plan);
+    expect(nav.querySelector('[aria-current="page"]')?.textContent).toBe(en.chrome.settingsModal.workspace.usage);
   });
 });

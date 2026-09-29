@@ -436,6 +436,18 @@ export const zh: Dictionary = {
     "expired": "參照已到期。請建立新參照。",
     "completion": "填寫後等待人工完成：請在瀏覽器手動完成並提交，再使用擴充功能的完成控制。解鎖前須關閉所有受控任務分頁，以及完整瀏覽器模式中收到受保護值的分頁，並解除控制。此面板無法解鎖。"
 },
+  tokenUsage: {
+    title: "Token 用量",
+    period: "過去 30 天",
+    description: "工作區所有來源記錄的 Token 數量。快取 Token 分開顯示。這不是供應商帳單。",
+    refresh: "重新整理",
+    error: "無法載入 Token 用量，請重新整理。",
+    empty: "此期間沒有記錄任何 Token。",
+    inputTokens: "輸入 Token",
+    outputTokens: "輸出 Token",
+    cacheReadTokens: "快取讀取 Token",
+    cacheWriteTokens: "快取寫入 Token",
+  },
   internalLinks: {
     recoveryTitle: "開啟共享頁面",
     received: "正在準備連結...",

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { BrowserTheme } from "./browser-theme.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BaseWindow, type BrowserWindow, WebContentsView, ipcMain, session, type WebContents, type IpcMainEvent, type Session, type View } from "electron";
 
@@ -54,6 +55,7 @@ export class EmbeddedBrowserHost {
   private readonly entries = new Map<number, Tab>();
   private selected: number | null = null;
   private status = "";
+  private theme: BrowserTheme | null = null;
   private disposed = false;
 
   constructor(partition: string, private readonly callbacks: Callbacks, options: { dockWindow?: BrowserWindow | null } = {}) {
@@ -116,6 +118,7 @@ export class EmbeddedBrowserHost {
     ipcMain.on(COMMAND, this.onCommand);
     this.layout();
     void toolbar.loadFile(toolbarPath).catch(() => this.setStatus("Browser toolbar failed to load"));
+    this.dockContents?.send("embedded-browser:request-theme");
   }
 
   async createTab(url: string, taskOwned: boolean): Promise<number> {
@@ -210,6 +213,11 @@ export class EmbeddedBrowserHost {
       (!this.collapsed && [...this.entries.values()].some(tab => tab.id === this.selected && !tab.contents.isDestroyed() && tab.contents.isFocused())));
   }
   setStatus(status: string): void { this.status = status; this.publish(); }
+  setTheme(theme: BrowserTheme): void {
+    if (this.disposed) return;
+    this.theme = theme;
+    this.publish();
+  }
   destroy(): void {
     if (this.disposed) return;
     this.cleanup();
@@ -332,7 +340,7 @@ export class EmbeddedBrowserHost {
   private publish(): void {
     if (this.disposed || this.toolbar.webContents.isDestroyed()) return;
     this.toolbar.webContents.send(STATE, {
-      status: this.status, selected: this.selected,
+      status: this.status, selected: this.selected, theme: this.theme,
       presentation: { mode: this.docked ? "docked" : "detached", collapsed: this.collapsed,
         panelWidth: this.panelWidth, minWidth: 360, maxWidth: this.maxWidth },
       tabs: [...this.entries.values()].filter(tab => !tab.contents.isDestroyed()).map(tab => ({

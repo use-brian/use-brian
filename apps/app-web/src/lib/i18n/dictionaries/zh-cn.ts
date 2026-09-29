@@ -447,6 +447,18 @@ export const zhCN: Dictionary = {
     "expired": "引用已过期。请创建新引用。",
     "completion": "填写后等待人工完成：请在浏览器手动完成并提交，再使用扩展程序的完成控件。解锁前必须关闭所有受控任务标签页，以及完整浏览器模式中收到受保护值的标签页，并解除控制。此面板无法解锁。"
 },
+  tokenUsage: {
+    title: "Token 用量",
+    period: "过去 30 天",
+    description: "工作区所有来源记录的 Token 数量。缓存 Token 单独显示。这不是供应商账单。",
+    refresh: "刷新",
+    error: "无法加载 Token 用量，请刷新重试。",
+    empty: "此期间没有记录任何 Token。",
+    inputTokens: "输入 Token",
+    outputTokens: "输出 Token",
+    cacheReadTokens: "缓存读取 Token",
+    cacheWriteTokens: "缓存写入 Token",
+  },
   internalLinks: {
     recoveryTitle: "打开共享页面",
     received: "正在准备链接...",
