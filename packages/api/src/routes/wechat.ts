@@ -387,8 +387,8 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
       // 4. Resolve the WeChat sender → a platform user. The QR-bound account
       //    is the owner identity; all other contacts stay tier-2 shadows.
       let channelUserId = ownerId
-      let isIdentified = false
-      if (!isBoundWechatOwner(incoming.userId, creds) && options.channelUserStore && incoming.userId) {
+      let isIdentified = isBoundWechatOwner(incoming.userId, creds)
+      if (!isIdentified && options.channelUserStore && incoming.userId) {
         try {
           const resolved = await resolveChannelUser(
             options.channelUserStore,
