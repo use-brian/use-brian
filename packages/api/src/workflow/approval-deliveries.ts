@@ -46,6 +46,10 @@ export function createApprovalDeliveryDispatcher(
         assistantId: params.assistantId,
         userId: params.approverUserId,
         text: composeMessage(params, deepLink),
+        // The pushed text carries no run content (see composeMessage), so it
+        // is public - and still passes the destination-audience gate rather
+        // than skipping it as an evidence-less caller would.
+        scopeEvidence: { sensitivity: 'public', compartments: [], projectIds: [] },
       })
       if (outcome.status !== 'delivered') {
         console.warn(
@@ -64,6 +68,14 @@ export function createApprovalDeliveryDispatcher(
         return
       }
       const chatId = await resolveTelegramChatId(params.approverUserId)
+      // The reply-to-approve fallback addresses the approver alone. A group
+      // (negative chat id) is not the approver's audience.
+      if (chatId?.startsWith('-')) {
+        console.warn(
+          `[approval-deliveries] latest telegram chat for approval ${params.approvalId} is a group; relying on web UI`,
+        )
+        return
+      }
       if (!chatId) {
         console.warn(
           `[approval-deliveries] no telegram chat_id for user ${params.approverUserId}; approval ${params.approvalId} relies on web UI`,
@@ -86,10 +98,11 @@ function composeMessage(
   params: Parameters<ApprovalDeliveryDispatcher>[0],
   deepLink: string,
 ): string {
-  const argsPreview = JSON.stringify(params.arguments).slice(0, 200)
+  // Tool arguments are run content derived under the run's scope, and a push
+  // destination is chosen by recency, not by who may read that scope. They
+  // stay on the authorized web page this message links to.
   return [
     `🔐 *${params.workflowName}* asks to run \`${params.toolName}\`.`,
-    `Args: \`${argsPreview}${argsPreview.length === 200 ? '…' : ''}\``,
     ``,
     ...(params.recentTarget ? [`Approve or reject on the web: ${deepLink}`] : [
       `Reply with \`approve ${params.approvalId.slice(0, 8)}\` or \`reject ${params.approvalId.slice(0, 8)}\`,`,

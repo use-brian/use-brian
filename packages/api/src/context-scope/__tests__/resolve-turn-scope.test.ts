@@ -105,16 +105,23 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
       activeTeam: null,
       activeProject: null,
     }
+    // A person's input belongs to the thread audience, never to the
+    // assistant that answered it (decision D2): other assistants the owner
+    // addresses in the same thread must be able to read it.
     expect(sessionMessageInputScope({
       scope,
       workspaceId: 'workspace-1',
       userId: 'user-1',
-      assistantId: 'assistant-1',
+    })).toMatchObject({ userId: 'user-1', assistantId: null })
+    expect(sessionMessageInputScope({
+      scope,
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
       sharedAudience: true,
     })).toEqual({
       workspaceId: 'workspace-1',
       userId: null,
-      assistantId: 'assistant-1',
+      assistantId: null,
       sensitivity: 'public',
       compartments: [],
       projectIds: [],

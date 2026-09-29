@@ -33,6 +33,8 @@ import {
 import {
   COALESCE_MAX_MERGED_ROWS,
   coalesceConsecutiveUserMessages,
+  isSharedAudienceSession,
+  isSharedChatSession,
   toStampedMessages,
   type SessionMessage,
 } from '../../db/sessions.js'
@@ -610,5 +612,45 @@ describe('[COMP:api/room-mechanics] crossAssistantSendPolicy — per-turn addres
     expect(src).toContain('crossAssistantSendPolicy({')
     expect(src).toContain('isDocSurfaceSession: isDocSurface(session)')
     expect(src).toContain('isSharedSession: isSharedChatSession(session)')
+  })
+})
+
+describe('[COMP:api/room-mechanics] one shared-audience definition', () => {
+  // Input stamping and the delivery gate must agree on who the audience is,
+  // or every turn in a shape only one of them calls shared is refused.
+  const shape = (over: Record<string, string | null>) => ({
+    visibility: 'owner', channelType: 'web', appOrigin: 'chat', mode: null, ...over,
+  })
+
+  it('treats doc comment threads, Feed threads and live drafts as shared audiences', () => {
+    for (const session of [
+      shape({ channelType: 'doc_thread', appOrigin: null, visibility: 'workspace' }),
+      shape({ channelType: 'feed_thread', appOrigin: null, visibility: 'workspace' }),
+      shape({ mode: 'draft' }),
+    ]) {
+      expect(isSharedAudienceSession(session)).toBe(true)
+      // The narrower web-room predicate keeps its own lifecycle meaning.
+      expect(isSharedChatSession(session)).toBe(false)
+    }
+    expect(isSharedAudienceSession(shape({ visibility: 'workspace' }))).toBe(true)
+    expect(isSharedAudienceSession(shape({}))).toBe(false)
+  })
+
+  it('is the predicate both the chat route and the delivery gate use', () => {
+    const chat = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+    const delivery = readFileSync(new URL('../../context-scope/delivery-authority.ts', import.meta.url), 'utf8')
+    expect(chat).toContain('sharedAudience: isSharedAudienceSession(session)')
+    expect(delivery).toContain('isSharedAudienceSession(session)')
+    expect(delivery).not.toMatch(/visibility === 'workspace' \|\| [a-zA-Z.]*mode === 'draft'/)
+  })
+
+  it('a resumed turn keeps the shared-audience reads and passes the audience gate before saving', () => {
+    const resume = readFileSync(new URL('../session-resume-replay.ts', import.meta.url), 'utf8')
+    expect(resume).toContain('sharedAudience: isSharedAudienceSession(session)')
+    expect(resume).toContain('sharedAudience: turnScope.access.sharedAudience')
+    const gate = resume.indexOf('await authorizeResumeAudience(')
+    const save = resume.indexOf("producer: 'turn:resume-output'")
+    expect(gate).toBeGreaterThan(0)
+    expect(gate).toBeLessThan(save)
   })
 })

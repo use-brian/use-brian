@@ -1086,12 +1086,15 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     channelId,
     channelIntegrationId: params.channelIntegrationId,
     recipientType: isGroupChat ? 'group' as const : 'individual' as const,
+    // A DM from a non-member goes back to that same guest, judged as the
+    // guest the turn ran as - never as a member lookup that cannot succeed.
+    recipientMode: memberMode === 'external' ? 'external' as const : 'member' as const,
   }
   const audienceEnvelope = isGroupChat && assistant.workspaceId
     ? await resolveDeliveryAudienceEnvelope(audienceInput)
     : null
   if (audienceEnvelope && !audienceEnvelope.allowed) {
-    throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail)
+    throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail, audienceEnvelope.diagnostic)
   }
   const publicAudienceTurn = audienceEnvelope?.allowed === true
     && audienceEnvelope.source === 'public'
@@ -1127,6 +1130,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       session,
       memberMode,
       ignoreSessionBinding: isGroupChat,
+      // A group reads only rows the whole group may see (decision D4). A
+      // personal group - bound to one recipient whose sole-human membership
+      // is proven at every check - is that person's own audience.
+      sharedAudience: isGroupChat && !(audienceEnvelope?.allowed && audienceEnvelope.ceiling.userId),
       identity: senderIsWorkspaceMember
         ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
         : {
@@ -1182,7 +1189,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     scope: dataTurnScope,
     workspaceId: assistant.workspaceId,
     userId,
-    assistantId: assistant.id,
     sharedAudience: isGroupChat,
   })
   const currentTurnWrite = () => turnOutputWrite({
@@ -1197,7 +1203,13 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
     })
-    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail)
+    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
+    // Current labels of a source that changed since it was read join the floor.
+    scopeAccumulator.note({
+      sensitivity: decision.evidence.sensitivity,
+      compartments: decision.evidence.compartments,
+      projectIds: decision.evidence.projectIds,
+    })
   }
 
   const filterHistoryForAudience = async <T extends {
@@ -1287,7 +1299,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // isolated current sentence (2026-08-09 Snapio incident on web; channels
   // share the same classifier contract).
   const preExistingDbMessages = await filterHistoryForAudience(
-    await getSessionMessages(session.id),
+    await getSessionMessages(session.id, { excludeHeld: true }),
   )
   const adaptiveRecentConversation = preExistingDbMessages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -1606,6 +1618,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // `fromSequence` skips rows already compacted into the most recent
   // boundary; null (never compacted) loads full history.
   const dbMessages = await filterHistoryForAudience(await getSessionMessages(session.id, {
+    excludeHeld: true,
     // A public audience cannot trust the durable summary because it has no
     // per-source audience evidence. Rebuild from filtered provider history.
     fromSequence: isolatedAudience ? null : session.compactBoundarySequence,
@@ -1776,6 +1789,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           clearance,
           compartments,
           projectIds: dataTurnScope.effectiveProjectIds,
+          sharedAudience: dataTurnScope.access.sharedAudience,
         },
         PER_TURN_FILES_INDEX_CAP,
       )
@@ -2241,7 +2255,22 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     await assertDeliveryAudience()
   } catch (err) {
     if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
-    console.warn(`[${channelType}] channel turn refused before generation:`, (err as Error).name)
+    console.warn(`[${channelType}] channel turn refused before generation:`, (err as Error).name,
+      isDeliveryAudienceUnverifiedError(err) ? err.diagnostic ?? '' : '')
+    // A refusal that ends the turn before any reply is exactly the one that
+    // must leave a row: without it the only trace is a console line, and the
+    // incident is invisible to the id-keyed SQL triage path.
+    analytics?.logEvent({
+      userId, assistantId: assistant.id, sessionId: session.id,
+      eventName: 'chat_route_error', channelType,
+      metadata: {
+        error_type: sanitizeAnalytics((err as Error).name),
+        stage: sanitizeAnalytics('pre_generation'),
+        ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
+          ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
+          : {}),
+      },
+    })
     if (isDeliveryAudienceUnverifiedError(err)) {
       await hooks.sendError(err)
     }
@@ -2513,6 +2542,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         compartments: execution.security.access.compartments,
         mutationCompartments: execution.security.access.mutationCompartments,
         projectIds: execution.security.access.projectIds,
+        sharedAudience: execution.security.access.sharedAudience,
       }),
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
@@ -3067,6 +3097,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         metadata: {
           error_type: sanitizeAnalytics((err as Error).name),
           stage: sanitizeAnalytics('live_authority'),
+          ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
+            ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
+            : {}),
         },
       })
       if (isDeliveryAudienceUnverifiedError(err)) {

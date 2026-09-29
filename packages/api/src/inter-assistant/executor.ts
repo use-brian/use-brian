@@ -1698,7 +1698,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       scope: turnScope,
       workspaceId: calleeAssistant.workspaceId,
       userId: session.userId,
-      assistantId: calleeAssistant.id,
     })
     const userMessageRow = await addSessionMessage({
       sessionId: session.id,
@@ -1717,6 +1716,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     if (params.sessionKey) {
       const priorRows = await getSessionMessages(session.id, {
         fromSequence: session.compactBoundarySequence,
+        excludeHeld: true,
       })
       noteAutomaticScopeEvidence(scopeAccumulator, priorRows)
       const compacted = await executeWithCurrentAuthority(() => runProactiveCompaction({

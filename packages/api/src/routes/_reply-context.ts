@@ -128,7 +128,7 @@ async function resolveByUuid(
   // getSessionMessages doesn't support by-id lookup directly; fetch a
   // bounded window and find the match. For the web route this is cheap
   // because the replied-to message is almost always in the recent window.
-  const recent = await getSessionMessages(sessionId, { limit: 500 })
+  const recent = await getSessionMessages(sessionId, { limit: 500, excludeHeld: true })
   const hit = recent.find((m) => m.id === id)
   if (!hit) return null
   return makeResolved(hit, id)

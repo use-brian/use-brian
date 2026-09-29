@@ -4,8 +4,12 @@ import { createAuthorityLease, createSessionAuthorityLease, runWithAuthorityLeas
 
 const liveSession = vi.hoisted(() => ({ row: null as Record<string, unknown> | null }))
 vi.mock('../../db/sessions.js', () => ({ findSessionAuthorityById: async () => liveSession.row }))
-vi.mock('../../db/users.js', () => ({ findAssistantById: async () => ({ id: 'assistant', workspaceId: 'workspace' }) }))
-vi.mock('../resolve-turn-scope.js', () => ({ resolveLiveAccessCeilingSystem: async () => initial }))
+vi.mock('../../db/users.js', () => ({ findAssistantById: async (id: string) => ({ id, workspaceId: 'workspace' }) }))
+// Each assistant's live ceiling is its own: a standard assistant sees only its rows.
+vi.mock('../resolve-turn-scope.js', () => ({
+  resolveLiveAccessCeilingSystem: async ({ assistant }: { assistant: { id: string } }) =>
+    assistant.id === 'assistant' ? initial : { ...initial, visibilityAssistantIds: [assistant.id] },
+}))
 
 const initial: AccessCeiling = { workspaceId: 'workspace', userId: 'actor',
   clearance: 'internal', compartments: ['product'], mutationCompartments:['product'], projectIds: [], visibilityAssistantIds: ['assistant'] }
@@ -125,6 +129,26 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
       })
       await expect(lease.assertCurrent()).resolves.toBeUndefined()
       maximum = { ...initial, compartments: [], mutationCompartments: [] }
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    })
+
+    it('re-checks the assistant running the turn, not the session binding it was addressed away from', async () => {
+      // Doc-dock switch / room @mention: the turn runs as another assistant,
+      // and its starting ceiling was resolved for that assistant.
+      liveSession.row = { ...base }
+      const starting = { ...initial, visibilityAssistantIds: ['doc-assistant'] }
+      const lease = createSessionAuthorityLease({ starting, session: base, executingAssistantId: 'doc-assistant' })
+      await expect(lease.assertCurrent()).resolves.toBeUndefined()
+      // Re-resolving the bound assistant instead can never contain that ceiling.
+      const bound = createSessionAuthorityLease({ starting, session: base })
+      await expect(bound.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    })
+
+    it('still invalidates a re-addressed turn when the session is rebound', async () => {
+      liveSession.row = { ...base }
+      const starting = { ...initial, visibilityAssistantIds: ['doc-assistant'] }
+      const lease = createSessionAuthorityLease({ starting, session: base, executingAssistantId: 'doc-assistant' })
+      liveSession.row = { ...base, assistantId: 'another-assistant' }
       await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
     })
 

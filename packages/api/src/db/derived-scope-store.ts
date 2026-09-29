@@ -1,5 +1,5 @@
 import {
-  DerivedScopeError, deriveResourceScope, resourceScopeKey,
+  DerivedScopeError, deriveContextFloor, deriveResourceScope, deriveWriteScope, isSensitivity, resourceScopeKey,
   type DerivedWriteEvidence, type ResourceScope, type ScopeSource,
 } from '@use-brian/core'
 import type pg from 'pg'
@@ -23,12 +23,29 @@ export async function validateDerivedMemoryInputs(
 }
 
 /**
- * Prove every source is still live and unchanged, without deriving one
- * envelope from them. Read evidence may span visibility partitions (a primary
- * reads the same user's rows other assistants own), so audience checks call
- * this directly; derived writers reach it through validateDerivedMemoryInputs.
+ * Inputs of a model-driven write (decision D3). Same exact-version lineage
+ * as `validateDerivedMemoryInputs`, but only the LABEL floor comes back: the
+ * write keeps its target's own visibility (`deriveWriteScope`), so a primary
+ * that read several assistants' rows can still save. Must run inside the
+ * canonical writer's transaction.
  */
-export async function revalidateScopeSources(
+export async function validateDerivedWriteInputs(
+  client: Pick<pg.PoolClient, 'query'>,
+  evidence: DerivedWriteEvidence,
+): Promise<Pick<ResourceScope, 'workspaceId' | 'sensitivity' | 'compartments' | 'projectIds'>> {
+  const labels = deriveContextFloor(evidence)
+  const workspaceId = evidence.sources[0]!.workspaceId
+  await revalidateScopeSources(client, workspaceId, evidence.sources)
+  return { workspaceId, ...labels }
+}
+
+/**
+ * Prove every source is still live and at the exact version read. This is
+ * lineage for a derived write, locked FOR SHARE inside the writer's
+ * transaction. Audience and consult checks judge current labels instead
+ * (`readCurrentScopeSources`).
+ */
+async function revalidateScopeSources(
   client: Pick<pg.PoolClient, 'query'>,
   workspaceId: string,
   sources: readonly ScopeSource[],
@@ -50,13 +67,84 @@ export async function revalidateScopeSources(
   }
 }
 
+/**
+ * What became of a source between the read and an audience/consult check.
+ * `gone` covers delete, supersession, retraction and legacy rows: the content
+ * was read under the recorded envelope, and removing it later does not make
+ * that read unauthorized (scoped-context.md -> "Audience checks are per
+ * source", decision D1).
+ */
+export type CurrentSourceState =
+  | { state: 'current'; source: ScopeSource }
+  | { state: 'changed'; source: ScopeSource; current: ResourceScope }
+  | { state: 'gone'; source: ScopeSource }
+  | { state: 'held'; source: ScopeSource }
+  | { state: 'unverifiable'; source: ScopeSource }
+  /** A causal input (a CRM event) whose content changed: exact-version only. */
+  | { state: 'stale_input'; source: ScopeSource }
+
+/**
+ * One round trip for every source, no transaction: an audience check couples
+ * no write to these rows, so it needs the current envelope, not a lock held
+ * across a later statement. Derived writers use `revalidateScopeSources`.
+ */
+export async function readCurrentScopeSources(
+  client: Pick<pg.ClientBase, 'query'>,
+  workspaceId: string,
+  sources: readonly ScopeSource[],
+): Promise<CurrentSourceState[]> {
+  const unique = new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
+  const list = [...unique.values()]
+  if (list.length === 0) return []
+  if (list.some(source=>source.workspaceId!==workspaceId)) throw new DerivedScopeError('scope_workspace_mismatch')
+  const { rows } = await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
+    `SELECT t.ord::int AS ord, read_scope_source($1, t.kind, t.id) AS snapshot
+       FROM unnest($2::text[], $3::uuid[]) WITH ORDINALITY AS t(kind, id, ord)`,
+    [workspaceId, list.map(source=>source.resourceKind), list.map(source=>source.resourceId)],
+  )
+  const byOrd = new Map(rows.map(row=>[row.ord, row.snapshot]))
+  return list.map((source, index): CurrentSourceState => {
+    // No result row at all is a failed read, not a deleted source.
+    if (!byOrd.has(index + 1)) return { state: 'unverifiable', source }
+    const row = byOrd.get(index + 1) ?? null
+    // A CRM event snapshot is withheld (NULL) while held or retired, so its
+    // absence is not proof of deletion.
+    if (!row) return source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
+    if (row.held) return { state: 'held', source }
+    if (source.resourceKind === 'crm_event' && (!row.causalEntityId
+      || !unique.has(`entity:${row.causalEntityId}`))) return { state: 'unverifiable', source }
+    if (row.retractedAt || row.validTo) return { state: 'gone', source }
+    if (row.version === source.version && resourceScopeKey(row) === resourceScopeKey(source)) {
+      return { state: 'current', source }
+    }
+    // An outbox event is immutable by nature and is the run's causal input:
+    // a changed payload means the run would finish on stale input, so its
+    // version must still match (scoped-context.md -> "CRM workflow input
+    // provenance"). Current-label judgement is for rows a turn edits itself.
+    if (source.resourceKind === 'crm_event') return { state: 'stale_input', source }
+    // The current envelope is judged against the receiver, so it must be
+    // complete: a missing label axis is not General.
+    if (!isSensitivity(row.sensitivity) || !Array.isArray(row.compartments) || !Array.isArray(row.projectIds)
+      || typeof row.workspaceId !== 'string') return { state: 'unverifiable', source }
+    return { state: 'changed', source, current: {
+      workspaceId: row.workspaceId, userId: row.userId, assistantId: row.assistantId,
+      sensitivity: row.sensitivity, compartments: row.compartments, projectIds: row.projectIds,
+    } }
+  })
+}
+
 /** The database validates the output reference and envelope again. */
 export async function recordDerivedResource(
   client: Pick<pg.PoolClient, 'query'>,
   evidence: DerivedWriteEvidence,
   output: ScopeSource,
+  /** The acting author, whose own private rows may feed a wider target (D3). */
+  actorUserId?: string | null,
 ): Promise<void> {
-  const floor = deriveResourceScope(evidence, output)
+  // The output must carry every label it was derived from and must not take
+  // another person's private rows anywhere else; its assistant visibility is
+  // the target's own (decision D3).
+  const floor = deriveWriteScope(evidence, output, actorUserId)
   if (resourceScopeKey(floor) !== resourceScopeKey(output)) {
     throw new DerivedScopeError('scope_visibility_incompatible')
   }

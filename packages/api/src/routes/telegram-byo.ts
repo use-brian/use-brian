@@ -492,6 +492,9 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           error_type: sanitizeAnalytics((err as Error)?.name ?? 'unknown'),
           error_message: sanitizeAnalytics(((err as Error)?.message ?? '').slice(0, 200)),
           stage: sanitizeAnalytics('telegram_byo_route_catch'),
+          ...(typeof (err as { diagnostic?: unknown } | null)?.diagnostic === 'string'
+            ? { denial_diagnostic: sanitizeAnalytics((err as { diagnostic: string }).diagnostic) }
+            : {}),
         },
       })
       adapter.sendMessage(channelId, {

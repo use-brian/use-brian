@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { AccessCeiling } from '@use-brian/core'
+import type { AccessCeiling, ScopeSource } from '@use-brian/core'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { Session } from '../../db/sessions.js'
 import {
@@ -12,6 +12,22 @@ const USER = '22222222-2222-4222-8222-222222222222'
 const ASSISTANT = '33333333-3333-4333-8333-333333333333'
 const APPROVER = '44444444-4444-4444-8444-444444444444'
 const PROJECT = '55555555-5555-4555-8555-555555555555'
+const OTHER_ASSISTANT = '77777777-7777-4777-8777-777777777777'
+
+// Current-label revalidation reads the database; these tests exercise the
+// per-source policy, so every source is reported unchanged.
+vi.mock('../../db/client.js', () => ({ getPool: () => ({}) }))
+vi.mock('../../db/derived-scope-store.js', () => ({
+  readCurrentScopeSources: async (_client: unknown, _workspaceId: string, sources: ScopeSource[]) =>
+    sources.map((source) => ({ state: 'current', source })),
+}))
+
+function source(id: string, assistantId: string | null, userId: string | null = USER): ScopeSource {
+  return {
+    workspaceId: WS, userId, assistantId, sensitivity: 'internal', compartments: [], projectIds: [],
+    resourceKind: 'memory', resourceId: id, version: '1',
+  }
+}
 
 function ceiling(overrides: Partial<AccessCeiling> = {}): AccessCeiling {
   return {
@@ -193,7 +209,7 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
       channelType: 'slack',
       channelId: 'C-FICTIONAL',
       scopeEvidence: { sensitivity: 'internal', compartments: [], projectIds: [] },
-    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', detail: 'unbound' })
+    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', detail: 'unbound', diagnostic: 'clearance' })
   })
 
   it('rechecks an exact owner-approved binding and its current approver role', async () => {
@@ -224,7 +240,7 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
     await expect(authorizer({ integration, approverRole: 'owner' })(input))
       .resolves.toMatchObject({ allowed: true })
     await expect(authorizer({ integration, approverRole: 'member' })(input))
-      .resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified' })
+      .resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', diagnostic: 'binding_approver_not_admin' })
   })
 
   it('intersects a private binding with the recipient current membership', async () => {
@@ -256,7 +272,7 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
       channelType: 'slack',
       channelId: 'D-FICTIONAL',
       scopeEvidence: { sensitivity: 'internal', compartments: ['finance'], projectIds: [] },
-    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', detail: 'evidence_exceeds_audience' })
+    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', detail: 'evidence_exceeds_audience', diagnostic: 'teams' })
   })
 
   it('refuses an expired binding even when its former approver is still admin', async () => {
@@ -287,7 +303,7 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
       channelType: 'slack',
       channelId: 'C-FICTIONAL',
       scopeEvidence: { sensitivity: 'internal', compartments: ['finance'] },
-    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified' })
+    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', diagnostic: 'binding_expired' })
   })
 
   it('uses the immutable room Team/Project envelope for an origin session', async () => {
@@ -316,7 +332,7 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
       channelId: 'default',
       sessionId: '66666666-6666-4666-8666-666666666666',
       scopeEvidence: { sensitivity: 'internal', compartments: ['legal'], projectIds: [PROJECT] },
-    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified' })
+    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', diagnostic: 'teams' })
   })
 })
 
@@ -398,6 +414,7 @@ describe('[COMP:api/delivery-authority] personal group bindings', () => {
       allowed: false,
       reason: 'delivery_audience_unverified',
       detail: 'personal_group_unverified',
+      diagnostic: 'personal_group_unverified',
     })
     await expect(createDeliveryAudienceAuthorizer(deps)({
       ...personalGroupInput,
@@ -406,6 +423,7 @@ describe('[COMP:api/delivery-authority] personal group bindings', () => {
       allowed: false,
       reason: 'delivery_audience_unverified',
       detail: 'personal_group_unverified',
+      diagnostic: 'personal_group_unverified',
     })
   })
 
@@ -418,6 +436,103 @@ describe('[COMP:api/delivery-authority] personal group bindings', () => {
       allowed: false,
       reason: 'delivery_audience_unverified',
       detail: 'evidence_exceeds_audience',
+      diagnostic: 'clearance',
     })
+  })
+})
+
+describe('[COMP:api/delivery-authority] owner thread audience (decision D2)', () => {
+  const ownerThread = session({ channelType: 'web', appOrigin: 'doc', visibility: 'owner' })
+  const input = {
+    workspaceId: WS,
+    // The doc dock re-addressed this turn: the answering assistant is not the
+    // session's bound one, and the transcript carries both assistants' rows.
+    assistantId: OTHER_ASSISTANT,
+    userId: USER,
+    channelType: 'web',
+    channelId: 'default',
+    sessionId: ownerThread.id,
+    scopeEvidence: { sources: [source('bound-reply', ASSISTANT), source('answering-memory', OTHER_ASSISTANT)] },
+  }
+
+  it('delivers a thread spanning several assistants to its owner', async () => {
+    const authorize = authorizer({
+      originSession: ownerThread,
+      // A standard assistant's own ceiling partitions by assistant; as an
+      // AUDIENCE the owner is not partitioned.
+      live: ceiling({ compartments: null, mutationCompartments: null, projectIds: null, visibilityAssistantIds: [OTHER_ASSISTANT] }),
+    })
+    await expect(authorize(input)).resolves.toMatchObject({ allowed: true })
+  })
+
+  it('still refuses another user\'s personal row and another member\'s thread', async () => {
+    const live = ceiling({ compartments: null, mutationCompartments: null, projectIds: null })
+    await expect(authorizer({ originSession: ownerThread, live })({
+      ...input,
+      scopeEvidence: { sources: [source('foreign', ASSISTANT, APPROVER)] },
+    })).resolves.toMatchObject({ allowed: false, diagnostic: 'user_visibility' })
+    await expect(authorizer({ originSession: session({ userId: APPROVER }), live })(input))
+      .resolves.toMatchObject({ allowed: false, diagnostic: 'session_not_owner' })
+  })
+
+  it('tells a failed membership lookup apart from a lost membership', async () => {
+    const failing = (error: Error) => createDeliveryAudienceAuthorizer({
+      findAssistant: vi.fn(async () => ({ id: ASSISTANT, workspaceId: WS })) as never,
+      findSession: vi.fn(async () => ownerThread),
+      findChannelSession: vi.fn(async () => null),
+      getWorkspaceRole: vi.fn(async () => null),
+      resolveLiveAccess: vi.fn(async () => { throw error }),
+    })
+    await expect(failing(new Error('authority_unavailable'))(input))
+      .resolves.toMatchObject({ allowed: false, diagnostic: 'member_not_found' })
+    await expect(failing(new Error('timeout exceeded when trying to connect'))(input))
+      .resolves.toMatchObject({ allowed: false, diagnostic: 'member_ceiling_error' })
+  })
+})
+
+describe('[COMP:api/delivery-authority] non-member recipients', () => {
+  const GUEST = '88888888-8888-4888-8888-888888888888'
+  const guestSession = session({ userId: GUEST, channelType: 'telegram', channelId: '5550100', appOrigin: null })
+  // What resolveLiveAccess yields for each mode: a guest is not a member, so
+  // the strict member lookup throws; as an external principal it resolves to
+  // public General for that guest.
+  const resolveLiveAccess = vi.fn(async (input: { memberMode?: string }) => {
+    if (input.memberMode !== 'external') throw new Error('authority_unavailable')
+    return ceiling({ userId: GUEST, clearance: 'public', compartments: [], mutationCompartments: [], projectIds: [] })
+  })
+  const authorize = () => createDeliveryAudienceAuthorizer({
+    findAssistant: vi.fn(async () => ({ id: ASSISTANT, workspaceId: WS })) as never,
+    findSession: vi.fn(async () => guestSession),
+    findChannelSession: vi.fn(async () => guestSession),
+    getWorkspaceRole: vi.fn(async () => null),
+    resolveLiveAccess: resolveLiveAccess as never,
+  })
+  const guestInput = {
+    workspaceId: WS,
+    assistantId: ASSISTANT,
+    userId: GUEST,
+    channelType: 'telegram',
+    channelId: '5550100',
+    recipientType: 'individual' as const,
+    scopeEvidence: {
+      sensitivity: 'public' as const,
+      sources: [{ ...source('guest-message', null, GUEST), sensitivity: 'public' as const, resourceKind: 'session_message' }],
+    },
+  }
+
+  it('delivers a guest DM reply that carries the guest\'s own message', async () => {
+    await expect(authorize()({ ...guestInput, recipientMode: 'external' })).resolves.toMatchObject({ allowed: true })
+    await expect(authorize()({ ...guestInput, sessionId: guestSession.id, channelType: 'api', recipientMode: 'external' }))
+      .resolves.toMatchObject({ allowed: true })
+  })
+
+  it('refuses when the guest is judged as a member, and never widens a guest past public', async () => {
+    await expect(authorize()({ ...guestInput, sessionId: guestSession.id, channelType: 'api' }))
+      .resolves.toMatchObject({ allowed: false, diagnostic: 'member_not_found' })
+    await expect(authorize()({
+      ...guestInput,
+      recipientMode: 'external',
+      scopeEvidence: { sensitivity: 'internal' as const, sources: guestInput.scopeEvidence.sources },
+    })).resolves.toMatchObject({ allowed: false, diagnostic: 'clearance' })
   })
 })

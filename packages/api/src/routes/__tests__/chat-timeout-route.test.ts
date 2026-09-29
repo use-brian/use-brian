@@ -5,6 +5,8 @@ import request from 'supertest'
 const state = vi.hoisted(() => ({
   events: [] as any[], rows: [] as any[], bus: [] as any[], held: true, cancelled: false,
   beforeLoop: null as null | ((options: any) => Promise<void>),
+  afterFirstEvent: null as null | ((options: any) => Promise<void>),
+  successor: null as null | string,
   onRelease: null as null | (() => Promise<void>),
   session: { id: 'session-test', userId: 'user-test', assistantId: 'assistant-test', channelType: 'web', channelId: 'user-test', status: 'idle', mode: 'default', visibility: 'owner', title: 'Existing title', contextGroupId: null, contextProjectId: null, contextLockedAt: null },
 }))
@@ -28,6 +30,7 @@ vi.mock('../../db/sessions.js', async (original) => ({
   requestTurnCancel: async () => {}, reclaimStaleTurn: async () => false, updateSessionTitle: async () => true, countSessionTurns: async () => 2,
   startTurnLease: async () => 'lease-test',
   touchTurnLease: vi.fn(async () => ({ held: state.held, cancelRequested: state.cancelled })),
+  isTurnLeaseSuperseded: vi.fn(async (_id: string, token: string) => state.successor !== null && state.successor !== token),
   releaseTurnLease: vi.fn(async () => { state.held = false; await state.onRelease?.() }),
 }))
 vi.mock('../route-helpers.js', async (original) => ({
@@ -41,7 +44,13 @@ vi.mock('../../context-scope/resolve-turn-scope.js', async (original) => ({
 }))
 vi.mock('@use-brian/core', async (original) => ({
   ...await original<any>(),
-  queryLoop: vi.fn(async function* (options) { await state.beforeLoop?.(options); for (const event of state.events) yield event }),
+  queryLoop: vi.fn(async function* (options) {
+    await state.beforeLoop?.(options)
+    for (const [index, event] of state.events.entries()) {
+      yield event
+      if (index === 0) await state.afterFirstEvent?.(options)
+    }
+  }),
   classifyTopic: async () => ({ isNewTopic: false, topic: 'test' }),
   buildMemoryContext: () => '',
   runMemoryNudge: async () => ({}),
@@ -77,7 +86,7 @@ async function run(extra: Record<string, unknown> = {}) {
 beforeEach(() => {
   state.events = [{ type: 'error', error: new Error('Stream idle 30000ms') }]
   state.rows = []; state.bus = []; state.held = true; state.cancelled = false
-  state.beforeLoop = null; state.onRelease = null; state.session.status = 'idle'; state.session.title = 'Existing title'
+  state.beforeLoop = null; state.afterFirstEvent = null; state.successor = null; state.onRelease = null; state.session.status = 'idle'; state.session.title = 'Existing title'
   vi.clearAllMocks()
   vi.spyOn(console, 'info').mockImplementation(() => {})
   vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -211,5 +220,37 @@ describe('actual chat route provider timeout (HTTP + real SSE/persistence wiring
     expect(titleStream).toHaveBeenCalledTimes(1)
     expect(touchTurnLease).toHaveBeenCalledTimes(2) // tick + final ownership check, no post-release tick
     expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('lease lost')
+  })
+})
+
+describe('[COMP:api/turn-lease] a stopped turn and its successor', () => {
+  const partial = [{
+    type: 'assistant_turn',
+    response: { stopReason: 'end_turn', content: [{ type: 'text', text: 'partial answer' }] },
+    toolResults: [],
+  }]
+  const stopThen = (successorTookLease: boolean) => async ({ context: { abortSignal } }: any) => {
+    const app = express(); app.use(express.json()); app.use((req, _res, next) => { (req as any).userId = 'user-test'; next() }); app.use('/chat', chatRoutes({} as any))
+    await request(app).post('/chat/stop').send({ sessionId: state.session.id })
+    expect(abortSignal.aborted).toBe(true)
+    // A plain stop releases the lease to NULL, exactly as the route does.
+    // Stop, then retry: the retry's startTurnLease installs ANOTHER token.
+    state.held = false
+    if (successorTookLease) state.successor = 'lease-retry'
+  }
+
+  it('does not save a superseded turn\'s partial reply, and does not report it as an error', async () => {
+    state.events = partial
+    state.afterFirstEvent = stopThen(true)
+    const response = await run()
+    expect(state.rows.filter((r) => r.role === 'assistant')).toHaveLength(0)
+    expect(frames(response.text).some((e) => e.event === 'error')).toBe(false)
+  })
+
+  it('still saves the partial reply of a stopped turn nobody replaced', async () => {
+    state.events = partial
+    state.afterFirstEvent = stopThen(false)
+    await run()
+    expect(state.rows.filter((r) => r.role === 'assistant')).toHaveLength(1)
   })
 })

@@ -3,6 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
   addSessionMessage: vi.fn(),
+  findSessionById: vi.fn(async () => null),
+  isSharedAudienceSession: vi.fn(() => false),
 }))
 
 // Adapters mocked, Slack error translation real — the failure copy under test
@@ -306,5 +308,33 @@ describe('[COMP:api/inter-assistant-deliver] deliverToChannel', () => {
       'chat_999',
       expect.objectContaining({ text: 'Default-bot notification' }),
     )
+  })
+})
+
+describe('[COMP:api/inter-assistant-deliver] relay copies from mixed partitions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockAddSessionMessage.mockResolvedValue(undefined as never)
+    mockFindOrCreateSession.mockResolvedValue({ id: 'ses_notif' } as never)
+  })
+
+  it('stamps the copy with the session audience raised to the label floor instead of a strict derivation', async () => {
+    const read = (id: string, assistantId: string) => ({
+      workspaceId: 'ws-1', userId: 'u_1', assistantId, sensitivity: 'internal' as const,
+      compartments: ['team:sales'], projectIds: [], resourceKind: 'memory', resourceId: id, version: '1',
+    })
+    const result = await deliverToChannel({
+      workspaceId: 'ws-1', assistantId: 'a_1', userId: 'u_1', text: 'Relayed answer', channelType: 'web',
+      // A callee that read two assistants' rows: no single envelope exists.
+      scopeEvidence: { sources: [read('m1', 'assistant-a'), read('m2', 'assistant-b')] },
+      // The real gate returns the evidence it verified.
+      authorizeDeliveryAudience: vi.fn(async (input: { scopeEvidence?: object }) => ({ allowed: true as const, evidence: input.scopeEvidence ?? {} })),
+    })
+    expect(result.delivered).toBe(true)
+    const write = mockAddSessionMessage.mock.calls[0]![0] as Record<string, unknown>
+    expect(write.derivation).toBeUndefined()
+    expect(write.scope).toMatchObject({
+      workspaceId: 'ws-1', userId: 'u_1', assistantId: null, sensitivity: 'internal', compartments: ['team:sales'],
+    })
   })
 })

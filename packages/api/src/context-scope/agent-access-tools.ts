@@ -15,6 +15,7 @@ export function bindToolsToAgentAccess(
     mutationCompartments?: string[] | null
     projectIds: string[] | null | undefined
     visibilityAssistantIds?: string[] | null
+    sharedAudience?: boolean
   },
 ): Map<string, Tool> {
   const scoped = new Map<string, Tool>()

@@ -74,19 +74,24 @@ export class ContextNotAvailableError extends Error {
   }
 }
 
-/** Canonical envelope for newly persisted human/session input. */
+/**
+ * Canonical envelope for newly persisted human/session input. A person's own
+ * words belong to the thread's audience, not to whichever assistant answered
+ * them: the assistant axis stays null so every assistant the owner addresses
+ * in the thread (doc-dock switch, room @mention, a consult carrying the
+ * message) may read it (scoped-context.md -> decision D2).
+ */
 export function sessionMessageInputScope(params: {
   scope: ResolvedTurnScope
   workspaceId: string | null | undefined
   userId: string
-  assistantId: string
   sharedAudience?: boolean
 }): ResourceScope | undefined {
   if (!params.workspaceId) return undefined
   return {
     workspaceId: params.workspaceId,
     userId: params.sharedAudience ? null : params.userId,
-    assistantId: params.assistantId,
+    assistantId: null,
     // Conversation text has no user-controlled sensitivity selector. Use the
     // resolved execution ceiling as a conservative server-owned floor.
     sensitivity: params.scope.access.clearance ?? 'internal',

@@ -9,6 +9,7 @@ import {
   scopeGrantContains,
   unionScopeRequirements,
 } from '../context-scope.js'
+import type { ScopeSource } from '../derived-scope.js'
 
 describe('[COMP:security/context-scope] Team and Project scope algebra', () => {
   it('uses null as universe and [] as General-only', () => {
@@ -82,5 +83,21 @@ describe('[COMP:security/context-scope] Team and Project scope algebra', () => {
   it('matches the migration project normalizer', () => {
     expect(normalizeProjectName('  Project Atlas  ')).toBe('project atlas')
     expect(normalizeProjectName('')).toBe('')
+  })
+})
+
+describe('[COMP:security/context-scope] re-reading a source within one turn', () => {
+  const read = (version: string, compartments: string[]): ScopeSource => ({
+    workspaceId: 'ws', userId: 'u', assistantId: null, sensitivity: 'internal',
+    compartments, projectIds: [], resourceKind: 'workspace_file', resourceId: 'file-1', version,
+  })
+
+  it('accepts the newer version a tool returns after its own write, keeping the earlier labels', () => {
+    const accumulator = new ContextScopeAccumulator()
+    accumulator.noteSource(read('1', ['team:sales']))
+    // fileRead then fileSetMeta: the tool result re-notes the same file.
+    expect(() => accumulator.noteSource(read('2', []))).not.toThrow()
+    expect(accumulator.evidence.sources?.map((s) => s.version)).toEqual(['2'])
+    expect(accumulator.compartments).toEqual(['team:sales'])
   })
 })

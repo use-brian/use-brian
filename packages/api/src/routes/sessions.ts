@@ -1177,7 +1177,6 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
             }),
             workspaceId,
             userId: user.id,
-            assistantId: scopedAssistant.id,
             sharedAudience: true,
           })
         : undefined

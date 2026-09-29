@@ -4,6 +4,8 @@ import { createTaskTools, type TaskToolEvent } from '../tools.js'
 import { formatToolError } from '../../engine/tool-executor.js'
 import type { TaskRecord, TaskStore } from '../types.js'
 import type { TaskAdmissionPort, TaskRuleRecord } from '../admission.js'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import type { ScopeSource } from '../../security/derived-scope.js'
 
 // The real store persists provenance (source*, mig 316/334) but does NOT
 // project it back on reads — `TaskRecord` is deliberately a compact,
@@ -1037,5 +1039,59 @@ describe('[COMP:tasks/tools-bulk] bulkUpdateTasks / archiveTasks', () => {
     const hit = await archiveTasks.execute({ filter: { status: 'done' } }, ctx)
     expect(String(hit.data)).toContain('Archived 1 task(s)')
     expect(store.rows[0].status).toBe('archived')
+  })
+})
+
+describe('[COMP:tasks/tools] write visibility after a primary read (decision D3)', () => {
+  const read = (id: string, userId: string | null, assistantId: string | null): ScopeSource => ({
+    workspaceId: 'workspace_1', userId, assistantId, sensitivity: 'internal', compartments: [], projectIds: [],
+    resourceKind: 'memory', resourceId: id, version: '1',
+  })
+  // The user's own chat message plus two standard assistants' private memories.
+  const primaryRead = () => new ContextScopeAccumulator({ sources: [
+    read('message', 'user_1', null), read('memory-a', 'user_1', 'standard-a'), read('memory-b', 'user_1', 'standard-b'),
+  ] })
+
+  it('closes a shared task without making it private', async () => {
+    const store = makeFakeStore()
+    const scopes: unknown[] = []
+    const update = store.update.bind(store)
+    store.update = async (userId, id, fields, opts) => { scopes.push(opts?.scope); return update(userId, id, fields, opts) }
+    const { saveTask, closeTask } = createTaskTools(store)
+    await saveTask.execute({ title: 'Ship' }, ctx)
+    const result = await closeTask.execute({ id: store.rows[0].id }, { ...ctx, scopeAccumulator: primaryRead() })
+    expect(result.isError).toBeFalsy()
+    expect(scopes.at(-1)).toMatchObject({ visibility: undefined })
+  })
+
+  it('keeps a task shared when only the author\'s own conversation fed it', async () => {
+    const store = makeFakeStore()
+    const creates: unknown[] = []
+    const create = store.create.bind(store)
+    store.create = async (params) => { creates.push(params.visibility); return create(params) }
+    const { saveTask } = createTaskTools(store)
+    const chat = new ContextScopeAccumulator({ sources: [{ ...read('message', 'user_1', null), resourceKind: 'session_message' }] })
+    await saveTask.execute({ title: 'Ship the release' }, { ...ctx, scopeAccumulator: chat })
+    expect(creates.at(-1)).toBeUndefined()
+  })
+
+  it('keeps content drawn from a private row private to that user, never to one assistant', async () => {
+    const store = makeFakeStore()
+    const creates: unknown[] = []
+    const create = store.create.bind(store)
+    store.create = async (params) => { creates.push(params.visibility); return create(params) }
+    const { saveTask } = createTaskTools(store)
+    await saveTask.execute({ title: 'From my notes' }, { ...ctx, scopeAccumulator: primaryRead() })
+    expect(creates.at(-1)).toEqual({ userId: 'user_1', assistantId: null })
+  })
+
+  it('refuses to write another person\'s private rows into a task', async () => {
+    const store = makeFakeStore()
+    const { saveTask } = createTaskTools(store)
+    const foreign = new ContextScopeAccumulator({ sources: [read('theirs', 'user_2', null)] })
+    // The executor turns the throw into a failed tool call, not a failed turn.
+    await expect(saveTask.execute({ title: 'Leak' }, { ...ctx, scopeAccumulator: foreign }))
+      .rejects.toThrow('scope_visibility_incompatible')
+    expect(store.rows).toHaveLength(0)
   })
 })

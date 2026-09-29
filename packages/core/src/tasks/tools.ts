@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
 import { intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
-import { deriveResourceScope } from '../security/derived-scope.js'
+import { deriveContextFloor, DerivedScopeError } from '../security/derived-scope.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
 import {
@@ -278,12 +278,29 @@ export function createTaskTools(
       context.mutationCompartments===undefined?context.compartments??null:context.mutationCompartments)
   }
 
-  function inheritedVisibility(context:ToolContext){
+  // Which user a task write must stay private to (decision D3, 2026-09-30).
+  //  - The assistant axis is never inherited: a primary that read several
+  //    assistants' rows can still write.
+  //  - The acting user's own conversation (`session_message` rows) never
+  //    privatizes a task: their words are theirs to share, and counting them
+  //    made every chat-created task private to its author.
+  //  - Any other private row (a personal memory, a private task or file)
+  //    keeps the task private to that user when CONTENT flows in; a
+  //    status-only change (close, reopen, reassign, due) carries none, so a
+  //    team task closed from chat stays a team task.
+  //  - Nobody writes another person's private rows into a task.
+  const CONTENT_FIELDS = ['title', 'tags', 'attributes', 'externalRef'] as const
+  function inheritedVisibility(context:ToolContext, fields?:Partial<Record<(typeof CONTENT_FIELDS)[number],unknown>>){
     const sources=context.scopeAccumulator?.evidence.sources
     if(!sources?.length)return undefined
-    const floor=deriveResourceScope({producer:'task-write',sources})
-    if(floor.workspaceId!==context.workspaceId)throw new Error('scope_operation_denied')
-    return {userId:floor.userId,assistantId:floor.assistantId}
+    deriveContextFloor({producer:'task-write',sources})
+    if(sources.some(source=>source.workspaceId!==context.workspaceId))throw new Error('scope_operation_denied')
+    if(sources.some(source=>source.userId!==null&&source.userId!==context.userId)){
+      throw new DerivedScopeError('scope_visibility_incompatible')
+    }
+    const content=!fields||CONTENT_FIELDS.some(key=>fields[key]!==undefined)
+    const privateContent=sources.some(source=>source.userId!==null&&source.resourceKind!=='session_message')
+    return content&&privateContent?{userId:context.userId,assistantId:null}:undefined
   }
 
   function resolveVisibleTask(context: ToolContext, id: string): Promise<TaskRecord | null> {
@@ -649,7 +666,7 @@ export function createTaskTools(
         access: accessFor(context),
         scope: {
           sensitivity: writeScope.sensitivity,
-          visibility: inheritedVisibility(context),
+          visibility: inheritedVisibility(context, fields),
           compartments: writeScope.compartments,
           projectIds: writeScope.projectIds,
         },
@@ -978,12 +995,13 @@ export function createTaskTools(
           compartmentGrant: writeGrant(context),
           projectGrant: context.projectIds,
         })
-        const result = await store.update(context.userId, row.id, fieldsFor(row), {
+        const rowFields = fieldsFor(row)
+        const result = await store.update(context.userId, row.id, rowFields, {
           writtenBy: 'system',
           access: accessFor(context),
           scope: {
             sensitivity: writeScope.sensitivity,
-            visibility: inheritedVisibility(context),
+            visibility: inheritedVisibility(context, rowFields),
             compartments: writeScope.compartments,
             projectIds: writeScope.projectIds,
           },

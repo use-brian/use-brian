@@ -48,6 +48,13 @@ export type AccessContext = {
   assistantKind: AssistantKind
   /** Additional delegated ceiling; [] permits only assistant-public rows. */
   visibilityAssistantIds?: string[] | null
+  /**
+   * The turn's audience is shared (a room, doc comment thread, Feed draft or
+   * team group), so only rows with no user owner are readable: one member's
+   * personal context never enters a reply the whole room receives (decision
+   * D4). Enforced by the universal predicate for automatic and tool reads.
+   */
+  sharedAudience?: boolean
   clearance?: Sensitivity
   compartments?: string[] | null
   /** Source mutations, independently bounded by read reach. Omission is legacy only. */

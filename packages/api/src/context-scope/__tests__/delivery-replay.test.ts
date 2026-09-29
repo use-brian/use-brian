@@ -10,6 +10,13 @@ const mocks = vi.hoisted(() => ({
   resolveLiveAccessCeilingSystem: vi.fn(),
   resolveTurnScopeSystem: vi.fn(),
   queryLoop: vi.fn(),
+  authorizeAudience: vi.fn(async (input: { scopeEvidence?: object }) => ({ allowed: true, evidence: input.scopeEvidence ?? {} })),
+}))
+
+// The audience gate reads live sessions and membership; here it is a seam.
+vi.mock('../delivery-authority.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../delivery-authority.js')>()),
+  createDeliveryAudienceAuthorizer: () => mocks.authorizeAudience,
 }))
 
 vi.mock('../../db/sessions.js', () => ({
@@ -17,6 +24,8 @@ vi.mock('../../db/sessions.js', () => ({
   getSessionMessages: mocks.getSessionMessages,
   addSessionMessage: mocks.addSessionMessage,
   toStampedMessages: mocks.toStampedMessages,
+  isSharedAudienceSession: (s: { visibility?: string | null; mode?: string | null }) =>
+    s.visibility === 'workspace' || s.mode === 'draft',
 }))
 
 vi.mock('../../db/users.js', () => ({
@@ -254,6 +263,26 @@ describe('[COMP:api/scope-delivery-replay] persisted replay authority', () => {
     expect(mocks.getSessionMessages).not.toHaveBeenCalled()
     expect(mocks.queryLoop).not.toHaveBeenCalled()
     expect(mocks.addSessionMessage).not.toHaveBeenCalled()
+  })
+
+  it('saves no continuation output its session audience cannot receive', async () => {
+    mocks.authorizeAudience.mockImplementationOnce(async () => ({
+      allowed: false, reason: 'delivery_audience_unverified', diagnostic: 'user_visibility',
+    }) as never)
+    mocks.queryLoop.mockImplementation(async function* () {
+      yield {
+        type: 'turn_complete',
+        response: { role: 'assistant', content: [{ type: 'text', text: 'personal result' }], model: 'gemini-flash' },
+      }
+    })
+    const error = await replay()(params({
+      suspendedToolName: 'askQuestion',
+      suspendedToolInput: { question: 'Which one?' },
+      approvalKind: 'question',
+      answerText: 'the first',
+    })).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ reason: 'delivery_audience_unverified', diagnostic: 'user_visibility' })
+    expect(mocks.addSessionMessage).not.toHaveBeenCalledWith(expect.objectContaining({ role: 'assistant' }))
   })
 
   it('withholds a completed model event when authority changes before persistence', async () => {

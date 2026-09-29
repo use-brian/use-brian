@@ -104,8 +104,13 @@ it.each(['telegram', 'slack', 'whatsapp', 'msteams', 'feishu'] as const)(
     expect(deliverToChannel).toHaveBeenCalledWith({
       ...recentTarget, workspaceId: 'ws-1', assistantId: 'assistant', userId: 'u-1',
       text: expect.stringContaining('/w/ws-1/approvals?focus=appr-12345678-rest'),
+      // Evidence is explicit so the destination-audience gate runs.
+      scopeEvidence: { sensitivity: 'public', compartments: [], projectIds: [] },
     })
     const text = deliverToChannel.mock.calls[0][0].text
+    // Tool arguments are run content; the push never carries them.
+    expect(text).not.toContain('a@b.com')
+    expect(text).not.toContain('Args:')
     expect(text).toContain('Approve or reject on the web: https://app.test/w/ws-1/approvals')
     expect(text).not.toContain('Reply with')
     expect(text).not.toContain('`approve ')
@@ -130,6 +135,19 @@ it.each(['skipped', 'failed'] as const)('warns when recent delivery is %s withou
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(`delivery ${status}`), outcome)
     expect(mockFetch).not.toHaveBeenCalled()
     expect(mockQuery).not.toHaveBeenCalled()
+  } finally {
+    warn.mockRestore()
+  }
+})
+
+it('never sends the reply-to-approve fallback into a Telegram group', async () => {
+  mockQuery.mockResolvedValueOnce({ rows: [{ chatId: '-1005550100' }], rowCount: 1 } as never)
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    await createApprovalDeliveryDispatcher({ webBaseUrl: 'https://app.test', telegramBotToken: 'official' })(
+      params({ deliveryChannelType: 'telegram' }),
+    )
+    expect(mockFetch).not.toHaveBeenCalled()
   } finally {
     warn.mockRestore()
   }

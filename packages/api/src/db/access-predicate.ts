@@ -68,6 +68,8 @@ export type AccessPredicate = {
 }
 
 const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+/** The nil UUID: never a user id, so a shared-audience viewer owns no rows. */
+const NO_USER = '00000000-0000-0000-0000-000000000000'
 
 /** Current member floor for existing sources, including owner-pool compositions. */
 export function buildCurrentMemberSourcePredicate(
@@ -169,9 +171,13 @@ export function buildAccessPredicate(
   // `ctx` field is absent, so the fragment stays byte-identical to the
   // visibility-only / +clearance forms for every existing caller.
   let sql = visibilityClauses
+  // A shared audience (room, doc thread, Feed draft, team group) reads only
+  // rows with no user owner (decision D4). The nil UUID is never a user, so
+  // `user_id = $viewer` matches nothing and the fragment keeps its shape.
+  const viewerUserId = ctx.sharedAudience || agent?.sharedAudience ? NO_USER : ctx.userId
   const params: Array<string | string[]> = isPrimary
-    ? [ctx.workspaceId, ctx.userId]
-    : [ctx.workspaceId, ctx.userId, ctx.assistantId]
+    ? [ctx.workspaceId, viewerUserId]
+    : [ctx.workspaceId, viewerUserId, ctx.assistantId]
   let nextIdx = baseNextIdx
 
   // Sensitivity ladder (optional — system callers omit it; see header).

@@ -6,7 +6,9 @@
  * DB-first: always persists to session, then pushes to channel adapter.
  */
 
-import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
+import { ContextScopeAccumulator } from '@use-brian/core'
+import { findOrCreateSession, addSessionMessage, findSessionById, isSharedAudienceSession } from '../db/sessions.js'
+import { turnOutputWrite } from '../context-scope/resolve-turn-scope.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { FeishuCredentials } from '../db/channel-integrations.js'
 import {
@@ -90,9 +92,32 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
   // workspace-channels migration (C2). See docs/architecture/channels/adapter-pattern.md.
   const channelType = params.channelType ?? 'web'
   const channelId = params.channelId ?? 'default'
-  const messageDerivation = params.scopeEvidence?.sources?.length
-    ? { producer: 'delivery:relay', sources: params.scopeEvidence.sources }
-    : undefined
+  // How a persisted relay copy is stamped. Relay evidence spans whatever the
+  // callee read, often several visibility partitions, so it certifies a
+  // derivation only when those partitions agree; otherwise the copy takes the
+  // receiving session's own audience raised to the label floor - the same
+  // rule as a turn's output (`turnOutputWrite`). Deriving one envelope from
+  // mixed partitions threw after the audience gate had already passed.
+  // The gate may raise the floor to the current labels of a changed source;
+  // relay copies are stamped from what it verified, not the pre-check copy.
+  let verifiedEvidence = params.scopeEvidence
+  const relayWrite = async (sessionId?: string) => {
+    const evidence = verifiedEvidence
+    if (!evidence || !params.workspaceId) return {}
+    const session = sessionId ? await findSessionById(sessionId) : null
+    return turnOutputWrite({
+      producer: 'delivery:relay',
+      accumulator: new ContextScopeAccumulator(evidence),
+      envelope: {
+        workspaceId: params.workspaceId,
+        userId: session && isSharedAudienceSession(session) ? null : userId,
+        assistantId: null,
+        sensitivity: 'public',
+        compartments: [],
+        projectIds: [],
+      },
+    })
+  }
 
   if (params.scopeEvidence !== undefined) {
     if (!params.workspaceId) {
@@ -121,6 +146,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
         reason: 'Not delivered: the destination audience could not be verified for this scoped output.',
       }
     }
+    verifiedEvidence = decision.evidence
   }
 
   // Only persist to notification session if delivering to web (avoid double notification)
@@ -135,7 +161,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
       sessionId: notifSession.id,
       role: 'assistant',
       content: [{ type: 'text', text }],
-      derivation: messageDerivation,
+      ...(await relayWrite(notifSession.id)),
     })
   }
 
@@ -145,7 +171,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
       sessionId: params.sessionId,
       role: 'assistant',
       content: [{ type: 'text', text }],
-      derivation: messageDerivation,
+      ...(await relayWrite(params.sessionId)),
     })
   }
 
@@ -264,7 +290,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
         sessionId: notifSession.id,
         role: 'assistant',
         content: [{ type: 'text', text }],
-        derivation: messageDerivation,
+        ...(await relayWrite(notifSession.id)),
       })
       salvaged = true
     } catch (fallbackErr) {

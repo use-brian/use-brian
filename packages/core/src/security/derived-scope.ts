@@ -100,6 +100,39 @@ export function deriveContextFloor(
   return { sensitivity, compartments, projectIds }
 }
 
+/**
+ * The envelope of a model-driven write (decision D3): the target keeps its
+ * own normal visibility, and the output carries the label floor of
+ * everything read (max sensitivity, every Team and Project). The assistant
+ * axis is never intersected, so a primary's memories stay workspace-shared
+ * (memory-system.md -> "Primary widens on WRITE too"). A source private to a
+ * user is admitted only when that user is the target's user or the acting
+ * author: nobody writes another person's private content anywhere else.
+ */
+export function deriveWriteScope(
+  evidence: DerivedWriteEvidence,
+  target: ResourceScope,
+  actorUserId?: string | null,
+): ResourceScope {
+  assertScope(target)
+  const floor = derive(evidence, target, (a) => a)
+  for (const source of evidence.sources) {
+    if (source.userId === null || source.userId === target.userId) continue
+    // The acting author may share their own private rows with a team
+    // (user-less) target - never place them in another person's space.
+    if (source.userId === actorUserId && target.userId === null) continue
+    throw new DerivedScopeError('scope_visibility_incompatible')
+  }
+  return {
+    workspaceId: floor.workspaceId,
+    userId: target.userId,
+    assistantId: target.assistantId,
+    sensitivity: floor.sensitivity,
+    compartments: floor.compartments,
+    projectIds: floor.projectIds,
+  }
+}
+
 /** True when the sources can certify one derived envelope. */
 export function sourcesShareVisibility(sources: readonly ScopeSource[]): boolean {
   try {

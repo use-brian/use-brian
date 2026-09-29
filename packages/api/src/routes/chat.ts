@@ -12,7 +12,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isSharedAudienceSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query } from '../db/client.js'
@@ -2618,7 +2618,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           !(await gateSessionRead(user.id, adaptiveSession))
         ) {
           adaptiveSessionId = adaptiveSession.id
-          adaptiveDbMessages = await getSessionMessages(adaptiveSession.id)
+          adaptiveDbMessages = await getSessionMessages(adaptiveSession.id, { excludeHeld: true })
           adaptiveRecentConversation = adaptiveDbMessages
             .filter((m) => m.role === 'user' || m.role === 'assistant')
             .filter((m) => !(
@@ -3010,6 +3010,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       const resolvedExecution = await resolveExecutionContextSystem({
         userId: user.id,
         assistant,
+        // A room, doc comment thread or Feed draft reads only rows the whole
+        // audience may see (decision D4).
+        sharedAudience: isSharedAudienceSession(session),
         workspaceId: assistant.workspaceId,
         session: isNewSession
           ? { ...session, contextLockedAt: null }
@@ -3074,8 +3077,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         scope: turnScope,
         workspaceId: assistant.workspaceId,
         userId: user.id,
-        assistantId: assistant.id,
-        sharedAudience: isRoomSession,
+        sharedAudience: isSharedAudienceSession(session),
       })
       const currentTurnWrite = () => turnOutputWrite({
         producer: 'turn:web',
@@ -3095,7 +3097,15 @@ export function chatRoutes(options: WebChatOptions): Router {
           recipientType: isRoomSession ? 'group' : 'individual',
           scopeEvidence: scopeAccumulator.evidence,
         })
-        if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
+        if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
+        // A source that changed since it was read passed on its CURRENT labels;
+        // those labels now belong to this turn's floor, so later writes and
+        // the transcript row carry them (labels only - no new lineage).
+        scopeAccumulator.note({
+          sensitivity: decision.evidence.sensitivity,
+          compartments: decision.evidence.compartments,
+          projectIds: decision.evidence.projectIds,
+        })
       }
       // A proxy can sever the browser stream while its upstream POST stays open.
       // Publish every turn's capped activity so an authenticated reconnect sees
@@ -3928,7 +3938,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       const preExistingDbMessages = adaptiveSessionId === session.id
         ? adaptiveDbMessages
-        : await getSessionMessages(session.id)
+        : await getSessionMessages(session.id, { excludeHeld: true })
       const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
         .filter((m) => m.role === 'user' && Array.isArray(m.content))
         .slice(-8)
@@ -4183,6 +4193,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // boundary; null (never compacted) loads full history.
       const dbMessages = await getSessionMessages(session.id, {
         fromSequence: session.compactBoundarySequence,
+        excludeHeld: true,
       })
       noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
       const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
@@ -4491,6 +4502,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               compartments: readCompartments,
               mutationCompartments: turnScope.access.mutationCompartments,
               projectIds: turnScope.effectiveProjectIds,
+              sharedAudience: turnScope.access.sharedAudience,
             },
             PER_TURN_FILES_INDEX_CAP,
           )
@@ -6759,6 +6771,19 @@ export function chatRoutes(options: WebChatOptions): Router {
        */
       const flushBufferedTurns = async (synthesisReason: string) => {
         if (flushed) return
+        // A stopped turn whose session a newer turn has since claimed (stop,
+        // then retry or edit) no longer owns the transcript: the successor
+        // rewrote it, often deleting the very message this turn answered.
+        // Saving its partial reply would interleave a stale answer after the
+        // new question, so it ends quietly - never as a delivery refusal.
+        if (abortController.signal.aborted && turnLeaseToken
+          && await isTurnLeaseSuperseded(session.id, turnLeaseToken)) {
+          flushed = true
+          console.log(
+            `[chat] superseded stopped turn: not persisting ${pendingAssistantTurns.length} buffered turn(s) for session ${session.id}`,
+          )
+          return
+        }
         await assertDeliveryAudience()
         flushed = true
 
@@ -7051,6 +7076,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             compartments: execution.security.access.compartments,
             mutationCompartments: execution.security.access.mutationCompartments,
             projectIds: execution.security.access.projectIds,
+            sharedAudience: execution.security.access.sharedAudience,
           }),
           trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
@@ -8446,7 +8472,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           try {
             // Reload messages from DB so we get the assistant response that was
             // just flushed — the in-memory `messages` array is stale.
-            const freshDbMessages = await authority.execute(() => getSessionMessages(session.id, { limit: 10 }))
+            const freshDbMessages = await authority.execute(() => getSessionMessages(session.id, { limit: 10, excludeHeld: true }))
             const freshMessages: Message[] = freshDbMessages.map((m) => ({
               role: m.role as 'user' | 'assistant' | 'system',
               content: m.content as Message['content'],
@@ -8733,6 +8759,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           metadata: {
             error_type: sanitize((err as Error)?.name ?? 'unknown'),
             error_message: sanitize(((err as Error)?.message ?? '').slice(0, 200)),
+            // Internal refusal reason: which rule refused, or that the check
+            // itself failed. Never sent to the client (chatTurnErrorEvent).
+            ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
+              ? { denial_diagnostic: sanitize(err.diagnostic) }
+              : {}),
             stage: sanitize(
               sessionIdForError ? 'post_session' :
               assistantIdForError ? 'post_assistant' : 'post_user',

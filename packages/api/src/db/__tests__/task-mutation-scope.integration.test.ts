@@ -138,11 +138,13 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     const saved=await runWithAgentAccess(f.execution(),()=>tools.saveTask.execute({title:'New scoped task'},context))
     expect(saved.isError).not.toBe(true)
     const row=(await f.rows()).find(row=>row.title==='New scoped task')!
-    expect(row).toMatchObject({sensitivity:'confidential',user_id:f.userId,assistant_id:f.assistantId,compartments:[f.key],project_ids:[f.projectId]})
+    // Private content keeps the task private to its user; the assistant axis is
+    // never inherited (decision D3).
+    expect(row).toMatchObject({sensitivity:'confidential',user_id:f.userId,assistant_id:null,compartments:[f.key],project_ids:[f.projectId]})
     const general=await f.create({title:'General fixture',compartments:[],projectIds:[]})
     const updated=await runWithAgentAccess(f.execution(),()=>tools.updateTask.execute({id:general.id,title:'Protected successor'},context))
     expect(updated.isError).not.toBe(true)
-    expect((await f.rows()).find(row=>row.title==='Protected successor')).toMatchObject({sensitivity:'confidential',user_id:f.userId,assistant_id:f.assistantId,compartments:[f.key],project_ids:[f.projectId]})
+    expect((await f.rows()).find(row=>row.title==='Protected successor')).toMatchObject({sensitivity:'confidential',user_id:f.userId,assistant_id:null,compartments:[f.key],project_ids:[f.projectId]})
     expect(updated.scopeEvidence?.sources?.[0].resourceKind).toBe('task')
   })
   it('retains stronger source labels and refuses incompatible inherited visibility or destination scope',async()=>{
