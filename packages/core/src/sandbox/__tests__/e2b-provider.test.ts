@@ -478,7 +478,7 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Jev primary and safe fall
       TEXT_MODEL_API_KEY: 'gemini-test',
       TEXT_MODEL: 'gemini-3-flash-preview',
       TEXT_MODEL_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
-      TEXT_MODEL_DIALECT: 'gemini-openai',
+      TEXT_MODEL_DIALECT: 'openai-chat-completions',
     })
     expect(new TextDecoder().decode(files.get(`${SCRATCH_DIR}/.jev/driver.py`))).toBe(JEV_ULTRAFAST_DRIVER_PY)
     for (const command of commands) {

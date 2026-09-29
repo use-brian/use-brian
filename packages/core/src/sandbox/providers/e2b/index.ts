@@ -586,7 +586,7 @@ export function createE2bCloudProvider(
             TEXT_MODEL_API_KEY: bu.apiKey,
             TEXT_MODEL: bu.model,
             TEXT_MODEL_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
-            TEXT_MODEL_DIALECT: 'gemini-openai',
+            TEXT_MODEL_DIALECT: 'openai-chat-completions',
           }
         : bu?.apiKeyEnvName === 'OPENAI_API_KEY'
           ? {

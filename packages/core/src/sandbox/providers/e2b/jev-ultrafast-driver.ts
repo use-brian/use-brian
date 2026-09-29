@@ -97,7 +97,7 @@ def _has_executed_action(agent):
 
 def _configure_text_model_compat():
     """Adapt Jev's nested reasoning extension to provider wire dialects."""
-    if os.environ.get("TEXT_MODEL_DIALECT") != "gemini-openai":
+    if os.environ.get("TEXT_MODEL_DIALECT") != "openai-chat-completions":
         return
     from jev_ultrafast import model as jev_model
     original_post_json = jev_model.post_json
