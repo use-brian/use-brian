@@ -7,6 +7,7 @@ import { getPool, getAppPool } from '../client.js'
 import { createDbMemoryStore } from '../memory-store.js'
 import { runLightConsolidation, runREMConsolidation, runDeepConsolidation } from '@use-brian/core'
 import { getSoulContext, writeScopedSummary } from '../scoped-summary-store.js'
+import { addSessionMessage } from '../sessions.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -35,6 +36,50 @@ async function fixture() {
 
 describe('[COMP:api/derived-scope-store] actual memory writes and source races', () => {
   afterAll(async () => { await getAppPool().end(); await pool.end() })
+
+  it('persists delegated input/output from workspace-wide sources and holds them when a source changes', async () => {
+    const f = await fixture(), sessionId = randomUUID()
+    await pool.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id)
+      VALUES($1,$2,$3,'web',$1::text)`, [sessionId,f.assistantId,f.userId])
+    const input = await f.create({ userId: null,
+      sensitivity: 'confidential', compartments: ['finance'], projectIds: [f.projectId] })
+    await pool.query('UPDATE memories SET assistant_id=NULL WHERE id=$1', [input.id])
+    const inputSource = (await pool.query('SELECT read_scope_source($1,$2,$3) AS source',
+      [f.workspaceId,'memory',input.id])).rows[0].source as ScopeSource
+    const message = await addSessionMessage({ sessionId, role: 'user', content: 'Workflow question',
+      derivation: { producer: 'turn:delegated-input', sources: [inputSource] } })
+    const source = (await pool.query('SELECT read_scope_source($1,$2,$3) AS source',
+      [f.workspaceId,'session_message',message.id])).rows[0].source as ScopeSource
+    expect(source).toMatchObject({ workspaceId: f.workspaceId, userId: null, assistantId: null,
+      sensitivity: 'confidential', compartments: ['finance'], projectIds: [f.projectId], version: '1' })
+    const output = await addSessionMessage({ sessionId, role: 'assistant', content: 'Workflow answer',
+      derivation: { producer: 'turn:delegated-output', sources: [source] } })
+    const edges = (await pool.query(`SELECT s.source_id FROM scope_derivation_sources s
+      JOIN scope_derivations d ON d.id=s.derivation_id WHERE d.resource_id=ANY($1::uuid[])`,
+      [[message.id,output.id]])).rows.map(row => row.source_id)
+    expect(edges.sort()).toEqual([input.id,message.id].sort())
+    await pool.query(`UPDATE memories SET compartments=ARRAY['product'] WHERE id=$1`, [input.id])
+    const rows = (await pool.query('SELECT scope_held FROM session_messages WHERE id=ANY($1::uuid[])',
+      [[message.id,output.id]])).rows
+    expect(rows).toEqual([{ scope_held: true }, { scope_held: true }])
+    await expect(addSessionMessage({ sessionId, role: 'assistant', content: 'Stale answer',
+      derivation: { producer: 'turn:delegated-output', sources: [source] } })).rejects.toThrow('scope_source_changed')
+  })
+
+  it('still rejects partial conversation scope while accepting legacy unscoped messages', async () => {
+    const f = await fixture(), sessionId = randomUUID()
+    await pool.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id)
+      VALUES($1,$2,$3,'web',$1::text)`, [sessionId,f.assistantId,f.userId])
+    await expect(addSessionMessage({ sessionId, role: 'user', content: 'Legacy' })).resolves.toBeDefined()
+    const complete = { workspace_id: f.workspaceId, sensitivity: 'internal', compartments: [],
+      project_ids: [], scope_version: 1, scope_held: false }
+    for (const missing of Object.keys(complete)) {
+      const fields = { ...complete, [missing]: null }, columns = Object.keys(fields)
+      await expect(pool.query(`INSERT INTO session_messages(session_id,role,content,sequence_num,${columns.join(',')})
+        VALUES($1,'user','[]',2,${columns.map((_,i) => `$${i+2}`).join(',')})`,
+        [sessionId,...Object.values(fields)])).rejects.toMatchObject({ constraint: 'session_messages_scope_complete' })
+    }
+  })
 
   it('A02/A04 persists the full floor and every edge regardless of requested lower labels', async () => {
     const f = await fixture()
