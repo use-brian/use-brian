@@ -2131,6 +2131,7 @@ export const zhCN: Dictionary = {
     turnReconnectFailed: "无法重新连接到运行中的回合，请重新加载页面确认。",
     switchAssistant: "切换助理",
     switchAssistantTitle: "对话对象",
+    nextReplyFrom: "下一条回复来自 {name}",
     emptyTitle: "向 Use Brian 提问",
     emptyDesc: "描述您想看的内容（表格、看板、清单），Use Brian 会为您起草一个查看。",
     retry: "重试",

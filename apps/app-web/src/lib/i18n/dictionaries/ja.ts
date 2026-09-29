@@ -2125,6 +2125,7 @@ export const ja: Dictionary = {
     turnReconnectFailed: "実行中のターンに再接続できませんでした。再読み込みして確認してください。",
     switchAssistant: "アシスタントを切り替え",
     switchAssistantTitle: "話す相手",
+    nextReplyFrom: "次の返信: {name}",
     emptyTitle: "Use Brian に依頼",
     emptyDesc: "表・ボード・一覧など、見たいものを伝えると Use Brian がビューを下書きします。",
     retry: "再試行",
