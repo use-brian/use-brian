@@ -18,11 +18,27 @@ export async function validateDerivedMemoryInputs(
   evidence: DerivedWriteEvidence,
 ): Promise<ResourceScope> {
   const floor = deriveResourceScope(evidence)
-  const unique = new Map(evidence.sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
+  await revalidateScopeSources(client, floor.workspaceId, evidence.sources)
+  return floor
+}
+
+/**
+ * Prove every source is still live and unchanged, without deriving one
+ * envelope from them. Read evidence may span visibility partitions (a primary
+ * reads the same user's rows other assistants own), so audience checks call
+ * this directly; derived writers reach it through validateDerivedMemoryInputs.
+ */
+export async function revalidateScopeSources(
+  client: Pick<pg.PoolClient, 'query'>,
+  workspaceId: string,
+  sources: readonly ScopeSource[],
+): Promise<void> {
+  const unique = new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
   // All writers use the same lock order, including mixed primitive prompts.
   for(const source of [...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))) {
+    if(source.workspaceId!==workspaceId)throw new DerivedScopeError('scope_workspace_mismatch')
     const result=await client.query<{snapshot:CanonicalEvidenceRow|null}>(
-      'SELECT read_scope_source($1,$2,$3) AS snapshot',[floor.workspaceId,source.resourceKind,source.resourceId],
+      'SELECT read_scope_source($1,$2,$3) AS snapshot',[workspaceId,source.resourceKind,source.resourceId],
     )
     const row=result.rows[0]?.snapshot
     if(!row||row.held||row.retractedAt||row.validTo||row.version!==source.version
@@ -32,7 +48,6 @@ export async function validateDerivedMemoryInputs(
     if(source.resourceKind==='crm_event' && (!row.causalEntityId
       || !unique.has(`entity:${row.causalEntityId}`))) throw new DerivedScopeError('scope_evidence_missing')
   }
-  return floor
 }
 
 /** The database validates the output reference and envelope again. */

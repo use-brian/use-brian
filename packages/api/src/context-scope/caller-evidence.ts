@@ -1,9 +1,9 @@
 import {
-  ContextScopeAccumulator, deriveResourceScope, intersectAccessCeilings, scopeGrantContains, RANK, isSensitivity,
-  type AccessCeiling, type ResourceScope, type ScopeEvidence,
+  ContextScopeAccumulator, intersectAccessCeilings, scopeGrantContains, RANK, isSensitivity,
+  type AccessCeiling, type ScopeEvidence,
 } from '@use-brian/core'
 import { getPool } from '../db/client.js'
-import { validateDerivedMemoryInputs } from '../db/derived-scope-store.js'
+import { revalidateScopeSources } from '../db/derived-scope-store.js'
 
 function unavailable(kind: 'caller' | 'audience' = 'caller'): Error {
   return Object.assign(new Error(kind === 'caller'
@@ -28,19 +28,22 @@ async function validateScopeEvidence(
     if (evidence.sources !== undefined && !Array.isArray(evidence.sources)) throw unavailable(kind)
     // Detach before any await: later caller mutations cannot erase the floor.
     const snapshot = new ContextScopeAccumulator(structuredClone(evidence)).evidence
-    const floor: ResourceScope = snapshot.sources?.length
-      ? deriveResourceScope({ producer:'consult',sources:snapshot.sources })
-      : { workspaceId:ceiling.workspaceId,userId:null,assistantId:null,sensitivity:'public',compartments:[],projectIds:[] }
-    if (floor.workspaceId!==ceiling.workspaceId || (floor.userId!==null&&floor.userId!==ceiling.userId)
-      || (floor.assistantId!==null&&!scopeGrantContains(ceiling.visibilityAssistantIds,[floor.assistantId]))
+    // Each source must be visible to the receiver on its own. Never intersect
+    // their visibility into one envelope: a primary's read evidence spans the
+    // same user's rows other assistants own, which no single row can represent
+    // (scoped-context.md -> "Reading is not deriving").
+    const sources = snapshot.sources ?? []
+    if (sources.some(source => source.workspaceId!==ceiling.workspaceId
+      || (source.userId!==null&&source.userId!==ceiling.userId)
+      || (source.assistantId!==null&&!scopeGrantContains(ceiling.visibilityAssistantIds,[source.assistantId])))
       || RANK[snapshot.sensitivity!]>RANK[ceiling.clearance]
       || !scopeGrantContains(ceiling.compartments,snapshot.compartments)
       || !scopeGrantContains(ceiling.projectIds,snapshot.projectIds)) throw unavailable(kind)
-    if (snapshot.sources?.length) {
+    if (sources.length) {
       const client=await getPool().connect()
       try {
         await client.query('BEGIN')
-        await validateDerivedMemoryInputs(client,{producer:'consult',sources:snapshot.sources})
+        await revalidateScopeSources(client,ceiling.workspaceId,sources)
         await client.query('COMMIT')
       } catch(error) { await client.query('ROLLBACK').catch(()=>{});throw error }
       finally { client.release() }
