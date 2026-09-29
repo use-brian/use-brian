@@ -25,7 +25,8 @@ async function fixture() {
   const eventId=randomUUID()
   await pool.query(`INSERT INTO crm_domain_event_outbox(id,workspace_id,event_type,event_key,subject_kind,subject_id,payload,actor_kind)
     VALUES($1::uuid,$2,'crm.deal.stage_changed',$1::text,'deal',$3,'{}','user')`,[eventId,workspaceId,deal.id])
-  const workflow=await createDbWorkflowStore().create({userId:member,workspaceId,name:'Event audience fixture',definition:{startStepId:'consult',steps:[{id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Fixture question'}]}})
+  const workflow=await createDbWorkflowStore().create({userId:member,workspaceId,name:'Event audience fixture',definition:{startStepId:'consult',steps:[{id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Fixture question'}]},
+    authoringAuthority:{version:1,assistantId,ceiling:{workspaceId,userId:member,clearance:'internal',compartments:[team.compartmentKey!],mutationCompartments:[team.compartmentKey!],projectIds:null,visibilityAssistantIds:null}}})
   const input={trigger:{sourceType:'crm'},event:{domainEventId:eventId,subjectId:deal.id}}
   const create=(actor=member)=>runs.createRun({workflowId:workflow.id,workspaceId,triggeredBy:actor,triggerKind:'event',input})
   const revoke=()=>pool.query('DELETE FROM workspace_group_members WHERE group_id=$1 AND user_id=$2',[team.id,member])

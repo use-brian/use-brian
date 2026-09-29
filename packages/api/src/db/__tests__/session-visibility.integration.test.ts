@@ -20,9 +20,15 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import pg from 'pg'
 
 let pool: pg.Pool | undefined
+// Reads run through the application role when one is configured
+// (DATABASE_URL_APP, the non-owner role production uses), so RLS applies.
+let appPool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({
+    connectionString: process.env.DATABASE_URL ?? 'postgres:///sidanclaw',
+    connectionTimeoutMillis: 2000,
+  })
   try {
     const client = await p.connect()
     try {
@@ -32,17 +38,32 @@ async function canConnect(): Promise<boolean> {
       client.release()
     }
     pool = p
-    return true
   } catch {
     await p.end().catch(() => {})
     return false
   }
+  if (process.env.DATABASE_URL_APP) {
+    const app = new pg.Pool({ connectionString: process.env.DATABASE_URL_APP, connectionTimeoutMillis: 2000 })
+    try {
+      const role = await app.query<{ bypass: boolean }>(
+        'SELECT rolsuper OR rolbypassrls AS bypass FROM pg_roles WHERE rolname = current_user',
+      )
+      if (role.rows[0]?.bypass === false) appPool = app
+      else await app.end()
+    } catch {
+      await app.end().catch(() => {})
+    }
+  }
+  return true
 }
 
 const ok = await canConnect()
 const describeIf = ok ? describe : describe.skip
+// Cross-user DENIAL needs a role that RLS actually binds.
+const itDenial = appPool ? it : it.skip
 
 afterAll(async () => {
+  if (appPool) await appPool.end()
   if (pool) await pool.end()
 })
 
@@ -131,6 +152,7 @@ async function asUser<T>(
 
 describeIf('[COMP:api/session-visibility] Session visibility RLS (integration)', () => {
   let client: pg.PoolClient
+  let reader: pg.PoolClient
   let userA: string // owner / creator
   let userB: string // workspace teammate
   let userC: string // outsider
@@ -155,61 +177,59 @@ describeIf('[COMP:api/session-visibility] Session visibility RLS (integration)',
     await addMessage(client, sharedSession)
     await addMessage(client, ownerSession)
     await addMessage(client, confidentialSession)
+    reader = appPool ? await appPool.connect() : client
   })
 
   afterAll(() => {
+    if (reader && reader !== client) reader.release()
     client?.release()
   })
 
   it('teammate B reads the workspace-shared session', async () => {
-    const rows = await asUser(client, userB, async () =>
-      (await client.query('SELECT id FROM sessions WHERE id = $1', [sharedSession])).rows,
+    const rows = await asUser(reader, userB, async () =>
+      (await reader.query('SELECT id FROM sessions WHERE id = $1', [sharedSession])).rows,
     )
     expect(rows).toHaveLength(1)
   })
 
   it('teammate B reads the shared session messages', async () => {
-    const rows = await asUser(client, userB, async () =>
-      (await client.query('SELECT id FROM session_messages WHERE session_id = $1', [sharedSession])).rows,
+    const rows = await asUser(reader, userB, async () =>
+      (await reader.query('SELECT id FROM session_messages WHERE session_id = $1', [sharedSession])).rows,
     )
     expect(rows).toHaveLength(1)
   })
 
-  // Cross-user DENIAL cannot be exercised when the suite connects as a
-  // Postgres SUPERUSER (the typical local-dev role) — superusers bypass RLS
-  // even with FORCE ROW LEVEL SECURITY. Production runs as a non-superuser, so
-  // the policy enforces; verified manually with `SET ROLE` (a non-member sees
-  // 0 workspace + 0 owner sessions, a member sees the workspace session). Same
-  // limitation + convention as crm-store / tasks-store integration suites. To
-  // run these, connect as a role without rolsuper / rolbypassrls.
-  it.skip('teammate B cannot read A\'s owner-scoped session (skipped under superuser)', async () => {
-    const rows = await asUser(client, userB, async () =>
-      (await client.query('SELECT id FROM sessions WHERE id = $1', [ownerSession])).rows,
+  // Cross-user DENIAL cannot be exercised through the owner connection:
+  // superusers and the table owner bypass RLS. These run whenever
+  // DATABASE_URL_APP names a role without rolsuper / rolbypassrls (the
+  // scripts/crm/local-fixture.mjs assurance_app role, and production).
+  itDenial('teammate B cannot read A\'s owner-scoped session', async () => {
+    const rows = await asUser(reader, userB, async () =>
+      (await reader.query('SELECT id FROM sessions WHERE id = $1', [ownerSession])).rows,
     )
     expect(rows).toHaveLength(0)
   })
 
-  it.skip('outsider C cannot read the workspace-shared session (skipped under superuser)', async () => {
-    const rows = await asUser(client, userC, async () =>
-      (await client.query('SELECT id FROM sessions WHERE id = $1', [sharedSession])).rows,
+  itDenial('outsider C cannot read the workspace-shared session', async () => {
+    const rows = await asUser(reader, userC, async () =>
+      (await reader.query('SELECT id FROM sessions WHERE id = $1', [sharedSession])).rows,
     )
     expect(rows).toHaveLength(0)
   })
 
   // Clearance gate (migration 224): B clears 'internal' but not 'confidential',
   // so B reads the internal thread (covered above) but NOT the confidential
-  // one. Proven manually via `SET ROLE`: internal member → 0 rows on the
-  // confidential session, confidential member → 1.
-  it.skip('member below the thread clearance cannot read it (skipped under superuser)', async () => {
-    const rows = await asUser(client, userB, async () =>
-      (await client.query('SELECT id FROM sessions WHERE id = $1', [confidentialSession])).rows,
+  // one.
+  itDenial('member below the thread clearance cannot read it', async () => {
+    const rows = await asUser(reader, userB, async () =>
+      (await reader.query('SELECT id FROM sessions WHERE id = $1', [confidentialSession])).rows,
     )
     expect(rows).toHaveLength(0)
   })
 
   it('owner A reads both their sessions', async () => {
-    const rows = await asUser(client, userA, async () =>
-      (await client.query('SELECT id FROM sessions WHERE id = ANY($1::uuid[])', [[sharedSession, ownerSession]])).rows,
+    const rows = await asUser(reader, userA, async () =>
+      (await reader.query('SELECT id FROM sessions WHERE id = ANY($1::uuid[])', [[sharedSession, ownerSession]])).rows,
     )
     expect(rows).toHaveLength(2)
   })

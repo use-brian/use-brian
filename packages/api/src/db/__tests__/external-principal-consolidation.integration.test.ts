@@ -34,7 +34,12 @@ import pg from 'pg'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  // Seed through the same database the store under test reads: getPool() uses
+  // DATABASE_URL, which vitest.integration.config.ts defaults to the local DB.
+  const p = new pg.Pool({
+    connectionString: process.env.DATABASE_URL ?? 'postgres:///sidanclaw',
+    connectionTimeoutMillis: 2000,
+  })
   try {
     const client = await p.connect()
     try {
@@ -172,10 +177,15 @@ async function seedFixture(
   const mem = (userId: string, detail: string) =>
     seedMemory(createMemory, { assistantId, workspaceId, userId, summary: SHARED_SUMMARY, detail })
 
+  // Light merges only rows in one exact scope envelope (workspace, author,
+  // assistant, sensitivity, Teams, Projects), so each same-author pair below
+  // is mergeable in principle and every cross-author pair is not.
   const memoryIds = {
     memberA: await mem(memberA, 'member-a-detail-line'),
+    memberA2: await mem(memberA, 'member-a-second-detail-line'),
     memberB: await mem(memberB, 'member-b-detail-line'),
     apiClientA: await mem(apiClientA, 'client-a-secret-detail-line'),
+    apiClientA2: await mem(apiClientA, 'client-a-second-secret-detail-line'),
     apiClientB: await mem(apiClientB, 'client-b-secret-detail-line'),
     chatlinkVisitor: await mem(chatlinkVisitor, 'visitor-secret-detail-line'),
   }
@@ -199,14 +209,18 @@ async function seedFixture(
 async function liveRowsByAuthor(
   client: pg.PoolClient,
   workspaceId: string,
-): Promise<Map<string, { detail: string | null; confidence: number }>> {
+): Promise<Map<string, Array<{ detail: string | null; confidence: number }>>> {
   const r = await client.query<{ userId: string; detail: string | null; confidence: number }>(
     `SELECT user_id as "userId", detail, confidence
        FROM memories
       WHERE workspace_id = $1 AND valid_to IS NULL`,
     [workspaceId],
   )
-  return new Map(r.rows.map((row) => [row.userId, { detail: row.detail, confidence: Number(row.confidence) }]))
+  const rows = new Map<string, Array<{ detail: string | null; confidence: number }>>()
+  for (const row of r.rows) {
+    rows.set(row.userId, [...(rows.get(row.userId) ?? []), { detail: row.detail, confidence: Number(row.confidence) }])
+  }
+  return rows
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -236,9 +250,10 @@ describeIf('[COMP:consolidation/external-principal-isolation] team passes skip e
   afterEach(async () => {
     const client = await pool!.connect()
     try {
-      await client.query(`DELETE FROM memories WHERE workspace_id = $1`, [seed.workspaceId])
-      await client.query(`DELETE FROM consolidation_logs WHERE workspace_id = $1`, [seed.workspaceId])
-      await client.query(`DELETE FROM assistants WHERE workspace_id = $1`, [seed.workspaceId])
+      // One cascade from the workspace. A statement-level DELETE FROM memories
+      // would also remove the merged keeper while its sources' scope-version
+      // triggers hold that same descendant (migration 563), which PostgreSQL
+      // rejects; the triggers skip holding once the workspace itself is gone.
       await client.query(`DELETE FROM workspaces WHERE id = $1`, [seed.workspaceId])
       await client.query(`DELETE FROM users WHERE id = ANY($1::uuid[])`, [[
         seed.ownerId, seed.memberA, seed.memberB,
@@ -249,7 +264,7 @@ describeIf('[COMP:consolidation/external-principal-isolation] team passes skip e
     }
   })
 
-  it('team light pass merges two member authors but never two external authors', async () => {
+  it('team light pass merges a compatible member pair but never external authors or across authors', async () => {
     const store = memoryStore.createDbMemoryStore()
     await phases.runTeamLightConsolidation(store, seed.assistantId, seed.workspaceId)
 
@@ -257,31 +272,30 @@ describeIf('[COMP:consolidation/external-principal-isolation] team passes skip e
     try {
       const live = await liveRowsByAuthor(client, seed.workspaceId)
 
-      // Members: identical summaries → one row absorbs the other's detail and
-      // the loser is marked for prune. Which row wins depends on the index's
-      // `ORDER BY updated_at DESC`, so assert the shape, not the direction.
-      const memA = live.get(seed.memberA)!
-      const memB = live.get(seed.memberB)!
-      const [winner, loser] = memA.confidence === 0 ? [memB, memA] : [memA, memB]
-      expect(loser.confidence).toBe(0)
-      expect(winner.confidence).toBeGreaterThan(0)
+      // Positive control: memberA's two rows share one envelope, so one absorbs
+      // the other's detail and the loser is marked for prune. Which row wins
+      // depends on the index order, so assert the shape, not the direction.
+      const memberA = live.get(seed.memberA)!
+      const winner = memberA.find((row) => row.confidence > 0)!
+      expect(memberA.map((row) => row.confidence).sort()).toEqual([0, 0.9])
       expect(winner.detail).toContain('member-a-detail-line')
-      expect(winner.detail).toContain('member-b-detail-line')
+      expect(winner.detail).toContain('member-a-second-detail-line')
 
-      // External clients: same summaries, but never compared to anything —
-      // untouched detail, untouched confidence, no prune mark.
-      const externals = {
-        apiClientA: [seed.apiClientA, 'client-a-secret-detail-line'],
-        apiClientB: [seed.apiClientB, 'client-b-secret-detail-line'],
-        chatlinkVisitor: [seed.chatlinkVisitor, 'visitor-secret-detail-line'],
-      } as const
-      for (const [userId, ownDetail] of Object.values(externals)) {
-        const row = live.get(userId)!
-        expect(row.confidence).toBe(0.9)
-        expect(row.detail).toBe(ownDetail)
+      // Another author's identical summary is a different envelope: untouched.
+      expect(live.get(seed.memberB)).toEqual([{ detail: 'member-b-detail-line', confidence: 0.9 }])
+
+      // External clients are excluded store-side, so even the same client's
+      // own mergeable pair is never compared: untouched detail and confidence.
+      expect(live.get(seed.apiClientA)!.map((row) => row.detail).sort()).toEqual([
+        'client-a-second-secret-detail-line', 'client-a-secret-detail-line',
+      ])
+      for (const userId of [seed.apiClientA, seed.apiClientB, seed.chatlinkVisitor]) {
+        for (const row of live.get(userId)!) expect(row.confidence).toBe(0.9)
       }
+      expect(live.get(seed.apiClientB)).toEqual([{ detail: 'client-b-secret-detail-line', confidence: 0.9 }])
+      expect(live.get(seed.chatlinkVisitor)).toEqual([{ detail: 'visitor-secret-detail-line', confidence: 0.9 }])
       // Belt-and-braces: no client's detail ever reached a teammate's row.
-      expect(winner.detail).not.toContain('secret')
+      for (const row of [...memberA, ...live.get(seed.memberB)!]) expect(row.detail).not.toContain('secret')
     } finally {
       client.release()
     }
@@ -293,6 +307,7 @@ describeIf('[COMP:consolidation/external-principal-isolation] team passes skip e
     expect(ids).toContain(seed.memoryIds.memberA)
     expect(ids).toContain(seed.memoryIds.memberB)
     expect(ids).not.toContain(seed.memoryIds.apiClientA)
+    expect(ids).not.toContain(seed.memoryIds.apiClientA2)
     expect(ids).not.toContain(seed.memoryIds.apiClientB)
     expect(ids).not.toContain(seed.memoryIds.chatlinkVisitor)
   })
