@@ -1109,18 +1109,33 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       const approvedAt = new Date().toISOString()
       patch = {
         ...patch,
-        deliveryAudienceBindings: parsed.data.deliveryAudienceBindings.map((binding) => ({
-          version: 1 as const,
-          channelId: binding.channelId,
-          audienceType: binding.audienceType,
-          clearance: binding.clearance,
-          compartments: [...new Set(binding.compartments)].sort(),
-          projectIds: [...new Set(binding.projectIds)].sort(),
-          recipientUserId: binding.recipientUserId ?? null,
-          expiresAt: binding.expiresAt ?? null,
-          approvedByUserId: userId,
-          approvedAt,
-        })),
+        deliveryAudienceBindings: parsed.data.deliveryAudienceBindings.map((binding) => {
+          const next = {
+            version: 1 as const,
+            channelId: binding.channelId,
+            audienceType: binding.audienceType,
+            clearance: binding.clearance,
+            compartments: [...new Set(binding.compartments)].sort(),
+            projectIds: [...new Set(binding.projectIds)].sort(),
+            recipientUserId: binding.recipientUserId ?? null,
+            expiresAt: binding.expiresAt ?? null,
+            approvedByUserId: userId,
+            approvedAt,
+          }
+          // This PATCH replaces a list, not every entry's consent. Preserve
+          // unchanged server-owned approvals, including those now invalid due
+          // to an approver's demotion. An unrelated edit/removal must not turn
+          // the current admin into the approver of those destinations.
+          const previous = integration.config.deliveryAudienceBindings?.find((old) =>
+            old.version === 1 && old.channelId === next.channelId
+            && old.audienceType === next.audienceType && old.clearance === next.clearance
+            && (old.recipientUserId ?? null) === next.recipientUserId
+            && (old.expiresAt ?? null) === next.expiresAt
+            && JSON.stringify([...new Set(old.compartments)].sort()) === JSON.stringify(next.compartments)
+            && JSON.stringify([...new Set(old.projectIds)].sort()) === JSON.stringify(next.projectIds),
+          )
+          return previous ?? next
+        }),
       }
     }
 

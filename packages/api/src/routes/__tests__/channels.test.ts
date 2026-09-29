@@ -850,6 +850,39 @@ describe('[COMP:api/channels-route] channel config', () => {
     expect(config.deliveryAudienceBindings[0].approvedAt).toEqual(expect.any(String))
   })
 
+  it.each(['edit', 'remove'] as const)('PATCH config does not reapprove unrelated destinations on %s', async (operation) => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
+    // This approver may have been demoted. Their current role is checked at
+    // delivery time; a different admin's list edit must not replace them.
+    const existing = {
+      version: 1 as const, channelId: 'C-RESTRICTED', audienceType: 'group' as const,
+      clearance: 'internal' as const, compartments: ['finance', 'product'], projectIds: [],
+      recipientUserId: null, expiresAt: null,
+      approvedByUserId: 'former-admin', approvedAt: '2026-01-01T00:00:00.000Z',
+    }
+    const other = { ...existing, channelId: 'C-OTHER' }
+    const integration = makeIntegration({ config: { deliveryAudienceBindings: [existing, other] } })
+    const updateConfig = vi.fn().mockImplementation(async ({ config }) => ({ ...integration, config }))
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([integration]), updateConfig,
+    } as unknown as ChannelIntegrationStore
+    const { version: _version, approvedByUserId: _by, approvedAt: _at, ...input } = existing
+    const unchanged = { ...input, compartments: ['product', 'finance', 'product'] }
+    const entries = operation === 'edit'
+      ? [unchanged, { ...input, channelId: 'C-OTHER', clearance: 'public' }]
+      : [unchanged]
+    const res = await request(buildApp({ integrationStore, role: 'owner' }))
+      .patch('/api/workspaces/ws-1/channels/chan-1/config')
+      .send({ deliveryAudienceBindings: entries })
+    expect(res.status).toBe(200)
+    const saved = updateConfig.mock.calls[0][0].config.deliveryAudienceBindings
+    expect(saved[0]).toEqual(existing)
+    if (operation === 'edit') {
+      expect(saved[1]).toMatchObject({ channelId: 'C-OTHER', clearance: 'public', approvedByUserId: 'user-1' })
+      expect(saved[1].approvedAt).not.toBe(existing.approvedAt)
+    } else expect(saved).toHaveLength(1)
+  })
+
   it('PATCH config refuses delivery audience approval by an ordinary member', async () => {
     vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
     const updateConfig = vi.fn()
