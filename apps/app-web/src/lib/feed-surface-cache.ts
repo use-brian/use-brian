@@ -57,6 +57,7 @@ import { mergeLocalFeedSessions } from "@/lib/offline/feed-offline";
 import {
   invalidateSurfaceCache,
   loadSurfaceCache,
+  mutateSurfaceCache,
   readSurfaceCache,
 } from "@/lib/surface-cache";
 
@@ -138,7 +139,7 @@ async function fetchFeedWorkspaceRecord(
   const owner = feedOwner();
   const capabilities = deploymentCapabilities();
   let team: Awaited<ReturnType<typeof loadWorkspaceIdentity>>;
-  let profiles: FeedProfile[];
+  let profiles: FeedProfile[] | null;
   let assistants: Array<{ id: string; name: string }>;
   let brand: BrandRecord | null;
   let cloudLink: FeedCloudLink;
@@ -146,8 +147,11 @@ async function fetchFeedWorkspaceRecord(
     [team, profiles, assistants, brand, cloudLink] = await Promise.all([
       loadWorkspaceIdentity(workspaceId),
       // Profiles failure != surface failure: connections are optional to
-      // planning, so render the zero-profile onboarding state instead.
-      fetchFeedTeamProfiles(workspaceId).catch(() => [] as FeedProfile[]),
+      // planning. But a failed or timed-out read is not "nothing connected":
+      // null here keeps the last-known profiles below, so a slow API never
+      // erases a real connection (docs/architecture/feed/twitter.md ->
+      // "Return landing").
+      fetchFeedTeamProfiles(workspaceId).catch(() => null),
       // Same degrade: the Create surfaces just see no brand voice yet.
       fetchFeedDistributionAssistants(workspaceId).catch(
         () => [] as Array<{ id: string; name: string }>,
@@ -179,7 +183,7 @@ async function fetchFeedWorkspaceRecord(
     role: team.role,
     canDraft: team.canDraft,
     me: { id: team.myUserId },
-    profiles,
+    profiles: profiles ?? (await lastKnownFeedProfiles(workspaceId, key)),
     assistants,
     brand,
     cloudLink,
@@ -189,6 +193,45 @@ async function fetchFeedWorkspaceRecord(
   if (feedOwner() !== owner) throw new Error("Local identity changed");
   await writeFeedCachedJson(feedWorkspaceRecordPath(workspaceId), record);
   return record;
+}
+
+/**
+ * The profiles this viewer last saw for the workspace: the in-memory record,
+ * else the disk record, else none. Used only when a profiles read fails.
+ */
+async function lastKnownFeedProfiles(
+  workspaceId: string,
+  key: string,
+): Promise<FeedProfile[]> {
+  const memory = readSurfaceCache<FeedWorkspaceRecord>(key).data;
+  if (memory) return memory.profiles;
+  const disk = await readFeedCachedJson<FeedWorkspaceRecord>(
+    feedWorkspaceRecordPath(workspaceId),
+  ).catch(() => null);
+  return disk?.profiles ?? [];
+}
+
+/**
+ * Drop a just-disconnected profile from both cache tiers. A failed read keeps
+ * the last-known profiles (`lastKnownFeedProfiles`), so without this a
+ * disconnect followed by a slow refresh would paint the account again.
+ */
+export async function forgetFeedProfile(params: {
+  workspaceId: string;
+  key: string;
+  assistantId: string;
+  platform: string;
+}): Promise<void> {
+  const drop = (record: FeedWorkspaceRecord): FeedWorkspaceRecord => ({
+    ...record,
+    profiles: record.profiles.filter(
+      (p) => !(p.assistantId === params.assistantId && p.platform === params.platform),
+    ),
+  });
+  mutateSurfaceCache<FeedWorkspaceRecord>(params.key, drop);
+  const path = feedWorkspaceRecordPath(params.workspaceId);
+  const disk = await readFeedCachedJson<FeedWorkspaceRecord>(path).catch(() => null);
+  if (disk) await writeFeedCachedJson(path, drop(disk));
 }
 
 /**
