@@ -2149,6 +2149,7 @@ export const en = {
     turnReconnectFailed: "Could not reconnect to the running turn. Reload to check.",
     switchAssistant: "Switch assistant",
     switchAssistantTitle: "Talk to",
+    nextReplyFrom: "Next reply from {name}",
     emptyTitle: "Ask Use Brian",
     emptyDesc: "Describe what you want to see (a table, a board, a list) and Use Brian will draft a view.",
     // Per-message actions (hover-reveal on assistant bubbles).
