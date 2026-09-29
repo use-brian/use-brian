@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 
 // The store's DB-touching paths need a live pool; this file pins the pure
 // link-binding rule that Slack (`resolveSlackSender`) and Telegram BYO
@@ -12,11 +12,19 @@ vi.mock('../teamspace-store.js', () => ({ joinDefaultTeamspacesSystem: vi.fn(asy
 
 import {
   channelLinkBindsHere,
+  createDbChannelUserStore,
   ensureAssistantMember,
   ensureTrustedChannelWorkspaceMembership,
+  resolveChannelUser,
 } from '../channel-user-store.js'
 import { getPool, query } from '../client.js'
+import { findUserByEmail } from '../users.js'
+import { mergeShadowUser } from '../linked-accounts.js'
 import { joinDefaultTeamspacesSystem } from '../teamspace-store.js'
+
+beforeEach(() => {
+  vi.clearAllMocks()
+})
 
 describe('[COMP:api/channel-user-store] channelLinkBindsHere', () => {
   const link = (userId: string, assistantId: string | null) => ({ userId, assistantId })
@@ -50,6 +58,51 @@ describe('[COMP:api/channel-user-store] channelLinkBindsHere', () => {
     const roleLookup = vi.fn(async () => 'member' as const)
     expect(await channelLinkBindsHere(link('u', 'a_other'), 'a1', 'owner', null, roleLookup)).toBe(false)
     expect(roleLookup).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/channel-user-store] provider email resolution', () => {
+  it('matches a normalized Feishu email to an existing platform user', async () => {
+    const member = { id: 'workspace-member-1', email: 'member@company.example' }
+    vi.mocked(findUserByEmail).mockResolvedValueOnce(member as never)
+    vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 0 } as never)
+    const identityStore = {
+      resolve: vi.fn(async () => null),
+      cache: vi.fn(async () => {}),
+      invalidateForAssistant: vi.fn(async () => {}),
+      sweepExpired: vi.fn(async () => 0),
+      pruneAnonymousShadowUsers: vi.fn(async () => 0),
+    }
+
+    const resolved = await resolveChannelUser(
+      identityStore,
+      'feishu',
+      'ou_sender',
+      'assistant-1',
+      async () => ({ email: ' Member@Company.Example ', displayName: 'Member' }),
+    )
+
+    expect(resolved).toEqual({ user: member, isIdentified: true })
+    expect(findUserByEmail).toHaveBeenCalledWith('member@company.example')
+    expect(mergeShadowUser).toHaveBeenCalledWith(
+      'workspace-member-1',
+      'ou_sender',
+      'feishu',
+      expect.objectContaining({ reason: 'email-discovery' }),
+    )
+    expect(identityStore.cache).toHaveBeenCalledWith(expect.objectContaining({
+      email: 'member@company.example',
+      userId: 'workspace-member-1',
+    }))
+  })
+
+  it('rechecks anonymous Feishu profiles after a short negative-cache interval', async () => {
+    vi.mocked(query).mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await createDbChannelUserStore().resolve('feishu', 'ou_sender', 'assistant-1')
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("WHEN provider = 'feishu' AND email IS NULL THEN INTERVAL '5 minutes'"),
+      ['feishu', 'ou_sender', 'assistant-1'],
+    )
   })
 })
 

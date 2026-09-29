@@ -76,6 +76,7 @@ export async function insertClaimProvenance(
  */
 export async function getClaimsForLatestAssistantMessage(
   sessionId: string,
+  requireDeliveredChannelMessage = false,
 ): Promise<ClaimLedgerEntry[]> {
   const result = await query<{
     claim: string
@@ -91,11 +92,12 @@ export async function getClaimsForLatestAssistantMessage(
      WHERE cp.session_message_id = (
        SELECT id FROM session_messages
        WHERE session_id = $1 AND role = 'assistant'
+         AND ($2::boolean = false OR channel_message_id IS NOT NULL)
        ORDER BY sequence_num DESC
        LIMIT 1
      )
      ORDER BY cp.created_at`,
-    [sessionId],
+    [sessionId, requireDeliveredChannelMessage],
   )
   return result.rows.map((r) => ({
     claim: r.claim,

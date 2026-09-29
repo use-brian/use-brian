@@ -12,6 +12,7 @@ import type { EvidenceAccumulator } from '../security/evidence.js'
 import type { AttachmentCollector } from '../workspace-files/attachments.js'
 import type { LLMProvider } from '../providers/types.js'
 import type { AccessContext } from '../security/access-context.js'
+import type { ExecutionContext } from '../security/execution-context.js'
 
 type TaskAuthorityContext = {
   kind: 'realtime_thread_target'
@@ -34,6 +35,8 @@ export type CurrentAuthorityBoundary = {
 // ── Tool context ───────────────────────────────────────────────
 
 export type ToolContext = {
+  /** Validated production execution facts; flat fields below are its compatibility projection. */
+  executionContext?: ExecutionContext
   userId: string
   /** Verified human actor for workspace administration. Set only by attended,
    * authenticated entrypoints; a billing owner or callee owner is not an actor. */
@@ -126,6 +129,19 @@ export type ToolContext = {
    * contexts (workers, scheduled jobs).
    */
   userMessageText?: string
+  /** Opaque ids from `<attached_file>` envelopes admitted on this exact user
+   * turn. Binary-intake tools must use this set instead of accepting an old
+   * file-cache id copied from history or invented by the model. */
+  currentTurnAttachmentIds?: ReadonlySet<string>
+  /** Server-authenticated receipt for the one approved tool invocation that
+   * is executing now. The executor stamps live approvals; durable chat resume
+   * reconstructs it from the settled approval row. Tool input can never set
+   * this value. */
+  approvedToolInvocation?: {
+    approvalId: string
+    approverUserId: string
+    toolName: string
+  }
   /**
    * The user's current effective timezone (IANA, e.g. 'Asia/Hong_Kong').
    * Resolved per-request in this order: (1) `X-Client-Timezone` header
@@ -534,6 +550,11 @@ export type Tool<Input extends z.ZodType = z.ZodType> = {
    * persistent decision would be misleading.
    */
   allowPersistentApproval?: boolean
+
+  /** Require a persisted approval row and an attended confirmation. Unlike a
+   * normal `ask` tool, this mode cannot be satisfied by workflow grants and
+   * cannot park from an unattended lane for later execution. */
+  confirmationMode?: 'durable_attended'
 
   /**
    * When true, repeated calls with IDENTICAL input are legitimate for this

@@ -11,7 +11,7 @@ vi.mock('../client.js', () => ({
   })),
 }))
 
-import { createWorkspaceStore, canMemberDraftRole, resolveReadClearanceSystem, resolveReadCompartmentsSystem, resolveReadCeilingsSystem, resolveOperationCeilingsSystem, effectiveReadCompartments, intersectCompartments, getWorkspaceDefaultRecordingBlueprint, InvalidRecordingBlueprintError } from '../workspace-store.js'
+import { createWorkspaceStore, canMemberDraftRole, resolveReadClearanceSystem, resolveReadCompartmentsSystem, resolveReadCeilingsSystem, resolveOperationCeilingsSystem, effectiveReadCompartments, intersectCompartments, getWorkspaceDefaultRecordingBlueprint, getWorkspaceRoleSystem, InvalidRecordingBlueprintError } from '../workspace-store.js'
 import { query, queryWithRLS, getPool } from '../client.js'
 
 const mockQuery = vi.mocked(query)
@@ -25,6 +25,16 @@ beforeEach(() => {
 const store = createWorkspaceStore()
 
 describe('[COMP:api/workspace-store] strict live authority lookup', () => {
+  it('distinguishes an absent membership from a failed role lookup', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+    await expect(getWorkspaceRoleSystem('actor', 'workspace', true)).resolves.toBeNull()
+    const failure = new Error('Fixture role lookup failed')
+    mockQuery.mockRejectedValueOnce(failure)
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(getWorkspaceRoleSystem('actor', 'workspace', true)).rejects.toBe(failure)
+    } finally { log.mockRestore() }
+  })
   it('rejects a missing membership rather than accepting the external public fallback', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] } as never)
     await expect(resolveReadCeilingsSystem('actor', 'workspace', 'public', [], true)).rejects.toThrow('authority_unavailable')

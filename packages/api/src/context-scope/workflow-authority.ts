@@ -1,4 +1,4 @@
-import { accessCeilingContains, ContextScopeAccumulator, intersectAccessCeilings, parseAuthoringAuthority, pinAccessCeiling, pinAuthoringAuthority, scopeGrantContains, unionScopeRequirements, WORKFLOW_SCOPE_EVIDENCE_VAR, type AccessCeiling, type AuthoringAuthority, type GoalRecord, type WorkflowRunRecord } from '@use-brian/core'
+import { accessCeilingContains, ContextScopeAccumulator, createExecutionContext, intersectAccessCeilings, parseAuthoringAuthority, pinAccessCeiling, pinAuthoringAuthority, scopeGrantContains, unionScopeRequirements, WORKFLOW_SCOPE_EVIDENCE_VAR, type AccessCeiling, type AuthoringAuthority, type GoalRecord, type ResolvedExecutionAccess, type WorkflowRunRecord } from '@use-brian/core'
 import { query, queryWithRLS, runWithAgentAccess } from '../db/client.js'
 import { findAssistantById } from '../db/users.js'
 import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
@@ -262,8 +262,44 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
       return null
     }
   })
+  const access = resolved.turnScope.access
+  if (access.clearance === undefined || access.compartments === undefined
+    || access.mutationCompartments === undefined || access.projectIds === undefined) {
+    throw unavailable()
+  }
+  const executionContext = createExecutionContext({
+    identity: { kind:'system', purpose:'workflow', jobId:params.run.id },
+    ownership: { kind:'workspace', workspaceId:params.workspaceId },
+    access: {
+      ...access,
+      workspaceId:params.workspaceId,
+      userId:params.userId,
+      assistantId:params.assistantId,
+      assistantKind:access.assistantKind,
+      clearance:access.clearance,
+      compartments:access.compartments,
+      mutationCompartments:access.mutationCompartments,
+      projectIds:access.projectIds,
+      visibilityAssistantIds:access.visibilityAssistantIds
+        ?? (access.assistantKind === 'primary' ? null : [params.assistantId]),
+    } satisfies ResolvedExecutionAccess,
+    writeDefaults: {
+      compartments:resolved.turnScope.writeCompartments,
+      projectIds:resolved.turnScope.writeProjectIds,
+    },
+    provenance:inputScopeEvidence,
+    authority:lease,
+    lifecycle: {
+      abortSignal:new AbortController().signal,
+      sessionId:params.run.id,
+      channelType:'workflow',
+      channelId:params.run.id,
+    },
+    attribution:{ billingUserId:params.userId },
+  })
   return {
     ...resolved,
+    executionContext,
     inputScopeEvidence,
     executeWithAuthority: <T>(operation: () => Promise<T>): Promise<T> =>
       runWithAgentAccess(pinAccessCeiling(resolved.turnScope.access), () =>

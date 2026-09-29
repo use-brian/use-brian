@@ -199,6 +199,28 @@ describe('[COMP:api/worker-runs-store] loadForSession', () => {
     expect(sql).toContain('ORDER BY created_at ASC')
     expect(values).toEqual(['sess-1'])
   })
+
+  it('loads only the durable run ids captured by the suspension checkpoint', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await store.loadForSession('sess-1', [
+      '55555555-5555-5555-5555-555555555555',
+      '66666666-6666-6666-6666-666666666666',
+    ])
+    const [sql, values] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain('AND id = ANY($2::uuid[])')
+    expect(values).toEqual([
+      'sess-1',
+      [
+        '55555555-5555-5555-5555-555555555555',
+        '66666666-6666-6666-6666-666666666666',
+      ],
+    ])
+  })
+
+  it('does not query historical rows when the checkpoint captured no workers', async () => {
+    await expect(store.loadForSession('sess-1', [])).resolves.toEqual([])
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
 })
 
 describe('[COMP:api/worker-runs-store] listRecentForWorkspace', () => {

@@ -21,12 +21,16 @@ describe('[COMP:office/deck-retirement] Legacy Deck retirement', () => {
       'createOfficeArtifact',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
+      'openPdfEditingSession',
+      'placePdfSignature',
     ])
     expect(BOOT_INJECTED_BUILTIN_TOOLS.office).toEqual([
       'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
+      'openPdfEditingSession',
+      'placePdfSignature',
     ])
   })
 })

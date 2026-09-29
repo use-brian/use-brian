@@ -7,7 +7,7 @@ window.addEventListener("DOMContentLoaded", () => {
   const send = (command, value) => ipcRenderer.send("embedded-browser:command", command, value);
   const address = element("address");
   let selected = null;
-  for (const command of ["back", "forward", "reload", "new", "stop", "approve", "detach", "dock", "collapse", "expand"]) {
+  for (const command of ["back", "forward", "reload", "new", "stop", "detach", "dock", "collapse", "expand"]) {
     element(command).addEventListener("click", () => send(command));
   }
   element("rail-stop").addEventListener("click", () => send("stop"));
@@ -51,6 +51,16 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   ipcRenderer.on("embedded-browser:focus-address", focusAddress);
   ipcRenderer.on("embedded-browser:state", (_event, state) => {
+    if (state.theme) {
+      // Main validates this appearance-only payload. Never inject stylesheets or resource URLs.
+      const root = document.documentElement;
+      for (const key of ["background", "foreground", "sidebar", "sidebar-foreground", "muted-foreground", "border", "primary", "accent", "accent-foreground", "destructive", "ring", "sidebar-accent", "sidebar-accent-foreground"]) {
+        root.style.setProperty(`--${key}`, state.theme.colors[key]);
+      }
+      root.style.setProperty("--radius", state.theme.radius);
+      root.style.setProperty("--browser-font-family", state.theme.fontFamily);
+      root.style.colorScheme = state.theme.colorScheme;
+    }
     presentation = state.presentation;
     if (presentation) {
       if (presentation.collapsed || presentation.mode !== "docked") endDrag();
@@ -74,18 +84,17 @@ window.addEventListener("DOMContentLoaded", () => {
     const tab = state.tabs.find(tab => tab.id === state.selected);
     if (selected !== state.selected || document.activeElement !== address) address.value = tab?.url || "";
     selected = state.selected;
-    element("status").textContent = state.status;
-    element("status").title = state.status;
+    element("status").textContent = state.status || "Browser";
+    element("status").title = state.status || "Browser";
     element("back").disabled = !tab?.back;
     element("forward").disabled = !tab?.forward;
     element("reload").disabled = !tab;
-    element("approve").disabled = !tab || tab.taskOwned;
     element("tabs").replaceChildren(...state.tabs.map(tab => {
       const group = document.createElement("div");
       group.className = "tab";
       const select = document.createElement("button");
       select.textContent = tab.title;
-      select.title = `${tab.title} — ${tab.url}${tab.taskOwned ? " (Brian task)" : ""}`;
+      select.title = `${tab.title}: ${tab.url}`;
       select.setAttribute("role", "tab");
       select.setAttribute("aria-selected", String(tab.id === selected));
       select.addEventListener("click", () => send("select", tab.id));

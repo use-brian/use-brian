@@ -5,18 +5,22 @@ import {
   appendOfficeCommand,
   applyOfficeCommand,
   applyOfficeUpdate,
+  canEnablePdfEditingSession,
   encodeOfficeState,
   officeCapabilityManifest,
+  pdfEditingCapabilityManifest,
   preflightOfficeCandidate,
   snapshotToYDoc,
   yDocToSnapshot,
   type OfficeArtifactSnapshot,
   type OfficeCommand,
+  type PdfEditingCapabilityAvailability,
 } from '@use-brian/office-model'
 import { layoutOfficeArtifact, renderOfficePreviewSvg } from '@use-brian/office-renderer'
 import { exportOfficeDocument, importOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
 import { exportOfficePresentation, importOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
 import { exportOfficeSpreadsheet, importOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
+import { canEnableOfficeCreation } from '../templates/compiler.js'
 import { completeDocumentSnapshot, completePresentationSnapshot, completeSpreadsheetSnapshot, formattedPresentationSnapshot, id, resolveFixtureResource } from './fixtures.js'
 
 const actorId = id(98)
@@ -101,6 +105,28 @@ function commandFor(capabilityId: EditableId, snapshot: OfficeArtifactSnapshot, 
 }
 
 describe('[COMP:office/capabilities] Matrix-driven Office capability conformance', () => {
+  it('admits the complete PDF session manifest without admitting generic PDF creation', () => {
+    const complete = Object.fromEntries([
+      'canonicalModel', 'pdfParser', 'browserRenderer', 'serverWriter', 'reopenValidator',
+      'sessionStorage', 'expiryCleanup', 'release', 'saveToFiles', 'targetPlanner',
+      'signatureApproval', 'editor', 'approvalPreview',
+    ].map((slice) => [slice, true])) as PdfEditingCapabilityAvailability
+
+    expect(canEnablePdfEditingSession(complete)).toBe(true)
+    expect(canEnableOfficeCreation('pdf')).toBe(false)
+    expect(pdfEditingCapabilityManifest.operations.map((operation) => operation.id)).toEqual([
+      'pdfSessionAdmission', 'pdfField', 'pdfOverlay', 'pdfPage',
+      'pdfSignature', 'pdfRelease', 'pdfSaveToFiles',
+    ])
+    expect(pdfEditingCapabilityManifest.operations.filter((operation) => operation.assistantAuthoring === 'command').map((operation) => operation.id)).toEqual([
+      'pdfField', 'pdfOverlay', 'pdfPage',
+    ])
+    expect(pdfEditingCapabilityManifest.operations.find((operation) => operation.id === 'pdfSignature')).toMatchObject({
+      browserAuthoring: 'manual',
+      assistantAuthoring: 'action-only',
+    })
+  })
+
   it('maps every editable manifest row to a concrete command fixture', () => {
     expect(editable).toHaveLength(37)
     for (const [ordinal, capability] of editable.entries()) {

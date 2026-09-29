@@ -74,7 +74,11 @@ export async function enqueueFileIngestJob(input: {
 }): Promise<{ enqueued: boolean; jobId: string | null }> {
   const { rows } = await query<{ id: string }>(
     `INSERT INTO file_ingest_jobs (file_id, workspace_id, acting_user_id, assistant_id, source_label, mode)
-     VALUES ($1, $2, $3, $4, $5, $6)
+     SELECT $1,$2,$3,$4,$5,$6
+       FROM workspace_files f
+      WHERE f.id=$1 AND f.workspace_id=$2
+        AND f.path NOT LIKE '/office/sessions/%'
+        AND NOT COALESCE((f.metadata->>'noIndex')::boolean,false)
      ON CONFLICT DO NOTHING
      RETURNING id`,
     [

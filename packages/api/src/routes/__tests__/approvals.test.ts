@@ -59,6 +59,7 @@ type Stores = {
   reviseWorkflowEmailBody: ReturnType<typeof vi.fn>
   getRole: ReturnType<typeof vi.fn>
   emailReviewContext: ReturnType<typeof vi.fn>
+  pdfSignaturePreview: ReturnType<typeof vi.fn>
   withResumeDeps: boolean
 }
 
@@ -70,6 +71,7 @@ function makeApp(stores: Partial<Stores> = {}) {
     stores.reviseWorkflowEmailBody ?? vi.fn(async () => null)
   const getRole = stores.getRole ?? vi.fn(async () => 'member')
   const emailReviewContext = stores.emailReviewContext ?? vi.fn(async () => ({ thread: null }))
+  const pdfSignaturePreview = stores.pdfSignaturePreview ?? vi.fn(async () => null)
 
   const app = express()
   app.use(express.json())
@@ -89,6 +91,7 @@ function makeApp(stores: Partial<Stores> = {}) {
       workspaceStore: { getRole } as never,
       bridgeDeps: {} as never,
       emailReviewContext,
+      pdfSignaturePreview,
       ...(stores.withResumeDeps ? { resumeDeps: {} as never } : {}),
     }),
   )
@@ -100,6 +103,7 @@ function makeApp(stores: Partial<Stores> = {}) {
     reviseWorkflowEmailBody,
     getRole,
     emailReviewContext,
+    pdfSignaturePreview,
   }
 }
 
@@ -154,6 +158,63 @@ describe('[COMP:api/unified-approvals-route] GET /count', () => {
     })
     const res = await request(app).get('/api/approvals/count?workspaceId=ws-1').expect(200)
     expect(res.body.pending).toBe(2)
+  })
+})
+
+describe('[COMP:app-web/pdf-signature-approval] GET /:id/pdf-signature-preview', () => {
+  const signatureArgs = {
+    artifactId: '10000000-0000-4000-8000-000000000001',
+    targetId: '10000000-0000-4000-8000-000000000002',
+    signatureResourceId: '10000000-0000-4000-8000-000000000003',
+    expectedSourceHash: 'a'.repeat(64),
+    expectedVersion: 3,
+    idempotencyKey: 'signature-preview-1',
+  }
+  const signatureApproval = (over: Partial<PendingApproval> = {}) => makeApproval({
+    kind: 'tool_invocation',
+    toolName: 'placePdfSignature',
+    arguments: signatureArgs,
+    originatingAssistantId: '10000000-0000-4000-8000-000000000004',
+    ...over,
+  })
+
+  it('returns only the protected server composite for the assigned pending owner', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    const pdfSignaturePreview = vi.fn(async () => ({ bytes: png, validForMs: 12_000 }))
+    const { app } = makeApp({
+      getById: vi.fn(async () => signatureApproval()),
+      pdfSignaturePreview,
+    })
+    const response = await request(app).get('/api/approvals/ap-1/pdf-signature-preview').expect(200)
+    expect(response.headers['content-type']).toMatch(/^image\/png/)
+    expect(response.headers['cache-control']).toBe('private, no-store')
+    expect(response.headers['x-brian-media-valid-for-ms']).toBe('12000')
+    expect(response.body).toEqual(png)
+    expect(pdfSignaturePreview).toHaveBeenCalledWith({
+      userId: 'u-1', approverUserId: 'u-1', assistantId: '10000000-0000-4000-8000-000000000004',
+      approvalId: 'ap-1', ...signatureArgs,
+    })
+  })
+
+  it('fails closed for owner, status, expiry, argument, and anchor drift', async () => {
+    const cases: Array<{ row: PendingApproval; status: number }> = [
+      { row: signatureApproval({ approverUserId: 'u-2' }), status: 403 },
+      { row: signatureApproval({ status: 'approved' }), status: 409 },
+      { row: signatureApproval({ expiresAt: new Date('2020-01-01T00:00:00.000Z') }), status: 409 },
+      { row: signatureApproval({ arguments: { ...signatureArgs, storagePath: '/private/source.pdf' } }), status: 422 },
+    ]
+    for (const testCase of cases) {
+      const preview = vi.fn(async () => ({ bytes: Buffer.from('no'), validForMs: 1 }))
+      const { app } = makeApp({ getById: vi.fn(async () => testCase.row), pdfSignaturePreview: preview })
+      await request(app).get('/api/approvals/ap-1/pdf-signature-preview').expect(testCase.status)
+      expect(preview).not.toHaveBeenCalled()
+    }
+    const { app } = makeApp({
+      getById: vi.fn(async () => signatureApproval()),
+      pdfSignaturePreview: vi.fn(async () => null),
+    })
+    const response = await request(app).get('/api/approvals/ap-1/pdf-signature-preview').expect(409)
+    expect(response.body).toEqual({ error: 'pdf_signature_approval_stale' })
   })
 })
 
@@ -433,6 +494,32 @@ describe('[COMP:api/unified-approvals-route] POST /:id/respond', () => {
       expect.anything(),
       { approval: updated, decision: 'approved', reason: undefined },
     )
+  })
+
+  it('never converts an approved PDF signature into a persistent tool grant', async () => {
+    const pending = makeApproval({
+      kind: 'tool_invocation',
+      toolName: 'placePdfSignature',
+      approvalPayload: { allowPersistentApproval: true },
+    })
+    const updated = makeApproval({
+      kind: 'tool_invocation',
+      toolName: 'placePdfSignature',
+      status: 'approved',
+    })
+    const respond = vi.fn(async () => updated)
+    const { app } = makeApp({
+      getById: vi.fn(async () => pending),
+      respond,
+      withResumeDeps: true,
+    })
+
+    await request(app)
+      .post('/api/approvals/ap-1/respond')
+      .send({ decision: 'approved', grantAlways: true })
+      .expect(200)
+
+    expect(respond).toHaveBeenCalledWith('ap-1', 'approved', 'u-1', undefined, undefined)
   })
 
   it('422s a distribution_draft respond, pointing at the feed surface', async () => {

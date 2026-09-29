@@ -98,6 +98,7 @@ type PrimitiveConfig = {
    * outage).
    */
   recencyExpr: string
+  extraWhere?: string
 }
 
 const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = {
@@ -128,6 +129,7 @@ const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = 
     table: 'workspace_files',
     textExpr: "coalesce(title, name) || coalesce(E'\\n' || summary, '')",
     recencyExpr: 'created_at',
+    extraWhere: "path NOT LIKE '/office/sessions/%' AND NOT COALESCE((metadata->>'noIndex')::boolean,false)",
   },
   // recording transcript segments — the packed segment text is the embed unit.
   // The store stamps embedding=NULL on insert; the worker drains these rows
@@ -292,7 +294,7 @@ export function createDbEmbeddingStore(): EmbeddingStore {
             `supported primitives: ${Object.keys(PRIMITIVE_CONFIGS).join(', ')}`,
         )
       }
-      const { table, textExpr, recencyExpr } = config
+      const { table, textExpr, recencyExpr, extraWhere = 'TRUE' } = config
 
       // ── Phase 1: budget check, claim, commit, release ────────────
       // System worker — runs on the system pool (owner), which bypasses RLS,
@@ -364,6 +366,7 @@ export function createDbEmbeddingStore(): EmbeddingStore {
              FROM ${table}
             WHERE embedding IS NULL
               AND embedding_failed_at IS NULL
+              AND ${extraWhere}
               AND ${recencyExpr} > now() - INTERVAL '${RECENCY_WINDOW_MONTHS} months'
               AND ${recencyExpr} ${bound} now() - INTERVAL '24 hours'
             ORDER BY ${recencyExpr} ASC
@@ -396,6 +399,7 @@ export function createDbEmbeddingStore(): EmbeddingStore {
                SELECT id
                  FROM ${table}
                 WHERE embedding IS NULL
+                  AND ${extraWhere}
                   AND embedding_failed_at <= now() - INTERVAL '${EMBEDDING_FAILURE_RETRY_DELAY_HOURS} hour'
                   AND ${recencyExpr} > now() - INTERVAL '${RECENCY_WINDOW_MONTHS} months'
                 ORDER BY ${recencyExpr} DESC, embedding_failed_at ASC

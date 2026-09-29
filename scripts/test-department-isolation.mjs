@@ -151,17 +151,21 @@ async function run() {
         const raw=await readFile(outputFile,'utf8').catch(()=>'')
         actual=flattenNodeAssertions(raw,suite)
       } else {
-        // Route tests open many short-lived Supertest listeners and several
-        // legacy files install module mocks. A one-worker multi-file process
-        // can leak that process state as a false 404 in a different file. The
-        // manifest can require one process per file while this runner still
-        // aggregates every assertion into one acceptance receipt.
-        const groups=suite.processIsolation==='file'?suite.testFiles.map(file=>[file]):[[...suite.testFiles]]
+        // Integration files share one disposable database and deliberately
+        // exercise DDL/transaction locks. Run them sequentially in fresh
+        // processes so sibling files cannot deadlock or leak module mocks.
+        // Route tests also open many short-lived Supertest listeners and some
+        // legacy files install process-level mocks, so the manifest may request
+        // the same isolation. The runner still aggregates every assertion into
+        // one acceptance receipt.
+        const isolateFiles=suite.integration||suite.processIsolation==='file'
+        const groups=isolateFiles?suite.testFiles.map(file=>[file]):[[...suite.testFiles]]
         for(const [index,testFiles] of groups.entries()){
           const resultFile=groups.length===1?outputFile:join(reports,`${suite.id}-${index}.json`)
+          const integrationGroup=testFiles.every(file=>file.endsWith('.integration.test.ts'))
           try {
             await runCommand('pnpm', ['exec', 'vitest', 'run',
-                ...(suite.integration?['--config','vitest.integration.config.ts']:[]),
+                ...(integrationGroup?['--config','vitest.integration.config.ts']:[]),
                 ...testFiles,'--reporter=default','--reporter=json',`--outputFile=${resultFile}`],
               { cwd:join(root,suite.packageDir), env, inherit:true })
           } catch(error) {executionErrors.push(error instanceof Error?error.message:String(error))}

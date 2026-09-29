@@ -306,6 +306,12 @@ export type ProactiveCompactionParams = {
    * brain Episodes, or persist/promote episodic rows.
    */
   persistLongTermContext?: boolean
+  /**
+   * False for an audience-isolated turn whose filtered history may be
+   * summarized in-memory but must neither trust nor replace the session's
+   * durable summary/boundary.
+   */
+  persistSessionSummary?: boolean
   /** Sticky live turn authority for every derived read/write boundary. */
   authority?: CurrentAuthorityBoundary
 }
@@ -367,6 +373,7 @@ export async function runProactiveCompaction(
     workspaceId, chatEpisodeIngestor,
   } = params
   const persistLongTermContext = params.persistLongTermContext !== false
+  const persistSessionSummary = params.persistSessionSummary !== false
   const compactionModel = params.model ?? 'gemini-flash'
   const guarded = <T>(operation: () => Promise<T>): Promise<T> => params.authority
     ? params.authority.execute(operation)
@@ -387,7 +394,9 @@ export async function runProactiveCompaction(
   // model sees prior context on every turn. `findRecentSplit` treats
   // role='system' as a non-anchor, so a prepended system row at index 0
   // never gets chosen as the tail anchor.
-  const summaryPrepended = typeof session.compactSummary === 'string' && session.compactSummary.length > 0
+  const summaryPrepended = persistSessionSummary
+    && typeof session.compactSummary === 'string'
+    && session.compactSummary.length > 0
   const summaryOffset = summaryPrepended ? 1 : 0
   const stampedWithSummary: Message[] = summaryPrepended
     ? [{ role: 'system', content: session.compactSummary as string }, ...stamped]
@@ -574,12 +583,14 @@ export async function runProactiveCompaction(
     // fails (someone else compacted the same session between our read
     // and write), discard our summary and fall through with the
     // pass-through — the other compaction already trimmed the history.
-    const claimed = await guarded(() => setCompactSummaryAndBoundary(
-      sessionId,
-      summaryText,
-      newCursor,
-      session.compactBoundarySequence,
-    ))
+    const claimed = persistSessionSummary
+      ? await guarded(() => setCompactSummaryAndBoundary(
+          sessionId,
+          summaryText,
+          newCursor,
+          session.compactBoundarySequence,
+        ))
+      : true
     if (!claimed) {
       console.warn(`[compaction] lost race for session ${sessionId} (cursor moved by concurrent turn)`)
       analytics?.logEvent({
@@ -665,7 +676,7 @@ export async function runProactiveCompaction(
     // 10b. Session-state decay — drop resolved rows older than 24h in the
     // same housekeeping window as episodic. Open rows are load-bearing and
     // never touched here. See docs/architecture/context-engine/session-state.md.
-    if (sessionStateStore) {
+    if (persistLongTermContext && sessionStateStore) {
       try {
         const cutoff = new Date(Date.now() - SESSION_STATE_RESOLVED_TTL_MS)
         const purged = await guarded(() => sessionStateStore.purgeResolvedOlderThan(sessionId, cutoff))
@@ -729,7 +740,8 @@ export async function runProactiveCompaction(
     ]
 
     console.log(
-      `[compaction] Session ${sessionId}: ${compactResult.tokensBefore} → ${compactResult.tokensAfter} tokens, cursor → ${newCursor}` +
+      `[compaction] Session ${sessionId}: ${compactResult.tokensBefore} → ${compactResult.tokensAfter} tokens, ` +
+      (persistSessionSummary ? `cursor → ${newCursor}` : 'ephemeral audience summary') +
       (episodes.length > 0 ? ` (${episodes.length} episodic rows)` : ''),
     )
 

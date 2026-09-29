@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 /**
  * Email channel adapter (AgentMail-backed, vendor-agnostic via EmailSendPort).
  *
@@ -146,6 +147,7 @@ export function createEmailAdapter(options: EmailAdapterOptions): ChannelAdapter
     },
 
     async sendMessage(_channelId: string, response: OutgoingMessage): Promise<string> {
+      response = denormalizeActions(response)
       // Raw-text exit with no render layer: strip planning scaffolding
       // before anything leaves (delivery-sanitize invariant).
       const sanitized = options.sanitizeDeliveryText(response.text ?? '').trim()
@@ -158,7 +160,9 @@ export function createEmailAdapter(options: EmailAdapterOptions): ChannelAdapter
       // The model composes in markdown; email clients don't parse it. Render
       // the multipart/alternative pair here so the recipient gets a real
       // email, never literal `**bold**` markers.
-      const { text, html } = renderEmailBody(sanitized)
+      const { text, html } = response.actions?.length
+        ? { text: sanitized, html: undefined }
+        : renderEmailBody(sanitized)
       const result = await withinEmailChannelReply(options.inboxAddress, options.replyToMessageId, () => options.send.reply({
         inReplyToMessageId: options.replyToMessageId,
         text,

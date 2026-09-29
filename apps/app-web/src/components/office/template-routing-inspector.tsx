@@ -284,9 +284,11 @@ export function TemplateRoutingInspector(props: {
   initialRouting?: OfficeTemplateRoutingDraft;
   onStateChange?: (state: TemplateRoutingInspectorState) => void;
 }) {
+  if (props.snapshot.family === "pdf") return null;
+  const snapshot = props.snapshot;
   return <TemplateRoutingBoundary templateId={props.templateId} initialRouting={props.initialRouting} onStateChange={props.onStateChange}>
-    {(routing, saveRouting, identity, saved) => props.snapshot.family === "presentation"
-      ? <PresentationTemplateRoutingInspector key={identity} {...props} initialRouting={routing} saveRouting={saveRouting} saveConfirmed={saved} snapshot={props.snapshot} />
-      : <TokenTemplateRoutingInspector key={identity} {...props} initialRouting={routing} saveRouting={saveRouting} saveConfirmed={saved} snapshot={props.snapshot} />}
+    {(routing, saveRouting, identity, saved) => snapshot.family === "presentation"
+      ? <PresentationTemplateRoutingInspector key={identity} {...props} initialRouting={routing} saveRouting={saveRouting} saveConfirmed={saved} snapshot={snapshot} />
+      : <TokenTemplateRoutingInspector key={identity} {...props} initialRouting={routing} saveRouting={saveRouting} saveConfirmed={saved} snapshot={snapshot} />}
   </TemplateRoutingBoundary>;
 }

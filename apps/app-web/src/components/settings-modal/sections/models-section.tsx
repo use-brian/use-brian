@@ -512,7 +512,9 @@ export function ModelsSection() {
                   <span className="text-[12.5px] font-medium">{t.decisionClassifierLabel}</span>
                   <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
                     {decisionRouting?.mode === "hybrid"
-                      ? selectedHybridOperationCount > 0
+                      ? decisionRouting.operatorOverride
+                        ? t.decisionOperatorOverrideBadge
+                        : selectedHybridOperationCount > 0
                         ? t.decisionHybridBadge.replace("{count}", String(selectedHybridOperationCount))
                         : t.decisionHybridFallbackBadge
                       : decisionRouting?.mode === "shadow"
@@ -554,8 +556,12 @@ export function ModelsSection() {
                       ? [{
                           value: `hybrid:${selectedDecisionModel.alias}`,
                           label: t.decisionHybridOption.replace("{model}", selectedDecisionModel.displayName),
-                          hint: t.decisionHybridRevokedHint,
-                          badge: t.decisionHybridFallbackBadge,
+                          hint: decisionRouting.operatorOverride
+                            ? t.decisionOperatorOverrideHint
+                            : t.decisionHybridRevokedHint,
+                          badge: decisionRouting.operatorOverride
+                            ? t.decisionOperatorOverrideBadge
+                            : t.decisionHybridFallbackBadge,
                         }]
                       : []),
                     ...(decisionRouting
@@ -576,7 +582,9 @@ export function ModelsSection() {
                   <p className="text-[11.5px] leading-relaxed text-muted-foreground">{t.decisionUnavailable}</p>
                 ) : null}
                 <p className="text-[11.5px] leading-relaxed text-muted-foreground">
-                  {(selectedHybridOperationCount > 0
+                  {(decisionRouting?.operatorOverride
+                    ? t.decisionOperatorOverrideNotice
+                    : selectedHybridOperationCount > 0
                     ? t.decisionHybridAvailable
                     : t.decisionHybridGate
                   ).replace("{count}", String(selectedHybridOperationCount))}

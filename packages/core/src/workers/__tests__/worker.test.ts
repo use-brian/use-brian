@@ -132,6 +132,23 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     expect(bEvents).toHaveLength(0)
   })
 
+  it('keeps concurrent sessions\' onEvent bindings isolated', async () => {
+    const manager = createWorkerManager({ provider: makeFakeProvider('x'), model: 'gemini-flash', tools: new Map() })
+    const aEvents: string[] = []
+    const bEvents: string[] = []
+    manager.setOnEvent(() => { aEvents.push('a') }, 'sess-A')
+    manager.setOnEvent(() => { bEvents.push('b') }, 'sess-B')
+
+    manager.spawn('do A', { ...ctx, sessionId: 'sess-A' })
+    manager.spawn('do B', { ...ctx, sessionId: 'sess-B' })
+    await manager.waitAll()
+
+    expect(aEvents.length).toBeGreaterThan(0)
+    expect(bEvents.length).toBeGreaterThan(0)
+    expect(aEvents.every((event) => event === 'a')).toBe(true)
+    expect(bEvents.every((event) => event === 'b')).toBe(true)
+  })
+
   it('forwards a worker run\'s accumulated usage to onUsage with the spawn billing identity', async () => {
     const usages: WorkerUsageEvent[] = []
     const manager = createWorkerManager({
@@ -225,6 +242,101 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
       tools: new Map(),
     })
     expect(manager.stop('worker_ghost')).toBe(false)
+  })
+
+  it('cancelForSession aborts only that session and suppresses stale notifications', async () => {
+    let startedCount = 0
+    let resolveStarted!: () => void
+    let resolveCancelled!: () => void
+    const bothStarted = new Promise<void>((resolve) => { resolveStarted = resolve })
+    const cancelled = new Promise<void>((resolve) => { resolveCancelled = resolve })
+    const provider: LLMProvider = {
+      name: 'fake',
+      models: ['gemini-flash'],
+      async *stream(req: ProviderRequest) {
+        startedCount++
+        if (startedCount === 2) resolveStarted()
+        await new Promise<void>((_resolve, reject) => {
+          req.signal?.addEventListener('abort', () => {
+            resolveCancelled()
+            const error = new Error('Aborted')
+            error.name = 'AbortError'
+            reject(error)
+          }, { once: true })
+        })
+      },
+      createSession(): ProviderSession {
+        throw new Error('stateless worker should use provider.stream')
+      },
+    }
+    const manager = createWorkerManager({
+      provider,
+      model: 'gemini-flash',
+      tools: new Map(),
+    })
+    manager.spawn('session one task', ctx)
+    manager.spawn('session two task', { ...ctx, sessionId: 's2' })
+    await bothStarted
+
+    expect(manager.cancelForSession('s1')).toBe(1)
+    expect(manager.pendingCountFor('s1')).toBe(0)
+    expect(manager.pendingCountFor('s2')).toBe(1)
+
+    await cancelled
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(manager.hasNotificationsFor('s1')).toBe(false)
+
+    manager.reset()
+  })
+
+  it('resetForSession preserves another session worker and keeps ids collision-free', async () => {
+    let releaseFirst!: () => void
+    let firstStarted!: () => void
+    let firstAborted = false
+    const release = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const started = new Promise<void>((resolve) => { firstStarted = resolve })
+    let streamCount = 0
+    const provider: LLMProvider = {
+      name: 'fake',
+      models: ['gemini-flash'],
+      async *stream(req: ProviderRequest) {
+        streamCount++
+        if (streamCount === 1) {
+          req.signal?.addEventListener('abort', () => { firstAborted = true }, { once: true })
+          firstStarted()
+          await release
+        }
+        const result = `result-${streamCount}`
+        yield { type: 'message_start', model: 'gemini-flash' }
+        yield { type: 'text_delta', text: result }
+        yield {
+          type: 'message_end',
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: result.length },
+        }
+      },
+      createSession(): ProviderSession {
+        throw new Error('stateless worker should use provider.stream')
+      },
+    }
+    const manager = createWorkerManager({ provider, model: 'gemini-flash', tools: new Map() })
+    const first = manager.spawn('session A', { ...ctx, sessionId: 'sess-A' })!
+    await started
+
+    manager.resetForSession('sess-B')
+    const second = manager.spawn('session B', { ...ctx, sessionId: 'sess-B' })!
+    expect(first.workerId).toBe('worker_1')
+    expect(second.workerId).toBe('worker_2')
+    expect(manager.pendingCountFor('sess-A')).toBe(1)
+    expect(firstAborted).toBe(false)
+    expect(manager.getStatus(first.workerId, 'sess-B')).toBeNull()
+    expect(manager.stop(first.workerId, 'sess-B')).toBe(false)
+
+    releaseFirst()
+    await manager.waitAll()
+    expect(manager.getResult(first.workerId, 'sess-B')).toBeNull()
+    expect(manager.drainNotifications('sess-A')).toHaveLength(1)
+    expect(manager.drainNotifications('sess-B')).toHaveLength(1)
   })
 
   it('pendingCount tracks running workers', async () => {
@@ -326,12 +438,15 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
       tools: new Map(),
     })
 
-    // Default — constrained prompt, no urlReader nudge, 1-2 search cap.
+    // Default — capability-neutral prompt, no urlReader nudge, and a compact
+    // retrieval budget that works for connector reads as well as web search.
     // User message is the raw prompt without any RESEARCH MODE preamble.
     manager.spawn('default task', ctx)
     await manager.waitAll()
     expect(seenPrompts).toHaveLength(1)
-    expect(seenPrompts[0]).toContain('1-2 web searches maximum')
+    expect(seenPrompts[0]).toContain('isolated read-only worker')
+    expect(seenPrompts[0]).toContain('1-2 focused retrieval operations')
+    expect(seenPrompts[0]).toContain('batch/list/search operation')
     expect(seenPrompts[0]).not.toContain('urlReader')
     expect(seenUserMessages[0]).toBe('default task')
 
@@ -350,7 +465,7 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     expect(seenPrompts[1]).toContain('<self-critique>')
     expect(seenPrompts[1]).toContain('<failed-sources>')
     expect(seenPrompts[1]).toContain('Failure codes')
-    expect(seenPrompts[1]).not.toContain('1-2 web searches maximum')
+    expect(seenPrompts[1]).not.toContain('1-2 focused retrieval operations')
     expect(seenUserMessages[1]).toContain('Research protocol')
     expect(seenUserMessages[1]).toContain('Forbidden')
     expect(seenUserMessages[1]).toContain('research task') // original prompt still appended
@@ -361,7 +476,7 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     manager.spawn('post-reset task', ctx)
     await manager.waitAll()
     expect(seenPrompts).toHaveLength(3)
-    expect(seenPrompts[2]).toContain('1-2 web searches maximum')
+    expect(seenPrompts[2]).toContain('1-2 focused retrieval operations')
     expect(seenUserMessages[2]).toBe('post-reset task')
   })
 

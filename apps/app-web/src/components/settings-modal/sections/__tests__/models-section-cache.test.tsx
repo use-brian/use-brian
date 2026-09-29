@@ -101,6 +101,7 @@ const menu = {
     mode: "llm_only",
     modelAlias: null,
     updatedAt: null,
+    operatorOverride: false,
     shadowSampleRate: 0.1,
     models: [],
   },

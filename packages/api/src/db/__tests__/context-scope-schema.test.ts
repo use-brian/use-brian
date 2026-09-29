@@ -7,6 +7,21 @@ const migration = (name: string) => readFile(
 )
 
 describe('[COMP:api/context-scope-store] context scope migration contract', () => {
+  it('allows workspace-wide derived conversation scope without accepting partial envelopes', async () => {
+    const sql = (await migration('608_session_message_workspace_scope.sql'))
+      .replace(/^\s*--[^\n]*$/gm, '').trim()
+    expect(sql).toMatch(/^BEGIN;/)
+    expect(sql).toMatch(/COMMIT;$/)
+    expect(sql).toContain('DROP CONSTRAINT session_messages_scope_complete')
+    expect(sql).toContain('ADD CONSTRAINT session_messages_scope_complete CHECK')
+    expect(sql).not.toContain('assistant_id IS NOT NULL')
+    for (const column of ['workspace_id', 'sensitivity', 'compartments', 'project_ids', 'scope_version', 'scope_held']) {
+      expect(sql).toContain(`${column} IS NOT NULL`)
+      expect(sql).toContain(`${column} IS NULL`)
+    }
+    expect(sql).toContain('user_id IS NULL AND assistant_id IS NULL')
+  })
+
   it('wraps the saved-page policy repair in one transaction', async () => {
     const sql = (await migration('537_saved_views_scope_guc_casts.sql'))
       .replace(/^\s*--[^\n]*$/gm, '').trim()

@@ -29,13 +29,13 @@ const CHAT_TS = fileURLToPath(new URL('../chat.ts', import.meta.url))
 const source = readFileSync(CHAT_TS, 'utf8')
 
 /**
- * The refusal block: from the cross-assistant verdict down to the first thing
- * that actually starts the turn. Everything that ends the stream in here is a
- * pre-turn refusal.
+ * The refusal block: from the cross-assistant verdict down to the trusted
+ * execution-context resolution that starts the turn. Everything that ends the
+ * stream in here is a pre-turn refusal.
  */
 function sessionBindingBlock(): string {
   const start = source.indexOf('const verdict = crossAssistantSendPolicy({')
-  const end = source.indexOf('const turnScope = await resolveTurnScopeSystem({')
+  const end = source.indexOf('const resolvedExecution = await resolveExecutionContextSystem({', start)
   expect(start).toBeGreaterThan(-1)
   expect(end).toBeGreaterThan(start)
   return source.slice(start, end)

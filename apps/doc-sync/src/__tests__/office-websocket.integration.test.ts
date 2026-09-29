@@ -10,7 +10,7 @@ import { revalidateOfficeRoom, type OfficeRoomDocument } from '../office-authori
 
 const room = 'office:00000000-0000-4000-8000-000000000001'
 const access = (canEdit: boolean): ResolvedOfficeAccess => ({
-  artifactId: room.slice('office:'.length), workspaceId: 'workspace', role: canEdit ? 'edit' : 'view',
+  artifactId: room.slice('office:'.length), workspaceId: 'workspace', mode: 'artifact', role: canEdit ? 'edit' : 'view',
   workspaceRole: 'member', lifecycleState: 'active', canView: true, canComment: canEdit,
   canEdit, canRestore: false, canDeletePermanently: false, canElevate: false, canManageSharing: false,
 })

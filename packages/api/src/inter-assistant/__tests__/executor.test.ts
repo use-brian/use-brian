@@ -151,7 +151,10 @@ const calleeAssistant = {
   id: 'callee-1',
   ownerUserId: 'owner-1',
   workspaceId: null,
+  kind: 'standard' as const,
   clearance: 'internal',
+  compartments: null,
+  defaultCompartments: [],
   name: 'Callee Bot',
 }
 const callerAssistant = { id: 'caller-1', name: 'Caller Bot' }
@@ -818,6 +821,35 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     await executor()(baseParams)
     const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
     expect(systemPrompt).toContain('## Automated tool policy')
+  })
+
+  it('registers the real deferred producer before prompt delivery with actor and native-thread provenance', async () => {
+    const prompt = await import('../../scheduling/confirmation-prompt.js')
+    const registry = await import('../../scheduling/confirmation-registry.js')
+    const send = vi.spyOn(prompt, 'sendConfirmationPrompt').mockImplementationOnce(async (target, request) => {
+      expect(target).toMatchObject({ workspaceId: 'workspace-1', assistantId: 'callee-1', channelIntegrationId: 'integration', threadRef: 'native-root' })
+      expect(registry.bindSchedulerConfirmationDelivery(request.toolCallId, {
+        workspaceId: target.workspaceId!, assistantId: target.assistantId,
+        integrationId: 'integration', channelType: target.channelType, channelId: target.channelId,
+        threadId: target.threadRef, messageId: 'prompt',
+      }, request.allowPersistentApproval === true)).toBe(true)
+      expect(registry.findSchedulerChannelConfirmations({ workspaceId: 'workspace-1', assistantId: 'callee-1',
+        userId: 'owner-1', integrationId: 'integration', channelType: 'slack', channelId: 'channel', threadId: 'native-root',
+      }, request.toolCallId)).toHaveLength(1)
+      return { delivered: true, channelType: target.channelType }
+    })
+    yields([
+      { type: 'tool_confirmation_required', request: { toolCallId: 'producer-call', toolName: 'send', serverName: 'connector', input: {}, description: 'Send', classification: null } },
+      { type: 'assistant_turn', response: { content: [{ type: 'text', text: 'done' }] }, toolResults: [] },
+      { type: 'turn_complete', response: { content: [{ type: 'text', text: 'done' }] } },
+    ])
+    try {
+      await executor()({ ...baseParams, workspaceId: 'workspace-1', deliverTarget: {
+        channelType: 'slack', channelId: 'channel', channelIntegrationId: 'integration', threadRef: 'native-root',
+      } })
+      expect(send).toHaveBeenCalledOnce()
+      expect(registry.tryResolveSchedulerConfirmation('producer-call', 'allow', { userId: 'owner-1' })).toBe(false)
+    } finally { send.mockRestore(); registry.unregisterSchedulerResolver('producer-call') }
   })
 
   it('omits the direct-execution framing when confirmations are deferred (deliverTarget set)', async () => {
@@ -2044,7 +2076,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
 describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory continuity', () => {
   // A workspace-scoped callee — research fan-out + prior-run memory both
   // require a workspace. No pageAnchorId, so the page gate is skipped.
-  const wsCallee = { id: 'callee-1', ownerUserId: 'owner-1', workspaceId: 'ws-1', clearance: 'internal', name: 'Callee Bot' }
+  const wsCallee = { ...calleeAssistant, workspaceId: 'ws-1', name: 'Callee Bot' }
 
   function wsMemoryStore(overrides: Record<string, unknown> = {}) {
     return {
@@ -2552,7 +2584,7 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
  * the same Telegram topic (the 2026-08-18 daily health report). Read-only.
  */
 describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments bridge', () => {
-  const wsCallee = { id: 'callee-1', ownerUserId: 'owner-1', workspaceId: 'ws-1', clearance: 'internal', name: 'Brian' }
+  const wsCallee = { ...calleeAssistant, workspaceId: 'ws-1', name: 'Brian' }
   const deliverTarget = { channelType: 'telegram' as const, channelId: '-100123:topic:2' }
 
   function stateStore(rowsBySession: Record<string, Array<Record<string, unknown>>>) {

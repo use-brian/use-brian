@@ -42,6 +42,7 @@ type Pending = {
 }
 
 type Connection = {
+  controlEpoch?: number
   protectedFillV1: boolean
   extensionOrigin: string | null
   socket: RelaySocket
@@ -314,6 +315,11 @@ export class BrowserRelay {
     }
 
     if (msg.data.type === 'event') {
+      // Commands already on the wire retain the old epoch and cannot restart
+      // an Electron host after Stop. Only subsequent dispatches get this fence.
+      if (msg.data.kind === 'stopped' && msg.data.controlEpoch !== undefined) {
+        conn.controlEpoch = msg.data.controlEpoch
+      }
       // stopped / tab_closed / detached abort everything in flight for this
       // user (P1.7 close-to-stop; the extension itself refuses follow-up
       // commands). Each carries its own message: they are different situations
@@ -401,6 +407,7 @@ export class BrowserRelay {
         op: params.op,
         args: params.args ?? {},
         controlMode: params.controlMode ?? 'task_tabs',
+        ...(conn.controlEpoch !== undefined ? { controlEpoch: conn.controlEpoch } : {}),
       })
     })
   }

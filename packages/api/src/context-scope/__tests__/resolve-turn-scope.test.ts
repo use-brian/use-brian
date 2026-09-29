@@ -1,11 +1,13 @@
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { describe, expect, it, vi } from 'vitest'
 import type { ContextScopeStore, ContextTeam, WorkspaceProject } from '../../db/context-scope-store.js'
+import { resolveExecutionContextSystem } from '../execution-context.js'
 import {
   ContextNotAvailableError,
   formatActiveWorkspaceContext,
   resolveTurnScopeSystem,
   resolveLiveAccessCeilingSystem,
+  sessionMessageInputScope,
   type TurnScopeAssistant,
 } from '../resolve-turn-scope.js'
 
@@ -84,6 +86,39 @@ function store(overrides: Partial<ContextScopeStore> = {}): ContextScopeStore {
 }
 
 describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
+  it('stamps a public group input from the audience-bounded turn', () => {
+    const scope = {
+      access: {
+        workspaceId: 'workspace-1', userId: 'user-1', assistantId: 'assistant-1',
+        assistantKind: 'standard' as const, clearance: 'public' as const,
+        compartments: [] as string[], mutationCompartments: [] as string[],
+        projectIds: [] as string[], visibilityAssistantIds: ['assistant-1'],
+      },
+      activeGroupId: null,
+      activeProjectId: null,
+      effectiveCompartments: [] as string[],
+      effectiveProjectIds: [] as string[],
+      writeCompartments: [] as string[],
+      writeProjectIds: [] as string[],
+      activeTeam: null,
+      activeProject: null,
+    }
+    expect(sessionMessageInputScope({
+      scope,
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
+      assistantId: 'assistant-1',
+      sharedAudience: true,
+    })).toEqual({
+      workspaceId: 'workspace-1',
+      userId: null,
+      assistantId: 'assistant-1',
+      sensitivity: 'public',
+      compartments: [],
+      projectIds: [],
+    })
+  })
+
   it('refreshes live authority independently of inherited execution narrowing', async () => {
     const input = { userId: 'user-1', assistant: { ...assistant, kind: 'primary' as const,
       teamScopeMode: 'legacy' as const, projectScopeMode: 'all' as const } }
@@ -159,6 +194,32 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
     expect(resolved.activeGroupId).toBeNull()
     expect(resolved.activeProjectId).toBeNull()
     expect(formatActiveWorkspaceContext(resolved)).toBe('')
+  })
+
+  it('lets a shared-provider audience replace a stale session Team and Project binding', async () => {
+    const contextStore = store()
+    const resolved = await resolveTurnScopeSystem({
+      userId: 'user-1',
+      assistant: {
+        ...assistant,
+        teamScopeMode: 'legacy',
+        projectScopeMode: 'all',
+      },
+      session: { contextGroupId: TEAM_ID, contextProjectId: PROJECT_ID },
+      ignoreSessionBinding: true,
+    }, {
+      store: contextStore,
+      resolveReadCeilings: vi.fn().mockResolvedValue({
+        clearance: 'confidential',
+        compartments: null,
+        mutationCompartments: null,
+      }),
+    })
+
+    expect(contextStore.getTeamSystem).not.toHaveBeenCalled()
+    expect(contextStore.getProjectSystem).not.toHaveBeenCalled()
+    expect(resolved.activeTeam).toBeNull()
+    expect(resolved.activeProject).toBeNull()
   })
 
   it('refuses a Team selection outside the effective principal grant', async () => {
@@ -250,5 +311,147 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
     expect(resolveReadCeilings).not.toHaveBeenCalled()
     expect(resolved.effectiveCompartments).toEqual([`team:${TEAM_ID}`])
     expect(resolved.access.compartments).toEqual([`team:${TEAM_ID}`])
+  })
+
+  it('builds an external channel execution context with no workspace read or write grants', async () => {
+    const resolveWorkspaceRole = vi.fn(async () => null)
+    const authority = {
+      async assertCurrent() {},
+      async execute<T>(operation: () => Promise<T>) { return operation() },
+    }
+    const createSessionLease = vi.fn(() => authority)
+    const result = await resolveExecutionContextSystem({
+      userId: 'external-user',
+      assistant,
+      memberMode: 'external',
+      session: { contextGroupId: null, contextProjectId: null },
+      identity: {
+        kind: 'attended',
+        principal: {
+          kind: 'verified_channel_guest',
+          userId: 'external-user',
+          provider: 'feishu',
+          externalId: 'channel-user-1',
+        },
+      },
+      ownership: { kind: 'workspace', workspaceId: 'workspace-1' },
+      lifecycle: {
+        abortSignal: new AbortController().signal,
+        sessionId: 'session-1',
+        channelType: 'feishu',
+        channelId: 'conversation-1',
+      },
+      sessionAuthority: {
+        id: 'session-1',
+        assistantId: assistant.id,
+        userId: 'external-user',
+        contextGroupId: null,
+        contextProjectId: null,
+        contextLockedAt: null,
+      },
+    }, {
+      store: store(),
+      resolveWorkspaceRole,
+      createSessionLease,
+    })
+
+    expect(resolveWorkspaceRole).toHaveBeenCalledWith('external-user', 'workspace-1', true)
+    expect(result.turnScope).toMatchObject({
+      effectiveCompartments: [],
+      effectiveProjectIds: [],
+      writeCompartments: [],
+      writeProjectIds: [],
+    })
+    expect(result.executionContext.security.access).toMatchObject({
+      clearance: 'public',
+      compartments: [],
+      mutationCompartments: [],
+      projectIds: [],
+    })
+    expect(result.executionContext.security.writeDefaults).toEqual({
+      compartments: [],
+      projectIds: [],
+    })
+    expect(createSessionLease).toHaveBeenCalledWith(expect.objectContaining({
+      memberMode: 'external',
+      userId: 'external-user',
+    }))
+  })
+
+  it('ignores stale member Team and Project bindings for an external channel principal', async () => {
+    const contextStore = store()
+    const resolved = await resolveTurnScopeSystem({
+      userId: 'external-user',
+      assistant: {
+        ...assistant,
+        teamScopeMode: 'legacy',
+        projectScopeMode: 'all',
+      },
+      memberMode: 'external',
+      session: {
+        contextGroupId: TEAM_ID,
+        contextProjectId: PROJECT_ID,
+        contextLockedAt: new Date('2026-09-29T00:00:00Z'),
+      },
+    }, {
+      store: contextStore,
+      resolveWorkspaceRole: vi.fn(async () => null),
+    })
+
+    expect(contextStore.getTeamSystem).not.toHaveBeenCalled()
+    expect(contextStore.getProjectSystem).not.toHaveBeenCalled()
+    expect(resolved).toMatchObject({
+      activeTeam: null,
+      activeProject: null,
+      effectiveCompartments: [],
+      effectiveProjectIds: [],
+      writeCompartments: [],
+      writeProjectIds: [],
+      access: { clearance: 'public', compartments: [], projectIds: [] },
+    })
+  })
+
+  it('keeps external renewal only while strict membership remains absent', async () => {
+    let role: 'member' | null = null
+    const resolveWorkspaceRole = vi.fn(async () => role)
+    const input = {
+      userId: 'external-user',
+      assistant,
+      memberMode: 'external' as const,
+    }
+
+    await expect(resolveLiveAccessCeilingSystem(input, {
+      store: store(),
+      resolveWorkspaceRole,
+    })).resolves.toMatchObject({
+      clearance: 'public',
+      compartments: [],
+      mutationCompartments: [],
+      projectIds: [],
+    })
+    role = 'member'
+    await expect(resolveLiveAccessCeilingSystem(input, {
+      store: store(),
+      resolveWorkspaceRole,
+    })).rejects.toThrow('authority_unavailable')
+  })
+
+  it('requires strict membership when renewing an ordinary member lease', async () => {
+    const resolveReadCeilings = vi.fn().mockResolvedValue({
+      clearance: 'internal',
+      compartments: [],
+      mutationCompartments: [],
+    })
+    await resolveLiveAccessCeilingSystem({
+      userId: 'user-1',
+      assistant: { ...assistant, teamScopeMode: 'legacy', projectScopeMode: 'all' },
+    }, { resolveReadCeilings })
+    expect(resolveReadCeilings).toHaveBeenCalledWith(
+      'user-1',
+      'workspace-1',
+      'confidential',
+      null,
+      true,
+    )
   })
 })

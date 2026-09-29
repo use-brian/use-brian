@@ -64,6 +64,7 @@ import {
   type MailboxIngestMessage,
   type MemoryStore,
   type PipelineBEpisode,
+  type PipelineBApplicationPort,
   type PlaceholderResolver,
   type SourceKind,
   type TaskAdmissionPort,
@@ -434,6 +435,7 @@ export type MailboxBrainRouterDeps = {
   analytics?: AnalyticsLogger
   usageStore?: UsageStore
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
+  application?: PipelineBApplicationPort
   /** Hosted batch worker available. False executes scheduled matches realtime (the WhatsApp OSS posture). */
   scheduledBatching?: boolean
   /** Test seam — defaults to core `processEpisode`. */
@@ -646,6 +648,7 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
       analytics: deps.analytics,
       usage: deps.usageStore,
       ingestCharge: deps.ingestCharge,
+      application: deps.application,
     })
     return { episodeId: episode.id }
   }

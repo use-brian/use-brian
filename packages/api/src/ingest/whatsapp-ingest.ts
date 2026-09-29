@@ -164,6 +164,8 @@ export type WhatsappIngestorDeps = {
    * ("mike ships feat A by sunday") becomes a ticket.
    */
   tasks?: TaskStore
+  taskAdmission?: import('@use-brian/core').TaskAdmissionPort
+  application?: import('@use-brian/core').PipelineBApplicationPort
   episodes: DbEpisodesStore
   /** DB rules for the paired connector_instance — loaded per event. */
   ingestRulesStore: IngestRulesStore
@@ -468,12 +470,14 @@ export function createWhatsappIngestor(
       entityLinks: deps.entityLinks,
       memories: deps.memories,
       tasks: deps.tasks,
+      taskAdmission: deps.taskAdmission,
       episodes: deps.episodes,
       classifierModel: runtime?.model ?? deps.classifierModel,
       analytics: deps.analytics,
       isUserBlockedForAssistant: deps.isUserBlockedForAssistant,
       usage: deps.usageStore,
       ingestCharge: deps.ingestCharge,
+      application: deps.application,
     })
 
     return { episodeId: episode.id }

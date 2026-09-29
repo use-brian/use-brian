@@ -99,6 +99,8 @@ export type FilesWriteBytesParams = {
   summary?: string | null
   tags?: string[]
   sensitivity?: FileSensitivity
+  /** Internal-only Office PDF lease marker. Public tools never set this. */
+  sessionOwned?: true
 }
 
 export type FilesReadResult = {

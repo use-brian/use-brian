@@ -18,6 +18,9 @@ import {
   type DocumentPdfReceipt,
   type PresentationPdfPort,
   type PresentationPdfReceipt,
+  type PdfWriterPort,
+  type ValidatedPdfOutput,
+  validateRenderedPdf,
 } from '@use-brian/core'
 import {
   preflightOfficeCandidate,
@@ -48,6 +51,7 @@ export type OfficeReleaseReceipt = {
   spreadsheetPdf?: SpreadsheetPdfReceipt
   presentationPdf?: PresentationPdfReceipt
   documentPdf?: DocumentPdfReceipt
+  pdf?: Pick<ValidatedPdfOutput, 'sha256' | 'pageCount'>
 }
 
 const RANK = { public: 0, internal: 1, confidential: 2 } as const
@@ -90,6 +94,7 @@ export function reviewOfficeRelease(params: {
     ? preflightSpreadsheetPdf(params.snapshot, params.spreadsheetPdf).receipt
     : undefined
   if (params.snapshot.family === 'spreadsheet' && params.format === 'pdf' && !params.spreadsheetPdf) blocks.push({ code: 'format.pdf_request_required', message: 'Spreadsheet PDF release requires an explicit worksheet and print area.' })
+  if (params.snapshot.family === 'pdf' && params.format !== 'pdf') blocks.push({ code: 'format.pdf_only', message: 'PDF editing sessions can release only a flattened PDF.' })
   for (const issue of spreadsheetPdf?.issues ?? []) (issue.severity === 'error' ? blocks : warnings).push({ code: `spreadsheet.${issue.code}`, message: issue.message, subjectId: issue.address })
   for (const claim of params.claims) {
     if (claim.status === 'superseded' || claim.status === 'resolved') continue
@@ -121,11 +126,19 @@ export function reviewOfficeRelease(params: {
   }
 }
 
-export async function prepareOfficeRelease(params: Parameters<typeof reviewOfficeRelease>[0] & { resolveResource?: OfficeResourceResolver; documentPdfPort?: DocumentPdfPort; presentationPdfPort?: PresentationPdfPort }): Promise<{ receipt: OfficeReleaseReceipt; bytes?: Uint8Array; mime?: string; extension?: 'docx' | 'pptx' | 'xlsx' | 'pdf' }> {
+export async function prepareOfficeRelease(params: Parameters<typeof reviewOfficeRelease>[0] & { resolveResource?: OfficeResourceResolver; documentPdfPort?: DocumentPdfPort; presentationPdfPort?: PresentationPdfPort; pdfSourceBytes?: Uint8Array; pdfWriterPort?: PdfWriterPort }): Promise<{ receipt: OfficeReleaseReceipt; bytes?: Uint8Array; mime?: string; extension?: 'docx' | 'pptx' | 'xlsx' | 'pdf' }> {
   const receipt = reviewOfficeRelease(params)
   if (receipt.status !== 'ready') return { receipt }
   const resolveResource = params.resolveResource ?? (async () => null)
   try {
+    if (params.snapshot.family === 'pdf') {
+      if (!params.pdfSourceBytes || !params.pdfWriterPort) {
+        return { receipt: { ...receipt, status: 'blocked', blocks: [...receipt.blocks, { code: 'export.pdf_session_unavailable', message: 'The PDF source or validated writer is unavailable.' }] } }
+      }
+      const rendered = await params.pdfWriterPort.render(params.pdfSourceBytes, params.snapshot)
+      const validated = await validateRenderedPdf(params.snapshot, rendered)
+      return { receipt: { ...receipt, pdf: { sha256: validated.sha256, pageCount: validated.pageCount } }, bytes: rendered.bytes, mime: 'application/pdf', extension: 'pdf' }
+    }
     if (params.snapshot.family === 'document' && params.format === 'pdf') {
       const exportedPdf = await exportOfficeDocumentPdf(params.snapshot, resolveResource, params.documentPdfPort)
       const documentPdf = exportedPdf.receipt
@@ -173,6 +186,7 @@ export async function prepareOfficeRelease(params: Parameters<typeof reviewOffic
 
 export function deriveOfficeSnapshot(params: { source: OfficeArtifactSnapshot; artifactId: string; title: string; selectedObjectIds?: string[] }): OfficeArtifactSnapshot {
   const selected = params.selectedObjectIds ? new Set(params.selectedObjectIds) : null
+  if (params.source.family === 'pdf') throw new Error('PDF sessions cannot be copied or derived through generic Office release')
   if (params.source.family === 'document') {
     return {
       ...params.source,

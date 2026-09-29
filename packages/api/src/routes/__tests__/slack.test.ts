@@ -614,8 +614,17 @@ describe('[COMP:api/slack-route] resolveSlackSender', () => {
     expect(out.userId).toBe('u_company_email')
   })
 
-  it('falls back to the owner when neither store is wired (prior behaviour)', async () => {
+  it('does not verify the owner when both identity lookup paths fail', async () => {
+    const out = await resolveSlackSender({ ...base,
+      linkedAccountStore: { findByProvider: vi.fn(async () => { throw new Error('offline') }) } as never,
+      channelUserStore: {} as never,
+      deps: { resolveByEmail: vi.fn(async () => { throw new Error('offline') }) as never },
+    })
+    expect(out).toEqual({ userId: 'owner_1', isIdentified: false, viaLink: false })
+  })
+
+  it('keeps legacy owner storage unverified when neither identity store is wired', async () => {
     const out = await resolveSlackSender({ ...base })
-    expect(out).toEqual({ userId: 'owner_1', isIdentified: true, viaLink: false })
+    expect(out).toEqual({ userId: 'owner_1', isIdentified: false, viaLink: false })
   })
 })

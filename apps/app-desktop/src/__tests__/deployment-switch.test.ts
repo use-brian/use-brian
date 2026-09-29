@@ -124,6 +124,42 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
     pairingToken: `header.${Buffer.from(JSON.stringify({ kind: "browser-ext-pair", exp: 4_000_000_000,
       userId, workspaceId: "workspace", browserProfileId: "profile" })).toString("base64url")}.signature` });
 
+  it('forwards live theme payloads only from the trusted app main frame', async () => {
+    const { EmbeddedBrowser } = await import('../embedded-browser.js');
+    const setTheme = vi.spyOn(EmbeddedBrowser.prototype, 'setTheme').mockImplementation(() => {});
+    const receive = state.handlers.get('embedded-browser:theme')!;
+    const input = { colorScheme: 'light' };
+    receive(sender(), input);
+    expect(setTheme).toHaveBeenCalledExactlyOnceWith(input);
+    setTheme.mockClear();
+    const website = { id: 999, isDestroyed: () => false, mainFrame: {}, getURL: () => 'https://example.com/' };
+    receive({ sender: website, senderFrame: website.mainFrame }, input);
+    receive({ ...sender(), senderFrame: {} }, input);
+    await state.windows.at(-1).webContents.loadURL('https://untrusted.example.com/');
+    receive(sender(), input);
+    expect(setTheme).not.toHaveBeenCalled();
+  });
+
+  it('rejects theme updates during an account identity transition and accepts the replacement app', async () => {
+    const { EmbeddedBrowser } = await import('../embedded-browser.js');
+    const setTheme = vi.spyOn(EmbeddedBrowser.prototype, 'setTheme').mockImplementation(() => {});
+    const receive = state.handlers.get('embedded-browser:theme')!;
+    const oldSender = sender();
+    let release!: (value: any) => void;
+    state.refresh.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const switching = state.handlers.get('Use Brian:select-account')!(oldSender,
+      deploymentAccountKey({ target: cloud, tokens: tokens('cloud') }));
+    receive(oldSender, { colorScheme: 'dark' });
+    expect(setTheme).not.toHaveBeenCalled();
+    release({ accessToken: 'new', refreshToken: 'rotated', accessTokenExpiresIn: 3600 });
+    expect(await switching).toEqual({ ok: true });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    receive(oldSender, { colorScheme: 'dark' });
+    expect(setTheme).not.toHaveBeenCalled();
+    receive(sender(), { colorScheme: 'light' });
+    expect(setTheme).toHaveBeenCalledExactlyOnceWith({ colorScheme: 'light' });
+  });
+
   it("supplies the current main window factory and preserves docked browser focus", async () => {
     const { EmbeddedBrowser } = await import("../embedded-browser.js");
     const main = state.windows[0];

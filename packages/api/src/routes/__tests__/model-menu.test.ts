@@ -310,6 +310,48 @@ describe('[COMP:decisions/workspace-routing] workspace decision classifier', () 
     )
   })
 
+  it('shows the inherited deployment operator default when no workspace row exists', async () => {
+    const res = await request(makeApp({
+      decisionRoutingStore: decisionRoutingStore as never,
+      configuredDecisionAdapters: new Set(['typesafe']),
+      operatorDecisionDefault: {
+        mode: 'operator_hybrid',
+        modelAlias: 'typesafe-jev-1.13',
+      },
+    })).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+
+    expect(res.body.decisionRouting).toMatchObject({
+      mode: 'hybrid',
+      modelAlias: 'typesafe-jev-1.13',
+      updatedAt: null,
+      operatorOverride: true,
+    })
+  })
+
+  it('shows an explicit workspace setting instead of the deployment operator default', async () => {
+    decisionRoutingStore.get.mockResolvedValue({
+      workspaceId: WID,
+      mode: 'llm_only',
+      modelAlias: null,
+      updatedAt: 'now',
+    })
+    const res = await request(makeApp({
+      decisionRoutingStore: decisionRoutingStore as never,
+      configuredDecisionAdapters: new Set(['typesafe']),
+      operatorDecisionDefault: {
+        mode: 'operator_hybrid',
+        modelAlias: 'typesafe-jev-1.13',
+      },
+    })).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+
+    expect(res.body.decisionRouting).toMatchObject({
+      mode: 'llm_only',
+      modelAlias: null,
+      updatedAt: 'now',
+      operatorOverride: false,
+    })
+  })
+
   it('lets an admin enable shadow but rejects an unconfigured adapter', async () => {
     getRole.mockResolvedValue('admin')
     decisionRoutingStore.set.mockResolvedValue({

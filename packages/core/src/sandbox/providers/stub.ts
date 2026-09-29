@@ -6,10 +6,10 @@
  */
 import type {
   BlockRunHandle,
+  BrowserAgentRunResult,
   BrowserNavigateResult,
   BrowserSnapshot,
   BrowserUrlResult,
-  BrowserUseRunResult,
   BuTraceStep,
   RunPythonRequest,
   RunPythonResult,
@@ -216,19 +216,40 @@ export class StubSandboxProvider implements SandboxProvider {
   /** Scripted block behaviors, consumed in order by `runSkill`. */
   private skillScripts: StubSkillRunScript[] = []
 
-  /** Scripted browser-use runs, consumed in order by `runBrowserUse`. */
-  private buRuns: BrowserUseRunResult[] = []
+  /** Scripted watched-agent runs, consumed in order by `runBrowserAgent`. */
+  private buRuns: BrowserAgentRunResult[] = []
   readonly buGoals: string[] = []
+  readonly buUrls: string[] = []
 
   /** Test hook: script the next browser-use exploration's trace + output. */
   scriptBrowserUse(result: { trace: BuTraceStep[]; output?: string }): void {
-    this.buRuns.push({ trace: result.trace, output: result.output ?? '' })
+    this.scriptBrowserAgent({
+      trace: result.trace,
+      output: result.output ?? '',
+      backend: 'jev-ultrafast',
+      status: 'completed',
+      usage: [],
+    })
   }
 
-  async runBrowserUse(sandboxId: string, req: { goal: string }): Promise<BrowserUseRunResult> {
+  scriptBrowserAgent(result: BrowserAgentRunResult): void {
+    this.buRuns.push(result)
+  }
+
+  async runBrowserAgent(
+    sandboxId: string,
+    req: { url: string; goal: string },
+  ): Promise<BrowserAgentRunResult> {
     this.must(sandboxId)
     this.buGoals.push(req.goal)
-    return this.buRuns.shift() ?? { trace: [], output: 'nothing scripted' }
+    this.buUrls.push(req.url)
+    return this.buRuns.shift() ?? {
+      trace: [],
+      output: 'nothing scripted',
+      backend: 'jev-ultrafast',
+      status: 'completed',
+      usage: [],
+    }
   }
 
   /** Test hook: script what the "running block" does (emit send requests, etc.). */

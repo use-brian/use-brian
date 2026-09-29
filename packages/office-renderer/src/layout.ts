@@ -395,6 +395,7 @@ function layoutSpreadsheet(snapshot: SpreadsheetSnapshot): OfficeLayoutResult {
 }
 
 export function layoutOfficeArtifact(snapshot: OfficeArtifactSnapshot): OfficeLayoutResult {
+  if (snapshot.family === 'pdf') throw new Error('PDF sessions require the independent PDF.js renderer')
   return snapshot.family === 'document' ? layoutDocument(snapshot) : snapshot.family === 'presentation' ? layoutPresentation(snapshot) : layoutSpreadsheet(snapshot)
 }
 
@@ -402,6 +403,7 @@ export function layoutOfficeArtifact(snapshot: OfficeArtifactSnapshot): OfficeLa
  * shrinks, hides, or invents a layout. Generation may repair the named issues
  * and call again within its own bounded loop. */
 export function fitOfficeArtifact(snapshot: OfficeArtifactSnapshot, budget: OfficeFitBudget = {}): OfficeFitResult {
+  if (snapshot.family === 'pdf') throw new Error('PDF sessions require the independent PDF.js renderer')
   const result = layoutOfficeArtifact(snapshot)
   const issues = [...result.issues]
   const pageLimit = snapshot.family === 'document' ? budget.maxPages : snapshot.family === 'presentation' ? budget.maxSlides : budget.maxWorksheets

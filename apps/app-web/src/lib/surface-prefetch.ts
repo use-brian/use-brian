@@ -320,6 +320,10 @@ export function ingestSourcesCacheKey(workspaceId: string): string {
   return `ingest-sources:${workspaceId}${viewerSuffix()}`;
 }
 
+export function ingestApplicationsCacheKey(workspaceId: string): string {
+  return `ingest-applications:${workspaceId}${viewerSuffix()}`;
+}
+
 export function whatsappIngestCacheKey(workspaceId: string): string {
   return `whatsapp-ingest:${workspaceId}${viewerSuffix()}`;
 }
@@ -1008,4 +1012,9 @@ export function workspaceMemberDirectoryCacheKey(workspaceId: string, viewerId: 
 /** Current-RLS page names used only by page-reference selection surfaces. */
 export function pageDirectoryCacheKey(workspaceId: string, viewerId: string): string {
   return `page-directory:${workspaceId}:${viewerId}`;
+}
+
+/** Settings telemetry is isolated by workspace and signed-in viewer. */
+export function tokenUsageCacheKey(workspaceId: string): string {
+  return `token-usage:${workspaceId}${viewerSuffix()}`;
 }

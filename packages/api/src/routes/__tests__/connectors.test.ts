@@ -71,6 +71,7 @@ function makeApp(userId?: string) {
     listForUser: vi.fn().mockResolvedValue([]),
     listByUser: vi.fn().mockResolvedValue([]),
     listByWorkspace: vi.fn().mockResolvedValue([]),
+    get: vi.fn().mockResolvedValue(instance()),
     createUserInstance: vi.fn().mockResolvedValue(instance()),
     update: vi.fn().mockResolvedValue(instance()),
     deleteInstance: vi.fn().mockResolvedValue(true),
@@ -91,6 +92,7 @@ function makeApp(userId?: string) {
     listForUser: m.listForUser,
     listByUser: m.listByUser,
     listByWorkspace: m.listByWorkspace,
+    get: m.get,
     createUserInstance: m.createUserInstance,
     update: m.update,
     delete: m.deleteInstance,
@@ -510,8 +512,8 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
   })
 
   it('store-credentials with instanceId 404s when the instance is missing', async () => {
-    const { app, update } = makeApp('u1')
-    update.mockResolvedValue(null)
+    const { app, get } = makeApp('u1')
+    get.mockResolvedValue(null)
     const res = await request(app)
       .post('/api/connectors/github/store-credentials')
       .send({ pat: 'x', instanceId: IID })
@@ -618,7 +620,8 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
 
   it('exchange-and-store reconnect (instanceId) re-points the existing instance', async () => {
     process.env.GOOGLE_CLIENT_ID = 'gid'; process.env.GOOGLE_CLIENT_SECRET = 'gsec'
-    const { app, update } = makeApp('u1')
+    const { app, update, get } = makeApp('u1')
+    get.mockResolvedValue(instance({ provider: 'gcal' }))
     stubFetch([
       { ok: true, json: { access_token: 'at', refresh_token: 'rt-r' } },
       { ok: true, json: { email: 'x@example.com' } },
@@ -631,13 +634,18 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
   })
 
   it('disconnect flips the primary instance and 404s when absent', async () => {
-    const { app, setConnected } = makeApp('u1')
-    setConnected.mockResolvedValueOnce(instance({ connected: false }))
+    const { app, listByUser, update } = makeApp('u1')
+    listByUser.mockResolvedValueOnce([instance()])
+    update.mockResolvedValueOnce(instance({ connected: false }))
     const ok = await request(app).post('/api/connectors/github/disconnect')
     expect(ok.status).toBe(200)
-    expect(setConnected).toHaveBeenCalledWith('u1', 'github', false)
+    expect(update).toHaveBeenCalledWith('u1', IID, {
+      connected: false,
+      connectedEmail: null,
+      configPatch: { connectedEmail: null },
+    })
 
-    setConnected.mockResolvedValueOnce(null)
+    listByUser.mockResolvedValueOnce([])
     const missing = await request(app).post('/api/connectors/github/disconnect')
     expect(missing.status).toBe(404)
   })
@@ -664,12 +672,14 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
   })
 
   it('DELETE /:provider deletes the primary instance and 404s when absent', async () => {
-    const { app, deleteConnector } = makeApp('u1')
-    deleteConnector.mockResolvedValueOnce(true)
+    const { app, listByUser, deleteInstance } = makeApp('u1')
+    listByUser.mockResolvedValueOnce([instance()])
+    deleteInstance.mockResolvedValueOnce(true)
     const ok = await request(app).delete('/api/connectors/github')
     expect(ok.status).toBe(200)
+    expect(deleteInstance).toHaveBeenCalledWith('u1', IID)
 
-    deleteConnector.mockResolvedValueOnce(false)
+    listByUser.mockResolvedValueOnce([])
     const missing = await request(app).delete('/api/connectors/notion')
     expect(missing.status).toBe(404)
   })

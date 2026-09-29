@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createWorkspaceDecisionRouteResolver } from '../workspace-decision-routing.js'
+import {
+  createWorkspaceDecisionRouteResolver,
+  parseOperatorDecisionDefault,
+} from '../workspace-decision-routing.js'
 
 const context = {
   workspaceId: 'workspace-fictional',
@@ -15,6 +18,73 @@ const context = {
 }
 
 describe('[COMP:decisions/workspace-routing] workspace decision route resolver', () => {
+  it('requires a complete, active operator-default pair', () => {
+    expect(parseOperatorDecisionDefault(undefined, undefined)).toBeUndefined()
+    expect(parseOperatorDecisionDefault('operator_hybrid', 'typesafe-jev-1.13')).toEqual({
+      mode: 'operator_hybrid',
+      modelAlias: 'typesafe-jev-1.13',
+    })
+    expect(() => parseOperatorDecisionDefault('operator_hybrid', undefined)).toThrow(/required together/)
+    expect(() => parseOperatorDecisionDefault(undefined, 'typesafe-jev-1.13')).toThrow(/required together/)
+    expect(() => parseOperatorDecisionDefault('hybrid', 'typesafe-jev-1.13')).toThrow(/required together/)
+    expect(() => parseOperatorDecisionDefault('operator_hybrid', 'not-a-model')).toThrow(/active decision model/)
+  })
+
+  it('makes the operator default authoritative for execution and full-sample shadow for observation', async () => {
+    const getSystem = vi.fn(async () => null)
+    const resolver = createWorkspaceDecisionRouteResolver({
+      store: { getSystem },
+      configuredAdapterIds: () => ['typesafe'],
+      operatorDefault: { mode: 'operator_hybrid', modelAlias: 'typesafe-jev-1.13' },
+    })
+
+    await expect(resolver(context)).resolves.toMatchObject({
+      mode: 'hybrid',
+      primaryModelId: 'typesafe-jev-1.13',
+      operatorOverride: true,
+      allowOperationalFailover: true,
+      allowInvalidResponseRecovery: true,
+      profile: {
+        status: 'operator_override',
+        evidence: 'operator_override',
+        operationId: 'fixture.intent',
+      },
+    })
+    await expect(resolver({ ...context, kind: 'observation' })).resolves.toMatchObject({
+      mode: 'shadow',
+      primaryModelId: 'typesafe-jev-1.13',
+      profile: {
+        status: 'operator_override',
+        evidence: 'operator_override',
+        shadowSampleRate: 1,
+      },
+    })
+    expect(getSystem).toHaveBeenCalledTimes(2)
+  })
+
+  it('lets an explicit workspace LLM-only row override the deployment default', async () => {
+    const resolver = createWorkspaceDecisionRouteResolver({
+      store: { getSystem: vi.fn(async () => ({
+        workspaceId: context.workspaceId,
+        mode: 'llm_only' as const,
+        modelAlias: null,
+        updatedAt: 'now',
+      })) },
+      configuredAdapterIds: () => ['typesafe'],
+      operatorDefault: { mode: 'operator_hybrid', modelAlias: 'typesafe-jev-1.13' },
+    })
+    await expect(resolver(context)).resolves.toEqual({ mode: 'llm_only' })
+  })
+
+  it('fails closed when the operator-default adapter is unavailable', async () => {
+    const resolver = createWorkspaceDecisionRouteResolver({
+      store: { getSystem: vi.fn(async () => null) },
+      configuredAdapterIds: () => [],
+      operatorDefault: { mode: 'operator_hybrid', modelAlias: 'typesafe-jev-1.13' },
+    })
+    await expect(resolver(context)).resolves.toEqual({ mode: 'llm_only' })
+  })
+
   it('builds a version-matched 10% shadow profile for a configured adapter', async () => {
     const resolver = createWorkspaceDecisionRouteResolver({
       store: { getSystem: vi.fn(async () => ({

@@ -30,6 +30,7 @@
  */
 
 import { Router } from 'express'
+import { z } from 'zod'
 import { executeDepartmentAccessCommand } from '../workspace-access/service.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import type {
@@ -99,7 +100,29 @@ export type UnifiedApprovalRouteOptions = {
   emailSenderDeps?: {
     allowlistSender(channelIntegrationId: string, sender: string): Promise<void>
   }
+  /** Exact-page, server-composited preview for a one-time PDF signature approval. */
+  pdfSignaturePreview?: (input: {
+    userId: string
+    approverUserId: string
+    assistantId: string
+    approvalId: string
+    artifactId: string
+    targetId: string
+    signatureResourceId: string
+    expectedSourceHash: string
+    expectedVersion: number
+    idempotencyKey: string
+  }) => Promise<{ bytes: Buffer; validForMs: number } | null>
 }
+
+const PdfSignatureArguments = z.object({
+  artifactId: z.string().uuid(),
+  targetId: z.string().uuid(),
+  signatureResourceId: z.string().uuid(),
+  expectedSourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedVersion: z.number().int().min(0),
+  idempotencyKey: z.string().min(8).max(255),
+}).strict()
 
 /** Where a non-workflow approval kind is actually resolved. */
 const NATIVE_SURFACE: Record<Exclude<ApprovalKind, 'workflow_step'>, string> = {
@@ -171,6 +194,34 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
     }
     const rows = await opts.approvalsStore.listPendingForWorkspace(userId, workspaceId)
     res.json({ pending: rows.length })
+  })
+
+  router.get('/:id/pdf-signature-preview', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox")
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const approval = await opts.approvalsStore.getById(userId, req.params.id)
+    if (!approval) return void res.status(404).json({ error: 'Approval not found' })
+    if (approval.approverUserId !== userId) return void res.status(403).json({ error: 'Only the assigned approver can view this preview' })
+    if (approval.status !== 'pending') return void res.status(409).json({ error: `Approval is already ${approval.status}` })
+    if (approval.expiresAt && approval.expiresAt.getTime() <= Date.now()) return void res.status(409).json({ error: 'pdf_signature_approval_stale' })
+    const args = PdfSignatureArguments.safeParse(approval.arguments)
+    if (approval.kind !== 'tool_invocation' || canonicalToolName(approval.toolName) !== 'placePdfSignature'
+      || !approval.originatingAssistantId || !args.success || !opts.pdfSignaturePreview) {
+      return void res.status(422).json({ error: 'This approval has no PDF signature preview' })
+    }
+    const preview = await opts.pdfSignaturePreview({
+      userId,
+      approverUserId: approval.approverUserId,
+      assistantId: approval.originatingAssistantId,
+      approvalId: approval.id,
+      ...args.data,
+    })
+    if (!preview) return void res.status(409).json({ error: 'pdf_signature_approval_stale' })
+    res.setHeader('X-Brian-Media-Valid-For-Ms', String(preview.validForMs))
+    res.append('Access-Control-Expose-Headers', 'X-Brian-Media-Valid-For-Ms')
+    res.type('image/png').send(preview.bytes)
   })
 
   // GET /:id/email-review-context — the thread read is keyed to the exact
@@ -338,7 +389,12 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
         decision,
         userId,
         reason,
-        decision === 'approved' && body.grantAlways === true ? 'always_allow' : undefined,
+        decision === 'approved'
+          && body.grantAlways === true
+          && approval.approvalPayload.allowPersistentApproval === true
+          && canonicalToolName(approval.toolName) !== 'placePdfSignature'
+          ? 'always_allow'
+          : undefined,
       )
       if (!updated) {
         // Lost a race — another path already settled the row.

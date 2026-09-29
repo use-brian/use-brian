@@ -1,5 +1,5 @@
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
-import { debugDocumentFlow, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
+import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
 import { closeProviderError } from './chat-provider-error.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
 import { resolveFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
@@ -102,6 +102,8 @@ import {
   resolveTurnScopeSystem,
   sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
 import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'
@@ -116,10 +118,7 @@ import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import { deploymentCapabilities } from '../edition.js'
 import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 import { connectorAuthorizationEntry } from '../agent-surface/connector-authorization.js'
-import {
-  createSessionAuthorityLease,
-  isAuthorityChangedError,
-} from '../context-scope/authority-lease.js'
+import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
   DeliveryAudienceUnverifiedError,
@@ -1996,6 +1995,8 @@ export type ResumeReplayParams = {
   selectedTier?: string
   selectedLegacyByo?: boolean
   selectedMeteredModel?: string
+  /** Exact durable worker runs captured with this suspension checkpoint. */
+  workerRunIds?: string[]
   /** Pinned original authoring/security principal for durable replay. */
   startingAccessCeiling?: import('@use-brian/core').AccessCeiling
   approvalStatus: ResumeReplayApprovalStatus
@@ -2114,6 +2115,7 @@ export async function runSessionResume(
       ...(point.selectedTier ? { selectedTier: point.selectedTier } : {}),
       ...(point.selectedLegacyByo !== undefined ? { selectedLegacyByo: point.selectedLegacyByo } : {}),
       ...(point.selectedMeteredModel ? { selectedMeteredModel: point.selectedMeteredModel } : {}),
+      ...(point.workerRunIds !== undefined ? { workerRunIds: point.workerRunIds } : {}),
       ...(point.startingAccessCeiling ? { startingAccessCeiling: point.startingAccessCeiling } : {}),
       approvalStatus: approval.status,
       rejectReason: approval.rejectReason,
@@ -3003,19 +3005,33 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       // Resolve the one trusted scope before this entry point performs any
       // persistent semantic write or enters the normal model path.
-      const turnScope = await resolveTurnScopeSystem({
+      const abortController = new AbortController()
+      const resolvedExecution = await resolveExecutionContextSystem({
         userId: user.id,
         assistant,
         workspaceId: assistant.workspaceId,
         session: isNewSession
           ? { ...session, contextLockedAt: null }
           : session,
+        identity: {
+          kind: 'attended',
+          principal: { kind: 'workspace_member', userId: user.id },
+        },
+        ownership: assistant.workspaceId
+          ? { kind: 'workspace', workspaceId: assistant.workspaceId }
+          : { kind: 'personal', ownerUserId: user.id },
+        lifecycle: {
+          abortSignal: abortController.signal,
+          sessionId: session.id,
+          channelType: session.channelType,
+          channelId: session.channelId,
+        },
+        attribution: { billingUserId: user.id },
+        sessionAuthority: session,
       })
-      const authority = createSessionAuthorityLease({
-        starting: pinAccessCeiling(turnScope.access),
-        session,
-        userId: user.id,
-      })
+      const turnScope = resolvedExecution.turnScope
+      const executionContext = resolvedExecution.executionContext
+      const authority = executionContext.security.authority
 
       // Giant-paste promotion writes a durable artifact, so it runs only
       // after the immutable session scope is known and stamps that scope on
@@ -3608,6 +3624,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       > = []
 
       let attachmentContext = ''
+      const currentTurnAttachmentIds = new Set<string>()
       // Voice transcription calls hit Gemini and must be attributed as
       // `overhead:transcription` — collect results here and record once we
       // have the stored user_message_id below.
@@ -3632,6 +3649,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           fileIds!.map((id) => options.fileStore!.get(id, fileCtx).catch(() => null)),
         )
         const validFiles = fetched.filter((f): f is NonNullable<typeof f> => f !== null)
+        for (const file of validFiles) currentTurnAttachmentIds.add(file.id)
 
         if (validFiles.length > 0) {
           // Only the PRE-FLIGHT needs this: whether the served model reads
@@ -6164,8 +6182,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
-      // Reset worker manager — prevents stale workers from prior requests blocking Phase 4b
-      options.workerManager?.reset()
+      // Reset only this session's stale worker state. The manager is shared
+      // process-wide, so a global reset here would abort concurrent users'
+      // workers and allow late old completions to collide with reused ids.
+      options.workerManager?.resetForSession(session.id)
       // Phase 3 of askQuestion suspend-resume — wire per-turn worker
       // persistence so a Cloud Run rotation between a suspend and the
       // user's answer can rehydrate worker results on the new instance.
@@ -6180,9 +6200,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
       // Per-request research flag: workers spawned during a Research-mode turn
       // get a loosened system prompt (chain webSearch → urlReader, up to 5
-      // searches, surface blocked URLs) and a higher turn budget. Reset back
-      // to false above via `reset()`, so this only widens the current turn.
-      options.workerManager?.setResearchMode(researchMode)
+      // searches, surface blocked URLs) and a higher turn budget. The
+      // session-scoped reset above clears this binding on the next turn.
+      options.workerManager?.setResearchMode(researchMode, session.id)
       // Upgrade research workers to the coordinator's model. Without this they
       // run on boot-time Flash, which treats "Search for X" prompts as one-shot
       // and skips urlReader entirely — defeating the deep-research wedge.
@@ -6191,7 +6211,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // routing provider reapplies the live application preference on spawn
         // and durable rehydrate. Explicit custom selectors still ride
         // workerRuntime and remain pinned authoritatively.
-        options.workerManager?.setResearchModel(logicalModel)
+        options.workerManager?.setResearchModel(logicalModel, session.id)
         // Cap concurrent workers at 5 for the research session. Lowered
         // from 10 after sustained 4GB OOM crashes — 10 concurrent worker
         // queryLoops at HIGH thinking + their statelessHistory growth +
@@ -6200,7 +6220,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // coordinator real fan-out. The coordinator can refill the pool
         // after Phase 4b drains between waves, so total worker output
         // across multi-wave is comparable to the 10-cap setup.
-        options.workerManager?.setMaxConcurrent(5)
+        options.workerManager?.setMaxConcurrent(5, session.id)
       }
 
       // ── Pre-flight: automatic parallel research ──────────────
@@ -6386,7 +6406,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   sendEvent('citation', { sources: newSources })
                 }
               }
-            })
+            }, session.id)
           }
         } else if (!isDocResearchTurn && !operateSiteIntent) {
           // Standard: application-layer pre-flight.
@@ -6650,8 +6670,6 @@ export function chatRoutes(options: WebChatOptions): Router {
           channel: resolveRunChannel(session),
         })
       }
-
-      const abortController = new AbortController()
 
       // EVERY turn runs to completion in the BACKGROUND; a disconnect is not a
       // stop. Until 2026-08-24 only `doc_thread` and room turns did, and every
@@ -7017,33 +7035,38 @@ export function chatRoutes(options: WebChatOptions): Router {
         // high-water evidence is checked again before each streamed event.
         await assertDeliveryAudience()
         const presentedDocumentInputs = new Map<string, PresentedDocumentInput>()
-        const scopedLoopTools = bindToolsToAgentAccess(loopTools, {
-          clearance: readClearance,
-          compartments: turnScope.effectiveCompartments,
-          mutationCompartments: turnScope.access.mutationCompartments,
-          projectIds: turnScope.effectiveProjectIds,
+        const preparedRun = await prepareAssistantRun({
+          executionContext,
+          model: {
+            provider: turnProvider,
+            model,
+            maxTokens: customLlmRuntime?.maxTokens,
+            inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+          },
+          candidateTools: loopTools,
+          bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, {
+            clearance: execution.security.access.clearance,
+            compartments: execution.security.access.compartments,
+            mutationCompartments: execution.security.access.mutationCompartments,
+            projectIds: execution.security.access.projectIds,
+          }),
+          trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
+          userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
         for await (const event of queryLoop({
           ledger: turnLedgerHandle.ledger,
           // BYO-aware: when the workspace set its own Gemini key, the main
           // response runs against that provider (else the platform provider).
-          provider: turnProvider,
-          model,
-          maxTokens: customLlmRuntime?.maxTokens,
-          inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+          provider: preparedRun.model.provider,
+          model: preparedRun.model.model,
+          maxTokens: preparedRun.model.maxTokens,
+          inputTokenLimit: preparedRun.model.inputTokenLimit,
           systemPrompt: splitPrompt.stablePrompt,
-          runtimeSystemContext,
+          runtimeSystemContext: preparedRun.trustedContext,
           messages,
-          tools: scopedLoopTools,
+          tools: preparedRun.tools,
           context: {
-            userId: user.id,
-            workspaceActorUserId: user.id,
-            assistantId: assistant.id,
-            sessionId: session.id,
-            appId: 'Use Brian',
-            channelType: session.channelType,
-            channelId: session.channelId,
-            workspaceId: assistant.workspaceId ?? undefined,
+            ...executionToolContext(executionContext, { appId: 'Use Brian' }),
             workerRuntime: customLlmRuntime
               ? {
                   provider: customLlmRuntime.provider,
@@ -7054,7 +7077,6 @@ export function chatRoutes(options: WebChatOptions): Router {
                   maxTokens: customLlmRuntime.maxTokens,
                 }
               : undefined,
-            assistantKind: assistant.kind,
             preferredChannel,
             userTimezone: user.timezone ?? undefined,
             workflowProposalReceipt,
@@ -7066,8 +7088,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // as the new page's `origin_prompt` (the History "first prompt").
             userMessageText:
               typeof message === 'string' && message.trim() ? message.trim() : undefined,
-            abortSignal: abortController.signal,
-            authority,
+            currentTurnAttachmentIds,
             cacheStore: options.cacheStore,
             sessionStateStore: options.sessionStateStore,
             requestTools: allTools,
@@ -7082,19 +7103,10 @@ export function chatRoutes(options: WebChatOptions): Router {
             // authorable at the assistant's clearance even when reads are
             // bounded lower. The sensitivity accumulator (max tier *seen* this
             // turn) drives write stamping and is naturally bounded by reads.
-            clearance: readClearance,
-            compartments: readCompartments,
-            mutationCompartments: turnScope.access.mutationCompartments,
-            projectIds: turnScope.effectiveProjectIds,
             activeGroupId: turnScope.activeGroupId,
             activeProjectId: turnScope.activeProjectId,
-            assistantClearance: assistant.clearance,
             // The effective turn ceiling is intentionally tighter than the
             // assistant's company-wide grant when Team/Project is selected.
-            assistantCompartments: turnScope.effectiveCompartments,
-            assistantDefaultCompartments: turnScope.writeCompartments,
-            assistantProjectIds: turnScope.effectiveProjectIds,
-            assistantDefaultProjectIds: turnScope.writeProjectIds,
             // Lifted to the per-turn accumulator constructed before the
             // extra-tool injection so the connector_action audit hook sees
             // the same instance the queryLoop populates.
@@ -7206,6 +7218,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   selectedLegacyByo: usedLegacyByoKey,
                   selectedMeteredModel: meteredTurn?.alias,
                   startingAccessCeiling: pinAccessCeiling(turnScope.access),
+                  workerRunIds: options.workerManager?.runIdsForSession(session.id) ?? [],
                   // `mcp_call` is the loop step being executed; replay
                   // re-enters that same step and the dispatcher's fast
                   // path picks up the resolved approval.
@@ -7741,6 +7754,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   selectedLegacyByo: usedLegacyByoKey,
                   selectedMeteredModel: meteredTurn?.alias,
                   startingAccessCeiling: pinAccessCeiling(turnScope.access),
+                  workerRunIds: options.workerManager?.runIdsForSession(session.id) ?? [],
                   loopStepIndex: event.loopStepIndex,
                 }))
               } catch (err) {

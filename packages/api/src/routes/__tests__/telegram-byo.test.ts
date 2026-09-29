@@ -1,3 +1,7 @@
+import type { ChannelQuestionStore } from '../../workflow/channel-questions.js'
+import { channelQuestionActions, resolveChannelQuestion } from '../channel-questions.js'
+import { channelConfirmations, type ChannelInteractionScope } from '../channel-interactions.js'
+import type { IncomingMessage, OutgoingAction } from '@use-brian/channels'
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
@@ -41,6 +45,9 @@ vi.mock('../../telegram-discussion-context.js', async (importOriginal) => ({
 
 // Capture adapter.leaveChat calls for the group add-protection tests.
 const leaveChatCalls: string[] = []
+const mediaDownloadCalls: string[] = []
+const mediaResolveCalls: string[] = []
+const confirmationOrder: string[] = []
 
 // Capture createTelegramApi().setWebhook calls so the legacy-URL self-heal
 // path can be asserted without touching api.telegram.org.
@@ -99,7 +106,7 @@ vi.mock('@use-brian/channels', async () => {
           adapterSendCalls.push({ channelId, text: message.text, documents: message.documents, actions: message.actions })
           return 'msg_stub'
         }),
-        answerCallbackQuery: vi.fn(async () => {}),
+        answerCallbackQuery: vi.fn(async () => { confirmationOrder.push('ack') }),
         sendStatus: vi.fn(async () => 'status_stub'),
         sendTypingIndicator: vi.fn(async () => {}),
         editMessage: vi.fn(async () => {}),
@@ -111,11 +118,14 @@ vi.mock('@use-brian/channels', async () => {
         // `downloadMedia` echoes the file_id into the buffer so tests can
         // assert each photo of a media group flowed through independently.
         downloadVoice: vi.fn(() => downloadVoiceImpl()),
-        downloadMedia: vi.fn(async (fileId: string) => ({
-          buffer: Buffer.from(`bytes-of-${fileId}`),
-          mime: 'image/jpeg',
-          name: `${fileId}.jpg`,
-        })),
+        resolveFileUrl: vi.fn(async (fileId: string) => {
+          mediaResolveCalls.push(fileId)
+          return `https://telegram.test/${fileId}`
+        }),
+        downloadMedia: vi.fn(async (fileId: string) => {
+          mediaDownloadCalls.push(fileId)
+          return { buffer: Buffer.from(`bytes-of-${fileId}`), mime: 'image/jpeg', name: `${fileId}.jpg` }
+        }),
       })
     },
   }
@@ -153,7 +163,14 @@ vi.mock('../../db/chat-lock.js', () => ({
 // Capture processChannelMessage calls and invoke sendResponse so we can
 // verify the adapter is called with a topic-qualified channel id on reply.
 const pipelineCalls: Array<{
+  admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
   channelId: string
+  interactionScope?: ChannelInteractionScope
+  incomingMessage?: IncomingMessage
+  questionIntegrationId?: string
+  conversationalAnswer?: boolean
+  workflowCallback?: { data: string; messageId: string }
+  questionStore?: unknown
   userId: string
   actorChannelId?: string | null
   isIdentified: boolean
@@ -177,6 +194,14 @@ beforeAll(async () => {
 
 vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
+    admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
+    interactionScope?: ChannelInteractionScope
+    incomingMessage?: IncomingMessage
+    questionIntegrationId?: string
+    conversationalAnswer?: boolean
+  workflowCallback?: { data: string; messageId: string }
+    questionStore?: unknown
+    assistant: { id: string }
     channelId: string
     userId: string
     actorChannelId?: string | null
@@ -189,11 +214,24 @@ vi.mock('../channel-pipeline.js', () => ({
     messageText?: string
     userContentBlocks?: Array<{ type: string; mimeType?: string }>
     hooks: {
-      sendResponse: (text: string, documents?: OutgoingTestDocument[], question?: { question: string; options?: string[] }) => Promise<void>
+      sendResponse: (text: string, documents?: OutgoingTestDocument[], question?: { question: string; options?: string[] }, actions?: OutgoingAction[]) => Promise<void>
       sendError?: (err: Error) => Promise<void>
     }
   }) => {
+    const binding = params.interactionScope && params.incomingMessage ? {
+      integrationId: params.interactionScope.integrationId, assistantId: params.assistant.id,
+      userId: params.userId, incoming: params.incomingMessage,
+    } : undefined
+    // The real central pipeline owns typed-answer resolution and action registration.
+    if (!params.admittedAnswerContext && binding && !params.workflowCallback) resolveChannelQuestion(binding)
     pipelineCalls.push({
+      admittedAnswerContext: params.admittedAnswerContext,
+      interactionScope: params.interactionScope,
+      incomingMessage: params.incomingMessage,
+      questionIntegrationId: params.questionIntegrationId,
+      conversationalAnswer: params.conversationalAnswer,
+      workflowCallback: params.workflowCallback,
+      questionStore: params.questionStore,
       channelId: params.channelId,
       userId: params.userId,
       actorChannelId: params.actorChannelId,
@@ -209,7 +247,9 @@ vi.mock('../channel-pipeline.js', () => ({
     if (pipelineError) {
       await params.hooks.sendError?.(pipelineError)
     } else {
-      await deliverChannelResponse(params.hooks, 'ok', pipelineDocuments, pipelineQuestion)
+      await deliverChannelResponse({ ...params.hooks, sendResponse: (text, documents, question) =>
+        params.hooks.sendResponse(text, documents, question, binding ? channelQuestionActions(binding, question) : undefined),
+      }, 'ok', pipelineDocuments, pipelineQuestion)
     }
   }),
 }))
@@ -286,7 +326,7 @@ vi.mock('../../db/channel-user-store.js', async () => {
 })
 
 // Capture outbound sendMessage invocations so we can assert the channel id.
-type OutgoingTestDocument = { filename: string; mime: string; data: Buffer; caption?: string }
+type OutgoingTestDocument = { filename: string; mime: string; data: Uint8Array; caption?: string }
 const adapterSendCalls: Array<{ channelId: string; text: string; documents?: OutgoingTestDocument[]; actions?: Array<{ data: string; label: string }> }> = []
 // Set by a test to make the mocked pipeline hand documents to `sendResponse`
 // (the second argument the real pipeline passes at turn_complete).
@@ -315,6 +355,7 @@ vi.mock('../../db/episodes-store.js', () => ({
 
 import {
   telegramByoRoutes,
+  telegramIncomingFailureText,
   persistSeenChat,
   telegramLinkBindsHere,
   shouldUseUniversalTelegramIntake,
@@ -386,6 +427,8 @@ beforeEach(() => {
   pipelineDocuments = undefined
   pipelineError = undefined
   leaveChatCalls.length = 0
+  mediaDownloadCalls.length = 0
+  mediaResolveCalls.length = 0
   teamRoleCalls.length = 0
   teamRoleResponse = null
   setWebhookCalls.length = 0
@@ -455,6 +498,17 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
     await flushMicrotasks()
 
     expect(adapterSendCalls.at(-1)?.text).toBe('Something went wrong. Please try again.')
+  })
+
+  it('explains how an admin can approve an unverified Telegram group', () => {
+    expect(telegramIncomingFailureText('-1002000000001', {
+      reason: 'delivery_audience_unverified',
+    })).toBe(
+      'Telegram is connected, but this group is not approved for workspace replies. Ask a workspace owner or admin to approve it in Studio > Channels > Group reply access.',
+    )
+    expect(telegramIncomingFailureText('42', {
+      reason: 'delivery_audience_unverified',
+    })).toBe('Sorry, something went wrong while handling that message. Please send it again.')
   })
 })
 
@@ -579,7 +633,10 @@ describe('[COMP:api/telegram-byo-route] recording intake', () => {
   async function runAudioIntake(recordingIngest: {
     surchargeCredits: ReturnType<typeof vi.fn>
     run: ReturnType<typeof vi.fn>
-  }) {
+  }, caption?: string, mediaType: 'audio' | 'document' = 'audio',
+    ingestChannelMediaRef: Parameters<typeof telegramByoRoutes>[0]['ingestChannelMediaRef'] = vi.fn(),
+    admissionOptions?: { questionStore: ChannelQuestionStore; duringAdmission?: (app: ReturnType<typeof createTestApp>) => Promise<void> },
+  ) {
     const { findAssistantById } = await import('../../db/users.js')
     const prevImpl = vi.mocked(findAssistantById).getMockImplementation()
     vi.mocked(findAssistantById).mockResolvedValue({
@@ -602,6 +659,10 @@ describe('[COMP:api/telegram-byo-route] recording intake', () => {
           capabilityStore: {} as never,
           apiUrl: 'http://test',
           recordingIngest: recordingIngest as never,
+          ingestChannelMediaRef,
+          questionStore: admissionOptions?.questionStore,
+          linkedAccountStore: { findByProvider: vi.fn(async () => ({ userId: 'owner_1', assistantId: 'assistant_1' })) } as never,
+          channelUserStore: {} as never,
         }),
       )
       await postUpdate(app, {
@@ -611,7 +672,8 @@ describe('[COMP:api/telegram-byo-route] recording intake', () => {
           from: { id: 42, first_name: 'Casey', username: 'casey' },
           chat: { id: 42, type: 'private' },
           date: Math.floor(Date.now() / 1000),
-          audio: {
+          caption,
+          [mediaType]: {
             file_id: 'standup_audio_id',
             duration: 90, // under the surcharge threshold — transcribes inline
             mime_type: 'audio/mpeg',
@@ -620,12 +682,71 @@ describe('[COMP:api/telegram-byo-route] recording intake', () => {
           },
         },
       })
+      await admissionOptions?.duringAdmission?.(app)
       await flushMicrotasks()
       await flushMicrotasks()
     } finally {
       vi.mocked(findAssistantById).mockImplementation(prevImpl!)
     }
   }
+
+  it.each(['audio', 'document'] as const)('intercepts a %s workflow caption before downloading or ingesting', async mediaType => {
+    const recording = { surchargeCredits: vi.fn(() => 0), run: vi.fn() }
+    const ingest = vi.fn()
+    await runAudioIntake(recording, `wq:${'a'.repeat(24)} yes`, mediaType, ingest)
+    expect(adapterSendCalls.at(-1)?.text).toContain('question is unavailable')
+    expect(mediaDownloadCalls).toEqual([])
+    expect(mediaResolveCalls).toEqual([])
+    expect(recording.surchargeCredits).not.toHaveBeenCalled()
+    expect(recording.run).not.toHaveBeenCalled()
+    expect(ingest).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(0)
+  })
+
+  it.each(['audio', 'document'] as const)('Stop during %s admission prevents all media work', async mediaType => {
+    let entered!: () => void
+    let release!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const store = {
+      find: vi.fn(async () => { entered(); await pending; return [] }),
+      isQuestionMessage: vi.fn(async () => false), consume: vi.fn(),
+      create: vi.fn(), attach: vi.fn(),
+    } satisfies ChannelQuestionStore
+    const recording = { surchargeCredits: vi.fn(() => 0), run: vi.fn() }
+    const ingest = vi.fn()
+    await runAudioIntake(recording, 'Please file this', mediaType, ingest, {
+      questionStore: store,
+      duringAdmission: async app => {
+        await started
+        await postUpdate(app, { update_id: 901, message: {
+          message_id: 901, from: { id: 42, first_name: 'Casey' },
+          chat: { id: 42, type: 'private' }, date: Math.floor(Date.now() / 1000), text: 'Stop',
+        } })
+        await flushMicrotasks()
+        release()
+      },
+    })
+    expect(store.find).toHaveBeenCalledTimes(1)
+    expect(adapterSendCalls.filter(call => call.text === 'Stopped.')).toHaveLength(1)
+    expect(store.consume).not.toHaveBeenCalled()
+    expect(mediaDownloadCalls).toEqual([])
+    expect(mediaResolveCalls).toEqual([])
+    expect(recording.surchargeCredits).not.toHaveBeenCalled()
+    expect(recording.run).not.toHaveBeenCalled()
+    expect(ingest).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(0)
+  })
+
+  it('keeps ordinary document captions on the media intake path', async () => {
+    const recording = { surchargeCredits: vi.fn(() => 0), run: vi.fn() }
+    const ingest = vi.fn(async () => ({ status: 'ingested' as const, kind: 'document' as const, episodeId: null, fileName: 'standup.mp3' }))
+    await runAudioIntake(recording, 'Please file this', 'document', ingest)
+    expect(ingest).toHaveBeenCalledTimes(1)
+    expect(mediaDownloadCalls).toContain('standup_audio_id')
+    expect(recording.run).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(1)
+  })
 
   it('hands the uploaded file name to the ingest port so the recording is nameable', async () => {
     const recordingIngest = {
@@ -700,7 +821,7 @@ describe('[COMP:api/telegram-byo-route] voice note without a transcript', () => 
     }
   }
 
-  function appWith(voiceTranscription?: { enabled: boolean; apiKey: string; model?: string }) {
+  function appWith(voiceTranscription?: { enabled: boolean; apiKey: string; model?: string }, questionStore?: ChannelQuestionStore) {
     return createTestApp(
       '/webhook/telegram-byo',
       telegramByoRoutes({
@@ -712,9 +833,30 @@ describe('[COMP:api/telegram-byo-route] voice note without a transcript', () => 
         capabilityStore: {} as never,
         apiUrl: 'http://test',
         ...(voiceTranscription ? { voiceTranscription } : {}),
+        questionStore,
       }),
     )
   }
+
+  it('defers voice question admission until transcription instead of rejecting an empty answer', async () => {
+    const core = await import('@use-brian/core')
+    const transcribe = vi.spyOn(core, 'transcribeFirstAudio').mockResolvedValue({ text: 'spoken answer', usage: null, model: 'test' })
+    const store = { find: vi.fn(async () => []), isQuestionMessage: vi.fn(async () => true),
+      create: vi.fn(), attach: vi.fn(), consume: vi.fn() } satisfies ChannelQuestionStore
+    const update = buildVoiceUpdate() as { message: Record<string, unknown> }
+    update.message.reply_to_message = { message_id: 800, from: { id: 1, is_bot: true },
+      text: `Where?\nQuestion reference: wq:${'a'.repeat(24)}` }
+    try {
+      await postUpdate(appWith({ enabled: true, apiKey: 'k' }, store), update)
+      await vi.waitFor(() => expect(pipelineCalls).toHaveLength(1))
+      expect(transcribe).toHaveBeenCalledOnce()
+      expect(store.find).not.toHaveBeenCalled()
+      expect(pipelineCalls[0].admittedAnswerContext).toBeUndefined()
+      expect(pipelineCalls[0].incomingMessage?.text).toContain('spoken answer')
+      expect(pipelineCalls[0].incomingMessage?.replyToMessageId).toBe('800')
+      expect(adapterSendCalls.some(call => /valid answer|question.*unavailable/.test(call.text))).toBe(false)
+    } finally { transcribe.mockRestore() }
+  })
 
   it('tells the model the voice note arrived when the kill switch is off', async () => {
     await postUpdate(appWith({ enabled: false, apiKey: 'k' }), buildVoiceUpdate())
@@ -1101,6 +1243,8 @@ describe('[COMP:api/telegram-byo-route] media-group buffering', () => {
           capabilityStore: {} as never,
           apiUrl: 'http://test',
           fileStore: fileStore as never,
+          linkedAccountStore: { findByProvider: vi.fn(async () => ({ userId: 'owner_1', assistantId: 'assistant_1' })) } as never,
+          channelUserStore: {} as never,
         }),
       )
 
@@ -2644,6 +2788,40 @@ describe('[COMP:api/telegram-byo-route] question buttons', () => {
     return actions!
   }
 
+  it('ACKs shared confirmation buttons before resolving, with sender isolation', async () => {
+    const app = makeApp()
+    confirmationOrder.length = 0
+    const resolve = vi.fn(() => { confirmationOrder.push('resolve') })
+    const dispose = channelConfirmations.register({
+      channelType: 'telegram', integrationId: 'channel_1', conversationId: '-100:topic:7', senderId: '42',
+    }, { toolCallId: 'tool-click', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' }, { resolve } as never)
+    try {
+      await postUpdate(app, callback('mcp_confirm:tool-click:allow', 43))
+      await settle()
+      expect(resolve).not.toHaveBeenCalled()
+      confirmationOrder.length = 0
+      await postUpdate(app, callback('mcp_confirm:tool-click:allow'))
+      await settle()
+      expect(resolve).toHaveBeenCalledOnce()
+      expect(confirmationOrder).toEqual(['ack', 'resolve'])
+    } finally { dispose() }
+  })
+
+  it('intercepts shared text confirmations before acquiring the chat lock', async () => {
+    const app = makeApp()
+    const resolve = vi.fn()
+    const dispose = channelConfirmations.register({
+      channelType: 'telegram', integrationId: 'channel_1', conversationId: '-100:topic:7', senderId: '42',
+    }, { toolCallId: 'tool-text', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' }, { resolve } as never)
+    try {
+      await postUpdate(app, message('@testbot yes'))
+      await settle()
+      expect(resolve).toHaveBeenCalledOnce()
+      expect(chatLockCalls).toHaveLength(0)
+      expect(pipelineCalls).toHaveLength(0)
+    } finally { dispose() }
+  })
+
   it('routes a button label as ordinary text through the same sender, topic and lock, once', async () => {
     const app = makeApp()
     const actions = await ask(app)
@@ -2651,10 +2829,23 @@ describe('[COMP:api/telegram-byo-route] question buttons', () => {
     await settle()
     expect(pipelineCalls).toHaveLength(2)
     expect(pipelineCalls[1]).toMatchObject({ userId: pipelineCalls[0]!.userId, channelId: '-100:topic:7', messageText: '/connect' })
+    expect(pipelineCalls[1]?.conversationalAnswer).toBe(true)
     expect(chatLockCalls.at(-1)).toBe('tg-byo:-100:topic:7')
     await postUpdate(app, callback(actions[1]!.data))
     await settle()
     expect(pipelineCalls).toHaveLength(2)
+  })
+
+  it('marks approval-shaped native labels as conversational answers', async () => {
+    const app = makeApp()
+    pipelineQuestion = { question: 'Choose', options: ['approve abc123'] }
+    await postUpdate(app, message())
+    await settle()
+    const action = adapterSendCalls.at(-1)!.actions![0]!
+    pipelineQuestion = undefined
+    await postUpdate(app, callback(action.data))
+    await settle()
+    expect(pipelineCalls.at(-1)).toMatchObject({ messageText: 'approve abc123', conversationalAnswer: true })
   })
 
   it('rejects other group members, cross-chat and cross-topic clicks without consuming the valid answer', async () => {
@@ -2727,60 +2918,78 @@ describe('[COMP:api/telegram-byo-route] question buttons', () => {
 
 })
 
-const workflowReplyTools = new Map<string, import('@use-brian/core').Tool>()
-vi.mock('../../workflow/mcp-bridge.js', () => ({ buildWorkflowToolRegistry: vi.fn(async () => workflowReplyTools) }))
-vi.mock('../../context-scope/resolve-turn-scope.js', () => ({ resolveTurnScopeSystem: vi.fn(async () => ({
-  access: { clearance: 'internal' }, effectiveCompartments: [], effectiveProjectIds: [], writeCompartments: [], writeProjectIds: [],
-})) }))
-
-describe('[COMP:api/telegram-byo-route] durable workflow reply interception', () => {
-  it.each(['click', 'typed', 'ask'] as const)('routes %s without entering the chat pipeline or calling submit_change', async (kind) => {
-    const { findAssistantById } = await import('../../db/users.js')
-    const { buildTool } = await import('@use-brian/core')
-    const { z } = await import('zod')
-    const execute = vi.fn(async () => ({ data: 'private backend result' }))
-    const submit = vi.fn()
-    workflowReplyTools.clear()
-    workflowReplyTools.set('answer_action', buildTool({ name: 'answer_action', description: '',
-      inputSchema: z.object({ action_id: z.string(), version: z.number(), answer: z.string() }),
-      isConcurrencySafe: false, isReadOnly: false, requiresConfirmation: kind === 'ask', execute }))
-    workflowReplyTools.set('submit_change', buildTool({ name: 'submit_change', description: '', inputSchema: z.object({}), execute: submit }))
-    vi.mocked(findAssistantById).mockResolvedValueOnce({ id: 'assistant_1', name: 'Test', ownerUserId: 'owner_1',
-      workspaceId: 'ws_1', kind: 'standard', clearance: 'internal', compartments: null, defaultModelAlias: 'standard' } as never)
-    teamRoleResponse = 'member'
-    const binding = { token: 'a'.repeat(24), integrationId: 'int_1', workspaceId: 'ws_1', assistantId: 'assistant_1',
-      userId: 'owner_1', channelId: '-100:topic:7', messageId: '42', question: { question: 'Which?', options: ['dev', 'prod'], allowCustom: true,
-        actionId: 'external-action', version: 3, context: 'Authored context' },
-      response: { toolName: 'answer_action', arguments: { action_id: 'external-action', version: 3 }, answerField: 'answer' } }
-    const store = { create: vi.fn(), attach: vi.fn(), find: vi.fn(async () => [binding]),
-      consume: vi.fn(async () => true), isQuestionMessage: vi.fn(async () => true) }
+describe('[COMP:api/telegram-byo-route] durable workflow pipeline handoff', () => {
+  it.each(['click', 'typed', 'persistent'] as const)('preserves authenticated %s context for central interception', async (kind) => {
+    const store = { create: vi.fn(), attach: vi.fn(), find: vi.fn(), consume: vi.fn(), isQuestionMessage: vi.fn() }
     const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
       provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
       integrationStore: makeIntegrationStore() as never, questionStore: store,
       linkedAccountStore: { findByProvider: vi.fn(async () => ({ userId: 'owner_1', assistantId: 'assistant_1' })) } as never,
-      channelUserStore: {} as never, connectorStore: {} as never, mcpSettingsStore: {} as never,
-      capabilityStore: {} as never, apiUrl: 'http://test',
+      channelUserStore: {} as never, capabilityStore: {} as never, apiUrl: 'http://test',
     }))
     const chat = { id: -100, type: 'supergroup', is_forum: true }
     const from = { id: 42, first_name: 'Casey', username: 'casey' }
-    await postUpdate(app, kind === 'click' ? {
-      update_id: 5001, callback_query: { id: 'workflow-click', from, data: `wq:${binding.token}:0`,
+    const data = kind === 'persistent' ? 'mcp_confirm:stale:always' : `wq:${'a'.repeat(24)}:0`
+    await postUpdate(app, kind !== 'typed' ? {
+      update_id: 5001, callback_query: { id: 'workflow-click', from, data,
         message: { message_id: 42, chat, message_thread_id: 7 } },
     } : {
       update_id: 5002, message: { message_id: 43, from, chat, message_thread_id: 7, text: 'test', date: 12345,
         reply_to_message: { message_id: 42, from: { id: 1, is_bot: true, username: 'testbot' }, text: 'Which?' } },
     })
     await flushMicrotasks(); await flushMicrotasks()
-    expect(pipelineCalls).toHaveLength(0)
-    expect(submit).not.toHaveBeenCalled()
-    expect(store.find).toHaveBeenCalledWith(expect.objectContaining({ channelId: '-100:topic:7', userId: 'owner_1', workspaceId: 'ws_1' }), expect.any(Object))
-    if (kind === 'ask') {
-      expect(execute).not.toHaveBeenCalled()
-      expect(store.consume).not.toHaveBeenCalled()
-      expect(adapterSendCalls.at(-1)?.text).toContain('question remains open')
-    } else {
-      expect(execute).toHaveBeenCalledWith({ action_id: 'external-action', version: 3, answer: kind === 'click' ? 'dev' : 'test' }, expect.objectContaining({ channelId: '-100:topic:7' }))
-      expect(adapterSendCalls.at(-1)?.text).toBe('Your answer was sent.')
+    if (kind !== 'typed') {
+      expect(pipelineCalls).toHaveLength(0)
+      expect(adapterSendCalls.at(-1)?.text).toContain('unavailable')
+      return
     }
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      questionIntegrationId: 'integ_1', questionStore: store,
+      interactionScope: { channelType: 'telegram', integrationId: 'channel_1', conversationId: '-100:topic:7', senderId: '42' },
+      incomingMessage: { channelId: '-100:topic:7', userId: '42' },
+    })
+    if (kind === 'typed') expect(pipelineCalls[0]?.incomingMessage?.replyToMessageId).toBe('42')
+    else expect(pipelineCalls[0]?.workflowCallback).toEqual({ data, messageId: '42' })
+    expect(store.find).not.toHaveBeenCalled() // route does not own workflow interpretation
+  })
+})
+
+
+describe('[COMP:api/telegram-byo-route] unverified workflow authority', () => {
+  it.each(['approve abc123', 'durable answer'])('never verifies owner fallback for %s with absent identity services', async text => {
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore({ requireMention: false }) as never,
+      capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    await postUpdate(app, { update_id: 991, message: {
+      message_id: 991, from: { id: 42 }, chat: { id: -100, type: 'supergroup' }, date: 1, text,
+      ...(text === 'durable answer' ? { reply_to_message: { message_id: 50, text: 'Which?', from: { id: 1, is_bot: true } } } : {}),
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    if (text === 'approve abc123') {
+      expect(pipelineCalls).toHaveLength(0)
+      expect(adapterSendCalls.at(-1)?.text).toContain('unavailable')
+    } else {
+      expect(pipelineCalls).toHaveLength(1)
+      expect(pipelineCalls[0]).toMatchObject({ userId: 'owner_1', isIdentified: false, externalGuest: true })
+    }
+  })
+
+  it.each(['approve abc123', 'durable answer', 'ordinary chat'])('refuses %s when group sender identity lookup fails', async text => {
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore({ requireMention: false }) as never,
+      linkedAccountStore: { findByProvider: vi.fn(async () => { throw new Error('identity offline') }) } as never,
+      channelUserStore: {} as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    await postUpdate(app, { update_id: 992, message: {
+      message_id: 992, from: { id: 42 }, chat: { id: -100, type: 'supergroup' }, date: 1, text,
+      ...(text === 'durable answer' ? { reply_to_message: { message_id: 50, text: 'Which?', from: { id: 1, is_bot: true } } } : {}),
+    } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(0)
+    expect(adapterSendCalls.at(-1)?.text).toContain('identity could not be verified')
   })
 })

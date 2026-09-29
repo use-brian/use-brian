@@ -5,7 +5,7 @@ import type {
   ScopeReviewKind,
 } from '@use-brian/shared'
 
-export const SCOPE_REVIEW_REGISTRY_REVISION = 1
+export const SCOPE_REVIEW_REGISTRY_REVISION = 2
 
 type SourceAdapter = {
   table: string
@@ -98,6 +98,10 @@ const jobQueries = [
     FROM scheduled_jobs j JOIN assistants a ON a.id=j.assistant_id
       LEFT JOIN workflows w ON w.id=j.workflow_id AND w.workspace_id=a.workspace_id
     WHERE a.workspace_id=$1`],
+  ['episode_extraction_applications', `SELECT count(*)::text total,
+      count(*) FILTER(WHERE application_state IN('not_started','partial') AND NOT scope_held)::text unresolved,
+      count(*) FILTER(WHERE scope_held OR application_state='blocked')::text held
+    FROM episode_extraction_runs WHERE workspace_id=$1`],
 ] as const
 
 export async function getScopeReviewCoverage(

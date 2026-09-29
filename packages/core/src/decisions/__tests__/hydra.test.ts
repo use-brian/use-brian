@@ -319,4 +319,27 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
       mode: 'hybrid', primary, profile: profile(),
     })).toThrow(/recorded/)
   })
+
+  it('accepts an operator override only with its separate authority bit and metadata', () => {
+    const request = decisionRequest()
+    const primary = provider(async () => response())
+    const overrideProfile: DecisionEvaluationProfile = {
+      ...profile(),
+      status: 'operator_override',
+      evidence: 'operator_override',
+    }
+
+    expect(() => validateDecisionRoute(request, {
+      mode: 'hybrid', primary, profile: overrideProfile, operatorOverride: true,
+    })).not.toThrow()
+    expect(() => validateDecisionRoute(request, {
+      mode: 'hybrid', primary, profile: overrideProfile,
+    })).toThrow(/approved evaluation profile/)
+    expect(() => validateDecisionRoute(request, {
+      mode: 'hybrid', primary, profile: profile(), operatorOverride: true,
+    })).toThrow(/override profile metadata/)
+    expect(() => validateDecisionRoute(request, {
+      mode: 'shadow', primary, profile: profile('shadow'), operatorOverride: true,
+    })).toThrow(/only for hybrid/)
+  })
 })

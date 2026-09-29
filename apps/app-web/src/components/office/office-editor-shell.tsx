@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
-import { FileCheck2, FileSpreadsheet, FileText, History, ListChecks, MessageSquare, MoreHorizontal, PanelRightClose, PanelRightOpen, Presentation, Redo2, Route, Share2, Sparkles, Undo2 } from "lucide-react";
+import { FileCheck2, FileSignature, FileSpreadsheet, FileText, History, ListChecks, MessageSquare, MoreHorizontal, PanelRightClose, PanelRightOpen, Presentation, Redo2, Route, Share2, Sparkles, Undo2 } from "lucide-react";
 import type { OfficeCommand } from "@use-brian/office-model";
 import { PresenceAvatars } from "@/components/doc/presence-avatars";
 import { Skeleton } from "@/components/skeleton";
@@ -20,6 +20,7 @@ import { OfficeJobActivity } from "./job-activity";
 import { DocumentEditor } from "./document-editor";
 import { PresentationEditor } from "./presentation-editor";
 import { SpreadsheetEditor } from "./spreadsheet-editor";
+import { PdfEditor } from "./pdf-editor";
 import { PresentationPresenter } from "./presentation-presenter";
 import { OfficeComments } from "./comments/office-comments";
 import { OfficeSuggestions } from "./suggestions/office-suggestions";
@@ -456,7 +457,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   if (artifact === undefined) return <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-office-shell-state="loading" aria-busy="true"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[]} /><OfficeEditorSkeleton /></div>;
   if (artifact === null) return <div className="flex flex-1 flex-col" data-office-shell-state="failed"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: t.editorFailed }]} /><p className="m-auto text-sm text-destructive">{t.editorFailed}</p></div>;
   if (fullReadSeen.current && !onlineReady) return <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-office-shell-state="loading" aria-busy="true"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{label: artifact.title}]} /><OfficeEditorSkeleton family={artifact.family}/></div>;
-  const Icon = artifact.family === "document" ? FileText : artifact.family === "presentation" ? Presentation : FileSpreadsheet;
+  const Icon = artifact.family === "document" ? FileText : artifact.family === "presentation" ? Presentation : artifact.family === "pdf" ? FileSignature : FileSpreadsheet;
   if (templateDraftFailed) return <div className="flex flex-1 flex-col" data-office-shell-state="failed"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: artifact.title }]} /><p className="m-auto text-sm text-destructive">{t.editorFailed}</p></div>;
   if (isOfficeStartFailed(artifact)) return <OfficeStartRecovery workspaceId={workspaceId} title={artifact.title} family={artifact.family} canTrash={artifact.role === "edit"} state={recoveryState} onTrash={() => {
     setRecoveryState("moving");
@@ -532,7 +533,8 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     }
   }
   const editorRole = artifact.lifecycleState === "active" ? artifact.role : "view" as const;
-  const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} doc={collab.doc} provider={collab.provider} currentUser={currentUser} synced={collab.synced || Boolean(offlineCopyAt)} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onSelectCommentAnchor={setCommentAnchor} onSelectSuggestionRange={setSuggestionRange} commentThreads={commentThreads} suggestions={suggestions} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "spreadsheet" ? <SpreadsheetEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onEditImageWithBrian={artifact.role !== "view" && artifact.lifecycleState === "active" && !offlineCopyAt && collab.status !== "disconnected" ? editSpreadsheetImageWithBrian : undefined} /> : snapshotPending ? <OfficeEditorSkeleton family={artifact.family} /> : <p className="m-auto text-sm text-muted-foreground">{t.running}</p>;
+  const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} doc={collab.doc} provider={collab.provider} currentUser={currentUser} synced={collab.synced || Boolean(offlineCopyAt)} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onSelectCommentAnchor={setCommentAnchor} onSelectSuggestionRange={setSuggestionRange} commentThreads={commentThreads} suggestions={suggestions} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "spreadsheet" ? <SpreadsheetEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onEditImageWithBrian={artifact.role !== "view" && artifact.lifecycleState === "active" && !offlineCopyAt && collab.status !== "disconnected" ? editSpreadsheetImageWithBrian : undefined} /> : live?.snapshot.family === "pdf" && artifact.mode === "session" && artifact.expiresAt ? <PdfEditor workspaceId={workspaceId} snapshot={live.snapshot} seq={live.seq} baseVersion={live.baseVersion} artifactVersion={artifact.version} expiresAt={artifact.expiresAt} role={editorRole} onCommand={apply} onReadback={refreshArtifact} onSelectTargets={setTargets} /> : snapshotPending ? <OfficeEditorSkeleton family={artifact.family} /> : <p className="m-auto text-sm text-muted-foreground">{t.running}</p>;
+  const isPdfSession = artifact.family === "pdf" && artifact.mode === "session";
   const showTemplateRouting = artifact.mode === "template" && Boolean(live) && Boolean(templateId);
   const templateRoutingBlocked = showTemplateRouting && (!templateRoutingState.ready || templateRoutingState.dirty || templateRoutingState.saving);
   const brianRevisionDisabledReason = targets.length === 0 ? t.brianSelectionRequired
@@ -582,14 +584,10 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
               <div className="flex min-w-0 items-center gap-2"><span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-blue-50 text-blue-600"><Sparkles className="size-3.5" aria-hidden /></span><div className="min-w-0"><p className="truncate text-xs font-semibold">{t.brian}</p><p className="truncate text-[11px] text-muted-foreground">{t.workspaceAssistant}</p></div></div>
               <button type="button" onClick={() => setPanelOpen(false)} aria-label={t.collapseAssistantPanel} title={t.collapseAssistantPanel} className="flex size-11 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground sm:size-7"><PanelRightClose className="size-4" /></button>
             </div>
-            <div className={cn("grid border-b p-1", showTemplateRouting ? "grid-cols-4" : "grid-cols-3")}>
+            <div className={cn("grid border-b p-1", isPdfSession ? "grid-cols-1" : showTemplateRouting ? "grid-cols-4" : "grid-cols-3")}>
               {showTemplateRouting ? <PanelButton active={panel === "routing"} label={t.routing} icon={<Route className="size-3" />} onClick={() => setPanel("routing")} /> : null}
               <PanelButton active={panel === "activity"} label={t.brian} icon={<Sparkles className="size-3" />} onClick={() => setPanel("activity")} />
-              <PanelButton active={panel === "comments"} label={t.comments} icon={<MessageSquare className="size-3" />} onClick={() => setPanel("comments")} />
-              <PanelButton active={panel === "suggestions"} label={t.suggestions} icon={<ListChecks className="size-3" />} onClick={() => setPanel("suggestions")} />
-              <PanelButton active={panel === "history"} label={t.history} icon={<History className="size-3" />} onClick={() => setPanel("history")} />
-              <PanelButton active={panel === "sharing"} label={t.sharing} icon={<Share2 className="size-3" />} onClick={() => setPanel("sharing")} />
-              <PanelButton active={panel === "review"} label={t.fileActions} icon={<FileCheck2 className="size-3" />} onClick={() => setPanel("review")} />
+              {!isPdfSession ? <><PanelButton active={panel === "comments"} label={t.comments} icon={<MessageSquare className="size-3" />} onClick={() => setPanel("comments")} /><PanelButton active={panel === "suggestions"} label={t.suggestions} icon={<ListChecks className="size-3" />} onClick={() => setPanel("suggestions")} /><PanelButton active={panel === "history"} label={t.history} icon={<History className="size-3" />} onClick={() => setPanel("history")} /><PanelButton active={panel === "sharing"} label={t.sharing} icon={<Share2 className="size-3" />} onClick={() => setPanel("sharing")} /><PanelButton active={panel === "review"} label={t.fileActions} icon={<FileCheck2 className="size-3" />} onClick={() => setPanel("review")} /></> : null}
             </div>
           </> : null}
           {/* Keep routing mounted when collapsed: pending edits and live binding
@@ -606,11 +604,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
             <button type="button" onClick={() => setPanelOpen(true)} aria-label={t.expandAssistantPanel} title={t.expandAssistantPanel} className="flex size-11 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground sm:size-8"><PanelRightOpen className="size-4" /></button>
             {showTemplateRouting ? <CompactPanelButton active={panel === "routing"} label={t.routing} icon={<Route className="size-4" />} onClick={() => { setPanel("routing"); setPanelOpen(true); }} /> : null}
             <CompactPanelButton active={panel === "activity"} label={t.brian} icon={<Sparkles className="size-4" />} onClick={() => { setPanel("activity"); setPanelOpen(true); }} />
-            <CompactPanelButton active={panel === "comments"} label={t.comments} icon={<MessageSquare className="size-4" />} onClick={() => { setPanel("comments"); setPanelOpen(true); }} />
-            <CompactPanelButton active={panel === "suggestions"} label={t.suggestions} icon={<ListChecks className="size-4" />} onClick={() => { setPanel("suggestions"); setPanelOpen(true); }} />
-            <CompactPanelButton active={panel === "history"} label={t.history} icon={<History className="size-4" />} onClick={() => { setPanel("history"); setPanelOpen(true); }} />
-            <CompactPanelButton active={panel === "sharing"} label={t.sharing} icon={<Share2 className="size-4" />} onClick={() => { setPanel("sharing"); setPanelOpen(true); }} />
-            <CompactPanelButton active={panel === "review"} label={t.fileActions} icon={<FileCheck2 className="size-4" />} onClick={() => { setPanel("review"); setPanelOpen(true); }} />
+            {!isPdfSession ? <><CompactPanelButton active={panel === "comments"} label={t.comments} icon={<MessageSquare className="size-4" />} onClick={() => { setPanel("comments"); setPanelOpen(true); }} /><CompactPanelButton active={panel === "suggestions"} label={t.suggestions} icon={<ListChecks className="size-4" />} onClick={() => { setPanel("suggestions"); setPanelOpen(true); }} /><CompactPanelButton active={panel === "history"} label={t.history} icon={<History className="size-4" />} onClick={() => { setPanel("history"); setPanelOpen(true); }} /><CompactPanelButton active={panel === "sharing"} label={t.sharing} icon={<Share2 className="size-4" />} onClick={() => { setPanel("sharing"); setPanelOpen(true); }} /><CompactPanelButton active={panel === "review"} label={t.fileActions} icon={<FileCheck2 className="size-4" />} onClick={() => { setPanel("review"); setPanelOpen(true); }} /></> : null}
           </div>}
         </aside>
       </div>

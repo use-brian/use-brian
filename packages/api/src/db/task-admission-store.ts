@@ -45,6 +45,7 @@ import {
   type TaskRuleStatus,
   type TaskTombstoneRecord,
 } from '@use-brian/core'
+import type pg from 'pg'
 import { applyRLSGucs, getAppPool, query, rollbackAndRelease } from './client.js'
 import { buildAccessPredicate, mutationActorAccess, type AccessContext } from './access-predicate.js'
 import { appendDecisionEvent } from './decision-event-store.js'
@@ -120,10 +121,18 @@ const SIMILARITY_LIMIT = 5
  *  does not turn every rejection into an unbounded scan. */
 const PROPOSAL_SCAN_LIMIT = 100
 
+function admissionQuery<T extends pg.QueryResultRow>(
+  client: pg.PoolClient | undefined,
+  sql: string,
+  values: unknown[],
+) {
+  return client ? client.query<T>(sql, values) : query<T>(sql, values)
+}
+
 // ── TaskAdmissionPort ────────────────────────────────────────────────────────
 
-export async function listActiveRules(workspaceId: string): Promise<TaskRuleRecord[]> {
-  const res = await query<RuleRow>(
+export async function listActiveRules(workspaceId: string, client?: pg.PoolClient): Promise<TaskRuleRecord[]> {
+  const res = await admissionQuery<RuleRow>(client,
     `SELECT ${RULE_SELECT} FROM task_rules
       WHERE workspace_id = $1 AND status = 'active'
       ORDER BY created_at`,
@@ -142,8 +151,9 @@ export async function findSimilarTombstones(
   workspaceId: string,
   titleNorm: string,
   minSimilarity: number,
+  client?: pg.PoolClient,
 ): Promise<ScoredTombstone[]> {
-  const res = await query<TombstoneRow & { sim: number }>(
+  const res = await admissionQuery<TombstoneRow & { sim: number }>(client,
     `SELECT ${TOMBSTONE_SELECT}, similarity(title_norm, $2) AS sim
        FROM task_tombstones
       WHERE workspace_id = $1
@@ -166,8 +176,9 @@ export async function findSimilarTasks(
   workspaceId: string,
   titleNorm: string,
   minSimilarity: number,
+  client?: pg.PoolClient,
 ): Promise<ScoredTask[]> {
-  const res = await query<{ id: string; title: string; sim: number }>(
+  const res = await admissionQuery<{ id: string; title: string; sim: number }>(client,
     `SELECT id, title, similarity(lower(title), $2) AS sim
        FROM tasks
       WHERE workspace_id = $1
@@ -182,8 +193,8 @@ export async function findSimilarTasks(
   return res.rows.map((r) => ({ id: r.id, title: r.title, similarity: r.sim }))
 }
 
-export async function recordCandidate(input: RecordCandidateInput): Promise<void> {
-  await query(
+export async function recordCandidate(input: RecordCandidateInput, client?: pg.PoolClient): Promise<void> {
+  await admissionQuery(client,
     `INSERT INTO task_candidates (
        workspace_id, title, due, source_kind, channel_ref, lane, source_episode_id,
        created_by_assistant_id, status, reason_code, matched_task_id,
@@ -286,12 +297,14 @@ export async function findOpenTasksForGithubMatch(
 }
 
 /** The port, ready to inject at boot. */
-export function createTaskAdmissionPort(): TaskAdmissionPort {
+export function createTaskAdmissionPort(transactionClient?: pg.PoolClient): TaskAdmissionPort {
   return {
-    listActiveRules,
-    findSimilarTombstones,
-    findSimilarTasks,
-    recordCandidate,
+    listActiveRules: (workspaceId) => listActiveRules(workspaceId, transactionClient),
+    findSimilarTombstones: (workspaceId, title, similarity) =>
+      findSimilarTombstones(workspaceId, title, similarity, transactionClient),
+    findSimilarTasks: (workspaceId, title, similarity) =>
+      findSimilarTasks(workspaceId, title, similarity, transactionClient),
+    recordCandidate: (input) => recordCandidate(input, transactionClient),
     loadPolicyForPrompt,
   }
 }

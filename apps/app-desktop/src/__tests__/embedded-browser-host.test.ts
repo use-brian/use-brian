@@ -1,3 +1,4 @@
+import { browserThemeColors, type BrowserTheme } from '../browser-theme.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -49,7 +50,7 @@ vi.mock('electron', async () => {
   };
 });
 import { BaseWindow, type BrowserWindow, ipcMain, session as electronSession } from 'electron';
-import { EmbeddedBrowserHost } from '../embedded-browser-host.js';
+import { browserAddress, EmbeddedBrowserHost } from '../embedded-browser-host.js';
 let hosts: EmbeddedBrowserHost[];
 let callbacks: { stop: ReturnType<typeof vi.fn>; closed: ReturnType<typeof vi.fn>; tabClosed: ReturnType<typeof vi.fn>; detached: ReturnType<typeof vi.fn> };
 const create = (partition = 'persist:embedded-test') => { const h = new EmbeddedBrowserHost(partition, callbacks); hosts.push(h); return h; };
@@ -66,6 +67,38 @@ beforeEach(() => {
   callbacks = { stop: vi.fn(), closed: vi.fn(), tabClosed: vi.fn(), detached: vi.fn() };
 });
 afterEach(() => { for (const h of hosts) h.destroy(); });
+
+const theme = (colorScheme: 'light' | 'dark') => ({
+  colors: Object.fromEntries(browserThemeColors.map((key, index) => [key,
+    colorScheme === 'dark' ? `rgb(${index}, 20, 30)` : `rgb(240, ${index}, 250)`])) as BrowserTheme['colors'],
+  colorScheme, radius: colorScheme === 'dark' ? '12px' : '4px',
+  fontFamily: colorScheme === 'dark' ? 'Georgia, serif' : 'Arial, sans-serif',
+});
+
+describe('typed browser addresses', () => {
+  it.each([
+    [' example.com ', 'https://example.com/'],
+    ['example.com/path?q=hello#section', 'https://example.com/path?q=hello#section'],
+    ['example.com?q=hello', 'https://example.com/?q=hello'],
+    ['example.com:8443/path?q=hello', 'https://example.com:8443/path?q=hello'],
+    ['localhost:3000', 'https://localhost:3000/'],
+    ['//example.com/path', 'https://example.com/path'],
+    ['[::1]:3000', 'https://[::1]:3000/'],
+    ['http://example.com/path', 'http://example.com/path'],
+    ['https://example.com/path', 'https://example.com/path'],
+  ])('normalizes %s to %s', (value, expected) => {
+    expect(browserAddress(value)).toBe(expected);
+  });
+  it.each([
+    undefined, null, 42, {}, '', '   ', 'example .com', 'example.com/a b',
+    'example.com/\tpath', 'example.com/\npath', 'example.com\\path',
+    'file:///etc/passwd', 'javascript:alert(1)', 'data:text/html,hello',
+    'about:blank', 'custom:launch', 'ftp://example.com', 'javascript:123', 'custom:123', '/relative',
+    'https://user:pass@example.com', 'user:pass@example.com', 'user@example.com',
+  ])('rejects unsafe typed address %j', value => {
+    expect(browserAddress(value)).toBeNull();
+  });
+});
 
 describe('embedded browser host isolation and native boundaries', () => {
   it.each(['', 'default', 'persist:', 'persist:deployment-production'])('rejects unsafe partition %s', partition => {
@@ -130,34 +163,50 @@ describe('embedded browser host isolation and native boundaries', () => {
       expect(toolbar().send.mock.lastCall[1].status).toMatch(/Popup blocked\. Open .* manually.*sign-in may not work/);
     }
   });
-  it('requests approval only from trusted IPC and never grants it implicitly', async () => {
-    const approveTab = vi.fn(); Object.assign(callbacks, { approveTab });
-    const h = create();
-    ipc('approve'); expect(approveTab).not.toHaveBeenCalled();
-    const id = await h.createTab('https://example.com', false);
-    ipc('approve', undefined, { sender: wc() });
-    ipc('approve', undefined, { senderFrame: { url: toolbar().mainFrame.url } });
-    const frame = toolbar().mainFrame; const trustedUrl = frame.url;
-    frame.url = 'https://attacker.example/'; ipc('approve'); frame.url = trustedUrl;
-    expect(approveTab).not.toHaveBeenCalled();
-    ipc('approve', id + 100); // Payload cannot choose a different tab.
-    expect(approveTab).toHaveBeenCalledExactlyOnceWith(id);
-    expect(h.tabs()[0].taskOwned).toBe(false);
-    h.approveTab(id);
-    expect(h.tabs()[0].taskOwned).toBe(true);
-    expect(toolbar().send.mock.lastCall[1].tabs[0]).toMatchObject({ id, taskOwned: true });
-    ipc('approve'); expect(approveTab).toHaveBeenCalledTimes(1);
-    h.closeTab(id); h.approveTab(id); h.approveTab(-1);
-    expect(h.tabs()).toEqual([]);
-    h.destroy(); expect(() => h.approveTab(id)).not.toThrow();
+  it.each([true, false])('normalizes trusted navigation without changing provenance (taskOwned=%s)', async taskOwned => {
+    const h = create(); const id = await h.createTab('https://example.com', taskOwned);
+    ipc('navigate', ' example.org:8443/path?q=hello ');
+    expect(wc().loadURL).toHaveBeenLastCalledWith('https://example.org:8443/path?q=hello');
+    expect(h.tabs()[0]).toMatchObject({ id, taskOwned });
+    ipc('approve', id); // Removed commands cannot alter provenance.
+    expect(h.tabs()[0]).toMatchObject({ id, taskOwned });
+    expect(wc().loadURL).toHaveBeenCalledTimes(2);
   });
-  it('keeps approval optional and contains callback failures without granting access', async () => {
+  it('creates a manual tab from a typed address when no tab is selected', () => {
+    const h = create(); ipc('navigate', 'example.com/path');
+    expect(wc().loadURL).toHaveBeenCalledExactlyOnceWith('https://example.com/path');
+    expect(h.tabs()).toHaveLength(1); expect(h.tabs()[0].taskOwned).toBe(false);
+  });
+  it.each([undefined, null, {}, 42, '', '   ', 'example .com', 'example.com/a b',
+    'example.com\\path', 'https://user:pass@example.com', 'user@example.com', 'ftp://example.com',
+    'javascript:alert(1)', 'file:///etc/passwd', 'data:text/html,hello', 'custom:launch'])('rejects invalid navigate IPC %j without creating or navigating tabs', async value => {
+    const h = create(); ipc('navigate', value);
+    expect(h.tabs()).toEqual([]); expect(electronMocks.views).toHaveLength(1);
+    expect(toolbar().send.mock.lastCall[1].status).toBe('Cannot open this address');
+    await h.createTab('https://example.com', false);
+    ipc('navigate', value);
+    expect(wc().loadURL).toHaveBeenCalledTimes(1);
+    expect(toolbar().send.mock.lastCall[1].status).toBe('Cannot open this address');
+  });
+  it('rejects navigation IPC from untrusted senders, frames and URLs', async () => {
     const h = create(); await h.createTab('https://example.com', false);
-    ipc('approve'); expect(h.tabs()[0].taskOwned).toBe(false);
-    Object.assign(callbacks, { approveTab: () => { throw new Error('denied'); } });
-    expect(() => ipc('approve')).not.toThrow();
-    expect(h.tabs()[0].taskOwned).toBe(false);
-    expect(toolbar().send.mock.lastCall[1].status).toBe('Browser callback failed');
+    ipc('navigate', 'attacker.example', { sender: wc() });
+    ipc('navigate', 'attacker.example', { senderFrame: { url: toolbar().mainFrame.url } });
+    const frame = toolbar().mainFrame; const trustedUrl = frame.url;
+    frame.url = 'https://attacker.example/'; ipc('navigate', 'attacker.example'); frame.url = trustedUrl;
+    expect(wc().loadURL).toHaveBeenCalledTimes(1);
+  });
+  it('keeps schemeless addresses invalid at non-toolbar URL boundaries', async () => {
+    const h = create(); const url = 'example.com/path';
+    await expect(h.createTab(url, true)).rejects.toThrow();
+    await h.createTab('https://example.com', true);
+    for (const name of ['will-navigate', 'will-redirect', 'will-frame-navigate']) {
+      const e = { ...event(), url }; wc().emit(name, e, url); expect(e.preventDefault).toHaveBeenCalledOnce();
+    }
+    expect(wc().setWindowOpenHandler.mock.calls[0][0]({ url })).toEqual({ action: 'deny' });
+    const intercept = electronMocks.sessions.get('persist:embedded-test').webRequest.onBeforeRequest.mock.calls[0][0];
+    const reply = vi.fn(); intercept({ resourceType: 'mainFrame', url }, reply);
+    expect(reply).toHaveBeenCalledWith({ cancel: true });
   });
   it('accepts IPC only from the exact toolbar main frame and URL', async () => {
     const h = create(); await h.createTab('https://example.com', true);
@@ -198,6 +247,28 @@ describe('docked view ownership and layout', () => {
     hosts.push(h);
     return { h, main };
   };
+  it('requests the app theme on creation and publishes live updates across presentation changes', () => {
+    const { h, main } = setup();
+    expect(main.webContents.send.mock.calls.filter(([channel]: [string]) => channel === 'embedded-browser:request-theme')).toEqual([
+      ['embedded-browser:request-theme'],
+    ]);
+    const contents = toolbar();
+    contents.emit('did-finish-load');
+    expect(contents.send.mock.lastCall).toEqual(['embedded-browser:state', expect.objectContaining({ theme: null })]);
+    for (const mode of ['light', 'dark'] as const) {
+      const appearance = theme(mode);
+      h.setTheme(appearance);
+      expect(contents.send.mock.lastCall).toEqual(['embedded-browser:state', expect.objectContaining({ theme: appearance })]);
+      ipc(mode === 'light' ? 'detach' : 'dock');
+      contents.emit('did-finish-load');
+      expect(contents.send.mock.lastCall[1]).toMatchObject({ theme: appearance,
+        presentation: { mode: mode === 'light' ? 'detached' : 'docked' } });
+    }
+    h.destroy();
+    contents.send.mockClear();
+    expect(() => h.setTheme(theme('light'))).not.toThrow();
+    expect(contents.send).not.toHaveBeenCalled();
+  });
   it('lazily detaches and redocks identical live views without navigating or closing', async () => {
     const { h, main } = setup();
     const id = await h.createTab('https://example.com', true);
@@ -222,7 +293,7 @@ describe('docked view ownership and layout', () => {
   it('reserves right-hand DIP geometry, clamps validated resize and remembers expansion', async () => {
     const { h, main } = setup(); await h.createTab('https://example.com', false);
     const view = electronMocks.views[1];
-    expect(view.setBounds).toHaveBeenLastCalledWith({ x: 728, y: 176, width: 472, height: 674 });
+    expect(view.setBounds).toHaveBeenLastCalledWith({ x: 728, y: 128, width: 472, height: 722 });
     ipc('resize', { width: 9999 });
     expect(main.webContents.send.mock.lastCall[1].reservedWidth).toBe(560);
     for (const payload of [{ width: NaN }, { width: Infinity }, { width: '400' }, { width: 400, extra: true }, 400]) ipc('resize', payload);
@@ -275,13 +346,15 @@ describe('docked view ownership and layout', () => {
   });
 });
 
-describe('trusted toolbar approval control', () => {
-  it('starts disabled, reflects selected ownership, and sends only an approval request', () => {
+describe('trusted toolbar navigation and resize controls', () => {
+  it('submits typed addresses without approval controls and preserves resizing', () => {
     const html = readFileSync(new URL('../embedded-browser.html', import.meta.url), 'utf8');
-    expect(html).toContain('<button id="approve" disabled>Allow Brian on this tab</button>');
+    expect(html).not.toContain('id="approve"');
+    expect(html).toContain('placeholder="example.com"');
+    expect(html).toMatch(/id="status"[^>]*>Browser<\/span>/);
     const elements = new Map<string, any>();
     const makeElement = () => ({
-      disabled: false, value: '', addEventListener: vi.fn(), replaceChildren: vi.fn(),
+      disabled: false, value: '', blur: vi.fn(), addEventListener: vi.fn(), replaceChildren: vi.fn(),
       setAttribute: vi.fn(), append: vi.fn(),
       setPointerCapture: vi.fn(), hasPointerCapture: vi.fn(() => true), releasePointerCapture: vi.fn(),
     });
@@ -299,17 +372,19 @@ describe('trusted toolbar approval control', () => {
     });
     window.addEventListener.mock.calls.find(([name]) => name === 'DOMContentLoaded')![1]();
     const update = ipcRenderer.on.mock.calls.find(([name]) => name === 'embedded-browser:state')![1];
-    const approve = elements.get('approve');
+    expect(elements.has('approve')).toBe(false);
     update({}, { tabs: [], selected: null, status: '' });
-    expect(approve.disabled).toBe(true);
-    update({}, { tabs: [{ id: 1, taskOwned: false }], selected: 1, status: '' });
-    expect(approve.disabled).toBe(false);
-    approve.addEventListener.mock.calls.find(([name]: [string]) => name === 'click')[1]();
-    expect(ipcRenderer.send).toHaveBeenLastCalledWith('embedded-browser:command', 'approve', undefined);
-    update({}, { tabs: [{ id: 1, taskOwned: true }], selected: 1, status: '' });
-    expect(approve.disabled).toBe(true);
-    update({}, { tabs: [{ id: 1, taskOwned: false }], selected: 2, status: '' });
-    expect(approve.disabled).toBe(true);
+    expect(elements.get('status').textContent).toBe('Browser');
+    const address = elements.get('address');
+    address.value = ' example.com/path ';
+    const submit = { preventDefault: vi.fn() };
+    elements.get('navigation').addEventListener.mock.calls.find(([name]: [string]) => name === 'submit')[1](submit);
+    expect(submit.preventDefault).toHaveBeenCalledOnce();
+    expect(ipcRenderer.send).toHaveBeenLastCalledWith('embedded-browser:command', 'navigate', 'example.com/path');
+    expect(address.blur).toHaveBeenCalledOnce();
+    update({}, { tabs: [{ id: 1, taskOwned: false, url: 'https://example.com/' }], selected: 1, status: 'Loading' });
+    expect(address.value).toBe('https://example.com/');
+    expect(elements.get('status').textContent).toBe('Loading');
     update({}, { tabs: [], selected: null, status: '', presentation: {
       mode: 'docked', collapsed: false, panelWidth: 480, minWidth: 360, maxWidth: 700,
     } });

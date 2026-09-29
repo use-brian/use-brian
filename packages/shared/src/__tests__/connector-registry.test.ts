@@ -80,7 +80,13 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
       'createOfficeArtifact',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
+      'openPdfEditingSession',
+      'placePdfSignature',
     ])
+    expect(OFFICIAL_CONNECTOR_TOOLS.office?.find((tool) => tool.name === 'placePdfSignature')).toMatchObject({
+      classification: 'write',
+      defaultPolicy: 'ask',
+    })
   })
 
   describe('Microsoft Teams (msgraph)', () => {

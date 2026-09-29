@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
+import type { BrowserTheme } from "./browser-theme.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BaseWindow, type BrowserWindow, WebContentsView, ipcMain, session, type WebContents, type IpcMainEvent, type Session, type View } from "electron";
 
 const COMMAND = "embedded-browser:command";
 const STATE = "embedded-browser:state";
-const TOOLBAR_HEIGHT = 176;
+const TOOLBAR_HEIGHT = 128;
 const DEFAULT_URL = "https://www.google.com/";
 const toolbarPath = fileURLToPath(new URL("./embedded-browser.html", import.meta.url));
 const toolbarUrl = pathToFileURL(toolbarPath).href;
 const activeSessions = new WeakSet<Session>();
 
-// Intentionally no scheme guessing: neither IPC nor callers may load local URLs.
+// Navigation/redirect/network boundaries remain strict. Only typed addresses get a default scheme.
 function validWebUrl(value: unknown): string | null {
   if (typeof value !== "string") return null;
   try {
@@ -19,7 +20,19 @@ function validWebUrl(value: unknown): string | null {
   } catch { return null; }
 }
 
-type Callbacks = { approveTab?: (id: number) => void; stop: () => void; closed: () => void; tabClosed: (id: number) => void; detached: (id: number) => void };
+/** Normalize human-entered addresses without permitting explicit unsafe schemes. */
+export function browserAddress(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const address = value.trim();
+  if (!address || address.length > 16_384 || /[\s\\]/.test(address)) return null;
+  const hostPort = /^(?:localhost|(?:[^/?#:\s]+\.)+[^/?#:\s]+):\d+(?:[/?#]|$)/i.test(address);
+  const hasScheme = /^[a-z][a-z\d+.-]*:/i.test(address);
+  if (address.startsWith("//")) return validWebUrl(`https:${address}`);
+  if (address.startsWith("/")) return null;
+  return validWebUrl(hasScheme && !hostPort ? address : `https://${address}`);
+}
+
+type Callbacks = { stop: () => void; closed: () => void; tabClosed: (id: number) => void; detached: (id: number) => void };
 type Tab = { id: number; handle: string; taskOwned: boolean; contents: WebContents; view: WebContentsView };
 
 /** Owns an exclusive persistent browsing partition; never use an app deployment partition. */
@@ -41,7 +54,8 @@ export class EmbeddedBrowserHost {
   private readonly browsingSession: Session;
   private readonly entries = new Map<number, Tab>();
   private selected: number | null = null;
-  private status = "Manual browsing ready";
+  private status = "";
+  private theme: BrowserTheme | null = null;
   private disposed = false;
 
   constructor(partition: string, private readonly callbacks: Callbacks, options: { dockWindow?: BrowserWindow | null } = {}) {
@@ -104,6 +118,7 @@ export class EmbeddedBrowserHost {
     ipcMain.on(COMMAND, this.onCommand);
     this.layout();
     void toolbar.loadFile(toolbarPath).catch(() => this.setStatus("Browser toolbar failed to load"));
+    this.dockContents?.send("embedded-browser:request-theme");
   }
 
   async createTab(url: string, taskOwned: boolean): Promise<number> {
@@ -168,14 +183,6 @@ export class EmbeddedBrowserHost {
     this.publish();
   }
 
-  /** Called by the controller only after its active-session check and native consent. */
-  approveTab(id: number): void {
-    const tab = this.entries.get(id);
-    if (this.disposed || !tab || tab.contents.isDestroyed()) return;
-    tab.taskOwned = true;
-    this.publish();
-  }
-
   closeTab(id: number): void {
     const tab = this.entries.get(id);
     if (!tab) return;
@@ -206,6 +213,11 @@ export class EmbeddedBrowserHost {
       (!this.collapsed && [...this.entries.values()].some(tab => tab.id === this.selected && !tab.contents.isDestroyed() && tab.contents.isFocused())));
   }
   setStatus(status: string): void { this.status = status; this.publish(); }
+  setTheme(theme: BrowserTheme): void {
+    if (this.disposed) return;
+    this.theme = theme;
+    this.publish();
+  }
   destroy(): void {
     if (this.disposed) return;
     this.cleanup();
@@ -235,22 +247,16 @@ export class EmbeddedBrowserHost {
           }
           break;
         case "ready": this.publish(); break;
-        case "approve":
-          // A toolbar click only requests consent; it never grants ownership.
-          if (tab && !tab.taskOwned && !tab.contents.isDestroyed()) {
-            this.notify(() => this.callbacks.approveTab?.(tab.id));
-          }
-          break;
         case "stop":
-          this.setStatus("Brian disconnected — manual browsing remains available");
           this.notify(() => this.callbacks.stop());
           break;
         case "new": void this.createTab(DEFAULT_URL, false).catch(() => this.setStatus("Could not create tab")); break;
         case "select": if (typeof value === "number") this.selectTab(value); break;
         case "close": if (typeof value === "number") this.closeTab(value); break;
         case "navigate": {
-          const url = validWebUrl(value);
-          if (!url) { this.setStatus("Enter a complete http:// or https:// address"); break; }
+          const url = browserAddress(value);
+          if (!url) { this.setStatus("Cannot open this address"); break; }
+          this.setStatus("");
           if (tab) void this.load(tab, url);
           else void this.createTab(url, false).catch(() => this.setStatus("Could not create tab"));
           break;
@@ -334,7 +340,7 @@ export class EmbeddedBrowserHost {
   private publish(): void {
     if (this.disposed || this.toolbar.webContents.isDestroyed()) return;
     this.toolbar.webContents.send(STATE, {
-      status: this.status, selected: this.selected,
+      status: this.status, selected: this.selected, theme: this.theme,
       presentation: { mode: this.docked ? "docked" : "detached", collapsed: this.collapsed,
         panelWidth: this.panelWidth, minWidth: 360, maxWidth: this.maxWidth },
       tabs: [...this.entries.values()].filter(tab => !tab.contents.isDestroyed()).map(tab => ({

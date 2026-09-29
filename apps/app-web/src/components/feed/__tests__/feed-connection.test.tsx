@@ -9,7 +9,7 @@
  * The OAuth redirect, disconnect confirm, and `refresh()` flows are web-QA.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
 
 import type { FeedWorkspaceValue } from "@/contexts/feed-profiles-context";
@@ -23,9 +23,11 @@ const paramsRef = vi.hoisted(
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(searchRef.current),
+  usePathname: () => "/w/ws-1/feed/twitter/settings",
   useParams: () => paramsRef.current,
 }));
+const searchRef = vi.hoisted(() => ({ current: "" }));
 vi.mock("@/lib/auth-fetch", () => ({
   authFetch: vi.fn(),
   getAccessToken: () => null,
@@ -91,6 +93,24 @@ function render(
 }
 
 describe("[COMP:app-web/feed-connection] FeedConnection", () => {
+  afterEach(() => {
+    searchRef.current = "";
+  });
+
+  it("OAuth return landing: confirms instead of offering Connect while the profile loads", () => {
+    searchRef.current = "connected=twitter&twitter_connected=1";
+    const html = render([], "admin", "twitter");
+    expect(html).toContain(format(td.landingConfirming, { platform: "X" }));
+    expect(html).not.toContain(td.connectCta);
+  });
+
+  it("OAuth return landing: a denied consent says so and keeps Connect", () => {
+    searchRef.current = "connected=twitter&error=twitter_consent_denied";
+    const html = render([], "admin", "twitter");
+    expect(html).toContain(format(td.landingDenied, { platform: "X" }));
+    expect(html).toContain(td.connectCta);
+  });
+
   it("not connected + admin: onboarding header and the connect CTA", () => {
     const html = render([], "admin");
     expect(html).toContain(format(td.notConnectedTitle, { platform: "Threads" }));

@@ -102,6 +102,7 @@ export function createPipelineBExtractor(args: {
       // warn - correct for a memory-only shadow run.
       tasks: undefined,
       taskAdmission: undefined,
+      applicationNamespace: 'shadow',
       // Episode archival state belongs to the LIVE pipeline; a shadow
       // re-derivation must not restamp it.
       episodes: {

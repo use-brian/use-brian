@@ -29,9 +29,21 @@ export type DeliveryAudienceDecision =
   | { allowed: true; evidence: ScopeEvidence }
   | { allowed: false; reason: 'delivery_audience_unverified' }
 
+export type DeliveryAudienceEnvelopeDecision =
+  | {
+      allowed: true
+      ceiling: AccessCeiling
+      source: 'member' | 'binding' | 'public'
+    }
+  | { allowed: false; reason: 'delivery_audience_unverified' }
+
 export type AuthorizeDeliveryAudience = (
   input: DeliveryAudienceInput,
 ) => Promise<DeliveryAudienceDecision>
+
+export type ResolveDeliveryAudienceEnvelope = (
+  input: DeliveryAudienceInput,
+) => Promise<DeliveryAudienceEnvelopeDecision>
 
 export class DeliveryAudienceUnverifiedError extends Error {
   readonly reason = 'delivery_audience_unverified'
@@ -61,6 +73,10 @@ type Dependencies = {
 }
 
 function denied(): DeliveryAudienceDecision {
+  return { allowed: false, reason: 'delivery_audience_unverified' }
+}
+
+function envelopeDenied(): DeliveryAudienceEnvelopeDecision {
   return { allowed: false, reason: 'delivery_audience_unverified' }
 }
 
@@ -133,13 +149,8 @@ async function integrationForTarget(
     : store.getCredentialsForAssistantSystem(input.assistantId, input.channelType)
 }
 
-/**
- * Resolve and validate the audience immediately before output persistence/send.
- * The returned denial is intentionally opaque: hidden Team/Project names never
- * become an existence oracle in a delivery error.
- */
-export function createDeliveryAudienceAuthorizer(dependencies: Dependencies = {}): AuthorizeDeliveryAudience {
-  const deps = {
+function resolvedDependencies(dependencies: Dependencies) {
+  return {
     now: dependencies.now ?? Date.now,
     findAssistant: dependencies.findAssistant ?? findAssistantById,
     findSession: dependencies.findSession ?? findSessionById,
@@ -149,6 +160,102 @@ export function createDeliveryAudienceAuthorizer(dependencies: Dependencies = {}
     validateEvidence: dependencies.validateEvidence ?? validateAudienceScopeEvidence,
     integrationStore: dependencies.integrationStore,
   }
+}
+
+async function resolveEnvelope(
+  input: DeliveryAudienceInput,
+  deps: ReturnType<typeof resolvedDependencies>,
+): Promise<DeliveryAudienceEnvelopeDecision> {
+  if (input.channelType === 'web' || input.channelType === 'notification') {
+    const ceiling = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps)
+    return ceiling ? { allowed: true, ceiling, source: 'member' } : envelopeDenied()
+  }
+
+  const inferredType = input.recipientType ?? externalAudienceType(input.channelType, input.channelId)
+  if (inferredType === 'individual' && input.recipientType !== 'group') {
+    const personalSession = await deps.findChannelSession({
+      assistantId: input.assistantId,
+      userId: input.userId,
+      channelType: input.channelType,
+      channelId: input.channelId,
+    })
+    if (personalSession && personalSession.visibility !== 'workspace' && personalSession.mode !== 'draft') {
+      const ceiling = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps)
+      if (ceiling) return { allowed: true, ceiling, source: 'member' }
+    }
+  }
+
+  const integration = await integrationForTarget(input, deps.integrationStore)
+  const parsed = parseTopicChannelId(input.channelId)
+  const bindings = integration?.config?.deliveryAudienceBindings?.filter((candidate) =>
+    candidate.version === 1
+    && (candidate.channelId === input.channelId || candidate.channelId === parsed.chatId),
+  ) ?? []
+  if (bindings.length === 0) {
+    return {
+      allowed: true,
+      source: 'public',
+      ceiling: {
+        workspaceId: input.workspaceId,
+        // This is an anonymous recipient. Keeping the actor empty is how the
+        // final evidence check rejects personal rows even when the sender is a
+        // workspace member.
+        userId: '',
+        clearance: 'public',
+        compartments: [],
+        mutationCompartments: [],
+        projectIds: [],
+        visibilityAssistantIds: null,
+      },
+    }
+  }
+  let ceiling: AccessCeiling | null = null
+  for (const binding of bindings) {
+    if (inferredType && binding.audienceType !== inferredType) return envelopeDenied()
+    if (binding.expiresAt) {
+      const expiresAt = Date.parse(binding.expiresAt)
+      if (!Number.isFinite(expiresAt) || expiresAt <= deps.now()) return envelopeDenied()
+    }
+    const approverRole = await deps.getWorkspaceRole(binding.approvedByUserId, input.workspaceId)
+    if (approverRole !== 'owner' && approverRole !== 'admin') return envelopeDenied()
+
+    let candidate = bindingCeiling(input.workspaceId, binding)
+    if (binding.recipientUserId) {
+      if (binding.audienceType !== 'individual') return envelopeDenied()
+      const current = await memberCeiling(
+        input.workspaceId,
+        input.assistantId,
+        binding.recipientUserId,
+        deps,
+      )
+      if (!current) return envelopeDenied()
+      candidate = intersectAccessCeilings(candidate, current)
+    }
+    // A topic may inherit its parent-chat cap, but neither array order nor a
+    // duplicate entry may widen it. Every applicable envelope participates.
+    if (ceiling && ceiling.userId !== candidate.userId) return envelopeDenied()
+    ceiling = ceiling ? intersectAccessCeilings(ceiling, candidate) : candidate
+  }
+  return ceiling
+    ? { allowed: true, ceiling, source: 'binding' }
+    : envelopeDenied()
+}
+
+/** Resolve the current recipient ceiling before prompt/tool assembly. */
+export function createDeliveryAudienceEnvelopeResolver(
+  dependencies: Dependencies = {},
+): ResolveDeliveryAudienceEnvelope {
+  const deps = resolvedDependencies(dependencies)
+  return (input) => resolveEnvelope(input, deps)
+}
+
+/**
+ * Resolve and validate the audience immediately before output persistence/send.
+ * The returned denial is intentionally opaque: hidden Team/Project names never
+ * become an existence oracle in a delivery error.
+ */
+export function createDeliveryAudienceAuthorizer(dependencies: Dependencies = {}): AuthorizeDeliveryAudience {
+  const deps = resolvedDependencies(dependencies)
 
   return async (input) => {
     const evidence = input.scopeEvidence ?? {}
@@ -169,71 +276,9 @@ export function createDeliveryAudienceAuthorizer(dependencies: Dependencies = {}
       if (!ceiling || !(await validate(evidence, ceiling, deps.validateEvidence)).allowed) return denied()
     }
 
-    if (input.channelType === 'web' || input.channelType === 'notification') {
-      const ceiling = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps)
-      return ceiling ? validate(evidence, ceiling, deps.validateEvidence) : denied()
-    }
-
-    const inferredType = input.recipientType ?? externalAudienceType(input.channelType, input.channelId)
-    if (inferredType === 'individual' && input.recipientType !== 'group') {
-      const personalSession = await deps.findChannelSession({
-        assistantId: input.assistantId,
-        userId: input.userId,
-        channelType: input.channelType,
-        channelId: input.channelId,
-      })
-      if (personalSession && personalSession.visibility !== 'workspace' && personalSession.mode !== 'draft') {
-        const ceiling = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps)
-        if (ceiling) {
-          const decision = await validate(evidence, ceiling, deps.validateEvidence)
-          if (decision.allowed) return decision
-        }
-      }
-    }
-
-    const integration = await integrationForTarget(input, deps.integrationStore)
-    const parsed = parseTopicChannelId(input.channelId)
-    const binding = integration?.config?.deliveryAudienceBindings?.find((candidate) =>
-      candidate.version === 1
-      && (candidate.channelId === input.channelId || candidate.channelId === parsed.chatId),
-    )
-    if (!binding) {
-      // Unbound external audiences may receive public, workspace-general output
-      // only. The empty grants deliberately reject every Team/Project requirement.
-      return validate(evidence, {
-        workspaceId: input.workspaceId,
-        // Without a verified personal-session binding this is an anonymous
-        // external audience, even when its provider identifier looks like a
-        // direct message. Never let the workflow actor stand in for recipient
-        // identity.
-        userId: '',
-        clearance: 'public',
-        compartments: [],
-        mutationCompartments: [],
-        projectIds: [],
-        visibilityAssistantIds: null,
-      }, deps.validateEvidence)
-    }
-    if (inferredType && binding.audienceType !== inferredType) return denied()
-    if (binding.expiresAt) {
-      const expiresAt = Date.parse(binding.expiresAt)
-      if (!Number.isFinite(expiresAt) || expiresAt <= deps.now()) return denied()
-    }
-    const approverRole = await deps.getWorkspaceRole(binding.approvedByUserId, input.workspaceId)
-    if (approverRole !== 'owner' && approverRole !== 'admin') return denied()
-
-    let ceiling = bindingCeiling(input.workspaceId, binding)
-    if (binding.recipientUserId) {
-      if (binding.audienceType !== 'individual') return denied()
-      const current = await memberCeiling(
-        input.workspaceId,
-        input.assistantId,
-        binding.recipientUserId,
-        deps,
-      )
-      if (!current) return denied()
-      ceiling = intersectAccessCeilings(ceiling, current)
-    }
-    return validate(evidence, ceiling, deps.validateEvidence)
+    const envelope = await resolveEnvelope(input, deps)
+    return envelope.allowed
+      ? validate(evidence, envelope.ceiling, deps.validateEvidence)
+      : denied()
   }
 }

@@ -1,80 +1,109 @@
-/**
- * Shared in-memory registry for scheduler confirmation resolvers.
- *
- * When a scheduled job hits an 'ask'-policy tool, the job executor
- * creates a ConfirmationResolver and registers it here. Channel webhook
- * handlers (Telegram callback, Slack message, WhatsApp keyword, web POST)
- * look up the resolver by toolCallId and call resolve() to unblock the
- * suspended query loop.
- *
- * This works because the scheduler and all route handlers run in the
- * same Node process (packages/api/src/index.ts).
- */
-
+/** Single process-local registry shared by scheduled producers, web and channels. */
 import type { ConfirmationDecision, ConfirmationResolver } from '@use-brian/core'
 
-/**
- * Each entry carries its OWNER (the deliver-target user + channel the
- * confirmation was issued to). The registry is a process-global map keyed by
- * toolCallId alone across every user and channel; without the owner, any
- * channel handler that resolves an arbitrary toolCallId could approve another
- * user's parked job action (cross-tenant — 2026-06-02 audit). Resolution is
- * therefore guardable: a caller passes the identity it can prove (e.g. the
- * Telegram chat id of the click), and the resolve only fires when it matches.
- */
-type SchedulerResolverEntry = {
+export const SHARED_TELEGRAM_CONFIRMATION_INTEGRATION = 'system:telegram'
+export const SYSTEM_WHATSAPP_CONFIRMATION_INTEGRATION = 'system:whatsapp'
+export type SchedulerChannelScope = {
+  workspaceId: string
+  assistantId: string
+  userId: string
+  integrationId: string
+  channelType: string
+  channelId: string
+  threadId?: string
+}
+export type SchedulerConfirmationDelivery = SchedulerChannelScope & { messageId?: string }
+type Owner = { userId?: string | null; channelType?: string | null; channelId?: string | null;
+  workspaceId?: string; assistantId?: string; allowPersistentApproval?: boolean }
+type Entry = {
   resolver: ConfirmationResolver
-  userId: string | null
-  channelType: string | null
-  channelId: string | null
+  owner: Owner
+  expiresAt: number
+  delivery?: SchedulerConfirmationDelivery
+}
+const registry = new Map<string, Entry>()
+
+export function registerSchedulerResolver(toolCallId: string, resolver: ConfirmationResolver, owner: Owner = {}): void {
+  for (const [id, entry] of registry) if (entry.expiresAt <= Date.now()) registry.delete(id)
+  registry.set(toolCallId, { resolver, owner: { ...owner }, expiresAt: Date.now() + 300_000 })
 }
 
-const registry = new Map<string, SchedulerResolverEntry>()
-
-/** Register a resolver (with its deliver-target owner) so channel handlers can find it. */
-export function registerSchedulerResolver(
-  toolCallId: string,
-  resolver: ConfirmationResolver,
-  owner?: { userId?: string | null; channelType?: string | null; channelId?: string | null },
-): void {
-  registry.set(toolCallId, {
-    resolver,
-    userId: owner?.userId ?? null,
-    channelType: owner?.channelType ?? null,
-    channelId: owner?.channelId ?? null,
-  })
-}
-
-/**
- * Try to resolve a scheduler confirmation. Returns true if the resolver was
- * found, passed the ownership guard, and the decision was delivered.
- *
- * When `guard` is supplied, every provided field MUST equal the entry's
- * recorded owner — and a guarded field that the entry left null fails closed
- * (the executor always records the deliver-target, so a null owner field means
- * "unknown owner", which a guarded caller must not resolve). Callers that have
- * already scoped the toolCallId to a tenant by other means (e.g. Slack/WhatsApp
- * `findPendingByChannel`, or the web route's deferred-row owner check) may omit
- * the guard.
+/** Called ONLY by the outbound producer with its actually selected credentials.
+ * The actor always comes from the parked resolver, never the delivery/webhook.
+ * Attach before sending; clear on failure and add the posted message ID after.
  */
-export function tryResolveSchedulerConfirmation(
-  toolCallId: string,
-  decision: ConfirmationDecision,
-  guard?: { userId?: string; channelType?: string; channelId?: string },
+export function bindSchedulerConfirmationDelivery(toolCallId: string,
+  delivery: Omit<SchedulerConfirmationDelivery, 'userId'>, allowPersistentApproval: boolean,
 ): boolean {
   const entry = registry.get(toolCallId)
-  if (!entry) return false
-  if (guard) {
-    if (guard.userId !== undefined && guard.userId !== entry.userId) return false
-    if (guard.channelType !== undefined && guard.channelType !== entry.channelType) return false
-    if (guard.channelId !== undefined && guard.channelId !== entry.channelId) return false
-  }
-  entry.resolver.resolve(toolCallId, decision)
-  registry.delete(toolCallId)
+  if (!entry || !entry.owner.userId || entry.expiresAt <= Date.now()
+    || entry.owner.channelType !== delivery.channelType
+    || (entry.owner.channelId !== delivery.channelId && entry.owner.channelId !== 'notifications')
+    || (entry.owner.workspaceId && entry.owner.workspaceId !== delivery.workspaceId)
+    || (entry.owner.assistantId && entry.owner.assistantId !== delivery.assistantId)) return false
+  entry.delivery = { ...delivery, userId: entry.owner.userId }
+  entry.owner.allowPersistentApproval = allowPersistentApproval
   return true
 }
-
-/** Remove a resolver (e.g. after timeout or job completion). */
-export function unregisterSchedulerResolver(toolCallId: string): void {
-  registry.delete(toolCallId)
+export function clearSchedulerConfirmationDelivery(toolCallId: string): void {
+  const entry = registry.get(toolCallId)
+  if (entry) entry.delivery = undefined
 }
+export function getSchedulerConfirmationActor(toolCallId: string): string | undefined {
+  return registry.get(toolCallId)?.owner.userId ?? undefined
+}
+
+function matchesAddress(delivery: SchedulerConfirmationDelivery, scope: SchedulerChannelScope): boolean {
+  return delivery.workspaceId === scope.workspaceId && delivery.assistantId === scope.assistantId
+    && delivery.userId === scope.userId && delivery.integrationId === scope.integrationId
+    && delivery.channelType === scope.channelType && delivery.channelId === scope.channelId
+}
+function matches(delivery: SchedulerConfirmationDelivery, scope: SchedulerChannelScope): boolean {
+  return matchesAddress(delivery, scope) && (delivery.threadId === scope.threadId
+      || (!delivery.threadId && !!delivery.messageId && scope.threadId === delivery.messageId))
+}
+/** Explicit native callbacks may report the card message as their thread root.
+ * Recover the actual delivery thread ONLY from an exact source-message match,
+ * after checking every non-thread address dimension. Never use for typed text.
+ */
+export function schedulerCallbackDeliveryScope(
+  toolCallId: string, scope: SchedulerChannelScope, sourceMessageId: string,
+): SchedulerChannelScope | undefined {
+  const entry = registry.get(toolCallId)
+  const delivery = entry?.delivery
+  if (!entry || entry.expiresAt <= Date.now() || !delivery || !sourceMessageId
+    || delivery.messageId !== sourceMessageId || !matchesAddress(delivery, scope)) return undefined
+  return { ...scope, threadId: delivery.threadId }
+}
+
+export function findSchedulerChannelConfirmations(scope: SchedulerChannelScope, toolCallId?: string) {
+  return [...registry.entries()].flatMap(([id, entry]) => entry.delivery
+    && entry.expiresAt > Date.now() && matches(entry.delivery, scope) && (!toolCallId || id === toolCallId)
+    ? [{ toolCallId: id, delivery: { ...entry.delivery }, expiresAt: entry.expiresAt,
+        allowPersistentApproval: entry.owner.allowPersistentApproval === true }] : [])
+}
+
+/** Channel callers MUST supply complete outbound provenance. User-only guards
+ * remain the authenticated web UI path; unguarded/channel-only legacy routes
+ * cannot resolve a provenance-bound entry. */
+export function tryResolveSchedulerConfirmation(toolCallId: string, decision: ConfirmationDecision,
+  guard?: { userId?: string; channelType?: string; channelId?: string } & Partial<SchedulerChannelScope>,
+): boolean {
+  const entry = registry.get(toolCallId)
+  if (!entry || entry.expiresAt <= Date.now() || !guard?.userId || guard.userId !== entry.owner.userId) return false
+  if (guard.channelType !== undefined && !entry.delivery) return false
+  if (entry.delivery) {
+    if (!guard?.userId) return false
+    if (guard.channelType !== undefined && !matches(entry.delivery, guard as SchedulerChannelScope)) return false
+  }
+  if (guard) {
+    if (guard.userId !== undefined && guard.userId !== entry.owner.userId) return false
+    if (guard.channelType !== undefined && guard.channelType !== entry.owner.channelType) return false
+    if (guard.channelId !== undefined && guard.channelId !== (entry.delivery?.channelId ?? entry.owner.channelId)) return false
+  }
+  if ((decision === 'always_allow' || decision === 'always_deny') && entry.owner.allowPersistentApproval !== true) return false
+  registry.delete(toolCallId) // claim before resuming (including synchronous re-entrancy)
+  entry.resolver.resolve(toolCallId, decision)
+  return true
+}
+export function unregisterSchedulerResolver(toolCallId: string): void { registry.delete(toolCallId) }

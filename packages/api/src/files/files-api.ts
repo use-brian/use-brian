@@ -351,9 +351,12 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       summary?: string | null
       tags?: string[]
       sensitivity?: FilesWriteParams['sensitivity']
+      sessionOwned?: true
     },
   ): Promise<FilesResult<WorkspaceFile>> {
     const path = normalizePath(p.path)
+    if (path.startsWith('/office/sessions/') && p.sessionOwned !== true) return err({ kind: 'read_only', path })
+    if (p.sessionOwned === true && !path.startsWith('/office/sessions/')) return err({ kind: 'read_only', path })
     if (assistantInWebsiteMedia(ctx, path)) return err({ kind: 'read_only', path })
     const parentPath = deriveParentPath(path)
     const name = deriveName(path)
@@ -411,6 +414,8 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
         sensitivity: maxSensitivity(p.sensitivity ?? 'internal', ctx.writeSensitivity ?? 'public'),
         compartments: ctx.writeCompartments,
         projectIds: ctx.writeProjectIds,
+        metadata: p.sessionOwned ? { officeSession: true, noIndex: true } : undefined,
+        userId: p.sessionOwned ? ctx.userId : null,
         createdByUserId: ctx.userId,
         createdByAssistantId: ctx.assistantId ?? null,
       }, ac))
@@ -456,6 +461,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
         summary: params.summary,
         tags: params.tags,
         sensitivity: params.sensitivity,
+        sessionOwned: params.sessionOwned,
       })
     },
 

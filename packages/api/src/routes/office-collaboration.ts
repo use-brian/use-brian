@@ -19,6 +19,7 @@ const AnchorSchema = z.object({
 export type OfficeCollaborationRouteDeps = {
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
   resolveAccess(userId: string, artifactId: string): Promise<ResolvedOfficeAccess | null>
+  resolveCollaborationAccess?(userId: string, artifactId: string): Promise<ResolvedOfficeAccess | null>
   getSnapshot(userId: string, artifactId: string): Promise<{ snapshot: unknown; seq: number; baseVersion: number } | null>
   appendCommand(params: { userId: string; artifactId: string; expectedSeq: number; command: z.infer<typeof OfficeCommandSchema> }): Promise<{ snapshot: unknown; seq: number; baseVersion: number } | 'conflict' | null>
   listThreads(userId: string, artifactId: string): Promise<Array<Record<string, unknown>>>
@@ -43,6 +44,7 @@ export type OfficeCollaborationRouteDeps = {
 
 export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): Router {
   const router = Router()
+  const resolveCollaborationAccess = deps.resolveCollaborationAccess ?? deps.resolveAccess
   router.get('/artifacts/:artifactId/snapshot', officeMetadataRoute(async (req, userId) => {
     const artifactId = String(req.params.artifactId)
     const access = await deps.resolveAccess(userId, artifactId)
@@ -78,7 +80,7 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
 
   router.get('/artifacts/:artifactId/comments', officeMetadataRoute(async (req, userId) => {
     const artifactId = String(req.params.artifactId)
-    const access = await deps.resolveAccess(userId, artifactId)
+    const access = await resolveCollaborationAccess(userId, artifactId)
     if (!access) return {status:404,body:{ error: 'Office artifact not found' }}
     return {workspaceId:access.workspaceId,body:{ threads: await deps.listThreads(userId, artifactId) }}
   }))
@@ -87,7 +89,7 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
     const artifactId = String(req.params.artifactId)
-    const access = await deps.resolveAccess(userId, artifactId)
+    const access = await resolveCollaborationAccess(userId, artifactId)
     if (!access?.canEdit) return void res.status(404).json({ error: 'Office artifact not found' })
     const live = await deps.getSnapshot(userId, artifactId)
     if (!live) return void res.status(409).json({ error: 'artifact_not_ready' })
@@ -100,7 +102,7 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     const body = z.object({ anchor: AnchorSchema, body: z.string().min(1).max(20_000), mentions: z.array(z.string().uuid()).max(100).default([]), invokeBrian: z.object({ assistantId: z.string().uuid(), expectedVersion: z.number().int().min(0), idempotencyKey: z.string().min(8).max(255) }).optional() }).strict().safeParse(req.body)
     if (!body.success) return void res.status(400).json({ error: 'Invalid Office comment', issues: body.error.issues })
     const artifactId = String(req.params.artifactId)
-    const [artifact, access] = await Promise.all([deps.getArtifact(userId, artifactId), deps.resolveAccess(userId, artifactId)])
+    const [artifact, access] = await Promise.all([deps.getArtifact(userId, artifactId), resolveCollaborationAccess(userId, artifactId)])
     if (!artifact || !access || !access.canComment || !artifact.headVersionId) return void res.status(404).json({ error: 'Office artifact not found' })
     const brianTriggerKey = body.data.invokeBrian?.idempotencyKey
     const created = await deps.createThread({ userId, workspaceId: artifact.workspaceId, artifactId, artifactVersionId: artifact.headVersionId, anchor: body.data.anchor, body: body.data.body, mentions: body.data.mentions, brianTriggerKey })
@@ -130,7 +132,7 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     if (!body.success) return void res.status(400).json({ error: 'Invalid comment reply' })
     const threadId = String(req.params.threadId)
     const context = await deps.getThreadContext(userId, threadId)
-    const access = context ? await deps.resolveAccess(userId, context.artifactId) : null
+    const access = context ? await resolveCollaborationAccess(userId, context.artifactId) : null
     if (!context || !access?.canComment) return void res.status(404).json({ error: 'Comment not found' })
     const reply = await deps.reply({ userId, workspaceId: context.workspaceId, threadId, ...body.data })
     if (!reply) return void res.status(409).json({ error: 'duplicate_or_detached' })
@@ -144,7 +146,7 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     if (!body.success) return void res.status(400).json({ error: 'Invalid resolve request' })
     const threadId = String(req.params.threadId)
     const context = await deps.getThreadContext(userId, threadId)
-    const access = context ? await deps.resolveAccess(userId, context.artifactId) : null
+    const access = context ? await resolveCollaborationAccess(userId, context.artifactId) : null
     if (!context || !access?.canComment || !await deps.resolve({ userId, threadId, resolved: body.data.resolved })) return void res.status(404).json({ error: 'Comment not found' })
     res.json({ ok: true })
   })
@@ -156,7 +158,7 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     if (!body.success) return void res.status(400).json({ error: 'Invalid comment update' })
     const threadId = String(req.params.threadId)
     const context = await deps.getThreadContext(userId, threadId)
-    const access = context ? await deps.resolveAccess(userId, context.artifactId) : null
+    const access = context ? await resolveCollaborationAccess(userId, context.artifactId) : null
     if (!context || !access?.canComment || !await deps.updateThread({ userId, threadId, ...body.data })) return void res.status(404).json({ error: 'Comment not found' })
     res.json({ ok: true })
   })
@@ -168,14 +170,14 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     if (!body.success) return void res.status(400).json({ error: 'Invalid reaction' })
     const messageId = String(req.params.messageId)
     const context = await deps.getMessageContext(userId, messageId)
-    const access = context ? await deps.resolveAccess(userId, context.artifactId) : null
+    const access = context ? await resolveCollaborationAccess(userId, context.artifactId) : null
     if (!context || !access?.canComment || !await deps.react({ userId, messageId, ...body.data })) return void res.status(404).json({ error: 'Comment not found' })
     res.json({ ok: true })
   })
 
   router.get('/artifacts/:artifactId/suggestions', officeMetadataRoute(async (req, userId) => {
     const artifactId = String(req.params.artifactId)
-    const access = await deps.resolveAccess(userId, artifactId)
+    const access = await resolveCollaborationAccess(userId, artifactId)
     if (!access) return {status:404,body:{ error: 'Office artifact not found' }}
     return {workspaceId:access.workspaceId,body:{ suggestions: await deps.listSuggestions(userId, artifactId) }}
   }))
@@ -187,7 +189,7 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     if (!body.success) return void res.status(400).json({ error: 'Invalid suggestion decision' })
     const suggestionId = String(req.params.suggestionId)
     const suggestion = await deps.getSuggestion(userId, suggestionId)
-    const access = suggestion ? await deps.resolveAccess(userId, suggestion.artifactId) : null
+    const access = suggestion ? await resolveCollaborationAccess(userId, suggestion.artifactId) : null
     if (!suggestion || !access?.canEdit) return void res.status(404).json({ error: 'Suggestion not found' })
     if (suggestion.status === body.data.decision) return void res.json({ ok: true })
     if (suggestion.status !== 'open' && suggestion.status !== 'conflicted') return void res.status(409).json({ error: 'suggestion_conflict' })

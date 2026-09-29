@@ -5,12 +5,16 @@ import { createAssociationStore } from '../association-store.js'
 import { createAssociationWorkspaceModulesStore } from '../../association/workspace-module.js'
 import { EventInputSchema, MembershipCheckoutCreateSchema, MembershipCheckoutProviderBindingSchema, MembershipInputSchema, OrderCreateSchema, PlanInputSchema, PromotionImportSchema, PromotionInputSchema, TicketInputSchema } from '../../association/domain.js'
 import { ProviderEntitlementEventSchema } from '@use-brian/core'
+import { createProviderEntitlementInbox } from '../../association/provider-entitlements.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 const pool = getPool(), appPool = getAppPool(), modules = createAssociationWorkspaceModulesStore()
 const promotionHmacKey = 'fictional-promotion-key-for-tests-only'
-const commerce = createAssociationStore(pool, undefined, { promotionHmacKey })
+const commerce = createAssociationStore(pool, undefined, {
+  promotionHmacKey,
+  providerEntitlements: createProviderEntitlementInbox(pool),
+})
 
 async function fixture() {
   const workspaceId = randomUUID(), userId = randomUUID(), buyerId = randomUUID(), secondBuyerId = randomUUID()

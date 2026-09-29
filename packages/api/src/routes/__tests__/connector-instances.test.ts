@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../../db/connector-grant-store.js'
+import type { ConnectorStore } from '../../db/connector-store.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import type { WorkspaceAuditStore } from '../../db/workspace-audit-store.js'
 import type { WorkspaceToolPolicyStore } from '../../db/workspace-tool-policy-store.js'
@@ -77,6 +78,7 @@ function makeApp(options: { userId?: string; clearance?: 'public' | 'internal' |
       delete: mocks.deleteInstance,
       transferToWorkspace: mocks.transferToWorkspace,
     } as unknown as ConnectorInstanceStore,
+    connectorStore: {} as ConnectorStore,
     connectorGrantStore: {
       create: mocks.createGrant,
       revoke: mocks.revoke,
@@ -132,7 +134,8 @@ describe('[COMP:api/connector-instances-route] connector instance routes', () =>
   })
 
   it('creates a grant and stamps the member clearance on the instance', async () => {
-    const { app, createGrant, update } = makeApp({ userId: 'u1', clearance: 'internal' })
+    const { app, createGrant, update, get } = makeApp({ userId: 'u1', clearance: 'internal' })
+    get.mockResolvedValue(instance({ scope: 'user', userId: 'u1', workspaceId: null }))
     const response = await request(app)
       .post(`/api/connector-instances/${IID}/grants`)
       .send({ targetType: 'workspace', targetId: WS })
@@ -142,7 +145,8 @@ describe('[COMP:api/connector-instances-route] connector instance routes', () =>
   })
 
   it('caps transfer sensitivity at the member clearance', async () => {
-    const { app, transferToWorkspace } = makeApp({ userId: 'u1', clearance: 'public' })
+    const { app, transferToWorkspace, get } = makeApp({ userId: 'u1', clearance: 'public' })
+    get.mockResolvedValue(instance({ scope: 'user', userId: 'u1', workspaceId: null }))
     const response = await request(app)
       .post(`/api/connector-instances/${IID}/transfer`)
       .send({ workspaceId: WS, sensitivity: 'confidential' })

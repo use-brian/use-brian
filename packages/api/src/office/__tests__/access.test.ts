@@ -13,6 +13,8 @@ function projection(overrides: Partial<OfficeAccessProjection> = {}): OfficeAcce
     workspaceId: '00000000-0000-4000-8000-000000000011',
     creatorUserId: OTHER,
     ownerUserId: OTHER,
+    mode: 'artifact',
+    expiresAt: null,
     sensitivity: 'internal',
     visibilityUserIds: [],
     requiredCompartments: [],
@@ -66,5 +68,18 @@ describe('[COMP:api/office-access] Office access predicate', () => {
   it('honours a live explicit grant and ignores a revoked grant', () => {
     expect(resolveOfficeAccessProjection(USER, projection({ explicitRole: 'edit' }))).toMatchObject({ role: 'edit', canEdit: true })
     expect(resolveOfficeAccessProjection(USER, projection({ explicitRole: 'edit', grantRevokedAt: new Date() }))).toMatchObject({ role: 'comment', canEdit: false })
+  })
+
+  it('admits only the active unexpired session owner and disables generic collaboration', () => {
+    const expiresAt = new Date('2030-01-02T00:00:00.000Z')
+    const session = projection({ mode: 'session', ownerUserId: USER, defaultWorkspaceRole: 'deny', expiresAt })
+    expect(resolveOfficeAccessProjection(USER, session, new Date('2030-01-01T00:00:00.000Z'))).toMatchObject({
+      mode: 'session', role: 'edit', canView: true, canEdit: true, canComment: false,
+      canRestore: false, canDeletePermanently: false, canElevate: false, canManageSharing: false,
+    })
+    expect(resolveOfficeAccessProjection(OTHER, session, new Date('2030-01-01T00:00:00.000Z'))).toBeNull()
+    expect(resolveOfficeAccessProjection(USER, session, expiresAt)).toBeNull()
+    expect(resolveOfficeAccessProjection(USER, { ...session, lifecycleState: 'purged' }, new Date('2030-01-01T00:00:00.000Z'))).toBeNull()
+    expect(resolveOfficeAccessProjection(USER, { ...session, mutationScopeEligible: false }, new Date('2030-01-01T00:00:00.000Z'))).toBeNull()
   })
 })

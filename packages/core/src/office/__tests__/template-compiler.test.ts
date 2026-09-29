@@ -18,6 +18,7 @@ describe('[COMP:office/template-compiler] Office template compiler', () => {
   it('admits all three authoring paths only after export/reopen validation', async () => {
     expect(canEnableOfficeCreation('document')).toBe(true)
     expect(canEnableOfficeCreation('presentation')).toBe(true)
+    expect(canEnableOfficeCreation('pdf')).toBe(false)
     for (const authoringPath of ['upload', 'scratch', 'promote_version'] as const) {
       const compiled = await compileOfficeTemplate({ authoringPath, draft: authoringPath === 'upload' ? templateBundle('presentation') : configuredDocumentBundle(), resources: [] })
       expect(compiled.receipt).toMatchObject({ ok: true, authoringPath, capabilityVersion: 1 })

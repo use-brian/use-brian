@@ -29,6 +29,7 @@ import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { Button } from "@/components/ui/button";
 import { PlatformIcon } from "@/components/feed/platform-icon";
 import { buildAuthorizeUrl } from "@/lib/feed-connect-account";
+import { desktopBridge } from "@/lib/desktop-auth-source";
 import {
   FEED_CONNECTABLE_PLATFORMS,
   type ConnectableFeedPlatform,
@@ -221,6 +222,7 @@ export function useConnectAccount() {
         platform,
         assistantId,
         origin: window.location.origin,
+        desktop: desktopBridge() !== undefined,
         workspaceId: team.workspaceId,
       });
       const res = await abortableAuthFetch(url, {}, controller.signal);

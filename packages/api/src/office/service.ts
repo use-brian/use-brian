@@ -5,7 +5,7 @@ import {
   type OfficeToolPort,
 } from '@use-brian/core'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
-import type { OfficeArtifactRow } from '../db/office-artifacts.js'
+import { isDurableOfficeArtifact, type OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { ResolvedOfficeAccess } from './access.js'
 
@@ -52,7 +52,7 @@ function artifactWithinTurnScope(
   )
 }
 
-function targetOutline(snapshot: OfficeArtifactSnapshot, offset = 0): Pick<OfficeArtifactToolProjection, 'targets' | 'targetsTruncated' | 'nextTargetOffset'> {
+function targetOutline(snapshot: OfficeArtifactSnapshot, offset = 0): Pick<OfficeArtifactToolProjection, 'sourceHash' | 'targets' | 'targetsTruncated' | 'nextTargetOffset'> {
   const targets: NonNullable<OfficeArtifactToolProjection['targets']> = []
   let targetCount = 0
   const add = (target: NonNullable<OfficeArtifactToolProjection['targets']>[number]) => {
@@ -85,16 +85,31 @@ function targetOutline(snapshot: OfficeArtifactSnapshot, offset = 0): Pick<Offic
         add({ id: object.id, kind: object.kind, label: text.trim().slice(0, 240) || `${object.kind} ${objectIndex + 1}`, parentId: slide.id, locked: object.locked || master?.lockedObjectIds.includes(object.id) })
       }
     }
-  } else {
+  } else if (snapshot.family === 'spreadsheet') {
     for (const [sheetIndex, sheet] of snapshot.worksheets.entries()) {
       add({ id: sheet.id, kind: 'worksheet', label: `${sheetIndex + 1}. ${sheet.name}` })
       for (const table of sheet.tables ?? []) add({ id: table.id, kind: 'spreadsheetTable', label: `${table.name} ${table.ref}; columns ${table.columns.map(c => `${c.id}:${c.name}`).join(', ')}`.slice(0, 240), parentId: sheet.id })
       for (const cell of sheet.cells) add({ id: cell.id, kind: cell.formula ? 'formulaCell' : 'cell', label: `${sheet.name}!${cell.address}: ${cell.formula ? `=${cell.formula}` : String(cell.value ?? '')}`.slice(0, 240), parentId: sheet.id, locked: cell.locked })
       for (const image of sheet.images) add({ id: image.id, kind: 'worksheetImage', label: image.altText || 'Decorative worksheet image', parentId: sheet.id })
     }
+  } else {
+    for (const [pageIndex, page] of snapshot.pages.entries()) {
+      add({ id: page.id, kind: 'pdfPage', label: `Page ${pageIndex + 1}`, pageNumber: pageIndex + 1, pageOrder: pageIndex, rotation: page.rotation, rect: page.cropBox })
+      for (const field of page.fields) {
+        if (field.kind === 'signature') continue
+        const widget = field.widgets.find((candidate) => candidate.pageId === page.id)
+        add({ id: field.id, kind: `pdfField:${field.kind}`, label: field.label, parentId: page.id, locked: field.readOnly, value: field.value, ...(field.allowedOptions ? { options: field.allowedOptions } : {}), pageNumber: pageIndex + 1, ...(widget ? { rect: widget.rect } : {}) })
+      }
+      for (const overlay of page.overlays) {
+        if (overlay.kind === 'signature') continue
+        const label = overlay.kind === 'text' ? overlay.text : overlay.kind === 'date' ? overlay.date : `PDF ${overlay.kind}`
+        add({ id: overlay.id, kind: `pdfOverlay:${overlay.kind}`, label: label.slice(0, 240), parentId: page.id, pageNumber: pageIndex + 1, rect: overlay.rect, rotation: overlay.rotation, ...('resourceId' in overlay ? { resourceId: overlay.resourceId } : {}) })
+      }
+      for (const target of page.placementTargets) add({ id: target.id, kind: 'pdfSignatureTarget', label: `Signature target on page ${pageIndex + 1}`, parentId: page.id, pageNumber: pageIndex + 1, rect: target.rect })
+    }
   }
   const nextTargetOffset = offset + targets.length < targetCount ? offset + targets.length : undefined
-  return { targets, targetsTruncated: nextTargetOffset !== undefined, nextTargetOffset }
+  return { ...(snapshot.family === 'pdf' ? { sourceHash: snapshot.source.sha256 } : {}), targets, targetsTruncated: nextTargetOffset !== undefined, nextTargetOffset }
 }
 
 export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
@@ -131,17 +146,23 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
       if (!artifact || !access || !artifactWithinTurnScope(artifact, params)) return null
       const [job, live] = await Promise.all([deps.latestJob(params.userId, params.artifactId), deps.getSnapshot(params.userId, params.artifactId)])
-      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode } : undefined }
+      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, ...(artifact.expiresAt ? { expiresAt: artifact.expiresAt.toISOString() } : {}), scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode } : undefined }
     },
 
     async revise(params) {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
-      if (!artifact || !access || !access.canComment || !artifactWithinTurnScope(artifact, params)) return null
+      const durable = artifact ? isDurableOfficeArtifact(artifact) : false
+      const pdfSession = artifact?.family === 'pdf' && artifact.mode === 'session'
+      if (!artifact || !access || !artifactWithinTurnScope(artifact, params)
+        || durable && !access.canComment
+        || pdfSession && !access.canEdit
+        || !durable && !pdfSession) return null
       if (artifact.headVersion !== params.expectedVersion) return 'version_conflict'
-      await deps.raiseScope({ userId: params.userId, artifactId: artifact.id, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds })
+      if (pdfSession && params.targetIds.length === 0) return null
+      if (durable) await deps.raiseScope({ userId: params.userId, artifactId: artifact.id, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds })
       const job = await deps.createJob({ userId: params.userId, workspaceId: artifact.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'revise', brief: { instruction: params.instruction, targetIds: params.targetIds, expectedVersion: params.expectedVersion }, authorityProjection: { role: access.role, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds, compartmentGrant: params.compartmentGrant, projectGrant: params.projectGrant }, baseArtifactVersion: artifact.headVersion, idempotencyKey: params.idempotencyKey })
       deps.wakeGeneration?.(params.userId)
-      return { jobId: job.id, mode: access.canEdit ? 'direct' : 'proposal' }
+      return { jobId: job.id, mode: pdfSession || access.canEdit ? 'direct' : 'proposal' }
     },
   }
 }

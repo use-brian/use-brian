@@ -15,7 +15,10 @@ import { EventInputSchema, TicketInputSchema, OrderCreateSchema } from '../../as
 import { _resetCoalescerForTests } from '../../brain-stream/notify.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
-const pool = getPool(), appPool = getAppPool(), modules = createAssociationWorkspaceModulesStore(), store = createAssociationStore(), keys = createCrmIntegrationStore()
+const pool = getPool(), appPool = getAppPool(), modules = createAssociationWorkspaceModulesStore()
+const providerEntitlements = createProviderEntitlementInbox(pool)
+const store = createAssociationStore(pool, undefined, { providerEntitlements })
+const keys = createCrmIntegrationStore()
 async function fixture() {
   const workspaceId = randomUUID(), userId = randomUUID(), contactId = randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [userId])
@@ -61,7 +64,10 @@ async function receipt(ws: string, eventId: string) {
 }
 async function pending(f: Awaited<ReturnType<typeof fixture>>, actor = f.actor) {
   await f.bind()
-  await expect(createAssociationStore(faultPool('admission_commit')).reconcileProviderEvent(f.workspaceId, f.orderId, f.evidence, actor)).rejects.toThrow()
+  const failingPool = faultPool('admission_commit')
+  await expect(createAssociationStore(failingPool, undefined, {
+    providerEntitlements: createProviderEntitlementInbox(failingPool),
+  }).reconcileProviderEvent(f.workspaceId, f.orderId, f.evidence, actor)).rejects.toThrow()
   const saved = await receipt(f.workspaceId, f.evidence.eventId)
   expect(saved.state).toBe('pending')
   return saved
@@ -141,7 +147,10 @@ describe('[COMP:crm/provider-inbox] Actual durable normalized receipts', () => {
   })
   it('rolls back domain effects when receipt acknowledgement fails and retries without duplicating evidence', async () => {
     const f = await fixture(); await f.bind()
-    await expect(createAssociationStore(faultPool('acknowledgement')).reconcileProviderEvent(f.workspaceId, f.orderId, f.evidence, f.actor)).rejects.toMatchObject({ details: { receiptState: 'retry' } })
+    const failingPool = faultPool('acknowledgement')
+    await expect(createAssociationStore(failingPool, undefined, {
+      providerEntitlements: createProviderEntitlementInbox(failingPool),
+    }).reconcileProviderEvent(f.workspaceId, f.orderId, f.evidence, f.actor)).rejects.toMatchObject({ details: { receiptState: 'retry' } })
     expect(await counts(f.workspaceId)).toEqual({ evidence: 0, transitions: 0, notifications: 0 })
     expect((await receipt(f.workspaceId, f.evidence.eventId))).toMatchObject({ state: 'retry', last_error_code: 'transient_failure', attempts: 1 })
     expect((await f.apply()).receipt).toMatchObject({ state: 'applied', attempts: 2 })
@@ -149,7 +158,10 @@ describe('[COMP:crm/provider-inbox] Actual durable normalized receipts', () => {
   })
   it('recognizes a lost response after the atomic commit and does not repeat the paid transition', async () => {
     const f = await fixture(); await f.bind()
-    await expect(createAssociationStore(faultPool('applied_commit')).reconcileProviderEvent(f.workspaceId, f.orderId, f.evidence, f.actor)).rejects.toMatchObject({ details: { receiptState: 'applied' } })
+    const failingPool = faultPool('applied_commit')
+    await expect(createAssociationStore(failingPool, undefined, {
+      providerEntitlements: createProviderEntitlementInbox(failingPool),
+    }).reconcileProviderEvent(f.workspaceId, f.orderId, f.evidence, f.actor)).rejects.toMatchObject({ details: { receiptState: 'applied' } })
     expect((await f.apply())).toMatchObject({ created: false, receipt: { state: 'applied', attempts: 1 } })
     expect(await counts(f.workspaceId)).toEqual({ evidence: 1, transitions: 1, notifications: 2 })
   })
@@ -160,7 +172,9 @@ describe('[COMP:crm/provider-inbox] Actual durable normalized receipts', () => {
     expect(results.some(r => r.status === 'fulfilled')).toBe(true)
     expect((await receipt(f.workspaceId, f.evidence.eventId)).state).toBe('applied')
     expect(await counts(f.workspaceId)).toEqual({ evidence: 1, transitions: 1, notifications: 2 })
-    const g = await fixture(), queued = await pending(g), worker = createProviderInboxWorker()
+    const g = await fixture(), queued = await pending(g), worker = createProviderInboxWorker({
+      process: (workspaceId, receiptId) => store.retryProviderEventReceipt(workspaceId, receiptId),
+    })
     expect(await worker.tick()).toBeGreaterThanOrEqual(1)
     expect((await receipt(g.workspaceId, g.evidence.eventId))).toMatchObject({ id: queued.id, state: 'applied' })
   })

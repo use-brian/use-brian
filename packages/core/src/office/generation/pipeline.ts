@@ -176,6 +176,7 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
     if (!candidate.ok) return { status: 'failed', code: 'candidate_invalid', message: candidate.diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join('; ') }
     if (!await stage(deps, { stage: 'validate', version: 8, templateVersionId: template.id, snapshot, evidence, claims }, 'office.job.candidate_validated', {})) return { status: 'cancelled' }
 
+    if (snapshot.family === 'pdf') return { status: 'failed', code: 'pdf_session_only', message: 'PDFs are edited only through bounded PDF sessions.' }
     const exported = snapshot.family === 'document' ? await exportOfficeDocument(snapshot, deps.resolveResource) : snapshot.family === 'presentation' ? await exportOfficePresentation(snapshot, deps.resolveResource) : await exportOfficeSpreadsheet(snapshot, deps.resolveResource)
     if (!deps.renderValidation) return { status: 'failed', code: 'render_validation_unavailable', message: 'Rendered validation is required before generation can be committed.' }
     const renderValidation = await deps.renderValidation(structuredClone(snapshot), { exportBytes: new Uint8Array(exported.bytes), resolveResource: deps.resolveResource, fitBudget })

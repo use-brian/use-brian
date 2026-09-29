@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto'
 import {
   OfficeTemplateBundleSchema,
+  canEnablePdfEditingSession as modelCanEnablePdfEditingSession,
   officeTemplateLockedTokenNames,
   officeCapabilityManifest,
   preflightOfficeCandidate,
@@ -10,6 +11,7 @@ import {
   type OfficeArtifactSnapshot,
   type OfficePreflightDiagnostic,
   type OfficeTemplateBundle,
+  type PdfEditingCapabilityAvailability,
 } from '@use-brian/office-model'
 import { fitOfficeArtifact, officeGoldenSerialization, type OfficeFitBudget } from '@use-brian/office-renderer'
 import { exportOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
@@ -53,6 +55,9 @@ const runtimeCapabilityIds = new Set(
 /** Structural feature-enablement gate used by template admission and, later,
  * tool/UI registration. It is deliberately independent of prompts/flags. */
 export function officeAdmissionBarrierDiagnostics(family: OfficeArtifactSnapshot['family']): OfficePreflightDiagnostic[] {
+  if (family === 'pdf') {
+    return [{ severity: 'error', code: 'capability.pdf_session_only', path: 'family', capabilityId: 'pdfSessionAdmission', message: 'PDF is import-only and cannot use generic Office creation or templates' }]
+  }
   const diagnostics: OfficePreflightDiagnostic[] = validateOfficeCapabilityManifest().map((message) => ({ severity: 'error', code: 'capability.manifest_invalid', path: '', message }))
   for (const capability of officeCapabilityManifest.capabilities) {
     if (capability.disposition !== 'editable' || capability.family !== 'shared' && capability.family !== family) continue
@@ -65,6 +70,12 @@ export function officeAdmissionBarrierDiagnostics(family: OfficeArtifactSnapshot
 
 export function canEnableOfficeCreation(family: OfficeArtifactSnapshot['family']): boolean {
   return officeAdmissionBarrierDiagnostics(family).length === 0
+}
+
+/** Independent session barrier. Callers must report every runtime slice from
+ * the same build; omission is a fail-closed unavailable result. */
+export function canEnablePdfEditingSession(availability: Partial<PdfEditingCapabilityAvailability> = {}): boolean {
+  return modelCanEnablePdfEditingSession(availability)
 }
 
 function collectIds(value: unknown, target = new Set<string>()): Set<string> {
@@ -149,6 +160,7 @@ export async function compileOfficeTemplate(params: {
     let exported: Awaited<ReturnType<typeof exportOfficeDocument>> | Awaited<ReturnType<typeof exportOfficePresentation>> | Awaited<ReturnType<typeof exportOfficeSpreadsheet>>
     let reparsed: Awaited<ReturnType<typeof reparseOfficeDocument>> | Awaited<ReturnType<typeof reparseOfficePresentation>> | Awaited<ReturnType<typeof reparseOfficeSpreadsheet>>
     const snapshot = draft.snapshot
+    if (snapshot.family === 'pdf') throw new Error('PDFs cannot be compiled as Office templates')
     if (snapshot.family === 'document') {
       exported = await exportOfficeDocument(snapshot, resolveResource)
       reparsed = await reparseOfficeDocument(exported.bytes)

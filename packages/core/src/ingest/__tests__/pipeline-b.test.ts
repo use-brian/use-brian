@@ -50,6 +50,7 @@ import {
 } from '../pipeline-b.js'
 import { estimateStringTokens } from '../../compaction/index.js'
 import type { PlatformEngagementMetrics } from '../types.js'
+import type { PipelineBApplicationPort } from '../pipeline-b-application.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 // ── Mock provider (sequenced responses across multiple stream() calls) ──
@@ -907,6 +908,70 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(episodes.checkpointCalls[0]?.summaryText).toContain('2 post(s)')
     expect(episodes.statusCalls).toEqual([{ id: 'digest-ep', next: 'archived' }])
     expect(result).toBeTruthy()
+  })
+
+  it('freezes the structured digest into the durable application path without model or direct writes', async () => {
+    const memories = spyMemories()
+    const links = spyLinks()
+    const episodes = spyEpisodes()
+    const application = { apply: vi.fn(async (
+      input: Parameters<PipelineBApplicationPort['apply']>[0],
+    ) => ({
+      id: 'run-digest', workspaceId: input.workspaceId, episodeId: input.plan.episodeId,
+      attemptKey: input.attemptKey, planHash: input.plan.planHash,
+      extractionState: 'succeeded' as const, applicationState: 'complete' as const,
+      errorCode: null, counts: { pending: 0, committed: 5, already_applied: 0, held: 0, rejected: 0, failed: 0 },
+      items: [],
+    })) } satisfies PipelineBApplicationPort
+    const digest: PlatformEngagementMetrics = {
+      per_post: [
+        { post_episode_id: 'post-ep-1', likes: 10 },
+        { post_episode_id: 'post-ep-2', replies: 2 },
+      ],
+      aggregate: { total_engagement: 12 },
+    }
+    const result = await processEpisode(
+      baseEpisode({ id: 'digest-ep', sourceKind: 'platform_engagement_digest', digest }),
+      '',
+      makeDeps({
+        provider: throwingProvider(), memories: memories.store, entityLinks: links.store,
+        episodes: {
+          ...episodes.port,
+          getEpisodeByIdSystem: vi.fn(async () => ({
+            ...baseEpisode({ id: 'digest-ep', sourceKind: 'platform_engagement_digest', digest }),
+            status: 'archived', scopeVersion: 'scope-v1', scopeHeld: false, extractionLocked: false,
+          } as never)),
+        },
+        application,
+      }),
+    )
+    expect(memories.created).toEqual([])
+    expect(links.created).toEqual([])
+    expect(application.apply).toHaveBeenCalledOnce()
+    const plan = application.apply.mock.calls[0]![0].plan
+    expect(plan.candidates.map((candidate) => candidate.primitiveKind)).toEqual([
+      'digest_memory', 'digest_edge', 'digest_memory', 'digest_edge', 'episode_finalization',
+    ])
+    expect(plan.candidates[1]!.dependencyIds).toEqual([plan.candidates[0]!.candidateId])
+    expect(result).toMatchObject({ applicationState: 'complete', applicationRunId: 'run-digest' })
+  })
+
+  it('keeps shadow rebuilds outside the live durable ledger', async () => {
+    const memories = spyMemories()
+    const application = { apply: vi.fn() }
+    const digest: PlatformEngagementMetrics = {
+      per_post: [{ post_episode_id: 'post-ep-1', likes: 1 }], aggregate: {},
+    }
+    const result = await processEpisode(
+      baseEpisode({ id: 'shadow-digest', sourceKind: 'platform_engagement_digest', digest }), '',
+      makeDeps({
+        provider: throwingProvider(), memories: memories.store,
+        application: application as never, applicationNamespace: 'shadow',
+      }),
+    )
+    expect(application.apply).not.toHaveBeenCalled()
+    expect(memories.created).toHaveLength(1)
+    expect(result.applicationState).toBe('not_started')
   })
 
   it('skips writes and still archives when extraction is fully empty', async () => {
@@ -2367,6 +2432,42 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
       triggerKey: 'pipeline_b_entity_resolution',
     })
     expect(resolverRow!.actualCostUsd).toBeGreaterThan(0)
+  })
+
+  it('does not duplicate centrally metered Jev entity resolution usage', async () => {
+    const usage = usageSpy()
+    const entities = spyEntities()
+    entities.store.listLiveEntitiesSystem = async () => [
+      makeEntity({ id: 'ent-a1', kind: 'company', displayName: 'Acme' }),
+      makeEntity({ id: 'ent-a2', kind: 'company', displayName: 'Acme' }),
+    ]
+    const extraction = JSON.stringify({
+      summary: 'Acme mentioned.',
+      entities: [{ kind: 'company', display_name: 'Acme', canonical_id: null }],
+      edges: [],
+      memories: [],
+      tags: [],
+    })
+    const extractionProvider = sequencedProvider([
+      extraction,
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ])
+    const resolverProvider = sequencedProvider(
+      [JSON.stringify({ id: 'ent-a1' })],
+      undefined,
+      'jev-1.13.0',
+    )
+    const deps = makeDeps({ provider: extractionProvider, entities: entities.store, usage: usage.store })
+    ;(deps as { entityResolver?: unknown }).entityResolver = {
+      candidateLimit: 100,
+      llm: { provider: resolverProvider, model: 'typesafe-jev-1.13' },
+    }
+
+    await processEpisode(baseEpisode(), 'note', deps)
+
+    const rows = usage.recordUsage.mock.calls.map((call) => call[0])
+    expect(rows.some((row) => row.triggerKey === 'pipeline_b_entity_resolution')).toBe(false)
+    expect(rows.some((row) => row.triggerKey === 'pipeline_b_extraction')).toBe(true)
   })
 
   it('records no resolver row when resolution stays on a local tier (no LLM spend)', async () => {

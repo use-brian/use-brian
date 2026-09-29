@@ -28,6 +28,14 @@ describe('[COMP:files/file-ingest-jobs-store] file-ingest job queue', () => {
     expect(res).toEqual({ enqueued: true, jobId: 'job-1' })
   })
 
+  it('[COMP:api/office-pdf-sessions] refuses session-owned and no-index files', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+    await enqueueFileIngestJob({ fileId: 'file-1', workspaceId: 'ws-1', actingUserId: 'u-1' })
+    const sql = mockQuery.mock.calls[0]?.[0] ?? ''
+    expect(sql).toContain("f.path NOT LIKE '/office/sessions/%'")
+    expect(sql).toContain("NOT COALESCE((f.metadata->>'noIndex')::boolean,false)")
+  })
+
   it('enqueue is idempotent — ON CONFLICT DO NOTHING yields enqueued:false', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] } as never)
     const res = await enqueueFileIngestJob({ fileId: 'file-1', workspaceId: 'ws-1', actingUserId: 'u-1' })

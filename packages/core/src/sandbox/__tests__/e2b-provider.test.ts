@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import { createE2bCloudProvider, SCRATCH_DIR } from '../providers/e2b/index.js'
 import { BU_DRIVER_PY, mapBrowserUseHistory } from '../providers/e2b/bu-driver.js'
+import {
+  JEV_ULTRAFAST_DRIVER_PY,
+  mapJevUltrafastReceipt,
+} from '../providers/e2b/jev-ultrafast-driver.js'
 import { parseSnapshotOutput, cli, PART_SEPARATOR, SANDBOX_SESSION_NAME } from '../providers/e2b/agent-browser-cli.js'
 import {
   TAKEOVER_INPUT_HELPER_MJS,
@@ -374,7 +378,181 @@ const BU_HISTORY = {
   ],
 }
 
-describe('[COMP:sandbox/e2b-cloud] runBrowserUse — the 0.13 python driver lane', () => {
+const JEV_RECEIPT = {
+  schema_version: 1,
+  status: 'done',
+  start_url: 'https://shop.example/',
+  final: {
+    url: 'https://shop.example/results',
+    title: 'Search results',
+    text: 'Three matching items are visible.',
+  },
+  history: [
+    {
+      step: 1,
+      action: 'Search',
+      kind: 'fill',
+      text: 'blue widgets',
+      operation: 'TYPE_TEXT',
+      page_changed: true,
+      url: 'https://shop.example/',
+    },
+    {
+      step: 2,
+      action: 'Search',
+      kind: 'click',
+      text: null,
+      operation: 'CLICK',
+      page_changed: true,
+      url: 'https://shop.example/results',
+    },
+    {
+      step: 3,
+      action: 'Scroll down',
+      kind: 'scroll',
+      text: null,
+      operation: 'SCROLL_DOWN',
+      page_changed: true,
+      url: 'https://shop.example/results',
+    },
+  ],
+  decisions: [
+    { model: 'jev-1.13.0', operation: 'TYPE_TEXT', usage: { input_tokens: 100, output_tokens: 0 } },
+    { model: 'jev-1.13.0', operation: 'CLICK', usage: { input_tokens: 80, output_tokens: 0 } },
+    { model: 'jev-1.13.0', operation: 'DONE', usage: { input_tokens: 60, output_tokens: 0 } },
+  ],
+  text_calls: [
+    { model: 'gemini-3-flash-preview', usage: { prompt_tokens: 30, completion_tokens: 8 } },
+  ],
+  error: null,
+}
+
+describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Jev primary and safe fallback', () => {
+  it('runs Jev over the shared CDP endpoint, returns evidence, and preserves exact usage', async () => {
+    let filesRef: Map<string, Uint8Array> | undefined
+    const { runtime, commands, files } = fakeRuntime((cmd) => {
+      if (cmd === cli.getCdpUrl()) return { stdout: 'http://127.0.0.1:9222\n', stderr: '', exitCode: 0 }
+      if (cmd.includes('.jev/driver.py')) {
+        filesRef?.set(
+          `${SCRATCH_DIR}/.jev/receipt.json`,
+          new TextEncoder().encode(JSON.stringify(JEV_RECEIPT)),
+        )
+        return { stdout: 'jev logs', stderr: '', exitCode: 0 }
+      }
+      return undefined
+    })
+    filesRef = files
+    const provider = createE2bCloudProvider(runtime, {
+      jevUltrafast: { apiKey: 'typesafe-test', model: 'jev-1.13.0' },
+      browserUse: {
+        apiKeyEnvName: 'GOOGLE_API_KEY',
+        apiKey: 'gemini-test',
+        model: 'gemini-3-flash-preview',
+      },
+    })
+    const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
+    const result = await provider.runBrowserAgent(sandboxId, {
+      url: 'https://shop.example/',
+      goal: 'Find blue widgets',
+      maxSteps: 12,
+    })
+
+    expect(result).toMatchObject({
+      backend: 'jev-ultrafast',
+      status: 'completed',
+      usage: [
+        { kind: 'jev', model: 'jev-1.13.0', inputTokens: 240, outputTokens: 0, providerKeySource: 'platform' },
+        { kind: 'text_helper', model: 'gemini-3-flash-preview', inputTokens: 30, outputTokens: 8, providerKeySource: 'platform' },
+      ],
+    })
+    expect(result.output).toContain('Three matching items are visible')
+    expect(result.trace.map((step) => step.action)).toEqual(['open', 'fill', 'click', 'scroll', 'done'])
+    expect(commands.some((command) => command.cmd.includes('.bu/driver.py'))).toBe(false)
+    const exec = commands.find((command) => command.cmd.includes('.jev/driver.py'))
+    expect(exec?.envs).toMatchObject({
+      BU_CDP_WS: 'http://127.0.0.1:9222',
+      JEV_START_URL: 'https://shop.example/',
+      JEV_MAX_STEPS: '12',
+      TYPESAFE_API_KEY: 'typesafe-test',
+      TYPESAFE_MODEL: 'jev-1.13.0',
+      TEXT_MODEL_API_KEY: 'gemini-test',
+      TEXT_MODEL: 'gemini-3-flash-preview',
+      TEXT_MODEL_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      TEXT_MODEL_DIALECT: 'openai-chat-completions',
+    })
+    expect(new TextDecoder().decode(files.get(`${SCRATCH_DIR}/.jev/driver.py`))).toBe(JEV_ULTRAFAST_DRIVER_PY)
+    for (const command of commands) {
+      if (command === exec) continue
+      expect(command.envs?.TYPESAFE_API_KEY).toBeUndefined()
+      expect(command.envs?.TEXT_MODEL_API_KEY).toBeUndefined()
+    }
+  })
+
+  it('falls back to Browser Use only when Jev stops before an action', async () => {
+    let filesRef: Map<string, Uint8Array> | undefined
+    const blocked = { ...JEV_RECEIPT, status: 'blocked', history: [], error: 'No supported operation' }
+    const { runtime, commands, files } = fakeRuntime((cmd) => {
+      if (cmd === cli.getCdpUrl()) return { stdout: 'http://127.0.0.1:9222\n', stderr: '', exitCode: 0 }
+      if (cmd.includes('.jev/driver.py')) {
+        filesRef?.set(`${SCRATCH_DIR}/.jev/receipt.json`, new TextEncoder().encode(JSON.stringify(blocked)))
+        return { stdout: '', stderr: '', exitCode: 0 }
+      }
+      if (cmd.includes('.bu/driver.py')) {
+        filesRef?.set(`${SCRATCH_DIR}/.bu/history.json`, new TextEncoder().encode(JSON.stringify(BU_HISTORY)))
+        filesRef?.set(`${SCRATCH_DIR}/.bu/output.txt`, new TextEncoder().encode('Browser Use completed'))
+        return { stdout: '', stderr: '', exitCode: 0 }
+      }
+      return undefined
+    })
+    filesRef = files
+    const provider = createE2bCloudProvider(runtime, {
+      jevUltrafast: { apiKey: 'typesafe-test', model: 'jev-1.13.0' },
+      browserUse: { apiKeyEnvName: 'GOOGLE_API_KEY', apiKey: 'gemini-test', model: 'gemini-test' },
+    })
+    const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
+    const result = await provider.runBrowserAgent(sandboxId, { url: 'https://shop.example/', goal: 'Find it' })
+
+    expect(result).toMatchObject({
+      backend: 'browser-use',
+      status: 'completed',
+      output: 'Browser Use completed',
+      fallbackReason: 'No supported operation',
+    })
+    expect(commands.some((command) => command.cmd.includes('/opt/browser-use-venv/bin/python'))).toBe(true)
+    expect(commands.filter((command) => command.cmd === cli.getCdpUrl())).toHaveLength(2)
+  })
+
+  it('never replays the goal after Jev has executed an action', async () => {
+    let filesRef: Map<string, Uint8Array> | undefined
+    const partial = {
+      ...JEV_RECEIPT,
+      status: 'error',
+      history: [JEV_RECEIPT.history[0]],
+      error: 'Page changed during observation',
+    }
+    const { runtime, commands, files } = fakeRuntime((cmd) => {
+      if (cmd === cli.getCdpUrl()) return { stdout: 'http://127.0.0.1:9222\n', stderr: '', exitCode: 0 }
+      if (cmd.includes('.jev/driver.py')) {
+        filesRef?.set(`${SCRATCH_DIR}/.jev/receipt.json`, new TextEncoder().encode(JSON.stringify(partial)))
+        return { stdout: '', stderr: '', exitCode: 0 }
+      }
+      return undefined
+    })
+    filesRef = files
+    const provider = createE2bCloudProvider(runtime, {
+      jevUltrafast: { apiKey: 'typesafe-test', model: 'jev-1.13.0' },
+      browserUse: { apiKeyEnvName: 'GOOGLE_API_KEY', apiKey: 'gemini-test', model: 'gemini-test' },
+    })
+    const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
+    const result = await provider.runBrowserAgent(sandboxId, { url: 'https://shop.example/', goal: 'Find it' })
+
+    expect(result).toMatchObject({ backend: 'jev-ultrafast', status: 'partial_failure' })
+    expect(result.output).toContain('Page changed during observation')
+    expect(commands.some((command) => command.cmd.includes('.bu/driver.py'))).toBe(false)
+  })
+})
+
+describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Browser Use compatibility fallback', () => {
   it('materializes the driver, attaches over CDP, and threads the LLM key per-run only', async () => {
     let filesRef: Map<string, Uint8Array> | undefined
     const { runtime, commands, files } = fakeRuntime((cmd) => {
@@ -392,14 +570,19 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserUse — the 0.13 python driver lane
       browserUse: { apiKeyEnvName: 'ANTHROPIC_API_KEY', apiKey: 'sk-ant-test', model: 'test-model' },
     })
     const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
-    const res = await provider.runBrowserUse(sandboxId, { goal: 'find the flight price', maxSteps: 25 })
+    const res = await provider.runBrowserAgent(sandboxId, {
+      url: 'https://www.google.com/travel/flights',
+      goal: 'find the flight price',
+      maxSteps: 25,
+    })
 
     // The final answer comes from the driver's output FILE, never the noisy stdout.
     expect(res.output).toBe('Cheapest CX premium economy: HK$9,876')
+    expect(res.backend).toBe('browser-use')
     expect(res.trace.map((t) => t.action)).toEqual(['open', 'click', 'fill', 'scroll', 'extract', 'done'])
 
     const exec = commands.find((c) => c.cmd.includes('.bu/driver.py'))
-    expect(exec?.cmd).toContain('python3')
+    expect(exec?.cmd).toContain('/opt/browser-use-venv/bin/python')
     // The exploration LLM needs egress — this lane is NOT unshare-wrapped.
     expect(exec?.cmd).not.toContain('unshare')
     // Env contract: CDP attach + paths + budget + model + the per-run key
@@ -414,13 +597,42 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserUse — the 0.13 python driver lane
       ANTHROPIC_API_KEY: 'sk-ant-test',
     })
     // Goal + driver traveled as scratch files, never shell-interpolated.
-    expect(new TextDecoder().decode(files.get(`${SCRATCH_DIR}/.bu/goal.txt`))).toBe('find the flight price')
+    expect(new TextDecoder().decode(files.get(`${SCRATCH_DIR}/.bu/goal.txt`))).toBe(
+      'Start at https://www.google.com/travel/flights. find the flight price',
+    )
     expect(new TextDecoder().decode(files.get(`${SCRATCH_DIR}/.bu/driver.py`))).toBe(BU_DRIVER_PY)
     // The sandbox-create path stayed secret-free — the key exists ONLY on the
     // driver exec, never on any other command.
     for (const c of commands) {
       if (!c.cmd.includes('.bu/driver.py')) expect(c.envs?.ANTHROPIC_API_KEY).toBeUndefined()
     }
+  })
+
+  it('reports Browser Use as partial when its process fails after producing a trace', async () => {
+    let filesRef: Map<string, Uint8Array> | undefined
+    const { runtime, files } = fakeRuntime((cmd) => {
+      if (cmd === cli.getCdpUrl()) return { stdout: 'http://127.0.0.1:9222\n', stderr: '', exitCode: 0 }
+      if (cmd.includes('.bu/driver.py')) {
+        filesRef?.set(`${SCRATCH_DIR}/.bu/history.json`, new TextEncoder().encode(JSON.stringify(BU_HISTORY)))
+        filesRef?.set(`${SCRATCH_DIR}/.bu/output.txt`, new TextEncoder().encode('Stopped after acting'))
+        return { stdout: '', stderr: 'late browser failure', exitCode: 1 }
+      }
+      return undefined
+    })
+    filesRef = files
+    const provider = createE2bCloudProvider(runtime, {
+      browserUse: { apiKeyEnvName: 'ANTHROPIC_API_KEY', apiKey: 'sk-ant-test', model: 'test-model' },
+    })
+    const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
+
+    await expect(provider.runBrowserAgent(sandboxId, {
+      url: 'https://shop.example/',
+      goal: 'Find it',
+    })).resolves.toMatchObject({
+      backend: 'browser-use',
+      status: 'partial_failure',
+      output: 'Stopped after acting',
+    })
   })
 
   it('forwards OpenAI-compatible config and no-vision only to the driver exec', async () => {
@@ -440,7 +652,10 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserUse — the 0.13 python driver lane
     })
     const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
 
-    await provider.runBrowserUse(sandboxId, { goal: 'browse without screenshots' })
+    await provider.runBrowserAgent(sandboxId, {
+      url: 'https://x.test/',
+      goal: 'browse without screenshots',
+    })
 
     const exec = commands.find((c) => c.cmd.includes('.bu/driver.py'))
     expect(exec?.envs).toMatchObject({
@@ -466,7 +681,8 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserUse — the 0.13 python driver lane
     const { runtime } = fakeRuntime()
     const provider = createE2bCloudProvider(runtime)
     const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
-    await expect(provider.runBrowserUse(sandboxId, { goal: 'x' })).rejects.toThrow(/not configured/i)
+    await expect(provider.runBrowserAgent(sandboxId, { url: 'https://x.test/', goal: 'x' }))
+      .rejects.toThrow(/not configured/i)
   })
 
   it('surfaces the stderr TAIL on a dead driver and re-resolves the CDP endpoint next call', async () => {
@@ -491,11 +707,11 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserUse — the 0.13 python driver lane
     })
     const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
     // Tail, not head: the traceback's LAST line is the real diagnostic.
-    await expect(provider.runBrowserUse(sandboxId, { goal: 'x' })).rejects.toThrow(
+    await expect(provider.runBrowserAgent(sandboxId, { url: 'https://x.test/', goal: 'x' })).rejects.toThrow(
       /RuntimeError: no LLM API key/,
     )
     // The failure dropped the cached CDP endpoint — the retry re-resolves it.
-    await provider.runBrowserUse(sandboxId, { goal: 'x' }).catch(() => undefined)
+    await provider.runBrowserAgent(sandboxId, { url: 'https://x.test/', goal: 'x' }).catch(() => undefined)
     expect(commands.filter((c) => c.cmd === cli.getCdpUrl()).length).toBe(2)
   })
 })
@@ -562,6 +778,52 @@ describe('[COMP:sandbox/e2b-cloud] mapBrowserUseHistory — history → distille
       mapBrowserUseHistory({ history: [{ model_output: { action: [{ brand_new_verb: { a: 1 } }] }, state: {}, result: [] }] })
         .trace,
     ).toEqual([])
+  })
+})
+
+describe('[COMP:sandbox/e2b-cloud] mapJevUltrafastReceipt — receipt → trace + usage', () => {
+  it('maps executable actions, skips selects honestly, and aggregates both usage lanes', () => {
+    const receipt = {
+      ...JEV_RECEIPT,
+      history: [
+        ...JEV_RECEIPT.history,
+        {
+          step: 4,
+          action: 'Blue',
+          kind: 'select',
+          text: null,
+          operation: 'SELECT',
+          page_changed: true,
+          url: 'https://shop.example/results',
+        },
+      ],
+    }
+    const result = mapJevUltrafastReceipt(receipt, 'https://fallback.example/')
+
+    expect(result.status).toBe('done')
+    expect(result.executedActions).toBe(4)
+    expect(result.trace.map((step) => step.action)).toEqual(['open', 'fill', 'click', 'scroll', 'done'])
+    expect(result.usage).toEqual([
+      { kind: 'jev', model: 'jev-1.13.0', inputTokens: 240, outputTokens: 0 },
+      { kind: 'text_helper', model: 'gemini-3-flash-preview', inputTokens: 30, outputTokens: 8 },
+    ])
+  })
+
+  it('never throws on drift and treats wait-only receipts as pre-action', () => {
+    expect(mapJevUltrafastReceipt(null, 'https://fallback.example/')).toMatchObject({
+      status: 'error',
+      executedActions: 0,
+      usage: [],
+    })
+    expect(mapJevUltrafastReceipt({
+      status: 'blocked',
+      history: [{ kind: 'wait', operation: 'WAIT' }, null, 42],
+      decisions: [{ model: 'jev-1.13.0', usage: { input_tokens: 'bad' } }],
+    }, 'https://fallback.example/')).toMatchObject({
+      status: 'blocked',
+      executedActions: 0,
+      usage: [],
+    })
   })
 })
 

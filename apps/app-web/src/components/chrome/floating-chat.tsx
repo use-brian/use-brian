@@ -161,6 +161,7 @@ import {
   useMidTurnQueue,
   joinQueuedInputs,
 } from "@/lib/use-mid-turn-queue";
+import { useChatController } from "@/lib/chat/use-chat-controller";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 import remarkGfm from "remark-gfm";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
@@ -829,6 +830,7 @@ export function FloatingChat({
   useEffect(() => {
     sessionIdRef.current = session.state.sessionId;
   }, [session.state.sessionId]);
+  const chatController = useChatController(() => sessionIdRef.current);
 
   // ── Mid-turn input (queue + steer) ─────────────────────────────────────
   // Messages sent while a turn streams. They live in the hook rather than in
@@ -1486,9 +1488,11 @@ export function FloatingChat({
       // Restore whichever durable human input owns the current turn. Generic
       // confirmations re-enter the shared confirmation reducer so the same
       // card renders after navigation/reload; questions keep their answer UI.
+      const controllerProbe = chatController.capture();
       void fetchPendingSessionInput(latest.id)
         .then(({ pending, toolConfirmation }) => {
           if (cancelled || epoch !== threadEpochRef.current) return;
+          if (!chatController.isCurrent(controllerProbe)) return;
           if (pending) {
             setPendingQuestion({
               approvalId: pending.approvalId,
@@ -1496,11 +1500,27 @@ export function FloatingChat({
               expiresAt: pending.expiresAt,
               sessionId: latest.id,
             });
+            chatController.presentInteraction(controllerProbe, {
+              kind: "question",
+              approvalId: pending.approvalId,
+              source: "restored",
+              status: "pending",
+              payload: pending,
+            });
           }
           if (toolConfirmation) {
+            const confirmation = toRestoredConfirmation(toolConfirmation, latest.id);
+            chatController.presentInteraction(controllerProbe, {
+              kind: "tool-confirmation",
+              approvalId: toolConfirmation.approvalId,
+              toolCallId: confirmation.toolCallId,
+              source: "restored",
+              status: "pending",
+              payload: confirmation,
+            });
             sessionDispatchRef.current({
               type: "confirmation/add",
-              confirmation: toRestoredConfirmation(toolConfirmation, latest.id),
+              confirmation,
             });
           }
         })
@@ -1585,7 +1605,16 @@ export function FloatingChat({
     let cancelled = false;
     let sawDone = false;
     const controller = new AbortController();
+    const controllerRun = chatController.capture();
+    chatController.reconnect(controllerRun);
     const epoch = threadEpochRef.current;
+    const unregisterControllerCleanup = chatController.registerCleanup(
+      controllerRun,
+      () => {
+        cancelled = true;
+        controller.abort();
+      },
+    );
     const narration = t.toolNarration;
     const clearReconnectNotice = () =>
       setNotice((current) =>
@@ -1594,6 +1623,7 @@ export function FloatingChat({
     const onCompleted = () => {
       if (sawDone || cancelled || epoch !== threadEpochRef.current || sessionIdRef.current !== sid) return;
       sawDone = true;
+      chatController.complete(controllerRun);
       setReconnectSessionId(null);
       clearReconnectNotice();
       void fetchSessionMessages(sid)
@@ -1619,11 +1649,27 @@ export function FloatingChat({
               expiresAt: pending.expiresAt,
               sessionId: sid,
             });
+            chatController.presentInteraction(controllerRun, {
+              kind: "question",
+              approvalId: pending.approvalId,
+              source: "restored",
+              status: "pending",
+              payload: pending,
+            });
           }
           if (toolConfirmation) {
+            const confirmation = toRestoredConfirmation(toolConfirmation, sid);
+            chatController.presentInteraction(controllerRun, {
+              kind: "tool-confirmation",
+              approvalId: toolConfirmation.approvalId,
+              toolCallId: confirmation.toolCallId,
+              source: "restored",
+              status: "pending",
+              payload: confirmation,
+            });
             sessionDispatchRef.current({
               type: "confirmation/add",
-              confirmation: toRestoredConfirmation(toolConfirmation, sid),
+              confirmation,
             });
           }
         })
@@ -1632,7 +1678,9 @@ export function FloatingChat({
       // Queued mid-turn input the dead POST never took: the turn is over
       // now, so it goes out as an ordinary turn (the queue's "client is
       // the durable holder" fallback).
-      flushQueuedInputsRef.current(sid);
+      if (chatController.claimExit(controllerRun)) {
+        flushQueuedInputsRef.current(sid);
+      }
     };
     const giveUp = () => {
       if (sawDone) return;
@@ -1640,6 +1688,7 @@ export function FloatingChat({
       setReconnectSessionId(null);
       clearReconnectNotice();
       setError(t.turnReconnectFailed);
+      chatController.fail(controllerRun, t.turnReconnectFailed);
     };
 
     void (async () => {
@@ -1665,7 +1714,8 @@ export function FloatingChat({
             const payload = coercePayload(ev.data);
             switch (ev.event) {
               case "status": {
-                if (payload.status !== "running") onCompleted();
+                if (payload.status === "running") chatController.connected(controllerRun);
+                else onCompleted();
                 break;
               }
               case "turn_completed":
@@ -1694,6 +1744,7 @@ export function FloatingChat({
       }
     })();
     return () => {
+      unregisterControllerCleanup();
       cancelled = true;
       controller.abort();
     };
@@ -1857,6 +1908,7 @@ export function FloatingChat({
       if (pendingQuestion) return false;
 
       let owningSessionId = sessionIdRef.current;
+      const controllerRun = chatController.begin(owningSessionId);
       const epoch = threadEpochRef.current;
       const current = () => epoch === threadEpochRef.current && sessionIdRef.current === owningSessionId;
 
@@ -1998,6 +2050,7 @@ export function FloatingChat({
                   ? payload.sessionId
                   : null;
               if (id) {
+                if (!owningSessionId) chatController.adoptSession(controllerRun, id);
                 owningSessionId = id;
                 sessionIdRef.current = id;
                 session.setSession(id);
@@ -2339,6 +2392,14 @@ export function FloatingChat({
                 sessionId: sessionIdRef.current ?? "",
                 status: "pending",
               };
+              chatController.presentInteraction(controllerRun, {
+                kind: "tool-confirmation",
+                approvalId: conf.approvalId ?? `tool:${toolCallId}`,
+                toolCallId,
+                source: "live",
+                status: "pending",
+                payload: conf,
+              });
               session.addConfirmation(conf);
               break;
             }
@@ -2409,6 +2470,13 @@ export function FloatingChat({
                     ? payload.expiresAt
                     : null,
                 sessionId: sid,
+              });
+              chatController.presentInteraction(controllerRun, {
+                kind: "question",
+                approvalId,
+                source: "live",
+                status: "pending",
+                payload: { question, sessionId: sid },
               });
               break;
             }
@@ -2779,6 +2847,7 @@ export function FloatingChat({
         },
         onDone: () => {
           if (!current()) return;
+          chatController.complete(controllerRun);
           const askedQuestion = turnAskedQuestionRef.current;
           // Doc is an `app` surface with no chip affordance: the builder
           // strips any `<followup>[...]</followup>` tag the model volunteered
@@ -2797,7 +2866,9 @@ export function FloatingChat({
           resetTurnBuffers();
           // Anything still queued was never taken by this turn — send it as
           // an ordinary one. See mid-turn-input.md → "the client is the holder".
-          flushQueuedInputs(owningSessionId);
+          if (chatController.claimExit(controllerRun)) {
+            flushQueuedInputs(owningSessionId);
+          }
           // Surface docks: a general chat turn may have written to the brain
           // (the assistant saves memories / entities while researching) —
           // nudge the brain page to re-pull so new rows appear without a
@@ -2833,6 +2904,7 @@ export function FloatingChat({
         },
         onDisconnect: () => {
           if (!current()) return;
+          chatController.disconnect(controllerRun);
           // The body closed with no `done` / `error`: a request-timeout cut,
           // a deploy, a network blip. The server keeps the turn running
           // (2026-08-24), so drop the live bubble, tell the user, and
@@ -2847,7 +2919,10 @@ export function FloatingChat({
             // No `session` frame ever arrived, so there is nothing to
             // re-attach to. Report it like any other transport failure.
             setError(t.streamInterrupted);
-            flushQueuedInputs(owningSessionId);
+            chatController.fail(controllerRun, t.streamInterrupted);
+            if (chatController.claimExit(controllerRun)) {
+              flushQueuedInputs(owningSessionId);
+            }
             return;
           }
           reconnectStartedAtRef.current = Date.now();
@@ -2857,6 +2932,10 @@ export function FloatingChat({
         },
         onError: (err) => {
           if (!current()) return;
+          chatController.fail(
+            controllerRun,
+            err instanceof Error ? err.message : t.error,
+          );
           setError(
             isTransportError(err)
               ? t.streamInterrupted
@@ -2866,7 +2945,9 @@ export function FloatingChat({
           );
           session.dispatch({ type: "stream/abort" });
           resetTurnBuffers();
-          flushQueuedInputs(owningSessionId);
+          if (chatController.claimExit(controllerRun)) {
+            flushQueuedInputs(owningSessionId);
+          }
         },
       });
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
@@ -3126,8 +3207,14 @@ export function FloatingChat({
     // because a flush racing the still-running turn is answered
     // `turn_in_flight`.
     const owningSessionId = sessionIdRef.current;
-    void stopRunningTurn().finally(() => flushQueuedInputs(owningSessionId));
-  }, [stopRunningTurn, flushQueuedInputs]);
+    const controllerRun = chatController.capture();
+    chatController.cancel(controllerRun);
+    void stopRunningTurn().finally(() => {
+      if (chatController.claimExit(controllerRun)) {
+        flushQueuedInputs(owningSessionId);
+      }
+    });
+  }, [stopRunningTurn, flushQueuedInputs, chatController]);
 
   const handleConfirmation = useCallback(
     async (
@@ -3139,6 +3226,9 @@ export function FloatingChat({
         (p) => p.toolCallId === toolCallId,
       );
       if (!conf) return;
+      const controllerRun = chatController.capture();
+      const approvalId = conf.approvalId ?? `tool:${toolCallId}`;
+      chatController.beginResponse(controllerRun, approvalId);
       session.updateConfirmation(toolCallId, {
         status: action === "approve" ? "approving" : "denied",
       });
@@ -3175,6 +3265,7 @@ export function FloatingChat({
           }
         }
         if (ok) {
+          chatController.resolveInteraction(controllerRun, approvalId);
           session.updateConfirmation(toolCallId, {
             status: action === "approve" ? "approved" : "denied",
             result: resultText,
@@ -3186,13 +3277,15 @@ export function FloatingChat({
           requestApprovalsRefresh(workspaceId);
         } else {
           // Reset to pending so the user can retry (e.g. 404 resolver expired).
+          chatController.responseFailed(controllerRun, approvalId);
           session.updateConfirmation(toolCallId, { status: "pending" });
         }
       } catch {
+        chatController.responseFailed(controllerRun, approvalId);
         session.updateConfirmation(toolCallId, { status: "pending" });
       }
     },
-    [session, workspaceId],
+    [session, workspaceId, chatController],
   );
 
   // ── Doc deep-link ────────────────────────────────────────────────────
@@ -3600,10 +3693,18 @@ export function FloatingChat({
               approvalId={pendingQuestion.approvalId}
               dict={t.pendingQuestion}
               onAnswered={() => {
+                chatController.resolveInteraction(
+                  chatController.capture(),
+                  pendingQuestion.approvalId,
+                );
                 setPendingQuestion(null);
                 setResumePolling(true);
               }}
               onCancelled={() => {
+                chatController.resolveInteraction(
+                  chatController.capture(),
+                  pendingQuestion.approvalId,
+                );
                 setPendingQuestion(null);
                 setResumePolling(true);
               }}

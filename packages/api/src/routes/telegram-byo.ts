@@ -1,8 +1,7 @@
+import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
+import { channelQuestions, resolveChannelQuestion } from './channel-questions.js'
 import { createTelegramDiscussionStore, observeTelegramDiscussion, telegramDiscussionContext, type TelegramDiscussionStore, type DiscussionMessage } from '../telegram-discussion-context.js'
-import { createChannelQuestionStore, handleChannelQuestionReply, type ChannelQuestionStore } from '../workflow/channel-questions.js'
-import { dispatchQuestionResponse } from '../workflow/question-response.js'
-import { buildWorkflowToolRegistry } from '../workflow/mcp-bridge.js'
-import { resolveTurnScopeSystem } from '../context-scope/resolve-turn-scope.js'
+import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Telegram BYO webhook route — per-channel BYO credentials.
@@ -31,7 +30,6 @@ import { resolveTurnScopeSystem } from '../context-scope/resolve-turn-scope.js'
  *      resolves the sender, runs the query loop.
  */
 
-import { TelegramQuestions, type QuestionBinding } from './telegram-questions.js'
 import { Router } from 'express'
 import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, describeTelegramDownloadFailure, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
 import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, ChatSeenEvent } from '@use-brian/channels'
@@ -54,20 +52,21 @@ import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.
 import type { LinkCodeStore } from '../db/link-codes.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { buildAlbumFiledReply, buildDocumentFiledReply, buildOversizeDocReply, classifyMedia, summarizeAlbumIntake } from '../ingest/channel-media-intake.js'
-import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
-import { buildConfirmationActions, confirmationDecisionLabel, interpretConfirmationEvent, transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
+import { transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
-import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
+import { humanizeToolName, describeToolInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { admitChannelMessage } from './channel-message-admission.js'
 import { channelUserErrorText } from './_channel-error-text.js'
+import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
 import { cacheInboundImage } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { buildFileContentBlocks } from './route-helpers.js'
 import { handleConnectCommand } from './_connect-command.js'
-import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import { randomUUID } from 'node:crypto'
 import { createEpisode } from '../db/episodes-store.js'
@@ -256,16 +255,11 @@ export const telegramLinkBindsHere = channelLinkBindsHere
 export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
   const router = Router()
 
-  // Pending confirmation resolvers — keyed by `chatId:toolCallId`
-  type PendingConf = { resolver: ConfirmationResolver; chatId: string }
-  const questions = new TelegramQuestions()
-  const pendingConfResolvers = new Map<string, PendingConf>()
-
   // Pending recording-surcharge confirmations — keyed by a short token embedded
   // in the inline-button callback data (`rec_confirm:<token>:<yes|no>`). The
   // bytes are re-downloaded on confirm (the Telegram file_id is stable), so the
   // entry only holds the routing + billing metadata. In-memory like
-  // pendingConfResolvers; a missed click after a restart just expires.
+  // the common confirmation registry; a missed click after a restart just expires.
   type PendingRecording = {
     fileId: string
     mime: string
@@ -501,7 +495,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         },
       })
       adapter.sendMessage(channelId, {
-        text: 'Sorry, something went wrong while handling that message. Please send it again.',
+        text: telegramIncomingFailureText(channelId, err),
       }).catch((sendErr) => {
         console.error('[telegram-byo] failure notice send failed:', sendErr)
       })
@@ -588,25 +582,15 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           return
         }
         if (parts[0] === 'ask') {
-          const pending = questions.take(query.data, integration.id, query.chatId, query.userId)
-          await adapter.answerCallbackQuery(query.id, {
-            text: pending ? 'Answer received' : 'Expired or unavailable. Please type your answer.',
-          }).catch(() => {})
-          if (!pending) return
+          await adapter.answerCallbackQuery(query.id).catch(() => {})
           const callback = (req.body as { callback_query?: { from?: { id: number; username?: string } } }).callback_query
           try {
             await handleIncoming({
-              channelId: query.chatId,
-              userId: query.userId,
-              text: pending.answer,
-              isGroupChat: pending.incoming.isGroupChat,
-              messageId: `ask:${query.id}`,
-              timestamp: Date.now(),
-              raw: { from: callback?.from },
-            }, pending)
-          } catch (err) {
-            reportIncomingFailure('message', query.chatId, err)
-          }
+              channelId: query.chatId, userId: query.userId, text: '',
+              isGroupChat: query.chatId.startsWith('-'), messageId: `ask:${query.id}`,
+              timestamp: Date.now(), raw: { from: callback?.from },
+            }, query.data)
+          } catch (err) { reportIncomingFailure('message', query.chatId, err) }
           return
         }
 
@@ -630,36 +614,17 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           return
         }
 
-        const confirmation = interpretConfirmationEvent({ kind: 'action', data: query.data })
-        if (confirmation.status !== 'decision' || !confirmation.toolCallId) return
-        const { toolCallId, decision } = confirmation
-        const confKey = `${query.chatId}:${toolCallId}`
-        const pending = pendingConfResolvers.get(confKey)
-        const label = confirmationDecisionLabel(decision)
-
-        if (pending) {
-          pending.resolver.resolve(toolCallId, decision)
-          pendingConfResolvers.delete(confKey)
-
-          await adapter.answerCallbackQuery(query.id, { text: label })
-          if (query.messageId) {
-            await adapter.editMessage(query.chatId, String(query.messageId), {
-              text: `Tool action: ${label}`,
-            })
-          }
-        } else if (tryResolveSchedulerConfirmation(toolCallId, decision, { channelType: 'telegram', channelId: String(query.chatId) })) {
-          options.deferredConfirmationStore?.markResolved(toolCallId, decision)
-            .catch((err) => console.error('[telegram-byo] deferred confirmation DB update failed:', err))
-
-          await adapter.answerCallbackQuery(query.id, { text: label })
-          if (query.messageId) {
-            await adapter.editMessage(query.chatId, String(query.messageId), {
-              text: `Tool action: ${label}`,
-            })
-          }
-        } else {
-          await adapter.answerCallbackQuery(query.id, { text: 'Expired or already handled' })
-        }
+        if (parts[0] !== 'mcp_confirm') return
+        // ACK before resolving: resuming a parked turn must not delay Telegram.
+        await adapter.answerCallbackQuery(query.id).catch(() => {})
+        const callback = (req.body as { callback_query?: { from?: { id: number; username?: string } } }).callback_query
+        try {
+          await handleIncoming({
+            channelId: query.chatId, userId: query.userId, text: '',
+            isGroupChat: query.chatId.startsWith('-'), messageId: `confirm:${query.id}`,
+            timestamp: Date.now(), raw: { from: callback?.from },
+          }, undefined, { data: query.data, messageId: String(query.messageId) })
+        } catch (err) { reportIncomingFailure('message', query.chatId, err) }
       },
     })
 
@@ -774,7 +739,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // wiring above can reference it before its declaration. Closes over
     // the bound aliases, `ownerId`, `channelId`, `credentials`,
     // `tgConfig`, and `adapter` from the enclosing request scope.
-    async function handleIncoming(incoming: IncomingMessage, questionBinding?: QuestionBinding, workflowCallback?: { data: string; messageId: string }): Promise<void> {
+    async function handleIncoming(incoming: IncomingMessage, actionData?: string, workflowCallback?: { data: string; messageId: string }): Promise<void> {
       // 4b. Sender access. A blocklist match is a hard denial. An allowlist
       //     match is carried through identity resolution because it is also an
       //     explicit conversation-only guest grant in private DMs and groups.
@@ -813,7 +778,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // and is bound to its default assistant. Claim is atomic, so only one
       // Telegram account can win even if the same code is sent concurrently.
       if (
-        !questionBinding && options.ownerPairing?.enabled &&
+        !actionData && !workflowCallback && options.ownerPairing?.enabled &&
         options.linkedAccountStore &&
         !incoming.isGroupChat &&
         incoming.text
@@ -872,7 +837,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       //       so only the owner can manage connectors here; non-owners get a
       //       polite refusal pointing them at the official shared bot.
       //       See docs/architecture/channels/telegram-mini-app.md → "/connect".
-      if (!isChatSender && !questionBinding && !incoming.replyToMessageId && /^\/connect(\b|$)/i.test((incoming.text ?? '').trim())) {
+      if (!isChatSender && !actionData && !workflowCallback && !incoming.replyToMessageId && /^\/connect(\b|$)/i.test((incoming.text ?? '').trim())) {
         const telegramUserIdStr = incoming.userId
         const linked = options.linkedAccountStore
           ? await options.linkedAccountStore.findByProvider('telegram', telegramUserIdStr)
@@ -966,7 +931,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       //    (@use_brian_bot) instead. The owner onboards by linking via a
       //    6-char code from the web UI.
       let channelUserId = ownerId
-      let isIdentified = true
+      let isIdentified = false
       let externalGuest = false
       let privateChatRedirect = false
       // Tracks whether Step 1 found a linked-account row. Cannot be inferred
@@ -974,7 +939,6 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // own Telegram would have found.id === ownerId, which would otherwise
       // cause Step 2 to re-run and (in a private chat) incorrectly redirect
       // the owner to the shared @use_brian_bot.
-      let identityResolutionFailed = false
       let foundLinked = false
       let foundLinkedOwner = false
       const telegramUserId = incoming.userId
@@ -1060,12 +1024,13 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
             }
           }
         } catch (err) {
-          identityResolutionFailed = true
           console.error('[telegram-byo] channel user resolution failed:', err)
-          if (questionBinding) return
-          // On resolution failure in a private chat, redirect rather than
-          // leak memory to the owner.
-          if (!incoming.isGroupChat) privateChatRedirect = true
+          // An outage is not an anonymous identity and must never resume a
+          // parked owner action or enter workflow interpretation as the owner.
+          await adapter.sendMessage(incoming.channelId, {
+            text: 'Your identity could not be verified. Please try again shortly.',
+          }).catch(() => {})
+          return
         }
       }
 
@@ -1134,72 +1099,35 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         }
       }
 
-      if (questionBinding && (questionBinding.assistantId !== routedAssistantId
-        || questionBinding.userId !== channelUserId)) return
+      // Legacy installations without identity services can still chat, but
+      // ownerId is only a storage fallback, never evidence of sender identity.
+      if (!isIdentified) externalGuest = true
 
-      const quoted = (incoming.raw as { reply_to_message?: { text?: string } })?.reply_to_message?.text
-      const referenceToken = quoted?.match(/Question reference: wq:([\w-]{24})\s*$/)?.[1]
-      // Durable workflow replies are intercepted AFTER identity/routing checks,
-      // BEFORE chat/tools/media. No LLM sees a bound answer, even on failure.
-      if (routedAssistant.workspaceId && !questionBinding) {
-        const reply = await handleChannelQuestionReply({
-          store: options.questionStore ?? createChannelQuestionStore(),
-          address: { integrationId: boundIntegration.id, channelId: incoming.channelId,
-            workspaceId: routedAssistant.workspaceId, assistantId: routedAssistantId, userId: channelUserId },
-          callback: workflowCallback, replyToMessageId: incoming.replyToMessageId, referenceToken, answerMessageId: incoming.messageId,
-          text: incoming.text ?? '',
-          authorized: async () => !!options.linkedAccountStore && !!options.channelUserStore
-            && !identityResolutionFailed && isIdentified && !externalGuest && !!await getWorkspaceRoleSystem(channelUserId, routedAssistant.workspaceId!),
-          dispatch: async (binding, answer, claim) => {
-            if (!options.connectorStore || !options.mcpSettingsStore) return 'Response actions are unavailable. No action was run.'
-            const scope = await resolveTurnScopeSystem({ userId: channelUserId, assistant: routedAssistant,
-              workspaceId: binding.workspaceId })
-            const registry = await buildWorkflowToolRegistry({
-              firstParty: new Map(), connectorStore: options.connectorStore, settingsStore: options.mcpSettingsStore,
-              assistantConnectorStore: options.assistantConnectorStore,
-              connectorGrantStore: options.connectorGrantStore, connectorInstanceStore: options.connectorInstanceStore,
-              workspaceToolPolicyStore: options.workspaceToolPolicyStore,
-            }, { workspaceId: binding.workspaceId, assistantId: binding.assistantId, userId: channelUserId, turnScope: scope })
-            return dispatchQuestionResponse(binding, answer, registry, {
-              userId: channelUserId, assistantId: binding.assistantId, workspaceId: binding.workspaceId,
-              sessionId: `question:${binding.token}`, appId: 'Use Brian', channelType: 'telegram', channelId: binding.channelId,
-              assistantKind: routedAssistant.kind, abortSignal: new AbortController().signal,
-              clearance: scope.access.clearance, compartments: scope.effectiveCompartments,
-              projectIds: scope.effectiveProjectIds, activeGroupId: scope.activeGroupId, activeProjectId: scope.activeProjectId,
-              assistantClearance: routedAssistant.clearance, assistantCompartments: scope.effectiveCompartments,
-              assistantDefaultCompartments: scope.writeCompartments, assistantProjectIds: scope.effectiveProjectIds,
-              assistantDefaultProjectIds: scope.writeProjectIds,
-            }, claim)
-          },
-        })
-        if (reply !== null) {
-          await adapter.sendMessage(incoming.channelId, { text: reply })
+      const interactionScope: ChannelInteractionScope = {
+        channelType: 'telegram', integrationId: boundIntegration.channelId!,
+        conversationId: incoming.channelId, senderId: incoming.userId,
+      }
+      if (workflowCallback?.data.startsWith('mcp_confirm:')) {
+        const result = channelConfirmations.handle(interactionScope, { kind: 'action', data: workflowCallback.data })
+        if (result.status === 'resolved') {
+          await adapter.editMessage(incoming.channelId, workflowCallback.messageId, {
+            text: `Tool action: ${result.decision}`, actions: [],
+          }).catch(() => {})
           return
         }
-      } else if (workflowCallback || referenceToken || (incoming.replyToMessageId
-        && await (options.questionStore ?? createChannelQuestionStore()).isQuestionMessage(
-          boundIntegration.id, incoming.channelId, incoming.replyToMessageId))) {
-        await adapter.sendMessage(incoming.channelId, { text: 'This question is unavailable.' })
-        return
-      }
-
-      // 5b. Audio FILE → recording-to-brain pipeline instead of normal chat.
-      //     A deliberate recording (msg.audio), routed to transcription + brain
-      //     ingest with the duration surcharge. Voice notes stay on the existing
-      //     voice-transcription-to-chat path. See docs/architecture/media/transcription.md.
-      if (options.recordingIngest && incoming.mediaType === 'audio' && !externalGuest) {
-        await handleTelegramRecordingIntake(
-          incoming,
-          routedAssistant.id,
-          routedAssistant.workspaceId ?? null,
-          routedOwnerId,
-        )
-        return
-      }
+        // Preserve callback provenance for the central durable approval handler.
+        // Unavailable/stale callbacks must never become ordinary conversational text.
+      } else if (!workflowCallback && !actionData
+        && channelConfirmations.handle(interactionScope, { kind: 'text', text: incoming.text }).handled) return
 
       // 6. Sequentialize per chat via Postgres advisory lock
-      await withChatLock(`tg-byo:${incoming.channelId}`, () => {
-        questions.invalidate(boundIntegration.id, incoming)
+      await withChatLock(`tg-byo:${incoming.channelId}`, async () => {
+        if (actionData) {
+          const answer = resolveChannelQuestion({ integrationId: interactionScope.integrationId,
+            assistantId: routedAssistantId, userId: channelUserId, incoming }, actionData, channelQuestions)
+          if (answer.kind !== 'answer') return
+          incoming = answer.incoming
+        }
         return processMessage({
           backgroundModel: options.backgroundModel,
           decisionRuntime: options.decisionRuntime,
@@ -1212,12 +1140,18 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           externalGuest,
           externalGuestConnectorTools:
             externalGuest
+            && !!options.linkedAccountStore && !!options.channelUserStore
             && explicitAllowlistGrant
             && integrationConfig.allowGuestConnectorTools === true,
           archiveConnectorInstanceId: boundIntegration.connectorInstanceId,
           ...options,
-          pendingConfResolvers,
-          questions,
+          interactionScope,
+          workflowCallback,
+          conversationalAnswer: actionData !== undefined,
+          recordingIntake: options.recordingIngest && incoming.mediaType === 'audio' && !externalGuest
+            ? () => handleTelegramRecordingIntake(incoming, routedAssistant.id, routedAssistant.workspaceId ?? null, routedOwnerId)
+            : undefined,
+          questionStore: options.questionStore,
           integrationId: boundIntegration.id,
           discussionStore,
         })
@@ -1328,8 +1262,12 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 // ── Per-message handler ─────────────────────────────────────────
 
 type ProcessMessageParams = {
+  recordingIntake?: () => Promise<void>
   discussionStore: TelegramDiscussionStore
-  questions: TelegramQuestions
+  interactionScope: ChannelInteractionScope
+  workflowCallback?: { data: string; messageId: string }
+  conversationalAnswer?: boolean
+  questionStore?: ChannelQuestionStore
   integrationId: string
   integrationStore: ChannelIntegrationStore
   /** Servable background-lane model, threaded from the route options. */
@@ -1387,7 +1325,6 @@ type ProcessMessageParams = {
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
-  pendingConfResolvers: Map<string, { resolver: ConfirmationResolver; chatId: string }>
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
@@ -1416,6 +1353,37 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     externalGuest,
     externalGuestConnectorTools,
   } = params
+
+  // Admission must precede ALL media side effects, including the hosted audio
+  // lane. Use the common interpreter so native conversational choices retain
+  // precedence over labels that happen to look like workflow commands.
+  const abortController = new AbortController()
+  // Voice notes are not recording/brain intake. Their answer text does not
+  // exist until transcription below; let the pipeline admit those once then.
+  const admission = incoming.mediaType === 'voice' ? undefined : await admitChannelMessage({
+    ...params,
+    assistant: { ...assistant, ownerUserId: ownerId },
+    userId: channelUserId,
+    channelType: 'telegram',
+    channelId: incoming.channelId,
+    incomingMessage: incoming,
+    questionIntegrationId: params.integrationId,
+    messageText: incoming.text ?? '',
+    userContentBlocks: [],
+    isGroupChat: incoming.isGroupChat,
+    modelAlias: assistant.defaultModelAlias,
+    abortController,
+    hooks: {
+      sendResponse: async (text) => { await adapter.sendMessage(incoming.channelId, { text }) },
+      sendError: async () => {},
+      onConfirmationRequired: async () => {},
+    },
+  })
+  if (admission?.kind === 'handled' || abortController.signal.aborted) return
+  if (params.recordingIntake) {
+    await params.recordingIntake()
+    return
+  }
 
   // Over-limit inbound media: a file above Telegram's 20MB bot download cap
   // (TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES) cannot be pulled via getFile, so a long
@@ -1824,6 +1792,13 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   const replyRaw = providerVisibleContext && rawReply.reply_to_message?.is_automatic_forward
     ? { ...rawReply, reply_to_message: undefined } : incoming.raw
   await processChannelMessage({
+    admittedAnswerContext: admission,
+    interactionScope: params.interactionScope,
+    incomingMessage: incoming,
+    questionIntegrationId: params.integrationId,
+    workflowCallback: params.workflowCallback,
+    conversationalAnswer: params.conversationalAnswer,
+    questionStore: params.questionStore,
     backgroundModel: params.backgroundModel,
     decisionRuntime: params.decisionRuntime,
     userId: channelUserId,
@@ -1852,7 +1827,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     archiveConnectorInstanceId: params.archiveConnectorInstanceId,
     modelAlias: assistant.defaultModelAlias,
     adaptiveResearchEnabled: true,
-    abortController: new AbortController(),
+    abortController,
     provider: params.provider,
     configuredProviders: params.configuredProviders,
     resolveWorkspaceCustomLlm: params.resolveWorkspaceCustomLlm,
@@ -1920,24 +1895,10 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       async onGoalAccepted(message) {
         await adapter.sendMessage(incoming.channelId, { text: message })
       },
-      async onConfirmationRequired(req, resolver) {
-        const confKey = `${incoming.channelId}:${req.toolCallId}`
-        params.pendingConfResolvers.set(confKey, { resolver, chatId: incoming.channelId })
-
-        const lines = req.displayLines && req.displayLines.length > 0
-          ? req.displayLines
-          : formatConfirmationInput(req.input)
-        const inputSummary = lines.length > 0 ? '\n\n' + lines.join('\n') : ''
-
-        const actions = buildConfirmationActions(req.toolCallId, req.allowPersistentApproval)
-
-        const displayName = getToolDisplayName(req.toolName)
-        await adapter.sendMessage(incoming.channelId, {
-          text: `${displayName}${inputSummary}\n\nAllow this action?`,
-          actions,
-        })
+      async onConfirmationRequired(req) {
+        await adapter.sendMessage(incoming.channelId, confirmationMessage(req))
       },
-      async sendResponse(text, documents, question) {
+      async sendResponse(text, documents, _question, actions) {
         // Delete the tool status message, then send response as a new message
         if (statusMessageId) {
           await adapter.deleteMessage?.(incoming.channelId, statusMessageId)
@@ -1945,23 +1906,18 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         }
         // Strip zero-width spaces (U+200B, U+FEFF) that some models emit as "empty" responses
         const cleaned = text.replace(/[\u200B\uFEFF]/g, '').trim()
-        if (cleaned || documents?.length) {
+        if (cleaned || documents?.length || actions?.length) {
           // Documents must ride this send \u2014 the adapter uploads them after
           // the text, and handles a documents-only message. A hook that
           // ignores the parameter turns sendFile's success into a lie: the
           // pipeline resolved the bytes, nothing errors, the file vanishes.
-          await adapter.sendMessage(incoming.channelId, {
+          const channelMessageId = await adapter.sendMessage(incoming.channelId, {
             text: cleaned ? text : '',
             format: 'markdown',
             documents,
-            actions: question?.options ? params.questions.create({
-              integrationId: params.integrationId,
-              assistantId: assistant.id,
-              userId: channelUserId,
-              incoming: { channelId: incoming.channelId, userId: incoming.userId,
-                text: '', timestamp: incoming.timestamp, isGroupChat: incoming.isGroupChat, raw: {} },
-            }, question.options) : undefined,
+            actions,
           })
+          return { channelMessageId }
         } else {
           // Loud-fail after query-loop's empty-response retries exhausted.
           // See telegram.ts comment + docs/architecture/engine/query-loop.md.
@@ -1998,11 +1954,27 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         // route-local copy here left every other channel masking the image
         // refusal until the 2026-08-19 Slack repeat.
         await adapter.sendMessage(incoming.channelId, {
-          text: channelUserErrorText(err),
+          text: isDeliveryAudienceUnverifiedError(err)
+            ? telegramIncomingFailureText(incoming.channelId, err)
+            : channelUserErrorText(err),
         })
       },
     },
   })
+}
+
+const TELEGRAM_RETRY_NOTICE =
+  'Sorry, something went wrong while handling that message. Please send it again.'
+const TELEGRAM_GROUP_NOT_APPROVED_NOTICE =
+  'Telegram is connected, but this group is not approved for workspace replies. Ask a workspace owner or admin to approve it in Studio > Channels > Group reply access.'
+
+/** Keep authority refusals actionable without exposing workspace content. */
+export function telegramIncomingFailureText(channelId: string, err: unknown): string {
+  const chatId = channelId.split(':topic:', 1)[0] ?? channelId
+  if (chatId.startsWith('-') && isDeliveryAudienceUnverifiedError(err)) {
+    return TELEGRAM_GROUP_NOT_APPROVED_NOTICE
+  }
+  return TELEGRAM_RETRY_NOTICE
 }
 
 // ── Seen-chat observation ──────────────────────────────────────

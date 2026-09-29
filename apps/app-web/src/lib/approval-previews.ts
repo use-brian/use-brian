@@ -14,6 +14,7 @@
  * branch in `parseToolPreview`, and a card in the render layer.
  *
  * Spec: docs/architecture/features/workflow.md → Unified approvals.
+ * [COMP:app-web/pdf-signature-approval]
  * [COMP:app-web/approvals]
  */
 
@@ -30,7 +31,7 @@ const REVIEWED_EMAIL_ARGUMENT_KEYS = new Set([
 ]);
 
 /** Discriminator for the specific previews the queue knows how to render. */
-type ToolPreviewKind = "email_send" | "shopify_refund" | "shopify_cancel";
+type ToolPreviewKind = "email_send" | "shopify_refund" | "shopify_cancel" | "pdf_signature";
 
 /**
  * Tool name → preview kind. Keyed on the canonical tool ident carried by
@@ -48,6 +49,7 @@ const TOOL_PREVIEW_KINDS: Record<string, ToolPreviewKind> = {
   // the amount is Shopify's own suggested figure, not one we invent here.
   shopifyRefundOrder: "shopify_refund",
   shopifyCancelOrder: "shopify_cancel",
+  placePdfSignature: "pdf_signature",
 };
 
 /** Parsed `gmailSendMessage` input, normalised for rendering. */
@@ -107,7 +109,8 @@ export type ShopifyCancelPreviewData = {
 export type ToolPreviewData =
   | { kind: "email_send"; email: EmailSendPreviewData }
   | { kind: "shopify_refund"; refund: ShopifyRefundPreviewData }
-  | { kind: "shopify_cancel"; cancel: ShopifyCancelPreviewData };
+  | { kind: "shopify_cancel"; cancel: ShopifyCancelPreviewData }
+  | { kind: "pdf_signature" };
 
 /**
  * Recognise + parse an approval row's tool call into preview data.
@@ -139,9 +142,27 @@ export function parseToolPreview(
       const cancel = parseShopifyCancelArgs(args ?? {});
       return cancel ? { kind, cancel } : null;
     }
+    case "pdf_signature":
+      return parsePdfSignatureArgs(args ?? {}) ? { kind } : null;
     default:
       return null;
   }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Keep the signature preview on the opaque anchored contract only. */
+export function parsePdfSignatureArgs(args: Record<string, unknown>): boolean {
+  const keys = Object.keys(args).sort();
+  if (keys.join(",") !== ["artifactId", "expectedSourceHash", "expectedVersion", "idempotencyKey", "signatureResourceId", "targetId"].sort().join(",")) return false;
+  return UUID.test(String(args.artifactId ?? ""))
+    && UUID.test(String(args.targetId ?? ""))
+    && UUID.test(String(args.signatureResourceId ?? ""))
+    && /^[a-f0-9]{64}$/.test(String(args.expectedSourceHash ?? ""))
+    && Number.isInteger(args.expectedVersion)
+    && typeof args.idempotencyKey === "string"
+    && args.idempotencyKey.length >= 8
+    && args.idempotencyKey.length <= 255;
 }
 
 /**

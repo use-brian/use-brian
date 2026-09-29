@@ -12,6 +12,7 @@
 
 import type { UsageStore, TokenUsage } from '@use-brian/core'
 import { calculateCost, isOverheadSource } from '@use-brian/core'
+import { isDecisionModelRow, registryRowForPricing } from '@use-brian/shared/model-registry'
 
 export type RecordOverheadUsageParams = {
   usageStore: UsageStore | undefined
@@ -57,6 +58,11 @@ export async function recordOverheadUsage(
   params: RecordOverheadUsageParams,
 ): Promise<void> {
   if (!params.usageStore || !params.usage || !params.model) return
+  const modelRow = registryRowForPricing(params.model)
+  // The decision runtime meters each primary decision-provider attempt at
+  // the provider boundary. A successful Jev result can still pass through
+  // this legacy caller helper, so skip it here to keep one row per call.
+  if (modelRow && isDecisionModelRow(modelRow)) return
   if (!isOverheadSource(params.source)) {
     console.warn(`[overhead-usage] non-overhead source "${params.source}" — refusing to record`)
     return

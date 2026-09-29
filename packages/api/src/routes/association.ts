@@ -51,8 +51,10 @@ import {
 } from '../association/domain.js'
 import { createAssociationService } from '../association/service.js'
 import { createAssociationStore, type AssociationStore } from '../db/association-store.js'
+import { getPool } from '../db/client.js'
 import { createDbCrmOperationsStore } from '../db/crm-operations-store.js'
 import { createCrmOperationsService } from '../crm-operations/service.js'
+import { createProviderEntitlementInbox } from '../association/provider-entitlements.js'
 
 type Options = {
   brainKeyStore: BrainKeyStore
@@ -202,7 +204,12 @@ function endpoint(
 
 export function associationRoutes(opts: Options): Router {
   const router = Router()
-  const store = opts.store ?? createAssociationStore()
+  const store = opts.store ?? (() => {
+    const pool = getPool()
+    return createAssociationStore(pool, undefined, {
+      providerEntitlements: createProviderEntitlementInbox(pool),
+    })
+  })()
   const crmService = opts.crmService ?? createCrmOperationsService(createDbCrmOperationsStore())
   const associationService = opts.associationService ?? createAssociationService({ store, crmService })
   const authenticate = opts.authenticate ?? ((req: Request) =>

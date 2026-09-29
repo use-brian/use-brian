@@ -383,7 +383,7 @@ export type BlockRunHandle = {
   wait(): Promise<RunPythonResult>
 }
 
-/** One step of a browser-use exploration trace (R2-1/R2-5 — self-heal input). */
+/** One step of a watched browser-agent trace (R2-1/R2-5 — self-heal input). */
 export type BuTraceStep = {
   step: number
   action: 'open' | 'click' | 'fill' | 'scroll' | 'extract' | 'done'
@@ -395,10 +395,22 @@ export type BuTraceStep = {
   detail?: string | null
 }
 
-export type BrowserUseRunResult = {
+export type BrowserAgentUsage = {
+  kind: 'jev' | 'text_helper'
+  model: string
+  inputTokens: number
+  outputTokens: number
+  providerKeySource: 'user' | 'platform'
+}
+
+export type BrowserAgentRunResult = {
   trace: BuTraceStep[]
-  /** The agent's final answer / summary text. */
+  /** Final page evidence or the fallback agent's final answer. */
   output: string
+  backend: 'jev-ultrafast' | 'browser-use'
+  status: 'completed' | 'partial_failure'
+  fallbackReason?: string
+  usage: BrowserAgentUsage[]
 }
 
 /**
@@ -483,17 +495,22 @@ export interface SandboxProvider {
    */
   runSkill(sandboxId: string, req: { entryPath: string; timeoutMs?: number }): Promise<BlockRunHandle>
   /**
-   * The WATCHED agentic fallback (R2-1/R2-7): run browser-use inside the
-   * cloud micro-VM for a novel flow and return its step trace, which the
-   * self-heal distiller compiles into a draft logic-block. Cloud-only by
-   * construction — the local backend has no such method, and the tool layer
-   * refuses unattended local runs outright.
+   * The WATCHED agentic path (R2-1/R2-7): run Jev Ultrafast inside the cloud
+   * micro-VM, falling back to Browser Use only before Jev executes a page
+   * action. Return the trace for self-heal plus exact primary usage receipts.
+   * Cloud-only by construction — the local backend has no such method, and
+   * the tool layer refuses unattended local runs outright.
    */
-  runBrowserUse(
+  runBrowserAgent(
     sandboxId: string,
-    req: { goal: string; maxSteps?: number; timeoutMs?: number; llm?: BrowserUseLlmConfig },
-  ): Promise<BrowserUseRunResult>
+    req: { url: string; goal: string; maxSteps?: number; timeoutMs?: number; llm?: BrowserUseLlmConfig },
+  ): Promise<BrowserAgentRunResult>
   bridge: SandboxBridge
+}
+
+export type JevUltrafastConfig = {
+  apiKey: string
+  model: string
 }
 
 export type BrowserUseLlmConfig = {
@@ -502,4 +519,10 @@ export type BrowserUseLlmConfig = {
   model: string
   baseUrl?: string
   useVision?: boolean
+  providerKeySource?: 'user' | 'platform'
+  /** Host-only credential-pool lease callback; never serialized into the VM. */
+  recordSpend?: (
+    model: string,
+    usage: { inputTokens: number; outputTokens: number },
+  ) => Promise<void>
 }

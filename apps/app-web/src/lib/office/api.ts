@@ -8,7 +8,7 @@ import { attachOfficeMetadata, type OfficeMetadata } from "./metadata";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
-export type OfficeFamily = "document" | "presentation" | "spreadsheet";
+export type OfficeFamily = "document" | "presentation" | "spreadsheet" | "pdf";
 export type { OfficeTemplateRoutingDraft, OfficeTemplateSlideRole };
 export type OfficeTemplate = {
   id: string;
@@ -24,11 +24,12 @@ export type OfficeTemplate = {
 export type OfficeArtifact = {
   artifactId: string;
   family: OfficeFamily;
-  mode?: "artifact" | "template";
+  mode?: "artifact" | "template" | "session";
   title: string;
   version: number;
   lifecycleState: "active" | "archived" | "trash" | "retained" | "purged";
   role: "view" | "comment" | "edit";
+  expiresAt?: string;
   job?: { id: string; status: string; stage: string; errorCode: string | null };
 };
 
@@ -373,7 +374,7 @@ export async function uploadOfficeSource(workspaceId: string, file: File): Promi
 }
 
 type SpreadsheetPdfRequest = { sheetId: string; printArea: string; calculationMode: "automatic" | "stored"; expectedPageCount: number; preset: "invoice" | "worksheet" };
-export type OfficeReleaseReceipt = { status: "blocked" | "needs_ack" | "ready"; version: number; action: string; blocks: Array<{ code: string; message: string; subjectId?: string }>; warnings: Array<{ code: string; message: string; subjectId?: string }>; acknowledgedCodes: string[]; spreadsheetPdf?: { sheetId: string; printArea: string; expectedPageCount: number; actualPageCount?: number; issues: Array<{ code: string; message: string; severity: "warning" | "error"; address?: string }> }; documentPdf?: { expectedPageCount: number; actualPageCount?: number; renderer: "libreoffice"; issues: Array<{ code: string; message: string; severity: "error" }> }; presentationPdf?: { expectedPageCount: number; actualPageCount?: number; renderer: "libreoffice"; issues: Array<{ code: string; message: string; severity: "error" }> } };
+export type OfficeReleaseReceipt = { status: "blocked" | "needs_ack" | "ready"; version: number; action: string; blocks: Array<{ code: string; message: string; subjectId?: string }>; warnings: Array<{ code: string; message: string; subjectId?: string }>; acknowledgedCodes: string[]; spreadsheetPdf?: { sheetId: string; printArea: string; expectedPageCount: number; actualPageCount?: number; issues: Array<{ code: string; message: string; severity: "warning" | "error"; address?: string }> }; documentPdf?: { expectedPageCount: number; actualPageCount?: number; renderer: "libreoffice"; issues: Array<{ code: string; message: string; severity: "error" }> }; presentationPdf?: { expectedPageCount: number; actualPageCount?: number; renderer: "libreoffice"; issues: Array<{ code: string; message: string; severity: "error" }> }; pdf?: { sha256: string; pageCount: number } };
 export type OfficeReleaseInput = { expectedVersion: number; action: "export" | "share" | "present" | "send" | "publish"; destination: { sensitivity: "public" | "internal" | "confidential"; external: boolean; disclosureSatisfied?: boolean }; format?: "native" | "pdf"; spreadsheetPdf?: SpreadsheetPdfRequest; acknowledgement?: { version: number; action: "export" | "share" | "present" | "send" | "publish"; codes: string[] } };
 
 export async function reviewOfficeRelease(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseReceipt> {
@@ -410,6 +411,43 @@ export async function readOfficeReleasedFile(workspaceId: string, fileId: string
     if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
     return attachOfficeMetadata(blob, header === null ? NaN : Number(header), started, viewerId);
   } catch { throw new OfficeApiError("office_projection_expired", 409); }
+}
+
+export type ProtectedPdfSource = { bytes: ArrayBuffer; validForMs: number };
+
+export async function readOfficePdfSource(artifactId: string): Promise<ProtectedPdfSource> {
+  const started = performance.now();
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/pdf/source`, { cache: "no-store" });
+  if (!response.ok) throw new OfficeApiError("office_pdf_source_failed", response.status);
+  const validForMs = Number(response.headers.get("X-Brian-Media-Valid-For-Ms"));
+  const elapsed = performance.now() - started;
+  if (!Number.isFinite(validForMs) || validForMs - elapsed <= 0) throw new OfficeApiError("office_projection_expired", 409);
+  return { bytes: await response.arrayBuffer(), validForMs: Math.min(30_000, validForMs - elapsed) };
+}
+
+export async function uploadPdfSessionImage(workspaceId: string, file: File): Promise<string> {
+  if (!['image/png', 'image/jpeg'].includes(file.type) || file.size <= 0 || file.size > 5 * 1024 * 1024) throw new Error('signature_image_invalid');
+  const form = new FormData();
+  form.append('files', file);
+  form.append('workspaceId', workspaceId);
+  form.append('appOrigin', 'doc');
+  const body = await json<{ files: Array<{ id?: string; error?: string }> }>(await authFetch(`${API_URL}/api/files/upload`, { method: 'POST', body: form }), 'office_pdf_image_upload_failed');
+  const uploaded = body.files[0];
+  if (!uploaded?.id || uploaded.error) throw new Error(uploaded?.error ?? 'office_pdf_image_upload_failed');
+  return uploaded.id;
+}
+
+export async function admitPdfSessionImage(artifactId: string, expectedSeq: number, sourceAttachmentId: string): Promise<{ signatureResourceId: string; seq: number }> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/pdf/signature-assets`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: { kind: 'file_cache', id: sourceAttachmentId }, expectedSeq }),
+  }), 'office_pdf_image_admission_failed');
+}
+
+export async function saveOfficePdfToFiles(artifactId: string, input: { expectedSeq: number; releaseHash: string; path: string }): Promise<{ fileId: string }> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/pdf/save-to-files`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  }), 'office_pdf_save_failed');
 }
 
 export async function transitionOfficeLifecycle(artifactId: string, action: "archive" | "unarchive" | "trash" | "restore" | "purge", reason: string): Promise<OfficeArtifact> {

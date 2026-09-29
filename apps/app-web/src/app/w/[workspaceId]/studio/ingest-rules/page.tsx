@@ -40,6 +40,7 @@ import { RailSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 import { WhatsappGroupManager } from "@/components/ingest/whatsapp-groups";
 import { FeishuGroupManager } from "@/components/ingest/feishu-groups";
 import { IngestRuleEditor } from "@/components/ingest/rule-editor";
+import { ApplicationRecovery } from "@/components/ingest/application-recovery";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { ingestSourceNotice } from "@/lib/ingest-source-notice";
 import {
@@ -851,6 +852,8 @@ export default function StudioIngestRulesPage() {
       <section className="border border-dashed border-border rounded-md bg-muted/30 p-4 text-xs text-muted-foreground leading-relaxed">
         {copy.statusNote}
       </section>
+
+      <ApplicationRecovery workspaceId={workspaceId} />
 
       {toggleError && (
         <div className="text-xs text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">

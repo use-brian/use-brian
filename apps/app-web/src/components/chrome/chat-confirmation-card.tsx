@@ -174,6 +174,8 @@ export function ChatConfirmationCard({
         {preview ? (
           <ToolPreview
             preview={preview}
+            approvalId={confirmation.approvalId}
+            displayLines={confirmation.displayLines}
             attachmentLines={extractAttachmentLines(confirmation.displayLines)}
             senderEmail={extractEmailSender(confirmation.displayLines)}
           />

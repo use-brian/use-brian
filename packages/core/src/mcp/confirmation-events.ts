@@ -34,7 +34,12 @@ const DECISION_LABELS: Record<ConfirmationDecision, string> = {
 
 export type NormalizedConfirmationEvent =
   | { kind: 'text'; text: string }
-  | { kind: 'action'; data: unknown }
+  | {
+    kind: 'action'
+    data: unknown
+    /** Provider-authenticated delivery message, never inferred from action data. */
+    sourceMessageId?: string
+  }
   | {
     kind: 'decision'
     toolCallId: unknown

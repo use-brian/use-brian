@@ -158,7 +158,7 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     expect(applied.items[0]).toMatchObject({status:'applied',resultVersion:record.scopeVersion})
     expect((await inventory(f.workspaceId,f.owner)).total).toBe('0')
     expect((await pool.query('SELECT user_id,assistant_id,sensitivity,compartments,summary FROM memories WHERE id=$1',[record.id])).rows[0]).toEqual({user_id:f.owner,assistant_id:f.assistantId,sensitivity:'confidential',compartments:[],summary:'Private fixture content'})
-    expect((await pool.query('SELECT classification_mode,reviewed_inventory_revision::text FROM workspace_access_policies WHERE workspace_id=$1',[f.workspaceId])).rows[0]).toEqual({classification_mode:'review',reviewed_inventory_revision:'1'})
+    expect((await pool.query('SELECT classification_mode,reviewed_inventory_revision::text FROM workspace_access_policies WHERE workspace_id=$1',[f.workspaceId])).rows[0]).toEqual({classification_mode:'review',reviewed_inventory_revision:'2'})
   })
   it('resumes bounded pages and does not replay an old apply even under concurrent requests',async()=>{
     const f=await fixture(),ids:string[]=[]

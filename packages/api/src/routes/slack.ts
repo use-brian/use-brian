@@ -1,3 +1,4 @@
+import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Slack webhook route — per-channel BYO credentials.
@@ -50,20 +51,18 @@ import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebh
 import {
   parseFileContent,
   buildTool,
-  interpretConfirmationEvent,
   resolveRealtimeThreadAddressing,
   sanitize as sanitizeAnalytics,
 } from '@use-brian/core'
 import { z } from 'zod'
-import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, WorkflowEventDispatcher } from '@use-brian/core'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
+import { humanizeToolName, describeToolInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { billingPartyForAssistant } from '../billing-party.js'
-import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
@@ -236,7 +235,7 @@ type SlackRouteOptions = {
 }
 
 /** The in-flight query loop for one Slack channel: its abort handle and the
- *  `ts` of the inbound message it is answering (see `activeAbortControllers`). */
+ *  `ts` of the inbound message it is answering. */
 export type ActiveSlackTurn = { controller: AbortController; messageId?: string }
 
 /**
@@ -324,8 +323,8 @@ export type SlackSenderResolution = {
  * same gate RLS applies downstream, so honouring the link cannot widen
  * what the sender can read.
  *
- * Any failure falls back to the owner (prior behaviour) and logs; the
- * turn still runs.
+ * An unresolved sender retains the legacy owner session key for ordinary
+ * anonymous chat, but that fallback is NEVER a verified workflow identity.
  * See docs/architecture/channels/channel-user-identity.md → "Slack".
  */
 export async function resolveSlackSender(params: {
@@ -382,23 +381,11 @@ export async function resolveSlackSender(params: {
     }
   }
 
-  return { userId: ownerId, isIdentified: true, viaLink: false }
+  return { userId: ownerId, isIdentified: false, viaLink: false }
 }
 
 export function slackRoutes(options: SlackRouteOptions): Router {
   const router = Router()
-
-  // Active abort controllers — keyed by the thread-qualified session channel
-  // id, so "stop" messages cancel only the in-flight loop in their thread.
-  // `messageId` is the Slack `ts` of
-  // the message that turn is answering, so an edit-to-retry can tell
-  // "the user edited THE message being answered" from "the user edited
-  // some other message while an unrelated turn is running".
-  const activeAbortControllers = new Map<string, ActiveSlackTurn>()
-
-  // Pending Slack confirmations — keyed by thread-qualified session channel id.
-  type SlackPendingConf = { resolver: ConfirmationResolver; toolCallId: string }
-  const pendingSlackConfirmations = new Map<string, SlackPendingConf>()
 
   router.post<{ channelId: string }>('/:channelId', async (req, res) => {
     const { channelId } = req.params
@@ -720,57 +707,12 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     // session identity must include the thread root. Until this split, every
     // native Slack thread in one DM/channel appended to the same transcript.
 
-    // ── Check if this message is an abort request or edit ───────
-    // Bypass the chat lock — abort the running loop immediately.
-    const ABORT_KEYWORDS = ['stop', 'cancel', 'abort', 'nevermind', 'never mind']
-    const normalizedText = incoming.text.trim().toLowerCase()
-    const activeTurn = activeAbortControllers.get(sessionChannelId)
-    if (activeTurn) {
-      if (ABORT_KEYWORDS.includes(normalizedText)) {
-        // Explicit abort — cancel and acknowledge
-        activeTurn.controller.abort()
-        activeAbortControllers.delete(sessionChannelId)
-        await adapter.sendMessage(incoming.channelId, { text: 'Stopped.' }, threadTs ? { threadTs } : undefined)
-        return
-      }
-      if (incoming.isEdit && shouldAbortForEdit(activeTurn, incoming.messageId)) {
-        // Edit-to-retry - the user edited THE message the running loop is
-        // answering, so abort it and let the edited text be reprocessed.
-        // The edit falls through to normal processing via the chat lock
-        // (which serializes after the abort completes). An edit to any
-        // OTHER message must not touch the running turn: it just queues
-        // behind the lock like a new message. (2026-08-18: a Slack
-        // link-unfurl `message_changed` on the user's NEXT message aborted
-        // an in-flight "yes" confirmation with "Something went wrong".)
-        activeTurn.controller.abort()
-        activeAbortControllers.delete(sessionChannelId)
-      }
+    const interactionScope: ChannelInteractionScope = {
+      channelType: 'slack', integrationId: channelId,
+      conversationId: incoming.channelId, senderId: incoming.userId, sessionId: sessionChannelId,
     }
-
-    // ── Check if this message is a confirmation response ──────
-    const pendingConf = pendingSlackConfirmations.get(sessionChannelId)
-    if (pendingConf) {
-      const confirmation = interpretConfirmationEvent(
-        { kind: 'text', text: incoming.text },
-        pendingConf.toolCallId,
-      )
-      pendingSlackConfirmations.delete(sessionChannelId)
-      if (confirmation.status === 'decision') {
-        pendingConf.resolver.resolve(pendingConf.toolCallId, confirmation.decision)
-        if (confirmation.consume) return
-      }
-    } else if (options.deferredConfirmationStore) {
-      // Check for a deferred confirmation from a scheduled job
-      const confirmation = interpretConfirmationEvent({ kind: 'text', text: incoming.text })
-      if (confirmation.status === 'decision') {
-        const deferred = await options.deferredConfirmationStore.findPendingByChannel('slack', incoming.channelId)
-        if (deferred && tryResolveSchedulerConfirmation(deferred.toolCallId, confirmation.decision)) {
-          options.deferredConfirmationStore.markResolved(deferred.toolCallId, confirmation.decision)
-            .catch((err) => console.error('[slack] deferred confirmation DB update failed:', err))
-          return
-        }
-      }
-    }
+    if (incoming.isEdit) channelConfirmations.abortForEdit(interactionScope, incoming.messageId)
+    if (channelConfirmations.handle(interactionScope, { kind: 'text', text: incoming.text }).handled) return
 
     // 5a-link. Link-code claim — a 6-char alphanumeric code in a Slack
     //          message binds this Slack user to the sidan web user that
@@ -823,7 +765,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     //     the person actually uses), then the profile-email path.
     //     See docs/architecture/channels/channel-user-identity.md → "Slack".
     let channelUserId = ownerId
-    let isIdentified = true
+    let isIdentified = false
     if (incoming.userId) {
       const sender = await resolveSlackSender({
         slackUserId: incoming.userId,
@@ -859,8 +801,8 @@ export function slackRoutes(options: SlackRouteOptions): Router {
           realtimeThreadTarget,
           botToken: slackCreds.bot_token,
           ...options,
-          pendingSlackConfirmations,
-          activeAbortControllers,
+          interactionScope,
+          questionIntegrationId: integration.id,
         }),
       )
     } catch (err) {
@@ -1253,8 +1195,8 @@ type ProcessMessageParams = {
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
-  pendingSlackConfirmations: Map<string, { resolver: ConfirmationResolver; toolCallId: string }>
-  activeAbortControllers: Map<string, ActiveSlackTurn>
+  interactionScope: ChannelInteractionScope
+  questionIntegrationId: string
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
@@ -1825,12 +1767,11 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
 
   // ── Abort controller ──
   const abortController = new AbortController()
-  params.activeAbortControllers.set(params.sessionChannelId, {
-    controller: abortController,
-    messageId: incoming.messageId,
-  })
 
   await processChannelMessage({
+    interactionScope: params.interactionScope,
+    incomingMessage: incoming,
+    questionIntegrationId: params.questionIntegrationId,
     backgroundModel: params.backgroundModel,
     decisionRuntime: params.decisionRuntime,
     userId: channelUserId,
@@ -1919,24 +1860,10 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       async onGoalAccepted(message) {
         await adapter.sendMessage(incoming.channelId, { text: message }, threadOpts)
       },
-      async onConfirmationRequired(req, resolver) {
-        params.pendingSlackConfirmations.set(params.sessionChannelId, {
-          resolver,
-          toolCallId: req.toolCallId,
-        })
-        const lines = req.displayLines && req.displayLines.length > 0
-          ? req.displayLines
-          : formatConfirmationInput(req.input)
-        const inputSummary = lines.length > 0 ? '\n' + lines.join('\n') : ''
-        const displayName = getToolDisplayName(req.toolName)
-        const replyHint = req.allowPersistentApproval
-          ? 'Reply: yes / no / always / never'
-          : 'Reply: yes / no'
-        await adapter.sendMessage(incoming.channelId, {
-          text: `${displayName}${inputSummary}\n\n${replyHint}`,
-        }, threadOpts)
+      async onConfirmationRequired(req) {
+        await adapter.sendMessage(incoming.channelId, confirmationMessage(req), threadOpts)
       },
-      async sendResponse(text, documents) {
+      async sendResponse(text, documents, _question, actions) {
         await adapter.clearStatus?.(incoming.channelId, { messageId: incoming.messageId })
         const finalText = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
         // Capture the Slack `ts` so the pipeline stamps it onto the
@@ -1945,10 +1872,10 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         // feedback to the correct turn via
         // `findSessionMessageByChannelId`. See corrections.md.
         let channelMessageId: string | undefined
-        if (finalText || documents?.length) {
+        if (finalText || documents?.length || actions?.length) {
           channelMessageId = await adapter.sendMessage(
             incoming.channelId,
-            { text: finalText, format: 'markdown', documents },
+            { text: finalText, format: 'markdown', documents, actions },
             threadOpts,
           )
         } else {
@@ -1984,12 +1911,6 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         }, threadOpts)
       },
       async onCleanup() {
-        // Only clear our own entry - a successor turn (e.g. the edit that
-        // aborted this one) may already have registered under this thread.
-        const current = params.activeAbortControllers.get(params.sessionChannelId)
-        if (current?.controller === abortController) {
-          params.activeAbortControllers.delete(params.sessionChannelId)
-        }
         await adapter.clearStatus?.(incoming.channelId, { messageId: incoming.messageId })
       },
     },

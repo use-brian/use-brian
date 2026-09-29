@@ -13,6 +13,7 @@ import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
 import type { Tool, ToolContext } from '../tools/types.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
 import { queryLoop, type QueryEvent } from '../engine/query-loop.js'
+import { createExecutionContext, executionToolContext } from '../security/execution-context.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -49,8 +50,8 @@ export type WorkerResult = {
  *
  * Row identity is the caller-generated `runId` (a UUID). Migration 190
  * originally keyed rows by (session_id, worker_id) UNIQUE, but the
- * in-process worker_id is a per-request monotonic counter that resets
- * on every reset(); cross-request collisions silently merged two
+ * in-process worker_id was a per-request counter that reset on every
+ * reset(); cross-request collisions silently merged two
  * different workers' state into one row. Migration 194 dropped the
  * UNIQUE; runIds are now the addressable identity (worker_id stays as
  * a display label only).
@@ -89,15 +90,18 @@ export type WorkerRunsStore = {
     turnCount: number
   }): Promise<void>
   /**
-   * Load every worker row for the session — used by `rehydrate()` on
-   * chat-route resume entry. The manager respawns rows with
+   * Load worker rows for the session — used by `rehydrate()` on chat-route
+   * resume entry. When `runIds` is present, only those runs belong to this
+   * suspension; an empty list intentionally loads nothing. Legacy resume
+   * checkpoints omit the filter and retain the historical all-session read.
+   * The manager respawns rows with
    * status='running' (seeded with `history`) and pushes rows with
    * status='completed'|'failed'|'stopped' into the notifications queue
    * for Phase 4b drain. The `runId` flows back to `recordTurn` /
    * `recordCompletion` so respawned workers update the existing row
    * instead of inserting a new one.
    */
-  loadForSession(sessionId: string): Promise<Array<{
+  loadForSession(sessionId: string, runIds?: readonly string[]): Promise<Array<{
     runId: string
     workerId: string
     status: WorkerStatus
@@ -180,7 +184,7 @@ export type WorkerOptions = {
   onUsage?: (usage: WorkerUsageEvent) => void
 }
 
-const WORKER_SYSTEM_PROMPT = `You are a research assistant. Your job is to find specific information and return it concisely.
+const WORKER_SYSTEM_PROMPT = `You are an isolated read-only worker. Your job is to complete one self-contained task and return the result concisely.
 
 Rules:
 - Answer the question directly, no preamble
@@ -189,13 +193,13 @@ Rules:
 - Format as a structured list when returning multiple items
 - If you can't find what's asked, say so clearly
 - Do NOT interact with the user — return your findings to the main assistant
-- Use 1-2 web searches maximum per task. A single well-crafted search is almost always enough. Do NOT search for each individual item separately — search for a list/roundup instead.
+- Use 1-2 focused retrieval operations by default; use more only when the brief clearly requires them. Prefer one batch/list/search operation over reading each item separately.
 - Stop searching once you have enough to answer. Don't seek exhaustive coverage.`
 
 /**
  * Research-mode prompt — used when the parent loop is in deep-research mode
- * (Research toggle on + max-tier model). The default prompt caps web searches
- * at 1-2 and never mentions urlReader, which causes workers to return raw
+ * (Research toggle on + max-tier model). The default prompt keeps retrieval
+ * brief and never mandates urlReader, which can cause workers to return raw
  * search snippets instead of actual page content. For research turns the
  * user has explicitly asked for thoroughness, so we mandate the search →
  * read → cite chain that webSearch's own tool description already documents.
@@ -307,12 +311,16 @@ export function createWorkerManager(options: WorkerOptions) {
     status: WorkerStatus
     description: string
     result?: string
+    /** Durable worker_runs row identity. Unlike workerId, unique across sessions. */
+    runId: string
     // Spawning turn's session — scopes pendingCount/notification delivery so
     // one user's worker never surfaces in another user's turn on this shared
     // singleton. See WorkerResult.ownerSessionId.
     ownerSessionId: string | null
     abortController: AbortController | undefined
     promise: Promise<WorkerResult> | undefined
+    /** Parent request was aborted; settle without queueing a stale result. */
+    suppressNotification: boolean
   }>()
 
   let workerCounter = 0
@@ -337,7 +345,7 @@ export function createWorkerManager(options: WorkerOptions) {
   // model so it knows to wait for completions before spawning more. Null
   // means unlimited (the default). Reset to null in `reset()`.
   //
-  // Research mode sets this to 10 so the coordinator can fan out broadly
+  // Research mode sets this to 5 so the coordinator can fan out broadly
   // on initial waves and refill the pool after a wave drains. Non-research
   // paths (splitter-triggered parallel research) leave it null because
   // their fan-outs are small (2-3 workers) and bounded by the classifier.
@@ -361,6 +369,30 @@ export function createWorkerManager(options: WorkerOptions) {
   let persistenceSessionId: string | null = null
   let persistenceWorkspaceId: string | null = null
 
+  type SessionWorkerConfig = {
+    onEvent?: (workerId: string, event: QueryEvent) => void
+    researchMode: boolean
+    researchModel: string | null
+    maxConcurrent: number | null
+    persistenceStore: WorkerRunsStore | null
+    workspaceId: string | null
+  }
+  const sessionConfigs = new Map<string, SessionWorkerConfig>()
+
+  function getOrCreateSessionConfig(sessionId: string): SessionWorkerConfig {
+    const existing = sessionConfigs.get(sessionId)
+    if (existing) return existing
+    const created: SessionWorkerConfig = {
+      researchMode: false,
+      researchModel: null,
+      maxConcurrent: null,
+      persistenceStore: null,
+      workspaceId: null,
+    }
+    sessionConfigs.set(sessionId, created)
+    return created
+  }
+
   function persistFireAndForget(p: Promise<void>, op: string, workerId: string) {
     p.catch((err) => {
       console.warn(
@@ -375,6 +407,29 @@ export function createWorkerManager(options: WorkerOptions) {
       if (w.status === 'running') active++
     }
     return active
+  }
+
+  function countActiveWorkersFor(sessionId: string): number {
+    let active = 0
+    for (const worker of workers.values()) {
+      if (worker.status === 'running' && worker.ownerSessionId === sessionId) active++
+    }
+    return active
+  }
+
+  function reserveRehydratedWorkerId(persistedWorkerId: string): string {
+    const match = persistedWorkerId.match(/^worker_(\d+)$/)
+    if (match) {
+      const n = parseInt(match[1], 10)
+      if (Number.isFinite(n) && n > workerCounter) workerCounter = n
+    }
+    if (!workers.has(persistedWorkerId)) return persistedWorkerId
+
+    let candidate: string
+    do {
+      candidate = `worker_${++workerCounter}`
+    } while (workers.has(candidate))
+    return candidate
   }
 
   // ── Notification queue + wake/wait (same pattern as tool-executor.ts) ──
@@ -431,10 +486,14 @@ export function createWorkerManager(options: WorkerOptions) {
       ? new Map([...requestTools].filter(([_, t]) => t.isReadOnly))
       : options.tools
 
+    const sessionConfig = context.sessionId
+      ? sessionConfigs.get(context.sessionId)
+      : undefined
+
     // Pick the prompt + budget + model at spawn time. Per-spawn snapshot —
     // flipping `researchMode` mid-turn doesn't retroactively change a worker
     // already running, which matches `setOnEvent`'s semantics.
-    const isResearch = researchMode
+    const isResearch = sessionConfig?.researchMode ?? researchMode
     // Research workers additionally get the governed read-browse tools
     // (sends-forbidden by construction — see setResearchBrowseTools). Standard
     // preflight workers and non-research spawns never see them: a cheap
@@ -468,8 +527,9 @@ export function createWorkerManager(options: WorkerOptions) {
     const userPrompt = isResearch
       ? `${RESEARCH_USER_PROMPT_PREAMBLE}${prompt}`
       : prompt
+    const configuredResearchModel = sessionConfig?.researchModel ?? researchModel
     const model = context.workerRuntime?.model
-      ?? (isResearch && researchModel ? researchModel : options.model)
+      ?? (isResearch && configuredResearchModel ? configuredResearchModel : options.model)
     const workerProvider = context.workerRuntime?.provider ?? options.provider
 
     // Capture per-spawn refs from the SPAWNING TURN's `context` (stable per
@@ -485,11 +545,14 @@ export function createWorkerManager(options: WorkerOptions) {
     // concurrent setOnEvent() must not redirect THIS worker's events
     // (queries / URLs / findings) and its tool-cost + analytics into another
     // user's live SSE stream.
-    const ownStore = persistenceStore
+    const ownStore = sessionConfig?.persistenceStore ?? persistenceStore
     const ownSessionId: string | null = context.sessionId ?? persistenceSessionId ?? null
-    const ownWorkspaceId: string | null = context.workspaceId ?? persistenceWorkspaceId ?? null
+    const ownWorkspaceId: string | null = context.workspaceId
+      ?? sessionConfig?.workspaceId
+      ?? persistenceWorkspaceId
+      ?? null
     const ownerSessionId: string | null = ownSessionId
-    const ownOnEvent = options.onEvent
+    const ownOnEvent = sessionConfig?.onEvent ?? options.onEvent
     const ownOnUsage = options.onUsage
 
     // Persistence — record spawn (skip when rehydrating; the row already
@@ -519,6 +582,38 @@ export function createWorkerManager(options: WorkerOptions) {
     // in `recordCompletion` for failed workers (otherwise the row would
     // show turnCount=0 even though several turns ran successfully).
     let lastTurnCount = 0
+    const finishSuppressedWorker = (): WorkerResult | null => {
+      const entry = workers.get(workerId)
+      if (!entry?.suppressNotification) return null
+
+      const stopped: WorkerResult = {
+        workerId,
+        description,
+        status: 'stopped',
+        result: 'Stopped because the parent request was cancelled.',
+        ownerSessionId,
+      }
+      entry.status = 'stopped'
+      entry.result = stopped.result
+      entry.abortController = undefined
+      entry.promise = undefined
+      if (ownStore && ownSessionId) {
+        persistFireAndForget(
+          ownStore.recordCompletion({
+            runId,
+            sessionId: ownSessionId,
+            workerId,
+            status: 'stopped',
+            result: stopped.result,
+            turnCount: lastTurnCount,
+          }),
+          'recordCompletion',
+          workerId,
+        )
+      }
+      workers.delete(workerId)
+      return stopped
+    }
     const promise = (async (): Promise<WorkerResult> => {
       try {
         let responseText = ''
@@ -538,6 +633,27 @@ export function createWorkerManager(options: WorkerOptions) {
         let urlReaderCalls = 0
         let webSearchCalls = 0
 
+        const workerExecution = context.executionContext
+          ? createExecutionContext({
+              identity: {
+                kind: 'delegated',
+                actorUserId: context.executionContext.security.access.userId,
+                delegationId: runId,
+                parentCeiling: context.executionContext.security.ceiling,
+              },
+              ownership: context.executionContext.ownership,
+              access: context.executionContext.security.access,
+              writeDefaults: context.executionContext.security.writeDefaults,
+              provenance: context.executionContext.security.provenance,
+              authority: context.executionContext.security.authority,
+              lifecycle: {
+                ...context.executionContext.lifecycle,
+                abortSignal: abortController.signal,
+              },
+              surface: context.executionContext.surface,
+              attribution: context.executionContext.attribution,
+            })
+          : undefined
         for await (const event of queryLoop({
           // Child trace on the invoking lane's recorder (stamped on the
           // context by the parent queryLoop). NOOP only reachable when a
@@ -552,6 +668,9 @@ export function createWorkerManager(options: WorkerOptions) {
           tools: workerTools,
           context: {
             ...context,
+            ...(workerExecution
+              ? executionToolContext(workerExecution, { appId: context.appId })
+              : {}),
             abortSignal: abortController.signal,
             // Workers must NOT have workerManager — otherwise Phase 4b
             // triggers inside the worker and deadlocks waiting for sibling workers.
@@ -686,6 +805,9 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
           )
         }
 
+        const stopped = finishSuppressedWorker()
+        if (stopped) return stopped
+
         const result: WorkerResult = {
           workerId,
           description,
@@ -731,6 +853,9 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
 
         return result
       } catch (err) {
+        const stopped = finishSuppressedWorker()
+        if (stopped) return stopped
+
         const result: WorkerResult = {
           workerId,
           description,
@@ -771,28 +896,30 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     workers.set(workerId, {
       status: 'running',
       description,
+      runId,
       ownerSessionId,
       abortController,
       promise,
+      suppressNotification: false,
     })
 
     return promise
   }
 
   return {
-    /**
-     * Reset the manager for a new request — abort stale workers, clear state.
-     * Call at the start of each request to prevent cross-request contamination.
-     */
+    /** Fully reset a request-local manager. Shared web paths use
+     * `resetForSession` so concurrent sessions are never disturbed. */
     reset() {
-      for (const entry of workers.values()) {
+      for (const [workerId, entry] of workers) {
         if (entry.status === 'running') {
+          entry.status = 'stopped'
+          entry.suppressNotification = true
           entry.abortController?.abort()
+        } else {
+          workers.delete(workerId)
         }
       }
-      workers.clear()
       notifications.length = 0
-      workerCounter = 0
       options.onEvent = undefined
       researchMode = false
       researchModel = null
@@ -800,6 +927,28 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       persistenceStore = null
       persistenceSessionId = null
       persistenceWorkspaceId = null
+      sessionConfigs.clear()
+    },
+
+    /** Reset stale state owned by one web session without touching any other
+     * request sharing this process-wide manager. Worker ids stay monotonic so
+     * a late cancelled promise cannot collide with a newer entry. */
+    resetForSession(sessionId: string) {
+      for (const [workerId, entry] of workers) {
+        if (entry.ownerSessionId !== sessionId) continue
+        if (entry.status === 'running') {
+          entry.status = 'stopped'
+          entry.suppressNotification = true
+          entry.abortController?.abort()
+        } else if (entry.promise === undefined) {
+          workers.delete(workerId)
+        }
+      }
+      for (let i = notifications.length - 1; i >= 0; i--) {
+        if (notifications[i]?.ownerSessionId === sessionId) notifications.splice(i, 1)
+      }
+      sessionConfigs.delete(sessionId)
+      wake()
     },
 
     /**
@@ -814,6 +963,12 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       sessionId: string | null
       workspaceId: string | null
     }) {
+      if (params.sessionId) {
+        const config = getOrCreateSessionConfig(params.sessionId)
+        config.persistenceStore = params.store
+        config.workspaceId = params.workspaceId
+        return
+      }
       persistenceStore = params.store
       persistenceSessionId = params.sessionId
       persistenceWorkspaceId = params.workspaceId
@@ -832,8 +987,8 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     },
 
     /**
-     * Phase 3 of askQuestion suspend-resume — load every persisted worker
-     * row for a session and reconstitute the manager state. Completed /
+     * Phase 3 of askQuestion suspend-resume — load the persisted workers
+     * captured by this suspension and reconstitute the manager state. Completed /
      * failed / stopped rows go straight into the notifications queue so
      * Phase 4b drains them on the next turn boundary. Running rows are
      * respawned with their saved history so they continue from the last
@@ -846,11 +1001,14 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       sessionId: string,
       context: ToolContext,
       requestTools?: Map<string, Tool>,
+      runIds?: readonly string[],
     ): Promise<{ respawned: number; notificationsReady: number }> {
-      if (!persistenceStore) {
+      const sessionConfig = sessionConfigs.get(sessionId)
+      const store = sessionConfig?.persistenceStore ?? persistenceStore
+      if (!store) {
         return { respawned: 0, notificationsReady: 0 }
       }
-      const rows = await persistenceStore.loadForSession(sessionId)
+      const rows = await store.loadForSession(sessionId, runIds)
       let respawned = 0
       let notificationsReady = 0
       // Drive the workerCounter past the highest known id so a follow-up
@@ -864,6 +1022,17 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
         }
       }
       for (const row of rows) {
+        // A same-process resume can see the exact run that is already active or
+        // queued in memory. The durable UUID, not the display worker id, is the
+        // idempotency key; loading it again would duplicate work or delivery.
+        const alreadyLoaded = [...workers.values()].some(
+          (entry) => entry.ownerSessionId === sessionId && entry.runId === row.runId,
+        )
+        if (alreadyLoaded) continue
+        // Persisted worker ids are display labels, not process-wide identities.
+        // Two sessions can both contain (for example) `worker_1`; preserve the
+        // label when free, otherwise remap it before touching the shared Map.
+        const runtimeWorkerId = reserveRehydratedWorkerId(row.workerId)
         if (row.status === 'running') {
           // Snapshot the per-request research flags so the spawn picks
           // the same prompt + budget as the original. The chat route
@@ -871,10 +1040,11 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
           // but be defensive: if a row says research_mode=true and the
           // current setting differs, the row's value wins for that
           // single respawn (we toggle, spawn, restore).
-          const savedResearch = researchMode
-          const savedModel = researchModel
-          researchMode = row.researchMode
-          researchModel = row.researchMode ? row.model : null
+          const config = getOrCreateSessionConfig(sessionId)
+          const savedResearch = config.researchMode
+          const savedModel = config.researchModel
+          config.researchMode = row.researchMode
+          config.researchModel = row.researchMode ? row.model : null
           try {
             const rowContext = context.workerRuntime
               ? {
@@ -883,7 +1053,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
                 }
               : context
             runWorker(
-              row.workerId,
+              runtimeWorkerId,
               row.prompt,
               rowContext,
               requestTools,
@@ -893,8 +1063,8 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
             )
             respawned++
           } finally {
-            researchMode = savedResearch
-            researchModel = savedModel
+            config.researchMode = savedResearch
+            config.researchModel = savedModel
           }
         } else {
           // Pre-completed (completed | failed | stopped). Surface the
@@ -902,19 +1072,21 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
           // had just finished, so Phase 4b's drain sees no difference
           // between a same-process worker and a rehydrated one.
           const result: WorkerResult = {
-            workerId: row.workerId,
+            workerId: runtimeWorkerId,
             description: row.description,
             status: row.status,
             result: row.result ?? '',
             ownerSessionId: sessionId,
           }
-          workers.set(row.workerId, {
+          workers.set(runtimeWorkerId, {
             status: row.status,
             description: row.description,
+            runId: row.runId,
             result: row.result ?? undefined,
             ownerSessionId: sessionId,
             abortController: undefined,
             promise: undefined,
+            suppressNotification: false,
           })
           notifications.push(result)
           notificationsReady++
@@ -930,8 +1102,16 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * Set the event handler for the current request.
      * Allows the singleton manager to forward worker events to the active SSE stream.
      */
-    setOnEvent(handler: ((workerId: string, event: QueryEvent) => void) | undefined) {
+    setOnEvent(
+      handler: ((workerId: string, event: QueryEvent) => void) | undefined,
+      sessionId?: string,
+    ) {
+      if (sessionId) {
+        getOrCreateSessionConfig(sessionId).onEvent = handler
+        return
+      }
       options.onEvent = handler
+      for (const config of sessionConfigs.values()) config.onEvent = handler
     },
 
     /**
@@ -940,8 +1120,13 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * webSearch → urlReader, up to 5 searches, surface blocked sources) and a
      * higher per-worker turn budget. Reset back to false in `reset()`.
      */
-    setResearchMode(enabled: boolean) {
+    setResearchMode(enabled: boolean, sessionId?: string) {
+      if (sessionId) {
+        getOrCreateSessionConfig(sessionId).researchMode = enabled
+        return
+      }
       researchMode = enabled
+      for (const config of sessionConfigs.values()) config.researchMode = enabled
     },
 
     /**
@@ -950,8 +1135,13 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * max-tier model so worker intelligence matches the coordinator's. Pass
      * `null` to fall back to `options.model`. Reset to null in `reset()`.
      */
-    setResearchModel(model: string | null) {
+    setResearchModel(model: string | null, sessionId?: string) {
+      if (sessionId) {
+        getOrCreateSessionConfig(sessionId).researchModel = model
+        return
+      }
       researchModel = model
+      for (const config of sessionConfigs.values()) config.researchModel = model
     },
 
     /**
@@ -960,12 +1150,43 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * the model) when at capacity. Pass `null` for unlimited. Reset to null
      * in `reset()`.
      *
-     * Research mode sets this to 10 so the coordinator can fan out broadly
+     * Research mode sets this to 5 so the coordinator can fan out broadly
      * on the initial wave and refill the pool after Phase 4b drains workers
      * between waves.
      */
-    setMaxConcurrent(n: number | null) {
+    setMaxConcurrent(n: number | null, sessionId?: string) {
+      if (sessionId) {
+        getOrCreateSessionConfig(sessionId).maxConcurrent = n
+        return
+      }
       maxConcurrent = n
+      for (const config of sessionConfigs.values()) config.maxConcurrent = n
+    },
+
+    clearSessionConfig(sessionId: string) {
+      sessionConfigs.delete(sessionId)
+    },
+
+    /** Release request-scoped configuration and drained terminal entries.
+     * Running workers and undrained notifications remain available for a
+     * suspended request to resume. */
+    releaseSession(sessionId: string) {
+      sessionConfigs.delete(sessionId)
+      const queuedWorkerIds = new Set(
+        notifications
+          .filter((result) => result.ownerSessionId === sessionId)
+          .map((result) => result.workerId),
+      )
+      for (const [workerId, entry] of workers) {
+        if (
+          entry.ownerSessionId === sessionId
+          && entry.status !== 'running'
+          && entry.promise === undefined
+          && !queuedWorkerIds.has(workerId)
+        ) {
+          workers.delete(workerId)
+        }
+      }
     },
 
     /**
@@ -981,6 +1202,15 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       return countActiveWorkers()
     },
 
+    /** Return the cap and active count that `spawn()` applies to one session.
+     * Capacity errors must use this view rather than process-wide diagnostics. */
+    capacityForSession(sessionId: string): { active: number; cap: number | null } {
+      return {
+        active: countActiveWorkersFor(sessionId),
+        cap: sessionConfigs.get(sessionId)?.maxConcurrent ?? maxConcurrent,
+      }
+    },
+
     /**
      * Spawn a new worker. Returns immediately — worker runs in the background.
      * Results arrive via the notification queue (drainNotifications). Returns
@@ -989,7 +1219,13 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * telling the model to wait for some workers to complete first.
      */
     spawn(prompt: string, context: ToolContext, requestTools?: Map<string, Tool>, description?: string): { workerId: string } | null {
-      if (maxConcurrent !== null && countActiveWorkers() >= maxConcurrent) {
+      const cap = context.sessionId
+        ? sessionConfigs.get(context.sessionId)?.maxConcurrent ?? maxConcurrent
+        : maxConcurrent
+      const active = context.sessionId
+        ? countActiveWorkersFor(context.sessionId)
+        : countActiveWorkers()
+      if (cap !== null && active >= cap) {
         return null
       }
       const workerId = `worker_${++workerCounter}`
@@ -1000,33 +1236,71 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     /**
      * Stop a running worker.
      */
-    stop(workerId: string): boolean {
+    stop(workerId: string, sessionId?: string): boolean {
       const entry = workers.get(workerId)
-      if (!entry || entry.status !== 'running') return false
+      if (
+        !entry
+        || entry.status !== 'running'
+        || (sessionId !== undefined && entry.ownerSessionId !== sessionId)
+      ) return false
       entry.abortController?.abort()
       entry.status = 'stopped'
       return true
     },
 
     /**
+     * Cancel only workers owned by one parent session and discard any queued
+     * notifications for that session. Used when the parent request is aborted:
+     * there is no open response left to synthesize into, so allowing those
+     * workers to finish would waste resources and leak stale results into a
+     * later turn. Other sessions on the shared manager are untouched.
+     */
+    cancelForSession(sessionId: string): number {
+      let cancelled = 0
+      for (const entry of workers.values()) {
+        if (
+          entry.status === 'running'
+          && entry.ownerSessionId === sessionId
+        ) {
+          entry.status = 'stopped'
+          entry.suppressNotification = true
+          entry.abortController?.abort()
+          cancelled++
+        }
+      }
+      for (let i = notifications.length - 1; i >= 0; i--) {
+        const owner = notifications[i]?.ownerSessionId
+        if (owner === sessionId) notifications.splice(i, 1)
+      }
+      wake()
+      return cancelled
+    },
+
+    /**
      * Get the status of a worker.
      */
-    getStatus(workerId: string): WorkerStatus | null {
-      return workers.get(workerId)?.status ?? null
+    getStatus(workerId: string, sessionId?: string): WorkerStatus | null {
+      const entry = workers.get(workerId)
+      if (!entry || (sessionId !== undefined && entry.ownerSessionId !== sessionId)) return null
+      return entry.status
     },
 
     /**
      * Get the short description of a worker (first 100 chars of its prompt).
      */
-    getDescription(workerId: string): string | null {
-      return workers.get(workerId)?.description ?? null
+    getDescription(workerId: string, sessionId?: string): string | null {
+      const entry = workers.get(workerId)
+      if (!entry || (sessionId !== undefined && entry.ownerSessionId !== sessionId)) return null
+      return entry.description
     },
 
     /**
      * Get the result of a completed worker.
      */
-    getResult(workerId: string): string | null {
-      return workers.get(workerId)?.result ?? null
+    getResult(workerId: string, sessionId?: string): string | null {
+      const entry = workers.get(workerId)
+      if (!entry || (sessionId !== undefined && entry.ownerSessionId !== sessionId)) return null
+      return entry.result ?? null
     },
 
     /**
@@ -1062,6 +1336,24 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     /** Whether an undrained notification is owned by `sessionId` (or session-less). */
     hasNotificationsFor(sessionId: string): boolean {
       return notifications.some((n) => n.ownerSessionId == null || n.ownerSessionId === sessionId)
+    },
+
+    /**
+     * Durable identities for the workers currently owned by `sessionId`.
+     * A suspension checkpoint stores this exact set so a later replay loads
+     * only work belonging to that suspension, never terminal rows retained
+     * from an older turn in the same chat.
+     */
+    runIdsForSession(sessionId: string): string[] {
+      return [...workers.entries()]
+        .filter(([workerId, entry]) => {
+          if (entry.ownerSessionId !== sessionId) return false
+          if (entry.status === 'running') return true
+          return notifications.some(
+            (result) => result.ownerSessionId === sessionId && result.workerId === workerId,
+          )
+        })
+        .map(([, entry]) => entry.runId)
     },
 
     /**

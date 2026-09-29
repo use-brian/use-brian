@@ -6,7 +6,7 @@
  * id back to a `pending_approvals` row, verifies the approver matches,
  * and dispatches to the same `resumeFromApproval` path the route uses.
  *
- * Used by `routes/telegram.ts`, `routes/slack.ts`, etc. before they
+ * Intended for the shared inbound interceptor before routes
  * forward the message to the chat pipeline. A matched reply short-
  * circuits — the model never sees the "approve" message.
  *
@@ -20,7 +20,7 @@ import { query } from '../db/client.js'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import { resumeFromApproval, type ApprovalBridgeDeps } from './approval.js'
 
-const APPROVE_RE = /^\s*(approve|reject)\s+([a-f0-9-]{6,})\s*(.*)$/i
+const APPROVE_RE = /^\s*(approve|reject)\s+([a-f0-9-]{6,})(?:\s+([\s\S]*))?\s*$/i
 
 export type ApprovalReplyMatch = {
   decision: 'approved' | 'rejected'
@@ -37,6 +37,7 @@ export async function maybeHandleApprovalReply(
   },
   userId: string,
   text: string,
+  scope?: { workspaceId: string; assistantId: string; authorized: () => Promise<boolean>; abortSignal?: AbortSignal },
 ): Promise<ApprovalReplyMatch | null> {
   const match = text.match(APPROVE_RE)
   if (!match) return null
@@ -44,29 +45,34 @@ export async function maybeHandleApprovalReply(
   const idPrefix = match[2].toLowerCase()
   const reason = match[3]?.trim() || undefined
 
+  const unavailable = (status = 'unavailable'): ApprovalReplyMatch => ({
+    decision, approvalId: idPrefix, reason, status, runId: null,
+  })
+  if (scope?.abortSignal?.aborted) return unavailable('cancelled')
+  if (scope && !await scope.authorized()) return unavailable()
+  if (scope?.abortSignal?.aborted) return unavailable('cancelled')
+
   // Resolve the short id prefix to a full approval id, but only among
   // rows the user is the assigned approver for + still pending.
   const result = await query<{ id: string }>(
     `SELECT id FROM pending_approvals
      WHERE approver_user_id = $1
        AND status = 'pending'
+       AND kind = 'workflow_step'
+       AND (expires_at IS NULL OR expires_at > now())
+       AND ($3::uuid IS NULL OR workspace_id = $3)
+       AND ($4::uuid IS NULL OR originating_assistant_id = $4)
        AND id::text LIKE $2 || '%'
      ORDER BY created_at DESC
      LIMIT 2`,
-    [userId, idPrefix],
+    [userId, idPrefix, scope?.workspaceId ?? null, scope?.assistantId ?? null],
   )
-  if (result.rows.length === 0) return null
-  if (result.rows.length > 1) {
-    // Ambiguous prefix — treat as no match so the chat pipeline asks the
-    // user for the full id rather than acting on the wrong row.
-    console.warn(
-      `[approval-replies] ambiguous prefix "${idPrefix}" for user ${userId} (${result.rows.length} matches); ignoring`,
-    )
-    return null
-  }
+  // A recognized command is always consumed, including stale/foreign IDs.
+  if (result.rows.length !== 1) return unavailable()
 
+  if (scope?.abortSignal?.aborted) return unavailable('cancelled')
   const approvalId = result.rows[0].id
-  const outcome = await resumeFromApproval(deps.bridgeDeps, approvalId, decision, userId, reason)
+  const outcome = await resumeFromApproval(deps.bridgeDeps, approvalId, decision, userId, reason, scope?.abortSignal)
   return {
     decision,
     approvalId,

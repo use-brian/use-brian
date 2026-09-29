@@ -64,6 +64,9 @@ function makeApp(over: {
     connectorInstanceStore: {
       listForUser: vi.fn().mockResolvedValue([]),
       listByUser: vi.fn().mockResolvedValue([]),
+      get: vi.fn().mockResolvedValue({
+        id: IID, provider: 'msgraph', scope: 'user', userId: 'u1', workspaceId: null,
+      }),
       createUserInstance,
       update,
       setConfig: vi.fn().mockResolvedValue(undefined),

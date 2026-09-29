@@ -12,7 +12,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto'
 import type { Pool, PoolClient, QueryResultRow } from 'pg'
 import { receiveProviderInbox, type ProviderInboxHandlers, type ProviderInboxRow } from '../association/provider-inbox.js'
-import { createProviderEntitlementInbox } from '../association/provider-entitlements.js'
+import type { ProviderEntitlementServicePort } from '../association/provider-entitlement-service.js'
 import type { ProviderEntitlementEvent, ProviderReceiptState } from '@use-brian/core'
 import { AssociationMembershipCheckoutProviderBindingSchema, AssociationProviderBindingInputSchema, AssociationProviderEventInputSchema, AssociationProviderFinancialEventInputSchema, crmOperationsSha256, type AssociationProviderBindingInput } from '@use-brian/core'
 import { requireAssociationProviderActor, requireBoundProviderOrder, requireBoundProviderOrderIdentity, requireProviderOrderMoney, type ProviderOrderIdentity } from '../association/provider.js'
@@ -24,6 +24,7 @@ import { mayTransitionCrmEntitlement } from '@use-brian/core'
 import {lockAssociationInventory,refreshAssociationInventory} from '../association/inventory.js'
 import { crmPageInstant, queryCrmPage } from '../crm-operations/pagination.js'
 import { getPool } from './client.js'
+import { saveCrmEntitlementPlanRecord, saveCrmEventRecord } from './crm-catalog-records.js'
 import { lockCrmIntegrationCredential, type CrmIntegrationPrincipal } from './crm-integration-store.js'
 import { crmEvidenceRequestHash, resolveCrmEvidenceReplay, type CrmEvidenceRequest } from '../crm-operations/evidence-replay.js'
 import { lockAssociationModule, requireAssociationAdmission } from '../association/workspace-module.js'
@@ -587,79 +588,6 @@ async function getSourceMembershipRecord(
 }
 
 
-export async function saveCrmEntitlementPlanRecord(client: PoolClient, workspaceId: string, input: PlanInput, publishing = false): Promise<MutationResult> {
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('membership-catalogue:'||$1,0))", [workspaceId])
-  if (!publishing) {
-    const managed = await client.query(`SELECT 1 FROM association_membership_catalogues c
-      JOIN association_membership_catalogue_revisions r ON r.workspace_id=c.workspace_id AND r.revision=c.published_revision
-      WHERE c.workspace_id=$1 AND EXISTS(SELECT 1 FROM jsonb_array_elements(r.document->'plans') p WHERE p->>'key'=$2)`, [workspaceId, input.key])
-    if (managed.rows.length) throw new AssociationError('conflict', 'Edit this website plan in the membership catalogue, then preview and publish it.')
-  }
-  const before = await client.query<{ id: string }>(
-    `SELECT id FROM association_membership_plans WHERE workspace_id = $1 AND plan_key = $2`,
-    [workspaceId, input.key],
-  )
-  const result = await client.query<DbRow>(
-    `INSERT INTO association_membership_plans
-       (workspace_id, plan_key, name, currency, fee_minor, billing_period,
-        benefits, eligibility_note, active_from, active_to, published,
-        provider, provider_plan_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-     ON CONFLICT (workspace_id, plan_key) DO UPDATE SET
-       name = EXCLUDED.name, currency = EXCLUDED.currency,
-       fee_minor = EXCLUDED.fee_minor, billing_period = EXCLUDED.billing_period,
-       benefits = EXCLUDED.benefits, eligibility_note = EXCLUDED.eligibility_note,
-       active_from = EXCLUDED.active_from, active_to = EXCLUDED.active_to,
-       published = EXCLUDED.published, provider = EXCLUDED.provider,
-       provider_plan_id = EXCLUDED.provider_plan_id
-     RETURNING ${PLAN_SELECT}`,
-    [workspaceId, input.key, input.name, input.currency, input.feeMinor,
-      input.billingPeriod, input.benefits, input.eligibilityNote ?? null,
-      input.activeFrom ?? null, input.activeTo ?? null, input.published,
-      input.provider ?? null, input.providerPlanId ?? null],
-  )
-  const plan = result.rows[0]
-  const created = before.rows.length === 0
-  return { record: plan, created }
-}
-
-
-export async function saveCrmEventRecord(client: PoolClient, workspaceId: string, input: EventInput, actorKind='system_job'): Promise<MutationResult> {
-  const before = await client.query<{ id: string }>(
-    `SELECT id FROM association_events WHERE workspace_id = $1 AND slug = $2`,
-    [workspaceId, input.slug],
-  )
-  if(before.rows[0])await lockAssociationInventory(client,workspaceId,{eventIds:[before.rows[0].id]})
-  const result = await client.query<DbRow>(
-    `INSERT INTO association_events
-       (workspace_id, slug, programme_key, title, description, starts_at,
-        ends_at, timezone, mode, venue, online_url, registration_opens_at,
-        registration_closes_at, capacity, status, canonical_url, metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-     ON CONFLICT (workspace_id, slug) DO UPDATE SET
-       programme_key = EXCLUDED.programme_key, title = EXCLUDED.title,
-       description = EXCLUDED.description, starts_at = EXCLUDED.starts_at,
-       ends_at = EXCLUDED.ends_at, timezone = EXCLUDED.timezone,
-       mode = EXCLUDED.mode, venue = EXCLUDED.venue,
-       online_url = EXCLUDED.online_url,
-       registration_opens_at = EXCLUDED.registration_opens_at,
-       registration_closes_at = EXCLUDED.registration_closes_at,
-       capacity = EXCLUDED.capacity, status = EXCLUDED.status,
-       canonical_url = EXCLUDED.canonical_url, metadata = EXCLUDED.metadata
-     RETURNING ${EVENT_SELECT}`,
-    [workspaceId, input.slug, input.programmeKey ?? null, input.title,
-      input.description, input.startsAt, input.endsAt, input.timezone,
-      input.mode, input.venue ?? null, input.onlineUrl ?? null,
-      input.registrationOpensAt ?? null, input.registrationClosesAt ?? null,
-      input.capacity ?? null, input.status, input.canonicalUrl ?? null,
-      input.metadata],
-  )
-  const event = result.rows[0]
-  await refreshAssociationInventory(client,workspaceId,[String(event.id)],actorKind)
-  const created = before.rows.length === 0
-  return { record: event, created }
-}
-
 async function applyProviderOrderEvent(client: PoolClient, workspaceId: string, orderId: string, input: ProviderEventInput, actor: AssociationActor): Promise<MutationResult> {
   const fingerprint = crmOperationsSha256({ orderId, ...input, occurredAt: crmPageInstant(input.occurredAt) })
         const integration = await lockIntegrationActor(client, workspaceId, actor)
@@ -874,7 +802,10 @@ async function applyProviderOrderFinancialEvent(client: PoolClient, workspaceId:
 export function createAssociationStore(
   pool: Pool = getPool(),
   transactionClient?: PoolClient,
-  options: { promotionHmacKey?: string } = {},
+  options: {
+    promotionHmacKey?: string
+    providerEntitlements?: ProviderEntitlementServicePort
+  } = {},
 ): AssociationStore {
   // A waitlist promotion shares this exact order implementation and outer commit.
   const transact = <T>(fn: (client: PoolClient) => Promise<T>): Promise<T> => transactionClient ? fn(transactionClient) : transaction(pool, fn)
@@ -2964,11 +2895,17 @@ export function createAssociationStore(
 
     reconcileProviderEvent: (workspaceId, orderId, event, actor) => receiveProviderInbox(pool, { target: 'order', orderId, event }, actor, workspaceId, providerHandlers(workspaceId)),
     reconcileProviderFinancialEvent: (workspaceId, orderId, event, actor) => receiveProviderInbox(pool, { target: 'order', orderId, event }, actor, workspaceId, providerHandlers(workspaceId)),
-    reconcileProviderEntitlement: (workspaceId, input, actor) => createProviderEntitlementInbox(pool).submit(workspaceId, input, actor),
+    reconcileProviderEntitlement: (workspaceId, input, actor) => {
+      if (!options.providerEntitlements) throw new CrmOperationsError('conflict', 'Provider entitlement processing is unavailable.', { reason: 'provider_entitlement_service_unavailable' })
+      return options.providerEntitlements.submit(workspaceId, input, actor)
+    },
     async retryProviderEventReceipt(workspaceId, receiptId) {
       const row = (await pool.query<ProviderInboxRow>('SELECT * FROM association_integration_events WHERE workspace_id=$1 AND id=$2', [workspaceId, receiptId])).rows[0]
       if (!row) throw new CrmOperationsError('not_found', 'Provider receipt is unavailable.')
-      if (row.target_kind === 'entitlement') return createProviderEntitlementInbox(pool).retry(row)
+      if (row.target_kind === 'entitlement') {
+        if (!options.providerEntitlements) throw new CrmOperationsError('conflict', 'Provider entitlement processing is unavailable.', { reason: 'provider_entitlement_service_unavailable' })
+        return options.providerEntitlements.retry(row)
+      }
       return receiveProviderInbox(pool, row.normalized_payload, row.execution_actor, workspaceId, providerHandlers(workspaceId), 'worker')
     },
     async resolveProviderReceipt(workspaceId, receiptId, actor) {
@@ -2995,7 +2932,8 @@ export function createAssociationStore(
       })
       if (row.target_kind === 'entitlement') {
         if (row.normalized_payload.target !== 'entitlement') throw new CrmOperationsError('conflict', 'Provider receipt target is inconsistent.')
-        return createProviderEntitlementInbox(pool).submit(workspaceId, row.normalized_payload.event, row.execution_actor)
+        if (!options.providerEntitlements) throw new CrmOperationsError('conflict', 'Provider entitlement processing is unavailable.', { reason: 'provider_entitlement_service_unavailable' })
+        return options.providerEntitlements.submit(workspaceId, row.normalized_payload.event, row.execution_actor)
       }
       if (row.normalized_payload.target !== 'order') throw new CrmOperationsError('conflict', 'Provider receipt target is inconsistent.')
       return receiveProviderInbox(pool, row.normalized_payload, row.execution_actor, workspaceId, providerHandlers(workspaceId))

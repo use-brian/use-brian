@@ -34,13 +34,14 @@ export type IndexFileArtifactResult = {
 }
 
 type ParentRow = {
+  path: string
   user_id: string | null
   assistant_id: string | null
   sensitivity: string
   compartments: string[]
   tags: string[] | null
   source: string
-  metadata: { indexing?: { status?: string } } | null
+  metadata: { indexing?: { status?: string }; noIndex?: boolean } | null
 }
 
 /**
@@ -71,7 +72,7 @@ export async function indexFileArtifact(input: {
   actingUserId: string
 }): Promise<IndexFileArtifactResult> {
   const parent = await getPool().query<ParentRow>(
-    `SELECT user_id, assistant_id, sensitivity, compartments, tags, source, metadata
+    `SELECT path,user_id, assistant_id, sensitivity, compartments, tags, source, metadata
        FROM workspace_files
       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`,
     [input.fileId, input.workspaceId],
@@ -80,6 +81,9 @@ export async function indexFileArtifact(input: {
     throw new Error(`indexFileArtifact: workspace file ${input.fileId} not found (or closed) in ${input.workspaceId}`)
   }
   const p = parent.rows[0]
+  if (p.path.startsWith('/office/sessions/') || p.metadata?.noIndex === true) {
+    throw Object.assign(new Error('Session-owned files cannot enter the artifact index.'), { code: 'file_index_forbidden' })
+  }
 
   // A file already carrying a `ready` stamp has a COMPLETE segment set from an
   // earlier run, so this call is a RE-index and its whole purpose is to replace

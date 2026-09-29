@@ -117,6 +117,7 @@ import {
   useMidTurnQueue,
   joinQueuedInputs,
 } from "@/lib/use-mid-turn-queue";
+import { useChatController } from "@/lib/chat/use-chat-controller";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { AssistantAvatar } from "@/components/assistant-avatar";
@@ -653,6 +654,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    */
   /** The id the next turn should resume, read by the queue during render. */
   const sessionIdRef = useRef<string | null>(null);
+  const chatController = useChatController(() => sessionIdRef.current);
   const midTurn = useMidTurnQueue({
     stream,
     getSessionId: () => sessionIdRef.current,
@@ -1376,6 +1378,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     (sessionId: string) => {
       const epoch = sessionEpochRef.current;
       if (sessionIdRef.current !== sessionId) return;
+      const controllerProbe = chatController.capture();
       const request = ++pendingInputRequestRef.current;
       void fetchPendingSessionInput(sessionId)
         .then(({ pending, toolConfirmation }) => {
@@ -1384,6 +1387,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             sessionIdRef.current !== sessionId ||
             pendingInputRequestRef.current !== request
           ) return;
+          if (!chatController.isCurrent(controllerProbe)) return;
           setPendingQuestion(
             pending
               ? {
@@ -1394,15 +1398,31 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 }
               : null,
           );
+          if (pending) {
+            chatController.presentInteraction(controllerProbe, {
+              kind: "question",
+              approvalId: pending.approvalId,
+              source: "restored",
+              status: "pending",
+              payload: pending,
+            });
+          }
           if (toolConfirmation) {
-            chat.addConfirmation(
-              toRestoredConfirmation(toolConfirmation, sessionId),
-            );
+            const confirmation = toRestoredConfirmation(toolConfirmation, sessionId);
+            chatController.presentInteraction(controllerProbe, {
+              kind: "tool-confirmation",
+              approvalId: toolConfirmation.approvalId,
+              toolCallId: confirmation.toolCallId,
+              source: "restored",
+              status: "pending",
+              payload: confirmation,
+            });
+            chat.addConfirmation(confirmation);
           }
         })
         .catch(() => {});
     },
-    [chat.addConfirmation],
+    [chat.addConfirmation, chatController],
   );
 
   // A turn-end explanation belongs to the room it happened in; switching
@@ -1439,7 +1459,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const noticeShowing = reconnectNotice;
     const controller = new AbortController();
     const sessionId = activeSessionId;
+    const controllerRun = chatController.capture();
+    if (reconnectWanted) chatController.reconnect(controllerRun);
     const epoch = sessionEpochRef.current;
+    const unregisterControllerCleanup = chatController.registerCleanup(
+      controllerRun,
+      () => {
+        cancelled = true;
+        controller.abort();
+      },
+    );
     const ownsFollow = () =>
       !cancelled && sessionEpochRef.current === epoch && sessionIdRef.current === sessionId;
     const mintRemoteId = () => `rev-${remoteSeqRef.current++}`;
@@ -1470,6 +1499,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         case "status": {
           const working = payload.status === "running";
           if (working) sawRunning = true;
+          if (reconnectWanted && working) chatController.connected(controllerRun);
           // A GET opened just before this page's POST may carry a stale `idle`
           // frame after the optimistic start signal. Never let it erase live
           // direct ownership; a returning page has no such owner and trusts
@@ -1751,6 +1781,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // room's follow stream has no `done`.
           if (isSharedOpen) break;
           sawDone = true;
+          if (reconnectWanted) chatController.complete(controllerRun);
           setReconnectSessionId(null);
           setReconnectNotice(false);
           resetRemoteTurn();
@@ -1773,7 +1804,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // queue's "client is the durable holder" fallback).
           if (sawRunning) {
             setQueuedNotice(false);
-            flushQueuedInputs(sessionId);
+            if (chatController.claimExit(controllerRun)) {
+              flushQueuedInputs(sessionId);
+            }
           }
           break;
         }
@@ -1831,6 +1864,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       }
     })();
     return () => {
+      unregisterControllerCleanup();
       cancelled = true;
       controller.abort();
     };
@@ -1995,13 +2029,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // turn is answered `turn_in_flight`. No session id means nothing is
     // running server-side and no session-owned queue to flush.
     if (!sessionId) return;
+    const controllerRun = chatController.capture();
+    chatController.cancel(controllerRun);
     const epoch = sessionEpochRef.current;
     const ownsStop = () => sessionEpochRef.current === epoch && sessionIdRef.current === sessionId;
     void stopTurn(sessionId)
       .catch(() => { if (ownsStop()) setError(t.stopTurnFailed); })
-      .finally(() => { if (ownsStop()) flushQueuedInputs(sessionId); });
+      .finally(() => {
+        if (ownsStop() && chatController.claimExit(controllerRun)) {
+          flushQueuedInputs(sessionId);
+        }
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream, resetTurnActivity, flushQueuedInputs, t.stopTurnFailed]);
+  }, [stream, resetTurnActivity, flushQueuedInputs, t.stopTurnFailed, chatController]);
 
   const copyResetRef = useRef<number | null>(null);
   const handleCopy = useCallback((messageId: string, text: string) => {
@@ -2187,6 +2227,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     ) {
       return false;
     }
+    const controllerRun = chatController.begin(owningSessionId);
 
     // The room decision (multiplayer chat D1/T3): in a room, send = POST
     // unless this message ADDRESSES the assistant (typed @mention or the
@@ -2456,6 +2497,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             const id = typeof payload.sessionId === "string" ? payload.sessionId : null;
             if (id && !owningSessionId) {
               owningSessionId = id;
+              chatController.adoptSession(controllerRun, id);
               // Adopt BEFORE the URL write: `hydratedRef` is what stops the
               // hydrate effect from re-fetching this thread and wiping the
               // reply that is streaming into it right now.
@@ -2806,7 +2848,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             const toolCallId =
               typeof payload.toolCallId === "string" ? payload.toolCallId : "";
             if (!toolCallId) break;
-            chat.addConfirmation({
+            const confirmation: PendingConfirmation = {
               toolCallId,
               approvalId:
                 typeof payload.approvalId === "string" ? payload.approvalId : undefined,
@@ -2824,7 +2866,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 : undefined,
               sessionId: sessionIdRef.current ?? "",
               status: "pending",
+            };
+            chatController.presentInteraction(controllerRun, {
+              kind: "tool-confirmation",
+              approvalId: confirmation.approvalId ?? `tool:${toolCallId}`,
+              toolCallId,
+              source: "live",
+              status: "pending",
+              payload: confirmation,
             });
+            chat.addConfirmation(confirmation);
             break;
           }
           case "notice": {
@@ -2906,6 +2957,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       },
       onDone: () => {
         if (!ownsSend()) return;
+        chatController.complete(controllerRun);
         const settledSessionId = owningSessionId;
         directTurnSessionRef.current = null;
         if (settledSessionId) {
@@ -2925,7 +2977,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         resetTurnActivity();
         // Anything still queued was never taken by this turn — send it as an
         // ordinary one. See mid-turn-input.md → "the client is the holder".
-        flushQueuedInputs(owningSessionId);
+        if (chatController.claimExit(controllerRun)) {
+          flushQueuedInputs(owningSessionId);
+        }
         setQueuedNotice(false);
         chat.dispatch({ type: "confirmation/clear" });
         // Suspended on a question this turn — fetch the pending row so the
@@ -2942,6 +2996,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       },
       onDisconnect: () => {
         if (!ownsSend()) return;
+        chatController.disconnect(controllerRun);
         // The transport closed with no `done` / `error`: a request-timeout
         // cut, a deploy, a network blip. The server no longer reads a client
         // close as Stop (2026-08-24), so the turn is still running and its
@@ -2962,6 +3017,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // No `session` frame ever arrived, so there is nothing to
           // re-attach to. Report it like any other transport failure.
           setError(t.errorGeneric);
+          chatController.fail(controllerRun, t.errorGeneric);
+          if (chatController.claimExit(controllerRun)) {
+            flushQueuedInputs(owningSessionId);
+          }
           dispatchChatSessionsRefresh(workspaceId);
           return;
         }
@@ -2979,11 +3038,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       },
       onError: () => {
         if (!ownsSend()) return;
+        chatController.fail(controllerRun, t.errorGeneric);
         turnFailed = true;
         directTurnSessionRef.current = null;
         chat.dispatch({ type: "stream/abort" });
         resetTurnActivity();
-        flushQueuedInputs(owningSessionId);
+        if (chatController.claimExit(controllerRun)) {
+          flushQueuedInputs(owningSessionId);
+        }
         setQueuedNotice(false);
         setError(t.errorGeneric);
         // The room backend may still be running after a transport failure.
@@ -3714,6 +3776,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         activeSessionId ??
         sessionIdRef.current;
       if (!sessionId) return;
+      const controllerRun = chatController.capture();
+      const approvalId = confirmation?.approvalId ?? `tool:${toolCallId}`;
+      chatController.beginResponse(controllerRun, approvalId);
       chat.updateConfirmation(toolCallId, {
         status: action === "approve" ? "approving" : "denied",
       });
@@ -3742,6 +3807,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           forbidden = res.status === 403;
         }
         if (ok) {
+          chatController.resolveInteraction(controllerRun, approvalId);
           chat.updateConfirmation(toolCallId, {
             status: action === "approve" ? "approved" : "denied",
           });
@@ -3750,18 +3816,21 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             setRemoteConfirmation(null);
           }
         } else if (forbidden) {
+          chatController.responseFailed(controllerRun, approvalId, t.confirmNotAllowed);
           chat.updateConfirmation(toolCallId, { status: "pending" });
           setError(t.confirmNotAllowed);
         } else {
+          chatController.responseFailed(controllerRun, approvalId);
           chat.updateConfirmation(toolCallId, { status: "pending" });
         }
       } catch {
+        chatController.responseFailed(controllerRun, approvalId);
         chat.updateConfirmation(toolCallId, { status: "pending" });
       }
     },
     // `chat.updateConfirmation` is a stable callback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeSessionId, chat.state.pendingConfirmations, remoteConfirmation, t, workspaceId],
+    [activeSessionId, chat.state.pendingConfirmations, remoteConfirmation, t, workspaceId, chatController],
   );
 
   /** The composer, styled as the app's composite-control box (globals.css
@@ -4664,8 +4733,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 sessionId={pendingQuestion.sessionId}
                 approvalId={pendingQuestion.approvalId}
                 dict={tChat.pendingQuestion}
-                onAnswered={() => setPendingQuestion(null)}
-                onCancelled={() => setPendingQuestion(null)}
+                onAnswered={() => {
+                  chatController.resolveInteraction(
+                    chatController.capture(),
+                    pendingQuestion.approvalId,
+                  );
+                  setPendingQuestion(null);
+                }}
+                onCancelled={() => {
+                  chatController.resolveInteraction(
+                    chatController.capture(),
+                    pendingQuestion.approvalId,
+                  );
+                  setPendingQuestion(null);
+                }}
               />
             )}
             {/* How this turn was served, when it was not served the way the

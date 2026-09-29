@@ -22,6 +22,68 @@ export type OfficeCapability = {
   reason?: string
 }
 
+export type PdfEditingOperation = {
+  id: 'pdfSessionAdmission' | 'pdfField' | 'pdfOverlay' | 'pdfPage' | 'pdfSignature' | 'pdfRelease' | 'pdfSaveToFiles'
+  browserAuthoring: 'manual' | 'action-only'
+  assistantAuthoring: 'command' | 'action-only'
+}
+
+/** PDF is session-only, so its independent direct/Brian rows do not make it a
+ * generic Office creation or template capability. */
+export const pdfEditingCapabilityManifest = {
+  version: 1,
+  family: 'pdf',
+  operations: [
+    { id: 'pdfSessionAdmission', browserAuthoring: 'action-only', assistantAuthoring: 'action-only' },
+    { id: 'pdfField', browserAuthoring: 'manual', assistantAuthoring: 'command' },
+    { id: 'pdfOverlay', browserAuthoring: 'manual', assistantAuthoring: 'command' },
+    { id: 'pdfPage', browserAuthoring: 'manual', assistantAuthoring: 'command' },
+    { id: 'pdfSignature', browserAuthoring: 'manual', assistantAuthoring: 'action-only' },
+    { id: 'pdfRelease', browserAuthoring: 'action-only', assistantAuthoring: 'action-only' },
+    { id: 'pdfSaveToFiles', browserAuthoring: 'action-only', assistantAuthoring: 'action-only' },
+  ] satisfies PdfEditingOperation[],
+} as const
+
+export const PDF_EDITING_REQUIRED_SLICES = [
+  'canonicalModel',
+  'pdfParser',
+  'browserRenderer',
+  'serverWriter',
+  'reopenValidator',
+  'sessionStorage',
+  'expiryCleanup',
+  'release',
+  'saveToFiles',
+  'targetPlanner',
+  'signatureApproval',
+  'editor',
+  'approvalPreview',
+] as const
+export type PdfEditingRequiredSlice = typeof PDF_EDITING_REQUIRED_SLICES[number]
+export type PdfEditingCapabilityAvailability = Record<PdfEditingRequiredSlice, boolean>
+
+export function validatePdfEditingCapabilityManifest(): string[] {
+  const errors: string[] = []
+  const ids = new Set<string>()
+  for (const operation of pdfEditingCapabilityManifest.operations) {
+    if (ids.has(operation.id)) errors.push(`Duplicate PDF editing capability: ${operation.id}`)
+    ids.add(operation.id)
+    if (operation.id === 'pdfSignature' && operation.assistantAuthoring !== 'action-only') errors.push('PDF signature placement must remain an action-only Brian operation')
+  }
+  return errors
+}
+
+export function pdfEditingCapabilityBarrierDiagnostics(availability: Partial<PdfEditingCapabilityAvailability>): string[] {
+  return [
+    ...validatePdfEditingCapabilityManifest(),
+    ...PDF_EDITING_REQUIRED_SLICES.filter((slice) => availability[slice] !== true).map((slice) => `Missing PDF editing runtime slice: ${slice}`),
+  ]
+}
+
+export function canEnablePdfEditingSession(availability: Partial<PdfEditingCapabilityAvailability>): boolean {
+  return pdfEditingCapabilityBarrierDiagnostics(availability).length === 0
+}
+
 const implemented = (id: string, family: OfficeFamily | 'shared', browserAuthoring?: OfficeCapability['browserAuthoring']): OfficeCapability => ({
   id,
   family,

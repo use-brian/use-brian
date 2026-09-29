@@ -33,11 +33,19 @@ import {
   prepareSlashCommand, resolveNativeSlashCommand,
   buildSlashCommandBlock, buildWorkflowSlashCommandBlock,
   buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, formatAssistantQuestion,
-  pinAccessCeiling,
+  createTurnOutputCollector,
+  executionToolContext,
+  boundScopeSource,
+  scopeEvidenceFromRows,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
-import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
+import type { IncomingMessage, OutgoingDocument, OutgoingAction } from '@use-brian/channels'
+import type { ChannelInteractionScope } from '@use-brian/core'
+import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
+import { channelConfirmations } from './channel-interactions.js'
+import { channelQuestionActions } from './channel-questions.js'
+import { resolveChannelAnswerContext, type AdmittedChannelMessage } from './channel-message-admission.js'
 import { parseFollowUps, resolveCharter } from '@use-brian/shared'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -73,6 +81,7 @@ import type {
   ConfirmationResolver, Message, TopicClassification, ClassifierRecentTurn,
   EpisodicStore, CapabilityStore, TokenUsage, ToolResultMeta,
   SessionStateStore, SessionStateRecord, CrmEmailDraftStore,
+  AccessCeiling, ScopeEvidence,
 } from '@use-brian/core'
 
 import { mintActorMediaToken } from '../media-token.js'
@@ -111,16 +120,17 @@ import {
   type ResolvedTurnScope,
   type ResolveTurnScopeInput,
 } from '../context-scope/resolve-turn-scope.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
-import {
-  createSessionAuthorityLease,
-  isAuthorityChangedError,
-} from '../context-scope/authority-lease.js'
+import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
+  createDeliveryAudienceEnvelopeResolver,
   DeliveryAudienceUnverifiedError,
   isDeliveryAudienceUnverifiedError,
 } from '../context-scope/delivery-authority.js'
+import { validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import {
   buildChannelSessionKey,
@@ -158,11 +168,14 @@ export function deliverChannelResponse(
   documents?: OutgoingDocument[],
   question?: ChannelQuestion,
   notice?: string | null,
+  actions?: OutgoingAction[],
 ) {
   // Some hooks ignore the structured third argument. Always include every option
   // in text; capable adapters may additionally render buttons.
   const body = question ? formatAssistantQuestion(question) : text
-  return hooks.sendResponse(notice ? `${notice}\n\n${body}` : body, documents, question)
+  const message = notice ? `${notice}\n\n${body}` : body
+  return actions === undefined ? hooks.sendResponse(message, documents, question)
+    : hooks.sendResponse(message, documents, question, actions)
 }
 
 /**
@@ -267,8 +280,8 @@ export type ChannelHooks = {
 
   /**
    * Called on `tool_confirmation_required`. The channel must render the
-   * confirmation prompt and stash the resolver so the route-level handler
-   * can call resolver.resolve() when the user responds.
+   * confirmation prompt. The shared interaction registry owns the resolver
+   * and handles normalized text/buttons before a route acquires the chat lock.
    *
    * `displayLines` carries human-readable prompt rows when the tool
    * pre-formatted them (e.g. `deleteMemory` resolves ids → summaries).
@@ -309,7 +322,7 @@ export type ChannelHooks = {
    * reacted to. Channels that don't have a stable platform id
    * (web streaming, scheduled-job executor) return `void`.
    */
-  sendResponse(text: string, documents?: OutgoingDocument[], question?: ChannelQuestion): Promise<{ channelMessageId?: string } | void>
+  sendResponse(text: string, documents?: OutgoingDocument[], question?: ChannelQuestion, actions?: OutgoingAction[]): Promise<{ channelMessageId?: string } | void>
 
   /**
    * Called the FIRST time a session observes the budget-downgraded state.
@@ -340,7 +353,7 @@ export type ChannelHooks = {
 
 // ── Pipeline params ──────────────────────────────────────────────
 
-export type ChannelPipelineParams = {
+export type ChannelPipelineParams = AdmittedChannelMessage & {
   /**
    * Background-lane model, resolved once at boot against the configured
    * providers. Omitted = fall back to the literal, which is only servable
@@ -425,6 +438,16 @@ export type ChannelPipelineParams = {
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
+  /** Authenticated transport scope used for pre-lock interaction handling. */
+  interactionScope?: ChannelInteractionScope
+  incomingMessage?: IncomingMessage
+  /** Database integration UUID used by durable workflow deliveries. */
+  questionIntegrationId?: string
+  /** Set only after a provider route authenticates and resolves a native ask
+   * binding. Its label is conversation content, never a workflow command. */
+  conversationalAnswer?: boolean
+  workflowCallback?: { data: string; messageId: string }
+  questionStore?: ChannelQuestionStore
   channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom' | 'feishu'
   /** Physical provider destination used for delivery and connector actions. */
   channelId: string
@@ -720,91 +743,6 @@ export async function promoteChannelPaste(input: {
 }
 
 /**
- * Assemble the outbound channel message from the buffered assistant turns.
- *
- * TERMINAL TURNS ONLY, and never a sum of `text_delta` chunks. Two incidents
- * sit behind each half:
- *
- *  1. A turn carrying a `tool_use` block is mid-reasoning — the loop feeds the
- *     result back and the model speaks again — so text riding alongside a call
- *     is narration, never the answer. Delta-summing concatenated it into the
- *     reply; on the scheduled-job twin of this path that shipped a model's
- *     entire chain-of-thought, its own tool list included, to a user's Telegram
- *     (2026-07-20, session `b8e567d6` — a job whose instructions named tools its
- *     assistant held no connector grant for, so the model narrated the hunt for
- *     them). `sanitizeDeliveryText` cannot cover this
- *     class — it matches known scaffolding phrasings and free-form reasoning has
- *     none; the signal that identifies it is structural, not lexical.
- *  2. Deltas stream BEFORE the turn-boundary instruction-leak sanitiser rewrites
- *     `response.content`, so a suppressed turn's text shipped anyway. Reading
- *     the buffered content means a suppressed turn contributes nothing,
- *     structurally rather than by downstream heuristics.
- *
- * Takes the turns already sliced to the delivery window: the grounding gate
- * retracts a draft the query loop had ALREADY yielded as an `assistant_turn`
- * (Phase 3b runs before the gate), so the caller cuts those turns off rather
- * than letting retracted unverified figures back into the message.
- *
- * Reads `content` at call time on purpose — the gate's post-nudge trailer
- * mutates the final text block IN PLACE after the turn was yielded, and an
- * eagerly-copied string would drop it.
- *
- * Mirrors `inter-assistant/executor.ts`. Spec:
- * docs/architecture/channels/inter-assistant.md → "Final-text assembly".
- */
-export function assembleDeliverableText(turns: { content: ContentBlock[] }[]): string {
-  return turns
-    .filter((t) => !t.content.some((b) => b.type === 'tool_use'))
-    .flatMap((t) => t.content)
-    .filter((b): b is ContentBlock & { type: 'text'; text: string } =>
-      b.type === 'text' && 'text' in b && typeof (b as { text?: unknown }).text === 'string')
-    .map((b) => b.text)
-    .join('\n')
-    .trim()
-}
-
-/**
- * Why `assembleDeliverableText` came back with nothing.
- *
- *  - `tools_only`    — the run called tools but never reached a terminal turn.
- *                      Work may already have shipped side effects, so a blind
- *                      retry can duplicate them.
- *  - `no_model_output` — no turn carried text OR a tool call. The provider
- *                      returned nothing usable, `EMPTY_RETRY_PLAN` included.
- *                      Retrying is safe and is often all that is needed.
- *  - `text_withheld` — text existed and this pipeline refused to send it: the
- *                      grounding gate retracted the draft (`deliveryCutIdx`)
- *                      or the instruction-leak sanitiser stripped it. Retrying
- *                      is safe.
- */
-export type EmptyDeliveryReason = 'tools_only' | 'no_model_output' | 'text_withheld'
-
-/**
- * Classify an empty delivery window so telemetry records WHICH failure this
- * was and the caller can decide whether a retry is safe to suggest.
- *
- * `window` is `pendingAssistantTurns.slice(deliveryCutIdx)` and may legitimately
- * be EMPTY: when the grounding gate retracts every turn it has yielded, the cut
- * consumes the whole buffer. An empty window has no tool call and no text, so
- * the structural tests below would call it `no_model_output` — which is exactly
- * backwards, since the model did speak and this pipeline withheld it. Hence
- * `retractedCount` (the cut index) decides that case first.
- */
-export function classifyEmptyDelivery(input: {
-  window: { content: ContentBlock[] }[]
-  /** `deliveryCutIdx`: turns the grounding gate cut out of the window. */
-  retractedCount: number
-}): EmptyDeliveryReason {
-  const { window, retractedCount } = input
-  if (window.length === 0) {
-    return retractedCount > 0 ? 'text_withheld' : 'no_model_output'
-  }
-  if (window.some((t) => t.content.some((b) => b.type === 'tool_use'))) return 'tools_only'
-  if (window.some((t) => t.content.some((b) => b.type === 'text'))) return 'text_withheld'
-  return 'no_model_output'
-}
-
-/**
  * What a channel user is told when a turn produced nothing deliverable and no
  * tool ran that a retry could duplicate.
  *
@@ -828,6 +766,30 @@ export function connectorToolsAllowedForChannelTurn(
   externalGuestConnectorTools: boolean | undefined,
 ): boolean {
   return !externalGuest || externalGuestConnectorTools === true
+}
+
+/** Keep exact-audience transcript history without laundering hidden results. */
+export async function filterChannelHistoryForAudience<T extends {
+  channelMessageId: string | null
+}>(params: {
+  rows: readonly T[]
+  group: boolean
+  ceiling?: AccessCeiling
+  validate?: (evidence: ScopeEvidence, ceiling: AccessCeiling) => Promise<unknown>
+}): Promise<T[]> {
+  if (!params.group || !params.ceiling) return [...params.rows]
+  const validate = params.validate ?? validateAudienceScopeEvidence
+  const decisions = await Promise.all(params.rows.map(async (row) => {
+    if (row.channelMessageId !== null) return true
+    if (!boundScopeSource(row)) return false
+    try {
+      await validate(scopeEvidenceFromRows([row]), params.ceiling!)
+      return true
+    } catch {
+      return false
+    }
+  }))
+  return params.rows.filter((_, index) => decisions[index])
 }
 
 type ConnectorTurnScopeResolver = (
@@ -1007,6 +969,24 @@ export function recordChannelToolResults(input: {
 }
 
 export async function processChannelMessage(params: ChannelPipelineParams): Promise<void> {
+  // Split-admission routes have already sent handled replies. A stopped turn
+  // must not re-enter admission or start conversational work after media intake.
+  if (params.admittedAnswerContext?.kind === 'handled' || params.abortController.signal.aborted) return
+  const messageId = params.incomingMessage?.messageId ?? params.incomingChannelMessageId
+  const unregister = params.interactionScope ? channelConfirmations.registerTurn(
+    params.interactionScope, params.abortController, {
+      messageId: messageId == null ? undefined : String(messageId),
+      onAbort: () => params.hooks.sendResponse('Stopped.'),
+    },
+  ) : undefined
+  try {
+    await processChannelMessageTurn(params)
+  } finally {
+    unregister?.()
+  }
+}
+
+async function processChannelMessageTurn(params: ChannelPipelineParams): Promise<void> {
   const {
     userId, ownerId, assistant, isIdentified,
     channelType, channelId, actorChannelId, mediaEpisodeId, isGroupChat,
@@ -1022,14 +1002,24 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     hooks,
     capabilityStore,
   } = params
+  const incoming = params.incomingMessage ?? params.archiveIncoming
+  const questionBinding = params.interactionScope && incoming ? {
+    integrationId: params.interactionScope.integrationId,
+    assistantId: assistant.id, userId, incoming,
+    sessionId: params.interactionScope.sessionId,
+  } : undefined
+  const answerContext = await resolveChannelAnswerContext(params, questionBinding)
+  if (abortController.signal.aborted) return
+  if (answerContext.kind === 'handled') { await hooks.sendResponse(answerContext.reply); return }
+  const questionAnswer = answerContext.questionAnswer
   const externalGuest = params.externalGuest === true
   const publishSessionEvent = params.publishSessionEvent ?? noopPublishSessionEvent
   const sessionChannelId = params.sessionChannelId ?? channelId
   const externalGuestConnectorTools = externalGuest && params.externalGuestConnectorTools === true
   const connectorAuthority = params.connectorAuthority ?? 'sender'
-  const connectorToolsAllowed = connectorAuthority !== 'disabled'
+  let connectorToolsAllowed = connectorAuthority !== 'disabled'
     && connectorToolsAllowedForChannelTurn(externalGuest, params.externalGuestConnectorTools)
-  const useAssistantConnectorAuthority = connectorAuthority === 'assistant'
+  let useAssistantConnectorAuthority = connectorAuthority === 'assistant'
     || externalGuestConnectorTools
   const taskAuthority = params.realtimeThreadTarget
     ? {
@@ -1052,8 +1042,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // `messageText` + `userContentBlocks` are `let` — the large-paste intercept
   // below may rewrite them to a manifest + head excerpt before anything reads
   // them (classifier, persist, query loop).
-  let messageText = params.messageText
-  let userContentBlocks = params.userContentBlocks
+  let messageText = questionAnswer ?? params.messageText
+  let userContentBlocks = questionAnswer === undefined ? params.userContentBlocks
+    : params.userContentBlocks.map(block => block.type === 'text' ? { ...block, text: questionAnswer! } : block)
 
   // ── Session ──
   const session = await findOrCreateSession({
@@ -1062,9 +1053,70 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     channelType,
     channelId: sessionChannelId,
   })
+  // Resolve credential/billing ownership before constructing execution facts.
+  // It remains attribution only and never substitutes for the channel actor.
+  const billingUserId = await billingPartyForAssistant({
+    id: assistant.id,
+    ownerUserId: assistant.workspaceId ? null : ownerId,
+    workspaceId: assistant.workspaceId ?? null,
+  })
+  const senderWorkspaceRole = assistant.workspaceId
+    ? await getWorkspaceRoleSystem(userId, assistant.workspaceId, true)
+    : null
+  const memberMode = assistant.workspaceId === null
+    ? undefined
+    : senderWorkspaceRole === null
+      ? 'external' as const
+      : 'member' as const
+  const senderIsWorkspaceMember = assistant.workspaceId === null
+    ? isIdentified
+    : senderWorkspaceRole !== null
+  const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
+    integrationStore: params.channelIntegrationStore,
+  })
+  const resolveDeliveryAudienceEnvelope = createDeliveryAudienceEnvelopeResolver({
+    integrationStore: params.channelIntegrationStore,
+  })
+  const audienceInput = {
+    workspaceId: assistant.workspaceId ?? '',
+    assistantId: assistant.id,
+    userId,
+    channelType,
+    channelId,
+    channelIntegrationId: params.channelIntegrationId,
+    recipientType: isGroupChat ? 'group' as const : 'individual' as const,
+  }
+  const audienceEnvelope = isGroupChat && assistant.workspaceId
+    ? await resolveDeliveryAudienceEnvelope(audienceInput)
+    : null
+  if (audienceEnvelope && !audienceEnvelope.allowed) {
+    throw new DeliveryAudienceUnverifiedError()
+  }
+  const publicAudienceTurn = audienceEnvelope?.allowed === true
+    && audienceEnvelope.source === 'public'
+  const currentAudienceMaximum = audienceEnvelope?.allowed
+    ? async (): Promise<AccessCeiling | null> => {
+        const current = await resolveDeliveryAudienceEnvelope(audienceInput)
+        return current.allowed ? { ...current.ceiling, userId } : null
+      }
+    : undefined
+  const isolatedAudience = externalGuest || publicAudienceTurn
+  const audienceSystemPrompt = publicAudienceTurn
+    ? `You are ${assistant.name}, a helpful assistant in a public group conversation. ` +
+      'Use general knowledge and only information already visible in this conversation. ' +
+      'Do not imply access to private workspace information or connected tools.'
+    : systemPrompt
+  if (publicAudienceTurn) {
+    // An unapproved shared audience gets conversation only. Connected tools
+    // and workspace-native capabilities remain unavailable until an owner or
+    // admin approves an explicit envelope.
+    connectorToolsAllowed = false
+    useAssistantConnectorAuthority = false
+  }
   let dataTurnScope
+  let executionContext
   try {
-    dataTurnScope = await resolveTurnScopeSystem({
+    const resolved = await resolveExecutionContextSystem({
       userId,
       assistant: {
         ...assistant,
@@ -1072,7 +1124,44 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       },
       workspaceId: assistant.workspaceId,
       session,
+      memberMode,
+      ignoreSessionBinding: isGroupChat,
+      identity: senderIsWorkspaceMember
+        ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
+        : {
+            kind: 'attended',
+            principal: {
+              kind: 'verified_channel_guest',
+              userId,
+              provider: channelType,
+              externalId: actorChannelId ?? channelId,
+            },
+          },
+      ownership: assistant.workspaceId
+        ? { kind: 'workspace', workspaceId: assistant.workspaceId }
+        : { kind: 'personal', ownerUserId: billingUserId },
+      lifecycle: {
+        abortSignal: abortController.signal,
+        sessionId: session.id,
+        channelType,
+        channelId,
+      },
+      attribution: { billingUserId },
+      sessionAuthority: session,
+      ...(audienceEnvelope?.allowed
+        ? {
+            maximumAccess: {
+              ...audienceEnvelope.ceiling,
+              // Access-ceiling intersection is actor-preserving. Recipient
+              // anonymity remains enforced by the separate delivery check.
+              userId,
+            },
+            maximumAccessCurrent: currentAudienceMaximum,
+          }
+        : {}),
     })
+    dataTurnScope = resolved.turnScope
+    executionContext = resolved.executionContext
   } catch (err) {
     if (!(err instanceof ContextNotAvailableError)) throw err
     try {
@@ -1099,28 +1188,23 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     producer: `turn:${channelType}`,
     sources: scopeAccumulator.evidence.sources ?? [],
   })
-  const authority = createSessionAuthorityLease({
-    starting: pinAccessCeiling(dataTurnScope.access),
-    session,
-  })
-  const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
-    integrationStore: params.channelIntegrationStore,
-  })
+  const authority = executionContext.security.authority
   const assertDeliveryAudience = async (): Promise<void> => {
     await authority.assertCurrent()
     const decision = await authorizeDeliveryAudience({
-      workspaceId: assistant.workspaceId ?? '',
-      assistantId: assistant.id,
-      userId,
-      channelType,
-      channelId,
-      channelIntegrationId: params.channelIntegrationId,
-      sessionId: session.id,
-      recipientType: isGroupChat ? 'group' : 'individual',
+      ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
     })
     if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
   }
+
+  const filterHistoryForAudience = async <T extends {
+    channelMessageId: string | null
+  }>(rows: readonly T[]): Promise<T[]> => filterChannelHistoryForAudience({
+    rows,
+    group: isGroupChat,
+    ceiling: audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined,
+  })
 
   // Expose session ID to channel hooks (e.g., WhatsApp confirmation store)
   if (params.sessionRef) params.sessionRef.id = session.id
@@ -1140,11 +1224,6 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // null: `billingPartyForAssistant` throws when an assistant has neither a
   // workspace nor a personal owner, and it throws HERE, before the first
   // overhead call, rather than at a silent per-row catch.
-  const billingUserId = await billingPartyForAssistant({
-    id: assistant.id,
-    ownerUserId: assistant.workspaceId ? null : ownerId,
-    workspaceId: assistant.workspaceId ?? null,
-  })
   let budgetStatus: 'ok' | 'downgraded' | 'blocked' = 'ok'
   // Billing is per-workspace (migration 143) — the plan + budget windows
   // are the assistant's workspace's.
@@ -1188,7 +1267,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // Runs before the message is classified, persisted, or fed to the model, so
   // a giant paste never reaches the classifier or the query loop as a blob.
   // Failure keeps the original text. See `promoteChannelPaste` above.
-  if (!externalGuest) {
+  if (!isolatedAudience) {
     ;({ messageText, userContentBlocks } = await promoteChannelPaste({
       rawUserText: params.rawUserText,
       messageText,
@@ -1205,7 +1284,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // topic classification. Follow-up detection needs actual dialogue, not an
   // isolated current sentence (2026-08-09 Snapio incident on web; channels
   // share the same classifier contract).
-  const preExistingDbMessages = await getSessionMessages(session.id)
+  const preExistingDbMessages = await filterHistoryForAudience(
+    await getSessionMessages(session.id),
+  )
   const adaptiveRecentConversation = preExistingDbMessages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .filter((m) => !(
@@ -1239,7 +1320,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   let effectiveModelAlias = modelAlias
   let adaptiveResearchActive = false
   if (
-    !externalGuest &&
+    !isolatedAudience &&
     adaptiveResearchEnabled &&
     messageText &&
     assistant.workspaceId &&
@@ -1522,10 +1603,17 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // ── Load history ──
   // `fromSequence` skips rows already compacted into the most recent
   // boundary; null (never compacted) loads full history.
-  const dbMessages = await getSessionMessages(session.id, {
-    fromSequence: session.compactBoundarySequence,
-  })
-  noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
+  const dbMessages = await filterHistoryForAudience(await getSessionMessages(session.id, {
+    // A public audience cannot trust the durable summary because it has no
+    // per-source audience evidence. Rebuild from filtered provider history.
+    fromSequence: isolatedAudience ? null : session.compactBoundarySequence,
+  }))
+  noteAutomaticScopeEvidence(
+    scopeAccumulator,
+    isGroupChat
+      ? dbMessages.filter((message) => message.channelMessageId === null)
+      : dbMessages,
+  )
   const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
   // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
@@ -1543,7 +1631,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     model: backgroundLaneModel,
     inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
     ...backgroundUsageAttribution,
-    systemPrompt,
+    systemPrompt: audienceSystemPrompt,
     assistantId: assistant.id,
     userId,
     // `ProactiveCompactionParams.ownerId` is a usage-attribution field and
@@ -1555,11 +1643,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     channelType,
     memoryStore,
     episodicStore,
-    sessionStateStore,
+    sessionStateStore: isolatedAudience ? undefined : sessionStateStore,
     analytics,
     usageStore,
     userMessageId: userMessageRow.id,
-    persistLongTermContext: !externalGuest,
+    persistLongTermContext: !isolatedAudience,
+    persistSessionSummary: !isolatedAudience,
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
     authority,
@@ -1581,7 +1670,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // Per-turn callers use the ranked+capped index slice. See
   // docs/architecture/context-engine/memory-system.md → "Index cap".
   let memoryContext = ''
-  if (isIdentified) {
+  if (isIdentified && !isolatedAudience) {
     const viewerCtx = dataTurnScope.access
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([
       (memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
@@ -1632,7 +1721,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Episodic context (topic-scoped history for resume/cross-topic) ──
   let episodicContext: string | null = null
-  if (!externalGuest && episodicStore && classification) {
+  if (!isolatedAudience && episodicStore && classification) {
     try {
       episodicContext = await fetchEpisodicContext({
         store: episodicStore,
@@ -1646,7 +1735,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Session-state block (# Open commitments — always on) ──
   let sessionStateBlock: string | null = null
-  if (sessionStateStore) {
+  if (sessionStateStore && !isolatedAudience) {
     try {
       sessionStateBlock = await buildSessionStateBlock({
         store: sessionStateStore,
@@ -1658,7 +1747,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   // ── Capability set (used twice — L1 files block + tool filter) ──
-  const activeCapabilities = externalGuest
+  const activeCapabilities = isolatedAudience
     ? new Set<string>()
     : new Set(await capabilityStore.listActive(assistant.id))
 
@@ -1671,6 +1760,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     workspaceFilesStore &&
     assistant.workspaceId &&
     isIdentified &&
+    !isolatedAudience &&
     activeCapabilities.has('files')
   ) {
     try {
@@ -1698,7 +1788,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // (capability + an APPROVED default brand) and the store live in
   // `resolveBrandContext`, so every channel shares one chokepoint instead of
   // each webhook factory forwarding a store.
-  const brandContext = externalGuest
+  const brandContext = isolatedAudience
     ? null
     : await resolveBrandContext({
         userId,
@@ -1717,7 +1807,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // see docs/architecture/brain/corrections.md → "Workspace-level
   // prompt evolution".
   let workspaceEvolutionSnippet: string | null = null
-  if (assistant.workspaceId && !externalGuest) {
+  if (assistant.workspaceId && !isolatedAudience) {
     try {
       // Memory-side + brain-side evolution snippets join into one Layer 2 block.
       const [memoryEvo, brainEvo] = await Promise.all([
@@ -1737,7 +1827,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     workspaceId: assistant.workspaceId ?? null,
     assistantId: assistant.id,
     actorUserId: userId,
-    externalPrincipal: externalGuest,
+    externalPrincipal: isolatedAudience,
     operationKind: 'channel_turn',
     operationId: userMessageRow.id,
     sourceKind: 'session_message',
@@ -1754,8 +1844,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // accepts lower implicit-cache reuse for changing private metadata; moving
   // it into a user-role envelope caused the 2026-08-01 referent leak.
   const splitPrompt = buildSplitSystemPrompt({
-    basePrompt: systemPrompt,
-    charter: resolveCharter(assistant),
+    basePrompt: audienceSystemPrompt,
+    charter: publicAudienceTurn ? {} : resolveCharter(assistant),
     playbookRules,
     workspaceEvolutionSnippet,
     currentDateTime,
@@ -1772,7 +1862,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     // all that teammate's. See layer-1-system-prompt.md → "Speaker identity".
     // `actorChannelId` (Slack `U…`, Telegram handle/id, Feishu/Lark open id, WhatsApp number) rides
     // along so "what is my Slack id" is answered as fact, not guessed.
-    speakerIdentity: isIdentified && !externalGuest
+    speakerIdentity: isIdentified && !isolatedAudience
       ? speakerIdentityFromUser(channelUser, { type: channelType, id: actorChannelId ?? null })
       : null,
     memoryContext,
@@ -1815,6 +1905,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         : ' Connected tools are not available in this turn.'),
     )
   }
+  if (publicAudienceTurn) {
+    privateRuntimeContextParts.push(
+      '# Unapproved group boundary\n\n' +
+      `This ${channelType} group is connected but has not been approved for workspace information. ` +
+      'Keep the conversation to public general knowledge and content already visible in this group. ' +
+      'Do not claim access to workspace memory, files, private company context, or connected tools.',
+    )
+  }
   // ── Non-member sender boundary ──
   // The sender resolved to a REAL platform user (or a shadow) that is not a
   // member of this assistant's workspace: an `assistant_members` row but no
@@ -1828,9 +1926,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // and the remedy instead of the symptom. One PK lookup per channel turn.
   // See docs/architecture/channels/channel-user-identity.md → "Non-member
   // senders".
-  if (assistant.workspaceId && !externalGuest) {
-    const senderRole = await getWorkspaceRoleSystem(userId, assistant.workspaceId)
-    if (senderRole === null) {
+  if (assistant.workspaceId && !isolatedAudience) {
+    if (senderWorkspaceRole === null) {
       privateRuntimeContextParts.push(
         buildNonMemberSenderBlock({
           channelType,
@@ -1842,7 +1939,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
   }
   let activeEmailDraftContext = ''
-  if (params.crmEmailDraftStore && assistant.workspaceId && !externalGuest && activeCapabilities.has('crm')) {
+  if (params.crmEmailDraftStore && assistant.workspaceId && !isolatedAudience && activeCapabilities.has('crm')) {
     try {
       const activeEmailDraft = await params.crmEmailDraftStore.getActiveForSession({
         userId,
@@ -1888,10 +1985,10 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   })
   // activeCapabilities was lifted up above the L1 prompt build (used by both
   // the `# Workspace Files` block gating and the tool filter here).
-  const allTools = externalGuest
+  const allTools = isolatedAudience
     ? new Map<string, Tool>()
     : filterToolsByCapabilities(new Map(tools), activeCapabilities)
-  if (!externalGuest) {
+  if (!isolatedAudience) {
     allTools.set('saveMemory', saveMemory)
     allTools.set('getMemory', getMemory)
     allTools.set('deleteMemory', deleteMemory)
@@ -1902,7 +1999,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // capability grants ('tasks' / 'crm') applied above by
   // filterToolsByCapabilities — no per-turn injection here.
 
-  if (sessionStateStore && !externalGuest) {
+  if (sessionStateStore && !isolatedAudience) {
     const { trackCommitment, resolveCommitment } = createSessionStateTools(
       sessionStateStore,
       {
@@ -2025,7 +2122,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   let preparedCommand = prepareSlashCommand(messageText)
-  if (assistant.workspaceId && (skillStore || params.workflowStore)) {
+  if (assistant.workspaceId && !isolatedAudience && (skillStore || params.workflowStore)) {
     try {
       const nativeCatalog = await buildWorkspaceNativeSlashCommands({
         userId: connectorUserId,
@@ -2040,7 +2137,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   // ── Skills ──
-  if (skillStore && !externalGuest) {
+  if (skillStore && !isolatedAudience) {
     // Slash command (`/goal register …` as the whole message) — same seam as
     // the web chat route: the name is threaded as an enforced skill slug, the
     // governance gates apply inside injectSkills, and an unresolved name
@@ -2108,7 +2205,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // file label, duration, credit cost, and the default blueprint id so the model
   // can map "yes / the default" to the right choice. Per-turn dynamic injection —
   // not in Layer 1 (the tool name only appears here, when a pending row exists).
-  {
+  if (!isolatedAudience) {
     try {
       const channelSessionKey = buildChannelSessionKey({
         channel: channelType,
@@ -2143,6 +2240,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   } catch (err) {
     if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
     console.warn(`[${channelType}] channel turn refused before generation:`, (err as Error).name)
+    if (isDeliveryAudienceUnverifiedError(err)) {
+      await hooks.sendError(err)
+    }
     await hooks.onCleanup?.()
     return
   }
@@ -2176,19 +2276,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // Only wired when filesApi is present — without it the pipeline could
   // collect intent it can never resolve to bytes, and `sendFile`'s
   // missing-collector gate gives the model an honest error instead.
-  const attachmentCollector = filesApi && !externalGuest ? new AttachmentCollector() : undefined
+  const attachmentCollector = filesApi && !isolatedAudience ? new AttachmentCollector() : undefined
 
   // ── Tool-pairing buffer ──
   type PendingTurn = { content: ContentBlock[]; toolResults: ContentBlock[] }
   const pendingAssistantTurns: PendingTurn[] = []
+  const turnOutput = createTurnOutputCollector({ format: 'channel' })
   let flushed = false
-  // Index of the first turn eligible for delivery — the outbound message is
-  // built by `assembleDeliverableText` (see its doc comment for why terminal
-  // turns, not deltas). `grounding_nudge` advances this past the retracted
-  // draft: the query loop yields `assistant_turn` at Phase 3b BEFORE the gate
-  // runs, so without the cut the unverified figures the gate just retracted
-  // would sail straight back into the message.
-  let deliveryCutIdx = 0
   // Track the most-recently-flushed assistant `session_messages` row id
   // so a `sendResponse` returning a channel-native message id (Slack
   // `ts`, Telegram `message_id`) can stamp it onto that row via
@@ -2274,7 +2368,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     if (endpointNotice) endpointFallbackAnnounced = true
     const pendingNotice = imageFallbackNotice ?? endpointNotice
     imageFallbackNotice = null
-    const result = await deliverChannelResponse(hooks, text, documents, terminalQuestion, pendingNotice)
+    const actions = questionBinding ? channelQuestionActions(questionBinding, terminalQuestion) : undefined
+    const result = await deliverChannelResponse(hooks, text, documents, terminalQuestion, pendingNotice, actions)
     const channelMessageId = result && typeof result === 'object'
       ? result.channelMessageId
       : undefined
@@ -2310,7 +2405,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Preflight research ──
   let preflightContext = ''
-  if (!externalGuest && messageText.length > 40) {
+  if (!isolatedAudience && messageText.length > 40) {
     try {
       const preflight = await runPreflight({
         provider: backgroundProvider, model: backgroundLaneModel, message: messageText, tools: allTools,
@@ -2347,7 +2442,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   if (messageText && matchesDisputedFigure(messageText)) {
     try {
       const { getClaimsForLatestAssistantMessage } = await import('../db/claim-provenance-store.js')
-      const priorClaims = await getClaimsForLatestAssistantMessage(session.id)
+      const priorClaims = await getClaimsForLatestAssistantMessage(session.id, true)
       if (priorClaims.length > 0) {
         privateRuntimeContextParts.push(
           `# Figure provenance (dispute check)\n\n${buildDisputeContextNote(priorClaims)}`,
@@ -2402,11 +2497,23 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Query loop ──
   try {
-    const scopedTools = bindToolsToAgentAccess(allTools, {
-      clearance,
-      compartments: dataTurnScope.effectiveCompartments,
-      mutationCompartments: dataTurnScope.access.mutationCompartments,
-      projectIds: dataTurnScope.effectiveProjectIds,
+    const preparedRun = await prepareAssistantRun({
+      executionContext,
+      model: {
+        provider: turnProvider,
+        model,
+        maxTokens: customLlmRuntime?.maxTokens,
+        inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+      },
+      candidateTools: allTools,
+      bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, {
+        clearance: execution.security.access.clearance,
+        compartments: execution.security.access.compartments,
+        mutationCompartments: execution.security.access.mutationCompartments,
+        projectIds: execution.security.access.projectIds,
+      }),
+      trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
+      userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
     })
     for await (const event of queryLoop({
       ledger: createTurnLedger({
@@ -2415,19 +2522,16 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         sessionId: session.id,
         payloads: getLedgerPayloadStore(),
       }).ledger,
-      provider: turnProvider, model,
-      maxTokens: customLlmRuntime?.maxTokens,
-      inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+      provider: preparedRun.model.provider, model: preparedRun.model.model,
+      maxTokens: preparedRun.model.maxTokens,
+      inputTokenLimit: preparedRun.model.inputTokenLimit,
       systemPrompt: splitPrompt.stablePrompt,
-      runtimeSystemContext,
-      messages, tools: scopedTools,
+      runtimeSystemContext: preparedRun.trustedContext,
+      messages, tools: preparedRun.tools,
       context: {
-        userId, assistantId: assistant.id, sessionId: session.id,
-        workspaceActorUserId: isIdentified ? userId : undefined,
-        appId: 'Use Brian', channelType, channelId,
+        ...executionToolContext(executionContext, { appId: 'Use Brian' }),
         channelSessionId: sessionChannelId,
         taskAuthority,
-        workspaceId: assistant.workspaceId ?? undefined,
         workerRuntime: customLlmRuntime
           ? {
               provider: customLlmRuntime.provider,
@@ -2438,11 +2542,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               maxTokens: customLlmRuntime.maxTokens,
             }
           : undefined,
-        assistantKind: assistant.kind,
         preferredChannel,
         userTimezone,
         workflowProposalReceipt,
-        abortSignal: abortController.signal,
         sessionStateStore,
         requestTools: allTools,
         workerManager,
@@ -2455,18 +2557,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         evidence: replyEvidence,
         // `clearance` is the read ceiling = min(member, assistant);
         // `assistantClearance` is the write ceiling (the assistant's tier).
-        clearance,
-        compartments,
-        mutationCompartments: dataTurnScope.access.mutationCompartments,
-        projectIds: dataTurnScope.effectiveProjectIds,
         activeGroupId: dataTurnScope.activeGroupId,
         activeProjectId: dataTurnScope.activeProjectId,
-        assistantClearance: assistant.clearance,
-        assistantCompartments: dataTurnScope.effectiveCompartments,
-        assistantDefaultCompartments: dataTurnScope.writeCompartments,
-        assistantProjectIds: dataTurnScope.effectiveProjectIds,
-        assistantDefaultProjectIds: dataTurnScope.writeProjectIds,
-        authority,
       },
       confirmationResolver,
       confirmationTimeoutMs: 300_000,
@@ -2483,16 +2575,16 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         : {}),
     })) {
       await assertDeliveryAudience()
+      turnOutput.observe(event)
       switch (event.type) {
         case 'question':
-          terminalQuestion = { question: event.question, options: event.options }
           break
         case 'text_delta':
           // Streaming channels (web SSE) render text as it arrives; the
           // client is a render layer that can drop control markers, so
           // partial chunks are fine here. The final-only channels' outbound
           // message is NOT built from these chunks — see
-          // `assembleDeliverableText`.
+          // the shared final-output selector.
           await hooks.onTextDelta?.(event.text)
           // Live watch mirror: the snapshot is the full reply-so-far, never
           // these deltas, so the deliverable-assembly rule stays intact.
@@ -2504,9 +2596,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           turnStream.onReasoningDelta(event.text)
           break
         case 'grounding_nudge':
-          // The buffered draft is superseded — cut it out of the deliverable
-          // so the outbound message never carries the unverified figures.
-          deliveryCutIdx = pendingAssistantTurns.length
+          // The shared output collector cuts the buffered draft at this event.
           analytics?.logEvent({
             userId, assistantId: assistant.id, sessionId: session.id,
             eventName: 'grounding_nudge_fired', channelType,
@@ -2584,6 +2674,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           }
           break
         case 'tool_confirmation_required':
+          if (params.interactionScope) {
+            channelConfirmations.register(params.interactionScope, event.request, confirmationResolver, abortController.signal)
+          }
           await hooks.onConfirmationRequired(event.request, confirmationResolver)
           break
         case 'assistant_turn':
@@ -2664,8 +2757,15 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // so the raw tag would leak into the message body. Web parses
           // it client-side and renders chips. See
           // docs/architecture/features/follow-up-questions.md.
+          const selectedOutput = turnOutput.select()
+          terminalQuestion = selectedOutput.kind === 'question'
+            ? {
+                question: selectedOutput.question.question,
+                options: selectedOutput.question.options,
+              }
+            : undefined
           const { display: visibleText } = parseFollowUps(
-            assembleDeliverableText(pendingAssistantTurns.slice(deliveryCutIdx)),
+            selectedOutput.kind === 'text' ? selectedOutput.text : '',
           )
           const attachmentNotes = failedAttachmentNames.length > 0
             ? `${visibleText ? '\n\n' : ''}${failedAttachmentNames.map((n) => `Could not attach: ${n}`).join('\n')}`
@@ -2695,10 +2795,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // A terminal question is deliverable even though its tool-bearing
           // assistant turn is intentionally excluded by text assembly.
           if (!outboundText && !terminalQuestion && documents.length === 0) {
-            const emptyReason = classifyEmptyDelivery({
-              window: pendingAssistantTurns.slice(deliveryCutIdx),
-              retractedCount: deliveryCutIdx,
-            })
+            const emptyReason = selectedOutput.kind === 'empty'
+              ? selectedOutput.reason
+              : 'text_withheld'
             console.warn(
               `[${channelType}] no deliverable text at turn_complete (session ${session.id}, reason ${emptyReason})`,
             )
@@ -2756,7 +2855,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               documents.length > 0 ? documents : undefined,
             )
           }
-          deliveryCutIdx = pendingAssistantTurns.length
+          turnOutput.advanceDelivery()
+          terminalQuestion = undefined
 
           // ── Cost tracking + analytics ──
           // Stage 5: cost attributes to the resolved billing party (team
@@ -2846,7 +2946,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
     // ── Session-state diff pass (fire-and-forget safety net) ──
     // See docs/architecture/context-engine/session-state.md.
-    if (sessionStateStore && isIdentified) {
+    if (sessionStateStore && isIdentified && !isolatedAudience) {
       const stateStore = sessionStateStore
       const diffRecentTurns: Message[] = []
       const assistantLastText = pendingAssistantTurns
@@ -2967,6 +3067,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           stage: sanitizeAnalytics('live_authority'),
         },
       })
+      if (isDeliveryAudienceUnverifiedError(err)) {
+        await hooks.sendError(err)
+      }
       return
     }
     await flushBufferedTurns('[Stream terminated unexpectedly before the tool result was recorded.]')
@@ -3019,6 +3122,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       await hooks.sendError(err instanceof Error ? err : new Error(String(err)))
     }
   } finally {
+    channelConfirmations.clear(confirmationResolver)
     await hooks.onCleanup?.()
     // Watch viewers clear their "Working" card on the terminal bus event —
     // published in the finally, not on the paths we happened to think of.

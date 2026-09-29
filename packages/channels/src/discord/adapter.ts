@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 import type { ChannelAdapter, IncomingFile, IncomingMessage, OutgoingAction, OutgoingMessage } from '../types.js'
 import { chunkText } from '../chunking.js'
 import { createDiscordApi, type DiscordActionRow, type DiscordAllowedMentions, type DiscordButton } from './api.js'
@@ -345,6 +346,7 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
     },
 
     async sendMessage(channelId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<string> {
+      response = denormalizeActions(response)
       if (!response.text.trim() && !response.documents?.length) return ''
       const text = response.format === 'markdown' ? markdownToDiscord(response.text) : response.text
       const chunks = chunkText(text, DISCORD_MAX_MESSAGE_LENGTH)
@@ -365,11 +367,15 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
         const reference = i === 0 && opts?.threadTs
           ? { message_id: opts.threadTs, fail_if_not_exists: false }
           : undefined
-        const result = await api.createMessage(channelId, {
+        const payload = {
           content: chunk,
           message_reference: reference,
           allowed_mentions: allowedMentions,
           ...(components && i === lastNonEmptyIndex ? { components } : {}),
+        }
+        const result = await api.createMessage(channelId, payload).catch(err => {
+          if (!payload.components) throw err
+          return api.createMessage(channelId, { ...payload, components: undefined })
         })
         lastId = result.id
       }
@@ -416,6 +422,11 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
     },
 
     async editMessage(channelId: string, messageId: string, response: OutgoingMessage): Promise<void> {
+      if (response.actions?.length && denormalizeActions(response).text.length > this.maxMessageLength) {
+        await this.sendMessage(channelId, response)
+        return
+      }
+      response = denormalizeActions(response)
       const raw = response.format === 'markdown' ? markdownToDiscord(response.text) : response.text
       const content = raw.slice(0, DISCORD_MAX_MESSAGE_LENGTH)
       // When `actions` is supplied, replace the message's buttons (an empty array
@@ -425,7 +436,7 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
         await api.editMessage(channelId, messageId, { content, ...(components ? { components } : {}) })
       } catch {
         // Edit failed (message too old, deleted, …) — fall back to a fresh send.
-        await api.createMessage(channelId, { content, allowed_mentions: allowedMentions }).catch(() => {})
+        await api.createMessage(channelId, { content, allowed_mentions: allowedMentions })
       }
     },
 

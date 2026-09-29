@@ -12,6 +12,7 @@ import type {
   Message,
 } from '../../providers/types.js'
 import { buildTool } from '../../tools/types.js'
+import type { WorkerManager } from '../../workers/worker.js'
 import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, streamErrorCodes, type QueryEvent } from '../query-loop.js'
 
 // ── Scripted provider with per-turn behaviour ──────────────────
@@ -409,6 +410,240 @@ describe('[COMP:engine/query-loop] Connection-drop classification', () => {
     // Gateway 5xx is transient (retried) but NOT a connection drop — the
     // endpoint answered, so "please retry" copy would be misleading there.
     expect(isConnectionDropError(new Error('503 Service Unavailable'))).toBe(false)
+  })
+})
+
+describe('[COMP:engine/query-loop] Worker result drain', () => {
+  it('waits beyond the former 60s deadline and synthesizes the worker result', async () => {
+    vi.useFakeTimers()
+    try {
+      const { provider, calls } = scriptedProvider([
+        { kind: 'chunks', chunks: textChunks('Worker is still running.') },
+        { kind: 'chunks', chunks: textChunks('Final synthesized answer') },
+      ])
+
+      let pending = 1
+      let notificationReady = false
+      const completion = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          pending = 0
+          notificationReady = true
+          resolve()
+        }, 61_000)
+      })
+      const workerResult = {
+        workerId: 'worker_1',
+        description: 'Research prompting guidance',
+        status: 'completed' as const,
+        result: 'Use precise instructions and include relevant context.',
+        ownerSessionId: baseContext.sessionId,
+      }
+      const workerManager = {
+        pendingCountFor: () => pending,
+        hasNotificationsFor: () => notificationReady,
+        waitForNext: () => completion,
+        drainNotifications: () => {
+          if (!notificationReady) return []
+          notificationReady = false
+          return [workerResult]
+        },
+        formatNotification: () => '<worker-result>Use precise instructions and include relevant context.</worker-result>',
+      }
+
+      const eventsPromise = (async () => {
+        const events: QueryEvent[] = []
+        for await (const event of queryLoop({
+          ledger: NOOP_TURN_LEDGER,
+          provider,
+          model: 'mock-model',
+          systemPrompt: 'sys',
+          messages: [{ role: 'user', content: 'Research better prompting' }],
+          tools: new Map(),
+          context: {
+            ...baseContext,
+            // The focused stub exercises the parent drain contract without
+            // starting another query loop for the worker itself.
+            workerManager: workerManager as unknown as WorkerManager,
+          },
+          maxTurns: 5,
+        })) events.push(event)
+        return events
+      })()
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(calls).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      const events = await eventsPromise
+      expect(calls).toHaveLength(2)
+      expect(JSON.stringify(calls[1]?.messages)).toContain('Use precise instructions')
+      expect(events.some((event) => event.type === 'text_delta'
+        && event.text === 'Final synthesized answer')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('synthesizes drained worker results when they arrive on the final allowed turn', async () => {
+    const { provider, calls } = scriptedProvider([
+      { kind: 'chunks', chunks: textChunks('Worker is still running.') },
+      { kind: 'chunks', chunks: textChunks('{"message":"Use precise instructions and include relevant context."}') },
+    ])
+    let notificationReady = true
+    const workerManager = {
+      pendingCountFor: () => 0,
+      hasNotificationsFor: () => notificationReady,
+      waitForNext: () => Promise.resolve(),
+      drainNotifications: () => {
+        if (!notificationReady) return []
+        notificationReady = false
+        return [{
+          workerId: 'worker_1',
+          description: 'Research prompting guidance',
+          status: 'completed' as const,
+          result: 'Use precise instructions and include relevant context.',
+          ownerSessionId: baseContext.sessionId,
+        }]
+      },
+      formatNotification: () => '<worker-result>Use precise instructions and include relevant context.</worker-result>',
+    }
+
+    const events: QueryEvent[] = []
+    for await (const event of queryLoop({
+      ledger: NOOP_TURN_LEDGER,
+      provider,
+      model: 'mock-model',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'Research better prompting' }],
+      tools: new Map(),
+      context: {
+        ...baseContext,
+        workerManager: workerManager as unknown as WorkerManager,
+      },
+      maxTurns: 1,
+    })) events.push(event)
+
+    expect(calls).toHaveLength(1)
+    expect(events.some((event) => event.type === 'text_delta'
+      && event.text === 'Use precise instructions and include relevant context.')).toBe(true)
+    const complete = events.find((event) => event.type === 'turn_complete')
+    expect(complete?.type === 'turn_complete' && complete.response.content).toEqual([
+      { type: 'text', text: 'Use precise instructions and include relevant context.' },
+    ])
+  })
+
+  it('cancels only the session workers when the parent request is aborted', async () => {
+    vi.useFakeTimers()
+    try {
+      const abortController = new AbortController()
+      const { provider, calls } = scriptedProvider([
+        { kind: 'chunks', chunks: textChunks('Worker is still running.') },
+      ])
+      let pending = 1
+      const cancelForSession = vi.fn(() => {
+        pending = 0
+        return 1
+      })
+      const workerManager = {
+        pendingCountFor: () => pending,
+        hasNotificationsFor: () => false,
+        waitForNext: () => new Promise<void>(() => {}),
+        drainNotifications: () => [],
+        formatNotification: () => '',
+        cancelForSession,
+      }
+
+      const eventsPromise = (async () => {
+        const events: QueryEvent[] = []
+        for await (const event of queryLoop({
+          ledger: NOOP_TURN_LEDGER,
+          provider,
+          model: 'mock-model',
+          systemPrompt: 'sys',
+          messages: [{ role: 'user', content: 'Research better prompting' }],
+          tools: new Map(),
+          context: {
+            ...baseContext,
+            abortSignal: abortController.signal,
+            workerManager: workerManager as unknown as WorkerManager,
+          },
+          maxTurns: 5,
+        })) events.push(event)
+        return events
+      })()
+
+      await vi.advanceTimersByTimeAsync(0)
+      abortController.abort()
+      await vi.advanceTimersByTimeAsync(5_000)
+      await eventsPromise
+
+      expect(cancelForSession).toHaveBeenCalledOnce()
+      expect(cancelForSession).toHaveBeenCalledWith(baseContext.sessionId)
+      expect(calls).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels session workers when abort happens before Phase 4b', async () => {
+    const abortController = new AbortController()
+    let streamStarted!: () => void
+    const started = new Promise<void>((resolve) => { streamStarted = resolve })
+    const provider: LLMProvider = {
+      name: 'abort-before-drain',
+      models: ['mock-model'],
+      async *stream(req) {
+        streamStarted()
+        await new Promise<void>((_resolve, reject) => {
+          req.signal?.addEventListener('abort', () => {
+            const error = new Error('Aborted')
+            error.name = 'AbortError'
+            reject(error)
+          }, { once: true })
+        })
+      },
+      createSession() {
+        throw new Error('stateless stream expected')
+      },
+    }
+    const cancelForSession = vi.fn(() => 1)
+    const clearSessionConfig = vi.fn()
+    const workerManager = {
+      pendingCountFor: () => 1,
+      hasNotificationsFor: () => false,
+      waitForNext: () => new Promise<void>(() => {}),
+      drainNotifications: () => [],
+      formatNotification: () => '',
+      cancelForSession,
+      clearSessionConfig,
+    }
+
+    const eventsPromise = (async () => {
+      const events: QueryEvent[] = []
+      for await (const event of queryLoop({
+        ledger: NOOP_TURN_LEDGER,
+        provider,
+        model: 'mock-model',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'Research better prompting' }],
+        tools: new Map(),
+        context: {
+          ...baseContext,
+          abortSignal: abortController.signal,
+          workerManager: workerManager as unknown as WorkerManager,
+        },
+        maxTurns: 5,
+        stateless: true,
+      })) events.push(event)
+      return events
+    })()
+
+    await started
+    abortController.abort()
+    await eventsPromise
+
+    expect(cancelForSession).toHaveBeenCalledWith(baseContext.sessionId)
+    expect(clearSessionConfig).toHaveBeenCalledWith(baseContext.sessionId)
   })
 })
 

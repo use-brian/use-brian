@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 import type { ChannelAdapter, IncomingFile, IncomingMessage, OutgoingMessage } from '../types.js'
 import { chunkText } from '../chunking.js'
 import { createMsTeamsApi } from './api.js'
@@ -178,6 +179,7 @@ export function createMsTeamsAdapter(options: MsTeamsAdapterOptions): ChannelAda
     },
 
     async sendMessage(channelId: string, response: OutgoingMessage): Promise<string> {
+      response = denormalizeActions(response)
       if (!response.text.trim() && !response.documents?.length) return ''
       const text = response.format === 'markdown' ? markdownToTeams(response.text) : response.text
       const chunks = chunkText(text, MSTEAMS_MAX_MESSAGE_LENGTH)
@@ -187,7 +189,7 @@ export function createMsTeamsAdapter(options: MsTeamsAdapterOptions): ChannelAda
         const { id } = await api.sendActivity(channelId, {
           type: 'message',
           text: chunk,
-          textFormat: 'markdown',
+          textFormat: response.format === 'plain' ? 'plain' : 'markdown',
         })
         lastId = id ?? lastId
       }
@@ -212,15 +214,20 @@ export function createMsTeamsAdapter(options: MsTeamsAdapterOptions): ChannelAda
     },
 
     async editMessage(channelId: string, messageId: string, response: OutgoingMessage): Promise<void> {
+      if (response.actions?.length && denormalizeActions(response).text.length > this.maxMessageLength) {
+        await this.sendMessage(channelId, response)
+        return
+      }
+      response = denormalizeActions(response)
       const text = (response.format === 'markdown' ? markdownToTeams(response.text) : response.text).slice(
         0,
         MSTEAMS_MAX_MESSAGE_LENGTH,
       )
       try {
-        await api.updateActivity(channelId, messageId, { type: 'message', text, textFormat: 'markdown' })
+        await api.updateActivity(channelId, messageId, { type: 'message', text, textFormat: response.format === 'plain' ? 'plain' : 'markdown' })
       } catch {
         // Edit failed (activity too old / not found) — send as a new message.
-        await api.sendActivity(channelId, { type: 'message', text, textFormat: 'markdown' }).catch(() => {})
+        await api.sendActivity(channelId, { type: 'message', text, textFormat: response.format === 'plain' ? 'plain' : 'markdown' })
       }
     },
 

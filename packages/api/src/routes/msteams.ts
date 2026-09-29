@@ -1,3 +1,4 @@
+import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 /**
  * Microsoft Teams webhook route — the Bot Framework messaging endpoint.
  *
@@ -30,8 +31,8 @@ import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, type ChannelUserStore } from '../db/channel-user-store.js'
 import { resolveRoutingForSurface, resolveAssistantForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import { interpretConfirmationEvent, parseFileContent } from '@use-brian/core'
-import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import { parseFileContent } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
 import type {
   ChannelIntegrationStore,
@@ -39,8 +40,9 @@ import type {
   MsTeamsCredentials,
 } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
+import { humanizeToolName, describeToolInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
@@ -78,6 +80,7 @@ export type MsTeamsWebhookIngestor = {
 }
 
 export type MsTeamsRouteOptions = {
+  questionStore?: ChannelQuestionStore
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
@@ -149,8 +152,6 @@ export function msteamsUserAllowed(config: ChannelIntegrationConfig, userId: str
 export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
   const router = Router()
 
-  // Pending text-based tool confirmations, keyed by Teams conversation id.
-  const pendingConfirmations = new Map<string, { resolver: ConfirmationResolver; toolCallId: string }>()
 
   // Verifiers are cached per App id so the JWKS cache survives across requests
   // (a fresh verifier per request would refetch Bot Framework's keys every time).
@@ -250,7 +251,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       // 8. Resolve the Teams sender → a platform user (tier 2 shadow: Teams bots
       //    can't read email without Graph consent, so identity stays anonymous).
       let channelUserId = ownerId
-      let isIdentified = true
+      let isIdentified = false
       if (options.channelUserStore && incoming.userId) {
         try {
           const displayName = activity.from?.name ?? null
@@ -268,21 +269,12 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         }
       }
 
-      // 9. A pending confirmation on this conversation intercepts the next
-      //    message as a yes/no/always/never decision (text fallback; Adaptive
-      //    Card buttons are P5).
-      const pending = pendingConfirmations.get(incoming.channelId)
-      if (pending) {
-        const confirmation = interpretConfirmationEvent(
-          { kind: 'text', text: incoming.text },
-          pending.toolCallId,
-        )
-        pendingConfirmations.delete(incoming.channelId)
-        if (confirmation.status === 'decision') {
-          pending.resolver.resolve(pending.toolCallId, confirmation.decision)
-          if (confirmation.consume) return
-        }
+      // Resolve before acquiring the conversation lock held by the suspended turn.
+      const scope: ChannelInteractionScope = {
+        channelType: 'msteams', integrationId: channelId,
+        conversationId: incoming.channelId, senderId: incoming.userId,
       }
+      if (channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
 
       // 10. Sequentialize per Teams conversation.
       await withChatLock(`msteams:${incoming.channelId}`, () =>
@@ -295,6 +287,8 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
           isIdentified,
           routing,
           integrationId: integration.id,
+          scope,
+          questionIntegrationId: integration.id,
           archiveConnectorInstanceId: integration.connectorInstanceId,
         }),
       )
@@ -312,6 +306,8 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
     integrationId: string
+    scope: ChannelInteractionScope
+    questionIntegrationId: string
     archiveConnectorInstanceId?: string | null
   }): Promise<void> {
     const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing } = params
@@ -420,6 +416,10 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
     const abortController = new AbortController()
 
     await processChannelMessage({
+      interactionScope: params.scope,
+      incomingMessage: incoming,
+      questionIntegrationId: params.questionIntegrationId,
+      questionStore: options.questionStore,
       backgroundModel: options.backgroundModel,
       decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
@@ -504,23 +504,10 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         async onGoalAccepted(message) {
           await adapter.sendMessage(channelId, { text: message })
         },
-        async onConfirmationRequired(req, resolver) {
-          // Park the resolver so the next message on this conversation answers
-          // it (text fallback). Adaptive Card buttons are the P5 fast-follow.
-          pendingConfirmations.set(channelId, { resolver, toolCallId: req.toolCallId })
-          const lines = req.displayLines && req.displayLines.length > 0
-            ? req.displayLines
-            : formatConfirmationInput(req.input)
-          const inputSummary = lines.length > 0 ? '\n' + lines.join('\n') : ''
-          const displayName = getToolDisplayName(req.toolName)
-          const replyHint = req.allowPersistentApproval
-            ? 'Reply: yes / no / always / never'
-            : 'Reply: yes / no'
-          await adapter.sendMessage(channelId, {
-            text: `${displayName}${inputSummary}\n\n${replyHint}`,
-          })
+        async onConfirmationRequired(req) {
+          await adapter.sendMessage(channelId, confirmationMessage(req))
         },
-        async sendResponse(text, documents) {
+        async sendResponse(text, documents, _question, actions) {
           const finalText = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
           const hasDocuments = !!documents?.length
           const reply = finalText || (hasDocuments ? '' : "I couldn't generate a reply — please rephrase or try again.")
@@ -530,11 +517,11 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
           // A reply carrying documents always sends fresh — an edit cannot
           // attach uploads, so the edit path would silently drop them.
           if (statusMessageId && !hasDocuments && reply.length <= adapter.maxMessageLength) {
-            await adapter.editMessage(channelId, statusMessageId, { text: reply, format: 'markdown' })
+            await adapter.editMessage(channelId, statusMessageId, { text: reply, format: 'markdown', actions })
             channelMessageId = statusMessageId
             statusMessageId = undefined
           } else {
-            channelMessageId = await adapter.sendMessage(channelId, { text: reply, format: 'markdown', documents })
+            channelMessageId = await adapter.sendMessage(channelId, { text: reply, format: 'markdown', documents, actions })
             if (statusMessageId) {
               await adapter.editMessage(channelId, statusMessageId, { text: '…' }).catch(() => {})
               statusMessageId = undefined

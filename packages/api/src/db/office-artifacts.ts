@@ -15,8 +15,8 @@ export const defaultOfficeDbQuery: OfficeDbQuery = async <T>(userId: string, sql
 export type OfficeArtifactRow = {
   id: string
   workspaceId: string
-  family: 'document' | 'presentation' | 'spreadsheet'
-  mode: 'artifact' | 'template'
+  family: 'document' | 'presentation' | 'spreadsheet' | 'pdf'
+  mode: 'artifact' | 'template' | 'session'
   title: string
   creatorUserId: string
   ownerUserId: string
@@ -27,9 +27,21 @@ export type OfficeArtifactRow = {
   sensitivity: 'public' | 'internal' | 'confidential'
   compartments: string[]
   projectIds: string[]
-  defaultWorkspaceRole: 'view' | 'comment' | 'edit'
+  defaultWorkspaceRole: 'view' | 'comment' | 'edit' | 'deny'
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained' | 'purged'
+  expiresAt: Date | null
   updatedAt: Date
+}
+
+export type DurableOfficeArtifactRow = OfficeArtifactRow & {
+  family: 'document' | 'presentation' | 'spreadsheet'
+  mode: 'artifact' | 'template'
+  defaultWorkspaceRole: 'view' | 'comment' | 'edit'
+  expiresAt: null
+}
+
+export function isDurableOfficeArtifact(row: OfficeArtifactRow): row is DurableOfficeArtifactRow {
+  return row.family !== 'pdf' && row.mode !== 'session' && row.defaultWorkspaceRole !== 'deny' && row.expiresAt === null
 }
 
 export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
@@ -43,7 +55,8 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                capability_version AS "capabilityVersion", sensitivity,
                compartments, project_ids AS "projectIds",
                default_workspace_role AS "defaultWorkspaceRole",
-               lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
+               lifecycle_state AS "lifecycleState", expires_at AS "expiresAt",
+               updated_at AS "updatedAt"
           FROM office_artifacts
          WHERE workspace_id = $1 AND lifecycle_state = $2
            AND mode = 'artifact'
@@ -79,7 +92,8 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                   capability_version AS "capabilityVersion", sensitivity,
                   compartments, project_ids AS "projectIds",
                   default_workspace_role AS "defaultWorkspaceRole",
-                  lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
+                  lifecycle_state AS "lifecycleState", expires_at AS "expiresAt",
+                  updated_at AS "updatedAt"
       `, [params.workspaceId, params.family, params.title, params.userId, params.templateVersionId, params.capabilityVersion, params.sensitivity, params.visibilityUserIds ?? [], params.requiredCompartments ?? [], params.projectIds ?? [], params.mode ?? 'artifact'])
       const row = result.rows[0]
       if (!row) throw new Error('Office artifact shell insert returned no row')
@@ -170,7 +184,8 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                capability_version AS "capabilityVersion", sensitivity,
                compartments, project_ids AS "projectIds",
                default_workspace_role AS "defaultWorkspaceRole",
-               lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
+               lifecycle_state AS "lifecycleState", expires_at AS "expiresAt",
+               updated_at AS "updatedAt"
           FROM office_artifacts WHERE id = $1
       `, [artifactId])
       return result.rows[0] ?? null

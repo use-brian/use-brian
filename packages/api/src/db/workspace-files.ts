@@ -598,6 +598,8 @@ export async function listWorkspaceFilesByPath(
     `SELECT ${INDEX_SELECT} FROM workspace_files
      WHERE ${ap.sql}
        AND parent_path = $${ap.nextIdx} AND valid_to IS NULL
+       AND path NOT LIKE '/office/sessions/%'
+       AND NOT COALESCE((metadata->>'noIndex')::boolean, false)
      ORDER BY updated_at DESC
      LIMIT $${ap.nextIdx + 1} OFFSET $${ap.nextIdx + 2}`,
     [...ap.params, prefix, limit, offset],
@@ -654,6 +656,8 @@ export async function searchWorkspaceFiles(
     'valid_to IS NULL',
     "path NOT LIKE '/doc/%'",
     "path NOT LIKE '/apps/%'",
+    "path NOT LIKE '/office/sessions/%'",
+    "NOT COALESCE((metadata->>'noIndex')::boolean, false)",
   ]
   const values: unknown[] = [...ap.params]
   let idx = ap.nextIdx
@@ -705,6 +709,8 @@ export async function listWorkspaceFilesIndexRanked(
     `SELECT ${INDEX_SELECT} FROM workspace_files
      WHERE ${ap.sql} AND valid_to IS NULL
        AND path NOT LIKE '/doc/%' AND path NOT LIKE '/apps/%'
+       AND path NOT LIKE '/office/sessions/%'
+       AND NOT COALESCE((metadata->>'noIndex')::boolean, false)
      ORDER BY updated_at DESC
      LIMIT $${ap.nextIdx}`,
     [...ap.params, cap],

@@ -1,11 +1,37 @@
 import { describe, expect, it } from 'vitest'
-import type { DocumentSnapshot, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
+import type { DocumentSnapshot, PdfSnapshot, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
 import { officeParagraphCss, fitOfficeArtifact, layoutOfficeArtifact, officeGoldenSerialization, renderOfficePreviewSvg, type OfficeDisplayPage } from '../layout.js'
 
 const id = (suffix: number): string => `00000000-0000-4000-8000-${suffix.toString().padStart(12, '0')}`
 const style = { fontFamily: 'Arial', fontSizePt: 12, bold: false, italic: false, underline: false, strike: false, color: '#111111' }
 
 describe('[COMP:office/layout] Deterministic Office layout', () => {
+  it('keeps PDF sessions on their independent PDF.js rendering path', () => {
+    const snapshot: PdfSnapshot = {
+      schemaVersion: 1,
+      capabilityVersion: 1,
+      artifactId: id(1),
+      workspaceId: id(2),
+      family: 'pdf',
+      locale: 'en-US',
+      defaultLanguage: 'en-US',
+      templateVersionId: null,
+      rootId: id(3),
+      title: 'Private form',
+      resources: [],
+      accessibility: { title: 'Private form' },
+      source: { fileId: id(4), sha256: 'a'.repeat(64), byteLength: 1_024, originalFileName: 'form.example.pdf', pageCount: 1 },
+      pages: [{
+        id: id(5), sourcePageIndex: 0,
+        mediaBox: { x: 0, y: 0, width: 612, height: 792 },
+        cropBox: { x: 0, y: 0, width: 612, height: 792 },
+        rotation: 0, fields: [], overlays: [], placementTargets: [],
+      }],
+    }
+    expect(() => layoutOfficeArtifact(snapshot)).toThrow('independent PDF.js renderer')
+    expect(() => fitOfficeArtifact(snapshot)).toThrow('independent PDF.js renderer')
+  })
+
   it('preserves only identical small objects from the same committed artifact', () => {
     const base: DocumentSnapshot = { schemaVersion: 1, capabilityVersion: 1, artifactId: id(1), workspaceId: id(2), family: 'document', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: id(4), title: 'Footer', resources: [], accessibility: { title: 'Footer' }, sections: [{ id: id(5), page: { widthPt: 595, heightPt: 842, marginTopPt: 72, marginRightPt: 62, marginBottomPt: 68, marginLeftPt: 62, orientation: 'portrait' }, header: [], footer: [{ id: id(6), text: 'BRAND', style: { ...style, fontSizePt: 7.5 } }], showPageNumber: false, nodes: [] }] }
     expect(fitOfficeArtifact(base).ok).toBe(false)

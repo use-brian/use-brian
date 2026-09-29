@@ -1,3 +1,5 @@
+import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
+import { resolveChannelQuestion } from './channel-questions.js'
 /**
  * Feishu/Lark internal route: authenticated long-connection bridge input,
  * workspace routing, durable dedup, channel identity, and shared query loop.
@@ -20,16 +22,12 @@ import {
   type IncomingMessage,
 } from '@use-brian/channels'
 import {
-  buildConfirmationActions,
   buildTool,
-  confirmationDecisionLabel,
   composeVoiceTurnText,
   describeTranscriptionFailure,
-  interpretConfirmationEvent,
   parseFileContent,
   transcribeFirstAudio,
   TRANSCRIPTION_DISABLED_REASON,
-  type ConfirmationResolver,
   type ContentBlock,
   type MediaBackend,
   type TokenUsage,
@@ -38,8 +36,6 @@ import {
 } from '@use-brian/core'
 import {
   describeToolInput,
-  formatConfirmationInput,
-  getToolDisplayName,
   humanizeToolName,
 } from '@use-brian/shared'
 import type { DiscordRouteOptions } from './discord.js'
@@ -69,7 +65,6 @@ import { cacheInboundImageTag } from './channel-file-cache.js'
 import { archiveMediaRef, type ChatArchiveLiveMedia, type ChatArchiveMediaKind } from '../chat-archive/live-media.js'
 import { resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
-import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 import { dispatchReactionFeedback } from '../feedback/reaction-dispatch.js'
 import { ensureFeishuConnectorInstance } from '../ingest/feishu-connector-instance.js'
 
@@ -188,6 +183,25 @@ function credentialsForApi(credentials: FeishuCredentials) {
     appId: credentials.app_id,
     appSecret: credentials.app_secret,
     brand: credentials.brand,
+  }
+}
+
+async function fetchFeishuSenderProfile(
+  api: ReturnType<typeof createFeishuApi>,
+  openId: string,
+  fallbackName: string | null,
+): Promise<{ email: string | null; displayName: string | null }> {
+  try {
+    const profile = await api.getUserProfile(openId)
+    return {
+      email: profile.email,
+      displayName: profile.displayName ?? fallbackName,
+    }
+  } catch (error) {
+    // Existing installations may not have approved the new contact scopes yet.
+    // Keep chat available on the isolated shadow lane until they do.
+    console.warn('[feishu] sender profile lookup unavailable; using anonymous identity:', error)
+    return { email: null, displayName: fallbackName }
   }
 }
 
@@ -378,22 +392,6 @@ export function createFeishuReactToMessageTool(args: {
 
 export function feishuRoutes(options: FeishuRouteOptions): Router {
   const router = Router()
-  const pendingConfirmations = new Map<
-    string,
-    { resolver: ConfirmationResolver; toolCallId: string }
-  >()
-  const pendingCardConfirmations = new Map<
-    string,
-    { resolver: ConfirmationResolver; toolCallId: string; sessionChannelId: string }
-  >()
-  const clearPendingCardConfirmations = (sessionChannelId: string): void => {
-    for (const [messageId, pending] of pendingCardConfirmations) {
-      if (pending.sessionChannelId === sessionChannelId) {
-        pendingCardConfirmations.delete(messageId)
-      }
-    }
-  }
-
   router.use((req, res, next) => {
     if (!feishuConnectorSecretMatches(req.headers['x-connector-secret'], options.connectorSecret)) {
       res.status(401).json({ error: 'Invalid or missing X-Connector-Secret' })
@@ -527,11 +525,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             'feishu',
             reaction.operator.openId,
             assistantId,
-            async () => ({
-              providerUserId: reaction.operator.openId,
-              email: null,
-              displayName: null,
-            }),
+            () => fetchFeishuSenderProfile(api, reaction.operator.openId, null),
           )
           return resolved.user.id
         } catch (error) {
@@ -548,46 +542,44 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     if (!interaction.chatId || !interaction.messageId || !interaction.action) return
     const data = actionData(interaction)
     if (!data) return
-    const confirmation = interpretConfirmationEvent({ kind: 'action', data })
-    if (confirmation.status !== 'decision' || !confirmation.toolCallId) return
-    const { toolCallId, decision } = confirmation
-    const pendingByCard = pendingCardConfirmations.get(interaction.messageId)
-    const pending = pendingByCard ?? pendingConfirmations.get(interaction.chatId)
-    let matched = !!pending && pending.toolCallId === toolCallId
-    if (matched) {
-      pendingCardConfirmations.delete(interaction.messageId)
-      if (pendingByCard) pendingConfirmations.delete(pendingByCard.sessionChannelId)
-      pendingConfirmations.delete(interaction.chatId)
-      pending?.resolver.resolve(toolCallId, decision)
-    } else if (options.deferredConfirmationStore) {
-      const deferred = await options.deferredConfirmationStore.findPendingByChannel(
-        'feishu',
-        interaction.chatId,
-      )
-      if (
-        deferred?.toolCallId === toolCallId
-        && tryResolveSchedulerConfirmation(toolCallId, decision, {
-          channelType: 'feishu',
-          channelId: interaction.chatId,
-        })
-      ) {
-        matched = true
-        await options.deferredConfirmationStore.markResolved(toolCallId, decision)
-      }
-    }
-
-    // Clear the buttons after a press. This is best-effort; the bridge already
-    // returned a provider toast, and resolving must not depend on the edit.
+    const channel = await getChannelForWebhook(channelRowId)
+    if (!channel || channel.status !== 'active' || !channel.enabledCapabilities.includes('chat')) return
     const integration = await options.integrationStore.getByChannelForWebhook(channelRowId, 'feishu')
-    if (integration) {
+    const senderId = interaction.operator?.openId
+    if (!integration || !senderId || !feishuUserAllowed((integration.config ?? {}) as ChannelIntegrationConfig, senderId)) return
+    if (data.startsWith('ask:')) {
+      await processInbound(channelRowId, {
+        messageId: interaction.messageId, chatId: interaction.chatId,
+        chatType: 'group', senderId, senderType: 'user', senderIsBot: false,
+        content: data, rawContentType: 'text', resources: [], mentions: [],
+        mentionAll: false, mentionedBot: true, createTime: Date.now(),
+      }, data)
+      return
+    }
+    const result = channelConfirmations.handle({
+      channelType: 'feishu', integrationId: channelRowId,
+      conversationId: interaction.chatId, senderId,
+    }, { kind: 'action', data, sourceMessageId: interaction.messageId })
+    // A different actor must not erase the authorized actor's controls.
+    if (result.status === 'resolved') {
       const api = createFeishuApi(credentialsForApi(integration.credentials as FeishuCredentials))
       await api.updateCard(interaction.messageId, {
-        elements: [{ tag: 'markdown', content: matched ? `Tool action: ${confirmationDecisionLabel(decision)}` : 'Expired or already handled.' }],
+        elements: [{ tag: 'markdown', content: `Tool action: ${result.decision}` }],
       }).catch(() => {})
+      return
+    }
+    if (data.startsWith('wq:') || data.startsWith('mcp_confirm:')) {
+      await processInbound(channelRowId, {
+        messageId: interaction.messageId, chatId: interaction.chatId,
+        replyToMessageId: interaction.messageId,
+        chatType: 'group', senderId, senderType: 'user', senderIsBot: false,
+        content: data, rawContentType: 'text', resources: [], mentions: [],
+        mentionAll: false, mentionedBot: true, createTime: Date.now(),
+      }, undefined, { data, messageId: interaction.messageId })
     }
   }
 
-  async function processInbound(channelRowId: string, value: unknown): Promise<void> {
+  async function processInbound(channelRowId: string, value: unknown, actionData?: string, workflowCallback?: { data: string; messageId: string }): Promise<void> {
     const channel = await getChannelForWebhook(channelRowId)
     if (!channel || channel.status !== 'active') return
 
@@ -595,7 +587,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     if (!integration) return
     const eventMessage = workflowEventMessage(value)
     if (!eventMessage) return
-    if (!await claimChannelEvent(channelRowId, eventMessage.messageId)) return
+    if (!actionData && !workflowCallback && !await claimChannelEvent(channelRowId, eventMessage.messageId)) return
 
     await persistFeishuSeenChat(
       options.integrationStore,
@@ -621,8 +613,11 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       },
       deferMentionGate: true,
     })
-    const incoming = adapter.parseIncoming(value)
+    let incoming = adapter.parseIncoming(value)
     if (!incoming) return
+    // The parser needs text for a synthetic callback envelope; its opaque data
+    // belongs only in workflowCallback, never in the conversational turn.
+    if (workflowCallback) incoming = { ...incoming, text: '' }
     const { sessionChannelId } = resolveFeishuThreadScope(eventMessage, replyInThread)
 
     if (incoming.isGroupChat && (config.requireMention ?? true) && !incoming.isMentioned) return
@@ -643,38 +638,12 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       workspaceId: assistant.workspaceId ?? null,
     })
 
-    const pending = pendingConfirmations.get(sessionChannelId)
-    if (pending) {
-      const confirmation = interpretConfirmationEvent(
-        { kind: 'text', text: incoming.text },
-        pending.toolCallId,
-      )
-      pendingConfirmations.delete(sessionChannelId)
-      clearPendingCardConfirmations(sessionChannelId)
-      if (confirmation.status === 'decision') {
-        pending.resolver.resolve(pending.toolCallId, confirmation.decision)
-        if (confirmation.consume) return
-      }
-    } else if (options.deferredConfirmationStore) {
-      const confirmation = interpretConfirmationEvent({ kind: 'text', text: incoming.text })
-      if (confirmation.status === 'decision') {
-        const deferred = await options.deferredConfirmationStore.findPendingByChannel(
-          'feishu',
-          incoming.channelId,
-          routing.assistantId,
-        )
-        if (
-          deferred
-          && tryResolveSchedulerConfirmation(deferred.toolCallId, confirmation.decision, {
-            channelType: 'feishu',
-            channelId: incoming.channelId,
-          })
-        ) {
-          await options.deferredConfirmationStore.markResolved(deferred.toolCallId, confirmation.decision)
-          return
-        }
-      }
+    const scope: ChannelInteractionScope = {
+      channelType: 'feishu', integrationId: channelRowId,
+      conversationId: incoming.channelId, senderId: incoming.userId,
+      sessionId: sessionChannelId,
     }
+    if (!actionData && !workflowCallback && channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
 
     // Link-code claim. A signed-in user mints this in Settings and sends it
     // through Feishu/Lark. Claim before sender resolution so the next normal
@@ -719,7 +688,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     }
 
     let channelUserId = ownerId
-    let isIdentified = true
+    let isIdentified = false
     let foundLinked = false
     if (options.linkedAccountStore) {
       try {
@@ -752,11 +721,11 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           'feishu',
           incoming.userId,
           routing.assistantId,
-          async () => ({
-            providerUserId: incoming.userId,
-            email: null,
-            displayName: incoming.senderDisplay ?? null,
-          }),
+          () => fetchFeishuSenderProfile(
+            api,
+            incoming.userId,
+            incoming.senderDisplay ?? null,
+          ),
         )
         channelUserId = resolved.user.id
         isIdentified = resolved.isIdentified
@@ -766,22 +735,37 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     }
 
     await options.integrationStore.touchLastEventAt(integration.id).catch(() => {})
-    await withChatLock(`feishu:${sessionChannelId}`, () => runTurn({
-      adapter,
-      api,
-      incoming,
-      assistant,
-      ownerId,
-      channelUserId,
-      isIdentified,
-      sessionChannelId,
-      connectorAuthority: config.allowAssistantConnectorTools === false ? 'disabled' : 'assistant',
-      routing,
-      integrationId: integration.id,
-      connectorInstanceId: integration.connectorInstanceId,
-    }))
+    const currentIncoming = incoming
+    await withChatLock(`feishu:${sessionChannelId}`, async () => {
+      const answer = actionData ? resolveChannelQuestion({ integrationId: channelRowId, assistantId: assistant.id, userId: channelUserId, incoming: currentIncoming }, actionData) : null
+      if (answer && answer.kind !== 'answer') return
+      // Resume the question's native topic, not a new session rooted at its card.
+      const questionSource = answer?.kind === 'answer' ? workflowEventMessage(answer.binding.incoming.raw) : null
+      const targetSession = (answer?.kind === 'answer' ? answer.binding.sessionId : undefined)
+        ?? (questionSource ? resolveFeishuThreadScope(questionSource, replyInThread).sessionChannelId : sessionChannelId)
+      const run = () => runTurn({
+        scope: { ...scope, sessionId: targetSession },
+        questionIntegrationId: integration.id,
+        workflowCallback,
+        conversationalAnswer: answer?.kind === 'answer',
+        adapter,
+        api,
+        incoming: answer?.incoming ?? currentIncoming,
+        assistant,
+        ownerId,
+        channelUserId,
+        isIdentified,
+        sessionChannelId: targetSession,
+        connectorAuthority: config.allowAssistantConnectorTools === false ? 'disabled' : 'assistant',
+        routing,
+        integrationId: integration.id,
+        connectorInstanceId: integration.connectorInstanceId,
+      })
+      if (targetSession === sessionChannelId) await run()
+      else await withChatLock(`feishu:${targetSession}`, run)
+    })
     } finally {
-      if (options.workflowEventDispatcher) {
+      if (options.workflowEventDispatcher && !actionData && !workflowCallback) {
         const mentionIds = eventMessage.mentions
           .map((mention) => mention.openId ?? mention.userId ?? mention.key)
           .filter((id): id is string => typeof id === 'string' && id.length > 0)
@@ -810,7 +794,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           console.error('[feishu] workflow event dispatch failed:', error)
         })
       }
-      if (options.feishuWebhookIngestor) {
+      if (options.feishuWebhookIngestor && !actionData && !workflowCallback) {
         await dispatchFeishuIngest({
           options,
           channel,
@@ -824,6 +808,10 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
   }
 
   async function runTurn(params: {
+    scope: ChannelInteractionScope
+    questionIntegrationId: string
+    workflowCallback?: { data: string; messageId: string }
+    conversationalAnswer?: boolean
     adapter: ReturnType<typeof createFeishuAdapter>
     api: ReturnType<typeof createFeishuApi>
     incoming: IncomingMessage
@@ -980,7 +968,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     }
 
     if (incoming.text.trim()) userContentBlocks.unshift({ type: 'text', text: incoming.text })
-    if (userContentBlocks.length === 0) return
+    if (userContentBlocks.length === 0 && !params.workflowCallback) return
 
     const turnTools = new Map(options.tools)
     turnTools.set('reactToMessage', createFeishuReactToMessageTool({
@@ -1031,6 +1019,12 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     }
 
     await processChannelMessage({
+      interactionScope: params.scope,
+      incomingMessage: incoming,
+      questionIntegrationId: params.questionIntegrationId,
+      questionStore: options.questionStore,
+      workflowCallback: params.workflowCallback,
+      conversationalAnswer: params.conversationalAnswer,
       backgroundModel: options.backgroundModel,
       decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
@@ -1118,30 +1112,13 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             replyTarget ? { threadTs: replyTarget } : undefined,
           )
         },
-        async onConfirmationRequired(request, resolver) {
-          pendingConfirmations.set(sessionChannelId, {
-            resolver,
-            toolCallId: request.toolCallId,
-          })
-          const lines = request.displayLines?.length
-            ? request.displayLines
-            : formatConfirmationInput(request.input)
-          const actions = buildConfirmationActions(request.toolCallId, request.allowPersistentApproval)
-          const cardMessageId = await adapter.sendMessage(incoming.channelId, {
-            text: `${getToolDisplayName(request.toolName)}${lines.length ? `\n${lines.join('\n')}` : ''}\n\n${request.allowPersistentApproval ? 'Tap a button, or reply: yes / no / always / never' : 'Tap a button, or reply: yes / no'}`,
-            actions,
-          }, replyTarget ? { threadTs: replyTarget } : undefined)
-          if (cardMessageId) {
-            pendingCardConfirmations.set(cardMessageId, {
-              resolver,
-              toolCallId: request.toolCallId,
-              sessionChannelId,
-            })
-          }
+        async onConfirmationRequired(request) {
+          const messageId = await adapter.sendMessage(incoming.channelId, confirmationMessage(request), replyTarget ? { threadTs: replyTarget } : undefined)
+          channelConfirmations.bindMessage(params.scope, request.toolCallId, messageId)
         },
-        async sendResponse(text, documents) {
+        async sendResponse(text, documents, _question, actions) {
           const reply = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-            || (documents?.length ? '' : "I couldn't generate a reply. Please rephrase or try again.")
+            || (documents?.length || actions?.length ? '' : "I couldn't generate a reply. Please rephrase or try again.")
           // The SDK's editMessage path always writes msg_type=text. Replacing
           // the status with Markdown would therefore expose markers such as
           // **bold** instead of rendering a Feishu rich-text post. Keep the
@@ -1150,7 +1127,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           const progressMessageId = statusMessageId
           const channelMessageId = await adapter.sendMessage(
             incoming.channelId,
-            { text: reply, format: 'markdown', documents },
+            { text: reply, format: 'markdown', documents, actions },
             replyTarget ? { threadTs: replyTarget } : undefined,
           )
           if (progressMessageId) {

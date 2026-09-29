@@ -206,6 +206,10 @@ const PIPELINE_B_RESULT: PipelineBResult = {
   sensitivity: null,
   extractionUsage: null,
   extracted: true,
+  extractionState: 'succeeded',
+  applicationState: 'complete',
+  applicationRunId: null,
+  applicationCounts: null,
 }
 
 /** First text block of a CallToolResult, or '' when none. */

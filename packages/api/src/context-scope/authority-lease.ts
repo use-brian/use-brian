@@ -66,7 +66,7 @@ export function createAuthorityLease(
   return lease
 }
 
-type SessionAuthoritySnapshot = Pick<Session,
+export type SessionAuthoritySnapshot = Pick<Session,
   'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
 >
 
@@ -76,9 +76,12 @@ export function createSessionAuthorityLease(input: {
   session: SessionAuthoritySnapshot
   /** Current caller; differs from the session starter in shared rooms. */
   userId?: string
-  memberMode?: 'enforce' | 'assistant'
+  memberMode?: 'enforce' | 'assistant' | 'member' | 'external'
+  ignoreSessionBinding?: boolean
   systemRead?: boolean
   credentialCurrent?: () => Promise<boolean>
+  /** Re-resolve a recipient/surface ceiling at every authority boundary. */
+  maximumAccessCurrent?: () => Promise<AccessCeiling | null>
 }): AuthorityLease {
   const expected = {
     id: input.session.id,
@@ -97,23 +100,47 @@ export function createSessionAuthorityLease(input: {
       input.credentialCurrent?.() ?? Promise.resolve(true),
     ])
     if (!session || !assistant || !credentialCurrent) return null
+    const currentLock = session.contextLockedAt?.toISOString() ?? null
     if (
       session.assistantId !== expected.assistantId
       || session.userId !== expected.userId
       || session.contextGroupId !== expected.contextGroupId
       || session.contextProjectId !== expected.contextProjectId
-      || (session.contextLockedAt?.toISOString() ?? null) !== expected.contextLockedAt
+      || !contextLockCurrent(expected.contextLockedAt, currentLock)
       || (assistant.workspaceId ?? '') !== expected.workspaceId
     ) return null
-    return resolveLiveAccessCeilingSystem({
+    // The first message takes the lock after the lease starts. Remember the
+    // observed timestamp so a later lock rewrite in the same turn cannot pass
+    // merely because the starting snapshot was null.
+    if (expected.contextLockedAt === null && currentLock !== null) {
+      expected.contextLockedAt = currentLock
+    }
+    const current = await resolveLiveAccessCeilingSystem({
       userId: expected.authorityUserId,
       assistant,
       workspaceId: assistant.workspaceId,
       session,
       memberMode: input.memberMode,
+      ignoreSessionBinding: input.ignoreSessionBinding,
       systemRead: input.systemRead,
     })
+    if (!input.maximumAccessCurrent) return current
+    const maximum = await input.maximumAccessCurrent()
+    return maximum
+      ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
+      : null
   })
+}
+
+/**
+ * A session that started unlocked is locked by its own first message (the
+ * `session_messages_lock_context` trigger), mid-turn, with the same Team and
+ * Project. That null → set step is the lock being taken, not access changing;
+ * the context ids themselves are compared separately. Once pinned, the lock
+ * timestamp must not move.
+ */
+function contextLockCurrent(expected: string | null, current: string | null): boolean {
+  return expected === null || current === expected
 }
 
 export function runWithAuthorityLease<T>(lease: AuthorityLease, fn: () => T): T {
