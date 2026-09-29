@@ -44,6 +44,7 @@ const EVENT_KINDS = ['stopped', 'tab_closed', 'detached'] as const
 const EventMessageSchema = z.object({
   type: z.literal('event'),
   kind: z.enum(EVENT_KINDS),
+  controlEpoch: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
 })
 
 const PingMessageSchema = z.object({ type: z.literal('ping') })
@@ -65,6 +66,7 @@ type CommandMessage = {
   op: string
   args: Record<string, unknown>
   controlMode?: 'task_tabs' | 'full_browser'
+  controlEpoch?: number
 }
 type PongMessage = { type: 'pong' }
 type ErrorMessage = { type: 'error'; message: string }

@@ -73,6 +73,31 @@ afterEach(() => {
 })
 
 describe('[COMP:ext/relay] Browser extension relay', () => {
+  it('fences new commands with the latest Stop epoch without changing frames already sent', async () => {
+    const relay = relayWithVerifier();
+    const socket = pair(relay);
+    const old = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'navigate' });
+    const oldFrame = socket.sent.at(-1)!;
+    expect(oldFrame.controlEpoch).toBeUndefined();
+    relay.handleMessage(socket, JSON.stringify({ type: 'event', kind: 'stopped', controlEpoch: 2 }));
+    await expect(old).resolves.toMatchObject({ ok: false, code: 'stopped' });
+    expect(oldFrame.controlEpoch).toBeUndefined();
+    const next = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'openTab' });
+    const frame = socket.sent.at(-1)!;
+    expect(frame).toMatchObject({ type: 'command', op: 'openTab', controlEpoch: 2 });
+    relay.handleMessage(socket, JSON.stringify({ type: 'result', id: frame.id, ok: true }));
+    await expect(next).resolves.toMatchObject({ ok: true });
+    relay.handleMessage(socket, JSON.stringify({ type: 'event', kind: 'stopped', controlEpoch: 4 }));
+    const later = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'navigate' });
+    expect(socket.sent.at(-1)).toMatchObject({ controlEpoch: 4 });
+    relay.handleDisconnect(socket);
+    await expect(later).resolves.toMatchObject({ ok: false });
+    const replacement = pair(relay);
+    const fresh = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'navigate' });
+    expect(replacement.sent.at(-1)?.controlEpoch).toBeUndefined();
+    relay.handleDisconnect(replacement);
+    await fresh;
+  });
   it('verifies a P1.3 pairing token on hello and answers ready', () => {
     const relay = relayWithVerifier()
     const socket = pair(relay)
