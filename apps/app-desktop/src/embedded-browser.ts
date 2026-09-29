@@ -48,11 +48,9 @@ export class EmbeddedBrowser {
   private generation = 0;
   private active = false;
   private pairing = false;
-  private fullBrowserApproved = false;
   private queue: Promise<void> = Promise.resolve();
   private cancelReady: (() => void) | null = null;
   private identity: { workspaceId: string; browserProfileId: string } | null = null;
-  private approvingTab = false;
 
   private automaticBlocked = false;
   // Keep only the approved control channel while the browser renderers are shut down.
@@ -97,7 +95,7 @@ export class EmbeddedBrowser {
     try {
       if (!this.approvals.has(pair.partition)) {
         const answer = await dialog.showMessageBox({ type: "question", title: "Set up Brian Browser", message: "Allow this browser profile to start automatically?",
-          detail: `Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with its task tabs, including sites you sign in to. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian closes all in-app browser tabs. The browser button or a new Brian navigation request can start it again. Manual tabs still need separate approval. Downloads and protected credential filling are not supported. This replaces any browser already paired to this profile.`,
+          detail: `Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with all in-app tabs, including tabs you open manually and sites you sign in to. This never grants access to your system browser or the Use Brian app. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian closes all in-app browser tabs. The browser button or a new Brian navigation request can start it again. Downloads and protected credential filling are not supported. This replaces any browser already paired to this profile.`,
           buttons: ["Not now", "Allow automatic sessions"], defaultId: 0, cancelId: 0 });
         if (generation !== this.generation) return false;
         if (answer.response !== 1) { this.automaticBlocked = true; return false; }
@@ -143,7 +141,6 @@ export class EmbeddedBrowser {
     this.host = new EmbeddedBrowserHost(partition, {
       stop: () => { if (generation === this.generation) this.shutdown(); },
       closed: () => { if (generation === this.generation) this.dispose(); },
-      approveTab: id => { void this.approveTab(id, generation); },
       tabClosed: id => {
         if (generation === this.generation && this.executor?.attachedTab() === id) {
           this.executor.onDetached(id); this.relay?.sendEvent("tab_closed");
@@ -157,7 +154,7 @@ export class EmbeddedBrowser {
     this.automaticBlocked = false;
     this.active = true;
     this.executor = new TabExecutor(this.platform(generation));
-    this.host.setStatus("Brian ready. Task tabs only.");
+    this.host.setStatus("");
     this.host.show();
   }
 
@@ -191,7 +188,6 @@ export class EmbeddedBrowser {
         }
       } catch { /* A renderer/debugger can disappear during teardown; revocation still wins. */ }
     }
-    this.fullBrowserApproved = false;
     const host = this.host;
     this.host = null;
     host?.destroy();
@@ -202,22 +198,6 @@ export class EmbeddedBrowser {
     this.stop(false);
     if (!preserveAutomaticBlock) this.automaticBlocked = false;
     this.identity = null;
-  }
-
-  private async approveTab(id: number, generation: number): Promise<void> {
-    if (!this.active || generation !== this.generation || this.approvingTab) return;
-    const host = this.host;
-    const tab = host?.tabs().find(t => t.id === id);
-    if (!tab || tab.taskOwned) return;
-    this.approvingTab = true;
-    try {
-      const answer = await dialog.showMessageBox({ type: "question", message: "Allow Brian on this tab?",
-        detail: `Brian can read and interact with ${tab.contents.getURL()} and subsequent pages in this tab until Stop Brian or disconnect.`,
-        buttons: ["Cancel", "Allow tab"], defaultId: 0, cancelId: 0 });
-      this.check(generation);
-      if (answer.response === 1) host?.approveTab(id);
-    } catch { /* Revocation, closed tab, or dismissed native dialog: never grant. */ }
-    finally { this.approvingTab = false; }
   }
 
   private check(generation: number): void {
@@ -300,15 +280,9 @@ export class EmbeddedBrowser {
   private async execute(cmd: Command, generation: number): Promise<unknown> {
     const host = this.host!;
     const executor = this.executor!;
-    const { op, args, controlMode } = cmd;
-    if (controlMode === "full_browser" && !this.fullBrowserApproved) {
-      const answer = await dialog.showMessageBox({ type: "question", message: "Allow Brian to use all tabs in this in-app browser?", detail: "This includes tabs you opened manually here, but never your system browser or the Use Brian app. Access lasts until Stop Brian or disconnect.", buttons: ["Cancel", "Allow all in-app tabs"], defaultId: 0, cancelId: 0 });
-      this.check(generation);
-      if (answer.response !== 1) throw new ExecutorError("Full-browser access was not approved", "user_denied");
-      this.fullBrowserApproved = true;
-      host.setStatus("Brian can control all in-app tabs. Stop Brian to revoke access.");
-    }
-    const eligible = () => host.tabs().filter(t => controlMode === "full_browser" || t.taskOwned);
+    const { op, args } = cmd;
+    // Both control modes cover this isolated host; taskOwned records creation source only.
+    const eligible = () => host.tabs();
     const selection = (id: number) => { const t = host.tabs().find(t => t.id === id)!; return { tabId: t.handle, url: t.contents.getURL(), title: t.contents.getTitle() }; };
     if (op === "openTab") {
       const id = await host.createTab(browserUrl(args.url), true);
@@ -336,7 +310,7 @@ export class EmbeddedBrowser {
       await executor.attach(id);
       return { url: tab!.contents.getURL() };
     }
-    if (!tab) throw new ExecutorError("Open or select an approved task tab first", "no_eligible_tab");
+    if (!tab) throw new ExecutorError("Open or select an in-app tab first", "no_eligible_tab");
     await executor.attach(tab.id);
     this.check(generation);
     switch (op) {
