@@ -2479,9 +2479,10 @@ describe('[COMP:workflow/executor] page anchor resolution', () => {
     }
   })
 
-  it('classifies a wall-clock timeout as run status "timeout" and preserves partial output', async () => {
+  it.each([false, true])('preserves timeout and partial output with external cancellation signal: %s', async withSignal => {
     const stores = makeFakeStores()
     const deps: ExecutorDeps = {
+      abortSignal: withSignal ? new AbortController().signal : undefined,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       consultTransport: {
@@ -3048,4 +3049,70 @@ describe('[COMP:workflow/executor] deliver.thread — reply-in-thread delivery',
       (replyRun?.output as { __delivery?: { thread?: string } } | undefined)?.__delivery,
     ).toMatchObject({ status: 'delivered', thread: 'parent_missing' })
   })
+})
+
+
+describe('executor cancellation', () => {
+  it.each(['before', 'scope', 'scope_reject', 'registry', 'registry_reject', 'tool', 'tool_reject'] as const)(
+    'persists terminal cancellation during %s without running successors', async stage => {
+      const stores = makeFakeStores()
+      const controller = new AbortController()
+      let entered!: () => void
+      let release!: () => void
+      const ready = new Promise<void>(resolve => { entered = resolve })
+      const blocked = new Promise<void>(resolve => { release = resolve })
+      const pause = async () => { entered(); await blocked }
+      const execute = vi.fn(async (_input: unknown, ctx: { abortSignal: AbortSignal }) => {
+        if (stage === 'tool' || stage === 'tool_reject') {
+          expect(ctx.abortSignal.aborted).toBe(false)
+          await pause()
+          expect(ctx.abortSignal.aborted).toBe(true)
+          if (stage === 'tool_reject') throw new Error('aborted')
+        }
+        return { data: { committed: true } }
+      })
+      const downstream = vi.fn(async () => ({ data: 'unexpected' }))
+      const registry = new Map([
+        ['first', buildTool({ name: 'first', description: '', inputSchema: z.object({}), execute })],
+        ['next', buildTool({ name: 'next', description: '', inputSchema: z.object({}), execute: downstream })],
+      ])
+      const deps = makeDeps({
+        ...stores,
+        abortSignal: controller.signal,
+        buildToolRegistry: async () => {
+          if (stage.startsWith('registry')) {
+            await pause()
+            if (stage === 'registry_reject') throw new Error('aborted registry')
+          }
+          return registry
+        },
+      })
+      if (stage.startsWith('scope')) deps.resolveRunScope = async () => {
+        await pause()
+        if (stage === 'scope_reject') throw new Error('aborted scope')
+        return {
+          assistantClearance: 'public',
+          turnScope: {
+            access: { workspaceId: WORKSPACE_ID, userId: USER_ID, assistantId: PRIMARY_ASSISTANT_ID, assistantKind: 'primary' },
+            activeGroupId: null, activeProjectId: null,
+            effectiveCompartments: [], effectiveProjectIds: [], writeCompartments: [], writeProjectIds: [],
+          },
+        }
+      }
+      const { run } = await seedWorkflowAndRun(deps, { startStepId: 'first', steps: [
+        { id: 'first', type: 'tool_call', toolName: 'first', arguments: {}, nextStepId: 'next' },
+        { id: 'next', type: 'tool_call', toolName: 'next', arguments: {}, nextStepId: null },
+      ] })
+      if (stage === 'before') controller.abort()
+      const advancing = advanceWorkflowRun(deps, run.id)
+      if (stage !== 'before') { await ready; controller.abort(); release() }
+      expect(await advancing).toMatchObject({ kind: 'failed', error: { reason: 'workflow_cancelled' } })
+      expect(await deps.runStore.getRunSystem(run.id)).toMatchObject({
+        status: 'failed', finishedAt: expect.any(Date), error: { reason: 'workflow_cancelled' },
+      })
+      expect(downstream).not.toHaveBeenCalled()
+      if (!stage.startsWith('tool')) expect(execute).not.toHaveBeenCalled()
+      if (stage === 'tool') expect(stores.stepRuns[0]).toMatchObject({ status: 'completed', output: { committed: true } })
+    },
+  )
 })

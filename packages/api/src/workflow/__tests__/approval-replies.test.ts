@@ -51,7 +51,7 @@ describe('[COMP:channels/approval-replies] maybeHandleApprovalReply', () => {
       status: 'approved',
       runId: 'run-7',
     })
-    expect(mockResume).toHaveBeenCalledWith(deps.bridgeDeps, 'abc123de-full', 'approved', 'u-1', undefined)
+    expect(mockResume).toHaveBeenCalledWith(deps.bridgeDeps, 'abc123de-full', 'approved', 'u-1', undefined, undefined)
   })
 
   it('parses a reject reply with a trailing reason', async () => {
@@ -60,7 +60,7 @@ describe('[COMP:channels/approval-replies] maybeHandleApprovalReply', () => {
     const res = await maybeHandleApprovalReply(deps, 'u-1', 'reject abc123de changed my mind')
     expect(res?.decision).toBe('rejected')
     expect(res?.reason).toBe('changed my mind')
-    expect(mockResume).toHaveBeenCalledWith(deps.bridgeDeps, 'abc123de-full', 'rejected', 'u-1', 'changed my mind')
+    expect(mockResume).toHaveBeenCalledWith(deps.bridgeDeps, 'abc123de-full', 'rejected', 'u-1', 'changed my mind', undefined)
   })
 
   it('matches case-insensitively and lowercases the id prefix for the lookup', async () => {

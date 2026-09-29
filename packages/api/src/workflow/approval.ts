@@ -177,7 +177,22 @@ export async function resumeFromApproval(
   decision: 'approved' | 'rejected',
   responderUserId: string,
   rejectReason?: string,
+  abortSignal?: AbortSignal,
 ): Promise<{ status: string; runId: string | null }> {
+  // Only this pre-claim outcome means no decision was submitted.
+  if (abortSignal?.aborted) return { status: 'cancelled', runId: null }
+  // Stop can race a downstream requestApproval delivery. Its row may remain
+  // pending after the executor has failed the run; a later click (without the
+  // old in-memory signal) must never restart that cancelled continuation.
+  const pending = await deps.approvalsStore.getByIdSystem(approvalId)
+  if (pending?.workflowRunId) {
+    const priorRun = await deps.runStore.getRunSystem(pending.workflowRunId)
+    if (priorRun && isCancelledRun(priorRun)) {
+      if (pending.status === 'pending') await deps.approvalsStore.expireById(approvalId)
+      return { status: 'workflow_cancelled', runId: priorRun.id }
+    }
+  }
+  if (abortSignal?.aborted) return { status: 'cancelled', runId: null }
   const updated = await deps.approvalsStore.respond(
     approvalId,
     decision,
@@ -194,6 +209,8 @@ export async function resumeFromApproval(
   if (!run) {
     return { status: 'orphaned', runId: updated.workflowRunId }
   }
+  // Recheck after the atomic decision claim, which itself may have raced Stop.
+  if (isCancelledRun(run)) return { status: 'workflow_cancelled', runId: run.id }
   // A pending approval can outlive a failed/revoked run. Restoring permissions
   // must not turn that old card into a new invocation of its frozen operation.
   if (run.status === 'completed' || run.status === 'failed' || run.status === 'timeout') {
@@ -231,13 +248,31 @@ export async function resumeFromApproval(
     return { status: 'failed', runId: run.id }
   }
 
+  // A claimed decision is never rolled back. Cancellation terminates the
+  // workflow (there is no cancelled run/step enum), with an explicit reason.
+  // Completed tool effects cannot be undone; preserve their output/status.
+  let toolCompleted = false
+  const cancelResume = async () => {
+    const error = { reason: 'approval_resume_cancelled', message: 'Approval submitted; workflow continuation stopped. Tool effects already started may have occurred.' }
+    if (!toolCompleted) {
+      await deps.runStore.updateStepRun(updated.workflowStepRunId, {
+        status: 'failed', error, finishedAt: new Date(),
+      })
+    }
+    await deps.runStore.updateRun(run.id, { status: 'failed', error, finishedAt: new Date() })
+    return { status: 'approval_submitted_workflow_cancelled', runId: run.id }
+  }
+  if (abortSignal?.aborted) return cancelResume()
+
   // Approved → run the tool with the frozen arguments, then continue.
   const workflow = await deps.workflowStore.getById(responderUserId, run.workflowId)
+  if (abortSignal?.aborted) return cancelResume()
   if (!workflow) {
     return { status: 'orphaned_workflow', runId: run.id }
   }
 
   const primaryAssistantId = await deps.resolvePrimary(run.workspaceId)
+  if (abortSignal?.aborted) return cancelResume()
   if (!primaryAssistantId) {
     await deps.runStore.updateRun(run.id, {
       status: 'failed',
@@ -263,6 +298,7 @@ export async function resumeFromApproval(
         ),
       })
     } catch (err) {
+      if (abortSignal?.aborted) return cancelResume()
       await failStep(
         deps,
         run,
@@ -275,6 +311,7 @@ export async function resumeFromApproval(
     }
   }
 
+  if (abortSignal?.aborted) return cancelResume()
   const scopeAccumulator = new ContextScopeAccumulator(runtimeScope
     ? {
         compartments: runtimeScope.turnScope.writeCompartments,
@@ -295,6 +332,7 @@ export async function resumeFromApproval(
       turnScope: runtimeScope?.turnScope,
     })
   } catch (err) {
+    if (abortSignal?.aborted) return cancelResume()
     await failStep(
       deps,
       run,
@@ -306,6 +344,7 @@ export async function resumeFromApproval(
     return { status: 'failed', runId: run.id }
   }
 
+  if (abortSignal?.aborted) return cancelResume()
   const tool = registry.get(updated.toolName)
   if (!tool) {
     await failStep(deps, run, workflow, updated, 'tool_no_longer_available', 'Tool no longer available in registry')
@@ -344,20 +383,23 @@ export async function resumeFromApproval(
     assistantProjectIds: runtimeScope?.turnScope.effectiveProjectIds,
     assistantDefaultProjectIds: runtimeScope?.turnScope.writeProjectIds,
     scopeAccumulator,
-    abortSignal: new AbortController().signal,
+    abortSignal: abortSignal ?? new AbortController().signal,
   }
 
   let result
+  if (abortSignal?.aborted) return cancelResume()
   try {
     const execute = () => tool.execute(validatedInput, toolContext)
     result = await (runtimeScope?.executeWithAuthority ? runtimeScope.executeWithAuthority(execute) : execute())
   } catch (err) {
+    if (abortSignal?.aborted) return cancelResume()
     const reason = (err as { reason?: unknown } | null)?.reason
     await failStep(deps, run, workflow, updated, typeof reason === 'string' ? reason : 'tool_threw_after_resume', err instanceof Error ? err.message : String(err))
     return { status: 'failed', runId: run.id }
   }
 
   if (result.isError) {
+    if (abortSignal?.aborted) return cancelResume()
     await failStep(deps, run, workflow, updated, 'tool_returned_error_after_resume', String(result.data))
     return { status: 'failed', runId: run.id }
   }
@@ -369,6 +411,9 @@ export async function resumeFromApproval(
     output: wrapOutput(result.data),
     finishedAt: new Date(),
   })
+
+  toolCompleted = true
+  if (abortSignal?.aborted) return cancelResume()
 
   // Resolve the steps that follow the gated step — possibly several, when
   // the approved step fans out (`nextStepId` array).
@@ -421,8 +466,12 @@ export async function resumeFromApproval(
     vars: nextVars,
   })
 
-  // Continue the run.
-  const outcome = await advanceWorkflowRun(deps.executorDeps, run.id, { startAt: nextIds })
+  // Continue with the same cancellation authority, including async executor loads.
+  if (abortSignal?.aborted) return cancelResume()
+  const outcome = await advanceWorkflowRun({ ...deps.executorDeps, ...(abortSignal ? { abortSignal } : {}) }, run.id, { startAt: nextIds })
+  if (outcome.kind === 'failed' && abortSignal?.aborted) {
+    return { status: 'approval_submitted_workflow_cancelled', runId: run.id }
+  }
   return { status: outcome.kind === 'paused' ? `paused_${outcome.reason}` : outcome.kind, runId: run.id }
 }
 
@@ -627,6 +676,11 @@ export async function sweepExpiredApprovals(deps: ApprovalBridgeDeps): Promise<n
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────
+
+function isCancelledRun(run: WorkflowRunRecord | null): boolean {
+  return run?.status === 'failed'
+    && (run.error?.reason === 'workflow_cancelled' || run.error?.reason === 'approval_resume_cancelled')
+}
 
 async function failStep(
   deps: ApprovalBridgeDeps,

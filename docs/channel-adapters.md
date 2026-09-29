@@ -19,8 +19,11 @@ not depend on whether the user pressed a button or typed a reply.
   and continues as a new message; it never implies approval.
 - **Cancellation:** `stop`, `cancel`, `abort`, `nevermind`, `never mind` and
   their slash forms stop only that sender's active turn in that thread. Any
-  pending confirmation is denied before aborting. Slack message edits retain
-  their transport-specific edit-to-retry behavior.
+  pending confirmation is denied before aborting. Workflow approval resume
+  carries the same abort signal through setup, tool execution and subsequent
+  steps. A submitted approval is not rolled back: cancellation records a failed
+  continuation, and effects already started may have occurred. Slack message
+  edits retain their transport-specific edit-to-retry behavior.
 - **Conversational choices:** buttons, one-based option numbers and option
   labels resolve to the same canonical answer. Native choice answers are never
   reinterpreted as workflow approval commands. Free text remains available.

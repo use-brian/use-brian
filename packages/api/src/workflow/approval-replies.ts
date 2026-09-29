@@ -72,7 +72,7 @@ export async function maybeHandleApprovalReply(
 
   if (scope?.abortSignal?.aborted) return unavailable('cancelled')
   const approvalId = result.rows[0].id
-  const outcome = await resumeFromApproval(deps.bridgeDeps, approvalId, decision, userId, reason)
+  const outcome = await resumeFromApproval(deps.bridgeDeps, approvalId, decision, userId, reason, scope?.abortSignal)
   return {
     decision,
     approvalId,
