@@ -355,6 +355,7 @@ vi.mock('../../db/episodes-store.js', () => ({
 
 import {
   telegramByoRoutes,
+  telegramIncomingFailureText,
   persistSeenChat,
   telegramLinkBindsHere,
   shouldUseUniversalTelegramIntake,
@@ -497,6 +498,17 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
     await flushMicrotasks()
 
     expect(adapterSendCalls.at(-1)?.text).toBe('Something went wrong. Please try again.')
+  })
+
+  it('explains how an admin can approve an unverified Telegram group', () => {
+    expect(telegramIncomingFailureText('-1002000000001', {
+      reason: 'delivery_audience_unverified',
+    })).toBe(
+      'Telegram is connected, but this group is not approved for workspace replies. Ask a workspace owner or admin to approve it in Studio > Channels > Group reply access.',
+    )
+    expect(telegramIncomingFailureText('42', {
+      reason: 'delivery_audience_unverified',
+    })).toBe('Sorry, something went wrong while handling that message. Please send it again.')
   })
 })
 

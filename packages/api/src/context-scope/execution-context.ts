@@ -4,6 +4,7 @@ import {
   createExecutionContext,
   intersectAccessCeilings,
   pinAccessCeiling,
+  scopeGrantContains,
   type AccessCeiling,
   type CreateExecutionContextInput,
   type CurrentAuthorityBoundary,
@@ -34,6 +35,10 @@ export type ResolveExecutionContextInput = ResolveTurnScopeInput & {
   /** Required for attended/public session runs; absent for request-scoped MCP/system jobs. */
   sessionAuthority?: SessionAuthoritySnapshot
   credentialCurrent?: () => Promise<boolean>
+  /** Optional recipient/surface ceiling that may only narrow this execution. */
+  maximumAccess?: AccessCeiling
+  /** Live counterpart to maximumAccess; revocation must stop tool execution. */
+  maximumAccessCurrent?: () => Promise<AccessCeiling | null>
 }
 
 export type ResolvedExecutionContext = {
@@ -63,6 +68,41 @@ function boundedStartingCeiling(
     : own
 }
 
+function boundTurnScope(
+  scope: ResolvedTurnScope,
+  maximum: AccessCeiling | undefined,
+): ResolvedTurnScope {
+  if (!maximum) return scope
+  const bounded = intersectAccessCeilings(pinAccessCeiling(scope.access), maximum)
+  const writeCompartments = scope.writeCompartments.filter((value) =>
+    scopeGrantContains(bounded.mutationCompartments, [value]))
+  const writeProjectIds = scope.writeProjectIds.filter((value) =>
+    scopeGrantContains(bounded.projectIds, [value]))
+  return {
+    ...scope,
+    access: {
+      ...scope.access,
+      clearance: bounded.clearance,
+      compartments: bounded.compartments,
+      mutationCompartments: bounded.mutationCompartments,
+      projectIds: bounded.projectIds,
+      visibilityAssistantIds: bounded.visibilityAssistantIds,
+    },
+    effectiveCompartments: bounded.compartments,
+    effectiveProjectIds: bounded.projectIds,
+    writeCompartments,
+    writeProjectIds,
+    activeTeam: scope.activeTeam
+      && scopeGrantContains(bounded.compartments, [scope.activeTeam.compartmentKey])
+      ? scope.activeTeam
+      : null,
+    activeProject: scope.activeProject
+      && scopeGrantContains(bounded.projectIds, [scope.activeProject.id])
+      ? scope.activeProject
+      : null,
+  }
+}
+
 /** Resolve current trusted scope and attach the existing sticky live lease. */
 export async function resolveExecutionContextSystem(
   input: ResolveExecutionContextInput,
@@ -75,7 +115,7 @@ export async function resolveExecutionContextSystem(
     resolveReadCeilings: deps.resolveReadCeilings,
     resolveWorkspaceRole: deps.resolveWorkspaceRole,
   }
-  const turnScope = await resolveScope(input, scopeDeps)
+  const turnScope = boundTurnScope(await resolveScope(input, scopeDeps), input.maximumAccess)
   const access: ResolvedExecutionAccess = {
     ...turnScope.access,
     workspaceId: turnScope.access.workspaceId,
@@ -105,15 +145,22 @@ export async function resolveExecutionContextSystem(
         session: input.sessionAuthority,
         userId: input.userId,
         memberMode: input.memberMode,
+        ignoreSessionBinding: input.ignoreSessionBinding,
         systemRead: input.surface?.systemRead,
         credentialCurrent: input.credentialCurrent,
+        maximumAccessCurrent: input.maximumAccessCurrent,
       })
     : (deps.createLease ?? createAuthorityLease)(starting, async () => {
         if (input.credentialCurrent && !(await input.credentialCurrent())) return null
-        const current = await resolveLive(input, scopeDeps)
-        return input.identity.kind === 'delegated'
+        let current = await resolveLive(input, scopeDeps)
+        current = input.identity.kind === 'delegated'
           ? intersectAccessCeilings(current, input.identity.parentCeiling)
           : current
+        if (!input.maximumAccessCurrent) return current
+        const maximum = await input.maximumAccessCurrent()
+        return maximum
+          ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
+          : null
       })
 
   return {

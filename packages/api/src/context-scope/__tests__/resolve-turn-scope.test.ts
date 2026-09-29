@@ -7,6 +7,7 @@ import {
   formatActiveWorkspaceContext,
   resolveTurnScopeSystem,
   resolveLiveAccessCeilingSystem,
+  sessionMessageInputScope,
   type TurnScopeAssistant,
 } from '../resolve-turn-scope.js'
 
@@ -85,6 +86,39 @@ function store(overrides: Partial<ContextScopeStore> = {}): ContextScopeStore {
 }
 
 describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
+  it('stamps a public group input from the audience-bounded turn', () => {
+    const scope = {
+      access: {
+        workspaceId: 'workspace-1', userId: 'user-1', assistantId: 'assistant-1',
+        assistantKind: 'standard' as const, clearance: 'public' as const,
+        compartments: [] as string[], mutationCompartments: [] as string[],
+        projectIds: [] as string[], visibilityAssistantIds: ['assistant-1'],
+      },
+      activeGroupId: null,
+      activeProjectId: null,
+      effectiveCompartments: [] as string[],
+      effectiveProjectIds: [] as string[],
+      writeCompartments: [] as string[],
+      writeProjectIds: [] as string[],
+      activeTeam: null,
+      activeProject: null,
+    }
+    expect(sessionMessageInputScope({
+      scope,
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
+      assistantId: 'assistant-1',
+      sharedAudience: true,
+    })).toEqual({
+      workspaceId: 'workspace-1',
+      userId: null,
+      assistantId: 'assistant-1',
+      sensitivity: 'public',
+      compartments: [],
+      projectIds: [],
+    })
+  })
+
   it('refreshes live authority independently of inherited execution narrowing', async () => {
     const input = { userId: 'user-1', assistant: { ...assistant, kind: 'primary' as const,
       teamScopeMode: 'legacy' as const, projectScopeMode: 'all' as const } }
@@ -160,6 +194,32 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
     expect(resolved.activeGroupId).toBeNull()
     expect(resolved.activeProjectId).toBeNull()
     expect(formatActiveWorkspaceContext(resolved)).toBe('')
+  })
+
+  it('lets a shared-provider audience replace a stale session Team and Project binding', async () => {
+    const contextStore = store()
+    const resolved = await resolveTurnScopeSystem({
+      userId: 'user-1',
+      assistant: {
+        ...assistant,
+        teamScopeMode: 'legacy',
+        projectScopeMode: 'all',
+      },
+      session: { contextGroupId: TEAM_ID, contextProjectId: PROJECT_ID },
+      ignoreSessionBinding: true,
+    }, {
+      store: contextStore,
+      resolveReadCeilings: vi.fn().mockResolvedValue({
+        clearance: 'confidential',
+        compartments: null,
+        mutationCompartments: null,
+      }),
+    })
+
+    expect(contextStore.getTeamSystem).not.toHaveBeenCalled()
+    expect(contextStore.getProjectSystem).not.toHaveBeenCalled()
+    expect(resolved.activeTeam).toBeNull()
+    expect(resolved.activeProject).toBeNull()
   })
 
   it('refuses a Team selection outside the effective principal grant', async () => {
@@ -316,6 +376,39 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
       memberMode: 'external',
       userId: 'external-user',
     }))
+  })
+
+  it('ignores stale member Team and Project bindings for an external channel principal', async () => {
+    const contextStore = store()
+    const resolved = await resolveTurnScopeSystem({
+      userId: 'external-user',
+      assistant: {
+        ...assistant,
+        teamScopeMode: 'legacy',
+        projectScopeMode: 'all',
+      },
+      memberMode: 'external',
+      session: {
+        contextGroupId: TEAM_ID,
+        contextProjectId: PROJECT_ID,
+        contextLockedAt: new Date('2026-09-29T00:00:00Z'),
+      },
+    }, {
+      store: contextStore,
+      resolveWorkspaceRole: vi.fn(async () => null),
+    })
+
+    expect(contextStore.getTeamSystem).not.toHaveBeenCalled()
+    expect(contextStore.getProjectSystem).not.toHaveBeenCalled()
+    expect(resolved).toMatchObject({
+      activeTeam: null,
+      activeProject: null,
+      effectiveCompartments: [],
+      effectiveProjectIds: [],
+      writeCompartments: [],
+      writeProjectIds: [],
+      access: { clearance: 'public', compartments: [], projectIds: [] },
+    })
   })
 
   it('keeps external renewal only while strict membership remains absent', async () => {

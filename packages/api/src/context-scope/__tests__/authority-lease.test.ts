@@ -99,10 +99,32 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
       await expect(lease.assertCurrent()).resolves.toBeUndefined()
     })
 
+    it('pins the first observed lock timestamp after an unlocked start', async () => {
+      liveSession.row = { ...base }
+      const lease = createSessionAuthorityLease({ starting: initial, session: base })
+      liveSession.row = { ...base, contextLockedAt: new Date('2026-09-29T00:00:00Z') }
+      await expect(lease.assertCurrent()).resolves.toBeUndefined()
+      liveSession.row = { ...base, contextLockedAt: new Date('2026-09-29T01:00:00Z') }
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    })
+
     it('still invalidates when the context itself changes', async () => {
       liveSession.row = { ...base }
       const lease = createSessionAuthorityLease({ starting: initial, session: base })
       liveSession.row = { ...base, contextGroupId: 'other-team' }
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    })
+
+    it('invalidates tool authority when the live recipient ceiling narrows', async () => {
+      liveSession.row = { ...base }
+      let maximum: AccessCeiling | null = structuredClone(initial)
+      const lease = createSessionAuthorityLease({
+        starting: initial,
+        session: base,
+        maximumAccessCurrent: async () => maximum,
+      })
+      await expect(lease.assertCurrent()).resolves.toBeUndefined()
+      maximum = { ...initial, compartments: [], mutationCompartments: [] }
       await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
     })
 

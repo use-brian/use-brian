@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling } from '@use-brian/core'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { Session } from '../../db/sessions.js'
-import { createDeliveryAudienceAuthorizer } from '../delivery-authority.js'
+import {
+  createDeliveryAudienceAuthorizer,
+  createDeliveryAudienceEnvelopeResolver,
+} from '../delivery-authority.js'
 
 const WS = '11111111-1111-4111-8111-111111111111'
 const USER = '22222222-2222-4222-8222-222222222222'
@@ -74,6 +77,105 @@ function authorizer(options: {
 }
 
 describe('[COMP:api/delivery-authority] destination-bound output policy', () => {
+  it('resolves an unbound group to a public General execution ceiling', async () => {
+    const resolve = createDeliveryAudienceEnvelopeResolver({
+      integrationStore: {
+        getCredentialsForAssistantSystem: vi.fn(async () => null),
+      } as unknown as ChannelIntegrationStore,
+    })
+    await expect(resolve({
+      workspaceId: WS,
+      assistantId: ASSISTANT,
+      userId: USER,
+      channelType: 'telegram',
+      channelId: '-100123',
+      recipientType: 'group',
+    })).resolves.toMatchObject({
+      allowed: true,
+      source: 'public',
+      ceiling: { clearance: 'public', compartments: [], projectIds: [] },
+    })
+  })
+
+  it('uses a group binding without requiring the external sender to be a member', async () => {
+    const resolveLiveAccess = vi.fn(async () => ceiling())
+    const resolve = createDeliveryAudienceEnvelopeResolver({
+      integrationStore: {
+        getCredentialsForAssistantSystem: vi.fn(async () => ({
+          config: { deliveryAudienceBindings: [{
+            version: 1,
+            channelId: '-100123',
+            audienceType: 'group',
+            clearance: 'internal',
+            compartments: ['finance'],
+            projectIds: [],
+            recipientUserId: null,
+            expiresAt: null,
+            approvedByUserId: APPROVER,
+            approvedAt: '2026-09-29T00:00:00.000Z',
+          }] },
+        })),
+      } as unknown as ChannelIntegrationStore,
+      getWorkspaceRole: vi.fn(async () => 'admin' as const),
+      resolveLiveAccess,
+    })
+
+    await expect(resolve({
+      workspaceId: WS,
+      assistantId: ASSISTANT,
+      userId: 'external-shadow-user',
+      channelType: 'telegram',
+      channelId: '-100123',
+      recipientType: 'group',
+    })).resolves.toMatchObject({
+      allowed: true,
+      source: 'binding',
+      ceiling: { clearance: 'internal', compartments: ['finance'] },
+    })
+    expect(resolveLiveAccess).not.toHaveBeenCalled()
+  })
+
+  it('intersects parent-chat and exact-topic bindings regardless of array order', async () => {
+    const resolve = createDeliveryAudienceEnvelopeResolver({
+      integrationStore: {
+        getCredentialsForAssistantSystem: vi.fn(async () => ({
+          config: { deliveryAudienceBindings: [
+            {
+              version: 1, channelId: '-100123', audienceType: 'group',
+              clearance: 'confidential', compartments: ['finance'], projectIds: [PROJECT],
+              recipientUserId: null, expiresAt: null, approvedByUserId: APPROVER,
+              approvedAt: '2026-09-29T00:00:00.000Z',
+            },
+            {
+              version: 1, channelId: '-100123:topic:42', audienceType: 'group',
+              clearance: 'internal', compartments: [], projectIds: [],
+              recipientUserId: null, expiresAt: null, approvedByUserId: APPROVER,
+              approvedAt: '2026-09-29T00:00:00.000Z',
+            },
+          ] },
+        })),
+      } as unknown as ChannelIntegrationStore,
+      getWorkspaceRole: vi.fn(async () => 'owner' as const),
+    })
+
+    await expect(resolve({
+      workspaceId: WS,
+      assistantId: ASSISTANT,
+      userId: USER,
+      channelType: 'telegram',
+      channelId: '-100123:topic:42',
+      recipientType: 'group',
+    })).resolves.toMatchObject({
+      allowed: true,
+      source: 'binding',
+      ceiling: {
+        clearance: 'internal',
+        compartments: [],
+        projectIds: [],
+      },
+    })
+  })
+
   it('allows only public unscoped output to an unbound external audience', async () => {
     const authorize = authorizer()
     await expect(authorize({

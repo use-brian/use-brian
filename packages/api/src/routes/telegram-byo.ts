@@ -62,6 +62,7 @@ import { humanizeToolName, describeToolInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { admitChannelMessage } from './channel-message-admission.js'
 import { channelUserErrorText } from './_channel-error-text.js'
+import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
 import { cacheInboundImage } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { buildFileContentBlocks } from './route-helpers.js'
@@ -494,7 +495,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         },
       })
       adapter.sendMessage(channelId, {
-        text: 'Sorry, something went wrong while handling that message. Please send it again.',
+        text: telegramIncomingFailureText(channelId, err),
       }).catch((sendErr) => {
         console.error('[telegram-byo] failure notice send failed:', sendErr)
       })
@@ -1953,11 +1954,27 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         // route-local copy here left every other channel masking the image
         // refusal until the 2026-08-19 Slack repeat.
         await adapter.sendMessage(incoming.channelId, {
-          text: channelUserErrorText(err),
+          text: isDeliveryAudienceUnverifiedError(err)
+            ? telegramIncomingFailureText(incoming.channelId, err)
+            : channelUserErrorText(err),
         })
       },
     },
   })
+}
+
+const TELEGRAM_RETRY_NOTICE =
+  'Sorry, something went wrong while handling that message. Please send it again.'
+const TELEGRAM_GROUP_NOT_APPROVED_NOTICE =
+  'Telegram is connected, but this group is not approved for workspace replies. Ask a workspace owner or admin to approve it in Studio > Channels > Group reply access.'
+
+/** Keep authority refusals actionable without exposing workspace content. */
+export function telegramIncomingFailureText(channelId: string, err: unknown): string {
+  const chatId = channelId.split(':topic:', 1)[0] ?? channelId
+  if (chatId.startsWith('-') && isDeliveryAudienceUnverifiedError(err)) {
+    return TELEGRAM_GROUP_NOT_APPROVED_NOTICE
+  }
+  return TELEGRAM_RETRY_NOTICE
 }
 
 // ── Seen-chat observation ──────────────────────────────────────

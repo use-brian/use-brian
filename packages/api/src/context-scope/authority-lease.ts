@@ -77,8 +77,11 @@ export function createSessionAuthorityLease(input: {
   /** Current caller; differs from the session starter in shared rooms. */
   userId?: string
   memberMode?: 'enforce' | 'assistant' | 'member' | 'external'
+  ignoreSessionBinding?: boolean
   systemRead?: boolean
   credentialCurrent?: () => Promise<boolean>
+  /** Re-resolve a recipient/surface ceiling at every authority boundary. */
+  maximumAccessCurrent?: () => Promise<AccessCeiling | null>
 }): AuthorityLease {
   const expected = {
     id: input.session.id,
@@ -97,22 +100,35 @@ export function createSessionAuthorityLease(input: {
       input.credentialCurrent?.() ?? Promise.resolve(true),
     ])
     if (!session || !assistant || !credentialCurrent) return null
+    const currentLock = session.contextLockedAt?.toISOString() ?? null
     if (
       session.assistantId !== expected.assistantId
       || session.userId !== expected.userId
       || session.contextGroupId !== expected.contextGroupId
       || session.contextProjectId !== expected.contextProjectId
-      || !contextLockCurrent(expected.contextLockedAt, session.contextLockedAt?.toISOString() ?? null)
+      || !contextLockCurrent(expected.contextLockedAt, currentLock)
       || (assistant.workspaceId ?? '') !== expected.workspaceId
     ) return null
-    return resolveLiveAccessCeilingSystem({
+    // The first message takes the lock after the lease starts. Remember the
+    // observed timestamp so a later lock rewrite in the same turn cannot pass
+    // merely because the starting snapshot was null.
+    if (expected.contextLockedAt === null && currentLock !== null) {
+      expected.contextLockedAt = currentLock
+    }
+    const current = await resolveLiveAccessCeilingSystem({
       userId: expected.authorityUserId,
       assistant,
       workspaceId: assistant.workspaceId,
       session,
       memberMode: input.memberMode,
+      ignoreSessionBinding: input.ignoreSessionBinding,
       systemRead: input.systemRead,
     })
+    if (!input.maximumAccessCurrent) return current
+    const maximum = await input.maximumAccessCurrent()
+    return maximum
+      ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
+      : null
   })
 }
 

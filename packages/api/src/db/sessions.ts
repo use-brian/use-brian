@@ -1721,6 +1721,7 @@ export async function getGroupChatContext(params: {
      WHERE s.assistant_id = $1
        AND s.channel_type = $2
        AND s.channel_id = $3
+       AND sm.channel_message_id IS NOT NULL
      ORDER BY sm.created_at DESC
      LIMIT $4`,
     [params.assistantId, params.channelType, params.channelId, limit],

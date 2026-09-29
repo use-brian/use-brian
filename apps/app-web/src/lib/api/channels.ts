@@ -53,6 +53,32 @@ export type SeenChat = {
 /** A per-chat / per-topic flip of the `requireMention` default (Telegram). */
 export type RequireMentionOverride = { chatId: string; topicId?: number | null };
 
+/** Owner/admin-attested ceiling for replies sent to an external conversation. */
+export type DeliveryAudienceBinding = {
+  version: 1;
+  channelId: string;
+  audienceType: "individual" | "group";
+  clearance: ChannelClearance;
+  compartments: string[];
+  projectIds: string[];
+  recipientUserId: string | null;
+  expiresAt: string | null;
+  approvedByUserId: string;
+  approvedAt: string;
+};
+
+/** Client-writable binding fields. Approval metadata is stamped by the API. */
+export type DeliveryAudienceBindingInput = Pick<
+  DeliveryAudienceBinding,
+  | "channelId"
+  | "audienceType"
+  | "clearance"
+  | "compartments"
+  | "projectIds"
+  | "recipientUserId"
+  | "expiresAt"
+>;
+
 /**
  * Per-integration behavior config — the `channel_integrations.config` JSONB.
  * Mirrors `ChannelIntegrationConfig` in packages/api. Not every field applies
@@ -68,6 +94,8 @@ export type ChannelIntegrationConfig = {
   requireMentionOverrides?: RequireMentionOverride[];
   /** Webhook-populated, read-only — never sent in a config PATCH. */
   seenChats?: SeenChat[];
+  /** Owner/admin-approved external destinations for restricted replies. */
+  deliveryAudienceBindings?: DeliveryAudienceBinding[];
   /** Feishu/Lark passive-ingest security allowlist. Dedicated admin API only. */
   ambientIngestChatIds?: string[];
   userAccessMode?: UserAccessMode;
@@ -83,10 +111,13 @@ export type ChannelIntegrationConfig = {
   blockedUserIds?: string[];
 };
 
-/** The fields a config PATCH may set — `seenChats` is webhook-owned. */
+/** The fields a config PATCH may set — server-owned fields are stripped. */
 export type ChannelConfigPatch = Partial<
-  Omit<ChannelIntegrationConfig, "seenChats" | "ambientIngestChatIds">
->;
+  Omit<
+    ChannelIntegrationConfig,
+    "seenChats" | "ambientIngestChatIds" | "deliveryAudienceBindings"
+  >
+> & { deliveryAudienceBindings?: DeliveryAudienceBindingInput[] };
 
 export type Channel = {
   id: string;
