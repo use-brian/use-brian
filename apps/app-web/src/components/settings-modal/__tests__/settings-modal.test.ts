@@ -43,6 +43,8 @@ describe("[COMP:app-web/profile-management] settings navigation", () => {
     const capabilities = deploymentCapabilitiesFor("outpost");
     const sections = workspaceSettingsSections(capabilities);
     expect(sections).toContain("ws-organization");
+    expect(sections).toContain("ws-usage");
+    expect(workspaceSettingsSections(deploymentCapabilitiesFor("hosted"))).not.toContain("ws-usage");
     for (const duplicate of ["ws-members", "ws-teams", "ws-access"]) expect(sections).not.toContain(duplicate);
     expect(sections).not.toContain("ws-plan");
   });
