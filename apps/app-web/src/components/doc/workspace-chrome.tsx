@@ -181,6 +181,8 @@ export function WorkspaceChrome({
     root.classList.add("is-canvas-desktop");
     if (desktop.platform && desktop.platform !== "darwin") {
       root.classList.add("is-canvas-desktop-standard-frame");
+      // Windows draws min/max/close over the top row's right edge.
+      root.classList.toggle("is-canvas-desktop-win", desktop.platform === "win32");
       root.style.removeProperty("--doc-titlebar-lights");
       return;
     }

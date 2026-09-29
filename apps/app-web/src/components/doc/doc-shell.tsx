@@ -840,6 +840,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     // zero the title-bar inset — see globals.css.
     if (desktop.platform && desktop.platform !== "darwin") {
       document.documentElement.classList.add("is-canvas-desktop-standard-frame");
+      if (desktop.platform === "win32") {
+        document.documentElement.classList.add("is-canvas-desktop-win");
+      }
     }
   }, []);
 

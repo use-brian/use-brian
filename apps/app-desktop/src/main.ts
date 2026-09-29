@@ -42,6 +42,7 @@ import {
   Notification,
   nativeImage,
   desktopCapturer,
+  nativeTheme,
   type Event,
   type Cookie,
   type IpcMainInvokeEvent,
@@ -53,6 +54,8 @@ import {
 // main process. Default-import the module object and destructure instead.
 import electronUpdater from "electron-updater";
 import { EmbeddedBrowser, browserPairing } from "./embedded-browser.js";
+import { parseBrowserTheme } from "./browser-theme.js";
+import { defaultTitleBarOverlay, titleBarOverlayFromTheme } from "./title-bar-overlay.js";
 
 const embeddedBrowser = new EmbeddedBrowser({ getDockWindow: () => ensureWindow() });
 let browserIdentityChanging = false;
@@ -689,13 +692,21 @@ function createWindow(initialLoad: { useBrian?: boolean; route?: string; linkReq
     minWidth: 720,
     minHeight: 480,
     title: app.name,
-    // macOS only: frameless window with inset traffic lights — app-web draws its
-    // own chrome and insets for the lights (app-web globals.css `.is-canvas-desktop`).
-    // On Windows/Linux `hiddenInset` degrades to a frameless window with NO min/
-    // close controls, so keep the standard OS frame there. The frameless-overlay
-    // polish for Windows (titleBarOverlay + an app-web right-side control inset) is
-    // deferred — see docs/architecture/features/app-desktop.md → "Windows (v1 frame)".
+    // macOS: frameless window with inset traffic lights — app-web draws its own
+    // chrome and insets for the lights (app-web globals.css `.is-canvas-desktop`).
+    // Windows: no OS title bar or menu bar; Windows draws only min/max/close as a
+    // window-controls overlay over app-web's top row, which insets by
+    // `env(titlebar-area-*)` (`.is-canvas-desktop-win`). The menu stays
+    // installed for its accelerators. Linux keeps the standard OS frame.
+    // See docs/architecture/features/app-desktop.md → "Windows title bar".
     ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
+    ...(process.platform === "win32"
+      ? {
+          titleBarStyle: "hidden" as const,
+          titleBarOverlay: defaultTitleBarOverlay(nativeTheme.shouldUseDarkColors),
+          autoHideMenuBar: true,
+        }
+      : {}),
     backgroundColor: "#ffffff",
     // A remote page can stall before ready-to-show, which otherwise leaves the
     // tray process alive with no window for the user to recover.
@@ -4465,6 +4476,12 @@ if (!gotLock) {
   ipcMain.on("embedded-browser:theme", (event, input: unknown) => {
     if (changingTarget || selectingAccount || removingAccount || browserIdentityChanging || !trustedTokenSender(event)) return;
     embeddedBrowser.setTheme(input);
+    // Keep the Windows min/max/close overlay the color of app-web's top row.
+    if (process.platform === "win32") {
+      const theme = parseBrowserTheme(input);
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (theme && win && win === mainWindow && !win.isDestroyed()) win.setTitleBarOverlay(titleBarOverlayFromTheme(theme));
+    }
   });
 
   ipcMain.handle("Use Brian:browser-control", async (event, input: unknown) => {
