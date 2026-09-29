@@ -61,7 +61,7 @@ type PageLoadDiagnosticCopy = {
   diagnosticsTruncated: string;
 };
 
-export function pageLoadHttpStatus(error: string): number | null {
+function pageLoadHttpStatus(error: string): number | null {
   const match = /^HTTP\s+(\d{3})\b/i.exec(error.trim());
   return match ? Number(match[1]) : null;
 }
@@ -264,7 +264,7 @@ export function PageLoadErrorState({
             alt=""
             width={64}
             height={64}
-            className="size-16 grayscale opacity-35 dark:opacity-50"
+            className="size-16 grayscale opacity-60 contrast-125 dark:opacity-70"
           />
           <span className="absolute -bottom-1 -right-1 flex size-10 items-center justify-center rounded-2xl border-4 border-card bg-amber-500/15 text-amber-700 dark:text-amber-300">
             <CloudOff className="size-5" />
