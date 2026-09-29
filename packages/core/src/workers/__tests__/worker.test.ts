@@ -227,6 +227,51 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     expect(manager.stop('worker_ghost')).toBe(false)
   })
 
+  it('cancelForSession aborts only that session and suppresses stale notifications', async () => {
+    let startedCount = 0
+    let resolveStarted!: () => void
+    let resolveCancelled!: () => void
+    const bothStarted = new Promise<void>((resolve) => { resolveStarted = resolve })
+    const cancelled = new Promise<void>((resolve) => { resolveCancelled = resolve })
+    const provider: LLMProvider = {
+      name: 'fake',
+      models: ['gemini-flash'],
+      async *stream(req: ProviderRequest) {
+        startedCount++
+        if (startedCount === 2) resolveStarted()
+        await new Promise<void>((_resolve, reject) => {
+          req.signal?.addEventListener('abort', () => {
+            resolveCancelled()
+            const error = new Error('Aborted')
+            error.name = 'AbortError'
+            reject(error)
+          }, { once: true })
+        })
+      },
+      createSession(): ProviderSession {
+        throw new Error('stateless worker should use provider.stream')
+      },
+    }
+    const manager = createWorkerManager({
+      provider,
+      model: 'gemini-flash',
+      tools: new Map(),
+    })
+    manager.spawn('session one task', ctx)
+    manager.spawn('session two task', { ...ctx, sessionId: 's2' })
+    await bothStarted
+
+    expect(manager.cancelForSession('s1')).toBe(1)
+    expect(manager.pendingCountFor('s1')).toBe(0)
+    expect(manager.pendingCountFor('s2')).toBe(1)
+
+    await cancelled
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(manager.hasNotificationsFor('s1')).toBe(false)
+
+    manager.reset()
+  })
+
   it('pendingCount tracks running workers', async () => {
     const manager = createWorkerManager({
       provider: makeFakeProvider('done'),

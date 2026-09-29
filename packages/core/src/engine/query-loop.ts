@@ -1593,7 +1593,11 @@ async function* queryLoopCore(
         const accumulatedNotifications: import('../workers/worker.js').WorkerResult[] = []
         if (wm.pendingCountFor(wmSid) > 0) {
           yield { type: 'status', message: 'Waiting for background workers...' }
-          // Wait for ALL workers with a 60s timeout to prevent hanging forever.
+          // Wait for ALL workers. Worker query loops are already bounded by
+          // turns/tool calls and provider idle recovery; this parent wait must
+          // not add a wall-clock guess that can expire while a healthy worker
+          // is still making progress. The 5s poll exists only so an aborted
+          // request is observed even if no worker notification wakes us.
           //
           // Two memory defenses (5/27 OOM root cause):
           //
@@ -1612,8 +1616,7 @@ async function* queryLoopCore(
           //    Promise + closure for the full 5s. Cumulative leaked
           //    timers under a tight-loop scenario were the
           //    multi-GB allocation source.
-          const workerDeadline = Date.now() + 60_000
-          while (wm.pendingCountFor(wmSid) > 0 && Date.now() < workerDeadline) {
+          while (wm.pendingCountFor(wmSid) > 0 && !context.abortSignal?.aborted) {
             let pollTimer: ReturnType<typeof setTimeout> | undefined
             try {
               await Promise.race([
@@ -1632,8 +1635,12 @@ async function* queryLoopCore(
               accumulatedNotifications.push(...partial)
             }
           }
-          if (wm.pendingCountFor(wmSid) > 0) {
-            console.warn(`[query-loop] Phase 4b: timed out waiting for ${wm.pendingCountFor(wmSid)} worker(s)`)
+          if (context.abortSignal?.aborted) {
+            const cancelledWorkers = wm.cancelForSession(wmSid)
+            console.log(
+              `[query-loop] Phase 4b: request aborted; cancelled ${cancelledWorkers} worker(s) for session`,
+            )
+            return
           }
         }
         // Tail drain — anything that arrived between the last wait and now.

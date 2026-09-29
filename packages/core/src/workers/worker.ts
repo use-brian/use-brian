@@ -314,6 +314,8 @@ export function createWorkerManager(options: WorkerOptions) {
     ownerSessionId: string | null
     abortController: AbortController | undefined
     promise: Promise<WorkerResult> | undefined
+    /** Parent request was aborted; settle without queueing a stale result. */
+    suppressNotification: boolean
   }>()
 
   let workerCounter = 0
@@ -520,6 +522,37 @@ export function createWorkerManager(options: WorkerOptions) {
     // in `recordCompletion` for failed workers (otherwise the row would
     // show turnCount=0 even though several turns ran successfully).
     let lastTurnCount = 0
+    const finishSuppressedWorker = (): WorkerResult | null => {
+      const entry = workers.get(workerId)
+      if (!entry?.suppressNotification) return null
+
+      const stopped: WorkerResult = {
+        workerId,
+        description,
+        status: 'stopped',
+        result: 'Stopped because the parent request was cancelled.',
+        ownerSessionId,
+      }
+      entry.status = 'stopped'
+      entry.result = stopped.result
+      entry.abortController = undefined
+      entry.promise = undefined
+      if (ownStore && ownSessionId) {
+        persistFireAndForget(
+          ownStore.recordCompletion({
+            runId,
+            sessionId: ownSessionId,
+            workerId,
+            status: 'stopped',
+            result: stopped.result,
+            turnCount: lastTurnCount,
+          }),
+          'recordCompletion',
+          workerId,
+        )
+      }
+      return stopped
+    }
     const promise = (async (): Promise<WorkerResult> => {
       try {
         let responseText = ''
@@ -711,6 +744,9 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
           )
         }
 
+        const stopped = finishSuppressedWorker()
+        if (stopped) return stopped
+
         const result: WorkerResult = {
           workerId,
           description,
@@ -756,6 +792,9 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
 
         return result
       } catch (err) {
+        const stopped = finishSuppressedWorker()
+        if (stopped) return stopped
+
         const result: WorkerResult = {
           workerId,
           description,
@@ -799,6 +838,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       ownerSessionId,
       abortController,
       promise,
+      suppressNotification: false,
     })
 
     return promise
@@ -940,6 +980,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
             ownerSessionId: sessionId,
             abortController: undefined,
             promise: undefined,
+            suppressNotification: false,
           })
           notifications.push(result)
           notificationsReady++
@@ -1031,6 +1072,34 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       entry.abortController?.abort()
       entry.status = 'stopped'
       return true
+    },
+
+    /**
+     * Cancel only workers owned by one parent session and discard any queued
+     * notifications for that session. Used when the parent request is aborted:
+     * there is no open response left to synthesize into, so allowing those
+     * workers to finish would waste resources and leak stale results into a
+     * later turn. Other sessions on the shared manager are untouched.
+     */
+    cancelForSession(sessionId: string): number {
+      let cancelled = 0
+      for (const entry of workers.values()) {
+        if (
+          entry.status === 'running'
+          && (entry.ownerSessionId == null || entry.ownerSessionId === sessionId)
+        ) {
+          entry.status = 'stopped'
+          entry.suppressNotification = true
+          entry.abortController?.abort()
+          cancelled++
+        }
+      }
+      for (let i = notifications.length - 1; i >= 0; i--) {
+        const owner = notifications[i]?.ownerSessionId
+        if (owner == null || owner === sessionId) notifications.splice(i, 1)
+      }
+      wake()
+      return cancelled
     },
 
     /**
