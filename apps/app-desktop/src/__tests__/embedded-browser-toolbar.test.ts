@@ -5,6 +5,15 @@ import { describe, expect, it, vi } from 'vitest';
 const html = readFileSync(new URL('../embedded-browser.html', import.meta.url), 'utf8');
 
 describe('compact browser panel controls', () => {
+  it('uses compact app colors with dark-mode support and no per-tab permission row', () => {
+    expect(html).toContain('header { height: 128px;');
+    expect(html).toContain('--sidebar: #f7f7f5');
+    expect(html).toContain('--primary: #2383e2');
+    expect(html).toContain('prefers-color-scheme: dark');
+    expect(html).toContain('placeholder="example.com"');
+    expect(html).not.toContain('id="approve"');
+    expect(html).not.toContain('Enter a complete');
+  });
   it('labels icon controls and preserves the visible Stop Brian label', () => {
     for (const [id, label] of Object.entries({
       collapse: 'Collapse browser panel', expand: 'Expand browser panel',
@@ -45,7 +54,7 @@ describe('compact browser panel controls', () => {
     window.addEventListener.mock.calls.find(([name]) => name === 'DOMContentLoaded')![1]();
     const update = ipcRenderer.on.mock.calls.find(([name]) => name === 'embedded-browser:state')![1];
     const present = (collapsed: boolean, mode = 'docked') => update({}, {
-      tabs: [], selected: null, status: 'Manual browsing ready',
+      tabs: [], selected: null, status: '',
       presentation: { collapsed, mode, panelWidth: collapsed ? 56 : 480, minWidth: 360, maxWidth: 700 },
     });
     for (const [id, command] of Object.entries({ collapse: 'collapse', expand: 'expand', detach: 'detach',
@@ -55,6 +64,8 @@ describe('compact browser panel controls', () => {
     }
     document.activeElement = elements.get('collapse');
     present(true);
+    expect(elements.get('status').textContent).toBe('Browser');
+    expect(elements.has('approve')).toBe(false);
     expect(elements.get('rail').hidden).toBe(false);
     expect(elements.get('controls').hidden).toBe(true);
     expect(elements.get('separator').hidden).toBe(true);
