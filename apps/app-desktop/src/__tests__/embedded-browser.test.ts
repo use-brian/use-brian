@@ -11,7 +11,6 @@ vi.mock('../embedded-browser-host.js', () => ({
     show = vi.fn(); destroy = vi.fn(); setStatus = vi.fn();
     isDockedFocused = vi.fn(() => false);
     constructor(public partition: string, public callbacks: any, public options?: { dockWindow?: BrowserWindow | null }) { mocks.hosts.push(this); }
-    approveTab = vi.fn((id: number) => { const tab = this.entries.find(t => t.id === id); if (tab) tab.taskOwned = true; });
     tabs() { return this.entries; }
     selectedId() { return this.selected; }
     selectTab(id: number) { this.selected = id; }
@@ -119,6 +118,9 @@ describe('native pairing lifecycle with the real RelayClient', () => {
     socket().message({ type: 'ready' }); expect(await pending).toBe(true);
     expect(host().partition).toBe(browserPairing(input(), 'account').partition);
     expect(host().show).toHaveBeenCalledOnce();
+    expect(mocks.consent).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.stringContaining('all in-app tabs, including tabs you open manually'),
+    }));
   });
   it('resolves the injected dock window only after consent and relay ready', async () => {
     const dockWindow = {} as BrowserWindow;
@@ -228,15 +230,15 @@ describe('standing approval and automatic lifecycle', () => {
     await flush(); socket().open(); socket().message({ type: 'ready' });
     expect(await pending).toBe(true);
   }
-  it('reuses injected approvals across instances and token renewal, but not manual tab grants', async () => {
+  it('reuses injected profile approval across instances and token renewal for manual tabs too', async () => {
     await connect();
     expect(approvals.grant).toHaveBeenCalledExactlyOnceWith(browserPairing(input(), 'account').partition);
     browser.dispose(); browser = new EmbeddedBrowser({ approvals });
     await ready(browser.pair(automatic({ exp: claims.exp + 10 }), 'account'));
     expect(mocks.consent).toHaveBeenCalledOnce();
-    const id = await host().createTab('https://manual.example/', false);
-    host().callbacks.approveTab(id); await flush();
-    expect(mocks.consent).toHaveBeenCalledTimes(2);
+    await host().createTab('https://manual.example/', false);
+    expect(await command('currentUrl')).toMatchObject({ ok: true, data: { url: 'https://manual.example/' } });
+    expect(mocks.consent).toHaveBeenCalledOnce();
   });
   it.each(['account', 'relay', 'userId', 'workspaceId', 'browserProfileId'])('requires fresh consent for a different %s', async dimension => {
     await connect(); browser.dispose(); browser = new EmbeddedBrowser({ approvals });
@@ -483,42 +485,27 @@ describe('operations and revocation with the real TabExecutor', () => {
     expect(await command(op, args)).toMatchObject({ ok: true, data });
     expect(method).toHaveBeenCalledExactlyOnceWith(...expectedArgs);
   });
-  it('task_tabs excludes manual tabs, including selected tabs and handle-based operations', async () => {
-    await connect(); await host().createTab('https://manual.example/', false);
-    expect(await command('listTabs')).toMatchObject({ data: { tabs: [], activeTabId: null } });
-    for (const op of ['switchTab', 'closeTab', 'currentUrl']) expect(await command(op, { tabId: 'tab-1' })).toMatchObject({ ok: false, code: 'no_eligible_tab' });
-    expect(await command('navigate', { url: 'https://task.example/' })).toMatchObject({ ok: true, data: { url: 'https://task.example/' } });
-    expect(host().tabs().map((t: any) => t.taskOwned)).toEqual([false, true]);
-  });
-  it('requires native consent before granting a manual tab through the host callback', async () => {
-    await connect(); const id = await host().createTab('https://manual.example/', false);
-    mocks.consent.mockResolvedValueOnce({ response: 0 });
-    host().callbacks.approveTab(id); await flush();
-    expect(mocks.consent).toHaveBeenLastCalledWith(expect.objectContaining({ defaultId: 0, cancelId: 0, buttons: ['Cancel', 'Allow tab'] }));
-    expect(host().approveTab).not.toHaveBeenCalled();
-    expect(await command('currentUrl', { tabId: 'tab-1' })).toMatchObject({ ok: false, code: 'no_eligible_tab' });
-    host().callbacks.approveTab(id); await flush();
-    expect(host().approveTab).toHaveBeenCalledExactlyOnceWith(id);
-    expect(await command('currentUrl', { tabId: 'tab-1' })).toMatchObject({ ok: true, data: { url: 'https://manual.example/' } });
-  });
-  it('stop while manual-tab consent is pending blocks a late grant', async () => {
-    await connect(); const id = await host().createTab('https://manual.example/', false);
-    const consent = deferred<{ response: number }>(); mocks.consent.mockReturnValueOnce(consent.promise);
-    host().callbacks.approveTab(id); await flush();
-    expect(mocks.consent).toHaveBeenCalledTimes(2);
-    browser.stop(); consent.resolve({ response: 1 }); await flush();
-    expect(host().approveTab).not.toHaveBeenCalled();
-    expect(host().tabs()[0].taskOwned).toBe(false);
-    expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: true, ...identity });
-  });
-  it('full_browser needs native approval, denies safely, then remembers approval only for this session', async () => {
-    await connect(); await host().createTab('https://manual.example/', false);
-    mocks.consent.mockResolvedValueOnce({ response: 0 });
-    expect(await command('listTabs', {}, 'full_browser')).toMatchObject({ ok: false, code: 'user_denied' });
-    expect(await command('listTabs', {}, 'full_browser')).toMatchObject({ ok: true, data: { tabs: [{ taskOwned: false }] } });
-    await command('currentUrl', {}, 'full_browser'); expect(mocks.consent).toHaveBeenCalledTimes(3);
-    browser.stop(); await connect(); await command('listTabs', {}, 'full_browser');
-    expect(mocks.consent).toHaveBeenCalledTimes(4);
+  it.each(['task_tabs', 'full_browser'])('%s allows all manual tabs without additional prompts or changing creation metadata', async controlMode => {
+    await connect();
+    await command('openTab', { url: 'https://task.example/' }, controlMode);
+    await host().createTab('https://manual.example/', false);
+    // Any obsolete grant prompt would be refused, rather than silently approved.
+    mocks.consent.mockResolvedValue({ response: 0 });
+    expect(host().callbacks.approveTab).toBeUndefined();
+    expect(await command('listTabs', {}, controlMode)).toMatchObject({ ok: true, data: {
+      tabs: [{ id: 'tab-1', taskOwned: true, active: false }, { id: 'tab-2', taskOwned: false, active: true }], activeTabId: 'tab-2',
+    } });
+    expect(await command('currentUrl', {}, controlMode)).toMatchObject({ ok: true, data: { url: 'https://manual.example/' } });
+    expect(await command('switchTab', { tabId: 'tab-1' }, controlMode)).toMatchObject({ ok: true });
+    expect(await command('switchTab', { tabId: 'tab-2' }, controlMode)).toMatchObject({ ok: true, data: { tabId: 'tab-2' } });
+    const navigate = vi.spyOn(TabExecutor.prototype, 'navigate').mockResolvedValue({ url: 'https://next.example/' });
+    expect(await command('navigate', { url: 'https://next.example/' }, controlMode)).toMatchObject({ ok: true });
+    expect(navigate).toHaveBeenCalledExactlyOnceWith('https://next.example/');
+    expect(await command('takeoverInput', { event: { kind: 'key', text: 'x' } }, controlMode)).toMatchObject({ ok: true });
+    expect(host().tabs()[1].contents.debugger.sendCommand).toHaveBeenCalledWith('Input.insertText', { text: 'x' });
+    expect(host().tabs().map((t: any) => t.taskOwned)).toEqual([true, false]);
+    expect(await command('closeTab', { tabId: 'tab-2' }, controlMode)).toMatchObject({ ok: true, data: { closed: true, activeTabId: 'tab-1' } });
+    expect(mocks.consent).toHaveBeenCalledOnce();
   });
   it.each(['file:///secret', 'javascript:alert(1)', 'data:text/html,x', 'https://u:p@example.com'])('blocks unsafe URL %s across all navigation operations', async url => {
     await connect();
@@ -563,11 +550,18 @@ describe('operations and revocation with the real TabExecutor', () => {
     expect(socket().sent.filter(m => ['inflight', 'queued'].includes(m.id))).toEqual([]);
     expect(socket().sent).toContainEqual({ type: 'event', kind: 'stopped', controlEpoch: 2 });
   });
-  it('late full-browser approval cannot revive disposed control', async () => {
-    await connect(); const consent = deferred<{ response: number }>(); mocks.consent.mockReturnValue(consent.promise);
-    socket().message({ type: 'command', id: 'pending', op: 'openTab', args: { url: 'https://example.com' }, controlMode: 'full_browser' });
-    await flush(); const oldHost = host(); browser.dispose(); consent.resolve({ response: 1 }); await flush();
-    expect(oldHost.tabs()).toHaveLength(0); expect(oldHost.destroy).toHaveBeenCalledOnce();
+  it.each(['stop', 'dispose'] as const)('late saved-state approval cannot revive control after %s', async action => {
+    await connect(); await host().createTab('https://example.com/', false);
+    const capture = vi.spyOn(TabExecutor.prototype, 'captureState');
+    const consent = deferred<{ response: number }>(); mocks.consent.mockReturnValueOnce(consent.promise);
+    socket().message({ type: 'command', id: 'pending', op: 'captureState', args: { site: 'example.com' }, controlMode: 'full_browser' });
+    await flush();
+    expect(mocks.consent).toHaveBeenLastCalledWith(expect.objectContaining({ message: 'Share saved sign-in state for example.com?' }));
+    const oldHost = host(); browser[action]();
+    consent.resolve({ response: 1 }); await flush();
+    expect(capture).not.toHaveBeenCalled();
+    expect(oldHost.destroy).toHaveBeenCalledOnce();
+    expect(browser.status().connected).toBe(false);
     expect(socket().sent.find(m => m.id === 'pending')).toBeUndefined();
   });
 });
