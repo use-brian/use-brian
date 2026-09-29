@@ -81,6 +81,7 @@ import {
   ContextNotAvailableError,
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
+  turnOutputWrite,
   sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
@@ -777,9 +778,10 @@ export async function executePublicTurn(
     userId: user.id,
     assistantId: assistant.id,
   })
-  const currentTurnDerivation = () => ({
+  const currentTurnWrite = () => turnOutputWrite({
     producer: 'turn:public-api',
-    sources: scopeAccumulator.evidence.sources ?? [],
+    accumulator: scopeAccumulator,
+    envelope: inputMessageScope,
   })
   const authority = executionContext.security.authority
   const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
@@ -1517,7 +1519,7 @@ export async function executePublicTurn(
             sessionId: session.id,
             role: 'assistant',
             content: event.response.content,
-            derivation: currentTurnDerivation(),
+            ...currentTurnWrite(),
           })
           assistantMessageId = stored.id
         }

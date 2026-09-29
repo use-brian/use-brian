@@ -83,6 +83,39 @@ export function deriveResourceScope(
   evidence: DerivedWriteEvidence,
   requested?: ResourceScope,
 ): ResourceScope {
+  return derive(evidence, requested, intersectVisibility)
+}
+
+/**
+ * The label floor (max sensitivity, union of compartments and Projects) over
+ * rows a turn has read, without intersecting personal/assistant visibility.
+ * Reading is not deriving: a primary assistant legitimately reads rows from
+ * several visibility partitions in one turn, and the refusal belongs to the
+ * derived write, never to the read. Every other evidence check still applies.
+ */
+export function deriveContextFloor(
+  evidence: DerivedWriteEvidence,
+): Pick<ResourceScope, 'sensitivity' | 'compartments' | 'projectIds'> {
+  const { sensitivity, compartments, projectIds } = derive(evidence, undefined, (a) => a)
+  return { sensitivity, compartments, projectIds }
+}
+
+/** True when the sources can certify one derived envelope. */
+export function sourcesShareVisibility(sources: readonly ScopeSource[]): boolean {
+  try {
+    deriveResourceScope({ producer: 'visibility-probe', sources: [...sources] })
+    return true
+  } catch (err) {
+    if (err instanceof DerivedScopeError && err.code === 'scope_visibility_incompatible') return false
+    throw err
+  }
+}
+
+function derive(
+  evidence: DerivedWriteEvidence,
+  requested: ResourceScope | undefined,
+  visibility: (a: string | null, b: string | null) => string | null,
+): ResourceScope {
   if (!evidence || !identity(evidence.producer) || !Array.isArray(evidence.sources)
     || evidence.sources.length === 0) throw new DerivedScopeError('scope_evidence_missing')
   const versions = new Map<string, { version: string; scope: string }>()
@@ -99,7 +132,7 @@ export function deriveResourceScope(
       throw new DerivedScopeError('scope_source_changed')
     }
     versions.set(key, { version: source.version, scope })
-    output = output ? combine(output, source) : {
+    output = output ? combine(output, source, visibility) : {
       workspaceId: source.workspaceId,
       userId: source.userId,
       assistantId: source.assistantId,
@@ -110,17 +143,21 @@ export function deriveResourceScope(
   }
   if (requested) {
     assertScope(requested)
-    output = combine(output!, requested)
+    output = combine(output!, requested, visibility)
   }
   return output!
 }
 
-function combine(a: ResourceScope, b: ResourceScope): ResourceScope {
+function combine(
+  a: ResourceScope,
+  b: ResourceScope,
+  visibility: (a: string | null, b: string | null) => string | null,
+): ResourceScope {
   if (a.workspaceId !== b.workspaceId) throw new DerivedScopeError('scope_workspace_mismatch')
   return {
     workspaceId: a.workspaceId,
-    userId: intersectVisibility(a.userId, b.userId),
-    assistantId: intersectVisibility(a.assistantId, b.assistantId),
+    userId: visibility(a.userId, b.userId),
+    assistantId: visibility(a.assistantId, b.assistantId),
     sensitivity: maxSensitivity(a.sensitivity, b.sensitivity),
     compartments: canonical([...a.compartments, ...b.compartments]),
     projectIds: canonical([...a.projectIds, ...b.projectIds]),

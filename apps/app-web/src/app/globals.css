@@ -621,6 +621,64 @@
        area clickable to place the caret at the document end. */
     padding-bottom: 30vh;
   }
+  /* Remote presence (remote-focus.ts). Quiet on purpose: a 2px caret with no
+     inline label, a faint wash on the block a peer is working in, and that
+     peer's face in the right gutter. `--doc-remote-color` is the peer's
+     cursor colour, set inline by the decoration. */
+  .doc-collab-editor .ProseMirror .doc-remote-caret {
+    position: relative;
+    margin-left: -1px;
+    margin-right: -1px;
+    border-left: 2px solid var(--doc-remote-color);
+    pointer-events: none;
+    word-break: normal;
+  }
+  .doc-collab-editor .ProseMirror .doc-remote-focus {
+    position: relative;
+    border-radius: 4px;
+    background-color: color-mix(in srgb, var(--doc-remote-color) 8%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--doc-remote-color) 8%, transparent);
+    transition: background-color 150ms ease, box-shadow 150ms ease;
+  }
+  .doc-collab-editor .ProseMirror .doc-remote-avatars {
+    position: absolute;
+    top: 0;
+    right: -2rem;
+    display: flex;
+    flex-direction: row-reverse;
+    align-items: center;
+    height: 1.5em;
+    pointer-events: auto;
+    user-select: none;
+    /* The line box may be a heading; keep the faces at body scale. */
+    font-size: 16px;
+    line-height: 1;
+  }
+  .doc-collab-editor .ProseMirror .doc-remote-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin-left: -6px;
+    overflow: hidden;
+    border-radius: 9999px;
+    background-color: var(--doc-remote-color);
+    box-shadow: 0 0 0 2px var(--background);
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+  .doc-collab-editor .ProseMirror .doc-remote-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  /* Inside a table cell there is no gutter: tuck the face into the cell. */
+  .doc-collab-editor .ProseMirror :is(td, th) .doc-remote-avatars {
+    right: 2px;
+    height: 1.25em;
+  }
   /* Drop-target affordance — `doc-media-paste.ts` toggles `.doc-drag-over` on
      the editor DOM while a FILE drag hovers it (block-reorder drags never set
      it). A soft inset brand ring + wash says "drop to upload"; on drop, an
@@ -2657,6 +2715,51 @@ html[data-vt-back="true"]::view-transition-new(root) {
    the desktop preload's `platform` (layout.tsx pre-paint + doc-shell.tsx effect). */
 .is-canvas-desktop-standard-frame {
   --doc-titlebar-lights: 0rem;
+}
+/* Windows hides the OS title bar + menu bar and draws min/max/close as a
+   window-controls overlay over the top-right of the window (apps/app-desktop
+   `titleBarOverlay`). The top row is the title bar, so it keeps clear of the
+   buttons. `env(titlebar-area-*)` is the live, zoom-correct overlay geometry;
+   its fallbacks make the inset collapse to the normal `pr-2` on an older shell
+   that still has a standard frame. */
+.is-canvas-desktop-win {
+  --doc-titlebar-controls: calc(
+    100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)
+  );
+}
+.is-canvas-desktop-win [data-doc-topbar] {
+  padding-right: calc(0.5rem + var(--doc-titlebar-controls));
+}
+
+/* Windows text cursor. The stock Windows I-beam is a monochrome INVERTING
+   cursor (drawn by XOR-ing the pixels under it). Remote Desktop, Parallels,
+   VMware, UTM and most screen-sharing tools cannot draw inverting cursors and
+   show NOTHING instead, so the pointer "disappears" exactly where it turns into
+   the I-beam: the editor and every text field, i.e. the page body. Over the
+   chrome (arrow / hand) it stays visible. Replace the I-beam with a colour
+   cursor Chromium hands the OS as a plain ARGB image (black beam, white halo,
+   visible on any background), falling back to the system I-beam. Scoped to the
+   Windows desktop shell; `@layer base` + `:where()` keep it below every
+   utility, so `cursor-pointer` and friends still win, and non-editable islands
+   inside an editor (widgets, buttons) get their normal cursor back. */
+@layer base {
+  .is-canvas-desktop-win
+    :where(
+      [contenteditable]:not([contenteditable="false"]),
+      a:read-write,
+      textarea,
+      input:not([type="button"], [type="submit"], [type="reset"], [type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="image"], [type="hidden"])
+    ) {
+    cursor:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'%3E%3Cpath d='M5 3h6M8 3v18M5 21h6' fill='none' stroke='white' stroke-width='3.5' stroke-linecap='round'/%3E%3Cpath d='M5 3h6M8 3v18M5 21h6' fill='none' stroke='black' stroke-width='1.25'/%3E%3C/svg%3E")
+        8 12,
+      text;
+  }
+  .is-canvas-desktop-win
+    :where([contenteditable]:not([contenteditable="false"]))
+    :where([contenteditable="false"], button, [role="button"], select) {
+    cursor: auto;
+  }
 }
 
 /* (1) The sidebar's top row (workspace switcher) is indented past the lights,

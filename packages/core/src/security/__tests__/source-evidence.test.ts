@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { bindScopeSource, boundScopeSource } from '../source-evidence.js'
 import { ContextScopeAccumulator, scopeEvidenceFromRows } from '../context-scope.js'
-import type { ScopeSource } from '../derived-scope.js'
+import { deriveResourceScope, type ScopeSource } from '../derived-scope.js'
 
 const source = (): ScopeSource => ({ workspaceId: 'fixture-workspace', userId: null,
   assistantId: null, sensitivity: 'confidential', compartments: ['finance'], projectIds: [],
@@ -51,9 +51,12 @@ describe('[COMP:security/source-evidence] canonical reader bindings', () => {
     expect(scopeEvidenceFromRows([row, row]).sources).toEqual([source()])
   })
 
-  it('refuses incompatible bound sources rather than dropping private visibility', () => {
+  it('keeps every partition\'s private visibility for the derived write to judge', () => {
     const first = bindScopeSource({}, { ...source(), userId: 'first-user' })
     const second = bindScopeSource({}, { ...source(), resourceId: 'other-memory', userId: 'second-user' })
-    expect(() => scopeEvidenceFromRows([first, second])).toThrow('scope_visibility_incompatible')
+    const evidence = scopeEvidenceFromRows([first, second])
+    expect(evidence.sources?.map(s => s.userId)).toEqual(['first-user', 'second-user'])
+    expect(() => deriveResourceScope({ producer: 'turn', sources: evidence.sources! }))
+      .toThrow('scope_visibility_incompatible')
   })
 })

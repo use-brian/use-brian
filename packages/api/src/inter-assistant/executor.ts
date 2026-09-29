@@ -99,6 +99,7 @@ import {
   resolveTurnScopeSystem,
   resolveLiveAccessCeilingSystem,
   sessionMessageInputScope,
+  turnOutputWrite,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
@@ -1687,21 +1688,21 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // consult with no replay.
     const userContent: Message['content'] = [{ type: 'text', text: params.question }]
     await assertCurrentAuthority()
-    const inheritedQuestionSources = scopeAccumulator.evidence.sources ?? []
+    const delegatedEnvelope = sessionMessageInputScope({
+      scope: turnScope,
+      workspaceId: calleeAssistant.workspaceId,
+      userId: session.userId,
+      assistantId: calleeAssistant.id,
+    })
     const userMessageRow = await addSessionMessage({
       sessionId: session.id,
       role: 'user',
       content: userContent,
-      ...(inheritedQuestionSources.length > 0
-        ? { derivation: { producer: 'turn:delegated-input', sources: inheritedQuestionSources } }
-        : {
-            scope: sessionMessageInputScope({
-              scope: turnScope,
-              workspaceId: calleeAssistant.workspaceId,
-              userId: session.userId,
-              assistantId: calleeAssistant.id,
-            }),
-          }),
+      ...turnOutputWrite({
+        producer: 'turn:delegated-input',
+        accumulator: scopeAccumulator,
+        envelope: delegatedEnvelope,
+      }),
     })
     const userMessageSource = boundScopeSource(userMessageRow)
     if (userMessageSource) scopeAccumulator.noteSource(userMessageSource)
@@ -2313,14 +2314,15 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             )
           }
         } else if (event.type === 'turn_complete') {
-          const outputSources = scopeAccumulator.evidence.sources ?? []
           await addSessionMessage({
             sessionId: session.id,
             role: 'assistant',
             content: event.response.content,
-            ...(outputSources.length > 0
-              ? { derivation: { producer: 'turn:delegated-output', sources: outputSources } }
-              : {}),
+            ...turnOutputWrite({
+              producer: 'turn:delegated-output',
+              accumulator: scopeAccumulator,
+              envelope: delegatedEnvelope,
+            }),
           })
           // Record the callee turn's LLM cost. Without this, every A2A /
           // workflow `assistant_call` / scheduled-job turn ran the model but
