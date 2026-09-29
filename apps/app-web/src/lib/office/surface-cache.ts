@@ -44,14 +44,20 @@ export function useOfficeMetadataResource<T>(key: string | null, viewerId: strin
   const retained = cache.data ?? (cache.error === undefined ? initialSeed : undefined);
   useEffect(() => {
     if (!key) return;
-    // Refresh joins in-flight reads and retains data only until its original TTL.
-    // Authority events and expiry still invalidate (and fence late responses).
-    const revalidate = () => { void cache.refresh(); };
+    // Keep a valid projection (and its in-flight refresh) only until its original
+    // deadline. Without one, detach a possibly stalled cold/recovery read so
+    // foreground entry can retry. Read the live slot, not a render-time closure:
+    // expiry or authority invalidation may have cleared it since the last render.
+    const revalidate = () => {
+      if (officeMetadataRemaining(readSurfaceCache(key).data, viewerId) <= 0)
+        invalidateSurfaceCache(key);
+      void cache.refresh();
+    };
     const visible = () => {if (document.visibilityState === 'visible') revalidate();};
     window.addEventListener('focus', revalidate);
     document.addEventListener('visibilitychange', visible);
     return () => {window.removeEventListener('focus', revalidate);document.removeEventListener('visibilitychange', visible);};
-  }, [key, cache.refresh]);
+  }, [key, viewerId, cache.refresh]);
   useEffect(() => {
     if (!key || !retained) return;
     const ttl = officeMetadataRemaining(retained, viewerId);

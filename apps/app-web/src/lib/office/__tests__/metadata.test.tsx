@@ -120,12 +120,36 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     await act(async()=>vi.advanceTimersByTime(3001));await flush();expect(host.textContent).toContain(row.title);
     await act(async()=>vi.advanceTimersByTime(3000));expect(host.textContent).not.toContain(row.title);
   });
-  it.each(['focus','visibilitychange'])('joins an in-flight cold read on %s without replacing its generation',async event=>{
-    let old:(value:Response)=>void=()=>{};
-    state.fetch.mockImplementationOnce(()=>new Promise(resolve=>{old=resolve}));await act(async()=>root.render(<Harness/>));
+  it.each(['focus','visibilitychange'])('joins an in-flight refresh of valid metadata on %s',async event=>{
+    state.fetch.mockResolvedValueOnce(response({artifacts:[row]}));await act(async()=>root.render(<Harness/>));
+    let finish!:(value:Response)=>void;
+    state.fetch.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}));
+    await act(async()=>vi.advanceTimersByTime(3001));
     await act(async()=>{(event==='focus'?window:document).dispatchEvent(new Event(event));});await flush();
+    expect(state.fetch).toHaveBeenCalledTimes(2);expect(host.textContent).toContain(row.title);
+    await act(async()=>finish(response({artifacts:[{...row,title:'Renewed report'}]})));await flush();
+    expect(state.fetch).toHaveBeenCalledTimes(2);expect(host.textContent).toContain('Renewed report');
+  });
+  it.each(['focus','visibilitychange'])('restarts a stalled cold read on %s and fences its late completion',async event=>{
+    let old!:(value:Response)=>void;
+    state.fetch.mockImplementationOnce(()=>new Promise(resolve=>{old=resolve}));await act(async()=>root.render(<Harness/>));
+    state.fetch.mockResolvedValueOnce(response({artifacts:[{...row,title:'Recovered report'}]}));
+    await act(async()=>{(event==='focus'?window:document).dispatchEvent(new Event(event));});await flush();
+    expect(state.fetch).toHaveBeenCalledTimes(2);expect(host.textContent).toContain('Recovered report');
     await act(async()=>old(response({artifacts:[row]})));await flush();
-    expect(state.fetch).toHaveBeenCalledTimes(1);expect(host.textContent).toContain(row.title);
+    expect(host.textContent).toContain('Recovered report');expect(host.textContent).not.toContain(row.title);
+  });
+  it.each(['focus','visibilitychange'])('checks the live deadline before timers run on %s and fences the expired refresh',async event=>{
+    state.fetch.mockResolvedValueOnce(response({artifacts:[row]}));await act(async()=>root.render(<Harness/>));
+    let old!:(value:Response)=>void;
+    state.fetch.mockImplementationOnce(()=>new Promise(resolve=>{old=resolve}));
+    await act(async()=>vi.advanceTimersByTime(3001));
+    vi.setSystemTime(Date.now()+3000);
+    state.fetch.mockResolvedValueOnce(response({artifacts:[{...row,title:'Fresh authority'}]}));
+    await act(async()=>{(event==='focus'?window:document).dispatchEvent(new Event(event));});await flush();
+    expect(state.fetch).toHaveBeenCalledTimes(3);expect(host.textContent).toContain('Fresh authority');
+    await act(async()=>old(response({error:'denied'},null,403)));await flush();
+    expect(host.textContent).toContain('Fresh authority');
   });
   it('removes real home cards and lazy preview content at their separate deadlines',async()=>{
     state.fetch.mockImplementation(async(url:string)=>url.endsWith('/snapshot')
