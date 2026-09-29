@@ -39,8 +39,10 @@ export function createChannelQuestionStore(runQuery: typeof query = query) {
       // become unrestricted chat. Implicit typing stays within its native thread;
       // a reply under an originally top-level prompt uses that prompt as its root.
       // An exact source message wins over thread-root matching, even when it
-      // is a tombstone. Thread-only matches exclude old questions, except for
-      // replay of their own answer message. Do not LIMIT before this selection.
+      // is a tombstone. Callers with only thread provenance (e.g. Slack
+      // thread_ts) must use threadId, not messageId. Thread-only matches exclude
+      // old questions, except for replay of their own answer message.
+      // Do not LIMIT before this selection.
       const result = await runQuery<ChannelQuestion>(`WITH addressed AS (
         SELECT * FROM workflow_channel_questions
         WHERE integration_id=$1 AND channel_id=$2 AND workspace_id=$3 AND assistant_id=$4 AND user_id=$5

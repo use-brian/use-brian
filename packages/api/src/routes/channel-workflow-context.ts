@@ -30,7 +30,7 @@ export type ChannelWorkflowContextParams = Pick<ChannelPipelineParams,
   allowUnthreaded?: boolean
   questionStore?: ChannelQuestionStore
   deferredConfirmationStore?: DeferredConfirmationStore
-  /** Native thread root for callback routes without a sessionChannelId. */
+  /** Verified INBOUND native thread root. Never an allocated outbound thread. */
   threadId?: string
 }
 
@@ -46,11 +46,20 @@ export async function maybeHandleChannelWorkflowContext(params: ChannelWorkflowC
   const quotedText = params.quotedText ?? (raw as { reply_to_message?: { text?: string } } | undefined)?.reply_to_message?.text
   const referenceToken = params.referenceToken ?? quotedText?.match(/Question reference: wq:([\w-]{24})\s*$/)?.[1]
   const replyId = params.incoming?.replyToMessageId ?? params.replyToMessageId
-  const replyToMessageId = replyId == null ? undefined : String(replyId)
-  const nativeThread = params.sessionChannelId?.startsWith(`${params.channelId}:thread:`)
-    ? params.sessionChannelId.slice(`${params.channelId}:thread:`.length) : undefined
-  const threadId = params.threadId ?? nativeThread
-    ?? (params.channelType === 'slack' || params.channelType === 'feishu' ? replyToMessageId : undefined)
+  const nativeReplyId = replyId == null ? undefined : String(replyId)
+  // Slack's normalized replyToMessageId is thread_ts, NOT the exact message
+  // being answered. Treating it as an exact quote selects an old root question
+  // ahead of the live question in its thread. Callbacks carry their own exact
+  // source message separately and continue to resolve by their opaque token.
+  const replyToMessageId = params.channelType === 'slack' ? undefined : nativeReplyId
+  const feishu = raw as { rootId?: unknown; threadId?: unknown } | null | undefined
+  const nativeId = (id: unknown) => typeof id === 'string' && id.length > 0 ? id : undefined
+  const threadId = params.threadId ?? (params.channelType === 'slack' ? nativeReplyId
+    : params.channelType === 'feishu'
+      ? nativeId(feishu?.rootId) ?? nativeId(feishu?.threadId) ?? nativeReplyId
+      : undefined)
+  // Do not derive inbound provenance from sessionChannelId: reply-in-thread
+  // routes allocate a NEW session rooted at a top-level answer's own message.
   const questionMessageId = replyToMessageId ?? threadId
   const answerId = params.incoming?.messageId ?? params.incomingChannelMessageId
   const recognized = /^\s*(approve|reject)\s+[a-f0-9-]{6,}(?:\s|$)/i.test(text)

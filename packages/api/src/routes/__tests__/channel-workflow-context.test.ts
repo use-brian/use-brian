@@ -35,7 +35,9 @@ describe('production workflow context assembly', () => {
     vi.mocked(getWorkspaceRoleSystem).mockResolvedValue('member')
     await maybeHandleChannelWorkflowContext({ ...params(), channelType, incoming: { text: 'answer', messageId: 'reply', replyToMessageId: 'question', raw: {} } })
     const input = vi.mocked(maybeHandleChannelWorkflowReply).mock.calls[0][0]
-    expect(input).toMatchObject({ text: 'answer', answerMessageId: 'reply', replyToMessageId: 'question', address: { userId: 'actor', workspaceId: 'workspace', integrationId: 'integration' } })
+    expect(input).toMatchObject({ text: 'answer', answerMessageId: 'reply',
+      replyToMessageId: channelType === 'slack' ? undefined : 'question',
+      address: { userId: 'actor', workspaceId: 'workspace', integrationId: 'integration' } })
     expect(await input.authorized()).toBe(true)
     expect(getWorkspaceRoleSystem).toHaveBeenCalledWith('actor', 'workspace')
     vi.mocked(getWorkspaceRoleSystem).mockResolvedValue(null)
@@ -62,14 +64,24 @@ describe('production workflow context assembly', () => {
   })
 })
 
-it.each(['slack', 'feishu'] as const)('carries %s native thread scope independently of explicit reply targeting', async (channelType) => {
-  await maybeHandleChannelWorkflowContext({ ...params(), channelType, sessionChannelId: 'channel:thread:root' })
-  expect(maybeHandleChannelWorkflowReply).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: 'root', replyToMessageId: undefined }))
-  await maybeHandleChannelWorkflowContext({ ...params(), channelType, incoming: { text: 'answer', replyToMessageId: 'prompt', raw: null } })
-  expect(maybeHandleChannelWorkflowReply).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: 'prompt', replyToMessageId: 'prompt' }))
-  await maybeHandleChannelWorkflowContext({ ...params(), channelType, sessionChannelId: 'channel:thread:root',
-    incoming: { text: 'answer', replyToMessageId: 'prompt', raw: null } })
-  expect(maybeHandleChannelWorkflowReply).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: 'root', replyToMessageId: 'prompt' }))
-  await maybeHandleChannelWorkflowContext({ ...params(), channelType, sessionChannelId: 'channel' })
-  expect(maybeHandleChannelWorkflowReply).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: undefined }))
+it.each(['slack', 'feishu'] as const)('never mistakes a new %s outbound thread for inbound answer provenance', async (channelType) => {
+  await maybeHandleChannelWorkflowContext({ ...params(), channelType, sessionChannelId: 'channel:thread:answer',
+    incoming: { text: '2', messageId: 'answer', raw: {} } })
+  expect(maybeHandleChannelWorkflowReply).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: undefined, replyToMessageId: undefined }))
+  await maybeHandleChannelWorkflowContext({ ...params(), channelType, threadId: 'verified-root' })
+  expect(maybeHandleChannelWorkflowReply).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: 'verified-root' }))
+})
+it('treats Slack thread_ts as thread provenance, never an exact question reference', async () => {
+  await maybeHandleChannelWorkflowContext({ ...params(), sessionChannelId: 'channel',
+    incoming: { text: '2', messageId: 'answer', replyToMessageId: 'root-question', raw: {} } })
+  expect(maybeHandleChannelWorkflowReply).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: 'root-question', replyToMessageId: undefined }))
+})
+it.each([
+  [{ rootId: 'root', threadId: 'topic' }, 'root'],
+  [{ threadId: 'topic' }, 'topic'],
+  [{}, 'prompt'],
+] as const)('preserves Feishu ancestry %j separately from an exact quote', async (raw, threadId) => {
+  await maybeHandleChannelWorkflowContext({ ...params(), channelType: 'feishu', sessionChannelId: 'channel:thread:outbound',
+    incoming: { text: 'answer', replyToMessageId: 'prompt', raw } })
+  expect(maybeHandleChannelWorkflowReply).toHaveBeenLastCalledWith(expect.objectContaining({ threadId, replyToMessageId: 'prompt' }))
 })

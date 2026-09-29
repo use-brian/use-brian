@@ -27,6 +27,8 @@ function fixture(channelType: ChannelWorkflowContextParams['channelType'] = 'sla
   const params: ChannelWorkflowContextParams = { userId: 'actor', isIdentified: true, channelType, channelId, integrationId,
     assistant: { id: 'assistant', workspaceId: 'workspace', ownerUserId: 'owner', name: 'A', kind: 'standard', systemPrompt: null, clearance: 'internal' },
     messageText: 'yes', sessionChannelId: threadRef ? `${channelId}:thread:${threadRef}` : channelId,
+    // Provider-authenticated inbound thread, distinct from an outbound session allocation.
+    threadId: threadRef,
     deferredConfirmationStore: store, questionStore,
   }
   const deliver = () => sendConfirmationPrompt({ workspaceId: 'workspace', assistantId: 'assistant', channelType, channelId, threadRef }, req,
@@ -62,7 +64,7 @@ describe('real scheduler prompt → shared inbound context', () => {
   it('recovers a Feishu callback thread only from its exact source card', async () => {
     const f = fixture('feishu')
     await f.deliver()
-    const params = { ...f.params, sessionChannelId: 'peer:thread:prompt-id' }
+    const params = { ...f.params, sessionChannelId: 'peer:thread:prompt-id', threadId: 'prompt-id' }
     expect(await maybeHandleChannelWorkflowContext(params)).toBeNull()
     expect(await maybeHandleChannelWorkflowContext({ ...params, callback: { data: 'mcp_confirm:call:allow', messageId: 'other-card' } })).toContain('unavailable')
     expect(f.resolver.resolve).not.toHaveBeenCalled()

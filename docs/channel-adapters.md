@@ -34,6 +34,11 @@ not depend on whether the user pressed a button or typed a reply.
   provenance, not a lookup for an arbitrary pending row in the channel.
   Workspace membership, assigned approver, assistant and current tool policy
   are checked again; a question answer does not grant tool approval.
+- **Thread provenance:** workflow selection uses the incoming native thread,
+  never a new outbound thread allocated for a top-level reply. Slack `thread_ts`
+  identifies a thread, not an exact quoted question; multiple active questions
+  there require an explicit reference. Exact message quotes and callback tokens
+  retain their expired/consumed tombstones.
 
 Live replies must be intercepted **before** acquiring the conversation lock:
 that lock is held by the turn waiting for the answer. `processChannelMessage`

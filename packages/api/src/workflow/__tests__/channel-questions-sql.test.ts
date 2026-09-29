@@ -13,11 +13,11 @@ const store = createChannelQuestionStore((async (sql, args) => db.query(sql, arg
 const dispatch = vi.fn(async (_binding: ChannelQuestion, _answer: string, claim: () => Promise<boolean>) =>
   await claim() ? 'sent' : 'already answered')
 const reply = (overrides: Partial<Parameters<typeof handleChannelQuestionReply>[0]> = {}) => handleChannelQuestionReply({
-  store, address, text: 'prod', replyToMessageId: 'root', threadId: 'root', answerMessageId: 'answer-2',
+  store, address, text: 'prod', threadId: 'root', answerMessageId: 'answer-2',
   authorized: async () => true, dispatch, ...overrides,
 })
-async function question(messageId: string, threadRef: string | undefined = 'root') {
-  const token = await store.create({ ...address, threadRef, question: { question: 'Where?', options: ['dev', 'prod'] },
+async function question(messageId: string, threadRef: string | null = 'root') {
+  const token = await store.create({ ...address, threadRef: threadRef ?? undefined, question: { question: 'Where?', options: ['dev', 'prod'] },
     response: { toolName: 'answer', arguments: {}, answerField: 'answer' } })
   await store.attach(token, messageId)
   return (await store.find(address, { token }))[0]!
@@ -42,10 +42,32 @@ describe('workflow question SQL thread selection', () => {
     if (status === 'consumed') expect(await store.consume(first, 'answer-1')).toBe(true)
     else await db.query("UPDATE workflow_channel_questions SET expires_at=now()-interval '1 second' WHERE token=$1", [first.token])
     const second = await question('prompt-2')
-    // Slack supplies thread_ts as replyToMessageId, not the question's own ts.
+    // Shared ingress separates Slack thread_ts from exact source-message replies.
     expect(await reply()).toBe('sent')
     expect(dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ token: second.token }), 'prod', expect.any(Function))
     expect((await store.find(address, { token: second.token }))[0]?.available).toBe(false)
+  })
+
+  it.each(['consumed', 'expired'])('answers Q2 when the %s Q1 is the thread root itself', async status => {
+    const first = await question('root', null)
+    if (status === 'consumed') await store.consume(first, 'answer-1')
+    else await db.query("UPDATE workflow_channel_questions SET expires_at=now()-interval '1 second' WHERE token=$1", [first.token])
+    const second = await question('prompt-2')
+    expect(await reply()).toBe('sent')
+    expect(dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ token: second.token }), 'prod', expect.any(Function))
+  })
+
+  it('never chooses a live root question over another live question in that thread', async () => {
+    await question('root', null); await question('prompt-2')
+    expect(await reply()).toContain('ambiguous')
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  it('does not let a replay of a root question answer consume its successor', async () => {
+    await store.consume(await question('root', null), 'answer-1')
+    await question('prompt-2')
+    expect(await reply({ answerMessageId: 'answer-1' })).toContain('ambiguous')
+    expect(dispatch).not.toHaveBeenCalled()
   })
 
   it('keeps multiple genuinely active questions ambiguous', async () => {
