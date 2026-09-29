@@ -20,8 +20,15 @@ import { useParams } from "next/navigation";
 import { authFetch } from "@/lib/auth-fetch";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { disconnectFeedProfile } from "@/lib/api/feed";
+import { forgetFeedProfile } from "@/lib/feed-surface-cache";
+import { feedWorkspaceCacheKey } from "@/lib/surface-prefetch";
 import { buildAuthorizeUrl } from "@/lib/feed-connect-account";
+import { desktopBridge } from "@/lib/desktop-auth-source";
 import { feedPath, isConnectableFeedPlatform } from "@/lib/feed-nav";
+import {
+  useFeedConnectLanding,
+  type ConnectLandingStatus,
+} from "@/lib/feed-connect-landing";
 import type { FeedPlatform } from "@/lib/feed-nav";
 import { useConnectAccount } from "@/components/feed/connect-account-dialog";
 import { PlatformIcon } from "@/components/feed/platform-icon";
@@ -51,6 +58,14 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
     isAdmin: canConnect,
   } = useConnectAccount();
   const isAdmin = team.role === "admin" || team.role === "owner";
+  const landing = useFeedConnectLanding({
+    platform,
+    connected: profile !== undefined,
+    refresh: team.refresh,
+  });
+  const landingNotice = (
+    <ConnectLandingNotice status={landing} platformLabel={platformLabel} />
+  );
   const cloudState = team.cloudLink?.state ?? "native";
   const managedReady = cloudState === "native" || cloudState === "linked";
 
@@ -102,6 +117,7 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
         platform,
         assistantId: targetAssistantId,
         origin: window.location.origin,
+        desktop: desktopBridge() !== undefined,
         workspaceId: team.workspaceId,
       });
       const res = await authFetch(url);
@@ -142,6 +158,14 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
       if (!result.ok) {
         throw new Error(result.error ?? t.connection.disconnectFailed);
       }
+      await forgetFeedProfile({
+        workspaceId: team.workspaceId,
+        key: feedWorkspaceCacheKey(team.workspaceId),
+        assistantId: profile.assistantId,
+        platform,
+        // The server already disconnected; a local cache write failing must
+        // not report the disconnect as failed.
+      }).catch(() => undefined);
       await team.refresh();
     } catch (err) {
       setError(
@@ -156,6 +180,7 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
     const content = (
       <>
         {connectDialog}
+        {landingNotice}
         <FeedCloudLinkCard assistantId={team.assistants[0]?.id} />
         <section className="rounded-xl border border-border/60 bg-card p-4 shadow-xs">
           <div className="flex items-start gap-3">
@@ -172,7 +197,8 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
                 })}
               </p>
               <div className="mt-3">
-                {canConnect && managedReady ? (
+                {landing.kind === "confirming" ||
+                landing.kind === "unconfirmed" ? null : canConnect && managedReady ? (
                   <Button
                     type="button"
                     variant="outline"
@@ -202,6 +228,7 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
 
   const content = (
     <>
+      {landingNotice}
       <FeedCloudLinkCard assistantId={profile.assistantId} />
       {error ? (
         <div className="animate-pop-in rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
@@ -293,6 +320,42 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
         </p>
       </header>
       {content}
+    </div>
+  );
+}
+
+function ConnectLandingNotice({
+  status,
+  platformLabel,
+}: {
+  status: ConnectLandingStatus;
+  platformLabel: string;
+}) {
+  const t = useT().feedPage.connection;
+  if (status.kind === "none") return null;
+  const message =
+    status.kind === "confirming"
+      ? t.landingConfirming
+      : status.kind === "connected"
+        ? t.landingConnected
+        : status.kind === "unconfirmed"
+          ? t.landingUnconfirmed
+          : status.kind === "denied"
+            ? t.landingDenied
+            : t.landingFailed;
+  const tone =
+    status.kind === "denied" || status.kind === "failed"
+      ? "border-destructive/40 bg-destructive/10 text-destructive"
+      : status.kind === "connected"
+        ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+        : "border-border/60 bg-muted/40 text-muted-foreground";
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={`animate-pop-in rounded-xl border p-3 text-sm ${tone}`}
+    >
+      {format(message, { platform: platformLabel })}
     </div>
   );
 }

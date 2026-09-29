@@ -2,22 +2,28 @@ import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import type { WorkerManager } from './worker.js'
 
+const ORDINARY_WORKER_CONCURRENCY_CAP = 4
+
+function atCapacity(active: number, cap: number): { data: string; isError: true } {
+  return {
+    data: `No worker was spawned: the pool is at capacity (${active}/${cap} running). Nothing about your prompt is wrong — there is simply no free slot. Do not call spawnWorker again this turn: emit your remaining tool calls if any, otherwise end the turn so Phase 4b can drain completed workers. Retrying this exact call in the NEXT turn, once some workers have finished, will succeed.`,
+    isError: true,
+  }
+}
+
 /**
  * Create the three worker tools backed by a WorkerManager.
  */
 /**
- * Worker ids are per-request and in-memory: `spawn()` mints `worker_<n>` from
- * a counter that `reset()` zeroes at the end of every request, and the map
- * itself is cleared with it. So an id from an earlier turn does not resolve —
- * and there is deliberately NO listing tool to re-resolve it from, because the
- * only valid source is a `spawnWorker` result inside the SAME turn. Say that,
- * rather than sending the model hunting for a discovery tool that does not
- * exist (the exact loop this copy standard is closing).
+ * Worker ids are in-memory and manager-lifetime monotonic so late completion
+ * from one request cannot collide with a newer worker. Tool lookups are also
+ * session-scoped. There is deliberately NO listing tool: the only valid source
+ * is a `spawnWorker` result inside the SAME turn.
  */
 function workerNotFound(workerId: string): string {
   return (
     `Worker ${workerId} does not exist in this turn. ` +
-    'Worker ids are per-turn and in-memory (they are minted by spawnWorker and discarded when the request ends), so an id from an earlier turn, another session, or another server instance never resolves here. ' +
+    'Worker ids are manager-lifetime in-memory labels, but lookup is limited to this session and delivered terminal entries are released, so an id from an earlier turn, another session, or another server instance may not resolve here. ' +
     'There is no tool that lists workers: the only valid workerId is one spawnWorker returned to you in THIS turn. ' +
     'If you still need the research, call spawnWorker with a self-contained prompt. Do NOT retry this exact id.'
   )
@@ -30,7 +36,7 @@ export function createWorkerTools(manager: WorkerManager): {
 } {
   const spawnWorker = buildTool({
     name: 'spawnWorker',
-    description: 'Spawn a parallel research worker. Use for complex tasks needing 3+ independent lookups. Workers run in parallel using a fast, cheap model. Write self-contained prompts — workers cannot see this conversation. In research mode the worker pool is capped at 10 concurrent workers; if you try to spawn when full, this tool returns an error and you should wait for some to complete before spawning more.',
+    description: 'Spawn an isolated read-only worker that runs concurrently with this turn. Use whenever 2 or more self-contained subtasks can make meaningful progress independently and worker startup is likely to reduce user wait time; this is not limited to web research. Prefer one connector batch operation or sibling concurrency-safe tool calls when they can do the same work with less overhead. Do not spawn for trivial work, serial dependencies, duplicate lookups, operations contending on one serialized resource, or final synthesis. Spawn independent workers together in the same turn. Write self-contained prompts because workers cannot see this conversation. Ordinary turns allow up to 4 active workers per parent session; research mode has its own configured pool cap.',
     inputSchema: z.object({
       // `description` is a cosmetic UI label (the `worker_start` payload).
       // It is TRUNCATED to 80 chars, not rejected — the model routinely
@@ -42,21 +48,32 @@ export function createWorkerTools(manager: WorkerManager): {
       // banner (prod incident 2026-06-26, session 2d29043f). A display label
       // overflowing its width must never break a research dispatch.
       description: z.string().describe('Short task label shown in the UI (kept to 80 chars; a longer label is trimmed to fit). Describe THIS worker\'s task specifically — e.g. "Research Acme Corp on row 5", not persona preamble like "You are a researcher". One line, no period.').transform((s) => s.slice(0, 80)),
-      prompt: z.string().describe('Self-contained research prompt. Include exactly what to search and what format to return results in.'),
+      prompt: z.string().describe('Self-contained task prompt. Include the goal, necessary input/context, expected output format, and a clear stopping condition.'),
     }),
     isReadOnly: false,
 
     async execute(input, context) {
+      // Research mode sets a separate manager-level pool cap. Ordinary turns
+      // use a per-session ceiling so one user's fan-out neither consumes an
+      // unbounded number of workers nor blocks unrelated sessions sharing the
+      // singleton manager.
+      if (manager.maxConcurrent === null) {
+        const activeForSession = manager.pendingCountFor(context.sessionId)
+        if (activeForSession >= ORDINARY_WORKER_CONCURRENCY_CAP) {
+          return atCapacity(activeForSession, ORDINARY_WORKER_CONCURRENCY_CAP)
+        }
+      }
+
       const result = manager.spawn(input.prompt, context, context.requestTools, input.description)
       if (!result) {
         // Concurrency cap hit. Surface a structured error so the model knows
         // to stop spawning this turn and wait for completions instead. The
         // active/cap numbers help the model reason about how many slots
         // remain and roughly when one will free up.
-        const cap = manager.maxConcurrent ?? 'unbounded'
-        const active = manager.activeCount
+        const capacity = manager.capacityForSession(context.sessionId)
+        const cap = capacity.cap ?? 'unbounded'
         return {
-          data: `No worker was spawned: the pool is at capacity (${active}/${cap} running). Nothing about your prompt is wrong — there is simply no free slot. Do not call spawnWorker again this turn: emit your remaining tool calls if any, otherwise end the turn so Phase 4b can drain completed workers. Retrying this exact call in the NEXT turn, once some workers have finished, will succeed.`,
+          data: `No worker was spawned: the pool is at capacity (${capacity.active}/${cap} running). Nothing about your prompt is wrong — there is simply no free slot. Do not call spawnWorker again this turn: emit your remaining tool calls if any, otherwise end the turn so Phase 4b can drain completed workers. Retrying this exact call in the NEXT turn, once some workers have finished, will succeed.`,
           isError: true,
         }
       }
@@ -72,8 +89,8 @@ export function createWorkerTools(manager: WorkerManager): {
       message: z.string().describe('Follow-up message for the worker'),
     }),
 
-    async execute(input) {
-      const status = manager.getStatus(input.workerId)
+    async execute(input, context) {
+      const status = manager.getStatus(input.workerId, context.sessionId)
       if (!status) {
         return { data: workerNotFound(input.workerId), isError: true }
       }
@@ -88,7 +105,7 @@ export function createWorkerTools(manager: WorkerManager): {
         }
       }
       // For now, return the existing result — full re-query with context is a future enhancement
-      const result = manager.getResult(input.workerId)
+      const result = manager.getResult(input.workerId, context.sessionId)
       return { data: result ?? 'No result available' }
     },
   })
@@ -100,10 +117,10 @@ export function createWorkerTools(manager: WorkerManager): {
       workerId: z.string().describe('Worker ID to stop'),
     }),
 
-    async execute(input) {
-      const stopped = manager.stop(input.workerId)
+    async execute(input, context) {
+      const stopped = manager.stop(input.workerId, context.sessionId)
       if (!stopped) {
-        const status = manager.getStatus(input.workerId)
+        const status = manager.getStatus(input.workerId, context.sessionId)
         if (!status) return { data: workerNotFound(input.workerId), isError: true }
         return {
           data:

@@ -14,6 +14,13 @@ describe('[COMP:context-engine/layer-1-system-prompt] system-prompt constants', 
     expect(LAYER_1_SYSTEM_PROMPT).toContain('Two search attempts with no useful results = stop searching')
   })
 
+  it('allows opportunistic worker delegation while preferring cheaper concurrency', () => {
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('2 or more isolated subtasks')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('connector batch operation')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('sibling concurrency-safe tool calls')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('keep final synthesis with yourself')
+  })
+
   it('LAYER_1_SYSTEM_PROMPT extends honesty-about-what-you-see to operational self-state', () => {
     // Regression — 2026-06-15: the prod "Product" assistant confabulated a
     // "sleeping scheduler" root cause and asserted "no workflow runs executed"

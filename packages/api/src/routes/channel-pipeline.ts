@@ -35,6 +35,8 @@ import {
   buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, formatAssistantQuestion,
   createTurnOutputCollector,
   executionToolContext,
+  boundScopeSource,
+  scopeEvidenceFromRows,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -79,6 +81,7 @@ import type {
   ConfirmationResolver, Message, TopicClassification, ClassifierRecentTurn,
   EpisodicStore, CapabilityStore, TokenUsage, ToolResultMeta,
   SessionStateStore, SessionStateRecord, CrmEmailDraftStore,
+  AccessCeiling, ScopeEvidence,
 } from '@use-brian/core'
 
 import { mintActorMediaToken } from '../media-token.js'
@@ -123,9 +126,11 @@ import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
+  createDeliveryAudienceEnvelopeResolver,
   DeliveryAudienceUnverifiedError,
   isDeliveryAudienceUnverifiedError,
 } from '../context-scope/delivery-authority.js'
+import { validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import {
   buildChannelSessionKey,
@@ -763,6 +768,30 @@ export function connectorToolsAllowedForChannelTurn(
   return !externalGuest || externalGuestConnectorTools === true
 }
 
+/** Keep exact-audience transcript history without laundering hidden results. */
+export async function filterChannelHistoryForAudience<T extends {
+  channelMessageId: string | null
+}>(params: {
+  rows: readonly T[]
+  group: boolean
+  ceiling?: AccessCeiling
+  validate?: (evidence: ScopeEvidence, ceiling: AccessCeiling) => Promise<unknown>
+}): Promise<T[]> {
+  if (!params.group || !params.ceiling) return [...params.rows]
+  const validate = params.validate ?? validateAudienceScopeEvidence
+  const decisions = await Promise.all(params.rows.map(async (row) => {
+    if (row.channelMessageId !== null) return true
+    if (!boundScopeSource(row)) return false
+    try {
+      await validate(scopeEvidenceFromRows([row]), params.ceiling!)
+      return true
+    } catch {
+      return false
+    }
+  }))
+  return params.rows.filter((_, index) => decisions[index])
+}
+
 type ConnectorTurnScopeResolver = (
   input: ResolveTurnScopeInput,
 ) => Promise<ResolvedTurnScope>
@@ -988,9 +1017,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   const sessionChannelId = params.sessionChannelId ?? channelId
   const externalGuestConnectorTools = externalGuest && params.externalGuestConnectorTools === true
   const connectorAuthority = params.connectorAuthority ?? 'sender'
-  const connectorToolsAllowed = connectorAuthority !== 'disabled'
+  let connectorToolsAllowed = connectorAuthority !== 'disabled'
     && connectorToolsAllowedForChannelTurn(externalGuest, params.externalGuestConnectorTools)
-  const useAssistantConnectorAuthority = connectorAuthority === 'assistant'
+  let useAssistantConnectorAuthority = connectorAuthority === 'assistant'
     || externalGuestConnectorTools
   const taskAuthority = params.realtimeThreadTarget
     ? {
@@ -1042,6 +1071,48 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   const senderIsWorkspaceMember = assistant.workspaceId === null
     ? isIdentified
     : senderWorkspaceRole !== null
+  const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
+    integrationStore: params.channelIntegrationStore,
+  })
+  const resolveDeliveryAudienceEnvelope = createDeliveryAudienceEnvelopeResolver({
+    integrationStore: params.channelIntegrationStore,
+  })
+  const audienceInput = {
+    workspaceId: assistant.workspaceId ?? '',
+    assistantId: assistant.id,
+    userId,
+    channelType,
+    channelId,
+    channelIntegrationId: params.channelIntegrationId,
+    recipientType: isGroupChat ? 'group' as const : 'individual' as const,
+  }
+  const audienceEnvelope = isGroupChat && assistant.workspaceId
+    ? await resolveDeliveryAudienceEnvelope(audienceInput)
+    : null
+  if (audienceEnvelope && !audienceEnvelope.allowed) {
+    throw new DeliveryAudienceUnverifiedError()
+  }
+  const publicAudienceTurn = audienceEnvelope?.allowed === true
+    && audienceEnvelope.source === 'public'
+  const currentAudienceMaximum = audienceEnvelope?.allowed
+    ? async (): Promise<AccessCeiling | null> => {
+        const current = await resolveDeliveryAudienceEnvelope(audienceInput)
+        return current.allowed ? { ...current.ceiling, userId } : null
+      }
+    : undefined
+  const isolatedAudience = externalGuest || publicAudienceTurn
+  const audienceSystemPrompt = publicAudienceTurn
+    ? `You are ${assistant.name}, a helpful assistant in a public group conversation. ` +
+      'Use general knowledge and only information already visible in this conversation. ' +
+      'Do not imply access to private workspace information or connected tools.'
+    : systemPrompt
+  if (publicAudienceTurn) {
+    // An unapproved shared audience gets conversation only. Connected tools
+    // and workspace-native capabilities remain unavailable until an owner or
+    // admin approves an explicit envelope.
+    connectorToolsAllowed = false
+    useAssistantConnectorAuthority = false
+  }
   let dataTurnScope
   let executionContext
   try {
@@ -1054,6 +1125,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       workspaceId: assistant.workspaceId,
       session,
       memberMode,
+      ignoreSessionBinding: isGroupChat,
       identity: senderIsWorkspaceMember
         ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
         : {
@@ -1076,6 +1148,17 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       },
       attribution: { billingUserId },
       sessionAuthority: session,
+      ...(audienceEnvelope?.allowed
+        ? {
+            maximumAccess: {
+              ...audienceEnvelope.ceiling,
+              // Access-ceiling intersection is actor-preserving. Recipient
+              // anonymity remains enforced by the separate delivery check.
+              userId,
+            },
+            maximumAccessCurrent: currentAudienceMaximum,
+          }
+        : {}),
     })
     dataTurnScope = resolved.turnScope
     executionContext = resolved.executionContext
@@ -1106,24 +1189,22 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     sources: scopeAccumulator.evidence.sources ?? [],
   })
   const authority = executionContext.security.authority
-  const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
-    integrationStore: params.channelIntegrationStore,
-  })
   const assertDeliveryAudience = async (): Promise<void> => {
     await authority.assertCurrent()
     const decision = await authorizeDeliveryAudience({
-      workspaceId: assistant.workspaceId ?? '',
-      assistantId: assistant.id,
-      userId,
-      channelType,
-      channelId,
-      channelIntegrationId: params.channelIntegrationId,
-      sessionId: session.id,
-      recipientType: isGroupChat ? 'group' : 'individual',
+      ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
     })
     if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
   }
+
+  const filterHistoryForAudience = async <T extends {
+    channelMessageId: string | null
+  }>(rows: readonly T[]): Promise<T[]> => filterChannelHistoryForAudience({
+    rows,
+    group: isGroupChat,
+    ceiling: audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined,
+  })
 
   // Expose session ID to channel hooks (e.g., WhatsApp confirmation store)
   if (params.sessionRef) params.sessionRef.id = session.id
@@ -1186,7 +1267,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // Runs before the message is classified, persisted, or fed to the model, so
   // a giant paste never reaches the classifier or the query loop as a blob.
   // Failure keeps the original text. See `promoteChannelPaste` above.
-  if (!externalGuest) {
+  if (!isolatedAudience) {
     ;({ messageText, userContentBlocks } = await promoteChannelPaste({
       rawUserText: params.rawUserText,
       messageText,
@@ -1203,7 +1284,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // topic classification. Follow-up detection needs actual dialogue, not an
   // isolated current sentence (2026-08-09 Snapio incident on web; channels
   // share the same classifier contract).
-  const preExistingDbMessages = await getSessionMessages(session.id)
+  const preExistingDbMessages = await filterHistoryForAudience(
+    await getSessionMessages(session.id),
+  )
   const adaptiveRecentConversation = preExistingDbMessages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .filter((m) => !(
@@ -1237,7 +1320,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   let effectiveModelAlias = modelAlias
   let adaptiveResearchActive = false
   if (
-    !externalGuest &&
+    !isolatedAudience &&
     adaptiveResearchEnabled &&
     messageText &&
     assistant.workspaceId &&
@@ -1520,10 +1603,17 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Load history ──
   // `fromSequence` skips rows already compacted into the most recent
   // boundary; null (never compacted) loads full history.
-  const dbMessages = await getSessionMessages(session.id, {
-    fromSequence: session.compactBoundarySequence,
-  })
-  noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
+  const dbMessages = await filterHistoryForAudience(await getSessionMessages(session.id, {
+    // A public audience cannot trust the durable summary because it has no
+    // per-source audience evidence. Rebuild from filtered provider history.
+    fromSequence: isolatedAudience ? null : session.compactBoundarySequence,
+  }))
+  noteAutomaticScopeEvidence(
+    scopeAccumulator,
+    isGroupChat
+      ? dbMessages.filter((message) => message.channelMessageId === null)
+      : dbMessages,
+  )
   const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
   // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
@@ -1541,7 +1631,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     model: backgroundLaneModel,
     inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
     ...backgroundUsageAttribution,
-    systemPrompt,
+    systemPrompt: audienceSystemPrompt,
     assistantId: assistant.id,
     userId,
     // `ProactiveCompactionParams.ownerId` is a usage-attribution field and
@@ -1553,11 +1643,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     channelType,
     memoryStore,
     episodicStore,
-    sessionStateStore,
+    sessionStateStore: isolatedAudience ? undefined : sessionStateStore,
     analytics,
     usageStore,
     userMessageId: userMessageRow.id,
-    persistLongTermContext: !externalGuest,
+    persistLongTermContext: !isolatedAudience,
+    persistSessionSummary: !isolatedAudience,
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
     authority,
@@ -1579,7 +1670,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // Per-turn callers use the ranked+capped index slice. See
   // docs/architecture/context-engine/memory-system.md → "Index cap".
   let memoryContext = ''
-  if (isIdentified) {
+  if (isIdentified && !isolatedAudience) {
     const viewerCtx = dataTurnScope.access
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([
       (memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
@@ -1630,7 +1721,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
 
   // ── Episodic context (topic-scoped history for resume/cross-topic) ──
   let episodicContext: string | null = null
-  if (!externalGuest && episodicStore && classification) {
+  if (!isolatedAudience && episodicStore && classification) {
     try {
       episodicContext = await fetchEpisodicContext({
         store: episodicStore,
@@ -1644,7 +1735,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
 
   // ── Session-state block (# Open commitments — always on) ──
   let sessionStateBlock: string | null = null
-  if (sessionStateStore) {
+  if (sessionStateStore && !isolatedAudience) {
     try {
       sessionStateBlock = await buildSessionStateBlock({
         store: sessionStateStore,
@@ -1656,7 +1747,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
 
   // ── Capability set (used twice — L1 files block + tool filter) ──
-  const activeCapabilities = externalGuest
+  const activeCapabilities = isolatedAudience
     ? new Set<string>()
     : new Set(await capabilityStore.listActive(assistant.id))
 
@@ -1669,6 +1760,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     workspaceFilesStore &&
     assistant.workspaceId &&
     isIdentified &&
+    !isolatedAudience &&
     activeCapabilities.has('files')
   ) {
     try {
@@ -1696,7 +1788,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // (capability + an APPROVED default brand) and the store live in
   // `resolveBrandContext`, so every channel shares one chokepoint instead of
   // each webhook factory forwarding a store.
-  const brandContext = externalGuest
+  const brandContext = isolatedAudience
     ? null
     : await resolveBrandContext({
         userId,
@@ -1715,7 +1807,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // see docs/architecture/brain/corrections.md → "Workspace-level
   // prompt evolution".
   let workspaceEvolutionSnippet: string | null = null
-  if (assistant.workspaceId && !externalGuest) {
+  if (assistant.workspaceId && !isolatedAudience) {
     try {
       // Memory-side + brain-side evolution snippets join into one Layer 2 block.
       const [memoryEvo, brainEvo] = await Promise.all([
@@ -1735,7 +1827,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     workspaceId: assistant.workspaceId ?? null,
     assistantId: assistant.id,
     actorUserId: userId,
-    externalPrincipal: externalGuest,
+    externalPrincipal: isolatedAudience,
     operationKind: 'channel_turn',
     operationId: userMessageRow.id,
     sourceKind: 'session_message',
@@ -1752,8 +1844,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // accepts lower implicit-cache reuse for changing private metadata; moving
   // it into a user-role envelope caused the 2026-08-01 referent leak.
   const splitPrompt = buildSplitSystemPrompt({
-    basePrompt: systemPrompt,
-    charter: resolveCharter(assistant),
+    basePrompt: audienceSystemPrompt,
+    charter: publicAudienceTurn ? {} : resolveCharter(assistant),
     playbookRules,
     workspaceEvolutionSnippet,
     currentDateTime,
@@ -1770,7 +1862,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // all that teammate's. See layer-1-system-prompt.md → "Speaker identity".
     // `actorChannelId` (Slack `U…`, Telegram handle/id, Feishu/Lark open id, WhatsApp number) rides
     // along so "what is my Slack id" is answered as fact, not guessed.
-    speakerIdentity: isIdentified && !externalGuest
+    speakerIdentity: isIdentified && !isolatedAudience
       ? speakerIdentityFromUser(channelUser, { type: channelType, id: actorChannelId ?? null })
       : null,
     memoryContext,
@@ -1813,6 +1905,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         : ' Connected tools are not available in this turn.'),
     )
   }
+  if (publicAudienceTurn) {
+    privateRuntimeContextParts.push(
+      '# Unapproved group boundary\n\n' +
+      `This ${channelType} group is connected but has not been approved for workspace information. ` +
+      'Keep the conversation to public general knowledge and content already visible in this group. ' +
+      'Do not claim access to workspace memory, files, private company context, or connected tools.',
+    )
+  }
   // ── Non-member sender boundary ──
   // The sender resolved to a REAL platform user (or a shadow) that is not a
   // member of this assistant's workspace: an `assistant_members` row but no
@@ -1826,7 +1926,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // and the remedy instead of the symptom. One PK lookup per channel turn.
   // See docs/architecture/channels/channel-user-identity.md → "Non-member
   // senders".
-  if (assistant.workspaceId && !externalGuest) {
+  if (assistant.workspaceId && !isolatedAudience) {
     if (senderWorkspaceRole === null) {
       privateRuntimeContextParts.push(
         buildNonMemberSenderBlock({
@@ -1839,7 +1939,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     }
   }
   let activeEmailDraftContext = ''
-  if (params.crmEmailDraftStore && assistant.workspaceId && !externalGuest && activeCapabilities.has('crm')) {
+  if (params.crmEmailDraftStore && assistant.workspaceId && !isolatedAudience && activeCapabilities.has('crm')) {
     try {
       const activeEmailDraft = await params.crmEmailDraftStore.getActiveForSession({
         userId,
@@ -1885,10 +1985,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   })
   // activeCapabilities was lifted up above the L1 prompt build (used by both
   // the `# Workspace Files` block gating and the tool filter here).
-  const allTools = externalGuest
+  const allTools = isolatedAudience
     ? new Map<string, Tool>()
     : filterToolsByCapabilities(new Map(tools), activeCapabilities)
-  if (!externalGuest) {
+  if (!isolatedAudience) {
     allTools.set('saveMemory', saveMemory)
     allTools.set('getMemory', getMemory)
     allTools.set('deleteMemory', deleteMemory)
@@ -1899,7 +1999,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // capability grants ('tasks' / 'crm') applied above by
   // filterToolsByCapabilities — no per-turn injection here.
 
-  if (sessionStateStore && !externalGuest) {
+  if (sessionStateStore && !isolatedAudience) {
     const { trackCommitment, resolveCommitment } = createSessionStateTools(
       sessionStateStore,
       {
@@ -2022,7 +2122,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
 
   let preparedCommand = prepareSlashCommand(messageText)
-  if (assistant.workspaceId && (skillStore || params.workflowStore)) {
+  if (assistant.workspaceId && !isolatedAudience && (skillStore || params.workflowStore)) {
     try {
       const nativeCatalog = await buildWorkspaceNativeSlashCommands({
         userId: connectorUserId,
@@ -2037,7 +2137,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
 
   // ── Skills ──
-  if (skillStore && !externalGuest) {
+  if (skillStore && !isolatedAudience) {
     // Slash command (`/goal register …` as the whole message) — same seam as
     // the web chat route: the name is threaded as an enforced skill slug, the
     // governance gates apply inside injectSkills, and an unresolved name
@@ -2105,7 +2205,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // file label, duration, credit cost, and the default blueprint id so the model
   // can map "yes / the default" to the right choice. Per-turn dynamic injection —
   // not in Layer 1 (the tool name only appears here, when a pending row exists).
-  {
+  if (!isolatedAudience) {
     try {
       const channelSessionKey = buildChannelSessionKey({
         channel: channelType,
@@ -2140,6 +2240,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   } catch (err) {
     if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
     console.warn(`[${channelType}] channel turn refused before generation:`, (err as Error).name)
+    if (isDeliveryAudienceUnverifiedError(err)) {
+      await hooks.sendError(err)
+    }
     await hooks.onCleanup?.()
     return
   }
@@ -2173,7 +2276,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // Only wired when filesApi is present — without it the pipeline could
   // collect intent it can never resolve to bytes, and `sendFile`'s
   // missing-collector gate gives the model an honest error instead.
-  const attachmentCollector = filesApi && !externalGuest ? new AttachmentCollector() : undefined
+  const attachmentCollector = filesApi && !isolatedAudience ? new AttachmentCollector() : undefined
 
   // ── Tool-pairing buffer ──
   type PendingTurn = { content: ContentBlock[]; toolResults: ContentBlock[] }
@@ -2302,7 +2405,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
 
   // ── Preflight research ──
   let preflightContext = ''
-  if (!externalGuest && messageText.length > 40) {
+  if (!isolatedAudience && messageText.length > 40) {
     try {
       const preflight = await runPreflight({
         provider: backgroundProvider, model: backgroundLaneModel, message: messageText, tools: allTools,
@@ -2339,7 +2442,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   if (messageText && matchesDisputedFigure(messageText)) {
     try {
       const { getClaimsForLatestAssistantMessage } = await import('../db/claim-provenance-store.js')
-      const priorClaims = await getClaimsForLatestAssistantMessage(session.id)
+      const priorClaims = await getClaimsForLatestAssistantMessage(session.id, true)
       if (priorClaims.length > 0) {
         privateRuntimeContextParts.push(
           `# Figure provenance (dispute check)\n\n${buildDisputeContextNote(priorClaims)}`,
@@ -2843,7 +2946,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
 
     // ── Session-state diff pass (fire-and-forget safety net) ──
     // See docs/architecture/context-engine/session-state.md.
-    if (sessionStateStore && isIdentified) {
+    if (sessionStateStore && isIdentified && !isolatedAudience) {
       const stateStore = sessionStateStore
       const diffRecentTurns: Message[] = []
       const assistantLastText = pendingAssistantTurns
@@ -2964,6 +3067,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           stage: sanitizeAnalytics('live_authority'),
         },
       })
+      if (isDeliveryAudienceUnverifiedError(err)) {
+        await hooks.sendError(err)
+      }
       return
     }
     await flushBufferedTurns('[Stream terminated unexpectedly before the tool result was recorded.]')

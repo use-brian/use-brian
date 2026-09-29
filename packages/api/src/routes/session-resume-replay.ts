@@ -447,6 +447,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
               sessionId,
               { ...runtimeContext, workerManager: undefined },
               deps.tools,
+              params.workerRunIds,
             ))
           if (respawned > 0 || notificationsReady > 0) {
             deps.analytics?.logEvent({

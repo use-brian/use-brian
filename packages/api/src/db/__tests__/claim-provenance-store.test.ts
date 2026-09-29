@@ -90,7 +90,7 @@ describe('[COMP:engine/grounding-gate] getClaimsForLatestAssistantMessage', () =
     const [sql, values] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain("role = 'assistant'")
     expect(sql).toContain('ORDER BY sequence_num DESC')
-    expect(values).toEqual(['sess-1'])
+    expect(values).toEqual(['sess-1', false])
     expect(claims).toEqual([
       { claim: '40,000 里', canonical: 'n:40000', kind: 'amount', status: 'unverified' },
       {
@@ -102,5 +102,13 @@ describe('[COMP:engine/grounding-gate] getClaimsForLatestAssistantMessage', () =
         backedByToolName: 'webSearch',
       },
     ])
+  })
+
+  it('can require the latest assistant claim to have reached the provider', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await getClaimsForLatestAssistantMessage('sess-1', true)
+    const [sql, values] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain('channel_message_id IS NOT NULL')
+    expect(values).toEqual(['sess-1', true])
   })
 })

@@ -102,6 +102,8 @@ import {
   type ChannelIntegrationConfig,
   type ChannelModelAlias,
   type CustomChannelState,
+  type DeliveryAudienceBinding,
+  type DeliveryAudienceBindingInput,
   type WhatsAppCloudGroup,
   type RequireMentionOverride,
   type UserAccessMode,
@@ -141,6 +143,7 @@ import {
   KeyRound,
   MessageCircle,
   Pencil,
+  ShieldCheck,
   SmilePlus,
   UsersRound,
   X,
@@ -1076,6 +1079,7 @@ export function ChannelDetail({
           <ChannelConfigSection
             workspaceId={workspaceId}
             channel={channel}
+            canManageAuthority={canRename}
             onUpdated={onUpdated}
           />
         )}
@@ -1575,10 +1579,12 @@ function SurfaceInput({
 export function ChannelConfigSection({
   workspaceId,
   channel,
+  canManageAuthority = false,
   onUpdated,
 }: {
   workspaceId: string;
   channel: Channel;
+  canManageAuthority?: boolean;
   onUpdated: (c: Channel) => void;
 }) {
   const t = useT();
@@ -1608,8 +1614,12 @@ export function ChannelConfigSection({
     setConfig(channel.config ?? {});
   }, [channel.config]);
 
-  async function save(patch: Omit<ChannelConfigPatch, "deliveryAudienceBindings">): Promise<void> {
-    setConfig((c) => ({ ...c, ...patch }));
+  async function save(patch: ChannelConfigPatch): Promise<void> {
+    // Audience bindings come back with server-stamped approval metadata, so
+    // wait for the refreshed channel rather than placing the input shape into
+    // the response-shaped config state.
+    const { deliveryAudienceBindings: _bindings, ...optimisticPatch } = patch;
+    setConfig((c) => ({ ...c, ...optimisticPatch }));
     setSaving(true);
     setSaveError(false);
     try {
@@ -1925,6 +1935,14 @@ export function ChannelConfigSection({
               saving={saving}
               onChange={(next) => void save({ requireMentionOverrides: next })}
             />
+            <div className="border-t border-border pt-3">
+              <TelegramDeliveryAudiences
+                config={config}
+                saving={saving}
+                canManageAuthority={canManageAuthority}
+                onChange={(next) => void save({ deliveryAudienceBindings: next })}
+              />
+            </div>
           </section>
 
           <section className="flex flex-col gap-3 rounded-lg border border-border bg-background p-3 xl:col-span-2">
@@ -2104,6 +2122,154 @@ function ConfigToggle({
         <span>{label}</span>
       </label>
       <p className="text-xs text-muted-foreground pl-6">{hint}</p>
+    </div>
+  );
+}
+
+const UNAPPROVED_AUDIENCE = "unapproved";
+
+function deliveryAudienceInput(
+  binding: DeliveryAudienceBinding,
+): DeliveryAudienceBindingInput {
+  return {
+    channelId: binding.channelId,
+    audienceType: binding.audienceType,
+    clearance: binding.clearance,
+    compartments: binding.compartments,
+    projectIds: binding.projectIds,
+    recipientUserId: binding.recipientUserId,
+    expiresAt: binding.expiresAt,
+  };
+}
+
+/** Owner/admin approval for the Telegram groups the bot has actually seen. */
+function TelegramDeliveryAudiences({
+  config,
+  saving,
+  canManageAuthority,
+  onChange,
+}: {
+  config: ChannelIntegrationConfig;
+  saving: boolean;
+  canManageAuthority: boolean;
+  onChange: (next: DeliveryAudienceBindingInput[]) => void;
+}) {
+  const t = useT();
+  const cfg = t.studioPage.channels.config;
+  const clearanceLabels = t.studioPage.channels.clearance;
+  const bindings = config.deliveryAudienceBindings ?? [];
+  const groups = (config.seenChats ?? [])
+    .filter((chat) => chat.chatType === "group" || chat.chatId.startsWith("-"))
+    .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+
+  async function setAudience(
+    chatId: string,
+    chatTitle: string,
+    nextValue: string,
+  ): Promise<void> {
+    if (!canManageAuthority) return;
+    const existing = bindings.find((binding) => binding.channelId === chatId);
+    const next = bindings
+      .filter((binding) => binding.channelId !== chatId)
+      .map(deliveryAudienceInput);
+
+    if (nextValue !== UNAPPROVED_AUDIENCE) {
+      const clearance = nextValue as ChannelClearance;
+      const ok = await confirmDialog({
+        title: cfg.telegramAudienceConfirmTitle,
+        description: format(cfg.telegramAudienceConfirmDescription, {
+          group: chatTitle,
+          clearance: clearanceLabels[clearance],
+        }),
+        confirmLabel: cfg.telegramAudienceConfirmAction,
+        cancelLabel: cfg.telegramAudienceConfirmCancel,
+      });
+      if (!ok) return;
+      next.push({
+        channelId: chatId,
+        audienceType: "group",
+        clearance,
+        compartments: existing?.compartments ?? [],
+        projectIds: existing?.projectIds ?? [],
+        recipientUserId: null,
+        expiresAt: existing?.expiresAt ?? null,
+      });
+    }
+
+    onChange(next);
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-start gap-2">
+        <ShieldCheck
+          className="mt-0.5 size-4 shrink-0 text-violet-600 dark:text-violet-400"
+          aria-hidden
+        />
+        <div>
+          <div className="text-sm font-medium">{cfg.telegramAudienceTitle}</div>
+          <p className="text-xs text-muted-foreground">
+            {cfg.telegramAudienceHint}
+          </p>
+        </div>
+      </div>
+      {groups.length === 0 ? (
+        <p className="text-xs italic text-muted-foreground">
+          {cfg.telegramAudienceNoGroups}
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-1.5">
+          {groups.map((chat) => {
+            const title =
+              chat.chatTitle ?? format(cfg.overridesChatFallback, { id: chat.chatId });
+            const binding = bindings.find(
+              (candidate) => candidate.channelId === chat.chatId,
+            );
+            return (
+              <li
+                key={chat.chatId}
+                className="flex flex-col gap-2 rounded-md border border-border bg-muted/30 p-2 sm:flex-row sm:items-center"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">{title}</div>
+                  <div className="truncate font-mono text-[11px] text-muted-foreground">
+                    {chat.chatId}
+                  </div>
+                </div>
+                <Select
+                  value={binding?.clearance ?? UNAPPROVED_AUDIENCE}
+                  disabled={saving || !canManageAuthority}
+                  onValueChange={(value) => {
+                    if (value) void setAudience(chat.chatId, title, value);
+                  }}
+                >
+                  <SelectTrigger
+                    aria-label={format(cfg.telegramAudienceSelectLabel, { group: title })}
+                    className="min-h-11 w-full text-[16px] sm:w-44 md:min-h-8 md:text-sm"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={UNAPPROVED_AUDIENCE}>
+                      {cfg.telegramAudienceNone}
+                    </SelectItem>
+                    <SelectItem value="public">{clearanceLabels.public}</SelectItem>
+                    <SelectItem value="internal">{clearanceLabels.internal}</SelectItem>
+                    <SelectItem value="confidential">
+                      {clearanceLabels.confidential}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {!canManageAuthority && (
+        <p className="text-xs text-muted-foreground">
+          {cfg.telegramAudienceAdminOnly}
+        </p>
+      )}
     </div>
   );
 }

@@ -100,6 +100,8 @@ export type ResolveTurnScopeInput = {
   key?: TurnScopeBinding
   /** Trusted public-share/key lanes may intentionally publish assistant scope. */
   memberMode?: 'enforce' | 'assistant' | 'member' | 'external'
+  /** The recipient envelope, not the storage session, owns shared-provider scope. */
+  ignoreSessionBinding?: boolean
   systemRead?: boolean
 }
 
@@ -114,6 +116,9 @@ function selectedBinding(input: ResolveTurnScopeInput): {
   projectId: string | null
   historical: boolean
 } {
+  if (input.ignoreSessionBinding) {
+    return { groupId: null, projectId: null, historical: false }
+  }
   // Presence matters: an existing legacy session/key with explicit NULL is
   // company-wide and must not begin inheriting a newly configured assistant
   // default after the fact.
@@ -199,9 +204,16 @@ async function resolveScope(
   applyProjection: (scope: ResolvedTurnScope) => ResolvedTurnScope,
 ): Promise<ResolvedTurnScope> {
   const workspaceId = input.workspaceId ?? input.assistant.workspaceId
-  const binding = selectedBinding(input)
   const resolveReadCeilings = deps.resolveReadCeilings ?? resolveOperationCeilingsSystem
   const externalPrincipal = input.memberMode === 'external'
+  // External channel principals never inherit a workspace member's saved
+  // Team/Project selection. Legacy sessions created before strict guest
+  // authority may still carry those ids; treating them as a requested binding
+  // bricks the public guest lane and, worse, makes session metadata look like a
+  // grant. Their effective scope is always public General.
+  const binding = externalPrincipal
+    ? { groupId: null, projectId: null, historical: false }
+    : selectedBinding(input)
 
   if (!workspaceId) {
     return applyProjection({

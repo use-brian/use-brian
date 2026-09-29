@@ -11,8 +11,8 @@
  *    construction, fail-closed when the template lacks `unshare`.
  *  - No ambient secrets: nothing from the host env is forwarded into the
  *    sandbox; the only credentials a sandbox ever sees are the session bundle
- *    the orchestrator explicitly injects and — on the `runBrowserUse` lane
- *    only — the exploration LLM key, set per-run on the driver exec (the
+ *    the orchestrator explicitly injects and — on the `runBrowserAgent` lane
+ *    only — the exploration keys, set per-run on the driver exec (the
  *    agentic loop runs inside the VM and must reach its LLM; documented on
  *    `E2bCloudProviderConfig.browserUse`).
  *  - The BYOP proxy hook (§4.6) is agent-browser's `--proxy` flag, set
@@ -21,7 +21,7 @@
 import {
   BrowserBackendError,
   type BlockRunHandle,
-  type BrowserUseRunResult,
+  type BrowserAgentRunResult,
   type BrowserUseLlmConfig,
   type BrowserSnapshot,
   type BuTraceStep,
@@ -34,9 +34,11 @@ import {
   type SandboxProvider,
   type SessionBundle,
   type TakeoverInputEvent,
+  type JevUltrafastConfig,
 } from '../../types.js'
 import { SANDBOX_SESSION_NAME, SANDBOX_VIEWPORT, chainCommands, cli, parseSnapshotOutput, sessionEnv, splitCommandParts } from './agent-browser-cli.js'
 import { BU_DRIVER_PY, mapBrowserUseHistory } from './bu-driver.js'
+import { JEV_ULTRAFAST_DRIVER_PY, mapJevUltrafastReceipt } from './jev-ultrafast-driver.js'
 import {
   TAKEOVER_INPUT_HELPER_MJS,
   TAKEOVER_INPUT_HELPER_PATH,
@@ -54,6 +56,7 @@ import { randomBytes } from 'node:crypto'
 
 export const SCRATCH_DIR = '/home/user/scratch'
 export const DOWNLOADS_DIR = '/home/user/downloads'
+const BROWSER_USE_PYTHON = '/opt/browser-use-venv/bin/python'
 // Sandbox commands run as `user` (HOME=/home/user), NOT root — validated
 // in-sandbox 2026-07-13. Auth state moves through explicit files: inject
 // writes one that AGENT_BROWSER_STATE loads at daemon launch (missing file
@@ -76,12 +79,13 @@ export type E2bCloudProviderConfig = {
   templateId?: string
   defaultMaxLifetimeSeconds?: number
   /**
-   * The LLM the watched browser-use exploration drives (R2-1). Threaded from
-   * boot — the model id NEVER lives in this tree (plan §4.14 model routing),
-   * and the key is injected per-run onto the driver exec only, the one
-   * documented exception to the no-ambient-secrets contract (§8): the
-   * exploration's agentic loop runs inside the VM and must reach its LLM.
-   * Absent → `runBrowserUse` refuses with an honest configuration error.
+   * Jev Ultrafast primary configuration. The model id and key are injected
+   * only on the driver exec; neither becomes ambient sandbox state.
+   */
+  jevUltrafast?: JevUltrafastConfig
+  /**
+   * Browser Use fallback model and Jev TYPE_TEXT helper. This credential is
+   * also scoped to the driver exec and never becomes ambient sandbox state.
    */
   browserUse?: BrowserUseLlmConfig
 }
@@ -483,82 +487,162 @@ export function createE2bCloudProvider(
       return { stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode }
     },
 
-    async runBrowserUse(sandboxId: string, req): Promise<BrowserUseRunResult> {
-      // The watched agentic fallback (R2-1): browser-use runs INSIDE the
-      // micro-VM through its 0.13 Python API — the provider materializes a
-      // deterministic driver (bu-driver.ts) that attaches over CDP to the
-      // SAME Chromium agent-browser drives (so injected profile state
-      // applies), runs one Agent loop, and saves the history JSON that
-      // `mapBrowserUseHistory` turns into the distiller's trace. The old
-      // one-shot `browser-use run --task-file` CLI never existed in 0.13 —
-      // every prod run argparse-died with exit 2 (2026-07-21 incident).
+    async runBrowserAgent(sandboxId: string, req): Promise<BrowserAgentRunResult> {
       const bu = req.llm ?? config.browserUse
-      if (!bu) {
+      const jev = config.jevUltrafast
+      if (!jev && !bu) {
         throw new Error(
-          'browser-use is not configured on this deployment: the sandbox provider has no LLM key for the exploration agent, so agentic browsing cannot run. The flat browser tools still work.',
+          'Agentic browsing is not configured on this deployment: Jev Ultrafast has no TypeSafe key and Browser Use has no fallback model key. The flat browser tools still work.',
         )
       }
       const handle = await handleFor(sandboxId)
       const m = meta(sandboxId)
-      // Resolve the CDP endpoint, lazily starting the daemon on first use —
-      // same cache + invalidation discipline as the take-over input relay.
-      if (!m.cdpUrl) {
-        m.cdpUrl = (await runBrowserCommand(sandboxId, cli.getCdpUrl())).trim()
+      const resolveCdp = async (): Promise<string> => {
         if (!m.cdpUrl) {
-          throw new Error('browser-use failed: the sandbox browser exposed no CDP endpoint')
+          m.cdpUrl = (await runBrowserCommand(sandboxId, cli.getCdpUrl())).trim()
+          if (!m.cdpUrl) throw new Error('the sandbox browser exposed no CDP endpoint')
+        }
+        return m.cdpUrl
+      }
+      const runBrowserUseFallback = async (
+        fallbackReason: string,
+        priorUsage: BrowserAgentRunResult['usage'] = [],
+      ): Promise<BrowserAgentRunResult> => {
+        if (!bu) {
+          throw new Error(
+            `Jev Ultrafast stopped before acting (${fallbackReason}), and Browser Use is not configured on this deployment. The flat browser tools still work.`,
+          )
+        }
+        m.cdpUrl = undefined
+        const cdpUrl = await resolveCdp()
+        const goalPath = `${SCRATCH_DIR}/.bu/goal.txt`
+        const driverPath = `${SCRATCH_DIR}/.bu/driver.py`
+        const tracePath = `${SCRATCH_DIR}/.bu/history.json`
+        const outPath = `${SCRATCH_DIR}/.bu/output.txt`
+        await handle.runCommand(`mkdir -p ${SCRATCH_DIR}/.bu`, { timeoutMs: 10_000 })
+        await handle.writeFile(goalPath, new TextEncoder().encode(`Start at ${req.url}. ${req.goal}`))
+        await handle.writeFile(driverPath, new TextEncoder().encode(BU_DRIVER_PY))
+        await handle.writeFile(tracePath, new Uint8Array())
+        await handle.writeFile(outPath, new Uint8Array())
+        const res = await handle.runCommand(`cd ${SCRATCH_DIR} && ${BROWSER_USE_PYTHON} ${driverPath}`, {
+          timeoutMs: req.timeoutMs ?? SKILL_DEFAULT_TIMEOUT_MS,
+          envs: {
+            BU_CDP_URL: cdpUrl,
+            BU_GOAL_PATH: goalPath,
+            BU_TRACE_PATH: tracePath,
+            BU_OUT_PATH: outPath,
+            BU_MAX_STEPS: String(req.maxSteps ?? 40),
+            BU_MODEL: bu.model,
+            ...(bu.baseUrl ? { OPENAI_BASE_URL: bu.baseUrl } : {}),
+            ...(bu.useVision === false ? { BU_USE_VISION: 'false' } : {}),
+            [bu.apiKeyEnvName]: bu.apiKey,
+            ANONYMIZED_TELEMETRY: 'false',
+            BROWSER_USE_CLOUD_SYNC: 'false',
+          },
+        })
+        let trace: BuTraceStep[] = []
+        let mappedOutput = ''
+        try {
+          const bytes = await handle.readFile(tracePath)
+          const mapped = mapBrowserUseHistory(JSON.parse(Buffer.from(bytes).toString('utf8')))
+          trace = mapped.trace
+          mappedOutput = mapped.output
+        } catch {
+          /* no trace → the distiller has nothing to compile */
+        }
+        let output = ''
+        try {
+          output = Buffer.from(await handle.readFile(outPath)).toString('utf8').trim()
+        } catch {
+          /* fall back to mapped done-text */
+        }
+        if (res.exitCode !== 0 && trace.length === 0) {
+          m.cdpUrl = undefined
+          const detail = (res.stderr || res.stdout || 'unknown error').trim().slice(-600)
+          throw new Error(
+            `Jev Ultrafast stopped before acting (${fallbackReason}); Browser Use fallback failed: ${detail}`,
+          )
+        }
+        return {
+          trace,
+          output: output || mappedOutput,
+          backend: 'browser-use',
+          status: res.exitCode === 0 ? 'completed' : 'partial_failure',
+          fallbackReason,
+          usage: priorUsage,
         }
       }
-      const goalPath = `${SCRATCH_DIR}/.bu/goal.txt`
-      const driverPath = `${SCRATCH_DIR}/.bu/driver.py`
-      const tracePath = `${SCRATCH_DIR}/.bu/history.json`
-      const outPath = `${SCRATCH_DIR}/.bu/output.txt`
-      await handle.runCommand(`mkdir -p ${SCRATCH_DIR}/.bu`, { timeoutMs: 10_000 })
+      if (!jev) return runBrowserUseFallback('Jev Ultrafast is not configured')
+      const cdpUrl = await resolveCdp()
+      const goalPath = `${SCRATCH_DIR}/.jev/goal.txt`
+      const driverPath = `${SCRATCH_DIR}/.jev/driver.py`
+      const receiptPath = `${SCRATCH_DIR}/.jev/receipt.json`
+      await handle.runCommand(`mkdir -p ${SCRATCH_DIR}/.jev`, { timeoutMs: 10_000 })
       await handle.writeFile(goalPath, new TextEncoder().encode(req.goal))
-      await handle.writeFile(driverPath, new TextEncoder().encode(BU_DRIVER_PY))
+      await handle.writeFile(driverPath, new TextEncoder().encode(JEV_ULTRAFAST_DRIVER_PY))
+      await handle.writeFile(receiptPath, new Uint8Array())
+      const textHelper: Record<string, string> = bu?.apiKeyEnvName === 'GOOGLE_API_KEY'
+        ? {
+            TEXT_MODEL_API_KEY: bu.apiKey,
+            TEXT_MODEL: bu.model,
+            TEXT_MODEL_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
+            TEXT_MODEL_DIALECT: 'openai-chat-completions',
+          }
+        : bu?.apiKeyEnvName === 'OPENAI_API_KEY'
+          ? {
+              TEXT_MODEL_API_KEY: bu.apiKey,
+              TEXT_MODEL: bu.model,
+              ...(bu.baseUrl ? { TEXT_MODEL_BASE_URL: bu.baseUrl } : {}),
+              TEXT_MODEL_REASONING: 'none',
+            }
+          : {}
       const res = await handle.runCommand(`cd ${SCRATCH_DIR} && python3 ${driverPath}`, {
         timeoutMs: req.timeoutMs ?? SKILL_DEFAULT_TIMEOUT_MS,
         envs: {
-          BU_CDP_URL: m.cdpUrl,
-          BU_GOAL_PATH: goalPath,
-          BU_TRACE_PATH: tracePath,
-          BU_OUT_PATH: outPath,
-          BU_MAX_STEPS: String(req.maxSteps ?? 40),
-          BU_MODEL: bu.model,
-          ...(bu.baseUrl ? { OPENAI_BASE_URL: bu.baseUrl } : {}),
-          ...(bu.useVision === false ? { BU_USE_VISION: 'false' } : {}),
-          // Per-run key injection — the documented no-ambient-secrets
-          // exception (see E2bCloudProviderConfig.browserUse).
-          [bu.apiKeyEnvName]: bu.apiKey,
-          ANONYMIZED_TELEMETRY: 'false',
-          BROWSER_USE_CLOUD_SYNC: 'false',
+          BU_CDP_WS: cdpUrl,
+          JEV_GOAL_PATH: goalPath,
+          JEV_START_URL: req.url,
+          JEV_RECEIPT_PATH: receiptPath,
+          JEV_MAX_STEPS: String(req.maxSteps ?? 40),
+          TYPESAFE_API_KEY: jev.apiKey,
+          TYPESAFE_MODEL: jev.model,
+          ...textHelper,
         },
       })
-      let trace: BuTraceStep[] = []
-      let mappedOutput = ''
+      let mapped: ReturnType<typeof mapJevUltrafastReceipt> | null = null
       try {
-        const bytes = await handle.readFile(tracePath)
-        const mapped = mapBrowserUseHistory(JSON.parse(Buffer.from(bytes).toString('utf8')))
-        trace = mapped.trace
-        mappedOutput = mapped.output
+        const bytes = await handle.readFile(receiptPath)
+        mapped = mapJevUltrafastReceipt(JSON.parse(Buffer.from(bytes).toString('utf8')), req.url)
       } catch {
-        /* no trace → the distiller has nothing to compile; the output still returns */
+        /* import/attach failure before the driver wrote its receipt */
       }
-      let output = ''
-      try {
-        output = Buffer.from(await handle.readFile(outPath)).toString('utf8').trim()
-      } catch {
-        /* fall back to the mapped done-text below */
+      const primaryUsage: BrowserAgentRunResult['usage'] = (mapped?.usage ?? []).map((line) => ({
+        ...line,
+        providerKeySource: line.kind === 'jev' ? 'platform' : (bu?.providerKeySource ?? 'platform'),
+      }))
+      if (mapped?.status === 'done' && res.exitCode === 0) {
+        return {
+          trace: mapped.trace,
+          output: mapped.output,
+          backend: 'jev-ultrafast',
+          status: 'completed',
+          usage: primaryUsage,
+        }
       }
-      if (res.exitCode !== 0 && trace.length === 0) {
-        // A failed CDP attach could also mean the daemon relaunched under a
-        // new endpoint — drop the cache so the next attempt re-resolves.
-        m.cdpUrl = undefined
-        // Tail, not head: a Python traceback puts the real error LAST.
-        throw new Error(
-          `browser-use failed: ${(res.stderr || res.stdout || 'unknown error').trim().slice(-600)}`,
-        )
+      if (mapped && mapped.executedActions > 0) {
+        return {
+          trace: mapped.trace,
+          output: mapped.output,
+          backend: 'jev-ultrafast',
+          status: 'partial_failure',
+          usage: primaryUsage,
+        }
       }
-      return { trace, output: output || mappedOutput }
+      const reason = mapped?.error
+        ?? (mapped?.status
+          ? `status ${mapped.status}`
+          : (res.stderr || res.stdout || 'driver produced no receipt').trim().slice(-600))
+      return runBrowserUseFallback(reason, primaryUsage)
     },
 
     async runSkill(sandboxId: string, req): Promise<BlockRunHandle> {

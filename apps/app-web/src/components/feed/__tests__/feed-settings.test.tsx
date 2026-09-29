@@ -27,9 +27,11 @@ const paramsRef = vi.hoisted(
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(searchRef.current),
+  usePathname: () => "/w/ws-1/feed/twitter/settings",
   useParams: () => paramsRef.current,
 }));
+const searchRef = vi.hoisted(() => ({ current: "" }));
 vi.mock("@/lib/auth-fetch", () => ({
   authFetch: vi.fn(),
   getAccessToken: () => null,

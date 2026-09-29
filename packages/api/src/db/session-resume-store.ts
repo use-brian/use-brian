@@ -35,6 +35,8 @@ export type SessionResumePoint = {
   selectedTier?: string
   selectedLegacyByo?: boolean
   selectedMeteredModel?: string
+  /** Exact durable worker runs owned by this suspension. Absent on legacy rows. */
+  workerRunIds?: string[]
   /** Original authoring/security principal. Absent only on legacy rows. */
   startingAccessCeiling?: AccessCeiling
   createdAt: Date
@@ -50,6 +52,7 @@ export type CreateSessionResumePointParams = {
   selectedTier?: string
   selectedLegacyByo?: boolean
   selectedMeteredModel?: string
+  workerRunIds: string[]
   startingAccessCeiling: AccessCeiling
 }
 
@@ -91,7 +94,7 @@ function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
   const envelopeVersion = storedInput && typeof storedInput === 'object'
     ? (storedInput as Record<string, unknown>).__useBrianResumeVersion
     : undefined
-  const envelope = envelopeVersion === 1 || envelopeVersion === 2
+  const envelope = envelopeVersion === 1 || envelopeVersion === 2 || envelopeVersion === 3
     ? storedInput as {
         toolInput?: unknown
         selectedCustomModel?: unknown
@@ -99,10 +102,11 @@ function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
         selectedLegacyByo?: unknown
         selectedMeteredModel?: unknown
         startingAccessCeiling?: unknown
+        workerRunIds?: unknown
       }
     : null
   let startingAccessCeiling: AccessCeiling | undefined
-  if (envelopeVersion === 2 && envelope?.startingAccessCeiling) {
+  if ((envelopeVersion === 2 || envelopeVersion === 3) && envelope?.startingAccessCeiling) {
     try {
       const candidate = envelope.startingAccessCeiling as AccessCeiling
       if (typeof candidate.workspaceId !== 'string' || !candidate.workspaceId
@@ -132,6 +136,13 @@ function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
       ? { selectedMeteredModel: envelope.selectedMeteredModel }
       : {}),
     ...(startingAccessCeiling ? { startingAccessCeiling } : {}),
+    ...(envelopeVersion === 3
+      ? {
+          workerRunIds: Array.isArray(envelope?.workerRunIds)
+            ? envelope.workerRunIds.filter((id): id is string => typeof id === 'string')
+            : [],
+        }
+      : {}),
     createdAt: row.createdAt as Date,
   }
 }
@@ -155,7 +166,7 @@ export function createDbSessionResumeStore(): SessionResumeStore {
           params.approvalId,
           params.suspendedToolName,
           JSON.stringify({
-            __useBrianResumeVersion: 2,
+            __useBrianResumeVersion: 3,
             toolInput: params.suspendedToolInput,
             selectedCustomModel: params.selectedCustomModel,
             selectedTier: params.selectedTier,
@@ -165,6 +176,7 @@ export function createDbSessionResumeStore(): SessionResumeStore {
               params.startingAccessCeiling,
               params.startingAccessCeiling,
             ),
+            workerRunIds: params.workerRunIds,
           }),
           params.loopStepIndex,
         ],

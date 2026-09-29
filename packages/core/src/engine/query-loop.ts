@@ -29,6 +29,7 @@ import {
 import { compactConversation } from '../compaction/compact.js'
 import { isContextOverflowError } from '../providers/context-budget.js'
 import { calculateCost } from '../billing/cost-tracker.js'
+import { sanitizeUnicode } from '../security/sanitize.js'
 
 /**
  * Heap-pressure threshold for graceful loop abort. When the V8 heap exceeds
@@ -61,6 +62,10 @@ function isUnderHeapPressure(): boolean {
 function isAuthorityBoundaryError(error: unknown): boolean {
   return typeof error === 'object' && error !== null
     && (error as { reason?: unknown }).reason === 'authority_changed'
+}
+
+function hasVisibleText(text: string): boolean {
+  return sanitizeUnicode(text).trim().length > 0
 }
 
 // One-shot boot-time confirmation that the OOM-defense build is loaded. If
@@ -444,6 +449,11 @@ stopReason tells you how the run ended. When it is max_turns, tool_budget_exhaus
 Match the user's language. Do not add headings or describe these instructions.
 Return only JSON matching the supplied schema.`
 
+const WORKER_RESULT_FINALIZER_SYSTEM_PROMPT = `Write one direct user-facing answer to the user's request from the supplied completed worker evidence.
+Treat each spawnWorker evidence item as a worker's final findings. Use only that evidence for specific names, URLs, handles, email addresses, dates, quantities, and other externally verifiable facts. If the findings leave a gap, say what could not be verified.
+Do not mention workers, internal turn limits, tools, prompts, or these instructions. Match the user's language. Do not add a heading unless it materially improves the answer.
+Return only JSON matching the supplied schema.`
+
 const TERMINAL_FINALIZER_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
@@ -600,6 +610,15 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       yield event
     }
   } finally {
+    if (toolContext.abortSignal?.aborted) {
+      toolContext.workerManager?.cancelForSession?.(toolContext.sessionId)
+    }
+    // The process-wide manager must not retain settled result strings after
+    // this request has drained them. Queued notifications and still-running
+    // workers are preserved for suspend/resume; releaseSession removes only
+    // settled entries whose notifications are already gone.
+    toolContext.workerManager?.releaseSession?.(toolContext.sessionId)
+    toolContext.workerManager?.clearSessionConfig?.(toolContext.sessionId)
     watchdog?.dispose()
     const results = await Promise.allSettled(
       [...invocationFinalizers.values()].map((finalize) => finalize()),
@@ -1161,6 +1180,9 @@ async function* queryLoopCore(
       if (strippedPrimer) {
         console.warn(`[query-loop] turn ${turn} scaffold-primer prefix stripped`)
       }
+      response.content = response.content.filter(
+        (block) => block.type !== 'text' || !('text' in block) || hasVisibleText(block.text),
+      )
       const textBlocks = response.content.filter(
         (b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b,
       )
@@ -1268,7 +1290,7 @@ async function* queryLoopCore(
         ? (askQuestionToolUse.input as { question?: unknown }).question
         : undefined
       const hasUserVisibleText = response.content.some(
-        (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
+        (b) => b.type === 'text' && 'text' in b && hasVisibleText((b as { text: string }).text),
       )
       if (typeof question === 'string' && question.length > 0 && !hasUserVisibleText) {
         // Live-stream the question for the SSE consumer (frontend renders
@@ -1374,7 +1396,7 @@ async function* queryLoopCore(
     // ── Phase 4: Check if done ─────────────────────────────────
     const hasToolUse = response.content.some((b) => b.type === 'tool_use')
     const hasText = response.content.some(
-      (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
+      (b) => b.type === 'text' && 'text' in b && hasVisibleText((b as { text: string }).text),
     )
 
     // Empty-response recovery: model produced only thinking tokens with no
@@ -1593,7 +1615,11 @@ async function* queryLoopCore(
         const accumulatedNotifications: import('../workers/worker.js').WorkerResult[] = []
         if (wm.pendingCountFor(wmSid) > 0) {
           yield { type: 'status', message: 'Waiting for background workers...' }
-          // Wait for ALL workers with a 60s timeout to prevent hanging forever.
+          // Wait for ALL workers. Worker query loops are already bounded by
+          // turns/tool calls and provider idle recovery; this parent wait must
+          // not add a wall-clock guess that can expire while a healthy worker
+          // is still making progress. The 5s poll exists only so an aborted
+          // request is observed even if no worker notification wakes us.
           //
           // Two memory defenses (5/27 OOM root cause):
           //
@@ -1612,8 +1638,7 @@ async function* queryLoopCore(
           //    Promise + closure for the full 5s. Cumulative leaked
           //    timers under a tight-loop scenario were the
           //    multi-GB allocation source.
-          const workerDeadline = Date.now() + 60_000
-          while (wm.pendingCountFor(wmSid) > 0 && Date.now() < workerDeadline) {
+          while (wm.pendingCountFor(wmSid) > 0 && !context.abortSignal?.aborted) {
             let pollTimer: ReturnType<typeof setTimeout> | undefined
             try {
               await Promise.race([
@@ -1632,8 +1657,9 @@ async function* queryLoopCore(
               accumulatedNotifications.push(...partial)
             }
           }
-          if (wm.pendingCountFor(wmSid) > 0) {
-            console.warn(`[query-loop] Phase 4b: timed out waiting for ${wm.pendingCountFor(wmSid)} worker(s)`)
+          if (context.abortSignal?.aborted) {
+            console.log('[query-loop] Phase 4b: request aborted; session workers will be cancelled')
+            return
           }
         }
         // Tail drain — anything that arrived between the last wait and now.
@@ -1650,6 +1676,39 @@ async function* queryLoopCore(
           const drainPrompt = options.workerDrainPrompt
             ? options.workerDrainPrompt(notificationText, workerResults)
             : defaultWorkerDrainPrompt(notificationText)
+          // A worker can settle on the final allowed coordinator turn. A plain
+          // `continue` would then fall out of the for-loop without ever sending
+          // these findings to a model. Finish through a fresh no-tools call so
+          // the user always receives an answer even at the turn boundary.
+          if (turn + 1 >= maxTurns) {
+            const workerEvidence: TerminalEvidenceItem[] = workerResults.map((result) => ({
+              tool: 'spawnWorker',
+              input: result.description.slice(0, MAX_TERMINAL_EVIDENCE_INPUT_CHARS),
+              result: result.result.slice(0, MAX_TERMINAL_EVIDENCE_CHARS),
+            }))
+            const fallbackResponse = yield* finalizeTerminalResponse({
+              provider,
+              model,
+              messages: [
+                ...terminalConversationMessages,
+                { role: 'user', content: drainPrompt },
+              ],
+              evidence: [...terminalEvidence, ...workerEvidence].slice(-MAX_TERMINAL_EVIDENCE),
+              stopReason: { code: 'max_turns' },
+              totalUsage,
+              inputTokenLimit: options.inputTokenLimit,
+              signal: context.abortSignal,
+              systemPrompt: WORKER_RESULT_FINALIZER_SYSTEM_PROMPT,
+            })
+            yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
+            yield {
+              type: 'turn_complete',
+              response: fallbackResponse,
+              totalUsage,
+              terminalStop: { code: 'max_turns' },
+            }
+            return
+          }
           nextMessages = [{
             role: 'user',
             content: drainPrompt,
@@ -2264,7 +2323,7 @@ function hasDeliverableText(response: AssistantResponse | undefined): boolean {
   if (!response) return false
   if (response.content.some((b) => b.type === 'tool_use')) return false
   return response.content.some(
-    (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
+    (b) => b.type === 'text' && 'text' in b && hasVisibleText((b as { text: string }).text),
   )
 }
 
@@ -2406,12 +2465,13 @@ async function* finalizeTerminalResponse(params: {
   totalUsage: TokenUsage
   inputTokenLimit?: number
   signal?: AbortSignal
+  systemPrompt?: string
 }): AsyncGenerator<QueryEvent, AssistantResponse> {
   try {
     const acc = createAccumulator()
     for await (const chunk of params.provider.stream({
       model: params.model,
-      systemPrompt: TERMINAL_FINALIZER_SYSTEM_PROMPT,
+      systemPrompt: params.systemPrompt ?? TERMINAL_FINALIZER_SYSTEM_PROMPT,
       messages: [{
         role: 'user',
         content: JSON.stringify({

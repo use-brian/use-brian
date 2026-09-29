@@ -37,6 +37,7 @@ const SAMPLE_POINT: SessionResumePoint = {
   loopStepIndex: 2,
   selectedCustomModel: 'custom:profile-1',
   selectedTier: 'max',
+  workerRunIds: ['11111111-1111-4111-8111-111111111111'],
   startingAccessCeiling: STARTING_ACCESS,
   createdAt: new Date('2026-05-14T00:00:00Z'),
 }
@@ -191,6 +192,7 @@ describe('[COMP:brain/session-resume-worker] runSessionResume', () => {
       loopStepIndex: 2,
       selectedCustomModel: 'custom:profile-1',
       selectedTier: 'max',
+      workerRunIds: ['11111111-1111-4111-8111-111111111111'],
       startingAccessCeiling: STARTING_ACCESS,
       approvalStatus: 'approved',
       rejectReason: null,

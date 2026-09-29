@@ -65,6 +65,8 @@ export type DeliveryAudienceBindingInput = {
 };
 export type DeliveryAudienceBinding = DeliveryAudienceBindingInput & {
   version: 1;
+  recipientUserId: string | null;
+  expiresAt: string | null;
   approvedByUserId: string;
   approvedAt: string;
 };
@@ -76,7 +78,6 @@ export type DeliveryAudienceBinding = DeliveryAudienceBindingInput & {
  * fields inside `seenChats` are Telegram-only.
  */
 export type ChannelIntegrationConfig = {
-  deliveryAudienceBindings?: DeliveryAudienceBinding[];
   replyInThread?: boolean;
   ackReaction?: string;
   requireMention?: boolean;
@@ -85,6 +86,8 @@ export type ChannelIntegrationConfig = {
   requireMentionOverrides?: RequireMentionOverride[];
   /** Webhook-populated, read-only — never sent in a config PATCH. */
   seenChats?: SeenChat[];
+  /** Owner/admin-approved external destinations for restricted replies. */
+  deliveryAudienceBindings?: DeliveryAudienceBinding[];
   /** Feishu/Lark passive-ingest security allowlist. Dedicated admin API only. */
   ambientIngestChatIds?: string[];
   userAccessMode?: UserAccessMode;
@@ -100,9 +103,12 @@ export type ChannelIntegrationConfig = {
   blockedUserIds?: string[];
 };
 
-/** The fields a config PATCH may set — `seenChats` is webhook-owned. */
+/** The fields a config PATCH may set — server-owned fields are stripped. */
 export type ChannelConfigPatch = Partial<
-  Omit<ChannelIntegrationConfig, "seenChats" | "ambientIngestChatIds" | "deliveryAudienceBindings" | "whatsappDisplayPhoneNumber">
+  Omit<
+    ChannelIntegrationConfig,
+    "seenChats" | "ambientIngestChatIds" | "deliveryAudienceBindings" | "whatsappDisplayPhoneNumber"
+  >
 > & { deliveryAudienceBindings?: DeliveryAudienceBindingInput[] };
 
 export type Channel = {

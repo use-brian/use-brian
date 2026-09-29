@@ -43,6 +43,7 @@ describe('[COMP:api/session-resume-store] create', () => {
       suspendedToolName: 'gmailSendMessage',
       suspendedToolInput: { to: 'user@example.com', subject: 'hi' },
       loopStepIndex: 3,
+      workerRunIds: ['11111111-1111-4111-8111-111111111111'],
       startingAccessCeiling: STARTING_ACCESS,
     })
 
@@ -55,9 +56,10 @@ describe('[COMP:api/session-resume-store] create', () => {
       'app-1',
       'gmailSendMessage',
       JSON.stringify({
-        __useBrianResumeVersion: 2,
+        __useBrianResumeVersion: 3,
         toolInput: { to: 'user@example.com', subject: 'hi' },
         startingAccessCeiling: STARTING_ACCESS,
+        workerRunIds: ['11111111-1111-4111-8111-111111111111'],
       }),
       3,
     ])
@@ -75,6 +77,7 @@ describe('[COMP:api/session-resume-store] create', () => {
       suspendedToolName: 'gmailSendMessage',
       suspendedToolInput: { to: 'user@example.com', subject: 'hi' },
       loopStepIndex: 3,
+      workerRunIds: [],
       startingAccessCeiling: STARTING_ACCESS,
     })
 
@@ -87,12 +90,13 @@ describe('[COMP:api/session-resume-store] create', () => {
 
   it('stores and decodes the selected profile and logical tier in JSONB', async () => {
     const storedInput = {
-      __useBrianResumeVersion: 2,
+      __useBrianResumeVersion: 3,
       toolInput: { to: 'user@example.com' },
       selectedCustomModel: 'custom:profile-1',
       selectedTier: 'max',
       selectedLegacyByo: false,
       startingAccessCeiling: STARTING_ACCESS,
+      workerRunIds: ['22222222-2222-4222-8222-222222222222'],
     }
     mockQuery.mockResolvedValueOnce({
       rows: [{ ...SAMPLE_ROW, suspendedToolInput: storedInput }],
@@ -108,6 +112,7 @@ describe('[COMP:api/session-resume-store] create', () => {
       selectedCustomModel: 'custom:profile-1',
       selectedTier: 'max',
       selectedLegacyByo: false,
+      workerRunIds: ['22222222-2222-4222-8222-222222222222'],
       startingAccessCeiling: STARTING_ACCESS,
     })
 
@@ -116,6 +121,7 @@ describe('[COMP:api/session-resume-store] create', () => {
       selectedCustomModel: 'custom:profile-1',
       selectedTier: 'max',
       selectedLegacyByo: false,
+      workerRunIds: ['22222222-2222-4222-8222-222222222222'],
       startingAccessCeiling: STARTING_ACCESS,
     })
     expect(mockQuery.mock.calls[0][1]?.[3]).toBe(JSON.stringify(storedInput))
@@ -153,6 +159,24 @@ describe('[COMP:api/session-resume-store] create', () => {
 
     const row = await store.getBySessionId('sess-1')
     expect(row).not.toHaveProperty('startingAccessCeiling')
+  })
+
+  it('fails a malformed version-3 worker boundary closed to an empty run set', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        ...SAMPLE_ROW,
+        suspendedToolInput: {
+          __useBrianResumeVersion: 3,
+          toolInput: { to: 'user@example.com' },
+          startingAccessCeiling: STARTING_ACCESS,
+          workerRunIds: 'not-an-array',
+        },
+      }],
+      rowCount: 1,
+    } as never)
+
+    const row = await store.getBySessionId('sess-1')
+    expect(row).toMatchObject({ workerRunIds: [] })
   })
 })
 

@@ -193,6 +193,142 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
     expect(confirmation?.description).toContain("@username");
     expect(confirmation?.description).toContain("stable numeric ID");
   });
+
+  it("lets an owner approve a seen group as a delivery audience", async () => {
+    const channel: Channel = {
+      id: "channel_1",
+      workspaceId: "workspace_1",
+      channelType: "telegram",
+      clearance: "internal",
+      enabledCapabilities: ["chat"],
+      status: "active",
+      displayName: "Telegram bot",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      integrationId: "integration_1",
+      config: {
+        seenChats: [{
+          chatId: "-1002000000001",
+          chatTitle: "Operations room",
+          chatType: "group",
+          isForum: false,
+          topics: [],
+          lastSeenAt: "2026-09-29T05:20:45.667Z",
+        }],
+      },
+    };
+    confirmDialog.mockResolvedValueOnce(true);
+    vi.mocked(updateChannelConfig).mockResolvedValueOnce({
+      ...channel,
+      config: {
+        ...channel.config,
+        deliveryAudienceBindings: [{
+          version: 1,
+          channelId: "-1002000000001",
+          audienceType: "group",
+          clearance: "confidential",
+          compartments: [],
+          projectIds: [],
+          recipientUserId: null,
+          expiresAt: null,
+          approvedByUserId: "owner_1",
+          approvedAt: "2026-09-29T05:30:00.000Z",
+        }],
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        localized(
+          <ChannelConfigSection
+            workspaceId="workspace_1"
+            channel={channel}
+            canManageAuthority
+            onUpdated={vi.fn()}
+          />,
+        ),
+      );
+    });
+
+    expect(host.textContent).toContain("Group reply access");
+    expect(host.textContent).toContain("Operations room");
+    const trigger = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Reply access for Operations room"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => trigger!.click());
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+      .find((node) => node.textContent?.trim() === "Confidential");
+    expect(option).toBeDefined();
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+      option!.click();
+    });
+
+    expect(confirmDialog).toHaveBeenCalledWith({
+      title: "Approve replies to this group?",
+      description: expect.stringContaining("Operations room"),
+      confirmLabel: "Approve group",
+      cancelLabel: "Cancel",
+    });
+    expect(updateChannelConfig).toHaveBeenCalledWith(
+      "workspace_1",
+      "channel_1",
+      { deliveryAudienceBindings: [{
+        channelId: "-1002000000001",
+        audienceType: "group",
+        clearance: "confidential",
+        compartments: [],
+        projectIds: [],
+        recipientUserId: null,
+        expiresAt: null,
+      }] },
+    );
+  });
+
+  it("keeps Telegram group audience approval read-only for members", async () => {
+    const channel: Channel = {
+      id: "channel_1",
+      workspaceId: "workspace_1",
+      channelType: "telegram",
+      clearance: "internal",
+      enabledCapabilities: ["chat"],
+      status: "active",
+      displayName: "Telegram bot",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      integrationId: "integration_1",
+      config: {
+        seenChats: [{
+          chatId: "-1002000000002",
+          chatTitle: "Team room",
+          chatType: "group",
+          isForum: false,
+          topics: [],
+          lastSeenAt: "2026-09-29T05:20:45.667Z",
+        }],
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        localized(
+          <ChannelConfigSection
+            workspaceId="workspace_1"
+            channel={channel}
+            onUpdated={vi.fn()}
+          />,
+        ),
+      );
+    });
+
+    expect(host.textContent).toContain(
+      "Only workspace owners and admins can change group reply access.",
+    );
+    expect(host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Reply access for Team room"]',
+    )?.disabled).toBe(true);
+  });
 });
 
 describe("[COMP:app-web/studio-channels] WhatsApp Cloud access UX", () => {

@@ -90,7 +90,8 @@ export function createDbWorkerRunsStore(): WorkerRunsStore {
       return result.rowCount ?? 0
     },
 
-    async loadForSession(sessionId) {
+    async loadForSession(sessionId, runIds) {
+      if (runIds && runIds.length === 0) return []
       const result = await query<{
         runId: string
         workerId: string
@@ -115,8 +116,9 @@ export function createDbWorkerRunsStore(): WorkerRunsStore {
                 history_json   AS "historyJson"
          FROM worker_runs
          WHERE session_id = $1
+           ${runIds ? 'AND id = ANY($2::uuid[])' : ''}
          ORDER BY created_at ASC`,
-        [sessionId],
+        runIds ? [sessionId, [...runIds]] : [sessionId],
       )
       return result.rows.map((r) => ({
         runId: r.runId,

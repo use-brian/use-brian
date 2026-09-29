@@ -123,6 +123,25 @@ afterEach(() => {
 })
 
 describe('[COMP:engine/query-loop] Empty-response recovery', () => {
+  it('treats an invisible-only provider turn as empty and retries it', async () => {
+    const { provider, calls } = scriptedProvider([
+      textChunks('\u200B\u2060'),
+      textChunks('visible recovery'),
+    ])
+
+    const events = await runLoop(provider)
+    const assistantTurns = events.filter(
+      (event): event is Extract<QueryEvent, { type: 'assistant_turn' }> =>
+        event.type === 'assistant_turn',
+    )
+
+    expect(calls).toHaveLength(2)
+    expect(assistantTurns[0]?.response.content).toEqual([])
+    expect(assistantTurns.at(-1)?.response.content).toEqual([
+      { type: 'text', text: 'visible recovery' },
+    ])
+  })
+
   it('recovers on turn 0 when the very first response is empty (cgov regression)', async () => {
     // Repro: Gemini Flash thinking-burns the user's question into silence
     // on turn 0 (no text, no tool_use, stopReason=STOP). Pre-fix this

@@ -454,6 +454,34 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
   })
 
+  it('keeps filtered audience compaction ephemeral and ignores durable hidden state', async () => {
+    const sessionStateStore = {
+      purgeResolvedOlderThan: vi.fn(async () => 0),
+    }
+    const result = await runProactiveCompaction({
+      ...baseParams({
+        sessionMessages: [
+          makeSessionMessage({ sequenceNum: 10, role: 'user', content: [{ type: 'text', text: 'visible old question' }] }),
+          makeSessionMessage({ sequenceNum: 11, role: 'assistant', content: [{ type: 'text', text: 'visible old answer' }] }),
+          makeSessionMessage({ sequenceNum: 12, role: 'user', content: [{ type: 'text', text: 'visible current question' }] }),
+        ],
+        session: makeSession({
+          compactSummary: 'hidden workspace summary',
+          compactBoundarySequence: 9,
+        }),
+        unconditional: true,
+      }),
+      persistLongTermContext: false,
+      persistSessionSummary: false,
+      sessionStateStore: sessionStateStore as never,
+    })
+
+    expect(result.compacted).toBe(true)
+    expect(JSON.stringify(result.messages)).not.toContain('hidden workspace summary')
+    expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
+    expect(sessionStateStore.purgeResolvedOlderThan).not.toHaveBeenCalled()
+  })
+
   it('on unconditional compaction, calls setCompactSummaryAndBoundary with cursor = first recent seq', async () => {
     // Build a session where findRecentSplit will anchor the last user msg
     // as recent and everything before it as compactable. Sequence spans
