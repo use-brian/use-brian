@@ -331,6 +331,102 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
   });
 });
 
+describe("[COMP:app-web/studio-channels] Telegram personal group replies", () => {
+  function approvedChannel(recipientUserId: string | null): Channel {
+    return {
+      id: "channel_1",
+      workspaceId: "workspace_1",
+      channelType: "telegram",
+      clearance: "internal",
+      enabledCapabilities: ["chat"],
+      status: "active",
+      displayName: "Telegram bot",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      integrationId: "integration_1",
+      config: {
+        seenChats: [{
+          chatId: "-1002000000003",
+          chatTitle: "My agents",
+          chatType: "group",
+          isForum: true,
+          topics: [],
+          lastSeenAt: "2026-09-29T05:20:45.667Z",
+        }],
+        deliveryAudienceBindings: [{
+          version: 1,
+          channelId: "-1002000000003",
+          audienceType: "group",
+          clearance: "internal",
+          compartments: [],
+          projectIds: [],
+          recipientUserId,
+          expiresAt: null,
+          approvedByUserId: "owner_1",
+          approvedAt: "2026-09-29T05:30:00.000Z",
+        }],
+      },
+    };
+  }
+
+  function render(channel: Channel) {
+    return act(async () => {
+      root.render(
+        localized(
+          <ChannelConfigSection
+            workspaceId="workspace_1"
+            channel={channel}
+            canManageAuthority
+            myUserId="owner_1"
+            onUpdated={vi.fn()}
+          />,
+        ),
+      );
+    });
+  }
+
+  function onlyMeBox(): HTMLInputElement {
+    const label = [...host.querySelectorAll("label")]
+      .find((node) => node.textContent?.includes("Only me") || node.textContent?.includes("Personal to another member"));
+    const input = label?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    expect(input).toBeTruthy();
+    return input!;
+  }
+
+  it("confirms, then marks an approved group as personal to the caller", async () => {
+    const channel = approvedChannel(null);
+    confirmDialog.mockResolvedValueOnce(true);
+    vi.mocked(updateChannelConfig).mockResolvedValueOnce(channel);
+    await render(channel);
+
+    await act(async () => onlyMeBox().click());
+
+    expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Use your personal context in this group?",
+      description: expect.stringContaining("My agents"),
+    }));
+    expect(updateChannelConfig).toHaveBeenCalledWith("workspace_1", "channel_1", {
+      deliveryAudienceBindings: [expect.objectContaining({
+        channelId: "-1002000000003",
+        audienceType: "group",
+        recipientUserId: "owner_1",
+      })],
+    });
+  });
+
+  it("does nothing when the confirmation is cancelled", async () => {
+    await render(approvedChannel(null));
+    await act(async () => onlyMeBox().click());
+    expect(updateChannelConfig).not.toHaveBeenCalled();
+  });
+
+  it("will not let one member take over another member personal group", async () => {
+    await render(approvedChannel("someone_else"));
+    expect(host.textContent).toContain("Personal to another member");
+    expect(onlyMeBox().disabled).toBe(true);
+  });
+});
+
 describe("[COMP:app-web/studio-channels] WhatsApp Cloud access UX", () => {
   it("normalizes allowlist input and renders a persistent chat QR", async () => {
     expect(normalizeWhatsAppPhoneNumberInput("+1 (555) 123-4567")).toBe(

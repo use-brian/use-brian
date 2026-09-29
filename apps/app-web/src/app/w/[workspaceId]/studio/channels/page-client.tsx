@@ -332,6 +332,7 @@ export default function StudioChannelsPage() {
     assistants,
     myClearance: membershipClearance,
     myRole,
+    myUserId,
     refresh: refreshChannels,
     updateChannels,
     updateRouting,
@@ -620,6 +621,7 @@ export default function StudioChannelsPage() {
                 myClearance={myClearance}
                 canRename={myRole === "owner" || myRole === "admin"}
                 canManageAudiences={myRole === "owner" || myRole === "admin"}
+                myUserId={myUserId}
                 onUpdated={onChannelUpdated}
                 onRoutingChanged={() => refreshRouting(sel.channel.id)}
                 onDeleted={onChannelDeleted}
@@ -657,6 +659,7 @@ export function ChannelDetail({
   myClearance,
   canRename,
   canManageAudiences = false,
+  myUserId = null,
   onUpdated,
   onRoutingChanged,
   onDeleted,
@@ -676,6 +679,8 @@ export function ChannelDetail({
   canRename: boolean;
   /** Explicit owner/admin gate for destination approval, fail closed while loading. */
   canManageAudiences?: boolean;
+  /** The caller's user id; enables marking a group as personal to them. */
+  myUserId?: string | null;
   onUpdated: (c: Channel) => void;
   onRoutingChanged: () => void;
   onDeleted: (channelId: string) => void;
@@ -1080,6 +1085,7 @@ export function ChannelDetail({
             workspaceId={workspaceId}
             channel={channel}
             canManageAuthority={canRename}
+            myUserId={myUserId}
             onUpdated={onUpdated}
           />
         )}
@@ -1580,11 +1586,13 @@ export function ChannelConfigSection({
   workspaceId,
   channel,
   canManageAuthority = false,
+  myUserId = null,
   onUpdated,
 }: {
   workspaceId: string;
   channel: Channel;
   canManageAuthority?: boolean;
+  myUserId?: string | null;
   onUpdated: (c: Channel) => void;
 }) {
   const t = useT();
@@ -1940,6 +1948,7 @@ export function ChannelConfigSection({
                 config={config}
                 saving={saving}
                 canManageAuthority={canManageAuthority}
+                myUserId={myUserId}
                 onChange={(next) => void save({ deliveryAudienceBindings: next })}
               />
             </div>
@@ -2147,11 +2156,14 @@ function TelegramDeliveryAudiences({
   config,
   saving,
   canManageAuthority,
+  myUserId = null,
   onChange,
 }: {
   config: ChannelIntegrationConfig;
   saving: boolean;
   canManageAuthority: boolean;
+  /** Enables "only me": a personal group whose replies may use my context. */
+  myUserId?: string | null;
   onChange: (next: DeliveryAudienceBindingInput[]) => void;
 }) {
   const t = useT();
@@ -2191,12 +2203,44 @@ function TelegramDeliveryAudiences({
         clearance,
         compartments: existing?.compartments ?? [],
         projectIds: existing?.projectIds ?? [],
-        recipientUserId: null,
+        // Changing the clearance keeps a personal group personal.
+        recipientUserId: existing?.recipientUserId ?? null,
         expiresAt: existing?.expiresAt ?? null,
       });
     }
 
     onChange(next);
+  }
+
+  /**
+   * Mark an approved group as personal to the caller (or undo it). The server
+   * re-proves on every reply that the caller is the group's only human, so the
+   * confirmation spells out what happens if anyone else joins.
+   */
+  async function setPersonal(
+    binding: DeliveryAudienceBinding,
+    chatTitle: string,
+    personal: boolean,
+  ): Promise<void> {
+    if (!canManageAuthority || !myUserId) return;
+    if (personal) {
+      const ok = await confirmDialog({
+        title: cfg.telegramAudiencePersonalConfirmTitle,
+        description: format(cfg.telegramAudiencePersonalConfirmDescription, {
+          group: chatTitle,
+        }),
+        confirmLabel: cfg.telegramAudiencePersonalConfirmAction,
+        cancelLabel: cfg.telegramAudienceConfirmCancel,
+      });
+      if (!ok) return;
+    }
+    onChange(
+      bindings.map((candidate) =>
+        candidate.channelId === binding.channelId
+          ? { ...deliveryAudienceInput(candidate), recipientUserId: personal ? myUserId : null }
+          : deliveryAudienceInput(candidate),
+      ),
+    );
   }
 
   return (
@@ -2236,6 +2280,28 @@ function TelegramDeliveryAudiences({
                     {chat.chatId}
                   </div>
                 </div>
+                {binding?.audienceType === "group" && (
+                  <label className="flex min-h-11 items-center gap-2 text-sm md:min-h-8">
+                    <input
+                      type="checkbox"
+                      checked={binding.recipientUserId !== null}
+                      disabled={
+                        saving ||
+                        !canManageAuthority ||
+                        !myUserId ||
+                        (binding.recipientUserId !== null &&
+                          binding.recipientUserId !== myUserId)
+                      }
+                      onChange={(e) => void setPersonal(binding, title, e.target.checked)}
+                    />
+                    <span>
+                      {binding.recipientUserId !== null &&
+                      binding.recipientUserId !== myUserId
+                        ? cfg.telegramAudiencePersonalOther
+                        : cfg.telegramAudiencePersonalLabel}
+                    </span>
+                  </label>
+                )}
                 <Select
                   value={binding?.clearance ?? UNAPPROVED_AUDIENCE}
                   disabled={saving || !canManageAuthority}
