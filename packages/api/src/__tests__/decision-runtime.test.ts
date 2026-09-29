@@ -5,7 +5,12 @@ import {
   type DecisionResponse,
   type LLMProvider,
 } from '@use-brian/core'
-import { createDecisionRuntime, type DecisionRuntimeOperation } from '../decision-runtime.js'
+import {
+  createDecisionAttemptUsageRecorder,
+  createDecisionRuntime,
+  type DecisionRuntimeAttempt,
+  type DecisionRuntimeOperation,
+} from '../decision-runtime.js'
 
 type Result = { verdict: 'ordinary' | 'research' | 'safe' }
 
@@ -174,12 +179,14 @@ describe('[COMP:decisions/runtime] decision composition', () => {
   })
 
   it('runs one configured primary observation without an LLM completion', async () => {
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
     const adapters = new DecisionAdapterRegistry().register('typesafe', () => primaryProvider())
     const complete = vi.fn(resultOperation().completeWithLlm)
     const runtime = createDecisionRuntime({
       llmProvider: fixtureLlm(),
       defaultLlmModel: 'fixture-llm',
       adapters,
+      onAttempt: createDecisionAttemptUsageRecorder({ recordUsage } as never),
       resolveRoute: () => ({
         mode: 'shadow',
         primaryModelId: 'typesafe-jev-1.13',
@@ -205,6 +212,12 @@ describe('[COMP:decisions/runtime] decision composition', () => {
       disposition: { kind: 'complete', result: { verdict: 'ordinary' } },
     })
     expect(complete).not.toHaveBeenCalled()
+    expect(recordUsage).toHaveBeenCalledOnce()
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'workspace-fictional',
+      model: 'jev-1.13.0',
+      triggerKey: 'decision_fixture_intent',
+    }))
   })
 
   it('resolves workspace policy to an injected adapter with no vendor branch in Hydra', async () => {
@@ -257,6 +270,117 @@ describe('[COMP:decisions/runtime] decision composition', () => {
     expect(attempts).toHaveLength(1)
     expect(attempts[0]).toMatchObject({ effectiveMode: 'hybrid', operatorOverride: false, usage: { costUsd: 8 * 0.042 / 1_000_000 } })
     expect(outcomes).toEqual([expect.objectContaining({ path: 'primary_complete', effectiveMode: 'hybrid', operatorOverride: false })])
+  })
+
+  it('records a successful Jev attempt in the shared usage ledger exactly once', async () => {
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+    const adapters = new DecisionAdapterRegistry().register('typesafe', () => primaryProvider())
+    const requestWithKnownOperation = {
+      ...request(),
+      operation: { ...operationRef, id: 'research.intent' },
+    }
+    const runtime = createDecisionRuntime({
+      llmProvider: fixtureLlm(),
+      defaultLlmModel: 'fixture-llm',
+      adapters,
+      resolveRoute: () => ({
+        mode: 'hybrid',
+        primaryModelId: 'typesafe-jev-1.13',
+        profile: { ...profile(), operationId: 'research.intent' },
+        allowSyntheticProfile: true,
+      }),
+      onAttempt: createDecisionAttemptUsageRecorder({ recordUsage } as never),
+    })
+
+    await runtime.run({
+      workspaceId: 'workspace-fictional',
+      request: requestWithKnownOperation,
+      operation: resultOperation(),
+    })
+
+    expect(recordUsage).toHaveBeenCalledTimes(1)
+    expect(recordUsage).toHaveBeenCalledWith({
+      userId: '',
+      assistantId: '',
+      workspaceId: 'workspace-fictional',
+      sessionId: null,
+      model: 'jev-1.13.0',
+      inputTokens: 8,
+      outputTokens: 0,
+      actualCostUsd: 8 * 0.042 / 1_000_000,
+      source: 'overhead:classifier',
+      triggerKey: 'adaptive_research_classifier',
+      providerKeySource: 'platform',
+    })
+  })
+
+  it('meters every priced primary attempt but ignores LLM stages and unattributed attempts', async () => {
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+    const record = createDecisionAttemptUsageRecorder({ recordUsage } as never)
+    const primaryAttempt: DecisionRuntimeAttempt = {
+      runId: 'runtime-fictional-metering',
+      operationId: 'ingest.sensitivity',
+      attempt: 1,
+      stage: 'primary_decision',
+      providerId: 'fixture-typesafe',
+      modelCatalogId: 'typesafe-jev-1.13',
+      modelWireId: 'jev-1.13.0',
+      latencyMs: 4,
+      outcome: 'success',
+      disposition: 'complete',
+      usage: { inputTokens: 100, outputTokens: 0 },
+      workspaceId: 'workspace-fictional',
+      configuredMode: 'shadow',
+      effectiveMode: 'shadow',
+      operatorOverride: false,
+    }
+
+    await record(primaryAttempt)
+    await record({ ...primaryAttempt, attempt: 2, outcome: 'error', disposition: undefined })
+    await record({ ...primaryAttempt, stage: 'generation', modelCatalogId: 'gemini-3.1-flash-lite', modelWireId: 'gemini-3.1-flash-lite' })
+    await record({ ...primaryAttempt, workspaceId: undefined })
+    await record({ ...primaryAttempt, usage: undefined })
+
+    expect(recordUsage).toHaveBeenCalledTimes(2)
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'overhead:classifier',
+      triggerKey: 'sensitivity_classifier',
+      actualCostUsd: 100 * 0.042 / 1_000_000,
+    }))
+  })
+
+  it('swallows decision usage-store failures so metering never changes the result', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const record = createDecisionAttemptUsageRecorder({
+      recordUsage: vi.fn().mockRejectedValue(new Error('ledger unavailable')),
+    } as never)
+    const attempt: DecisionRuntimeAttempt = {
+      runId: 'runtime-fictional-metering-error',
+      operationId: 'fixture.unknown',
+      attempt: 1,
+      stage: 'primary_decision',
+      providerId: 'fixture-typesafe',
+      modelCatalogId: 'typesafe-jev-1.13',
+      modelWireId: 'jev-1.13.0',
+      latencyMs: 4,
+      outcome: 'success',
+      disposition: 'complete',
+      usage: { inputTokens: 8, outputTokens: 0 },
+      workspaceId: 'workspace-fictional',
+      configuredMode: 'hybrid',
+      effectiveMode: 'hybrid',
+      operatorOverride: false,
+    }
+
+    await expect(record(attempt)).resolves.toBeUndefined()
+    expect(error).toHaveBeenCalledWith(
+      '[decision-metering] failed to record provider usage',
+      expect.objectContaining({
+        runId: 'runtime-fictional-metering-error',
+        error: 'ledger unavailable',
+      }),
+    )
+    error.mockRestore()
   })
 
   it('attributes deployment operator override attempts and outcomes', async () => {

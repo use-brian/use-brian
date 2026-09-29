@@ -739,6 +739,7 @@ import type { BuildConnectorActionAudit } from './connector-action-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from './tool-injection-port.js'
 import type { CreditBudgetGate } from './routes/route-helpers.js'
 import {
+  createDecisionAttemptUsageRecorder,
   createDecisionRuntime,
   type CreateDecisionRuntimeOptions,
   type DecisionRouteResolver,
@@ -2111,6 +2112,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const workspaceDecisionRoutingStore = createWorkspaceDecisionRoutingStore()
   const decisionEvaluationProfileStore = createDecisionEvaluationProfileStore()
+  const recordDecisionUsage = createDecisionAttemptUsageRecorder(usageStore)
   const operatorDecisionDefault = parseOperatorDecisionDefault(
     env.DECISION_DEFAULT_MODE,
     env.DECISION_DEFAULT_MODEL,
@@ -2136,7 +2138,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     typesafeApiKey: env.TYPESAFE_API_KEY,
     configureAdapters: ports.configureDecisionAdapters,
     resolveRoute: workspaceDecisionRouteResolver,
-    onAttempt: ports.recordDecisionAttempt,
+    onAttempt: async (attempt) => {
+      await recordDecisionUsage(attempt)
+      await ports.recordDecisionAttempt?.(attempt)
+    },
     onOutcome: ports.recordDecisionOutcome,
   })
   if (operatorDecisionDefault) {

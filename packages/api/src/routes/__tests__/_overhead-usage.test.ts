@@ -55,6 +55,18 @@ describe('[COMP:api/route-helpers] recordOverheadUsage', () => {
     }))
   })
 
+  it('does not duplicate decision-provider usage owned by the central attempt meter', async () => {
+    await recordOverheadUsage({
+      ...baseParams,
+      model: 'jev-1.13.0',
+      usage: { inputTokens: 100, outputTokens: 0 },
+      source: 'overhead:classifier',
+      triggerKey: 'adaptive_research_classifier',
+    })
+
+    expect(mockRecord).not.toHaveBeenCalled()
+  })
+
   it('attributes classifier and voice overhead to the channel actor while billing the resolved party', () => {
     // This assertion used to demand `userId: ownerId`, which is how the bug
     // survived a green suite: `ownerId` is `assistants.owner_user_id`, NULL for

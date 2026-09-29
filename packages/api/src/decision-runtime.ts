@@ -8,6 +8,7 @@
  */
 
 import {
+  calculateCost,
   DecisionAdapterRegistry,
   DecisionProviderError,
   assertDecisionCapabilities,
@@ -26,6 +27,8 @@ import {
   type DecisionModelRef,
   type DecisionRequest,
   type DecisionProvider,
+  type OverheadSource,
+  type UsageStore,
 } from '@use-brian/core'
 import type { LLMProvider } from '@use-brian/core'
 import {
@@ -33,6 +36,7 @@ import {
   isDecisionModelRow,
   modelRates,
   registryRow,
+  registryRowForPricing,
 } from '@use-brian/shared/model-registry'
 
 export type DecisionLlmRoute = DecisionCompletionRoute
@@ -70,6 +74,98 @@ export type DecisionRuntimeAttempt = DecisionAttemptRecord & {
   configuredMode: DecisionRouteConfig['mode']
   effectiveMode: DecisionRouteConfig['mode']
   operatorOverride: boolean
+}
+
+type DecisionUsageTarget = {
+  source: OverheadSource
+  triggerKey: string
+}
+
+const DECISION_USAGE_TARGETS: Readonly<Record<string, DecisionUsageTarget>> = {
+  'research.intent': { source: 'overhead:classifier', triggerKey: 'adaptive_research_classifier' },
+  'research.split': { source: 'overhead:splitter', triggerKey: 'parallel_split_classifier' },
+  'memory.usefulness': { source: 'overhead:nudge', triggerKey: 'memory_nudge' },
+  'memory.topic': { source: 'overhead:classifier', triggerKey: 'topic_classifier' },
+  'entity.disambiguation': { source: 'overhead:extraction', triggerKey: 'pipeline_b_entity_resolution' },
+  'task.assistability': { source: 'overhead:goal-triage', triggerKey: 'goal_triage' },
+  'task.readiness': { source: 'overhead:classifier', triggerKey: 'pipeline_b_task_readiness' },
+  'memory.reclassification': { source: 'overhead:consolidation', triggerKey: 'memory_reclassification' },
+  'entity.alias-clustering': { source: 'overhead:consolidation', triggerKey: 'entity_alias_clustering' },
+  'skill.categorization': { source: 'overhead:skill-review', triggerKey: 'skill_categorization' },
+  'ingest.extraction-gate': { source: 'overhead:classifier', triggerKey: 'ingest_extraction_gate' },
+  'ingest.sensitivity': { source: 'overhead:classifier', triggerKey: 'sensitivity_classifier' },
+  'feed.reply-classification': { source: 'overhead:distribution-classifier', triggerKey: 'feed_reply_classification' },
+  'feed.draft-safety': { source: 'overhead:distribution-safety', triggerKey: 'feed_draft_safety' },
+}
+
+function usageTargetForOperation(operationId: string): DecisionUsageTarget {
+  const configured = DECISION_USAGE_TARGETS[operationId]
+  if (configured) return configured
+  const normalized = operationId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return {
+    source: 'overhead:classifier',
+    triggerKey: normalized ? `decision_${normalized}` : 'decision_unknown',
+  }
+}
+
+/**
+ * True when the central decision-attempt meter owns this model's spend.
+ * Caller-local LLM meters use this guard to avoid recording a successful
+ * decision-provider result a second time.
+ */
+export function isCentrallyMeteredDecisionModel(modelId: string): boolean {
+  const row = registryRowForPricing(modelId)
+  return Boolean(row && isDecisionModelRow(row))
+}
+
+/**
+ * Convert every priced primary decision-provider attempt into the same
+ * UsageStore ledger used by the existing LLM paths. The workspace fallback
+ * resolves the concrete billing user and assistant inside each store.
+ * Recording is deliberately best-effort: metering must never change a
+ * classifier result or trigger an LLM fallback.
+ */
+export function createDecisionAttemptUsageRecorder(
+  usageStore: UsageStore | undefined,
+): (attempt: DecisionRuntimeAttempt) => Promise<void> {
+  return async (attempt) => {
+    if (
+      !usageStore
+      || !attempt.workspaceId
+      || attempt.stage !== 'primary_decision'
+      || !attempt.usage
+      || !isCentrallyMeteredDecisionModel(attempt.modelCatalogId)
+    ) return
+
+    const target = usageTargetForOperation(attempt.operationId)
+    try {
+      await usageStore.recordUsage({
+        userId: '',
+        assistantId: '',
+        workspaceId: attempt.workspaceId,
+        sessionId: null,
+        model: attempt.modelWireId,
+        inputTokens: attempt.usage.inputTokens,
+        outputTokens: attempt.usage.outputTokens,
+        actualCostUsd: attempt.usage.costUsd
+          ?? calculateCost(attempt.modelCatalogId, attempt.usage),
+        source: target.source,
+        triggerKey: target.triggerKey,
+        providerKeySource: 'platform',
+      })
+    } catch (error) {
+      console.error('[decision-metering] failed to record provider usage', {
+        runId: attempt.runId,
+        operationId: attempt.operationId,
+        model: attempt.modelWireId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
 }
 
 export type DecisionRuntimeOutcome = {

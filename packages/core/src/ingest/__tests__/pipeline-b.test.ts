@@ -2434,6 +2434,42 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
     expect(resolverRow!.actualCostUsd).toBeGreaterThan(0)
   })
 
+  it('does not duplicate centrally metered Jev entity resolution usage', async () => {
+    const usage = usageSpy()
+    const entities = spyEntities()
+    entities.store.listLiveEntitiesSystem = async () => [
+      makeEntity({ id: 'ent-a1', kind: 'company', displayName: 'Acme' }),
+      makeEntity({ id: 'ent-a2', kind: 'company', displayName: 'Acme' }),
+    ]
+    const extraction = JSON.stringify({
+      summary: 'Acme mentioned.',
+      entities: [{ kind: 'company', display_name: 'Acme', canonical_id: null }],
+      edges: [],
+      memories: [],
+      tags: [],
+    })
+    const extractionProvider = sequencedProvider([
+      extraction,
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ])
+    const resolverProvider = sequencedProvider(
+      [JSON.stringify({ id: 'ent-a1' })],
+      undefined,
+      'jev-1.13.0',
+    )
+    const deps = makeDeps({ provider: extractionProvider, entities: entities.store, usage: usage.store })
+    ;(deps as { entityResolver?: unknown }).entityResolver = {
+      candidateLimit: 100,
+      llm: { provider: resolverProvider, model: 'typesafe-jev-1.13' },
+    }
+
+    await processEpisode(baseEpisode(), 'note', deps)
+
+    const rows = usage.recordUsage.mock.calls.map((call) => call[0])
+    expect(rows.some((row) => row.triggerKey === 'pipeline_b_entity_resolution')).toBe(false)
+    expect(rows.some((row) => row.triggerKey === 'pipeline_b_extraction')).toBe(true)
+  })
+
   it('records no resolver row when resolution stays on a local tier (no LLM spend)', async () => {
     // A single fuzzy candidate resolves locally — no disambiguation call,
     // so nothing to meter beyond extraction. Guards against double-count /

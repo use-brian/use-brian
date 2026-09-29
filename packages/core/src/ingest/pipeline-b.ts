@@ -35,6 +35,7 @@
  */
 
 import { z } from 'zod'
+import { isDecisionModelRow, registryRowForPricing } from '@use-brian/shared/model-registry'
 
 import { sanitize, type AnalyticsLogger } from '../analytics/logger.js'
 import { calculateCost, type UsageStore } from '../billing/cost-tracker.js'
@@ -1609,6 +1610,11 @@ async function recordResolverUsage(
   const userId = episode.createdByUserId || episode.userId
   if (!userId) return
   const usageModel = model ?? deps.entityResolver?.llm?.model ?? deps.model
+  const modelRow = registryRowForPricing(usageModel)
+  // Decision-provider attempts are metered centrally by the API runtime.
+  // The resolver also returns its terminal usage to this legacy LLM meter;
+  // recording it here would duplicate a successful Jev call.
+  if (modelRow && isDecisionModelRow(modelRow)) return
   try {
     await deps.usage.recordUsage({
       userId,
