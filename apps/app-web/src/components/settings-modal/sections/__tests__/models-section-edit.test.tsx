@@ -113,6 +113,7 @@ beforeEach(() => {
       mode: "llm_only",
       modelAlias: null,
       updatedAt: null,
+      operatorOverride: false,
       shadowSampleRate: 0.1,
       models: [{
         alias: "typesafe-jev-1.13",
@@ -155,6 +156,7 @@ describe("[COMP:app-web/models-settings] custom profile editing", () => {
         mode: "hybrid",
         modelAlias: "typesafe-jev-1.13",
         updatedAt: "now",
+        operatorOverride: false,
         shadowSampleRate: 0.1,
         models: [{
           alias: "typesafe-jev-1.13",
@@ -187,6 +189,43 @@ describe("[COMP:app-web/models-settings] custom profile editing", () => {
     expect(container.textContent).toContain(
       en.chrome.settingsModal.models.decisionHybridBadge.replace("{count}", "1"),
     );
+    await act(async () => root.unmount());
+  });
+
+  it("labels an inherited Jev operator override as the deployment default", async () => {
+    fetchModelMenu.mockResolvedValueOnce({
+      classes: {},
+      defaults: [],
+      profiles: [],
+      modelRoutes: [],
+      decisionRouting: {
+        mode: "hybrid",
+        modelAlias: "typesafe-jev-1.13",
+        updatedAt: null,
+        operatorOverride: true,
+        shadowSampleRate: 0.1,
+        models: [{
+          alias: "typesafe-jev-1.13",
+          displayName: "Jev 1.13",
+          provider: "typesafe",
+          adapterId: "typesafe",
+          hybridOperations: [],
+        }],
+      },
+      meteredBillingAvailable: false,
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={en as unknown as Dictionary}>
+          <ModelsSection />
+        </I18nProvider>,
+      );
+    });
+    expect(container.textContent).toContain(en.chrome.settingsModal.models.decisionOperatorOverrideBadge);
+    expect(container.textContent).toContain(en.chrome.settingsModal.models.decisionOperatorOverrideNotice);
+    expect(container.textContent).not.toContain(en.chrome.settingsModal.models.decisionHybridGate);
     await act(async () => root.unmount());
   });
 

@@ -47,7 +47,10 @@ import type {
   DecisionEvaluationProfileStore,
 } from '../db/decision-evaluation-profiles.js'
 import { isAuthorityBearingDecisionOperation } from '../decision-promotion.js'
-import { WORKSPACE_DECISION_SHADOW_SAMPLE_RATE } from '../workspace-decision-routing.js'
+import {
+  WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
+  type OperatorDecisionDefault,
+} from '../workspace-decision-routing.js'
 
 export type ModelMenuRouteOptions = {
   workspaceStore: WorkspaceStore
@@ -57,6 +60,8 @@ export type ModelMenuRouteOptions = {
   decisionRoutingStore?: WorkspaceDecisionRoutingStore
   decisionEvaluationProfileStore?: Pick<DecisionEvaluationProfileStore, 'listApproved'>
   configuredDecisionAdapters?: ReadonlySet<string>
+  /** Inherited deployment default, shown only when the workspace has no explicit row. */
+  operatorDecisionDefault?: OperatorDecisionDefault
   /** Provider keys configured at boot (the routing table's keys). */
   configuredProviders: ProviderAvailability
   /** Closed billing seam; absent on the open build (menus still work,
@@ -261,9 +266,12 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
         }
       }),
       decisionRouting: {
-        mode: decisionSetting?.mode ?? 'llm_only',
-        modelAlias: decisionSetting?.modelAlias ?? null,
+        mode: decisionSetting?.mode ?? (opts.operatorDecisionDefault ? 'hybrid' : 'llm_only'),
+        modelAlias: decisionSetting
+          ? decisionSetting.modelAlias
+          : opts.operatorDecisionDefault?.modelAlias ?? null,
         updatedAt: decisionSetting?.updatedAt ?? null,
+        operatorOverride: !decisionSetting && Boolean(opts.operatorDecisionDefault),
         shadowSampleRate: WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
         models: decisionModelRows()
           .filter((row) => opts.configuredDecisionAdapters?.has(row.decisionCapabilities.adapterId))

@@ -238,8 +238,8 @@ describe('[COMP:decisions/runtime] decision composition', () => {
   })
 
   it('attributes each attempt and prices known decision usage from the shared catalog', async () => {
-    const attempts: Array<{ usage?: { costUsd?: number }; effectiveMode: string }> = []
-    const outcomes: Array<{ path: string; effectiveMode: string }> = []
+    const attempts: Array<{ usage?: { costUsd?: number }; effectiveMode: string; operatorOverride: boolean }> = []
+    const outcomes: Array<{ path: string; effectiveMode: string; operatorOverride: boolean }> = []
     const adapters = new DecisionAdapterRegistry().register('typesafe', () => primaryProvider())
     const runtime = createDecisionRuntime({
       llmProvider: fixtureLlm(),
@@ -255,8 +255,36 @@ describe('[COMP:decisions/runtime] decision composition', () => {
     await runtime.run({ request: request(), operation: resultOperation() })
 
     expect(attempts).toHaveLength(1)
-    expect(attempts[0]).toMatchObject({ effectiveMode: 'hybrid', usage: { costUsd: 8 * 0.042 / 1_000_000 } })
-    expect(outcomes).toEqual([expect.objectContaining({ path: 'primary_complete', effectiveMode: 'hybrid' })])
+    expect(attempts[0]).toMatchObject({ effectiveMode: 'hybrid', operatorOverride: false, usage: { costUsd: 8 * 0.042 / 1_000_000 } })
+    expect(outcomes).toEqual([expect.objectContaining({ path: 'primary_complete', effectiveMode: 'hybrid', operatorOverride: false })])
+  })
+
+  it('attributes deployment operator override attempts and outcomes', async () => {
+    const attempts: Array<{ operatorOverride: boolean }> = []
+    const outcomes: Array<{ operatorOverride: boolean }> = []
+    const adapters = new DecisionAdapterRegistry().register('typesafe', () => primaryProvider())
+    const runtime = createDecisionRuntime({
+      llmProvider: fixtureLlm(),
+      defaultLlmModel: 'fixture-llm',
+      adapters,
+      resolveRoute: () => ({
+        mode: 'hybrid',
+        primaryModelId: 'typesafe-jev-1.13',
+        profile: {
+          ...profile(),
+          status: 'operator_override',
+          evidence: 'operator_override',
+        },
+        operatorOverride: true,
+      }),
+      onAttempt: (attempt) => { attempts.push(attempt) },
+      onOutcome: (outcome) => { outcomes.push(outcome) },
+    })
+
+    await runtime.run({ request: request(), operation: resultOperation() })
+
+    expect(attempts).toEqual([expect.objectContaining({ operatorOverride: true })])
+    expect(outcomes).toEqual([expect.objectContaining({ operatorOverride: true })])
   })
 
   it('rejects unknown models, missing model ids, denied LLM lanes, and mismatched profiles before dispatch', async () => {

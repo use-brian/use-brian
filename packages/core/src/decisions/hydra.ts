@@ -31,8 +31,8 @@ export type DecisionEvaluationProfile = {
   modelCatalogId: string
   modelWireId: string
   evaluationSegment: string
-  status: 'evaluation' | 'approved'
-  evidence: 'recorded' | 'synthetic'
+  status: 'evaluation' | 'approved' | 'operator_override'
+  evidence: 'recorded' | 'synthetic' | 'operator_override'
   totalTimeoutMs: number
   primaryTimeoutMs: number
   maxAttempts: 2
@@ -50,6 +50,8 @@ export type DecisionRoute = {
   allowInvalidResponseRecovery?: boolean
   /** Test/evaluation harness only. Production activation never sets this. */
   allowSyntheticProfile?: boolean
+  /** Explicit deployment-owner authority; requires matching operator_override profile metadata. */
+  operatorOverride?: boolean
 }
 
 export type DecisionAttemptStage =
@@ -257,14 +259,22 @@ export function validateDecisionRoute(
       profile.shadowSampleRate <= 0 || profile.shadowSampleRate > 1
     ) configError('shadow profile requires 0 < shadowSampleRate <= 1')
   }
-  if (route.mode === 'hybrid' && profile.status !== 'approved') {
-    configError('hybrid route requires an approved evaluation profile')
+  if (route.mode === 'hybrid') {
+    if (route.operatorOverride === true) {
+      if (profile.status !== 'operator_override' || profile.evidence !== 'operator_override') {
+        configError('operator override route requires matching override profile metadata')
+      }
+    } else {
+      if (profile.status !== 'approved') {
+        configError('hybrid route requires an approved evaluation profile')
+      }
+      if (profile.evidence !== 'recorded' && route.allowSyntheticProfile !== true) {
+        configError('hybrid production route requires recorded evaluation evidence')
+      }
+    }
+  } else if (route.operatorOverride === true) {
+    configError('operator override authority is valid only for hybrid routes')
   }
-  if (
-    route.mode === 'hybrid' &&
-    profile.evidence !== 'recorded' &&
-    route.allowSyntheticProfile !== true
-  ) configError('hybrid production route requires recorded evaluation evidence')
 }
 
 function earlierDeadline(request: DecisionRequest, timeoutMs: number, now: number): number {

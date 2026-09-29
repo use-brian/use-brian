@@ -228,6 +228,7 @@ import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, createUpdateViewedSkillTool, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import {
+  isDecisionModelRow,
   menuForClass,
   MutableProviderAvailability,
   modelRates,
@@ -745,7 +746,10 @@ import {
   type DecisionRuntimeAttempt,
   type DecisionRuntimeOutcome,
 } from './decision-runtime.js'
-import { createWorkspaceDecisionRouteResolver } from './workspace-decision-routing.js'
+import {
+  createWorkspaceDecisionRouteResolver,
+  parseOperatorDecisionDefault,
+} from './workspace-decision-routing.js'
 
 // ════════════════════════════════════════════════════════════════════
 // Public types
@@ -765,6 +769,9 @@ export interface OpenApiEnv {
   GEMINI_API_KEY?: string
   /** Optional TypeSafe System One credential. Absence keeps decisions LLM-only. */
   TYPESAFE_API_KEY?: string
+  /** Both values are required to activate the audited deployment-wide decision override. */
+  DECISION_DEFAULT_MODE?: string
+  DECISION_DEFAULT_MODEL?: string
   // Vertex AI backing for the `gemini` provider. When VERTEX_PROJECT_ID is set,
   // boot builds the gemini transport against Vertex (regional host + OAuth)
   // instead of AI Studio. Credentials come from the metadata server (ADC)
@@ -2104,11 +2111,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const workspaceDecisionRoutingStore = createWorkspaceDecisionRoutingStore()
   const decisionEvaluationProfileStore = createDecisionEvaluationProfileStore()
+  const operatorDecisionDefault = parseOperatorDecisionDefault(
+    env.DECISION_DEFAULT_MODE,
+    env.DECISION_DEFAULT_MODEL,
+  )
   let decisionRuntime!: DecisionRuntime
   const workspaceDecisionRouteResolver = createWorkspaceDecisionRouteResolver({
     store: workspaceDecisionRoutingStore,
     profileStore: decisionEvaluationProfileStore,
     configuredAdapterIds: () => decisionRuntime.configuredAdapterIds(),
+    operatorDefault: operatorDecisionDefault,
     fallback: ports.resolveDecisionRoute,
     onError: (error, context) => {
       console.warn('[decision-routing] route resolution degraded safely', {
@@ -2127,6 +2139,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     onAttempt: ports.recordDecisionAttempt,
     onOutcome: ports.recordDecisionOutcome,
   })
+  if (operatorDecisionDefault) {
+    const row = registryRow(operatorDecisionDefault.modelAlias)
+    if (
+      !row
+      || !isDecisionModelRow(row)
+      || !decisionRuntime.configuredAdapterIds().includes(row.decisionCapabilities.adapterId)
+    ) {
+      throw new Error(
+        `decision-routing: operator default '${operatorDecisionDefault.modelAlias}' has no configured adapter`,
+      )
+    }
+    console.warn('[decision-routing] deployment operator override active', {
+      mode: operatorDecisionDefault.mode,
+      modelAlias: operatorDecisionDefault.modelAlias,
+      scope: 'workspaces_without_explicit_setting',
+      llmFailover: true,
+    })
+  }
 
   // ── Media backend, final rung ──
   //
@@ -6370,6 +6400,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     decisionRoutingStore: workspaceDecisionRoutingStore,
     decisionEvaluationProfileStore,
     configuredDecisionAdapters: new Set(decisionRuntime.configuredAdapterIds()),
+    operatorDecisionDefault,
     configuredProviders,
     estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
   }))

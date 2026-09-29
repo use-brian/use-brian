@@ -48,6 +48,8 @@ export type DecisionRouteConfig = {
   allowInvalidResponseRecovery?: boolean
   /** Offline tests/evaluation only; production resolvers never set this. */
   allowSyntheticProfile?: boolean
+  /** Explicit deployment-wide authority; validated against operator_override profile metadata. */
+  operatorOverride?: boolean
 }
 
 export type DecisionRouteContext = {
@@ -67,6 +69,7 @@ export type DecisionRuntimeAttempt = DecisionAttemptRecord & {
   workspaceId?: string
   configuredMode: DecisionRouteConfig['mode']
   effectiveMode: DecisionRouteConfig['mode']
+  operatorOverride: boolean
 }
 
 export type DecisionRuntimeOutcome = {
@@ -75,6 +78,7 @@ export type DecisionRuntimeOutcome = {
   workspaceId?: string
   configuredMode: DecisionRouteConfig['mode']
   effectiveMode: DecisionRouteConfig['mode']
+  operatorOverride: boolean
   path: DecisionCascadeResult<unknown>['path']
   attempts: number
   failureKind?: DecisionCascadeResult<unknown>['failureKind']
@@ -206,6 +210,7 @@ export function createDecisionRuntime(
               primary: primary.provider,
               profile: config.profile,
               allowSyntheticProfile: config.allowSyntheticProfile,
+              operatorOverride: config.operatorOverride,
             },
         onAttempt: async (attempt) => {
           await options.onAttempt?.({
@@ -213,6 +218,7 @@ export function createDecisionRuntime(
             ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
             configuredMode: config.mode,
             effectiveMode: primary.effectiveMode,
+            operatorOverride: config.profile?.evidence === 'operator_override',
           })
         },
       })
@@ -257,6 +263,7 @@ export function createDecisionRuntime(
               allowOperationalFailover: config.allowOperationalFailover,
               allowInvalidResponseRecovery: config.allowInvalidResponseRecovery,
               allowSyntheticProfile: config.allowSyntheticProfile,
+              operatorOverride: config.operatorOverride,
             },
         onAttempt: async (attempt) => {
           const attributed: DecisionRuntimeAttempt = {
@@ -264,6 +271,7 @@ export function createDecisionRuntime(
             ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
             configuredMode: config.mode,
             effectiveMode: primary.effectiveMode,
+            operatorOverride: config.profile?.evidence === 'operator_override',
           }
           await options.onAttempt?.(attributed)
           await runOptions.onAttempt?.(attributed)
@@ -275,6 +283,7 @@ export function createDecisionRuntime(
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
         configuredMode: config.mode,
         effectiveMode: primary.effectiveMode,
+        operatorOverride: config.profile?.evidence === 'operator_override',
         path: result.path,
         attempts: result.attempts,
         ...(result.failureKind ? { failureKind: result.failureKind } : {}),
