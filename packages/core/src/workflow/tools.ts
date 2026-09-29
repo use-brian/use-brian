@@ -184,6 +184,9 @@ export type WorkflowToolDeps = {
     workspaceId: string
     assistantId: string
     toolNames: string[]
+    authoringAuthority: AuthoringAuthority
+    contextGroupId: string | null
+    contextProjectId: string | null
   }) => Promise<string[]>
   /**
    * Scheduling substrate — lets the authoring tools attach a schedule trigger
@@ -735,7 +738,7 @@ function warningsFor(
       && !opts.runtimeKnownToolNames?.has(step.toolName)
     ) {
       warnings.push(
-        `Step "${step.id}" calls tool "${step.toolName}", which is not a built-in tool. The run fails with \`tool_not_found\` unless it is a connector action whose connector is connected in this workspace. Built-in brain search is \`searchBrain\`; web search / fetch is \`mcp_search\`. Double-check the tool name.`,
+        `Step "${step.id}" calls tool "${step.toolName}", which is not a built-in tool. The run fails with \`tool_not_found\` unless it is available in the workflow execution scope. Check the connector connection and execution permissions. Built-in brain search is \`searchBrain\`; web search / fetch is \`mcp_search\`. Double-check the tool name.`,
       )
     }
     if (step.type === 'wait' && !opts.phaseBActive) {
@@ -813,8 +816,10 @@ async function runtimeKnownToolNames(
   def: WorkflowDefinition,
   context: ToolContext,
   deps: Pick<WorkflowToolDeps, 'isKnownTool' | 'resolveKnownWorkflowTools' | 'resolvePrimary'>,
+  authoringAuthority: AuthoringAuthority,
+  binding: { contextGroupId: string | null; contextProjectId: string | null },
 ): Promise<Set<string>> {
-  if (!context.workspaceId || !deps.resolveKnownWorkflowTools || !deps.resolvePrimary) {
+  if (!context.workspaceId || !deps.resolveKnownWorkflowTools) {
     return new Set()
   }
   const toolNames = [...new Set(def.steps.flatMap((step) => (
@@ -826,13 +831,15 @@ async function runtimeKnownToolNames(
   if (toolNames.length === 0) return new Set()
 
   try {
-    const assistantId = await deps.resolvePrimary(context.workspaceId)
+    const assistantId = def.principal?.assistantId ?? await deps.resolvePrimary?.(context.workspaceId)
     if (!assistantId) return new Set()
     return new Set(await deps.resolveKnownWorkflowTools({
       userId: context.userId,
       workspaceId: context.workspaceId,
       assistantId,
       toolNames,
+      authoringAuthority,
+      ...binding,
     }))
   } catch (err) {
     console.warn('[workflow/tools] runtime tool-name lookup threw:', err)
@@ -2128,13 +2135,17 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         }
       }
 
-      const knownRuntimeTools = await runtimeKnownToolNames(definition, context, deps)
       let authoringAuthority: AuthoringAuthority
       try {
         authoringAuthority = pinToolAuthoringAuthority(context)
       } catch {
         return { data: 'Workflow authoring permissions are unavailable in this turn. Start a new workspace conversation and propose it again.', isError: true }
       }
+
+      const knownRuntimeTools = await runtimeKnownToolNames(definition, context, deps, authoringAuthority, {
+        contextGroupId: existingWorkflow ? existingWorkflow.contextGroupId ?? null : context.activeGroupId ?? null,
+        contextProjectId: existingWorkflow ? existingWorkflow.contextProjectId ?? null : context.activeProjectId ?? null,
+      })
 
       const proposalReceipt = input.workflowId
         ? encodeProposalReceipt({

@@ -24,6 +24,7 @@ import {
 } from '../route-helpers.js'
 import { query } from '../../db/client.js'
 import { injectMcpTools } from '../../mcp/inject.js'
+import { CONNECTOR_SCOPE_RESTRICTION } from '../../mcp/discovery-diagnostics.js'
 
 const mockQuery = vi.mocked(query)
 
@@ -82,6 +83,16 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
 
     it('returns empty string for empty array', () => {
       expect(buildUnavailableCapabilitiesPrompt([], noSearch, [])).toBe('')
+    })
+
+    it.each([false, true])('explains scope restrictions without reconnect advice (search=%s)', (searchable) => {
+      const tools = new Map(searchable ? [['mcp_search', {}]] : [])
+      const result = buildUnavailableCapabilitiesPrompt([CONNECTOR_SCOPE_RESTRICTION], tools, ['Knowledge'])
+      expect(result).toContain('review the workflow or conversation execution scope')
+      expect(result).toContain('Do not recommend reconnecting')
+      expect(result).not.toContain('Studio → Connectors')
+      expect(result).not.toContain('say Use Brian has no integration')
+      if (searchable) expect(result).toContain('Sources indexed for search in this run')
     })
 
     it('includes capability names and NOT available text', () => {

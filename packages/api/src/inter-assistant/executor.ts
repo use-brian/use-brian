@@ -1285,8 +1285,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
       if (unknown.length) {
         parts.push(
-          `${unknown.join(', ')}: not available to this assistant (check connector connection and exposure)`,
+          `${unknown.join(', ')}: not available to this assistant (check tool names and exposure)`,
         )
+        // Injection diagnostics describe discovery as a whole, not the cause
+        // of every unknown pin (which can also be a typo or a removed tool).
+        // Preserve these safe facts even though this path never builds a prompt.
+        if (unavailableCapabilities.length) {
+          parts.push(`Discovery diagnostics: ${unavailableCapabilities.join('; ')}`)
+        }
       }
       throw Object.assign(
         new Error(

@@ -155,8 +155,10 @@ import {
   matchKnowledgeCaptureRules,
   type KnowledgeCaptureRuleStore,
 } from '../knowledge/capture-rules.js'
+import { CONNECTOR_SCOPE_RESTRICTION } from './discovery-diagnostics.js'
 import {
   connectorExposureAllowed,
+  type ConnectorContextBinding,
   type ConnectorTurnGrant,
 } from '../context-scope/connector-exposure.js'
 
@@ -578,6 +580,22 @@ export async function injectMcpTools(params: {
   } = params
 
   const unavailable: string[] = []
+  // Discovery visits the same bindings in multiple lanes. Report once per
+  // injection, without exposing connector identity, scope values, or counts.
+  let scopeRejectionReported = false
+  const exposureAllowed = (binding: ConnectorContextBinding): boolean => {
+    const allowed = connectorExposureAllowed(contextScope, binding)
+    if (!allowed && !scopeRejectionReported) {
+      scopeRejectionReported = true
+      unavailable.push(CONNECTOR_SCOPE_RESTRICTION)
+      console.info('[mcp-inject] connector discovery scope restriction', {
+        assistantId,
+        workspaceId: assistantTeamId ?? null,
+        reason: 'connector_exposure_outside_execution_scope',
+      })
+    }
+    return allowed
+  }
   let searchableSources: string[] = []
   let knowledgeCapturePrompt: string | undefined
 
@@ -678,7 +696,7 @@ export async function injectMcpTools(params: {
   if (assistantTeamId && connectorInstanceStore) {
     try {
       const teamInstances = (await connectorInstanceStore.listByWorkspaceSystem(assistantTeamId))
-        .filter((instance) => connectorExposureAllowed(contextScope, instance))
+        .filter((instance) => exposureAllowed(instance))
       for (const inst of teamInstances) {
         if (!inst.custom || !inst.connected || !inst.url) continue
         connectedCustom.push({
@@ -948,9 +966,9 @@ export async function injectMcpTools(params: {
           : Promise.resolve([]),
       ])
       const teamNative = allTeamNative.filter((instance) =>
-        connectorExposureAllowed(contextScope, instance))
+        exposureAllowed(instance))
       const grants = allGrants.filter((grant) =>
-        connectorExposureAllowed(contextScope, grant))
+        exposureAllowed(grant))
       const seen = new Set(cliInstances.map((inst) => inst.id))
       for (const inst of teamNative) {
         if (inst.provider !== 'cli' || !inst.connected || seen.has(inst.id)) continue
@@ -1138,7 +1156,7 @@ export async function injectMcpTools(params: {
   if (assistantTeamId && connectorGrantStore) {
     try {
       const grants = (await connectorGrantStore.listForTargetSystem('workspace', assistantTeamId))
-        .filter((grant) => connectorExposureAllowed(contextScope, grant))
+        .filter((grant) => exposureAllowed(grant))
         .sort((a, b) => (a.instance.createdAt?.getTime() ?? 0) - (b.instance.createdAt?.getTime() ?? 0)
           || String(a.instance.id).localeCompare(String(b.instance.id)))
       const overlaidByGrant = new Set<string>()
@@ -1377,7 +1395,7 @@ export async function injectMcpTools(params: {
   if (assistantTeamId && connectorInstanceStore) {
     try {
       const teamNative = (await connectorInstanceStore.listByWorkspaceSystem(assistantTeamId))
-        .filter((instance) => connectorExposureAllowed(contextScope, instance))
+        .filter((instance) => exposureAllowed(instance))
         .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0)
           || String(a.id).localeCompare(String(b.id)))
       const overlaidByTeam = new Set<string>()

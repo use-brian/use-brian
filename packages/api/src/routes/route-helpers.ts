@@ -20,6 +20,7 @@ import type { AssistantConnectorStore } from '../db/assistant-connector-store.js
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { injectMcpTools, type ConfirmationEnricher, type McpInjectionResult } from '../mcp/inject.js'
+import { CONNECTOR_SCOPE_RESTRICTION } from '../mcp/discovery-diagnostics.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { truncateForInline } from '../files/inline-truncation.js'
 
@@ -272,11 +273,18 @@ export function buildUnavailableCapabilitiesPrompt(
     return `\n\n# Connector tools\n\n${FOLDED_SURFACE}${sourceRoster} ${SEARCH_BEFORE_DENIAL}`
   }
 
-  const head = `\n\n# Unavailable capabilities\n\nThese capabilities are not available in this run. Do not call, search for, or simulate them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nUse another available tool when it serves the requested account and identity. Otherwise report the limitation plainly and use any remediation stated above, or point the user to Studio → Connectors.`
+  const scopeRestricted = capabilities.includes(CONNECTOR_SCOPE_RESTRICTION)
+  const remediation = scopeRestricted
+    ? 'For the execution-scope restriction, explain that connector authorization alone does not make a provider available in this context. Ask an authorized owner to review the workflow or conversation execution scope. Do not recommend reconnecting, claim the integration is unsupported, or suggest bypassing the scope restriction. Other listed failures retain their own remediation.'
+    : 'Use another available tool when it serves the requested account and identity. Otherwise report the limitation plainly and use any remediation stated above, or point the user to Studio → Connectors.'
+
+  const head = `\n\n# Unavailable capabilities\n\nThese capabilities are not available in this run. Do not call, search for, or simulate them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\n${remediation}`
 
   const closedWorld = searchable
     ? ` ${FOLDED_SURFACE}${sourceRoster} ${SEARCH_BEFORE_DENIAL} A listed capability remains unavailable even if searched.`
-    : ` The list and visible tools are the complete integration surface. For any other service, say Use Brian has no integration and offer the nearest supported alternative.`
+    : scopeRestricted
+      ? ' Visible tools describe only this restricted run, not the platform integration catalog. Do not infer that an absent service is disconnected or unsupported.'
+      : ` The list and visible tools are the complete integration surface. For any other service, say Use Brian has no integration and offer the nearest supported alternative.`
 
   return `${head}${closedWorld} Do not suggest a connector setting for an unlisted service.`
 }
