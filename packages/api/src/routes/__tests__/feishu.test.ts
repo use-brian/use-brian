@@ -1,3 +1,5 @@
+import { channelQuestions } from '../channel-questions.js'
+import { channelConfirmations } from '../channel-interactions.js'
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -694,60 +696,136 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     }))
   })
 
-  it('resolves a deferred scheduled confirmation from a card action', async () => {
-    const deferredConfirmationStore = {
-      findPendingByChannel: vi.fn(async () => ({ toolCallId: 'tool-1' })),
-      markResolved: vi.fn(async () => {}),
-    }
-    const { app } = setup({ route: { deferredConfirmationStore } as never })
+  it.each(['wq:abcdefghijklmnopqrstuvwx:0', 'mcp_confirm:deferred:allow'])(
+    'passes native workflow callback %s with the original message and sender identity', async data => {
+      mocks.resolveChannelUser.mockImplementation(async (_store, _provider, sender) => ({ user: { id: `resolved:${sender}` }, isIdentified: true }))
+      const dispatcher = { dispatch: vi.fn() }
+      const { app } = setup({ route: { channelUserStore: {} as never, workflowEventDispatcher: dispatcher as never } })
+      for (const sender of ['intruder', 'ou_sender']) {
+        await request(app).post('/internal/feishu/interaction').set('X-Connector-Secret', 'shared-secret').send({
+          channelId: CHANNEL_ROW_ID, interaction: { messageId: 'om_workflow', chatId: 'oc_chat',
+            operator: { openId: sender }, action: { value: data, tag: 'button' } },
+        }).expect(202)
+        await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+          questionIntegrationId: 'integration-1', userId: `resolved:${sender}`, isIdentified: true,
+          workflowCallback: { data, messageId: 'om_workflow' },
+          incomingMessage: expect.objectContaining({ userId: sender, messageId: 'om_workflow', text: '' }),
+          interactionScope: expect.objectContaining({ integrationId: CHANNEL_ROW_ID, senderId: sender }),
+        })))
+      }
+      expect(mocks.claimChannelEvent).not.toHaveBeenCalled()
+      expect(mocks.api.updateCard).not.toHaveBeenCalled()
+      expect(dispatcher.dispatch).not.toHaveBeenCalled()
+    },
+  )
 
-    await request(app)
-      .post('/internal/feishu/interaction')
-      .set('X-Connector-Secret', 'shared-secret')
-      .send({
-        channelId: CHANNEL_ROW_ID,
-        interaction: {
-          messageId: 'om_card',
-          chatId: 'oc_chat',
-          operator: { openId: 'ou_sender' },
-          action: { value: 'mcp_confirm:tool-1:allow', tag: 'button' },
-        },
-      })
-      .expect(202)
-
-    await vi.waitFor(() => expect(deferredConfirmationStore.markResolved).toHaveBeenCalledOnce())
-    expect(deferredConfirmationStore.findPendingByChannel).toHaveBeenCalledWith('feishu', 'oc_chat')
-    expect(mocks.tryResolveSchedulerConfirmation).toHaveBeenCalledWith(
-      'tool-1',
-      'allow',
-      { channelType: 'feishu', channelId: 'oc_chat' },
-    )
-    expect(mocks.api.updateCard).toHaveBeenCalledWith(
-      'om_card',
-      expect.objectContaining({ elements: expect.any(Array) }),
-    )
+  it.each(['missing', 'failed'])('does not identify an owner-fallback sender when resolution is %s', async mode => {
+    mocks.resolveChannelUser.mockRejectedValueOnce(new Error('resolution failed'))
+    const { app } = setup({ route: mode === 'failed' ? { channelUserStore: {} as never } : {} })
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
+    await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'owner-1', isIdentified: false, questionIntegrationId: 'integration-1',
+      incomingMessage: expect.objectContaining({ userId: 'ou_sender', raw: expect.objectContaining({ messageId: 'om_1' }) }),
+    })))
   })
 
-  it('resolves a deferred scheduled confirmation from the text fallback', async () => {
-    const deferredConfirmationStore = {
-      findPendingByChannel: vi.fn(async () => ({ toolCallId: 'tool-2' })),
-      markResolved: vi.fn(async () => {}),
-    }
-    const { app } = setup({ route: { deferredConfirmationStore } as never })
+  it('binds the delivered confirmation card and recovers its thread only for the exact actor and message', async () => {
+    const { app } = setup()
+    const resolve = vi.fn()
+    let dispose: (() => void) | undefined
+    const confirmation = { toolCallId: 'tool-1', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' }
+    mocks.api.send.mockResolvedValue({ messageId: 'om_card' })
+    // Model the pipeline contract: register at the event, then deliver via the
+    // real route hook. The hook must bind the actual adapter return value.
+    mocks.processChannelMessage.mockImplementationOnce(async params => {
+      expect(params.interactionScope).toEqual({
+        channelType: 'feishu', integrationId: CHANNEL_ROW_ID, conversationId: 'oc_chat', senderId: 'ou_sender',
+        sessionId: 'oc_chat:thread:om_1',
+      })
+      dispose = channelConfirmations.register(params.interactionScope, confirmation, { resolve } as never)
+      await params.hooks.onConfirmationRequired(confirmation, { resolve })
+    })
+    try {
+      await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+        .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
+      await vi.waitFor(() => expect(mocks.api.send).toHaveBeenCalledOnce())
+      const click = (sender = 'ou_sender', messageId = 'om_card', chatId = 'oc_chat', channelId = CHANNEL_ROW_ID, data = 'mcp_confirm:tool-1:allow') => request(app).post('/internal/feishu/interaction')
+        .set('X-Connector-Secret', 'shared-secret').send({ channelId, interaction: {
+          messageId, chatId, operator: { openId: sender },
+          action: { value: data, tag: 'button' },
+        } })
+      await click('intruder').expect(202)
+      await click('ou_sender', 'wrong-card').expect(202)
+      await click('ou_sender', 'om_card', 'other-chat').expect(202)
+      await click('ou_sender', 'om_card', 'oc_chat', '33333333-3333-4333-8333-333333333333').expect(202)
+      await click('ou_sender', 'om_card', 'oc_chat', CHANNEL_ROW_ID, 'mcp_confirm:wrong-tool:allow').expect(202)
+      expect(resolve).not.toHaveBeenCalled()
+      expect(mocks.api.updateCard).not.toHaveBeenCalled()
+      await click().expect(202)
+      await vi.waitFor(() => expect(resolve).toHaveBeenCalledExactlyOnceWith('tool-1', 'allow', undefined))
+      expect(mocks.api.updateCard).toHaveBeenCalledExactlyOnceWith('om_card', expect.any(Object))
+      await click().expect(202)
+      expect(resolve).toHaveBeenCalledTimes(1)
+      expect(mocks.api.updateCard).toHaveBeenCalledOnce()
+    } finally { dispose?.() }
+  })
 
-    await request(app)
-      .post('/internal/feishu/inbound')
-      .set('X-Connector-Secret', 'shared-secret')
-      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage({ content: 'yes' }) })
-      .expect(202)
+  it('does not recover a threaded confirmation from an unbound card', async () => {
+    const { app } = setup()
+    const resolve = vi.fn()
+    const dispose = channelConfirmations.register({
+      channelType: 'feishu', integrationId: CHANNEL_ROW_ID, conversationId: 'oc_chat', senderId: 'ou_sender',
+      sessionId: 'oc_chat:thread:om_1',
+    }, { toolCallId: 'unbound', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' }, { resolve } as never)
+    try {
+      await request(app).post('/internal/feishu/interaction').set('X-Connector-Secret', 'shared-secret')
+        .send({ channelId: CHANNEL_ROW_ID, interaction: {
+          messageId: 'om_card', chatId: 'oc_chat', operator: { openId: 'ou_sender' },
+          action: { value: 'mcp_confirm:unbound:allow', tag: 'button' },
+        } }).expect(202)
+      expect(resolve).not.toHaveBeenCalled()
+      expect(mocks.api.updateCard).not.toHaveBeenCalled()
+    } finally { dispose() }
+  })
 
-    await vi.waitFor(() => expect(deferredConfirmationStore.markResolved).toHaveBeenCalledOnce())
-    expect(deferredConfirmationStore.findPendingByChannel).toHaveBeenCalledWith(
-      'feishu',
-      'oc_chat',
-      ASSISTANT_ID,
-    )
+  it('forwards native question answers only after actor and resolved identity checks', async () => {
+    const { app } = setup()
+    const actions = channelQuestions.create({
+      integrationId: CHANNEL_ROW_ID, assistantId: ASSISTANT_ID, userId: 'owner-1',
+      incoming: { userId: 'ou_sender', channelId: 'oc_chat', text: 'question', isGroupChat: false,
+        timestamp: Date.now(), raw: normalizedMessage() },
+    }, ['approve abc123'])
+    const click = (sender: string) => request(app).post('/internal/feishu/interaction')
+      .set('X-Connector-Secret', 'shared-secret').send({ channelId: CHANNEL_ROW_ID, interaction: {
+        messageId: 'om_question', chatId: 'oc_chat', operator: { openId: sender },
+        action: { value: actions[0].data, tag: 'button' },
+      } })
+    await click('intruder').expect(202)
     expect(mocks.processChannelMessage).not.toHaveBeenCalled()
+    await click('ou_sender').expect(202)
+    await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledOnce())
+    expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      messageText: 'approve abc123', conversationalAnswer: true, sessionChannelId: 'oc_chat:thread:om_1',
+      interactionScope: expect.objectContaining({ integrationId: CHANNEL_ROW_ID, senderId: 'ou_sender' }),
+    }))
+    await click('ou_sender').expect(202)
+    expect(mocks.processChannelMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('intercepts common text confirmations before the pipeline', async () => {
+    const { app } = setup()
+    const resolve = vi.fn()
+    const dispose = channelConfirmations.register({
+      channelType: 'feishu', integrationId: CHANNEL_ROW_ID, conversationId: 'oc_chat', senderId: 'ou_sender',
+      sessionId: 'oc_chat:thread:om_1',
+    }, { toolCallId: 'tool-2', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' }, { resolve } as never)
+    try {
+      await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+        .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage({ content: 'yes' }) }).expect(202)
+      await vi.waitFor(() => expect(resolve).toHaveBeenCalledOnce())
+      expect(mocks.processChannelMessage).not.toHaveBeenCalled()
+    } finally { dispose() }
   })
 
   it('downloads and stages provider media before the archive append', async () => {

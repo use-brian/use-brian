@@ -1,3 +1,6 @@
+import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
+import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
+import { resolveChannelQuestion } from './channel-questions.js'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Discord internal route — Gateway connector seam.
@@ -24,25 +27,22 @@
 
 import { timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
-import { createDiscordAdapter, DiscordApiError, respondToInteraction } from '@use-brian/channels'
+import { createDiscordAdapter, denormalizeActions, DiscordApiError, respondToInteraction } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
 import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, type ChannelUserStore } from '../db/channel-user-store.js'
 import { resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
 import {
-  buildConfirmationActions,
   buildTool,
-  confirmationDecisionLabel,
-  interpretConfirmationEvent,
   parseFileContent,
 } from '@use-brian/core'
 import { z } from 'zod'
-import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, DiscordCredentials } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
+import { humanizeToolName, describeToolInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
@@ -50,6 +50,7 @@ import { billingPartyForAssistant } from '../billing-party.js'
 import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 
 export type DiscordRouteOptions = {
+  questionStore?: ChannelQuestionStore
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
@@ -118,8 +119,7 @@ export type DiscordRouteOptions = {
 const STATUS_THROTTLE_MS = 1200
 
 const interactionSchema = z.object({
-  // Internal `channels` row id (forwarded for symmetry; resolution keys off the
-  // Discord channel id below since the pending map is keyed by it).
+  // Internal channels row id: the common interaction integration identity.
   channelId: z.string().min(1),
   interaction: z.object({
     id: z.string().min(1),
@@ -265,9 +265,6 @@ export function createDiscordReactToMessageTool(args: {
 export function discordRoutes(options: DiscordRouteOptions): Router {
   const router = Router()
 
-  // Pending text-based tool confirmations, keyed by Discord channel id.
-  const pendingConfirmations = new Map<string, { resolver: ConfirmationResolver; toolCallId: string }>()
-
   // ── Connector auth ────────────────────────────────────────────
   router.use((req, res, next) => {
     if (!connectorSecretMatches(req.headers['x-connector-secret'], options.connectorSecret)) {
@@ -305,8 +302,10 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     // forward timeout, and inbound is fire-and-forget from its side.
     res.status(200).json({ ok: true })
 
-    const { channelId, message } = parsed.data
-    const incoming = message as unknown as IncomingMessage
+    await processInbound(parsed.data.channelId, parsed.data.message as unknown as IncomingMessage)
+  })
+
+  async function processInbound(channelId: string, incoming: IncomingMessage, actionData?: string, workflowCallback?: { data: string; messageId: string }): Promise<void> {
 
     try {
       // 1. Channel must be active and chat-enabled.
@@ -360,7 +359,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       //    anonymous — session only, no memory consolidation).
       //    See docs/architecture/channels/channel-user-identity.md.
       let channelUserId = ownerId
-      let isIdentified = true
+      let isIdentified = false
       if (options.channelUserStore && incoming.userId) {
         try {
           const author = (incoming.raw as { author?: { username?: string; global_name?: string | null } })?.author
@@ -385,24 +384,24 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         botUserId: integration.botUserId ?? undefined,
       })
 
-      // 6. A pending confirmation on this channel intercepts the next message
-      //    as a yes/no/always/never decision.
-      const pending = pendingConfirmations.get(incoming.channelId)
-      if (pending) {
-        const confirmation = interpretConfirmationEvent(
-          { kind: 'text', text: incoming.text },
-          pending.toolCallId,
-        )
-        pendingConfirmations.delete(incoming.channelId)
-        if (confirmation.status === 'decision') {
-          pending.resolver.resolve(pending.toolCallId, confirmation.decision)
-          if (confirmation.consume) return
-        }
+      const scope: ChannelInteractionScope = {
+        channelType: 'discord', integrationId: channelId,
+        conversationId: incoming.channelId, senderId: incoming.userId,
       }
+      if (!actionData && !workflowCallback && channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
 
       // 7. Sequentialize per Discord channel.
-      await withChatLock(`discord:${incoming.channelId}`, () =>
-        processMessage({
+      await withChatLock(`discord:${incoming.channelId}`, async () => {
+        if (actionData) {
+          const answer = resolveChannelQuestion({ integrationId: channelId, assistantId: assistant.id, userId: channelUserId, incoming }, actionData)
+          if (answer.kind !== 'answer') return
+          incoming = answer.incoming
+        }
+        await processMessage({
+          scope,
+          questionIntegrationId: integration.id,
+          workflowCallback,
+          conversationalAnswer: actionData !== undefined,
           adapter,
           incoming,
           assistant,
@@ -413,23 +412,17 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
           integrationId: integration.id,
           ingestChannelMediaRef: options.ingestChannelMediaRef,
           archiveConnectorInstanceId: integration.connectorInstanceId,
-        }),
-      )
+        })
+      })
     } catch (err) {
       console.error(`[discord] error processing message for channel ${incoming.channelId}:`, err)
     }
-  })
+  }
 
   // ── Button-press interaction from the Gateway connector ───────
   //
-  // A confirmation button press arrives here as an already-flattened
-  // INTERACTION_CREATE. The ordering is load-bearing: we ack Discord (type 7
-  // UPDATE_MESSAGE — morph the prompt + clear the buttons) BEFORE resolving the
-  // parked confirmation. Resolving resumes the query loop (tool execution, usage
-  // recording, the next model turn) whose microtasks would otherwise hog the
-  // event loop and delay this callback's network send past Discord's 3s deadline
-  // — which surfaces as a "This interaction failed" toast even though the late
-  // update still lands. Ack first, resume after.
+  // ACK Discord before resolving the common registry: resumed tool execution
+  // must not compete with the provider's three-second acknowledgement deadline.
   router.post('/interaction', async (req, res) => {
     const parsed = interactionSchema.safeParse(req.body)
     if (!parsed.success) {
@@ -439,38 +432,59 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     // Ack the connector immediately; the Discord callback happens below.
     res.status(200).json({ ok: true })
 
-    const { interaction } = parsed.data
-    const confirmation = interpretConfirmationEvent({ kind: 'action', data: interaction.customId })
-    if (confirmation.status !== 'decision' || !confirmation.toolCallId) return
-    const { toolCallId, decision } = confirmation
-
-    const pending = pendingConfirmations.get(interaction.channelId)
-    const matched = !!pending && pending.toolCallId === toolCallId
-    if (matched) pendingConfirmations.delete(interaction.channelId)
-
-    // 1. Ack + edit the prompt in place, with nothing else competing for the
-    //    event loop. On a stale/expired button we still ack so the user sees a
-    //    note rather than Discord's "This interaction failed".
+    const { channelId, interaction } = parsed.data
+    // Provider ACK must complete before resuming a parked query loop.
     try {
-      await respondToInteraction(interaction.id, interaction.token, {
-        type: 7,
-        data: {
-          content: matched ? `Tool action: ${confirmationDecisionLabel(decision)}` : 'Expired or already handled.',
-          components: [],
-          allowed_mentions: { parse: [] },
-        },
-      })
+      await respondToInteraction(interaction.id, interaction.token, { type: 6 })
     } catch (err) {
       console.error('[discord] interaction ack failed:', err)
+      return
     }
-
-    // 2. Now resume the parked turn. Resolving an already-resolved/timed-out
-    //    call is a no-op (the resolver guards against it), so a button press
-    //    racing the text fallback is safe.
-    if (matched && pending) pending.resolver.resolve(toolCallId, decision)
+    if (!interaction.userId) return
+    const channel = await getChannelForWebhook(channelId)
+    if (!channel || channel.status !== 'active' || !channel.enabledCapabilities.includes('chat')) return
+    const integration = await options.integrationStore.getByChannelForWebhook(channelId, 'discord')
+    if (!integration) return
+    const cfg = (integration.config ?? {}) as ChannelIntegrationConfig
+    if (cfg.userAccessMode === 'allowlist' && cfg.allowedUserIds?.length && !cfg.allowedUserIds.includes(interaction.userId)) return
+    if (cfg.userAccessMode === 'blocklist' && cfg.blockedUserIds?.includes(interaction.userId)) return
+    if (interaction.customId.startsWith('ask:')) {
+      await processInbound(channelId, {
+        userId: interaction.userId, channelId: interaction.channelId,
+        messageId: interaction.id, text: '', isGroupChat: true, isMentioned: true,
+        timestamp: Date.now(), raw: interaction,
+      }, interaction.customId)
+      return
+    }
+    const result = channelConfirmations.handle({
+      channelType: 'discord', integrationId: channelId,
+      conversationId: interaction.channelId, senderId: interaction.userId,
+    }, { kind: 'action', data: interaction.customId })
+    if (result.status === 'resolved') {
+      if (interaction.messageId) {
+        const adapter = createDiscordAdapter({ token: (integration.credentials as DiscordCredentials).bot_token })
+        await adapter.editMessage(interaction.channelId, interaction.messageId, {
+          text: `Tool action: ${result.decision}`, actions: [],
+        }).catch(() => {})
+      }
+      return
+    }
+    // Unresolved MCP controls may belong to a durable workflow. Keep native
+    // provenance so the common handler checks the bound actor and message.
+    if (interaction.messageId && (interaction.customId.startsWith('wq:') || interaction.customId.startsWith('mcp_confirm:'))) {
+      await processInbound(channelId, {
+        userId: interaction.userId, channelId: interaction.channelId,
+        messageId: interaction.id, replyToMessageId: interaction.messageId,
+        text: '', isGroupChat: true, isMentioned: true, timestamp: Date.now(), raw: interaction,
+      }, undefined, { data: interaction.customId, messageId: interaction.messageId })
+    }
   })
 
   async function processMessage(params: {
+    scope: ChannelInteractionScope
+    questionIntegrationId: string
+    workflowCallback?: { data: string; messageId: string }
+    conversationalAnswer?: boolean
     adapter: ReturnType<typeof createDiscordAdapter>
     incoming: IncomingMessage
     assistant: Awaited<ReturnType<typeof findAssistantById>> & {}
@@ -590,7 +604,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     }
     if (incoming.text.trim()) {
       userContentBlocks.unshift({ type: 'text', text: incoming.text })
-    } else if (userContentBlocks.length === 0) {
+    } else if (userContentBlocks.length === 0 && !params.workflowCallback) {
       return
     }
 
@@ -640,6 +654,12 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     const abortController = new AbortController()
 
     await processChannelMessage({
+      interactionScope: params.scope,
+      incomingMessage: incoming,
+      questionIntegrationId: params.questionIntegrationId,
+      questionStore: options.questionStore,
+      workflowCallback: params.workflowCallback,
+      conversationalAnswer: params.conversationalAnswer,
       backgroundModel: options.backgroundModel,
       decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
@@ -725,40 +745,21 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         async onGoalAccepted(message) {
           await adapter.sendMessage(channelId, { text: message })
         },
-        async onConfirmationRequired(req, resolver) {
-          // Park the resolver so BOTH paths can answer: an atomic button press
-          // (relayed back as an INTERACTION_CREATE → POST /interaction) and the
-          // text fallback (the next normalized message on this channel). The
-          // key includes toolCallId so a button echoing a stale id is rejected.
-          pendingConfirmations.set(channelId, { resolver, toolCallId: req.toolCallId })
-          const lines = req.displayLines && req.displayLines.length > 0
-            ? req.displayLines
-            : formatConfirmationInput(req.input)
-          const inputSummary = lines.length > 0 ? '\n' + lines.join('\n') : ''
-          const displayName = getToolDisplayName(req.toolName)
-
-          // custom_id = mcp_confirm:<toolCallId>:<decision> (≤100 chars, the
-          // Discord button limit). Mirrors the Telegram inline-keyboard payload.
-          const actions = buildConfirmationActions(req.toolCallId, req.allowPersistentApproval)
-          const replyHint = req.allowPersistentApproval
-            ? 'Tap a button, or reply: yes / no / always / never'
-            : 'Tap a button, or reply: yes / no'
-          await adapter.sendMessage(channelId, {
-            text: `${displayName}${inputSummary}\n\n${replyHint}`,
-            actions,
-          })
+        async onConfirmationRequired(req) {
+          await adapter.sendMessage(channelId, confirmationMessage(req), incoming.messageId ? { threadTs: incoming.messageId } : undefined)
         },
-        async sendResponse(text, documents) {
+        async sendResponse(text, documents, _question, actions) {
           const finalText = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
           const hasDocuments = !!documents?.length
-          const reply = finalText || (hasDocuments ? '' : "I couldn't generate a reply — please rephrase or try again.")
+          const reply = finalText || (hasDocuments || actions?.length ? '' : "I couldn't generate a reply — please rephrase or try again.")
           let channelMessageId: string | undefined
           // Edit-in-place: morph the status message into the response when it
           // fits one Discord message; otherwise drop the status and send fresh.
           // A reply carrying documents always sends fresh — an edit cannot
           // attach uploads, so the edit path would silently drop them.
-          if (statusMessageId && !hasDocuments && reply.length <= 2000) {
-            await adapter.editMessage(channelId, statusMessageId, { text: reply, format: 'markdown' })
+          const renderedLength = denormalizeActions({ text: reply, actions }).text.length
+          if (statusMessageId && !hasDocuments && renderedLength <= adapter.maxMessageLength) {
+            await adapter.editMessage(channelId, statusMessageId, { text: reply, format: 'markdown', actions })
             channelMessageId = statusMessageId
             statusMessageId = undefined
           } else {
@@ -768,7 +769,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
             }
             channelMessageId = await adapter.sendMessage(
               channelId,
-              { text: reply, format: 'markdown', documents },
+              { text: reply, format: 'markdown', documents, actions },
               incoming.messageId ? { threadTs: incoming.messageId } : undefined,
             )
           }

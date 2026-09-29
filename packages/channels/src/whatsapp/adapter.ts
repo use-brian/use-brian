@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 // NOTE — The *legacy shared official responder* is deprecated (2026-06-02), but
 // this adapter is ACTIVE: the Bring-Your-Own-Number path uses it for read-only
 // group ingest AND, on `'chat'`-capability channels, for the full-assistant bot
@@ -118,6 +119,7 @@ export function createWhatsAppAdapter(options: WhatsAppAdapterOptions): ChannelA
     },
 
     async sendMessage(channelId: string, response: OutgoingMessage): Promise<string> {
+      response = denormalizeActions(response)
       const text = response.format === 'markdown' ? markdownToWhatsApp(response.text) : response.text
       const chunks = chunkText(text, 4096)
       let lastMessageId = ''
@@ -138,6 +140,11 @@ export function createWhatsAppAdapter(options: WhatsAppAdapterOptions): ChannelA
     },
 
     async editMessage(channelId: string, messageId: string, response: OutgoingMessage): Promise<void> {
+      if (response.actions?.length && denormalizeActions(response).text.length > this.maxMessageLength) {
+        await this.sendMessage(channelId, response)
+        return
+      }
+      response = denormalizeActions(response)
       const text = response.format === 'markdown' ? markdownToWhatsApp(response.text) : response.text
       try {
         const res = await connectorFetch(`/edit/${connectionId}`, {
@@ -146,10 +153,10 @@ export function createWhatsAppAdapter(options: WhatsAppAdapterOptions): ChannelA
           text: text.slice(0, 4096),
         })
         if (!res.ok) {
-          console.error(`[wa-adapter] edit failed: ${res.status} ${res.statusText}`)
+          throw new Error(`wa-adapter edit failed: ${res.status} ${res.statusText}`)
         }
       } catch {
-        // Edit failed — non-critical, message may be too old
+        if (response.actions?.length) await this.sendMessage(channelId, { ...response, actions: undefined })
       }
     },
 

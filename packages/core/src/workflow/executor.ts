@@ -327,6 +327,8 @@ export type SendPageResult =
     }
 
 export type ExecutorDeps = {
+  /** Cooperative cancellation for this advance pass; persisted as failed/workflow_cancelled. */
+  abortSignal?: AbortSignal
   workflowStore: WorkflowStore
   runStore: WorkflowRunStore
   consultTransport: ConsultTransport
@@ -686,7 +688,15 @@ export async function advanceWorkflowRun(
     return { kind: 'completed', runId, stepCount: 0 }
   }
 
+  const cancelRun = async () => {
+    const error = workflowCancellationError()
+    await markRunFailed(deps, run, run.currentStepId ?? '<cancelled>', error)
+    return failOutcome(runId, run.currentStepId ?? '<cancelled>', error, 0)
+  }
+  if (deps.abortSignal?.aborted) return cancelRun()
+
   const workflow = await loadWorkflowForRun(deps, run)
+  if (deps.abortSignal?.aborted) return cancelRun()
   if (!workflow) {
     const err: ExecutorError = { message: `Workflow ${run.workflowId} not found.`, reason: 'workflow_not_found' }
     await markRunFailed(deps, run, '<unknown>', err)
@@ -751,6 +761,7 @@ export async function advanceWorkflowRun(
   // Resolve the acting assistant first — needed for both `assistant_call`
   // chain construction and tool-registry scoping.
   const primaryAssistantId = await deps.resolvePrimary(run.workspaceId)
+  if (deps.abortSignal?.aborted) return cancelRun()
   if (!primaryAssistantId) {
     const err: ExecutorError = { message: 'Workspace has no primary assistant.', reason: 'no_primary_assistant' }
     await markRunFailed(deps, run, '<unknown>', err, 'failed', undefined, workflow)
@@ -771,6 +782,7 @@ export async function advanceWorkflowRun(
         externalClientPrincipal,
       })
     } catch (err) {
+      if (deps.abortSignal?.aborted) return cancelRun()
       const error: ExecutorError = {
         message: err instanceof Error ? err.message : String(err),
         reason: typeof (err as { reason?: unknown } | null)?.reason === 'string'
@@ -780,6 +792,7 @@ export async function advanceWorkflowRun(
       return failOutcome(runId, '<context>', error, 0)
     }
   }
+  if (deps.abortSignal?.aborted) return cancelRun()
   // Delivery can also happen in completion/failure notification paths outside
   // dispatchStep. Bind the port once so those paths renew the same lease.
   const executeWithAuthority = runtimeScope?.executeWithAuthority
@@ -811,6 +824,7 @@ export async function advanceWorkflowRun(
       turnScope: runtimeScope?.turnScope,
     })
   } catch (err) {
+    if (deps.abortSignal?.aborted) return cancelRun()
     const error: ExecutorError = {
       message: `Failed to build tool registry: ${err instanceof Error ? err.message : String(err)}`,
       reason: 'tool_registry_failed',
@@ -818,6 +832,8 @@ export async function advanceWorkflowRun(
     await markRunFailed(deps, run, '<unknown>', error, 'failed', undefined, workflow)
     return failOutcome(runId, '<unknown>', error, 0)
   }
+
+  if (deps.abortSignal?.aborted) return cancelRun()
 
   // Was this the first call into the run? Emit the audit event + flip to running.
   const isFirstAdvance = run.status === 'pending'
@@ -963,6 +979,7 @@ export async function advanceWorkflowRun(
 
     let dispatchResult: StepDispatchResult
     try {
+      throwIfWorkflowCancelled(deps.abortSignal)
       const dispatch = () => dispatchStep(step, {
         run,
         workflow,
@@ -1125,6 +1142,13 @@ export async function advanceWorkflowRun(
       return
     }
 
+    if (deps.abortSignal?.aborted) {
+      const error = workflowCancellationError()
+      await deps.runStore.updateStepRun(stepRunId, { status: 'failed', error, finishedAt: new Date(now()) })
+      firstFailure ??= { stepId: step.id, error, isTimeout: false }
+      return
+    }
+
     // Pause request (wait / approval). Legal only as the sole live cursor —
     // the single-cursor resume model cannot represent a parked sibling.
     // Authoring rejects the statically-detectable shapes; this guard is the
@@ -1225,15 +1249,22 @@ export async function advanceWorkflowRun(
 
   // Drain the frontier.
   while (true) {
+    if (deps.abortSignal?.aborted) {
+      firstFailure ??= { stepId: run.currentStepId ?? '<cancelled>', error: workflowCancellationError(), isTimeout: false }
+    }
     if (!firstFailure && !pausedOutcome) releaseParked()
     while (
       !firstFailure &&
       !pausedOutcome &&
+      !deps.abortSignal?.aborted &&
       pending.length > 0 &&
       inFlight.size < MAX_CONCURRENT_STEPS
     ) {
       const id = pending.shift()!
       await startStep(id)
+    }
+    if (deps.abortSignal?.aborted) {
+      firstFailure ??= { stepId: run.currentStepId ?? '<cancelled>', error: workflowCancellationError(), isTimeout: false }
     }
     if (inFlight.size === 0) {
       if (!firstFailure && !pausedOutcome && parked.size > 0) {
@@ -1256,7 +1287,7 @@ export async function advanceWorkflowRun(
     await handleSettled(settled)
   }
 
-  if (pausedOutcome) return pausedOutcome
+  if (pausedOutcome && !firstFailure) return pausedOutcome
 
   if (firstFailure) {
     const status = firstFailure.isTimeout ? 'timeout' : 'failed'
@@ -1376,7 +1407,16 @@ type SettledStep = {
     | Extract<StepDispatchResult, { kind: 'paused_wait' } | { kind: 'paused_approval' }>
 }
 
+function workflowCancellationError() {
+  return { message: 'Workflow continuation stopped; effects already started may have occurred.', reason: 'workflow_cancelled' }
+}
+
+function throwIfWorkflowCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw Object.assign(new Error(workflowCancellationError().message), workflowCancellationError())
+}
+
 async function dispatchStep(step: WorkflowStep, ctx: DispatchContext): Promise<StepDispatchResult> {
+  throwIfWorkflowCancelled(ctx.deps.abortSignal)
   if (ctx.externalClientPrincipal) {
     const violation = principalBoundStepViolation(step)
     if (violation) {
@@ -1716,7 +1756,11 @@ async function dispatchAssistantCall(
     // Delivery target: a `deliver`-carrying step (scheduled-job reminders)
     // rides its channel through so the callee can surface `ask`-policy tool
     // confirmations there. Undefined = ordinary A2A (confirmations stripped).
-    deliver: step.deliver && !('replyToTrigger' in step.deliver) ? step.deliver : undefined,
+    deliver: step.deliver && !('replyToTrigger' in step.deliver) ? {
+      ...step.deliver,
+      threadRef: step.deliver.thread && typeof ctx.scope.vars[`__deliveryMsg_${step.deliver.thread.fromStep}`] === 'string'
+        ? ctx.scope.vars[`__deliveryMsg_${step.deliver.thread.fromStep}`] as string : undefined,
+    } : undefined,
     // Page anchor — resolved above to a concrete saved_views id. The callee
     // executor gates access + injects doc tools + sets ToolContext.docViewId.
     pageAnchorId,
@@ -1952,11 +1996,16 @@ async function dispatchToolCall(
   }
 
   const interpolatedArgs = interpolateValue(step.arguments, ctx.scope)
-  const toolContext: ToolContext = ctx.runtimeScope?.executionContext
+  const execution = ctx.runtimeScope?.executionContext
+  const turnExecution = execution && ctx.deps.abortSignal
+    ? { ...execution, lifecycle: { ...execution.lifecycle,
+        abortSignal: AbortSignal.any([execution.lifecycle.abortSignal, ctx.deps.abortSignal]) } }
+    : execution
+  const toolContext: ToolContext = turnExecution
     ? {
-        ...executionToolContext(ctx.runtimeScope.executionContext, { appId: 'Use Brian' }),
-        activeGroupId: ctx.runtimeScope.turnScope.activeGroupId,
-        activeProjectId: ctx.runtimeScope.turnScope.activeProjectId,
+        ...executionToolContext(turnExecution, { appId: 'Use Brian' }),
+        activeGroupId: ctx.runtimeScope?.turnScope.activeGroupId,
+        activeProjectId: ctx.runtimeScope?.turnScope.activeProjectId,
         scopeAccumulator: ctx.scopeAccumulator,
       }
     : {
@@ -1980,7 +2029,7 @@ async function dispatchToolCall(
         assistantProjectIds: ctx.runtimeScope?.turnScope.effectiveProjectIds,
         assistantDefaultProjectIds: ctx.runtimeScope?.turnScope.writeProjectIds,
         scopeAccumulator: ctx.scopeAccumulator,
-        abortSignal: new AbortController().signal,
+        abortSignal: ctx.deps.abortSignal ?? new AbortController().signal,
       }
 
   // Policy gate. MCP-discovered tools have `resolveConfirmation` set to a
@@ -1999,6 +2048,7 @@ async function dispatchToolCall(
       needsConfirmation = true
     }
   }
+  throwIfWorkflowCancelled(ctx.deps.abortSignal)
   if (needsConfirmation) {
     let displayLines: string[] | undefined
     if (tool.describeConfirmation) {
@@ -2009,6 +2059,7 @@ async function dispatchToolCall(
         console.debug(`[workflow] describeConfirmation failed for ${step.toolName}:`, err)
       }
     }
+    throwIfWorkflowCancelled(ctx.deps.abortSignal)
     return askPolicyOutcome(step, ctx, interpolatedArgs, displayLines)
   }
   // Phase C activation lives in `dispatchStep` (one level up): when
@@ -2033,6 +2084,7 @@ async function dispatchToolCall(
   }
 
   let result
+  throwIfWorkflowCancelled(ctx.deps.abortSignal)
   try {
     result = await tool.execute(validatedInput, toolContext)
   } catch (err) {

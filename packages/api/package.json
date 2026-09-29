@@ -51,6 +51,7 @@
     "zod": "^3.24"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.3",
     "@types/express": "^5",
     "@types/mailparser": "^3.4.6",
     "@types/multer": "^2.1.0",

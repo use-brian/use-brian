@@ -161,7 +161,7 @@ describe('[COMP:channels/feishu] outbound delivery', () => {
     })
 
     const sent = api.send.mock.calls[0][1] as { card: object }
-    expect(sent.card).toEqual(buildFeishuCard('Run the action?', [
+    expect(sent.card).toEqual(buildFeishuCard('Run the action?\n\nAllow — reply: Allow\nDeny — reply: Deny', [
       { id: 'allow', label: 'Allow', data: 'mcp_confirm:call_1:allow' },
       { id: 'deny', label: 'Deny', data: 'mcp_confirm:call_1:deny' },
     ]))

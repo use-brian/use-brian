@@ -49,6 +49,7 @@ vi.mock('@use-brian/shared', async (importOriginal) => ({
 
 import { customChannelBridgeRoutes } from '../custom-channel-bridge.js'
 import { processChannelMessage } from '../channel-pipeline.js'
+import { channelConfirmations } from '../channel-interactions.js'
 import { getChannelForWebhook, resolveRoutingForSurface } from '../../db/channels-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveChannelUser } from '../../db/channel-user-store.js'
@@ -355,6 +356,8 @@ describe('[COMP:api/custom-channel-bridge] inbound', () => {
 
     expect(processChannelMessage).toHaveBeenCalledTimes(1)
     const arg = vi.mocked(processChannelMessage).mock.calls[0][0]
+    expect(arg.questionIntegrationId).toBe('int-1')
+    expect(arg.incomingMessage).toMatchObject({ userId: 'peer-1', channelId: 'peer-1', messageId: 'm-1', text: 'hi' })
     expect(arg.channelType).toBe('custom')
     expect(arg.channelId).toBe('peer-1')
     expect(arg.userId).toBe('cu-1')
@@ -371,11 +374,22 @@ describe('[COMP:api/custom-channel-bridge] inbound', () => {
     expect(enqueued).toContainEqual({ type: 'typing', peerId: 'peer-1', payload: { on: false } })
   })
 
+  it('keeps owner fallback unidentified when sender resolution fails', async () => {
+    vi.mocked(resolveChannelUser).mockRejectedValueOnce(new Error('resolution failed'))
+    const { app } = buildApp()
+    await request(app).post(`${BASE}/inbound`).set('Authorization', `Bearer ${TOKEN}`).send(inbound())
+    await flush()
+    expect(processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner', isIdentified: false }))
+  })
+
   it('a pending text confirmation is resolved by the next message instead of starting a turn', async () => {
     const resolver = { resolve: vi.fn() }
     vi.mocked(processChannelMessage).mockImplementationOnce(async (params) => {
+      const req = { toolCallId: 'tc-1', toolName: 'sendEmail', input: {}, allowPersistentApproval: true } as never
+      expect(params.interactionScope).toEqual({ channelType: 'custom', integrationId: CHANNEL_ID, conversationId: 'peer-1', senderId: 'peer-1' })
+      channelConfirmations.register(params.interactionScope!, req, resolver as never)
       await params.hooks.onConfirmationRequired?.(
-        { toolCallId: 'tc-1', toolName: 'sendEmail', input: {}, allowPersistentApproval: true } as never,
+        req,
         resolver as never,
       )
     })
@@ -383,15 +397,15 @@ describe('[COMP:api/custom-channel-bridge] inbound', () => {
     await request(app).post(`${BASE}/inbound`).set('Authorization', `Bearer ${TOKEN}`).send(inbound())
     await flush()
     const prompt = vi.mocked(store.enqueue).mock.calls.map((c) => c[1]).find((i) => i.type === 'message')
-    expect(String(prompt?.payload.text)).toContain('Reply: yes / no / always / never')
+    expect(String(prompt?.payload.text)).toContain('Reply: approve / deny / always allow / always deny')
 
     await request(app).post(`${BASE}/inbound`).set('Authorization', `Bearer ${TOKEN}`).send(inbound({ messageId: 'm-2', text: 'yes' }))
     await flush()
-    expect(resolver.resolve).toHaveBeenCalledWith('tc-1', 'allow')
+    expect(resolver.resolve).toHaveBeenCalledWith('tc-1', 'allow', undefined)
     expect(processChannelMessage).toHaveBeenCalledTimes(1)
   })
 
-  it('resolves a deferred custom-channel confirmation from a guarded text reply', async () => {
+  it('does not resolve deferred confirmations through an unbound route-local text lookup', async () => {
     const resolver = { resolve: vi.fn() }
     const deferredConfirmationStore = {
       findPendingByChannel: vi.fn(async () => ({
@@ -414,10 +428,10 @@ describe('[COMP:api/custom-channel-bridge] inbound', () => {
         .send(inbound({ text: 'always', messageId: 'm-deferred' }))
       expect(res.status).toBe(200)
       await flush()
-      expect(deferredConfirmationStore.findPendingByChannel).toHaveBeenCalledWith('custom', 'peer-1', 'a-1')
-      expect(resolver.resolve).toHaveBeenCalledWith('tc-deferred', 'always_allow')
-      expect(deferredConfirmationStore.markResolved).toHaveBeenCalledWith('tc-deferred', 'always_allow')
-      expect(processChannelMessage).not.toHaveBeenCalled()
+      expect(deferredConfirmationStore.findPendingByChannel).not.toHaveBeenCalled()
+      expect(resolver.resolve).not.toHaveBeenCalled()
+      expect(deferredConfirmationStore.markResolved).not.toHaveBeenCalled()
+      expect(processChannelMessage).toHaveBeenCalledTimes(1)
     } finally {
       unregisterSchedulerResolver('tc-deferred')
     }

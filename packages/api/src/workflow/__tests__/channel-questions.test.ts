@@ -119,3 +119,108 @@ describe('[COMP:workflow/channel-questions] deterministic response action', () =
     expect(submit).not.toHaveBeenCalled()
   })
 })
+
+it('leaves unthreaded conversational asks alone when requested', async () => {
+  const { params, store } = fixture()
+  expect(await handleChannelQuestionReply({ ...params, replyToMessageId: undefined, allowUnthreaded: false })).toBeNull()
+  expect(store.find).not.toHaveBeenCalled()
+})
+it('accepts an opaque reference without native reply metadata but rejects conflicting native metadata', async () => {
+  const { params } = fixture()
+  expect(await handleChannelQuestionReply({ ...params, referenceToken: binding.token, replyToMessageId: undefined })).toBe('sent')
+  expect(await handleChannelQuestionReply({ ...params, referenceToken: binding.token, replyToMessageId: 'wrong' })).toContain('unavailable')
+})
+
+it('accepts quoted reference metadata pointing at the bound native thread root', async () => {
+  const { params } = fixture({ threadRef: 'root' })
+  expect(await handleChannelQuestionReply({ ...params, referenceToken: binding.token, replyToMessageId: 'root' })).toBe('sent')
+})
+
+it('persists native thread provenance separately from authored question data and scopes thread lookups', async () => {
+  const { createChannelQuestionStore } = await import('../channel-questions.js')
+  const runQuery = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+  const store = createChannelQuestionStore(runQuery as never)
+  await store.create({ ...binding, threadRef: 'root' })
+  expect(JSON.parse((runQuery.mock.calls[0] as unknown as [string, unknown[]])[1][6] as string)).toMatchObject({ __channelThreadRef: 'root', question: binding.question.question })
+  await store.find(binding, { messageId: 'root' })
+  expect(runQuery).toHaveBeenLastCalledWith(expect.stringContaining("question - '__channelThreadRef' AS question"), expect.arrayContaining(['root']))
+  await store.isQuestionMessage(binding.integrationId, binding.channelId, 'root')
+  expect(runQuery).toHaveBeenLastCalledWith(expect.stringContaining("question->>'__channelThreadRef'=$3"), [binding.integrationId, binding.channelId, 'root'])
+})
+
+it.each(['2', 'prod', 'PROD', ' Prod '])('resolves portable choice %j to the canonical authored label', async (text) => {
+  const { params, row } = fixture({ question: { ...binding.question, allowCustom: false } })
+  expect(await handleChannelQuestionReply({ ...params, text })).toBe('sent')
+  expect(params.dispatch).toHaveBeenCalledWith(row, 'prod', expect.any(Function))
+})
+it('accepts explicit typed references without quote metadata even while conversational ask owns plain text', async () => {
+  const { params, row, store } = fixture({ question: { ...binding.question, allowCustom: false } })
+  expect(await handleChannelQuestionReply({ ...params, text: `wq:${row.token} 2`, replyToMessageId: undefined, allowUnthreaded: false })).toBe('sent')
+  expect(store.find).toHaveBeenCalledWith(params.address, expect.objectContaining({ token: row.token }))
+  expect(params.dispatch).toHaveBeenCalledWith(row, 'prod', expect.any(Function))
+})
+it('never treats malformed or mismatched typed references as conversational text', async () => {
+  const { params, store } = fixture()
+  expect(await handleChannelQuestionReply({ ...params, text: 'wq:bad answer' })).toContain('invalid')
+  expect(await handleChannelQuestionReply({ ...params, text: `wq:${binding.token} 2`, referenceToken: 'b'.repeat(24) })).toContain('unavailable')
+  expect(store.consume).not.toHaveBeenCalled()
+})
+
+describe('implicit workflow question thread isolation', () => {
+  it.each([undefined, 'other-root'])('does not consume a threaded question from %s', async (threadId) => {
+    const { params, store } = fixture({ threadRef: 'root' })
+    expect(await handleChannelQuestionReply({ ...params, replyToMessageId: undefined, threadId })).toBeNull()
+    expect(params.dispatch).not.toHaveBeenCalled()
+    expect(store.consume).not.toHaveBeenCalled()
+    expect(store.find).toHaveBeenCalledWith(params.address, expect.objectContaining({ threadId }))
+  })
+  it('accepts implicit text in the original native thread', async () => {
+    const { params, store } = fixture({ threadRef: 'root' })
+    expect(await handleChannelQuestionReply({ ...params, replyToMessageId: undefined, threadId: 'root' })).toBe('sent')
+    expect(store.consume).toHaveBeenCalledOnce()
+  })
+  it('keeps top-level questions out of unrelated threads but accepts replies rooted at their prompt', async () => {
+    const { params, store } = fixture()
+    expect(await handleChannelQuestionReply({ ...params, replyToMessageId: undefined, threadId: 'other-root' })).toBeNull()
+    expect(store.consume).not.toHaveBeenCalled()
+    expect(await handleChannelQuestionReply({ ...params, replyToMessageId: undefined, threadId: '42' })).toBe('sent')
+  })
+  it('still accepts top-level implicit answers for top-level prompts', async () => {
+    const { params } = fixture()
+    expect(await handleChannelQuestionReply({ ...params, replyToMessageId: undefined })).toBe('sent')
+  })
+  it('preserves exact source-message callback recovery without the original thread metadata', async () => {
+    const { params, row } = fixture({ threadRef: 'root' })
+    expect(await handleChannelQuestionReply({ ...params, threadId: '42',
+      callback: { data: `wq:${row.token}:0`, messageId: '42' } })).toBe('sent')
+  })
+  it('preserves explicit typed targeting from another thread without quote metadata', async () => {
+    const { params, row } = fixture({ threadRef: 'root' })
+    expect(await handleChannelQuestionReply({ ...params, replyToMessageId: undefined, threadId: 'other-root',
+      text: `wq:${row.token} 2` })).toBe('sent')
+  })
+  it('preserves exact native source-message replies even when the thread root is unavailable', async () => {
+    const { params } = fixture({ threadRef: 'root' })
+    expect(await handleChannelQuestionReply({ ...params, threadId: '42' })).toBe('sent')
+  })
+  it('applies thread isolation to both active candidates and answer-message tombstones in SQL', async () => {
+    const { createChannelQuestionStore } = await import('../channel-questions.js')
+    const runQuery = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    const store = createChannelQuestionStore(runQuery as never)
+    for (const threadId of [undefined, 'root']) {
+      await store.find(binding, { threadId, answerMessageId: 'answer-id' })
+      expect(runQuery).toHaveBeenLastCalledWith(expect.stringContaining(
+        "ELSE (answer_message_id=$8 OR (consumed_at IS NULL AND expires_at > now()))\n                   AND (question->>'__channelThreadRef' IS NOT DISTINCT FROM $9::text\n                     OR (question->>'__channelThreadRef' IS NULL AND message_id=$9)) END"),
+      [binding.integrationId, binding.channelId, binding.workspaceId, binding.assistantId, binding.userId,
+        null, null, 'answer-id', threadId ?? null])
+    }
+  })
+})
+
+it('does not turn replies in an expired question thread into unrestricted chat', async () => {
+  const { params, store } = fixture({ threadRef: 'root' })
+  vi.mocked(store.find).mockResolvedValue([])
+  expect(await handleChannelQuestionReply({ ...params, replyToMessageId: undefined, threadId: 'root' })).toContain('unavailable')
+  expect(store.isQuestionMessage).toHaveBeenCalledWith(binding.integrationId, binding.channelId, 'root')
+  expect(store.consume).not.toHaveBeenCalled()
+})

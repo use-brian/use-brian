@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 /**
  * Custom (bridge-driven) channel adapter.
  *
@@ -100,10 +101,12 @@ export function createCustomAdapter(options: CustomAdapterOptions): ChannelAdapt
       return `${payload.peerId}:${payload.messageId}`
     },
 
-    async sendMessage(channelId: string, response: OutgoingMessage): Promise<string> {
+    async sendMessage(channelId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<string> {
+      response = denormalizeActions(response)
       if (!response.text.trim() && !(response.documents && response.documents.length > 0)) return ''
       const payload: OutboxMessagePayload = {
         text: response.text,
+        ...(opts?.threadTs ? { replyToMessageId: opts.threadTs } : {}),
         format: response.format === 'markdown' ? 'markdown' : 'plain',
       }
       if (response.documents && response.documents.length > 0) {

@@ -823,6 +823,35 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(systemPrompt).toContain('## Automated tool policy')
   })
 
+  it('registers the real deferred producer before prompt delivery with actor and native-thread provenance', async () => {
+    const prompt = await import('../../scheduling/confirmation-prompt.js')
+    const registry = await import('../../scheduling/confirmation-registry.js')
+    const send = vi.spyOn(prompt, 'sendConfirmationPrompt').mockImplementationOnce(async (target, request) => {
+      expect(target).toMatchObject({ workspaceId: 'workspace-1', assistantId: 'callee-1', channelIntegrationId: 'integration', threadRef: 'native-root' })
+      expect(registry.bindSchedulerConfirmationDelivery(request.toolCallId, {
+        workspaceId: target.workspaceId!, assistantId: target.assistantId,
+        integrationId: 'integration', channelType: target.channelType, channelId: target.channelId,
+        threadId: target.threadRef, messageId: 'prompt',
+      }, request.allowPersistentApproval === true)).toBe(true)
+      expect(registry.findSchedulerChannelConfirmations({ workspaceId: 'workspace-1', assistantId: 'callee-1',
+        userId: 'owner-1', integrationId: 'integration', channelType: 'slack', channelId: 'channel', threadId: 'native-root',
+      }, request.toolCallId)).toHaveLength(1)
+      return { delivered: true, channelType: target.channelType }
+    })
+    yields([
+      { type: 'tool_confirmation_required', request: { toolCallId: 'producer-call', toolName: 'send', serverName: 'connector', input: {}, description: 'Send', classification: null } },
+      { type: 'assistant_turn', response: { content: [{ type: 'text', text: 'done' }] }, toolResults: [] },
+      { type: 'turn_complete', response: { content: [{ type: 'text', text: 'done' }] } },
+    ])
+    try {
+      await executor()({ ...baseParams, workspaceId: 'workspace-1', deliverTarget: {
+        channelType: 'slack', channelId: 'channel', channelIntegrationId: 'integration', threadRef: 'native-root',
+      } })
+      expect(send).toHaveBeenCalledOnce()
+      expect(registry.tryResolveSchedulerConfirmation('producer-call', 'allow', { userId: 'owner-1' })).toBe(false)
+    } finally { send.mockRestore(); registry.unregisterSchedulerResolver('producer-call') }
+  })
+
   it('omits the direct-execution framing when confirmations are deferred (deliverTarget set)', async () => {
     // A scheduled-origin step keeps `ask` confirmations live (surfaced to the
     // delivery channel), so the "everything is pre-authorized" framing would

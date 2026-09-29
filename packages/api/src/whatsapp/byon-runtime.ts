@@ -1,7 +1,6 @@
 import { createWhatsAppAdapter } from '@use-brian/channels'
 import type {
   AnalyticsLogger,
-  ConfirmationResolver,
   CrmStore,
   EntityLinksStore,
   EntityStore,
@@ -12,9 +11,8 @@ import type {
   TaskStore,
   UsageStore,
 } from '@use-brian/core'
-import { interpretConfirmationEvent } from '@use-brian/core'
-import { getToolDisplayName } from '@use-brian/shared'
 import { query } from '../db/client.js'
+import { withChatLock } from '../db/chat-lock.js'
 import type { DbEpisodesStore } from '../db/episodes-store.js'
 import type { IngestRulesStore } from '../db/ingest-rules-store.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
@@ -23,6 +21,7 @@ import { recordSeenWhatsappGroup } from '../ingest/whatsapp-seen-groups.js'
 import { createWhatsappBot, type BotChannelContext } from '../routes/whatsapp-bot-wiring.js'
 import { normalizeWhatsappNumber, type WhatsappBotInput } from '../routes/whatsapp-bot-handler.js'
 import type { ChannelHooks } from '../routes/channel-pipeline.js'
+import { channelConfirmations, confirmationMessage } from '../routes/channel-interactions.js'
 
 export type WhatsappByonRuntimeDeps = {
   connectorUrl: string
@@ -131,8 +130,6 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
     }
   }
 
-  const pending = new Map<string, { resolver: ConfirmationResolver; toolCallId: string }>()
-
   const bot = createWhatsappBot({
     resolveBotChannel: async (channelId) => {
       const result = await query<{
@@ -201,18 +198,11 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
         connectorSecret: deps.connectorSecret,
         connectionId: input.channelId,
       })
-      const parked = pending.get(input.chatJid)
-      if (parked) {
-        const confirmation = interpretConfirmationEvent(
-          { kind: 'text', text: input.text },
-          parked.toolCallId,
-        )
-        pending.delete(input.chatJid)
-        if (confirmation.status === 'decision') {
-          parked.resolver.resolve(parked.toolCallId, confirmation.decision)
-          if (confirmation.consume) return
-        }
+      const scope = {
+        channelType: 'whatsapp', integrationId: input.channelId,
+        conversationId: input.chatJid, senderId: input.senderPnJid ?? input.senderJid,
       }
+      if (channelConfirmations.handle(scope, { kind: 'text', text: input.text }).handled) return
       const hooks: ChannelHooks = {
         onProcessingStart: async () => {
           await adapter.sendTypingIndicator(input.chatJid).catch(() => {})
@@ -221,18 +211,21 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
         onGoalAccepted: async (message) => {
           await adapter.sendMessage(input.chatJid, { text: message })
         },
-        onConfirmationRequired: async (request, resolver) => {
-          pending.set(input.chatJid, { resolver, toolCallId: request.toolCallId })
-          await adapter.sendMessage(input.chatJid, {
-            text: `*${getToolDisplayName(request.toolName)}*\n\nAllow this action?\nReply: *allow* / *deny*`,
-          })
+        onConfirmationRequired: async (request) => {
+          await adapter.sendMessage(input.chatJid, confirmationMessage(request))
         },
-        sendResponse: async (text) => ({
-          channelMessageId: await adapter.sendMessage(input.chatJid, { text: text.trim() || 'Please try again.' }),
+        sendResponse: async (text, documents, _question, actions) => ({
+          channelMessageId: await adapter.sendMessage(input.chatJid, {
+            text: text.trim() || (documents?.length ? '' : 'Please try again.'), documents, actions,
+          }),
         }),
         sendError: async () => { await adapter.sendMessage(input.chatJid, { text: 'Something went wrong. Please try again.' }) },
       }
-      await deps.runPipeline({ ctx, input, hooks, abortController: new AbortController() })
+      // Confirmation replies must reach the registry above while a suspended
+      // turn owns this lock. Only new turns queue, across instances as well as
+      // within this process; distinct connections and chats remain independent.
+      await withChatLock(`whatsapp-byon:${JSON.stringify([input.channelId, input.chatJid])}`, () =>
+        deps.runPipeline({ ctx, input, hooks, abortController: new AbortController() }))
     },
   })
 

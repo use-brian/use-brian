@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 import type {
   ChannelAdapter,
   IncomingFile,
@@ -170,24 +171,29 @@ export function createFeishuAdapter(options: FeishuAdapterOptions): ChannelAdapt
     },
 
     async sendMessage(channelId, response, opts) {
+      response = denormalizeActions(response)
       if (!response.text.trim() && !response.documents?.length && !response.images?.length) {
         return ''
       }
       const apiOpts = sendOptions(opts?.threadTs)
       let lastMessageId = ''
 
-      if (response.actions?.length) {
-        const card = buildFeishuCard(response.text, response.actions)
-        lastMessageId = (await options.api.send(channelId, { card }, apiOpts)).messageId
-      } else {
-        const chunks = chunkText(response.text, FEISHU_MAX_MESSAGE_LENGTH)
-        for (const chunk of chunks) {
-          if (!chunk.trim()) continue
-          const input = response.format === 'markdown'
-            ? { markdown: chunk }
-            : { text: chunk }
-          lastMessageId = (await options.api.send(channelId, input, apiOpts)).messageId
+      const chunks = chunkText(response.text, FEISHU_MAX_MESSAGE_LENGTH)
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i]
+        if (!chunk.trim()) continue
+        if (response.actions?.length && i === chunks.length - 1) {
+          try {
+            lastMessageId = (await options.api.send(channelId, {
+              card: buildFeishuCard(chunk, response.actions.slice(0, 5)),
+            }, apiOpts)).messageId
+            continue
+          } catch {
+            // Rejected cards degrade to the complete readable alternative.
+          }
         }
+        const input = response.format === 'markdown' ? { markdown: chunk } : { text: chunk }
+        lastMessageId = (await options.api.send(channelId, input, apiOpts)).messageId
       }
 
       for (const image of response.images ?? []) {
@@ -226,8 +232,17 @@ export function createFeishuAdapter(options: FeishuAdapterOptions): ChannelAdapt
     },
 
     async editMessage(channelId, messageId, response, opts) {
+      if (response.actions?.length && denormalizeActions(response).text.length > this.maxMessageLength) {
+        await this.sendMessage(channelId, response, opts)
+        return
+      }
+      response = denormalizeActions(response)
       if (response.actions?.length) {
-        await options.api.updateCard(messageId, buildFeishuCard(response.text, response.actions))
+        try {
+          await options.api.updateCard(messageId, buildFeishuCard(response.text, response.actions.slice(0, 5)))
+        } catch {
+          await this.sendMessage(channelId, { ...response, actions: undefined }, opts)
+        }
         return
       }
       if (response.format === 'markdown') {

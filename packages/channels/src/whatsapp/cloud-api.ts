@@ -1,3 +1,4 @@
+import { denormalizeActions } from '../actions.js'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { ChannelAdapter, IncomingMessage, OutgoingMessage } from '../types.js'
 import { chunkText } from '../chunking.js'
@@ -349,6 +350,7 @@ export function createWhatsAppCloudAdapter(options: WhatsAppCloudApiOptions): Ch
     },
 
     async sendMessage(channelId: string, response: OutgoingMessage): Promise<string> {
+      response = denormalizeActions(response)
       const text = response.format === 'markdown' ? markdownToWhatsApp(response.text) : response.text
       let lastMessageId = ''
       if (text) {

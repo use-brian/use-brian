@@ -13,7 +13,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { advanceWorkflowRun, type ExecutorDeps } from '@use-brian/core'
+import { advanceWorkflowRun, createExecutionContext, type ExecutorDeps } from '@use-brian/core'
 import { buildTool, type Tool } from '@use-brian/core'
 import type {
   WorkflowDefinition,
@@ -33,6 +33,11 @@ import {
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 import type { WorkspaceAuditStore } from '../../db/workspace-audit-store.js'
 import { createAuthorityLease, executeWithCurrentAuthority, runWithAuthorityLease } from '../../context-scope/authority-lease.js'
+
+vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
+import { query } from '../../db/client.js'
+import { maybeHandleApprovalReply } from '../approval-replies.js'
+import { ChannelInteractions } from '../../routes/channel-interactions.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
 const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
@@ -212,8 +217,9 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
     async createEmailSenderCard() {
       throw new Error('createEmailSenderCard not used in workflow approval tests')
     },
-    async expireById() {
-      /* not used in workflow approval tests */
+    async expireById(id) {
+      const row = rows.find(r => r.id === id && r.status === 'pending')
+      if (row) row.status = 'expired'
     },
     async recordAnswer() {
       throw new Error('recordAnswer not used in workflow approval tests')
@@ -331,6 +337,187 @@ function askPolicyTool(name: string, capture?: (i: unknown) => void): Tool {
   t.resolveConfirmation = async () => true
   return t
 }
+
+// ── Cancellation regressions (real bridge + downstream executor) ─────────
+
+async function cancellationFixture() {
+  const stores = makeStores()
+  const approvals = fakeApprovalsStore()
+  const execute = vi.fn(async (_input: unknown, _ctx: { abortSignal: AbortSignal }) => ({ data: { sent: true } }))
+  const downstream = vi.fn(async (_input: unknown, _ctx: { abortSignal: AbortSignal }) => ({ data: { continued: true } }))
+  const tool = buildTool({ name: 'send', description: 'send', inputSchema: z.object({}), execute })
+  const next = buildTool({ name: 'next', description: 'next', inputSchema: z.object({}), execute: downstream })
+  const registry = new Map([['send', tool], ['next', next]])
+  const executorDeps: ExecutorDeps = {
+    workflowStore: stores.workflowStore, runStore: stores.runStore,
+    consultTransport: FAKE_TRANSPORT, resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+    buildToolRegistry: async () => registry,
+  }
+  const deps: ApprovalBridgeDeps = {
+    ...executorDeps, approvalsStore: approvals, auditStore: fakeAuditStore(),
+    deliveries: async () => {}, executorDeps,
+  }
+  const workflow = await stores.workflowStore.create({
+    userId: USER_ID, workspaceId: WORKSPACE_ID, name: 'cancellation',
+    definition: { startStepId: 'send', steps: [
+      { id: 'send', type: 'tool_call', toolName: 'send', arguments: {}, nextStepId: 'next' },
+      { id: 'next', type: 'tool_call', toolName: 'next', arguments: {}, nextStepId: null },
+    ] },
+  })
+  const run = await stores.runStore.createRun({ workflowId: workflow.id, workspaceId: WORKSPACE_ID, triggeredBy: USER_ID, triggerKind: 'manual' })
+  const step = await stores.runStore.createStepRun({ runId: run.id, stepId: 'send', stepType: 'tool_call', input: {} })
+  await stores.runStore.updateRun(run.id, { status: 'awaiting_input', currentStepId: 'send' })
+  const approval = await approvals.create({ workspaceId: WORKSPACE_ID, workflowRunId: run.id,
+    workflowStepRunId: step.id, toolName: 'send', arguments: {}, approverUserId: USER_ID,
+    originatingAssistantId: PRIMARY_ASSISTANT_ID, deliveryChannelType: 'web', expiresAt: null,
+  })
+  return { ...stores, deps, approvals, approval, run, tool, registry, execute, downstream }
+}
+
+function deferred() {
+  let release!: () => void
+  const promise = new Promise<void>(resolve => { release = resolve })
+  return { promise, release }
+}
+
+function cancellationRunScope(signal = new AbortController().signal) {
+  const access = { workspaceId: WORKSPACE_ID, userId: USER_ID, assistantId: PRIMARY_ASSISTANT_ID,
+    assistantKind: 'primary' as const, clearance: 'internal' as const, compartments: ['product'],
+    mutationCompartments: ['product'], projectIds: [], visibilityAssistantIds: null }
+  const authority = createAuthorityLease(access, async () => access)
+  return {
+    assistantClearance: 'internal' as const,
+    turnScope: { access, activeGroupId: null, activeProjectId: null, effectiveCompartments: ['product'],
+      effectiveProjectIds: [], writeCompartments: ['product'], writeProjectIds: [] },
+    executionContext: createExecutionContext({
+      identity: { kind: 'system', purpose: 'workflow', jobId: 'run-fixture' },
+      ownership: { kind: 'workspace', workspaceId: WORKSPACE_ID }, access, authority,
+      writeDefaults: { compartments: ['product'], projectIds: [] },
+      lifecycle: { abortSignal: signal, sessionId: 'run-fixture', channelType: 'workflow', channelId: 'run-fixture' },
+    }),
+  }
+}
+
+it.each(['none', 'stop', 'lifecycle'] as const)('projects live execution authority while preserving %s cancellation on approval resume', async source => {
+  const f = await cancellationFixture()
+  const stop = new AbortController(), lifecycle = new AbortController()
+  const scope = cancellationRunScope(lifecycle.signal)
+  f.deps.executorDeps.resolveRunScope = async () => scope
+  expect(await resumeFromApproval(f.deps, f.approval.id, 'approved', USER_ID, undefined,
+    source === 'none' ? undefined : stop.signal)).toMatchObject({ status: 'completed' })
+  const context = f.execute.mock.calls[0][1] as import('@use-brian/core').ToolContext
+  expect(context.authority).toBe(scope.executionContext.security.authority)
+  expect(context.mutationCompartments).toEqual(['product'])
+  expect(context.executionContext?.lifecycle.abortSignal).toBe(context.abortSignal)
+  if (source === 'none') expect(context.executionContext).toBe(scope.executionContext)
+  else {
+    expect(context.abortSignal.aborted).toBe(false)
+    if (source === 'stop') stop.abort()
+    else lifecycle.abort()
+    expect(context.abortSignal.aborted).toBe(true)
+  }
+})
+
+it.each(['claim', 'scope', 'registry', 'authority', 'tool', 'downstream_registry', 'downstream_tool'] as const)(
+  'Stop during %s preserves the submitted decision and terminates continuation', async stage => {
+    const f = await cancellationFixture()
+    const controller = new AbortController()
+    const entered = deferred(), paused = deferred()
+    const pause = async () => { entered.release(); await paused.promise }
+    if (stage === 'claim') {
+      const respond = f.approvals.respond.bind(f.approvals)
+      f.approvals.respond = async (...args) => { const row = await respond(...args); await pause(); return row }
+    }
+    if (stage === 'scope') f.deps.executorDeps.resolveRunScope = async () => { await pause(); throw new Error('scope cancelled') }
+    if (stage === 'registry') f.deps.buildToolRegistry = async () => { await pause(); return f.registry }
+    if (stage === 'authority') f.deps.executorDeps.resolveRunScope = async () => ({
+      ...cancellationRunScope(),
+      executeWithAuthority: async operation => { await pause(); return operation() },
+    })
+    if (stage === 'downstream_registry') f.deps.executorDeps.buildToolRegistry = async () => { await pause(); return f.registry }
+    if (stage === 'tool') f.execute.mockImplementation(async (_input, ctx) => {
+      expect(ctx.abortSignal).toBe(controller.signal)
+      await pause()
+      expect(ctx.abortSignal.aborted).toBe(true)
+      return { data: { sent: true } } // A non-cooperative tool may have committed an effect.
+    })
+    if (stage === 'downstream_tool') f.downstream.mockImplementation(async (_input, ctx) => {
+      expect(ctx.abortSignal.aborted).toBe(false)
+      await pause()
+      expect(ctx.abortSignal.aborted).toBe(true)
+      return { data: { continued: true } }
+    })
+    vi.mocked(query).mockResolvedValueOnce({ rows: [{ id: f.approval.id }] } as never)
+    const interactions = new ChannelInteractions()
+    const scope = { channelType: 'custom', integrationId: 'integration', conversationId: 'chat', senderId: 'sender' }
+    const ack = vi.fn()
+    interactions.registerTurn(scope, controller, { onAbort: ack })
+    const result = maybeHandleApprovalReply({ approvalsStore: f.approvals, bridgeDeps: f.deps }, USER_ID, `approve ${f.approval.id}`, {
+      workspaceId: WORKSPACE_ID, assistantId: PRIMARY_ASSISTANT_ID, authorized: async () => true, abortSignal: controller.signal,
+    })
+    await entered.promise
+    expect(interactions.handle(scope, { kind: 'text', text: 'stop' }).handled).toBe(true)
+    expect(ack).toHaveBeenCalledOnce()
+    paused.release()
+    expect(await result).toMatchObject({ status: 'approval_submitted_workflow_cancelled', runId: f.run.id })
+    expect(f.approval.status).toBe('approved')
+    expect(f.runs.get(f.run.id)).toMatchObject({ status: 'failed', finishedAt: expect.any(Date), error: {
+      reason: stage.startsWith('downstream') ? 'workflow_cancelled' : 'approval_resume_cancelled',
+    } })
+    expect(f.stepRuns[0].status).toBe(['tool', 'downstream_registry', 'downstream_tool'].includes(stage) ? 'completed' : 'failed')
+    if (['claim', 'scope', 'registry', 'authority'].includes(stage)) expect(f.execute).not.toHaveBeenCalled()
+    if (stage !== 'downstream_tool') expect(f.downstream).not.toHaveBeenCalled()
+  },
+)
+
+it('does not revive a cancelled run through an approval whose delivery was in flight during Stop', async () => {
+  const f = await cancellationFixture()
+  const controller = new AbortController()
+  const entered = deferred(), paused = deferred()
+  f.registry.get('next')!.requiresConfirmation = true
+  f.deps.executorDeps.requestApproval = makeRequestApproval({ ...f.deps,
+    deliveries: async () => { entered.release(); await paused.promise },
+  })
+  const result = resumeFromApproval(f.deps, f.approval.id, 'approved', USER_ID, undefined, controller.signal)
+  await entered.promise
+  const outstanding = f.approvals.rows.find(row => row.toolName === 'next')!
+  expect(outstanding.status).toBe('pending')
+  controller.abort(); paused.release()
+  expect(await result).toMatchObject({ status: 'approval_submitted_workflow_cancelled' })
+  expect(await resumeFromApproval(f.deps, outstanding.id, 'approved', USER_ID)).toMatchObject({ status: 'workflow_cancelled' })
+  expect(outstanding.status).toBe('expired')
+  expect(f.downstream).not.toHaveBeenCalled()
+  expect(f.runs.get(f.run.id)).toMatchObject({ status: 'failed', error: { reason: 'workflow_cancelled' } })
+})
+
+it('rechecks a cancelled run when Stop races the approval claim', async () => {
+  const f = await cancellationFixture()
+  const respond = f.approvals.respond.bind(f.approvals)
+  f.approvals.respond = async (...args) => {
+    await f.runStore.updateRun(f.run.id, { status: 'failed', error: { reason: 'workflow_cancelled' }, finishedAt: new Date() })
+    return respond(...args)
+  }
+  expect(await resumeFromApproval(f.deps, f.approval.id, 'approved', USER_ID)).toMatchObject({ status: 'workflow_cancelled' })
+  expect(f.execute).not.toHaveBeenCalled()
+  expect(f.downstream).not.toHaveBeenCalled()
+})
+
+it('does not claim an already cancelled approval', async () => {
+  const f = await cancellationFixture()
+  const controller = new AbortController(); controller.abort()
+  expect(await resumeFromApproval(f.deps, f.approval.id, 'approved', USER_ID, undefined, controller.signal)).toEqual({ status: 'cancelled', runId: null })
+  expect(f.approval.status).toBe('pending')
+  expect(f.runs.get(f.run.id)?.status).toBe('awaiting_input')
+})
+
+it('checks cancellation at the tool boundary after argument validation', async () => {
+  const f = await cancellationFixture()
+  const controller = new AbortController()
+  vi.spyOn(f.tool.inputSchema, 'parse').mockImplementation(() => { controller.abort(); return {} })
+  expect(await resumeFromApproval(f.deps, f.approval.id, 'approved', USER_ID, undefined, controller.signal)).toMatchObject({ status: 'approval_submitted_workflow_cancelled' })
+  expect(f.execute).not.toHaveBeenCalled()
+  expect(f.runs.get(f.run.id)?.status).toBe('failed')
+})
 
 // ── Tests ────────────────────────────────────────────────────────────────
 

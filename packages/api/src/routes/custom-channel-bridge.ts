@@ -1,3 +1,4 @@
+import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 /**
  * Custom channel bridge route — the API-side half of the bridge protocol (v1).
  *
@@ -22,8 +23,8 @@
  * archived, access control → archived (never dropped), routing → archived
  * when nobody answers, tier-2 shadow user keyed `custom:<channelId>:<senderId>`,
  * `withChatLock('custom:<channelId>:<peerId>')`, then `processChannelMessage`
- * with text-only confirmations (yes / no / always / never — a bridge has no
- * buttons). Replies go through the custom adapter, which enqueues outbox
+ * with shared sender-bound confirmations. Replies go through the custom
+ * adapter (native actions or readable text fallback), which enqueues outbox
  * items the bridge pulls. The 200 is sent BEFORE the turn runs.
  *
  * See docs/architecture/channels/custom-channel.md.
@@ -51,7 +52,6 @@ import {
 import type { IncomingMessage } from '@use-brian/channels'
 import {
   composeVoiceTurnText,
-  interpretConfirmationEvent,
   parseFileContent,
   sanitize as sanitizeAnalytics,
   transcribeFirstAudio,
@@ -59,9 +59,8 @@ import {
   type MediaBackend,
   type TokenUsage,
 } from '@use-brian/core'
-import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
-import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, type ChannelUserStore } from '../db/channel-user-store.js'
@@ -78,6 +77,7 @@ import { bridgeTokenMatches } from '../db/custom-channel-token.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { query } from '../db/client.js'
 import { processChannelMessage } from './channel-pipeline.js'
+import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
@@ -88,9 +88,9 @@ import {
   archiveUnroutedInbound,
   appendOutboundChatArchive,
 } from '../chat-archive/live-writer.js'
-import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 
 export type CustomChannelBridgeRouteOptions = {
+  questionStore?: ChannelQuestionStore
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
@@ -334,8 +334,6 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
   const store = options.customChannelStore
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
 
-  // Pending text-based tool confirmations, keyed by `channelId:peerId`.
-  const pendingConfirmations = new Map<string, { resolver: ConfirmationResolver; toolCallId: string }>()
 
   // ── Bridge token auth — loads the channel + integration once per request.
   const auth = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -706,7 +704,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       // 6. Sender → tier-2 shadow user, namespaced by channel: two custom
       //    channels may carry overlapping sender ids.
       let channelUserId = ownerId
-      let isIdentified = true
+      let isIdentified = false
       if (options.channelUserStore) {
         try {
           const resolved = await resolveChannelUser(
@@ -731,43 +729,12 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       // inbound is fire-and-forget from the bridge's side.
       res.status(200).json({ ok: true })
 
-      // 7. A pending confirmation on this chat intercepts the next message
-      //    as a yes/no/always/never decision; anything else resolves as deny
-      //    and falls through as a fresh turn. Mirrors wechat.ts.
-      const confirmKey = `${channelId}:${peerId}`
-      const pending = pendingConfirmations.get(confirmKey)
-      if (pending) {
-        const confirmation = interpretConfirmationEvent(
-          { kind: 'text', text: incoming.text },
-          pending.toolCallId,
-        )
-        pendingConfirmations.delete(confirmKey)
-        if (confirmation.status === 'decision') {
-          pending.resolver.resolve(pending.toolCallId, confirmation.decision)
-          if (confirmation.consume) return
-        }
-      } else {
-        const confirmation = interpretConfirmationEvent({ kind: 'text', text: incoming.text })
-        if (confirmation.status === 'decision' && options.deferredConfirmationStore) {
-          // A custom peer id is only unique inside its routed assistant/channel
-          // (many WeChat accounts have the same `filehelper` peer). Scope the
-          // DB lookup by assistant, then carry the trusted deferred-row user
-          // into the registry guard so another tenant cannot approve it.
-          const deferred = await options.deferredConfirmationStore.findPendingByChannel(
-            'custom',
-            peerId,
-            routing.assistantId,
-          )
-          if (deferred && tryResolveSchedulerConfirmation(deferred.toolCallId, confirmation.decision, {
-            userId: deferred.userId,
-            channelType: 'custom',
-            channelId: peerId,
-          })) {
-            await options.deferredConfirmationStore.markResolved(deferred.toolCallId, confirmation.decision)
-            return
-          }
-        }
+      // Resolve before acquiring the conversation lock held by the suspended turn.
+      const scope: ChannelInteractionScope = {
+        channelType: 'custom', integrationId: channelId,
+        conversationId: incoming.channelId, senderId: incoming.userId,
       }
+      if (channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
 
       // 8. Sequentialize per conversation.
       // A file reply is deliverable only when THIS bridge declared it can put
@@ -787,7 +754,8 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
           routing,
           integrationId: integration.id,
           channelId,
-          confirmKey,
+          scope,
+          questionIntegrationId: integration.id,
           archiveConnectorInstanceId: integration.connectorInstanceId,
           documentsCapable: bridgeState?.capabilities?.documents === true,
         }),
@@ -948,11 +916,12 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     routing: { assistantId: string; modelAlias: string }
     integrationId: string
     channelId: string
-    confirmKey: string
+    scope: ChannelInteractionScope
+    questionIntegrationId: string
     archiveConnectorInstanceId?: string | null
     documentsCapable?: boolean
   }): Promise<void> {
-    const { adapter, incoming, bridgeMessage, assistant, channelUserId, ownerId, isIdentified, routing, channelId, confirmKey } = params
+    const { adapter, incoming, bridgeMessage, assistant, channelUserId, ownerId, isIdentified, routing, channelId } = params
     const peerId = incoming.channelId
 
     // ── Content blocks (text + media) — same shapes as routes/wechat.ts ──
@@ -1160,6 +1129,10 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     const abortController = new AbortController()
 
     await processChannelMessage({
+      interactionScope: params.scope,
+      incomingMessage: incoming,
+      questionIntegrationId: params.questionIntegrationId,
+      questionStore: options.questionStore,
       backgroundModel: options.backgroundModel,
       decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
@@ -1235,26 +1208,13 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
         async onGoalAccepted(message) {
           await adapter.sendMessage(peerId, { text: message })
         },
-        async onConfirmationRequired(req, resolver) {
-          // Text-only confirmation: park the resolver; the peer's next
-          // message resolves it through the shared confirmation interpreter.
-          pendingConfirmations.set(confirmKey, { resolver, toolCallId: req.toolCallId })
-          const lines = req.displayLines && req.displayLines.length > 0
-            ? req.displayLines
-            : formatConfirmationInput(req.input)
-          const inputSummary = lines.length > 0 ? '\n' + lines.join('\n') : ''
-          const displayName = getToolDisplayName(req.toolName)
-          const replyHint = req.allowPersistentApproval
-            ? 'Reply: yes / no / always / never'
-            : 'Reply: yes / no'
+        async onConfirmationRequired(req) {
           await cancelTyping()
-          await adapter.sendMessage(peerId, {
-            text: `${displayName}${inputSummary}\n\n${replyHint}`,
-          })
+          await adapter.sendMessage(peerId, confirmationMessage(req))
         },
-        async sendResponse(text, documents) {
+        async sendResponse(text, documents, _question, actions) {
           const finalText = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-          const reply = finalText || "I couldn't generate a reply - please rephrase or try again."
+          const reply = finalText || (documents?.length ? '' : "I couldn't generate a reply - please rephrase or try again.")
           await cancelTyping()
           // Documents reach this hook only when the sendFile gate admitted
           // them, which for `custom` requires the bridge's declared
@@ -1263,6 +1223,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
           const channelMessageId = await adapter.sendMessage(peerId, {
             text: reply,
             format: 'markdown',
+            actions,
             ...(documents && documents.length > 0 ? { documents } : {}),
           })
           return channelMessageId ? { channelMessageId } : undefined

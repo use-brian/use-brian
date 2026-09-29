@@ -420,7 +420,7 @@ import { feishuRoutes } from './routes/feishu.js'
 import { msteamsRoutes } from './routes/msteams.js'
 import { telegramLinkingRoutes } from './routes/telegram-linking.js'
 import { slackLinkingRoutes } from './routes/slack-linking.js'
-import { createDbChannelUserStore } from './db/channel-user-store.js'
+import { createDbChannelUserStore, resolveChannelUser } from './db/channel-user-store.js'
 import { createDiscordConnectorClient } from './discord/connector-client.js'
 import { createWhatsappConnectorClient } from './whatsapp/connector-client.js'
 import { createWechatConnectorClient } from './wechat/connector-client.js'
@@ -429,6 +429,7 @@ import { wechatRoutes } from './routes/wechat.js'
 import { customChannelBridgeRoutes } from './routes/custom-channel-bridge.js'
 import { createCustomChannelStore } from './db/custom-channel-store.js'
 import { createWhatsappByonRuntime } from './whatsapp/byon-runtime.js'
+import { resolveWhatsappByonTurnIdentity } from './whatsapp/byon-identity.js'
 import { createIngestRulesStore } from './db/ingest-rules-store.js'
 import { createIngestRuleEditorStore } from './db/ingest-rules-editor-store.js'
 import { ingestRoutes } from './routes/ingest.js'
@@ -436,6 +437,7 @@ import { createExtractionApplicationStore } from './db/extraction-application-st
 import { createIngestApplicationService, type IngestApplicationService } from './ingest/application-service.js'
 import { createPipelineBApplicationMutationPort } from './ingest/pipeline-b-application-adapter.js'
 import { processChannelMessage } from './routes/channel-pipeline.js'
+import { configureChannelWorkflowReplies } from './routes/channel-workflow-context.js'
 import { loadConnectorRegistry } from './registry/load-registry.js'
 import { createDbLinkedAccountStore } from './db/linked-accounts.js'
 import { createLinkedIdentityStore } from './db/linked-identity-store.js'
@@ -3589,6 +3591,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     deliveries: approvalDeliveries,
     executorDeps: workflowExecutorDeps,
   }
+  configureChannelWorkflowReplies(approvalBridgeDeps)
   workflowExecutorDeps.requestApproval = makeRequestApproval(approvalBridgeDeps)
 
   // ── Goal-seeker acting loop (R1) ──
@@ -9227,10 +9230,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         scheduledBatching: ports.whatsappScheduledBatching,
         runPipeline: async ({ ctx: channel, input, hooks, abortController }) => {
           if (!channel.assistantId) return
+          const identity = await resolveWhatsappByonTurnIdentity(input, channel.assistantId, {
+            findLinkedAccount: (provider, providerId) => linkedAccountStore.findByProvider(provider, providerId),
+            findUser: findUserById,
+            resolveShadow: (providerUserId, assistantId, displayName) => resolveChannelUser(
+              channelUserStore, 'whatsapp', providerUserId, assistantId,
+              async () => ({ providerUserId, email: null, displayName }),
+            ),
+          })
+          const integration = await integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
           await processChannelMessage({
+            ...identity,
+            questionIntegrationId: integration?.id,
             backgroundModel,
             decisionRuntime,
-            userId: channel.ownerUserId,
             ownerId: channel.ownerUserId,
             assistant: {
               id: channel.assistantId,
@@ -9241,10 +9254,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               clearance: channel.assistantClearance,
               kind: channel.assistantKind,
             },
-            isIdentified: true,
             channelType: 'whatsapp',
             channelId: input.chatJid,
-            actorChannelId: (input.senderPnJid ?? input.senderJid).split('@')[0] ?? null,
             mediaEpisodeId: input.mediaEpisodeId,
             messageText: input.text,
             rawUserText: input.text,

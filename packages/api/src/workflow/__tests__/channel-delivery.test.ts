@@ -37,6 +37,8 @@ vi.mock('@use-brian/channels', async (importOriginal) => ({
   createWhatsAppAdapter: vi.fn(() => ({ sendMessage })),
   createWhatsAppCloudAdapter,
   createFeishuAdapter,
+  createMsTeamsAdapter: vi.fn(() => ({ sendMessage })),
+  createCustomAdapter: vi.fn(() => ({ sendMessage })),
 }))
 
 vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) }))
@@ -52,6 +54,7 @@ import { addSessionMessage } from '../../db/sessions.js'
 
 const integrationStore = {
   getCredentialsForAssistantSystem: vi.fn(async () => ({
+    id: 'integration',
     credentials: { bot_token: 'xoxb-test' },
     botUserId: 'B1',
   })),
@@ -473,14 +476,15 @@ describe('[COMP:workflow/channel-delivery] question fallback', () => {
     const deliver = createWorkflowChannelDelivery({ integrationStore })
     expect(await deliver({ ...baseParams(), channelType, text: '', question }))
       .toMatchObject({ status: 'delivered' })
-    expect(sendMessage.mock.calls.at(-1)?.[1]).toEqual({ text: 'Which?\n1. First\n2. Second', format: 'markdown' })
+    expect(sendMessage.mock.calls.at(-1)?.[1].text).toContain('Which?\n1. First\n2. Second')
+    expect(sendMessage.mock.calls.at(-1)?.[1].text).toContain('Question reference: wq:')
   })
 
   it('supports questions without choices and retains ordinary text delivery', async () => {
     sendMessage.mockResolvedValue('msg-43')
     const deliver = createWorkflowChannelDelivery({ integrationStore })
     await deliver({ ...baseParams(), channelType: 'telegram', text: '', question: { question: 'Your thoughts?' } })
-    expect(sendMessage.mock.calls.at(-1)?.[1].text).toBe('Your thoughts?')
+    expect(sendMessage.mock.calls.at(-1)?.[1].text).toContain('Your thoughts?')
     await deliver({ ...baseParams(), channelType: 'telegram' })
     expect(sendMessage.mock.calls.at(-1)?.[1].text).toBe('per-person update')
   })
@@ -502,7 +506,7 @@ describe('[COMP:workflow/channel-delivery] durable question buttons', () => {
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ integrationId: 'byo-integration', channelId: '-100:topic:7', question, response }))
     expect(createTelegramAdapter).toHaveBeenLastCalledWith({ token: 'byo', strictTopic: true })
     expect(sendMessage).toHaveBeenLastCalledWith('-100:topic:7', expect.objectContaining({
-      actions: [{ id: '0', label: 'dev', data: `wq:${'a'.repeat(24)}:0` }, { id: '1', label: 'prod', data: `wq:${'a'.repeat(24)}:1` }],
+      actions: [{ id: '0', label: 'dev', data: `wq:${'a'.repeat(24)}:0`, replyText: `wq:${'a'.repeat(24)} 1` }, { id: '1', label: 'prod', data: `wq:${'a'.repeat(24)}:1`, replyText: `wq:${'a'.repeat(24)} 2` }],
     }), undefined)
     expect(attach).toHaveBeenCalledWith('a'.repeat(24), '123')
   })
@@ -525,4 +529,50 @@ describe('[COMP:workflow/channel-delivery] durable question buttons', () => {
     })).rejects.toThrow('chat not found')
     expect(vi.mocked(mockedCreateTelegramAdapter).mock.calls.slice(start).map(([opts]) => opts.token)).toEqual(['byo'])
   })
+})
+
+describe('durable question delivery parity', () => {
+  it.each(['slack', 'feishu', 'msteams', 'custom', 'whatsapp'] as const)('binds %s replies to the selected integration and posted message', async (channelType) => {
+    const { createChannelQuestionStore } = await import('../channel-questions.js')
+    const store = createChannelQuestionStore()
+    const create = vi.spyOn(store, 'create').mockResolvedValue('a'.repeat(24))
+    const attach = vi.spyOn(store, 'attach').mockResolvedValue()
+    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce({
+      id: 'pinned', channelId: 'workspace-channel', credentials: {}, config: { msteamsServiceUrl: 'https://example.com' },
+    } as never)
+    sendMessage.mockResolvedValueOnce('posted')
+    const question = { question: 'Choose', options: ['A', 'B'] }
+    const response = { toolName: 'answer_action', arguments: { version: 3 }, answerField: 'answer' }
+    const result = await createWorkflowChannelDelivery({ integrationStore, questionStore: store,
+      waConnectorUrl: 'http://connector', waConnectorSecret: 'secret', customChannelStore: { enqueue: vi.fn() },
+    })({ ...baseParams(), channelType, channelIntegrationId: 'pinned', channelId: 'peer@example', question, questionResponse: response })
+    expect(result).toMatchObject({ status: 'delivered', messageId: 'posted' })
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ integrationId: 'pinned', channelId: 'peer@example', question, response }))
+    expect(attach).toHaveBeenCalledWith('a'.repeat(24), 'posted')
+    expect(sendMessage.mock.calls.at(-1)?.[1].text).toContain('Question reference: wq:')
+  })
+  it('fails closed for an actionable integration-less WhatsApp question', async () => {
+    const result = await createWorkflowChannelDelivery({ waConnectorUrl: 'http://connector', waConnectorSecret: 'secret' })({
+      ...baseParams(), channelType: 'whatsapp', channelId: 'peer@example', question: { question: 'Choose' },
+    })
+    expect(result).toMatchObject({ status: 'skipped', reason: 'no_integration' })
+    expect(sendMessage).not.toHaveBeenCalled()
+  })
+})
+
+it('binds a WhatsApp Cloud trigger reply after provider/access/window validation', async () => {
+  const { createChannelQuestionStore } = await import('../channel-questions.js')
+  const store = createChannelQuestionStore()
+  const create = vi.spyOn(store, 'create').mockResolvedValue('a'.repeat(24))
+  const attach = vi.spyOn(store, 'attach').mockResolvedValue()
+  vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce(whatsappCloudIntegration())
+  sendMessage.mockResolvedValueOnce('cloud-message')
+  const result = await createWorkflowChannelDelivery({ integrationStore, questionStore: store, now: () => Date.parse('2026-08-18T12:00:00Z') })({
+    ...baseParams(), channelType: 'whatsapp', channelId: '15551234567', channelIntegrationId: 'int-wa',
+    question: { question: 'Choose', options: ['A', 'B'] },
+    replyToTrigger: { actorId: '15551234567', recipientType: 'individual', providerAccountId: 'phone-1', occurredAt: '2026-08-18T11:00:00Z' },
+  })
+  expect(result).toMatchObject({ status: 'delivered', messageId: 'cloud-message' })
+  expect(create).toHaveBeenCalledWith(expect.objectContaining({ integrationId: 'int-wa', channelId: '15551234567' }))
+  expect(attach).toHaveBeenCalledWith('a'.repeat(24), 'cloud-message')
 })

@@ -1,3 +1,4 @@
+import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 /**
  * WeChat internal route — iLink long-poll connector seam.
  *
@@ -41,8 +42,8 @@ import {
 } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
 import { z } from 'zod'
-import { interpretConfirmationEvent, parseFileContent } from '@use-brian/core'
-import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import { parseFileContent } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
 import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -51,8 +52,8 @@ import { resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-s
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, WechatCredentials } from '../db/channel-integrations.js'
 import { upsertWechatContextToken, getWechatContextToken } from '../db/wechat-context-tokens.js'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
@@ -62,6 +63,7 @@ import { resolveChatArchiveInstanceId, archiveUnroutedInbound } from '../chat-ar
 import { query } from '../db/client.js'
 
 export type WechatRouteOptions = {
+  questionStore?: ChannelQuestionStore
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
@@ -155,8 +157,6 @@ function connectorSecretMatches(provided: unknown, expected: string): boolean {
 export function wechatRoutes(options: WechatRouteOptions): Router {
   const router = Router()
 
-  // Pending text-based tool confirmations, keyed by `channelId:peerId`.
-  const pendingConfirmations = new Map<string, { resolver: ConfirmationResolver; toolCallId: string }>()
 
   // ── Connector auth ────────────────────────────────────────────
   router.use((req, res, next) => {
@@ -387,8 +387,8 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
       // 4. Resolve the WeChat sender → a platform user. The QR-bound account
       //    is the owner identity; all other contacts stay tier-2 shadows.
       let channelUserId = ownerId
-      let isIdentified = true
-      if (!isBoundWechatOwner(incoming.userId, creds) && options.channelUserStore && incoming.userId) {
+      let isIdentified = isBoundWechatOwner(incoming.userId, creds)
+      if (!isIdentified && options.channelUserStore && incoming.userId) {
         try {
           const resolved = await resolveChannelUser(
             options.channelUserStore,
@@ -411,23 +411,12 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
         getContextToken: (uid: string) => getWechatContextToken(channelId, uid),
       })
 
-      // 6. A pending confirmation on this chat intercepts the next message as
-      //    a yes/no/always/never decision. A non-decision message resolves as
-      //    deny so the in-flight turn (holding the chat lock) unblocks, then
-      //    falls through as a fresh turn. Mirrors discord.ts / slack.ts.
-      const confirmKey = `${channelId}:${peerId}`
-      const pending = pendingConfirmations.get(confirmKey)
-      if (pending) {
-        const confirmation = interpretConfirmationEvent(
-          { kind: 'text', text: incoming.text },
-          pending.toolCallId,
-        )
-        pendingConfirmations.delete(confirmKey)
-        if (confirmation.status === 'decision') {
-          pending.resolver.resolve(pending.toolCallId, confirmation.decision)
-          if (confirmation.consume) return
-        }
+      // Resolve before acquiring the conversation lock held by the suspended turn.
+      const scope: ChannelInteractionScope = {
+        channelType: 'wechat', integrationId: channelId,
+        conversationId: incoming.channelId, senderId: incoming.userId,
       }
+      if (channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
 
       // 7. Sequentialize per DM peer.
       await withChatLock(`wechat:${channelId}:${peerId}`, () =>
@@ -442,7 +431,8 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
           integrationId: integration.id,
           channelId,
           creds,
-          confirmKey,
+          scope,
+          questionIntegrationId: integration.id,
           archiveConnectorInstanceId: integration.connectorInstanceId,
         }),
       )
@@ -462,10 +452,11 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
     integrationId: string
     channelId: string
     creds: WechatCredentials
-    confirmKey: string
+    scope: ChannelInteractionScope
+    questionIntegrationId: string
     archiveConnectorInstanceId?: string | null
   }): Promise<void> {
-    const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing, channelId, creds, confirmKey } = params
+    const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing, channelId, creds } = params
     const peerId = incoming.channelId
     const raw = incoming.raw as WeixinMessage | undefined
 
@@ -661,6 +652,10 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
     const abortController = new AbortController()
 
     await processChannelMessage({
+      interactionScope: params.scope,
+      incomingMessage: incoming,
+      questionIntegrationId: params.questionIntegrationId,
+      questionStore: options.questionStore,
       backgroundModel: options.backgroundModel,
       decisionRuntime: options.decisionRuntime,
       userId: channelUserId,
@@ -726,28 +721,15 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
         async onGoalAccepted(message) {
           await adapter.sendMessage(peerId, { text: message })
         },
-        async onConfirmationRequired(req, resolver) {
-          // Text-only confirmation: park the resolver; the peer's next
-          // message resolves it through the shared confirmation interpreter.
-          pendingConfirmations.set(confirmKey, { resolver, toolCallId: req.toolCallId })
-          const lines = req.displayLines && req.displayLines.length > 0
-            ? req.displayLines
-            : formatConfirmationInput(req.input)
-          const inputSummary = lines.length > 0 ? '\n' + lines.join('\n') : ''
-          const displayName = getToolDisplayName(req.toolName)
-          const replyHint = req.allowPersistentApproval
-            ? 'Reply: yes / no / always / never'
-            : 'Reply: yes / no'
+        async onConfirmationRequired(req) {
           await cancelTyping()
-          await adapter.sendMessage(peerId, {
-            text: `${displayName}${inputSummary}\n\n${replyHint}`,
-          })
+          await adapter.sendMessage(peerId, confirmationMessage(req))
         },
-        async sendResponse(text) {
+        async sendResponse(text, documents, _question, actions) {
           const finalText = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-          const reply = finalText || "I couldn't generate a reply - please rephrase or try again."
+          const reply = finalText || (documents?.length ? '' : "I couldn't generate a reply - please rephrase or try again.")
           await cancelTyping()
-          const channelMessageId = await adapter.sendMessage(peerId, { text: reply, format: 'markdown' })
+          const channelMessageId = await adapter.sendMessage(peerId, { text: reply, format: 'markdown', documents, actions })
           return channelMessageId ? { channelMessageId } : undefined
         },
         async onDowngraded(resetsAt) {
