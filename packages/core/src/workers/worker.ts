@@ -1198,6 +1198,15 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       return countActiveWorkers()
     },
 
+    /** Return the cap and active count that `spawn()` applies to one session.
+     * Capacity errors must use this view rather than process-wide diagnostics. */
+    capacityForSession(sessionId: string): { active: number; cap: number | null } {
+      return {
+        active: countActiveWorkersFor(sessionId),
+        cap: sessionConfigs.get(sessionId)?.maxConcurrent ?? maxConcurrent,
+      }
+    },
+
     /**
      * Spawn a new worker. Returns immediately — worker runs in the background.
      * Results arrive via the notification queue (drainNotifications). Returns

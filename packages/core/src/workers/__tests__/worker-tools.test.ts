@@ -35,6 +35,9 @@ function makeFakeManager(options?: { cap?: number | null }): FakeManager {
     },
     get maxConcurrent(): number | null { return cap },
     get activeCount(): number { return active() },
+    capacityForSession(): { active: number; cap: number | null } {
+      return { active: active(), cap }
+    },
     // Mirrors the real manager: only a RUNNING worker can be stopped
     // (worker.ts `stop()` returns false for a settled one). The fake used to
     // return true for any known id, which hid the difference between "no such
@@ -155,6 +158,23 @@ describe('[COMP:workers/tools] spawnWorker', () => {
     // The rejected spawn must NOT count toward `spawned` — only the 2 that succeeded did.
     expect(manager.spawned).toHaveLength(2)
   })
+
+  it('reports capacity for the calling session instead of process-wide totals', async () => {
+    const manager = makeFakeManager({ cap: 2 })
+    const { spawnWorker } = createWorkerTools(manager)
+    await spawnWorker.execute({ description: 'w1', prompt: 'task 1' }, ctx)
+    await spawnWorker.execute({ description: 'w2', prompt: 'task 2' }, ctx)
+
+    manager.capacityForSession = () => ({ active: 2, cap: 2 })
+    Object.defineProperty(manager, 'activeCount', { get: () => 99 })
+    Object.defineProperty(manager, 'maxConcurrent', { get: () => null })
+
+    const rejected = await spawnWorker.execute({ description: 'w3', prompt: 'task 3' }, ctx)
+    expect(rejected.isError).toBe(true)
+    expect(String(rejected.data)).toContain('2/2')
+    expect(String(rejected.data)).not.toContain('99/')
+    expect(String(rejected.data)).not.toContain('/unbounded')
+  })
 })
 
 describe('[COMP:workers/tools] sendWorkerMessage', () => {
@@ -167,11 +187,12 @@ describe('[COMP:workers/tools] sendWorkerMessage', () => {
     )
     expect(result.isError).toBe(true)
     const data = String(result.data)
-    // Worker ids are per-turn and in-memory, and there is NO listing tool —
+    // Worker ids are manager-lifetime labels, lookup is session-scoped, and
+    // there is NO listing tool —
     // so the copy must name the id, say where the only valid id comes from,
     // and close the search rather than sending the model hunting.
     expect(data).toContain('worker_missing')
-    expect(data).toContain('per-turn and in-memory')
+    expect(data).toContain('manager-lifetime in-memory labels')
     expect(data).toContain('no tool that lists workers')
     expect(data).toContain('spawnWorker')
     expect(data).toContain('Do NOT retry this exact id')

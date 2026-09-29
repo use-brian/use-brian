@@ -14,7 +14,7 @@ import type { WorkerManager } from './worker.js'
 function workerNotFound(workerId: string): string {
   return (
     `Worker ${workerId} does not exist in this turn. ` +
-    'Worker ids are per-turn and in-memory (they are minted by spawnWorker and discarded when the request ends), so an id from an earlier turn, another session, or another server instance never resolves here. ' +
+    'Worker ids are manager-lifetime in-memory labels, but lookup is limited to this session and delivered terminal entries are released, so an id from an earlier turn, another session, or another server instance may not resolve here. ' +
     'There is no tool that lists workers: the only valid workerId is one spawnWorker returned to you in THIS turn. ' +
     'If you still need the research, call spawnWorker with a self-contained prompt. Do NOT retry this exact id.'
   )
@@ -50,10 +50,10 @@ export function createWorkerTools(manager: WorkerManager): {
         // to stop spawning this turn and wait for completions instead. The
         // active/cap numbers help the model reason about how many slots
         // remain and roughly when one will free up.
-        const cap = manager.maxConcurrent ?? 'unbounded'
-        const active = manager.activeCount
+        const capacity = manager.capacityForSession(context.sessionId)
+        const cap = capacity.cap ?? 'unbounded'
         return {
-          data: `No worker was spawned: the pool is at capacity (${active}/${cap} running). Nothing about your prompt is wrong — there is simply no free slot. Do not call spawnWorker again this turn: emit your remaining tool calls if any, otherwise end the turn so Phase 4b can drain completed workers. Retrying this exact call in the NEXT turn, once some workers have finished, will succeed.`,
+          data: `No worker was spawned: the pool is at capacity (${capacity.active}/${cap} running). Nothing about your prompt is wrong — there is simply no free slot. Do not call spawnWorker again this turn: emit your remaining tool calls if any, otherwise end the turn so Phase 4b can drain completed workers. Retrying this exact call in the NEXT turn, once some workers have finished, will succeed.`,
           isError: true,
         }
       }
