@@ -177,7 +177,7 @@ import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, 
 import { findAssistantById, findUserByAuthProvider, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from './context-scope/execution-context.js'
-import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowRunScope } from './context-scope/workflow-authority.js'
+import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowAuthoringScope, resolveWorkflowRunScope } from './context-scope/workflow-authority.js'
 import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
@@ -3901,11 +3901,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })),
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
-    resolveKnownWorkflowTools: async ({ userId, workspaceId, assistantId, toolNames }) => {
+    resolveKnownWorkflowTools: async ({ userId, workspaceId, assistantId, toolNames, authoringAuthority, contextGroupId, contextProjectId }) => {
+      const turnScope = await resolveWorkflowAuthoringScope({
+        userId, workspaceId, assistantId, authoringAuthority, contextGroupId, contextProjectId,
+      })
       const registry = await workflowExecutorDeps.buildToolRegistry({
         userId,
         workspaceId,
         assistantId,
+        turnScope,
       })
       return toolNames.filter((toolName) => registry.has(toolName))
     },
