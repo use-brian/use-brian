@@ -169,6 +169,38 @@ describe('[COMP:core/worker-manager-persist] setPersistence + spawn lifecycle', 
     expect(manager.getResult(workerId, 's1')).toBeNull()
   })
 
+  it('does not resurrect a cancelled worker when release races its abort', async () => {
+    let started!: () => void
+    const streamStarted = new Promise<void>((resolve) => { started = resolve })
+    const provider: LLMProvider = {
+      name: 'abort-race',
+      models: ['gemini-flash'],
+      async *stream(req: ProviderRequest) {
+        started()
+        await new Promise<void>((_resolve, reject) => {
+          req.signal?.addEventListener('abort', () => {
+            const error = new Error('Aborted')
+            error.name = 'AbortError'
+            reject(error)
+          }, { once: true })
+        })
+      },
+      createSession(): ProviderSession {
+        throw new Error('stateless worker should use provider.stream')
+      },
+    }
+    const manager = createWorkerManager({ provider, model: 'gemini-flash', tools: new Map() })
+    const { workerId } = manager.spawn('wait forever', ctx)!
+    await streamStarted
+
+    expect(manager.cancelForSession('s1')).toBe(1)
+    manager.releaseSession('s1')
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(manager.hasNotificationsFor('s1')).toBe(false)
+    expect(manager.getStatus(workerId, 's1')).toBeNull()
+  })
+
   it('reset() clears persistence — no writes for subsequent spawns', async () => {
     const store = makeStore()
     const manager = createWorkerManager({
@@ -419,6 +451,38 @@ describe('[COMP:core/worker-manager-persist] rehydrate', () => {
     expect(resultB.result).toBe('result B')
     expect(resultA.workerId).toBe('worker_1')
     expect(resultB.workerId).not.toBe(resultA.workerId)
+  })
+
+  it('does not duplicate a persisted run that is already queued in memory', async () => {
+    const store = makeStore()
+    const manager = createWorkerManager({
+      provider: makeFakeProvider('same-process result'),
+      model: 'gemini-flash',
+      tools: new Map(),
+    })
+    manager.setPersistence({ store, sessionId: 's1', workspaceId: 'ws1' })
+    const { workerId } = manager.spawn('existing run', ctx)!
+    await manager.waitForNext('s1')
+    await new Promise((resolve) => setImmediate(resolve))
+    const runId = store.spawns[0].runId
+    store.loadResult.push({
+      runId,
+      workerId,
+      status: 'completed',
+      description: 'existing run',
+      prompt: 'existing run',
+      researchMode: false,
+      model: 'gemini-flash',
+      turnCount: 1,
+      result: 'same-process result',
+      history: [],
+    })
+
+    await expect(manager.rehydrate('s1', ctx)).resolves.toEqual({
+      respawned: 0,
+      notificationsReady: 0,
+    })
+    expect(manager.drainNotifications('s1')).toHaveLength(1)
   })
 
   it('is a no-op when no persistence store is set', async () => {

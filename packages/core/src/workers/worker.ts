@@ -308,6 +308,8 @@ export function createWorkerManager(options: WorkerOptions) {
     status: WorkerStatus
     description: string
     result?: string
+    /** Durable worker_runs row identity. Unlike workerId, unique across sessions. */
+    runId: string
     // Spawning turn's session — scopes pendingCount/notification delivery so
     // one user's worker never surfaces in another user's turn on this shared
     // singleton. See WorkerResult.ownerSessionId.
@@ -606,6 +608,7 @@ export function createWorkerManager(options: WorkerOptions) {
           workerId,
         )
       }
+      workers.delete(workerId)
       return stopped
     }
     const promise = (async (): Promise<WorkerResult> => {
@@ -890,6 +893,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     workers.set(workerId, {
       status: 'running',
       description,
+      runId,
       ownerSessionId,
       abortController,
       promise,
@@ -1014,6 +1018,13 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
         }
       }
       for (const row of rows) {
+        // A same-process resume can see the exact run that is already active or
+        // queued in memory. The durable UUID, not the display worker id, is the
+        // idempotency key; loading it again would duplicate work or delivery.
+        const alreadyLoaded = [...workers.values()].some(
+          (entry) => entry.ownerSessionId === sessionId && entry.runId === row.runId,
+        )
+        if (alreadyLoaded) continue
         // Persisted worker ids are display labels, not process-wide identities.
         // Two sessions can both contain (for example) `worker_1`; preserve the
         // label when free, otherwise remap it before touching the shared Map.
@@ -1066,6 +1077,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
           workers.set(runtimeWorkerId, {
             status: row.status,
             description: row.description,
+            runId: row.runId,
             result: row.result ?? undefined,
             ownerSessionId: sessionId,
             abortController: undefined,
@@ -1165,6 +1177,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
         if (
           entry.ownerSessionId === sessionId
           && entry.status !== 'running'
+          && entry.promise === undefined
           && !queuedWorkerIds.has(workerId)
         ) {
           workers.delete(workerId)
