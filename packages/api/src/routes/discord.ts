@@ -27,7 +27,7 @@ import { resolveChannelQuestion } from './channel-questions.js'
 
 import { timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
-import { createDiscordAdapter, DiscordApiError, respondToInteraction } from '@use-brian/channels'
+import { createDiscordAdapter, denormalizeActions, DiscordApiError, respondToInteraction } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
 import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -757,7 +757,8 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
           // fits one Discord message; otherwise drop the status and send fresh.
           // A reply carrying documents always sends fresh — an edit cannot
           // attach uploads, so the edit path would silently drop them.
-          if (statusMessageId && !hasDocuments && reply.length <= 2000) {
+          const renderedLength = denormalizeActions({ text: reply, actions }).text.length
+          if (statusMessageId && !hasDocuments && renderedLength <= adapter.maxMessageLength) {
             await adapter.editMessage(channelId, statusMessageId, { text: reply, format: 'markdown', actions })
             channelMessageId = statusMessageId
             statusMessageId = undefined

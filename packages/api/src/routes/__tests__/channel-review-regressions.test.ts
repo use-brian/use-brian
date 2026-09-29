@@ -14,6 +14,8 @@ vi.mock('../../db/chat-lock.js', () => ({ withChatLock: (_key: string, fn: () =>
 vi.mock('../../db/channel-event-dedup.js', () => ({ claimChannelEvent: async () => true }))
 vi.mock('../../feishu/client.js', () => ({ createFeishuApi: () => ({}) }))
 vi.mock('../../db/client.js', () => ({ query: async () => ({ rows: [{ id: 'abcdef12' }] }) }))
+import { denormalizeActions } from '@use-brian/channels'
+import { discordRoutes } from '../discord.js'
 import { wechatRoutes } from '../wechat.js'
 import { feishuRoutes } from '../feishu.js'
 import { channelQuestions } from '../channel-questions.js'
@@ -82,4 +84,44 @@ it.each([true, false])('successive Feishu choices preserve the session (initial 
   expect(mocks.pipeline.mock.calls.map(([p]) => p.interactionScope.sessionId)).toEqual([
     'chat:thread:om_original', 'chat:thread:om_original', 'chat:thread:om_original',
   ])
+})
+
+it.each([2000, 2001])('Discord selects delivery using rendered action length %i', async renderedLength => {
+  const actions = [{ id: 'next', label: 'Next', data: 'ask:test:0', replyText: 'Next' }]
+  const suffixLength = denormalizeActions({ text: 'x', actions }).text.length - 1
+  const text = 'x'.repeat(renderedLength - suffixLength)
+  const calls: { method: string; url: string; body: any }[] = []
+  let sent = 0
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    calls.push({ method: init.method!, url: String(url), body: init.body ? JSON.parse(String(init.body)) : undefined })
+    if (init.method === 'DELETE') return new Response(null, { status: 204 })
+    const id = init.method === 'POST' ? `sent-${++sent}` : 'sent-1'
+    return new Response(JSON.stringify({ id }), { status: 200 })
+  }))
+  const delivered = vi.fn()
+  mocks.pipeline.mockImplementation(async p => {
+    await p.hooks.onProcessingStart()
+    delivered(await p.hooks.sendResponse(text, undefined, undefined, actions))
+    await p.hooks.onCleanup()
+  })
+  const app = express(); app.use(express.json())
+  app.use('/discord', discordRoutes({ connectorSecret: 'secret', tools: new Map(),
+    integrationStore: integrationStore({ bot_token: 'token' }),
+  } as never))
+  await request(app).post('/discord/inbound').set('X-Connector-Secret', 'secret').send({ channelId: 'channel', message: {
+    userId: 'sender', channelId: 'room', messageId: 'original', text: 'hello', isGroupChat: false, timestamp: 1, raw: {},
+  } }).expect(200)
+  await vi.waitFor(() => expect(delivered).toHaveBeenCalledOnce())
+  if (renderedLength === 2000) {
+    expect(calls.map(c => c.method)).toEqual(['POST', 'PATCH'])
+    expect(calls[1].body.content).toBe(denormalizeActions({ text, actions }).text)
+    expect(delivered).toHaveBeenCalledWith({ channelMessageId: 'sent-1' })
+  } else {
+    expect(calls.map(c => c.method)).toEqual(['POST', 'DELETE', 'POST', 'POST'])
+    expect(calls[1].url).toContain('/channels/room/messages/sent-1')
+    expect(calls[2].body.message_reference).toEqual({ message_id: 'original', fail_if_not_exists: false })
+    expect(calls[3].body.message_reference).toBeUndefined()
+    expect(calls[3].body.components).toBeDefined()
+    expect(delivered).toHaveBeenCalledWith({ channelMessageId: 'sent-3' })
+  }
 })
