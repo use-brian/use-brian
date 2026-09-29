@@ -56,6 +56,7 @@ import { randomBytes } from 'node:crypto'
 
 export const SCRATCH_DIR = '/home/user/scratch'
 export const DOWNLOADS_DIR = '/home/user/downloads'
+const BROWSER_USE_PYTHON = '/opt/browser-use-venv/bin/python'
 // Sandbox commands run as `user` (HOME=/home/user), NOT root — validated
 // in-sandbox 2026-07-13. Auth state moves through explicit files: inject
 // writes one that AGENT_BROWSER_STATE loads at daemon launch (missing file
@@ -523,7 +524,7 @@ export function createE2bCloudProvider(
         await handle.writeFile(driverPath, new TextEncoder().encode(BU_DRIVER_PY))
         await handle.writeFile(tracePath, new Uint8Array())
         await handle.writeFile(outPath, new Uint8Array())
-        const res = await handle.runCommand(`cd ${SCRATCH_DIR} && python3 ${driverPath}`, {
+        const res = await handle.runCommand(`cd ${SCRATCH_DIR} && ${BROWSER_USE_PYTHON} ${driverPath}`, {
           timeoutMs: req.timeoutMs ?? SKILL_DEFAULT_TIMEOUT_MS,
           envs: {
             BU_CDP_URL: cdpUrl,
@@ -580,12 +581,12 @@ export function createE2bCloudProvider(
       await handle.writeFile(goalPath, new TextEncoder().encode(req.goal))
       await handle.writeFile(driverPath, new TextEncoder().encode(JEV_ULTRAFAST_DRIVER_PY))
       await handle.writeFile(receiptPath, new Uint8Array())
-      const textHelper = bu?.apiKeyEnvName === 'GOOGLE_API_KEY'
+      const textHelper: Record<string, string> = bu?.apiKeyEnvName === 'GOOGLE_API_KEY'
         ? {
             TEXT_MODEL_API_KEY: bu.apiKey,
             TEXT_MODEL: bu.model,
             TEXT_MODEL_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
-            TEXT_MODEL_REASONING: 'none',
+            TEXT_MODEL_DIALECT: 'gemini-openai',
           }
         : bu?.apiKeyEnvName === 'OPENAI_API_KEY'
           ? {
@@ -598,7 +599,7 @@ export function createE2bCloudProvider(
       const res = await handle.runCommand(`cd ${SCRATCH_DIR} && python3 ${driverPath}`, {
         timeoutMs: req.timeoutMs ?? SKILL_DEFAULT_TIMEOUT_MS,
         envs: {
-          BU_CDP_URL: cdpUrl,
+          BU_CDP_WS: cdpUrl,
           JEV_GOAL_PATH: goalPath,
           JEV_START_URL: req.url,
           JEV_RECEIPT_PATH: receiptPath,

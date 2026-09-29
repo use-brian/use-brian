@@ -470,7 +470,7 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Jev primary and safe fall
     expect(commands.some((command) => command.cmd.includes('.bu/driver.py'))).toBe(false)
     const exec = commands.find((command) => command.cmd.includes('.jev/driver.py'))
     expect(exec?.envs).toMatchObject({
-      BU_CDP_URL: 'http://127.0.0.1:9222',
+      BU_CDP_WS: 'http://127.0.0.1:9222',
       JEV_START_URL: 'https://shop.example/',
       JEV_MAX_STEPS: '12',
       TYPESAFE_API_KEY: 'typesafe-test',
@@ -478,6 +478,7 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Jev primary and safe fall
       TEXT_MODEL_API_KEY: 'gemini-test',
       TEXT_MODEL: 'gemini-3-flash-preview',
       TEXT_MODEL_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      TEXT_MODEL_DIALECT: 'gemini-openai',
     })
     expect(new TextDecoder().decode(files.get(`${SCRATCH_DIR}/.jev/driver.py`))).toBe(JEV_ULTRAFAST_DRIVER_PY)
     for (const command of commands) {
@@ -517,6 +518,7 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Jev primary and safe fall
       output: 'Browser Use completed',
       fallbackReason: 'No supported operation',
     })
+    expect(commands.some((command) => command.cmd.includes('/opt/browser-use-venv/bin/python'))).toBe(true)
     expect(commands.filter((command) => command.cmd === cli.getCdpUrl())).toHaveLength(2)
   })
 
@@ -580,7 +582,7 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Browser Use compatibility
     expect(res.trace.map((t) => t.action)).toEqual(['open', 'click', 'fill', 'scroll', 'extract', 'done'])
 
     const exec = commands.find((c) => c.cmd.includes('.bu/driver.py'))
-    expect(exec?.cmd).toContain('python3')
+    expect(exec?.cmd).toContain('/opt/browser-use-venv/bin/python')
     // The exploration LLM needs egress — this lane is NOT unshare-wrapped.
     expect(exec?.cmd).not.toContain('unshare')
     // Env contract: CDP attach + paths + budget + model + the per-run key

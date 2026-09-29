@@ -47,9 +47,11 @@ After any image or agent-browser update, create a sandbox and verify:
 2. `HOME=/home/user AGENT_BROWSER_SESSION_NAME=main agent-browser open about:blank`
    starts Chromium; a following `agent-browser get url` returns `about:blank`.
 3. `unshare -rn python3 -I` cannot reach the network.
-4. Python is 3.12+ and plain Python imports `pandas`, `numpy`, `jev_ultrafast`,
-   and `browser_use`.
-5. With `BU_CDP_URL` set from `agent-browser get cdp-url`, Jev Ultrafast's
+4. Python is 3.12+; system Python imports `pandas`, `numpy`, and
+   `jev_ultrafast`, while `/opt/browser-use-venv/bin/python` imports
+   `browser_use`. The split is required because their exact Browser Harness
+   pins conflict.
+5. With `BU_CDP_WS` set from `agent-browser get cdp-url`, Jev Ultrafast's
    Browser Harness attaches to that Chromium rather than starting another one.
 6. A Jev failure before any action invokes Browser Use; a failure after an
    executed action returns partial failure without replaying the goal.

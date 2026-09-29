@@ -13,6 +13,10 @@ bounded goal, and always write a sanitized receipt. A pre-action failure
 closes its owned target before fallback; a completed or partially executed run
 leaves that target to the sandbox lifecycle so its final page stays visible.
 Credentials stay in the process environment and never enter receipt.
+
+The provider supplies agent-browser's WebSocket endpoint as BU_CDP_WS. Browser
+Harness treats BU_CDP_URL as an HTTP discovery origin and would otherwise wait
+30 seconds trying to fetch /json/version from a ws:// URL.
 """
 import json
 import os
@@ -91,7 +95,27 @@ def _has_executed_action(agent):
     )
 
 
+def _configure_text_model_compat():
+    """Adapt Jev's nested reasoning extension to provider wire dialects."""
+    if os.environ.get("TEXT_MODEL_DIALECT") != "gemini-openai":
+        return
+    from jev_ultrafast import model as jev_model
+    original_post_json = jev_model.post_json
+    text_base = os.environ.get("TEXT_MODEL_BASE_URL", "").rstrip("/")
+
+    def post_json_compat(url, key, body):
+        if text_base and url.startswith(text_base + "/"):
+            body = dict(body)
+            body.pop("reasoning", None)
+            body.pop("thinking", None)
+            body["reasoning_effort"] = "low"
+        return original_post_json(url, key, body)
+
+    jev_model.post_json = post_json_compat
+
+
 def _main():
+    _configure_text_model_compat()
     from jev_ultrafast import Agent
     from browser_harness.helpers import cdp
 
