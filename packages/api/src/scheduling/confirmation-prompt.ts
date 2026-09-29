@@ -156,7 +156,10 @@ export async function sendConfirmationPrompt(
     if (!deps.authorizeDeliveryAudience || !target.workspaceId || !deps.userId) throw new Error(refusal)
     const audience = await deps.authorizeDeliveryAudience({
       workspaceId: target.workspaceId, assistantId: target.assistantId, userId: deps.userId,
-      channelType: target.channelType, channelId, channelIntegrationId, scopeEvidence: deps.scopeEvidence,
+      channelType: target.channelType, channelId,
+      // System transport sentinels bind replies, but are not integration UUIDs.
+      channelIntegrationId: channelIntegrationId?.startsWith('system:') ? undefined : channelIntegrationId,
+      scopeEvidence: deps.scopeEvidence,
     })
     if (!audience.allowed) throw new Error(refusal)
   }

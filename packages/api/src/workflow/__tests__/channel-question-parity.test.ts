@@ -1,3 +1,4 @@
+import { createWhatsAppAdapter } from '@use-brian/channels'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { buildTool } from '@use-brian/core'
@@ -10,14 +11,25 @@ vi.mock('@use-brian/channels', async (original) => ({ ...(await original<typeof 
 vi.mock('../../db/sessions.js', () => ({ findOrCreateSession: vi.fn(async () => ({ id: 'session' })), addSessionMessage: vi.fn() }))
 vi.mock('../../db/workspace-store.js', () => ({ getWorkspaceRoleSystem: vi.fn(async () => 'member') }))
 vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) }))
-vi.mock('../../context-scope/resolve-turn-scope.js', () => ({ resolveTurnScopeSystem: vi.fn(async () => ({ access: { clearance: 'internal' }, effectiveCompartments: [], effectiveProjectIds: [], writeCompartments: [], writeProjectIds: [] })) }))
+vi.mock('../../context-scope/resolve-turn-scope.js', () => {
+  // The merged inbound path builds a full execution context and rechecks its lease.
+  const access = { workspaceId: 'workspace', userId: 'actor', assistantId: 'assistant', assistantKind: 'standard', clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: ['assistant'] }
+  return {
+    resolveTurnScopeSystem: vi.fn(async () => ({ access, activeGroupId: null, activeProjectId: null, effectiveCompartments: [], effectiveProjectIds: [], writeCompartments: [], writeProjectIds: [] })),
+    resolveLiveAccessCeilingSystem: vi.fn(async () => access),
+  }
+})
 vi.mock('../mcp-bridge.js', () => ({ buildWorkflowToolRegistry: vi.fn() }))
 import { buildWorkflowToolRegistry } from '../mcp-bridge.js'
-import { createWorkflowChannelDelivery } from '../channel-delivery.js'
+vi.mock('../../db/client.js', async (original) => ({ ...(await original<typeof import('../../db/client.js')>()), query: vi.fn(async () => ({ rows: [{ channel_id: 'peer@s.whatsapp.net' }] })) }))
+import { query } from '../../db/client.js'
+import { findOrCreateSession, addSessionMessage } from '../../db/sessions.js'
+import type { AuthorizeDeliveryAudience } from '../../context-scope/delivery-authority.js'
+import { createWorkflowChannelDelivery, type WorkflowChannelDeliveryOptions } from '../channel-delivery.js'
 import { maybeHandleChannelWorkflowContext, type ChannelWorkflowContextParams } from '../../routes/channel-workflow-context.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { ChannelQuestion, ChannelQuestionStore } from '../channel-questions.js'
-function fixture(channelType: 'telegram' | 'slack' | 'feishu' | 'msteams' | 'custom' | 'whatsapp') {
+function fixture(channelType: 'telegram' | 'slack' | 'feishu' | 'msteams' | 'custom' | 'whatsapp', notifications = false) {
   let row: ChannelQuestion | undefined
   const token = 'a'.repeat(24)
   const store: ChannelQuestionStore = {
@@ -39,12 +51,12 @@ function fixture(channelType: 'telegram' | 'slack' | 'feishu' | 'msteams' | 'cus
     messageText: '', questionStore: store, connectorStore: {} as never, mcpSettingsStore: {} as never,
   }
   const integrationStore = { getCredentialsForAssistantIntegrationSystem: vi.fn(async () => ({ id: 'integration', channelId: 'account', credentials: { bot_token: 'token' }, config: { msteamsServiceUrl: 'https://teams.example' } })) } as unknown as ChannelIntegrationStore
-  const deliver = () => createWorkflowChannelDelivery({ integrationStore, questionStore: store, customChannelStore: { enqueue: vi.fn() }, waConnectorUrl: 'http://connector', waConnectorSecret: 'secret' })({
-    workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', channelType, channelId, channelIntegrationId: 'integration', text: '', threadRef,
+  const deliver = (options: Partial<WorkflowChannelDeliveryOptions> = {}, scopeEvidence?: import('@use-brian/core').ScopeEvidence) => createWorkflowChannelDelivery({ integrationStore, questionStore: store, customChannelStore: { enqueue: vi.fn() }, waConnectorUrl: 'http://connector', waConnectorSecret: 'secret', ...options })({
+    workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', channelType, channelId: notifications ? 'notifications' : channelId, channelIntegrationId: 'integration', text: '', threadRef, scopeEvidence,
     question: { question: 'Where?', options: ['dev', 'prod'], allowCustom: false },
     questionResponse: { toolName: 'pinned_answer', arguments: { version: 7 }, answerField: 'answer' },
   })
-  return { params, store, deliver, token, nativeReply: threadRef ?? 'posted' }
+  return { params, store, integrationStore, deliver, token, nativeReply: threadRef ?? 'posted' }
 }
 beforeEach(() => {
   vi.clearAllMocks()
@@ -68,5 +80,41 @@ describe('durable question delivery → scoped inbound → pinned action', () =>
     expect(execute).not.toHaveBeenCalled()
     expect(await maybeHandleChannelWorkflowContext({ ...f.params, messageText: 'PROD', replyToMessageId: f.nativeReply })).toBe('Your answer was sent.')
     expect(execute).toHaveBeenCalledExactlyOnceWith({ version: 7, answer: 'prod' }, expect.objectContaining({ channelType }))
+  })
+})
+
+const scopeEvidence = { sensitivity: 'internal' as const, compartments: ['restricted'], projectIds: [] }
+describe('scoped workflow question authorization compatibility', () => {
+  it.each(['telegram', 'slack', 'feishu', 'msteams', 'custom', 'whatsapp'] as const)('denies %s without a transcript, question/token, attachment or send', async (channelType) => {
+    const f = fixture(channelType, channelType === 'whatsapp')
+    const authorize = vi.fn<AuthorizeDeliveryAudience>(async () => ({ allowed: false, reason: 'delivery_audience_unverified' }))
+    expect(await f.deliver({ authorizeDeliveryAudience: authorize }, scopeEvidence)).toEqual({ status: 'skipped', channelType, reason: 'delivery_audience_unverified' })
+    expect(authorize).toHaveBeenCalledExactlyOnceWith({ workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', channelType, channelId: f.params.channelId, channelIntegrationId: 'integration', recipientType: undefined, scopeEvidence })
+    expect(findOrCreateSession).not.toHaveBeenCalled()
+    expect(addSessionMessage).not.toHaveBeenCalled()
+    expect(f.store.create).not.toHaveBeenCalled()
+    expect(f.store.attach).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+  it('uses the authorized WhatsApp JID/integration for question binding, transcript and send', async () => {
+    const f = fixture('whatsapp', true)
+    const authorize = vi.fn<AuthorizeDeliveryAudience>(async () => {
+      expect(query).toHaveBeenCalledWith(expect.stringContaining('user_id = $2'), ['assistant', 'actor'])
+      expect(findOrCreateSession).not.toHaveBeenCalled()
+      expect(addSessionMessage).not.toHaveBeenCalled()
+      expect(f.store.create).not.toHaveBeenCalled()
+      expect(send).not.toHaveBeenCalled()
+      return { allowed: true, evidence: scopeEvidence }
+    })
+    expect(await f.deliver({ authorizeDeliveryAudience: authorize }, scopeEvidence)).toEqual({ status: 'delivered', channelType: 'whatsapp', channelId: f.params.channelId, messageId: 'posted' })
+    expect(authorize).toHaveBeenCalledExactlyOnceWith({ workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', channelType: 'whatsapp', channelId: f.params.channelId, channelIntegrationId: 'integration', recipientType: undefined, scopeEvidence })
+    expect(f.integrationStore.getCredentialsForAssistantIntegrationSystem).toHaveBeenCalledExactlyOnceWith('workspace', 'assistant', 'integration', 'whatsapp', f.params.channelId)
+    expect(findOrCreateSession).toHaveBeenCalledExactlyOnceWith({ assistantId: 'assistant', userId: 'actor', channelType: 'whatsapp', channelId: f.params.channelId })
+    expect(addSessionMessage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ sessionId: 'session', role: 'assistant', content: [{ type: 'text', text: expect.stringContaining('Where?') }] }))
+    expect(f.store.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', integrationId: 'integration', channelId: f.params.channelId, response: { toolName: 'pinned_answer', arguments: { version: 7 }, answerField: 'answer' } }))
+    expect(createWhatsAppAdapter).toHaveBeenCalledExactlyOnceWith({ connectorUrl: 'http://connector', connectorSecret: 'secret', connectionId: 'account' })
+    expect(send).toHaveBeenCalledExactlyOnceWith(f.params.channelId, expect.objectContaining({ text: expect.stringContaining(`wq:${f.token}`) }))
+    expect(f.store.attach).toHaveBeenCalledExactlyOnceWith(f.token, 'posted')
+    expect(await maybeHandleChannelWorkflowContext({ ...f.params, messageText: `wq:${f.token} 2` })).toBe('Your answer was sent.')
   })
 })

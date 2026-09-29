@@ -1,3 +1,4 @@
+import { createWhatsAppAdapter } from '@use-brian/channels'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const { send, role } = vi.hoisted(() => ({ send: vi.fn(async () => 'prompt-id'), role: vi.fn(async () => 'member') }))
 vi.mock('@use-brian/channels', async (original) => ({ ...(await original<typeof import('@use-brian/channels')>()),
@@ -7,20 +8,25 @@ vi.mock('@use-brian/channels', async (original) => ({ ...(await original<typeof 
 }))
 vi.mock('../../db/workspace-store.js', () => ({ getWorkspaceRoleSystem: role }))
 vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) }))
-import { sendConfirmationPrompt } from '../confirmation-prompt.js'
-import { registerSchedulerResolver, unregisterSchedulerResolver, SHARED_TELEGRAM_CONFIRMATION_INTEGRATION } from '../confirmation-registry.js'
+vi.mock('../../db/client.js', () => ({ query: vi.fn(async () => ({ rows: [{ channel_id: 'peer@s.whatsapp.net' }] })) }))
+import { query } from '../../db/client.js'
+import { createDeliveryAudienceAuthorizer, type AuthorizeDeliveryAudience } from '../../context-scope/delivery-authority.js'
+import { sendConfirmationPrompt, type ConfirmationPromptDeps } from '../confirmation-prompt.js'
+import { findSchedulerChannelConfirmations, registerSchedulerResolver, unregisterSchedulerResolver, SHARED_TELEGRAM_CONFIRMATION_INTEGRATION, SYSTEM_WHATSAPP_CONFIRMATION_INTEGRATION } from '../confirmation-registry.js'
 import { maybeHandleChannelWorkflowContext, type ChannelWorkflowContextParams } from '../../routes/channel-workflow-context.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { DeferredConfirmationStore } from '../../db/deferred-confirmation-store.js'
 import type { ToolConfirmationRequest } from '@use-brian/core'
 const req: ToolConfirmationRequest = { toolCallId: 'call', toolName: 'send', serverName: 'connector', description: 'Send', input: {}, classification: null }
 const questionStore = { isQuestionMessage: vi.fn(async () => false), find: vi.fn(async () => []) } as unknown as NonNullable<ChannelWorkflowContextParams['questionStore']>
-function fixture(channelType: ChannelWorkflowContextParams['channelType'] = 'slack', shared = false) {
+function fixture(channelType: ChannelWorkflowContextParams['channelType'] = 'slack', shared = false, notifications = false) {
   const channelId = channelType === 'whatsapp' ? 'peer@s.whatsapp.net' : 'peer'
   const threadRef = channelType === 'slack' || channelType === 'feishu' ? 'root' : undefined
-  const integrationId = shared ? SHARED_TELEGRAM_CONFIRMATION_INTEGRATION : 'integration'
+  const integrationId = shared
+    ? channelType === 'whatsapp' ? SYSTEM_WHATSAPP_CONFIRMATION_INTEGRATION : SHARED_TELEGRAM_CONFIRMATION_INTEGRATION
+    : 'integration'
   const resolver = { resolve: vi.fn() }
-  registerSchedulerResolver('call', resolver as never, { userId: 'actor', workspaceId: 'workspace', assistantId: 'assistant', channelType, channelId })
+  registerSchedulerResolver('call', resolver as never, { userId: 'actor', workspaceId: 'workspace', assistantId: 'assistant', channelType, channelId: notifications ? 'notifications' : channelId })
   const row = { userId: 'actor', assistantId: 'assistant', channelType, channelId, status: 'pending', expiresAt: new Date(Date.now() + 60_000) }
   const store = { findByToolCallId: vi.fn(async () => row), markResolved: vi.fn(async () => {}) } as unknown as DeferredConfirmationStore
   const integrationStore = { getCredentialsForAssistantSystem: vi.fn(async () => shared ? null : ({ id: integrationId, channelId: 'account', credentials: { bot_token: 'token' }, config: { msteamsServiceUrl: 'https://teams.example' } })) } as unknown as ChannelIntegrationStore
@@ -31,8 +37,8 @@ function fixture(channelType: ChannelWorkflowContextParams['channelType'] = 'sla
     threadId: threadRef,
     deferredConfirmationStore: store, questionStore,
   }
-  const deliver = () => sendConfirmationPrompt({ workspaceId: 'workspace', assistantId: 'assistant', channelType, channelId, threadRef }, req,
-    { integrationStore, defaultTelegramBotToken: 'official', waConnectorUrl: 'http://connector', waConnectorSecret: 'secret', customChannelStore: { enqueue: vi.fn() } })
+  const deliver = (deps: Partial<ConfirmationPromptDeps> = {}) => sendConfirmationPrompt({ workspaceId: 'workspace', assistantId: 'assistant', channelType, channelId: notifications ? 'notifications' : channelId, threadRef }, req,
+    { integrationStore, defaultTelegramBotToken: 'official', waConnectorUrl: 'http://connector', waConnectorSecret: 'secret', customChannelStore: { enqueue: vi.fn() }, ...deps })
   return { params, resolver, store, deliver }
 }
 beforeEach(() => { vi.clearAllMocks(); send.mockResolvedValue('prompt-id'); role.mockResolvedValue('member') })
@@ -93,5 +99,75 @@ describe('real scheduler prompt → shared inbound context', () => {
     const replies = await Promise.all([maybeHandleChannelWorkflowContext(params), maybeHandleChannelWorkflowContext(params)])
     expect(replies.filter(reply => reply === 'Allowed')).toHaveLength(1)
     expect(f.resolver.resolve).toHaveBeenCalledOnce()
+  })
+})
+
+const scopeEvidence = { sensitivity: 'internal' as const, compartments: ['restricted'], projectIds: [] }
+describe('scoped scheduler authorization compatibility', () => {
+  it.each(['telegram', 'whatsapp'] as const)('keeps %s system reply bindings out of UUID audience lookups', async channelType => {
+    const f = fixture(channelType, true, channelType === 'whatsapp')
+    const exactLookup = vi.fn(async () => { throw new Error('invalid input syntax for type uuid') })
+    const authorize = vi.fn(createDeliveryAudienceAuthorizer({
+      integrationStore: { getCredentialsForAssistantSystem: async () => null,
+        getCredentialsForAssistantIntegrationSystem: exactLookup } as unknown as ChannelIntegrationStore,
+      findChannelSession: async () => null,
+      validateEvidence: async (evidence, ceiling) => {
+        expect(ceiling.clearance).toBe('public')
+        if (evidence.compartments?.length) throw new Error('restricted audience')
+        return evidence
+      },
+    }))
+    // Restricted output still fails closed on a system transport.
+    expect(await f.deliver({ scopeEvidence, userId: 'actor', authorizeDeliveryAudience: authorize })).toMatchObject({ delivered: false })
+    expect(send).not.toHaveBeenCalled()
+    expect(await f.deliver({ scopeEvidence: {}, userId: 'actor', authorizeDeliveryAudience: authorize })).toMatchObject({ delivered: true })
+    expect(authorize).toHaveBeenLastCalledWith(expect.objectContaining({ channelId: f.params.channelId, channelIntegrationId: undefined }))
+    expect(exactLookup).not.toHaveBeenCalled()
+    expect(await maybeHandleChannelWorkflowContext({ ...f.params, callback: { data: 'mcp_confirm:call:allow', messageId: 'prompt-id' } })).toBe('Allowed')
+    expect(f.resolver.resolve).toHaveBeenCalledOnce()
+  })
+  it.each(['telegram', 'slack', 'feishu', 'msteams', 'custom', 'whatsapp'] as const)('denies %s before creating a usable binding or sending', async (channelType) => {
+    const f = fixture(channelType, false, channelType === 'whatsapp')
+    const scope = { workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', integrationId: 'integration', channelType, channelId: f.params.channelId, threadId: f.params.threadId }
+    const authorize = vi.fn<AuthorizeDeliveryAudience>(async () => {
+      expect(findSchedulerChannelConfirmations(scope)).toEqual([])
+      expect(send).not.toHaveBeenCalled()
+      return { allowed: false, reason: 'delivery_audience_unverified' }
+    })
+    expect(await f.deliver({ scopeEvidence, userId: 'actor', authorizeDeliveryAudience: authorize })).toMatchObject({ delivered: false, reason: expect.stringContaining('audience could not be verified') })
+    expect(authorize).toHaveBeenCalledExactlyOnceWith({ workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', channelType, channelId: f.params.channelId, channelIntegrationId: 'integration', scopeEvidence })
+    expect(findSchedulerChannelConfirmations(scope)).toEqual([])
+    expect(send).not.toHaveBeenCalled()
+    expect(await maybeHandleChannelWorkflowContext({ ...f.params, callback: { data: 'mcp_confirm:call:allow', messageId: 'prompt-id' } })).toContain('unavailable')
+    expect(f.resolver.resolve).not.toHaveBeenCalled()
+    expect(f.store.markResolved).not.toHaveBeenCalled()
+  })
+  it.each([false, true])('authorizes the actor JID and concrete integration before binding; send failure=%s', async (fail) => {
+    const f = fixture('whatsapp', false, true)
+    const scope = { workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', integrationId: 'integration', channelType: 'whatsapp', channelId: f.params.channelId }
+    const authorize = vi.fn<AuthorizeDeliveryAudience>(async () => {
+      expect(query).toHaveBeenCalledWith(expect.stringContaining('user_id = $2'), ['assistant', 'actor'])
+      expect(findSchedulerChannelConfirmations(scope)).toEqual([])
+      expect(send).not.toHaveBeenCalled()
+      return { allowed: true, evidence: scopeEvidence }
+    })
+    send.mockImplementationOnce(async () => {
+      expect(authorize).toHaveBeenCalledOnce()
+      expect(findSchedulerChannelConfirmations(scope)).toHaveLength(1)
+      if (fail) throw new Error('provider unavailable')
+      return 'prompt-id'
+    })
+    expect(await f.deliver({ scopeEvidence, userId: 'actor', authorizeDeliveryAudience: authorize })).toMatchObject({ delivered: !fail })
+    expect(authorize).toHaveBeenCalledExactlyOnceWith({ workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', channelType: 'whatsapp', channelId: f.params.channelId, channelIntegrationId: 'integration', scopeEvidence })
+    expect(createWhatsAppAdapter).toHaveBeenCalledExactlyOnceWith({ connectorUrl: 'http://connector', connectorSecret: 'secret', connectionId: 'account' })
+    expect(send).toHaveBeenCalledExactlyOnceWith(f.params.channelId, expect.any(Object))
+    if (fail) {
+      expect(findSchedulerChannelConfirmations(scope)).toEqual([])
+      expect(await maybeHandleChannelWorkflowContext(f.params)).not.toBe('Allowed')
+      expect(f.resolver.resolve).not.toHaveBeenCalled()
+    } else {
+      expect(findSchedulerChannelConfirmations(scope)[0]?.delivery).toMatchObject({ ...scope, messageId: 'prompt-id' })
+      expect(await maybeHandleChannelWorkflowContext(f.params)).toBe('Allowed')
+    }
   })
 })
