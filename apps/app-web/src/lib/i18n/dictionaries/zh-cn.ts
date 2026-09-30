@@ -12,6 +12,30 @@
 import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
+  workflowPublicationConsent: {
+    "title": "生成输出的发布",
+    "intro": "允许此已保存步骤将根据你的私人背景信息生成的文字发布到固定的 Telegram 目的地。这与保存工作流是分开的操作。",
+    "warning": "生成的输出可能向目的地读者泄露你的私人信息。这不保证保密，也不授予订阅者访问你记忆的权限。绝不允许使用其他用户的私人来源。目的地的机密等级及团队／项目限制仍然适用。同意在30天后到期；任何工作流更新都会使其失效。批准或重新批准仅适用于新的运行。",
+    "confirmTitle": "批准发布？",
+    "confirm": "我已了解，批准发布",
+    "cancel": "取消",
+    "approve": "批准",
+    "reapprove": "重新批准",
+    "revoke": "撤销",
+    "active": "有效",
+    "inactive": "无效或已到期",
+    "approvedAt": "批准时间",
+    "expiresAt": "到期时间",
+    "step": "步骤",
+    "destination": "Telegram 目的地",
+    "integration": "集成",
+    "permission": "只有仍为工作区所有者或管理员的工作流创建者可以管理同意。",
+    "dirty": "批准发布前，请保存或放弃未保存的更改。",
+    "empty": "没有符合条件的已保存步骤。请使用没有待回答问题、具有固定 Telegram 群组／频道目的地及明确集成的助手步骤。受管理及外部客户端工作流不适用。",
+    "error": "无法验证或更改同意。请刷新并检查权限及已保存的工作流后重试。",
+    "refresh": "刷新",
+    "version": "已保存的工作流版本已更改。请在批准前刷新。"
+},
   feedLinkedIn: {
     help: {
       "media_link_conflict": "链接帖子只支持一张缩略图。请移除附件图片或选择“帖子”。",

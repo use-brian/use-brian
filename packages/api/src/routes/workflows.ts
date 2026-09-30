@@ -23,6 +23,8 @@
  */
 
 import { Router } from 'express'
+import { mountWorkflowPublicationRoutes } from './workflow-publication.js'
+import type { PublicationConsentStore } from '../workflow/publication-consent.js'
 import { randomBytes } from 'node:crypto'
 import {
   advanceWorkflowRun,
@@ -51,6 +53,7 @@ import {
 } from '../context-scope/context-readiness.js'
 
 export type WorkflowsRouteOptions = {
+  publicationConsentStore?: PublicationConsentStore
   workflowStore: WorkflowStore
   runStore: WorkflowRunStore
   workspaceStore: WorkspaceStore
@@ -517,6 +520,7 @@ function serializeSummary(w: import('@use-brian/core').WorkflowRecord) {
 
 export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
   const router = Router()
+  mountWorkflowPublicationRoutes(router, opts)
 
   // Reconcile the firing `scheduled_jobs` row from a workflow's trigger — the
   // web-builder counterpart of the `scheduleWorkflow` chat tool, via the SAME

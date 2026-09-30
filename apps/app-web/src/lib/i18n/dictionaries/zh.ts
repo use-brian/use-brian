@@ -1,6 +1,30 @@
 import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
+  workflowPublicationConsent: {
+    "title": "生成輸出的發布",
+    "intro": "允許此已儲存步驟將根據你的私人背景資訊生成的文字發布到固定的 Telegram 目的地。這與儲存工作流程是分開的操作。",
+    "warning": "生成的輸出可能向目的地讀者洩露你的私人資訊。這不保證保密，也不授予訂閱者存取你記憶的權限。絕不允許使用其他使用者的私人來源。目的地的機密等級及團隊／專案限制仍然適用。同意在30天後到期；任何工作流程更新都會使其失效。批准或重新批准僅適用於新的執行。",
+    "confirmTitle": "批准發布？",
+    "confirm": "我已了解，批准發布",
+    "cancel": "取消",
+    "approve": "批准",
+    "reapprove": "重新批准",
+    "revoke": "撤銷",
+    "active": "有效",
+    "inactive": "無效或已到期",
+    "approvedAt": "批准時間",
+    "expiresAt": "到期時間",
+    "step": "步驟",
+    "destination": "Telegram 目的地",
+    "integration": "整合",
+    "permission": "只有仍為工作區擁有者或管理員的工作流程建立者可以管理同意。",
+    "dirty": "批准發布前，請儲存或捨棄未儲存的變更。",
+    "empty": "沒有符合資格的已儲存步驟。請使用沒有待回答問題、具備固定 Telegram 群組／頻道目的地及明確整合的助理步驟。受管理及外部客戶端工作流程不適用。",
+    "error": "無法驗證或變更同意。請重新整理並檢查權限及已儲存的工作流程後重試。",
+    "refresh": "重新整理",
+    "version": "已儲存的工作流程版本已變更。請在批准前重新整理。"
+},
   feedLinkedIn: {
     help: {
       "media_link_conflict": "連結貼文只支援一張縮圖。請移除附件圖片或選擇「貼文」。",

@@ -1233,7 +1233,8 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     })
   })
 
-  it('records a delivered outcome on the step run but does not audit it (no per-fire noise)', async () => {
+  it.each([undefined, 'explicit-publication-approval'])(
+    'records delivered output and audits only explicit publication receipt %s', async (publicationApprovalId) => {
     const stores = makeFakeStores()
     const audits: WorkflowAuditEvent[] = []
     const deps: ExecutorDeps = {
@@ -1245,11 +1246,11 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       emitAudit: async (e) => {
         audits.push(e)
       },
-      deliverToChannel: async ({ channelType, channelId }) => ({
-        status: 'delivered' as const,
-        channelType,
-        channelId,
-      }),
+      deliverToChannel: async ({ channelType, channelId, publication }) => {
+        expect(publication).toEqual({ runId: expect.any(String), stepId: 's1' })
+        return { status: 'delivered' as const, channelType, channelId,
+          ...(publicationApprovalId ? { publicationApprovalId } : {}) }
+      },
     }
     const definition: WorkflowDefinition = {
       startStepId: 's1',
@@ -1264,12 +1265,16 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       ],
     }
     const { run } = await seedWorkflowAndRun(deps, definition)
+    const consult = vi.spyOn(deps.consultTransport, 'send')
     await advanceWorkflowRun(deps, run.id)
+    expect(consult).toHaveBeenCalledWith(expect.objectContaining({ workflowStepId: 's1', workflowRunId: run.id }))
     const stepRun = stores.stepRuns.find((s) => s.runId === run.id && s.stepId === 's1')
     expect(
       (stepRun?.output as { __delivery?: { status: string } } | undefined)?.__delivery?.status,
     ).toBe('delivered')
-    expect(audits.find((a) => a.type === 'workflow.step_delivered')).toBeUndefined()
+    const receipt = audits.find((a) => a.type === 'workflow.step_delivered')
+    if (publicationApprovalId) expect(receipt).toMatchObject({ delivery: { status: 'delivered', publicationApprovalId } })
+    else expect(receipt).toBeUndefined()
   })
 
   it.each([
