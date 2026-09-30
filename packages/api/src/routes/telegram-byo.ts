@@ -492,6 +492,9 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           error_type: sanitizeAnalytics((err as Error)?.name ?? 'unknown'),
           error_message: sanitizeAnalytics(((err as Error)?.message ?? '').slice(0, 200)),
           stage: sanitizeAnalytics('telegram_byo_route_catch'),
+          ...(typeof (err as { diagnostic?: unknown } | null)?.diagnostic === 'string'
+            ? { denial_diagnostic: sanitizeAnalytics((err as { diagnostic: string }).diagnostic) }
+            : {}),
         },
       })
       adapter.sendMessage(channelId, {
@@ -1968,10 +1971,21 @@ const TELEGRAM_RETRY_NOTICE =
 const TELEGRAM_GROUP_NOT_APPROVED_NOTICE =
   'Telegram is connected, but this group is not approved for workspace replies. Ask a workspace owner or admin to approve it in Studio > Channels > Group reply access.'
 
-/** Keep authority refusals actionable without exposing workspace content. */
+const TELEGRAM_PERSONAL_GROUP_UNVERIFIED_NOTICE =
+  'This group is set to personal replies, but Brian could not confirm that you are the only person in it, so it did not reply. Make sure this bot is a group admin (Telegram only lets admins check members) and that nobody else is in the group, or change its reply access in Studio > Channels > Group reply access.'
+const TELEGRAM_GROUP_NEEDS_MORE_ACCESS_NOTICE =
+  'This reply needs personal or restricted context that this group is not approved to receive. Message the bot directly, or if you are the only person in this group, set it to personal replies in Studio > Channels > Group reply access.'
+
+/**
+ * Keep authority refusals actionable without exposing workspace content.
+ * Each text names only the fix, never the Team, Project or clearance involved.
+ */
 export function telegramIncomingFailureText(channelId: string, err: unknown): string {
   const chatId = channelId.split(':topic:', 1)[0] ?? channelId
   if (chatId.startsWith('-') && isDeliveryAudienceUnverifiedError(err)) {
+    const detail = (err as { detail?: unknown }).detail
+    if (detail === 'personal_group_unverified') return TELEGRAM_PERSONAL_GROUP_UNVERIFIED_NOTICE
+    if (detail === 'evidence_exceeds_audience') return TELEGRAM_GROUP_NEEDS_MORE_ACCESS_NOTICE
     return TELEGRAM_GROUP_NOT_APPROVED_NOTICE
   }
   return TELEGRAM_RETRY_NOTICE

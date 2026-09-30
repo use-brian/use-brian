@@ -25,5 +25,7 @@ export default defineConfig({
     // large suite across runners, so one worker per shard avoids intra-runner
     // socket/RPC contention without putting the whole suite on one serial path.
     maxWorkers: process.env.CI === 'true' ? 1 : undefined,
+    // Supertest must dial the address it bound; see vitest.setup.ts.
+    setupFiles: ['./vitest.setup.ts'],
   },
 })

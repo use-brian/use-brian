@@ -1,6 +1,6 @@
 import type { AccessContext } from './access-context.js'
 import { isSensitivity, maxSensitivity, type Sensitivity } from './sensitivity.js'
-import { deriveContextFloor, deriveResourceScope, type ScopeSource } from './derived-scope.js'
+import { deriveContextFloor, type ScopeSource } from './derived-scope.js'
 import { boundScopeSource } from './source-evidence.js'
 
 /** A finite set is a ceiling; null is the universe grant. */
@@ -121,12 +121,20 @@ export class ContextScopeAccumulator {
     if (!evidence) return
     // Validate first so an invalid batch cannot leave half-applied evidence.
     if (evidence.sources?.length) {
-      const sources = [...this.#sources, ...evidence.sources]
+      // A later read of the same resource supersedes the earlier snapshot: a
+      // tool that returns its own committed write re-notes a newer version.
+      // The earlier labels already raised the floor below and stay there;
+      // only the lineage pointer moves to the version read last.
+      const latest = new Map<string, ScopeSource>()
+      for (const source of [...this.#sources, ...evidence.sources]) {
+        latest.set(JSON.stringify([source.workspaceId, source.resourceKind, source.resourceId]), source)
+      }
+      const sources = [...latest.values()]
       // Label floor only: context may span visibility partitions (a primary
       // reads other authors' rows). The derived write decides whether those
       // sources can certify one envelope — see `sourcesShareVisibility`.
       const floor = deriveContextFloor({ producer: 'context', sources })
-      this.#sources.push(...structuredClone(evidence.sources))
+      this.#sources.splice(0, this.#sources.length, ...structuredClone(sources))
       this.note({ sensitivity: floor.sensitivity, compartments: floor.compartments, projectIds: floor.projectIds })
     }
     if (evidence.sensitivity) {
@@ -216,8 +224,11 @@ export function resolveWriteScope(params: {
   const evidence = params.evidence instanceof ContextScopeAccumulator
     ? params.evidence.evidence
     : params.evidence
+  // Labels only (decision D3): a write's visibility is its target's, never
+  // the intersection of every partition a primary read. The canonical writer
+  // applies the per-user rule (`deriveWriteScope`).
   const full = evidence?.sources?.length
-    ? deriveResourceScope({ producer: 'write-scope', sources: evidence.sources })
+    ? deriveContextFloor({ producer: 'write-scope', sources: evidence.sources })
     : null
   const compartments = unionScopeRequirements(
     params.baseCompartments,

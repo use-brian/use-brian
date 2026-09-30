@@ -187,7 +187,7 @@ describe('[COMP:app-web/workspace-access] request and administration paths',()=>
     await render();await click(t.approve);expect(host.querySelector('[role="alert"]')?.textContent).toBe(t.notReady)
   });
   it('lets a member request thirty days of read-only access for themselves',async()=>{
-    await render();expect(host.textContent).not.toContain(t.configureTeams);expect(host.textContent).not.toContain(t.adminHint);
+    await render();expect(host.textContent).not.toContain(t.reviewData);expect(host.textContent).not.toContain(t.adminHint);
     await click(t.requestAccess);expect(host.textContent).toContain(t.readOnly);expect(host.querySelector('select')).toBeNull();
     const reason=host.querySelector('textarea')!;
     await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(reason,'Review launch requirements');reason.dispatchEvent(new Event('input',{bubbles:true}));});
@@ -195,9 +195,9 @@ describe('[COMP:app-web/workspace-access] request and administration paths',()=>
     expect(mocks.prepare).toHaveBeenCalledWith('workspace-fixture',{type:'access.request.create',targetTeamId:'research',beneficiaryKind:'member',beneficiaryId:'member-fixture',reason:'Review launch requirements',days:30,ongoing:false},'15',expect.any(String));
     expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({description:expect.stringContaining(t.readOnly)}));
   });
-  it('links administrators to department setup in the same home',async()=>{
+  it('gives administrators data review without repeating section navigation',async()=>{
     mocks.fetch.mockResolvedValue({...fixture(),canAdminister:true});await render();expect(host.textContent).toContain(t.adminHint);
-    expect(host.querySelector('a')?.getAttribute('href')).toBe('/w/workspace-fixture/organization?section=departments');
+    expect(host.textContent).toContain(t.reviewData);expect(host.querySelector('a[href*="section=departments"]')).toBeNull();
     await click(t.edit);expect(host.textContent).toContain(t.managerSave);expect(host.textContent).toContain(t.manageMembers);
   });
   it('submits the exact reviewed request version and policy revision, and explains stale reviews',async()=>{

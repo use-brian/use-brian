@@ -1,5 +1,5 @@
 import { captureMemoryVersions, type CaptureOpts } from './brain-row-versions.js'
-import { deriveResourceScope, type AccessContext, type EntityLinksStore, type Sensitivity, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/core'
+import { deriveResourceScope, deriveWriteScope, type AccessContext, type ResourceScope, type EntityLinksStore, type Sensitivity, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/core'
 import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
 import { currentAgentAccess } from './agent-access-context.js'
@@ -8,7 +8,7 @@ import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getPool, query } from './client.js'
 import { emitMentionedEdges } from './edge-hooks.js'
 import { excludeExternalPrincipalsSql } from './external-principal.js'
-import { validateDerivedMemoryInputs, recordDerivedResource } from './derived-scope-store.js'
+import { validateDerivedMemoryInputs, validateDerivedWriteInputs, recordDerivedResource } from './derived-scope-store.js'
 
 export type { AccessContext }
 
@@ -177,18 +177,28 @@ export async function createMemory(
       throw error
     } finally { client.release() }
   }
-  // Derived writes preserve actual source visibility, including a primary's
-  // assistant partition, instead of applying fresh-intake normalization.
+  // A model-driven save names its own target (`derivationTarget`: a team
+  // save is user-less, a primary's save is assistant-less). It keeps that
+  // visibility and carries the label floor of everything read (decision D3).
+  // Without a target (extraction, consolidation) a derived write preserves
+  // the sources' single envelope, as before.
   const floor = params.derivation
-    ? await validateDerivedMemoryInputs(transactionClient!, params.derivation)
+    ? params.derivationTarget
+      ? await validateDerivedWriteInputs(transactionClient!, params.derivation)
+      : await validateDerivedMemoryInputs(transactionClient!, params.derivation)
     : null
-  const derived = floor && params.derivation ? deriveResourceScope(params.derivation, {
-    ...floor,
-    ...(params.derivationTarget ?? {}),
+  const requestedLabels = {
     sensitivity: params.sensitivity,
     compartments: params.compartments ?? [],
     projectIds: params.projectIds ?? [],
-  }) : null
+  }
+  const derived = floor && params.derivation
+    ? params.derivationTarget
+      ? deriveWriteScope(params.derivation, {
+          workspaceId: floor.workspaceId, ...params.derivationTarget, ...requestedLabels,
+        }, params.createdByUserId)
+      : deriveResourceScope(params.derivation, { ...(floor as ResourceScope), ...requestedLabels })
+    : null
   const executing=currentAgentAccess();
   if(executing){
     if(!executing.workspaceId||!executing.userId||params.createdByUserId!==executing.userId)throw Object.assign(new Error('The operation requires the executing author.'),{code:'scope_operation_denied'});
@@ -297,7 +307,7 @@ export async function createMemory(
   if (params.derivation) {
     await recordDerivedResource(transactionClient!, params.derivation, {
       ...memory, workspaceId: memory.workspaceId!, resourceKind: 'memory', resourceId: memory.id, version: memory.scopeVersion,
-    })
+    }, params.createdByUserId)
   }
 
   // Fire-and-forget `mentioned` edges. Only fires when the graph store
@@ -408,7 +418,7 @@ export async function updateMemory(
           ...old, workspaceId: old.workspaceId!, resourceKind: 'memory', resourceId: old.id, version: old.scopeVersion,
         }],
       } : null
-      const floor = derivation ? await validateDerivedMemoryInputs(client, derivation) : null
+      const floor = derivation ? await validateDerivedWriteInputs(client, derivation) : null
 
       // Merge updates over the old row. Untouched fields carry through.
       const next = {
@@ -425,16 +435,16 @@ export async function updateMemory(
         projectIds: updates.projectIds ?? old.projectIds,
       }
       if (floor && derivation) {
-        const resolved = deriveResourceScope(derivation, {
-          ...floor, workspaceId: next.workspaceId!, sensitivity: next.sensitivity,
-          compartments: next.compartments, projectIds: next.projectIds,
-        })
+        // The superseding row keeps the memory's own visibility and carries
+        // every label its new inputs had (decision D3). New inputs private to
+        // someone other than the memory's user or the editor still refuse.
+        const resolved = deriveWriteScope(derivation, {
+          workspaceId: next.workspaceId!, userId: next.userId, assistantId: next.assistantId,
+          sensitivity: next.sensitivity, compartments: next.compartments, projectIds: next.projectIds,
+        }, access?.userId ?? null)
         next.sensitivity = resolved.sensitivity
         next.compartments = resolved.compartments
         next.projectIds = resolved.projectIds
-        // A superseding row cannot silently erase visibility from new inputs.
-        next.userId = resolved.userId
-        next.assistantId = resolved.assistantId
       }
 
       assertExecutionResourceScope({...next,workspaceId:next.workspaceId!},'mutation',access)
@@ -460,7 +470,7 @@ export async function updateMemory(
         || JSON.stringify(next.projectIds) !== JSON.stringify(old.projectIds)
       if (changed) {
         await client.query(`SELECT hold_scope_descendants($1,'memory',$2)`, [old.workspaceId, old.id])
-        if (derivation) await validateDerivedMemoryInputs(client, derivation)
+        if (derivation) await validateDerivedWriteInputs(client, derivation)
       }
 
       // Insert the new version. Authorship + audit columns carry the old
@@ -500,7 +510,7 @@ export async function updateMemory(
 
       if (derivation) await recordDerivedResource(client, derivation, {
         ...newRow, workspaceId: newRow.workspaceId!, resourceKind: 'memory', resourceId: newRow.id, version: newRow.scopeVersion,
-      })
+      }, access?.userId ?? null)
 
       // Tombstone the old row, pointing OLD → NEW.
       await client.query(

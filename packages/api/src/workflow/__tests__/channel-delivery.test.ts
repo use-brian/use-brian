@@ -119,25 +119,32 @@ beforeEach(() => {
 })
 
 describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
-  it('refuses an unverified audience before persistence or adapter send', async () => {
-    const authorizeDeliveryAudience = vi.fn(async () => ({
-      allowed: false as const,
-      reason: 'delivery_audience_unverified' as const,
-    }))
-    const deliver = createWorkflowChannelDelivery({ integrationStore, authorizeDeliveryAudience })
-    const outcome = await deliver({
-      ...baseParams(),
-      channelType: 'slack',
-      scopeEvidence: { sensitivity: 'confidential', compartments: ['finance'] },
-    })
-    expect(outcome).toEqual({
-      status: 'skipped',
-      channelType: 'slack',
-      reason: 'delivery_audience_unverified',
-    })
-    expect(addSessionMessage).not.toHaveBeenCalled()
-    expect(sendMessage).not.toHaveBeenCalled()
-  })
+  // A07 acceptance evidence selects the stable "refuses an unverified audience" title.
+  it.each([undefined, 'unbound', 'personal_group_unverified', 'evidence_exceeds_audience'] as const)(
+    'refuses an unverified audience before persistence or adapter send, preserving detail %s', async (detail) => {
+      vi.mocked(addSessionMessage).mockClear()
+      const authorizeDeliveryAudience = vi.fn(async () => ({
+        allowed: false as const,
+        reason: 'delivery_audience_unverified' as const,
+        ...(detail ? { detail } : {}),
+      }))
+      const deliver = createWorkflowChannelDelivery({ integrationStore, authorizeDeliveryAudience })
+      const outcome = await deliver({
+        ...baseParams(),
+        channelType: 'telegram',
+        channelId: '-100123',
+        scopeEvidence: { sensitivity: 'confidential', compartments: ['finance'] },
+      })
+      expect(outcome).toEqual({
+        status: 'skipped',
+        channelType: 'telegram',
+        reason: 'delivery_audience_unverified',
+        ...(detail ? { detail } : {}),
+      })
+      expect(addSessionMessage).not.toHaveBeenCalled()
+      expect(sendMessage).not.toHaveBeenCalled()
+    },
+  )
 
   it('slack: passes threadRef as opts.threadTs and returns the posted ts as messageId', async () => {
     const deliver = createWorkflowChannelDelivery({ integrationStore })

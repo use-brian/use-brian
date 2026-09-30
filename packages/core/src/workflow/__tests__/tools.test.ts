@@ -15,6 +15,7 @@ import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport } from '../../a2a/types.js'
 import type { JobStore, ScheduledJob } from '../../scheduling/types.js'
 import type { DeliverToChannel } from '../executor.js'
+import { pinToolAuthoringAuthority } from '../../security/index.js'
 import { loadBuiltinSkills } from '../../skills/loader.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
@@ -281,6 +282,7 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
 }
 
 function makeAllTools(opts?: {
+  resolvePrimary?: (workspaceId: string) => Promise<string | null>
   isKnownTool?: (name: string) => boolean
   resolveKnownWorkflowTools?: (args: {
     userId: string
@@ -344,7 +346,7 @@ function makeAllTools(opts?: {
     resolveKnownWorkflowTools: opts?.resolveKnownWorkflowTools,
     // Scheduling substrate (scheduling-authoring-unification).
     jobStore,
-    resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+    resolvePrimary: opts?.resolvePrimary ?? (async () => PRIMARY_ASSISTANT_ID),
     deliverToChannel: opts?.deliverToChannel,
     resolveViewWorkspace: opts?.resolveViewWorkspace ?? (async () => WORKSPACE_ID),
     validateDeliveryTarget: opts?.validateDeliveryTarget,
@@ -824,10 +826,12 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
   })
 
   it('[COMP:api/client-principal-runtime] resolves safe API-key metadata into a receipt-backed reviewed reply', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async () => [])
+    const resolvePrimary = vi.fn(async () => PRIMARY_ASSISTANT_ID)
     const keyId = '00000000-0000-4000-8000-000000000020'
     const listAuthorableClientApiKeys = vi.fn(async () => [{
       id: keyId,
-      assistantId: PRIMARY_ASSISTANT_ID,
+      assistantId: AUTHORING_ASSISTANT_ID,
       name: 'Studio public clients',
       scope: 'chat' as const,
       audience: 'external' as const,
@@ -840,11 +844,14 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     const { tools, stores } = makeAllTools({
       allowLegacyDirectWrites: false,
       listAuthorableClientApiKeys,
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+      resolvePrimary,
     })
     const proposed = await tools.proposeWorkflow.execute({
       name: 'Review client replies',
       clientBoundary: {
-        assistantId: PRIMARY_ASSISTANT_ID,
+        assistantId: AUTHORING_ASSISTANT_ID,
         resolve: { kind: 'verified_email_pairing' },
       },
       definition: {
@@ -853,7 +860,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
           {
             id: 'draft',
             type: 'assistant_call',
-            target: { assistantId: PRIMARY_ASSISTANT_ID },
+            target: { assistantId: AUTHORING_ASSISTANT_ID },
             prompt: 'Draft a reply to {{input.event.text}}.',
             storeOutputAs: 'draft',
             nextStepId: 'review',
@@ -884,7 +891,13 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     }, makeContext())
 
     expect(proposed.isError).toBeFalsy()
-    expect(listAuthorableClientApiKeys).toHaveBeenCalledWith(USER_ID, PRIMARY_ASSISTANT_ID)
+    expect(resolvePrimary).not.toHaveBeenCalled()
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: AUTHORING_ASSISTANT_ID,
+      authoringAuthority: pinToolAuthoringAuthority(makeContext()),
+      toolNames: ['imapSendMessage'],
+    }))
+    expect(listAuthorableClientApiKeys).toHaveBeenCalledWith(USER_ID, AUTHORING_ASSISTANT_ID)
     expect((proposed.data as { selectedClientBoundary: unknown }).selectedClientBoundary).toMatchObject({
       id: keyId,
       name: 'Studio public clients',
@@ -900,7 +913,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(stores.workflows.get(workflowId)?.definition.principal).toEqual({
       kind: 'api_external_client',
       apiKeyId: keyId,
-      assistantId: PRIMARY_ASSISTANT_ID,
+      assistantId: AUTHORING_ASSISTANT_ID,
       resolve: { kind: 'verified_email_pairing' },
     })
   })
@@ -1444,7 +1457,32 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       workspaceId: WORKSPACE_ID,
       assistantId: PRIMARY_ASSISTANT_ID,
       toolNames: ['list_events'],
+      authoringAuthority: pinToolAuthoringAuthority(makeContext()),
+      contextGroupId: null,
+      contextProjectId: null,
     })
+  })
+
+  it.each([false, true])('uses the create/edit binding for exact lookup (edit=%s)', async (editing) => {
+    const resolveKnownWorkflowTools = vi.fn(async () => [])
+    const { tools } = makeAllTools({ isKnownTool: () => false, resolveKnownWorkflowTools })
+    const definition = { startStepId: 'events', steps: [
+      { id: 'events', type: 'tool_call', toolName: 'list_events', arguments: {} },
+    ] }
+    let workflowId: string | undefined
+    if (editing) {
+      const created = await tools.createWorkflow.execute({ name: 'Existing', definition }, makeContext())
+      workflowId = (created.data as { id: string }).id
+      expect(workflowId).toBeTruthy()
+    }
+    const context = makeContext({ activeGroupId: AUTHORING_ASSISTANT_ID, activeProjectId: PROJECT_ID })
+    const result = await tools.proposeWorkflow.execute({ name: 'Scoped', workflowId, definition }, context)
+    expect(result.isError).toBeFalsy()
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledWith(expect.objectContaining({
+      authoringAuthority: pinToolAuthoringAuthority(context),
+      contextGroupId: editing ? null : AUTHORING_ASSISTANT_ID,
+      contextProjectId: editing ? null : PROJECT_ID,
+    }))
   })
 
   it('batches deterministic tool lookups and does not mix assistant_call scope', async () => {
@@ -1484,8 +1522,11 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     }))
   })
 
-  it('keeps the unknown warning when exact runtime lookup fails or disagrees with preflight', async () => {
-    const resolveKnownWorkflowTools = vi.fn(async () => [])
+  it.each([false, true])('keeps execution-scope warnings when exact lookup fails or disagrees with preflight (throws=%s)', async (throws) => {
+    const resolveKnownWorkflowTools = vi.fn(async () => {
+      if (throws) throw new Error('Execution scope unavailable')
+      return []
+    })
     const { tools } = makeAllTools({
       isKnownTool: () => false,
       resolveKnownWorkflowTools,
@@ -1502,6 +1543,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(r.isError).toBeFalsy()
     const warnings = (r.data as Record<string, unknown>).warnings as string[]
     expect(warnings.some((w) => w.includes('missing_action') && w.includes('tool_not_found'))).toBe(true)
+    expect(warnings.some((w) => w.includes('execution scope'))).toBe(true)
   })
 
   it('does not build the runtime tool registry during createWorkflow', async () => {

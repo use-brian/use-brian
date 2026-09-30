@@ -50,6 +50,10 @@ vi.mock('@use-brian/channels', () => ({
   stripMarkdown: vi.fn(),
 }))
 
+vi.mock('../../db/telegram-group-membership.js', () => ({
+  listLinkedTelegramIdsSystem: vi.fn(async () => ['5550001']),
+  listTelegramBotUserIdsSeenInChatSystem: vi.fn(async () => []),
+}))
 vi.mock('../../feishu/client.js', () => ({
   validateFeishuCredentials: vi.fn(),
 }))
@@ -96,6 +100,7 @@ import { validateFeishuCredentials } from '../../feishu/client.js'
 import type { LinkCodeStore } from '../../db/link-codes.js'
 import type { CustomChannelStore } from '../../db/custom-channel-store.js'
 import { hashBridgeToken } from '../../db/custom-channel-token.js'
+import { listLinkedTelegramIdsSystem } from '../../db/telegram-group-membership.js'
 import type {
   WhatsAppCloudManagedGroup,
   WhatsAppCloudManagedGroupStore,
@@ -881,6 +886,53 @@ describe('[COMP:api/channels-route] channel config', () => {
       expect(saved[1]).toMatchObject({ channelId: 'C-OTHER', clearance: 'public', approvedByUserId: 'user-1' })
       expect(saved[1].approvedAt).not.toBe(existing.approvedAt)
     } else expect(saved).toHaveLength(1)
+  })
+
+  describe('personal group approvals', () => {
+    const ME = '77777777-7777-4777-8777-777777777777'
+    const OTHER = '88888888-8888-4888-8888-888888888888'
+    async function send(channelType: string, recipientUserId: string) {
+      vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
+      const integration = makeIntegration({ channelType })
+      const updateConfig = vi.fn().mockImplementation(async ({ config }) => ({ ...integration, config }))
+      const integrationStore = {
+        listForWorkspace: vi.fn().mockResolvedValue([integration]), updateConfig,
+      } as unknown as ChannelIntegrationStore
+      const res = await request(buildApp({ integrationStore, role: 'owner', userId: ME }))
+        .patch('/api/workspaces/ws-1/channels/chan-1/config')
+        .send({ deliveryAudienceBindings: [{
+          channelId: '-100777', audienceType: 'group', clearance: 'internal',
+          compartments: [], projectIds: [], recipientUserId,
+        }] })
+      return { res, updateConfig }
+    }
+
+    it('saves a Telegram group declared personal to the approving member', async () => {
+      const { res, updateConfig } = await send('telegram', ME)
+      expect(res.status).toBe(200)
+      expect(updateConfig.mock.calls[0][0].config.deliveryAudienceBindings[0])
+        .toMatchObject({ audienceType: 'group', recipientUserId: ME })
+    })
+
+    it('refuses a personal group on a channel that cannot prove membership', async () => {
+      const { res, updateConfig } = await send('slack', ME)
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('personal_group_unsupported')
+      expect(updateConfig).not.toHaveBeenCalled()
+    })
+
+    it('refuses declaring a group personal to someone else', async () => {
+      const { res } = await send('telegram', OTHER)
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('personal_group_self_only')
+    })
+
+    it('refuses a personal group without a linked Telegram account', async () => {
+      vi.mocked(listLinkedTelegramIdsSystem).mockResolvedValueOnce([])
+      const { res } = await send('telegram', ME)
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('personal_group_requires_linked_telegram')
+    })
   })
 
   it('PATCH config refuses delivery audience approval by an ordinary member', async () => {

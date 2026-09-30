@@ -74,6 +74,13 @@ export type SessionAuthoritySnapshot = Pick<Session,
 export function createSessionAuthorityLease(input: {
   starting: AccessCeiling
   session: SessionAuthoritySnapshot
+  /**
+   * The assistant actually running this turn. On a doc-dock switch or a room
+   * @mention it differs from the session's bound assistant, and the starting
+   * ceiling was resolved for IT - so the live re-check must be too. Absent,
+   * the bound assistant runs the turn.
+   */
+  executingAssistantId?: string
   /** Current caller; differs from the session starter in shared rooms. */
   userId?: string
   memberMode?: 'enforce' | 'assistant' | 'member' | 'external'
@@ -86,6 +93,7 @@ export function createSessionAuthorityLease(input: {
   const expected = {
     id: input.session.id,
     assistantId: input.session.assistantId,
+    executingAssistantId: input.executingAssistantId ?? input.session.assistantId,
     userId: input.session.userId,
     authorityUserId: input.userId ?? input.session.userId,
     contextGroupId: input.session.contextGroupId,
@@ -96,7 +104,7 @@ export function createSessionAuthorityLease(input: {
   return createAuthorityLease(input.starting, async () => {
     const [session, assistant, credentialCurrent] = await Promise.all([
       findSessionAuthorityById(expected.id),
-      findAssistantById(expected.assistantId),
+      findAssistantById(expected.executingAssistantId),
       input.credentialCurrent?.() ?? Promise.resolve(true),
     ])
     if (!session || !assistant || !credentialCurrent) return null

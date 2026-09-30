@@ -72,7 +72,8 @@ describe('[COMP:app-web/organization-chart] directory and configuration UX',()=>
     await click('Research assistant');
     expect(document.activeElement?.textContent).toBe('Research assistant');
     expect(host.querySelector('aside a')?.getAttribute('href')).toBe('/w/workspace-fixture/studio/assistants?assistant=assistant-fixture');
-    expect(host.querySelector('a')?.getAttribute('href')).toBe('/w/workspace-fixture/organization?section=departments');
+    // Section navigation lives in the sidebar and top bar, never inside Structure.
+    expect(host.querySelector('a[href*="section=departments"]')).toBeNull();
   });
   it('nests a human direct report and their assistant under the manager within a unit',async()=>{
     const chart=fixture();chart.placements.push({id:'report-placement',unitId:'unit-1',userId:'unassigned-fixture',assistantId:null,isPrimary:true,reportsToUserId:'member-fixture',accountableUserId:null,version:'1'});

@@ -15,8 +15,8 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { useDepartmentChange } from './use-department-change';
 import { SurfaceSkeletonFor } from '@/components/chrome/surface-skeleton';
-import Link from 'next/link';
-import { organizationHref } from '@/lib/organization-navigation';
+import { History, RefreshCw, ScanSearch } from 'lucide-react';
+import { OrganizationTopbarActions, organizationTopbarActionCls } from '@/components/organization/organization-chrome';
 import { ScopeReviewPanel } from './scope-review';
 import {AccessExplanationPanel,AccessEventsPanel} from './access-inspection';
 
@@ -61,15 +61,17 @@ function WorkspaceAccessPanel({selection,embedded}:{selection?:AccessSelection;e
   // Review owns its independently expiring administrator projection. A refresh
   // of the parent must not discard an in-progress saved-review selection.
   if(reviewOpen)return <ScopeReviewPanel teams={data?.canAdminister?data.teams:[]} close={()=>setReviewOpen(false)}/>;
-  if(!data) return resource.error?<main className={`space-y-4 ${embedded?'':'p-4 md:p-6'}`}>{header}<p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></main>:<SurfaceSkeletonFor surface="organization"/>;
-  return <main className={historyVisible?'mx-auto min-w-0 max-w-7xl space-y-6 p-4 md:p-6':embedded?'min-w-0 space-y-5':'min-w-0 space-y-5 pt-6'}>{header}
+  if(!data) return resource.error?<main className="space-y-4">{header}<p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></main>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
+  const reload=()=>{change.clearError();invalidateSurfaceCache(key);};
+  // The Access section's own actions ride the Organization top bar; embedded
+  // person/department panels keep their Refresh beside the data it reloads.
+  return <main className={historyVisible?'min-w-0 space-y-6':embedded?'min-w-0 space-y-5':'min-w-0 space-y-5 pt-6'}>{header}
     {data.readiness?.ready!==true?<p role="status" className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.notReady}</p>:null}
-    <div className="flex flex-wrap items-center gap-2">
-      {data.canAdminister&&historyVisible?<Button variant="outline" className="min-h-11" onClick={()=>setReviewOpen(true)}>{t.reviewData}</Button>:null}
-      {data.canAdminister&&historyVisible?<Link className="inline-flex min-h-11 items-center justify-center rounded-lg border border-border bg-background px-3 text-sm font-medium hover:bg-muted" href={organizationHref(workspaceId,'departments')}>{t.configureTeams}</Link>:null}
-      {historyVisible?<Button variant="outline" className="min-h-11" onClick={()=>setInspection('events')}>{t.accessAudit}</Button>:null}
-      <Button variant="ghost" className="min-h-11" onClick={()=>{change.clearError();invalidateSurfaceCache(key);}}>{t.reload}</Button>
-    </div>
+    {historyVisible?<OrganizationTopbarActions>
+      {data.canAdminister?<button type="button" aria-label={t.reviewData} title={t.reviewData} onClick={()=>setReviewOpen(true)} className={organizationTopbarActionCls}><ScanSearch aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.reviewData}</span></button>:null}
+      <button type="button" aria-label={t.accessAudit} title={t.accessAudit} aria-pressed={inspection==='events'} onClick={()=>setInspection('events')} className={organizationTopbarActionCls}><History aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.accessAudit}</span></button>
+      <button type="button" aria-label={t.reload} title={t.reload} onClick={reload} className={organizationTopbarActionCls}><RefreshCw aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.reload}</span></button>
+    </OrganizationTopbarActions>:<div className="flex flex-wrap items-center gap-2"><Button variant="ghost" className="min-h-11" onClick={reload}>{t.reload}</Button></div>}
     {selection?.kind==='department'?<Button variant="outline" className="min-h-11" onClick={()=>setInspection({memberId:me.id})}>{t.explainAccess}</Button>:null}
     {inspection==='events'?<AccessEventsPanel key={data.policyRevision} data={data} close={()=>setInspection(null)}/>:inspection?<AccessExplanationPanel key={`${inspection.memberId}:${data.policyRevision}`} data={data} memberId={inspection.memberId} close={()=>setInspection(null)}/>:null}
     {error||resource.error?<p role="alert" className="text-sm text-destructive">{error||t.loadError}</p>:null}
@@ -174,7 +176,7 @@ function AccessHistoryPage({kind,after,revision,reset,render}:{kind:'requests'|'
   const history=useProtectedProjection(key,resource.data,()=>{},resource.refresh);
   if(history)return render(history);
   return <section className="space-y-3"><h2 className="font-semibold">{kind==='requests'?t.requests:t.grants}</h2>
-    {resource.error?<><p role="alert">{t.historyChanged}</p><Button className="min-h-11" variant="outline" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization"/>}
+    {resource.error?<><p role="alert">{t.historyChanged}</p><Button className="min-h-11" variant="outline" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>}
     <Button className="min-h-11" variant="outline" onClick={reset}>{t.newestHistory}</Button>
   </section>;
 }

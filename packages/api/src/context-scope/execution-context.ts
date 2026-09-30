@@ -39,6 +39,11 @@ export type ResolveExecutionContextInput = ResolveTurnScopeInput & {
   maximumAccess?: AccessCeiling
   /** Live counterpart to maximumAccess; revocation must stop tool execution. */
   maximumAccessCurrent?: () => Promise<AccessCeiling | null>
+  /**
+   * The turn's audience is shared (decision D4): every read in it - automatic
+   * context and tools alike - sees only rows with no user owner.
+   */
+  sharedAudience?: boolean
 }
 
 export type ResolvedExecutionContext = {
@@ -115,7 +120,10 @@ export async function resolveExecutionContextSystem(
     resolveReadCeilings: deps.resolveReadCeilings,
     resolveWorkspaceRole: deps.resolveWorkspaceRole,
   }
-  const turnScope = boundTurnScope(await resolveScope(input, scopeDeps), input.maximumAccess)
+  const bounded = boundTurnScope(await resolveScope(input, scopeDeps), input.maximumAccess)
+  const turnScope = input.sharedAudience
+    ? { ...bounded, access: { ...bounded.access, sharedAudience: true } }
+    : bounded
   const access: ResolvedExecutionAccess = {
     ...turnScope.access,
     workspaceId: turnScope.access.workspaceId,
@@ -143,6 +151,7 @@ export async function resolveExecutionContextSystem(
     ? (deps.createSessionLease ?? createSessionAuthorityLease)({
         starting,
         session: input.sessionAuthority,
+        executingAssistantId: input.assistant.id,
         userId: input.userId,
         memberMode: input.memberMode,
         ignoreSessionBinding: input.ignoreSessionBinding,

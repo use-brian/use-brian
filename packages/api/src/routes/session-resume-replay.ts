@@ -51,9 +51,14 @@ import {
   findSessionById,
   getSessionMessages,
   addSessionMessage,
+  isSharedAudienceSession,
   toStampedMessages,
   type Session,
 } from '../db/sessions.js'
+import {
+  createDeliveryAudienceAuthorizer,
+  DeliveryAudienceUnverifiedError,
+} from '../context-scope/delivery-authority.js'
 import { findAssistantById } from '../db/users.js'
 import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
 import { MODEL_MAP, chatTierBudget, tierForModel } from '../model-resolution.js'
@@ -363,7 +368,9 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         || !scopeGrantContains(bounded.projectIds, resolved.writeProjectIds)) throw authorityUnavailable()
       turnScope = {
         ...resolved,
-        access: { ...resolved.access, ...bounded },
+        // A resumed room, doc-thread or draft turn keeps the shared-audience
+        // read rule the original turn ran under (decision D4).
+        access: { ...resolved.access, ...bounded, ...(isSharedAudienceSession(session) ? { sharedAudience: true } : {}) },
         effectiveCompartments: bounded.compartments,
         effectiveProjectIds: bounded.projectIds,
       }
@@ -476,12 +483,13 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         mutationCompartments: bounded.mutationCompartments,
         projectIds: bounded.projectIds,
         visibilityAssistantIds: bounded.visibilityAssistantIds,
+        sharedAudience: turnScope.access.sharedAudience,
       })
       const outcomeNote = await resolveResumeOutcomeNote(scopedTools, params, context)
       await assertCurrentAuthority()
 
       // ── 2. Rebuild the conversation, append the outcome note ──
-      const dbMessages = await getSessionMessages(sessionId)
+      const dbMessages = await getSessionMessages(sessionId, { excludeHeld: true })
       const scopeAccumulator = context.scopeAccumulator as ContextScopeAccumulator
       noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
       await assertCurrentAuthority()
@@ -495,7 +503,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         scope: turnScope,
         workspaceId: assistant.workspaceId,
         userId: session.userId,
-        assistantId: assistant.id,
+        sharedAudience: isSharedAudienceSession(session),
       })
       const storedOutcome = await executeWithCurrentAuthority(() => addSessionMessage({
         sessionId,
@@ -519,6 +527,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         ? `${baseSystemPrompt}\n\n${activeWorkspaceContext}`
         : baseSystemPrompt
 
+      const authorizeResumeAudience = createDeliveryAudienceAuthorizer()
       for await (const event of queryLoop({
         ledger: createTurnLedger({
           workspaceId: runtimeContext.workspaceId ?? null,
@@ -548,6 +557,18 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         // accepted or persisted after authority changes.
         await assertCurrentAuthority()
         if (event.type === 'turn_complete') {
+          // The continuation's output reaches the session's audience like any
+          // turn's: judge its evidence against that audience first.
+          const audience = await authorizeResumeAudience({
+            workspaceId: assistant.workspaceId!,
+            assistantId: assistant.id,
+            userId: session.userId,
+            channelType: session.channelType,
+            channelId: session.channelId,
+            sessionId,
+            scopeEvidence: scopeAccumulator.evidence,
+          })
+          if (!audience.allowed) throw new DeliveryAudienceUnverifiedError(audience.detail, audience.diagnostic)
           await executeWithCurrentAuthority(() => addSessionMessage({
             sessionId,
             role: 'assistant',

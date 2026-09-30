@@ -38,6 +38,7 @@ const scope = {
 
 beforeEach(() => {
   mockInject.mockReset()
+  mockInject.mockResolvedValue({ unavailable: [], searchableSources: [], enrichConfirmation: async (_name, input) => input })
 })
 
 describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
@@ -46,7 +47,10 @@ describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
     const turnScope={access:{workspaceId:'ws-1',userId:'u-1',assistantId:'a-1',assistantKind:'primary' as const,
       clearance:'internal' as const,compartments:['product'],projectIds:[],visibilityAssistantIds:[]},
       effectiveCompartments:['product'],effectiveProjectIds:[],writeCompartments:['product'],writeProjectIds:[],activeGroupId:null,activeProjectId:null}
+    const warning = 'Connector discovery is limited by the current execution scope.'
+    mockInject.mockResolvedValueOnce({ unavailable: [warning], searchableSources: [], enrichConfirmation: async (_name, input) => input })
     const registry=await buildWorkflowToolRegistry(makeDeps(new Map([[probe.name,probe]])),{...scope,turnScope})
+    expect(registry.discoveryWarnings).toEqual([warning])
     const result=await registry.get(probe.name)!.execute({}, {userId:'u-1',assistantId:'a-1',assistantKind:'primary',workspaceId:'ws-1',
       sessionId:'run',appId:'fixture',channelType:'workflow',channelId:'run',abortSignal:new AbortController().signal})
     expect(result.data).toMatchObject({workspaceId:'ws-1',userId:'u-1',clearance:'internal',compartments:['product'],projectIds:[],visibilityAssistantIds:[]})

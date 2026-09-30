@@ -137,6 +137,7 @@ import { SidebarTreeNode, parseDropId } from "./sidebar-tree-node";
 import { EmptySearchResults } from "./empty-states";
 import { BrainSidebarPanel } from "./sidebar-panels/brain-sidebar-panel";
 import { StudioSidebarPanel } from "./sidebar-panels/studio-sidebar-panel";
+import { OrganizationSidebarPanel } from "./sidebar-panels/organization-sidebar-panel";
 import { WorkflowSidebarPanel } from "./sidebar-panels/workflow-sidebar-panel";
 import { FeedSidebarPanel } from "./sidebar-panels/feed-sidebar-panel";
 import { TasksSidebarPanel } from "./sidebar-panels/tasks-sidebar-panel";
@@ -810,7 +811,7 @@ export function DocSidebar(props: Props) {
         href={`/w/${workspaceId}/organization`}
         {...intentPrefetch(`/w/${workspaceId}/organization`)}
         aria-current={surfaceActive("organization") ? "page" : undefined}
-        className={`mx-2 flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm hover:bg-sidebar-accent ${surfaceActive("organization") ? "bg-sidebar-accent font-medium" : "text-muted-foreground"}`}
+        className={`mx-2 mb-1.5 flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm hover:bg-sidebar-accent ${surfaceActive("organization") ? "bg-sidebar-accent font-medium" : "text-muted-foreground"}`}
       >
         <Users className="size-4 shrink-0" />
         {copy.organization.title}
@@ -862,7 +863,8 @@ export function DocSidebar(props: Props) {
         {/* Surface-aware body. Suggested borrows `/p` for its content pane but
             resolves this body from the sticky Home app, so first load keeps the
             selected app's navigation visible. Page shows the page tree; Office
-            / Brain / Studio / Workflow / Tasks / CRM / Browsers / Chat swap in
+            / Brain / Studio / Workflow / Tasks / CRM / Browsers / Chat /
+            Organization swap in
             their own panel; every other surface renders nothing here. */}
         {sidebarSurface === "office" ? (
           <OfficeSidebarPanel workspaceId={workspaceId} />
@@ -884,6 +886,8 @@ export function DocSidebar(props: Props) {
           <ChatSidebarPanel workspaceId={workspaceId} />
         ) : sidebarSurface === "shopify" ? (
           <ShopifySidebarPanel workspaceId={workspaceId} />
+        ) : sidebarSurface === "organization" ? (
+          <OrganizationSidebarPanel workspaceId={workspaceId} />
         ) : sidebarSurface === "live" ? (
           <LiveSidebarPanel
             workspaceId={workspaceId}

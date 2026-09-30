@@ -166,7 +166,10 @@ export function createWorkflowChannelDelivery(
         scopeEvidence,
       })
       if (!audience.allowed) {
-        return { status: 'skipped', channelType, reason: 'delivery_audience_unverified' }
+        return {
+          status: 'skipped', channelType, reason: 'delivery_audience_unverified',
+          ...(audience.detail ? { detail: audience.detail } : {}),
+        }
       }
     }
 

@@ -1,12 +1,15 @@
 import type pg from 'pg'
 import {
   bindScopeSource,
+  deriveResourceScope,
+  DerivedScopeError,
+  maxSensitivity,
   type DerivedWriteEvidence,
   type ResourceScope,
   type ScopeSource,
 } from '@use-brian/core'
 import { getPool, query } from './client.js'
-import { recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
+import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 /**
@@ -203,6 +206,19 @@ export function isSharedChatSession(s: SessionShape): boolean {
     s.channelType === 'web' &&
     s.appOrigin === 'chat'
   )
+}
+
+/**
+ * Is this session's AUDIENCE shared rather than one owner? The single
+ * definition for audience-scoped decisions: how a person's input is stamped,
+ * which ceiling delivery checks, and what automatic context a turn may load.
+ * Wider than `isSharedChatSession` (web rooms): doc comment threads and Feed
+ * threads are `visibility='workspace'`, and live drafts are `mode='draft'`.
+ * Two definitions refused every doc-thread and draft turn: input stamped
+ * personal, delivery judged against a room.
+ */
+export function isSharedAudienceSession(s: Pick<SessionShape, 'visibility' | 'mode'>): boolean {
+  return s.visibility === 'workspace' || s.mode === 'draft'
 }
 
 /**
@@ -747,6 +763,21 @@ export async function touchTurnLease(
 }
 
 /**
+ * Did a DIFFERENT turn claim this session after `token`'s turn? True only when
+ * another, non-null lease token is now current. A plain stop releases the
+ * lease to NULL (`releaseTurnLease(..., null)`), which is not a successor: the
+ * stopped turn still owns what it streamed. Stop-then-retry is.
+ */
+export async function isTurnLeaseSuperseded(sessionId: string, token: string): Promise<boolean> {
+  const result = await query<{ token: string | null }>(
+    `SELECT turn_lease_token AS token FROM sessions WHERE id = $1`,
+    [sessionId],
+  )
+  const current = result.rows[0]?.token ?? null
+  return current !== null && current !== token
+}
+
+/**
  * Ask the turn holding this session's lock to stop. Picked up by the holder's
  * next heartbeat tick (<= `TURN_HEARTBEAT_INTERVAL_MS`) when it runs in another
  * process; the same-process path aborts its `AbortController` directly and does
@@ -1022,11 +1053,24 @@ export async function countSessionTurns(sessionId: string): Promise<number> {
  */
 export async function getSessionMessages(
   sessionId: string,
-  opts?: { limit?: number; afterSequence?: number; fromSequence?: number | null },
+  opts?: {
+    limit?: number
+    afterSequence?: number
+    fromSequence?: number | null
+    /**
+     * Withhold rows whose scope is held for review. This read runs on the
+     * owner pool, which bypasses the RLS policy that withholds them
+     * everywhere else, so every caller that turns history into MODEL context
+     * must pass it: a held row carries no bound source, so its labels would
+     * never reach the turn's writes or delivery check.
+     */
+    excludeHeld?: boolean
+  },
 ): Promise<SessionMessage[]> {
   const conditions = ['session_id = $1']
   const values: unknown[] = [sessionId]
   let paramIdx = 2
+  if (opts?.excludeHeld) conditions.push('scope_held IS NOT TRUE')
 
   if (opts?.afterSequence !== undefined) {
     conditions.push(`sequence_num > $${paramIdx}`)
@@ -1391,9 +1435,33 @@ export async function addSessionMessage(params: {
                attachments`
 
   const write = async (db: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> => {
-    const scope = params.derivation
-      ? await validateDerivedMemoryInputs(db, params.derivation)
-      : params.scope
+    let derivation = params.derivation
+    let scope = params.scope
+    if (derivation) {
+      // A transcript row records what was SAID, not a derived fact. A source
+      // the turn itself edited or removed (list then close a task, forget a
+      // memory) must not block saving a reply the user already received
+      // (decision D1): lineage keeps only still-current sources, while the row
+      // carries the labels of every source it was derived from, raised to the
+      // current labels of any that changed. Held sources and changed causal
+      // inputs still refuse.
+      const certified = deriveResourceScope(derivation)
+      const states = await readCurrentScopeSources(db, certified.workspaceId, derivation.sources)
+      if (states.some((state) => state.state === 'held' || state.state === 'unverifiable' || state.state === 'stale_input')) {
+        throw new DerivedScopeError('scope_source_changed')
+      }
+      const labels = { ...certified }
+      for (const state of states) {
+        if (state.state !== 'changed') continue
+        labels.sensitivity = maxSensitivity(labels.sensitivity, state.current.sensitivity)
+        labels.compartments = [...new Set([...labels.compartments, ...state.current.compartments])].sort()
+        labels.projectIds = [...new Set([...labels.projectIds, ...state.current.projectIds])].sort()
+      }
+      scope = labels
+      const current = states.filter((state) => state.state === 'current').map((state) => state.source)
+      derivation = current.length ? { ...derivation, sources: current } : undefined
+      if (derivation) await validateDerivedMemoryInputs(db, derivation)
+    }
     const values = [
       params.sessionId,
       params.role,
@@ -1423,8 +1491,8 @@ export async function addSessionMessage(params: {
       resourceId: stored.id,
       version: '1',
     }
-    if (params.derivation) {
-      await recordDerivedResource(db, params.derivation, source)
+    if (derivation) {
+      await recordDerivedResource(db, derivation, source)
     }
     return bindScopeSource(stored, source)
   }

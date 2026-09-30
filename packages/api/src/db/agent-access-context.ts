@@ -17,6 +17,8 @@ type AgentAccessContext = {
   workspaceId?: string
   userId?: string
   visibilityAssistantIds?: string[] | null
+  /** Sticky: a nested execution can narrow to a shared audience, never widen back. */
+  sharedAudience?: boolean
   clearance: AgentClearance
   /** undefined = legacy clearance-only wrap; linked Teams fail closed. */
   compartments?: string[] | null
@@ -41,6 +43,7 @@ export function runWithAgentAccess<T>(
     workspaceId?: string
     userId?: string
     visibilityAssistantIds?: string[] | null
+    sharedAudience?: boolean
     clearance: string | null | undefined
     compartments: string[] | null | undefined
     mutationCompartments?: string[] | null
@@ -64,6 +67,7 @@ export function runWithAgentAccess<T>(
       intersect(parent?.compartments,access.compartments)),
     projectIds:intersect(parent?.projectIds,access.projectIds),
     visibilityAssistantIds:intersect(parent?.visibilityAssistantIds,access.visibilityAssistantIds),
+    ...(parent?.sharedAudience||access.sharedAudience?{sharedAudience:true}:{}),
   },fn)
 }
 

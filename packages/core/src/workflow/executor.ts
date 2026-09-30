@@ -112,14 +112,16 @@ export type ResolvePrimaryAssistant = (workspaceId: string) => Promise<string | 
  * tools, scoped to a workspace + acting assistant. Constructed once at the
  * start of every workflow run; held immutable for that run's duration.
  */
+type WorkflowToolRegistry = Map<string, Tool> & { discoveryWarnings?: readonly string[] }
+
 export type BuildToolRegistry = (params: {
   workspaceId: string
   /** The acting assistant — typically the workspace's primary. */
   assistantId: string
   userId: string | null
-  /** Trusted execution scope. Undefined only for authoring-time tool lookup. */
+  /** Trusted execution scope, including authoring previews when available. */
   turnScope?: TurnScope
-}) => Promise<Map<string, Tool>>
+}) => Promise<WorkflowToolRegistry>
 
 /**
  * Optional audit hook. Fire-and-forget at the call site (the executor never
@@ -178,8 +180,19 @@ export type DeliveryOutcome =
         | 'access_denied'
         | 'customer_service_window_expired'
         | 'delivery_audience_unverified'
+      /** Coarse audience diagnosis only; never source names or policy identifiers. */
+      detail?: DeliveryAudienceDenialDetail
     }
   | { status: 'failed'; channelType: string; error: string }
+
+/** Safe, coarse audience diagnoses shared by the authorizer and delivery outcomes. */
+export type DeliveryAudienceDenialDetail =
+  /** No approval covers this conversation and the output was not public. */
+  | 'unbound'
+  /** A personal-group approval exists but membership could not be proven now. */
+  | 'personal_group_unverified'
+  /** An approval exists but the output needs more than it grants (e.g. personal context). */
+  | 'evidence_exceeds_audience'
 
 /**
  * Push an `assistant_call` step's text output to a user channel. Injected
@@ -812,7 +825,7 @@ export async function advanceWorkflowRun(
     scopeAccumulator.note(persistedScopeEvidence as import('../security/context-scope.js').ScopeEvidence)
   }
 
-  let toolRegistry: Map<string, Tool>
+  let toolRegistry: WorkflowToolRegistry
   try {
     toolRegistry = await deps.buildToolRegistry({
       workspaceId: run.workspaceId,
@@ -1378,7 +1391,7 @@ type DispatchContext = {
   primaryAssistantId: string
   /** Assistant whose grants/connector instances back deterministic tool_call. */
   toolAssistantId: string
-  toolRegistry: Map<string, Tool>
+  toolRegistry: WorkflowToolRegistry
   consultTransport: ConsultTransport
   externalClientPrincipal?: ResolvedExternalClientWorkflowPrincipal
   runtimeScope?: {
@@ -1989,7 +2002,9 @@ async function dispatchToolCall(
     return {
       kind: 'failed',
       error: {
-        message: `tool_call references unknown / disallowed tool "${step.toolName}".`,
+        message: [`tool_call references unknown / disallowed tool "${step.toolName}".`,
+          ...(ctx.toolRegistry.discoveryWarnings ?? []).map((warning) => `Discovery: ${warning}`),
+        ].join(' '),
         reason: 'tool_not_found',
       },
     }

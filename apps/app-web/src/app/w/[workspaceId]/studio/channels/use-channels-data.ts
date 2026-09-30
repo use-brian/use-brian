@@ -52,6 +52,8 @@ export type ChannelsSnapshot = {
 export type WorkspaceMembership = {
   clearance: ChannelClearance | null;
   role: WorkspaceRole | null;
+  /** The caller's own user id, for approvals that are personal to them. */
+  userId?: string | null;
 };
 
 /** The channel list plus every channel's routing rows, in one fetcher. */
@@ -96,7 +98,7 @@ async function fetchWorkspaceMembership(workspaceId: string): Promise<WorkspaceM
     const meId = data.me?.id;
     if (!meId || !Array.isArray(data.members)) return { clearance: null, role: null };
     const mine = data.members.find((m) => m.userId === meId);
-    return { clearance: mine?.clearance ?? null, role: mine?.role ?? null };
+    return { clearance: mine?.clearance ?? null, role: mine?.role ?? null, userId: mine ? meId : null };
   } catch {
     return { clearance: null, role: null };
   }
@@ -162,6 +164,7 @@ export function useChannelsData(workspaceId: string | null) {
     assistants: assistants.data ?? [],
     myClearance: membership.data?.clearance ?? null,
     myRole: membership.data?.role ?? null,
+    myUserId: membership.data?.userId ?? null,
     updateChannels,
     updateRouting,
     refreshRouting,

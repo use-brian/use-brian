@@ -139,7 +139,7 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
     catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
-  if(!data)return resource.error?<div className="space-y-3"><p role="alert">{t.loadFailed}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{accessCopy.reload}</Button></div>:<SurfaceSkeletonFor surface="organization"/>;
+  if(!data)return resource.error?<div className="space-y-3"><p role="alert">{t.loadFailed}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{accessCopy.reload}</Button></div>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
   const createDepartment=canManage?<section className="space-y-3 rounded-xl border border-border bg-muted/20 p-4">
     <h3 className="font-medium">{t.createTeamTitle}</h3>
     <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t.teamNamePlaceholder}

@@ -6,7 +6,8 @@
  * injected mock store. Verifies POST / (name + purpose validation, the
  * non-paid additional-workspace cap, create), GET /, GET /:workspaceId
  * (membership gate, detail shape), the requireWorkspaceRole level gate
- * on PATCH (admin) and DELETE (owner), and the add-member lookup.
+ * on PATCH (admin) and DELETE (owner), the add-member lookup, and the
+ * per-address `emailStatus` on POST /:workspaceId/invitations.
  */
 
 import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
@@ -677,5 +678,108 @@ describe('[COMP:api/workspaces-route] standalone token usage', () => {
     expect((await request(app('u1')).get(path)).body).toMatchObject({ models: [], estimatedCostUsd: 0, hasUnpricedUsage: false })
     mockQuery.mockRejectedValueOnce(new Error('database unavailable'))
     expect((await request(app('u1')).get(path)).status).toBe(500)
+  })
+})
+
+describe('[COMP:api/workspaces-route] POST /:workspaceId/invitations email status', () => {
+  const invitationStore = { create: vi.fn(), listPending: vi.fn(), revoke: vi.fn() }
+
+  function inviteApp(smtpClient?: { sendWorkspaceInvitation: ReturnType<typeof vi.fn> }) {
+    return createTestApp(
+      '/api/workspaces',
+      workspaceRoutes({
+        workspaceStore: workspaceStore as never,
+        auditStore: auditStore as never,
+        invitationStore: invitationStore as never,
+        smtpClient: smtpClient as never,
+        appUrl: 'https://app.example.com',
+      }),
+      { userId: 'u-admin' },
+    )
+  }
+
+  beforeEach(() => {
+    workspaceStore.getRole.mockResolvedValue('admin')
+    mockQuery.mockImplementation((async (sql: string) => {
+      if (sql.includes('FROM workspaces')) return { rows: [{ name: 'Example Co' }], rowCount: 1 }
+      if (sql.includes('SELECT name FROM users')) return { rows: [{ name: 'Inviter' }], rowCount: 1 }
+      return { rows: [], rowCount: 0 } // not already a member
+    }) as never)
+    let n = 0
+    invitationStore.create.mockImplementation(async () => ({ token: `tok-${++n}` }))
+  })
+
+  afterEach(() => {
+    workspaceStore.getRole.mockReset()
+    mockQuery.mockReset()
+  })
+
+  it('reports sent once the mail server accepts the invitation', async () => {
+    const smtpClient = { sendWorkspaceInvitation: vi.fn().mockResolvedValue(undefined) }
+    const res = await request(inviteApp(smtpClient))
+      .post('/api/workspaces/ws-1/invitations')
+      .send({ emails: ['invitee@example.com'], role: 'admin' })
+
+    expect(res.status).toBe(201)
+    expect(res.body.results).toEqual([
+      {
+        email: 'invitee@example.com',
+        status: 'invited',
+        link: 'https://app.example.com/invite?token=tok-1',
+        emailStatus: 'sent',
+      },
+    ])
+    expect(smtpClient.sendWorkspaceInvitation).toHaveBeenCalledWith(
+      'invitee@example.com',
+      expect.objectContaining({ workspaceName: 'Example Co', role: 'admin' }),
+    )
+  })
+
+  it('reports failed with the copy-link fallback when the mail server refuses the send', async () => {
+    const smtpClient = {
+      sendWorkspaceInvitation: vi.fn().mockRejectedValue(new Error('500 5.5.4 Unknown MAIL FROM argument')),
+    }
+    const res = await request(inviteApp(smtpClient))
+      .post('/api/workspaces/ws-1/invitations')
+      .send({ emails: 'invitee@example.com' })
+
+    expect(res.status).toBe(201)
+    expect(res.body.results[0]).toMatchObject({
+      status: 'invited',
+      link: 'https://app.example.com/invite?token=tok-1',
+      emailStatus: 'failed',
+    })
+    expect(console.error).toHaveBeenCalledWith(
+      '[workspaces] invitation email send failed:',
+      expect.any(Error),
+    )
+  })
+
+  it('reports each address independently in a mixed batch', async () => {
+    const smtpClient = {
+      sendWorkspaceInvitation: vi.fn(async (to: string) => {
+        if (to === 'refused@example.com') throw new Error('550 mailbox unavailable')
+      }),
+    }
+    const res = await request(inviteApp(smtpClient))
+      .post('/api/workspaces/ws-1/invitations')
+      .send({ emails: ['ok@example.com', 'refused@example.com', 'not-an-email'] })
+
+    expect(res.status).toBe(201)
+    expect(res.body.results.map((r: { email: string; status: string; emailStatus?: string }) =>
+      [r.email, r.status, r.emailStatus])).toEqual([
+      ['ok@example.com', 'invited', 'sent'],
+      ['refused@example.com', 'invited', 'failed'],
+      ['not-an-email', 'invalid', undefined],
+    ])
+  })
+
+  it('reports not_configured when the deployment has no SMTP client', async () => {
+    const res = await request(inviteApp())
+      .post('/api/workspaces/ws-1/invitations')
+      .send({ emails: ['invitee@example.com'] })
+
+    expect(res.status).toBe(201)
+    expect(res.body.results[0]).toMatchObject({ status: 'invited', emailStatus: 'not_configured' })
   })
 })

@@ -6,6 +6,7 @@
  */
 
 import { createTransport, type Transporter } from 'nodemailer'
+import addressparser from 'nodemailer/lib/addressparser/index.js'
 import type { MagicLinkLocale } from '../db/magic-link-store.js'
 import { renderMagicLinkEmail } from './magic-link-template.js'
 import {
@@ -56,6 +57,10 @@ export type SmtpClient = {
 
 // ── Transport construction ─────────────────────────────────────
 
+export const SMTP_CONNECTION_TIMEOUT_MS = 20_000
+export const SMTP_GREETING_TIMEOUT_MS = 20_000
+export const SMTP_SOCKET_TIMEOUT_MS = 60_000
+
 /**
  * Resolve provider-neutral SMTP settings. The defaults retain the original
  * Gmail STARTTLS behavior for existing deployments.
@@ -77,7 +82,32 @@ export function resolveSmtpTransportOptions(opts: {
     port,
     secure: opts.secure ?? false,
     auth: { user: opts.user, pass: opts.password },
+    // Workspace invitations await the send inside the admin's request, so a
+    // server that accepts the socket and then stalls must fail in bounded
+    // time instead of holding the request for nodemailer's 10-minute default.
+    connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+    greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+    socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
   }
+}
+
+/**
+ * Reduce `EMAIL_FROM_ADDRESS` to its bare mailbox.
+ *
+ * Operators write the setting either as a bare address or with a display
+ * name (`"Acme" <noreply@acme.example>`). The string form of nodemailer's
+ * `from` parses both, but the `{ name, address }` form copies `address`
+ * verbatim into the SMTP envelope, so a display-name value becomes an
+ * unparseable `MAIL FROM` that strict servers refuse
+ * (`500 5.5.4 Unknown MAIL FROM argument`). Parsing here with nodemailer's
+ * own address parser keeps the object form on the same mailbox the string
+ * form resolves to. An unparseable value is returned trimmed so the transport
+ * reports it rather than this function guessing.
+ */
+export function senderMailbox(fromAddress: string): string {
+  const [first] = addressparser(fromAddress, { flatten: true })
+  const address = first?.address?.trim()
+  return address && address.includes('@') ? address : fromAddress.trim()
 }
 
 export function createSmtpTransport(opts: Parameters<typeof resolveSmtpTransportOptions>[0]): SmtpTransport {
@@ -103,9 +133,13 @@ export function createSmtpTransport(opts: Parameters<typeof resolveSmtpTransport
 
 export function createSmtpClient(opts: {
   transport: SmtpTransport
-  /** The `From:` header. Should be an alias registered with the auth user. */
+  /**
+   * The `From:` header, as a bare address or with a display name. Should be
+   * an alias registered with the auth user.
+   */
   fromAddress: string
 }): SmtpClient {
+  const inviteSenderAddress = senderMailbox(opts.fromAddress)
   return {
     async sendMagicLink(to, link, locale = 'en', code) {
       const { subject, html, text } = renderMagicLinkEmail(link, locale, code)
@@ -131,7 +165,7 @@ export function createSmtpClient(opts: {
         // "Use Brian - <workspace>" instead of the bare alias local-part.
         from: {
           name: `Use Brian - ${inviteOpts.workspaceName}`,
-          address: opts.fromAddress,
+          address: inviteSenderAddress,
         },
         to,
         subject,

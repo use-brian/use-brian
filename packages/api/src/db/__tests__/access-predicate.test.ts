@@ -394,3 +394,26 @@ describe('[COMP:brain/permission-predicates] delegated ceilings',()=>{
     })
   })
 })
+
+describe('[COMP:brain/permission-predicates] shared audience reads (decision D4)', () => {
+  const NO_USER = '00000000-0000-0000-0000-000000000000'
+  const member: AccessContext = { workspaceId: 'ws-1', userId: 'member-1', assistantId: 'a-1', assistantKind: 'primary' }
+
+  it('a room turn matches only rows with no user owner', () => {
+    const personal = buildAccessPredicate(member)
+    expect(personal.sql).toContain('user_id = $2')
+    expect(personal.params[1]).toBe('member-1')
+    const room = buildAccessPredicate({ ...member, sharedAudience: true })
+    expect(room.sql).toBe(personal.sql)
+    expect(room.params[1]).toBe(NO_USER)
+  })
+
+  it('applies to tool reads inside the turn and cannot be cleared by a nested execution', () => {
+    runWithAgentAccess({ workspaceId: 'ws-1', userId: 'member-1', clearance: 'internal', compartments: null, sharedAudience: true }, () => {
+      expect(buildAccessPredicate(member).params[1]).toBe(NO_USER)
+      runWithAgentAccess({ workspaceId: 'ws-1', userId: 'member-1', clearance: 'internal', compartments: null, sharedAudience: false }, () => {
+        expect(buildAccessPredicate(member).params[1]).toBe(NO_USER)
+      })
+    })
+  })
+})
