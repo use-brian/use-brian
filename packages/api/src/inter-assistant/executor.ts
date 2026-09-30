@@ -99,6 +99,7 @@ import {
   resolveTurnScopeSystem,
   resolveLiveAccessCeilingSystem,
   sessionMessageInputScope,
+  turnOutputWrite,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
@@ -1284,8 +1285,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
       if (unknown.length) {
         parts.push(
-          `${unknown.join(', ')}: not available to this assistant (check connector connection and exposure)`,
+          `${unknown.join(', ')}: not available to this assistant (check tool names and exposure)`,
         )
+        // Injection diagnostics describe discovery as a whole, not the cause
+        // of every unknown pin (which can also be a typo or a removed tool).
+        // Preserve these safe facts even though this path never builds a prompt.
+        if (unavailableCapabilities.length) {
+          parts.push(`Discovery diagnostics: ${unavailableCapabilities.join('; ')}`)
+        }
       }
       throw Object.assign(
         new Error(
@@ -1687,21 +1694,21 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // consult with no replay.
     const userContent: Message['content'] = [{ type: 'text', text: params.question }]
     await assertCurrentAuthority()
-    const inheritedQuestionSources = scopeAccumulator.evidence.sources ?? []
+    const delegatedEnvelope = sessionMessageInputScope({
+      scope: turnScope,
+      workspaceId: calleeAssistant.workspaceId,
+      userId: session.userId,
+      assistantId: calleeAssistant.id,
+    })
     const userMessageRow = await addSessionMessage({
       sessionId: session.id,
       role: 'user',
       content: userContent,
-      ...(inheritedQuestionSources.length > 0
-        ? { derivation: { producer: 'turn:delegated-input', sources: inheritedQuestionSources } }
-        : {
-            scope: sessionMessageInputScope({
-              scope: turnScope,
-              workspaceId: calleeAssistant.workspaceId,
-              userId: session.userId,
-              assistantId: calleeAssistant.id,
-            }),
-          }),
+      ...turnOutputWrite({
+        producer: 'turn:delegated-input',
+        accumulator: scopeAccumulator,
+        envelope: delegatedEnvelope,
+      }),
     })
     const userMessageSource = boundScopeSource(userMessageRow)
     if (userMessageSource) scopeAccumulator.noteSource(userMessageSource)
@@ -2313,14 +2320,15 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             )
           }
         } else if (event.type === 'turn_complete') {
-          const outputSources = scopeAccumulator.evidence.sources ?? []
           await addSessionMessage({
             sessionId: session.id,
             role: 'assistant',
             content: event.response.content,
-            ...(outputSources.length > 0
-              ? { derivation: { producer: 'turn:delegated-output', sources: outputSources } }
-              : {}),
+            ...turnOutputWrite({
+              producer: 'turn:delegated-output',
+              accumulator: scopeAccumulator,
+              envelope: delegatedEnvelope,
+            }),
           })
           // Record the callee turn's LLM cost. Without this, every A2A /
           // workflow `assistant_call` / scheduled-job turn ran the model but

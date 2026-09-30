@@ -42,6 +42,9 @@ export interface OfflineSyncState {
   connectivity: Connectivity;
   /** True when the app should show the Offline affordance + queue writes. */
   offline: boolean;
+  /** Online, but the live doc's sync socket is re-dialing / not yet synced
+   *  (past a short grace). Display-only: writes are not queued for it. */
+  reconnecting: boolean;
   /** Count of writes queued for replay. */
   pending: number;
   /** Feed drafts waiting for explicit recovery rather than automatic replay. */
@@ -78,6 +81,37 @@ function subscribeCollabConnected(listener: () => void): () => void {
   };
 }
 
+// ── Collab-live signal (module store) ──────────────────────────
+// Stricter than `collabConnected`: true only when the mounted doc's socket is
+// connected AND synced. A socket still dialing ("connecting") is not live -
+// that is the Reconnecting state the bottom status bar reports. It does NOT
+// feed the connectivity classification (writes are not queued while a socket
+// re-dials); it is display-only. Reset to true on unmount like its sibling.
+let collabLive = true;
+const collabLiveListeners = new Set<() => void>();
+
+/** Publish whether the live doc is connected + synced (doc-shell). */
+export function publishCollabLive(live: boolean): void {
+  if (collabLive === live) return;
+  collabLive = live;
+  for (const l of collabLiveListeners) l();
+}
+
+function getCollabLive(): boolean {
+  return collabLive;
+}
+
+function subscribeCollabLive(listener: () => void): () => void {
+  collabLiveListeners.add(listener);
+  return () => {
+    collabLiveListeners.delete(listener);
+  };
+}
+
+/** Grace before a not-live socket reads as Reconnecting, so a page switch
+ *  (which re-dials the socket) never flashes the status bar. */
+export const RECONNECTING_GRACE_MS = 1000;
+
 /**
  * Reader hook: true when the app is offline (navigator down, or the live doc's
  * sync socket down). Backed by the module-level connectivity flag (driven by
@@ -110,6 +144,20 @@ export function useOfflineSync(): OfflineSyncState {
     getCollabConnected,
     () => true,
   );
+  const collabLiveNow = useSyncExternalStore(
+    subscribeCollabLive,
+    getCollabLive,
+    () => true,
+  );
+  const [reconnecting, setReconnecting] = useState(false);
+  useEffect(() => {
+    if (collabLiveNow) {
+      setReconnecting(false);
+      return;
+    }
+    const id = setTimeout(() => setReconnecting(true), RECONNECTING_GRACE_MS);
+    return () => clearTimeout(id);
+  }, [collabLiveNow]);
 
   // navigator online/offline events.
   useEffect(() => {
@@ -191,6 +239,7 @@ export function useOfflineSync(): OfflineSyncState {
   return {
     connectivity,
     offline: isEffectivelyOffline(connectivity),
+    reconnecting: reconnecting && connectivity === "online",
     pending: pending + localPending + feedPending,
     paused: feedPaused,
   };

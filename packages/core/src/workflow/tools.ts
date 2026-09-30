@@ -24,7 +24,7 @@
  */
 
 import { z } from 'zod'
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { accessCeilingContains, pinToolAuthoringAuthority, type AuthoringAuthority } from '../security/index.js'
@@ -184,6 +184,9 @@ export type WorkflowToolDeps = {
     workspaceId: string
     assistantId: string
     toolNames: string[]
+    authoringAuthority: AuthoringAuthority
+    contextGroupId: string | null
+    contextProjectId: string | null
   }) => Promise<string[]>
   /**
    * Scheduling substrate — lets the authoring tools attach a schedule trigger
@@ -280,6 +283,11 @@ export type WorkflowToolDeps = {
   >
   /** Internal/test escape hatch. Production authoring must consume a proposal receipt. */
   allowLegacyDirectWrites?: boolean
+  /**
+   * Root secret the proposal-receipt HMAC key is derived from (boot passes
+   * `JWT_SECRET`). Absent → a per-process random key.
+   */
+  proposalReceiptSecret?: string
 }
 
 const idShape = z.string().uuid()
@@ -410,7 +418,20 @@ const clientBoundaryInputSchema = z
       'Pass the assistant id and client resolver; omit definition.principal. The server selects an active external chat key from safe metadata and stamps its row id into the proposal receipt. The assistant never receives the key secret or hash.',
   )
 
-const PROPOSAL_RECEIPT_PREFIX = 'wf1'
+const PROPOSAL_RECEIPT_PREFIX = 'wf2'
+/** Domain label for the receipt key: the same root secret signs other tokens. */
+const PROPOSAL_RECEIPT_KEY_LABEL = 'workflow-proposal-receipt-v2'
+
+/**
+ * Derive the receipt HMAC key. The receipt is accepted from the caller on
+ * stateless surfaces (brain MCP / Assistant MCP), so it must be unforgeable,
+ * not merely corruption-evident. No secret (tests, a boot without JWT_SECRET)
+ * → a per-process random key: receipts then do not survive a restart.
+ */
+function deriveProposalReceiptKey(secret: unknown): Buffer {
+  if (typeof secret !== 'string' || !secret) return randomBytes(32)
+  return createHmac('sha256', secret).update(PROPOSAL_RECEIPT_KEY_LABEL).digest()
+}
 const PROPOSAL_RECEIPT_MAX_CHARS = 500_000
 const PROPOSAL_RECEIPT_MAX_JSON_BYTES = 1_000_000
 const workflowTriggerReceiptSchema = WorkflowTriggerSchema as z.ZodType<WorkflowTrigger>
@@ -485,7 +506,7 @@ export function latestWorkflowProposalReceipt(messages: readonly { content: unkn
         // Oversized tool results may be capped after the receipt field, leaving
         // invalid trailing JSON. The receipt alphabet needs no JSON escapes, so
         // recover that first field without accepting arbitrary prose.
-        const match = result.content.match(/"proposalReceipt":"(wf1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"/)
+        const match = result.content.match(/"proposalReceipt":"(wf2\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"/)
         return match?.[1]
       }
     }
@@ -493,27 +514,27 @@ export function latestWorkflowProposalReceipt(messages: readonly { content: unkn
   return undefined
 }
 
-function encodeProposalReceipt(receipt: WorkflowProposalReceipt): string {
+function encodeProposalReceipt(receipt: WorkflowProposalReceipt, key: Buffer): string {
   const compressed = deflateRawSync(Buffer.from(JSON.stringify(receipt), 'utf8'))
   const body = compressed.toString('base64url')
-  const checksum = createHash('sha256').update(compressed).digest('base64url')
-  return `${PROPOSAL_RECEIPT_PREFIX}.${body}.${checksum}`
+  const signature = createHmac('sha256', key).update(compressed).digest('base64url')
+  return `${PROPOSAL_RECEIPT_PREFIX}.${body}.${signature}`
 }
 
-function decodeProposalReceipt(value: string):
+function decodeProposalReceipt(value: string, key: Buffer):
   | { ok: true; receipt: WorkflowProposalReceipt }
   | { ok: false; error: string } {
   if (value.length > PROPOSAL_RECEIPT_MAX_CHARS) {
     return { ok: false, error: 'The workflow proposal receipt is too large. Re-propose the workflow.' }
   }
-  const [prefix, body, checksum, extra] = value.split('.')
-  if (prefix !== PROPOSAL_RECEIPT_PREFIX || !body || !checksum || extra !== undefined) {
+  const [prefix, body, signature, extra] = value.split('.')
+  if (prefix !== PROPOSAL_RECEIPT_PREFIX || !body || !signature || extra !== undefined) {
     return { ok: false, error: 'The workflow proposal receipt is malformed. Re-propose the workflow.' }
   }
   try {
     const compressed = Buffer.from(body, 'base64url')
-    const expected = Buffer.from(createHash('sha256').update(compressed).digest('base64url'))
-    const received = Buffer.from(checksum)
+    const expected = Buffer.from(createHmac('sha256', key).update(compressed).digest('base64url'))
+    const received = Buffer.from(signature)
     if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
       return { ok: false, error: 'The workflow proposal receipt changed after validation. Re-propose the workflow.' }
     }
@@ -717,7 +738,7 @@ function warningsFor(
       && !opts.runtimeKnownToolNames?.has(step.toolName)
     ) {
       warnings.push(
-        `Step "${step.id}" calls tool "${step.toolName}", which is not a built-in tool. The run fails with \`tool_not_found\` unless it is a connector action whose connector is connected in this workspace. Built-in brain search is \`searchBrain\`; web search / fetch is \`mcp_search\`. Double-check the tool name.`,
+        `Step "${step.id}" calls tool "${step.toolName}", which is not a built-in tool. The run fails with \`tool_not_found\` unless it is available in the workflow execution scope. Check the connector connection and execution permissions. Built-in brain search is \`searchBrain\`; web search / fetch is \`mcp_search\`. Double-check the tool name.`,
       )
     }
     if (step.type === 'wait' && !opts.phaseBActive) {
@@ -795,8 +816,10 @@ async function runtimeKnownToolNames(
   def: WorkflowDefinition,
   context: ToolContext,
   deps: Pick<WorkflowToolDeps, 'isKnownTool' | 'resolveKnownWorkflowTools' | 'resolvePrimary'>,
+  authoringAuthority: AuthoringAuthority,
+  binding: { contextGroupId: string | null; contextProjectId: string | null },
 ): Promise<Set<string>> {
-  if (!context.workspaceId || !deps.resolveKnownWorkflowTools || !deps.resolvePrimary) {
+  if (!context.workspaceId || !deps.resolveKnownWorkflowTools) {
     return new Set()
   }
   const toolNames = [...new Set(def.steps.flatMap((step) => (
@@ -808,13 +831,15 @@ async function runtimeKnownToolNames(
   if (toolNames.length === 0) return new Set()
 
   try {
-    const assistantId = await deps.resolvePrimary(context.workspaceId)
+    const assistantId = def.principal?.assistantId ?? await deps.resolvePrimary?.(context.workspaceId)
     if (!assistantId) return new Set()
     return new Set(await deps.resolveKnownWorkflowTools({
       userId: context.userId,
       workspaceId: context.workspaceId,
       assistantId,
       toolNames,
+      authoringAuthority,
+      ...binding,
     }))
   } catch (err) {
     console.warn('[workflow/tools] runtime tool-name lookup threw:', err)
@@ -1869,6 +1894,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
   listSlackMembers: Tool
 } {
   const phaseBActive = deps.executorDeps.pauseRunForWait !== undefined
+  const receiptKey = deriveProposalReceiptKey(deps.proposalReceiptSecret)
 
   const proposeWorkflow = buildTool({
     name: 'proposeWorkflow',
@@ -2109,13 +2135,17 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         }
       }
 
-      const knownRuntimeTools = await runtimeKnownToolNames(definition, context, deps)
       let authoringAuthority: AuthoringAuthority
       try {
         authoringAuthority = pinToolAuthoringAuthority(context)
       } catch {
         return { data: 'Workflow authoring permissions are unavailable in this turn. Start a new workspace conversation and propose it again.', isError: true }
       }
+
+      const knownRuntimeTools = await runtimeKnownToolNames(definition, context, deps, authoringAuthority, {
+        contextGroupId: existingWorkflow ? existingWorkflow.contextGroupId ?? null : context.activeGroupId ?? null,
+        contextProjectId: existingWorkflow ? existingWorkflow.contextProjectId ?? null : context.activeProjectId ?? null,
+      })
 
       const proposalReceipt = input.workflowId
         ? encodeProposalReceipt({
@@ -2132,7 +2162,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
               targetViewId: input.targetViewId,
               confirmDeliveryRemoval: input.confirmDeliveryRemoval,
             },
-          })
+          }, receiptKey)
         : encodeProposalReceipt({
             version: 2,
             action: 'create',
@@ -2148,7 +2178,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
               contextProjectId:
                 (context as ToolContext & { activeProjectId?: string | null }).activeProjectId ?? null,
             },
-          })
+          }, receiptKey)
 
       context.workflowProposalReceipt = proposalReceipt
 
@@ -2196,13 +2226,19 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           ],
           definition,
           confirmationHint:
-            'Show the user this proposal (and the trigger / schedule) and the warnings. Ask for explicit confirmation. On approval, immediately call createWorkflow with {} when proposedAction is create, or updateWorkflow with {} when proposedAction is update. The runtime recovers the receipt from session history. Do not repeat discovery, listAssistants, or proposeWorkflow unless the user changes the proposal or the write reports no valid pending proposal.',
+            'Show the user this proposal (and the trigger / schedule) and the warnings. Ask for explicit confirmation. On approval, immediately call createWorkflow with {} when proposedAction is create, or updateWorkflow with {} when proposedAction is update. The runtime recovers the receipt from session history; on a stateless surface (MCP / API) pass { proposalReceipt } unchanged instead. Do not repeat discovery, listAssistants, or proposeWorkflow unless the user changes the proposal or the write reports no valid pending proposal.',
         },
       }
     },
   })
 
-  const pendingWriteInputSchema = z.object({}).strict().describe('No arguments. Applies the latest approved proposal in this session.')
+  // Chat recovers the receipt from session history and calls with {}.
+  // Stateless surfaces (brain MCP, Assistant MCP) have no history, so they pass
+  // the signed receipt proposeWorkflow returned. Nested fields stay rejected.
+  const pendingWriteInputSchema = z
+    .object({ proposalReceipt: proposalReceiptInput.optional() })
+    .strict()
+    .describe('In a chat session pass {}: the latest approved proposal is recovered from session history. On a stateless surface (MCP / API) pass the proposalReceipt proposeWorkflow returned, unchanged.')
   const createWorkflowInputSchema = deps.allowLegacyDirectWrites
     ? z.union([receiptWriteInputSchema, legacyCreateWorkflowInputSchema])
     : pendingWriteInputSchema
@@ -2210,7 +2246,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
   const createWorkflow = buildTool({
     name: 'createWorkflow',
     description:
-      `Persist the latest new-workflow proposal that the user explicitly approved. This tool takes NO arguments: the runtime recovers the exact validated receipt from this session's persisted history. After approval call it immediately with {}. Never re-run proposeWorkflow, reconstruct or resend workflow fields, or run discovery/listAssistants. A call with no pending create proposal is rejected. ` +
+      `Persist the latest new-workflow proposal that the user explicitly approved. In a chat session call it with {}: the runtime recovers the exact validated receipt from this session's persisted history. On a stateless surface (MCP / API, no session history) pass { proposalReceipt } exactly as proposeWorkflow returned it. After approval call it immediately. Never re-run proposeWorkflow, reconstruct or resend workflow fields, or run discovery/listAssistants. A call with no pending create proposal is rejected. ` +
       `\n\nTriggering is built into the receipt: proposeWorkflow freezes \`trigger: { kind: "schedule", schedule, ... }\` to schedule it, or \`{ kind: "event", event: { sources } }\` to subscribe to workspace signals. A one-step assistant_call workflow with \`trigger.delivery\` is a reminder; a multi-step workflow is an automation. Confirm the schedule with the user before applying the receipt.`,
     inputSchema: createWorkflowInputSchema,
     requiresConfirmation: false,
@@ -2220,11 +2256,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
 
       let createInput: z.infer<typeof createProposalInputSchema>
       let authoringAuthority: AuthoringAuthority
-      const pendingReceipt = 'proposalReceipt' in input
-        ? input.proposalReceipt
-        : context.workflowProposalReceipt
+      const pendingReceipt = ('proposalReceipt' in input ? input.proposalReceipt : undefined)
+        ?? context.workflowProposalReceipt
       if (pendingReceipt) {
-        const decoded = decodeProposalReceipt(pendingReceipt)
+        const decoded = decodeProposalReceipt(pendingReceipt, receiptKey)
         if (!decoded.ok) return { data: decoded.error, isError: true }
         if (decoded.receipt.action !== 'create') {
           return { data: 'This receipt is for an existing workflow edit. Apply it with updateWorkflow.', isError: true }
@@ -2416,7 +2451,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     name: 'updateWorkflow',
     description:
       `Edit an existing workflow — add a step, remove a step, reorder steps, rewrite a step's fields, OR change its trigger / schedule. Patches any subset of name / description / definition / enabled / trigger. ` +
-      `First call \`getWorkflow\`, then \`proposeWorkflow\` with that workflowId and the complete edited values. After explicit confirmation call this tool immediately with {}. It takes NO arguments: the runtime recovers the exact validated receipt from persisted session history. Never re-run proposal/discovery/listAssistants or reconstruct workflow fields. A call with no pending update proposal is rejected. Never use \`createWorkflow\` for an edit. ` +
+      `First call \`getWorkflow\`, then \`proposeWorkflow\` with that workflowId and the complete edited values. After explicit confirmation call this tool immediately: with {} in a chat session (the runtime recovers the exact validated receipt from persisted session history), or with { proposalReceipt } exactly as proposeWorkflow returned it on a stateless surface (MCP / API). Never re-run proposal/discovery/listAssistants or reconstruct workflow fields. A call with no pending update proposal is rejected. Never use \`createWorkflow\` for an edit. ` +
       `Editing does not affect runs already in flight — the change applies to the next run.`,
     inputSchema: updateWorkflowInputSchema,
     requiresConfirmation: false,
@@ -2426,11 +2461,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
 
       let updateInput: z.infer<typeof updateProposalInputSchema>
       let authoringAuthority: AuthoringAuthority
-      const pendingReceipt = 'proposalReceipt' in input
-        ? input.proposalReceipt
-        : context.workflowProposalReceipt
+      const pendingReceipt = ('proposalReceipt' in input ? input.proposalReceipt : undefined)
+        ?? context.workflowProposalReceipt
       if (pendingReceipt) {
-        const decoded = decodeProposalReceipt(pendingReceipt)
+        const decoded = decodeProposalReceipt(pendingReceipt, receiptKey)
         if (!decoded.ok) return { data: decoded.error, isError: true }
         if (decoded.receipt.action !== 'update') {
           return { data: 'This receipt is for a new workflow. Apply it with createWorkflow.', isError: true }

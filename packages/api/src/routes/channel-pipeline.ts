@@ -115,6 +115,7 @@ import {
   ContextNotAvailableError,
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
+  turnOutputWrite,
   resolveTurnScopeSystem,
   sessionMessageInputScope,
   type ResolvedTurnScope,
@@ -1090,7 +1091,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     ? await resolveDeliveryAudienceEnvelope(audienceInput)
     : null
   if (audienceEnvelope && !audienceEnvelope.allowed) {
-    throw new DeliveryAudienceUnverifiedError()
+    throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail)
   }
   const publicAudienceTurn = audienceEnvelope?.allowed === true
     && audienceEnvelope.source === 'public'
@@ -1184,9 +1185,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     assistantId: assistant.id,
     sharedAudience: isGroupChat,
   })
-  const currentTurnDerivation = () => ({
+  const currentTurnWrite = () => turnOutputWrite({
     producer: `turn:${channelType}`,
-    sources: scopeAccumulator.evidence.sources ?? [],
+    accumulator: scopeAccumulator,
+    envelope: inputMessageScope,
   })
   const authority = executionContext.security.authority
   const assertDeliveryAudience = async (): Promise<void> => {
@@ -1195,7 +1197,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
     })
-    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
+    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail)
   }
 
   const filterHistoryForAudience = async <T extends {
@@ -2313,7 +2315,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         // the turn that produced this assistant message.
         senderUserId: senderUserId ?? null,
         attachments: turnIdx === lastContentIdx && attachments?.length ? attachments : undefined,
-        derivation: currentTurnDerivation(),
+        ...currentTurnWrite(),
       })
       lastFlushedAssistantRowId = assistantRow.id
       // Streaming channels surface the persisted row so the client
@@ -2334,7 +2336,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           sessionId: session.id,
           role: 'user',
           content: allResults,
-          derivation: currentTurnDerivation(),
+          ...currentTurnWrite(),
         })
       }
     }

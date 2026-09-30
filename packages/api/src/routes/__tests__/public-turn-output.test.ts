@@ -66,6 +66,6 @@ describe('[COMP:api/public-turn-output] final JSON reply', () => {
     expect(source).toContain('turnOutput.observe(event)')
     expect(source).toMatch(/event\.type === 'text_delta'[\s\S]*?sendEvent\?\.\('text_delta'/)
     expect(source).toMatch(/await assertDeliveryAudience\(\)[\s\S]*?res\.json\(/)
-    expect(source).toContain('derivation: currentTurnDerivation()')
+    expect(source).toContain('...currentTurnWrite()')
   })
 })

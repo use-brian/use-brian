@@ -79,6 +79,36 @@ export async function captureAuthoringAuthoritySystem(params: {
   }
 }
 
+/** Preview deterministic tool exposure using run-equivalent scope, without a run row. */
+export async function resolveWorkflowAuthoringScope(params: {
+  userId: string
+  workspaceId: string
+  assistantId: string
+  authoringAuthority: AuthoringAuthority
+  contextGroupId: string | null
+  contextProjectId: string | null
+}): Promise<ResolvedTurnScope> {
+  const saved = await resolveSavedAuthoringCeiling(params.authoringAuthority, params, params)
+  const assistant = await findAssistantById(params.assistantId)
+  if (!assistant || assistant.workspaceId !== params.workspaceId) throw unavailable()
+  try {
+    const scope = await resolveTurnScopeSystem({
+      userId: params.userId, workspaceId: params.workspaceId, assistant,
+      key: { contextGroupId: params.contextGroupId, contextProjectId: params.contextProjectId },
+    }, {
+      resolveReadCeilings: (actor, workspace, clearance, compartments) =>
+        resolveOperationCeilingsSystem(actor, workspace, clearance, compartments, true),
+    })
+    const bounded = intersectAccessCeilings(pinAccessCeiling(scope.access), saved.ceiling)
+    if (!scopeGrantContains(bounded.mutationCompartments, scope.writeCompartments)
+      || !scopeGrantContains(bounded.projectIds, scope.writeProjectIds)) throw unavailable()
+    return { ...scope, access: { ...scope.access, ...bounded },
+      effectiveCompartments: bounded.compartments, effectiveProjectIds: bounded.projectIds }
+  } catch {
+    throw unavailable()
+  }
+}
+
 /** The durable run binding survives edits to input and cannot change actors. */
 async function readGoalBinding(runId: string, workspaceId: string, userId: string): Promise<GoalBinding | null> {
   const row = (await query<{

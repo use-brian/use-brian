@@ -12,6 +12,7 @@ import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { resolveLiveAccessCeilingSystem } from './resolve-turn-scope.js'
 import { validateAudienceScopeEvidence } from './caller-evidence.js'
 import { roomAudienceCeiling } from '../routes/_room-binding.js'
+import { createPersonalGroupVerifier, type VerifyPersonalGroup } from './personal-group-membership.js'
 
 export type DeliveryAudienceInput = {
   workspaceId: string
@@ -25,9 +26,24 @@ export type DeliveryAudienceInput = {
   scopeEvidence?: ScopeEvidence
 }
 
+/**
+ * Why a destination was refused, for choosing the user-facing explanation.
+ * Deliberately coarse: it never names the Team, Project or clearance that
+ * failed, so a refusal cannot become an existence oracle.
+ */
+export type DeliveryAudienceDenialDetail =
+  /** No approval covers this conversation and the output was not public. */
+  | 'unbound'
+  /** A personal-group approval exists but membership could not be proven now. */
+  | 'personal_group_unverified'
+  /** An approval exists but the output needs more than it grants (e.g. personal context). */
+  | 'evidence_exceeds_audience'
+
+type Denial = { allowed: false; reason: 'delivery_audience_unverified'; detail?: DeliveryAudienceDenialDetail }
+
 export type DeliveryAudienceDecision =
   | { allowed: true; evidence: ScopeEvidence }
-  | { allowed: false; reason: 'delivery_audience_unverified' }
+  | Denial
 
 export type DeliveryAudienceEnvelopeDecision =
   | {
@@ -35,7 +51,7 @@ export type DeliveryAudienceEnvelopeDecision =
       ceiling: AccessCeiling
       source: 'member' | 'binding' | 'public'
     }
-  | { allowed: false; reason: 'delivery_audience_unverified' }
+  | Denial
 
 export type AuthorizeDeliveryAudience = (
   input: DeliveryAudienceInput,
@@ -48,9 +64,11 @@ export type ResolveDeliveryAudienceEnvelope = (
 export class DeliveryAudienceUnverifiedError extends Error {
   readonly reason = 'delivery_audience_unverified'
   readonly retrySafe = false
-  constructor() {
+  readonly detail: DeliveryAudienceDenialDetail | undefined
+  constructor(detail?: DeliveryAudienceDenialDetail) {
     super('The current destination is not authorized for this response.')
     this.name = 'DeliveryAudienceUnverifiedError'
+    this.detail = detail
   }
 }
 
@@ -70,14 +88,23 @@ type Dependencies = {
   getWorkspaceRole?: typeof getWorkspaceRoleSystem
   resolveLiveAccess?: typeof resolveLiveAccessCeilingSystem
   validateEvidence?: typeof validateAudienceScopeEvidence
+  verifyPersonalGroup?: VerifyPersonalGroup
 }
 
-function denied(): DeliveryAudienceDecision {
-  return { allowed: false, reason: 'delivery_audience_unverified' }
+// One process-wide verifier so its short success cache spans the several
+// checks a single turn makes (authorizers are created per turn).
+let defaultPersonalGroupVerifier: VerifyPersonalGroup | null = null
+function personalGroupVerifier(): VerifyPersonalGroup {
+  defaultPersonalGroupVerifier ??= createPersonalGroupVerifier()
+  return defaultPersonalGroupVerifier
 }
 
-function envelopeDenied(): DeliveryAudienceEnvelopeDecision {
-  return { allowed: false, reason: 'delivery_audience_unverified' }
+function denied(detail?: DeliveryAudienceDenialDetail): DeliveryAudienceDecision {
+  return { allowed: false, reason: 'delivery_audience_unverified', ...(detail ? { detail } : {}) }
+}
+
+function envelopeDenied(detail?: DeliveryAudienceDenialDetail): DeliveryAudienceEnvelopeDecision {
+  return { allowed: false, reason: 'delivery_audience_unverified', ...(detail ? { detail } : {}) }
 }
 
 function externalAudienceType(channelType: string, channelId: string): 'individual' | 'group' | null {
@@ -159,6 +186,7 @@ function resolvedDependencies(dependencies: Dependencies) {
     resolveLiveAccess: dependencies.resolveLiveAccess ?? resolveLiveAccessCeilingSystem,
     validateEvidence: dependencies.validateEvidence ?? validateAudienceScopeEvidence,
     integrationStore: dependencies.integrationStore,
+    verifyPersonalGroup: dependencies.verifyPersonalGroup ?? personalGroupVerifier(),
   }
 }
 
@@ -221,7 +249,22 @@ async function resolveEnvelope(
 
     let candidate = bindingCeiling(input.workspaceId, binding)
     if (binding.recipientUserId) {
-      if (binding.audienceType !== 'individual') return envelopeDenied()
+      if (binding.audienceType === 'group') {
+        // A personal group: the recipient's own context may reach it only
+        // while every human in it is provably that recipient. Re-proven on
+        // every check, so a join takes effect before the next restricted
+        // token rather than whenever the approval is next reviewed.
+        const credentials = integration?.credentials as { bot_token?: string } | undefined
+        const verified = await deps.verifyPersonalGroup({
+          channelType: input.channelType,
+          chatId: parsed.chatId,
+          recipientUserId: binding.recipientUserId,
+          botToken: credentials?.bot_token ?? null,
+        })
+        if (!verified) return envelopeDenied('personal_group_unverified')
+      } else if (binding.audienceType !== 'individual') {
+        return envelopeDenied()
+      }
       const current = await memberCeiling(
         input.workspaceId,
         input.assistantId,
@@ -277,8 +320,9 @@ export function createDeliveryAudienceAuthorizer(dependencies: Dependencies = {}
     }
 
     const envelope = await resolveEnvelope(input, deps)
-    return envelope.allowed
-      ? validate(evidence, envelope.ceiling, deps.validateEvidence)
-      : denied()
+    if (!envelope.allowed) return denied(envelope.detail)
+    const decision = await validate(evidence, envelope.ceiling, deps.validateEvidence)
+    if (decision.allowed) return decision
+    return denied(envelope.source === 'public' ? 'unbound' : 'evidence_exceeds_audience')
   }
 }

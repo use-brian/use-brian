@@ -12,8 +12,11 @@ import {
   pinAccessCeiling,intersectAccessCeilings,
   ContextScopeAccumulator,
   intersectScopeGrants,
+  maxSensitivity,
   scopeEvidenceFromRows,
   scopeGrantContains,
+  sourcesShareVisibility,
+  type DerivedWriteEvidence,
   type Sensitivity,
   type TurnScope,
   type ScopeGrant,
@@ -89,6 +92,38 @@ export function sessionMessageInputScope(params: {
     sensitivity: params.scope.access.clearance ?? 'internal',
     compartments: [...(params.scope.writeCompartments ?? [])],
     projectIds: [...(params.scope.writeProjectIds ?? [])],
+  }
+}
+
+/**
+ * How a turn's model output row is stamped. When everything the turn read sits
+ * in one visibility partition, the output is a certified derivation, as before.
+ * A primary assistant reads across partitions (memory-system.md -> "Primary
+ * widens"), and such sources cannot certify one derived envelope. The output
+ * then takes the session's own input envelope raised to the turn's label floor:
+ * the transcript's existing audience, never wider, with every sensitivity,
+ * compartment and Project requirement kept. Only the lineage edges are skipped.
+ * A turn with no bound sources takes the same envelope.
+ * See scoped-context.md -> "Departmental derivation evidence".
+ */
+export function turnOutputWrite(params: {
+  producer: string
+  accumulator: ContextScopeAccumulator
+  envelope: ResourceScope | undefined
+}): { derivation: DerivedWriteEvidence } | { scope: ResourceScope } {
+  const sources = params.accumulator.evidence.sources ?? []
+  if (!params.envelope || (sources.length > 0 && sourcesShareVisibility(sources))) {
+    return { derivation: { producer: params.producer, sources } }
+  }
+  const envelope = params.envelope
+  const union = (a: readonly string[], b: readonly string[]) => [...new Set([...a, ...b])].sort()
+  return {
+    scope: {
+      ...envelope,
+      sensitivity: maxSensitivity(envelope.sensitivity, params.accumulator.sensitivity),
+      compartments: union(envelope.compartments, params.accumulator.compartments),
+      projectIds: union(envelope.projectIds, params.accumulator.projectIds),
+    },
   }
 }
 

@@ -1148,8 +1148,11 @@ export function workspaceRoutes({
   // of emails, an optional role (member|admin), and an optional personal
   // note. For each email: already-a-member → skipped; otherwise an
   // invitation is upserted, the accept link is built, and (when SMTP is
-  // configured) an invitation email is sent fire-and-forget. The link is
-  // also returned per-email so the UI can offer a copy-link fallback.
+  // configured) an invitation email is sent. The sends run in parallel and
+  // are awaited so each invited result carries `emailStatus` (`sent`,
+  // `failed`, or `not_configured`): the row exists either way, so a refused
+  // send must reach the admin as "share the link yourself", never as a
+  // silent success. The link is returned per-email for exactly that.
   router.post('/:workspaceId/invitations', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
@@ -1186,7 +1189,13 @@ export function workspaceRoutes({
       const inviterRow = await query<{ name: string | null }>(`SELECT name FROM users WHERE id = $1`, [userId])
       const inviterName = inviterRow.rows[0]?.name ?? null
 
-      const results: Array<{ email: string; status: 'invited' | 'already_member' | 'invalid'; link?: string }> = []
+      const results: Array<{
+        email: string
+        status: 'invited' | 'already_member' | 'invalid'
+        link?: string
+        emailStatus?: 'sent' | 'failed' | 'not_configured'
+      }> = []
+      const sends: Array<Promise<void>> = []
       for (const email of emails) {
         if (!EMAIL_RE.test(email)) { results.push({ email, status: 'invalid' }); continue }
 
@@ -1206,12 +1215,23 @@ export function workspaceRoutes({
           invitedByUserId: userId,
         })
         const link = `${(appUrl ?? '').replace(/\/$/, '')}/invite?token=${encodeURIComponent(token)}`
-        results.push({ email, status: 'invited', link })
+        const result: (typeof results)[number] = {
+          email,
+          status: 'invited',
+          link,
+          emailStatus: smtpClient ? 'failed' : 'not_configured',
+        }
+        results.push(result)
 
         if (smtpClient) {
-          smtpClient
-            .sendWorkspaceInvitation(email, { link, workspaceName, inviterName, role: inviteRole, message })
-            .catch((err) => console.error('[workspaces] invitation email send failed:', err))
+          sends.push(
+            smtpClient
+              .sendWorkspaceInvitation(email, { link, workspaceName, inviterName, role: inviteRole, message })
+              .then(
+                () => { result.emailStatus = 'sent' },
+                (err) => { console.error('[workspaces] invitation email send failed:', err) },
+              ),
+          )
         }
         if (auditStore) {
           void auditStore.append({
@@ -1222,6 +1242,7 @@ export function workspaceRoutes({
           })
         }
       }
+      await Promise.all(sends)
       res.status(201).json({ results })
     } catch (err) {
       console.error('[workspaces] invite failed:', err)

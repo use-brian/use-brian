@@ -99,6 +99,7 @@ import {
   ContextNotAvailableError,
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
+  turnOutputWrite,
   resolveTurnScopeSystem,
   sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
@@ -3076,9 +3077,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         assistantId: assistant.id,
         sharedAudience: isRoomSession,
       })
-      const currentTurnDerivation = () => ({
+      const currentTurnWrite = () => turnOutputWrite({
         producer: 'turn:web',
-        sources: scopeAccumulator.evidence.sources ?? [],
+        accumulator: scopeAccumulator,
+        envelope: inputMessageScope,
       })
       const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
       const assertDeliveryAudience = async (): Promise<void> => {
@@ -6822,7 +6824,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               turnIdx === lastNonEmptyIdx && outboundAttachments.length > 0
                 ? outboundAttachments
                 : undefined,
-            derivation: currentTurnDerivation(),
+            ...currentTurnWrite(),
           }))
           await assertDeliveryAudience()
           lastAssistantMessageId = storedAssistantMsg.id
@@ -6873,7 +6875,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               sessionId: session.id,
               role: 'user',
               content: allResults,
-              derivation: currentTurnDerivation(),
+              ...currentTurnWrite(),
             }))
           }
         }
@@ -8007,7 +8009,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   role: 'assistant',
                   content: [{ type: 'text', text }],
                   senderAssistantId: assistant.id,
-                  derivation: currentTurnDerivation(),
+                  ...currentTurnWrite(),
                 }))
                 await assertDeliveryAudience()
                 closingPersisted = true
@@ -8276,7 +8278,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 // @CFO turn and then inherited "I'd need QuickBooks" as its
                 // own position. See db/sessions.ts → `assistantVoices`.
                 senderAssistantId: assistant.id,
-                derivation: currentTurnDerivation(),
+                ...currentTurnWrite(),
               }))
             } else {
               await assertDeliveryAudience()
@@ -8341,7 +8343,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               content: [{ type: 'text', text: recovered.text }],
               // Same attribution contract as the empty-turn synthesis above.
               senderAssistantId: assistant.id,
-              derivation: currentTurnDerivation(),
+              ...currentTurnWrite(),
             }))
             await recordOverheadUsage({
               usageStore: options.usageStore,

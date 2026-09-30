@@ -138,6 +138,7 @@ import { subscribeBuildActivity, buildIndicatorTransition } from "@/lib/build-ac
 import { offlineWrite } from "@/lib/offline/offline-writes";
 import {
   publishCollabConnected,
+  publishCollabLive,
 } from "@/lib/offline/use-offline-sync";
 
 type ShellProps = {
@@ -257,6 +258,12 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     publishCollabConnected(collab.status !== "disconnected");
     return () => publishCollabConnected(true);
   }, [collab.status]);
+  // Display-only "live" flag (connected + synced): while the socket re-dials
+  // the bottom status bar reads "Reconnecting…" instead of "Online".
+  useEffect(() => {
+    publishCollabLive(collab.status === "connected" && collab.synced);
+    return () => publishCollabLive(true);
+  }, [collab.status, collab.synced]);
 
   // Whether the active page's body is empty, recomputed live off the synced Yjs
   // doc. Gates the draft landing (alongside the placeholder title): a fresh
@@ -840,6 +847,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     // zero the title-bar inset — see globals.css.
     if (desktop.platform && desktop.platform !== "darwin") {
       document.documentElement.classList.add("is-canvas-desktop-standard-frame");
+      if (desktop.platform === "win32") {
+        document.documentElement.classList.add("is-canvas-desktop-win");
+      }
     }
   }, []);
 

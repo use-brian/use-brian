@@ -112,14 +112,16 @@ export type ResolvePrimaryAssistant = (workspaceId: string) => Promise<string | 
  * tools, scoped to a workspace + acting assistant. Constructed once at the
  * start of every workflow run; held immutable for that run's duration.
  */
+type WorkflowToolRegistry = Map<string, Tool> & { discoveryWarnings?: readonly string[] }
+
 export type BuildToolRegistry = (params: {
   workspaceId: string
   /** The acting assistant — typically the workspace's primary. */
   assistantId: string
   userId: string | null
-  /** Trusted execution scope. Undefined only for authoring-time tool lookup. */
+  /** Trusted execution scope, including authoring previews when available. */
   turnScope?: TurnScope
-}) => Promise<Map<string, Tool>>
+}) => Promise<WorkflowToolRegistry>
 
 /**
  * Optional audit hook. Fire-and-forget at the call site (the executor never
@@ -812,7 +814,7 @@ export async function advanceWorkflowRun(
     scopeAccumulator.note(persistedScopeEvidence as import('../security/context-scope.js').ScopeEvidence)
   }
 
-  let toolRegistry: Map<string, Tool>
+  let toolRegistry: WorkflowToolRegistry
   try {
     toolRegistry = await deps.buildToolRegistry({
       workspaceId: run.workspaceId,
@@ -1378,7 +1380,7 @@ type DispatchContext = {
   primaryAssistantId: string
   /** Assistant whose grants/connector instances back deterministic tool_call. */
   toolAssistantId: string
-  toolRegistry: Map<string, Tool>
+  toolRegistry: WorkflowToolRegistry
   consultTransport: ConsultTransport
   externalClientPrincipal?: ResolvedExternalClientWorkflowPrincipal
   runtimeScope?: {
@@ -1989,7 +1991,9 @@ async function dispatchToolCall(
     return {
       kind: 'failed',
       error: {
-        message: `tool_call references unknown / disallowed tool "${step.toolName}".`,
+        message: [`tool_call references unknown / disallowed tool "${step.toolName}".`,
+          ...(ctx.toolRegistry.discoveryWarnings ?? []).map((warning) => `Discovery: ${warning}`),
+        ].join(' '),
         reason: 'tool_not_found',
       },
     }

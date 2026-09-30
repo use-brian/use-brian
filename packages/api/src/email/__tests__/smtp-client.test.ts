@@ -1,5 +1,14 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createSmtpClient, resolveSmtpTransportOptions, type SmtpTransport } from '../smtp-client.js'
+import { createTransport } from 'nodemailer'
+import {
+  createSmtpClient,
+  resolveSmtpTransportOptions,
+  senderMailbox,
+  SMTP_CONNECTION_TIMEOUT_MS,
+  SMTP_GREETING_TIMEOUT_MS,
+  SMTP_SOCKET_TIMEOUT_MS,
+  type SmtpTransport,
+} from '../smtp-client.js'
 import { renderMagicLinkEmail } from '../magic-link-template.js'
 import { renderWorkspaceInviteEmail } from '../workspace-invite-template.js'
 
@@ -26,7 +35,17 @@ describe('[COMP:api/smtp-client] transport configuration', () => {
       port: 465,
       secure: true,
       auth: { user: 'mailer@example.com', pass: 'secret' },
+      connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+      greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+      socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
     })
+  })
+
+  it('bounds a stalled server well below nodemailer\'s 10-minute socket default', () => {
+    const opts = resolveSmtpTransportOptions({ user: 'mailer@example.com', password: 'secret' })
+    expect(opts.connectionTimeout).toBeLessThanOrEqual(30_000)
+    expect(opts.greetingTimeout).toBeLessThanOrEqual(30_000)
+    expect(opts.socketTimeout).toBeLessThanOrEqual(120_000)
   })
 
   it('retains the Gmail STARTTLS defaults for existing deployments', () => {
@@ -134,6 +153,47 @@ describe('[COMP:api/smtp-client] sendWorkspaceInvitation', () => {
     expect(calls[0].to).toBe('a@b.com')
   })
 
+  it('sends from the bare mailbox when the configured From: carries a display name', async () => {
+    const { transport, calls } = makeFakeTransport()
+    const client = createSmtpClient({
+      transport,
+      fromAddress: '"Example Sender" <noreply@example.com>',
+    })
+
+    await client.sendWorkspaceInvitation('a@b.com', inviteOpts)
+
+    expect(calls[0].from).toEqual({
+      name: 'Use Brian - AI Trading',
+      address: 'noreply@example.com',
+    })
+  })
+
+  // The object `from` form is copied into the SMTP envelope verbatim, so the
+  // assertion that matters is the MAIL FROM the real library would send, not
+  // the object handed to it. Strict servers refuse anything but a mailbox
+  // there (`500 5.5.4 Unknown MAIL FROM argument`).
+  it.each([
+    ['a bare address', 'noreply@example.com'],
+    ['a quoted display name', '"Example Sender" <noreply@example.com>'],
+    ['an unquoted display name', 'Example Sender <noreply@example.com>'],
+  ])('puts only the mailbox in MAIL FROM when configured with %s', async (_label, fromAddress) => {
+    const envelopes: Array<{ from?: string | false; to?: string[] }> = []
+    const streaming = createTransport({ streamTransport: true, buffer: true })
+    const transport: SmtpTransport = {
+      async sendMail(o) {
+        const info = await streaming.sendMail(o)
+        envelopes.push(info.envelope as { from?: string | false; to?: string[] })
+        return info
+      },
+    }
+    const client = createSmtpClient({ transport, fromAddress })
+
+    await client.sendWorkspaceInvitation('invitee@example.com', { ...inviteOpts, workspaceName: '工作區' })
+    await client.sendMagicLink('invitee@example.com', 'https://app.example.com/x')
+
+    expect(envelopes.map((e) => e.from)).toEqual(['noreply@example.com', 'noreply@example.com'])
+  })
+
   it('renders the localized invitation subject and body', async () => {
     const { transport, calls } = makeFakeTransport()
     const client = createSmtpClient({ transport, fromAddress: 'contact@usebrian.ai' })
@@ -155,6 +215,22 @@ describe('[COMP:api/smtp-client] sendWorkspaceInvitation', () => {
     await expect(
       client.sendWorkspaceInvitation('a@b.com', inviteOpts),
     ).rejects.toThrow('SMTP 535: auth failed')
+  })
+})
+
+describe('[COMP:api/smtp-client] senderMailbox', () => {
+  it.each([
+    ['noreply@example.com', 'noreply@example.com'],
+    ['  noreply@example.com  ', 'noreply@example.com'],
+    ['"Example Sender" <noreply@example.com>', 'noreply@example.com'],
+    ['Example Sender <noreply@example.com>', 'noreply@example.com'],
+    ['<noreply@example.com>', 'noreply@example.com'],
+  ])('reduces %j to its mailbox', (input, expected) => {
+    expect(senderMailbox(input)).toBe(expected)
+  })
+
+  it('returns an unparseable value unchanged so the transport reports it', () => {
+    expect(senderMailbox('not an address')).toBe('not an address')
   })
 })
 

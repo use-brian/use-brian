@@ -121,6 +121,12 @@ type InviteResult = {
   status: "invited" | "already_member" | "invalid";
   /** Accept link — present only for `status: "invited"` (copy-link fallback). */
   link?: string;
+  /**
+   * Whether the invitation email left the server — present only for
+   * `status: "invited"`. `failed` / `not_configured` mean the link above is
+   * the only way the invitee will get in, so the row says so.
+   */
+  emailStatus?: "sent" | "failed" | "not_configured";
 };
 
 /** A pending (not accepted, not expired) invitation from GET /:workspaceId/invitations. */
@@ -1523,7 +1529,24 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
                   key={r.email}
                   className="flex items-center justify-between gap-2 text-[12px]"
                 >
-                  <span className="truncate">{r.email}</span>
+                  <div className="min-w-0">
+                    <div className="truncate">{r.email}</div>
+                    {r.status === "invited" && r.emailStatus && (
+                      <div
+                        className={
+                          r.emailStatus === "failed"
+                            ? "text-[11px] text-destructive"
+                            : "text-[11px] text-muted-foreground"
+                        }
+                      >
+                        {r.emailStatus === "sent"
+                          ? t.workspaceDetailInline.inviteEmailSent
+                          : r.emailStatus === "failed"
+                            ? t.workspaceDetailInline.inviteEmailFailed
+                            : t.workspaceDetailInline.inviteEmailNotConfigured}
+                      </div>
+                    )}
+                  </div>
                   {r.status === "invited" && r.link ? (
                     <button
                       onClick={() => copyLink(r.link!)}
