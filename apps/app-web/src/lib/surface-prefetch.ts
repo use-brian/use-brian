@@ -388,6 +388,10 @@ export function chatTranscriptCacheKey(sessionId: string): string {
  *
  * Both viewer-suffixed: a workflow row and its runs are RLS-scoped reads.
  */
+export function workflowPublicationConsentCacheKey(workspaceId: string, workflowId: string): string {
+  return `workflow-publication-consent:${workspaceId}${viewerSuffix()}:${workflowId}`;
+}
+
 export function workflowDetailCacheKey(workspaceId: string, workflowId: string): string {
   return `workflow-detail:${workspaceId}${viewerSuffix()}:${workflowId}`;
 }

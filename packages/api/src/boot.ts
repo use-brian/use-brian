@@ -1,3 +1,4 @@
+import { createBrowserFileBridge } from './sandbox/browser-files.js'
 import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
 import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher,setFeedLinkedInRecovery} from './content-planning/linkedin-authority.js'
 import { supportsProtectedFill } from './sandbox/relay-transport.js'
@@ -3323,6 +3324,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workflowId: request.workflowId,
         blueprintId: request.blueprintId,
         workflowRunId: request.workflowRunId,
+        workflowStepId: request.workflowStepId,
         decisionContext: request.decisionContext
           ? {
               actorUserId: request.caller.userId,
@@ -4883,6 +4885,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   const computerTools = createComputerTools({
+    files: filesApi ? createBrowserFileBridge(filesApi, getAssistantClearance) : null,
     protectedFill: protectedFill ? {
       blocked: (ctx, profileId) => protectedFill.isSessionLocked(ctx.userId, ctx.sessionId) ||
         Boolean(profileId && protectedFill.isLocked({ userId: ctx.userId, browserProfileId: profileId })),
@@ -4985,6 +4988,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('browserType', computerTools.browserType)
   if (protectedFill) allTools.set('browserFillReference', computerTools.browserFillReference)
   allTools.set('browserFillForm', computerTools.browserFillForm)
+  allTools.set('browserDownloads', computerTools.browserDownloads)
+  allTools.set('browserReadDownload', computerTools.browserReadDownload)
+  allTools.set('browserUploadFile', computerTools.browserUploadFile)
   allTools.set('browserCurrentUrl', computerTools.browserCurrentUrl)
   // Research read-browse (computer-use.md §12): browserReadPage is
   // deliberately NOT in allTools — interactive turns have the full flat

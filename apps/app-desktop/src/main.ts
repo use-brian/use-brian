@@ -965,7 +965,8 @@ function messageBrian(opts: { forceOpen?: boolean; useBrian?: boolean } = {}): v
   positionDesktopChat();
   publishCompanionState({ phase: "loading" });
   win.setAlwaysOnTop(true, "floating");
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Keep the app's foreground process type (Dock icon and native menus).
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
 
   win.once("ready-to-show", () => {
     if (win.isDestroyed()) return;
@@ -1128,7 +1129,8 @@ function showBrianPet(): void {
   brianPetWindow = win;
   positionBrianPet();
   win.setAlwaysOnTop(true, "floating");
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // A floating companion must not transform the entire macOS app into a UIElement.
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   win.webContents.on("will-navigate", (event) => event.preventDefault());
   win.once("ready-to-show", () => win.showInactive());
@@ -1257,7 +1259,8 @@ function showRecorderOverlay(): void {
   // "floating" keeps it above normal windows without fighting the OS for
   // system-level surfaces; visible on all Spaces incl. fullscreen apps.
   win.setAlwaysOnTop(true, "floating");
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Preserve the main app's Dock presence and native menu activation.
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   // The same security spine as the main window, minimally: the overlay loads
   // ONE app-origin page and must never become a browsing surface — no child
   // windows, no off-origin navigation.

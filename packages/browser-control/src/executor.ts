@@ -8,7 +8,7 @@ import { parseFormFields, formFieldOperation, type FillFormResult } from './fill
  */
 import { buildSnapshot, type BuiltSnapshot, type CdpAXNode } from './snapshot.js'
 import { RESTRICTED_TAB_MESSAGE } from './tab-eligibility.js'
-import { ACTION_CURSOR_BEFORE_CAPTURE, buildActionCursorArmExpression, type ActionCursorKind } from './action-cursor.js'
+import { ACTION_CURSOR_BEFORE_CAPTURE, buildActionCursorArmExpression, buildActionCursorMoveExpression, type ActionCursorKind } from './action-cursor.js'
 
 export class ExecutorError extends Error {
   constructor(
@@ -361,9 +361,18 @@ export class TabExecutor {
     }).catch(() => undefined)
   }
 
+  private async moveActionCursor(tabId: number, x: number, y: number): Promise<void> {
+    await this.cdp(tabId, 'Runtime.evaluate', {
+      expression: buildActionCursorMoveExpression(x, y),
+      awaitPromise: true,
+      returnByValue: true,
+    }).catch(() => undefined)
+  }
+
   /** Scroll before focus; direct feedback also covers an already-focused control. */
   private async focusActionTarget(tabId: number, backendNodeId: number): Promise<void> {
     const quad = await this.targetBox(tabId, backendNodeId)
+    if (quad) await this.moveActionCursor(tabId, (quad[0] + quad[4]) / 2, (quad[1] + quad[5]) / 2)
     await this.cdp(tabId, 'DOM.focus', { backendNodeId })
     if (quad) {
       const x = (quad[0] + quad[4]) / 2
@@ -699,9 +708,33 @@ export class TabExecutor {
     const y = (quad[1] + quad[5]) / 2
     const base = { x, y, button: 'left', clickCount: 1 } as const
     await this.armActionCursor(tabId, 'pointer')
+    await this.moveActionCursor(tabId, x, y)
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
+  }
+
+  /** Desktop-only caller supplies a private, authorized staging file, never a model path. */
+  async uploadFile(ref: string, path: string): Promise<void> {
+    const tabId = this.mustTab()
+    const backendNodeId = this.resolveRef(ref)
+    const objectGroup = 'use-brian-file-upload'
+    try {
+      const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', { backendNodeId, objectGroup })
+      const objectId = resolved.object?.objectId
+      if (!objectId) throw new ExecutorError('File input is no longer attached. Take a fresh browserSnapshot.', 'stale_ref')
+      const checked = await this.cdp<{ result?: { value?: unknown } }>(tabId, 'Runtime.callFunctionOn', {
+        objectId, objectGroup, returnByValue: true,
+        functionDeclaration: `function () {
+          return this.isConnected && this.tagName === 'INPUT' && this.type === 'file' &&
+            !this.disabled && !this.matches(':disabled') && !this.webkitdirectory;
+        }`,
+      })
+      if (checked.result?.value !== true) throw new ExecutorError('Target must be an enabled, attached file input (not a directory picker).', 'backend_error')
+      await this.cdp(tabId, 'DOM.setFileInputFiles', { objectId, files: [path] })
+    } finally {
+      await this.cdp(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+    }
   }
 
   async type(ref: string, text: string): Promise<void> {

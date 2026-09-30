@@ -54,14 +54,16 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
   {id:'workflow-authority',packageDir:'packages/api',integration:true,testFiles:[
     'src/context-scope/__tests__/workflow-authority.integration.test.ts',
     'src/context-scope/__tests__/workflow-input-evidence.integration.test.ts',
-    'src/context-scope/__tests__/caller-evidence.integration.test.ts']},
+    'src/context-scope/__tests__/caller-evidence.integration.test.ts',
+    'src/workflow/__tests__/publication-consent.integration.test.ts']},
   {id:'entrypoints',packageDir:'packages/api',integration:false,testFiles:[
     'src/context-scope/__tests__/path-security-matrix.test.ts','src/context-scope/__tests__/authority-lease.test.ts',
     'src/context-scope/__tests__/execution-context.test.ts',
     'src/context-scope/__tests__/connector-exposure.test.ts','src/context-scope/__tests__/delivery-authority.test.ts',
     'src/context-scope/__tests__/delivery-replay.test.ts','src/inter-assistant/__tests__/delegation-scope.test.ts',
     'src/inter-assistant/__tests__/executor.test.ts','src/inter-assistant/__tests__/deliver.test.ts',
-    'src/workflow/__tests__/channel-delivery.test.ts','src/routes/__tests__/proactive-compaction.test.ts']},
+    'src/workflow/__tests__/channel-delivery.test.ts','src/routes/__tests__/proactive-compaction.test.ts',
+    'src/workflow/__tests__/publication-consent.test.ts','src/routes/__tests__/workflow-publication.test.ts']},
   {id:'access-policy',packageDir:'packages/api',integration:false,testFiles:[
     'src/workspace-access/__tests__/policy.test.ts','src/workspace-access/__tests__/tools.test.ts',
     'src/workspace-access/__tests__/readiness.test.ts','src/context-scope/__tests__/context-readiness.test.ts']},
@@ -128,6 +130,8 @@ export const DEPARTMENT_ISOLATION_CASES: ReadonlyArray<{
     selector('entrypoints','src/context-scope/__tests__/delivery-authority.test.ts','rechecks an exact owner-approved binding'),
     selector('entrypoints','src/inter-assistant/__tests__/delegation-scope.test.ts','keeps inherited Team evidence inside the exact approved group binding'),
     selector('entrypoints','src/workflow/__tests__/channel-delivery.test.ts','refuses an unverified audience'),
+    selector('entrypoints','src/workflow/__tests__/publication-consent.test.ts','keeps other-private-owner source restriction enforced'),
+    selector('workflow-authority','src/workflow/__tests__/publication-consent.integration.test.ts','serializes concurrent approvals'),
   ]},
   {id:'A08',assertions:[
     selector('entrypoints','src/context-scope/__tests__/delivery-replay.test.ts','refuses a contraction before tool'),

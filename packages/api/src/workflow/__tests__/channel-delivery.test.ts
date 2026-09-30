@@ -44,13 +44,15 @@ vi.mock('@use-brian/channels', async (importOriginal) => ({
 vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) }))
 
 import { createWorkflowChannelDelivery } from '../channel-delivery.js'
+import { createWorkflowPublicationDispatcher, type AuthorizeWorkflowPublication, type PublicationConsentStore } from '../publication-consent.js'
+import type { WorkflowRunRecord } from '@use-brian/core'
 import {
   createTelegramAdapter as mockedCreateTelegramAdapter,
   createWhatsAppCloudAdapter as mockedCreateWhatsAppCloudAdapter,
   SlackApiError,
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
-import { addSessionMessage } from '../../db/sessions.js'
+import { addSessionMessage, findOrCreateSession } from '../../db/sessions.js'
 
 const integrationStore = {
   getCredentialsForAssistantSystem: vi.fn(async () => ({
@@ -110,6 +112,8 @@ function whatsappCloudIntegration(
 }
 
 beforeEach(() => {
+  vi.mocked(addSessionMessage).mockClear()
+  vi.mocked(findOrCreateSession).mockClear()
   sendMessage.mockReset()
   sendMessage.mockResolvedValue('1751970000.111111')
   vi.mocked(mockedCreateTelegramAdapter).mockClear()
@@ -495,6 +499,74 @@ describe('[COMP:workflow/channel-delivery] question fallback', () => {
     await deliver({ ...baseParams(), channelType: 'telegram' })
     expect(sendMessage.mock.calls.at(-1)?.[1].text).toBe('per-person update')
   })
+})
+
+describe('[COMP:workflow/channel-delivery] explicit prepared-output publication', () => {
+  const params = () => ({ ...baseParams(), channelType: 'telegram' as const, channelId: '-100123:topic:7',
+    channelIntegrationId: 'integration', scopeEvidence: { sensitivity: 'internal' as const },
+    publication: { runId: 'run', stepId: 'remind' } })
+  const denyAudience = async () => ({ allowed: false as const, reason: 'delivery_audience_unverified' as const })
+  const dispatcher = (authorizePublication: AuthorizeWorkflowPublication) => createWorkflowPublicationDispatcher({
+    authorizePublication,
+    store: { withPublicationLock: async (_wf, _user, send) => send() } as PublicationConsentStore,
+    runStore: { getRunSystem: async () => ({ workflowId: 'workflow', workspaceId: 'ws-1' }) as WorkflowRunRecord },
+  })
+
+  it('publishes only prepared text with its approval receipt and rechecks consent before sending', async () => {
+    const authorizeWorkflowPublication = vi.fn(async () => ({ allowed: true as const, approvalId: 'consent-1' }))
+    const outcome = await createWorkflowChannelDelivery({ integrationStore,
+      authorizeDeliveryAudience: denyAudience, authorizeWorkflowPublication,
+      dispatchWorkflowPublication: dispatcher(authorizeWorkflowPublication) })(params())
+    expect(outcome).toMatchObject({ status: 'delivered', publicationApprovalId: 'consent-1' })
+    expect(authorizeWorkflowPublication).toHaveBeenCalledTimes(2)
+    expect(authorizeWorkflowPublication).toHaveBeenLastCalledWith(expect.objectContaining({
+      channelId: '-100123:topic:7', channelIntegrationId: 'integration', scopeEvidence: { sensitivity: 'internal' },
+      publication: { runId: 'run', stepId: 'remind' },
+    }))
+    expect(createTelegramAdapter).toHaveBeenLastCalledWith({ token: 'selected-token', strictTopic: true })
+    expect(sendMessage).toHaveBeenCalledWith('-100123:topic:7', { text: 'per-person update', format: 'markdown', actions: undefined }, undefined)
+  })
+  it('does not send after publication consent is revoked during preparation', async () => {
+    const authorizeWorkflowPublication = vi.fn()
+      .mockResolvedValueOnce({ allowed: true, approvalId: 'consent-1' }).mockResolvedValueOnce({ allowed: false })
+    const outcome = await createWorkflowChannelDelivery({ integrationStore,
+      authorizeDeliveryAudience: denyAudience, authorizeWorkflowPublication,
+      dispatchWorkflowPublication: dispatcher(authorizeWorkflowPublication) })(params())
+    expect(outcome).toMatchObject({ status: 'skipped', reason: 'delivery_audience_unverified' })
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(addSessionMessage).not.toHaveBeenCalled()
+    expect(findOrCreateSession).not.toHaveBeenCalled()
+  })
+  it('retains mixed assistant provenance without manufacturing a lineage-free delivery transcript', async () => {
+    const authorizeWorkflowPublication = vi.fn(async () => ({ allowed: true as const, approvalId: 'consent-1' }))
+    const sources = ['assistant-one', 'assistant-two'].map((assistantId, index) => ({
+      workspaceId: 'ws-1', userId: 'u-1', assistantId, resourceKind: 'memory', resourceId: `memory-${index}`,
+      version: '1', sensitivity: 'internal' as const, compartments: [], projectIds: [],
+    }))
+    const scopeEvidence = { sensitivity: 'internal' as const, sources }
+    const outcome = await createWorkflowChannelDelivery({ integrationStore, authorizeDeliveryAudience: denyAudience,
+      authorizeWorkflowPublication, dispatchWorkflowPublication: dispatcher(authorizeWorkflowPublication),
+    })({ ...params(), scopeEvidence })
+    expect(outcome.status).toBe('delivered')
+    expect(addSessionMessage).not.toHaveBeenCalled()
+    expect(findOrCreateSession).not.toHaveBeenCalled()
+    expect(authorizeWorkflowPublication).toHaveBeenLastCalledWith(expect.objectContaining({ scopeEvidence }))
+    expect(scopeEvidence.sources).toHaveLength(2)
+  })
+  it.each(['interactive', 'question', 'missing-evidence', 'unpinned'])(
+    'does not apply the exception to %s delivery', async kind => {
+      const input = params()
+      if (kind === 'interactive') input.publication = undefined as never
+      if (kind === 'question') Object.assign(input, { question: { question: 'Your thoughts?' } })
+      if (kind === 'missing-evidence') input.scopeEvidence = undefined as never
+      if (kind === 'unpinned') input.channelIntegrationId = undefined as never
+      const authorizeWorkflowPublication = vi.fn(async () => ({ allowed: true as const, approvalId: 'consent-1' }))
+      const outcome = await createWorkflowChannelDelivery({ integrationStore,
+        authorizeDeliveryAudience: denyAudience, authorizeWorkflowPublication })(input)
+      expect(outcome).toMatchObject({ status: 'skipped' })
+      expect(authorizeWorkflowPublication).not.toHaveBeenCalled()
+      expect(sendMessage).not.toHaveBeenCalled()
+    })
 })
 
 describe('[COMP:workflow/channel-delivery] durable question buttons', () => {
