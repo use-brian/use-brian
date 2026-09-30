@@ -13,6 +13,11 @@ import { sessionRedirect } from "@/lib/session";
 
 export const runtime = "nodejs";
 
+// Authorization codes are opaque and unbounded by the spec. Microsoft Entra
+// issues codes longer than 2 KiB (about 2.2 KB for B2B guests), so bound the
+// value only to keep it within ordinary URL limits.
+const MAX_AUTHORIZATION_CODE_LENGTH = 8192;
+
 function clearTransaction(response: NextResponse): NextResponse {
   response.cookies.set({ name: OIDC_TRANSACTION_COOKIE, value: "", path: "/", maxAge: 0 });
   return response;
@@ -33,7 +38,7 @@ export async function GET(request: Request) {
   if (!transaction || !state || !equalState(state, transaction.state)) return fail("oidc_failed");
   if (requestUrl.searchParams.has("error")) return fail("oidc_failed");
   const code = requestUrl.searchParams.get("code");
-  if (!code || code.length > 2048) return fail("oidc_failed");
+  if (!code || code.length > MAX_AUTHORIZATION_CODE_LENGTH) return fail("oidc_failed");
 
   let stage = "discovery";
   try {

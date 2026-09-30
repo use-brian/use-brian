@@ -24,7 +24,7 @@ function configure() {
   vi.stubEnv("OUTPOST_AUTH_BRIDGE_SECRET", BRIDGE);
 }
 
-function callbackRequest() {
+function callbackRequest(code = "code") {
   const transaction = serializeOidcTransaction({
     state: "s".repeat(43),
     nonce: "n".repeat(43),
@@ -32,7 +32,7 @@ function callbackRequest() {
     createdAt: Date.now(),
     next: "http://localhost:3003/w/one",
   }, BRIDGE);
-  return new Request(`http://localhost:3005/api/auth/oidc/callback?code=code&state=${"s".repeat(43)}`, {
+  return new Request(`http://localhost:3005/api/auth/oidc/callback?code=${code}&state=${"s".repeat(43)}`, {
     headers: { Cookie: `brian_oidc_tx=${transaction}` },
   });
 }
@@ -57,6 +57,18 @@ describe("[COMP:app/outpost-auth] OIDC callback", () => {
     expect(cookies).toContain("access_token=access");
     expect(cookies).toContain("refresh_token=refresh");
     expect(cookies).toContain("brian_oidc_tx=;");
+  });
+
+  it("accepts Microsoft Entra authorization codes longer than 2 KiB", async () => {
+    configure();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      accessToken: "access",
+      refreshToken: "refresh",
+      user: { id: "u1", name: "Admin", email: "admin@example.com" },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    const { GET } = await import("./route");
+    const response = await GET(callbackRequest("c".repeat(2300)));
+    expect(response.headers.get("location")).toBe("http://localhost:3003/w/one");
   });
 
   it("maps admission rejection to fixed portal copy without session cookies", async () => {
