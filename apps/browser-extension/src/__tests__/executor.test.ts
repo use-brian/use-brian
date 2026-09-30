@@ -425,6 +425,11 @@ describe('[COMP:sandbox/action-cursor] Chromium My Browser action cursor', () =>
     const calls = dbg.sendCommand.mock.calls
     const cursorCalls = calls.filter((call) => call[1] === 'Runtime.evaluate' && String(call[2]?.expression).includes(ACTION_CURSOR_MARKER))
     expect(cursorCalls).toHaveLength(2)
+    const travel = calls.filter(call => call[1] === 'Runtime.evaluate' && String(call[2]?.expression).includes('?.arrive('))
+    expect(travel).toHaveLength(2)
+    for (const call of travel) expect(call[2]?.awaitPromise).toBe(true)
+    expect(calls.indexOf(travel[0]!)).toBeLessThan(calls.findIndex(call => call[1] === 'Input.dispatchMouseEvent'))
+    expect(calls.indexOf(travel[1]!)).toBeLessThan(calls.findIndex(call => call[1] === 'DOM.focus'))
     expect(cursorCalls[0]?.[2]?.expression).toContain(ACTION_CURSOR_MARKER)
     expect(cursorCalls[0]?.[2]?.expression).toContain('("pointer")')
     expect(cursorCalls[1]?.[2]?.expression).toContain('("typing")')

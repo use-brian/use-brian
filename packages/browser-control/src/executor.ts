@@ -8,7 +8,7 @@ import { parseFormFields, formFieldOperation, type FillFormResult } from './fill
  */
 import { buildSnapshot, type BuiltSnapshot, type CdpAXNode } from './snapshot.js'
 import { RESTRICTED_TAB_MESSAGE } from './tab-eligibility.js'
-import { ACTION_CURSOR_BEFORE_CAPTURE, buildActionCursorArmExpression, type ActionCursorKind } from './action-cursor.js'
+import { ACTION_CURSOR_BEFORE_CAPTURE, buildActionCursorArmExpression, buildActionCursorMoveExpression, type ActionCursorKind } from './action-cursor.js'
 
 export class ExecutorError extends Error {
   constructor(
@@ -361,9 +361,18 @@ export class TabExecutor {
     }).catch(() => undefined)
   }
 
+  private async moveActionCursor(tabId: number, x: number, y: number): Promise<void> {
+    await this.cdp(tabId, 'Runtime.evaluate', {
+      expression: buildActionCursorMoveExpression(x, y),
+      awaitPromise: true,
+      returnByValue: true,
+    }).catch(() => undefined)
+  }
+
   /** Scroll before focus; direct feedback also covers an already-focused control. */
   private async focusActionTarget(tabId: number, backendNodeId: number): Promise<void> {
     const quad = await this.targetBox(tabId, backendNodeId)
+    if (quad) await this.moveActionCursor(tabId, (quad[0] + quad[4]) / 2, (quad[1] + quad[5]) / 2)
     await this.cdp(tabId, 'DOM.focus', { backendNodeId })
     if (quad) {
       const x = (quad[0] + quad[4]) / 2
@@ -699,6 +708,7 @@ export class TabExecutor {
     const y = (quad[1] + quad[5]) / 2
     const base = { x, y, button: 'left', clickCount: 1 } as const
     await this.armActionCursor(tabId, 'pointer')
+    await this.moveActionCursor(tabId, x, y)
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
