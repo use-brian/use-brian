@@ -13,22 +13,30 @@ import { getPool, getAppPool } from '../db/client.js'
 import { updateCompany } from '../db/crm.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 
+// DB-backed suite (`pnpm test:integration`): it needs a LOCAL PostgreSQL and
+// builds its own throwaway schema from fixture.sql + the migration. Like every
+// other integration suite it self-skips without a URL instead of throwing at
+// import, so the unit lane and a credential-less CI runner stay green.
 const schema=`publication_${randomUUID().replaceAll('-','')}`
 const url=process.env.PUBLICATION_TEST_DATABASE_URL ?? process.env.TEST_DATABASE_URL
-if(!url)throw new Error('PUBLICATION_TEST_DATABASE_URL is required for actual PostgreSQL verification')
-const dbUrl=new URL(url)
-if(!['localhost','127.0.0.1'].includes(dbUrl.hostname)) throw new Error('Local PostgreSQL required')
-dbUrl.searchParams.set('options',`-c search_path=${schema},public`)
-process.env.DATABASE_URL=dbUrl.href
-process.env.DATABASE_URL_APP=dbUrl.href
-const admin=new pg.Pool({connectionString:url})
+const describeIf=url?describe:describe.skip
+if(url){
+ const dbUrl=new URL(url)
+ if(!['localhost','127.0.0.1'].includes(dbUrl.hostname)) throw new Error('Local PostgreSQL required')
+ dbUrl.searchParams.set('options',`-c search_path=${schema},public`)
+ process.env.DATABASE_URL=dbUrl.href
+ process.env.DATABASE_URL_APP=dbUrl.href
+}
+let admin:pg.Pool
 const user=randomUUID(), observer=randomUUID(), outsider=randomUUID(), workspace=randomUUID(), otherWorkspace=randomUUID()
 const secret='local-publication-test-secret-only',signingSecret='synthetic-source-signing-secret-only'
 let pool:pg.Pool,app:express.Express
 const tokens=(id:string)=>createTokens(id,secret).accessToken
 const path=(op:string,source='erp')=>`/api/external-app/workspaces/${workspace}/records/${source}/${op}`
 function post(op:string,body:Record<string,unknown>,id=user,source='erp') {const authorization=`Bearer ${tokens(id)}`;return request(app).post(path(op,source)).set('Authorization',authorization).set('X-Correlation-ID','publication-test').set('X-Source-Signature',sourceSignature(signingSecret,workspace,source,op,'publication-test',authorization,body)).send(body)}
+describeIf('[COMP:api/external-app-records] actual HTTP authentication, canonical CRM and PostgreSQL',()=>{
 beforeAll(async()=>{
+ admin=new pg.Pool({connectionString:url})
  await admin.query(`CREATE SCHEMA ${schema}`)
  pool=getPool()
  await pool.query(await readFile(new URL('./fixture.sql',import.meta.url),'utf8'))
@@ -44,7 +52,6 @@ beforeAll(async()=>{
 afterAll(async()=>{
  await Promise.all([getPool().end(),getAppPool().end()]);await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end()
 })
-describe('[COMP:api/external-app-records] actual HTTP authentication, canonical CRM and PostgreSQL',()=>{
  it('authenticates actual signed human tokens and current membership before effects',async()=>{
   expect((await request(app).post(path('publish')).send({})).status).toBe(401)
   expect((await request(app).post(path('publish')).set('Authorization','Bearer machine-key').send({})).status).toBe(401)
