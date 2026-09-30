@@ -32,7 +32,7 @@ import { createFeedReviewContextLoader } from './content-planning/review-context
  * `env` option, not `getEnv()`.
  */
 
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { detectInternalLinkAliasReadiness } from './internal-link-capabilities.js'
 import { seedBuiltinPrimitiveCapabilities } from './db/capability-seed.js'
 import type http from 'node:http'
@@ -327,6 +327,11 @@ import { assistantConnectorGrantsRoutes } from './routes/assistant-connector-gra
 import { skillRoutes } from './routes/skills.js'
 import { workspaceRoutes } from './routes/workspaces.js'
 import { externalAppCalendarRoutes } from './external-app-calendar/routes.js'
+import { externalAppRecordsRoutes } from './external-app-records/routes.js'
+import { createExternalAppRecordsStore } from './external-app-records/store.js'
+import { externalAppDocumentRoutes, authorizeDocumentHuman } from './external-app-documents/routes.js'
+import { createDocumentService } from './external-app-documents/service.js'
+import { externalAppConfiguration } from './external-app-documents/configuration.js'
 import { createCalendarCredentials } from './external-app-calendar/credentials.js'
 import { workspaceIconPublicRoutes, workspaceIconRoutes } from './routes/workspace-icon.js'
 import { invitationRoutes } from './routes/invitations.js'
@@ -1241,6 +1246,8 @@ export interface PublicExtraRouteDeps {
 
 export interface BootOpenApiOptions {
   env: OpenApiEnv
+  /** Shared self-host/hosted application integration configuration; no automatic grants. */
+  externalApps?: ReturnType<typeof externalAppConfiguration>
   ports?: OpenApiPorts
   /** Default true; gates the background workers (consolidation, pollers, …). */
   runWorkers?: boolean
@@ -6135,6 +6142,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       listUsable: (userId, workspaceId) => listUsableWorkspaceConnectors({ connectorInstanceStore, connectorGrantStore, userId, workspaceId }),
     }),
   }))
+
+  const externalApps = opts.externalApps ?? externalAppConfiguration()
+  app.use('/api/external-app', externalAppRecordsRoutes({
+    jwtSecret: env.JWT_SECRET,
+    store: createExternalAppRecordsStore({ sources: externalApps.sources }),
+  }))
+  if (filesApi) app.use('/api/external-app', externalAppDocumentRoutes({
+    jwtSecret: env.JWT_SECRET,
+    service: createDocumentService({
+      ...externalApps.documents, files: filesApi, authorize: authorizeDocumentHuman,
+      locatorSecret: createHmac('sha256', env.JWT_SECRET).update('external-app-documents-v1').digest('hex'),
+    }),
+  }))
+  else app.use('/api/external-app/workspaces/:workspaceId/documents', requireAuth(env.JWT_SECRET), (_req, res) => {
+    res.status(503).json({ error: 'document_storage_unavailable' })
+  })
 
   const invitationRouter = invitationRoutes({
     invitationStore: workspaceInvitationStore,
