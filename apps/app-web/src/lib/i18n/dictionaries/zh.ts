@@ -275,7 +275,6 @@ export const zh: Dictionary = {
     "departments": "部門",
     "requests": "存取申請",
     "grants": "唯讀授權",
-    "configureTeams": "設定部門",
     "organization": "查看組織圖",
     "requestAccess": "申請存取權",
     "requestFor": "授權對象",
@@ -337,7 +336,6 @@ export const zh: Dictionary = {
     "memberRestriction": "此處只能選取可見的人員，請管理員指派清單以外的人員。"
 },
   organization: {
-    hubDescription: "在同一處管理成員、部門、匯報關係和存取權限。",
     structureTab: "組織架構",
     structureSummary: "整理匯報關係與責任歸屬。",
     peopleTab: "成員",
@@ -358,8 +356,8 @@ export const zh: Dictionary = {
     initializeUses: "在現有單位「{unit}」新增此主要配置。",
 
     title: "組織",
+    sectionsAriaLabel: "組織導覽",
     description: "查看工作區內的人員、匯報關係與 Brian 助理。",
-    departments: "管理部門",
     permissionHint: "匯報關係不會授予資料存取權。請在「部門」管理成員資格和讀取範圍，並在「存取權限」管理權限和申請。",
     adminHint: "此為管理員完整檢視。工作區擁有者及管理員保有廣泛資料權限。",
     loadError: "無法載入組織。請重新整理以確認目前權限。",

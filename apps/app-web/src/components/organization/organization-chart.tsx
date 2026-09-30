@@ -3,7 +3,7 @@
 /** Directory-only hierarchy. Permissions are changed explicitly in Departments. [COMP:app-web/organization-chart] */
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import Link from 'next/link';
-import { Bot, UserRound, Network, Plus, Search, Settings2 } from 'lucide-react';
+import { Bot, Info, ListChecks, UserRound, Network, Plus, Search } from 'lucide-react';
 import type { OrganizationChart, OrganizationCommand, OrganizationPlacement, OrganizationSubject, OrganizationUnit } from '@use-brian/shared';
 import { useProtectedProjection } from '@/lib/use-protected-projection';
 import { useWorkspaceContext } from '@/lib/workspace-context';
@@ -21,6 +21,7 @@ import { useOrganizationChange } from './use-organization-change';
 import { SurfaceSkeletonFor } from '@/components/chrome/surface-skeleton';
 import { organizationHref } from '@/lib/organization-navigation';
 import { OrganizationInitialization } from './organization-initialization';
+import { OrganizationTopbarActions, organizationTopbarActionCls, organizationTopbarPrimaryCls } from './organization-chrome';
 
 type Editor = {kind:'unit';unit?:OrganizationUnit} | {kind:'subject';subject:OrganizationSubject;placement?:OrganizationPlacement};
 const inputClass = 'min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
@@ -55,12 +56,9 @@ function OrganizationWorkspace() {
   const chart=useProtectedProjection(key,resource.data,()=>{change.cancelReview();setEditor(null);setQuery('');},resource.refresh);
   // Selection stores only viewer-scoped data and is never reused after a scope switch.
   useEffect(()=>{setEditor(null);setQuery('');},[key]);
-  const title=<div className="flex flex-wrap items-center justify-between gap-3">
-    <div><h2 className="flex items-center gap-2 text-lg font-semibold"><Network className="size-5"/>{t.structureTab}</h2><p className="mt-1 text-sm text-muted-foreground">{t.description}</p></div>
-    <Link className="flex min-h-11 items-center gap-2 rounded-lg border border-border px-3 text-sm" href={organizationHref(workspaceId,'departments')}><Settings2 className="size-4"/>{t.departments}</Link>
-  </div>;
-  if(resource.error && !chart) return <main className="space-y-4 p-4 md:p-6">{title}<p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.retry}</Button></main>;
-  if(!chart) return <SurfaceSkeletonFor surface="organization"/>;
+  const title=<div><h2 className="text-lg font-semibold">{t.structureTab}</h2><p className="mt-1 text-sm text-muted-foreground">{t.description}</p></div>;
+  if(resource.error && !chart) return <main className="space-y-4">{title}<p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.retry}</Button></main>;
+  if(!chart) return <SurfaceSkeletonFor surface="organization" chrome={false}/>;
   const term=query.trim().toLocaleLowerCase();
   const subjectName=(subject:OrganizationSubject)=>subject.name || (subject.kind==='assistant'?t.unnamedAssistant:t.unnamedPerson);
   const subjectFor=(placement:OrganizationPlacement)=>chart.subjects.find(s=>s.id===(placement.userId??placement.assistantId)&&s.kind===(placement.userId?'member':'assistant'));
@@ -92,22 +90,33 @@ function OrganizationWorkspace() {
   }
   const units=term?chart.units.filter(u=>u.name.toLocaleLowerCase().includes(term)||chart.placements.some(p=>p.unitId===u.id&&subjectFor(p)&&nameMatches(subjectFor(p)!))):chart.units.filter(u=>!u.parentId);
   const unassigned=chart.subjects.filter(s=>!chart.placements.some(p=>p.isPrimary&&(s.kind==='member'?p.userId:p.assistantId)===s.id)&&(!term||nameMatches(s)));
-  return <main className="h-full min-w-0 overflow-y-auto p-4 md:p-6">
-    <div className="mx-auto max-w-6xl space-y-5">{title}<DepartmentChangeFeedback change={change}/>
-      <p className="rounded-lg border border-border bg-muted/40 p-3 text-sm">{t.permissionHint}{chart.canManage?` ${t.adminHint}`:''}</p>
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="relative min-w-0 flex-1 basis-full md:basis-0"><Search aria-hidden className="absolute left-3 top-3 size-5 text-muted-foreground"/><input aria-label={t.search} placeholder={t.search} value={query} onChange={e=>setQuery(e.target.value)} className={`${inputClass} pl-10`}/></label>
-        {chart.canManage?<Button className="min-h-11" onClick={()=>selectEditor({kind:'unit'})}><Plus className="size-4"/>{t.addUnit}</Button>:null}
-        {chart.canManage&&chart.initialization?.candidates.length?<Button variant="outline" className="min-h-11" onClick={()=>selectEditor({kind:'initialize'})}>{t.initialize}</Button>:null}
+  const canInitialize=chart.canManage&&Boolean(chart.initialization?.candidates.length);
+  return <main className="min-w-0 space-y-5">
+    {chart.canManage?<OrganizationTopbarActions>
+      {canInitialize?<button type="button" aria-label={t.initialize} title={t.initialize} aria-pressed={editor?.kind==='initialize'} onClick={()=>selectEditor({kind:'initialize'})} className={organizationTopbarActionCls}><ListChecks aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.initialize}</span></button>:null}
+      <button type="button" aria-label={t.addUnit} title={t.addUnit} onClick={()=>selectEditor({kind:'unit'})} className={organizationTopbarPrimaryCls}><Plus aria-hidden className="size-4 shrink-0"/><span className="max-sm:hidden">{t.addUnit}</span></button>
+    </OrganizationTopbarActions>:null}
+    {title}<DepartmentChangeFeedback change={change}/>
+    <p className="flex items-start gap-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2.5 text-[13px] leading-relaxed text-muted-foreground"><Info aria-hidden className="mt-0.5 size-4 shrink-0"/><span>{t.permissionHint}{chart.canManage?` ${t.adminHint}`:''}</span></p>
+    <label className="relative block min-w-0"><Search aria-hidden className="absolute left-3 top-3 size-5 text-muted-foreground"/><input aria-label={t.search} placeholder={t.search} value={query} onChange={e=>setQuery(e.target.value)} className={`${inputClass} pl-10`}/></label>
+    {resource.error?<p role="alert" className="text-sm text-destructive">{t.loadError}</p>:null}
+    <div className={editor?'grid min-w-0 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)]':'min-w-0'}>
+      <div className="min-w-0 space-y-5">
+        {units.length?<ul aria-label={t.chart} className="grid min-w-0 gap-4">{units.map(unit=>unitTree(unit))}</ul>:<div className="rounded-xl border border-dashed border-border px-5 py-8 text-center">
+          <Network aria-hidden className="mx-auto size-6 text-muted-foreground/60"/>
+          <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">{term?t.noResults:t.empty}</p>
+          {!term&&chart.canManage?<Button variant="outline" className="mt-4 min-h-11" onClick={()=>selectEditor({kind:'unit'})}><Plus className="size-4"/>{t.addUnit}</Button>:null}
+        </div>}
+        {unassigned.length?<section className="rounded-xl border border-border bg-card">
+          <h2 className="flex items-center gap-2 border-b border-border px-4 py-3 text-sm font-semibold">{t.unassigned}<span className="rounded-full bg-muted px-2 text-xs font-medium tabular-nums text-muted-foreground">{unassigned.length}</span></h2>
+          <ul className="p-1.5">{unassigned.map(subject=><li key={`${subject.kind}:${subject.id}`}><button type="button" onClick={()=>selectEditor({kind:'subject',subject})} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-2.5 py-1.5 text-left hover:bg-muted focus-visible:outline focus-visible:outline-ring">
+            <span aria-hidden className="grid size-8 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground">{subject.kind==='assistant'?<Bot className="size-4"/>:<UserRound className="size-4"/>}</span>
+            <span className="min-w-0 flex-1 break-words text-sm font-medium">{subjectName(subject)}</span>
+            <span className="shrink-0 text-xs text-muted-foreground">{subject.kind==='assistant'?t.assistant:t.person}</span>
+          </button></li>)}</ul>
+        </section>:null}
       </div>
-      {resource.error?<p role="alert" className="text-sm text-destructive">{t.loadError}</p>:null}
-      <div className={editor?'grid min-w-0 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)]':'min-w-0'}>
-        <div className="min-w-0 space-y-5">
-          {units.length?<ul aria-label={t.chart} className="grid min-w-0 gap-4">{units.map(unit=>unitTree(unit))}</ul>:<p className="rounded-xl border border-dashed border-border p-5 text-sm text-muted-foreground">{term?t.noResults:t.empty}</p>}
-          {unassigned.length?<section className="rounded-xl border border-border p-3"><h2 className="px-2 py-2 font-semibold">{t.unassigned}</h2><ul>{unassigned.map(subject=><li key={`${subject.kind}:${subject.id}`}><button type="button" onClick={()=>selectEditor({kind:'subject',subject})} className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left hover:bg-muted">{subject.kind==='assistant'?<Bot className="size-4"/>:<UserRound className="size-4"/>}<span className="min-w-0 break-words">{subjectName(subject)} <span className="text-xs text-muted-foreground">{subject.kind==='assistant'?t.assistant:t.person}</span></span></button></li>)}</ul></section>:null}
-        </div>
-        {editor?.kind==='initialize'?<OrganizationInitialization chart={chart} close={()=>selectEditor(null)} change={change}/>:editor?<OrganizationEditor key={editor.kind==='unit'?editor.unit?.id??'new':`${editor.subject.id}:${editor.placement?.id??'new'}`} chart={chart} editor={editor} close={()=>selectEditor(null)} change={change}/>:null}
-      </div>
+      {editor?.kind==='initialize'?<OrganizationInitialization chart={chart} close={()=>selectEditor(null)} change={change}/>:editor?<OrganizationEditor key={editor.kind==='unit'?editor.unit?.id??'new':`${editor.subject.id}:${editor.placement?.id??'new'}`} chart={chart} editor={editor} close={()=>selectEditor(null)} change={change}/>:null}
     </div>
   </main>;
 }

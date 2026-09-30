@@ -288,7 +288,6 @@ export const en = {
     "departments": "Departments",
     "requests": "Access requests",
     "grants": "Read-only grants",
-    "configureTeams": "Configure departments",
     "organization": "View organization",
     "requestAccess": "Request access",
     "requestFor": "Access for",
@@ -350,7 +349,6 @@ export const en = {
     "memberRestriction": "Only visible people can be selected here. Ask an administrator to assign someone outside this list."
 },
   organization: {
-    hubDescription: "Manage people, departments, reporting lines and access in one place.",
     structureTab: "Structure",
     structureSummary: "Map reporting lines and ownership.",
     peopleTab: "People",
@@ -371,8 +369,8 @@ export const en = {
     initializeUses: "Add this primary placement to the existing unit {unit}.",
 
     title: "Organization",
+    sectionsAriaLabel: "Organization sections",
     description: "People, reporting lines and Brian assistants in one workspace.",
-    departments: "Manage departments",
     permissionHint: "Reporting lines do not grant data access. Use Departments for membership and read bundles, and Access for permissions and requests.",
     adminHint: "Full administrator view. Workspace owners and admins retain broad data authority.",
     loadError: "Unable to load the organization. Refresh to check your current access.",

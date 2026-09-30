@@ -3,7 +3,7 @@
 import type { SettingsMemberTarget, SettingsSection } from './workspace-settings-events';
 
 export const ORGANIZATION_SECTIONS = ['structure', 'people', 'departments', 'access'] as const;
-type OrganizationSection = typeof ORGANIZATION_SECTIONS[number];
+export type OrganizationSection = typeof ORGANIZATION_SECTIONS[number];
 
 export function organizationSection(value: string | null): OrganizationSection {
   return ORGANIZATION_SECTIONS.find(section => section === value) ?? 'structure';

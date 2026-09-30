@@ -33,7 +33,7 @@ function AccessExplanationContent({data,memberId,assistantId,close}:Props&{membe
   return <section className="min-w-0 space-y-4 rounded-xl border border-border p-4" aria-label={t.explainAccess}>
     <header className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">{t.explainAccess}</h2><Button variant="ghost" className="min-h-11" onClick={close}>{t.close}</Button></header>
     <Button variant="outline" className="min-h-11" onClick={()=>setSelection({memberId})}>{t.resetExample}</Button>
-    {!explanation?resource.error?<><p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization"/>:<>
+    {!explanation?resource.error?<><p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>:<>
       <div className="grid gap-3 sm:grid-cols-2">
         {pick('assistantId',t.assistantCeiling,selection.assistantId??'none',[{value:'none',label:t.humanOnly},...explanation.choices.assistants.map(row=>({value:row.id,label:row.name||t.unnamed}))])}
         {pick('contextTeamId',t.contextDepartment,selection.contextTeamId??'none',[{value:'none',label:t.allDepartments},...data.teams.map(row=>({value:row.id,label:row.name}))])}
@@ -76,7 +76,7 @@ function AccessEventsContent({data,close}:Props){
   const label=(kind:string)=>kind.startsWith('department.')?t.auditDepartment:kind.startsWith('access.request.')?t.auditRequest:kind==='access.grant.revoke'?t.auditGrant:kind==='member.access.set'?t.auditMember:kind==='assistant.audience.set'?t.auditAssistant:t.auditOther;
   return <section className="min-w-0 space-y-3 rounded-xl border border-border p-4" aria-label={t.accessAudit}>
     <header className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">{t.accessAudit}</h2><Button className="min-h-11" variant="ghost" onClick={close}>{t.close}</Button></header>
-    {!page?resource.error?<><p role="alert">{t.historyChanged}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization"/>:<>
+    {!page?resource.error?<><p role="alert">{t.historyChanged}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>:<>
       {!page.events.length?<p className="text-sm">{t.auditEmpty}</p>:<ul className="space-y-2">{page.events.map(event=><li key={event.id} className="rounded-lg border border-border p-3 text-sm">
         <p>{label(event.kind)}</p><p>{event.actor?.name||t.unnamed}</p><time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
       </li>)}</ul>}
@@ -98,6 +98,6 @@ function AssistantExplanationData({assistantId,close}:{assistantId:string;close:
   const {workspaceId,me}=useWorkspaceContext(),t=useT().workspaceAccess;
   const key=workspaceAccessCacheKey(workspaceId,me.id),resource=useCachedResource(key,()=>fetchWorkspaceAccess(workspaceId));
   const data=useProtectedProjection(key,resource.data,close,resource.refresh);
-  if(!data)return resource.error?<p role="alert">{t.loadError}</p>:<SurfaceSkeletonFor surface="organization"/>;
+  if(!data)return resource.error?<p role="alert">{t.loadError}</p>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
   return <AccessExplanationPanel key={data.policyRevision} data={data} memberId={me.id} assistantId={assistantId} close={close}/>;
 }

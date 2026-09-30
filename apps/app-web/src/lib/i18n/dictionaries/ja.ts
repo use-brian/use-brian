@@ -275,7 +275,6 @@ export const ja: Dictionary = {
     "departments": "部署",
     "requests": "アクセス申請",
     "grants": "読み取り専用の許可",
-    "configureTeams": "部門を設定",
     "organization": "組織図を表示",
     "requestAccess": "アクセスを申請",
     "requestFor": "アクセス対象",
@@ -337,7 +336,6 @@ export const ja: Dictionary = {
     "memberRestriction": "表示されている人のみ選択できます。一覧外の人の割り当ては管理者に依頼してください。"
 },
   organization: {
-    hubDescription: "メンバー、部門、報告関係、アクセス権を一か所で管理します。",
     structureTab: "組織図",
     structureSummary: "報告関係と責任者を整理します。",
     peopleTab: "メンバー",
@@ -358,8 +356,8 @@ export const ja: Dictionary = {
     initializeUses: "既存の組織「{unit}」にこの主所属を追加します。",
 
     title: "組織",
+    sectionsAriaLabel: "組織のセクション",
     description: "同じワークスペースのメンバー、報告関係、Brianアシスタント。",
-    departments: "部門を管理",
     permissionHint: "報告関係によってデータへのアクセス権は付与されません。所属と読み取り範囲は「部門」、権限と申請は「アクセス権」で管理します。",
     adminHint: "管理者向けの全体表示です。ワークスペースの所有者と管理者は広いデータ権限を持ちます。",
     loadError: "組織を読み込めません。再読み込みして現在のアクセス権を確認してください。",

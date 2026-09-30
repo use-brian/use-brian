@@ -85,11 +85,17 @@ export function surfaceSkeletonKind(
   }
 }
 
-/** Render the skeleton matching a surface. */
+/**
+ * Render the skeleton matching a surface. `chrome={false}` drops the `h-11`
+ * chrome row for a pane that renders under a top bar the surface already
+ * painted (Organization's sections load inside its hub).
+ */
 export function SurfaceSkeletonFor({
   surface,
+  chrome = true,
 }: {
   surface: WorkspaceSurface | null;
+  chrome?: boolean;
 }) {
   switch (surfaceSkeletonKind(surface)) {
     case "brain":
@@ -97,9 +103,9 @@ export function SurfaceSkeletonFor({
     case "rail":
       return <RailSurfaceSkeleton />;
     case "grid":
-      return <GridSurfaceSkeleton />;
+      return <GridSurfaceSkeleton chrome={chrome} />;
     case "list":
-      return <ListSurfaceSkeleton />;
+      return <ListSurfaceSkeleton chrome={chrome} />;
     case "page":
       return <PageSurfaceSkeleton />;
   }
@@ -161,10 +167,17 @@ function PageSurfaceSkeleton() {
  * Operator surfaces (Tasks, CRM) - chrome row, a filter strip, then dense
  * table rows on the shared 28px / flexible / trailing-columns grid.
  */
-export function ListSurfaceSkeleton({ rows = 9 }: { rows?: number }) {
+export function ListSurfaceSkeleton({
+  rows = 9,
+  chrome = true,
+}: {
+  rows?: number;
+  /** Draw the `h-11` chrome row. OFF inside a surface that painted its own. */
+  chrome?: boolean;
+}) {
   return (
     <div className="flex h-full w-full flex-col animate-fade-in">
-      <SurfaceChromeSkeleton trailing={2} />
+      {chrome && <SurfaceChromeSkeleton trailing={2} />}
       <div className="flex items-center gap-2 border-b border-border/60 px-4 py-2.5">
         <Skeleton className="h-7 w-20 rounded-full" />
         <Skeleton className="h-7 w-24 rounded-full" />

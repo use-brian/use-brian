@@ -286,7 +286,6 @@ export const zhCN: Dictionary = {
     "departments": "部门",
     "requests": "访问申请",
     "grants": "只读授权",
-    "configureTeams": "设置部门",
     "organization": "查看组织图",
     "requestAccess": "申请访问权限",
     "requestFor": "授权对象",
@@ -348,7 +347,6 @@ export const zhCN: Dictionary = {
     "memberRestriction": "此处只能选择可见的人员，请管理员指派列表以外的人员。"
 },
   organization: {
-    hubDescription: "在同一处管理成员、部门、汇报关系和访问权限。",
     structureTab: "组织架构",
     structureSummary: "整理汇报关系与责任归属。",
     peopleTab: "成员",
@@ -369,8 +367,8 @@ export const zhCN: Dictionary = {
     initializeUses: "在现有单位“{unit}”新增此主要配置。",
 
     title: "组织",
+    sectionsAriaLabel: "组织导览",
     description: "查看工作区内的人员、汇报关系与 Brian 助理。",
-    departments: "管理部门",
     permissionHint: "汇报关系不会授予数据访问权。请在“部门”管理成员资格和读取范围，并在“访问权限”管理权限和申请。",
     adminHint: "此为管理员完整视图。工作区所有者及管理员保有广泛数据权限。",
     loadError: "无法加载组织。请刷新以确认当前权限。",
