@@ -44,6 +44,12 @@ export async function validateDerivedWriteInputs(
  * lineage for a derived write, locked FOR SHARE inside the writer's
  * transaction. Audience and consult checks judge current labels instead
  * (`readCurrentScopeSources`).
+ *
+ * ONE statement for every source. A round trip per source made a transcript
+ * flush cost `rows x sources` round trips (45 s for eight buffered tool rounds
+ * over ~100 sources on 2026-09-29). `unnest ... WITH ORDINALITY` evaluates
+ * `read_scope_source`, and so takes its locks, in array order, which keeps the
+ * shared sorted lock order every writer uses.
  */
 async function revalidateScopeSources(
   client: Pick<pg.PoolClient, 'query'>,
@@ -52,19 +58,24 @@ async function revalidateScopeSources(
 ): Promise<void> {
   const unique = new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
   // All writers use the same lock order, including mixed primitive prompts.
-  for(const source of [...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))) {
-    if(source.workspaceId!==workspaceId)throw new DerivedScopeError('scope_workspace_mismatch')
-    const result=await client.query<{snapshot:CanonicalEvidenceRow|null}>(
-      'SELECT read_scope_source($1,$2,$3) AS snapshot',[workspaceId,source.resourceKind,source.resourceId],
-    )
-    const row=result.rows[0]?.snapshot
+  const list=[...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))
+  for(const source of list)if(source.workspaceId!==workspaceId)throw new DerivedScopeError('scope_workspace_mismatch')
+  if(list.length===0)return
+  const { rows }=await client.query<{ord:number;snapshot:CanonicalEvidenceRow|null}>(
+    `SELECT t.ord::int AS ord, read_scope_source($1, t.kind, t.id) AS snapshot
+       FROM unnest($2::text[], $3::uuid[]) WITH ORDINALITY AS t(kind, id, ord)`,
+    [workspaceId,list.map(source=>source.resourceKind),list.map(source=>source.resourceId)],
+  )
+  const byOrd=new Map(rows.map(row=>[row.ord,row.snapshot]))
+  list.forEach((source,index)=>{
+    const row=byOrd.get(index+1)
     if(!row||row.held||row.retractedAt||row.validTo||row.version!==source.version
       ||resourceScopeKey(row)!==resourceScopeKey(source))throw new DerivedScopeError('scope_source_changed')
     // A historical event's audience is only half of its current authorization.
     // Require the live entity edge even if a future producer forgets to add it.
     if(source.resourceKind==='crm_event' && (!row.causalEntityId
       || !unique.has(`entity:${row.causalEntityId}`))) throw new DerivedScopeError('scope_evidence_missing')
-  }
+  })
 }
 
 /**
@@ -158,11 +169,12 @@ export async function recordDerivedResource(
       output.userId, output.assistantId, output.sensitivity, output.compartments, output.projectIds],
   )
   const unique = new Map(evidence.sources.map((source) => [`${source.resourceKind}:${source.resourceId}`, source]))
-  for (const source of [...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))) {
-    await client.query(
-      `INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
-       VALUES($1,$2,$3,$4,$5)`,
-      [output.workspaceId, rows[0].id, source.resourceKind, source.resourceId, source.version],
-    )
-  }
+  const list = [...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))
+  if (list.length === 0) return
+  // One multi-row insert: lineage is bounded by rows written, not by sources read.
+  await client.query(
+    `INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+     SELECT $1,$2,t.kind,t.id,t.version FROM unnest($3::text[],$4::uuid[],$5::text[]) AS t(kind,id,version)`,
+    [output.workspaceId, rows[0].id, list.map(s=>s.resourceKind), list.map(s=>s.resourceId), list.map(s=>s.version)],
+  )
 }

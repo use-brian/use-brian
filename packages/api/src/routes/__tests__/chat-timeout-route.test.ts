@@ -4,6 +4,7 @@ import request from 'supertest'
 
 const state = vi.hoisted(() => ({
   events: [] as any[], rows: [] as any[], bus: [] as any[], held: true, cancelled: false,
+  txClients: [] as Array<{ query: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> }>,
   beforeLoop: null as null | ((options: any) => Promise<void>),
   afterFirstEvent: null as null | ((options: any) => Promise<void>),
   successor: null as null | string,
@@ -13,7 +14,17 @@ const state = vi.hoisted(() => ({
 vi.mock('../../db/notify-listener.js', () => ({ registerNotifyChannel: vi.fn(), startNotifyListener: vi.fn() }))
 vi.mock('../_recovery-message.js', () => ({ composeRecoveryMessage: vi.fn() }))
 vi.mock('../_empty-turn-synthesis.js', () => ({ composeEmptyTurnSynthesis: vi.fn() }))
-vi.mock('../../db/client.js', () => ({ query: vi.fn(async () => ({ rows: [] })) }))
+vi.mock('../../db/client.js', () => ({
+  query: vi.fn(async () => ({ rows: [] })),
+  // The flush writes every buffered row inside one transaction on a pool
+  // client; `addSessionMessage` is mocked, so the client only sees
+  // BEGIN / COMMIT / ROLLBACK.
+  getPool: () => ({ connect: async () => {
+    const client = { query: vi.fn(async () => ({ rows: [] })), release: vi.fn() }
+    state.txClients.push(client)
+    return client
+  } }),
+}))
 vi.mock('../../db/users.js', () => ({
   getDefaultAssistant: async () => ({ id: 'assistant-test', kind: 'personal', name: 'Test', soul: 'Test', userId: 'user-test', workspaceId: 'workspace-test', clearance: 'internal' }),
   findAssistantById: async () => ({ id: 'assistant-test', kind: 'personal', name: 'Test', soul: 'Test', userId: 'user-test', workspaceId: 'workspace-test', clearance: 'internal' }),
@@ -85,7 +96,7 @@ async function run(extra: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   state.events = [{ type: 'error', error: new Error('Stream idle 30000ms') }]
-  state.rows = []; state.bus = []; state.held = true; state.cancelled = false
+  state.rows = []; state.bus = []; state.txClients = []; state.held = true; state.cancelled = false
   state.beforeLoop = null; state.afterFirstEvent = null; state.successor = null; state.onRelease = null; state.session.status = 'idle'; state.session.title = 'Existing title'
   vi.clearAllMocks()
   vi.spyOn(console, 'info').mockImplementation(() => {})
@@ -169,6 +180,42 @@ describe('actual chat route provider timeout (HTTP + real SSE/persistence wiring
     expect(composeRecoveryMessage).not.toHaveBeenCalled()
     expect(composeEmptyTurnSynthesis).not.toHaveBeenCalled()
     expect(console.info).toHaveBeenCalledWith('[chat] provider-error closing outcome', expect.objectContaining({ outcome: 'failed', persisted: false, mirrored: false, delivered: false }))
+  })
+
+  it('saves every buffered row in one transaction and announces nothing when a later row fails', async () => {
+    state.events = [...toolTurns(3), ...state.events]
+    state.beforeLoop = async () => {
+      vi.mocked(addSessionMessage).mockImplementation(async (row, client) => {
+        // The first turn's tool-result row fails mid-flush, after its
+        // assistant row was already written on the transaction client.
+        if (client && row.role === 'user') throw new Error('write unavailable')
+        const saved = { ...row, createdAt: new Date(), id: `row-${state.rows.length}`, sequenceNum: state.rows.length }
+        state.rows.push(saved)
+        return saved as any
+      })
+    }
+    const response = await run()
+    expect(state.txClients).toHaveLength(1)
+    const [tx] = state.txClients
+    expect(tx.query.mock.calls.map((call) => call[0])).toEqual(['BEGIN', 'ROLLBACK'])
+    expect(tx.release).toHaveBeenCalledTimes(1)
+    // Every flushed row went through the transaction client, none through the pool.
+    const flushed = vi.mocked(addSessionMessage).mock.calls.filter(([, client]) => client !== undefined)
+    expect(flushed.map(([row]) => row.role)).toEqual(['assistant', 'user'])
+    for (const [, client] of flushed) expect(client).toBe(tx)
+    // Rolled-back rows are never announced as saved, to the stream or the bus.
+    expect(frames(response.text).some((e) => e.event === 'assistant_message_saved')).toBe(false)
+    expect(state.bus.some((e) => e.kind === 'assistant_message_saved')).toBe(false)
+    expect(frames(response.text).filter((e) => e.event === 'error')).toHaveLength(1)
+  })
+
+  it('commits the buffered rows in one transaction before announcing them', async () => {
+    state.events = [...toolTurns(2), ...state.events]
+    expectClosed((await run()).text)
+    // The provider-error closure is a second, separate flush after the rows.
+    const statements = state.txClients.map((tx) => tx.query.mock.calls.map((call) => call[0]))
+    expect(statements[0]).toEqual(['BEGIN', 'COMMIT'])
+    for (const tx of state.txClients) expect(tx.release).toHaveBeenCalledTimes(1)
   })
 
   it.each(['remote-stop', 'lease-lost', 'local-stop'] as const)('does not close or synthesize after %s', async (kind) => {

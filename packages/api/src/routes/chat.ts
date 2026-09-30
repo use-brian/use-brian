@@ -15,7 +15,8 @@ import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isSharedAudienceSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
-import { query } from '../db/client.js'
+import { query, getPool } from '../db/client.js'
+import { createTurnTiming } from './turn-timings.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import {
   resolvePinnedContext,
@@ -2416,6 +2417,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       leaseHeartbeat = null
     }
     let sseKeepalive: ReturnType<typeof setInterval> | null = null
+    // Per-phase wall-clock of this turn, reported once from `finally` as the
+    // `turn_timings` analytics event (docs/architecture/platform/analytics.md)
+    // so a slow turn names its phase instead of being inferred from logs.
+    const turnTiming = createTurnTiming()
+    let turnTimingIdentity: { userId: string; assistantId: string; sessionId: string } | null = null
+    let turnTimingOutcome = 'completed'
     // The token this turn registered in `activeTurnAborts`, kept SEPARATE from
     // `turnLeaseToken` because the success and catch paths null that one once
     // they have released the lock — leaving the `finally` unable to identify
@@ -3067,6 +3074,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
 
       sessionIdForError = session.id
+      turnTimingIdentity = { userId: user.id, assistantId: assistant.id, sessionId: session.id }
 
       const isRoomSession = isSharedChatSession(session)
       const scopeAccumulator = new ContextScopeAccumulator({
@@ -3085,7 +3093,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         envelope: inputMessageScope,
       })
       const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
-      const assertDeliveryAudience = async (): Promise<void> => {
+      const assertDeliveryAudience = (): Promise<void> => turnTiming.time('audience_check', async () => {
         await authority.assertCurrent()
         const decision = await authorizeDeliveryAudience({
           workspaceId: assistant.workspaceId ?? '',
@@ -3106,7 +3114,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           compartments: decision.evidence.compartments,
           projectIds: decision.evidence.projectIds,
         })
-      }
+      })
       // A proxy can sever the browser stream while its upstream POST stays open.
       // Publish every turn's capped activity so an authenticated reconnect sees
       // ongoing tools even when this server never observed a disconnect.
@@ -4376,6 +4384,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const readClearance = turnScope.access.clearance ?? assistant.clearance
       const readCompartments = turnScope.effectiveCompartments
       const viewerCtx = turnScope.access
+      turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
         options.memoryStore.getIdentity(viewerCtx),
@@ -5779,6 +5788,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         if (!admittedTools.has(name)) allTools.delete(name)
       }
       const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
+      turnTiming.mark('context')
       const {
         enrichConfirmation,
         unavailable: unavailableCapabilities,
@@ -5827,6 +5837,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             ? options.introspectionTools
             : undefined,
       })
+      turnTiming.mark('tools_inject')
       if (knowledgeCapturePrompt) privateRuntimeContextParts.push(knowledgeCapturePrompt)
 
       let preparedCommand = message ? prepareSlashCommand(message) : null
@@ -6784,6 +6795,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           )
           return
         }
+        turnTiming.mark('loop')
         await assertDeliveryAudience()
         flushed = true
 
@@ -6803,71 +6815,123 @@ export function chatRoutes(options: WebChatOptions): Router {
           return -1
         })()
 
-        for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
-          await assertDeliveryAudience()
-          const turn = pendingAssistantTurns[turnIdx]
-          // Pure empty response (safety filter / MAX_TOKENS with zero
-          // content). Nothing to persist for this turn — the loop just exits
-          // without appending a blank message.
-          if (turn.content.length === 0) continue
+        // ONE transaction for every buffered row (scoped-context.md → "Live
+        // authority for interactive and public turns"). The audience was
+        // verified just above; the writes take about a second, then the lease
+        // and the audience are verified again once the rows are committed,
+        // exactly where the old per-row sequence checked after each commit.
+        // A refusal before the transaction persists nothing; one after it
+        // reports `operationMayHaveExecuted`. Per-row checks cost two audience
+        // and two lease resolutions per turn and, with a round trip per
+        // source per row, took 45 s for eight tool rounds on 2026-09-29.
+        // The post-write check runs outside the transaction on purpose: with
+        // PG_POOL_MAX=2 a check that needs a second system-pool slot while
+        // the transaction holds one would starve under load and lose the
+        // reply. Client-facing events are emitted only after COMMIT, so a
+        // rolled-back row is never announced as saved.
+        type SavedTurn = {
+          stored: SessionMessage
+          isLast: boolean
+          attachments: typeof outboundAttachments
+        }
+        const savedTurns: SavedTurn[] = []
+        await authority.execute(async () => {
+          const tx = await getPool().connect()
+          try {
+            await tx.query('BEGIN')
+            for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
+              const turn = pendingAssistantTurns[turnIdx]
+              // Pure empty response (safety filter / MAX_TOKENS with zero
+              // content). Nothing to persist for this turn — the loop just
+              // exits without appending a blank message.
+              if (turn.content.length === 0) continue
 
-          // `app` assistants (doc / feed) author their own soul and are
-          // never served the FOLLOW_UP_QUESTIONS_ADDENDUM — but the model can
-          // still *volunteer* a `<followup>[...]</followup>` chip tag, and once
-          // it's persisted raw it (1) renders as literal text on these surfaces
-          // and (2) re-teaches itself via history replay on the next turn.
-          // Strip it from text blocks before it lands in session_messages.
-          // See docs/architecture/features/follow-up-questions.md → "app surfaces".
-          //
-          // Same defense for the confabulated `<comment-thread-reply pageId=…>`
-          // wrapper a doc assistant sometimes invents around a comment-thread
-          // reply (no prompt defines it) — left raw it renders as tag soup and
-          // leaks an internal page UUID on the comment surfaces.
-          // See docs/architecture/features/doc-comments.md → "Reply routing".
-          const content =
-            assistant.kind === 'app'
-              ? turn.content
-                  .map((block) =>
-                    block.type === 'text'
-                      ? { ...block, text: stripCommentThreadReplyTag(stripFollowUps(block.text)) }
-                      : block,
-                  )
-                  .filter((block) => !(block.type === 'text' && block.text.length === 0))
-              : turn.content
-          // The turn was nothing but a chip tag (no real answer / tool calls).
-          if (content.length === 0) continue
+              // `app` assistants (doc / feed) author their own soul and are
+              // never served the FOLLOW_UP_QUESTIONS_ADDENDUM — but the model
+              // can still *volunteer* a `<followup>[...]</followup>` chip tag,
+              // and once it's persisted raw it (1) renders as literal text on
+              // these surfaces and (2) re-teaches itself via history replay on
+              // the next turn. Strip it from text blocks before it lands in
+              // session_messages. See
+              // docs/architecture/features/follow-up-questions.md → "app surfaces".
+              //
+              // Same defense for the confabulated `<comment-thread-reply pageId=…>`
+              // wrapper a doc assistant sometimes invents around a comment-thread
+              // reply (no prompt defines it) — left raw it renders as tag soup
+              // and leaks an internal page UUID on the comment surfaces.
+              // See docs/architecture/features/doc-comments.md → "Reply routing".
+              const content =
+                assistant.kind === 'app'
+                  ? turn.content
+                      .map((block) =>
+                        block.type === 'text'
+                          ? { ...block, text: stripCommentThreadReplyTag(stripFollowUps(block.text)) }
+                          : block,
+                      )
+                      .filter((block) => !(block.type === 'text' && block.text.length === 0))
+                  : turn.content
+              // The turn was nothing but a chip tag (no real answer / tool calls).
+              if (content.length === 0) continue
 
-          const storedAssistantMsg = await authority.execute(() => addSessionMessage({
-            sessionId: session.id,
-            role: 'assistant',
-            content,
-            // The ANSWERING assistant (T9) — in a multi-assistant room this
-            // may differ from the session's binding; per-reply avatars and
-            // foreign-voice assembly labels read it.
-            senderAssistantId: assistant.id,
-            attachments:
-              turnIdx === lastNonEmptyIdx && outboundAttachments.length > 0
-                ? outboundAttachments
-                : undefined,
-            ...currentTurnWrite(),
-          }))
-          await assertDeliveryAudience()
-          lastAssistantMessageId = storedAssistantMsg.id
-          turnLedgerHandle.bindAssistantMessageId(storedAssistantMsg.id)
+              const isLast = turnIdx === lastNonEmptyIdx
+              const attachments = isLast && outboundAttachments.length > 0 ? outboundAttachments : []
+              const storedAssistantMsg = await addSessionMessage({
+                sessionId: session.id,
+                role: 'assistant',
+                content,
+                // The ANSWERING assistant (T9) — in a multi-assistant room this
+                // may differ from the session's binding; per-reply avatars and
+                // foreign-voice assembly labels read it.
+                senderAssistantId: assistant.id,
+                attachments: attachments.length > 0 ? attachments : undefined,
+                ...currentTurnWrite(),
+              }, tx)
+              savedTurns.push({ stored: storedAssistantMsg, isLast, attachments })
+
+              // Synthesise stubs for any tool_use in this turn's content that
+              // the executor failed to produce a real result for.
+              const missing = synthesizeMissingToolResults(
+                turn.content,
+                turn.toolResults,
+                synthesisReason,
+              )
+              const allResults = [...turn.toolResults, ...missing]
+              if (allResults.length > 0) {
+                await addSessionMessage({
+                  sessionId: session.id,
+                  role: 'user',
+                  content: allResults,
+                  ...currentTurnWrite(),
+                }, tx)
+              }
+            }
+            await tx.query('COMMIT')
+          } catch (error) {
+            await tx.query('ROLLBACK').catch(() => {})
+            throw error
+          } finally {
+            tx.release()
+          }
+        })
+        if (savedTurns.length > 0) await assertDeliveryAudience()
+
+        for (const saved of savedTurns) {
+          lastAssistantMessageId = saved.stored.id
+          turnLedgerHandle.bindAssistantMessageId(saved.stored.id)
 
           // The UI uses `assistant_message_saved` to attach retry/edit/
           // feedback actions to the most recent bubble. Only emit for the
           // last non-empty turn — intermediate tool_use turns render as
           // timeline entries, not message bubbles, so the UI doesn't need
           // their ids.
-          if (turnIdx === lastNonEmptyIdx) {
-            sendEvent('assistant_message_saved', { id: storedAssistantMsg.id })
+          if (saved.isLast) {
+            sendEvent('assistant_message_saved', { id: saved.stored.id })
             // File cards (sendFile) — the streaming client renders these
             // at turn end; refetches read them from the persisted row.
-            if (outboundAttachments.length > 0) {
+            if (saved.attachments.length > 0) {
               sendEvent('attachments', {
-                messageId: storedAssistantMsg.id,
-                attachments: outboundAttachments,
+                messageId: saved.stored.id,
+                attachments: saved.attachments,
               })
             }
           }
@@ -6880,28 +6944,11 @@ export function chatRoutes(options: WebChatOptions): Router {
               kind: 'assistant_message_saved',
               sessionId: session.id,
               payload: {
-                id: storedAssistantMsg.id,
-                sequenceNum: storedAssistantMsg.sequenceNum,
-                content: storedAssistantMsg.content,
+                id: saved.stored.id,
+                sequenceNum: saved.stored.sequenceNum,
+                content: saved.stored.content,
               },
             })
-          }
-
-          // Synthesise stubs for any tool_use in this turn's content that
-          // the executor failed to produce a real result for.
-          const missing = synthesizeMissingToolResults(
-            turn.content,
-            turn.toolResults,
-            synthesisReason,
-          )
-          const allResults = [...turn.toolResults, ...missing]
-          if (allResults.length > 0) {
-            await authority.execute(() => addSessionMessage({
-              sessionId: session.id,
-              role: 'user',
-              content: allResults,
-              ...currentTurnWrite(),
-            }))
           }
         }
 
@@ -6948,6 +6995,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // Drop queued recalls — there's no message id to attach them to.
           recallBuffer.discard()
         }
+        turnTiming.mark('flush')
       }
 
       // ── Runtime-context provenance ────────────────────────────
@@ -7081,6 +7129,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
+        turnTiming.mark('prompt')
+        // Tool executions arrive as `tool_start` per call and ONE `tool_result`
+        // per batch; the batch's wall-clock is what the turn waited for.
+        let toolBatchStartedAt: number | null = null
         for await (const event of queryLoop({
           ledger: turnLedgerHandle.ledger,
           // BYO-aware: when the workspace set its own Gemini key, the main
@@ -7351,6 +7403,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (abortController.signal.aborted) break
 
           if (event.type === 'text_delta') {
+            turnTiming.count('text_delta')
             if (event.text.trim()) hasDeliveredText = true
             sendEvent('text_delta', { text: event.text })
             // Mirror onto the session bus (throttled) so a reconnected client
@@ -7367,6 +7420,8 @@ export function chatRoutes(options: WebChatOptions): Router {
             turnStream.onReasoningDelta(event.text)
           }
           if (event.type === 'tool_start') {
+            turnTiming.count('tool_call')
+            toolBatchStartedAt ??= Date.now()
             // Clients clear tool narration from the answer when a tool starts.
             // It must not suppress a closing message after a later timeout.
             hasDeliveredText = false
@@ -7423,6 +7478,10 @@ export function chatRoutes(options: WebChatOptions): Router {
             pendingClaimLedger = event.claims
           }
           if (event.type === 'tool_result') {
+            if (toolBatchStartedAt !== null) {
+              turnTiming.add('tool_exec', Date.now() - toolBatchStartedAt)
+              toolBatchStartedAt = null
+            }
             for (const block of event.results) {
               if (block.type === 'tool_result') {
                 // For spawnWorker results, extract the workerId so the frontend
@@ -7999,6 +8058,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             })
           }
         }
+        turnTiming.mark('loop')
 
         // Happy-path flush: the loop completed without throwing. Any
         // tool_use without a result at this point means the executor
@@ -8690,6 +8750,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       sendEvent('done', {})
       res.end()
     } catch (err) {
+      turnTimingOutcome = 'error'
       // A `ChatTurnRefusal` is not a crash — it is this route declining the
       // turn after the SSE headers went out, and it arrives here only
       // because the catch owns the cleanup (see the class doc). It carries
@@ -8773,6 +8834,23 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
       res.end()
     } finally {
+      // The turn's per-phase wall-clock, once per request. Only a request that
+      // reached the query loop is a turn (queued mid-turn input, 409s and
+      // pre-flight refusals are not); those still surface through
+      // chat_route_error. Emitted from `finally` so error paths report too.
+      if (turnTimingIdentity && 'prompt_ms' in turnTiming.snapshot()) {
+        turnTiming.mark('post')
+        const timings = turnTiming.snapshot()
+        console.log(
+          `[chat] turn timings session ${turnTimingIdentity.sessionId} ${turnTimingOutcome}: `
+          + Object.entries(timings).map(([k, v]) => `${k}=${v}`).join(' '),
+        )
+        options.analytics?.logEvent({
+          ...turnTimingIdentity,
+          eventName: 'turn_timings', channelType: 'web',
+          metadata: { outcome: sanitize(turnTimingOutcome), ...timings },
+        })
+      }
       // Stop the lease heartbeat before anything else — a tick that fires
       // after the release would resurrect nothing (it is token-guarded) but
       // would keep a timer alive past the turn.
