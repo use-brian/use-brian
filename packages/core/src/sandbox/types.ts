@@ -202,6 +202,9 @@ export const NO_EXTENSION_MESSAGE = `No Use Brian browser extension is connected
  * cloud mode resolves the task's sandbox per call (stateless orchestrator).
  */
 export interface BrowserProvider {
+  listDownloads?(ctx: BrowserCallContext): Promise<import('./browser-files.js').BrowserDownloads>
+  readDownload?(ctx: BrowserCallContext, id: string, offset: number): Promise<import('./browser-files.js').BrowserDownloadChunk>
+  uploadFile?(ctx: BrowserCallContext, ref: string, name: string, data: string): Promise<void>
   readonly kind: 'local' | 'cloud'
   fillReference?(scope: ProtectedFillScope, items: ProtectedFillItem[]): Promise<void>
   navigate(ctx: BrowserCallContext, url: string): Promise<BrowserNavigateResult>
