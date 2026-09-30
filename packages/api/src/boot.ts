@@ -497,7 +497,7 @@ import { openRecordingsRoutes } from './routes/recordings.js'
 import { createMeetingTagsTool } from './recordings/meeting-tags-tool.js'
 import { recordingLiveRoutes } from './routes/recording-live.js'
 import { createDocGateway } from './doc/doc-gateway.js'
-import { createFilesApi, createSingletonFilesClientResolver, storageLimitBytesForPlan, workspaceFileReadRevision, type FilesClientResolver } from './files/files-api.js'
+import { createFilesApi, createSingletonFilesClientResolver, workspaceFileReadRevision, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
@@ -1053,6 +1053,15 @@ export interface OpenApiPorts {
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
   /** Hosted recording-duration credit quote; absent in OSS/self-hosted. */
   recordingSurchargeCredits?: (durationSeconds: number) => number
+  /**
+   * Hosted plan-tiered workspace storage quota (`getWorkspacePlan` ->
+   * `storageLimitBytesForPlan`). Absent = UNLIMITED: a self-host or Outpost
+   * install's disk or bucket is its own, and the plan table is a hosted
+   * billing construct. Until 2026-10-01 the open boot derived this from the
+   * workspace `plan` column in both editions, which put every OSS install and
+   * every Outpost on the free tier's 1 GiB.
+   */
+  storageLimitBytesFor?: (workspaceId: string) => Promise<number>
   /**
    * Hosted standalone Generate-from-Brain pricing + success charge. The open
    * route remains fully usable without it and reports zero credits in OSS.
@@ -4457,10 +4466,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return null
     }
     filesResolver = createCachedByoFilesResolver({ lookup: lookupStorageBinding, fallback: defaultFilesResolver })
-    // One plan-derived storage cap shared by both quota gates (fileWrite /
-    // fileAppend and the chunked Work Bench uploads) so they cannot disagree.
-    const storageLimitBytesFor = async (workspaceId: string) =>
-      storageLimitBytesForPlan(await getWorkspacePlan(workspaceId))
+    // One storage cap shared by both quota gates (fileWrite / fileAppend and
+    // the chunked Work Bench uploads) so they cannot disagree. Hosted injects
+    // the plan-derived resolver; the open default is no cap at all.
+    const storageLimitBytesFor: (workspaceId: string) => Promise<number> =
+      ports.storageLimitBytesFor ?? (async () => Number.POSITIVE_INFINITY)
     filesApi = createFilesApi({
       resolver: filesResolver,
       store: workspaceFilesStore,

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createFileIngestWorker, type FileIngestWorkerDeps } from '../file-ingest-worker.js'
+import { MAX_INGEST_PARSE_BYTES, createFileIngestWorker, type FileIngestWorkerDeps } from '../file-ingest-worker.js'
 import type { FileIngestJob } from '../../db/file-ingest-jobs-store.js'
 
 function job(over: Partial<FileIngestJob> = {}): FileIngestJob {
@@ -47,6 +47,41 @@ function claimOnce(j: FileIngestJob) {
 }
 
 describe('[COMP:files/file-ingest-worker] file-ingest drain loop', () => {
+  // The worker reads a file whole into memory; past the parse ceiling that
+  // would take the process down, so the guard runs on `stat` BEFORE readBytes
+  // (the MCP and passive-promotion lanes enqueue without the route's answer).
+  it('GUARD: skips a file past the parse ceiling before reading a byte', async () => {
+    const readBytes = vi.fn(async () => readOk('text/csv', 'dump.csv'))
+    const deps = baseDeps({
+      claim: claimOnce(job()),
+      filesApi: {
+        readBytes,
+        stat: vi.fn(async () => ({ ok: true, value: { sizeBytes: MAX_INGEST_PARSE_BYTES + 1 } }) as never),
+      },
+    })
+    const w = createFileIngestWorker(deps)
+    await w.tick()
+
+    expect(readBytes).not.toHaveBeenCalled()
+    expect(deps.parse).not.toHaveBeenCalled()
+    expect(deps.setIndexing).toHaveBeenCalledWith('file-1', expect.objectContaining({
+      status: 'skipped', reason: 'too_large_to_parse',
+    }))
+    expect(deps.markDone).toHaveBeenCalledWith('job-1')
+  })
+
+  it('reads and parses a file at the parse ceiling', async () => {
+    const deps = baseDeps({
+      claim: claimOnce(job()),
+      filesApi: {
+        readBytes: vi.fn(async () => readOk('text/markdown')),
+        stat: vi.fn(async () => ({ ok: true, value: { sizeBytes: MAX_INGEST_PARSE_BYTES } }) as never),
+      },
+    })
+    await createFileIngestWorker(deps).tick()
+    expect(deps.parse).toHaveBeenCalled()
+  })
+
   it('claim -> parse -> index -> brainIngest -> stamp -> done for a text artifact', async () => {
     const deps = baseDeps({ claim: claimOnce(job()) })
     const w = createFileIngestWorker(deps)

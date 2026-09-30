@@ -89,6 +89,7 @@ import {
 import { DocSidebar } from "./doc-sidebar";
 import { InboxPanel } from "./inbox-panel";
 import { WorkspaceFileDropBoundary } from "./workspace-file-drop";
+import { BrainIntakeTray } from "@/components/chrome/brain-intake-tray";
 import { useSidebarData } from "./doc-sidebar-data";
 import {
   TeamspaceCreateDialog,
@@ -845,25 +846,33 @@ export function WorkspaceChrome({
           </div>
         )}
       </div>
-      {/* Reserved app chrome: sync changes never cover or resize the editor. */}
+      {/* Reserved app chrome: sync changes never cover or resize the editor.
+          The brain-intake chip + tray share the row but sit OUTSIDE the sync
+          live region, so an upload tick never re-announces the sync sentence. */}
       <div
-        data-workspace-sync-status
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        title={syncDescription || syncTitle}
-        className={cn(
-          "flex h-[calc(1.75rem+env(safe-area-inset-bottom))] shrink-0 items-center gap-2 border-t border-sidebar-border bg-sidebar py-0 pl-3 pr-20 pb-[env(safe-area-inset-bottom)] text-[11px]",
-          hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
-        )}
+        data-workspace-footer
+        className="relative flex h-[calc(1.75rem+env(safe-area-inset-bottom))] shrink-0 items-center gap-2 border-t border-sidebar-border bg-sidebar py-0 pl-3 pr-20 pb-[env(safe-area-inset-bottom)] text-[11px]"
       >
-        {offlineState.reconnecting && !offlineState.offline && offlineState.paused === 0 ? (
-          <RefreshCw aria-hidden className="size-3 shrink-0 animate-spin" />
-        ) : (
-          <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
-        )}
-        <span className="shrink-0 font-medium">{syncTitle}</span>
-        {syncDescription ? <span className="sr-only min-w-0 opacity-80 md:not-sr-only md:truncate">{syncDescription}</span> : null}
+        <div
+          data-workspace-sync-status
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          title={syncDescription || syncTitle}
+          className={cn(
+            "flex min-w-0 shrink items-center gap-2",
+            hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
+          )}
+        >
+          {offlineState.reconnecting && !offlineState.offline && offlineState.paused === 0 ? (
+            <RefreshCw aria-hidden className="size-3 shrink-0 animate-spin" />
+          ) : (
+            <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
+          )}
+          <span className="shrink-0 font-medium">{syncTitle}</span>
+          {syncDescription ? <span className="sr-only min-w-0 opacity-80 md:not-sr-only md:truncate">{syncDescription}</span> : null}
+        </div>
+        <BrainIntakeTray workspaceId={workspaceId} />
       </div>
     </WorkspaceFileDropBoundary>
   );

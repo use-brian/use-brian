@@ -29,7 +29,14 @@ import {
 import { buildStorageKey, buildStorageUri } from './gcs-client.js'
 
 export const CHUNKED_UPLOAD_PART_BYTES = 8 * 1024 * 1024
-export const MAX_CHUNKED_UPLOAD_BYTES = 1024 * 1024 * 1024
+/**
+ * Per-file ceiling of the chunked lane. 1 GiB until 2026-10-01; raised when an
+ * Outpost user needed a document past it. Safe to raise because completion
+ * streams the parts into the final object rather than buffering them; what a
+ * file that size means for the brain is decided by the ingest worker's parse
+ * ceiling (`MAX_INGEST_PARSE_BYTES`), not here.
+ */
+export const MAX_CHUNKED_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024
 export const CHUNKED_UPLOAD_TTL_MS = 24 * 60 * 60 * 1000
 
 export type ChunkedUploadErrorKind =
@@ -183,7 +190,7 @@ export function createChunkedFileUploadService(
         throw new ChunkedUploadError('invalid', 'sizeBytes must be a positive integer')
       }
       if (input.sizeBytes > MAX_CHUNKED_UPLOAD_BYTES) {
-        throw new ChunkedUploadError('too_large', 'File exceeds the 1 GiB upload limit')
+        throw new ChunkedUploadError('too_large', `File exceeds the ${MAX_CHUNKED_UPLOAD_BYTES / (1024 * 1024 * 1024)} GiB upload limit`)
       }
       const name = safeFileName(input.fileName)
       const path = `/uploads/${name}`
