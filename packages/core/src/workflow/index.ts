@@ -80,6 +80,7 @@ export {
   type BuildToolRegistry,
   type DeliverToChannel,
   type DeliveryOutcome,
+  type DeliveryAudienceDenialDetail,
   type SendPageResult,
 } from './executor.js'
 

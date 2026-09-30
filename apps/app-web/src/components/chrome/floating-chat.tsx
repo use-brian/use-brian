@@ -107,6 +107,7 @@ import {
   readActiveAssistantId,
   writeActiveAssistantId,
 } from "@/lib/active-assistant";
+import { nextReplyVoiceHint } from "@/lib/next-reply-voice";
 import {
   derivePageIcon,
   getAssistantIdentity,
@@ -3298,6 +3299,13 @@ export function FloatingChat({
   );
 
   const messages = session.state.messages as MessageWithViews[];
+  // Doc-dock per-turn re-address: a mid-thread switch keeps the transcript,
+  // so name who the NEXT reply comes from (doc.md → "Next-reply hint").
+  // Hidden while streaming: queued input rides the running turn's voice.
+  const nextReplyVoiceId =
+    isDocOrigin && !isStreaming
+      ? nextReplyVoiceHint(messages, selectedAssistantId)
+      : null;
   const showEmpty = messages.length === 0 && !isStreaming;
   // A browser tool anywhere in this session's activity (live timeline or a
   // restored receipt) arms the live-browser chip's task probe.
@@ -3757,6 +3765,22 @@ export function FloatingChat({
                 {othersRun.actor?.name
                   ? format(tRun.guard, { name: othersRun.actor.name })
                   : tRun.guardAnon}
+              </span>
+            </div>
+          ) : null}
+          {nextReplyVoiceId && activeAssistant ? (
+            <div
+              className="mb-2 flex items-center gap-1.5 text-[11px] text-muted-foreground"
+              aria-live="polite"
+            >
+              <AssistantAvatar
+                id={activeAssistant.id}
+                name={activeAssistant.name}
+                iconSeed={activeAssistant.iconSeed ?? undefined}
+                size="xs"
+              />
+              <span className="min-w-0 truncate">
+                {format(t.nextReplyFrom, { name: activeAssistant.name })}
               </span>
             </div>
           ) : null}
