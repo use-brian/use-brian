@@ -14,6 +14,30 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  workflowPublicationConsent: {
+    "title": "Prepared-output publication",
+    "intro": "Allow this saved step to publish generated text derived from your private context to its fixed Telegram destination. This is separate from saving the workflow.",
+    "warning": "Prepared output may disclose your private information to destination readers. This does not guarantee secrecy or give subscribers access to your memory. Other users’ private sources are never allowed. Destination clearance and Team/Project limits still apply. Consent expires after 30 days; any workflow update invalidates it. Approval or reapproval applies only to new runs.",
+    "confirmTitle": "Approve publication?",
+    "confirm": "I understand, approve publication",
+    "cancel": "Cancel",
+    "approve": "Approve",
+    "reapprove": "Reapprove",
+    "revoke": "Revoke",
+    "active": "Active",
+    "inactive": "Inactive or expired",
+    "approvedAt": "Approved",
+    "expiresAt": "Expires",
+    "step": "Step",
+    "destination": "Telegram destination",
+    "integration": "Integration",
+    "permission": "Only the workflow creator who remains a workspace owner or admin can manage consent.",
+    "dirty": "Save or discard unsaved changes before approving publication.",
+    "empty": "No saved steps are eligible. Use an assistant step without an actionable question, with a fixed Telegram group/channel destination and an explicit integration. Managed and external-client workflows are excluded.",
+    "error": "Consent could not be verified or changed. Refresh and check your permissions and saved workflow before trying again.",
+    "refresh": "Refresh",
+    "version": "The saved workflow version changed. Refresh before approving."
+},
   feedLinkedIn: {
     help: {
       "media_link_conflict": "A link post supports one thumbnail, not image attachments. Remove the attachments or choose Post.",
