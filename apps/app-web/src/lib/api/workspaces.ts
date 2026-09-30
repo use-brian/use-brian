@@ -155,6 +155,36 @@ export class WorkspaceApiError extends Error {
 }
 
 /**
+ * Transfer workspace ownership to another existing member
+ * (workspaces.md → "Ownership transfer"). Owner-only on the server; on
+ * success the caller is demoted to admin. Both entry points (General →
+ * Advanced and the Members row menu) go through here. A rejection throws a
+ * `WorkspaceApiError` carrying the server's readable message when it sent
+ * one (e.g. the Free-plan recipient cap), else its error code.
+ */
+export async function transferWorkspaceOwnership(
+  workspaceId: string,
+  newOwnerUserId: string,
+  apiUrl = API_URL,
+): Promise<void> {
+  const res = await authFetch(
+    `${apiUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/transfer-ownership`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ newOwnerUserId }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as {
+      message?: string;
+      error?: string;
+    };
+    throw new WorkspaceApiError(body.message ?? body.error ?? "", res.status);
+  }
+}
+
+/**
  * PATCH the workspace's default recording blueprint. `templateId` is a blueprint
  * template id, or `null` to clear it (ingest-only). The backend validates the
  * template is a same-workspace blueprint and 400s otherwise — surfaced as a
