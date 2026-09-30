@@ -38,6 +38,7 @@ import {
   setWorkspaceDefaultBlueprint,
   setWorkspaceInboxRetention,
   setWorkspaceTranscriptionScript,
+  transferWorkspaceOwnership,
   uploadWorkspaceIcon,
   removeWorkspaceIcon,
   MAX_WORKSPACE_ICON_BYTES,
@@ -650,29 +651,12 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
     if (!data || !transferTarget) return;
     setTransferError(null);
     try {
-      const res = await authFetch(
-        `${API_URL}/api/workspaces/${data.id}/transfer-ownership`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ newOwnerUserId: transferTarget }),
-        },
-      );
-      if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as {
-          message?: string;
-          error?: string;
-        };
-        setTransferError(
-          err.message ?? err.error ?? t.workspaceDetailInline.transferOwnershipFailed,
-        );
-        return;
-      }
+      await transferWorkspaceOwnership(data.id, transferTarget, API_URL);
       setTransferDone(true);
       setTransferTarget("");
       await refetch();
-    } catch {
-      setTransferError(t.workspaceDetailInline.networkError);
+    } catch (err) {
+      setTransferError(transferErrorText(err, t));
     } finally {
       setTransferOpen(false);
     }
@@ -1176,6 +1160,17 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
   );
 }
 
+// The readable line for a failed ownership transfer: the server's own
+// message when it sent one (the Free-plan recipient cap is a real outcome the
+// owner has to read), the generic failure otherwise, and the network line when
+// the request never got an answer.
+function transferErrorText(err: unknown, t: ReturnType<typeof useT>): string {
+  if (err instanceof WorkspaceApiError) {
+    return err.message || t.workspaceDetailInline.transferOwnershipFailed;
+  }
+  return t.workspaceDetailInline.networkError;
+}
+
 // Type-to-confirm dialog for the irreversible workspace-level destructive
 // actions (delete workspace, flush workspace data). A portaled base-ui
 // AlertDialog layered above the settings modal (z-[60]); it deliberately
@@ -1294,6 +1289,10 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
   const [results, setResults] = useState<InviteResult[] | null>(null);
   const [copiedLink, setCopiedLink] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingInvitation[]>([]);
+  // Ownership transfer from a member row's menu (same route and confirm gate
+  // as General -> Advanced; workspaces.md -> "Ownership transfer").
+  const [transferTarget, setTransferTarget] = useState<string | null>(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
 
   const currentUser = getUserInfo();
 
@@ -1439,6 +1438,21 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
       await refetch();
     } catch {
       // ignore
+    }
+  }
+
+  // On success the caller is demoted to admin, so the refetch drops every
+  // owner-only row menu in this section.
+  async function transferOwnership() {
+    if (!data || !transferTarget) return;
+    setTransferError(null);
+    try {
+      await transferWorkspaceOwnership(data.id, transferTarget, API_URL);
+      await refetch();
+    } catch (err) {
+      setTransferError(transferErrorText(err, t));
+    } finally {
+      setTransferTarget(null);
     }
   }
 
@@ -1640,6 +1654,9 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
         <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
           {format(t.workspaceDetailInline.membersHeader, { count: shownMembers.length })}
         </h3>
+        {transferError && (
+          <p role="alert" className="text-[13px] text-red-400">{transferError}</p>
+        )}
         <div className="space-y-1.5">
           {shownMembers.map((m) => (
             <div
@@ -1691,6 +1708,17 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
                           ? t.workspaceDetailInline.demoteToMember
                           : t.workspaceDetailInline.promoteToAdmin}
                       </DropdownMenuItem>
+                      {/* Personal workspaces are never transferable. */}
+                      {!data.isPersonal && (
+                        <DropdownMenuItem
+                          onClick={() => {
+                            setTransferError(null);
+                            setTransferTarget(m.userId);
+                          }}
+                        >
+                          {t.workspaceDetailInline.transferOwnershipTitle}
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         variant="destructive"
@@ -1706,6 +1734,20 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
           ))}
         </div>
       </div>
+      <TypeToConfirmDialog
+        open={transferTarget !== null}
+        workspaceName={data.name}
+        title={t.workspaceDetailInline.transferOwnershipDialogTitle}
+        description={format(t.workspaceDetailInline.transferOwnershipConfirm, {
+          name:
+            data.members.find((m) => m.userId === transferTarget)?.userName ??
+            data.members.find((m) => m.userId === transferTarget)?.email ??
+            "",
+        })}
+        confirmLabel={t.workspaceDetailInline.transferOwnershipTitle}
+        onCancel={() => setTransferTarget(null)}
+        onConfirm={transferOwnership}
+      />
     </div>
   );
 }
