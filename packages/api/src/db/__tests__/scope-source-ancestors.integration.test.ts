@@ -17,7 +17,7 @@ const chainId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,
  * Production carried 700-link repository chains on 2026-09-30. At that depth
  * the 567-588 walk (`to_jsonb(r)->>'superseded_by'`, one full workspace scan per
  * level) ran past the 120 s background statement timeout on every entity
- * update; the column walk (616) finishes in milliseconds. 1,000 links keeps the
+ * update; the column walk (618) finishes in milliseconds. 1,000 links keeps the
  * old body seconds away from the bound (8.5 s / 16.9 s on the local rig), and
  * the new body is two orders of magnitude inside it. The budget is the
  * behavioral check; the function-body assertion at the end of this file is the

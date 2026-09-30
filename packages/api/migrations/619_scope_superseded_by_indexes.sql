@@ -1,5 +1,5 @@
--- Companion to 616: partial indexes so the column walk stays an index lookup
--- as the two large versioned source tables grow (616's hash join is already
+-- Companion to 618: partial indexes so the column walk stays an index lookup
+-- as the two large versioned source tables grow (618's hash join is already
 -- milliseconds at today's sizes). Built CONCURRENTLY, outside a transaction,
 -- because a plain CREATE INDEX takes a SHARE lock on `entities`: on a database
 -- where a compose UPDATE is mid-flight it would wait behind that statement
