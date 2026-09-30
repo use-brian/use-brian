@@ -20,6 +20,9 @@ vi.mock('../../db/file-ingest-jobs-store.js', () => ({
   enqueueFileIngestJob: vi.fn(),
   getFileIngestJob: vi.fn(),
 }))
+vi.mock('../../files/artifact-index.js', () => ({
+  setFileIndexing: vi.fn(async () => {}),
+}))
 // The resolver itself is exercised in recordings/__tests__/recording-for-file.test.ts
 // against injected stores; here only the route's wiring and gates are under test.
 vi.mock('../../recordings/recording-for-file.js', async () => {
@@ -56,6 +59,7 @@ import { findOrCreateUser, getDefaultAssistant, getUserAssistant, findUserById, 
 import { findOrCreateSession, findSessionById } from '../../db/sessions.js'
 import { getWorkspaceFileById } from '../../db/workspace-files.js'
 import { enqueueFileIngestJob, getFileIngestJob } from '../../db/file-ingest-jobs-store.js'
+import { setFileIndexing } from '../../files/artifact-index.js'
 import { resolveRecordingForFile } from '../../recordings/recording-for-file.js'
 import { parseFileContent, shouldInline } from '@use-brian/core'
 
@@ -804,6 +808,7 @@ describe('[COMP:api/files-reingest] POST /:fileId/ingest', () => {
   const mockGetPrimary = vi.mocked(getWorkspacePrimaryAssistant)
   const mockGetFile = vi.mocked(getWorkspaceFileById)
   const mockEnqueue = vi.mocked(enqueueFileIngestJob)
+  const mockSetIndexing = vi.mocked(setFileIndexing)
 
   const ASSISTANT = {
     id: 'a-1', kind: 'primary', workspaceId: 'ws-1',
@@ -832,6 +837,23 @@ describe('[COMP:api/files-reingest] POST /:fileId/ingest', () => {
     expect(mockEnqueue).toHaveBeenCalledWith(
       expect.objectContaining({ fileId: 'f-1', workspaceId: 'ws-1', actingUserId: 'u-1', assistantId: 'a-1', sourceLabel: 'upload' }),
     )
+  })
+
+  // Stored is not the same as analyzed: the worker reads a file whole into
+  // memory, so past the parse ceiling the honest answer is `stored_only`.
+  it('GUARD: a file past the parse ceiling answers stored_only (200, nothing enqueued, indexing stamped)', async () => {
+    mockGetFile.mockResolvedValue({ ...FILE, name: 'dump.csv', sizeBytes: 2 * 1024 * 1024 * 1024 } as never)
+    const res = await request(app()).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      fileId: 'f-1',
+      status: 'stored_only',
+      reason: 'too_large_to_parse',
+      maxParseBytes: 128 * 1024 * 1024,
+    })
+    expect(res.body.detail).toContain('too large to analyze')
+    expect(mockEnqueue).not.toHaveBeenCalled()
+    expect(mockSetIndexing).toHaveBeenCalledWith('f-1', expect.objectContaining({ status: 'skipped', reason: 'too_large_to_parse' }))
   })
 
   it('GUARD: an already-ingested file requires confirmation (409, nothing enqueued)', async () => {

@@ -16,9 +16,10 @@ import {
   getIngestJobStatus,
   ingestFiles,
   ingestLinkedInArchive,
+  reingestStoredFile,
   storeFiles,
 } from "../ingest";
-import { statusForIngestResult } from "@/components/doc/suggested-file-drop";
+import { statusForIngestResult } from "@/lib/brain-intake/run-intake";
 
 const mockAuthFetch = vi.mocked(authFetch);
 const mockGetValidAccessToken = vi.mocked(getValidAccessToken);
@@ -303,6 +304,24 @@ describe("[COMP:app-web/home-file-drop] queued-ingest status poll", () => {
   });
 });
 
+describe("[COMP:app-web/brain-intake-queue] stored-file ingest outcomes", () => {
+  it("reads a 202 as queued and a 200 stored_only as stored, not queued", async () => {
+    mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      fileId: "wf-1", status: "queued", jobId: "job-1",
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    await expect(reingestStoredFile("ws-1", "wf-1")).resolves.toEqual({ status: "queued", jobId: "job-1" });
+
+    mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      fileId: "wf-1", status: "stored_only", reason: "too_large_to_parse", detail: "too large to analyze",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    await expect(reingestStoredFile("ws-1", "wf-1")).resolves.toEqual({
+      status: "stored_only",
+      reason: "too_large_to_parse",
+      detail: "too large to analyze",
+    });
+  });
+});
+
 describe("[COMP:app-web/home-file-drop] upload result → chip status", () => {
   it("shows a queued ingest as still working, never as done or failed", () => {
     expect(statusForIngestResult({
@@ -348,6 +367,7 @@ describe("[COMP:app-web/home-file-drop] ingest size guard", () => {
     // The real 2026-08-29 file, and the limit it exceeded.
     expect(formatFileSize(65_790_453)).toBe("62.7 MB");
     expect(formatFileSize(MAX_INGEST_FILE_BYTES)).toBe("30.0 MB");
+    expect(formatFileSize(1024 * 1024 * 1024)).toBe("1.0 GB");
     expect(formatFileSize(84_964)).toBe("83 KB");
   });
 });

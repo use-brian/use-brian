@@ -38,7 +38,6 @@ export function WorkspaceFileDropBoundary({
   const batchId = useRef(0);
   const [batch, setBatch] = useState<IngestFileBatch | null>(null);
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
 
   const stageFiles = useCallback((files: FileList) => {
     const nextFiles = Array.from(files);
@@ -49,10 +48,12 @@ export function WorkspaceFileDropBoundary({
     setOpen(true);
   }, []);
 
-  const drop = useFileDrop(stageFiles, { disabled: busy, fallback: true });
+  const drop = useFileDrop(stageFiles, { fallback: true });
 
+  // Always closable: the review never owns an in-flight request. "Add to
+  // brain" hands the batch to the intake queue and the tray in the bottom bar
+  // carries the wait, so the modal is for choosing, not waiting.
   const onOpenChange = (next: boolean) => {
-    if (!next && busy) return;
     if (next) requestSidebarClose();
     setOpen(next);
     if (!next) setBatch(null);
@@ -79,16 +80,21 @@ export function WorkspaceFileDropBoundary({
         )}
 
         <Dialog.Portal>
-          <Dialog.Backdrop className="fixed inset-0 z-[70] bg-background/80 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
-          <Dialog.Popup className="fixed left-1/2 top-1/2 z-[70] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-border bg-background p-5 shadow-xl ring-1 ring-foreground/5 transition-all duration-150 data-[starting-style]:scale-95 data-[starting-style]:opacity-0 data-[ending-style]:scale-95 data-[ending-style]:opacity-0">
+          {/* The review dialog stays on the shared z-50 modal layer: the recording
+              cost + blueprint confirm is the global confirmDialog, a body-portaled
+              z-50 AlertDialog that lands above its caller by DOM order alone. At
+              z-[70] this backdrop covered that confirm, so every audio/video drop
+              sat on "Checking recording..." with nothing to click. Only the
+              transient, pointer-events-none drag overlay above may go higher. */}
+          <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
+          <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-border bg-background p-5 shadow-xl ring-1 ring-foreground/5 transition-all duration-150 data-[starting-style]:scale-95 data-[starting-style]:opacity-0 data-[ending-style]:scale-95 data-[ending-style]:opacity-0">
             <Dialog.Title className="sr-only">{t.ingestTitle}</Dialog.Title>
             <Dialog.Description className="sr-only">{t.ingestCaption}</Dialog.Description>
             <button
               type="button"
               aria-label={t.ingestDialogClose}
               onClick={() => onOpenChange(false)}
-              disabled={busy}
-              className="absolute right-3 top-3 z-10 grid size-11 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40 md:size-8"
+              className="absolute right-3 top-3 z-10 grid size-11 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:size-8"
             >
               <X className="size-4" aria-hidden />
             </button>
@@ -99,7 +105,7 @@ export function WorkspaceFileDropBoundary({
               incomingBatch={batch}
               offline={offline}
               appearance="dialog"
-              onBusyChange={setBusy}
+              onQueued={() => onOpenChange(false)}
             />
           </Dialog.Popup>
         </Dialog.Portal>
