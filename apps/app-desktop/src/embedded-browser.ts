@@ -57,6 +57,7 @@ export class EmbeddedBrowser {
   // Keep only the approved control channel while the browser renderers are shut down.
   private partition: string | null = null;
   private commandEpoch: number | undefined;
+  private uploadApproval: AbortController | null = null;
   private readonly approvals: Pick<BrowserApprovals, "has" | "grant">;
 
   constructor(private readonly options: {
@@ -100,7 +101,7 @@ export class EmbeddedBrowser {
     try {
       if (!this.approvals.has(pair.partition)) {
         const answer = await dialog.showMessageBox({ type: "question", title: "Set up Brian Browser", message: "Allow this browser profile to start automatically?",
-          detail: `Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with all in-app tabs, including tabs you open manually and sites you sign in to. This never grants access to your system browser or the Use Brian app. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian closes all in-app browser tabs. The browser button or a new Brian navigation request can start it again. Downloads and protected credential filling are not supported. This replaces any browser already paired to this profile.`,
+          detail: `Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with all in-app tabs, including tabs you open manually and sites you sign in to. This never grants access to your system browser or the Use Brian app. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian closes all in-app browser tabs. The browser button or a new Brian navigation request can start it again. Webpage downloads (up to 32 MiB each) are held temporarily and can be read or saved to workspace files by Brian. Uploads use authorized workspace files (up to 4 MiB each) and require approval; websites may send them immediately upon selection. Temporary files are deleted when this browser closes. Protected credential filling is not supported. This replaces any browser already paired to this profile.`,
           buttons: ["Not now", "Allow automatic sessions"], defaultId: 0, cancelId: 0 });
         if (generation !== this.generation) return false;
         if (answer.response !== 1) { this.automaticBlocked = true; return false; }
@@ -170,6 +171,8 @@ export class EmbeddedBrowser {
   stop(blockAutomatic = true, keepControlChannel = false): void {
     if (blockAutomatic) this.automaticBlocked = true;
     this.active = false;
+    this.uploadApproval?.abort();
+    this.uploadApproval = null;
     this.generation++;
     this.cancelReady?.();
     this.cancelReady = null;
@@ -269,10 +272,12 @@ export class EmbeddedBrowser {
         return;
       }
     }
+    // Do not allow a delayed native approval to execute after relay timeout.
+    const deadline = Date.now() + 20_000;
     this.queue = this.queue.then(async () => {
       try {
         this.check(generation);
-        const data = await this.execute(cmd, generation);
+        const data = await this.execute(cmd, generation, deadline);
         this.check(generation);
         relay?.sendResult({ id: cmd.id, ok: true, data });
       } catch (error) {
@@ -282,7 +287,7 @@ export class EmbeddedBrowser {
     });
   }
 
-  private async execute(cmd: Command, generation: number): Promise<unknown> {
+  private async execute(cmd: Command, generation: number, deadline = Date.now() + 20_000): Promise<unknown> {
     const host = this.host!;
     const executor = this.executor!;
     const { op, args } = cmd;
@@ -304,8 +309,10 @@ export class EmbeddedBrowser {
       await executor.attach(tab.id);
       return selection(tab.id);
     }
+    if (op === "listDownloads") return host.files.list();
+    if (op === "readDownload") return host.files.read(text(args.id), args.offset);
     if (op === "browserFillReference") throw new ExecutorError("Protected credential filling is not supported by the in-app browser", "protected_fill_denied");
-    const allowed = ["navigate", "snapshot", "click", "type", "fillForm", "currentUrl", "captureState", "captureFrame", "takeoverInput"];
+    const allowed = ["navigate", "snapshot", "click", "type", "fillForm", "currentUrl", "captureState", "captureFrame", "takeoverInput", "uploadFile"];
     if (!allowed.includes(op)) throw new ExecutorError("Unsupported browser operation", "backend_error");
     let tab = eligible().find(t => t.id === host.selectedId());
     if (!tab && op === "navigate") {
@@ -324,6 +331,40 @@ export class EmbeddedBrowser {
       case "click": await executor.click(text(args.ref)); return {};
       case "type": await executor.type(text(args.ref), text(args.text)); return {};
       case "fillForm": return executor.fillForm(args);
+      case "uploadFile": {
+        const ref = text(args.ref);
+        const name = text(args.name);
+        const data = text(args.data);
+        const url = tab.contents.getURL();
+        const tabId = tab.id;
+        if (Date.now() >= deadline) throw new ExecutorError("Upload approval expired; retry the upload.", "user_denied");
+        const approval = new AbortController();
+        this.uploadApproval = approval;
+        const timer = setTimeout(() => approval.abort(), deadline - Date.now());
+        let answer: Electron.MessageBoxReturnValue;
+        try {
+          answer = await dialog.showMessageBox({ type: "question", title: "Upload a workspace file?",
+            message: `Send ${name.slice(0, 200)} to ${new URL(browserUrl(url)).origin}?`,
+            detail: "The website can read or upload this file immediately after selection, without a Submit click. Approve only a file and destination you intended. Approval expires after 20 seconds.",
+            buttons: ["Cancel", "Upload file"], defaultId: 0, cancelId: 0, signal: approval.signal });
+        } finally {
+          clearTimeout(timer);
+          if (this.uploadApproval === approval) this.uploadApproval = null;
+        }
+        this.check(generation);
+        if (answer.response !== 1 || approval.signal.aborted) throw new ExecutorError("File upload was not approved", "user_denied");
+        const unchanged = () => {
+          this.check(generation);
+          if (Date.now() >= deadline || host.selectedId() !== tabId || tab!.contents.isDestroyed() || tab!.contents.getURL() !== url) {
+            throw new ExecutorError("Upload destination changed. Take a fresh browserSnapshot and approve again.", "stale_ref");
+          }
+        };
+        unchanged();
+        const path = await host.files.stageUpload(name, data);
+        unchanged();
+        await executor.uploadFile(ref, path);
+        return {};
+      }
       case "currentUrl": return executor.currentUrl();
       case "captureFrame": return executor.captureFrame();
       case "captureState": {

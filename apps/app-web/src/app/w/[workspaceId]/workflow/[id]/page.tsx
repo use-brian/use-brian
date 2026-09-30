@@ -86,6 +86,7 @@ import {
 } from "@/lib/api/views";
 import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { listWorkspaceSkills, type WorkspaceSkillSummary } from "@/lib/api/skills";
+import { WorkflowPublicationConsent } from "@/components/workflow/publication-consent";
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
 import {
   MAX_FAN_OUT_WIDTH,
@@ -1002,6 +1003,8 @@ export default function WorkflowDetailPage({
           onApprovalResolved={pollNow}
         />
       )}
+
+      <WorkflowPublicationConsent workflow={workflow} dirty={dirty || saving} />
 
       {/* Board — the n8n-style illustration. Always visible; reflects the
           live draft. Clicking a node opens its editor. */}

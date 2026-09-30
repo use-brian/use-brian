@@ -25,6 +25,7 @@
  * [COMP:workflow/channel-delivery]
  */
 
+import { createWorkflowPublicationAuthorizer, createWorkflowPublicationDispatcher, type AuthorizeWorkflowPublication, type DispatchWorkflowPublication } from './publication-consent.js'
 import { createChannelQuestionStore, workflowQuestionActions, workflowQuestionReplyHint, type ChannelQuestionStore } from './channel-questions.js'
 import { formatAssistantQuestion, type DeliverToChannel, type DeliveryOutcome } from '@use-brian/core'
 import { sanitizeDeliveryText } from '@use-brian/shared'
@@ -70,6 +71,8 @@ export type WorkflowChannelDeliveryOptions = {
   customChannelStore?: Pick<CustomChannelStore, 'enqueue'>
   /** Injectable final-sink policy; production defaults to live authority. */
   authorizeDeliveryAudience?: AuthorizeDeliveryAudience
+  authorizeWorkflowPublication?: AuthorizeWorkflowPublication
+  dispatchWorkflowPublication?: DispatchWorkflowPublication
 }
 
 /**
@@ -108,6 +111,7 @@ export function createWorkflowChannelDelivery(
     channelIntegrationId,
     text,
     scopeEvidence,
+    publication,
     question,
     questionResponse,
     threadRef,
@@ -149,6 +153,17 @@ export function createWorkflowChannelDelivery(
       targetChannelId = waSession.rows[0].channel_id
     }
 
+    let publicationApprovalId: string | undefined
+    const authorizePublication: AuthorizeWorkflowPublication = options.authorizeWorkflowPublication
+      ?? (input => createWorkflowPublicationAuthorizer({ integrationStore: options.integrationStore })(input))
+    const publicationInput = publication && !question && !questionResponse && !replyToTrigger
+      && channelType === 'telegram' && channelIntegrationId && scopeEvidence !== undefined
+      ? { workspaceId, assistantId, userId, channelType, channelId: targetChannelId,
+          channelIntegrationId, scopeEvidence, publication } : null
+    if (publication && scopeEvidence === undefined) {
+      return { status: 'skipped', channelType, reason: 'delivery_audience_unverified' }
+    }
+
     // Every unattended producer supplies a trusted snapshot, including the
     // explicit empty/public snapshot. Undefined remains a compatibility path
     // for interactive callers that R3d will bind to their live turn.
@@ -166,7 +181,9 @@ export function createWorkflowChannelDelivery(
         scopeEvidence,
       })
       if (!audience.allowed) {
-        return {
+        const consent = publicationInput ? await authorizePublication(publicationInput) : null
+        if (consent?.allowed) publicationApprovalId = consent.approvalId
+        else return {
           status: 'skipped', channelType, reason: 'delivery_audience_unverified',
           ...(audience.detail ? { detail: audience.detail } : {}),
         }
@@ -264,20 +281,25 @@ export function createWorkflowChannelDelivery(
       }
     }
 
-    // DB-first: persist into the messaging-channel delivery session so the
-    // message survives a failed channel push.
-    const session = await findOrCreateSession({
-      assistantId,
-      userId,
-      channelType,
-      channelId: targetChannelId,
-    })
-    await addSessionMessage({
-      sessionId: session.id,
-      role: 'assistant',
-      content: [{ type: 'text', text: deliverable }],
-      derivation: messageDerivation,
-    })
+    // Ordinary delivery remains DB-first. Publication consent authorizes the
+    // provider sink, not a new independently readable transcript. Mixed private
+    // sources cannot certify one derived session row; do not drop their lineage
+    // to manufacture a copy. The workflow retains the result and original
+    // evidence, plus an approval receipt on successful publication.
+    if (!publicationApprovalId) {
+      const session = await findOrCreateSession({
+        assistantId,
+        userId,
+        channelType,
+        channelId: targetChannelId,
+      })
+      await addSessionMessage({
+        sessionId: session.id,
+        role: 'assistant',
+        content: [{ type: 'text', text: deliverable }],
+        derivation: messageDerivation,
+      })
+    }
 
     if (channelType === 'telegram') {
       const tokens: Array<{ token: string; integrationId?: string }> = []
@@ -308,14 +330,24 @@ export function createWorkflowChannelDelivery(
           const questionToken = question && integrationId ? await store.create({
             integrationId, workspaceId, assistantId, userId, channelId, question, response: questionResponse, threadRef,
           }) : undefined
-          const tgMessageId = await createTelegramAdapter({ token, strictTopic: !!questionToken }).sendMessage(
+          const send = () => createTelegramAdapter({ token, strictTopic: !!questionToken || !!publicationApprovalId }).sendMessage(
             channelId,
             { text: deliverable + (questionToken && question ? workflowQuestionReplyHint(questionToken, question, !!questionResponse) : ''), format: 'markdown',
               actions: questionToken && question && questionResponse ? workflowQuestionActions(questionToken, question) : undefined },
             threadRef ? { threadTs: threadRef } : undefined,
           )
+          let tgMessageId: string | void
+          if (publicationApprovalId && publicationInput) {
+            // Serialize dispatch with approval/revocation, then revalidate all
+            // authority immediately before the provider call inside that boundary.
+            const dispatch = options.dispatchWorkflowPublication ?? createWorkflowPublicationDispatcher({ integrationStore: options.integrationStore })
+            const result = await dispatch(publicationInput, publicationApprovalId, send)
+            if (!result.allowed) return { status: 'skipped', channelType, reason: 'delivery_audience_unverified' }
+            tgMessageId = result.messageId
+          } else tgMessageId = await send()
           await attachQuestion(questionToken, tgMessageId)
-          return { status: 'delivered', channelType, channelId, messageId: tgMessageId || undefined }
+          return { status: 'delivered', channelType, channelId, messageId: tgMessageId || undefined,
+            ...(publicationApprovalId ? { publicationApprovalId } : {}) }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           const canTryNext = index < tokens.length - 1
