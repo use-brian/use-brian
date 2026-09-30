@@ -8,7 +8,7 @@ const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/loca
 await assertLocalFixture()
 const pool=getPool()
 
-// Migration 589's per-row floor, verbatim, as the reference 611 must match.
+// Migration 589's per-row floor, verbatim, as the reference 615 must match.
 const FLOOR_589=`CREATE FUNCTION pg_temp.floor_589(w uuid,sensitivity text,compartments text[],mutation boolean)
 RETURNS boolean LANGUAGE plpgsql STABLE AS $$
 DECLARE actor uuid=nullif(current_setting('app.current_user_id',true),'')::uuid;

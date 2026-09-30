@@ -12,6 +12,16 @@ describe('[COMP:api/migration-order] Migration filename compatibility', () => {
     expect(findAppliedMigrationRenames(new Set([previousName, currentName, pageRepair]))).toEqual([])
   })
 
+  it('preserves the applied member operation floor beside the external app records it collided with', () => {
+    const previousName = '611_member_operation_floor_per_statement.sql'
+    const currentName = '615_member_operation_floor_per_statement.sql'
+    const externalRecords = '611_external_app_records.sql'
+    expect(findAppliedMigrationRenames(new Set([previousName, externalRecords])))
+      .toEqual([{ previousName, currentName }])
+    expect(findAppliedMigrationRenames(new Set([externalRecords]))).toEqual([])
+    expect(findAppliedMigrationRenames(new Set([previousName, currentName]))).toEqual([])
+  })
+
   it('aliases applied migrations to their collision-free names', () => {
     const aliases = findAppliedMigrationRenames(
       new Set([
