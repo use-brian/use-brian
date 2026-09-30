@@ -119,8 +119,9 @@ beforeEach(() => {
 })
 
 describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
+  // A07 acceptance evidence selects the stable "refuses an unverified audience" title.
   it.each([undefined, 'unbound', 'personal_group_unverified', 'evidence_exceeds_audience'] as const)(
-    'preserves audience denial detail %s without persistence or adapter send', async (detail) => {
+    'refuses an unverified audience before persistence or adapter send, preserving detail %s', async (detail) => {
       vi.mocked(addSessionMessage).mockClear()
       const authorizeDeliveryAudience = vi.fn(async () => ({
         allowed: false as const,
