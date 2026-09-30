@@ -289,6 +289,35 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(mockQueryLoop).not.toHaveBeenCalled()
   })
 
+  it.each(['approved', 'revoked', 'interactive'])(
+    'checks explicit publication only for the identified workflow step: %s', async state => {
+      mockFindAssistant.mockImplementation(async id => ({ ...calleeAssistant, id, workspaceId: 'workspace-1',
+        kind: 'primary', compartments: [], defaultCompartments: [] }) as never)
+      const authorizeWorkflowPublication = vi.fn(async () => state === 'approved'
+        ? { allowed: true as const, approvalId: 'consent-1' } : { allowed: false as const })
+      const run = createCalleeExecutor({ provider: {} as never, tools: new Map(), memoryStore: memoryStore() as never,
+        capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+        authorizeDeliveryAudience: async () => ({ allowed: false, reason: 'delivery_audience_unverified' }),
+        authorizeWorkflowPublication,
+      })
+      if (state === 'approved') yieldsText('Prepared broadcast')
+      const operation = run({ ...baseParams, callerChannelType: state === 'interactive' ? 'web' : 'workflow',
+        workflowRunId: 'run-1', workflowStepId: 'remind',
+        deliverTarget: { channelType: 'telegram', channelId: '-100123', channelIntegrationId: 'integration-1' },
+      })
+      if (state === 'approved') {
+        await expect(operation).resolves.toBe('Prepared broadcast')
+        expect(mockQueryLoop).toHaveBeenCalled()
+      } else {
+        await expect(operation).rejects.toMatchObject({ reason: 'delivery_audience_unverified' })
+        expect(mockQueryLoop).not.toHaveBeenCalled()
+      }
+      if (state === 'interactive') expect(authorizeWorkflowPublication).not.toHaveBeenCalled()
+      else expect(authorizeWorkflowPublication).toHaveBeenCalledWith(expect.objectContaining({
+        publication: { runId: 'run-1', stepId: 'remind' }, channelId: '-100123', channelIntegrationId: 'integration-1',
+      }))
+    })
+
   it('carries validated caller sources into the receiver write accumulator and returned evidence',async()=>{
     const primary={...calleeAssistant,workspaceId:'workspace-1',kind:'primary',clearance:'internal',compartments:['product']}
     mockFindAssistant.mockImplementation(async id=>({...primary,id}) as never)

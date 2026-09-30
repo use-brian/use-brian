@@ -3323,6 +3323,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workflowId: request.workflowId,
         blueprintId: request.blueprintId,
         workflowRunId: request.workflowRunId,
+        workflowStepId: request.workflowStepId,
         decisionContext: request.decisionContext
           ? {
               actorUserId: request.caller.userId,

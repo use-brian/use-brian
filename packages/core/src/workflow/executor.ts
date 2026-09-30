@@ -151,6 +151,8 @@ export type DeliveryOutcome =
        * step's `deliver.thread.fromStep` can reply under this message.
        */
       messageId?: string
+      /** Explicit generated-output publication consent used for this send. */
+      publicationApprovalId?: string
       /**
        * Thread-reply resolution for a `deliver.thread` step: `applied` — the
        * parent message id resolved and the push was a thread reply;
@@ -213,6 +215,8 @@ export type DeliverToChannel = (params: {
   text: string
   /** Trusted run/turn high-water evidence checked against the current audience. */
   scopeEvidence?: import('../security/context-scope.js').ScopeEvidence
+  /** Only the engine's generated-output step sets this; never tool or question delivery. */
+  publication?: { runId: string; stepId: string }
   question?: import('../tools/base/ask-question.js').AssistantQuestion
   questionResponse?: { toolName: string; arguments: Record<string, unknown>; answerField: string }
   /**
@@ -1792,6 +1796,7 @@ async function dispatchAssistantCall(
     // consult stamp source_id=<runId>, which is what the next run's
     // `{{lastRun.output.<key>}}` reads.
     workflowRunId: ctx.run.id,
+    workflowStepId: step.id,
     decisionContext: {
       operationId: `${ctx.run.id}:${step.id}`,
       externalPrincipal: ctx.externalClientPrincipal !== undefined,
@@ -1907,6 +1912,8 @@ async function dispatchAssistantCall(
                   : undefined),
               text: deliveredText,
               scopeEvidence: ctx.scopeAccumulator.evidence,
+              publication: !question && !ctx.externalClientPrincipal
+                ? { runId: ctx.run.id, stepId: step.id } : undefined,
               question,
               questionResponse: question && step.questionResponse ? {
                 ...step.questionResponse,
@@ -1942,7 +1949,7 @@ async function dispatchAssistantCall(
         // Audit + log only the non-`delivered` outcomes so a recurring
         // reminder that delivers fine every fire doesn't spam the audit log,
         // while a silent no-op / failure becomes a first-class signal.
-        if (delivery.status !== 'delivered') {
+        if (delivery.status !== 'delivered' || delivery.publicationApprovalId) {
           console.warn(`[workflow] step "${step.id}" delivery ${delivery.status}:`, delivery)
           fireAndForgetAudit(ctx.deps, {
             type: 'workflow.step_delivered',
