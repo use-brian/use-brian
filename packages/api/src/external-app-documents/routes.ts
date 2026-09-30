@@ -16,7 +16,7 @@ export async function authorizeDocumentHuman(p:DocumentPrincipal) {
   const scope=await resolveTurnScopeSystem({userId:p.userId,workspaceId:p.workspaceId,assistant,memberMode:'member'})
   return {workspaceId:p.workspaceId,userId:p.userId,assistantId:null,clearance:scope.access.clearance,compartments:scope.access.compartments,projectIds:scope.access.projectIds,mutationCompartments:scope.writeCompartments,writeSensitivity:scope.access.clearance,writeCompartments:scope.writeCompartments,writeProjectIds:scope.writeProjectIds}
 }
-export function externalAppDocumentRoutes(options:{jwtSecret:string;sessions?:Pick<AuthSessionStore,'validateAccess'>;service:ReturnType<typeof createDocumentService>}) {
+export function externalAppDocumentRoutes(options:{jwtSecret:string;sessions?:Pick<AuthSessionStore,'validateAccess'>;service:ReturnType<typeof createDocumentService>}):Router {
   const router=Router(),s=options.service
   router.use(requireAuth(options.jwtSecret,options.sessions))
   const base='/workspaces/:workspaceId/documents'

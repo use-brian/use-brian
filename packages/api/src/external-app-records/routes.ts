@@ -5,7 +5,7 @@ import type { AuthSessionStore } from '../db/auth-session-store.js'
 import { AccessInput, ObserveInput, PublishInput, ReconcileInput, RecordsError } from './contracts.js'
 import type { ExternalAppRecordsStore } from './store.js'
 
-export function externalAppRecordsRoutes(options: { jwtSecret: string; store: ExternalAppRecordsStore; sessions?: Pick<AuthSessionStore,'validateAccess'> }) {
+export function externalAppRecordsRoutes(options: { jwtSecret: string; store: ExternalAppRecordsStore; sessions?: Pick<AuthSessionStore,'validateAccess'> }): Router {
   const router=Router()
   const params=z.object({workspaceId:z.string().uuid(),sourceId:z.string().regex(/^[a-zA-Z0-9._:-]{1,200}$/)})
   for(const operation of ['publish','reconcile','observe','access','access-reconcile'] as const) {

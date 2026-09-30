@@ -13,7 +13,7 @@ export function externalAppConfiguration(env:NodeJS.ProcessEnv=process.env):{sou
  if(endpoint){url=new URL(endpoint);if(url.username||url.password||!(url.protocol==='https:'||url.protocol==='http:'&&['localhost','127.0.0.1'].includes(url.hostname)))throw new Error('External document scanner requires a trusted HTTPS origin')}
  return {sources,documents:{templates,scan:async(bytes,mimeType)=>{
   if(!url)throw new DocumentError('document_scanner_unconfigured',503)
-  const response=await fetch(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(30000),headers:{'Content-Type':mimeType,...(env.EXTERNAL_APP_SCAN_TOKEN?{Authorization:`Bearer ${env.EXTERNAL_APP_SCAN_TOKEN}`}:{})},body:Buffer.from(bytes) as unknown as BodyInit})
+  const response=await fetch(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(30000),headers:{'Content-Type':mimeType,...(env.EXTERNAL_APP_SCAN_TOKEN?{Authorization:`Bearer ${env.EXTERNAL_APP_SCAN_TOKEN}`}:{})},body:new Uint8Array(bytes).buffer})
   if(!response.ok)throw new DocumentError('document_scanner_unavailable',503)
   const result=await response.json() as {state?:string};if(result.state!=='clean'&&result.state!=='rejected')throw new DocumentError('document_scanner_invalid',503)
   return result.state

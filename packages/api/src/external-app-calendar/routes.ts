@@ -10,7 +10,7 @@ export function externalAppCalendarRoutes(options: {
   jwtSecret: string
   sessions?: Pick<AuthSessionStore, 'validateAccess'>
   withCalendar: ReturnType<typeof createCalendarCredentials>
-}) {
+}): Router {
   const router = Router()
   const paramsSchema = z.object({ workspaceId: z.string().uuid(), connectorInstanceId: z.string().uuid() })
   const correlationSchema = z.string().regex(/^[a-zA-Z0-9._:-]{1,200}$/)
