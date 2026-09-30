@@ -2,6 +2,7 @@
 import {
   intersectAccessCeilings,
   type AccessCeiling,
+  type DeliveryAudienceDenialDetail,
   type ScopeEvidence,
 } from '@use-brian/core'
 import { parseTopicChannelId } from '@use-brian/channels'
@@ -31,13 +32,7 @@ export type DeliveryAudienceInput = {
  * Deliberately coarse: it never names the Team, Project or clearance that
  * failed, so a refusal cannot become an existence oracle.
  */
-export type DeliveryAudienceDenialDetail =
-  /** No approval covers this conversation and the output was not public. */
-  | 'unbound'
-  /** A personal-group approval exists but membership could not be proven now. */
-  | 'personal_group_unverified'
-  /** An approval exists but the output needs more than it grants (e.g. personal context). */
-  | 'evidence_exceeds_audience'
+export type { DeliveryAudienceDenialDetail } from '@use-brian/core'
 
 type Denial = { allowed: false; reason: 'delivery_audience_unverified'; detail?: DeliveryAudienceDenialDetail }
 

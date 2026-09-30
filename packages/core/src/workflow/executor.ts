@@ -180,8 +180,19 @@ export type DeliveryOutcome =
         | 'access_denied'
         | 'customer_service_window_expired'
         | 'delivery_audience_unverified'
+      /** Coarse audience diagnosis only; never source names or policy identifiers. */
+      detail?: DeliveryAudienceDenialDetail
     }
   | { status: 'failed'; channelType: string; error: string }
+
+/** Safe, coarse audience diagnoses shared by the authorizer and delivery outcomes. */
+export type DeliveryAudienceDenialDetail =
+  /** No approval covers this conversation and the output was not public. */
+  | 'unbound'
+  /** A personal-group approval exists but membership could not be proven now. */
+  | 'personal_group_unverified'
+  /** An approval exists but the output needs more than it grants (e.g. personal context). */
+  | 'evidence_exceeds_audience'
 
 /**
  * Push an `assistant_call` step's text output to a user channel. Injected

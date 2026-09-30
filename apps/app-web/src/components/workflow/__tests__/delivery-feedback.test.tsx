@@ -10,6 +10,7 @@ vi.mock("next/navigation", () => ({ useParams: () => route.params }));
 vi.mock("@/lib/i18n/client", () => ({ useT: () => en }));
 import { WorkflowDeliveryField } from "../step-editor";
 import { ScheduleTriggerFields } from "../schedule-trigger-fields";
+import { DeliveryOutcomeFeedback } from "../delivery-feedback";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root;
@@ -32,6 +33,33 @@ const copy = en.workflowPage.builder.deliveryFeedback;
 async function openChannelSelect() {
   await act(async () => (host.querySelector('[role="combobox"]') as HTMLElement).click());
 }
+
+describe("[COMP:app-web/workflow-delivery-feedback] audience denial outcomes", () => {
+  it.each([
+    ["unbound", copy.unbound],
+    ["personal_group_unverified", copy.personalGroupUnverified],
+    ["evidence_exceeds_audience", copy.evidenceExceedsAudience],
+    [undefined, copy.unverified],
+    ["private-source-secret", copy.unverified],
+    [{ message: "private-source-secret" }, copy.unverified],
+  ])("shows safe guidance for detail %j", (detail, expected) => {
+    mount(<DeliveryOutcomeFeedback workspaceId="workspace-example" output={{ __delivery: {
+      status: "skipped", channelType: "telegram", reason: "delivery_audience_unverified", detail,
+    } }} />);
+    expect(host.textContent).toContain(copy.skipped);
+    expect(host.textContent).toContain(expected);
+    expect(host.textContent).not.toContain("private-source-secret");
+    expect(host.querySelector("a")?.getAttribute("href")).toBe("/w/workspace-example/studio/channels");
+  });
+
+  it("ignores audience detail on unrelated skips", () => {
+    mount(<DeliveryOutcomeFeedback workspaceId="workspace-example" output={{ __delivery: {
+      status: "skipped", channelType: "telegram", reason: "no_integration", detail: "evidence_exceeds_audience",
+    } }} />);
+    expect(host.textContent).not.toContain(copy.evidenceExceedsAudience);
+    expect(host.querySelector("a")).toBeNull();
+  });
+});
 
 describe("[COMP:app-web/workflow-delivery-feedback] delivery authoring", () => {
   it.each([
