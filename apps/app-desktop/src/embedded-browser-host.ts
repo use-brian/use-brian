@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { BrowserFiles } from "./browser-files.js";
 import type { BrowserTheme } from "./browser-theme.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BaseWindow, type BrowserWindow, WebContentsView, ipcMain, session, type WebContents, type IpcMainEvent, type Session, type View } from "electron";
@@ -57,6 +58,7 @@ export class EmbeddedBrowserHost {
   private status = "";
   private theme: BrowserTheme | null = null;
   private disposed = false;
+  readonly files = new BrowserFiles(message => this.setStatus(message));
 
   constructor(partition: string, private readonly callbacks: Callbacks, options: { dockWindow?: BrowserWindow | null } = {}) {
     if (!partition.startsWith("persist:") || partition.length <= 8 || partition.startsWith("persist:deployment-")) {
@@ -79,6 +81,20 @@ export class EmbeddedBrowserHost {
         allowed ||= /^(data:|blob:|wss?:)/i.test(details.url);
       }
       reply({ cancel: !allowed });
+    });
+    // Inline PDFs otherwise open Chromium's internal viewer, whose document
+    // bytes are not exposed by accessibility snapshots. Capture the real,
+    // authenticated response as a download instead of refetching its URL.
+    this.browsingSession.webRequest.onHeadersReceived((details, reply) => {
+      const headers = details.responseHeaders ?? {};
+      const contentType = Object.entries(headers).find(([name]) => name.toLowerCase() === "content-type")?.[1]?.[0] ?? "";
+      if (details.resourceType === "mainFrame" && /^application\/pdf(?:;|$)/i.test(contentType)) {
+        const disposition = Object.keys(headers).find(name => name.toLowerCase() === "content-disposition");
+        const original = disposition ? headers[disposition]?.[0] : undefined;
+        if (disposition) delete headers[disposition];
+        headers["Content-Disposition"] = [original?.replace(/^inline\b/i, "attachment") || "attachment"];
+      }
+      reply({ responseHeaders: headers });
     });
     this.browsingSession.on("will-download", this.onDownload);
     this.dockWindow = options.dockWindow && !options.dockWindow.isDestroyed() ? options.dockWindow : null;
@@ -223,9 +239,14 @@ export class EmbeddedBrowserHost {
     this.cleanup();
   }
 
-  private readonly onDownload = (event: Electron.Event): void => {
-    event.preventDefault();
-    this.setStatus("Download blocked: saving files is not enabled in this browser");
+  private readonly onDownload = (event: Electron.Event, item: Electron.DownloadItem, source: WebContents): void => {
+    // Never grant downloads to the privileged toolbar or an unrelated renderer.
+    if (this.disposed || ![...this.entries.values()].some(tab => tab.contents === source)) {
+      event.preventDefault();
+      return;
+    }
+    try { this.files.capture(item); }
+    catch { event.preventDefault(); this.setStatus("Download could not be captured"); }
   };
 
   private readonly onCommand = (event: IpcMainEvent, command: unknown, value: unknown): void => {
@@ -370,6 +391,7 @@ export class EmbeddedBrowserHost {
   }
   private cleanup(): void {
     this.disposed = true;
+    this.files.dispose();
     this.publishDockLayout();
     this.dockWindow?.removeListener("resize", this.onLayout);
     this.dockContentView?.removeListener("bounds-changed", this.onLayout);
@@ -392,6 +414,7 @@ export class EmbeddedBrowserHost {
     this.browsingSession.removeListener("will-download", this.onDownload);
     // Retain deny-by-default session policy even after the window closes.
     this.browsingSession.webRequest.onBeforeRequest(null);
+    this.browsingSession.webRequest.onHeadersReceived(null);
     activeSessions.delete(this.browsingSession);
     const tabs = [...this.entries.values()];
     this.entries.clear();

@@ -714,6 +714,29 @@ export class TabExecutor {
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
   }
 
+  /** Desktop-only caller supplies a private, authorized staging file, never a model path. */
+  async uploadFile(ref: string, path: string): Promise<void> {
+    const tabId = this.mustTab()
+    const backendNodeId = this.resolveRef(ref)
+    const objectGroup = 'use-brian-file-upload'
+    try {
+      const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', { backendNodeId, objectGroup })
+      const objectId = resolved.object?.objectId
+      if (!objectId) throw new ExecutorError('File input is no longer attached. Take a fresh browserSnapshot.', 'stale_ref')
+      const checked = await this.cdp<{ result?: { value?: unknown } }>(tabId, 'Runtime.callFunctionOn', {
+        objectId, objectGroup, returnByValue: true,
+        functionDeclaration: `function () {
+          return this.isConnected && this.tagName === 'INPUT' && this.type === 'file' &&
+            !this.disabled && !this.matches(':disabled') && !this.webkitdirectory;
+        }`,
+      })
+      if (checked.result?.value !== true) throw new ExecutorError('Target must be an enabled, attached file input (not a directory picker).', 'backend_error')
+      await this.cdp(tabId, 'DOM.setFileInputFiles', { objectId, files: [path] })
+    } finally {
+      await this.cdp(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+    }
+  }
+
   async type(ref: string, text: string): Promise<void> {
     const tabId = this.mustTab()
     const backendNodeId = this.resolveRef(ref)

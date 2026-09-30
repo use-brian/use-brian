@@ -24,7 +24,6 @@ import { InternalCommandRequestSchema } from './protocol.js'
 
 const env = getEnv()
 const app = express()
-app.use(express.json({ limit: '1mb' }))
 
 const relay = new BrowserRelay({
   verifyPairingToken: (token) => verifyBrowserExtHelloToken(token, env.JWT_SECRET),
@@ -46,7 +45,9 @@ app.use('/internal', (req, res, next) => {
 })
 
 // ── Command routing (P1.4) ────────────────────────────────────
-app.post('/internal/browser/command', async (req, res) => {
+// Parse only after shared-secret authentication. A 4 MiB upload is ~5.34 MiB
+// of base64; leave room for its command envelope while staying below WS's 8 MiB cap.
+app.post('/internal/browser/command', express.json({ limit: '6mb' }), async (req, res) => {
   const parsed = InternalCommandRequestSchema.safeParse(req.body)
   if (!parsed.success) {
     res.status(400).json({ error: 'userId, browserProfileId, and op are required' })

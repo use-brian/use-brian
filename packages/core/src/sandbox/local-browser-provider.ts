@@ -1,3 +1,5 @@
+import { z } from 'zod'
+import { BrowserDownloadsSchema, validateDownloadChunk, decodeBrowserData, MAX_BROWSER_UPLOAD } from './browser-files.js'
 /**
  * Local browsing backend (§4.15): drives the user's real Chrome through the
  * browser extension, via the single-instance relay. This module only speaks
@@ -100,6 +102,20 @@ export function createLocalBrowserProvider(deps: {
 
   return {
     kind: 'local',
+    async listDownloads(ctx) {
+      return BrowserDownloadsSchema.parse(await send(ctx, 'listDownloads', {}))
+    },
+    async readDownload(ctx, id, offset) {
+      z.string().min(1).max(512).parse(id)
+      z.number().int().min(0).max(32 * 1024 * 1024).parse(offset)
+      return validateDownloadChunk(await send(ctx, 'readDownload', { id, offset }), offset)
+    },
+    async uploadFile(ctx, ref, name, data) {
+      z.string().min(1).max(512).parse(ref)
+      z.string().min(1).max(255).regex(/^[^/\\\x00-\x1f]+$/).parse(name)
+      decodeBrowserData(data, MAX_BROWSER_UPLOAD)
+      z.object({}).strict().parse(await send(ctx, 'uploadFile', { ref, name, data }))
+    },
     async fillReference(scope, items) {
       try {
         const data = await send({ userId: scope.userId, workspaceId: scope.workspaceId,

@@ -394,6 +394,29 @@ describe('[COMP:ext/agent] Native dropdown option clicks', () => {
   })
 })
 
+describe('desktop file selection executor', () => {
+  it.each([true, false])('only selects files on a validated file input (valid=%s)', async valid => {
+    dbg.sendCommand.mockImplementation(async (_target, method) => {
+      if (method === 'Accessibility.getFullAXTree') return { nodes: [{ nodeId: 'file', backendDOMNodeId: 9, role: { value: 'button' }, name: { value: 'Choose file' }, ignored: false }] };
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'file-input-object' } };
+      if (method === 'Runtime.callFunctionOn') return { result: { value: valid } };
+      return {};
+    });
+    const executor = new TabExecutor(); await executor.attach(42);
+    const snapshot = await executor.snapshot();
+    const upload = executor.uploadFile(snapshot.nodes[0]!.ref, '/private/staged/report.pdf');
+    if (valid) {
+      await upload;
+      expect(dbg.sendCommand).toHaveBeenCalledWith({ tabId: 42 }, 'DOM.setFileInputFiles', { objectId: 'file-input-object', files: ['/private/staged/report.pdf'] });
+    } else {
+      await expect(upload).rejects.toThrow('enabled, attached file input');
+      expect(dbg.sendCommand.mock.calls.some(c => c[1] === 'DOM.setFileInputFiles')).toBe(false);
+    }
+    expect(dbg.sendCommand).toHaveBeenCalledWith({ tabId: 42 }, 'Runtime.releaseObjectGroup', { objectGroup: 'use-brian-file-upload' });
+    await expect(executor.uploadFile('@unknown', '/private/staged/report.pdf')).rejects.toThrow('Unknown ref');
+  });
+});
+
 describe('[COMP:sandbox/action-cursor] Chromium My Browser action cursor', () => {
   function installActionTarget(): void {
     dbg.sendCommand.mockImplementation(async (_target, method, params) => {

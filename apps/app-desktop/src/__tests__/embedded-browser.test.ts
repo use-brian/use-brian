@@ -11,6 +11,7 @@ vi.mock('../embedded-browser-host.js', () => ({
     selected: number | null = null;
     show = vi.fn(); destroy = vi.fn(); setStatus = vi.fn(); setTheme = vi.fn();
     isDockedFocused = vi.fn(() => false);
+    files = { list: vi.fn(() => ({ downloads: [] })), read: vi.fn(async () => ({ data: 'eA==', offset: 0, total: 1 })), stageUpload: vi.fn(async () => '/private/staged/file.pdf') };
     constructor(public partition: string, public callbacks: any, public options?: { dockWindow?: BrowserWindow | null }) { mocks.hosts.push(this); }
     tabs() { return this.entries; }
     selectedId() { return this.selected; }
@@ -135,6 +136,49 @@ describe('pairing validation and storage isolation', () => {
   });
   it('rejects oversized URLs', () => { expect(() => browserUrl('https://example.com/' + 'x'.repeat(16384))).toThrow(); });
   it('normalizes HTTP(S) URLs', () => { expect(browserUrl('https://EXAMPLE.com')).toBe('https://example.com/'); });
+});
+
+describe('browser file transfer commands', () => {
+  it('lists and reads only through the active host file manager', async () => {
+    await connect();
+    expect(await command('listDownloads')).toMatchObject({ ok: true, data: { downloads: [] } });
+    expect(await command('readDownload', { id: 'download-id', offset: 0 })).toMatchObject({ ok: true, data: { data: 'eA==', total: 1 } });
+    expect(host().files.read).toHaveBeenCalledWith('download-id', 0);
+    await command('stop');
+    expect(await command('listDownloads')).toMatchObject({ ok: false });
+  });
+  it('requires native approval before staging or selecting a workspace file', async () => {
+    await connect(); await command('openTab', { url: 'https://example.com/upload' });
+    const select = vi.spyOn(TabExecutor.prototype, 'uploadFile').mockResolvedValue();
+    mocks.consent.mockResolvedValueOnce({ response: 0 });
+    expect(await command('uploadFile', { ref: '@e1', name: 'report.pdf', data: 'eA==' })).toMatchObject({ ok: false, code: 'user_denied' });
+    expect(host().files.stageUpload).not.toHaveBeenCalled(); expect(select).not.toHaveBeenCalled();
+    expect(await command('uploadFile', { ref: '@e1', name: 'report.pdf', data: 'eA==' })).toMatchObject({ ok: true });
+    expect(host().files.stageUpload).toHaveBeenCalledWith('report.pdf', 'eA==');
+    expect(select).toHaveBeenCalledWith('@e1', '/private/staged/file.pdf');
+  });
+  it.each(['stop', 'navigate', 'timeout'])('rejects late upload approval after %s', async kind => {
+    await connect(); await command('openTab', { url: 'https://example.com/upload' });
+    const current = host();
+    const select = vi.spyOn(TabExecutor.prototype, 'uploadFile').mockResolvedValue();
+    const answer = deferred<{ response: number }>(); mocks.consent.mockReturnValueOnce(answer.promise);
+    await command('uploadFile', { ref: '@e1', name: 'report.pdf', data: 'eA==' });
+    if (kind === 'stop') await command('stop');
+    if (kind === 'navigate') current.entries[0].contents.getURL = () => 'https://other.example/';
+    if (kind === 'timeout') await vi.advanceTimersByTimeAsync(20_000);
+    answer.resolve({ response: 1 }); await flush();
+    expect(current.files.stageUpload).not.toHaveBeenCalled(); expect(select).not.toHaveBeenCalled();
+  });
+  it('rechecks destination after asynchronous file staging', async () => {
+    await connect(); await command('openTab', { url: 'https://example.com/upload' });
+    const select = vi.spyOn(TabExecutor.prototype, 'uploadFile').mockResolvedValue();
+    host().files.stageUpload.mockImplementationOnce(async () => {
+      host().entries[0].contents.getURL = () => 'https://other.example/';
+      return '/private/staged/file.pdf';
+    });
+    expect(await command('uploadFile', { ref: '@e1', name: 'report.pdf', data: 'eA==' })).toMatchObject({ ok: false, code: 'stale_ref' });
+    expect(select).not.toHaveBeenCalled();
+  });
 });
 
 describe('native pairing lifecycle with the real RelayClient', () => {
