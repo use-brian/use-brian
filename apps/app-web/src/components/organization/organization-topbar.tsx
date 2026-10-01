@@ -16,6 +16,8 @@
  * Spec: docs/architecture/features/organization-chart.md → "User experience".
  * [COMP:app-web/organization-chart]
  */
+import {useWorkspaceAccessMode} from "@/components/context/mode-aware-context";
+import {visibleOrganizationSections} from "@/lib/organization-navigation";
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ChevronDown, Users } from 'lucide-react';
@@ -32,6 +34,8 @@ export function OrganizationTopbar({ workspaceId, section, slotRef }: {
   section: OrganizationSection;
   slotRef: (element: HTMLDivElement | null) => void;
 }) {
+  const mode=useWorkspaceAccessMode();
+  const sections=visibleOrganizationSections(mode.data);
   const t = useT().organization;
   const copy = organizationSectionCopy(t);
   const { sidebarCollapsed } = useSidebarData();
@@ -48,7 +52,7 @@ export function OrganizationTopbar({ workspaceId, section, slotRef }: {
           <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
-          {ORGANIZATION_SECTIONS.map(item => {
+          {sections.map(item => {
             const Icon = ORGANIZATION_SECTION_ICON[item];
             return <DropdownMenuItem key={item} className={cn('min-h-11', item === section && 'font-medium')} onClick={() => router.push(organizationHref(workspaceId, item))}>
               <Icon className="size-3.5" aria-hidden /><span className="min-w-32 flex-1">{copy[item].label}</span>
@@ -57,7 +61,7 @@ export function OrganizationTopbar({ workspaceId, section, slotRef }: {
         </DropdownMenuContent>
       </DropdownMenu>
       {sidebarCollapsed ? <nav aria-label={t.sectionsAriaLabel} data-organization-switcher className="hidden shrink-0 items-center gap-0.5 md:flex">
-        {ORGANIZATION_SECTIONS.map(item => {
+        {sections.map(item => {
           const Icon = ORGANIZATION_SECTION_ICON[item], active = item === section;
           return <Link key={item} href={organizationHref(workspaceId, item)} aria-current={active ? 'page' : undefined}
             className={cn('inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] transition-colors',

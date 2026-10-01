@@ -451,7 +451,7 @@ export async function createWorkspaceSession(
   /** Bind the room to a specific workspace assistant (default: primary).
    *  The binding is per-room for its lifetime - per-turn routing is P3. */
   assistantId?: string,
-  context?: { contextGroupId: string | null; contextProjectId: string | null },
+  context?: { contextGroupId: string | null; contextProjectId: string | null; expectedPolicyRevision?:string },
 ): Promise<WorkspaceSession> {
   const res = await authFetch(`${API_URL}/api/sessions/workspace`, {
     method: "POST",

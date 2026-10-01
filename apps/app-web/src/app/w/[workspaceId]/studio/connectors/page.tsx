@@ -105,6 +105,7 @@ import {
   type CurrentConnectorAuth,
 } from "@/lib/connector-auth-form";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {ShopifySetupGate,ShopifySetupResume} from "@/components/connectors/shopify-reviewed-setup";
 import { ConnectorContextBinding } from "@/components/context/connector-context-binding";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
@@ -1847,6 +1848,7 @@ function ConnectorsList() {
     // merchant's own custom app has to grant). Delete this early return and a
     // Shopify connect falls through to the GOOGLE authorize URL.
     if (id === "shopify") {
+      setJustConnected(null); // A pending reviewed setup must never inherit an auto-exposure arm.
       setShowShopifyForm(rid);
       revealConnectForm(rid);
       setShopifyConnectOpts(opts ?? null);
@@ -3765,6 +3767,7 @@ function ConnectorsList() {
 
   return (
     <div className="space-y-5">
+      <ShopifySetupResume/>
       <StudioTopbarActions>
         <AddConnectorMenu
           label={tc.addConnector}
@@ -4911,7 +4914,7 @@ function ConnectorsList() {
                   </div>
                 )}
                 {showShopifyForm === rid && (
-                  <div className="space-y-2">
+                  <ShopifySetupGate instanceId={shopifyConnectOpts?.instanceId??sel.connectorInstanceId??undefined} reconnect={!shopifyConnectOpts?.addAnother&&Boolean(shopifyConnectOpts?.instanceId??sel.connectorInstanceId)} legacy={<div className="space-y-2">
                     <p className="text-xs text-muted-foreground">{tc.shopify.formHelp}</p>
                     <input
                       type="text"
@@ -5027,7 +5030,7 @@ function ConnectorsList() {
                         </button>
                       </div>
                     )}
-                  </div>
+                  </div>}/>
                 )}
 
                 {/* GCS bring-your-own storage form — SA key + bucket, validated

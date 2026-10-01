@@ -12,6 +12,8 @@
  * [COMP:app-web/sidebar-panel-organization]
  */
 
+import {useWorkspaceAccessMode} from "@/components/context/mode-aware-context";
+import {visibleOrganizationSections} from "@/lib/organization-navigation";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
@@ -27,6 +29,8 @@ import {
 } from "@/components/organization/organization-chrome";
 
 export function OrganizationSidebarPanel({ workspaceId }: { workspaceId: string }) {
+  const mode=useWorkspaceAccessMode();
+  const sections=visibleOrganizationSections(mode.data);
   const t = useT().organization;
   const copy = organizationSectionCopy(t);
   const active = organizationSection(useSearchParams()?.get("section") ?? null);
@@ -36,7 +40,7 @@ export function OrganizationSidebarPanel({ workspaceId }: { workspaceId: string 
     // sits beneath that row's icon, so the sections read as its children.
     <nav aria-label={t.sectionsAriaLabel} className="ml-5 flex flex-col gap-0.5 border-l border-sidebar-border pl-2 pr-1">
 
-      {ORGANIZATION_SECTIONS.map((section) => {
+      {sections.map((section) => {
         const Icon = ORGANIZATION_SECTION_ICON[section];
         const current = section === active;
         return (

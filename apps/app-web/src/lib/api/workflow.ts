@@ -614,6 +614,7 @@ export type WorkflowIssue = {
 };
 
 export type CreateWorkflowInput = {
+  expectedPolicyRevision?: string;
   workspaceId: string;
   name: string;
   description?: string;

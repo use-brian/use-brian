@@ -1,3 +1,4 @@
+import {SHOPIFY_SETUP_COOKIE,parseShopifySetupState,readSetupCookie} from "@/lib/shopify-setup-state";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import {
@@ -60,6 +61,23 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
   const stateRaw = url.searchParams.get("state") ?? ""; // "shopify[:add]:<workspaceId>:<nonce>"
+  const pending=parseShopifySetupState(stateRaw);
+  if(pending){
+    const store=await cookies(),binding=readSetupCookie(store.get(SHOPIFY_SETUP_COOKIE)?.value??'');
+    if(!binding||binding.id!==pending.id||!verifyConnectorState({stateNonce:pending.nonce,cookieNonce:binding.nonce}))return NextResponse.redirect(new URL('/teams',request.url));
+    const destination=new URL(`/w/${binding.workspaceId}/studio/connectors`,request.url);
+    destination.searchParams.set('shopifySetup',pending.id);
+    const token=store.get('access_token')?.value;
+    // Never replay the exchange automatically after an uncertain response.
+    if(token&&code&&!url.searchParams.get('error')){
+      try{
+        const params=Object.fromEntries(url.searchParams.entries());
+        const response=await fetch(`${API_URL}/api/connectors/shopify/oauth-callback`,{cache:'no-store',method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({setupId:pending.id,workspaceId:binding.workspaceId,params})});
+        if(!response.ok)destination.searchParams.set('setupError','review_required');
+      }catch{destination.searchParams.set('setupError','review_required');}
+    }else destination.searchParams.set('setupError','review_required');
+    const response=NextResponse.redirect(destination);response.cookies.delete(SHOPIFY_SETUP_COOKIE);return response;
+  }
   const error = url.searchParams.get("error");
   const shopDomain = normalizeShopifyShopDomain(url.searchParams.get("shop") ?? "");
 

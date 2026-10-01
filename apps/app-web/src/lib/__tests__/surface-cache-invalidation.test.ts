@@ -284,3 +284,13 @@ it('[COMP:app-web/surface-cache-invalidation] purges only the changed workspace 
   expect(readSurfaceCache('page-directory:w1:viewer').data).toBeUndefined();
   expect(readSurfaceCache('page-directory:w2:viewer').data).toBe('other');
 });
+
+describe('[COMP:app-web/shopify-setup] unmounted reconnect projections',()=>{
+ it.each(['brian:organization-changed',WORKSPACE_IDENTITY_REFRESH_EVENT])('purges every viewer on %s without touching another workspace',async event=>{
+  resetSurfaceCache();
+  const keys=['workspace-access:w1:u1:connector-reconnect:i1','workspace-access:w1:u2:connector-reconnect:i1','workspace-access:w2:u1:connector-reconnect:i1'];
+  for(const key of keys)await loadSurfaceCache(key,async()=>({binding:'saved-private-scope'}));
+  applySpineEventToSurfaceCache(event,{workspaceId:'w1'},'w1');
+  expect(readSurfaceCache(keys[0])?.data).toBeUndefined();expect(readSurfaceCache(keys[1])?.data).toBeUndefined();expect(readSurfaceCache(keys[2])?.data).toEqual({binding:'saved-private-scope'});
+ });
+});

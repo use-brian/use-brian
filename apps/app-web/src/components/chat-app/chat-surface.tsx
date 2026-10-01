@@ -202,6 +202,7 @@ import {
 } from "@/lib/api/sessions";
 import { getUserInfo } from "@/lib/user";
 import { markRoomSeen } from "@/lib/chat-seen";
+import {ModeAwareCreationContext,useCreationContext} from "@/components/context/mode-aware-context";
 import { ContextScopePicker } from "@/components/context/context-scope-picker";
 import { ContextScopeChips } from "@/components/context/context-scope-chips";
 import {
@@ -524,6 +525,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [restoring, setRestoring] = useState<ChatLocation | null>(null);
   const activeSessionId = restoring ? restoring.sessionId : urlSessionId;
   const view: ChatView = restoring ? restoring.view : urlView;
+  const creationContext=useCreationContext(activeSessionId?"existing":view==="workspace"?"new-shared":"private");
   /** The open thread is shared when it is in the workspace list. */
   const activeShared = useMemo(
     () => sharedSessions.find((r) => r.id === activeSessionId) ?? null,
@@ -1974,6 +1976,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    */
   const startNewWorkspaceChat = useCallback(async () => {
     if (startingShared) return;
+    if(activeSessionId||view!=="workspace"){resetPane();selectSession(null,"workspace");return;}
+    const admitted=creationContext.snapshot();
+    if(!admitted){setError(t.newWorkspaceChatFailed);return;}
     setStartingShared(true);
     try {
       // The room binds the assistant picked in the fresh pane's composer
@@ -1982,10 +1987,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         workspaceId,
         pickedAssistantId ?? undefined,
         {
-          contextGroupId: pickedContextGroupId,
-          contextProjectId: pickedContextProjectId,
+          contextGroupId: admitted.contextGroupId,
+          contextProjectId: admitted.contextProjectId,
+          expectedPolicyRevision:admitted.expectedPolicyRevision,
         },
       );
+      if(!creationContext.isCurrent())return;
       resetPane();
       patchSharedChatSessions(
         workspaceId,
@@ -2000,11 +2007,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       selectSession(created.id, "workspace");
       dispatchChatSessionsRefresh(workspaceId);
     } catch {
+      creationContext.fail();
       setError(t.newWorkspaceChatFailed);
     } finally {
       setStartingShared(false);
     }
-  }, [pickedAssistantId, pickedContextGroupId, pickedContextProjectId, resetPane, selectSession, startingShared, t, workspaceId]);
+  }, [activeSessionId, view, creationContext, pickedAssistantId, pickedContextGroupId, pickedContextProjectId, resetPane, selectSession, startingShared, t, workspaceId]);
 
   /** Stop the in-flight turn. Aborted streams fire neither onDone nor
    *  onError, so the state resets here (the dock's `handleAbort`). */
@@ -2200,6 +2208,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
      *  replays a message that already chose its responders. */
     resolveMentions?: boolean;
   }) => {
+    if(!sessionIdRef.current&&view==="workspace"&&!creationContext.snapshot()){setError(t.newWorkspaceChatFailed);return false;}
     const sendEpoch = sessionEpochRef.current;
     let owningSessionId = sessionIdRef.current;
     const ownsSend = () =>
@@ -2296,11 +2305,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setStartingShared(true);
       try {
         // Bind the room to the hero's picked interlocutor (default primary).
+        const admitted=creationContext.snapshot();
+        if(!admitted)return false;
         const created = await createWorkspaceSession(workspaceId, interlocutor.id, {
-          contextGroupId: pickedContextGroupId,
-          contextProjectId: pickedContextProjectId,
+          contextGroupId: admitted.contextGroupId,
+          contextProjectId: admitted.contextProjectId,
+          expectedPolicyRevision:admitted.expectedPolicyRevision,
         });
-        if (!ownsSend()) return false;
+        if (!ownsSend()||!creationContext.isCurrent()) return false;
         owningSessionId = created.id;
         sessionIdRef.current = created.id;
         hydratedRef.current = created.id;
@@ -2314,6 +2326,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         selectSession(created.id, "workspace");
         dispatchChatSessionsRefresh(workspaceId);
       } catch {
+        creationContext.fail();
         if (ownsSend()) setError(t.newWorkspaceChatFailed);
         return false;
       } finally {
@@ -3074,7 +3087,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     }
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
+  }, [creationContext, input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
 
   // While this full-page surface is mounted it IS the visible chat, so a
   // short capture's voice turn must land in the open thread here — never in
@@ -3917,7 +3930,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             ? () => void send({ forceAddress: true })
             : undefined
         }
-        disabled={!!pendingQuestion}
+        disabled={!!pendingQuestion||(!activeSessionId&&view==="workspace"&&!creationContext.ready)}
         // Mid-turn sends are text-only: an attachment needs the full pre-turn
         // pipeline, which belongs to a turn of its own. Staged chips stay
         // visible and ride the next turn.
@@ -4281,7 +4294,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               </div>
             )}
             <div className="w-full rounded-xl border border-border/70 bg-muted/20 p-3">
-              <ContextScopePicker
+              {view==="workspace"?<ModeAwareCreationContext context={creationContext}/>:<ContextScopePicker
                 teams={contextTeams}
                 projects={contextProjects}
                 teamId={pickedContextGroupId}
@@ -4289,7 +4302,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 onTeamChange={setPickedContextGroupId}
                 onProjectChange={setPickedContextProjectId}
                 disabled={att.uploading}
-              />
+              />}
             </div>
             <div className="w-full">{composerBox}</div>
             {error && (

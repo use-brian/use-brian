@@ -26,3 +26,8 @@ export function organizationSettingsHref(workspaceId: string, section: SettingsS
   if (target && section === 'ws-members' && target.workspaceId !== workspaceId) return organizationHref(workspaceId);
   return organizationHref(workspaceId, destination, target?.memberId);
 }
+
+/** Ready Simple suppresses routine requests, never administrator recovery. */
+export function visibleOrganizationSections(mode?:{mode:string;setupState:string;canAdminister:boolean}) {
+ return ORGANIZATION_SECTIONS.filter(section=>!(mode?.mode==='simple'&&mode.setupState==='ready'&&!mode.canAdminister&&(section==='departments'||section==='access')));
+}
