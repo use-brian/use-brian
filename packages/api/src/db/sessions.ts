@@ -8,8 +8,9 @@ import {
   type ResourceScope,
   type ScopeSource,
 } from '@use-brian/core'
-import { getPool, query } from './client.js'
+import { getPool, getAppPool, applyRLSGucs, query } from './client.js'
 import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
+import { admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 /**
@@ -295,8 +296,11 @@ export async function createWorkspaceChatSession(params: {
   effectiveClearance: string | null
   contextGroupId?: string | null
   contextProjectId?: string | null
+  expectedPolicyRevision?: string
+  /** Set only by the authenticated web route, never from request JSON. */
+  authenticatedHuman?: true
 }): Promise<Session> {
-  return findOrCreateSession({
+  return findOrCreateSessionInternal({
     assistantId: params.assistantId,
     userId: params.starterUserId,
     channelType: 'web',
@@ -307,20 +311,21 @@ export async function createWorkspaceChatSession(params: {
     visibility: 'workspace',
     workspaceId: params.workspaceId,
     effectiveClearance: params.effectiveClearance,
+    expectedPolicyRevision: params.expectedPolicyRevision,
     ...(params.contextGroupId !== undefined
       ? { contextGroupId: params.contextGroupId }
       : {}),
     ...(params.contextProjectId !== undefined
       ? { contextProjectId: params.contextProjectId }
       : {}),
-  })
+  }, params.authenticatedHuman === true)
 }
 
 /**
  * Find or create a session for the given tuple.
  * Updates lastActiveAt on access.
  */
-export async function findOrCreateSession(params: {
+type CreateSessionParams = {
   assistantId: string
   userId: string
   channelType: string
@@ -359,7 +364,45 @@ export async function findOrCreateSession(params: {
   contextGroupId?: string | null
   contextProjectId?: string | null
   contextCompartments?: string[]
-}): Promise<Session> {
+  expectedPolicyRevision?: string
+}
+
+export async function findOrCreateSession(params: CreateSessionParams): Promise<Session> {
+  return findOrCreateSessionInternal(params, false)
+}
+
+/** Per-call authenticated personal transport; no request-supplied visibility. */
+export async function createPersonalWebSession(params: Omit<CreateSessionParams, 'visibility' | 'effectiveClearance' | 'contextCompartments'>,
+  principal: PersonalWebSessionPrincipal): Promise<Session> {
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, principal.actorUserId)
+    const admitted = await admitPersonalWebSession(client, params, principal)
+    const session = await insertSession({ ...admitted, visibility: 'owner' }, (sql, values) => client.query(sql, values), true)
+    await client.query('COMMIT')
+    return session
+  } catch (error) { await client.query('ROLLBACK'); throw error }
+  finally { client.release() }
+}
+
+async function findOrCreateSessionInternal(params: CreateSessionParams, authenticatedHuman: boolean): Promise<Session> {
+  if (params.visibility !== 'workspace') return insertSession(params, query, params.channelType === 'web' && params.appOrigin === 'chat')
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, params.userId)
+    const admitted = await admitSessionCreate(client, params, authenticatedHuman)
+    const session = await insertSession(admitted, (sql, values) => client.query(sql, values), true)
+    await client.query('COMMIT')
+    return session
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally { client.release() }
+}
+
+async function insertSession(params: CreateSessionParams, execute: typeof query, resumeFirst = false): Promise<Session> {
   const appId = params.appId ?? 'Use Brian'
   const appOrigin = params.appOrigin ?? null
   const visibility = params.visibility ?? 'owner'
@@ -371,7 +414,31 @@ export async function findOrCreateSession(params: {
   const contextProjectId = params.contextProjectId ?? null
   const contextCompartments = params.contextCompartments ?? null
 
-  const result = await query<Session>(
+  // BEFORE INSERT runs even for ON CONFLICT. Never exempt a proposed row
+  // merely because its identity matches history: resume the locked row instead.
+  if (resumeFirst) {
+    const resumed = await execute<Session>(
+      `UPDATE sessions SET last_active_at=now()
+       WHERE assistant_id=$1 AND user_id=$2 AND channel_type=$3 AND channel_id=$4 AND app_id=$5
+       RETURNING id, assistant_id as "assistantId", user_id as "userId",
+               channel_type as "channelType", channel_id as "channelId",
+               app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+               compaction_count as "compactionCount",
+               compact_boundary_sequence as "compactBoundarySequence", title,
+               downgrade_notice_sent as "downgradeNoticeSent",
+               downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
+               mode, visibility, effective_clearance as "effectiveClearance",
+               context_group_id as "contextGroupId",
+               context_project_id as "contextProjectId",
+               context_compartments as "contextCompartments",
+               context_locked_at as "contextLockedAt",
+               created_at as "createdAt", last_active_at as "lastActiveAt"`,
+      [params.assistantId, params.userId, params.channelType, params.channelId, appId],
+    )
+    if (resumed.rows[0]) return resumed.rows[0]
+  }
+
+  const result = await execute<Session>(
     `INSERT INTO sessions (
        assistant_id, user_id, channel_type, channel_id, app_id, app_origin,
        visibility, workspace_id, effective_clearance, context_group_id,

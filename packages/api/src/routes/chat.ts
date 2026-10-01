@@ -12,7 +12,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isSharedAudienceSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isSharedAudienceSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
@@ -2844,7 +2844,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           ? (req.body as { appOrigin: string }).appOrigin
           : null
         const appOrigin = rawOrigin && KNOWN_ORIGINS.has(rawOrigin) ? rawOrigin : null
-        session = await findOrCreateSession({
+        const createSession = appOrigin === 'chat' && req.userId && req.authSessionId && req.authVersion !== undefined
+          ? (params: Parameters<typeof findOrCreateSession>[0]) => createPersonalWebSession({ ...params, workspaceId: assistant.workspaceId },
+            { actorUserId: req.userId!, authSessionId: req.authSessionId!, authVersion: req.authVersion! })
+          : findOrCreateSession
+        session = await createSession({
           assistantId: assistant.id,
           userId: user.id,
           channelType: 'web',
