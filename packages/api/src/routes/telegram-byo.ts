@@ -34,7 +34,7 @@ import { Router } from 'express'
 import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, describeTelegramDownloadFailure, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
 import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, ChatSeenEvent } from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
-import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
+import { getWorkspaceMembershipWithClearanceSystem, getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
 import {
   channelLinkBindsHere,
@@ -55,7 +55,7 @@ import { buildAlbumFiledReply, buildDocumentFiledReply, buildOversizeDocReply, c
 import type { ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
 import { transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
-import type { ChannelIntegrationStore, ChannelIntegrationConfig, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
+import type { ChannelIntegrationStore, ChannelIntegrationConfig, DeliveryAudienceBinding, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import { humanizeToolName, describeToolInput } from '@use-brian/shared'
@@ -568,6 +568,28 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
             `[telegram-byo] unauthorized add of assistant ${assistant.id} to chat ${evt.chatId} by tg:${evt.adderUserId} — leaving`,
           )
           adapter.leaveChat(evt.chatId).catch(() => {})
+          return
+        }
+
+        // The add IS the approval: a workspace owner or admin, through their
+        // own linked Telegram account, chose this group's audience. Record it
+        // as a group reply-access binding at their clearance so workspace
+        // context answers there. See scoped-context.md -> "Owners and admins
+        // in approved groups".
+        if (!assistant.workspaceId || !adderUserId) return
+        if (evt.chatType !== 'group' && evt.chatType !== 'supergroup') return
+        try {
+          const membership = await getWorkspaceMembershipWithClearanceSystem(adderUserId, assistant.workspaceId)
+          if (membership?.role !== 'owner' && membership?.role !== 'admin') return
+          await options.integrationStore.mergeConfigSystem(integration.id, (current) =>
+            withBotAddApproval(current, {
+              chatId: evt.chatId,
+              approvedByUserId: adderUserId!,
+              clearance: membership.clearance,
+              approvedAt: new Date().toISOString(),
+            }))
+        } catch (err) {
+          console.error('[telegram-byo] bot-add group approval failed:', err)
         }
       },
       onCallbackQuery: async (query) => {
@@ -1140,6 +1162,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           channelUserId,
           ownerId: routedOwnerId,
           isIdentified,
+          senderLinkedIdentity: foundLinked,
           externalGuest,
           externalGuestConnectorTools:
             externalGuest
@@ -1282,6 +1305,8 @@ type ProcessMessageParams = {
   channelUserId: string
   ownerId: string
   isIdentified: boolean
+  /** Sender came in through their own linked Telegram account (`foundLinked`). */
+  senderLinkedIdentity: boolean
   /** Explicitly allowlisted, unlinked private sender: conversation-only lane. */
   externalGuest: boolean
   /** Explicit per-integration opt-in for connector tools on that guest lane. */
@@ -1353,6 +1378,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     channelUserId,
     ownerId,
     isIdentified,
+    senderLinkedIdentity,
     externalGuest,
     externalGuestConnectorTools,
   } = params
@@ -1808,6 +1834,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     ownerId,
     assistant: { ...assistant, ownerUserId: ownerId },
     isIdentified,
+    senderLinkedIdentity,
     externalGuest,
     externalGuestConnectorTools,
     channelType: 'telegram',
@@ -1998,6 +2025,40 @@ export function telegramIncomingFailureText(channelId: string, err: unknown): st
  * Exported for unit tests.
  */
 const SEEN_CHAT_STALE_MS = 60 * 60 * 1000 // 1h
+
+/**
+ * Approve a Telegram group for workspace replies because an owner or admin
+ * added the bot to it. A chat that already has an approval is left exactly as
+ * an admin configured it (Studio may have narrowed it); the new entry covers
+ * every topic of the chat, General Team only, at the adder's clearance.
+ */
+export function withBotAddApproval(
+  config: ChannelIntegrationConfig,
+  params: {
+    chatId: string
+    approvedByUserId: string
+    clearance: DeliveryAudienceBinding['clearance']
+    approvedAt: string
+  },
+): ChannelIntegrationConfig {
+  const bindings = config.deliveryAudienceBindings ?? []
+  if (bindings.some((binding) => binding.channelId === params.chatId)) return config
+  return {
+    ...config,
+    deliveryAudienceBindings: [...bindings, {
+      version: 1,
+      channelId: params.chatId,
+      audienceType: 'group',
+      clearance: params.clearance,
+      compartments: [],
+      projectIds: [],
+      recipientUserId: null,
+      expiresAt: null,
+      approvedByUserId: params.approvedByUserId,
+      approvedAt: params.approvedAt,
+    }],
+  }
+}
 
 export async function persistSeenChat(
   store: ChannelIntegrationStore,

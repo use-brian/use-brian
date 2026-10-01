@@ -32,8 +32,9 @@ export type DeliveryAudienceInput = {
    */
   recipientMode?: 'member' | 'external' | 'assistant'
   /**
-   * Set ONLY by a live channel turn in a group, where `userId` is the verified
-   * human who just spoke there. An owner or admin speaking in an approved
+   * Set ONLY by a live channel turn in a group, where `userId` is the human
+   * who just spoke there through their own linked provider account (the same
+   * Telegram account connected to their Brian account). An owner or admin speaking in an approved
    * group may receive their own personal context in the reply: who else is in
    * that group is the group admin's responsibility, not a reason to refuse.
    * Workflows, relays and replays never set it, so they stay at the binding.

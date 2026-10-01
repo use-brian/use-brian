@@ -140,6 +140,8 @@ vi.mock('../../db/workspace-store.js', () => ({
     teamRoleCalls.push({ userId, workspaceId })
     return teamRoleResponse
   }),
+  getWorkspaceMembershipWithClearanceSystem: vi.fn(async () =>
+    teamRoleResponse ? { role: teamRoleResponse, clearance: 'confidential' as const } : null),
 }))
 
 // billingPartyForAssistant performs a DB query against `teams` to resolve
@@ -174,6 +176,7 @@ const pipelineCalls: Array<{
   userId: string
   actorChannelId?: string | null
   isIdentified: boolean
+  senderLinkedIdentity: boolean
   externalGuest: boolean
   externalGuestConnectorTools: boolean
   isGroupChat: boolean
@@ -206,6 +209,7 @@ vi.mock('../channel-pipeline.js', () => ({
     userId: string
     actorChannelId?: string | null
     isIdentified: boolean
+    senderLinkedIdentity?: boolean
     externalGuest?: boolean
     externalGuestConnectorTools?: boolean
     isGroupChat: boolean
@@ -236,6 +240,7 @@ vi.mock('../channel-pipeline.js', () => ({
       userId: params.userId,
       actorChannelId: params.actorChannelId,
       isIdentified: params.isIdentified,
+      senderLinkedIdentity: params.senderLinkedIdentity === true,
       externalGuest: params.externalGuest === true,
       externalGuestConnectorTools: params.externalGuestConnectorTools === true,
       isGroupChat: params.isGroupChat,
@@ -356,6 +361,7 @@ vi.mock('../../db/episodes-store.js', () => ({
 import {
   telegramByoRoutes,
   telegramIncomingFailureText,
+  withBotAddApproval,
   persistSeenChat,
   telegramLinkBindsHere,
   shouldUseUniversalTelegramIntake,
@@ -513,6 +519,18 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
 
   // 2026-09-29: an approved group was told it was "not approved" when the
   // reply actually needed context the approval does not grant.
+  it('keeps an existing group approval exactly as an admin configured it', () => {
+    const existing = {
+      version: 1 as const, channelId: '-100555', audienceType: 'group' as const, clearance: 'internal' as const,
+      compartments: ['team:finance'], projectIds: [], recipientUserId: null, expiresAt: null,
+      approvedByUserId: 'admin_a', approvedAt: '2026-09-01T00:00:00.000Z',
+    }
+    const config = { deliveryAudienceBindings: [existing] }
+    expect(withBotAddApproval(config, {
+      chatId: '-100555', approvedByUserId: 'admin_b', clearance: 'confidential', approvedAt: '2026-10-01T00:00:00.000Z',
+    })).toBe(config)
+  })
+
   it('does not tell an approved group it is unapproved', () => {
     expect(telegramIncomingFailureText('-1002000000001:topic:15', {
       reason: 'delivery_audience_unverified',
@@ -2050,9 +2068,22 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
     expect(pipelineCalls[0]).toMatchObject({
       userId: 'shadow_unlisted_group_sender',
       isGroupChat: true,
+      senderLinkedIdentity: false,
       externalGuest: true,
       externalGuestConnectorTools: false,
     })
+  })
+
+  // Personal context in a group needs the SAME Telegram account the member
+  // connected to Brian; a shadow or allowlisted sender never qualifies.
+  it('marks a group sender as linked only through their own linked Telegram account', async () => {
+    const app = makeGuestApp([], { userId: 'owner_1', assistantId: 'assistant_1' }, true, 'allow_all')
+    await postUpdate(app, buildGroupMessage(42, 'hello', 'ownerhandle'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({ userId: 'owner_1', isGroupChat: true, senderLinkedIdentity: true })
   })
 
   it('silently ignores an unlisted stranger, including when the list is empty', async () => {
@@ -2300,6 +2331,53 @@ describe('[COMP:api/telegram-byo-route] group add-protection', () => {
 
     expect(leaveChatCalls).toEqual([])
     expect(teamRoleCalls).toEqual([{ userId: 'team_admin_user', workspaceId: 'team_1' }])
+  })
+
+  // 2026-10-01: the add IS the approval. A workspace owner/admin adding the
+  // bot through their own linked Telegram account approves the group.
+  it('approves the group for workspace replies when a team admin adds the bot', async () => {
+    const { findAssistantById } = await import('../../db/users.js')
+    vi.mocked(findAssistantById).mockResolvedValueOnce({
+      id: 'assistant_1', name: 'Team Bot', ownerUserId: 'owner_1', workspaceId: 'team_1',
+      defaultModelAlias: 'gemini-flash', systemPrompt: null,
+    } as never)
+    teamRoleResponse = 'admin'
+    const integrationStore = makeIntegrationStore()
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: integrationStore as never,
+      linkedAccountStore: makeLinkedAccountStore({ userId: 'team_admin_user', assistantId: 'assistant_1' }) as never,
+      capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+
+    await postUpdate(app, buildGroupAdd({ adderTgId: 42, chatId: -1002000000009 }))
+    await vi.waitFor(() => expect(integrationStore.mergeConfigSystem).toHaveBeenCalledTimes(2))
+
+    expect(leaveChatCalls).toEqual([])
+    // One merge records seenChats; the other is the approval.
+    const mutators = integrationStore.mergeConfigSystem.mock.calls.map((call) => (call as unknown[])[1] as (c: object) => { deliveryAudienceBindings?: unknown[] })
+    const approved = mutators.map((mutate) => mutate({}).deliveryAudienceBindings).find(Boolean)
+    expect(approved).toEqual([expect.objectContaining({
+      channelId: '-1002000000009', audienceType: 'group', clearance: 'confidential',
+      compartments: [], projectIds: [], recipientUserId: null, approvedByUserId: 'team_admin_user',
+    })])
+  })
+
+  it('never approves a group for a personal (no workspace) bot', async () => {
+    const integrationStore = makeIntegrationStore()
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: integrationStore as never,
+      linkedAccountStore: makeLinkedAccountStore({ userId: 'owner_1', assistantId: 'assistant_1' }) as never,
+      capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+
+    await postUpdate(app, buildGroupAdd({ adderTgId: 42 }))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    const mutators = integrationStore.mergeConfigSystem.mock.calls.map((call) => (call as unknown[])[1] as (c: object) => { deliveryAudienceBindings?: unknown[] })
+    expect(mutators.some((mutate) => mutate({}).deliveryAudienceBindings)).toBe(false)
   })
 
   it('leaves when the adder is only a team member (not admin or owner)', async () => {

@@ -424,6 +424,15 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    */
   externalGuest?: boolean
   /**
+   * The sender reached Brian through their own verified linked account for
+   * this provider (the same Telegram account connected to their Brian
+   * account), not a shadow, merged-guest or allowlist identity. Only such a
+   * sender, as a workspace owner or admin, receives their personal context
+   * in an approved group. See scoped-context.md -> "Owners and admins in
+   * approved groups".
+   */
+  senderLinkedIdentity?: boolean
+  /**
    * Explicit owner opt-in for an external guest to use the connected tools
    * enabled for this assistant. Does not relax memory, workspace-file, skill,
    * private-context, or long-term-persistence boundaries.
@@ -1091,7 +1100,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     recipientMode: memberMode === 'external' ? 'external' as const : 'member' as const,
     // The verified sender of this group message. An owner or admin gets their
     // own personal context here; see `groupSpeakerCeiling`.
-    groupSpeaker: isGroupChat && senderIsWorkspaceMember,
+    groupSpeaker: isGroupChat && senderIsWorkspaceMember && params.senderLinkedIdentity === true,
   }
   const audienceEnvelope = isGroupChat && assistant.workspaceId
     ? await resolveDeliveryAudienceEnvelope(audienceInput)

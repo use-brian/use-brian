@@ -518,8 +518,9 @@ export type ChannelIntegrationStore = {
 
   /**
    * System-level config merge (no RLS). Used by the BYO webhook to persist
-   * opportunistic observations (`seenChats`) without user context. Atomically
-   * reads the current row, applies `mutate`, and writes it back.
+   * opportunistic observations (`seenChats`) and bot-add audience approvals
+   * without user context. Locks the row, applies `mutate`, and writes it back
+   * in one transaction, so concurrent mergers never lose each other's keys.
    *
    * Only keys the mutator touches are committed — other concurrent writers
    * (e.g. owner flipping `requireMention` in the UI) aren't clobbered provided
@@ -1147,16 +1148,30 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
     },
 
     async mergeConfigSystem(id, mutate) {
-      const current = await query<{ config: ChannelIntegrationConfig | null }>(
-        `SELECT config FROM channel_integrations WHERE id = $1`,
-        [id],
-      )
-      if (current.rows.length === 0) return
-      const next = mutate(current.rows[0].config ?? {})
-      await query(
-        `UPDATE channel_integrations SET config = $2 WHERE id = $1`,
-        [id, JSON.stringify(next)],
-      )
+      // Row-locked: the Telegram webhook fires `seenChats` and the bot-add
+      // audience approval for the same update without awaiting either, and a
+      // plain read-modify-write let one silently erase the other.
+      const client = await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        const current = await client.query<{ config: ChannelIntegrationConfig | null }>(
+          `SELECT config FROM channel_integrations WHERE id = $1 FOR UPDATE`,
+          [id],
+        )
+        if (current.rows.length > 0) {
+          const next = mutate(current.rows[0].config ?? {})
+          await client.query(
+            `UPDATE channel_integrations SET config = $2 WHERE id = $1`,
+            [id, JSON.stringify(next)],
+          )
+        }
+        await client.query('COMMIT')
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      } finally {
+        client.release()
+      }
     },
 
     async touchLastEventAt(id) {
