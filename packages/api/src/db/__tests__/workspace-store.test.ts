@@ -1,3 +1,5 @@
+import { transferAssistant } from '../assistant-transfer-admission.js'
+vi.mock('../assistant-transfer-admission.js', () => ({ transferAssistant: vi.fn() }))
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../client.js', () => ({
@@ -442,89 +444,42 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
     })
   })
 
-  describe('addMember', () => {
-    it('adds member to team and all team assistants (and the General teamspace)', async () => {
-      mockQuery
-        .mockResolvedValueOnce({
-          rows: [{ id: 'tm_1', workspaceId: 't_1', userId: 'u_2', role: 'member', joinedAt: new Date() }],
-          rowCount: 1,
-        } as never)
-        .mockResolvedValueOnce({ rowCount: 0 } as never) // assistant_members insert
-        // Default-teamspace auto-join (mig 313): ensureDefault's SELECT finds
-        // the existing General row, then the member-join INSERT.
-        .mockResolvedValueOnce({ rows: [{ id: 'ts_general' }], rowCount: 1 } as never)
-        .mockResolvedValueOnce({ rowCount: 1 } as never)
+  describe.each(['addMember', 'ensureMemberSystem'] as const)('%s atomic admission', (method) => {
+    const member = { id: 'tm_1', workspaceId: 't_1', userId: 'u_2', role: 'admin', clearance: 'confidential' }
+    let client: { query: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> }
+    beforeEach(() => {
+      client = { query: vi.fn(async (sql: string, _values?: unknown[]) => ({ rows: sql.includes('INSERT INTO workspace_members') ? [member] : [], rowCount: 1 })), release: vi.fn() }
+      mockGetPool.mockReturnValue({ connect: vi.fn().mockResolvedValue(client) } as never)
+    })
+    const admit = () => method === 'addMember' ? store.addMember('u_1', 't_1', 'u_2', 'admin') : store.ensureMemberSystem('t_1', 'u_2')
 
-      const member = await store.addMember('u_1', 't_1', 'u_2')
-      expect(member.userId).toBe('u_2')
-      expect(member.role).toBe('member')
-
-      // Verify assistant_members sync
-      expect(mockQuery).toHaveBeenCalledTimes(4)
-      const assistantSql = mockQuery.mock.calls[1][0] as string
-      expect(assistantSql).toContain('INSERT INTO assistant_members')
-      expect(assistantSql).toContain('ON CONFLICT')
-
-      // Verify the teamspace auto-join landed on the default teamspace
-      const teamspaceJoinSql = mockQuery.mock.calls[3][0] as string
-      expect(teamspaceJoinSql).toContain('INSERT INTO teamspace_members')
-      expect(teamspaceJoinSql).toContain('is_default = true')
+    it('locks workspace first and commits membership, eligible assistants and defaults on one client', async () => {
+      expect(await admit()).toEqual(member)
+      const sql = client.query.mock.calls.map(([text]) => text)
+      expect(sql[0]).toBe('BEGIN')
+      expect(sql[1]).toBe('SELECT id FROM workspaces WHERE id = $1 FOR UPDATE')
+      expect(sql[2]).toContain('INSERT INTO workspace_members')
+      if (method === 'addMember') expect(client.query.mock.calls[2][1]).toEqual(['t_1', 'u_2', 'admin', 'confidential'])
+      else {
+        expect(sql[2]).toContain('ON CONFLICT (workspace_id, user_id) DO UPDATE SET user_id = EXCLUDED.user_id')
+        expect(sql[2]).not.toContain('SET role')
+      }
+      expect(sql[3]).toContain("a.owner_user_id IS NULL OR a.kind IN ('primary', 'app') OR a.owner_user_id = $1")
+      expect(sql.some(text => text.includes('INSERT INTO teamspace_members'))).toBe(true)
+      expect(sql.at(-1)).toBe('COMMIT')
+      expect(mockQuery).not.toHaveBeenCalled()
+      expect(client.release).toHaveBeenCalledOnce()
     })
 
-    it("stamps a plain member's clearance to 'internal' (role default)", async () => {
-      mockQuery
-        .mockResolvedValueOnce({
-          rows: [{ id: 'tm_1', workspaceId: 't_1', userId: 'u_2', role: 'member', joinedAt: new Date() }],
-          rowCount: 1,
-        } as never)
-        .mockResolvedValueOnce({ rowCount: 0 } as never)
-        .mockResolvedValueOnce({ rows: [{ id: 'ts_general' }], rowCount: 1 } as never) // teamspace default lookup (mig 313)
-        .mockResolvedValueOnce({ rowCount: 1 } as never) // teamspace member join
-
-      await store.addMember('u_1', 't_1', 'u_2')
-
-      const memberInsertSql = mockQuery.mock.calls[0][0] as string
-      const memberInsertArgs = mockQuery.mock.calls[0][1] as unknown[]
-      expect(memberInsertSql).toContain('INSERT INTO workspace_members')
-      expect(memberInsertSql).toContain('clearance')
-      // [workspaceId, memberUserId, role, clearance]
-      expect(memberInsertArgs).toEqual(['t_1', 'u_2', 'member', 'internal'])
-    })
-
-    it("stamps an admin's clearance to 'confidential' (operator role default)", async () => {
-      mockQuery
-        .mockResolvedValueOnce({
-          rows: [{ id: 'tm_2', workspaceId: 't_1', userId: 'u_3', role: 'admin', joinedAt: new Date() }],
-          rowCount: 1,
-        } as never)
-        .mockResolvedValueOnce({ rowCount: 0 } as never)
-        .mockResolvedValueOnce({ rows: [{ id: 'ts_general' }], rowCount: 1 } as never) // teamspace default lookup (mig 313)
-        .mockResolvedValueOnce({ rowCount: 1 } as never) // teamspace member join
-
-      await store.addMember('u_1', 't_1', 'u_3', 'admin')
-
-      const memberInsertArgs = mockQuery.mock.calls[0][1] as unknown[]
-      expect(memberInsertArgs).toEqual(['t_1', 'u_3', 'admin', 'confidential'])
-    })
-  })
-
-  describe('ensureMemberSystem', () => {
-    it('preserves an existing role and heals assistant and General teamspace membership', async () => {
-      mockQuery
-        .mockResolvedValueOnce({
-          rows: [{ id: 'tm_1', workspaceId: 't_1', userId: 'u_2', role: 'admin', joinedAt: new Date() }],
-          rowCount: 1,
-        } as never)
-        .mockResolvedValueOnce({ rowCount: 0 } as never)
-        .mockResolvedValueOnce({ rows: [{ id: 'ts_general' }], rowCount: 1 } as never)
-        .mockResolvedValueOnce({ rowCount: 1 } as never)
-
-      const member = await store.ensureMemberSystem('t_1', 'u_2')
-      expect(member.role).toBe('admin')
-      expect(mockQuery.mock.calls[0][0]).toContain('ON CONFLICT (workspace_id, user_id)')
-      expect(mockQuery.mock.calls[0][0]).not.toContain('SET role')
-      expect(mockQuery.mock.calls[1][0]).toContain('INSERT INTO assistant_members')
-      expect(mockQuery.mock.calls[3][0]).toContain('INSERT INTO teamspace_members')
+    it.each(['assistant_members', 'teamspace_members'])('rolls back a failed %s write and releases the client', async (table) => {
+      client.query.mockImplementation(async (sql: string) => {
+        if (sql.includes(`INSERT INTO ${table}`)) throw new Error('admission fault')
+        return { rows: sql.includes('INSERT INTO workspace_members') ? [member] : [], rowCount: 1 }
+      })
+      await expect(admit()).rejects.toThrow('admission fault')
+      expect(client.query).toHaveBeenLastCalledWith('ROLLBACK')
+      expect(client.query).not.toHaveBeenCalledWith('COMMIT')
+      expect(client.release).toHaveBeenCalledOnce()
     })
   })
 
@@ -799,137 +754,16 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
     })
   })
 
-  describe('adoptAssistant (transfer-of-ownership)', () => {
-    /**
-     * Stage 5 of the team-connector promotion: adopt is now a single
-     * transaction that (a) NULLs owner_user_id + sets workspace_id, and (b)
-     * strips assistant_members rows. Fan-out per team member is no longer
-     * created — team access flows through workspace_members after migration
-     * 089's XOR flip.
-     */
-    function makeTxClient(rowCounts: number[]): {
-      client: { query: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> }
-      setPool: () => void
-    } {
-      const calls = [...rowCounts]
-      const client = {
-        query: vi.fn(async (sql: string) => {
-          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return undefined
-          const count = calls.shift() ?? 0
-          return { rowCount: count, rows: [] }
-        }),
-        release: vi.fn(),
-      }
-      return {
-        client,
-        setPool() {
-          mockGetPool.mockReturnValue({ connect: vi.fn().mockResolvedValue(client) } as never)
-        },
-      }
-    }
-
-    it('runs the ownership-transfer transaction when caller is the owner', async () => {
-      // 1) RLS ownership check — caller is owner
-      mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 } as never)
-
-      // 2) transactional client: BEGIN → UPDATE → DELETE → COMMIT
-      //    rowCounts feed the non-BEGIN/COMMIT queries: [UPDATE, DELETE]
-      const { client, setPool } = makeTxClient([1, 0])
-      setPool()
-
-      const result = await store.adoptAssistant('u_1', 't_1', 'a_1')
-      expect(result).toBe(true)
-
-      // BEGIN + UPDATE + DELETE + COMMIT = 4 calls
-      expect(client.query).toHaveBeenCalledTimes(4)
-      expect(client.query.mock.calls[0][0]).toBe('BEGIN')
-      expect(client.query.mock.calls[3][0]).toBe('COMMIT')
-
-      const updateSql = client.query.mock.calls[1][0] as string
-      expect(updateSql).toContain('UPDATE assistants')
-      expect(updateSql).toContain('workspace_id = $1')
-      expect(updateSql).toContain('owner_user_id = NULL')
-
-      const deleteSql = client.query.mock.calls[2][0] as string
-      expect(deleteSql).toContain('DELETE FROM assistant_members')
+  describe('assistant transfer admission', () => {
+    it('delegates adoption with the actual actor and explicit department', async () => {
+      vi.mocked(transferAssistant).mockResolvedValueOnce(true)
+      expect(await store.adoptAssistant('actor', 'workspace', 'assistant', 'department')).toBe(true)
+      expect(transferAssistant).toHaveBeenLastCalledWith('actor', 'workspace', 'assistant', 'adopt', 'department', undefined)
     })
-
-    it('returns false if user does not own the assistant', async () => {
-      mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
-
-      const result = await store.adoptAssistant('u_2', 't_1', 'a_1')
-      expect(result).toBe(false)
-    })
-
-    it('rolls back if the UPDATE matched zero rows (assistant already in a team)', async () => {
-      mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 } as never)
-      const { client, setPool } = makeTxClient([0])
-      setPool()
-
-      const result = await store.adoptAssistant('u_1', 't_1', 'a_1')
-      expect(result).toBe(false)
-
-      // BEGIN + UPDATE + ROLLBACK (no DELETE, no COMMIT)
-      expect(client.query.mock.calls[0][0]).toBe('BEGIN')
-      expect(client.query.mock.calls[2][0]).toBe('ROLLBACK')
-    })
-  })
-
-  describe('removeAssistant (transfer-of-ownership)', () => {
-    it('transfers the assistant into the workspace owner\'s Personal workspace', async () => {
-      // 1) workspace lookup — returns owner + their Personal workspace id
-      mockQuery.mockResolvedValueOnce({ rows: [{ ownerUserId: 'u_team_owner', personalWorkspaceId: 'w_personal' }], rowCount: 1 } as never)
-
-      // 2) transactional client: BEGIN → UPDATE → DELETE assistant_members → INSERT owner → COMMIT
-      const calls = [1, 0, 1]
-      const client = {
-        query: vi.fn(async (sql: string) => {
-          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return undefined
-          const count = calls.shift() ?? 0
-          return { rowCount: count, rows: [] }
-        }),
-        release: vi.fn(),
-      }
-      mockGetPool.mockReturnValue({ connect: vi.fn().mockResolvedValue(client) } as never)
-
-      const result = await store.removeAssistant('u_admin', 't_1', 'a_1')
-      expect(result).toBe(true)
-
-      expect(client.query.mock.calls[0][0]).toBe('BEGIN')
-      const updateSql = client.query.mock.calls[1][0] as string
-      expect(updateSql).toContain('workspace_id = $1')
-      expect(updateSql).toContain('owner_user_id = $2')
-
-      const insertSql = client.query.mock.calls[3][0] as string
-      expect(insertSql).toContain('INSERT INTO assistant_members')
-      expect(insertSql).toContain("VALUES ($1, $2, 'owner')")
-
-      expect(client.query.mock.calls[4][0]).toBe('COMMIT')
-    })
-
-    it('returns false if assistant not in the workspace (UPDATE matched 0)', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [{ ownerUserId: 'u_team_owner', personalWorkspaceId: 'w_personal' }], rowCount: 1 } as never)
-      const calls = [0]
-      const client = {
-        query: vi.fn(async (sql: string) => {
-          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return undefined
-          const count = calls.shift() ?? 0
-          return { rowCount: count, rows: [] }
-        }),
-        release: vi.fn(),
-      }
-      mockGetPool.mockReturnValue({ connect: vi.fn().mockResolvedValue(client) } as never)
-
-      const result = await store.removeAssistant('u_admin', 't_1', 'a_missing')
-      expect(result).toBe(false)
-      expect(client.query.mock.calls[2][0]).toBe('ROLLBACK')
-    })
-
-    it('returns false if workspace not found', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-
-      const result = await store.removeAssistant('u_admin', 't_missing', 'a_1')
-      expect(result).toBe(false)
+    it('delegates detachment without inferring an actor', async () => {
+      vi.mocked(transferAssistant).mockResolvedValueOnce(false)
+      expect(await store.removeAssistant('actor', 'workspace', 'assistant')).toBe(false)
+      expect(transferAssistant).toHaveBeenLastCalledWith('actor', 'workspace', 'assistant', 'remove', undefined, undefined)
     })
   })
 })

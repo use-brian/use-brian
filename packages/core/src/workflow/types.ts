@@ -820,7 +820,43 @@ export type WorkflowStepRunRecord = {
 
 // ── Store interfaces ────────────────────────────────────────────────────
 
+/** Trusted server-only creation context. Never deserialize from a request/tool body. */
+export type WorkflowCreateOptions = {
+  /** Internal receipt: the store committed workflow + firing row atomically. */
+  onSchedulePublished?: () => void
+  authoring?: {
+    kind: 'authenticated-workflow-rest'
+    userId: string
+    /** Set by verified session JWT middleware, not merely a user-id header. */
+    authSessionId: string
+    /** Optimistic preview fence; never an authorization grant. */
+    expectedPolicyRevision?: string
+    /** Legacy-only compatibility: never called for mode-aware creation.
+     * Invoke the supplied transaction-bound capture, never a pool-backed
+     * resolver while the insertion transaction owns its connection. */
+    captureLegacyAuthority: (captureInTransaction: () => Promise<AuthoringAuthority>) => Promise<AuthoringAuthority>
+  } | {
+    kind: 'internal-human'
+    userId: string
+    assistantId: string
+    expectedPolicyRevision?: string
+  }
+}
+
+export type WorkflowScheduleEditProof = {
+  kind: 'authenticated-workflow-rest'
+  userId: string
+  authSessionId: string
+  expectedPolicyRevision?: string
+  reviewId?: string
+}
+
 export type WorkflowStore = {
+  /** Canonical review only; does not publish or renew persisted consent. */
+  prepareScheduleEdit?(userId: string, id: string, fields: Parameters<WorkflowStore['update']>[2], proof: WorkflowScheduleEditProof): Promise<{
+    reviewId: string; policyRevision: string; before: Record<string, unknown>; after: Record<string, unknown>
+  } | null>
+
   create(params: {
     userId: string
     workspaceId: string
@@ -837,9 +873,9 @@ export type WorkflowStore = {
     managedBy?: string | null
     contextGroupId?: string | null
     contextProjectId?: string | null
-    /** Required for every newly authored workflow; never inferred by the store. */
+    /** Internal consent is never replaced or enlarged by mode defaulting. */
     authoringAuthority?: AuthoringAuthority
-  }): Promise<WorkflowRecord>
+  }, options?: WorkflowCreateOptions): Promise<WorkflowRecord>
 
   getById(userId: string, id: string): Promise<WorkflowRecord | null>
 
@@ -893,6 +929,7 @@ export type WorkflowStore = {
       /** Replaced only by an explicit execution-affecting authoring action. */
       authoringAuthority: AuthoringAuthority
     }>,
+    proof?: WorkflowScheduleEditProof,
   ): Promise<WorkflowRecord | null>
 
   /**
@@ -949,6 +986,8 @@ export type PageWorkflowRunSummary = {
 export type WorkflowRunStore = {
   /** Insert a new run row in `pending` state. */
   createRun(params: {
+    /** Internal queue proof, never workflow input or a user-supplied actor. */
+    scheduledJob?: { id: string; claimId: string }
     workflowId: string
     workspaceId: string
     triggeredBy: string | null

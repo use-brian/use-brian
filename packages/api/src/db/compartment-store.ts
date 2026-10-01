@@ -10,7 +10,7 @@
  * Reads/writes are `queryWithRLS`-gated (admin-write / member-read via the
  * migration-246 policies); a `null` insert result means RLS rejected the caller.
  */
-import { query, queryWithRLS, getPool, rollbackAndRelease } from './client.js'
+import { query, queryWithRLS, getPool, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 
 // Same shape as the other db stores (entities-store, mark-useful-store, …).
 // Used to validate any id that reaches a session GUC via string interpolation.
@@ -94,12 +94,24 @@ export function createDbCompartmentStore() {
       compartments: string[] | null,
       defaultCompartments: string[],
     ): Promise<boolean> {
-      const r = await queryWithRLS<{ id: string }>(
-        actingUserId,
-        `UPDATE assistants SET compartments = $2, default_compartments = $3 WHERE id = $1 RETURNING id`,
-        [assistantId, compartments, defaultCompartments],
-      )
-      return r.rows.length > 0
+      const client = await getAppPool().connect()
+      try {
+        await client.query('BEGIN')
+        await applyRLSGucs(client, actingUserId)
+        const prior = (await client.query<{ workspace_id: string }>(
+          'SELECT workspace_id FROM assistants WHERE id=$1', [assistantId],
+        )).rows[0]
+        if (!prior) return false
+        await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [prior.workspace_id])
+        const r = await client.query<{ id: string }>(
+          `UPDATE assistants SET compartments=$2,default_compartments=$3
+            WHERE id=$1 AND workspace_id=$4 AND EXISTS(SELECT 1 FROM workspace_members
+              WHERE workspace_id=$4 AND user_id=$5 AND role IN ('owner','admin')) RETURNING id`,
+          [assistantId, compartments, defaultCompartments, prior.workspace_id, actingUserId],
+        )
+        await client.query('COMMIT')
+        return r.rows.length > 0
+      } finally { await rollbackAndRelease(client) }
     },
 
     /**

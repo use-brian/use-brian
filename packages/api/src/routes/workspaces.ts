@@ -1,3 +1,5 @@
+import { previewAssistantTransfer } from '../db/assistant-transfer-admission.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { readWorkspaceMemberDirectory } from '../db/workspace-member-directory.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 /**
@@ -63,9 +65,7 @@ import { getWorkspaceIconPointer } from '../db/workspace-icon.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import {
-  countWorkspaceMemories,
   transferWorkspaceMemories,
-  deleteWorkspaceMemories,
   countUnverifiedByWorkspace,
   listUnverifiedByWorkspace,
 } from '../db/memories.js'
@@ -1482,6 +1482,31 @@ export function workspaceRoutes({
     }
   })
 
+  // Preview is authoritative selection metadata only; it never certifies safety
+  // or authorizes principal reassignment. Removal previews the actual destination.
+  const transferSelection = z.object({
+    departmentId: z.string().uuid().optional(),
+    expectedPolicyRevision: z.string().regex(/^[1-9][0-9]*$/),
+  }).strict()
+  const transferParams = z.object({ workspaceId: z.string().uuid(), assistantId: z.string().uuid() })
+  for (const operation of ['adopt', 'remove'] as const) {
+    router.post(`/:workspaceId/assistants/:assistantId/${operation}/preview`, async (req, res) => {
+      if (!req.userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+      if (!await requireWorkspaceRole(req as any, res, 'admin')) return
+      const params = transferParams.safeParse(req.params)
+      if (!params.success) { res.status(400).json({ error: 'invalid_transfer_selection' }); return }
+      try {
+        const preview = await previewAssistantTransfer(req.userId, params.data.workspaceId, params.data.assistantId, operation)
+        if (!preview) { res.status(404).json({ error: 'not_found' }); return }
+        res.json(preview)
+      } catch (err) {
+        if (err instanceof WorkspaceAccessError) { res.status(err.status).json({ error: err.code }); return }
+        console.error('[workspaces] assistant transfer preview failed:', err)
+        res.status(500).json({ error: 'Failed to preview assistant transfer' })
+      }
+    })
+  }
+
   // ── POST /:workspaceId/assistants/:assistantId/adopt — move existing assistant into team ──
 
   router.post('/:workspaceId/assistants/:assistantId/adopt', async (req, res) => {
@@ -1494,7 +1519,12 @@ export function workspaceRoutes({
     const { workspaceId, assistantId } = req.params as { workspaceId: string; assistantId: string }
 
     try {
-      const adopted = await workspaceStore.adoptAssistant(userId, workspaceId, assistantId)
+      const selection = transferSelection.safeParse(req.body ?? {})
+      if (!transferParams.safeParse(req.params).success || !selection.success) {
+        res.status(400).json({ error: 'invalid_transfer_selection' }); return
+      }
+      const adopted = await workspaceStore.adoptAssistant(userId, workspaceId, assistantId,
+        selection.data.departmentId, selection.data.expectedPolicyRevision)
       if (!adopted) {
         res.status(400).json({ error: 'Cannot adopt this assistant. You must own it and it must not already belong to a team.' })
         return
@@ -1508,15 +1538,15 @@ export function workspaceRoutes({
       notifyWorkspaceChange(workspaceId, 'assistant', 'create', assistantId)
       res.json({ ok: true })
     } catch (err) {
+      if (err instanceof WorkspaceAccessError) { res.status(err.status).json({ error: err.code }); return }
       console.error('[workspaces] adopt assistant failed:', err)
       res.status(500).json({ error: 'Failed to adopt assistant' })
     }
   })
 
   // ── POST /:workspaceId/assistants/:assistantId/remove — detach assistant from team ──
-  // Guarded: blocks if team memories exist unless force option provided.
-  //   force: 'delete' — delete workspace memories, then detach
-  //   force: 'keep'   — detach without cleanup (memories stay with team, unlinked)
+  // No pre-admission cleanup. Force disposition requires a separate reviewed,
+  // atomic content migration; failed detachment must never destroy memories.
 
   router.post('/:workspaceId/assistants/:assistantId/remove', async (req, res) => {
     const userId = req.userId
@@ -1526,38 +1556,16 @@ export function workspaceRoutes({
     if (!role) return
 
     const { workspaceId, assistantId } = req.params as { workspaceId: string; assistantId: string }
-    const { force } = (req.body ?? {}) as { force?: 'delete' | 'keep' }
-
+    if (req.body?.force !== undefined) {
+      res.status(409).json({ error: 'assistant_transfer_review_required' }); return
+    }
+    const selection = transferSelection.safeParse(req.body ?? {})
+    if (!transferParams.safeParse(req.params).success || !selection.success) {
+      res.status(400).json({ error: 'invalid_transfer_selection' }); return
+    }
     try {
-      // Guard: check for team memories. This is an admin-gated detach
-      // operation — the count is workspace-scoped so we use a system
-      // context (no clearance) keyed on the assistant the operator is
-      // removing.
-      const memoryCount = await countWorkspaceMemories({
-        workspaceId,
-        userId,
-        assistantId,
-        // Admin-gated detach operation counts every workspace memory for
-        // this assistant; the predicate's assistant_id partition is
-        // immaterial because we're counting by-assistant directly.
-        assistantKind: 'standard',
-      })
-      if (memoryCount > 0 && !force) {
-        res.status(409).json({
-          error: 'team_memories_exist',
-          count: memoryCount,
-          message: `This assistant has ${memoryCount} team memories. Transfer them to another assistant, delete them, or keep them with the team before detaching.`,
-        })
-        return
-      }
-
-      // Handle force options
-      if (force === 'delete' && memoryCount > 0) {
-        await deleteWorkspaceMemories(assistantId, workspaceId)
-      }
-      // force === 'keep' → do nothing, memories stay orphaned
-
-      const removed = await workspaceStore.removeAssistant(userId, workspaceId, assistantId)
+      const removed = await workspaceStore.removeAssistant(userId, workspaceId, assistantId,
+        selection.data.departmentId, selection.data.expectedPolicyRevision)
       if (!removed) {
         res.status(400).json({ error: 'Assistant not found in this team' })
         return
@@ -1567,6 +1575,7 @@ export function workspaceRoutes({
       notifyWorkspaceChange(workspaceId, 'assistant', 'delete', assistantId)
       res.json({ ok: true })
     } catch (err) {
+      if (err instanceof WorkspaceAccessError) { res.status(err.status).json({ error: err.code }); return }
       console.error('[workspaces] remove assistant failed:', err)
       res.status(500).json({ error: 'Failed to remove assistant' })
     }
