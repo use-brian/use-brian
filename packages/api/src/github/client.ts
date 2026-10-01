@@ -458,7 +458,10 @@ export async function getRepoTree(
     pat,
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${sha}?recursive=1`,
   )
-  const data = await res.json() as { tree: TreeEntry[] }
+  const data = await res.json() as { tree: TreeEntry[]; truncated?: boolean }
+  // This inventory drives reconciliation deletions. A partial tree must never
+  // be indistinguishable from a complete snapshot, even when it has blobs.
+  if (data.truncated) throw new Error('GitHub repository tree is truncated; knowledge sync requires a complete inventory')
   return data.tree.filter((t) => t.type === 'blob')
 }
 

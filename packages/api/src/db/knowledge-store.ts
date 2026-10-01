@@ -32,7 +32,14 @@
 
 import type { AccessContext, Sensitivity } from '@use-brian/core'
 import type { KnowledgeLifecycleAction, KnowledgeWriteActor } from '@use-brian/core'
-import { query } from './client.js'
+import { query, getPool, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
+import { randomUUID } from 'node:crypto'
+import type { PoolClient, QueryResultRow } from 'pg'
+import { currentAgentAccess } from './agent-access-context.js'
+import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
+import { admitKnowledgeWrite, lockKnowledgePrior, admitKnowledgeSourceConfiguration, type KnowledgeSourceBindingInput, type KnowledgeConfigureAuthority } from '../workspace-access/knowledge-create-admission.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { captureKnowledgeSyncAuthority, knowledgeSyncCapture, admitKnowledgeSync } from '../workspace-access/knowledge-sync-admission.js'
 import { publishKnowledgeLifecycle } from '../knowledge-event-fanout.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -60,6 +67,14 @@ export type KnowledgeEntry = {
 export type KnowledgeSourceType = 'github' | 'local'
 
 export type KnowledgeSource = {
+  configuredByUserId: string | null
+  bindingSensitivity: Sensitivity | null
+  bindingCompartments: string[] | null
+  bindingProjectIds: string[] | null
+  syncRunId: string | null
+  syncDirty: boolean
+  bindingVersion: string
+  bindingHeld: boolean
   id: string
   workspaceId: string
   sourceType: KnowledgeSourceType
@@ -213,12 +228,20 @@ const SOURCE_COLUMNS = `
   sync_error AS "syncError", connector_instance_id AS "connectorInstanceId",
   write_access AS "writeAccess", write_access_checked_at AS "writeAccessCheckedAt",
   default_sensitivity AS "defaultSensitivity",
+  configured_by_user_id AS "configuredByUserId", binding_sensitivity AS "bindingSensitivity",
+  binding_compartments AS "bindingCompartments", binding_project_ids AS "bindingProjectIds",
+  sync_run_id AS "syncRunId", sync_dirty AS "syncDirty",
+  binding_version::text AS "bindingVersion", binding_held AS "bindingHeld",
   created_at AS "createdAt"
 ` as const
 
 // ── Store ──────────────────────────────────────────────────────
 
 export type KnowledgeStore = {
+  /** Internal worker port; captures a canonical binding before external I/O. */
+  captureSourceSync(source: Pick<KnowledgeSource, 'id' | 'workspaceId' | 'sourceType' | 'repo' | 'branch' | 'rootPath' | 'connectorInstanceId' | 'lastSyncedSha'> & { bindingVersion?: string }): Promise<object | undefined>
+  releaseSourceSync(authority: object): Promise<void>
+  syncRequiresFullReconciliation(authority: object): boolean
   // Viewer-facing entry reads — gated by ctx (workspace + clearance).
   // `ctx.clearance === undefined` is treated as passthrough ('confidential').
   search(ctx: AccessContext, queryStr: string, limit?: number): Promise<KnowledgeEntry[]>
@@ -276,6 +299,7 @@ export type KnowledgeStore = {
   listPathsSystem(workspaceId: string): Promise<string[]>
 
   create(params: {
+    expectedPolicyRevision?: string
     workspaceId: string; path: string; title: string
     summary?: string | null; content: string; tags?: string[]; sensitivity: Sensitivity
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
@@ -289,10 +313,11 @@ export type KnowledgeStore = {
      * `DispatchEvent.isBot` — the self-loop guard. Defaults to `user`.
      */
     writtenBy?: KnowledgeWriteActor
-    /** Acting user id for the lifecycle event; falls back to `createdBy`. */
+    /** Authenticated acting user; required in ready mode (or ambient actor). Legacy falls back to createdBy. */
     actorId?: string | null
   }): Promise<KnowledgeEntry>
   upsertByPath(params: {
+    expectedPolicyRevision?: string
     workspaceId: string; path: string; title: string
     summary?: string | null; content: string; tags?: string[]; relatedIds?: string[]
     sensitivity: Sensitivity
@@ -313,9 +338,9 @@ export type KnowledgeStore = {
      * not re-trigger on the assistant's own commit.
      */
     writtenBy?: KnowledgeWriteActor
-    /** Acting user id for the lifecycle event. */
+    /** Authenticated acting user; required in ready mode (or ambient actor). */
     actorId?: string | null
-  }): Promise<KnowledgeEntry>
+  }, syncAuthority?: object): Promise<KnowledgeEntry>
   /**
    * Body-only update of a MANUAL entry (`source_id IS NULL` enforced in the
    * predicate — repo-synced entries change through the repo writer, never
@@ -327,13 +352,13 @@ export type KnowledgeStore = {
     workspaceId: string,
     id: string,
     content: string,
-    scope?: { compartments?: string[]; projectIds?: string[] },
+    scope?: { compartments?: string[]; projectIds?: string[]; actorId?: string; expectedPolicyRevision?: string },
   ): Promise<{ id: string; path: string } | null>
   delete(id: string): Promise<boolean>
   deleteBySource(sourceId: string): Promise<number>
-  deleteByTeamAndPath(workspaceId: string, path: string): Promise<boolean>
+  deleteByTeamAndPath(workspaceId: string, path: string, syncAuthority?: object): Promise<boolean>
   deleteByTeamAndPathPrefix(workspaceId: string, pathPrefix: string): Promise<number>
-  updateRelatedIds(id: string, relatedIds: string[]): Promise<void>
+  updateRelatedIds(id: string, relatedIds: string[], syncAuthority?: object): Promise<void>
   hasEntriesForAssistant(assistantId: string): Promise<boolean>
 
   /**
@@ -347,14 +372,15 @@ export type KnowledgeStore = {
     workspaceId: string; sourceType: KnowledgeSourceType; repo: string; branch?: string; rootPath?: string
     /** The connector_instance whose PAT this source syncs through. */
     connectorInstanceId?: string | null
-  }): Promise<KnowledgeSource>
+    binding?: KnowledgeSourceBindingInput
+  }, authority?: KnowledgeConfigureAuthority): Promise<KnowledgeSource>
   getSource(id: string): Promise<KnowledgeSource | null>
   listSources(workspaceId: string): Promise<KnowledgeSource[]>
   listSourcesForAssistant(assistantId: string): Promise<KnowledgeSource[]>
   deleteSource(id: string): Promise<boolean>
-  updateSourceSync(id: string, sha: string, error?: string | null): Promise<void>
+  updateSourceSync(id: string, sha: string, error?: string | null, syncAuthority?: object): Promise<void>
   /** Persist the PAT write-capability probe result (migration 310). */
-  updateSourceWriteAccess(id: string, writeAccess: boolean): Promise<void>
+  updateSourceWriteAccess(id: string, writeAccess: boolean, syncAuthority?: object): Promise<void>
   /**
    * Change a source's default sensitivity (mig 410) and reset
    * `last_synced_sha` to NULL so the next sync tick full-walks the tree —
@@ -375,8 +401,80 @@ export type KnowledgeStore = {
   }): Promise<void>
 }
 
+/** The unlocked probe chooses a connection only, never authorizes a write.
+ * Recheck after the workspace-first lock; activation races fail closed. */
+async function knowledgeWrite<T>(workspaceId: string, actorId: string | null | undefined,
+  write: (client: PoolClient, ready: boolean, actor: string) => Promise<T>, readyBlocker?: string, requireActor = false): Promise<T> {
+  const probe = await query<{ ready: boolean }>("SELECT setup_state='ready' AS ready FROM workspace_access_policies WHERE workspace_id=$1", [workspaceId])
+  const readyConnection = probe.rows[0]?.ready === true
+  if (readyConnection && readyBlocker) throw new Error(readyBlocker)
+  const actor = currentAgentAccess()?.userId ?? actorId
+  if ((readyConnection || requireActor) && !actor) throw new Error('knowledge_actor_required')
+  if ((readyConnection || requireActor) && currentAgentAccess()?.userId && actorId && actorId !== actor) throw new WorkspaceAccessError('context_not_available', 404)
+  const client = await (readyConnection || requireActor ? getAppPool() : getPool()).connect()
+  try {
+    await client.query('BEGIN')
+    if (readyConnection || requireActor) await applyRLSGucs(client, actor!)
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
+    const policy = await readAdmissionPolicy(client, workspaceId)
+    const ready = policy?.setupState === 'ready'
+    if (ready !== readyConnection) throw new WorkspaceAccessError('access_policy_conflict', 409)
+    if (ready) await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [workspaceId, actor])
+    const result = await write(client, ready, actor ?? '')
+    await client.query('COMMIT')
+    return result
+  } finally { await rollbackAndRelease(client) }
+}
+
+// Legacy/status writers also lock the workspace before touching the source row.
+async function sourceQuery<T extends QueryResultRow = QueryResultRow>(id: string, sql: string, values: unknown[]) {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT id FROM workspaces WHERE id=(SELECT workspace_id FROM workspace_knowledge_sources WHERE id=$1) FOR UPDATE', [id])
+    const result = await client.query<T>(sql, values)
+    await client.query('COMMIT')
+    return result
+  } finally { await rollbackAndRelease(client) }
+}
+
+async function syncMutation(authority: object, operation: string, details: Record<string, unknown>) {
+  const source = knowledgeSyncCapture(authority)
+  return knowledgeWrite(source.workspaceId, source.configuredByUserId, async client => {
+    let path = details.path as string | undefined
+    if (operation === 'related') {
+      const row = (await client.query<{ path: string }>('SELECT path FROM knowledge_entries WHERE workspace_id=$1 AND id=$2', [source.workspaceId, details.targetId])).rows[0]
+      if (!row) throw new Error('knowledge_source_target_conflict')
+      path = row.path
+    }
+    const admitted = await admitKnowledgeSync(client, authority, {
+      workspaceId: source.workspaceId, sourceId: source.id, sourceSha: 'status',
+      path: path ?? '', title: '', content: '', sensitivity: source.bindingSensitivity ?? source.defaultSensitivity,
+      compartments: source.bindingCompartments ?? [], projectIds: source.bindingProjectIds ?? [],
+    })
+    return client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM ${source.configuredByUserId ? 'apply_knowledge_source_sync' : 'apply_knowledge_source_sync_worker'}($1::jsonb,$2::jsonb)`,
+      [JSON.stringify({ ...admitted, ...details, path: path ?? '', operation }), JSON.stringify(source)])
+  }, undefined, !!source.configuredByUserId)
+}
+
 export function createDbKnowledgeStore(): KnowledgeStore {
   return {
+    async captureSourceSync(expected) {
+      const current = (await query<KnowledgeSource>(`SELECT ${SOURCE_COLUMNS} FROM workspace_knowledge_sources WHERE workspace_id=$1 AND id=$2`, [expected.workspaceId, expected.id])).rows[0]
+      if (!current) throw new Error('knowledge_source_changed')
+      return knowledgeWrite(current.workspaceId, current.configuredByUserId, async client => {
+        const claimed = (await client.query<KnowledgeSource>(`SELECT ${SOURCE_COLUMNS} FROM ${current.configuredByUserId ? 'claim_knowledge_source_sync' : 'claim_knowledge_source_sync_worker'}($1,$2,$3,$4::jsonb)`,
+          [current.workspaceId, current.id, randomUUID(), JSON.stringify(expected)])).rows[0]
+        return captureKnowledgeSyncAuthority(claimed, expected)
+      }, current.configuredByUserId ? undefined : 'knowledge_source_admission_required', !!current.configuredByUserId)
+    },
+    syncRequiresFullReconciliation(authority) { return knowledgeSyncCapture(authority).syncDirty },
+    async releaseSourceSync(authority) {
+      const source = knowledgeSyncCapture(authority)
+      await knowledgeWrite(source.workspaceId, source.configuredByUserId, async client => {
+        await client.query(`SELECT ${source.configuredByUserId ? 'release_knowledge_source_sync' : 'release_knowledge_source_sync_worker'}($1,$2,$3)`, [source.workspaceId, source.id, source.syncRunId])
+      }, undefined, !!source.configuredByUserId)
+    },
     // ── Entries ──────────────────────────────────────────────
 
     async search(ctx, queryStr, limit = 10) {
@@ -526,64 +624,85 @@ export function createDbKnowledgeStore(): KnowledgeStore {
     },
 
     async create(params) {
-      const result = await query<KnowledgeEntry>(
-        `INSERT INTO knowledge_entries
-           (workspace_id, path, title, summary, content, tags, sensitivity, metadata, source_id, source_sha, created_by, compartments, project_ids)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-         RETURNING ${ENTRY_COLUMNS}`,
-        [
-          params.workspaceId, params.path, params.title,
-          params.summary ?? null, params.content, params.tags ?? [],
-          params.sensitivity, JSON.stringify(params.metadata ?? {}),
-          params.sourceId ?? null, params.sourceSha ?? null, params.createdBy ?? null,
-          params.compartments ?? [],
-          params.projectIds ?? [],
-        ],
-      )
+      const result = await knowledgeWrite(params.workspaceId, params.actorId ?? params.createdBy, async (client, ready, actor) => {
+        if (ready) {
+          params = await admitKnowledgeWrite(client, actor, params)
+        }
+        return client.query<KnowledgeEntry>(
+          `INSERT INTO knowledge_entries
+             (workspace_id, path, title, summary, content, tags, sensitivity, metadata, source_id, source_sha, created_by, compartments, project_ids)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           RETURNING ${ENTRY_COLUMNS}`,
+          [
+            params.workspaceId, params.path, params.title,
+            params.summary ?? null, params.content, params.tags ?? [],
+            params.sensitivity, JSON.stringify(params.metadata ?? {}),
+            params.sourceId ?? null, params.sourceSha ?? null, params.createdBy ?? null,
+            params.compartments ?? [],
+            params.projectIds ?? [],
+          ],
+        )
+      })
       const row = result.rows[0]
       emitLifecycle(row, 'created', params.writtenBy, params.actorId ?? params.createdBy ?? null)
       return row
     },
 
-    async upsertByPath(params) {
+    async upsertByPath(params, syncAuthority) {
+      if (syncAuthority) {
+        const source = knowledgeSyncCapture(syncAuthority)
+        const result = await knowledgeWrite(params.workspaceId, source.configuredByUserId, async client => {
+          const admitted = await admitKnowledgeSync(client, syncAuthority, params)
+          return client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM ${source.configuredByUserId ? 'apply_knowledge_source_sync' : 'apply_knowledge_source_sync_worker'}($1::jsonb,$2::jsonb)`,
+            [JSON.stringify(admitted), JSON.stringify(source)])
+        }, undefined, !!source.configuredByUserId)
+        return result.rows[0]
+      }
+      if (params.sourceId != null) throw new Error('knowledge_sync_authority_required')
       // `xmax = 0` is the standard upsert discriminator: a row inserted by
       // THIS statement has no updating transaction stamped on it, so the
       // predicate separates a create from an update without a second read.
       // Needed for the lifecycle action — the sync worker calls this for both.
-      const result = await query<KnowledgeEntry & { __inserted: boolean }>(
-        `INSERT INTO knowledge_entries
-           (workspace_id, path, title, summary, content, tags, related_ids, sensitivity, sensitivity_explicit, metadata, source_id, source_sha, compartments, project_ids)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                 COALESCE($13::text[], ARRAY[]::text[]),
-                 COALESCE($14::uuid[], ARRAY[]::uuid[]))
-         ON CONFLICT (workspace_id, path) DO UPDATE SET
-           title = EXCLUDED.title,
-           summary = EXCLUDED.summary,
-           content = EXCLUDED.content,
-           tags = EXCLUDED.tags,
-           related_ids = COALESCE(EXCLUDED.related_ids, knowledge_entries.related_ids),
-           sensitivity = EXCLUDED.sensitivity,
-           sensitivity_explicit = EXCLUDED.sensitivity_explicit,
-           metadata = EXCLUDED.metadata,
-           source_id = EXCLUDED.source_id,
-           source_sha = EXCLUDED.source_sha,
-           compartments = CASE WHEN $13::text[] IS NULL THEN knowledge_entries.compartments ELSE ARRAY(
-             SELECT DISTINCT unnest(knowledge_entries.compartments || EXCLUDED.compartments) ORDER BY 1
-           ) END,
-           project_ids = CASE WHEN $14::uuid[] IS NULL THEN knowledge_entries.project_ids ELSE ARRAY(
-             SELECT DISTINCT unnest(knowledge_entries.project_ids || EXCLUDED.project_ids) ORDER BY 1
-           ) END
-         RETURNING ${ENTRY_COLUMNS}, (xmax = 0) AS "__inserted"`,
-        [
-          params.workspaceId, params.path, params.title,
-          params.summary ?? null, params.content, params.tags ?? [],
-          params.relatedIds ?? [], params.sensitivity, params.sensitivityExplicit ?? null,
-          JSON.stringify(params.metadata ?? {}),
-          params.sourceId ?? null, params.sourceSha ?? null,
-          params.compartments ?? null,
-          params.projectIds ?? null,
-        ],
-      )
+      const result = await knowledgeWrite(params.workspaceId, params.actorId, async (client, ready, actor) => {
+        if (ready) {
+          const prior = await lockKnowledgePrior(client, params.workspaceId, params.path)
+          params = await admitKnowledgeWrite(client, actor, params, prior)
+        }
+        return client.query<KnowledgeEntry & { __inserted: boolean }>(
+          `INSERT INTO knowledge_entries
+             (workspace_id, path, title, summary, content, tags, related_ids, sensitivity, sensitivity_explicit, metadata, source_id, source_sha, compartments, project_ids)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                   COALESCE($13::text[], ARRAY[]::text[]),
+                   COALESCE($14::uuid[], ARRAY[]::uuid[]))
+           ON CONFLICT (workspace_id, path) DO UPDATE SET
+             title = EXCLUDED.title,
+             summary = EXCLUDED.summary,
+             content = EXCLUDED.content,
+             tags = EXCLUDED.tags,
+             related_ids = COALESCE(EXCLUDED.related_ids, knowledge_entries.related_ids),
+             sensitivity = EXCLUDED.sensitivity,
+             sensitivity_explicit = EXCLUDED.sensitivity_explicit,
+             metadata = EXCLUDED.metadata,
+             source_id = EXCLUDED.source_id,
+             source_sha = EXCLUDED.source_sha,
+             compartments = CASE WHEN $13::text[] IS NULL THEN knowledge_entries.compartments ELSE ARRAY(
+               SELECT DISTINCT unnest(knowledge_entries.compartments || EXCLUDED.compartments) ORDER BY 1
+             ) END,
+             project_ids = CASE WHEN $14::uuid[] IS NULL THEN knowledge_entries.project_ids ELSE ARRAY(
+               SELECT DISTINCT unnest(knowledge_entries.project_ids || EXCLUDED.project_ids) ORDER BY 1
+             ) END
+           RETURNING ${ENTRY_COLUMNS}, (xmax = 0) AS "__inserted"`,
+          [
+            params.workspaceId, params.path, params.title,
+            params.summary ?? null, params.content, params.tags ?? [],
+            params.relatedIds ?? [], params.sensitivity, params.sensitivityExplicit ?? null,
+            JSON.stringify(params.metadata ?? {}),
+            params.sourceId ?? null, params.sourceSha ?? null,
+            params.compartments ?? null,
+            params.projectIds ?? null,
+          ],
+        )
+      })
       const { __inserted, ...row } = result.rows[0]
       emitLifecycle(
         row,
@@ -595,18 +714,25 @@ export function createDbKnowledgeStore(): KnowledgeStore {
     },
 
     async updateManualEntryContent(workspaceId, id, content, scope = {}) {
-      const result = await query<
-        Pick<KnowledgeEntry, 'id' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId'>
-      >(
-        `UPDATE knowledge_entries
-         SET content = $1,
-             compartments = ARRAY(SELECT DISTINCT unnest(compartments || $4::text[]) ORDER BY 1),
-             project_ids = ARRAY(SELECT DISTINCT unnest(project_ids || $5::uuid[]) ORDER BY 1),
-             updated_at = now()
-         WHERE id = $2 AND workspace_id = $3 AND source_id IS NULL
-         RETURNING id, path, title, tags, sensitivity, source_id AS "sourceId"`,
-        [content, id, workspaceId, scope.compartments ?? [], scope.projectIds ?? []],
-      )
+      const result = await knowledgeWrite(workspaceId, scope.actorId, async (client, ready, actor) => {
+        if (ready) {
+          const prior = await lockKnowledgePrior(client, workspaceId, id, true)
+          if (!prior) throw new WorkspaceAccessError('context_not_available', 404)
+          scope = { ...scope, ...await admitKnowledgeWrite(client, actor, { ...scope, workspaceId, sensitivity: prior.sensitivity }, prior) }
+        }
+        return client.query<
+          Pick<KnowledgeEntry, 'id' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId'>
+        >(
+          `UPDATE knowledge_entries
+           SET content = $1,
+               compartments = ARRAY(SELECT DISTINCT unnest(compartments || $4::text[]) ORDER BY 1),
+               project_ids = ARRAY(SELECT DISTINCT unnest(project_ids || $5::uuid[]) ORDER BY 1),
+               updated_at = now()
+           WHERE id = $2 AND workspace_id = $3 AND source_id IS NULL
+           RETURNING id, path, title, tags, sensitivity, source_id AS "sourceId"`,
+          [content, id, workspaceId, scope.compartments ?? [], scope.projectIds ?? []],
+        )
+      })
       const row = result.rows[0]
       if (!row) return null
       publishKnowledgeLifecycle({
@@ -643,23 +769,14 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       return result.rowCount ?? 0
     },
 
-    async deleteByTeamAndPath(workspaceId, path) {
-      const result = await query<
-        Pick<
-          KnowledgeEntry,
-          'id' | 'workspaceId' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId'
-        >
-      >(
-        `DELETE FROM knowledge_entries WHERE workspace_id = $1 AND path = $2
-         RETURNING id, workspace_id AS "workspaceId", path, title, tags, sensitivity,
-                   source_id AS "sourceId"`,
-        [workspaceId, path],
-      )
-      const row = result.rows[0]
-      // Sole callers are the sync worker's removed-file paths, i.e. a human
-      // deleted the markdown at the source — a `user` write, not a bot one.
-      if (row) emitLifecycle(row, 'deleted', 'user', null)
-      return (result.rowCount ?? 0) > 0
+    async deleteByTeamAndPath(workspaceId, path, syncAuthority) {
+      if (syncAuthority) {
+        if (knowledgeSyncCapture(syncAuthority).workspaceId !== workspaceId) throw new Error('knowledge_source_changed')
+        const row = (await syncMutation(syncAuthority, 'delete', { path })).rows[0]
+        if (row) emitLifecycle(row, 'deleted', 'user', null)
+        return !!row
+      }
+      throw new Error('knowledge_sync_authority_required')
     },
 
     async deleteByTeamAndPathPrefix(workspaceId, pathPrefix) {
@@ -671,11 +788,9 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       return result.rowCount ?? 0
     },
 
-    async updateRelatedIds(id, relatedIds) {
-      await query(
-        `UPDATE knowledge_entries SET related_ids = $1 WHERE id = $2`,
-        [relatedIds, id],
-      )
+    async updateRelatedIds(id, relatedIds, syncAuthority) {
+      if (syncAuthority) { await syncMutation(syncAuthority, 'related', { targetId: id, relatedIds }); return }
+      throw new Error('knowledge_sync_authority_required')
     },
 
     async listSummaries(ctx) {
@@ -851,14 +966,22 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       return result.rows.map((r) => ({ sourceId: r.sourceId, count: Number(r.count) }))
     },
 
-    async createSource(params) {
-      const result = await query<KnowledgeSource>(
-        `INSERT INTO workspace_knowledge_sources
-           (workspace_id, source_type, repo, branch, root_path, connector_instance_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING ${SOURCE_COLUMNS}`,
-        [params.workspaceId, params.sourceType, params.repo, params.branch ?? 'main', params.rootPath ?? '', params.connectorInstanceId ?? null],
-      )
+    async createSource(params, authority) {
+      if (params.binding && !authority?.actorUserId) throw new Error('knowledge_source_admission_required')
+      const result = await knowledgeWrite(params.workspaceId, authority?.actorUserId, async (client, ready) => {
+        if (ready && (!params.binding || !authority?.actorUserId)) throw new Error('knowledge_source_admission_required')
+        const binding = params.binding && authority
+          ? await admitKnowledgeSourceConfiguration(client, params.workspaceId, authority, params.binding) : undefined
+        return client.query<KnowledgeSource>(
+          `INSERT INTO workspace_knowledge_sources
+             (workspace_id, source_type, repo, branch, root_path, connector_instance_id,
+              configured_by_user_id,binding_sensitivity,binding_compartments,binding_project_ids,default_sensitivity)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($8,'internal'))
+           RETURNING ${SOURCE_COLUMNS}`,
+          [params.workspaceId, params.sourceType, params.repo, params.branch ?? 'main', params.rootPath ?? '', params.connectorInstanceId ?? null,
+            binding ? authority!.actorUserId : null, binding?.sensitivity ?? null, binding?.compartments ?? null, binding?.projectIds ?? null],
+        )
+      }, params.binding && authority ? undefined : 'knowledge_source_admission_required', !!authority)
       return result.rows[0]
     },
 
@@ -890,33 +1013,45 @@ export function createDbKnowledgeStore(): KnowledgeStore {
     },
 
     async deleteSource(id) {
-      const result = await query(
+      const result = await sourceQuery(id,
         `DELETE FROM workspace_knowledge_sources WHERE id = $1`,
         [id],
       )
       return (result.rowCount ?? 0) > 0
     },
 
-    async updateSourceSync(id, sha, error = null) {
-      await query(
+    async updateSourceSync(id, sha, error = null, syncAuthority) {
+      if (syncAuthority) {
+        if (knowledgeSyncCapture(syncAuthority).id !== id) throw new Error('knowledge_source_changed')
+        await syncMutation(syncAuthority, error === null ? 'checkpoint' : 'error', { sourceSha: sha || 'status', error }); return
+      }
+      const result = await sourceQuery(id,
         `UPDATE workspace_knowledge_sources
-         SET last_synced_sha = $1, last_synced_at = now(), sync_error = $2
-         WHERE id = $3`,
+         SET last_synced_sha = CASE WHEN $2::text IS NULL THEN $1 ELSE last_synced_sha END, last_synced_at = now(), sync_error = $2
+         WHERE id = $3 AND configured_by_user_id IS NULL AND sync_run_id IS NULL
+           AND NOT EXISTS(SELECT 1 FROM workspace_access_policies p WHERE p.workspace_id=workspace_knowledge_sources.workspace_id AND p.setup_state<>'legacy')`,
         [sha, error, id],
       )
+      if (!result.rowCount) throw new Error('knowledge_sync_authority_required')
     },
 
-    async updateSourceWriteAccess(id, writeAccess) {
-      await query(
+    async updateSourceWriteAccess(id, writeAccess, syncAuthority) {
+      if (syncAuthority) {
+        if (knowledgeSyncCapture(syncAuthority).id !== id) throw new Error('knowledge_source_changed')
+        await syncMutation(syncAuthority, 'probe', { writeAccess }); return
+      }
+      const result = await sourceQuery(id,
         `UPDATE workspace_knowledge_sources
          SET write_access = $1, write_access_checked_at = now()
-         WHERE id = $2`,
+         WHERE id = $2 AND configured_by_user_id IS NULL AND sync_run_id IS NULL
+           AND NOT EXISTS(SELECT 1 FROM workspace_access_policies p WHERE p.workspace_id=workspace_knowledge_sources.workspace_id AND p.setup_state<>'legacy')`,
         [writeAccess, id],
       )
+      if (!result.rowCount) throw new Error('knowledge_sync_authority_required')
     },
 
     async updateSourceDefaultSensitivity(id, tier) {
-      const result = await query<KnowledgeSource>(
+      const result = await sourceQuery<KnowledgeSource>(id,
         `UPDATE workspace_knowledge_sources
          SET default_sensitivity = $1, last_synced_sha = NULL
          WHERE id = $2

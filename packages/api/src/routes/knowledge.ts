@@ -296,6 +296,7 @@ async function createGithubKnowledgeSource(opts: {
   branch?: string
   rootPath?: string
   connectorInstanceId: string
+  binding?: Parameters<KnowledgeStore['createSource']>[0]['binding']
   res: import('express').Response
 }): Promise<void> {
   const { knowledgeStore, connectorInstanceStore, connectorGrantStore, userId, workspaceId, repo, branch, rootPath, connectorInstanceId, res } = opts
@@ -340,11 +341,13 @@ async function createGithubKnowledgeSource(opts: {
       }
       const treeData = await treeRes.json() as { tree: Array<{ path: string; type: string }> }
 
-      const prefix = rootPath?.replace(/\/+$/, '') ?? ''
+      const parts = (rootPath ?? '').trim().replace(/\\/g, '/').split('/').filter(p => p && p !== '.')
+      if (parts.includes('..')) { res.status(400).json({ error: 'Invalid knowledge root' }); return }
+      const prefix = parts.join('/')
       const allBlobs = treeData.tree.filter((f) => f.type === 'blob')
       const mdFiles = allBlobs.filter((f) =>
         f.path.endsWith('.md') &&
-        (!prefix || f.path.startsWith(prefix)),
+        (!prefix || f.path.startsWith(prefix + '/')),
       )
 
       const EXCLUDED_NAMES = new Set(['readme', 'changelog', 'contributing', 'license', 'code_of_conduct'])
@@ -405,19 +408,22 @@ async function createGithubKnowledgeSource(opts: {
         sourceType: 'github',
         repo,
         branch: targetBranch,
-        rootPath: rootPath?.replace(/\/+$/, ''),
+        rootPath: prefix,
         // Bind the source to the connector the user picked, so sync uses this
         // exact PAT instead of re-resolving by workspace. See
         // docs/architecture/features/knowledge-base.md → "Workspace credential scoping".
         connectorInstanceId,
-      })
+        binding: opts.binding,
+      }, { actorUserId: userId })
 
       // Inline write-capability probe so a just-created source is writable
       // for the assistant KB tools immediately instead of after the first
       // sync tick (≤15 min). Best-effort — the tick re-probes regardless.
       try {
         const perms = await github.getRepoPermissions(pat, repoOwner, repoName)
-        await knowledgeStore.updateSourceWriteAccess(source.id, perms.push)
+        const authority = await knowledgeStore.captureSourceSync(source)
+        try { await knowledgeStore.updateSourceWriteAccess(source.id, perms.push, authority) }
+        finally { if (authority) await knowledgeStore.releaseSourceSync(authority) }
       } catch (probeErr) {
         console.warn('[knowledge] create-time write-access probe failed:', probeErr instanceof Error ? probeErr.message : String(probeErr))
       }
@@ -452,7 +458,8 @@ async function createGithubKnowledgeSource(opts: {
       branch,
       rootPath,
       connectorInstanceId,
-    })
+      binding: opts.binding,
+    }, { actorUserId: userId })
     res.status(201).json(source)
   } catch (err: any) {
     if (err?.code === '23505') {
@@ -481,6 +488,8 @@ async function walkMdFiles(dir: string): Promise<string[]> {
 
 async function createLocalKnowledgeSource(opts: {
   knowledgeStore: KnowledgeStore
+  userId: string
+  binding?: Parameters<KnowledgeStore['createSource']>[0]['binding']
   workspaceId: string
   localPath: string
   rootPath?: string
@@ -547,7 +556,8 @@ async function createLocalKnowledgeSource(opts: {
       repo: resolvedPath,
       branch: 'local',
       rootPath: normalizedRoot,
-    })
+      binding: opts.binding,
+    }, { actorUserId: opts.userId })
 
     res.status(201).json({
       ...source,
@@ -887,7 +897,7 @@ export function knowledgeRoutes({
     }
     await createGithubKnowledgeSource({
       knowledgeStore, connectorInstanceStore, connectorGrantStore,
-      userId, workspaceId, repo, branch, rootPath, connectorInstanceId, res,
+      userId, workspaceId, repo, branch, rootPath, connectorInstanceId, binding: req.body.binding, res,
     })
   })
 
@@ -1645,6 +1655,8 @@ export function workspaceKnowledgeRoutes({
       await createLocalKnowledgeSource({
         knowledgeStore,
         workspaceId: auth.workspaceId,
+        userId: auth.userId,
+        binding: req.body.binding,
         localPath: resolvedLocalPath,
         rootPath,
         res,
@@ -1665,7 +1677,7 @@ export function workspaceKnowledgeRoutes({
     await createGithubKnowledgeSource({
       knowledgeStore, connectorInstanceStore, connectorGrantStore,
       userId: auth.userId, workspaceId: auth.workspaceId,
-      repo, branch, rootPath, connectorInstanceId, res,
+      repo, branch, rootPath, connectorInstanceId, binding: req.body.binding, res,
     })
   })
 
