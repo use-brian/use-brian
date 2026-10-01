@@ -1,3 +1,4 @@
+import { admitEntityCreate, admitEntitySuccessor, beginEntityAdmission } from '../workspace-access/entity-create-admission.js'
 import type {
   AccessContext,
   EntityCreateParams,
@@ -218,11 +219,31 @@ function entitySourceGuard(actorUserId: string, access: AccessContext | undefine
 }
 
 export async function createEntity(params: EntityCreateParams, transactionClient?: pg.PoolClient): Promise<EntityRecord> {
+  if (!transactionClient) {
+    const client = await getAppPool().connect()
+    try {
+      await client.query('BEGIN')
+      await applyRLSGucs(client, params.createdByUserId)
+      const entity = await createEntity(params, client)
+      await client.query('COMMIT')
+      return entity
+    } catch (error) { await client.query('ROLLBACK'); throw error }
+    finally { client.release() }
+  }
+  params = await admitEntityCreate(transactionClient, params)
   assertAuthorshipPresent('createEntity', params.createdByUserId)
   const access = entityMutationAccess(params.createdByUserId)
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: params.userId ?? null,
     assistantId: params.assistantId ?? null, sensitivity: params.sensitivity ?? 'internal',
-    compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
+    compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, params.derivation ? 'read' : 'mutation', access)
+  if (params.derivation) {
+    const result = await transactionClient.query<EntityRow>(
+      `SELECT ${FULL_SELECT} FROM create_source_derived_entity($1::jsonb,$2::jsonb)`,
+      [JSON.stringify({ ...params, aliases: normalizeAliasArray(params.aliases ?? []) }), JSON.stringify(params.derivation)],
+    )
+    if (!result.rows[0]) throw new Error('scope_operation_denied')
+    return toEntity(result.rows[0])
+  }
   const sql = `INSERT INTO entities (
        kind, display_name, canonical_id, aliases, attributes, sensitivity,
        workspace_id, user_id, assistant_id,
@@ -333,21 +354,9 @@ export async function getOrCreateSelfEntity(params: {
   // Materialise. attributes.self=true is the discriminator for
   // follow-up tools that need to distinguish self entities from
   // regular contacts.
-  const created = await query<EntityRow>(
-    `INSERT INTO entities (
-       kind, display_name, attributes, sensitivity,
-       workspace_id, user_id, assistant_id,
-       created_by_user_id, source
-     )
-     VALUES (
-       'person', $1, $2::jsonb, 'internal',
-       $3, $4, NULL,
-       $4, 'user'
-     )
-     RETURNING ${FULL_SELECT}`,
-    [params.displayName, JSON.stringify({ self: true }), params.workspaceId, params.userId],
-  )
-  const newEntity = toEntity(created.rows[0])
+  const newEntity = await createEntity({ kind: 'person', displayName: params.displayName,
+    attributes: { self: true }, sensitivity: 'internal', workspaceId: params.workspaceId,
+    userId: params.userId, createdByUserId: params.userId, source: 'user' })
 
   // Stamp users.entity_id so subsequent calls skip the materialisation.
   await query(
@@ -396,53 +405,64 @@ export async function getOrCreateClientContactEntity(params: {
   externalUserId: string
   email?: string | null
 }): Promise<EntityRecord> {
-  // Fast path: users.entity_id already set + entity exists in this workspace.
-  const existing = await query<{ entityId: string | null }>(
-    `SELECT entity_id AS "entityId" FROM users WHERE id = $1`,
-    [params.userId],
-  )
-  const existingId = existing.rows[0]?.entityId
-  if (existingId) {
-    const row = await query<EntityRow>(
-      `SELECT ${FULL_SELECT} FROM entities
-       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`,
-      [existingId, params.workspaceId],
-    )
-    if (row.rows[0]) return toEntity(row.rows[0])
-    // Stale (cross-workspace, deleted, or wrong workspace) — fall through.
-  }
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    if (await beginEntityAdmission(client, params.workspaceId)) throw new Error('scope_evidence_missing')
+    const run = async () => {
+      // Fast path: users.entity_id already set + entity exists in this workspace.
+      const existing = await client.query<{ entityId: string | null }>(
+        `SELECT entity_id AS "entityId" FROM users WHERE id = $1`,
+        [params.userId],
+      )
+      const existingId = existing.rows[0]?.entityId
+      if (existingId) {
+        const row = await client.query<EntityRow>(
+          `SELECT ${FULL_SELECT} FROM entities
+           WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`,
+          [existingId, params.workspaceId],
+        )
+        if (row.rows[0]) return toEntity(row.rows[0])
+        // Stale (cross-workspace, deleted, or wrong workspace) — fall through.
+      }
 
-  const attributes: Record<string, unknown> = {
-    client: true,
-    externalUserId: params.externalUserId,
-  }
-  if (params.email) attributes.email = params.email
+      const attributes: Record<string, unknown> = {
+        client: true,
+        externalUserId: params.externalUserId,
+      }
+      if (params.email) attributes.email = params.email
 
-  const created = await query<EntityRow>(
-    `INSERT INTO entities (
-       kind, display_name, attributes, sensitivity,
-       workspace_id, user_id, assistant_id,
-       created_by_user_id, source, compartments
-     )
-     VALUES (
-       'person', $1, $2::jsonb, 'internal',
-       $3, NULL, NULL,
-       $4, 'user', $5::text[]
-     )
-     RETURNING ${FULL_SELECT}`,
-    [
-      params.displayName,
-      JSON.stringify(attributes),
-      params.workspaceId,
-      params.userId,
-      [clientCompartment(params.externalUserId)],
-    ],
-  )
-  const newEntity = toEntity(created.rows[0])
+      const created = await client.query<EntityRow>(
+        `INSERT INTO entities (
+           kind, display_name, attributes, sensitivity,
+           workspace_id, user_id, assistant_id,
+           created_by_user_id, source, compartments
+         )
+         VALUES (
+           'person', $1, $2::jsonb, 'internal',
+           $3, NULL, NULL,
+           $4, 'user', $5::text[]
+         )
+         RETURNING ${FULL_SELECT}`,
+        [
+          params.displayName,
+          JSON.stringify(attributes),
+          params.workspaceId,
+          params.userId,
+          [clientCompartment(params.externalUserId)],
+        ],
+      )
+      const newEntity = toEntity(created.rows[0])
 
-  await query(`UPDATE users SET entity_id = $1 WHERE id = $2`, [newEntity.id, params.userId])
+      await client.query(`UPDATE users SET entity_id = $1 WHERE id = $2`, [newEntity.id, params.userId])
 
-  return newEntity
+      return newEntity
+    }
+    const result = await run()
+    await client.query('COMMIT')
+    return result
+  } catch (error) { await client.query('ROLLBACK'); throw error }
+  finally { client.release() }
 }
 
 /**
@@ -466,6 +486,8 @@ export async function getOrCreateClientContactAndLeadEntities(params: {
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
+    // External principal intake has no authenticated member/source binding yet.
+    if (await beginEntityAdmission(client, params.workspaceId)) throw new Error('scope_evidence_missing')
 
     const anchor = await client.query<{ entityId: string | null }>(
       `SELECT entity_id AS "entityId" FROM users WHERE id = $1 FOR UPDATE`,
@@ -1277,6 +1299,11 @@ export async function supersedeEntity(
       await applyRLSGucs(client, actorUserId)
     }
     try {
+      // Discover the destination without a resource lock, then serialize policy
+      // before locking the canonical predecessor (also for owner-pool callers).
+      const destination = (await client.query<{ workspace_id: string }>('SELECT workspace_id FROM entities WHERE id=$1', [id])).rows[0]
+      const ready = destination ? await beginEntityAdmission(client, destination.workspace_id) : false
+      if (ready) await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [destination!.workspace_id, actorUserId])
       // Lock the live row so a concurrent supersede can't double-close it.
       const sourceGuard = entitySourceGuard(actorUserId, access, 'mutation', 2)
       const oldRes = await client.query<EntityRow>(
@@ -1291,9 +1318,16 @@ export async function supersedeEntity(
         return null
       }
       const old = toEntity(oldRes.rows[0])
+      if (destination?.workspace_id !== old.workspaceId) throw new Error('scope_workspace_mismatch')
       const nextSensitivity = maxSensitivity(old.sensitivity, patch.sensitivity ?? old.sensitivity)
       if (patch.sensitivity !== undefined && patch.sensitivity !== nextSensitivity) {
         throw Object.assign(new Error('Lowering sensitivity requires an audited release.'),{code:'scope_declassification_required'})
+      }
+      if (ready) {
+        if ((patch.sourceEpisodeId && patch.sourceEpisodeId !== old.sourceEpisodeId)
+          || (patch.source !== undefined && patch.source !== 'user')) throw new Error('scope_evidence_missing')
+        const admitted = await admitEntitySuccessor(client, actorUserId, { ...old, compartments: old.compartments ?? [], projectIds: old.projectIds ?? [] }, patch)
+        patch = { ...patch, ...admitted }
       }
       const sourceScope = { ...old, compartments: old.compartments ?? [], projectIds: old.projectIds ?? [] }
       assertExecutionResourceScope(sourceScope, 'read', access)

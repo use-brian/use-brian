@@ -63,6 +63,7 @@ function toCoreSensitivity(s: EpisodeSensitivity): Sensitivity {
       return 'public'
     case 'internal':
       return 'internal'
+    case 'confidential':
     case 'private':
     case 'secret':
       return 'confidential'

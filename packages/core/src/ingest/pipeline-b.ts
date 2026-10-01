@@ -2334,6 +2334,12 @@ const PIPELINE_B_APPLICATION_CONTRACT = 'pipeline-b-v1'
 
 function sourceEnvelope(episode: PipelineBEpisode): PipelineBSourceEnvelope {
   return {
+    ...(episode.scopeVersion ? { derivation: { producer: 'pipeline-b', sources: [{
+      resourceKind: 'episode', resourceId: episode.id, version: episode.scopeVersion,
+      workspaceId: episode.workspaceId, userId: episode.userId, assistantId: episode.assistantId,
+      sensitivity: episode.sensitivity, compartments: [...(episode.compartments ?? [])],
+      projectIds: [...(episode.projectIds ?? [])],
+    }] } } : {}),
     workspaceId: episode.workspaceId,
     episodeId: episode.id,
     userId: episode.userId,

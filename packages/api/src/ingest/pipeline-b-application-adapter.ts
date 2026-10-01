@@ -82,6 +82,7 @@ async function applyEntity(
     }
     case 'create_entity': {
       const entity = await createEntity({
+        derivation: payload.derivation,
         kind: payload.entityKind,
         displayName: payload.displayName,
         canonicalId: payload.canonicalId,
