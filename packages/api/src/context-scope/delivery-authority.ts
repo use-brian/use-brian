@@ -34,9 +34,10 @@ export type DeliveryAudienceInput = {
   /**
    * Set ONLY by a live channel turn in a group, where `userId` is the human
    * who just spoke there through their own linked provider account (the same
-   * Telegram account connected to their Brian account). An owner or admin speaking in an approved
-   * group may receive their own personal context in the reply: who else is in
-   * that group is the group admin's responsibility, not a reason to refuse.
+   * Telegram account connected to their Brian account). A workspace member
+   * speaking in an approved group may receive their own personal context in
+   * the reply: who else is in that group was chosen by the owner or admin who
+   * added the bot, not a reason to refuse.
    * Workflows, relays and replays never set it, so they stay at the binding.
    */
   groupSpeaker?: boolean
@@ -179,8 +180,8 @@ type CeilingResult =
  * A workspace member as a RECIPIENT. Labels (clearance, Teams, Projects) stay
  * capped by the answering assistant, whose reads produced the evidence; the
  * assistant-visibility axis is dropped because assistants are readers, not
- * audiences. A member receiving on their own screen, DM, or (as an owner or admin)
- * an approved group they are speaking in may see any of their assistants' rows (decision D2). Consults keep the
+ * audiences. A member receiving on their own screen, DM, or an approved
+ * group they are speaking in may see any of their assistants' rows (decision D2). Consults keep the
  * axis: there the receiver IS an assistant (`validateCallerScopeEvidence`).
  */
 async function memberCeiling(
@@ -340,11 +341,13 @@ async function resolveEnvelope(
 }
 
 /**
- * An owner or admin speaking in an approved group gets their own personal
- * context, still capped by the group's approved labels and their own live
- * access. Anyone else (members, guests) stays at the shared binding, which
- * reads only unowned rows. A failed lookup degrades to that shared ceiling
- * rather than refusing the turn.
+ * A workspace member speaking in an approved group, through their own linked
+ * account, gets their own personal context, still capped by the group's
+ * approved labels and their own live access. Their role does not matter: the
+ * group's audience was chosen by the owner or admin who added the bot, and
+ * everyone in it reads every reply whoever asks. Guests stay at the shared
+ * binding, which reads only unowned rows. A failed lookup (including a sender
+ * who is not a member) degrades to that shared ceiling rather than refusing.
  */
 async function groupSpeakerCeiling(
   input: DeliveryAudienceInput,
@@ -352,8 +355,6 @@ async function groupSpeakerCeiling(
   deps: ReturnType<typeof resolvedDependencies>,
 ): Promise<AccessCeiling | null> {
   if (!input.groupSpeaker || !input.userId || (input.recipientMode ?? 'member') !== 'member') return null
-  const role = await deps.getWorkspaceRole(input.userId, input.workspaceId)
-  if (role !== 'owner' && role !== 'admin') return null
   const member = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps)
   if (!member.ceiling) {
     console.warn('[delivery-authority] group speaker kept at the shared ceiling:', member.diagnostic)

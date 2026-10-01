@@ -337,7 +337,7 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
   })
 })
 
-// ── Owners and admins speaking in an approved group ──
+// ── Linked members speaking in an approved group ──
 
 const SPEAKER_GROUP = '-100777'
 
@@ -385,11 +385,12 @@ const speakerInput = {
 
 const ownPersonalRow = { sensitivity: 'internal' as const, compartments: [], projectIds: [], sources: [source('own-memory', null)] }
 
-describe('[COMP:api/delivery-authority] owner or admin speaking in an approved group', () => {
+describe('[COMP:api/delivery-authority] a linked member speaking in an approved group', () => {
   // 2026-10-01: group bindings could never carry personal context, so an
   // owner's own topic-routed Telegram group refused every turn that touched
-  // their memories. Who else is in the group is the group admin's call.
-  it.each(['owner', 'admin'] as const)('delivers the %s their own personal context', async (role) => {
+  // their memories. Who else is in the group is the call of the owner or
+  // admin who added the bot, so the speaker's role is not checked.
+  it.each(['owner', 'admin', 'member'] as const)('delivers the %s their own personal context', async (role) => {
     const deps = approvedGroupDeps({ speakerRole: role })
     await expect(createDeliveryAudienceEnvelopeResolver(deps)(speakerInput)).resolves.toMatchObject({
       allowed: true,
@@ -401,11 +402,13 @@ describe('[COMP:api/delivery-authority] owner or admin speaking in an approved g
       .resolves.toMatchObject({ allowed: true })
   })
 
-  it('keeps a plain member at the shared binding', async () => {
-    const deps = approvedGroupDeps({ speakerRole: 'member' })
+  it('keeps a sender who is not a workspace member at the shared binding', async () => {
+    const deps = approvedGroupDeps({
+      speakerRole: null,
+      live: async () => { throw Object.assign(new Error('gone'), { code: 'context_not_available' }) },
+    })
     await expect(createDeliveryAudienceEnvelopeResolver(deps)(speakerInput))
       .resolves.toMatchObject({ allowed: true, source: 'binding', ceiling: { userId: '' } })
-    expect(deps.resolveLiveAccess).not.toHaveBeenCalled()
     await expect(createDeliveryAudienceAuthorizer(deps)({ ...speakerInput, scopeEvidence: ownPersonalRow }))
       .resolves.toMatchObject({ allowed: false, detail: 'evidence_exceeds_audience' })
   })
