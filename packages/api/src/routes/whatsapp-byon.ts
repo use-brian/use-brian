@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
 import type { ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
@@ -7,6 +8,7 @@ import { resolveChatArchiveInstanceId, appendOutboundChatArchive } from '../chat
 import { z } from 'zod'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { WhatsappIngestor } from '../ingest/whatsapp-ingest.js'
+import { botAnswerDecision, normalizeWhatsappNumber } from './whatsapp-bot-handler.js'
 import type { WhatsappBot, WhatsappBotInput } from './whatsapp-bot-handler.js'
 import { buildWhatsappListenerHandler } from './whatsapp-listener-handler.js'
 import { runHandlers, selectHandlers } from './whatsapp-dispatcher.js'
@@ -511,6 +513,51 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
       } catch (err) {
         input.archiveMediaAvailability = 'failed'
         console.error('[whatsapp] archive media completion failed:', err)
+      }
+    }
+
+    // Emit for known, active BYON channels even without a chat handler.
+    // Never let an official-number fallback or a self echo masquerade as BYON.
+    if (!input.fromMe && (input.text.trim() || input.mediaBase64 || input.mediaRef)) {
+      const integration = await opts.integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
+      if (integration) {
+        const channel = await (opts.getChannel ?? getChannelForWebhook)(input.channelId)
+        const config = integration.config ?? {}
+        // Match the bot runtime's phone normalization, including legacy config
+        // values stored as formatted numbers or JIDs. Group-member-only DMs
+        // fail closed here: this ingress has no verified membership directory.
+        const normalizeNumbers = (values?: string[]) => (values ?? [])
+          .map(normalizeWhatsappNumber).filter((value): value is string => value !== null)
+        const access = botAnswerDecision({
+          persona: null,
+          sendScope: 'dm_and_groups',
+          accessMode: config.userAccessMode as 'allow_all' | 'allowlist' | 'blocklist' | 'group_members' | undefined,
+          allowedNumbers: normalizeNumbers(config.allowedUserIds),
+          blockedNumbers: normalizeNumbers(config.blockedUserIds),
+        }, input)
+        if (channel?.status === 'active' && channel.channelType === 'whatsapp' && access.allowed) {
+          const eventIncoming: IncomingMessage & { channelType: string } = {
+            channelType: 'whatsapp',
+            userId: input.senderPnJid ?? input.senderJid,
+            senderDisplay: input.senderName,
+            channelId: input.chatJid,
+            messageId: input.messageId,
+            text: /^<media:[^>]+>$/.test(input.text.trim()) ? '' : input.text,
+            mediaType: input.archiveMediaType,
+            mediaMime: input.archiveMediaMime,
+            mediaName: input.archiveMediaName,
+            mediaSizeBytes: input.archiveMediaSizeBytes,
+            isGroupChat: input.isGroup,
+            timestamp: input.timestamp,
+            raw: null,
+          }
+          await dispatchIncomingMessageEvent({
+            workspaceId: channel.workspaceId,
+            integrationId: integration.id,
+            providerAccountId: input.channelId,
+            incoming: eventIncoming,
+          })
+        }
       }
     }
 

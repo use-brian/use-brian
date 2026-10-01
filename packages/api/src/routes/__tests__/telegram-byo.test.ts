@@ -1,3 +1,6 @@
+import { expectMentionMatches } from './incoming-event-assertions.js'
+import { dispatchIncomingMessageEvent } from '../../message-events.js'
+vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
 import type { ChannelQuestionStore } from '../../workflow/channel-questions.js'
 import { channelQuestionActions, resolveChannelQuestion } from '../channel-questions.js'
 import { channelConfirmations, type ChannelInteractionScope } from '../channel-interactions.js'
@@ -1748,6 +1751,7 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
   })
 
   it('uses verified linked-chat metadata to scope nested comments and outbound replies', async () => {
+    vi.mocked(dispatchIncomingMessageEvent).mockClear()
     linkedDiscussionChatId = -10010
     const app = makeGuestApp([], null, false, 'allow_all')
     for (const root of [30, 40]) {
@@ -1760,6 +1764,7 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
       await flushMicrotasks(); await flushMicrotasks()
     }
     expect(pipelineCalls).toHaveLength(2)
+    expect(vi.mocked(dispatchIncomingMessageEvent).mock.calls.map(([input]) => input.incoming.channelId)).toEqual(['-10020:discussion:30', '-10020:discussion:40'])
     expect(adapterSendCalls.map(c => c.channelId)).toEqual(expect.arrayContaining(['-10020:discussion:30', '-10020:discussion:40']))
   })
 
@@ -3078,5 +3083,114 @@ describe('[COMP:api/telegram-byo-route] unverified workflow authority', () => {
     await flushMicrotasks(); await flushMicrotasks()
     expect(pipelineCalls).toHaveLength(0)
     expect(adapterSendCalls.at(-1)?.text).toContain('identity could not be verified')
+  })
+})
+
+
+describe.each([{ capabilities: [] }, { capabilities: ['chat'] }])('Telegram incoming workflow events ($capabilities)', ({ capabilities }) => {
+  it('does not turn button callbacks into incoming-message events', async () => {
+    vi.mocked(dispatchIncomingMessageEvent).mockClear()
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore() as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    await postUpdate(app, { update_id: 99, callback_query: {
+      id: 'callback', from: { id: 42 }, data: 'unknown:callback',
+      message: { message_id: 1, date: 1700000000, chat: { id: 42, type: 'private' }, text: 'button message' },
+    } })
+    await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['addressed text', { text: '@testbot hello' }, {}, 1],
+    ['passive text', { text: 'room chatter' }, {}, 1],
+    ['passive photo', { photo: [{ file_id: 'photo', width: 1, height: 1 }] }, {}, 1],
+    ['blocked sender', { text: 'blocked' }, { userAccessMode: 'blocklist', blockedUserIds: ['42'] }, 0],
+    ['empty allowlist', { text: 'denied' }, { userAccessMode: 'allowlist', allowedUserIds: [] }, 0],
+    ['self echo', { text: 'bot', from: { id: 999999, is_bot: true } }, {}, 0],
+    ['automatic forward', { text: 'forward', is_automatic_forward: true }, {}, 0],
+  ])('%s is handled before disabled chat/routing', async (_name, fields, config, count) => {
+    vi.mocked(dispatchIncomingMessageEvent).mockClear()
+    const { getChannelForWebhook } = await import('../../db/channels-store.js')
+    vi.mocked(getChannelForWebhook).mockResolvedValueOnce({
+      workspaceId: 'ws_1', status: 'active', enabledCapabilities: capabilities,
+    } as never)
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore(config) as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    await postUpdate(app, { update_id: 123, message: {
+      message_id: 456, date: 1700000000, from: { id: 42, first_name: 'User' },
+      chat: { id: -100, type: 'supergroup' }, ...fields,
+    } })
+    await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledTimes(count as number)
+    if (count) expect(dispatchIncomingMessageEvent).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws_1', integrationId: 'integ_1',
+      incoming: expect.objectContaining({ channelType: 'telegram', messageId: '456', userId: '42', timestamp: 1700000000 }),
+    }))
+  })
+})
+
+
+describe('Telegram workflow provider identity', () => {
+  function app() {
+    return createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore() as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+  }
+  async function disableChat() {
+    vi.mocked(dispatchIncomingMessageEvent).mockClear()
+    const { getChannelForWebhook } = await import('../../db/channels-store.js')
+    vi.mocked(getChannelForWebhook).mockResolvedValueOnce({ workspaceId: 'ws', status: 'active', enabledCapabilities: [] } as never)
+  }
+  it.each(['text', 'caption'])('matches Telegram %s entity IDs and handles using UTF-16 offsets', async field => {
+    await disableChat()
+    const text = '😀 @Other Human @TESTBOT'
+    await postUpdate(app(), { update_id: 1, message: {
+      message_id: 1, date: 1700000000, from: { id: 42 }, chat: { id: -100, type: 'supergroup' },
+      [field]: text, [field === 'text' ? 'entities' : 'caption_entities']: [
+        { type: 'mention', offset: 3, length: 6 },
+        { type: 'text_mention', offset: 10, length: 5, user: { id: 123 } },
+        { type: 'text_mention', offset: 10, length: 5, user: { id: 123 } },
+        { type: 'mention', offset: 16, length: 8 },
+      ],
+    } })
+    await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+    await expectMentionMatches(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0], ['@other', '123', '@testbot', '999999'])
+  })
+  it('uses one canonical discussion for direct and nested passive replies with chat disabled', async () => {
+    linkedDiscussionChatId = -10010
+    mockResolveTelegramRouting.mockClear()
+    mockResolveAnyRouting.mockClear()
+    const destinations: string[] = []
+    for (const reply of [{ message_id: 30, is_automatic_forward: true }, { message_id: 31 }]) {
+      await disableChat()
+      await postUpdate(app(), { update_id: 2, message: {
+        message_id: 32, date: 1700000000, from: { id: 42 }, chat: { id: -10020, type: 'supergroup' },
+        ...('is_automatic_forward' in reply ? {} : { message_thread_id: 30 }),
+        reply_to_message: reply, text: 'passive comment',
+      } })
+      await flushMicrotasks()
+      expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+      destinations.push(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0].incoming.channelId)
+    }
+    expect(destinations).toEqual(['-10020:discussion:30', '-10020:discussion:30'])
+    expect(mockResolveTelegramRouting).not.toHaveBeenCalled()
+    expect(mockResolveAnyRouting).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(0)
+  })
+  it('does not dispatch a room-scoped event when nested discussion metadata lookup fails', async () => {
+    await disableChat()
+    chatLookupFails = true
+    await postUpdate(app(), { update_id: 3, message: {
+      message_id: 33, date: 1700000000, from: { id: 42 }, chat: { id: -10020, type: 'supergroup' },
+      message_thread_id: 30, reply_to_message: { message_id: 31 }, text: 'comment',
+    } })
+    await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
   })
 })

@@ -122,10 +122,16 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
         text: 'Need help with my order',
         message_id: 'wamid-1',
         from: '15551234567',
+        user: '15551234567',
+        channel: '15551234567',
+        channel_id: '15551234567',
+        is_bot: false,
         phone_number_id: 'phone-1',
         group_id: null,
         message_type: 'text',
         media_type: null,
+        thread_id: null, reply_to_message_id: null, is_edit: false,
+        media_mime: null, media_name: null, media_duration_sec: null, media_size_bytes: null, files: [],
       },
     })
   })

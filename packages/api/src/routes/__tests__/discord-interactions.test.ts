@@ -1,3 +1,5 @@
+import { dispatchIncomingMessageEvent } from '../../message-events.js'
+vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
 import { channelQuestions } from '../channel-questions.js'
 import express from 'express'
 import request from 'supertest'
@@ -19,6 +21,7 @@ vi.mock('../../db/chat-lock.js', () => ({ withChatLock: (_key: string, fn: () =>
 import { discordRoutes } from '../discord.js'
 
 function setup(withUserStore = false) {
+  vi.mocked(dispatchIncomingMessageEvent).mockClear()
   mocks.processChannelMessage.mockClear()
   const app = express()
   app.use(express.json())
@@ -73,6 +76,7 @@ describe('Discord common confirmations', () => {
       await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
         messageText: 'approve abc123', conversationalAnswer: true,
       })))
+      expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
     } finally { dispose() }
   })
 
@@ -124,6 +128,7 @@ describe('Discord common confirmations', () => {
       await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
         userId: 'owner', isIdentified: false, workflowCallback: expect.any(Object),
       })))
+      expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
     } finally { dispose() }
   })
 

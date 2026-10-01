@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 /**
  * Custom channel bridge route — the API-side half of the bridge protocol (v1).
@@ -594,6 +595,23 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     const incoming = adapter.parseIncoming(msg)
 
     try {
+      // Workflow subscriptions are independent of chat/mention/routing gates.
+      // Media upgrades update an existing message; they are not new messages.
+      const accessModeForEvent = config.userAccessMode ?? 'allow_all'
+      const authorizedForEvent = accessModeForEvent === 'allowlist'
+        ? !(config.allowedUserIds?.length) || config.allowedUserIds.includes(msg.senderId)
+        : accessModeForEvent !== 'blocklist' || !config.blockedUserIds?.includes(msg.senderId)
+      if (incoming && !msg.isSelf && !parsed.data.mediaUpgrade && authorizedForEvent) {
+        const eventIncoming: IncomingMessage & { channelType: string } = {
+          ...incoming, channelType: 'custom', timestamp: incoming.timestamp / 1000,
+        }
+        await dispatchIncomingMessageEvent({
+          workspaceId: channel.workspaceId,
+          integrationId: integration.id,
+          incoming: eventIncoming,
+        })
+      }
+
       // 1. Chat capability (the auth middleware already proved active).
       if (!channel.enabledCapabilities.includes('chat')) {
         console.warn(`[custom-channel] channel ${channelId} not accepting chat — dropping inbound`)
