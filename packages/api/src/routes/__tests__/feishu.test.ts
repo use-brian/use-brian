@@ -420,6 +420,23 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     expect(mocks.processChannelMessage).not.toHaveBeenCalled()
   })
 
+  it.each(['allowlist', 'blocklist'])('does not trigger workflows for a sender denied by %s, even without chat', async mode => {
+    const dispatcher = { dispatch: vi.fn(async () => {}) }
+    const { app } = setup({
+      config: { userAccessMode: mode, allowedUserIds: ['someone-else'], blockedUserIds: ['ou_sender'] },
+      route: { workflowEventDispatcher: dispatcher },
+    })
+    mocks.getChannelForWebhook.mockResolvedValue({ workspaceId: 'workspace-1', status: 'active', enabledCapabilities: ['ingest'] })
+    await request(app).post('/internal/feishu/inbound')
+      .set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
+    // The sender gate runs before the durable claim and the finally producers.
+    await new Promise(resolve => setImmediate(resolve))
+    expect(mocks.claimChannelEvent).not.toHaveBeenCalled()
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
+    expect(mocks.processChannelMessage).not.toHaveBeenCalled()
+  })
+
   it('dispatches bot and non-mention traffic to Feishu workflow event subscribers', async () => {
     const workflowEventDispatcher = { dispatch: vi.fn(async () => []) }
     const { app } = setup({
@@ -438,6 +455,8 @@ describe('[COMP:api/feishu-route] bridge route', () => {
           senderType: 'bot',
           senderIsBot: true,
           content: 'service alert',
+          threadId: 'omt_topic', replyToMessageId: 'om_parent',
+          resources: [{ type: 'file', fileName: 'report.pdf', fileKey: 'secret-resource-key' }],
         }),
       })
       .expect(202)
@@ -454,7 +473,12 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       actorId: 'ou_monitor_bot',
       channelId: 'oc_chat',
       isBot: true,
+      payload: expect.objectContaining({
+        thread_id: 'omt_topic', reply_to_message_id: 'om_parent',
+        files: [{ name: 'report.pdf', mime_type: 'application/octet-stream', size_bytes: null }],
+      }),
     }))
+    expect(JSON.stringify(workflowEventDispatcher.dispatch.mock.calls)).not.toContain('secret-resource-key')
     expect(mocks.processChannelMessage).not.toHaveBeenCalled()
   })
 

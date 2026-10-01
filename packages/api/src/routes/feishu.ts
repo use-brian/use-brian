@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 import { resolveChannelQuestion } from './channel-questions.js'
 /**
@@ -587,6 +588,8 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     if (!integration) return
     const eventMessage = workflowEventMessage(value)
     if (!eventMessage) return
+    const config = (integration.config ?? {}) as ChannelIntegrationConfig
+    if (!feishuUserAllowed(config, eventMessage.senderId)) return
     if (!actionData && !workflowCallback && !await claimChannelEvent(channelRowId, eventMessage.messageId)) return
 
     await persistFeishuSeenChat(
@@ -602,7 +605,6 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     if (!channel.enabledCapabilities.includes('chat')) return
     const credentials = integration.credentials as FeishuCredentials
     const api = createFeishuApi(credentialsForApi(credentials))
-    const config = (integration.config ?? {}) as ChannelIntegrationConfig
     const replyInThread = config.replyInThread ?? true
     const adapter = createFeishuAdapter({
       api,
@@ -765,21 +767,32 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       else await withChatLock(`feishu:${targetSession}`, run)
     })
     } finally {
-      if (options.workflowEventDispatcher && !actionData && !workflowCallback) {
+      if (!actionData && !workflowCallback && eventMessage.senderId !== integration.botUserId) {
         const mentionIds = eventMessage.mentions
           .map((mention) => mention.openId ?? mention.userId ?? mention.key)
           .filter((id): id is string => typeof id === 'string' && id.length > 0)
-        await options.workflowEventDispatcher.dispatch({
+        await dispatchIncomingMessageEvent({
           workspaceId: channel.workspaceId,
-          source: {
-            type: 'channel',
-            channelIntegrationId: integration.id,
-            channel: 'feishu',
+          integrationId: integration.id,
+          incoming: {
+            channelType: 'feishu',
+            userId: eventMessage.senderId,
+            channelId: eventMessage.chatId,
+            messageId: eventMessage.messageId,
+            threadId: eventMessage.threadId,
+            replyToMessageId: eventMessage.replyToMessageId,
+            files: eventMessage.resources.map(resource => ({
+              url: '',
+              name: resource.fileName ?? resource.type,
+              mimeType: resource.type === 'file' ? 'application/octet-stream'
+                : resource.type === 'sticker' ? 'image/*' : `${resource.type}/*`,
+            })),
+            text: eventMessage.content,
+            mentions: mentionIds,
+            isGroupChat: eventMessage.chatType === 'group',
+            timestamp: eventMessage.createTime / 1000,
+            raw: value,
           },
-          text: eventMessage.content || null,
-          actorId: eventMessage.senderId,
-          channelId: eventMessage.chatId,
-          mentions: mentionIds,
           isBot: eventMessage.senderIsBot === true || eventMessage.senderType === 'bot',
           payload: {
             text: eventMessage.content,
@@ -790,9 +803,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             user: eventMessage.senderId,
             is_bot: eventMessage.senderIsBot === true || eventMessage.senderType === 'bot',
           },
-        }).catch((error) => {
-          console.error('[feishu] workflow event dispatch failed:', error)
-        })
+        }, options.workflowEventDispatcher)
       }
       if (options.feishuWebhookIngestor && !actionData && !workflowCallback) {
         await dispatchFeishuIngest({

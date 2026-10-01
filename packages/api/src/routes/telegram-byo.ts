@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 import { channelQuestions, resolveChannelQuestion } from './channel-questions.js'
 import { createTelegramDiscussionStore, observeTelegramDiscussion, telegramDiscussionContext, type TelegramDiscussionStore, type DiscussionMessage } from '../telegram-discussion-context.js'
@@ -252,6 +253,28 @@ export function shouldUseUniversalTelegramIntake(
  */
 export const telegramLinkBindsHere = channelLinkBindsHere
 
+/** Telegram only supplies numeric IDs for text_mention entities. Ordinary
+ * mentions carry handles; retain their lowercase @handle and add the known
+ * bot ID when possible rather than pretending every handle is a user ID. */
+function telegramEventMentions(raw: unknown, botUsername?: string | null, botUserId?: string | null): string[] {
+  type Entity = { type?: string; offset: number; length: number; user?: { id?: number } }
+  const message = raw as { text?: string; caption?: string; entities?: Entity[]; caption_entities?: Entity[] }
+  const content = message.text ?? message.caption ?? ''
+  const entities = message.text !== undefined ? message.entities : message.caption_entities
+  const mentions = new Set<string>()
+  for (const entity of entities ?? []) {
+    if (entity.type === 'text_mention' && entity.user?.id != null) {
+      mentions.add(String(entity.user.id))
+    } else if (entity.type === 'mention' && Number.isInteger(entity.offset) && Number.isInteger(entity.length)) {
+      const handle = content.slice(entity.offset, entity.offset + entity.length).toLowerCase()
+      if (!/^@[a-z0-9_]+$/.test(handle)) continue
+      mentions.add(handle)
+      if (botUserId && botUsername && handle === `@${botUsername.toLowerCase()}`) mentions.add(botUserId)
+    }
+  }
+  return [...mentions]
+}
+
 export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
   const router = Router()
 
@@ -384,7 +407,72 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     //    re-resolved inside `handleIncoming` once the chat id is known.
     //    See docs/architecture/channels/adapter-pattern.md.
     const channel = await getChannelForWebhook(integration.channelId)
-    if (!channel || channel.status !== 'active' || !channel.enabledCapabilities.includes('chat')) {
+    if (!channel || channel.status !== 'active') return
+
+    // ChatFullInfo, not Update.chat, carries linked_chat_id. Resolve it for
+    // nested discussion replies (including callbacks) on every request: no
+    // warm-process history or stale link cache is required. On lookup failure
+    // drop rather than merge an unknown thread into the room session.
+    const threadUpdate = req.body as { message?: RawTelegramGroupMessage; channel_post?: RawTelegramGroupMessage; callback_query?: { message?: RawTelegramGroupMessage } }
+    const threadMessage = threadUpdate.message ?? threadUpdate.channel_post ?? threadUpdate.callback_query?.message
+    const discussionChatIds: string[] = []
+    if (threadMessage?.chat?.type === 'supergroup' && !threadMessage.chat.is_forum && threadMessage.message_thread_id != null) {
+      try {
+        const chat = await createTelegramApi({ token: credentials.bot_token }).getChat(String(threadMessage.chat.id))
+        if (chat.linked_chat_id != null) discussionChatIds.push(String(chat.id))
+      } catch (err) {
+        console.error('[telegram-byo] discussion metadata lookup failed; dropping threaded update:', err)
+        return
+      }
+    }
+
+    // Workflow events observe provider messages, not conversational callbacks
+    // or the later album/reassembly callbacks. This pass never sends replies.
+    const eventConfig = (integration.config ?? {}) as ChannelIntegrationConfig
+    const eventIncoming = createTelegramAdapter({
+      token: credentials.bot_token,
+      botUsername: integration.botUsername ?? undefined,
+      config: { normalizePassive: true, discussionChatIds },
+    }).parseIncoming(req.body)
+    if (eventIncoming && eventIncoming.userId !== String(integration.botUserId ?? '')) {
+      const raw = eventIncoming.raw as { from?: { username?: string }; sender_chat?: unknown; chat?: { type?: string } }
+      const chatSender = !!raw.sender_chat || raw.chat?.type === 'channel'
+      const matches = (entry: string) => {
+        entry = entry.trim()
+        return entry.startsWith('@')
+          ? !chatSender && raw.from?.username?.toLowerCase() === entry.slice(1).toLowerCase()
+          : eventIncoming.userId === entry
+      }
+      let allowed = eventConfig.userAccessMode !== 'blocklist'
+        || !(eventConfig.blockedUserIds ?? []).some(matches)
+      if (eventConfig.userAccessMode === 'allowlist') {
+        allowed = !chatSender && (eventConfig.allowedUserIds ?? []).some(matches)
+        // Telegram's linked owner is implicitly allowed even with an empty
+        // allowlist. Resolve only for this exception, not for ordinary events.
+        if (!allowed && !chatSender && options.linkedAccountStore) {
+          const routing = await resolveTelegramRoutingForSurface(integration.channelId, null)
+            ?? await resolveAnyRoutingForChannel(integration.channelId)
+          const ownerAssistant = routing ? await findAssistantById(routing.assistantId) : null
+          if (ownerAssistant) {
+            const owner = await billingPartyForAssistant({
+              id: ownerAssistant.id, ownerUserId: ownerAssistant.ownerUserId ?? null,
+              workspaceId: ownerAssistant.workspaceId ?? null,
+            })
+            const linked = await options.linkedAccountStore.findByProvider('telegram', eventIncoming.userId)
+            allowed = linked?.userId === owner
+          }
+        }
+      }
+      if (allowed) await dispatchIncomingMessageEvent({
+        workspaceId: channel.workspaceId, integrationId: integration.id,
+        // Adapters use milliseconds; the workflow envelope expects seconds.
+        incoming: {
+          ...eventIncoming, timestamp: eventIncoming.timestamp / 1000, channelType: 'telegram',
+          mentions: telegramEventMentions(eventIncoming.raw, integration.botUsername, integration.botUserId),
+        },
+      })
+    }
+    if (!channel.enabledCapabilities.includes('chat')) {
       console.warn(`[telegram-byo] channel ${integration.channelId} not accepting chat — ignoring inbound`)
       return
     }
@@ -449,12 +537,6 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           })),
         }
       : baseRequireMention
-    // ChatFullInfo, not Update.chat, carries linked_chat_id. Resolve it for
-    // nested discussion replies (including callbacks) on every request: no
-    // warm-process history or stale link cache is required. On lookup failure
-    // drop rather than merge an unknown thread into the room session.
-    const threadUpdate = req.body as { message?: RawTelegramGroupMessage; channel_post?: RawTelegramGroupMessage; callback_query?: { message?: RawTelegramGroupMessage } }
-    const threadMessage = threadUpdate.message ?? threadUpdate.channel_post ?? threadUpdate.callback_query?.message
     const discussionStore = options.discussionStore ?? createTelegramDiscussionStore()
     // Persist before suppression/address gates, including privacy-mode reply snapshots.
     // A storage failure drops the update, never silently fabricates source context.
@@ -464,17 +546,6 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       console.error('[telegram-byo] discussion context persistence failed:', err)
       return
     }
-    const discussionChatIds: string[] = []
-    if (threadMessage?.chat?.type === 'supergroup' && !threadMessage.chat.is_forum && threadMessage.message_thread_id != null) {
-      try {
-        const chat = await createTelegramApi({ token: credentials.bot_token }).getChat(String(threadMessage.chat.id))
-        if (chat.linked_chat_id != null) discussionChatIds.push(String(chat.id))
-      } catch (err) {
-        console.error('[telegram-byo] discussion metadata lookup failed; dropping threaded update:', err)
-        return
-      }
-    }
-
     const tgConfig: TelegramAdapterConfig = {
       discussionChatIds,
       ackReaction: storedConfig.ackReaction,

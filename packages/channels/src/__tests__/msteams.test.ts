@@ -321,3 +321,19 @@ describe('[COMP:channels/msteams-markdown] markdownToTeams', () => {
     expect(out).toContain('- one')
   })
 })
+
+describe('Teams mention-only event normalization', () => {
+  const raw = { type: 'message', id: 'message', from: { id: 'human' }, recipient: { id: 'bot' },
+    conversation: { id: 'room', conversationType: 'channel' }, text: '<at>Bot</at>', entities: [{ type: 'mention', mentioned: { id: 'bot' } }],
+  }
+  it('opts in without admitting empty/unidentified mentions or changing the chat default', () => {
+    const credentials = { appId: 'app', appPassword: 'secret', tenantId: 'tenant', botId: 'bot' }
+    const chat = createMsTeamsAdapter(credentials)
+    const events = createMsTeamsAdapter({ ...credentials, config: { requireMention: false, preserveMentionOnly: true } })
+    expect(chat.parseIncoming(raw)).toBeNull()
+    expect(events.parseIncoming(raw)).toMatchObject({ text: '', isMentioned: true, raw })
+    expect(events.parseIncoming({ ...raw, text: '   ' })).toBeNull()
+    expect(events.parseIncoming({ ...raw, entities: [] })).toBeNull()
+    expect(events.parseIncoming({ ...raw, from: { id: 'bot' } })).toBeNull()
+  })
+})

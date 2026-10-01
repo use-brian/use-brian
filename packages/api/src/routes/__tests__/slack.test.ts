@@ -26,6 +26,9 @@ vi.mock('@use-brian/channels', () => {
   }
 })
 
+vi.mock('../../db/channel-event-dedup.js', () => ({ claimChannelEvent: vi.fn(async () => true) }))
+import { claimChannelEvent } from '../../db/channel-event-dedup.js'
+
 // Mock DB modules
 vi.mock('../../db/users.js', () => ({
   findAssistantById: vi.fn(),
@@ -136,6 +139,134 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
     vi.resetAllMocks()
     integrationStore.touchLastEventAt.mockResolvedValue(undefined)
   })
+
+  it.each([
+    ['message', 'app_mention'], ['app_mention', 'message'], ['app_mention', 'app_mention'],
+  ])('dispatches %s then %s only once per Slack message', async (first, second) => {
+    const claimed = new Set<string>()
+    vi.mocked(claimChannelEvent).mockImplementation(async (channel, id) => {
+      const key = `${channel}:${id}`
+      if (claimed.has(key)) return false
+      claimed.add(key)
+      return true
+    })
+    const dispatch = vi.fn(async () => {})
+    const app = createTestApp('/webhook/slack', slackRoutes({ ...options, workflowEventDispatcher: { dispatch } }))
+    integrationStore.getByChannelForWebhook.mockResolvedValue({
+      id: 'int_1', credentials: { bot_token: 'token', signing_secret: 'secret' }, botUserId: 'SELF',
+    })
+    mockVerifySignature.mockReturnValue(true)
+    mockGetChannelForWebhook.mockResolvedValue({ workspaceId: 'workspace', status: 'active', enabledCapabilities: [] } as never)
+    for (const type of [first, second]) {
+      await request(app).post('/webhook/slack/channel').send({
+        type: 'event_callback', event_id: `${type}-envelope`,
+        event: { type, user: 'sender', channel: 'room', text: '<@SELF> alert', ts: '123.456', thread_ts: '100.000',
+          files: [{ name: 'report.pdf', mimetype: 'application/pdf', size: 42, url_private: 'https://secret-slack' }],
+        },
+      }).expect(200)
+    }
+    await vi.waitFor(() => expect(claimChannelEvent).toHaveBeenCalledTimes(2))
+    expect(dispatch).toHaveBeenCalledOnce()
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ message_id: '123.456', thread_id: '100.000', reply_to_message_id: '100.000',
+        files: [{ name: 'report.pdf', mime_type: 'application/pdf', size_bytes: 42 }],
+      }),
+    }))
+    expect(JSON.stringify(dispatch.mock.calls)).not.toContain('secret-slack')
+    // The same timestamp in a different room is not a duplicate.
+    await request(app).post('/webhook/slack/channel').send({
+      type: 'event_callback', event: { type: first, user: 'sender', channel: 'other-room', text: 'alert', ts: '123.456' },
+    }).expect(200)
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2))
+  })
+
+  // Native Slack envelope (not an adapter fixture): no onMessage callback is
+  // emitted by the chat mock, so every assertion exercises the finally path.
+  function slackPost(event: Record<string, unknown> = {}) {
+    return {
+      token: 'verification-token', team_id: 'T123', api_app_id: 'A123',
+      type: 'event_callback', event_id: 'Ev123', event_time: 1710000000,
+      event: {
+        type: 'message', user: 'U123', channel: 'C123', channel_type: 'channel',
+        text: 'ordinary unmentioned post', ts: '1710000000.000001', event_ts: '1710000000.000001',
+        ...event,
+      },
+    }
+  }
+
+  function workflowApp(config: Record<string, unknown> = {}, status = 'active') {
+    const dispatch = vi.fn(async () => {})
+    integrationStore.getByChannelForWebhook.mockResolvedValue({
+      id: 'int_1', credentials: { bot_token: 'token', signing_secret: 'secret' },
+      botUserId: 'SELF', config,
+    })
+    mockVerifySignature.mockReturnValue(true)
+    mockGetChannelForWebhook.mockResolvedValue({
+      workspaceId: 'workspace', status, enabledCapabilities: ['ingest'],
+    } as never)
+    vi.mocked(claimChannelEvent).mockResolvedValue(true)
+    const app = createTestApp('/webhook/slack', slackRoutes({ ...options, workflowEventDispatcher: { dispatch } }))
+    return { app, dispatch }
+  }
+
+  it.each([
+    { status: 'disabled', config: {} },
+    { status: 'archived', config: {} },
+    { status: 'active', config: { userAccessMode: 'allowlist', allowedUserIds: ['OTHER'] } },
+    { status: 'active', config: { userAccessMode: 'blocklist', blockedUserIds: ['U123'] } },
+  ])('does not trigger or claim unauthorized posts: %j', async ({ status, config }) => {
+    const { app, dispatch } = workflowApp(config, status)
+    await request(app).post('/webhook/slack/channel').send(slackPost()).expect(200)
+    await vi.waitFor(() => expect(mockGetChannelForWebhook).toHaveBeenCalled())
+    await new Promise(resolve => setImmediate(resolve))
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(claimChannelEvent).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {},
+    { userAccessMode: 'allowlist', allowedUserIds: ['U123'] },
+    { userAccessMode: 'allowlist', allowedUserIds: [] },
+    { userAccessMode: 'blocklist', blockedUserIds: ['OTHER'] },
+  ])('dispatches authorized unmentioned posts without chat capability: %j', async config => {
+    const { app, dispatch } = workflowApp(config)
+    await request(app).post('/webhook/slack/channel').send(slackPost()).expect(200)
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce())
+    expect(claimChannelEvent).toHaveBeenCalledOnce()
+  })
+
+  it.each(['', 'Attached is the report'])('dispatches native file_share messages with text %j', async text => {
+    const { app, dispatch } = workflowApp({ userAccessMode: 'allowlist', allowedUserIds: ['U123'] })
+    await request(app).post('/webhook/slack/channel').send(slackPost({
+      subtype: 'file_share', text, files: [{
+        id: 'F123', name: 'report.pdf', mimetype: 'application/pdf', size: 1234,
+        url_private: 'https://files.slack.com/secret', url_private_download: 'https://files.slack.com/secret-download',
+      }],
+    })).expect(200)
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce())
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      text: text || null, actorId: 'U123',
+      payload: expect.objectContaining({
+        message_id: '1710000000.000001', text,
+        files: [{ name: 'report.pdf', mime_type: 'application/pdf', size_bytes: 1234 }],
+      }),
+    }))
+    expect(JSON.stringify(dispatch.mock.calls)).not.toContain('secret')
+  })
+
+  it.each(['message_changed', 'message_deleted', 'message_replied', 'channel_join', 'channel_leave', 'channel_topic'])
+    ('does not trigger on Slack %s lifecycle events', async subtype => {
+      const { app, dispatch } = workflowApp()
+      await request(app).post('/webhook/slack/channel').send(slackPost({
+        subtype,
+        message: { type: 'message', user: 'U123', text: 'edited post', ts: '1710000000.000001' },
+        previous_message: { type: 'message', user: 'U123', text: 'old post', ts: '1710000000.000001' },
+        deleted_ts: '1710000000.000001',
+      })).expect(200)
+      await new Promise(resolve => setImmediate(resolve))
+      expect(dispatch).not.toHaveBeenCalled()
+      expect(claimChannelEvent).not.toHaveBeenCalled()
+    })
 
   it('responds to url_verification challenge', async () => {
     const app = createTestApp('/webhook/slack', slackRoutes(options))

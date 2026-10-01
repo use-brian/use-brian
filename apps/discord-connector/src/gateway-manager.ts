@@ -252,8 +252,12 @@ class Connection {
     private readonly onInteraction: (interaction: ForwardedInteraction) => void,
   ) {
     this.managed = { channelId, botUserId: input.botUserId, status: 'connecting' }
-    // Send-only adapter (no onMessage): we call parseIncoming directly per event.
-    this.adapter = createDiscordAdapter({ token: input.botToken, botUserId: input.botUserId })
+    // Normalize all human messages, not only conversational mentions. The API
+    // dispatches workflow events before applying the historical reply gate.
+    this.adapter = createDiscordAdapter({
+      token: input.botToken, botUserId: input.botUserId,
+      config: { requireMention: false, preserveMentionOnly: true },
+    })
   }
 
   start(): void {

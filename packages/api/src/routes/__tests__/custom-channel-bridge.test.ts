@@ -15,6 +15,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
+vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
+import { dispatchIncomingMessageEvent } from '../../message-events.js'
+
 vi.mock('../channel-pipeline.js', () => ({ processChannelMessage: vi.fn().mockResolvedValue(undefined) }))
 vi.mock('../../db/users.js', () => ({ findAssistantById: vi.fn() }))
 vi.mock('../../db/channels-store.js', () => ({
@@ -908,5 +911,49 @@ describe('[COMP:api/custom-channel-bridge] outbound documents', () => {
     expect(payload.documents).toHaveLength(1)
     expect(payload.documents![0]).toMatchObject({ filename: 'sushi.jpg', mime: 'image/jpeg', caption: 'from Jack' })
     expect(Buffer.from(payload.documents![0].dataBase64, 'base64')).toEqual(Buffer.from([1, 2, 3]))
+  })
+})
+
+
+describe('custom workflow message ingress', () => {
+  it.each(['routed', 'unrouted', 'chat disabled', 'unaddressed group'])('emits normalized %s messages', async (mode) => {
+    if (mode === 'unrouted') vi.mocked(resolveRoutingForSurface).mockResolvedValue(null)
+    if (mode === 'chat disabled') vi.mocked(getChannelForWebhook).mockResolvedValue({ ...activeChannel, enabledCapabilities: [] } as never)
+    const { app } = buildApp()
+    await request(app).post(`${BASE}/inbound`).set('Authorization', `Bearer ${TOKEN}`)
+      .send(inbound({ isGroupChat: mode === 'unaddressed group' }))
+    await flush()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      workspaceId: 'ws-1', integrationId: 'int-1',
+      incoming: expect.objectContaining({ channelType: 'custom', userId: 'peer-1', channelId: 'peer-1', messageId: 'm-1', text: 'hi', timestamp: 1700000000 }),
+    }))
+  })
+
+  it('emits media-only messages when chat is disabled', async () => {
+    vi.mocked(getChannelForWebhook).mockResolvedValue({ ...activeChannel, enabledCapabilities: [] } as never)
+    const { app } = buildApp()
+    const response = await request(app).post(`${BASE}/inbound`).set('Authorization', `Bearer ${TOKEN}`)
+      .send(inbound({ text: '', media: [{ kind: 'image', mime: 'image/jpeg', name: 'photo.jpg', dataBase64: 'YQ==' }] }))
+    expect(response.status).toBe(202)
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledWith(expect.objectContaining({
+      incoming: expect.objectContaining({ channelType: 'custom', text: '', mediaType: 'photo' }),
+    }))
+  })
+  it.each(['self', 'upgrade', 'blocked', 'unauthorized', 'empty', 'callback'])('does not emit %s', async (mode) => {
+    const { app } = buildApp({ integrationStore: makeIntegrationStore({ config: mode === 'blocked' ? { userAccessMode: 'blocklist', blockedUserIds: ['peer-1'] } : {} }) })
+    const body = mode === 'callback' ? { results: [] } : {
+      ...inbound({
+        isSelf: mode === 'self',
+        ...(mode === 'empty' ? { text: '' } : {}),
+        ...(mode === 'upgrade' ? {
+          media: [{ kind: 'image', mime: 'image/jpeg', name: 'photo.jpg', dataBase64: 'YQ==' }],
+        } : {}),
+      }),
+      ...(mode === 'upgrade' ? { mediaUpgrade: true } : {}),
+    }
+    await request(app).post(`${BASE}/${mode === 'callback' ? 'outbox/ack' : 'inbound'}`)
+      .set('Authorization', `Bearer ${mode === 'unauthorized' ? 'wrong' : TOKEN}`).send(body)
+    await flush()
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
   })
 })

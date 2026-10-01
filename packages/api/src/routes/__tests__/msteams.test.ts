@@ -1,3 +1,6 @@
+import { expectMentionMatches } from './incoming-event-assertions.js'
+import { dispatchIncomingMessageEvent } from '../../message-events.js'
+vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
@@ -96,12 +99,87 @@ describe('[COMP:api/msteams-route] webhook', () => {
     mocks.verifyAuthHeader.mockResolvedValue({ valid: true })
     mocks.parseIncoming.mockReturnValue({
       userId: '29:user', channelId: 'conv-1', text: 'hello',
-      isGroupChat: false, isMentioned: false, messageId: 'a1',
+      isGroupChat: false, isMentioned: false, messageId: 'a1', timestamp: 1700000000000,
     })
     vi.mocked(getChannelForWebhook).mockResolvedValue({ status: 'active', enabledCapabilities: ['chat'] } as never)
     vi.mocked(resolveRoutingForSurface).mockResolvedValue({ assistantId: 'a-1', modelAlias: 'pro' } as never)
     vi.mocked(findAssistantById).mockResolvedValue({ id: 'a-1', ownerUserId: 'owner', workspaceId: 'ws-1' } as never)
     vi.mocked(resolveChannelUser).mockResolvedValue({ user: { id: 'cu-1' }, isIdentified: false } as never)
+  })
+
+  it.each([false, true])('dispatches passive/media messages with chat disabled (blocked=%s)', async blocked => {
+    vi.mocked(getChannelForWebhook).mockResolvedValue({ workspaceId: 'ws', status: 'active', enabledCapabilities: [] } as never)
+    mocks.parseIncoming.mockReturnValue({ userId: '29:user', channelId: 'conv-1', messageId: 'a1', text: '', files: [{ url: 'https://example.com/file', name: 'f', mimeType: 'audio/mpeg' }] })
+    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore(
+      blocked ? { userAccessMode: 'blocklist', blockedUserIds: ['29:user'] } : {},
+    ))))
+    await request(app).post('/webhook/msteams/ch-1').send(ACTIVITY)
+    await flush()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledTimes(blocked ? 0 : 1)
+    expect(processChannelMessage).not.toHaveBeenCalled()
+    expect(channels.createMsTeamsAdapter).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ requireMention: false }) }))
+  })
+
+  it('uses real normalization for passive messages without enabling a reply', async () => {
+    const actual = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
+    vi.mocked(channels.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter)
+    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
+    await request(app).post('/webhook/msteams/ch-1').send({ ...ACTIVITY, conversation: { id: 'conv-1', conversationType: 'channel' } })
+    await flush()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+    expect(processChannelMessage).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { ...ACTIVITY, from: { id: '28:app' } },
+    { ...ACTIVITY, type: 'invoke' },
+    { ...ACTIVITY, from: {} },
+  ])('rejects self, callbacks, and missing senders', async activity => {
+    const actual = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
+    // Restore at the end: non-message activities do not construct adapters.
+    const factory = vi.mocked(channels.createMsTeamsAdapter).getMockImplementation()!
+    vi.mocked(channels.createMsTeamsAdapter).mockImplementation(actual.createMsTeamsAdapter)
+    try {
+      const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
+      await request(app).post('/webhook/msteams/ch-1').send(activity)
+      await flush()
+      expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+      expect(processChannelMessage).not.toHaveBeenCalled()
+    } finally { vi.mocked(channels.createMsTeamsAdapter).mockImplementation(factory) }
+  })
+
+  it('matches Teams mentioned account IDs independently of the bot mention gate', async () => {
+    const actual = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
+    vi.mocked(channels.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter)
+    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
+    await request(app).post('/webhook/msteams/ch-1').send({ ...ACTIVITY,
+      conversation: { id: 'conv-1', conversationType: 'channel' },
+      text: '<at>Human</at> hello', entities: [
+        { type: 'mention', mentioned: { id: '29:human', name: 'Human' } },
+        { type: 'mention', mentioned: { id: '29:human' } },
+        { type: 'other', mentioned: { id: 'not-mentioned' } },
+      ],
+    })
+    await flush()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+    await expectMentionMatches(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0], ['29:human'])
+    expect(processChannelMessage).not.toHaveBeenCalled()
+  })
+
+  it.each(['28:app', '29:human'])('dispatches real mention-only Teams activity for %s without replying', async mentionedId => {
+    const actual = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
+    vi.mocked(channels.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter)
+    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
+    await request(app).post('/webhook/msteams/ch-1').send({ ...ACTIVITY,
+      conversation: { id: 'conv-1', conversationType: 'channel' },
+      text: '<at>Mentioned</at>', entities: [{ type: 'mention', mentioned: { id: mentionedId } }],
+    })
+    await flush()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+    expect(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0].incoming.text).toBe('')
+    await expectMentionMatches(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0], [mentionedId])
+    expect(processChannelMessage).not.toHaveBeenCalled()
+    expect(mocks.sendMessage).not.toHaveBeenCalled()
   })
 
   it('drives processChannelMessage on a verified message Activity', async () => {
@@ -113,6 +191,8 @@ describe('[COMP:api/msteams-route] webhook', () => {
 
     expect(res.status).toBe(200)
     await flush()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledTimes(1)
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledWith(expect.objectContaining({ incoming: expect.objectContaining({ channelType: 'msteams', timestamp: 1700000000 }) }))
     expect(processChannelMessage).toHaveBeenCalledTimes(1)
     const arg = vi.mocked(processChannelMessage).mock.calls[0][0]
     expect(arg.channelType).toBe('msteams')
@@ -175,6 +255,7 @@ describe('[COMP:api/msteams-route] webhook', () => {
 
     expect(res.status).toBe(401)
     await flush()
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
     expect(processChannelMessage).not.toHaveBeenCalled()
   })
 
