@@ -1,6 +1,7 @@
 import type { AccessContext } from './access-context.js'
 import { intersectScopeGrants, type ScopeGrant } from './context-scope.js'
 import { isSensitivity, minSensitivity, RANK, type Sensitivity } from './sensitivity.js'
+import { intersectDepartmentReadGrants, type DepartmentReadGrant } from './department-read.js'
 
 /** Trusted server snapshot. Null is explicit universe; no axis may be absent. */
 export type AccessCeiling = {
@@ -11,6 +12,8 @@ export type AccessCeiling = {
   mutationCompartments: ScopeGrant
   projectIds: ScopeGrant
   visibilityAssistantIds: ScopeGrant
+  /** Permission model v2 read authority; only for a workspace whose v2 flag is on. */
+  departmentRead?: DepartmentReadGrant
 }
 
 /** Durable consent captured from an attended authoring turn. */
@@ -40,6 +43,7 @@ export function pinAccessCeiling(context: AccessContext): AccessCeiling {
       context.assistantKind==='primary'?null:[context.assistantId],
       context.visibilityAssistantIds===undefined?null:grant(context.visibilityAssistantIds),
     ),
+    ...(context.departmentRead?{departmentRead:context.departmentRead}:{}),
   }
 }
 
@@ -79,6 +83,8 @@ export function intersectAccessCeilings(a: AccessCeiling,b: AccessCeiling): Acce
     mutationCompartments:intersectScopeGrants(grant(a.mutationCompartments),grant(b.mutationCompartments),grant(a.compartments),grant(b.compartments)),
     projectIds:intersectScopeGrants(grant(a.projectIds),grant(b.projectIds)),
     visibilityAssistantIds:intersectScopeGrants(grant(a.visibilityAssistantIds),grant(b.visibilityAssistantIds)),
+    ...(a.departmentRead&&b.departmentRead?{departmentRead:intersectDepartmentReadGrants(a.departmentRead,b.departmentRead)}
+      :a.departmentRead??b.departmentRead?{departmentRead:(a.departmentRead??b.departmentRead)!}:{}),
   }
 }
 

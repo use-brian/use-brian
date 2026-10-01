@@ -708,7 +708,7 @@ export async function resolveOperationCeilingsSystem(
   assistantCompartments: string[] | null,
   requireMembership = false,
   authorityQuery: typeof query = query,
-): Promise<{ clearance: Sensitivity; compartments: string[] | null; mutationCompartments: string[] | null }> {
+): Promise<{ clearance: Sensitivity; compartments: string[] | null; mutationCompartments: string[] | null; departmentReadV2?: boolean }> {
   if (!workspaceId) return {
     clearance: assistantClearance, compartments: assistantCompartments,
     mutationCompartments: assistantCompartments,
@@ -717,16 +717,20 @@ export async function resolveOperationCeilingsSystem(
   // One statement sees read grants and ordinary membership at the same snapshot.
   const member = (await authorityQuery<{
     role: 'owner' | 'admin' | 'member'; clearance: Sensitivity;
-    readCompartments: string[] | null; mutationCompartments: string[] | null;
+    readCompartments: string[] | null; mutationCompartments: string[] | null; departmentReadV2?: string | null;
   }>(`SELECT role,clearance,
       effective_member_read_compartments(user_id,workspace_id) AS "readCompartments",
-      effective_member_team_compartments(user_id,workspace_id) AS "mutationCompartments"
+      effective_member_team_compartments(user_id,workspace_id) AS "mutationCompartments",
+      (SELECT to_jsonb(w)->>'department_read_v2' FROM workspaces w WHERE w.id=$1) AS "departmentReadV2"
     FROM workspace_members WHERE workspace_id=$1 AND user_id=$2`,[workspaceId,userId])).rows[0]
   if (!member && requireMembership) throw new Error('authority_unavailable')
   return {
     clearance: effectiveReadClearance(member?.role ?? null,member?.clearance ?? null,assistantClearance),
     compartments: effectiveReadCompartments(member?.role ?? null,member ? member.readCompartments : [],assistantCompartments),
     mutationCompartments: effectiveReadCompartments(member?.role ?? null,member ? member.mutationCompartments : [],assistantCompartments),
+    // Permission model v2 flag (migration 649), read through to_jsonb so an
+    // older schema reads "off". The resolver switches paths on it.
+    ...(member?.departmentReadV2 === 'true' ? { departmentReadV2: true } : {}),
   }
 }
 

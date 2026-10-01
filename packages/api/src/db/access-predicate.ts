@@ -23,7 +23,7 @@
  * reused here.
  */
 
-import { intersectScopeGrants,minSensitivity,scopeGrantContains,RANK,type ResourceScope,type AccessContext } from '@use-brian/core'
+import { departmentReadGrantJson,intersectDepartmentReadGrants,intersectScopeGrants,minSensitivity,scopeGrantContains,RANK,type ResourceScope,type AccessContext,type DepartmentReadGrant } from '@use-brian/core'
 import { currentAgentAccess } from './agent-access-context.js'
 
 /**
@@ -126,6 +126,9 @@ export function buildAccessPredicate(
   options?: AccessPredicateOptions,
 ): AccessPredicate {
   const agent=currentAgentAccess()
+  const v2=ctx.departmentRead&&agent?.departmentRead?intersectDepartmentReadGrants(ctx.departmentRead,agent.departmentRead)
+    :ctx.departmentRead??agent?.departmentRead
+  if(v2)return buildDepartmentReadPredicate(ctx,v2,options)
   const intersect=(a:string[]|null|undefined,b:string[]|null|undefined)=>
     b===undefined?a:intersectScopeGrants(a??null,b)
   ctx={...ctx,
@@ -211,6 +214,27 @@ export function buildAccessPredicate(
   params.push(...visibility.params);nextIdx=visibility.nextIdx
 
   return { sql, params, nextIdx }
+}
+
+/**
+ * Permission model v2 store predicate (workspace v2 flag on): the same SQL row
+ * function the 649 RLS policy evaluates, fed the grant the turn resolver
+ * computed through the reference predicate. Department, tier, context,
+ * binding and the private leg come from that grant alone; the legacy
+ * clearance, compartment, project and assistant clauses do not apply (D8,
+ * D11). Spec: docs/architecture/context-engine/scoped-context.md ->
+ * "Reference predicate (v2)".
+ */
+export function buildDepartmentReadPredicate(ctx:AccessContext,grant:DepartmentReadGrant,options?:AccessPredicateOptions):AccessPredicate {
+  const alias=options?.alias
+  if(alias!==undefined&&!IDENTIFIER_RE.test(alias))throw new Error('Invalid access alias')
+  if(grant.workspaceId!==ctx.workspaceId)return {sql:'FALSE',params:[],nextIdx:options?.startIdx??1}
+  const p=alias?`${alias}.`:'',i=options?.startIdx??1
+  const agent=currentAgentAccess()
+  // A shared audience reads only rows with no user owner (decision D4).
+  const viewer=ctx.sharedAudience||agent?.sharedAudience?NO_USER:grant.userId
+  const sql=`${p}workspace_id = $${i} AND public.department_row_allows($${i+1}::jsonb, ${p}workspace_id, ${p}sensitivity, ${p}compartments, ${p}user_id)`
+  return {sql,params:[ctx.workspaceId,departmentReadGrantJson({...grant,userId:viewer})],nextIdx:i+2}
 }
 
 /** Also fences special read branches that intentionally have different content rules. */

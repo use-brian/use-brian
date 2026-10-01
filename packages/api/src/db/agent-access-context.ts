@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { intersectScopeGrants,minSensitivity } from '@use-brian/core'
+import { intersectDepartmentReadGrants,intersectScopeGrants,minSensitivity,type DepartmentReadGrant } from '@use-brian/core'
 
 /**
  * Trusted execution ceiling propagated through awaits and nested tools.
@@ -25,6 +25,8 @@ type AgentAccessContext = {
   mutationCompartments?: string[] | null
   /** Project is not an ACL, but page/container reads must retain its boundary. */
   projectIds?: string[] | null
+  /** Permission model v2 read authority for a workspace whose v2 flag is on. */
+  departmentRead?: DepartmentReadGrant
 }
 
 const agentAccessStorage = new AsyncLocalStorage<AgentAccessContext>()
@@ -48,6 +50,7 @@ export function runWithAgentAccess<T>(
     compartments: string[] | null | undefined
     mutationCompartments?: string[] | null
     projectIds?: string[] | null | undefined
+    departmentRead?: DepartmentReadGrant
   },
   fn: () => T,
 ): T {
@@ -68,6 +71,9 @@ export function runWithAgentAccess<T>(
     projectIds:intersect(parent?.projectIds,access.projectIds),
     visibilityAssistantIds:intersect(parent?.visibilityAssistantIds,access.visibilityAssistantIds),
     ...(parent?.sharedAudience||access.sharedAudience?{sharedAudience:true}:{}),
+    // Nested executions only narrow the v2 grant; one never replaces another.
+    ...(parent?.departmentRead&&access.departmentRead?{departmentRead:intersectDepartmentReadGrants(parent.departmentRead,access.departmentRead)}
+      :parent?.departmentRead??access.departmentRead?{departmentRead:(parent?.departmentRead??access.departmentRead)!}:{}),
   },fn)
 }
 

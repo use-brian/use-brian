@@ -8,6 +8,8 @@ import { intersectScopeGrants, scopeGrantContains, type ScopeGrant } from '@use-
 import type { ResourceAdmission, ResourceDestination, WorkspaceAccessMode, WorkspaceResourceEnvelope } from '@use-brian/shared'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 import { WorkspaceAccessError } from './policy.js'
+import { loadDepartmentSnapshot } from '../context-scope/department-resolver.js'
+import { write as referenceWrite, type Row } from '../context-scope/reference-predicate.js'
 
 const ranks = { public: 0, internal: 1, confidential: 2 } as const
 const canonical = (values: readonly string[]) => [...new Set(values)].sort()
@@ -129,12 +131,18 @@ export async function admitWorkspaceResource(
     || (ambient?.userId !== undefined && ambient.userId !== userId)) throw new WorkspaceAccessError('not_found', 404)
   // Same lock order as canonical reviewed commands: workspace -> member/policy.
   await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
-  const member = (await client.query<{ role: string; clearance: AdmissionAuthority['clearance'] }>(
-    'SELECT role,clearance FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [workspaceId, userId],
+  // The v2 flag (migration 649) rides on this read, through to_jsonb so an
+  // older schema reads "off" instead of aborting the caller's transaction.
+  const member = (await client.query<{ role: string; clearance: AdmissionAuthority['clearance']; departmentReadV2: string | null }>(
+    `SELECT role,clearance,(SELECT to_jsonb(w)->>'department_read_v2' FROM workspaces w WHERE w.id=$1) AS "departmentReadV2"
+       FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE OF workspace_members`, [workspaceId, userId],
   )).rows[0]
   if (!member) throw new WorkspaceAccessError('not_found', 404)
   const policy = await readAdmissionPolicy(client, workspaceId)
   if (!policy) throw new WorkspaceAccessError('access_mode_setup_required', 409)
+  if (member.departmentReadV2 === 'true') {
+    return admitDepartmentWrite(client, workspaceId, userId, policy, input)
+  }
   const trustedRole = member.role === 'owner' || member.role === 'admin'
   const reach = (await client.query<{ compartments: string[] | null; readCompartments: string[] | null; projectIds: string[] | null }>(`SELECT
     effective_member_team_compartments($2,$1) AS compartments,
@@ -178,6 +186,67 @@ export async function admitWorkspaceResource(
     // SET LOCAL is reset at commit/rollback; the INSERT trigger consumes this
     // once and checks the actual envelope and live policy revision. Old writers
     // cannot silently insert through a ready-mode canonical table without it.
+    await client.query("SELECT set_config('app.creation_admission',$1,true)", [JSON.stringify({
+      protocol: 1, kind: input.writerKind, workspaceId, actor: userId,
+      policyRevision: admitted.policyRevision, envelope: admitted.envelope,
+      rowVisibility: input.rowVisibility ?? { userId: null, assistantId: null },
+    })])
+  }
+  return admitted
+}
+
+const TEAM = 'team:'
+/**
+ * Permission model v2 admission (workspace v2 flag on): the reference WRITE.
+ * The new row is stamped with ctx.department (the chosen destination, else
+ * the turn's bound department) and every inherited source department, at the
+ * max of the requested and inherited tiers (I12), and must be readable by the
+ * acting assistant's clearances alone (the write ceiling). Access mode,
+ * classification mode, Team scope mode and the readiness constants are not
+ * inputs. Labels already on an inherited floor are never removed (I13).
+ */
+async function admitDepartmentWrite(
+  client: PoolClient, workspaceId: string, userId: string, policy: AdmissionPolicy, input: AdmissionInput,
+): Promise<ResourceAdmission> {
+  if (input.expectedPolicyRevision !== undefined && input.expectedPolicyRevision !== policy.revision) throw new WorkspaceAccessError('access_policy_conflict', 409)
+  if (input.destination && input.requestedLabels?.compartments !== undefined) throw new WorkspaceAccessError('access_mode_destination_conflict', 409)
+  const grant = currentAgentAccess()?.departmentRead
+  if (grant && grant.userId !== userId) throw new WorkspaceAccessError('not_found', 404)
+  const query = <R>(sql: string, values: unknown[]) => client.query(sql, values) as unknown as Promise<{ rows: R[] }>
+  const { snapshot, principal } = await loadDepartmentSnapshot(query, { workspaceId, userId, assistantId: grant?.assistantId ?? null })
+  const destination = input.destination?.kind === 'department' ? input.destination.departmentId : null
+  if (destination && !(await client.query("SELECT 1 FROM workspace_groups WHERE workspace_id=$1 AND id=$2 AND kind='team' AND status='active'", [workspaceId, destination])).rowCount) {
+    throw new WorkspaceAccessError('context_not_available', 404)
+  }
+  const department = (key: string) => key.startsWith(TEAM) ? key.slice(TEAM.length) : null
+  const parent = input.inherited
+  const otherKeys = [...(parent?.compartments ?? []), ...(input.requestedLabels?.compartments ?? [])].filter(k => department(k) === null)
+  const sources: Row[] = []
+  const inheritedDepartments = (parent?.compartments ?? []).map(department).filter((d): d is string => d !== null)
+  const requested = (input.requestedLabels?.compartments ?? []).map(department).filter((d): d is string => d !== null)
+  if (parent || requested.length) {
+    sources.push({ id: '__inherited__', workspaceId, tier: parent?.sensitivity ?? input.sensitivity,
+      departmentIds: [...new Set([...inheritedDepartments, ...requested])], userId: null })
+  }
+  const result = referenceWrite(snapshot, {
+    principal,
+    assistant: grant?.assistantId ? { kind: 'assistant', id: grant.assistantId } : null,
+    credential: grant?.cap ? { issuerUserId: userId, cap: grant.cap, binding: grant.binding, scope: 'read_write' } : null,
+  }, { requestedTier: input.sensitivity, sources }, {
+    workspaceId, department: destination ?? grant?.contextDepartment ?? null, now: new Date(),
+  })
+  if (!result.allowed) throw new WorkspaceAccessError('context_not_available', 404)
+  const visibility = parent?.visibility === 'private' ? 'private' : input.visibility
+  const projectIds = canonical([...(parent?.projectIds ?? []), ...(input.destination?.projectId ? [input.destination.projectId] : []),
+    ...(input.requestedLabels?.projectIds ?? [])])
+  const admitted: ResourceAdmission = {
+    policyRevision: policy.revision,
+    origin: parent ? 'inherited' : visibility === 'private' ? 'private' : 'explicit',
+    departmentId: destination ?? grant?.contextDepartment ?? null,
+    envelope: { visibility, sensitivity: result.row.tier,
+      compartments: canonical([...result.row.departmentIds.map(d => TEAM + d), ...otherKeys]), projectIds },
+  }
+  if (input.writerKind) {
     await client.query("SELECT set_config('app.creation_admission',$1,true)", [JSON.stringify({
       protocol: 1, kind: input.writerKind, workspaceId, actor: userId,
       policyRevision: admitted.policyRevision, envelope: admitted.envelope,
