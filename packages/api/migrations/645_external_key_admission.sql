@@ -25,10 +25,15 @@ DECLARE w uuid; ready boolean; session uuid; actor uuid; reach text[]; team text
 BEGIN
  IF TG_TABLE_NAME='brain_keys' THEN w:=NEW.workspace_id;
  ELSE SELECT workspace_id INTO w FROM assistants WHERE id=NEW.assistant_id; END IF;
- -- Mixed writers that already locked a key fail rather than deadlock against
- -- canonical workspace-first writers.
- PERFORM 1 FROM workspaces WHERE id=w FOR UPDATE NOWAIT;
  SELECT setup_state<>'legacy' INTO ready FROM workspace_access_policies WHERE workspace_id=w;
+ -- Mixed writers that already locked a key fail rather than deadlock against
+ -- canonical workspace-first writers. A legacy update (revoke, last-used
+ -- touch, clearance cap) never waited on the workspace before the access-mode
+ -- branch and must not start failing on it (permission-model-v2 §12.3 item 4);
+ -- inserts come from createExternalKey, which already holds the lock.
+ IF coalesce(ready,false) OR TG_OP='INSERT' THEN
+  PERFORM 1 FROM workspaces WHERE id=w FOR UPDATE NOWAIT;
+ END IF;
  IF TG_OP='UPDATE' THEN
   IF TG_TABLE_NAME='api_keys' THEN
    -- No finite assistant-key admission exists yet. Preserve existing keys,

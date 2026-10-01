@@ -72,17 +72,17 @@ export async function prepareScheduleEdit(client: PoolClient, userId: string, id
   const workflowVersion = hash(row)
   const payloadHash = hash({ reviewId,expiresAt,workflowVersion,userId,sessionId: proof.authSessionId,policyRevision: policy!.revision,
     before: shapes.before,after: shapes.after,patch: JSON.parse(JSON.stringify(fields)) })
-  await client.query(`INSERT INTO workflow_schedule_edit_reviews(id,workflow_id,actor_id,session_id,policy_revision,before_row,after_shape,patch,payload_hash,expires_at)
-    VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9,$10)`,
-  [reviewId,id,userId,proof.authSessionId,policy!.revision,JSON.stringify(row),JSON.stringify(shapes.after),JSON.stringify(fields),payloadHash,expiresAt])
+  // The receipt's actor is the connection's app.current_user_id, never an argument.
+  await client.query('SELECT workflow_schedule_review_create($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8,$9)',
+  [reviewId,id,proof.authSessionId,policy!.revision,JSON.stringify(row),JSON.stringify(shapes.after),JSON.stringify(fields),payloadHash,expiresAt])
   return { reviewId,payloadHash,expiresAt,workflowVersion,policyRevision: policy!.revision,before: shapes.before,after: shapes.after }
 }
 
 export async function applyScheduleEdit(client: PoolClient, userId: string, id: string, fields: Fields, proof: Proof, policy: Policy) {
   const row = await scheduleEditRow(client,id)
   await session(client,row,userId,proof,policy)
-  const r = (await client.query(`SELECT * FROM workflow_schedule_edit_reviews WHERE id=$1 AND workflow_id=$2 AND actor_id=$3
-    AND session_id=$4 FOR UPDATE`, [proof.reviewId,id,userId,proof.authSessionId])).rows[0]
+  const r = (await client.query('SELECT * FROM workflow_schedule_review_claim($1,$2,$3)',
+    [proof.reviewId,id,proof.authSessionId])).rows[0]
   if (!r || !proof.payloadHash || r.payload_hash !== proof.payloadHash || !isDeepStrictEqual(r.patch,JSON.parse(JSON.stringify(fields)))) fail('workflow_schedule_review_stale')
   if (r.policy_revision !== policy!.revision) fail('access_policy_conflict')
   // A consumed receipt is a read-only retry, even after its preview expires.
@@ -94,7 +94,7 @@ export async function applyScheduleEdit(client: PoolClient, userId: string, id: 
   // Revalidate saved reviewed consent, NEVER recapture/renew it during apply.
   await admitOperationalAuthoring(client,{ userId,workspaceId: row.workspace_id,contextGroupId: r.after_shape.context_group_id,
     contextProjectId: r.after_shape.context_project_id,authoringAuthority: authority }, { userId,assistantId: authority.assistantId })
-  await client.query('UPDATE workflow_schedule_edit_reviews SET apply_txid=txid_current()::text WHERE id=$1', [r.id])
+  await client.query('SELECT workflow_schedule_review_mark_applied($1)', [r.id])
   await client.query("SELECT set_config('app.workflow_schedule_review',$1,true)", [r.id])
   return { fields: { ...fields,authoringAuthority: authority },replayRow: null }
 }

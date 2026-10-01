@@ -1,5 +1,7 @@
 # M0 — non-connector resource admission manifest
 
+> **Status 2026-10-02:** direction superseded by the platform plan `docs/plans/permission-model-v2.md` (§12 adopts this branch as its starting point); this note is kept unrewritten as the branch's history.
+
 **Baseline preparation inventory; not release certification.** Observations and blockers below describe the preparation baseline, not the current implementation. See `workspace-access-modes-implementation-status.md` for subsequent bounded adapters and verified checkpoints. Read against `c555316a132860799a6a8fb366a97049bf861ff8` and `workspace-access-modes-and-migration.md`. This bounded inventory follows canonical stores, SQL triggers and shared entry adapters rather than every form/provider. Connector instances, grants, OAuth and provider exposure are deliberately delegated to the connector manifest. Ingest destinations, channel sessions and principal boundaries remain in this manifest.
 
 ## Reading conventions and proposed defaults

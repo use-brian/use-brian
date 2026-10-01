@@ -1,6 +1,7 @@
 BEGIN;
--- Transfers are temporarily closed until dependency-writer serialization is
--- certified. This scan provides diagnostics, NOT an emptiness certificate. No
+-- Transfers out of or into a non-legacy workspace are temporarily closed until
+-- dependency-writer serialization is certified; legacy-to-legacy moves are
+-- unchanged. This scan provides diagnostics, NOT an emptiness certificate. No
 -- content, history, connector, audience or source binding is silently reassigned.
 CREATE FUNCTION public.assert_assistant_transfer_unbound(subject uuid) RETURNS void
 LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
@@ -39,6 +40,12 @@ BEGIN
     OR receipt->>'destination' IS DISTINCT FROM NEW.workspace_id::text
     OR receipt->>'userId' IS DISTINCT FROM nullif(current_setting('app.current_user_id',true),'') THEN
     RAISE EXCEPTION 'assistant_transfer_admission_required';
+  END IF;
+  -- Legacy-to-legacy moves keep their pre-mode behaviour (permission-model-v2
+  -- §12.3 item 4). A workspace with no policy row counts as legacy.
+  IF receipt->>'legacy'='true' AND NOT EXISTS(SELECT 1 FROM public.workspace_access_policies
+    WHERE workspace_id IN (OLD.workspace_id,NEW.workspace_id) AND setup_state<>'legacy') THEN
+    RETURN NEW;
   END IF;
   PERFORM public.assert_assistant_transfer_unbound(OLD.id);
   -- Non-FK dependency writers are not yet certified. Never mistake snapshot

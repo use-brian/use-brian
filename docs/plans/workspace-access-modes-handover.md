@@ -1,5 +1,7 @@
 # Workspace access modes — implementation handover
 
+> **Status 2026-10-02:** direction superseded by the platform plan `docs/plans/permission-model-v2.md` (§12 adopts this branch as its starting point); this note is kept unrewritten as the branch's history.
+
 ## Checkpoint and ownership
 
 - PR: https://github.com/use-brian/use-brian/pull/395 (**draft**).

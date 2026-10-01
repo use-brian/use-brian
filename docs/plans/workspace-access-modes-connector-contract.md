@@ -1,5 +1,7 @@
 # M0 connector setup and Simple provider exposure contract
 
+> **Status 2026-10-02:** direction superseded by the platform plan `docs/plans/permission-model-v2.md` (§12 adopts this branch as its starting point); this note is kept unrewritten as the branch's history.
+
 Status: proposed implementation contract, not shipped behavior or a KB plan. Companion to `workspace-access-modes-and-migration.md` §§4.2, 8, AM12–AM13. Scope is connectors only; workspace policy schema, general resource admission and nonconnector manifests remain owned by their respective workstreams.
 
 ## 1. Findings and minimum safe decision

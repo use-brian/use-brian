@@ -219,7 +219,8 @@ async function restFixture(mode: 'simple' | 'departments' = 'simple') {
   const post = (patch = {}, verified = true, bearer = token) => request(mount(verified)).post('/api/workflows').set('Authorization', `Bearer ${bearer}`).send({ ...body, ...patch })
   const count = async () => (await pool.query('SELECT count(*)::int AS n FROM workflows WHERE workspace_id=$1', [f.w])).rows[0].n
   const patch = (id: string, body: Record<string, unknown>) => request(mount(true)).patch(`/api/workflows/${id}`).set('Authorization', `Bearer ${token}`).send(body)
-  return { ...f, store, post, patch, token, secret, session: session!, legacyCapture, jobCreate, count }
+  const prepare = (id: string, body: Record<string, unknown>) => request(mount(true)).post(`/api/workflows/${id}/schedule-review`).set('Authorization', `Bearer ${token}`).send(body)
+  return { ...f, store, post, patch, prepare, token, secret, session: session!, legacyCapture, jobCreate, count }
 }
 
 describe('authenticated workflow REST authoring (real JWT + PostgreSQL)', () => {
@@ -605,14 +606,47 @@ describe('authenticated workflow REST authoring (real JWT + PostgreSQL)', () => 
     for (const userId of [f.member,f.owner]) {
       const existing = await f.store.create({ ...f.params,userId },{ authoring: { kind: 'internal-human',userId,assistantId: f.assistant } })
       const response = await f.patch(existing.id,{ trigger: { kind: 'schedule',schedule: { type: 'once',datetime: '2099-01-01T00:00:00Z' } } })
+      // An unreviewed edit is refused and pointed at the prepare/apply review
+      // lane; nothing commits and no consent receipt is minted on its behalf.
       expect(response.status).toBe(409)
-      expect(response.body.code).toBe('workflow_schedule_edit_not_ready')
+      expect(response.body.code).toBe('workflow_schedule_review_required')
+      expect((await pool.query('SELECT count(*)::int AS n FROM workflow_schedule_edit_reviews WHERE workflow_id=$1',[existing.id])).rows[0].n).toBe(0)
       const after = await f.store.getById(f.member,existing.id)
       expect(after?.trigger).toEqual(existing.trigger)
       expect(after?.authoringAuthority).toEqual(existing.authoringAuthority)
       expect(await createDbJobStore().listFiringJobsForWorkflowSystem(existing.id)).toEqual([])
     }
     expect(f.jobCreate).not.toHaveBeenCalled()
+  })
+  it('reviewed schedule edit prepares and applies on the app connection with an actor-bound receipt', async () => {
+    const f = await restFixture()
+    const created = await f.post({ trigger: { kind: 'schedule', schedule: { type: 'once', datetime: '2099-01-01T00:00:00Z' } } })
+    expect(created.status).toBe(201)
+    const edit = { trigger: { kind: 'schedule', schedule: { type: 'once', datetime: '2099-02-01T00:00:00Z' } } }
+    const review = await f.prepare(created.body.id, edit)
+    expect(review.status).toBe(200)
+    const app = await getAppPool().connect()
+    try {
+      // The app role cannot read receipts directly, and the claim function
+      // only ever returns a receipt to the actor it was minted for.
+      await app.query('BEGIN')
+      await app.query("SELECT set_config('app.current_user_id',$1,true)", [f.owner])
+      expect((await app.query('SELECT * FROM workflow_schedule_edit_reviews')).rowCount).toBe(0)
+      expect((await app.query('SELECT * FROM workflow_schedule_review_claim($1,$2,$3)', [review.body.reviewId, created.body.id, f.session.id])).rowCount).toBe(0)
+      await expect(app.query('SELECT workflow_schedule_review_mark_applied($1)', [review.body.reviewId])).rejects.toThrow(/workflow_schedule_review_stale/)
+    } finally { await app.query('ROLLBACK'); app.release() }
+    const applied = await f.patch(created.body.id, { ...edit, reviewId: review.body.reviewId, payloadHash: review.body.payloadHash })
+    expect(applied.status).toBe(200)
+    expect(applied.body.trigger).toEqual(edit.trigger)
+    const receipt = (await pool.query('SELECT actor_id,apply_txid,result_record FROM workflow_schedule_edit_reviews WHERE id=$1', [review.body.reviewId])).rows[0]
+    expect(receipt.actor_id).toBe(f.member)
+    expect(receipt.apply_txid).not.toBeNull()
+    expect(receipt.result_record).not.toBeNull()
+    const replay = await f.patch(created.body.id, { ...edit, reviewId: review.body.reviewId, payloadHash: review.body.payloadHash })
+    expect(replay.status).toBe(200)
+    expect(replay.body.trigger).toEqual(edit.trigger)
+    const [job] = await createDbJobStore().listFiringJobsForWorkflowSystem(created.body.id)
+    expect(job).toBeDefined()
   })
   it('scheduled General retains old explicit null when mode and primary defaults change', async () => {
     const f = await restFixture('departments')

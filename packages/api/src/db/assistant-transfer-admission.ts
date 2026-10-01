@@ -9,16 +9,19 @@ export type AssistantTransferPreview = {
   setupState: string
   defaultDepartmentId: string | null
   departments: { id: string; name: string }[]
-  canTransfer: false
-  reason: 'assistant_transfer_certification_required'
+  /** True only when both workspaces are still legacy (pre-mode behaviour). */
+  canTransfer: boolean
+  reason: 'assistant_transfer_certification_required' | null
 }
 
 export async function previewAssistantTransfer(userId: string, workspaceId: string, assistantId: string, operation: 'adopt' | 'remove') {
   return runTransfer(userId, workspaceId, assistantId, operation, undefined, undefined, true)
 }
 
-/** Temporarily closed until every dependency writer shares a certified barrier.
- * A preview or revision is selection evidence, not permission to move content. */
+/** Closed for any workspace past legacy until every dependency writer shares a
+ * certified barrier. A move between two legacy workspaces keeps its pre-mode
+ * behaviour unchanged (permission-model-v2 §12.3 item 4). A preview or revision
+ * is selection evidence, not permission to move content. */
 export async function transferAssistant(userId: string, workspaceId: string, assistantId: string,
   operation: 'adopt' | 'remove', departmentId?: string, expectedPolicyRevision?: string): Promise<boolean> {
   const result = await runTransfer(userId, workspaceId, assistantId, operation, departmentId, expectedPolicyRevision)
@@ -55,7 +58,7 @@ async function runTransfer(
     const assistant = (await client.query<{ workspace_id: string; owner_user_id: string | null; kind: string }>(
       'SELECT workspace_id,owner_user_id,kind FROM assistants WHERE id=$1 FOR UPDATE', [assistantId],
     )).rows[0]
-    if (!assistant || assistant.workspace_id !== source.id || assistant.kind !== 'standard') return await deny()
+    if (!assistant || assistant.workspace_id !== source.id) return await deny()
     const roles = (await client.query<{ workspace_id: string; role: string }>(
       'SELECT workspace_id,role FROM workspace_members WHERE user_id=$1 AND workspace_id=ANY($2::uuid[])',
       [userId, [source.id, destination.id]],
@@ -72,6 +75,8 @@ async function runTransfer(
       [[source.id, destination.id]],
     )).rows
     const policy = policies.find(p => p.workspace_id === destination.id)
+    // A workspace with no policy row is legacy by construction.
+    const legacy = policies.every(p => p.setup_state === 'legacy')
     if (preview) {
       const departments = (await client.query<{ id: string; name: string }>(
         "SELECT id,name FROM workspace_groups WHERE workspace_id=$1 AND kind='team' AND status='active' ORDER BY id", [destination.id],
@@ -80,13 +85,29 @@ async function runTransfer(
       return { destinationWorkspaceId: destination.id, policyRevision: policy?.revision ?? '1',
         mode: policy?.access_mode ?? 'departments', setupState: policy?.setup_state ?? 'legacy',
         defaultDepartmentId: policy?.default_department_id ?? null, departments,
-        canTransfer: false, reason: 'assistant_transfer_certification_required' }
+        canTransfer: legacy, reason: legacy ? null : 'assistant_transfer_certification_required' }
     }
     if (expectedPolicyRevision !== undefined && expectedPolicyRevision !== (policy?.revision ?? '1')) {
       throw new WorkspaceAccessError('access_policy_conflict', 409)
     }
     const ready = policy?.setup_state === 'ready'
     if (!ready && (departmentId || policies.some(p => p.setup_state === 'ready'))) throw new WorkspaceAccessError('access_mode_setup_required', 409)
+    if (legacy) {
+      // Pre-mode transfer, unchanged: the same rows move as before the branch.
+      // The receipt is what the 641 trigger accepts for a legacy-to-legacy move.
+      await client.query("SELECT set_config('app.assistant_transfer',$1,true)",
+        [JSON.stringify({ assistantId, source: source.id, destination: destination.id, userId, legacy: true })])
+      await client.query('UPDATE assistants SET workspace_id=$1,owner_user_id=$2 WHERE id=$3',
+        [destination.id, operation === 'adopt' ? null : destination.owner_user_id, assistantId])
+      await client.query('DELETE FROM assistant_members WHERE assistant_id=$1', [assistantId])
+      if (operation === 'remove') {
+        await client.query("INSERT INTO assistant_members(assistant_id,user_id,role) VALUES($1,$2,'owner') ON CONFLICT (assistant_id,user_id) DO UPDATE SET role='owner'",
+          [assistantId, destination.owner_user_id])
+      }
+      await client.query('COMMIT')
+      return true
+    }
+    if (assistant.kind !== 'standard') return await deny()
     let selected: string | null = null
     if (ready) {
       selected = departmentId ?? policy.default_department_id
@@ -96,7 +117,7 @@ async function runTransfer(
     }
     await client.query('SELECT assert_assistant_transfer_unbound($1)', [assistantId])
     // Scanning even twice cannot see an uncommitted non-FK writer. No body
-    // provenance, receipt, feature flag or legacy destination may reopen this.
+    // provenance, receipt or feature flag may reopen this past legacy.
     throw new WorkspaceAccessError('assistant_transfer_certification_required', 409)
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})

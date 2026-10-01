@@ -164,10 +164,13 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
 }
 
 async function withWorkflowWrite<T>(userId: string, id: string,
-  operation: (client: PoolClient, policy: Awaited<ReturnType<typeof lockOperationalPolicy>>) => Promise<T>, reviewed = false): Promise<T | null> {
-  // Review receipts are owner-only. The reviewed lane performs its own live
-  // actor/session/member checks on this same connection before any write.
-  const client = await (reviewed ? getPool() : getAppPool()).connect()
+  operation: (client: PoolClient, policy: Awaited<ReturnType<typeof lockOperationalPolicy>>) => Promise<T>): Promise<T | null> {
+  // Every lane, the reviewed schedule edit included, runs on the RLS-enforced
+  // app connection. Audit 2026-10-02: the reviewed lane once switched to the
+  // owner pool only to reach the receipt table, which has no app policy; that
+  // bypassed RLS on every other table it touched. Receipts are now reached
+  // through the actor-bound SECURITY DEFINER functions of migration 647.
+  const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
     await applyRLSGucs(client,userId)
@@ -336,7 +339,7 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       return result.rows.map(rowToWorkflow)
     },
     async prepareScheduleEdit(userId,id,fields,proof) {
-      return withWorkflowWrite(userId,id,(client,policy) => prepareScheduleEdit(client,userId,id,fields,proof,policy,hooks?.resolveAuthoringPrimary),true)
+      return withWorkflowWrite(userId,id,(client,policy) => prepareScheduleEdit(client,userId,id,fields,proof,policy,hooks?.resolveAuthoringPrimary))
     },
     async update(userId, id, fields, proof) {
       const result = await withWorkflowWrite(userId,id,async (client,policy) => {
@@ -423,10 +426,10 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       }
       if (reviewed) {
         // Save the exact committed response; retries never replace the row again.
-        await client.query('UPDATE workflow_schedule_edit_reviews SET result_record=$2::jsonb WHERE id=$1', [proof!.reviewId,JSON.stringify(updated.rows[0])])
+        await client.query('SELECT workflow_schedule_review_save_result($1,$2::jsonb)', [proof!.reviewId,JSON.stringify(updated.rows[0])])
       }
       return updated
-      },!!proof?.reviewId)
+      })
       if (!result?.rows[0]) return null
       const record = rowToWorkflow(result.rows[0])
       notifyWorkspaceChange(record.workspaceId, 'workflow', 'update', record.id)

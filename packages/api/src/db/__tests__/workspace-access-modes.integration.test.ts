@@ -5,6 +5,23 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 // @ts-expect-error The disposable fixture is a repository-local JS utility.
 import { assertLocalFixture } from '../../../../../scripts/crm/local-fixture.mjs'
 
+/** Applies the open migration files in runner order (one name-sorted sequence,
+ * as `scripts/migration-order.ts`) up to and including `last`. */
+async function replayOpenMigrationsThrough(client: pg.Client, last: string) {
+  const dir = new URL('../../../migrations/', import.meta.url)
+  const { readdir } = await import('node:fs/promises')
+  await client.query(`CREATE TABLE IF NOT EXISTS public._migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+  await client.query(`SELECT set_config('app.migration_edition','oss',false)`)
+  for (const file of (await readdir(dir)).filter(f => f.endsWith('.sql')).sort()) {
+    if (file > last) break
+    const sql = await readFile(new URL(file, dir), 'utf8')
+    if (/concurrently/i.test(sql) && !/^\s*BEGIN/im.test(sql)) {
+      for (const stmt of sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '').split(';').map(s => s.trim()).filter(Boolean)) await client.query(stmt)
+    } else await client.query(sql)
+    await client.query('INSERT INTO public._migrations(name) VALUES($1)', [file])
+  }
+}
+
 // Deliberately fail rather than silently skip: this suite requires the owned PG18 fixture.
 describe('workspace access modes M1 PostgreSQL foundation', () => {
   let db: pg.Client
@@ -55,35 +72,50 @@ describe('workspace access modes M1 PostgreSQL foundation', () => {
   afterEach(async () => { await query('ROLLBACK') })
 
   it('preserves populated pre-620 principals, grants, effective access and classification on upgrade', async () => {
-    // Restore only 620's additive schema inside this rollback-only transaction.
-    // The fixture separately proves that the complete real migration runner succeeds.
-    await query(`DROP TABLE workspace_access_migration_items,workspace_access_migration_plans;
-      DROP FUNCTION guard_workspace_access_migration();
-      DROP FUNCTION guard_workspace_access_mode(),audit_workspace_access_mode(),guard_workspace_default_package(),admit_simple_workspace_principal() CASCADE;
-      ALTER TABLE workspace_access_policies DROP COLUMN access_mode,DROP COLUMN default_department_id,DROP COLUMN setup_state;
-      ALTER TABLE workspace_groups DROP CONSTRAINT workspace_groups_workspace_id_id_key;
-      ALTER TABLE workspace_access_command_reviews DROP CONSTRAINT workspace_access_command_reviews_workspace_id_id_key;`)
-    const f = await workspace(), department = await team(f.w,f.owner), member = await user()
-    await query(`INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode) VALUES($1,$2,'member','confidential','assigned')`, [f.w,member])
-    await query(`INSERT INTO workspace_group_members(group_id,user_id) VALUES($1,$2)`, [department,member])
-    await query(`UPDATE workspace_access_policies SET classification_mode='strict' WHERE workspace_id=$1`, [f.w])
-    await query(`INSERT INTO assistants(name,workspace_id,owner_user_id) VALUES('Private',$1,$2)`, [f.w,f.owner])
-    const snapshot = async () => ({
-      members: (await query('SELECT * FROM workspace_members WHERE workspace_id=$1 ORDER BY user_id',[f.w])).rows,
-      assistants: (await query('SELECT * FROM assistants WHERE workspace_id=$1',[f.w])).rows,
-      groups: (await query('SELECT * FROM workspace_groups WHERE workspace_id=$1',[f.w])).rows,
-      grants: (await query('SELECT * FROM workspace_group_members WHERE group_id=$1 ORDER BY user_id',[department])).rows,
-      effective: await row('SELECT effective_member_team_compartments($1,$2) AS teams',[member,f.w]),
-      policy: await row('SELECT classification_mode,revision,updated_at FROM workspace_access_policies WHERE workspace_id=$1',[f.w]),
-    })
-    const before = await snapshot()
-    const sql = (await readFile(new URL('../../../migrations/621_workspace_access_modes.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*$/m,'').replace(/^COMMIT;\s*$/m,'')
-    await query(sql)
-    expect(await snapshot()).toEqual(before)
-    expect(await row('SELECT access_mode,setup_state,default_department_id FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).toEqual({access_mode:'departments',setup_state:'legacy',default_department_id:null})
-    const fresh = await workspace()
-    expect(await row('SELECT access_mode,setup_state,classification_mode FROM workspace_access_policies WHERE workspace_id=$1',[fresh.w])).toEqual({access_mode:'departments',setup_state:'legacy',classification_mode:'legacy'})
-  })
+    // Isolation: later migrations depend on 621's objects, so 621 cannot be
+    // dropped and replayed inside the fully migrated fixture. Replay the real
+    // open migrations through 620 into a disposable database, populate the
+    // legacy shape there, then apply the real 621 file.
+    const scratch = `access_upgrade_${randomUUID().replaceAll('-', '')}`
+    await db.query('ROLLBACK')
+    await db.query(`CREATE DATABASE ${scratch}`)
+    await db.query('BEGIN')
+    const url = new URL(process.env.DATABASE_URL!)
+    url.pathname = `/${scratch}`
+    const hist = new pg.Client({ connectionString: url.toString() })
+    await hist.connect()
+    const main = db
+    try {
+      await replayOpenMigrationsThrough(hist, '620_drop_email_archive_trgm.sql')
+      db = hist
+      const f = await workspace(), department = await team(f.w,f.owner), member = await user()
+      await query(`INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode) VALUES($1,$2,'member','confidential','assigned')`, [f.w,member])
+      await query(`INSERT INTO workspace_group_members(group_id,user_id) VALUES($1,$2)`, [department,member])
+      await query(`UPDATE workspace_access_policies SET classification_mode='strict' WHERE workspace_id=$1`, [f.w])
+      await query(`INSERT INTO assistants(name,workspace_id,owner_user_id) VALUES('Private',$1,$2)`, [f.w,f.owner])
+      const snapshot = async () => ({
+        members: (await query('SELECT * FROM workspace_members WHERE workspace_id=$1 ORDER BY user_id',[f.w])).rows,
+        assistants: (await query('SELECT * FROM assistants WHERE workspace_id=$1',[f.w])).rows,
+        groups: (await query('SELECT * FROM workspace_groups WHERE workspace_id=$1',[f.w])).rows,
+        grants: (await query('SELECT * FROM workspace_group_members WHERE group_id=$1 ORDER BY user_id',[department])).rows,
+        effective: await row('SELECT effective_member_team_compartments($1,$2) AS teams',[member,f.w]),
+        policy: await row('SELECT classification_mode,revision,updated_at FROM workspace_access_policies WHERE workspace_id=$1',[f.w]),
+      })
+      const before = await snapshot()
+      const sql = (await readFile(new URL('../../../migrations/621_workspace_access_modes.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*$/m,'').replace(/^COMMIT;\s*$/m,'')
+      await query(sql)
+      expect(await snapshot()).toEqual(before)
+      expect(await row('SELECT access_mode,setup_state,default_department_id FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).toEqual({access_mode:'departments',setup_state:'legacy',default_department_id:null})
+      const fresh = await workspace()
+      expect(await row('SELECT access_mode,setup_state,classification_mode FROM workspace_access_policies WHERE workspace_id=$1',[fresh.w])).toEqual({access_mode:'departments',setup_state:'legacy',classification_mode:'legacy'})
+    } finally {
+      db = main
+      await hist.end()
+      await main.query('ROLLBACK')
+      await main.query(`DROP DATABASE IF EXISTS ${scratch}`)
+      await main.query('BEGIN')
+    }
+  }, 300_000)
 
   it('enforces local active flat defaults and reverse package guards, even for privileged writes', async () => {
     const a = await workspace(), b = await workspace(), local = await team(a.w,a.owner), foreign = await team(b.w,b.owner)
@@ -185,6 +217,78 @@ describe('workspace access modes M1 PostgreSQL foundation', () => {
     await query('DELETE FROM workspaces WHERE id=$1',[f.w])
     for (const table of ['workspace_access_policies','workspace_groups','workspace_members','workspace_access_migration_plans','workspace_access_migration_items']) {
       expect((await query(`SELECT * FROM ${table} WHERE workspace_id=$1`,[f.w])).rows).toEqual([])
+    }
+  })
+})
+
+// permission-model-v2 §12.3 item 4: a workspace that never chose a mode keeps
+// its pre-branch behaviour. Ordinary key writes must not start waiting on, or
+// failing against, a workspace lock held by an unrelated admission.
+describe('legacy workspaces are inert to the access-mode fail-closed paths', () => {
+  let owner: pg.Client, holder: pg.Client
+  beforeAll(async () => {
+    owner = new pg.Client({ connectionString: process.env.DATABASE_URL }); await owner.connect()
+    holder = new pg.Client({ connectionString: process.env.DATABASE_URL }); await holder.connect()
+  })
+  afterAll(async () => { await owner?.end(); await holder?.end() })
+
+  it('revoke, last-used and clearance updates on legacy keys succeed while the workspace is locked', async () => {
+    const user = (await owner.query(`INSERT INTO users(auth_provider,auth_provider_id) VALUES('test',$1) RETURNING id`, [randomUUID()])).rows[0].id
+    const w = (await owner.query(`INSERT INTO workspaces(name,purpose,owner_user_id,is_personal) VALUES('Legacy','test',$1,false) RETURNING id`, [user])).rows[0].id
+    try {
+      await owner.query(`INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')`, [w,user])
+      expect((await owner.query('SELECT access_mode,setup_state FROM workspace_access_policies WHERE workspace_id=$1',[w])).rows[0]).toEqual({access_mode:'departments',setup_state:'legacy'})
+      const assistant = (await owner.query(`INSERT INTO assistants(name,workspace_id,owner_user_id) VALUES('Legacy',$1,$2) RETURNING id`,[w,user])).rows[0].id
+      const api = (await owner.query(`INSERT INTO api_keys(assistant_id,name,key_hash,key_prefix) VALUES($1,'k',$2,'sk_live_x') RETURNING id`,[assistant,randomUUID()])).rows[0].id
+      const brain = (await owner.query(`INSERT INTO brain_keys(workspace_id,name,key_hash,key_prefix) VALUES($1,'k',$2,'sk_brain_x') RETURNING id`,[w,randomUUID()])).rows[0].id
+      await holder.query('BEGIN')
+      await holder.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[w])
+      await owner.query('UPDATE api_keys SET last_used_at=now() WHERE id=$1',[api])
+      await owner.query('UPDATE brain_keys SET last_used_at=now() WHERE id=$1',[brain])
+      await owner.query(`UPDATE brain_keys SET max_clearance='internal' WHERE id=$1`,[brain])
+      await owner.query(`UPDATE api_keys SET status='revoked' WHERE id=$1`,[api])
+      await owner.query(`UPDATE brain_keys SET status='revoked' WHERE id=$1`,[brain])
+      await holder.query('ROLLBACK')
+      expect((await owner.query('SELECT status,max_clearance FROM brain_keys WHERE id=$1',[brain])).rows[0]).toEqual({status:'revoked',max_clearance:'internal'})
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      await owner.query('DELETE FROM workspaces WHERE id=$1',[w])
+      await owner.query('DELETE FROM users WHERE id=$1',[user])
+    }
+  })
+
+  it('a workspace with no access-policy row at all is treated as legacy', async () => {
+    const user = (await owner.query(`INSERT INTO users(auth_provider,auth_provider_id) VALUES('test',$1) RETURNING id`, [randomUUID()])).rows[0].id
+    const w = (await owner.query(`INSERT INTO workspaces(name,purpose,owner_user_id,is_personal) VALUES('No row','test',$1,false) RETURNING id`, [user])).rows[0].id
+    try {
+      const brain = (await owner.query(`INSERT INTO brain_keys(workspace_id,name,key_hash,key_prefix) VALUES($1,'k',$2,'sk_brain_x') RETURNING id`,[w,randomUUID()])).rows[0].id
+      expect((await owner.query('SELECT count(*)::int n FROM workspace_access_policies WHERE workspace_id=$1',[w])).rows[0].n).toBe(0)
+      await holder.query('BEGIN')
+      await holder.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[w])
+      await owner.query('UPDATE brain_keys SET last_used_at=now() WHERE id=$1',[brain])
+      await owner.query(`UPDATE brain_keys SET status='revoked' WHERE id=$1`,[brain])
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      await owner.query('DELETE FROM workspaces WHERE id=$1',[w])
+      await owner.query('DELETE FROM users WHERE id=$1',[user])
+    }
+  })
+
+  it('a ready workspace still fails a key update fast behind the workspace lock', async () => {
+    const user = (await owner.query(`INSERT INTO users(auth_provider,auth_provider_id) VALUES('test',$1) RETURNING id`, [randomUUID()])).rows[0].id
+    const w = (await owner.query(`INSERT INTO workspaces(name,purpose,owner_user_id,is_personal) VALUES('Ready','test',$1,false) RETURNING id`, [user])).rows[0].id
+    try {
+      const brain = (await owner.query(`INSERT INTO brain_keys(workspace_id,name,key_hash,key_prefix) VALUES($1,'k',$2,'sk_brain_x') RETURNING id`,[w,randomUUID()])).rows[0].id
+      await owner.query('INSERT INTO workspace_access_policies(workspace_id) VALUES($1) ON CONFLICT(workspace_id) DO NOTHING',[w])
+      await owner.query(`UPDATE workspace_access_policies SET setup_state='ready' WHERE workspace_id=$1`,[w])
+      expect((await owner.query('SELECT setup_state FROM workspace_access_policies WHERE workspace_id=$1',[w])).rows[0]).toEqual({setup_state:'ready'})
+      await holder.query('BEGIN')
+      await holder.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[w])
+      await expect(owner.query('UPDATE brain_keys SET last_used_at=now() WHERE id=$1',[brain])).rejects.toMatchObject({ code: '55P03' })
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      await owner.query('DELETE FROM workspaces WHERE id=$1',[w])
+      await owner.query('DELETE FROM users WHERE id=$1',[user])
     }
   })
 })

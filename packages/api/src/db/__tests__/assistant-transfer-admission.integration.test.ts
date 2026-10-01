@@ -56,7 +56,25 @@ describe('bounded assistant transfer admission', () => {
     await q("INSERT INTO workspace_access_policies(workspace_id,setup_state) VALUES($1,'ready') ON CONFLICT(workspace_id) DO UPDATE SET setup_state='ready'", [source])
     await expect(adopt()).rejects.toMatchObject({ code: 'access_mode_setup_required' })
     await q("UPDATE workspace_access_policies SET setup_state='legacy' WHERE workspace_id=$1", [source])
-    await expect(adopt()).rejects.toMatchObject({ code: 'assistant_transfer_certification_required' })
+    // Both legacy: the pre-mode transfer applies unchanged (see the legacy test below).
+    expect(await adopt()).toBe(true)
+  })
+  it('legacy-to-legacy adopt and remove behave exactly as before the access-mode branch', async () => {
+    await q("UPDATE workspace_access_policies SET access_mode='departments',setup_state='legacy',default_department_id=NULL WHERE workspace_id=$1", [destination])
+    // Legacy moves never required an empty shell.
+    await q("UPDATE assistants SET system_prompt='Kept instructions' WHERE id=$1", [assistant])
+    const preview = await previewAssistantTransfer(actor, destination, assistant, 'adopt')
+    expect(preview).toMatchObject({ setupState: 'legacy', canTransfer: true, reason: null })
+    expect(await adopt()).toBe(true)
+    expect((await q('SELECT workspace_id,owner_user_id,system_prompt FROM assistants WHERE id=$1', [assistant])).rows)
+      .toEqual([{ workspace_id: destination, owner_user_id: null, system_prompt: 'Kept instructions' }])
+    expect((await q('SELECT user_id FROM assistant_members WHERE assistant_id=$1', [assistant])).rows).toEqual([])
+    expect(await store.removeAssistant(actor, destination, assistant)).toBe(true)
+    expect((await q('SELECT workspace_id,owner_user_id FROM assistants WHERE id=$1', [assistant])).rows)
+      .toEqual([{ workspace_id: source, owner_user_id: actor }])
+    expect((await q('SELECT user_id,role FROM assistant_members WHERE assistant_id=$1', [assistant])).rows).toEqual([{ user_id: actor, role: 'owner' }])
+    // A raw write without the canonical receipt is still refused, legacy or not.
+    await expect(q('UPDATE assistants SET workspace_id=$2 WHERE id=$1', [assistant, destination])).rejects.toThrow('assistant_transfer_admission_required')
   })
   it('blocks raw mixed-version workspace updates', async () => {
     await expect(q('UPDATE assistants SET workspace_id=$2 WHERE id=$1', [assistant, destination])).rejects.toThrow('assistant_transfer_admission_required')
