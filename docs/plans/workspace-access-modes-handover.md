@@ -4,7 +4,8 @@
 
 - PR: https://github.com/use-brian/use-brian/pull/395 (**draft**).
 - Source: `feature/workspace-access-modes`; target: `develop`.
-- Implementation checkpoint: `1acdd2fe`, following the 15 functional commits below. This handover is a follow-up documentation commit on the same branch.
+- Original implementation checkpoint: `1acdd2fe`, followed by handover commit `e07f3696`. Current follow-up: integration commit `a3e8b99f` and partial schedule-review checkpoint `c41f93eb`.
+- Latest `develop` integrated: `e824defd`. Unpublished feature migration filenames shifted **+1**, to 621–647, preserving upstream migration 620. Historical migration numbers in the domain summaries below refer to the original checkpoint; add one when locating those files now (original 639 was unused; current 640 is unused).
 - Original baseline: `c555316a132860799a6a8fb366a97049bf861ff8`.
 - Main worktree used: `/workspace/brian-access-modes/use-brian`.
 - Separate KB worktree: `/workspace/brian-access-modes/brian-kb`, branch `docs/workspace-access-modes`, baseline `ea07cca`. It remains unchanged; no KB commit or push was made.
@@ -14,9 +15,9 @@
 
 ## Read first / immediate blockers
 
-1. **Migration numbering collision with current develop.** At handover, `origin/develop` is `e824defd`, four commits ahead of the original baseline. It contains `packages/api/migrations/620_drop_email_archive_trgm.sql`; this branch contains `620_workspace_access_modes.sql`. GitHub reports the PR textually mergeable, but that does not resolve the semantic migration collision. Integrate upstream deliberately and renumber the unpublished feature migrations and their references/tests before merge. Do not rewrite upstream migrations or assume numeric duplicates are safe. Upstream also changes chunked upload/intake and workspace ownership UI; review those integrations rather than blindly resolving files.
-2. **Interrupted migration-646 schedule-edit prototype.** `646_workflow_schedule_edit_review.sql`, `workspace-access/workflow-schedule-edit.ts`, and associated workflow store/route/core-contract edits were created immediately before the checkpoint request. Small nullability/narrowing corrections make the checkpoint typecheck, but this new prepare/apply flow is not independently reviewed or positively certified.
-3. **Known current test failures.** The checkpoint's six-suite PostgreSQL run reports **68 passed / 2 failed**. Both failures are in `db/__tests__/operational-admission.integration.test.ts` (around lines 309 and 345): expected `workflow_schedule_reapproval_required`, received `workflow_schedule_edit_not_ready`. Preserve the intended no-unreviewed-edit invariant; decide the final API contract and test real reviewed edits rather than only changing expected strings.
+1. **Numbering collision resolved in the follow-up integration.** `develop` at `e824defd` is now merged. Its `620_drop_email_archive_trgm.sql` is unchanged; feature schema starts at `621_workspace_access_modes.sql`. Executable filename references were updated. Upstream upload/intake, Feishu and workspace ownership UI changes are included; Office publication now uses the upstream storage-quota port. The integration typechecks, but broad runtime verification remains incomplete.
+2. **Interrupted schedule-edit prototype (now migration 647, formerly 646).** `647_workflow_schedule_edit_review.sql`, `workspace-access/workflow-schedule-edit.ts`, and associated workflow store/route/core-contract edits remain partial. The brief resumed work added hash-bound receipts and replay handling before being stopped again at the user's request. In particular, the new reviewed lane in `withWorkflowWrite` switches to the owner pool: audit/replace that authorization boundary before using it. Typechecking is not independent security review or positive prepare/apply certification.
+3. **Known current test failures.** The follow-up four-suite PostgreSQL run reports **50 passed / 2 failed**. `operational-admission.integration.test.ts` (around line 609) expects `workflow_schedule_edit_not_ready` but receives `workflow_schedule_review_required`. The historical upgrade test in `workspace-access-modes.integration.test.ts` (around line 60) cannot drop migration tables because newer objects depend on them. The earlier two schedule-reapproval expectation failures no longer occur in this run. Preserve the no-unreviewed-edit invariant and fix historical fixture isolation; do not merely weaken assertions.
 4. **No completed mode finalizer/provisioning certification.** `migration-service.ts` still exposes `full_inventory_required`, `intake_certification_required`, and `mode_finalizer_unavailable`. Do not remove these constants merely to make the UI look complete.
 5. **Assistant transfers remain blocked.** Migration 640 and the transfer helper intentionally deny even empty-shell transfers pending non-FK dependency-writer serialization. A snapshot emptiness scan was found unsafe. HTTP preview/selection/error handling and destructive-removal prevention exist, but positive transfers are not finished.
 
@@ -121,11 +122,12 @@ Paths below are relative to `packages/api/src` unless stated otherwise.
 
 ### Current checkpoint checks
 
-- Core build: passed.
-- API typecheck: passed after small interrupted-prototype typing fixes.
+- Core and channels builds: passed on the integrated follow-up.
+- API typecheck: passed after integrating the upstream quota port and rebuilding channels.
 - Web and desktop typechecks: passed.
 - `git diff --check`: passed; commits ran without bypass flags.
-- Focused real-PG run: **68 passed / 2 failed**, six suites, including `operational-admission`, `workflow-authoring-single-connection`, `external-key-ready`, shared sessions, personal sessions and inventory. Failures are recorded above, not hidden.
+- Current focused real-PG run: **50 passed / 2 failed**, four suites: `workspace-access-modes`, `resource-admission`, `operational-admission`, and `workflow-authoring-single-connection`. Migrations applied successfully with unique renumbered filenames; the historical replay fixture and schedule-edit expectations fail as recorded above.
+- Earlier checkpoint's six-suite run: **68 passed / 2 failed**, including external keys, shared/personal sessions and inventory. This is historical evidence, not a rerun of those domains after integration.
 - Home-app authority mock regression fixed; its five unit tests pass.
 
 ### Earlier evidence (not additive or final-tip certification)
@@ -136,11 +138,12 @@ Paths below are relative to `packages/api/src` unless stated otherwise.
 - Focused later lane reports include recording/file/derivation regressions, intake, goal, key and personal-session tests. Independent reviews were bounded by lane, not a whole-branch security sign-off.
 - No complete AM01–AM22 run, final package lint, live OAuth/model-provider certification, browser/Electron visual acceptance, or full offline/isolation report is claimed.
 
-The `/tmp` logs below exist in the original environment only and are **not portable artifacts**: `/tmp/access-checkpoint-{core,api,web,desktop,pg}.log`, `/tmp/access-reviewed-through638.log`, `/tmp/access-reviewed-through643.log`, `/tmp/access-643-final-domains.log`, `/tmp/access-638-shopify-pdf-final.log`, `/tmp/access-shopify-production-final.log`, `/tmp/access-644-home-authority.log`. Reproduce results from committed tests rather than relying on those files.
+The `/tmp` logs below exist in the original environment only and are **not portable artifacts**: `/tmp/access-current-stage-{core,channels,api,web,desktop,pg}.log`, `/tmp/access-checkpoint-{core,api,web,desktop,pg}.log`, `/tmp/access-reviewed-through638.log`, `/tmp/access-reviewed-through643.log`, `/tmp/access-643-final-domains.log`, `/tmp/access-638-shopify-pdf-final.log`, `/tmp/access-shopify-production-final.log`, `/tmp/access-644-home-authority.log`. Reproduce results from committed tests rather than relying on those files.
 
 ```sh
 cd /workspace/brian-access-modes/use-brian
 corepack pnpm --filter @use-brian/core build
+corepack pnpm --filter @use-brian/channels build
 NODE_OPTIONS=--max-old-space-size=12000 corepack pnpm --filter @use-brian/api typecheck
 NODE_OPTIONS=--max-old-space-size=12000 corepack pnpm --filter app-web typecheck
 NODE_OPTIONS=--max-old-space-size=12000 corepack pnpm --filter app-web typecheck:desktop
@@ -151,12 +154,10 @@ PATH=/tmp/brian-access-modes-bin:$PATH node scripts/crm/local-fixture.mjs \
   --pg-bin /tmp/access-modes-pg-run -- \
   pnpm --filter @use-brian/api exec vitest run \
   --config vitest.integration.config.ts \
+  src/db/__tests__/workspace-access-modes.integration.test.ts \
+  src/workspace-access/__tests__/resource-admission.integration.test.ts \
   src/db/__tests__/operational-admission.integration.test.ts \
   src/db/__tests__/workflow-authoring-single-connection.integration.test.ts \
-  src/db/__tests__/external-key-ready.integration.test.ts \
-  src/db/__tests__/session-admission.integration.test.ts \
-  src/routes/__tests__/sessions-personal-admission.integration.test.ts \
-  src/workspace-access/__tests__/migration-inventory.integration.test.ts \
   --maxWorkers=1
 
 corepack pnpm --filter @use-brian/api exec vitest run \
@@ -169,8 +170,8 @@ Use exact Vitest files and sequential PG workers. `pnpm test -- ...` can acciden
 
 ## Suggested continuation order
 
-1. Fetch the feature branch and review the PR's current checks. Integrate current `develop`, resolve migration numbering and intake/ownership changes; do not force-push or rewrite published commits as part of routine continuation.
-2. Finish or explicitly quarantine the interrupted 646 prepare/apply prototype. Add positive and negative real-HTTP/app-role tests for reviewed edits, stale/expired/session-revoked review, scope broadening, duplicate/lost-response apply, actor changes, claims/runs, and one-connection execution; obtain independent review.
+1. Fetch the feature branch and review the PR's current checks. `develop` through `e824defd` and the migration renumbering are already integrated; check for newer upstream changes and verify intake/ownership behavior. Do not force-push or rewrite published commits as part of routine continuation.
+2. Finish or explicitly quarantine the interrupted 647 (formerly 646) prepare/apply prototype. Add positive and negative real-HTTP/app-role tests for reviewed edits, stale/expired/session-revoked review, scope broadening, duplicate/lost-response apply, actor changes, claims/runs, and one-connection execution; obtain independent review.
 3. Re-run the combined current tree and fix all observed regressions before adding more admission families. Add reproducible CI coverage rather than aggregating historical counts.
 4. Close remaining canonical adapters and SQL barriers by the lanes above; update inventory/remediation coverage as schemas evolve. Coordinate disjoint file ownership when working in parallel.
 5. Implement M3/M4 live closure and reviewed transitions, then readiness-backed provisioning. Audit every AM01–AM22 requirement against actual code and execution evidence.
