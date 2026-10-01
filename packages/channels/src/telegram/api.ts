@@ -332,22 +332,6 @@ export function createTelegramApi(options: TelegramApiOptions) {
     leaveChat: (chatId: string) =>
       call<true>('leaveChat', { chat_id: chatId }),
 
-    /** Total member count of a group/supergroup, bots included. */
-    getChatMemberCount: (chatId: string) =>
-      call<number>('getChatMemberCount', { chat_id: chatId }),
-
-    /**
-     * One user's membership in a chat. Telegram guarantees this for other
-     * users only when the calling bot is an administrator, so callers that
-     * use it as proof must treat a failure as "not verified".
-     */
-    getChatMember: (chatId: string, userId: string) =>
-      call<{
-        status: 'creator' | 'administrator' | 'member' | 'restricted' | 'left' | 'kicked'
-        is_member?: boolean
-        user: { id: number; is_bot: boolean }
-      }>('getChatMember', { chat_id: chatId, user_id: userId }),
-
     /**
      * Chat metadata for a chat this bot can see. `title` is set for
      * groups/supergroups/channels; private chats carry `first_name` /
