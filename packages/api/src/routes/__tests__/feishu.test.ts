@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   api: {
     send: vi.fn(),
     editMessage: vi.fn(),
+    editPost: vi.fn(),
     updateCard: vi.fn(),
     recallMessage: vi.fn(),
     addReaction: vi.fn(),
@@ -185,6 +186,7 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     mocks.tryResolveSchedulerConfirmation.mockReturnValue(true)
     mocks.processChannelMessage.mockResolvedValue(undefined)
     mocks.api.send.mockResolvedValue({ messageId: 'om_status' })
+    mocks.api.editPost.mockResolvedValue(undefined)
     mocks.api.updateCard.mockResolvedValue(undefined)
     mocks.api.addReaction.mockResolvedValue('reaction-1')
     mocks.api.getMessageChatId.mockResolvedValue('oc_chat')
@@ -497,7 +499,7 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     }))
   })
 
-  it('targets every nested-thread delivery at the current message id and sends finals as rich posts', async () => {
+  it('edits the rich-text status into the first answer without recalling it', async () => {
     const firstFinal = [
       '**coordinationOverview**',
       '',
@@ -521,10 +523,8 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     })
     mocks.api.send
       .mockResolvedValueOnce({ messageId: 'om_status_one' })
-      .mockResolvedValueOnce({ messageId: 'om_final_one' })
       .mockResolvedValueOnce({ messageId: 'om_final_two' })
       .mockResolvedValueOnce({ messageId: 'om_status_two' })
-      .mockResolvedValueOnce({ messageId: 'om_error' })
     const { app } = setup({
       config: { requireMention: true, replyInThread: true },
     })
@@ -545,14 +545,12 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       })
       .expect(202)
 
-    await vi.waitFor(() => expect(mocks.api.send).toHaveBeenCalledTimes(5))
-    expect(firstDelivery).toEqual({ channelMessageId: 'om_final_one' })
+    await vi.waitFor(() => expect(mocks.api.send).toHaveBeenCalledTimes(3))
+    expect(firstDelivery).toEqual({ channelMessageId: 'om_status_one' })
     expect(mocks.api.editMessage).not.toHaveBeenCalled()
-    expect(mocks.api.recallMessage).toHaveBeenCalledTimes(2)
-    expect(mocks.api.recallMessage).toHaveBeenNthCalledWith(1, 'om_status_one')
-    expect(mocks.api.recallMessage).toHaveBeenNthCalledWith(2, 'om_status_two')
-    expect(mocks.api.send.mock.invocationCallOrder[1])
-      .toBeLessThan(mocks.api.recallMessage.mock.invocationCallOrder[0])
+    expect(mocks.api.recallMessage).not.toHaveBeenCalled()
+    expect(mocks.api.editPost).toHaveBeenNthCalledWith(1, 'om_status_one', firstFinal)
+    expect(mocks.api.editPost).toHaveBeenNthCalledWith(2, 'om_status_two', 'Something went wrong. Please try again.')
     for (const call of mocks.api.send.mock.calls) {
       expect(call[2]).toEqual({
         replyTo: 'om_current',
@@ -561,20 +559,18 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       })
     }
     expect(mocks.api.send.mock.calls.map((call) => call[1])).toEqual([
-      { text: 'Thinking...' },
-      { markdown: firstFinal },
+      { markdown: 'Thinking...' },
       { markdown: secondFinal },
-      { text: 'Thinking...' },
-      { text: 'Something went wrong. Please try again.' },
+      { markdown: 'Thinking...' },
     ])
     expect(JSON.stringify(mocks.api.send.mock.calls)).not.toContain('omt_topic')
     expect(JSON.stringify(mocks.api.send.mock.calls)).not.toContain('om_root')
     expect(JSON.stringify(mocks.api.send.mock.calls)).not.toContain('om_parent')
   })
 
-  it('keeps the progress status when a rich final send fails', async () => {
-    const providerError = new Error('rich post rejected')
-    let caught: unknown
+  it('sends a rich reply if editing the status fails, without recalling it', async () => {
+    const providerError = new Error('rich post edit rejected')
+    let delivery: unknown
     mocks.processChannelMessage.mockImplementation(async (params: {
       hooks: {
         onProcessingStart(): Promise<void>
@@ -582,15 +578,12 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       }
     }) => {
       await params.hooks.onProcessingStart()
-      try {
-        await params.hooks.sendResponse('**Formatted answer**')
-      } catch (error) {
-        caught = error
-      }
+      delivery = await params.hooks.sendResponse('**Formatted answer**')
     })
     mocks.api.send
       .mockResolvedValueOnce({ messageId: 'om_status' })
-      .mockRejectedValueOnce(providerError)
+      .mockResolvedValueOnce({ messageId: 'om_final' })
+    mocks.api.editPost.mockRejectedValueOnce(providerError)
     const { app } = setup({ config: { replyInThread: true } })
 
     await request(app)
@@ -600,7 +593,8 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       .expect(202)
 
     await vi.waitFor(() => expect(mocks.api.send).toHaveBeenCalledTimes(2))
-    expect(caught).toBe(providerError)
+    expect(delivery).toEqual({ channelMessageId: 'om_final' })
+    expect(mocks.api.editPost).toHaveBeenNthCalledWith(2, 'om_status', 'Response sent below.')
     expect(mocks.api.send).toHaveBeenNthCalledWith(
       2,
       'oc_chat',
@@ -611,6 +605,38 @@ describe('[COMP:api/feishu-route] bridge route', () => {
         resolveMentionsInText: true,
       },
     )
+    expect(mocks.api.recallMessage).not.toHaveBeenCalled()
+  })
+
+  it('keeps the edited answer and sends confirmation actions in a follow-up card', async () => {
+    let delivery: unknown
+    mocks.processChannelMessage.mockImplementation(async (params: {
+      hooks: {
+        onProcessingStart(): Promise<void>
+        sendResponse(text: string, documents?: unknown, question?: unknown, actions?: unknown): Promise<unknown>
+      }
+    }) => {
+      await params.hooks.onProcessingStart()
+      delivery = await params.hooks.sendResponse('**Ready**', undefined, undefined, [
+        { id: 'allow', label: 'Allow', data: 'mcp_confirm:example:allow' },
+      ])
+    })
+    mocks.api.send
+      .mockResolvedValueOnce({ messageId: 'om_status' })
+      .mockResolvedValueOnce({ messageId: 'om_actions' })
+    const { app } = setup()
+
+    await request(app)
+      .post('/internal/feishu/inbound')
+      .set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() })
+      .expect(202)
+
+    await vi.waitFor(() => expect(mocks.api.send).toHaveBeenCalledTimes(2))
+    expect(delivery).toEqual({ channelMessageId: 'om_status' })
+    expect(mocks.api.editPost).toHaveBeenCalledWith('om_status', '**Ready**')
+    expect(mocks.api.send.mock.calls[1][1].card.elements)
+      .toContainEqual(expect.objectContaining({ tag: 'action' }))
     expect(mocks.api.recallMessage).not.toHaveBeenCalled()
   })
 
