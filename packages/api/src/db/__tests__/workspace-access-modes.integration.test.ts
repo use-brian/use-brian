@@ -48,7 +48,7 @@ describe('workspace access modes M1 PostgreSQL foundation', () => {
     await assertLocalFixture()
     db = new pg.Client({ connectionString: process.env.DATABASE_URL })
     await db.connect()
-    expect((await row(`SELECT count(*)::int n FROM _migrations WHERE name='620_workspace_access_modes.sql'`)).n).toBe(1)
+    expect((await row(`SELECT count(*)::int n FROM _migrations WHERE name='621_workspace_access_modes.sql'`)).n).toBe(1)
   })
   afterAll(async () => { await db?.end() })
   beforeEach(async () => { await query('BEGIN') })
@@ -77,7 +77,7 @@ describe('workspace access modes M1 PostgreSQL foundation', () => {
       policy: await row('SELECT classification_mode,revision,updated_at FROM workspace_access_policies WHERE workspace_id=$1',[f.w]),
     })
     const before = await snapshot()
-    const sql = (await readFile(new URL('../../../migrations/620_workspace_access_modes.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*$/m,'').replace(/^COMMIT;\s*$/m,'')
+    const sql = (await readFile(new URL('../../../migrations/621_workspace_access_modes.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*$/m,'').replace(/^COMMIT;\s*$/m,'')
     await query(sql)
     expect(await snapshot()).toEqual(before)
     expect(await row('SELECT access_mode,setup_state,default_department_id FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).toEqual({access_mode:'departments',setup_state:'legacy',default_department_id:null})

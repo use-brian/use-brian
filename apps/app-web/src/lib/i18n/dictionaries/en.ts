@@ -8447,7 +8447,7 @@ export const en = {
       dropFiles: "Drop files",
       browseFiles: "Browse",
       dropToPin: "Drop to pin",
-      fileTooLarge: "That file is too large to pin (max 1 GB).",
+      fileTooLarge: "That file is too large to pin (max {limit}).",
       fileVideoUnsupported:
         "Video cannot be pinned. Send it in the chat instead, where recordings are processed.",
       largeFileTitle: "Upload a large file?",
@@ -11696,6 +11696,32 @@ export const en = {
     slowDown: "You're sending messages too quickly. Wait a moment and try again.",
     sendFailed: "Something went wrong sending that. Please try again.",
     poweredBy: "Powered by Use Brian",
+  },
+  // Bottom-bar chip + tray for files handed to the brain intake queue by
+  // "Add to brain". Lives in the workspace sync footer so the user keeps
+  // navigating while a recording uploads. [COMP:app-web/brain-intake-tray]
+  intakeTray: {
+    region: "Files being added to your brain",
+    showTray: "Show file progress",
+    hideTray: "Hide file progress",
+    title: "Adding to your brain",
+    chipAdding: "Adding {count} files",
+    chipAddingOne: "Adding 1 file",
+    chipReview: "{count} need your review",
+    chipReviewOne: "1 needs your review",
+    chipFailed: "{count} failed",
+    chipFailedOne: "1 failed",
+    chipDone: "{count} added to brain",
+    chipDoneOne: "1 added to brain",
+    statusQueued: "Waiting",
+    statusReadyToReview: "Ready to review: {minutes} min. Choose a blueprint to start transcribing.",
+    statusReviewing: "Reviewing...",
+    statusQueuedTranscription: "Queued for transcription",
+    statusStoredOnly: "Stored in workspace files. Too large to analyze, so nothing was added to the brain.",
+    review: "Review",
+    reviewAgain: "Review again",
+    dismiss: "Dismiss",
+    clearFinished: "Clear finished",
   },
   recordings: {
     panelTitle: "Recordings",

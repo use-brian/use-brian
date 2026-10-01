@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const migration = readFileSync(
-  new URL('../../../migrations/620_workspace_access_modes.sql', import.meta.url),
+  new URL('../../../migrations/621_workspace_access_modes.sql', import.meta.url),
   'utf8',
 )
 const sql = migration.replace(/--[^\n]*/g, '')

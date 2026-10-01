@@ -20,6 +20,8 @@ import {
   type FileStore,
 } from '@use-brian/core'
 import { FileIngestError } from '../files/ingest-error.js'
+import { MAX_INGEST_PARSE_BYTES } from '../files/file-ingest-worker.js'
+import { setFileIndexing } from '../files/artifact-index.js'
 import type { FileIngestor } from '../files/ingest-port.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { resolveUser } from './route-helpers.js'
@@ -576,7 +578,7 @@ export function fileRoutes(
       const tooLarge = typeof req.body?.sizeBytes === 'number' && req.body.sizeBytes > MAX_CHUNKED_UPLOAD_BYTES
       res.status(tooLarge ? 413 : 400).json({
         error: tooLarge ? 'too_large' : 'invalid_upload',
-        detail: tooLarge ? 'Each file must be 1 GiB or smaller.' : 'Invalid upload metadata.',
+        detail: tooLarge ? `Each file must be ${MAX_CHUNKED_UPLOAD_BYTES / (1024 * 1024 * 1024)} GiB or smaller.` : 'Invalid upload metadata.',
       })
       return
     }
@@ -760,6 +762,28 @@ export function fileRoutes(
           'Audio and video are transcribed through the recording pipeline, not file ingest. ' +
           `Resolve the recording with POST /api/files/${file.id}/recording, then run the ` +
           'recording estimate → confirm → process flow.',
+      })
+      return
+    }
+
+    // Stored is not the same as analyzed: past the parse ceiling the worker
+    // would load the whole file into memory and take the process down, so the
+    // answer is an honest `stored_only`, never a job. The worker guards too.
+    if (file.sizeBytes > MAX_INGEST_PARSE_BYTES) {
+      await setFileIndexing(file.id, {
+        status: 'skipped',
+        reason: 'too_large_to_parse',
+        indexedAt: new Date().toISOString(),
+      })
+      res.status(200).json({
+        fileId: file.id,
+        status: 'stored_only',
+        reason: 'too_large_to_parse',
+        sizeBytes: file.sizeBytes,
+        maxParseBytes: MAX_INGEST_PARSE_BYTES,
+        detail:
+          `This file is stored in the workspace but too large to analyze (${Math.round(file.sizeBytes / (1024 * 1024))} MB; ` +
+          `files up to ${MAX_INGEST_PARSE_BYTES / (1024 * 1024)} MB are decomposed into the brain).`,
       })
       return
     }

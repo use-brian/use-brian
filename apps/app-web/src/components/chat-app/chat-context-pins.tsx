@@ -76,6 +76,7 @@ import { fetchWorkspaceCrm } from "@/lib/api/crm";
 import {
   LARGE_FILE_CONFIRM_BYTES,
   MAX_STORED_FILE_BYTES,
+  formatFileSize,
   reingestStoredFile,
   storeFiles,
 } from "@/lib/api/ingest";
@@ -466,7 +467,7 @@ function SessionContextPins({
             status: "error",
             error:
               reason === "too_large"
-                ? t.fileTooLarge
+                ? format(t.fileTooLarge, { limit: formatFileSize(MAX_STORED_FILE_BYTES) })
                 : // NOT the chat composer's copy: that string describes the
                   // 20 MB transient-attachment allowlist, while this lane is
                   // the 1 GB durable store. Both refuse video, for different

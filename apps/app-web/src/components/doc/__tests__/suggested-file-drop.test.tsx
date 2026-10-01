@@ -12,17 +12,13 @@ vi.mock("@/lib/auth-fetch", () => ({
 vi.mock("@/lib/desktop-auth-source", () => ({
   usesGatewayCredentials: vi.fn(() => false),
 }));
-const recordingHarness = vi.hoisted(() => ({
-  run: vi.fn(),
-  dismiss: vi.fn(),
+const queueHarness = vi.hoisted(() => ({ enqueueIntake: vi.fn() }));
+vi.mock("@/lib/brain-intake/intake-queue", () => ({
+  enqueueIntake: queueHarness.enqueueIntake,
 }));
-vi.mock("@/lib/recordings/use-recording-upload", () => ({
-  useRecordingUpload: () => ({
-    run: recordingHarness.run,
-    dismiss: recordingHarness.dismiss,
-    status: "idle",
-    uploadProgress: 0,
-  }),
+const confirmHarness = vi.hoisted(() => ({ confirmDialog: vi.fn() }));
+vi.mock("@/components/ui/confirm-dialog", () => ({
+  confirmDialog: confirmHarness.confirmDialog,
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -42,8 +38,8 @@ describe("[COMP:app-web/home-file-drop] SuggestedFileDrop staging", () => {
   let host: HTMLDivElement | null = null;
 
   beforeEach(() => {
-    recordingHarness.run.mockReset();
-    recordingHarness.dismiss.mockReset();
+    queueHarness.enqueueIntake.mockReset();
+    confirmHarness.confirmDialog.mockReset();
   });
 
   afterEach(() => {
@@ -79,16 +75,46 @@ describe("[COMP:app-web/home-file-drop] SuggestedFileDrop staging", () => {
     return host;
   }
 
-  it("names the size cap on an oversized file and keeps the rest of the batch", () => {
+  it("names the 10 GB cap on an oversized file and keeps the rest of the batch", () => {
     const dom = mountWith([
-      sized("guide.docx", 65_790_453),
+      sized("archive.pdf", 12 * 1024 * 1024 * 1024),
       sized("notes.md", 84_964),
     ]);
-    expect(dom.textContent).toContain("62.7 MB");
-    expect(dom.textContent).toContain("30.0 MB");
+    expect(dom.textContent).toContain("12.0 GB");
+    expect(dom.textContent).toContain("10.0 GB");
     // The small file is still staged, not collateral damage.
     expect(dom.textContent).toContain("notes.md");
     expect(dom.textContent).not.toContain("Failed to fetch");
+  });
+
+  // 2026-10-01: a 62.7 MB .docx used to be refused with "the limit is 30 MB";
+  // the intake queue now takes it through the chunked lane, so the modal
+  // stages it like any other file.
+  it("accepts a file past the 30 MB multipart ceiling and hands it to the queue", async () => {
+    const big = sized("guide.docx", 65_790_453);
+    const dom = mountWith([big]);
+    expect(dom.textContent).toContain("guide.docx");
+    expect(dom.textContent).not.toContain("Too large");
+    await clickAdd(dom);
+    expect(confirmHarness.confirmDialog).not.toHaveBeenCalled();
+    expect(queueHarness.enqueueIntake).toHaveBeenCalledTimes(1);
+    expect(queueHarness.enqueueIntake.mock.calls[0][0].files).toEqual([big]);
+  });
+
+  it("confirms a file above 100 MB before enqueueing it, and keeps a declined one staged", async () => {
+    const huge = sized("video-export.pdf", 150 * 1024 * 1024);
+    const dom = mountWith([huge]);
+    confirmHarness.confirmDialog.mockResolvedValueOnce(false);
+    await clickAdd(dom);
+    expect(confirmHarness.confirmDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ description: expect.stringContaining("150.0 MB") }),
+    );
+    expect(queueHarness.enqueueIntake).not.toHaveBeenCalled();
+    expect(dom.textContent).toContain("video-export.pdf");
+
+    confirmHarness.confirmDialog.mockResolvedValueOnce(true);
+    await clickAdd(dom);
+    expect(queueHarness.enqueueIntake).toHaveBeenCalledTimes(1);
   });
 
   it("tells the user about files past the per-drop cap instead of dropping them", () => {
@@ -102,31 +128,57 @@ describe("[COMP:app-web/home-file-drop] SuggestedFileDrop staging", () => {
     expect(dom.textContent).toContain("Only 5 files at a time");
   });
 
-  it("routes a large video through recording intake and keeps it off the document size cap", async () => {
-    const video = new File([new Uint8Array(1)], "planning.mov", { type: "" });
-    Object.defineProperty(video, "size", { value: 65_790_453 });
-    recordingHarness.run.mockResolvedValue({
-      outcome: "queued",
-      recording: {
-        recordingId: "recording-1",
-        status: "queued",
-        jobId: "job-1",
-      },
-      message: "Queued",
-    });
-
-    const dom = mountWith([video], "assistant-1");
-    expect(dom.textContent).toContain("planning.mov");
-    expect(dom.textContent).not.toContain("30.0 MB");
-
+  const clickAdd = async (dom: HTMLElement) => {
     const add = [...dom.querySelectorAll("button")].find(
       (button) => button.textContent === "Add to brain",
     );
     await act(async () => {
       add?.click();
     });
+  };
 
-    expect(recordingHarness.run).toHaveBeenCalledWith(video);
-    expect(dom.textContent).toContain("Queued for transcription");
+  // The modal is for choosing, never for waiting: "Add to brain" hands the
+  // batch to the intake queue (the bottom-bar tray owns the wait) and the
+  // review empties, so a five-minute recording upload never blocks the app.
+  it("hands a large video to the intake queue as media, off the document size cap, and empties the review", async () => {
+    const video = new File([new Uint8Array(1)], "planning.mov", { type: "" });
+    Object.defineProperty(video, "size", { value: 65_790_453 });
+
+    const dom = mountWith([video], "assistant-1");
+    expect(dom.textContent).toContain("planning.mov");
+    expect(dom.textContent).not.toContain("30.0 MB");
+
+    await clickAdd(dom);
+
+    expect(queueHarness.enqueueIntake).toHaveBeenCalledTimes(1);
+    const call = queueHarness.enqueueIntake.mock.calls[0][0];
+    expect(call.workspaceId).toBe("ws-1");
+    expect(call.assistantId).toBe("assistant-1");
+    expect(call.files).toEqual([video]);
+    expect(call.kind(video)).toBe("media");
+    expect(dom.textContent).not.toContain("planning.mov");
+  });
+
+  it("keeps a ZIP mixed with other files in the review instead of sending anything", async () => {
+    const dom = mountWith([
+      new File([new Uint8Array(1)], "linkedin.zip", { type: "application/zip" }),
+      sized("notes.md", 1_000),
+    ]);
+    await clickAdd(dom);
+    expect(queueHarness.enqueueIntake).not.toHaveBeenCalled();
+    expect(dom.textContent).toContain("Add a LinkedIn ZIP by itself");
+    expect(dom.textContent).toContain("notes.md");
+  });
+
+  it("refuses media without an assistant before enqueueing, and still sends the documents", async () => {
+    const video = new File([new Uint8Array(1)], "memo.m4a", { type: "audio/mp4" });
+    const dom = mountWith([video, sized("notes.md", 1_000)]);
+    await clickAdd(dom);
+    expect(queueHarness.enqueueIntake).toHaveBeenCalledTimes(1);
+    expect(queueHarness.enqueueIntake.mock.calls[0][0].files.map((f: File) => f.name)).toEqual([
+      "notes.md",
+    ]);
+    expect(dom.textContent).toContain("memo.m4a");
+    expect(dom.textContent).toContain("Add an assistant before ingesting audio or video.");
   });
 });

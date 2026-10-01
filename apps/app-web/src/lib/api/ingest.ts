@@ -21,8 +21,12 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Keep one multipart body below Cloud Run's 32 MiB HTTP/1 request ceiling. */
 export const MAX_INGEST_FILE_BYTES = 30 * 1024 * 1024;
-/** Work Bench storage-only lane. Larger files are split into signed PUT parts. */
-export const MAX_STORED_FILE_BYTES = 1024 * 1024 * 1024;
+/**
+ * Durable chunked lane ceiling (signed 8 MiB parts), mirroring the server's
+ * `MAX_CHUNKED_UPLOAD_BYTES`. 1 GiB until 2026-10-01. What a file that size
+ * means for the brain is decided by the parse ceiling (`stored_only`), not here.
+ */
+export const MAX_STORED_FILE_BYTES = 10 * 1024 * 1024 * 1024;
 /** A transfer above this size needs an explicit pre-flight confirmation. */
 export const LARGE_FILE_CONFIRM_BYTES = 100 * 1024 * 1024;
 
@@ -33,6 +37,7 @@ export const LARGE_FILE_CONFIRM_BYTES = 100 * 1024 * 1024;
  */
 export function formatFileSize(bytes: number): string {
   const mb = bytes / (1024 * 1024);
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   if (mb >= 1) return `${mb.toFixed(1)} MB`;
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
@@ -478,7 +483,9 @@ export type ReingestOutcome =
       sizeBytes: number;
       detail: string;
     }
-  | { status: "in_flight" };
+  | { status: "in_flight" }
+  /** Stored in workspace files, past the parse ceiling: nothing went into the brain. */
+  | { status: "stored_only"; reason: string; detail: string };
 
 /** Which recording owns a stored audio/video file. */
 export type RecordingForFile = {
@@ -546,6 +553,8 @@ export async function reingestStoredFile(
   });
   const data = (await res.json().catch(() => null)) as
     | {
+        status?: string;
+        reason?: string;
         jobId?: string | null;
         requiresConfirmation?: boolean;
         fileName?: string;
@@ -555,6 +564,9 @@ export async function reingestStoredFile(
       }
     | null;
   if (res.status === 202) return { status: "queued", jobId: data?.jobId ?? null };
+  if (res.status === 200 && data?.status === "stored_only") {
+    return { status: "stored_only", reason: data.reason ?? "", detail: data.detail ?? "" };
+  }
   if (res.status === 409 && data?.requiresConfirmation) {
     return {
       status: "requires_confirmation",

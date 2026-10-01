@@ -13,13 +13,9 @@ vi.mock("@/lib/auth-fetch", () => ({
 vi.mock("@/lib/desktop-auth-source", () => ({
   usesGatewayCredentials: vi.fn(() => false),
 }));
-vi.mock("@/lib/recordings/use-recording-upload", () => ({
-  useRecordingUpload: () => ({
-    run: vi.fn(),
-    dismiss: vi.fn(),
-    status: "idle",
-    uploadProgress: 0,
-  }),
+const queueHarness = vi.hoisted(() => ({ enqueueIntake: vi.fn() }));
+vi.mock("@/lib/brain-intake/intake-queue", () => ({
+  enqueueIntake: queueHarness.enqueueIntake,
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -36,6 +32,7 @@ describe("[COMP:app-web/workspace-file-drop] WorkspaceFileDropBoundary", () => {
 
   beforeEach(() => {
     authHarness.authFetch.mockReset();
+    queueHarness.enqueueIntake.mockReset();
     host = document.createElement("div");
     document.body.appendChild(host);
   });
@@ -99,16 +96,40 @@ describe("[COMP:app-web/workspace-file-drop] WorkspaceFileDropBoundary", () => {
     expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
     expect(document.body.textContent).toContain("Drop files here");
 
-    pickFiles([new File(["notes"], "planning-notes.md", { type: "text/markdown" })]);
+    const file = new File(["notes"], "planning-notes.md", { type: "text/markdown" });
+    pickFiles([file]);
     expect(document.body.textContent).toContain("planning-notes.md");
     expect(authHarness.authFetch).not.toHaveBeenCalled();
+    expect(queueHarness.enqueueIntake).not.toHaveBeenCalled();
 
-    authHarness.authFetch.mockResolvedValue(new Response(JSON.stringify({
-      files: [{ fileName: "planning-notes.md", ok: true, status: "stored" }],
-    }), { status: 200 }));
+    // "Add to brain" hands the batch to the intake queue and closes the
+    // review: the wait lives in the bottom-bar tray, never in the modal.
     await act(async () => button("Add to brain").click());
-    expect(authHarness.authFetch).toHaveBeenCalledTimes(1);
-    expect(document.body.textContent).toContain("Stored");
+    expect(queueHarness.enqueueIntake).toHaveBeenCalledTimes(1);
+    expect(queueHarness.enqueueIntake.mock.calls[0][0]).toMatchObject({
+      workspaceId: "ws-1",
+      assistantId: "assistant-1",
+      files: [file],
+    });
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  // The recording cost + blueprint confirm is the global confirmDialog: a
+  // body-portaled z-50 AlertDialog that lands above its caller by DOM order
+  // alone. A review dialog raised above that layer hides the confirm behind
+  // its own backdrop, so every audio/video drop hangs on "Checking
+  // recording..." with nothing to click (2026-09-05 to 2026-09-30, z-[70]).
+  it("keeps the review dialog on the shared modal layer so the recording confirm can land above it", () => {
+    mount();
+    act(() => button("Add files").click());
+    const popup = document.body.querySelector('[role="dialog"]')!;
+    expect(popup).not.toBeNull();
+    const backdrop = popup.parentElement!.querySelector('[data-open]:not([role="dialog"])');
+    for (const el of [popup, backdrop]) {
+      expect(el).not.toBeNull();
+      expect(el!.className).toContain("z-50");
+      expect(el!.className).not.toMatch(/z-\[\d+\]/);
+    }
   });
 
   it("dismisses a dropped batch without uploading and opens a fresh picker review", async () => {
@@ -121,18 +142,14 @@ describe("[COMP:app-web/workspace-file-drop] WorkspaceFileDropBoundary", () => {
     expect(authHarness.authFetch).not.toHaveBeenCalled();
   });
 
-  it("keeps the review open during submission and allows closing after it finishes", async () => {
+  it("can always be closed: the review never owns an in-flight request", async () => {
     mount();
     act(() => button("Add files").click());
     pickFiles([new File(["notes"], "planning-notes.md")]);
-    let finish!: (response: Response) => void;
-    authHarness.authFetch.mockReturnValue(new Promise<Response>((resolve) => { finish = resolve; }));
-    await act(async () => button("Add to brain").click());
-    expect(button("Close file intake").disabled).toBe(true);
-    act(() => button("Close file intake").click());
-    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
-    await act(async () => finish(new Response(JSON.stringify({ files: [] }), { status: 200 })));
     expect(button("Close file intake").disabled).toBe(false);
+    act(() => button("Close file intake").click());
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(queueHarness.enqueueIntake).not.toHaveBeenCalled();
   });
 
   it("stages a neutral workspace drop for review without uploading", () => {

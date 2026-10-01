@@ -47,6 +47,7 @@ import {
 } from "@/lib/api/recordings";
 import { setPageLinkedRecording } from "@/lib/api/views";
 import { confirmAndProcessRecording } from "@/lib/recordings/confirm-and-process";
+import { recordingFailureMessage } from "@/lib/recordings/failure-copy";
 
 export type RecordingUploadStatus =
   | "idle"
@@ -258,21 +259,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         return { outcome: "queued", recording: res, message };
       } catch (e) {
         setStatus("error");
-        const code = e instanceof RecordingApiError ? e.code : undefined;
-        const detail =
-          e instanceof RecordingApiError && e.message && e.status !== 0 ? e.message : null;
-        const message =
-          code === "too_long"
-            ? t.recordings.tooLong
-            : code === "could_not_read_duration"
-              ? t.recordings.cannotReadDuration
-              : stage === "upload"
-                ? t.recordings.uploadFailed
-                : stage === "estimate"
-                  ? t.recordings.estimateFailed
-                  : detail
-                    ? `${t.recordings.processFailed} (${detail})`
-                    : t.recordings.processFailed;
+        const message = recordingFailureMessage(e, stage, t);
         setMessage(message);
         return { outcome: "failed", message };
       } finally {

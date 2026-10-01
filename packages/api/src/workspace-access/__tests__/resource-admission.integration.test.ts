@@ -45,7 +45,7 @@ async function fixture(mode: 'simple' | 'departments' = 'simple') {
 describe('canonical resource admission PostgreSQL integration', () => {
   beforeAll(async () => {
     db = await pool.connect()
-    expect((await query("SELECT count(*)::int n FROM _migrations WHERE name='620_workspace_access_modes.sql'")).rows[0].n).toBe(1)
+    expect((await query("SELECT count(*)::int n FROM _migrations WHERE name='621_workspace_access_modes.sql'")).rows[0].n).toBe(1)
     await query('CREATE TEMP TABLE admission_test_writes(id uuid PRIMARY KEY, envelope jsonb NOT NULL)')
   })
   beforeEach(async () => { await query('BEGIN') })

@@ -189,6 +189,21 @@ describe('[COMP:files/chunked-upload] durable direct upload', () => {
     })
   }
 
+  // The open boot's default resolver: a self-host's bucket is its own, so the
+  // gate must accept an infinite limit rather than treat it as "unknown plan".
+  it('accepts an unlimited storage resolver (the self-host default) without a quota gate', async () => {
+    const GIB = 1024 * 1024 * 1024
+    files.sumSizeBytes = async () => 500 * GIB
+    const selfHost = service(async () => Number.POSITIVE_INFINITY)
+    const started = await selfHost.start(ctx, {
+      fileName: 'archive.pdf', mime: 'application/pdf', sizeBytes: 9 * GIB,
+    })
+    expect(started.uploadId).toBeTruthy()
+    await expect(
+      selfHost.start(ctx, { fileName: 'too-big.pdf', mime: 'application/pdf', sizeBytes: 11 * GIB }),
+    ).rejects.toMatchObject({ kind: 'too_large', message: 'File exceeds the 10 GiB upload limit' })
+  })
+
   it('gates start() on the injected plan-derived storage limit', async () => {
     const GIB = 1024 * 1024 * 1024
     files.sumSizeBytes = async () => 21 * GIB

@@ -44,6 +44,7 @@ vi.mock("@/lib/api/ingest", () => ({
   MAX_INGEST_FILE_BYTES: 30 * 1024 * 1024,
   MAX_STORED_FILE_BYTES: 1024 * 1024 * 1024,
   LARGE_FILE_CONFIRM_BYTES: 100 * 1024 * 1024,
+  formatFileSize: (bytes: number) => `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`,
   storeFiles: (...args: unknown[]) => storeFiles(...args),
   reingestStoredFile: (...args: unknown[]) => reingestStoredFile(...args),
 }));
@@ -811,8 +812,9 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     expect(storeFiles).not.toHaveBeenCalled();
     expect(addSessionPin).not.toHaveBeenCalled();
     expect(container.textContent).toContain("price-list.pdf");
+    // The limit in the copy is derived from the constant, never typed by hand.
     expect(container.textContent).toContain(
-      "That file is too large to pin (max 1 GB).",
+      "That file is too large to pin (max 1.0 GB).",
     );
 
     act(() => root.unmount());
