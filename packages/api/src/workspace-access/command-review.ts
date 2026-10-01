@@ -16,11 +16,12 @@ function canonical(value:unknown):string {
   return JSON.stringify(value)??'null'
 }
 export function hashCommandReviewIntent(value:unknown){return createHash('sha256').update(canonical(value)).digest('hex')}
-export async function withCommandReviewTransaction<T>(run:(client:PoolClient)=>Promise<T>):Promise<T>{
-  const client=await getPool().connect()
+/** A reserved session stays checked out; each call still commits its own phase. */
+export async function withCommandReviewTransaction<T>(run:(client:PoolClient)=>Promise<T>,reservedClient?:PoolClient):Promise<T>{
+  const client=reservedClient??await getPool().connect()
   try{await client.query('BEGIN');const result=await run(client);await client.query('COMMIT');return result}
   catch(error){await client.query('ROLLBACK');if(error instanceof WorkspaceAccessError)throw error;const code=(error as {code?:string}).code;if(code&&['23503','23505','23514','P0001','40001','40P01'].includes(code))throw new WorkspaceAccessError('access_conflict',409);throw error}
-  finally{client.release()}
+  finally{if(!reservedClient)client.release()}
 }
 function project(row:ReviewRow,validForMs:number):DepartmentCommandReview {
   return{id:row.id,payloadHash:row.payloadHash,policyRevision:row.policyRevision,command:row.command,changes:row.changes,expiresAt:row.expiresAt.toISOString(),validForMs}
@@ -38,8 +39,8 @@ async function changes(client:PoolClient,workspaceId:string,auditEventId:string|
     UNION ALL SELECT id::text,name FROM workspace_projects WHERE workspace_id=$1`,[workspaceId])).rows
   const labels=new Map(names.map(row=>[row.id,row.name]))
   const plain=['name','description','color','reason','starts_at','expires_at']
-  const codes=['status','classification_mode','reviewed_inventory_revision','directory_visibility','requestable','read_all','clearance','team_scope_mode','project_scope_mode','member','capabilities','revoked_at']
-  const references=['bundle','assistant_ids','team_ids','project_ids','default_workspace_group_id','default_project_id','reviewer_id']
+  const codes=['status','access_mode','classification_mode','reviewed_inventory_revision','directory_visibility','requestable','read_all','clearance','team_scope_mode','project_scope_mode','member','capabilities','revoked_at']
+  const references=['default_department_id','bundle','assistant_ids','team_ids','project_ids','default_workspace_group_id','default_project_id','reviewer_id']
   const before=audit.before??{},after=audit.after??{}
   return [...plain,...codes,...references].filter(field=>canonical(before[field]??null)!==canonical(after[field]??null)).map(field=>{
     const values=(value:unknown):DepartmentCommandReview['changes'][number]['before']=>{
@@ -51,7 +52,7 @@ async function changes(client:PoolClient,workspaceId:string,auditEventId:string|
   })
 }
 
-export async function prepareDepartmentCommand(workspaceId:string,userId:string,input:unknown):Promise<DepartmentCommandReview>{
+export async function prepareDepartmentCommand(workspaceId:string,userId:string,input:unknown,reservedClient?:PoolClient):Promise<DepartmentCommandReview>{
   const parsed=departmentCommandIntentSchema.safeParse(input);if(!parsed.success)throw new WorkspaceAccessError('invalid_command',400)
   const intent=parsed.data,intentHash=hashCommandReviewIntent(intent)
   return withCommandReviewTransaction(async client=>{
@@ -74,10 +75,10 @@ export async function prepareDepartmentCommand(workspaceId:string,userId:string,
     const row=(await client.query<ReviewRow>(`INSERT INTO workspace_access_command_reviews(id,workspace_id,actor_user_id,idempotency_key,intent_hash,command,policy_revision,changes,payload_hash,expires_at)
       VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9,$10) RETURNING ${columns}`,[id,workspaceId,userId,intent.idempotencyKey,intentHash,JSON.stringify(command),current.policyRevision,JSON.stringify(effects),payloadHash,expiresAt])).rows[0]
     return project(row,Math.min(current.validForMs,15*60_000))
-  })
+  },reservedClient)
 }
 
-export async function applyDepartmentCommand(workspaceId:string,userId:string,input:unknown,expectedCommand?:unknown):Promise<WorkspaceAccessOverview>{
+export async function applyDepartmentCommand(workspaceId:string,userId:string,input:unknown,expectedCommand?:unknown,reservedClient?:PoolClient):Promise<WorkspaceAccessOverview>{
   const parsed=departmentCommandApplySchema.safeParse(input);if(!parsed.success)throw new WorkspaceAccessError('access_review_required',409)
   const expected=expectedCommand===undefined?undefined:departmentAccessCommandSchema.safeParse(expectedCommand)
   if(expected&&!expected.success)throw new WorkspaceAccessError('invalid_command',400)
@@ -95,7 +96,7 @@ export async function applyDepartmentCommand(workspaceId:string,userId:string,in
     const applied=await executeDepartmentAccessInTransaction(client,workspaceId,userId,row.command)
     await client.query("UPDATE workspace_access_command_reviews SET status='applied',applied_at=clock_timestamp(),receipt=$4::jsonb WHERE workspace_id=$1 AND actor_user_id=$2 AND id=$3",[workspaceId,userId,row.id,JSON.stringify({appliedCommand:applied.appliedCommand??null})])
     return{...applied,commandReceipt:{reviewId:row.id,replayed:false}}
-  })
+  },reservedClient)
   if(!result.commandReceipt?.replayed){notifyWorkspaceChange(workspaceId,'workspace_config','update');notifyWorkspaceChange(workspaceId,'approval','update')}
   return result
 }
