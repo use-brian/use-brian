@@ -1,3 +1,6 @@
+import { triageTaskForGoal } from './db/goal-task-triage.js'
+import { createProgrammaticEpisodeTerminal } from './ingest/programmatic-terminal.js'
+import { checkPromptOnlyAuthority, executePromptOnlyGeneration } from './office/generation-publication.js'
 import { createBrowserFileBridge } from './sandbox/browser-files.js'
 import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
 import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher,setFeedLinkedInRecovery} from './content-planning/linkedin-authority.js'
@@ -409,6 +412,8 @@ import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
 import { connectorRoutes } from './routes/connectors.js'
+import { createTransactionalConnectorSetup } from './connectors/transactional-setup.js'
+import { connectorSetupProviders } from './connectors/setup-providers.js'
 import {
   memberConnectorInstanceRoutes,
   workspaceConnectorInstanceRoutes,
@@ -556,6 +561,7 @@ import { teamspacesRoutes } from './routes/teamspaces.js'
 import { contextScopeRoutes } from './routes/context-scopes.js'
 import { workspaceAccessRoutes } from './routes/workspace-access.js'
 import { createOrganizationTools, createWorkspaceAccessTools } from './workspace-access/tools.js'
+import { createWorkspaceMigrationTools } from './workspace-access/migration-tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore, isDurableOfficeArtifact } from './db/office-artifacts.js'
 import { readWorkspaceMemberDirectory } from './db/workspace-member-directory.js'
@@ -620,11 +626,10 @@ import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
 import { setBrandEventDispatcher } from './brand-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
-import { processOpenRecording } from './recordings/process-recording.js'
+import { processOpenRecordingWithBookkeeping } from './recordings/process-recording.js'
 import { createRecordingFrameAnalyzer } from './recordings/frame-analysis.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
 import { getRecording, updateRecording } from './db/recordings-store.js'
-import { mergeEpisodeSourceRef } from './db/episodes-store.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
 import { createGenerateSynthesizer, type GenerateSynthesizeFn } from './synthesis/generate-synthesizer.js'
 import { createGenerateBlueprintTool } from './synthesis/generate-blueprint-tool.js'
@@ -1871,6 +1876,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     nativeSlashSyncTimers.set(workspaceId, timer)
   }
   const workflowStore = createDbWorkflowStore({
+    resolveAuthoringPrimary: (workspaceId, client) => resolvePrimaryAssistantForWorkspace(workspaceId, undefined, (sql, values) => client.query(sql, values)),
     onChanged: (userId, workspaceId) => scheduleNativeSlashCommandSync(userId, workspaceId),
   })
   const workflowRunStore = createDbWorkflowRunStore()
@@ -3077,6 +3083,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         processBatch: createProgrammaticBatchProcessor({
           store: programmaticCaptureStore,
           ingest: brainEpisodeIngestor,
+          configuredIngest: createProgrammaticEpisodeTerminal({ provider, model: extractionModel ?? EXTRACTION_MODEL }),
         }),
       })
     : null
@@ -3380,8 +3387,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of interAssistantTools) allTools.set(tool.name, tool)
 
   // ── Workflow tools ──
-  async function resolvePrimaryAssistantForWorkspace(workspaceId: string): Promise<string | null> {
-    const result = await query<{ id: string }>(
+  async function resolvePrimaryAssistantForWorkspace(workspaceId: string, _userId?: string, execute: typeof query = query): Promise<string | null> {
+    const result = await execute<{ id: string }>(
       `SELECT id FROM assistants WHERE workspace_id = $1 AND kind = 'primary' LIMIT 1`,
       [workspaceId],
     )
@@ -4250,23 +4257,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
     }
   judgeTaskForGoal = (task, userId) => {
-      void (async () => {
-        const capabilities = await summariseWorkspaceCapabilities(userId, task.workspaceId)
-        const attrs = Object.keys(task.attributes ?? {}).length > 0 ? JSON.stringify(task.attributes) : null
-        const assistantId = (await getWorkspacePrimaryAssistant(userId, task.workspaceId))?.id
-        const brief = await taskTriageJudge({ title: task.title, description: attrs, capabilities, userId, workspaceId: task.workspaceId, assistantId })
-        if (!brief) return
-        await goalStore.create({
-          workspaceId: task.workspaceId,
-          host: { type: 'task', id: task.id },
-          outcome: brief.outcome,
-          doneWhen: { kind: 'query', query: { description: 'task complete', predicate: { hostTaskDone: true } } },
-          means: {},
-          confirmed: false, // draft — triaged on the Tasks-assignable surface
-          createdByUserId: userId,
-          brief: { verification: brief.verification, approach: brief.approach, judgeReason: brief.judgeReason },
-        })
-      })().catch((err) => console.error('[goals] task triage draft failed:', err))
+    void triageTaskForGoal(task, userId, {
+      goalStore,
+      resolveAssistantId: async (actor, workspaceId) => (await getWorkspacePrimaryAssistant(actor, workspaceId))?.id,
+      // Ready goals use only these public constants; connector metadata is legacy-only.
+      publicCoreCapabilities: CORE_CAPABILITY_LINES,
+      summariseCapabilities: summariseWorkspaceCapabilities,
+      judge: taskTriageJudge,
+    }).catch((err) => console.error('[goals] task triage draft failed:', err))
   }
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
@@ -4290,7 +4288,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
-  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools()]) allTools.set(tool.name,tool)
+  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools()]) allTools.set(tool.name,tool)
 
   for (const tool of Object.values(createInternalLinkTools(internalLinkService))) {
     allTools.set(tool.name, tool)
@@ -5902,6 +5900,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // one there would shadow it. See routes/connectors.ts.
   if (usesOpenStandaloneRoutes(profile)) {
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
+      setupService: credKey ? createTransactionalConnectorSetup({
+        pool: getPool(), encryptionKey: credKey, adapters: connectorSetupProviders(),
+      }) : undefined,
+      shopifySetupRedirectUri: new URL('/api/auth/callback/shopify', env.AUTHED_APP_URL ?? env.APP_URL).toString(),
       connectorStore,
       connectorInstanceStore,
       connectorGrantStore,
@@ -6502,7 +6504,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     jobStore,
     resolvePrimary: workflowExecutorDeps.resolvePrimary,
-    resolveAuthoringAuthority: async (params) => {
+    resolveAuthoringAuthority: async (params, captureInTransaction) => {
+      if (captureInTransaction) return captureInTransaction()
       const assistantId = await workflowExecutorDeps.resolvePrimary(params.workspaceId)
       if (!assistantId) throw new Error('workflow_authority_unavailable')
       return captureAuthoringAuthoritySystem({ ...params, assistantId })
@@ -7112,6 +7115,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const createGenerationRunner = (userId: string) => createOfficeGenerationWorker({
     store: officeGenerationStore,
     workerUserId: userId,
+    async executePromptOnly(job,leaseToken) {
+      if (!filesResolver) throw new Error('Office storage unavailable')
+      await checkPromptOnlyAuthority(job,leaseToken)
+      const runtime=await resolveBackgroundRuntime(job.workspaceId)
+      await executePromptOnlyGeneration({job,leaseToken,provider:runtime?.provider ?? provider,model:runtime?.selector ?? BACKGROUND_MODEL,
+        resolver:filesResolver,storageLimitBytes:storageLimitBytesForPlan(await getWorkspacePlan(job.workspaceId))})
+    },
     buildPipelineDeps(job) {
       let fitPolicy: import('@use-brian/core').OfficeGenerationFitPolicy = { eligibleTargetIds: [], maxAttempts: 1 }
       const onFitPolicy = (policy: import('@use-brian/core').OfficeGenerationFitPolicy) => { fitPolicy = policy }
@@ -8062,6 +8072,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const run = await workflowRunStore.createRun({
         workflowId: wf.id, workspaceId: wf.workspaceId,
         triggeredBy: null, triggerKind: 'schedule', input: triggerInput,
+        ...(job.scheduleClaimId ? { scheduledJob: { id: job.id, claimId: job.scheduleClaimId } } : {}),
       })
       const outcome = await advanceWorkflowRun(workflowExecutorDeps, run.id)
       if (outcome.kind === 'failed') {
@@ -8844,9 +8855,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? createOpenRecordingProcessWorker({
         claim: claimNextRecordingJob,
         process: async (job) => {
-          await updateRecording(job.recordingId, { status: 'processing', lastError: null })
-          await mergeEpisodeSourceRef(job.actingUserId, job.recordingId, { status: 'processing' })
-          const result = await processOpenRecording(job, {
+          await processOpenRecordingWithBookkeeping(job, {
             filesResolver,
             fallbackStorage: filesBlobClient,
             transcriber: recordingTranscriber,
@@ -8861,13 +8870,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               backend: () => selectKeyedMediaBackend() ?? providerMediaBackend,
             }),
           })
-          await updateRecording(job.recordingId, {
-            status: 'processed',
-            truncated: result.truncated,
-            durationMs: result.durationMs,
-            lastError: null,
-          })
-          await mergeEpisodeSourceRef(job.actingUserId, job.recordingId, { status: 'processed' })
         },
         markDone: markRecordingJobDone,
         markFailed: async (id, error) => {
@@ -8876,10 +8878,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           if (job) {
             const status = result.retrying ? 'queued' : 'failed'
             await updateRecording(job.recordingId, { status, lastError: error }).catch(() => null)
-            await mergeEpisodeSourceRef(job.actingUserId, job.recordingId, {
-              status,
-              lastError: error.slice(0, 300),
-            }).catch(() => null)
           }
           return result
         },
