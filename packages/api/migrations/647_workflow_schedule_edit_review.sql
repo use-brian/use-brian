@@ -11,12 +11,16 @@ CREATE TABLE workflow_schedule_edit_reviews (
   after_shape jsonb NOT NULL,
   patch jsonb NOT NULL,
   expires_at timestamptz NOT NULL DEFAULT clock_timestamp()+interval '10 minutes',
+  payload_hash text NOT NULL,
+  result_record jsonb,
   apply_txid text
 );
 ALTER TABLE workflow_schedule_edit_reviews ENABLE ROW LEVEL SECURITY;
-CREATE POLICY workflow_schedule_edit_reviews_actor ON workflow_schedule_edit_reviews
-  USING(actor_id=nullif(current_setting('app.current_user_id',true),'')::uuid)
-  WITH CHECK(actor_id=nullif(current_setting('app.current_user_id',true),'')::uuid);
+-- No app policy: even a later blanket table grant cannot mint or consume consent.
+REVOKE ALL ON workflow_schedule_edit_reviews FROM PUBLIC;
+DO $$ BEGIN IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='app_user') THEN
+  REVOKE ALL ON workflow_schedule_edit_reviews FROM app_user;
+END IF; END $$;
 CREATE FUNCTION workflow_schedule_review_shape(value jsonb) RETURNS jsonb
 LANGUAGE sql IMMUTABLE AS $$
   SELECT coalesce(jsonb_object_agg(key,val),'{}'::jsonb) FROM jsonb_each(value) AS e(key,val)
@@ -25,7 +29,7 @@ LANGUAGE sql IMMUTABLE AS $$
     'name_manually_set','pinned','lifecycle_state'])
 $$;
 CREATE OR REPLACE FUNCTION protect_pinned_workflow_schedule() RETURNS trigger
-LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 BEGIN
   IF TG_TABLE_NAME='scheduled_jobs' THEN
     IF NEW.workflow_authoring_snapshot IS DISTINCT FROM OLD.workflow_authoring_snapshot THEN
@@ -38,6 +42,8 @@ BEGIN
       OR (NEW.enabled AND NOT OLD.enabled)
     ) THEN RAISE EXCEPTION 'workflow_schedule_reapproval_required'; END IF;
   ELSE
+    -- Noncanonical row-first writers must fail rather than invert lock order.
+    PERFORM 1 FROM workspaces WHERE id=OLD.workspace_id FOR UPDATE NOWAIT;
     IF EXISTS (SELECT 1 FROM workflow_schedule_edit_reviews r
       JOIN auth_sessions s ON s.id=r.session_id AND s.user_id=r.actor_id
       JOIN users u ON u.id=r.actor_id
@@ -52,6 +58,14 @@ BEGIN
         AND r.after_shape=workflow_schedule_review_shape(to_jsonb(NEW)))
       AND NEW.created_by=OLD.created_by AND NEW.workspace_id=OLD.workspace_id
     THEN RETURN NEW; END IF;
+    IF EXISTS(SELECT 1 FROM workspace_access_policies WHERE workspace_id=OLD.workspace_id AND setup_state<>'legacy')
+      AND (OLD.trigger->>'kind'='schedule' OR NEW.trigger->>'kind'='schedule')
+      AND (workflow_schedule_review_shape(to_jsonb(NEW))-ARRAY['name','description','name_manually_set','pinned','lifecycle_state','enabled'])
+        IS DISTINCT FROM (workflow_schedule_review_shape(to_jsonb(OLD))-ARRAY['name','description','name_manually_set','pinned','lifecycle_state','enabled'])
+    THEN RAISE EXCEPTION 'workflow_schedule_reapproval_required'; END IF;
+    IF EXISTS(SELECT 1 FROM workspace_access_policies WHERE workspace_id=OLD.workspace_id AND setup_state<>'legacy')
+      AND NEW.trigger->>'kind'='schedule' AND NEW.enabled AND NOT OLD.enabled
+    THEN RAISE EXCEPTION 'workflow_schedule_reapproval_required'; END IF;
     IF NEW.schedule_authoring_user_id IS DISTINCT FROM OLD.schedule_authoring_user_id THEN
       RAISE EXCEPTION 'workflow_schedule_reapproval_required';
     END IF;
@@ -76,4 +90,17 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+REVOKE ALL ON FUNCTION protect_pinned_workflow_schedule() FROM PUBLIC;
+CREATE FUNCTION pause_workflow_schedule_jobs() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+ IF NOT NEW.enabled AND OLD.enabled THEN
+  UPDATE scheduled_jobs SET enabled=false,schedule_claim_id=NULL,schedule_claim_expires_at=NULL
+   WHERE workflow_id=NEW.id AND workflow_step_run_id IS NULL;
+ END IF;
+ RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION pause_workflow_schedule_jobs() FROM PUBLIC;
+CREATE TRIGGER pause_workflow_schedule_jobs AFTER UPDATE ON workflows
+ FOR EACH ROW EXECUTE FUNCTION pause_workflow_schedule_jobs();
 COMMIT;

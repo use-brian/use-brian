@@ -164,8 +164,10 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
 }
 
 async function withWorkflowWrite<T>(userId: string, id: string,
-  operation: (client: PoolClient, policy: Awaited<ReturnType<typeof lockOperationalPolicy>>) => Promise<T>): Promise<T | null> {
-  const client = await getAppPool().connect()
+  operation: (client: PoolClient, policy: Awaited<ReturnType<typeof lockOperationalPolicy>>) => Promise<T>, reviewed = false): Promise<T | null> {
+  // Review receipts are owner-only. The reviewed lane performs its own live
+  // actor/session/member checks on this same connection before any write.
+  const client = await (reviewed ? getPool() : getAppPool()).connect()
   try {
     await client.query('BEGIN')
     await applyRLSGucs(client,userId)
@@ -334,19 +336,29 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       return result.rows.map(rowToWorkflow)
     },
     async prepareScheduleEdit(userId,id,fields,proof) {
-      return withWorkflowWrite(userId,id,(client,policy) => prepareScheduleEdit(client,userId,id,fields,proof,policy,hooks?.resolveAuthoringPrimary))
+      return withWorkflowWrite(userId,id,(client,policy) => prepareScheduleEdit(client,userId,id,fields,proof,policy,hooks?.resolveAuthoringPrimary),true)
     },
     async update(userId, id, fields, proof) {
       const result = await withWorkflowWrite(userId,id,async (client,policy) => {
         const current = await scheduleEditRow(client,id)
         const reviewed = !!proof?.reviewId
-        if (reviewed) fields = await applyScheduleEdit(client,userId,id,fields,proof!,policy)
+        if (reviewed) {
+          const applied = await applyScheduleEdit(client,userId,id,fields,proof!,policy)
+          if (applied.replayRow) {
+            const saved = applied.replayRow as WorkflowRow
+            saved.createdAt = new Date(saved.createdAt)
+            saved.updatedAt = new Date(saved.updatedAt)
+            if (saved.lifecycleTransitionedAt) saved.lifecycleTransitionedAt = new Date(saved.lifecycleTransitionedAt)
+            return { rows: [saved] }
+          }
+          fields = applied.fields
+        }
         else if ((policy?.setupState !== 'legacy' || current.schedule_authoring_pinned) &&
           (current.trigger.kind === 'schedule' || fields.trigger?.kind === 'schedule' || current.schedule_authoring_pinned) &&
           (fields.definition !== undefined || fields.trigger !== undefined || fields.enabled === true || fields.authoringAuthority !== undefined ||
             fields.modelAlias !== undefined || fields.maxTurns !== undefined || fields.researchMode !== undefined ||
             fields.contextGroupId !== undefined || fields.contextProjectId !== undefined)) {
-          throw new WorkspaceAccessError('workflow_schedule_edit_not_ready',409)
+          throw new WorkspaceAccessError(current.schedule_authoring_pinned ? 'workflow_schedule_reapproval_required' : 'workflow_schedule_review_required',409)
         }
       const sets: string[] = []
       const values: unknown[] = []
@@ -409,8 +421,12 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
         await client.query(`UPDATE scheduled_jobs SET enabled=false,schedule_claim_id=NULL,schedule_claim_expires_at=NULL
           WHERE workflow_id=$1 AND workflow_step_run_id IS NULL`, [id])
       }
+      if (reviewed) {
+        // Save the exact committed response; retries never replace the row again.
+        await client.query('UPDATE workflow_schedule_edit_reviews SET result_record=$2::jsonb WHERE id=$1', [proof!.reviewId,JSON.stringify(updated.rows[0])])
+      }
       return updated
-      })
+      },!!proof?.reviewId)
       if (!result?.rows[0]) return null
       const record = rowToWorkflow(result.rows[0])
       notifyWorkspaceChange(record.workspaceId, 'workflow', 'update', record.id)

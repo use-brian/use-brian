@@ -849,12 +849,13 @@ export type WorkflowScheduleEditProof = {
   authSessionId: string
   expectedPolicyRevision?: string
   reviewId?: string
+  payloadHash?: string
 }
 
 export type WorkflowStore = {
   /** Canonical review only; does not publish or renew persisted consent. */
   prepareScheduleEdit?(userId: string, id: string, fields: Parameters<WorkflowStore['update']>[2], proof: WorkflowScheduleEditProof): Promise<{
-    reviewId: string; policyRevision: string; before: Record<string, unknown>; after: Record<string, unknown>
+    reviewId: string; payloadHash: string; expiresAt: string; workflowVersion: string; policyRevision: string; before: Record<string, unknown>; after: Record<string, unknown>
   } | null>
 
   create(params: {

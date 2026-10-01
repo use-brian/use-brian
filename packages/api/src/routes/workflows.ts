@@ -185,6 +185,7 @@ const createBodySchema = z.object({
 
 const updateBodySchema = z.object({
   reviewId: z.string().uuid().optional(),
+  payloadHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   expectedPolicyRevision: z.string().regex(/^[1-9][0-9]*$/).max(32).optional(),
   name: z.string().min(1).max(120).optional(),
   description: z.string().max(2000).nullable().optional(),
@@ -885,7 +886,7 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     let updated: WorkflowRecord | null
     try {
       const proof = { kind: 'authenticated-workflow-rest' as const,userId,authSessionId: req.authSessionId ?? '',
-        reviewId: parsed.data.reviewId,expectedPolicyRevision: parsed.data.expectedPolicyRevision }
+        reviewId: parsed.data.reviewId,payloadHash: parsed.data.payloadHash,expectedPolicyRevision: parsed.data.expectedPolicyRevision }
       if (preparing) {
         if (!opts.workflowStore.prepareScheduleEdit) throw new WorkspaceAccessError('workflow_schedule_review_unavailable',409)
         const review = await opts.workflowStore.prepareScheduleEdit(userId,req.params.id,fields,proof)
