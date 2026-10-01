@@ -3,6 +3,7 @@
  * [COMP:api/programmatic-capture]
  */
 
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { Router, type Request, type Response } from 'express'
 import { computeNextRun } from '@use-brian/core'
 import { z } from 'zod'
@@ -18,6 +19,7 @@ const ProfileBody = z.object({
   name: z.string().trim().min(1).max(120),
   partitionBy: z.enum(['connection', 'user', 'session', 'subject']),
   enabled: z.boolean().default(true),
+  destination: z.union([z.object({kind:z.literal('department'),departmentId:Uuid,projectId:Uuid.optional()}).strict(),z.object({kind:z.literal('general')}).strict()]).nullable().optional(),
 }).strict()
 
 const Scalar = z.union([z.string().max(500), z.number(), z.boolean()])
@@ -42,8 +44,8 @@ const RuleBody = z.object({
   routingSchedule: z.string().trim().min(1).max(120).nullable().optional(),
   routingTimezone: z.string().trim().min(1).max(100).default('UTC'),
   episodeSensitivity: z.enum(['public', 'internal', 'confidential']).nullable().optional(),
-  compartments: z.array(z.string().min(1).max(160)).max(50).default([]),
-  projectIds: z.array(Uuid).max(50).default([]),
+  compartments: z.array(z.string().min(1).max(160)).max(50).optional(),
+  projectIds: z.array(Uuid).max(50).optional(),
   scopeBindingMode: z.enum(['inherit','explicit']).default('inherit'),
 }).strict().superRefine((value, ctx) => {
   const params = value.filterParams as Record<string, unknown>
@@ -96,6 +98,13 @@ type Options = {
 
 export function programmaticCaptureRoutes(opts: Options): Router {
   const router = Router({ mergeParams: true })
+  function admissionError(err: unknown,res:Response):boolean {
+    if(err instanceof WorkspaceAccessError){res.status(err.status).json({error:err.code});return true}
+    if(err instanceof Error && /^capture_(configuration|destination|binding|ready)_/.test(err.message)) {
+      res.status(409).json({error:'Capture configuration unavailable'});return true
+    }
+    return false
+  }
 
   async function gate(req: Request, res: Response): Promise<string | null> {
     if (!req.userId) {
@@ -130,6 +139,7 @@ export function programmaticCaptureRoutes(opts: Options): Router {
     try {
       res.json({ profiles: await opts.store.listProfiles(req.userId!, workspaceId) })
     } catch (err) {
+      if(admissionError(err,res))return
       console.error('[programmatic-capture] list failed:', err)
       res.status(500).json({ error: 'Failed to list capture profiles' })
     }
@@ -142,12 +152,14 @@ export function programmaticCaptureRoutes(opts: Options): Router {
     if (!parsed.success) return void res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
     try {
       const profile = await opts.store.createProfile({
+        authSessionId: req.authSessionId,
         actingUserId: req.userId!,
         workspaceId,
         ...parsed.data,
       })
       res.status(201).json({ profile })
     } catch (err) {
+      if(admissionError(err,res))return
       console.error('[programmatic-capture] create failed:', err)
       res.status(500).json({ error: 'Failed to create capture profile' })
     }
@@ -161,11 +173,13 @@ export function programmaticCaptureRoutes(opts: Options): Router {
     if (!profileId || !parsed.success) return void res.status(400).json({ error: 'Invalid input' })
     try {
       const profile = await opts.store.updateProfile({
+        authSessionId: req.authSessionId,
         actingUserId: req.userId!, workspaceId, profileId, ...parsed.data,
       })
       if (!profile) return void res.status(404).json({ error: 'Capture profile not found' })
       res.json({ profile })
     } catch (err) {
+      if(admissionError(err,res))return
       console.error('[programmatic-capture] update failed:', err)
       res.status(500).json({ error: 'Failed to update capture profile' })
     }
@@ -191,11 +205,13 @@ export function programmaticCaptureRoutes(opts: Options): Router {
     }
     try {
       const rule = await opts.store.addRule({
+        authSessionId: req.authSessionId,
         actingUserId: req.userId!, workspaceId, profileId, rule: parsed.data as CaptureRuleInput,
       })
       if (!rule) return void res.status(404).json({ error: 'Capture profile not found' })
       res.status(201).json({ rule })
     } catch (err) {
+      if(admissionError(err,res))return
       if ((err as { code?: string }).code === '23505') {
         return void res.status(409).json({ error: 'Rule order is already in use' })
       }
@@ -215,11 +231,13 @@ export function programmaticCaptureRoutes(opts: Options): Router {
     }
     try {
       const rule = await opts.store.updateRule({
+        authSessionId: req.authSessionId,
         actingUserId: req.userId!, workspaceId, profileId, ruleId, rule: parsed.data as CaptureRuleInput,
       })
       if (!rule) return void res.status(404).json({ error: 'Capture rule not found' })
       res.json({ rule })
     } catch (err) {
+      if(admissionError(err,res))return
       if ((err as { code?: string }).code === '23505') {
         return void res.status(409).json({ error: 'Rule order is already in use' })
       }
@@ -247,11 +265,18 @@ export function programmaticCaptureRoutes(opts: Options): Router {
     const assistantId = idParam(req, 'assistantId')
     const parsed = z.object({ profileId: Uuid.nullable() }).strict().safeParse(req.body)
     if (!assistantId || !parsed.success) return void res.status(400).json({ error: 'Invalid input' })
-    const updated = await opts.store.setAssistantProfile({
-      actingUserId: req.userId!, workspaceId, assistantId, profileId: parsed.data.profileId,
-    })
-    if (!updated) return void res.status(404).json({ error: 'Assistant or capture profile not found' })
-    res.status(204).end()
+    try {
+      const updated = await opts.store.setAssistantProfile({
+        actingUserId: req.userId!, authSessionId: req.authSessionId,
+        workspaceId, assistantId, profileId: parsed.data.profileId,
+      })
+      if (!updated) return void res.status(404).json({ error: 'Assistant or capture profile not found' })
+      res.status(204).end()
+    } catch (err) {
+      if (admissionError(err, res)) return
+      console.error('[programmatic-capture] assignment failed:', err)
+      res.status(500).json({ error: 'Failed to assign capture profile' })
+    }
   })
 
   return router

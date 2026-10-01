@@ -1,5 +1,6 @@
 import type { BatchStore, PendingBatch } from '@use-brian/core'
 import { getPool } from './client.js'
+import { programmaticIntakeClient, programmaticIntakeClaims } from './programmatic-intake-context.js'
 
 /**
  * Postgres-backed `BatchStore` for the company-brain ingest batch worker
@@ -95,6 +96,10 @@ export function createDbProgrammaticBatchStore(
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        // Workspace first, before row locks or exposing events to the handler.
+        const workspaces = await client.query<{workspace_id:string}>(`SELECT DISTINCT workspace_id
+          FROM pending_ingest_batches WHERE source='programmatic' AND fires_at<now() AND processed_at IS NULL AND NOT scope_held ORDER BY workspace_id`)
+        await client.query('SELECT id FROM workspaces WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE',[workspaces.rows.map(r=>r.workspace_id)])
         const result = await client.query<BatchRow>(
           `SELECT id, workspace_id, rule_id, assistant_id, partition_key,
                   source, fires_at, events,
@@ -103,6 +108,8 @@ export function createDbProgrammaticBatchStore(
              FROM pending_ingest_batches
             WHERE fires_at < now() AND processed_at IS NULL
               AND source = 'programmatic' AND NOT scope_held
+              AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(events) ev
+                WHERE programmatic_intake_current(workspace_id,assistant_id,rule_id,ev) IS NOT TRUE)
             FOR UPDATE SKIP LOCKED
             LIMIT $1`,
           [limit],
@@ -120,7 +127,8 @@ export function createDbProgrammaticBatchStore(
             [id],
           )
         }
-        const handlerResult = await handler(batches, markProcessed)
+        const handlerResult = await programmaticIntakeClaims.run(new Set(batches.map(b=>b.id)), () =>
+          programmaticIntakeClient.run(client, () => handler(batches, markProcessed)))
         await client.query('COMMIT')
         return handlerResult
       } catch (err) {
@@ -302,6 +310,7 @@ export async function appendProgrammaticBatchEvent(input: {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[input.workspaceId])
     const receipt = await client.query<{ id: string }>(
       `INSERT INTO programmatic_capture_receipts
          (workspace_id, principal_kind, principal_id, event_id, rule_id, status)
@@ -317,13 +326,16 @@ export async function appendProgrammaticBatchEvent(input: {
       ],
     )
     if (!receipt.rows[0]) {
-      await client.query('COMMIT')
-      return getProgrammaticReceipt(
+      // Reuse the checked-out connection. Calling pool.query here deadlocks
+      // with max=1 because this connection is released only in finally.
+      const existing = await getProgrammaticReceipt(
         input.event.principalKind,
         input.event.principalId,
         input.event.eventId,
-        pool,
+        client,
       )
+      await client.query('COMMIT')
+      return existing
     }
 
     const eventJson = JSON.stringify([input.event])
