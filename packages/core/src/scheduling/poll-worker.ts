@@ -139,7 +139,37 @@ export function createPollWorker(options: PollWorkerOptions) {
       // to bound concurrent DB checkouts, not to serialize work.
       const dueJobs = await runInBackgroundLane(() => store.getDueJobs())
 
-      for (const job of dueJobs) {
+      for (const candidate of dueJobs) {
+        let job = candidate
+        if (candidate.requiresScheduleClaim) {
+          // Do not spend a later job's lease while earlier jobs execute.
+          if (!store.claimDueJob || !store.finishScheduleClaim) continue
+          const claimed = await runInBackgroundLane(() => store.claimDueJob!(candidate.id))
+          if (!claimed?.scheduleClaimId) continue
+          job = claimed
+          let success = false
+          try {
+            await executor(job)
+            success = true
+          } catch (error) {
+            const code = (error as { code?: string; reason?: string }).code ?? (error as { reason?: string }).reason
+            if (['workflow_schedule_claim_required','workflow_schedule_claim_unavailable',
+              'workflow_schedule_binding_conflict','workflow_schedule_authority_unavailable','workflow_authority_unavailable'].includes(code ?? '')) {
+              // Lost/expired/revoked admission is not an executed one-shot.
+              // Never disable it or write over a newer worker's claim.
+              continue
+            }
+            console.error(`[scheduler] Claimed job ${job.id} execution failed:`, error)
+          }
+          const outcome = await store.finishScheduleClaim(job.id, job.scheduleClaimId!, {
+            success, nextRunAt: job.schedule.type === 'once' ? new Date(0) : computeNextRun(job.schedule, job.timezone),
+            maxConsecutiveFailures,
+          })
+          if (outcome.applied && outcome.disabled && !success && job.schedule.type !== 'once' && onJobAutoDisabled) {
+            try { await onJobAutoDisabled(job, outcome.failures) } catch (error) { console.warn('[scheduler] onJobAutoDisabled failed:', error) }
+          }
+          continue
+        }
         // Path B durable chat resume — dispatch to `resumeHandler` instead
         // of the standard executor. Resume jobs are always treated as
         // one-time: they disable on completion regardless of `schedule`

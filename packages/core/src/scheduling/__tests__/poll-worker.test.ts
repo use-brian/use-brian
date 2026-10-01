@@ -404,3 +404,42 @@ describe('[COMP:brain/session-resume-worker] poll worker dispatch', () => {
     worker.stop()
   })
 })
+
+
+describe('pinned schedule dispatch claims', () => {
+  it('claims just before each sequential dispatch, even after an earlier job takes over ten minutes', async () => {
+    vi.useFakeTimers()
+    const first = makeJob({ id: 'first',requiresScheduleClaim: true }), second = makeJob({ id: 'second',requiresScheduleClaim: true,schedule: { type: 'once',datetime: '2099-01-01T00:00:00Z' } })
+    const store = makeFakeJobStore([first,second])
+    const claimedAt: number[] = []
+    store.claimDueJob = vi.fn(async id => { claimedAt.push(Date.now()); return { ...(id === 'first' ? first : second),scheduleClaimId: `${id}-claim` } })
+    store.finishScheduleClaim = vi.fn(async () => ({ applied: true,disabled: false,failures: 0 }))
+    const executor = vi.fn(async job => { if (job.id === 'first') vi.setSystemTime(Date.now()+11*60_000); return 'ok' })
+    const worker = createPollWorker({ store,executor })
+    try {
+      worker.start()
+      await vi.waitFor(() => expect(store.finishScheduleClaim).toHaveBeenCalledTimes(2))
+      expect(claimedAt[1]-claimedAt[0]).toBeGreaterThanOrEqual(11*60_000)
+      expect(store.finishScheduleClaim).toHaveBeenLastCalledWith('second','second-claim',expect.objectContaining({ success: true,nextRunAt: new Date(0) }))
+      expect(executor).toHaveBeenCalledTimes(2)
+      expect(store.completedCalls).toEqual([])
+      expect(store.failedCalls).toEqual([])
+      expect(store.updates).toEqual([])
+    } finally { worker.stop();vi.useRealTimers() }
+  })
+  it.each(['workflow_schedule_claim_unavailable','workflow_schedule_authority_unavailable'])('does not disable or count %s as a failed one-shot', async code => {
+    const job = makeJob({ requiresScheduleClaim: true,schedule: { type: 'once',datetime: '2099-01-01T00:00:00Z' } })
+    const store = makeFakeJobStore([job])
+    store.claimDueJob = vi.fn(async () => ({ ...job,scheduleClaimId: 'claim' }))
+    store.finishScheduleClaim = vi.fn(async () => ({ applied: false,disabled: false,failures: 0 }))
+    const executor = vi.fn(async () => { throw Object.assign(new Error(code),{ code }) })
+    const worker = createPollWorker({ store,executor })
+    try {
+      worker.start()
+      await vi.waitFor(() => expect(executor).toHaveBeenCalledTimes(1))
+      expect(store.finishScheduleClaim).not.toHaveBeenCalled()
+      expect(store.failedCalls).toEqual([])
+      expect(store.updates).toEqual([])
+    } finally { worker.stop() }
+  })
+})

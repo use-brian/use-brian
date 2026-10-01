@@ -1,3 +1,5 @@
+import { admitGoalSource, bindTaskGoalSource } from '../workspace-access/goal-source-admission.js'
+import { admitOperationalAuthoring, type OperationalHumanAuthor } from '../workspace-access/operational-admission.js'
 /**
  * Goals SQL helpers — the operational goal-seeker primitive.
  *
@@ -8,7 +10,7 @@
  * confined by the `goals_workspace_member` policy.
  */
 import type { DoneWhenNode, EventSubscription, GoalBrief, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalListRow, GoalMeans, GoalRecord, GoalStatus } from '@use-brian/core'
-import { query, queryWithRLS } from './client.js'
+import { query, queryWithRLS, getPool } from './client.js'
 import type pg from 'pg'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import type { BrainChangeAction } from '../brain-stream/sse-fanout.js'
@@ -119,42 +121,68 @@ function toRecord(row: GoalRow): GoalRecord {
 }
 
 /** Insert a goal (owner pool; the route/engine is the authz gate). */
-export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> {
-  const host = params.host ?? null
-  if (params.confirmed !== false && !params.authoringAuthority) {
-    throw Object.assign(new Error('Goal authoring permissions are missing. Confirm the goal from a current workspace turn.'), { reason: 'goal_authority_unavailable' })
-  }
-  const result = await query<GoalRow>(
-    `INSERT INTO goals (
-       workspace_id, parent_goal_id, recipe_id, host_type, host_id,
-       outcome, done_when, means, budget, policy, status, created_by_user_id,
-       origin_session_id, context_group_id, context_project_id, authoring_authority, confirmed_at, brief
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb, $17, $18::jsonb)
-     RETURNING ${FULL_SELECT}`,
-    [
-      params.workspaceId,
-      params.parentGoalId ?? null,
-      params.recipeId ?? null,
-      host ? host.type : null,
-      host ? host.id : null,
-      params.outcome,
-      JSON.stringify(params.doneWhen),
-      JSON.stringify(params.means ?? {}),
-      JSON.stringify(params.budget ?? {}),
-      JSON.stringify(params.policy ?? {}),
-      params.status ?? 'active',
-      params.createdByUserId ?? null,
-      params.originSessionId ?? null,
-      params.contextGroupId ?? null,
-      params.contextProjectId ?? null,
-      params.authoringAuthority ? JSON.stringify(params.authoringAuthority) : null,
-      // Explicitly-created goals are confirmed; the judge-draft path passes
-      // `confirmed: false` to mint a draft (autopilot §4/§8).
-      params.confirmed === false ? null : new Date(),
-      params.brief ? JSON.stringify(params.brief) : null,
-    ],
-  )
+export async function createGoal(params: GoalCreateParams, humanAuthor?: OperationalHumanAuthor, taskSource?: object): Promise<GoalRecord> {
+  const client = await getPool().connect()
+  const result = await (async () => {
+    try {
+      await client.query('BEGIN')
+      // Parent/host/session-derived and autodrafted goals need canonical source
+      // proof, not a human default or a creator/owner guess. Block ready mode
+      // until those adapters supply it; legacy creation remains unchanged.
+      const ordinary = !params.parentGoalId && !params.host && !params.originSessionId
+        && !params.recipeId && params.confirmed !== false
+      const admitted = taskSource ? await admitGoalSource(client, params, taskSource) : await admitOperationalAuthoring(client, {
+        workspaceId: params.workspaceId, userId: params.createdByUserId ?? '',
+        contextGroupId: params.contextGroupId, contextProjectId: params.contextProjectId,
+        authoringAuthority: params.authoringAuthority,
+      }, ordinary ? humanAuthor : undefined)
+      params = { ...params, contextGroupId: admitted.contextGroupId,
+        contextProjectId: admitted.contextProjectId, authoringAuthority: admitted.authoringAuthority ?? undefined }
+      const host = params.host ?? null
+      if (params.confirmed !== false && !params.authoringAuthority) {
+        throw Object.assign(new Error('Goal authoring permissions are missing. Confirm the goal from a current workspace turn.'), { reason: 'goal_authority_unavailable' })
+      }
+      const inserted = await client.query<GoalRow>(
+        `INSERT INTO goals (
+           workspace_id, parent_goal_id, recipe_id, host_type, host_id,
+           outcome, done_when, means, budget, policy, status, created_by_user_id,
+           origin_session_id, context_group_id, context_project_id, authoring_authority, confirmed_at, brief
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb, $17, $18::jsonb)
+         RETURNING ${FULL_SELECT}`,
+        [
+          params.workspaceId,
+          params.parentGoalId ?? null,
+          params.recipeId ?? null,
+          host ? host.type : null,
+          host ? host.id : null,
+          params.outcome,
+          JSON.stringify(params.doneWhen),
+          JSON.stringify(params.means ?? {}),
+          JSON.stringify(params.budget ?? {}),
+          JSON.stringify(params.policy ?? {}),
+          params.status ?? 'active',
+          params.createdByUserId ?? null,
+          params.originSessionId ?? null,
+          params.contextGroupId ?? null,
+          params.contextProjectId ?? null,
+          params.authoringAuthority ? JSON.stringify(params.authoringAuthority) : null,
+          // Explicitly-created goals are confirmed; the judge-draft path passes
+          // `confirmed: false` to mint a draft (autopilot §4/§8).
+          params.confirmed === false ? null : new Date(),
+          params.brief ? JSON.stringify(params.brief) : null,
+        ],
+      )
+      if (taskSource) await bindTaskGoalSource(client, params.host!.id, inserted.rows[0].id)
+      await client.query('COMMIT')
+      return inserted
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  })()
   const created = toRecord(result.rows[0])
   notifyGoalChange(created.workspaceId, 'create', created.id)
   return created
@@ -171,7 +199,7 @@ export async function getGoalById(userId: string, id: string, transactionClient?
     [id, userId],
   ) : await queryWithRLS<GoalRow>(
     userId,
-    `SELECT ${FULL_SELECT} FROM goals WHERE id = $1`,
+    `SELECT ${FULL_SELECT} FROM goals WHERE id = $1 AND goal_crm_scope_visible(id)`,
     [id],
   )
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
@@ -215,7 +243,7 @@ export async function listGoals(
   workspaceId: string,
   filters: GoalListFilters = {},
 ): Promise<GoalListRow[]> {
-  const wheres: string[] = ['workspace_id = $1']
+  const wheres: string[] = ['workspace_id = $1', 'goal_crm_scope_visible(id)']
   const values: unknown[] = [workspaceId]
   let idx = 2
 

@@ -1,3 +1,4 @@
+import type { OperationalHumanAuthor } from '../workspace-access/operational-admission.js'
 import type { GoalStore } from '@use-brian/core'
 import {
   countOpenSubGoalsSystem,
@@ -15,9 +16,9 @@ import {
  * the owner pool (the route/engine is the authz gate), user reads route
  * through `queryWithRLS` so `goals_workspace_member` enforces isolation.
  */
-export function createDbGoalStore(): GoalStore {
+export function createDbGoalStore(humanAuthor?: OperationalHumanAuthor): GoalStore {
   return {
-    create: createGoal,
+    create: (params, execution) => createGoal(params, humanAuthor, execution?.taskSource),
     getById: getGoalById,
     getByIdSystem: getGoalByIdSystem,
     list: listGoals,

@@ -251,11 +251,12 @@ describe('[COMP:db/job-store-claim] countEnabledRecurring', () => {
 
 describe('[COMP:db/job-store-claim] getDueJobs lease semantics', () => {
   it('claims due jobs with an UPDATE that advances next_run_at by a 10-minute lease', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // no pinned candidates
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     const store = createDbJobStore()
     await store.getDueJobs()
-    expect(mockQuery).toHaveBeenCalledOnce()
-    const [sql] = mockQuery.mock.calls[0]
+    expect(mockQuery).toHaveBeenCalledTimes(2)
+    const [sql] = mockQuery.mock.calls[1]
     // The claim must be a write, not a read — that's the bug fix.
     expect(sql).toContain('UPDATE scheduled_jobs')
     // The new next_run_at must be 10 minutes in the future. If anyone
@@ -275,6 +276,7 @@ describe('[COMP:db/job-store-claim] getDueJobs lease semantics', () => {
   })
 
   it('returns an array of jobs with leased state', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // no pinned candidates
     mockQuery.mockResolvedValueOnce({
       rows: [
         {

@@ -1,5 +1,10 @@
+import type { PoolClient } from 'pg'
+import { isDeepStrictEqual } from 'node:util'
+import { computeNextRun } from '@use-brian/core'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { assertLegacyJobCreation, lockOperationalPolicy, readWorkflowScheduleAuthority } from '../workspace-access/operational-admission.js'
 import type { JobStore, ScheduledJob, ScheduledJobMode, ScheduledJobState, StructuredSchedule } from '@use-brian/core'
-import { query } from './client.js'
+import { query, getPool } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 /**
@@ -45,6 +50,8 @@ type JobRow = {
   contextProjectId: string | null
   contextCompartments: string[]
   contextProjectIds: string[]
+  scheduleClaimId?: string | null
+  requiresScheduleClaim?: boolean
 }
 
 const JOB_SELECT = `
@@ -63,7 +70,9 @@ const JOB_SELECT = `
   context_group_id as "contextGroupId",
   context_project_id as "contextProjectId",
   context_compartments as "contextCompartments",
-  context_project_ids as "contextProjectIds"
+  context_project_ids as "contextProjectIds",
+  schedule_claim_id as "scheduleClaimId",
+  (workflow_authoring_snapshot IS NOT NULL) as "requiresScheduleClaim"
 `
 
 /**
@@ -127,71 +136,136 @@ function rowToJob(row: JobRow): ScheduledJob {
   }
 }
 
+/** Caller holds the workspace barrier through workflow + firing-row publication.
+ * No model fields, caller grants, fresh capture, or mode defaults enter here. */
+export async function insertWorkflowScheduleJob(client: PoolClient, workspaceId: string, workflowId: string,
+  requested?: Parameters<JobStore['create']>[0]): Promise<ScheduledJob> {
+  const source = await readWorkflowScheduleAuthority(client, workspaceId, workflowId)
+  const trigger = source.trigger
+  const instructions = JSON.stringify({ kind: 'workflow_trigger', workflowId, input: {} })
+  if (requested) {
+    const expected = { assistantId: source.assistantId, userId: source.userId, channelType: 'workflow', channelId: workflowId,
+      workflowId, schedule: trigger.schedule, timezone: trigger.timezone ?? 'UTC', mode: trigger.mode ?? 'local',
+      instructions, workflowStepRunId: null, viewId: null,
+      contextGroupId: source.contextGroupId, contextProjectId: source.contextProjectId,
+      contextCompartments: source.compartments, contextProjectIds: source.projectIds,
+      silentUntilFire: trigger.policy?.silentUntilFire ?? false,
+      nagIntervalMins: trigger.policy?.nagIntervalMins ?? null, nagUntilKeyword: trigger.policy?.nagUntilKeyword ?? null }
+    for (const [key, value] of Object.entries(expected)) {
+      const supplied = requested[key as keyof typeof requested]
+      if (supplied !== undefined && !isDeepStrictEqual(supplied, value)) throw new WorkspaceAccessError('workflow_schedule_binding_conflict', 409)
+    }
+  }
+  const existing = (await client.query<JobRow & { snapshot: unknown }>(`SELECT ${JOB_SELECT},workflow_authoring_snapshot AS snapshot
+    FROM scheduled_jobs WHERE workflow_id=$1 AND workflow_step_run_id IS NULL FOR UPDATE`, [workflowId])).rows
+  if (existing.length) {
+    if (existing.length !== 1 || !existing[0].enabled || !isDeepStrictEqual(existing[0].snapshot, source.snapshot)) {
+      throw new WorkspaceAccessError('workflow_schedule_binding_conflict', 409)
+    }
+    return rowToJob(existing[0])
+  }
+  const nextRunAt = computeNextRun(trigger.schedule, trigger.timezone ?? 'UTC')
+  if (!Number.isFinite(nextRunAt.getTime())) throw new WorkspaceAccessError('workflow_schedule_invalid', 409)
+  const row = (await client.query<JobRow>(`INSERT INTO scheduled_jobs(assistant_id,user_id,schedule,timezone,mode,instructions,
+    channel_type,channel_id,next_run_at,workflow_id,context_group_id,context_project_id,context_compartments,context_project_ids,
+    silent_until_fire,nag_interval_mins,nag_until_keyword,workflow_authoring_snapshot)
+    VALUES($1,$2,$3::jsonb,$4,$5,$6,'workflow',$7::text,$8,$7::uuid,$9,$10,$11,$12,$13,$14,$15,$16::jsonb) RETURNING ${JOB_SELECT}`,
+  [source.assistantId,source.userId,JSON.stringify(trigger.schedule),trigger.timezone ?? 'UTC',trigger.mode ?? 'local',instructions,
+    workflowId,nextRunAt,source.contextGroupId,source.contextProjectId,source.compartments,source.projectIds,
+    trigger.policy?.silentUntilFire ?? false,trigger.policy?.nagIntervalMins ?? null,trigger.policy?.nagUntilKeyword ?? null,JSON.stringify(source.snapshot)])).rows[0]
+  // Sticky tombstone: deleting the transient firing row must not allow an
+  // old queue object to fall back to unproven legacy dispatch after a mode change.
+  await client.query('UPDATE workflows SET schedule_authoring_pinned=true WHERE id=$1', [workflowId])
+  return rowToJob(row)
+}
+
 export function createDbJobStore(): JobStore {
   return {
     async create(params) {
-      const result = await query<JobRow>(
-        `INSERT INTO scheduled_jobs (
-           assistant_id, user_id, schedule, timezone, mode, instructions,
-           channel_type, channel_id, next_run_at,
-           silent_until_fire, nag_interval_mins, nag_until_keyword,
-           workflow_id, workflow_step_run_id, view_id,
-           context_group_id, context_project_id, context_compartments,
-           context_project_ids
-         )
-         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                $13, $14, $15,
-                COALESCE($16::uuid, wr.context_group_id, s.context_group_id, w.context_group_id),
-                COALESCE($17::uuid, wr.context_project_id, s.context_project_id, w.context_project_id),
-                CASE
-                  WHEN $18::text[] IS NOT NULL THEN $18::text[]
-                  WHEN wr.id IS NOT NULL THEN wr.context_compartments
-                  WHEN s.id IS NOT NULL THEN s.context_compartments
-                  WHEN g.compartment_key IS NOT NULL THEN ARRAY[g.compartment_key]::text[]
-                  ELSE ARRAY[]::text[]
-                END,
-                CASE
-                  WHEN $19::uuid[] IS NOT NULL THEN $19::uuid[]
-                  WHEN $17::uuid IS NOT NULL THEN ARRAY[$17::uuid]::uuid[]
-                  WHEN wr.id IS NOT NULL THEN wr.context_project_ids
-                  WHEN s.context_project_id IS NOT NULL THEN ARRAY[s.context_project_id]::uuid[]
-                  WHEN w.context_project_id IS NOT NULL THEN ARRAY[w.context_project_id]::uuid[]
-                  ELSE ARRAY[]::uuid[]
-                END
-           FROM (SELECT $13::uuid AS workflow_id,
-                        $14::uuid AS workflow_step_run_id,
-                        $7::text AS channel_type,
-                        $8::text AS channel_id) input
-           LEFT JOIN workflow_step_runs wsr ON wsr.id = input.workflow_step_run_id
-           LEFT JOIN workflow_runs wr ON wr.id = wsr.run_id
-           LEFT JOIN workflows w ON w.id = COALESCE(wr.workflow_id, input.workflow_id)
-           LEFT JOIN sessions s
-             ON input.channel_type = 'session_resume' AND s.id::text = input.channel_id
-           LEFT JOIN workspace_groups g
-             ON g.id = COALESCE($16::uuid, wr.context_group_id, s.context_group_id, w.context_group_id)
-         RETURNING ${JOB_SELECT}`,
-        [
-          params.assistantId,
-          params.userId,
-          JSON.stringify(params.schedule),
-          params.timezone,
-          params.mode ?? 'local',
-          params.instructions,
-          params.channelType,
-          params.channelId,
-          params.nextRunAt,
-          params.silentUntilFire ?? false,
-          params.nagIntervalMins ?? null,
-          params.nagUntilKeyword ?? null,
-          params.workflowId ?? null,
-          params.workflowStepRunId ?? null,
-          params.viewId ?? null,
-          params.contextGroupId ?? null,
-          params.contextProjectId ?? null,
-          params.contextCompartments === undefined ? null : params.contextCompartments,
-          params.contextProjectIds === undefined ? null : params.contextProjectIds,
-        ],
-      )
+      const client = await getPool().connect()
+      const result = await (async () => {
+        try {
+          await client.query('BEGIN')
+          const pointer = (await client.query('SELECT workspace_id FROM assistants WHERE id=$1', [params.assistantId])).rows[0]?.workspace_id
+          const policy = pointer ? await lockOperationalPolicy(client, pointer) : undefined
+          if (policy?.setupState === 'ready' && params.workflowId && !params.workflowStepRunId) {
+            const inherited = await insertWorkflowScheduleJob(client, pointer, params.workflowId, params)
+            await client.query('COMMIT')
+            return { rows: [inherited as JobRow] }
+          }
+          await assertLegacyJobCreation(client, params.assistantId)
+          const inserted = await client.query<JobRow>(
+            `INSERT INTO scheduled_jobs (
+               assistant_id, user_id, schedule, timezone, mode, instructions,
+               channel_type, channel_id, next_run_at,
+               silent_until_fire, nag_interval_mins, nag_until_keyword,
+               workflow_id, workflow_step_run_id, view_id,
+               context_group_id, context_project_id, context_compartments,
+               context_project_ids
+             )
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                    $13, $14, $15,
+                    COALESCE($16::uuid, wr.context_group_id, s.context_group_id, w.context_group_id),
+                    COALESCE($17::uuid, wr.context_project_id, s.context_project_id, w.context_project_id),
+                    CASE
+                      WHEN $18::text[] IS NOT NULL THEN $18::text[]
+                      WHEN wr.id IS NOT NULL THEN wr.context_compartments
+                      WHEN s.id IS NOT NULL THEN s.context_compartments
+                      WHEN g.compartment_key IS NOT NULL THEN ARRAY[g.compartment_key]::text[]
+                      ELSE ARRAY[]::text[]
+                    END,
+                    CASE
+                      WHEN $19::uuid[] IS NOT NULL THEN $19::uuid[]
+                      WHEN $17::uuid IS NOT NULL THEN ARRAY[$17::uuid]::uuid[]
+                      WHEN wr.id IS NOT NULL THEN wr.context_project_ids
+                      WHEN s.context_project_id IS NOT NULL THEN ARRAY[s.context_project_id]::uuid[]
+                      WHEN w.context_project_id IS NOT NULL THEN ARRAY[w.context_project_id]::uuid[]
+                      ELSE ARRAY[]::uuid[]
+                    END
+               FROM (SELECT $13::uuid AS workflow_id,
+                            $14::uuid AS workflow_step_run_id,
+                            $7::text AS channel_type,
+                            $8::text AS channel_id) input
+               LEFT JOIN workflow_step_runs wsr ON wsr.id = input.workflow_step_run_id
+               LEFT JOIN workflow_runs wr ON wr.id = wsr.run_id
+               LEFT JOIN workflows w ON w.id = COALESCE(wr.workflow_id, input.workflow_id)
+               LEFT JOIN sessions s
+                 ON input.channel_type = 'session_resume' AND s.id::text = input.channel_id
+               LEFT JOIN workspace_groups g
+                 ON g.id = COALESCE($16::uuid, wr.context_group_id, s.context_group_id, w.context_group_id)
+             RETURNING ${JOB_SELECT}`,
+            [
+              params.assistantId,
+              params.userId,
+              JSON.stringify(params.schedule),
+              params.timezone,
+              params.mode ?? 'local',
+              params.instructions,
+              params.channelType,
+              params.channelId,
+              params.nextRunAt,
+              params.silentUntilFire ?? false,
+              params.nagIntervalMins ?? null,
+              params.nagUntilKeyword ?? null,
+              params.workflowId ?? null,
+              params.workflowStepRunId ?? null,
+              params.viewId ?? null,
+              params.contextGroupId ?? null,
+              params.contextProjectId ?? null,
+              params.contextCompartments === undefined ? null : params.contextCompartments,
+              params.contextProjectIds === undefined ? null : params.contextProjectIds,
+            ],
+          )
+
+          await client.query('COMMIT')
+          return inserted
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        } finally {
+          client.release()
+        }
+      })()
 
       // Retroactive `users.timezone` backfill. When the model captures a
       // concrete IANA zone on a scheduled job (e.g. "Asia/Hong_Kong" from
@@ -330,19 +404,88 @@ export function createDbJobStore(): JobStore {
       //
       // FOR UPDATE SKIP LOCKED is defense in depth — we run min=max=1 today,
       // but the same statement is correct under any future scale-out.
+      // Pinned jobs are only discovered here, never leased in a batch.
+      const pinned = (await query<JobRow>(`SELECT ${JOB_SELECT} FROM scheduled_jobs
+        WHERE workflow_authoring_snapshot IS NOT NULL AND enabled AND next_run_at<=clock_timestamp()
+        AND (schedule_claim_id IS NULL OR schedule_claim_expires_at<=clock_timestamp()) ORDER BY id`)).rows.map(rowToJob)
       const result = await query<JobRow>(
         `UPDATE scheduled_jobs
          SET next_run_at = now() + interval '10 minutes',
              updated_at = now()
          WHERE id IN (
            SELECT id FROM scheduled_jobs
-           WHERE next_run_at <= now() AND enabled = true
+           WHERE next_run_at <= now() AND enabled = true AND workflow_authoring_snapshot IS NULL
            FOR UPDATE SKIP LOCKED
          )
          RETURNING ${JOB_SELECT}`,
         [],
       )
-      return result.rows.map(rowToJob)
+      return [...pinned, ...result.rows.map(rowToJob)]
+    },
+
+    async claimDueJob(id) {
+      const pointer = (await query<{ workspaceId: string; workflowId: string }>(`SELECT w.workspace_id AS "workspaceId",w.id AS "workflowId"
+        FROM scheduled_jobs j JOIN workflows w ON w.id=j.workflow_id WHERE j.id=$1 AND j.workflow_authoring_snapshot IS NOT NULL`, [id])).rows[0]
+      if (!pointer) return null
+      const client = await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        // Canonical lock order: workspace, workflow, then job (also deletion).
+        const source = await readWorkflowScheduleAuthority(client, pointer.workspaceId, pointer.workflowId)
+        const job = (await client.query<JobRow & { snapshot: unknown }>(`SELECT ${JOB_SELECT},workflow_authoring_snapshot AS snapshot
+          FROM scheduled_jobs WHERE id=$1 AND workflow_id=$2 AND enabled AND next_run_at<=clock_timestamp()
+          AND (schedule_claim_id IS NULL OR schedule_claim_expires_at<=clock_timestamp()) FOR UPDATE SKIP LOCKED`, [id,pointer.workflowId])).rows[0]
+        if (!job) { await client.query('COMMIT'); return null }
+        if (!isDeepStrictEqual(job.snapshot,source.snapshot)) throw new WorkspaceAccessError('workflow_schedule_binding_conflict', 409)
+        const claimed = (await client.query<JobRow>(`UPDATE scheduled_jobs SET schedule_claim_expires_at=clock_timestamp()+interval '10 minutes',updated_at=now(),
+          schedule_claim_id=gen_random_uuid(),schedule_claim_consumed=false WHERE id=$1 RETURNING ${JOB_SELECT}`, [id])).rows[0]
+        await client.query('COMMIT')
+        return rowToJob(claimed)
+      } catch (error) {
+        await client.query('ROLLBACK')
+        if (error instanceof WorkspaceAccessError || (error as { reason?: string }).reason === 'workflow_authority_unavailable') return null
+        throw error
+      } finally { client.release() }
+    },
+
+    async advanceScheduleClaimNag(id, claimId, activeNag, nextRunAt) {
+      // Single-row CAS: never take a workflow/workspace lock after this lock.
+      // Merge rather than replacing failure counters or other runtime state.
+      const result = await query(`UPDATE scheduled_jobs
+        SET state_json=COALESCE(state_json,'{}'::jsonb) || jsonb_build_object('activeNag',$3::jsonb),
+          next_run_at=$4,updated_at=now()
+        WHERE id=$1 AND schedule_claim_id=$2 AND workflow_authoring_snapshot IS NOT NULL
+          AND enabled AND NOT schedule_claim_consumed AND schedule_claim_expires_at>clock_timestamp()`,
+      [id,claimId,JSON.stringify(activeNag),safeNextRunAt(id,nextRunAt)])
+      return (result.rowCount ?? 0) > 0
+    },
+
+    async finishScheduleClaim(id, claimId, outcome) {
+      const unchanged = { applied: false, disabled: false, failures: 0 }
+      const pointer = (await query<{ workspaceId: string; workflowId: string }>(`SELECT w.workspace_id AS "workspaceId",w.id AS "workflowId"
+        FROM scheduled_jobs j JOIN workflows w ON w.id=j.workflow_id WHERE j.id=$1 AND j.workflow_authoring_snapshot IS NOT NULL`, [id])).rows[0]
+      if (!pointer) return unchanged
+      const client = await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        await lockOperationalPolicy(client,pointer.workspaceId)
+        await client.query('SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 FOR SHARE', [pointer.workflowId,pointer.workspaceId])
+        const job = (await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM scheduled_jobs
+          WHERE id=$1 AND workflow_id=$2 AND schedule_claim_id=$3 AND schedule_claim_consumed FOR UPDATE`, [id,pointer.workflowId,claimId])).rows[0]
+        if (!job) { await client.query('COMMIT'); return unchanged }
+        const failures = outcome.success ? 0 : (job.state?.consecutiveFailures ?? 0) + 1
+        const disabled = job.schedule.type === 'once' || failures >= outcome.maxConsecutiveFailures
+        const state = { ...job.state, consecutiveFailures: failures }
+        // Read under the claim-fenced row lock: a resolved nag resumes its
+        // normal schedule; an open cycle keeps the executor's exact deadline.
+        const nextRunAt = !disabled && job.nagIntervalMins != null && job.state?.activeNag
+          ? job.nextRunAt : outcome.nextRunAt
+        await client.query(`UPDATE scheduled_jobs SET enabled=enabled AND NOT $3,next_run_at=$4,last_run_at=clock_timestamp(),
+          last_status=$5,state_json=$6::jsonb,schedule_claim_id=NULL,schedule_claim_expires_at=NULL,updated_at=now() WHERE id=$1 AND schedule_claim_id=$2`,
+        [id,claimId,disabled,safeNextRunAt(id,nextRunAt),outcome.success ? 'completed' : 'failed',JSON.stringify(state)])
+        await client.query('COMMIT')
+        return { applied: true,disabled,failures }
+      } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
     },
 
     async markCompleted(id, nextRunAt) {
@@ -368,7 +511,7 @@ export function createDbJobStore(): JobStore {
         assistant_id: string
       }>(
         `SELECT schedule, nag_interval_mins, channel_type, workflow_id, state_json, assistant_id
-           FROM scheduled_jobs WHERE id = $1`,
+           FROM scheduled_jobs WHERE id = $1 AND workflow_authoring_snapshot IS NULL`,
         [id],
       )
       const row = rowResult.rows[0]
@@ -380,7 +523,7 @@ export function createDbJobStore(): JobStore {
 
       if (isOnceNonNag) {
         // Reap the trigger row.
-        await query(`DELETE FROM scheduled_jobs WHERE id = $1`, [id])
+        await query(`DELETE FROM scheduled_jobs WHERE id = $1 AND workflow_authoring_snapshot IS NULL AND workflow_authoring_snapshot IS NULL`, [id])
         // Cascade-delete the implicit one-step reminder workflow. A
         // `scheduleWorkflow`-backed job (channelType 'workflow') points at
         // a user-authored multi-step workflow we must leave intact —
@@ -420,7 +563,7 @@ export function createDbJobStore(): JobStore {
         // `now + nagIntervalMins * 60_000`. Just stamp last_run_at /
         // last_status.
         await query(
-          `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'completed', updated_at = now() WHERE id = $1`,
+          `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'completed', updated_at = now() WHERE id = $1 AND workflow_authoring_snapshot IS NULL`,
           [id],
         )
         notifyJobChange(id, row.assistant_id, 'update')
@@ -428,7 +571,7 @@ export function createDbJobStore(): JobStore {
       }
 
       await query(
-        `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'completed', next_run_at = $2, updated_at = now() WHERE id = $1`,
+        `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'completed', next_run_at = $2, updated_at = now() WHERE id = $1 AND workflow_authoring_snapshot IS NULL`,
         [id, safeNextRunAt(id, nextRunAt)],
       )
       notifyJobChange(id, row.assistant_id, 'update')
@@ -443,7 +586,7 @@ export function createDbJobStore(): JobStore {
         nagIntervalMins: number | null
         workflowId: string | null
       }>(
-        `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'failed', next_run_at = $2, updated_at = now() WHERE id = $1
+        `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'failed', next_run_at = $2, updated_at = now() WHERE id = $1 AND workflow_authoring_snapshot IS NULL
          RETURNING assistant_id AS "assistantId", schedule, nag_interval_mins AS "nagIntervalMins", workflow_id AS "workflowId"`,
         [id, safeNextRunAt(id, nextRunAt)],
       )
@@ -504,6 +647,20 @@ export function createDbJobStore(): JobStore {
         `UPDATE scheduled_jobs SET state_json = $2, updated_at = now() WHERE id = $1`,
         [id, JSON.stringify(state ?? {})],
       )
+    },
+
+    async resolveActiveNag(id, userId, observedNag, nextRunAt) {
+      // One statement/transaction: PostgreSQL rechecks the cycle predicate
+      // after waiting for a concurrent writer, and subtracts from the LIVE
+      // JSON rather than a stale snapshot (notably consecutiveFailures).
+      const result = await query<{ assistantId: string }>(`UPDATE scheduled_jobs
+        SET state_json=state_json - 'activeNag',next_run_at=$4,updated_at=now()
+        WHERE id=$1 AND user_id=$2 AND enabled AND state_json->'activeNag'=$3::jsonb
+        RETURNING assistant_id AS "assistantId"`,
+      [id,userId,JSON.stringify(observedNag),safeNextRunAt(id,nextRunAt)])
+      if (!result.rows[0]) return false
+      notifyJobChange(id,result.rows[0].assistantId,'update')
+      return true
     },
 
     async listActiveNagsForUser(userId) {

@@ -4,8 +4,7 @@
  *
  * Fakes a `JobStore`. Verifies detectAndResolveNags: the empty-message
  * and no-active-nags early exits, case-insensitive nagUntilKeyword
- * matching, skipping jobs with no keyword, clearing activeNag via
- * setState({}), and the post-collapse `next_run_at` rewind back to the
+ * matching, skipping jobs with no keyword, compare-and-swap resolution, and the post-collapse `next_run_at` rewind back to the
  * normal schedule cadence (so the parent doesn't keep re-firing on the
  * nag interval after resolution).
  */
@@ -44,6 +43,7 @@ function job(over: Partial<ScheduledJob> = {}): ScheduledJob {
 function makeJobStore(activeJobs: ScheduledJob[]) {
   return {
     listActiveNagsForUser: vi.fn().mockResolvedValue(activeJobs),
+    resolveActiveNag: vi.fn().mockResolvedValue(true),
     setState: vi.fn().mockResolvedValue(undefined),
     update: vi.fn().mockResolvedValue(null),
   }
@@ -93,23 +93,10 @@ describe('[COMP:api/scheduling-nag-resolver] detectAndResolveNags', () => {
       jobStore: js as unknown as JobStore,
     })
     expect(res).toEqual({ resolved: 1, jobIds: ['job-1'] })
-    expect(js.setState).toHaveBeenCalledWith('job-1', {})
-
-    // The parent's next_run_at is rewound to the normal schedule via
-    // computeNextRun(schedule, timezone). Without this, the executor's
-    // most-recent `now + nagIntervalMins * 60_000` override would still
-    // be on the row and the parent would re-fire on the nag interval
-    // forever.
-    expect(js.update).toHaveBeenCalledTimes(1)
-    const [updatedId, updates] = js.update.mock.calls[0]
-    expect(updatedId).toBe('job-1')
-    expect((updates as { nextRunAt: Date }).nextRunAt).toBeInstanceOf(Date)
-    // It is the daily 09:00 UTC schedule fire (`computeNextRun`), NOT the
-    // executor's `now + nagIntervalMins` override. Assert the schedule time
-    // directly — clock-independent. (The old `> 30min from now` check was
-    // flaky: it failed whenever the test ran in the 08:30-09:00 UTC window,
-    // where the next 09:00 fire is genuinely less than 30 minutes away.)
-    const next = (updates as { nextRunAt: Date }).nextRunAt
+    expect(js.resolveActiveNag).toHaveBeenCalledWith('job-1', 'u-1', job().state.activeNag, expect.any(Date))
+    expect(js.setState).not.toHaveBeenCalled()
+    expect(js.update).not.toHaveBeenCalled()
+    const next = js.resolveActiveNag.mock.calls[0][3] as Date
     expect(next.getUTCHours()).toBe(9)
     expect(next.getUTCMinutes()).toBe(0)
   })
@@ -137,9 +124,27 @@ describe('[COMP:api/scheduling-nag-resolver] detectAndResolveNags', () => {
       jobStore: js as unknown as JobStore,
     })
     expect(res).toEqual({ resolved: 1, jobIds: ['job-1'] })
-    expect(js.setState).toHaveBeenCalledTimes(1)
-    expect(js.setState).toHaveBeenCalledWith('job-1', {})
-    expect(js.update).toHaveBeenCalledTimes(1)
-    expect(js.update.mock.calls[0][0]).toBe('job-1')
+    expect(js.resolveActiveNag).toHaveBeenCalledTimes(1)
+    expect(js.resolveActiveNag.mock.calls[0][0]).toBe('job-1')
+    expect(js.setState).not.toHaveBeenCalled()
+    expect(js.update).not.toHaveBeenCalled()
   })
+  it('counts only applied resolutions, not stale cycles', async () => {
+    const js = makeJobStore([job(), job({ id: 'job-2' })])
+    js.resolveActiveNag.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    expect(await detectAndResolveNags({ userId: 'u-1', userMessage: 'done', jobStore: js as unknown as JobStore }))
+      .toEqual({ resolved: 1, jobIds: ['job-2'] })
+    expect(js.setState).not.toHaveBeenCalled()
+    expect(js.update).not.toHaveBeenCalled()
+  })
+
+  it('fails closed without an atomic resolution port or observed cycle', async () => {
+    for (const js of [makeJobStore([job({ state: {} })]), { ...makeJobStore([job()]), resolveActiveNag: undefined }]) {
+      expect(await detectAndResolveNags({ userId: 'u-1', userMessage: 'done', jobStore: js as unknown as JobStore }))
+        .toEqual({ resolved: 0, jobIds: [] })
+      expect(js.setState).not.toHaveBeenCalled()
+      expect(js.update).not.toHaveBeenCalled()
+    }
+  })
+
 })
