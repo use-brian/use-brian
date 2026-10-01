@@ -1,3 +1,4 @@
+import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
 import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
 import { closeProviderError } from './chat-provider-error.js'
@@ -3443,6 +3444,10 @@ export function chatRoutes(options: WebChatOptions): Router {
             senderUserId: user.id,
             scope: inputMessageScope,
           })
+          dispatchPersistedWebInput({
+            workspaceId: assistant.workspaceId, session, userId: user.id,
+            stored, text: rawMessage ?? '', replay: !!truncateFromMessageId,
+          })
           sendEvent('user_message_saved', { id: stored.id, senderUserId: user.id })
           publishSessionEvent({
             kind: 'user_message_saved',
@@ -4036,6 +4041,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         // them apart.
         senderUserId: isMultiParticipantSession(session) ? user.id : null,
         scope: inputMessageScope,
+      })
+      // Reused room rows and regenerate/edit (including seeded kickoffs) are
+      // not new inbound events. Use human text, not model/attachment context.
+      dispatchPersistedWebInput({
+        workspaceId: assistant.workspaceId, session, userId: user.id,
+        stored: storedUserMsg, text: rawMessage ?? '',
+        replay: !!prePersistedUserMsg || !!truncateFromMessageId,
       })
       const storedUserSource = await readSessionMessageScopeSource(
         assistant.workspaceId,
@@ -7719,6 +7731,10 @@ export function chatRoutes(options: WebChatOptions): Router {
                     : {}),
                   scope: inputMessageScope,
                 }))
+                dispatchPersistedWebInput({
+                  workspaceId: assistant.workspaceId, session, userId: user.id,
+                  stored: storedQueued, text: queuedInput.text,
+                })
                 const queuedSource = await readSessionMessageScopeSource(
                   assistant.workspaceId,
                   storedQueued.id,
