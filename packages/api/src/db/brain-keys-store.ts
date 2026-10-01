@@ -1,3 +1,4 @@
+import { createExternalKey } from './external-key-admission.js'
 /**
  * Brain key store — workspace-scoped API keys for the brain MCP server.
  *
@@ -160,6 +161,9 @@ export type BrainKeyStore = {
     captureProfileId: string | null,
   ): Promise<boolean>
 
+  /** Rotate only the secret, retaining the exact row and admitted binding. */
+  rotate(actingUserId: string, workspaceId: string, id: string): Promise<CreatedBrainKey | null>
+
   /** Fire-and-forget. System-level. */
   touchLastUsedAt(id: string): Promise<void>
 }
@@ -189,8 +193,9 @@ export function createDbBrainKeyStore(): BrainKeyStore {
       const { plaintext, secret, prefix } = mintBrainPlaintext(id)
       const keyHash = await hashSecret(secret)
 
-      const result = await queryWithRLS<BrainKeyRowWithHash>(
+      const result = await createExternalKey<BrainKeyRowWithHash>(
         params.actingUserId,
+        { workspaceId: params.workspaceId },
         `INSERT INTO brain_keys
            (id, workspace_id, name, key_hash, key_prefix, scope,
             max_clearance, created_by, context_group_id, context_project_id,
@@ -211,6 +216,7 @@ export function createDbBrainKeyStore(): BrainKeyStore {
           params.captureAssistantId ?? null,
           params.captureProfileId ?? null,
         ],
+        params.contextGroupId !== undefined && params.contextProjectId !== undefined,
       )
       if (result.rows.length === 0) {
         // RLS WITH CHECK rejected the insert — caller is not owner/admin.
@@ -237,7 +243,7 @@ export function createDbBrainKeyStore(): BrainKeyStore {
       const result = await query<BrainKeyRowWithHash>(
         `SELECT ${COLS_PUBLIC}, key_hash as "keyHash"
          FROM brain_keys
-         WHERE id = $1
+         WHERE id = $1 AND external_brain_key_current(id)
          LIMIT 1`,
         [id],
       )
@@ -301,6 +307,16 @@ export function createDbBrainKeyStore(): BrainKeyStore {
         [id, workspaceId, captureAssistantId, captureProfileId],
       )
       return result.rows.length > 0
+    },
+
+    async rotate(actingUserId, workspaceId, id) {
+      const { plaintext, secret, prefix } = mintBrainPlaintext(id)
+      const keyHash = await hashSecret(secret)
+      const result = await createExternalKey<BrainKeyRow>(actingUserId, { workspaceId },
+        `UPDATE brain_keys SET key_hash=$3,key_prefix=$4
+         WHERE id=$1 AND workspace_id=$2 AND status='active' RETURNING ${COLS_PUBLIC}`,
+        [id, workspaceId, keyHash, prefix])
+      return result.rows[0] ? { ...result.rows[0], plaintext } : null
     },
 
     async touchLastUsedAt(id) {

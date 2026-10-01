@@ -315,6 +315,8 @@ type BuildOpts = {
   keyId: string
   /** Authenticated credential family; used only for server-derived audit attribution. */
   authKind?: 'api_key' | 'oauth_token' | 'home_app'
+  /** Internal proof pinned by successful bearer authentication, never JSON. */
+  credentialCurrent?: () => Promise<boolean>
   actingUserId?: string
   /**
    * Per-credential clearance cap from auth (`brain_keys.max_clearance`, or
@@ -1208,6 +1210,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     opts.maxClearance,
     'programmatic',
     { kind: principalKind, credentialId: opts.keyId, userId: opts.actingUserId },
+    opts.credentialCurrent,
   )
   const workspaceId = opts.workspaceId
 
@@ -1914,7 +1917,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     // scope only (never in READ_TOOL_NAMES): the key IS the trust gate.
     ...(opts.browserSkills ? [buildWriteBrowserSkillTool(opts.browserSkills, workspaceId)] : []),
   ]
-  return opts.scope === 'read'
+  const exposed = opts.scope === 'read'
     // `storeNames` rides alongside `agentReadNames`: the brain scope and the
     // store scope are SEPARATE axes, so a `data: 'read'` app must still keep
     // the store tools its `scopes.store` tier earned. Without this the read
@@ -1930,6 +1933,24 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
           t.name === 'askStoreAssistant',
       )
     : all
+  // Ready external keys have a shared-only finite ceiling. Carry it through
+  // legacy tool projections as well as native handlers, and check the live
+  // credential before execution and again before delivering the result.
+  return exposed.map(tool => ({
+    ...tool,
+    handler: async args => {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const security = ctx.executionContext?.security
+      if (!security?.access.sharedAudience) return tool.handler(args)
+      try {
+        return await security.authority.execute(() =>
+          runWithAgentAccess(security.access, () => tool.handler(args)))
+      } catch {
+        return text('Credential or context unavailable. Start a new request.', true)
+      }
+    },
+  }))
 }
 
 /**
@@ -2204,6 +2225,7 @@ export function makeBrainContextResolver(
   maxClearance: Sensitivity | null,
   channelType = 'programmatic',
   programmaticPrincipal?: ToolContext['programmaticPrincipal'],
+  authenticatedCredentialCurrent?: () => Promise<boolean>,
 ): () => Promise<ToolContext | { error: string }> {
   let cached: ToolContext | { error: string } | undefined
   return async () => {
@@ -2219,20 +2241,41 @@ export function makeBrainContextResolver(
       contextGroupId: string | null
       contextProjectId: string | null
       createdAt: Date
+      configurationSessionId: string | null
+      admittedCompartments: string[] | null
+      admittedProjectIds: string[] | null
     }>(
       `SELECT context_group_id AS "contextGroupId",
               context_project_id AS "contextProjectId",
-              created_at AS "createdAt"
+              created_at AS "createdAt", configuration_session_id AS "configurationSessionId",
+              admitted_compartments AS "admittedCompartments", admitted_project_ids AS "admittedProjectIds"
          FROM brain_keys
         WHERE id = $1 AND workspace_id = $2`,
       [keyId, workspaceId],
     )
+    const admitted = binding.rows[0]?.configurationSessionId ? binding.rows[0] : undefined
+    // A ready key must carry the proof from the actual authentication. A
+    // current key row is not proof that this request authenticated its secret.
+    const credentialCurrent = authenticatedCredentialCurrent
+      ?? (admitted ? async () => false : undefined)
+    if (credentialCurrent && !await credentialCurrent()) return { error: 'Credential unavailable' }
     let turnScope
     let executionContext
     const sessionId = randomUUID()
     const abortController = new AbortController()
     try {
       const resolved = await resolveExecutionContextSystem({
+        ...(admitted ? {
+          sharedAudience: true,
+          credentialCurrent,
+          maximumAccess: {
+            workspaceId, userId: target.ownerUserId, clearance,
+            compartments: admitted.admittedCompartments ?? [],
+            mutationCompartments: admitted.admittedCompartments ?? [],
+            projectIds: admitted.admittedProjectIds ?? [],
+            visibilityAssistantIds: [target.assistantId],
+          },
+        } : {}),
         userId: target.ownerUserId,
         workspaceId,
         assistant: {
