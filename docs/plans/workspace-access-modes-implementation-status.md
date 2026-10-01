@@ -1,6 +1,8 @@
 # Workspace access modes — implementation evidence
 
-This is an implementation checkpoint, **not completion or release certification**. The complete requirements remain in `workspace-access-modes-and-migration.md`, including AM01–AM22. No workspace is automatically activated as Simple by these changes. No commits or pushes have been made.
+This is historical implementation evidence, **not completion or release certification**. The complete requirements remain in `workspace-access-modes-and-migration.md`, including AM01–AM22. No workspace is automatically activated as Simple by these changes.
+
+**Current handover:** see [workspace-access-modes-handover.md](workspace-access-modes-handover.md) for the committed/pushed checkpoint, draft PR #395, later 640–646 work, current test failures, upstream migration-number collision, and continuation priorities. Statements below about no commits/pushes describe their earlier checkpoints, not the current repository state.
 
 ## Implemented at this checkpoint
 
