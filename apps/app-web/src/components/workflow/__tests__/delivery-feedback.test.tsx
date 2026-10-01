@@ -37,7 +37,7 @@ async function openChannelSelect() {
 describe("[COMP:app-web/workflow-delivery-feedback] audience denial outcomes", () => {
   it.each([
     ["unbound", copy.unbound],
-    ["personal_group_unverified", copy.personalGroupUnverified],
+    ["personal_group_unverified", copy.unverified],
     ["evidence_exceeds_audience", copy.evidenceExceedsAudience],
     [undefined, copy.unverified],
     ["private-source-secret", copy.unverified],

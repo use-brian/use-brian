@@ -512,16 +512,12 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
   })
 
   // 2026-09-29: an approved group was told it was "not approved" when the
-  // reply actually needed personal context the approval does not grant.
+  // reply actually needed context the approval does not grant.
   it('does not tell an approved group it is unapproved', () => {
     expect(telegramIncomingFailureText('-1002000000001:topic:15', {
       reason: 'delivery_audience_unverified',
       detail: 'evidence_exceeds_audience',
-    })).toContain('set it to personal replies')
-    expect(telegramIncomingFailureText('-1002000000001', {
-      reason: 'delivery_audience_unverified',
-      detail: 'personal_group_unverified',
-    })).toMatch(/could not confirm that you are the only person.*bot is a group admin/)
+    })).toContain('not approved to receive')
   })
 })
 

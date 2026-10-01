@@ -130,8 +130,8 @@ describe('[COMP:security/derived-scope] complete evidence for derived content', 
 })
 
 describe('[COMP:security/derived-scope] shared and personal sources together', () => {
-  // A personal Telegram group reads audience-owned (unowned) group history and
-  // the member's own memories in one turn. An unowned source is "no owner",
+  // An owner or admin speaking in an approved group reads audience-owned
+  // (unowned) group history and their own memories in one turn. An unowned source is "no owner",
   // not a different owner, so the pair derives to that member.
   it('derives an unowned source plus one member source to that member', () => {
     const member = source({ resourceId: 'memory-1', userId: 'member-1' })

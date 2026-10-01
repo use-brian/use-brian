@@ -80,7 +80,6 @@ import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance
 import { ensureMsTeamsConnectorInstance } from '../ingest/msteams-connector-instance.js'
 import { ensureFeishuConnectorInstance } from '../ingest/feishu-connector-instance.js'
 import { query, queryWithRLS } from '../db/client.js'
-import { listLinkedTelegramIdsSystem } from '../db/telegram-group-membership.js'
 import { providerChannelIdFromSession } from '../db/sessions.js'
 import {
   buildWorkspaceNativeSlashCommands,
@@ -1106,45 +1105,6 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
           detail: 'Only the workspace owner or an admin can approve delivery audiences.',
         })
         return
-      }
-      // A group binding that names a recipient is a PERSONAL group: that
-      // member's own context may reach it while live membership checks prove
-      // they are its only human. Only Telegram can prove membership, only the
-      // member themself may declare it, and it needs a linked Telegram
-      // account to prove anything with.
-      for (const binding of parsed.data.deliveryAudienceBindings) {
-        if (binding.audienceType !== 'group' || !binding.recipientUserId) continue
-        // The UI re-sends every binding on any edit; a personal group the
-        // recipient already declared stays valid when another admin saves.
-        // Only the recipient is compared: another admin changing its clearance
-        // still cannot widen it, because delivery intersects the binding with
-        // the recipient's own live ceiling.
-        const unchanged = integration.config.deliveryAudienceBindings?.some((current) =>
-          current.channelId === binding.channelId
-          && current.audienceType === 'group'
-          && current.recipientUserId === binding.recipientUserId)
-        if (unchanged) continue
-        if (integration.channelType !== 'telegram') {
-          res.status(400).json({
-            error: 'personal_group_unsupported',
-            detail: 'Personal group replies are only available for Telegram groups.',
-          })
-          return
-        }
-        if (binding.recipientUserId !== userId) {
-          res.status(400).json({
-            error: 'personal_group_self_only',
-            detail: 'You can only mark a group as personal to yourself.',
-          })
-          return
-        }
-        if ((await listLinkedTelegramIdsSystem(userId)).length === 0) {
-          res.status(400).json({
-            error: 'personal_group_requires_linked_telegram',
-            detail: 'Link your Telegram account first so Brian can confirm you are the only person in the group.',
-          })
-          return
-        }
       }
       const approvedAt = new Date().toISOString()
       patch = {

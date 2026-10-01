@@ -1089,6 +1089,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // A DM from a non-member goes back to that same guest, judged as the
     // guest the turn ran as - never as a member lookup that cannot succeed.
     recipientMode: memberMode === 'external' ? 'external' as const : 'member' as const,
+    // The verified sender of this group message. An owner or admin gets their
+    // own personal context here; see `groupSpeakerCeiling`.
+    groupSpeaker: isGroupChat && senderIsWorkspaceMember,
   }
   const audienceEnvelope = isGroupChat && assistant.workspaceId
     ? await resolveDeliveryAudienceEnvelope(audienceInput)
@@ -1130,9 +1133,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       session,
       memberMode,
       ignoreSessionBinding: isGroupChat,
-      // A group reads only rows the whole group may see (decision D4). A
-      // personal group - bound to one recipient whose sole-human membership
-      // is proven at every check - is that person's own audience.
+      // A group reads only rows the whole group may see (decision D4),
+      // unless the envelope names the speaker: an owner or admin speaking in
+      // an approved group also reads their own personal rows.
       sharedAudience: isGroupChat && !(audienceEnvelope?.allowed && audienceEnvelope.ceiling.userId),
       identity: senderIsWorkspaceMember
         ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
