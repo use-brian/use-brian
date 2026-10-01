@@ -56,6 +56,9 @@
  */
 
 import { Router } from 'express'
+import { connectorSetupRoutes } from '../connectors/setup-routes.js'
+import { shopifySetupRoutes } from '../connectors/shopify-setup-routes.js'
+import type { TransactionalConnectorSetup } from '../connectors/transactional-setup.js'
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
 import type { FilesApi, McpSettingsStore } from '@use-brian/core'
@@ -186,6 +189,10 @@ type ConnectorRowOut = {
 }
 
 type ConnectorRouteOptions = {
+  /** Canonical reviewed setup; boot must supply the transaction-backed service. */
+  setupService?: TransactionalConnectorSetup
+  /** Server-configured public app callback; never taken from request headers. */
+  shopifySetupRedirectUri?: string
   connectorStore: ConnectorStore
   connectorInstanceStore: ConnectorInstanceStore
   /**
@@ -399,6 +406,10 @@ function instanceRow(
 export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   const { connectorStore, connectorInstanceStore, mcpSettingsStore } = opts
   const router = Router()
+  if (opts.setupService) {
+    router.use('/setups', connectorSetupRoutes(opts.setupService))
+    router.use(shopifySetupRoutes(opts.setupService, opts.shopifySetupRedirectUri))
+  }
   const lifecycle = createConnectorLifecycleService({
     instanceStore: connectorInstanceStore,
     legacyStore: connectorStore,

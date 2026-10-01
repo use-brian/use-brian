@@ -86,6 +86,7 @@ import {
 } from '../fathom/client.js'
 import {
   createShopifyTokenManager,
+  isManagedShopifyTokens,
   unpackShopifyTokens, packShopifyTokens,
   getShop as getShopifyShop,
   listProducts as listShopifyProducts,
@@ -1111,7 +1112,7 @@ export async function injectMcpTools(params: {
   await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
-  await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
+  await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile, connectorInstanceStore)
   await injectWordPressTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('wordpress'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
   await injectSearchConsoleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('gsc'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   // No extras argument: `msgraph` is `single_instance` in OFFICIAL_CONNECTORS
@@ -1315,7 +1316,7 @@ export async function injectMcpTools(params: {
             extraInstances, resolveGrantedInstanceCreds, persistGrantedInstanceCreds,
             { report: reportHealth, instanceId: g.instance.id },
             assistantConnectorGrantsStore,
-            filesApi,
+            filesApi, undefined, connectorInstanceStore,
           )
         } else if (p === 'wordpress') {
           await injectWordPressTools(
@@ -1607,7 +1608,7 @@ export async function injectMcpTools(params: {
             extraInstances, resolveTeamInstanceCreds, persistTeamInstanceCreds,
             { report: reportHealth, instanceId: inst.id },
             assistantConnectorGrantsStore,
-            filesApi,
+            filesApi, undefined, connectorInstanceStore,
           )
         } else if (p === 'wordpress') {
           await injectWordPressTools(
@@ -3893,6 +3894,7 @@ async function injectShopifyTools(
   filesApi?: FilesApi,
   /** Upload-cache reader, so a just-attached photo can be promoted on the fly. */
   readCachedFile?: (id: string, ctx: AccessContext) => Promise<CachedFile | null>,
+  rotationStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore,
 ): Promise<void> {
   const shopify = connectors.find((c) => c.connectorId === 'shopify' && c.connected)
   const shopifyEnabled = shopify && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'shopify'))
@@ -3921,13 +3923,27 @@ async function injectShopifyTools(
     })
   }
 
-  // App credentials (SHOPIFY_CLIENT_ID/SECRET) are only needed to refresh an
-  // expiring OAuth token — resolved lazily inside the manager so pasted
-  // static tokens work with zero app registration.
+  // A real store owns ALL refresh decisions. Never hand its result to the
+  // legacy manager: verification/publication may have consumed the leeway.
   function makeTokenManager(
     load: () => Promise<string | null>,
     persist: (encoded: string) => Promise<void>,
+    instanceId?: string | null,
   ) {
+    if (rotationStore?.refreshShopifyCredentialsSystem) {
+      return {
+        async getAuth() {
+          if (!instanceId) throw new Error('connector_rotation_instance_required')
+          const credentials = await rotationStore.refreshShopifyCredentialsSystem!(instanceId)
+          const tokens = credentials?.type === 'oauth' ? unpackShopifyTokens(credentials.client_secret) : null
+          if (!tokens) throw new Error('connector_rotation_reconnect_required')
+          if (isManagedShopifyTokens(tokens) && !(Date.parse(tokens.expiresAt!) - Date.now() > 60000)) {
+            throw new Error('connector_rotation_reconnect_required')
+          }
+          return { accessToken: tokens.accessToken, shopDomain: tokens.shopDomain }
+        },
+      }
+    }
     return createShopifyTokenManager({
       getAppConfig: () => getConnectorConfig('shopify'),
       store: {
@@ -4043,7 +4059,7 @@ async function injectShopifyTools(
   const primaryInstanceId = healthProbe?.instanceId ?? (shopify as { id?: string }).id ?? null
   try {
     if (shopifyEnabled) {
-      const built = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded))
+      const built = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded, primaryInstanceId))
       const shopifyTools = healthProbe && primaryInstanceId
         ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
         : built
@@ -4065,7 +4081,7 @@ async function injectShopifyTools(
         buildToolsForInstance: (inst, governanceId) => {
           const variant = buildTools(makeTokenManager(
             () => resolveInstanceCreds(inst.id),
-            (encoded) => persistInstanceCreds(inst.id, 'shopify_oauth', encoded),
+            (encoded) => persistInstanceCreds(inst.id, 'shopify_oauth', encoded), inst.id,
           ), governanceId)
           return healthProbe ? wrapToolsWithHealthProbe(variant, inst.id, healthProbe.report) : variant
         },
