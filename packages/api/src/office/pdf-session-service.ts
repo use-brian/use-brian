@@ -1,3 +1,4 @@
+import {pdfIntakeHash} from '../db/office-pdf-intake.js'
 /** Transactional PDF intake, protected assets, and flattened outputs.
  * [COMP:api/office-pdf-sessions] */
 import { createHash, randomUUID } from 'node:crypto'
@@ -264,9 +265,15 @@ export function createPdfSessionService(deps: PdfSessionServiceDeps) {
       if (!await deps.assertWorkspaceMember({ userId: params.userId, workspaceId: params.workspaceId })) {
         throw new PdfSessionServiceError('source_unavailable', 'The selected source is unavailable.', 404)
       }
+      const requestHash=pdfIntakeHash({source:params.source,signatureSource:params.signatureSource,title:params.title,sensitivity:params.sensitivity,locale:params.locale})
+      await sessions.checkIntakeRequest?.(params.userId,params.workspaceId,params.idempotencyKey,requestHash)
       const existing = await sessions.findByIdempotency(params.userId, params.workspaceId, params.idempotencyKey)
       if (existing) return loadReady(params.userId, existing)
 
+      // Capture BEFORE bytes/conversion, and revalidate under the workspace
+      // lock at allocation and final publication. IDs/JSON labels aren't proof.
+      const intakeSources=sessions.captureSource ? [await sessions.captureSource(params.userId,params.workspaceId,params.source),
+        ...(params.signatureSource?[await sessions.captureSource(params.userId,params.workspaceId,params.signatureSource)]:[])] : undefined
       const source = await deps.resolveSource({
         userId: params.userId,
         workspaceId: params.workspaceId,
@@ -309,6 +316,11 @@ export function createPdfSessionService(deps: PdfSessionServiceDeps) {
         locale: params.locale,
         signal: params.signal,
       })
+      if (intakeSources) {
+        try { await sessions.reserveIntake({userId:params.userId,workspaceId:params.workspaceId,artifactId,title:params.title,
+          idempotencyKey:params.idempotencyKey,requestHash,sensitivity:effectiveSensitivity,sources:intakeSources}) }
+        catch (error) { await sessions.abortIntake(params.userId,artifactId).catch(()=>false); throw error }
+      }
       const written: Array<{ id: string }> = []
       try {
         const storedSource = await deps.assets.write({
@@ -371,6 +383,7 @@ export function createPdfSessionService(deps: PdfSessionServiceDeps) {
         written.push(storedSnapshot)
 
         const created = await sessions.create({
+          intakeReserved:!!intakeSources,
           userId: params.userId,
           artifactId,
           versionId,
@@ -396,6 +409,13 @@ export function createPdfSessionService(deps: PdfSessionServiceDeps) {
         for (const file of written.reverse()) await deps.assets.delete({ userId: params.userId, workspaceId: params.workspaceId, fileId: file.id })
         return loadReady(params.userId, raced)
       } catch (error) {
+        if (intakeSources) {
+          // Unknown commit outcome is NOT permission to delete published bytes.
+          // Pending files remain hidden; abandonment releases the retry key and
+          // makes all tracked partial assets eligible for the durable reaper.
+          await sessions.abortIntake(params.userId,artifactId).catch(()=>false)
+          throw error
+        }
         for (const file of written.reverse()) {
           try { await deps.assets.delete({ userId: params.userId, workspaceId: params.workspaceId, fileId: file.id }) } catch { /* retryable orphan cleanup owns the residual */ }
         }

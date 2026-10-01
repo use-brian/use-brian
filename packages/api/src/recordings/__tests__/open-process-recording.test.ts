@@ -26,6 +26,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
             storageUri: 's3://bucket/ws-1/channel-media/id',
           },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/channel-media/id', parent: { storageUri: 's3://bucket/ws-1/channel-media/id' } }) as never),
         getRecording: vi.fn(async () => null),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
@@ -70,6 +71,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
             storageUri: 'file:///data/files/ws-1/recordings/video-id',
           },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/video-id', parent: { storageUri: 'file:///data/files/ws-1/recordings/video-id' } }) as never),
         getRecording: vi.fn(async () => null),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('m4a-bytes'), mime: 'audio/mp4' })),
@@ -129,6 +131,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
           id: 'rec-1', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
           sensitivity: 'confidential', sourceRef: { gcsKey: 'ws-1/recordings/id' },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/id', parent: { storageUri: '' } }) as never),
         getRecording: vi.fn(async () => ({ title: 'Sales call', fileName: 'call.m4a' }) as never),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
@@ -147,7 +150,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
       recordingId: 'rec-1',
       sensitivity: 'confidential',
       title: 'Sales call',
-    }))
+    }), expect.objectContaining({ recordingStorageKey: 'ws-1/recordings/id' }))
     expect(linkTranscriptFile).toHaveBeenCalledWith('rec-1', 'transcript-1')
     expect(synthesize).toHaveBeenCalledWith(expect.objectContaining({
       blueprintSlug: 'sales-call',
@@ -180,6 +183,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
           id: 'rec-1', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
           sensitivity: 'internal', sourceRef: { gcsKey: 'ws-1/recordings/id' },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/id', parent: { storageUri: '' } }) as never),
         getRecording: vi.fn(async () => null),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
@@ -220,6 +224,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
           id: 'rec-v', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
           sensitivity: 'internal', sourceRef: { gcsKey: 'ws-1/recordings/v' },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/v', parent: { storageUri: '' } }) as never),
         getRecording: vi.fn(async () => ({ mime: 'video/webm', title: 'demo', kind: 'meeting' }) as never),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
@@ -255,6 +260,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
           id: 'rec-v2', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
           sensitivity: 'internal', sourceRef: { gcsKey: 'ws-1/recordings/v2', mime: 'video/mp4' },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/v2', parent: { storageUri: '' } }) as never),
         getRecording: vi.fn(async () => null),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),

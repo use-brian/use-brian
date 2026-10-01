@@ -31,15 +31,15 @@
  * the backstop for text that never went through a parser. See
  * `@use-brian/core` → `files/data-uri.ts` for the two incidents.
  *
- * The store runs on the system pool (background ingest job / in-request
- * indexing, no per-user RLS context) — same pattern as the embedding worker.
+ * Publication requires explicit current-actor/canonical-parent provenance and
+ * runs on the app role. Caller-supplied labels never replace the parent floor.
  *
  * [COMP:brain/file-segments-store]
  */
 
 import { stripDataUris } from '@use-brian/core'
 
-import { getPool } from './client.js'
+import { publishRecordingIntakeSegments, type RecordingSegmentProvenance } from './recording-intake-admission.js'
 
 /** A packed file segment — the embedding/retrieval unit. */
 export type FileChunk = {
@@ -282,68 +282,15 @@ export type InsertFileSegmentsParams = {
   replace?: boolean
 }
 
-const INSERT_BATCH = 100
 
 /**
  * Insert packed segments, batched. Idempotent on `(file_id, segment_index)` so
  * a retried ingest job re-inserts without duplicating. Leaves `embedding` NULL
- * for the async embedding worker. Runs on the system pool.
+ * for the async embedding worker. Publication and exact lineage are atomic.
  *
  * @returns the number of rows actually inserted (excludes idempotent skips).
  */
-export async function insertFileSegments(params: InsertFileSegmentsParams): Promise<number> {
-  const { fileId, workspaceId, createdByUserId, visibility, sensitivity, compartments, tags, source, segments, replace } = params
-  const valid = segments.filter((s) => s.content.trim().length > 0)
-  if (valid.length === 0) return 0
-
-  const client = await getPool().connect()
-  try {
-    await client.query('BEGIN')
-    if (replace) {
-      // Same transaction as the insert, so no reader ever sees the file
-      // segment-less and a failure leaves the old set intact.
-      await client.query(`DELETE FROM file_segments WHERE file_id = $1 AND workspace_id = $2`, [
-        fileId,
-        workspaceId,
-      ])
-    }
-    let inserted = 0
-    for (let i = 0; i < valid.length; i += INSERT_BATCH) {
-      const batch = valid.slice(i, i + INSERT_BATCH)
-      const values: unknown[] = []
-      const rows = batch.map((s, j) => {
-        const b = j * 14
-        values.push(
-          workspaceId, fileId, s.segmentIndex, s.charStart, s.charEnd,
-          s.headingPath, s.content, visibility.userId, visibility.assistantId,
-          source, sensitivity, compartments, tags, createdByUserId,
-        )
-        return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6}::text[],$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12}::text[],$${b + 13}::text[],$${b + 14})`
-      })
-      const res = await client.query(
-        `INSERT INTO file_segments (
-           workspace_id, file_id, segment_index, char_start, char_end,
-           heading_path, content, user_id, assistant_id,
-           source, sensitivity, compartments, tags, created_by_user_id
-         ) VALUES ${rows.join(',')}
-         ON CONFLICT (file_id, segment_index) DO NOTHING`,
-        values,
-      )
-      inserted += res.rowCount ?? 0
-    }
-    await client.query('COMMIT')
-    return inserted
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw err
-  } finally {
-    client.release()
-  }
+export async function insertFileSegments(params: InsertFileSegmentsParams, provenance?: RecordingSegmentProvenance): Promise<number> {
+  if (!provenance || provenance.parent.resourceId !== params.fileId || provenance.recordingId) throw new Error('recording_intake_provenance_required')
+  return publishRecordingIntakeSegments(params.workspaceId, params.createdByUserId, params.segments.filter(s => s.content.trim().length > 0), provenance, params.replace)
 }
-
-// `deleteFileSegmentsByFileId` lived here as "the re-index path" and was called
-// from nowhere — the replacement path was written, documented, and never wired,
-// which is why a re-index silently kept its stale segments. Replacement now
-// happens inside insertFileSegments' own transaction (`replace`), so a reader
-// never observes the file segment-less and a failed re-index leaves the old set
-// intact; a standalone delete could offer neither.

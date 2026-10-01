@@ -5,7 +5,6 @@ import { Router } from 'express'
 import {
   createEpisode,
   getEpisodeByIdSystem,
-  mergeEpisodeSourceRef,
 } from '../db/episodes-store.js'
 import {
   createRecording,
@@ -48,7 +47,6 @@ type RouteDeps = {
   listTasks?: typeof listTasksBySourceEpisode
   getEpisode?: typeof getEpisodeByIdSystem
   updateRecording?: typeof updateRecording
-  mergeEpisodeSourceRef?: typeof mergeEpisodeSourceRef
 }
 
 function toClientRecording(recording: Recording) {
@@ -370,12 +368,19 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
     }
     if (durationMs > MAX_RECORDING_DURATION_MS) return void res.status(413).json({ error: 'too_long' })
 
+    // Preflight crosses storage I/O: authorize the requester again, never the
+    // historical author. The worker rechecks this same actor at execution.
+    if (!(await deps.getRole(userId, episode.workspaceId))
+      || !(await (deps.getEpisode ?? getEpisodeByIdSystem)(userId, episode.id, {}))) {
+      return void res.status(403).json({ error: 'Forbidden' })
+    }
+
     let jobId: string | null
     try {
       ;({ jobId } = await deps.enqueueJob({
         recordingId: episode.id,
         workspaceId: episode.workspaceId,
-        actingUserId: episode.createdByUserId,
+        actingUserId: userId,
         blueprintSlug:
           typeof blueprintSlug === 'string' && blueprintSlug.trim() ? blueprintSlug.trim() : null,
         parentPageId: destinationPageId,
@@ -385,7 +390,7 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
       return void res.status(400).json({ error: 'invalid_blueprint', detail: error.message })
     }
     await (deps.updateRecording ?? updateRecording)(episode.id, { status: 'queued', durationMs })
-    await (deps.mergeEpisodeSourceRef ?? mergeEpisodeSourceRef)(episode.createdByUserId, episode.id, { status: 'queued' })
+    // UI status lives in recordings/job metadata, not immutable provenance.
     res.status(202).json({ recordingId: episode.id, status: 'queued', jobId })
   })
 

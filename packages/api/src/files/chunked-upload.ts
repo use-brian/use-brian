@@ -1,3 +1,4 @@
+import type { DerivedWorkspaceFilesStore } from '../db/workspace-files-store.js'
 /**
  * Direct-to-storage multipart upload orchestration for large durable files.
  *
@@ -81,7 +82,7 @@ export type ChunkedFileUploadService = {
 
 export type CreateChunkedFileUploadServiceDeps = {
   resolver: FilesClientResolver
-  filesStore: WorkspaceFilesStore
+  filesStore: WorkspaceFilesStore & Partial<Pick<DerivedWorkspaceFilesStore, 'finalizeUpload'>>
   uploadsStore: WorkspaceFileUploadsStore
   auditStore: WorkspaceAuditStore
   /**
@@ -97,10 +98,12 @@ function accessCtx(ctx: FilesContext): AccessContext {
   return {
     workspaceId: ctx.workspaceId,
     userId: ctx.userId,
-    assistantId: ctx.assistantId ?? ctx.userId,
+    assistantId: ctx.assistantId ?? '',
     assistantKind: ctx.assistantKind ?? 'standard',
     clearance: ctx.clearance,
     compartments: ctx.compartments,
+    mutationCompartments: ctx.mutationCompartments,
+    projectIds: ctx.projectIds,
   }
 }
 
@@ -225,6 +228,7 @@ export function createChunkedFileUploadService(
         ),
         quotaExempt: resolved.byo ?? false,
         expiresAt,
+        access: ac, requestedCompartments:ctx.writeCompartments, requestedProjectIds:ctx.writeProjectIds, sensitivity:ctx.writeSensitivity,
       })
 
       try {
@@ -253,6 +257,7 @@ export function createChunkedFileUploadService(
     },
 
     async complete(ctx, uploadId) {
+      if (!deps.filesStore.finalizeUpload) throw new ChunkedUploadError('invalid','Upload finalization requires the canonical publication adapter')
       let upload = await getOwned(ctx, uploadId)
       const repaired = await repairCompleted(ctx, upload)
       if (repaired) return repaired
@@ -320,7 +325,11 @@ export function createChunkedFileUploadService(
         }))
         finalWritten = true
 
-        const file = await deps.filesStore.create(ctx.userId, {
+        // Assembled bytes are still staging: only the canonical finalizer can
+        // publish the row after re-reading current actor and pinned admission.
+        const file = await (deps.filesStore.finalizeUpload
+          ? (actor: string, input: Parameters<WorkspaceFilesStore['create']>[1]) => deps.filesStore.finalizeUpload!(actor,input,upload.id,ac)
+          : (actor: string, input: Parameters<WorkspaceFilesStore['create']>[1]) => deps.filesStore.create(actor,input,ac))(ctx.userId, {
           id: upload.fileId,
           workspaceId: upload.workspaceId,
           path: upload.path,
@@ -332,10 +341,10 @@ export function createChunkedFileUploadService(
           title: upload.name,
           sensitivity: 'internal',
           createdByUserId: upload.actingUserId,
-          createdByAssistantId: upload.assistantId,
+          createdByAssistantId: null,
         })
         fileCreated = true
-        await deps.uploadsStore.markCompleted(ctx.userId, upload.id)
+        if (!deps.filesStore.finalizeUpload) await deps.uploadsStore.markCompleted(ctx.userId, upload.id)
         void deps.auditStore.append({
           workspaceId: upload.workspaceId,
           actorUserId: upload.actingUserId,
@@ -354,7 +363,11 @@ export function createChunkedFileUploadService(
         })
         return file
       } catch (err) {
-        if (finalWritten && !fileCreated) {
+        // Never erase possibly committed bytes after a lost COMMIT acknowledgement.
+        // Known constraint/admission refusals prove publication did not happen.
+        const code=(err as {code?:string}).code
+        const refused=typeof code==='string' && (code.startsWith('23') || code==='42501' || code==='context_not_available' || code==='access_policy_conflict' || code==='scope_operation_denied')
+        if (finalWritten && !fileCreated && refused) {
           await gcs.deleteBlob(buildStorageKey(upload.workspaceId, upload.fileId)).catch((deleteErr) => {
             console.warn(`[chunked-upload] final-object rollback failed for ${upload.id}:`, deleteErr)
           })

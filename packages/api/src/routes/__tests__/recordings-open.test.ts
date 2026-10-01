@@ -292,6 +292,8 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
 
     expect(response.status).toBe(202)
     expect(response.body).toEqual({ recordingId: 'rec-1', status: 'queued', jobId: 'job-1' })
+    expect(deps.mergeEpisodeSourceRef).not.toHaveBeenCalled()
+    expect(deps.updateRecording).toHaveBeenCalledWith('rec-1', { status: 'queued', durationMs: 65_000 })
     expect(deps.enqueueJob).toHaveBeenCalledWith({
       recordingId: 'rec-1',
       workspaceId: 'ws-1',
@@ -327,4 +329,17 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
     expect(response.body.error).toBe('invalid_destination')
     expect(deps.enqueueJob).not.toHaveBeenCalled()
   })
+})
+
+it('queues as the authenticated requester, never the Episode historical creator or request JSON', async () => {
+  const { app, deps } = makeApp({ getEpisode: vi.fn(async () => ({ id: 'rec-1', workspaceId: 'ws-1', createdByUserId: 'historical-creator', sourceRef: { gcsKey: 'audio' } })) })
+  expect((await request(app).post('/api/recordings/rec-1/process').send({ actingUserId: 'historical-creator' })).status).toBe(202)
+  expect(deps.enqueueJob).toHaveBeenCalledWith(expect.objectContaining({ actingUserId: 'user-1' }))
+  expect(deps.mergeEpisodeSourceRef).not.toHaveBeenCalled()
+})
+it('rechecks current requester membership after asynchronous preflight', async () => {
+  const { app, deps } = makeApp({ getRole: vi.fn().mockResolvedValueOnce('member').mockResolvedValueOnce(null) })
+  expect((await request(app).post('/api/recordings/rec-1/process').send({})).status).toBe(403)
+  expect(deps.enqueueJob).not.toHaveBeenCalled()
+  expect(deps.updateRecording).not.toHaveBeenCalled()
 })

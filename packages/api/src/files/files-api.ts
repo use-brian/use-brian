@@ -1,3 +1,5 @@
+import type { DerivedWriteEvidence } from '@use-brian/core'
+import type { DerivedWorkspaceFilesStore } from '../db/workspace-files-store.js'
 /**
  * Files API orchestration — stitches the GCS bytes layer
  * (`gcs-client.ts`) and the workspace_files index store
@@ -12,7 +14,7 @@
  * See docs/architecture/features/files.md.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import { assertExecutionResourceScope } from '../db/access-predicate.js'
 import { executeWithCurrentAuthority } from '../context-scope/authority-lease.js'
@@ -98,18 +100,19 @@ export function createSingletonFilesClientResolver(
 }
 
 /**
- * Build an `AccessContext` from a `FilesContext`. The visibility-double
- * predicate compares `assistant_id` for equality, so callers without an
- * assistant set get the userId echoed in — workspace-shared rows
- * (`assistant_id IS NULL`) still match. Same shape WU-4.2b uses
- * elsewhere for non-chat callers.
+ * Preserve an absent executing assistant for human-only callers (e.g. PDF
+ * session assets). AccessContext requires a string, so use its empty sentinel,
+ * not the user's ID. The primary-shaped SQL projection avoids casting that
+ * sentinel to UUID; the empty visibility ceiling still admits ONLY rows with
+ * assistant_id IS NULL, never primary-assistant widening.
  */
 function accessCtx(ctx: FilesContext): AccessContext {
   return {
     workspaceId: ctx.workspaceId,
     userId: ctx.userId,
-    assistantId: ctx.assistantId ?? ctx.userId,
-    assistantKind: ctx.assistantKind ?? 'standard',
+    assistantId: ctx.assistantId ?? '',
+    assistantKind: ctx.assistantId ? ctx.assistantKind ?? 'standard' : 'primary',
+    ...(ctx.assistantId ? {} : { visibilityAssistantIds: [] }),
     clearance: ctx.clearance,
     compartments: ctx.compartments,
     mutationCompartments: ctx.mutationCompartments,
@@ -213,7 +216,7 @@ function isUniqueViolation(e: unknown): boolean {
 }
 
 export type CreateFilesApiDeps = {
-  store: WorkspaceFilesStore
+  store: WorkspaceFilesStore & Partial<Pick<DerivedWorkspaceFilesStore, 'createDerived' | 'prepareSessionOwned' | 'createSessionOwned'>>
   auditStore: WorkspaceAuditStore
   /**
    * Plan-derived per-workspace durable-storage cap. Boot wires this to
@@ -256,7 +259,11 @@ export const workspaceFileReadRevision = (file: WorkspaceFile): string => JSON.s
   file.validTo, file.retractedAt, file.supersededBy,
 ])
 
-export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
+export type DerivedFilesApi = FilesApi & {
+  writeDerivedBytes(ctx: FilesContext, params: Parameters<FilesApi['writeBytes']>[1], evidence: DerivedWriteEvidence): ReturnType<FilesApi['writeBytes']>
+}
+
+export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
   const { store, auditStore } = deps
   const resolver: FilesClientResolver =
     deps.resolver ?? createSingletonFilesClientResolver(deps.gcs, deps.bucket)
@@ -352,8 +359,11 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       tags?: string[]
       sensitivity?: FilesWriteParams['sensitivity']
       sessionOwned?: true
+      derivation?: DerivedWriteEvidence
     },
   ): Promise<FilesResult<WorkspaceFile>> {
+    // Explicit per-call evidence wins; tool contexts carry a detached snapshot.
+    p = { ...p, derivation: p.derivation ?? (ctx.derivation ? structuredClone(ctx.derivation) : undefined) }
     const path = normalizePath(p.path)
     if (path.startsWith('/office/sessions/') && p.sessionOwned !== true) return err({ kind: 'read_only', path })
     if (p.sessionOwned === true && !path.startsWith('/office/sessions/')) return err({ kind: 'read_only', path })
@@ -361,7 +371,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     const parentPath = deriveParentPath(path)
     const name = deriveName(path)
     const { mime, bytes } = p
-    if (!mutationAllowed(ctx, undefined, p.sensitivity ?? 'internal')) return err({ kind: 'read_only', reason: 'scope', path })
+    if (!p.derivation && !mutationAllowed(ctx, undefined, p.sensitivity ?? 'internal')) return err({ kind: 'read_only', reason: 'scope', path })
 
     const ac = accessCtx(ctx)
     const existing = await store.getByPath(ac, path)
@@ -386,20 +396,36 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       }
     }
 
+    if (p.derivation && !store.createDerived) throw new Error('scope_evidence_missing')
+    const sessionBinding=p.sessionOwned && store.prepareSessionOwned
+      ? await store.prepareSessionOwned(ctx.userId,ctx.workspaceId,path,ac) : undefined
+    // Session-derived model evidence needs a combined adapter, not an ignored floor.
+    if (sessionBinding && p.derivation) throw new Error('scope_evidence_missing')
     const fileId = randomUUID()
     const storageKey = buildStorageKey(ctx.workspaceId, fileId)
     const storageUri = buildStorageUri(bucket, ctx.workspaceId, fileId, uriScheme)
 
-    await executeWithCurrentAuthority(() => gcs.writeBlob(storageKey, bytes, {
-      workspaceId: ctx.workspaceId,
-      createdByUserId: ctx.userId,
-      createdByAssistantId: ctx.assistantId ?? undefined,
-      mime,
-    }))
+    try {
+      await executeWithCurrentAuthority(() => gcs.writeBlob(storageKey, bytes, {
+        workspaceId: ctx.workspaceId,
+        createdByUserId: ctx.userId,
+        createdByAssistantId: ctx.assistantId ?? undefined,
+        mime,
+      }))
+    } catch (error) {
+      // No canonical row write has started; this random staging key cannot
+      // belong to a committed file even if the storage acknowledgement was lost.
+      try { await gcs.deleteBlob(storageKey) } catch { /* storage retention retries orphan cleanup */ }
+      throw error
+    }
 
     let row: WorkspaceFile
     try {
-      row = await executeWithCurrentAuthority(() => store.create(ctx.userId, {
+      row = await executeWithCurrentAuthority(() => (sessionBinding
+        ? (userId: string, input: Parameters<WorkspaceFilesStore['create']>[1], access: AccessContext) => store.createSessionOwned!(userId,input,sessionBinding,access)
+        : p.derivation
+        ? (userId: string, input: Parameters<WorkspaceFilesStore['create']>[1], access: AccessContext) => store.createDerived!(userId, input, p.derivation!, access)
+        : store.create.bind(store))(ctx.userId, {
         id: fileId,
         workspaceId: ctx.workspaceId,
         path,
@@ -414,7 +440,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
         sensitivity: maxSensitivity(p.sensitivity ?? 'internal', ctx.writeSensitivity ?? 'public'),
         compartments: ctx.writeCompartments,
         projectIds: ctx.writeProjectIds,
-        metadata: p.sessionOwned ? { officeSession: true, noIndex: true }
+        metadata: p.sessionOwned ? { officeSession: true, noIndex: true, contentSha256:createHash('sha256').update(bytes).digest('hex') }
           : path.startsWith('/office/anchors/') ? { noIndex: true } : undefined,
         userId: p.sessionOwned ? ctx.userId : null,
         createdByUserId: ctx.userId,
@@ -424,7 +450,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       // Only an explicit constraint/permission refusal proves the INSERT did
       // not commit. An uncertain acknowledgement must retain the staged object.
       const code = (dbErr as { code?: string }).code
-      if (typeof code !== 'string' || !(code.startsWith('23') || code === '42501' || code === 'scope_operation_denied')) {
+      if (typeof code !== 'string' || !(code.startsWith('23') || code === '42501' || code === 'scope_operation_denied' || ['context_not_available','access_policy_conflict','file_admission_provenance_required','access_mode_destination_conflict','pdf_intake_source_changed','pdf_intake_source_unavailable','pdf_intake_asset_changed'].includes(code))) {
         throw new FilePublicationUncertainError()
       }
       try { await gcs.deleteBlob(storageKey) } catch { /* Unpublished orphan: storage retention handles cleanup. */ }
@@ -440,6 +466,10 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
   }
 
   return {
+    async writeDerivedBytes(ctx, params, evidence) {
+      // Snapshot this invocation: never retain mutable or ambient provenance.
+      return persist(ctx, { ...params, bytes: Buffer.from(params.bytes), derivation: structuredClone(evidence) })
+    },
     async write(ctx, params): Promise<FilesResult<WorkspaceFile>> {
       const name = deriveName(normalizePath(params.path))
       return persist(ctx, {

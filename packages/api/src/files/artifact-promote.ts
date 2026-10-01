@@ -1,3 +1,4 @@
+import type { DerivedFilesApi } from './files-api.js'
 // [COMP:files/artifact-promote] — silent promotion of a large upload/paste to
 // a durable workspace_files artifact + file_segments (large-content-artifacts
 // §Phase 2.3).
@@ -10,7 +11,7 @@
 // promotion NEVER fails the upload/message that triggered it (the file_cache
 // row still exists; behavior falls back to the pre-artifact pointer).
 
-import type { FilesApi, FilesContext } from '@use-brian/core'
+import type { DerivedWriteEvidence, FilesApi, FilesContext } from '@use-brian/core'
 import { indexFileArtifact } from './artifact-index.js'
 
 export type PromotedArtifact = {
@@ -22,6 +23,8 @@ export type PromotedArtifact = {
 }
 
 export type ArtifactPromoteInput = {
+  /** Internal snapshots of the actual parsed source; never a request-body field. */
+  derivation?: DerivedWriteEvidence
   fileName: string
   mime: string
   bytes: Buffer
@@ -53,7 +56,7 @@ function slugName(fileName: string): string {
 }
 
 export function createArtifactPromoter(deps: {
-  filesApi: FilesApi
+  filesApi: FilesApi & Partial<Pick<DerivedFilesApi, 'writeDerivedBytes'>>
   /** file_ingest_jobs enqueue (Pipeline B via the worker). Absent -> segments only. */
   enqueue?: (job: {
     fileId: string
@@ -71,14 +74,18 @@ export function createArtifactPromoter(deps: {
         ...(input.assistantId ? { assistantId: input.assistantId } : {}),
         compartments: input.compartments,
         projectIds: input.projectIds,
-        writeCompartments: input.compartments,
-        writeProjectIds: input.projectIds,
+        writeCompartments: input.derivation ? undefined : input.compartments,
+        writeProjectIds: input.derivation ? undefined : input.projectIds,
       }
       // Timestamped path: no path-UNIQUE conflicts on re-upload; the artifact
       // is workspace-shared (filesApi default NULL/NULL visibility, decision D4).
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
       const path = `${input.pathPrefix ?? '/uploads/chat'}/${stamp}-${slugName(input.fileName)}`
-      const stored = await deps.filesApi.writeBytes(ctx, {
+      if (input.derivation && !deps.filesApi.writeDerivedBytes) throw new Error('scope_evidence_missing')
+      const write = input.derivation
+        ? (ctx: FilesContext, params: Parameters<FilesApi['writeBytes']>[1]) => deps.filesApi.writeDerivedBytes!(ctx, params, input.derivation!)
+        : deps.filesApi.writeBytes.bind(deps.filesApi)
+      const stored = await write(ctx, {
         path,
         bytes: input.bytes,
         mime: input.mime,

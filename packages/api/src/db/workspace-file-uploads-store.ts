@@ -1,3 +1,5 @@
+import { assertCurrentFileAssistant } from '../workspace-access/file-publication-admission.js'
+import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
 /**
  * Durable ledger for direct-to-storage workspace file uploads.
  *
@@ -8,11 +10,15 @@
  * [COMP:files/chunked-upload]
  */
 
-import { query, queryWithRLS } from './client.js'
+import { query, queryWithRLS, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
+import type { AccessContext, ResourceScope } from '@use-brian/core'
+import { admitFileCreate } from '../workspace-access/file-create-admission.js'
+import { assertExecutionResourceScope } from './access-predicate.js'
 
 export type WorkspaceFileUploadStatus = 'pending' | 'assembling' | 'completed' | 'aborted'
 
 export type WorkspaceFileUpload = {
+  admissionBinding?: ResourceScope
   id: string
   workspaceId: string
   actingUserId: string
@@ -36,13 +42,13 @@ export type WorkspaceFileUpload = {
 
 export type CreateWorkspaceFileUpload = Omit<
   WorkspaceFileUpload,
-  'status' | 'completedAt' | 'partsDeletedAt' | 'createdAt' | 'updatedAt'
->
+  'status' | 'completedAt' | 'partsDeletedAt' | 'createdAt' | 'updatedAt' | 'admissionBinding'
+> & { access?: AccessContext; requestedCompartments?: string[]; requestedProjectIds?: string[]; sensitivity?: ResourceScope['sensitivity'] }
 
 type UploadRow = Omit<WorkspaceFileUpload, 'sizeBytes'> & { sizeBytes: number | string }
 
 const SELECT = `
-  id,
+  id, admission_binding AS "admissionBinding",
   workspace_id AS "workspaceId",
   acting_user_id AS "actingUserId",
   assistant_id AS "assistantId",
@@ -83,32 +89,45 @@ export type WorkspaceFileUploadsStore = {
 export function createWorkspaceFileUploadsStore(): WorkspaceFileUploadsStore {
   return {
     async create(userId, input) {
-      const result = await queryWithRLS<UploadRow>(
-        userId,
-        `INSERT INTO workspace_file_uploads (
-           id, workspace_id, acting_user_id, assistant_id, file_id,
-           path, name, mime, size_bytes, chunk_size_bytes, part_count,
-           storage_uri, quota_exempt, expires_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-         RETURNING ${SELECT}`,
-        [
-          input.id,
-          input.workspaceId,
-          input.actingUserId,
-          input.assistantId,
-          input.fileId,
-          input.path,
-          input.name,
-          input.mime,
-          input.sizeBytes,
-          input.chunkSizeBytes,
-          input.partCount,
-          input.storageUri,
-          input.quotaExempt,
-          input.expiresAt,
-        ],
-      )
-      return record(result.rows[0])
+      const client=await getAppPool().connect()
+      try {
+        await client.query('BEGIN'); await applyRLSGucs(client,userId)
+        if (input.actingUserId!==userId || (input.access && (input.access.userId!==userId || input.access.workspaceId!==input.workspaceId))) throw new Error('scope_operation_denied')
+        const admitted=await admitFileCreate(client,userId,{workspaceId:input.workspaceId,path:input.path,parentPath:'/uploads',name:input.name,mime:input.mime,
+          sizeBytes:input.sizeBytes,storageUri:input.storageUri,createdByUserId:userId,sensitivity:input.sensitivity,
+          compartments:input.requestedCompartments,projectIds:input.requestedProjectIds})
+        const binding:ResourceScope={workspaceId:input.workspaceId,userId:null,assistantId:null,sensitivity:admitted.sensitivity??'internal',
+          compartments:admitted.compartments??[],projectIds:admitted.projectIds??[]}
+        await assertCurrentFileAssistant(client,binding,input.access)
+        assertExecutionResourceScope(binding,'mutation',input.access)
+        const ready=(await readAdmissionPolicy(client,input.workspaceId))?.setupState==='ready'
+        const result = await client.query<UploadRow>(
+          `INSERT INTO workspace_file_uploads (
+             id, workspace_id, acting_user_id, assistant_id, file_id,
+             path, name, mime, size_bytes, chunk_size_bytes, part_count,
+             storage_uri, quota_exempt, expires_at, admission_binding
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
+           RETURNING ${SELECT}`,
+          [
+            input.id,
+            input.workspaceId,
+            input.actingUserId,
+            input.assistantId,
+            input.fileId,
+            input.path,
+            input.name,
+            input.mime,
+            input.sizeBytes,
+            input.chunkSizeBytes,
+            input.partCount,
+            input.storageUri,
+            input.quotaExempt,
+            input.expiresAt, JSON.stringify({...binding,ready,executingAssistantId:input.assistantId}),
+          ],
+        )
+        await client.query('COMMIT')
+        return record(result.rows[0])
+      } finally { await rollbackAndRelease(client) }
     },
 
     async get(userId, uploadId) {

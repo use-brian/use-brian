@@ -1,6 +1,7 @@
 // [COMP:recordings/open-process-recording] - generic OSS recording processor.
 
 import type { FilesApi, RecordingTranscriber } from '@use-brian/core'
+import { captureRecordingSegmentProvenance, type RecordingSegmentProvenance } from '../db/recording-intake-admission.js'
 import { getEpisodeByIdSystem } from '../db/episodes-store.js'
 import { getRecordingSystem, updateRecording } from '../db/recordings-store.js'
 import {
@@ -43,9 +44,10 @@ export async function processOpenRecording(
     getRecording?: typeof getRecordingSystem
     probe?: typeof probeRecordingDuration
     extract?: typeof extractRecordingAudio
+    captureProvenance?: typeof captureRecordingSegmentProvenance
     insertSegments?: typeof insertTranscriptSegments
     filesApi?: FilesApi
-    persistTranscript?: (input: PersistTranscriptInput) => Promise<PersistedTranscript | null>
+    persistTranscript?: (input: PersistTranscriptInput, provenance: RecordingSegmentProvenance) => Promise<PersistedTranscript | null>
     linkTranscriptFile?: (recordingId: string, transcriptFileId: string) => Promise<void>
     synthesize?: RecordingSynthesizeFn
     /**
@@ -64,7 +66,8 @@ export async function processOpenRecording(
   }
   const episode = await (deps.getEpisode ?? getEpisodeByIdSystem)(job.actingUserId, job.recordingId, {})
   if (!episode) throw new Error(`recording ${job.recordingId} not found`)
-  const source = (episode.sourceRef ?? {}) as { gcsKey?: string; storageUri?: string | null }
+  const provenance = await (deps.captureProvenance ?? captureRecordingSegmentProvenance)({ actorUserId: job.actingUserId }, episode.workspaceId, job.recordingId)
+  const source = { gcsKey: provenance.recordingStorageKey, storageUri: provenance.parent.storageUri }
   if (!source.gcsKey) throw new Error(`recording ${job.recordingId} has no storage key`)
 
   const storage = source.storageUri
@@ -130,7 +133,7 @@ export async function processOpenRecording(
     compartments: episode.compartments,
     projectIds: episode.projectIds,
     segments,
-  })
+  }, provenance)
 
   // Hosted parity step 3.5: the durable transcript is additive and isolated.
   // transcript_segments remains the retrieval substrate, so the file is marked
@@ -150,7 +153,7 @@ export async function processOpenRecording(
         projectIds: episode.projectIds,
         utterances: transcription.utterances,
         title: recording?.title ?? recording?.fileName ?? null,
-      })
+      }, provenance)
       if (artifact) {
         const linkTranscriptFile = deps.linkTranscriptFile ?? (async (recordingId, transcriptFileId) => {
           await updateRecording(recordingId, { transcriptFileId })
@@ -201,4 +204,17 @@ export async function processOpenRecording(
     }
   }
   return { truncated: transcription.truncated, segmentsInserted, durationMs }
+}
+
+/** Queue-producer lifecycle. Status is recording bookkeeping, not a mutation of
+ * the Episode's immutable source_ref (which correctly invalidates derivations). */
+export async function processOpenRecordingWithBookkeeping(
+  job: Parameters<typeof processOpenRecording>[0], deps: Parameters<typeof processOpenRecording>[1],
+): Promise<OpenRecordingProcessResult> {
+  await updateRecording(job.recordingId, { status: 'processing', lastError: null })
+  const result = await processOpenRecording(job, deps)
+  await updateRecording(job.recordingId, {
+    status: 'processed', truncated: result.truncated, durationMs: result.durationMs, lastError: null,
+  })
+  return result
 }

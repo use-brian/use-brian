@@ -14,6 +14,13 @@ const input = {
   ],
 }
 
+const provenance = {
+  actorUserId: input.actingUserId, recordingId: input.recordingId, recordingVersion: '3', episodeVersion: '2',
+  parent: { resourceKind: 'workspace_file' as const, resourceId: 'media-1', version: '1', workspaceId: input.workspaceId,
+    userId: input.actingUserId, assistantId: input.assistantId, sensitivity: 'confidential' as const,
+    compartments: [], projectIds: [], storageUri: 'gs://fixture/media', name: 'media.wav', mime: 'audio/wav', sizeBytes: 3 },
+}
+
 function filesApi(overrides: Record<string, unknown> = {}) {
   return {
     writeBytes: vi.fn(async () => ({
@@ -39,7 +46,7 @@ describe('[COMP:recordings/transcript-artifact] OSS transcript artifact', () => 
       now: () => new Date('2026-07-16T12:00:00Z'),
     })
 
-    await expect(persist(input)).resolves.toMatchObject({ fileId: 'file-1' })
+    await expect(persist(input, provenance)).resolves.toMatchObject({ fileId: 'file-1' })
     const [, params] = (api.writeBytes.mock.calls as unknown as Array<[
       unknown,
       { bytes: Buffer; mime: string; sensitivity: string; path: string },
@@ -52,6 +59,11 @@ describe('[COMP:recordings/transcript-artifact] OSS transcript artifact', () => 
       sensitivity: 'confidential',
       path: '/recordings/2026-07-16T12-00-00-Weekly-call.md',
     })
+    expect(api.writeBytes).toHaveBeenCalledWith(expect.objectContaining({ derivation: { producer: 'recording-transcript', sources: [
+      expect.objectContaining({ resourceKind: 'workspace_file', userId: 'user-1', version: '1' }),
+      expect.objectContaining({ resourceKind: 'recording', resourceId: 'rec-1', version: '3', userId: 'user-1' }),
+      expect.objectContaining({ resourceKind: 'episode', resourceId: 'rec-1', version: '2', userId: 'user-1' }),
+    ] } }), expect.anything())
     expect(api.setMeta).toHaveBeenCalledWith(
       expect.anything(),
       'file-1',
@@ -71,6 +83,12 @@ describe('[COMP:recordings/transcript-artifact] OSS transcript artifact', () => 
       }),
     })
     const persist = createTranscriptArtifactWriter({ filesApi: api as never })
-    await expect(persist(input)).resolves.toBeNull()
+    await expect(persist(input, provenance)).resolves.toBeNull()
   })
+})
+
+it('never falls back to an authored/shared write without per-call evidence', async () => {
+  const api = filesApi()
+  await expect(createTranscriptArtifactWriter({ filesApi: api as never })(input)).resolves.toBeNull()
+  expect(api.writeBytes).not.toHaveBeenCalled()
 })
