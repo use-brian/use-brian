@@ -80,7 +80,7 @@ describe("[COMP:recordings/live-interaction] durable interaction store", () => {
     await db.exec(
       readFileSync(
         new URL(
-          "../../../migrations/650_live_interaction.sql",
+          "../../../migrations/653_live_interaction.sql",
           import.meta.url,
         ),
         "utf8",

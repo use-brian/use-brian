@@ -162,7 +162,7 @@ Scope interpretation: broader context means authorized workspace knowledge/past 
 
 ## Configuration and operational limits
 
-- Apply migration `650_live_interaction.sql` and set server-only `LIVE_INTERACTION_OPENAI_API_KEY` to enable streaming transcription. Normal recording continues without this key; the interaction option explains its unavailable state. API worker processes must run the existing `runWorkers` composition.
+- Apply migration `653_live_interaction.sql` and set server-only `LIVE_INTERACTION_OPENAI_API_KEY` to enable streaming transcription. Normal recording continues without this key; the interaction option explains its unavailable state. API worker processes must run the existing `runWorkers` composition.
 - Enable Interaction in the recorder menu. This enables the live page and binds answers to the current personal chat, in either the main chat or the floating dock. Interaction keeps that chat open instead of navigating to the recording page. The server derives the answering assistant from the destination chat, not the dock's selected assistant. Feed/shared-room recorder targets are explicitly unavailable rather than silently routing answers to another thread. Settings > General contains the personal natural-language rule editor and preview.
 - Microphone-only is a source boundary, not voice authentication. Echo cancellation mitigates but cannot guarantee suppression of room speech/acoustic playback picked up by the microphone.
 - Transcript and question data cascade with their capture page, owning chat, user or workspace. Answer evidence is retained with the job and canonical trace; final transcription does not re-trigger old utterances or silently rewrite prior evidence.
