@@ -955,7 +955,7 @@ Reply with ONLY one JSON object, no prose:
         {draft.audienceCount !== undefined ? (
           <div className="space-y-2">
             <div className="max-w-xs">
-              <Kpi label={t.shopifyApp.campaignEligibleSubscribers} value={draft.audienceCount.toLocaleString()} />
+              <Kpi bare label={t.shopifyApp.campaignEligibleSubscribers} value={draft.audienceCount.toLocaleString()} />
             </div>
             {draft.audienceCount === 0 ? (
               <Note>
@@ -1223,7 +1223,7 @@ Reply with ONLY one JSON object, no prose:
           </h3>
           <div
             aria-label={t.shopifyApp.campaignMessagePreviewTitle}
-            className="overflow-hidden rounded-xl border border-border bg-muted/40 p-3 sm:p-5"
+            className="overflow-hidden rounded-xl bg-muted/40 p-3 sm:p-5"
           >
             <div className="mx-auto max-w-xl overflow-hidden rounded-xl border border-border bg-background shadow-sm">
               <div className="border-b border-border px-4 py-3">
@@ -1266,10 +1266,10 @@ Reply with ONLY one JSON object, no prose:
 
       <CampaignSection number="5" title={t.shopifyApp.campaignReviewTitle}>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-          <Kpi label={t.shopifyApp.campaignSelectedProducts} value={draft.selectedProducts.length} />
-          <Kpi label={t.shopifyApp.campaignEligibleSubscribers} value={draft.audienceCount?.toLocaleString() ?? "-"} />
-          <Kpi label={t.shopifyApp.campaignCode} value={draft.code || "-"} />
-          <Kpi label={t.shopifyApp.campaignExpiry} value={draft.expiresAt || "-"} />
+          <Kpi bare label={t.shopifyApp.campaignSelectedProducts} value={draft.selectedProducts.length} />
+          <Kpi bare label={t.shopifyApp.campaignEligibleSubscribers} value={draft.audienceCount?.toLocaleString() ?? "-"} />
+          <Kpi bare label={t.shopifyApp.campaignCode} value={draft.code || "-"} />
+          <Kpi bare label={t.shopifyApp.campaignExpiry} value={draft.expiresAt || "-"} />
         </div>
         {!prepared ? (
           <>
@@ -1284,7 +1284,7 @@ Reply with ONLY one JSON object, no prose:
 
       {prepared ? (
         <CampaignSection number="6" title={t.shopifyApp.campaignHandoffTitle}>
-          <div className="flex items-start gap-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-3">
+          <div className="flex items-start gap-2 rounded-xl bg-emerald-500/10 p-3">
             <CheckCircle2 className="mt-0.5 size-4 text-emerald-600" aria-hidden />
             <div>
               <p className="text-[13px] font-medium">{t.shopifyApp.campaignPrepared}</p>
@@ -1306,7 +1306,7 @@ Reply with ONLY one JSON object, no prose:
             <CopyField label={t.shopifyApp.campaignCtaUrl} value={draft.ctaUrl} copyKey="url" copied={copied} onCopy={copyText} copyLabel={t.shopifyApp.copy} copiedLabel={t.shopifyApp.copied} />
           </div>
           {draft.includeProductImage && draft.selectedImage && selectedImageSrc ? (
-            <div className="grid gap-3 rounded-xl border border-border bg-background p-3 sm:grid-cols-[160px_1fr]">
+            <div className="grid gap-3 sm:grid-cols-[160px_1fr]">
               <img
                 src={selectedImageSrc}
                 alt={selectedImageAlt}

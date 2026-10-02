@@ -459,7 +459,7 @@ function ImportDialog({ workspaceId, config, canCreateField, open, initialKind, 
                 ))}
               </div>
               {createColumn !== null && (
-                <div className="mt-3 space-y-3 rounded-lg border border-border bg-muted/20 p-3">
+                <div className="mt-3 space-y-3 border-l-2 border-border pl-3">
                   <div className="text-xs font-medium">{t.createFieldFromColumn}</div>
                   <div className="grid gap-2 sm:grid-cols-2">
                     <Input label={t.fieldLabel} value={newFieldLabel} onChange={setNewFieldLabel} />

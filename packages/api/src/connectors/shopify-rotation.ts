@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Pool } from 'pg'
 import { decryptCredentials, encryptCredentials } from '../db/credential-crypto.js'
-import type { ConnectorCredentials } from '../db/connector-store.js'
+import { normalizeStoredCredentials, type ConnectorCredentials } from '../db/connector-store.js'
 import { getConnectorConfig } from '../connector-config.js'
 import { isManagedShopifyTokens, unpackShopifyTokens, packShopifyTokens, shopifyAppCredentialsFromTokens, refreshShopifyTokens, type ShopifyTokens } from '../shopify/client.js'
 import { connectorSetupProviders } from './setup-providers.js'
@@ -47,8 +47,10 @@ export async function refreshShopifyInstanceCredentials(pool: Pool, key: Buffer,
         LEFT JOIN connector_setup_identity x ON x.instance_id=i.id
         WHERE i.id=$1 AND i.provider='shopify' AND i.connected=true`, [id])).rows[0]
       if (!row?.credentials) return { kind: 'usable', credentials: null }
-      const previous = decryptCredentials<ConnectorCredentials>(row.credentials, key)
-      if (previous.type !== 'oauth') return { kind: 'usable', credentials: previous }
+      // Legacy and hosted-connect blobs carry no `type`; read them the way every
+      // other credential reader does, or an untyped OAuth pair reads as non-OAuth.
+      const previous = normalizeStoredCredentials(decryptCredentials<unknown>(row.credentials, key))
+      if (previous?.type !== 'oauth') return { kind: 'usable', credentials: previous }
       const current = unpackShopifyTokens(previous.client_secret)
       if (!current || !isManagedShopifyTokens(current)) return { kind: 'usable', credentials: previous }
       const fingerprint = createHash('sha256').update(current.refreshToken!).digest('hex')
@@ -94,7 +96,7 @@ export async function refreshShopifyInstanceCredentials(pool: Pool, key: Buffer,
         throw new ConnectorSetupError('connector_rotation_uncertain')
       }
     }
-    const credentials = decryptCredentials<OAuth>(encrypted, key)
+    const credentials = normalizeStoredCredentials(decryptCredentials<unknown>(encrypted, key)) as OAuth
     const next = unpackShopifyTokens(credentials.client_secret)
     const requireReconnect = async (code: string): Promise<never> => {
       await transaction(async () => {

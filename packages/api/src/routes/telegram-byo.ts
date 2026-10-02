@@ -49,7 +49,8 @@ import {
   resolveTelegramRoutingForSurface,
   getChannelForWebhook,
 } from '../db/channels-store.js'
-import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
+import { type LinkedAccountStore } from '../db/linked-accounts.js'
+import { completeLinkClaim } from './link-claim.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { buildAlbumFiledReply, buildDocumentFiledReply, buildOversizeDocReply, classifyMedia, summarizeAlbumIntake } from '../ingest/channel-media-intake.js'
@@ -905,14 +906,16 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
                   lastName: raw.from?.last_name ?? null,
                 },
               })
-              mergeShadowUser(code.userId, incoming.userId, 'telegram', {
-                reason: 'link-code',
+              const claim = await completeLinkClaim({
+                provider: 'telegram',
+                realUserId: code.userId,
+                providerId: incoming.userId,
                 evidence: { codeId: code.id, channelId: boundIntegration.channelId },
-              }).catch((err) => {
-                console.error('[telegram-byo] owner pairing shadow merge failed:', err)
+                receivingAssistant: { id: boundAssistant.id, name: boundAssistant.name ?? null },
+                analytics: options.analytics,
               })
               await adapter.sendMessage(incoming.channelId, {
-                text: 'Telegram connected. This Telegram account is now linked to your Brian account.',
+                text: claim.text,
               }).catch((err) => {
                 console.error('[telegram-byo] owner pairing confirmation failed:', err)
               })

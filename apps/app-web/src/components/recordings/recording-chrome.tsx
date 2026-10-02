@@ -208,7 +208,7 @@ export function RecordingChromeContent({
   const canPlay = !notProcessed || (summary?.durationMs ?? 0) > 0;
 
   return (
-    <div className="mb-6 flex flex-col gap-3 rounded-lg border border-border bg-muted/20 p-3">
+    <div className="mb-6 flex flex-col gap-3">
       <HashSeek />
       {/* Popped by a `[H:MM:SS]` citation in the prose below. */}
       <CitationTranscriptCard
@@ -319,7 +319,7 @@ export function RecordingChromeContent({
               {t.recordings.detailTranscript}
             </button>
             {showTranscript ? (
-              <div className="mt-2 max-h-96 overflow-y-auto rounded-md border border-border bg-background px-3 py-2">
+              <div className="mt-2 max-h-96 overflow-y-auto rounded-md bg-muted/30 px-3 py-2">
                 <TranscriptPane
                   recordingId={recordingId}
                   participants={summary?.participants ?? []}

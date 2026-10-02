@@ -60,7 +60,7 @@ export function FeedLearnedDecisions(props: {
     {props.loading && !props.data ? <ListSurfaceSkeleton rows={3} /> : null}
     {props.error || props.actions.error ? <p role="alert" className="text-sm">{t.failed}<Button variant="outline" size="sm" className="min-h-11 md:min-h-8 whitespace-normal" disabled={props.offline || props.actions.busy} onClick={props.onRefresh}>{tc.retry}</Button></p> : null}
     {props.data?.privateSourcesOmitted ? <p role="status" className="text-sm">{t.privateOmitted}</p> : null}
-    {editor ? <form className="space-y-2 rounded-md border p-2" onSubmit={event => { event.preventDefault(); void saveEditor(); }}>
+    {editor ? <form className="space-y-2 border-t pt-3" onSubmit={event => { event.preventDefault(); void saveEditor(); }}>
       <label className="block text-sm">{editor.kind === 'editSummary' ? t.summary : t.instruction}<textarea autoFocus className="min-h-24 w-full rounded-md border bg-background p-2 text-base" maxLength={editor.kind === 'editSummary' ? 1200 : 280} value={editor.text} onChange={event => setEditor({ ...editor, text: event.target.value })} disabled={unavailable} /></label>
       {editor.kind === 'editSummary' || editor.kind === 'editVoice' ? <label className="block text-sm">{t.detail}<textarea className="min-h-24 w-full rounded-md border bg-background p-2 text-base" maxLength={editor.kind === 'editVoice' ? 4000 : 8000} value={editor.detail} onChange={event => setEditor({ ...editor, detail: event.target.value })} disabled={unavailable} /></label> : null}
       <div className="flex flex-wrap gap-2"><Button variant="default" size="sm" className="min-h-11 md:min-h-8 whitespace-normal" disabled={unavailable || !editor.text.trim()} type="submit">{t.save}</Button><Button variant="outline" size="sm" className="min-h-11 md:min-h-8 whitespace-normal" type="button" onClick={() => setEditor(null)}>{tc.cancel}</Button></div>
@@ -78,7 +78,7 @@ export function FeedLearnedDecisions(props: {
       </div> : <p className="text-sm text-muted-foreground">{t.noSummary}</p>}
       {typeof item.coverage.included === 'number' ? <p className="text-xs text-muted-foreground">{t.coverage}: {item.coverage.included}/{String(item.coverage.eligible ?? item.coverage.included)}; {t.omitted}: {String(item.coverage.omitted ?? 0)}</p> : null}
       {props.data?.canConfirm && !item.revoked ? <Button variant="outline" size="sm" className="min-h-11 md:min-h-8 whitespace-normal" disabled={unavailable} onClick={() => setEditor({ confirmationId: item.id, kind: 'remember', text: '', detail: '' })}>{t.remember}</Button> : null}
-      {item.artifacts.map(artifact => <details key={artifact.id} className="min-w-0 rounded-md border p-2" data-feed-artifact={artifact.id}>
+      {item.artifacts.map(artifact => <details key={artifact.id} className="min-w-0 border-t pt-1" data-feed-artifact={artifact.id}>
         <summary className="min-h-11 cursor-pointer break-words py-2 text-sm">{artifact.kind === 'voice' ? t.voice : t.rule}: {artifact.erased ? t.erased : artifact.text} ({t[artifact.status]})</summary>
         <p className="text-xs text-muted-foreground">{t.scope}: {artifact.scope.platform}, {artifact.scope.postFormat}{artifact.scope.brandId ? ` · ${t.brand}` : ''}</p>
         {artifact.canEdit && !item.revoked ? <div className="mt-2 flex flex-wrap gap-2">

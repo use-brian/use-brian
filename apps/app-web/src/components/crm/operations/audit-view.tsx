@@ -60,7 +60,7 @@ export function CrmOperationsAuditView({ workspaceId }: { workspaceId: string })
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
         <div>
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t.auditChanges}</div>
-          <div className="max-h-48 divide-y divide-border/60 overflow-y-auto rounded-lg bg-muted/20 px-2">
+          <div className="max-h-48 divide-y divide-border/60 overflow-y-auto">
             {audit.map((entry) => (
               <div key={entry.id} className="flex items-center justify-between gap-2 py-2 text-[11px]">
                 <span className="min-w-0 truncate font-mono">{entry.action}</span>
@@ -72,7 +72,7 @@ export function CrmOperationsAuditView({ workspaceId }: { workspaceId: string })
         </div>
         <div>
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t.eventDelivery}</div>
-          <div className="max-h-48 divide-y divide-border/60 overflow-y-auto rounded-lg bg-muted/20 px-2">
+          <div className="max-h-48 divide-y divide-border/60 overflow-y-auto">
             {events.map((entry) => (
               <div key={entry.id} className="flex items-center justify-between gap-2 py-2 text-[11px]">
                 <span className="min-w-0 truncate font-mono">{entry.eventType}</span>

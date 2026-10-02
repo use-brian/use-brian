@@ -384,7 +384,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onConnectorCo
 
                   {/* Skill editor inline */}
                   {showSkillEditor && (
-                    <div className="border border-primary/30 rounded-xl p-5 bg-muted/10 space-y-3">
+                    <div className="border-t border-border pt-5 space-y-3">
                       <h3 className="text-sm font-semibold">{t.browseDirectory.createSkill}</h3>
                       <input type="text" value={skillForm.name} onChange={(e) => setSkillForm({ ...skillForm, name: e.target.value })} placeholder={t.browseDirectory.skillNamePlaceholder} maxLength={100} className="w-full text-[16px] md:text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
                       <input type="text" value={skillForm.description} onChange={(e) => setSkillForm({ ...skillForm, description: e.target.value })} placeholder={t.browseDirectory.shortDescriptionPlaceholder} maxLength={250} className="w-full text-[16px] md:text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />

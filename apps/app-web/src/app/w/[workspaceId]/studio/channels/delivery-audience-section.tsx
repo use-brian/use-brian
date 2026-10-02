@@ -233,8 +233,8 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
       {!canManage && <p className="text-sm text-muted-foreground">{copy.adminOnly}</p>}
     </div>
     {bindings.length === 0 && <p className="text-sm text-muted-foreground">{copy.empty}</p>}
-    <ul className="space-y-3">
-      {bindings.map((binding, index) => <li key={`${binding.channelId}-${index}`} className="space-y-2 rounded-md border border-border p-3">
+    <ul className="divide-y divide-border">
+      {bindings.map((binding, index) => <li key={`${binding.channelId}-${index}`} className="space-y-2 py-3 first:pt-0 last:pb-0">
         <p className="break-all font-mono text-sm">{binding.channelId}</p>
         <p className="text-sm">{binding.audienceType === "group" ? copy.group : copy.individual} · {t.studioPage.channels.clearance[binding.clearance]}</p>
         <dl className="space-y-1 break-words text-xs text-muted-foreground">

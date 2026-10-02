@@ -23,7 +23,7 @@ function useProtectedMedia(workspaceId:string|null,fileId:string|null,kind:'dura
     previous.current=key;
   },[key]);
   const cache=useCachedResource(key,()=>kind==='durable'?fetchDocMediaProjection(workspaceId!,fileId!):fetchCachedMediaProjection(workspaceId!,fileId!,kind),lifecycle);
-  const projection=useProtectedProjection(key??'doc-media:disabled',cache.data,()=>{},cache.refresh);
+  const projection=useProtectedProjection(key??'doc-media:disabled',cache.data,()=>{},cache.refresh,{purgeOnForeground:true});
   return {url:projection?.url??null,mimeType:projection?.mimeType??null,
     loading:!!key&&!projection&&!cache.error,error:cache.error};
 }
@@ -109,7 +109,7 @@ export function useOfficeResourceUrls(artifactId:string|null,resourceIds:readonl
     dispose:value=>{for(const url of Object.values(value.urls))URL.revokeObjectURL(url);},
     expiresInMs:value=>Math.min(value.projectionDeadline-Date.now(),value.projectionMonotonicDeadline-performance.now()),
   });
-  const projection=useProtectedProjection(key??'office-media:disabled',cache.data,()=>{},cache.refresh);
+  const projection=useProtectedProjection(key??'office-media:disabled',cache.data,()=>{},cache.refresh,{purgeOnForeground:true});
   return {urls:projection?.urls??{},error:cache.error};
 }
 

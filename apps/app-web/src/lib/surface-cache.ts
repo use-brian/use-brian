@@ -155,7 +155,7 @@ export function loadSurfaceCache<T>(
         lifecycle?.dispose?.(data);
         throw new SurfaceCacheEvictionError(new Error("cache_resource_expired"));
       }
-      const timer = ttl === undefined ? undefined : setTimeout(() => invalidateSurfaceCache(key), Math.ceil(ttl));
+      const timer = ttl === undefined ? undefined : setTimeout(() => evictSurfaceCacheKey(key), Math.ceil(ttl));
       if (timer !== undefined || lifecycle?.dispose) {
         disposals.set(key, () => {
           if (timer !== undefined) clearTimeout(timer);
@@ -206,7 +206,7 @@ export function seedSurfaceCache<T>(key: string, data: T, lifecycle?: CacheLifec
   const ttl = lifecycle?.expiresInMs?.(data);
   if (ttl !== undefined && (!Number.isFinite(ttl) || ttl <= 0)) return false;
   disposeEntry(key);
-  const timer = ttl === undefined ? undefined : setTimeout(() => invalidateSurfaceCache(key), Math.ceil(ttl));
+  const timer = ttl === undefined ? undefined : setTimeout(() => evictSurfaceCacheKey(key), Math.ceil(ttl));
   if (timer !== undefined || lifecycle?.dispose) disposals.set(key, () => {
     if (timer !== undefined) clearTimeout(timer);
     lifecycle?.dispose?.(data);
@@ -266,6 +266,22 @@ export function invalidateSurfaceCache(prefix: string): void {
   for (const key of store.keys()) {
     if (key === prefix || key.startsWith(prefix)) dropped.push(key);
   }
+  dropKeys(dropped);
+}
+
+/**
+ * Drop exactly one key, never the keys it happens to prefix. A value's OWN
+ * lifetime ending (expiry) is not an authority signal for its siblings:
+ * `workspace-access:<w>:<u>` prefixes the registry, mode and history slots,
+ * and evicting the family whenever one projection expired blanked every
+ * still-valid sibling to a skeleton.
+ */
+export function evictSurfaceCacheKey(key: string): void {
+  if (!isBrowser() || !store.has(key)) return;
+  dropKeys([key]);
+}
+
+function dropKeys(dropped: string[]): void {
   for (const key of dropped) {
     // Detach old reads: their completion must not repopulate an invalidated key.
     inflight.delete(key);

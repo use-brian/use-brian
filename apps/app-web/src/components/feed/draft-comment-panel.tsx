@@ -118,8 +118,8 @@ function Suggestion(props: FeedCommentPanelProps & { suggestion: FeedDraftSugges
   const blocked = props.readOnly || props.pending; const proposed = ['proposed', 'deferred'].includes(suggestion.status);
   return <article className="space-y-3 rounded-lg border p-3" data-feed-suggestion={suggestion.id}>
     <p className="text-sm font-medium">{suggestion.authorKind === 'assistant' ? t.brian : t.author}</p>
-    <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm"><p className="mb-1 text-xs font-semibold text-muted-foreground">{t.before}</p><p className="whitespace-pre-wrap break-words">{before}</p></div>
-    <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/40 p-3 text-sm dark:border-emerald-900 dark:bg-emerald-950/20"><p className="mb-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">{t.after}</p><p className="whitespace-pre-wrap break-words">{after}</p></div>
+    <div className="rounded-lg bg-muted/40 p-3 text-sm"><p className="mb-1 text-xs font-semibold text-muted-foreground">{t.before}</p><p className="whitespace-pre-wrap break-words">{before}</p></div>
+    <div className="rounded-lg bg-emerald-50/60 p-3 text-sm dark:bg-emerald-950/25"><p className="mb-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">{t.after}</p><p className="whitespace-pre-wrap break-words">{after}</p></div>
     {suggestion.sourceProposal?.imageBrief ? <div className="text-sm"><p className="font-medium">{t.imageBrief}</p><p className="whitespace-pre-wrap">{suggestion.sourceProposal.imageBrief}</p></div> : null}
     {suggestion.rationale ? <p className="text-sm whitespace-pre-wrap">{suggestion.rationale}</p> : null}
     <div className="flex flex-wrap gap-2">

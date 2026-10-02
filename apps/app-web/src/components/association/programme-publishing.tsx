@@ -110,10 +110,10 @@ export function ProgrammePublishingPanel({ workspaceId }: { workspaceId: string 
                   <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.steps = null; })}>{c.remove}: {c.steps}</Button></div>}
               </div>
               <div className="space-y-3 md:col-span-2"><h4>{c.sections}</h4>
-                {copy.sections.map((section, i) => <div className="space-y-3 rounded-xl border p-3" key={i}>
+                {copy.sections.map((section, i) => <div className="space-y-3 border-t border-border pt-3" key={i}>
                   <SectionFields section={section} labels={c} onChange={fn => patchCopy(value => fn(value.sections[i]))}/>
                   <div className="space-y-2 pl-3"><h5 className="text-sm font-medium">{c.subsections}</h5>
-                    {section.subsections.map((sub, j) => <div className="space-y-2 rounded-lg border p-2" key={j}><SectionFields section={sub} labels={c} onChange={fn => patchCopy(value => fn(value.sections[i].subsections[j]))}/><Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.sections[i].subsections.splice(j, 1); })}>{c.remove}</Button></div>)}
+                    {section.subsections.map((sub, j) => <div className="space-y-2 border-l-2 border-border pl-3" key={j}><SectionFields section={sub} labels={c} onChange={fn => patchCopy(value => fn(value.sections[i].subsections[j]))}/><Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.sections[i].subsections.splice(j, 1); })}>{c.remove}</Button></div>)}
                     <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.sections[i].subsections.push(emptySub(value.sections[i].subsections.length + 1)); })}>{c.add}: {c.subsections}</Button></div>
                   <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.sections.splice(i, 1); })}>{c.remove}: {c.sections}</Button>
                 </div>)}

@@ -153,9 +153,18 @@ export function Field({ label, children }: { label: string; children: React.Reac
   );
 }
 
-export function Kpi({ label, value }: { label: string; value: React.ReactNode }) {
+export function Kpi({
+  label,
+  value,
+  bare = false,
+}: {
+  label: string;
+  value: React.ReactNode;
+  /** Drop the card frame when the stat already sits inside a framed section. */
+  bare?: boolean;
+}) {
   return (
-    <div className="rounded-xl border border-border bg-card px-3 py-2">
+    <div className={bare ? "py-1" : "rounded-xl border border-border bg-card px-3 py-2"}>
       <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </div>

@@ -100,7 +100,7 @@ export function DesktopLinkRecovery() {
           <p role="status" className="mt-4 text-sm leading-relaxed">{message}</p>
 
           {state.phase === "choose-account" && (
-            <div className="mt-4 rounded-xl border border-border p-1">
+            <div className="-mx-2 mt-4">
               <DesktopAccounts
                 allowedKeys={state.choices.map((choice) => choice.key)}
                 onSelect={(account) => act("choose", account.key)}

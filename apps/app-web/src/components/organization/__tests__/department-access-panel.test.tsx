@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DepartmentAccessPanel, HomeDepartmentControls } from '../department-access-panel';
+import { resetSurfaceCache } from '@/lib/surface-cache';
 import { I18nProvider } from '@/lib/i18n/client';
 import { en } from '@/lib/i18n/dictionaries/en';
 import { ja } from '@/lib/i18n/dictionaries/ja';
@@ -58,6 +59,7 @@ async function setDate(input: HTMLInputElement, value: string) {
 }
 
 beforeEach(() => {
+  resetSurfaceCache();
   mocks.viewer.me.id = 'owner-fixture';
   for (const m of [mocks.departments, mocks.edges, mocks.setEdge, mocks.removeEdge, mocks.addOwner, mocks.removeOwner, mocks.breakGlass, mocks.setHome, mocks.confirm, mocks.prompt]) m.mockReset();
   mocks.departments.mockResolvedValue({ departments: [entry()], homes: [{ principal: { kind: 'user', id: 'owner-fixture' }, departmentId: null }] });

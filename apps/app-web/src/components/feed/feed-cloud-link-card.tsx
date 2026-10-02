@@ -121,7 +121,7 @@ export function FeedCloudLinkCard({ assistantId }: { assistantId?: string }) {
           </div>
 
           {!linked && !pending && !planRequired ? (
-            <div className="mt-3 rounded-lg border border-border/50 bg-muted/35 p-3 text-[11px] leading-relaxed text-muted-foreground">
+            <div className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
               <p>{t.disclosureSent}</p>
               <p className="mt-1">{t.disclosureLocal}</p>
             </div>

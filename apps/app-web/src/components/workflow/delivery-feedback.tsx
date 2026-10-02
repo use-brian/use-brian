@@ -50,10 +50,10 @@ export function DeliveryOutcomeFeedback({ output, workspaceId }: { output: unkno
     : unverified && outcome.detail === "evidence_exceeds_audience" ? copy.evidenceExceedsAudience
       : copy.unverified;
   return (
-    <div className={cn("rounded-md border p-3 text-sm", {
-      "border-green-500/40 bg-green-500/5": status === "delivered",
-      "border-amber-500/40 bg-amber-500/5": status === "skipped" || status === "unknown",
-      "border-red-500/40 bg-red-500/5": status === "failed",
+    <div className={cn("rounded-md p-3 text-sm", {
+      "bg-green-500/10": status === "delivered",
+      "bg-amber-500/10": status === "skipped" || status === "unknown",
+      "bg-red-500/10": status === "failed",
     })}>
       <p className="font-semibold">{copy[status]}</p>
       <p>{copy.generationNote}</p>

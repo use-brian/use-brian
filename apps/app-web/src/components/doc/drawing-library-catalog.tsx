@@ -87,7 +87,7 @@ export function DrawingLibraryCatalog({ theme, path, onClose, onImport }: {
           <ul className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain" aria-busy={busy}>
             {matches.map(entry =>
               <li key={entry.url} className="flex flex-wrap items-center gap-3 rounded border border-border p-3">
-                <div className="flex h-28 w-full shrink-0 items-center justify-center overflow-hidden rounded border border-border bg-muted/30 sm:w-44">
+                <div className="flex h-28 w-full shrink-0 items-center justify-center overflow-hidden rounded bg-muted/40 sm:w-44">
                   {entry.preview && !brokenPreviews.has(entry.preview) ? <img src={entry.preview}
                     alt={`${t.libraryPreview}: ${entry.name}`} loading="lazy" decoding="async" referrerPolicy="no-referrer"
                     className="h-full w-full object-contain" onError={() => setBrokenPreviews(previous => new Set(previous).add(entry.preview!))} />

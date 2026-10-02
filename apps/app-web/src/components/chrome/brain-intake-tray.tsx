@@ -167,7 +167,7 @@ export function BrainIntakeTray({ workspaceId }: { workspaceId: string }) {
               <X className="size-3.5" aria-hidden />
             </button>
           </header>
-          <ul className="flex max-h-[min(50dvh,20rem)] flex-col gap-1 overflow-y-auto p-2">
+          <ul className="flex max-h-[min(50dvh,20rem)] flex-col divide-y divide-border/60 overflow-y-auto px-3 py-1">
             {items.map((item) => (
               <IntakeRow key={item.id} item={item} copy={copy} />
             ))}
@@ -185,7 +185,7 @@ function IntakeRow({ item, copy }: { item: IntakeItem; copy: ReturnType<typeof u
   return (
     <li
       data-intake-status={item.status}
-      className="flex items-center gap-2.5 rounded-lg border border-border/70 bg-background px-2.5 py-1.5"
+      className="flex items-center gap-2.5 py-2"
     >
       <RowIcon item={item} />
       <div className="min-w-0 flex-1">

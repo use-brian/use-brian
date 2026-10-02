@@ -634,7 +634,7 @@ export function ModelsSection() {
                 </Button>
               </div>
 
-              <ul className="space-y-2">
+              <ul className="divide-y divide-border/70">
                 {customProfiles.map(({ endpoint, profile }) => {
                   const assigned = customTierDefaults
                     .filter((setting) => setting.profileId === profile.id)
@@ -646,7 +646,7 @@ export function ModelsSection() {
                           ? t.classMax
                           : t.classResearch);
                   return (
-                    <li key={profile.id} className="space-y-3 rounded-lg bg-muted/25 px-3 py-2.5">
+                    <li key={profile.id} className="space-y-3 py-2.5">
                       <div className="flex items-center gap-3">
                         <Layers3 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                         <div className="min-w-0 flex-1">
@@ -713,14 +713,14 @@ export function ModelsSection() {
                   );
                 })}
                 {customProfiles.length === 0 ? (
-                  <li className="rounded-lg border border-dashed border-border/70 px-3 py-3 text-[12.5px] text-muted-foreground">
+                  <li className="py-3 text-[12.5px] text-muted-foreground">
                     {t.noCustomProfiles}
                   </li>
                 ) : null}
               </ul>
 
               {showCustomCreate ? (
-                <div className="space-y-3 rounded-lg bg-muted/20 p-3">
+                <div className="space-y-3 border-t border-border/70 pt-3">
                   <div className="text-[12.5px] font-medium">{t.customCreateTitle}</div>
                   {customEndpoints.length === 0 ? (
                     <p className="text-[11.5px] text-muted-foreground">{t.customCreateNeedsEndpoint}</p>
@@ -769,7 +769,7 @@ export function ModelsSection() {
                 <div className="text-[13px] font-medium">{t.defaultsTitle}</div>
                 <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">{t.defaultsBlurb}</p>
                 {models.length > 0 && profiles.length === 0 ? (
-                  <p className="mt-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-[11.5px] text-muted-foreground">{t.defaultsNoProfilesHint}</p>
+                  <p className="mt-2 text-[11.5px] text-muted-foreground">{t.defaultsNoProfilesHint}</p>
                 ) : null}
               </div>
               {DEFAULTABLE_CLASSES.map((cls) => {
@@ -819,11 +819,11 @@ export function ModelsSection() {
                   {showMeteredCreate ? t.cancelCreateCta : t.addProfileCta}
                 </Button>
               </div>
-              <ul className="space-y-2">
+              <ul className="divide-y divide-border/70">
                 {profiles.map((profile) => {
                   const estimate = estimates[profile.id];
                   return (
-                    <li key={profile.id} className="flex items-center gap-3 rounded-lg bg-muted/25 px-3 py-2.5">
+                    <li key={profile.id} className="flex items-center gap-3 py-2.5">
                       <Gauge className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[13px] font-medium">{nameFor(profile.modelAlias)} / {profile.name}</div>
@@ -854,11 +854,11 @@ export function ModelsSection() {
                   );
                 })}
                 {profiles.length === 0 ? (
-                  <li className="rounded-lg border border-dashed border-border/70 px-3 py-3 text-[12.5px] text-muted-foreground">{t.noProfiles}</li>
+                  <li className="py-3 text-[12.5px] text-muted-foreground">{t.noProfiles}</li>
                 ) : null}
               </ul>
               {showMeteredCreate ? (
-                <div className="space-y-3 rounded-lg bg-muted/20 p-3">
+                <div className="space-y-3 border-t border-border/70 pt-3">
                   <div className="text-[12.5px] font-medium">{t.createTitle}</div>
                   <div className="flex flex-wrap items-center gap-2">
                     <Select value={newModel} onValueChange={(value) => { if (value) setNewModel(value); }}>

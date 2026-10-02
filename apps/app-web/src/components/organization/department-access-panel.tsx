@@ -6,7 +6,7 @@
  * `manageDepartments` tool (D25). Spec: docs/architecture/features/workspace-access.md
  * -> "Department management and home departments (v2, migration 651)".
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarClock, Check, Crown, MoreHorizontal, ShieldAlert, Trash2, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -19,6 +19,10 @@ import { format } from "@/lib/i18n/format";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { listWorkspaceMembers } from "@/lib/api/mentions";
 import { listAssistants } from "@/lib/api/studio";
+import { fetchWorkspaceAccess, ORGANIZATION_CHANGED_EVENT } from "@/lib/api/workspace-access";
+import { invalidateSurfaceCache, useCachedResource, warmSurfaceCache } from "@/lib/surface-cache";
+import { assistantsCacheKey, departmentDirectoryCacheKey, departmentEdgesCacheKey, workspaceAccessCacheKey } from "@/lib/surface-prefetch";
+import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import {
   DEPARTMENTS_CHANGED_EVENT, DepartmentRequestError, addDepartmentOwner, breakGlassDepartment, fetchDepartmentEdges,
   fetchDepartments, removeDepartmentEdge, removeDepartmentOwner, setDepartmentEdge, setHomeDepartment,
@@ -29,41 +33,73 @@ const CLEARANCES: DepartmentClearance[] = ["public", "internal", "confidential"]
 type Names = Map<string, string>;
 const key = (p: DepartmentPrincipal) => `${p.kind}:${p.id}`;
 
-/** People and assistant names, for rendering ids. */
+/** People and assistant names, for rendering ids. Assistants come from the
+ * shared Studio roster slot; members from the cached member directory. */
 function useNames(workspaceId: string) {
-  const [names, setNames] = useState<Names>(new Map());
-  const [assistantIds, setAssistantIds] = useState<string[]>([]);
-  const [userIds, setUserIds] = useState<string[]>([]);
+  const assistants = useCachedResource(assistantsCacheKey(workspaceId), () => listAssistants(workspaceId));
+  const [people, setPeople] = useState<Array<{ id: string; name: string }>>([]);
   useEffect(() => {
     let live = true;
-    void Promise.all([listWorkspaceMembers(workspaceId), listAssistants(workspaceId)]).then(([people, assistants]) => {
-      if (!live) return;
-      const next: Names = new Map();
-      for (const person of people) next.set(`user:${person.id}`, person.name);
-      for (const assistant of assistants) next.set(`assistant:${assistant.id}`, assistant.name);
-      setNames(next);
-      setUserIds(people.map(person => person.id));
-      setAssistantIds(assistants.map(assistant => assistant.id));
-    }).catch(() => {});
+    void listWorkspaceMembers(workspaceId).then(rows => { if (live) setPeople(rows); }).catch(() => {});
     return () => { live = false; };
   }, [workspaceId]);
-  return { names, userIds, assistantIds };
+  return useMemo(() => {
+    const roster = assistants.data ?? [];
+    const names: Names = new Map();
+    for (const person of people) names.set(`user:${person.id}`, person.name);
+    for (const assistant of roster) names.set(`assistant:${assistant.id}`, assistant.name);
+    return { names, userIds: people.map(person => person.id), assistantIds: roster.map(assistant => assistant.id) };
+  }, [people, assistants.data]);
+}
+
+type Directory = { departments: DepartmentDirectoryEntry[]; homes: DepartmentHome[] };
+const loadDirectory = (workspaceId: string): Promise<Directory> => fetchDepartments(workspaceId)
+  .then(r => ({ departments: Array.isArray(r?.departments) ? r.departments : [], homes: Array.isArray(r?.homes) ? r.homes : [] }));
+const loadEdges = (workspaceId: string, departmentId: string): Promise<DepartmentEdge[]> =>
+  fetchDepartmentEdges(workspaceId, departmentId).then(r => Array.isArray(r?.edges) ? r.edges : []);
+
+/**
+ * Start every request the Departments section needs at once, before the
+ * registry gate has painted. Without this the directory, roster and access
+ * overview only begin after the registry round trip lands (a serial chain).
+ */
+export function warmDepartmentsSection(workspaceId: string, userId: string) {
+  warmSurfaceCache(departmentDirectoryCacheKey(workspaceId, userId), () => loadDirectory(workspaceId));
+  warmSurfaceCache(assistantsCacheKey(workspaceId), () => listAssistants(workspaceId));
+  warmSurfaceCache(workspaceAccessCacheKey(workspaceId, userId), () => fetchWorkspaceAccess(workspaceId));
+  void listWorkspaceMembers(workspaceId).catch(() => {});
+}
+
+/** Refresh on a department change; drop the viewer's department family on an
+ * authority signal so a changed role never repaints the previous answer. */
+function useDepartmentSignals(workspaceId: string, userId: string, refresh: () => Promise<unknown>) {
+  const refreshRef = useRef(refresh); refreshRef.current = refresh;
+  useEffect(() => {
+    const onChange = (event: Event) => { if ((event as CustomEvent<{ workspaceId: string }>).detail?.workspaceId === workspaceId) void refreshRef.current(); };
+    const purge = (event: Event) => {
+      const detail = (event as CustomEvent<{ workspaceId?: string }>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      invalidateSurfaceCache(`departments:${workspaceId}:${userId}:`);
+    };
+    window.addEventListener(DEPARTMENTS_CHANGED_EVENT, onChange);
+    window.addEventListener(ORGANIZATION_CHANGED_EVENT, purge);
+    window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT, purge);
+    return () => {
+      window.removeEventListener(DEPARTMENTS_CHANGED_EVENT, onChange);
+      window.removeEventListener(ORGANIZATION_CHANGED_EVENT, purge);
+      window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT, purge);
+    };
+  }, [workspaceId, userId]);
 }
 
 /** Departments directory plus homes, refreshed on every department change. */
 function useDirectory(workspaceId: string) {
-  const [data, setData] = useState<{ departments: DepartmentDirectoryEntry[]; homes: DepartmentHome[] } | null>(null);
-  const reload = useCallback(() => {
-    fetchDepartments(workspaceId)
-      .then(r => setData({ departments: Array.isArray(r?.departments) ? r.departments : [], homes: Array.isArray(r?.homes) ? r.homes : [] }))
-      .catch(() => setData({ departments: [], homes: [] }));
-  }, [workspaceId]);
-  useEffect(() => {
-    reload();
-    const onChange = (event: Event) => { if ((event as CustomEvent<{ workspaceId: string }>).detail?.workspaceId === workspaceId) reload(); };
-    window.addEventListener(DEPARTMENTS_CHANGED_EVENT, onChange);
-    return () => window.removeEventListener(DEPARTMENTS_CHANGED_EVENT, onChange);
-  }, [workspaceId, reload]);
+  const { me } = useWorkspaceContext();
+  const resource = useCachedResource(departmentDirectoryCacheKey(workspaceId, me.id), () => loadDirectory(workspaceId));
+  useDepartmentSignals(workspaceId, me.id, resource.refresh);
+  const data: Directory | null = resource.data ?? (resource.error !== undefined ? { departments: [], homes: [] } : null);
+  const refresh = resource.refresh;
+  const reload = useCallback(() => { void refresh(); }, [refresh]);
   return { data, reload };
 }
 
@@ -98,7 +134,9 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
   const errorCopy = useErrorCopy();
   const { data: directory, reload: reloadDirectory } = useDirectory(workspaceId);
   const { names, userIds, assistantIds } = useNames(workspaceId);
-  const [edges, setEdges] = useState<DepartmentEdge[] | null>(null);
+  const edgeResource = useCachedResource(departmentEdgesCacheKey(workspaceId, me.id, departmentId), () => loadEdges(workspaceId, departmentId));
+  const edges: DepartmentEdge[] | null = edgeResource.data ?? (edgeResource.error !== undefined ? [] : null);
+  useDepartmentSignals(workspaceId, me.id, edgeResource.refresh);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState("");
@@ -107,15 +145,8 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
   const [editingExpiry, setEditingExpiry] = useState<{ key: string; value: string } | null>(null);
   const entry = directory?.departments.find(d => d.departmentId === departmentId) ?? null;
 
-  const reload = useCallback(() => {
-    fetchDepartmentEdges(workspaceId, departmentId).then(r => setEdges(Array.isArray(r?.edges) ? r.edges : [])).catch(() => setEdges([]));
-  }, [workspaceId, departmentId]);
-  useEffect(() => {
-    reload();
-    const onChange = (event: Event) => { if ((event as CustomEvent<{ workspaceId: string }>).detail?.workspaceId === workspaceId) reload(); };
-    window.addEventListener(DEPARTMENTS_CHANGED_EVENT, onChange);
-    return () => window.removeEventListener(DEPARTMENTS_CHANGED_EVENT, onChange);
-  }, [workspaceId, reload]);
+  const refreshEdges = edgeResource.refresh;
+  const reload = useCallback(() => { void refreshEdges(); }, [refreshEdges]);
   useEffect(() => { setEditingExpiry(null); setAdding(""); setAddUntil(""); setError(null); }, [departmentId]);
 
   const run = async (change: () => Promise<unknown>) => {

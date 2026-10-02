@@ -21,6 +21,13 @@
 import { captureMemoryVersions } from './brain-row-versions.js'
 import { query, queryWithRLS, getPool } from './client.js'
 
+/**
+ * SQLSTATEs a DELETE raises when another row still references it:
+ * 23001 restrict_violation (ON DELETE RESTRICT), 23503 foreign_key_violation
+ * (NO ACTION).
+ */
+const STILL_REFERENCED = new Set(['23001', '23503'])
+
 // ── Types ──────────────────────────────────────────────────────
 
 export type LinkedAccount = {
@@ -278,8 +285,43 @@ export async function mergeShadowUser(
         ],
       )
 
-      // 6. Finally, delete the shadow user row (cascades clear any residue)
-      await client.query(`DELETE FROM users WHERE id = $1`, [sid])
+      // 6. Delete the shadow user row (cascades clear any residue) - unless
+      // historical evidence still names it. Per-message authorship
+      // (session_messages.user_id) and scope evidence (scope_derivations,
+      // office records, audit actors) reference users ON DELETE RESTRICT on
+      // purpose: they record who spoke or produced something at the time and
+      // are never rewritten. Such a shadow is RETIRED instead: its lookup
+      // keys move to a `merged:` namespace so no resolver can find it again,
+      // and the row stays as the historical author. The user-visible data
+      // (sessions, memories, souls) already moved above.
+      await client.query('SAVEPOINT merge_shadow_delete')
+      try {
+        await client.query(`DELETE FROM users WHERE id = $1`, [sid])
+        await client.query('RELEASE SAVEPOINT merge_shadow_delete')
+      } catch (err) {
+        if (!STILL_REFERENCED.has((err as { code?: string }).code ?? '')) throw err
+        await client.query('ROLLBACK TO SAVEPOINT merge_shadow_delete')
+        // Retiring must leave the row reachable by NOTHING that resolves a
+        // live person: the email moves out (it is kept in the user_merges
+        // snapshot above) so sign-in and email matching can never land in
+        // the empty retired row or be blocked by its unique email; the live
+        // state the DELETE would have cascaded away goes too (membership,
+        // seats, the provider-email cache); any other provider identity the
+        // shadow held follows the person.
+        await client.query(
+          `UPDATE users
+              SET auth_provider = 'merged',
+                  auth_provider_id = 'merged:' || id::text,
+                  email = NULL
+            WHERE id = $1`,
+          [sid],
+        )
+        await client.query(`UPDATE linked_identities SET user_id = $1 WHERE user_id = $2`, [realUserId, sid])
+        await client.query(`DELETE FROM channel_user_cache WHERE user_id = $1`, [sid])
+        await client.query(`DELETE FROM workspace_group_members WHERE user_id = $1`, [sid])
+        await client.query(`DELETE FROM workspace_members WHERE user_id = $1`, [sid])
+        await client.query(`DELETE FROM assistant_members WHERE user_id = $1`, [sid])
+      }
     }
 
     await client.query('COMMIT')

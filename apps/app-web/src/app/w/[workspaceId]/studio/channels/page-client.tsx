@@ -135,6 +135,7 @@ import {
 } from "@/components/ui/searchable-select";
 import { StudioTopbarActions } from "@/components/studio/studio-topbar";
 import { ScrollableNav } from "@/components/scrollable-nav";
+import { ChannelIdentityFooter } from "@/components/channel-identity/channel-identity";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
 import {
   Bot,
@@ -1236,6 +1237,9 @@ export function ChannelDetail({
       </div>
       )}
 
+      {/* Who the viewer is on this channel, and how to connect. */}
+      <ChannelIdentityFooter channel={channel} workspaceId={workspaceId} />
+
       {/* Disconnect — destructive, confirmed via the shared confirmDialog. */}
       <div className="flex flex-col gap-2 border-t border-border pt-3">
         <div className="flex items-center justify-end">
@@ -1360,9 +1364,9 @@ export function WhatsAppCloudGroupsSection({
       ) : groups.length === 0 ? (
         <p className="text-sm text-muted-foreground">{copy.empty}</p>
       ) : (
-        <ul className="flex flex-col gap-2">
+        <ul className="flex flex-col divide-y divide-border">
           {groups.map((group) => (
-            <li key={group.id} className="flex flex-col gap-2 rounded-md bg-muted/40 px-3 py-2 sm:flex-row sm:items-center">
+            <li key={group.id} className="flex flex-col gap-2 py-2 sm:flex-row sm:items-center">
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium">{group.subject}</div>
                 <div className={cn("text-xs", group.status === "failed" ? "text-destructive" : "text-muted-foreground")}>
@@ -1877,8 +1881,8 @@ export function ChannelConfigSection({
           {cfg.title}
         </div>
 
-        <div className="grid gap-3 xl:grid-cols-2">
-          <section className="flex flex-col gap-3 rounded-lg border border-border bg-background p-3">
+        <div className="grid gap-x-6 gap-y-5 xl:grid-cols-2">
+          <section className="flex flex-col gap-3">
             <div className="flex items-center gap-2">
               <span className="grid size-8 place-items-center rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400">
                 <MessageCircle className="size-4" aria-hidden />
@@ -1913,7 +1917,7 @@ export function ChannelConfigSection({
             )}
           </section>
 
-          <section className="flex flex-col gap-3 rounded-lg border border-border bg-background p-3">
+          <section className="flex flex-col gap-3">
             <div className="flex items-center gap-2">
               <span className="grid size-8 place-items-center rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400">
                 <UsersRound className="size-4" aria-hidden />
@@ -1945,7 +1949,7 @@ export function ChannelConfigSection({
             </div>
           </section>
 
-          <section className="flex flex-col gap-3 rounded-lg border border-border bg-background p-3 xl:col-span-2">
+          <section className="flex flex-col gap-3 xl:col-span-2">
             <div className="flex items-center gap-2">
               <span className="grid size-8 place-items-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">
                 <SmilePlus className="size-4" aria-hidden />
@@ -2923,7 +2927,7 @@ export function AddChannelForm({
               </label>
               <p className="text-xs text-muted-foreground">{add.manifest.urlNote}</p>
               <div className="relative">
-                <pre className="text-xs font-mono px-3 py-2 rounded bg-background border border-border overflow-x-auto max-h-56 overflow-y-auto">
+                <pre className="text-xs font-mono px-3 py-2 rounded bg-background overflow-x-auto max-h-56 overflow-y-auto">
                   {manifest}
                 </pre>
                 <button
@@ -3164,7 +3168,7 @@ export function AddChannelForm({
                 <li className="pl-1">{add.feishu.guideBot}</li>
                 <li className="space-y-2 pl-1">
                   <p>{add.feishu.guidePermissions}</p>
-                  <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-background p-2 font-mono text-[11px] leading-4">
+                  <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-all rounded-md bg-background p-2 font-mono text-[11px] leading-4">
                     {FEISHU_PERMISSION_IMPORT}
                   </pre>
                   <button
@@ -3372,7 +3376,7 @@ export function AddChannelForm({
       )}
 
       {success?.kind === "slack" && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
+        <div className="rounded-md bg-emerald-500/5 p-3 flex flex-col gap-2">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
             {add.connectedSlack}
           </p>
@@ -3399,7 +3403,7 @@ export function AddChannelForm({
         </div>
       )}
       {success?.kind === "custom" && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-3">
+        <div className="rounded-md bg-emerald-500/5 p-3 flex flex-col gap-3">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
             {add.custom.created}
           </p>
@@ -3420,7 +3424,7 @@ export function AddChannelForm({
         </div>
       )}
       {success?.kind === "msteams" && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
+        <div className="rounded-md bg-emerald-500/5 p-3 flex flex-col gap-2">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
             {add.connectedMsTeams}
           </p>
@@ -3455,7 +3459,7 @@ export function AddChannelForm({
         </div>
       )}
       {success?.kind === "email" && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex items-center justify-between gap-2">
+        <div className="rounded-md bg-emerald-500/5 p-3 flex items-center justify-between gap-2">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400 break-all">
             {format(add.connectedEmail, { address: success.address })}
           </p>
@@ -3469,7 +3473,7 @@ export function AddChannelForm({
         </div>
       )}
       {success?.kind === "telegram" && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
+        <div className="rounded-md bg-emerald-500/5 p-3 flex flex-col gap-2">
           <div className="flex items-center gap-2">
             <TelegramGlyph />
             <CheckCircle2
@@ -3512,7 +3516,7 @@ export function AddChannelForm({
         </div>
       )}
       {success?.kind === "feishu" && (
-        <div className="flex flex-col gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
+        <div className="flex flex-col gap-2 rounded-md bg-emerald-500/5 p-3">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
             {format(add.feishu.connected, {
               name: success.botName,
@@ -3542,7 +3546,7 @@ export function AddChannelForm({
         </div>
       )}
       {success?.kind === "discord" && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
+        <div className="rounded-md bg-emerald-500/5 p-3 flex flex-col gap-2">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
             {format(add.connectedDiscord, { username: success.botUsername })}
           </p>
@@ -3705,7 +3709,7 @@ function WhatsappConnectTab({
 
       {mode === "cloud" ? (
         cloudResult ? (
-          <div className="flex flex-col gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
+          <div className="flex flex-col gap-2 rounded-md bg-emerald-500/5 p-3">
             <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">{add.connectedWhatsAppCloud}</p>
             <p className="text-xs text-muted-foreground">{add.whatsappCloudWebhookHint}</p>
             <code className="break-all rounded bg-muted px-2 py-1.5 text-xs">{cloudResult.webhookUrl}</code>
@@ -4187,7 +4191,7 @@ export function CustomBridgeSection({
       )}
 
       {newToken && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
+        <div className="rounded-md bg-emerald-500/5 p-3 flex flex-col gap-2">
           <BridgeTokenReveal
             bridgeToken={newToken}
             channelId={channelId}
@@ -5458,13 +5462,13 @@ function EmailInboxSection({
             : em.senderRoutingApprovedHint}
         </p>
         {allowlist.length > 0 && (
-          <ul className="flex flex-col gap-1.5">
+          <ul className="flex flex-col divide-y divide-border">
             {allowlist.map((entry) => {
               const route = senderRoutes.find((candidate) => candidate.email === entry);
               return (
                 <li
                   key={entry}
-                  className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2 py-1.5"
+                  className="flex flex-wrap items-center gap-2 py-1.5"
                 >
                   <span className="min-w-52 flex-1 break-all font-mono text-xs">{entry}</span>
                   <Select
@@ -5529,7 +5533,7 @@ function EmailInboxSection({
         </div>
       </div>
 
-      <div className="rounded-md bg-muted/50 px-3 py-2">
+      <div>
         <div className="text-xs font-medium">{em.guestSafetyLabel}</div>
         <p className="mt-0.5 text-xs text-muted-foreground">{em.guestSafetyHint}</p>
       </div>

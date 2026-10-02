@@ -970,6 +970,16 @@ export function workspaceAccessInspectionCacheKey(workspaceId:string,userId:stri
 /** Meeting tags share workspace/page cache identity across the doc panel. */
 export const meetingTagsCacheKey = (workspaceId: string, pageId: string): string => `meeting-tags:${workspaceId}:${pageId}`;
 
+/** Department directory + homes (v2), viewer-scoped like every access read. */
+export function departmentDirectoryCacheKey(workspaceId:string,userId:string):string {
+  return `departments:${workspaceId}:${userId}:directory`;
+}
+
+/** One department's reader edges; shares the department family prefix. */
+export function departmentEdgesCacheKey(workspaceId:string,userId:string,departmentId:string):string {
+  return `departments:${workspaceId}:${userId}:edges:${departmentId}`;
+}
+
 /** Registry snapshots share the access invalidation namespace and viewer scope. */
 export function workspaceDepartmentRegistryCacheKey(workspaceId:string,userId:string):string {
   return `${workspaceAccessCacheKey(workspaceId,userId)}:registry`;

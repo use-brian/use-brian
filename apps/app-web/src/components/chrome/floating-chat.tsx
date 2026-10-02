@@ -3572,7 +3572,7 @@ export function FloatingChat({
           className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5"
         >
           {recorder.interactionChatSessionId && recorder.interactionChatSessionId === session.state.sessionId && recorder.interactionStatus !== "idle" && (
-            <div className="space-y-2 rounded-lg border p-3">
+            <div className="space-y-2 rounded-lg bg-muted/40 p-3">
               <p role={recorder.interactionStatus === "gap" ? "alert" : "status"} className="text-sm">
                 {recorder.interactionStatus === "unavailable" ? interactionT.personalOnly : recorder.interactionStatus === "gap" ? interactionT.error : interactionT.listening}
               </p>
@@ -3771,7 +3771,7 @@ export function FloatingChat({
           ) : null}
 
           {error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {error}
             </div>
           ) : null}
@@ -3799,7 +3799,7 @@ export function FloatingChat({
           {/* Soft double-text guard — warns when another member already has the
               assistant working on this page (presence over Yjs awareness). */}
           {othersRun ? (
-            <div className="mb-2 flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground">
+            <div className="mb-2 flex items-center gap-2 rounded-md bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground">
               <span
                 aria-hidden
                 className="claw-blink size-1.5 shrink-0 rounded-full bg-primary"
