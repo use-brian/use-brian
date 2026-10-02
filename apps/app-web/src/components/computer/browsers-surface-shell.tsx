@@ -32,17 +32,20 @@ import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { ConnectBrowserButton } from "./connect-browser-button";
 
-type BrowsersView = "live" | "profiles";
+type BrowsersView = "live" | "profiles" | "native";
 
 /** Static `/profiles` wins over `[sessionId]`; every other computer route is live. */
 function browserViewFromPathname(pathname: string | null | undefined): BrowsersView {
+  if (pathname?.endsWith("/computer/native")) return "native";
   return pathname && /\/computer\/profiles(?:\/|$)/.test(pathname) ? "profiles" : "live";
 }
 
 function BrowsersViewToggle({ workspaceId }: { workspaceId: string }) {
-  const t = useT().computer.sessions;
+  const all = useT();
+  const t = all.computer.sessions;
   const view = browserViewFromPathname(usePathname());
   const items: Array<{ id: BrowsersView; label: string; href: string }> = [
+    { id: "native", label: all.nativeComputer.title, href: `/w/${workspaceId}/computer/native` },
     { id: "live", label: t.liveView, href: `/w/${workspaceId}/computer` },
     { id: "profiles", label: t.profilesView, href: `/w/${workspaceId}/computer/profiles` },
   ];
@@ -50,7 +53,7 @@ function BrowsersViewToggle({ workspaceId }: { workspaceId: string }) {
   return (
     <nav
       aria-label={t.viewSwitcherAria}
-      className="flex shrink-0 items-center gap-0.5 rounded-md bg-sidebar-accent/70 p-0.5"
+      className="flex flex-wrap items-center gap-0.5 rounded-md bg-sidebar-accent/70 p-0.5"
     >
       {items.map((item) => {
         const active = item.id === view;
@@ -60,7 +63,7 @@ function BrowsersViewToggle({ workspaceId }: { workspaceId: string }) {
             href={item.href}
             aria-current={active ? "page" : undefined}
             className={cn(
-              "inline-flex h-7 items-center rounded px-2 text-xs font-medium whitespace-nowrap transition-colors sm:px-2.5",
+              "inline-flex min-h-11 items-center rounded px-2 text-xs font-medium whitespace-nowrap transition-colors sm:px-2.5",
               active
                 ? "bg-background text-foreground shadow-sm"
                 : "text-sidebar-foreground/65 hover:text-sidebar-accent-foreground",

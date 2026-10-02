@@ -1,4 +1,5 @@
 "use client";
+import { NativeComputerCoordinator } from "@/components/computer/native-computer-coordinator";
 
 /**
  * Persistent workspace chrome — the left sidebar + inbox flyout that wrap
@@ -628,6 +629,7 @@ export function WorkspaceChrome({
       className="relative flex h-full w-full flex-col overflow-hidden"
     >
       <DesktopBrowserCoordinator workspaceId={workspaceId} />
+      <NativeComputerCoordinator workspaceId={workspaceId} />
       <div data-workspace-surfaces className="relative flex min-h-0 w-full flex-1 overflow-hidden">
         {/* Backdrop — mobile only, dismisses the drawer on tap. */}
         {sidebarOpen && (

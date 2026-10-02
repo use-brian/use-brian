@@ -1,0 +1,310 @@
+{
+  "requestBudgetMs": 3500,
+  "treeBudgetMs": 1800,
+  "sessions": [
+    {
+      "session": 1,
+      "exit": 1,
+      "errors": [
+        "AssertionError: cold observation incomplete"
+      ]
+    },
+    {
+      "session": 2,
+      "exit": 1,
+      "errors": [
+        "AssertionError: cold observation incomplete"
+      ]
+    },
+    {
+      "session": 3,
+      "exit": 1,
+      "errors": [
+        "AssertionError: cold observation incomplete"
+      ]
+    },
+    {
+      "session": 4,
+      "exit": 1,
+      "errors": [
+        "AssertionError: cold observation incomplete"
+      ]
+    },
+    {
+      "session": 5,
+      "exit": 1,
+      "errors": [
+        "RuntimeError: 3500ms request watchdog expired",
+        "RuntimeError: 3500ms request watchdog expired"
+      ]
+    }
+  ],
+  "failedSessions": 5,
+  "overBudgetRequests": 1,
+  "failedExpectedRequests": 5,
+  "timingAccepted": false,
+  "productionAuthorityAccepted": false,
+  "quantile": "nearest rank; expected failures included",
+  "results": [
+    {
+      "phase": "cold",
+      "operation": "start",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 14.744,
+      "p95Ms": 68.549,
+      "maxMs": 68.549
+    },
+    {
+      "phase": "cold",
+      "operation": "observe",
+      "n": 5,
+      "success": 1,
+      "p50Ms": 1869.021,
+      "p95Ms": 1893.428,
+      "maxMs": 1893.428
+    },
+    {
+      "phase": "cold",
+      "operation": "begin",
+      "n": 1,
+      "success": 1,
+      "p50Ms": 1943.681,
+      "p95Ms": 1943.681,
+      "maxMs": 1943.681
+    },
+    {
+      "phase": "cold",
+      "operation": "end",
+      "n": 1,
+      "success": 0,
+      "p50Ms": 3910.482,
+      "p95Ms": 3910.482,
+      "maxMs": 3910.482
+    },
+    {
+      "phase": "cold",
+      "operation": "execute",
+      "n": 0,
+      "success": 0,
+      "p50Ms": null,
+      "p95Ms": null,
+      "maxMs": null
+    },
+    {
+      "phase": "warm",
+      "operation": "start",
+      "n": 0,
+      "success": 0,
+      "p50Ms": null,
+      "p95Ms": null,
+      "maxMs": null
+    },
+    {
+      "phase": "warm",
+      "operation": "observe",
+      "n": 0,
+      "success": 0,
+      "p50Ms": null,
+      "p95Ms": null,
+      "maxMs": null
+    },
+    {
+      "phase": "warm",
+      "operation": "begin",
+      "n": 0,
+      "success": 0,
+      "p50Ms": null,
+      "p95Ms": null,
+      "maxMs": null
+    },
+    {
+      "phase": "warm",
+      "operation": "end",
+      "n": 0,
+      "success": 0,
+      "p50Ms": null,
+      "p95Ms": null,
+      "maxMs": null
+    },
+    {
+      "phase": "warm",
+      "operation": "execute",
+      "n": 0,
+      "success": 0,
+      "p50Ms": null,
+      "p95Ms": null,
+      "maxMs": null
+    }
+  ],
+  "samples": [
+    {
+      "operation": "start",
+      "phase": "cold",
+      "ms": 3.525,
+      "success": true,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": null,
+      "outcome": null,
+      "completeness": null,
+      "sourceRequestMs": 3.127,
+      "apiMs": [],
+      "session": 1
+    },
+    {
+      "operation": "observe",
+      "phase": "cold",
+      "ms": 1869.021,
+      "success": false,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": "ok",
+      "outcome": "executed",
+      "completeness": "partial",
+      "sourceRequestMs": 1868.528,
+      "apiMs": [],
+      "session": 1
+    },
+    {
+      "operation": "start",
+      "phase": "cold",
+      "ms": 14.744,
+      "success": true,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": null,
+      "outcome": null,
+      "completeness": null,
+      "sourceRequestMs": 12.822,
+      "apiMs": [],
+      "session": 2
+    },
+    {
+      "operation": "observe",
+      "phase": "cold",
+      "ms": 1885.366,
+      "success": false,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": "ok",
+      "outcome": "executed",
+      "completeness": "partial",
+      "sourceRequestMs": 1884.542,
+      "apiMs": [],
+      "session": 2
+    },
+    {
+      "operation": "start",
+      "phase": "cold",
+      "ms": 68.549,
+      "success": true,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": null,
+      "outcome": null,
+      "completeness": null,
+      "sourceRequestMs": 67.269,
+      "apiMs": [],
+      "session": 3
+    },
+    {
+      "operation": "observe",
+      "phase": "cold",
+      "ms": 1836.873,
+      "success": false,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": "ok",
+      "outcome": "executed",
+      "completeness": "partial",
+      "sourceRequestMs": 1835.106,
+      "apiMs": [],
+      "session": 3
+    },
+    {
+      "operation": "start",
+      "phase": "cold",
+      "ms": 63.445,
+      "success": true,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": null,
+      "outcome": null,
+      "completeness": null,
+      "sourceRequestMs": 13.675,
+      "apiMs": [],
+      "session": 4
+    },
+    {
+      "operation": "observe",
+      "phase": "cold",
+      "ms": 1893.428,
+      "success": false,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": "ok",
+      "outcome": "executed",
+      "completeness": "partial",
+      "sourceRequestMs": 1890.256,
+      "apiMs": [],
+      "session": 4
+    },
+    {
+      "operation": "start",
+      "phase": "cold",
+      "ms": 4.447,
+      "success": true,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": null,
+      "outcome": null,
+      "completeness": null,
+      "sourceRequestMs": 4.107,
+      "apiMs": [],
+      "session": 5
+    },
+    {
+      "operation": "observe",
+      "phase": "cold",
+      "ms": 1775.481,
+      "success": true,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": "ok",
+      "outcome": "executed",
+      "completeness": "complete",
+      "sourceRequestMs": 1775.022,
+      "apiMs": [],
+      "session": 5
+    },
+    {
+      "operation": "begin",
+      "phase": "cold",
+      "ms": 1943.681,
+      "success": true,
+      "overBudget": false,
+      "expectedSuccess": true,
+      "code": null,
+      "outcome": null,
+      "completeness": null,
+      "sourceRequestMs": 1942.828,
+      "apiMs": [],
+      "session": 5
+    },
+    {
+      "operation": "end",
+      "phase": "cold",
+      "ms": 3910.482,
+      "success": false,
+      "overBudget": true,
+      "expectedSuccess": true,
+      "code": null,
+      "outcome": null,
+      "completeness": null,
+      "sourceRequestMs": null,
+      "apiMs": null,
+      "session": 5
+    }
+  ]
+}

@@ -54,6 +54,7 @@ import {
 // main process. Default-import the module object and destructure instead.
 import electronUpdater from "electron-updater";
 import { EmbeddedBrowser, browserPairing } from "./embedded-browser.js";
+import { NativeComputerIntegration } from "./native-computer-integration.js";
 import { parseBrowserTheme } from "./browser-theme.js";
 import { defaultTitleBarOverlay, titleBarOverlayFromTheme } from "./title-bar-overlay.js";
 
@@ -237,6 +238,14 @@ import {
 const { autoUpdater } = electronUpdater;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const nativeComputer = new NativeComputerIntegration({ directory: __dirname, getAuth: async () => {
+  const config = cfg;
+  const tokens = cfg.bundled ? readStoredTokens() : null;
+  const user = tokens?.user ?? parseUserCookieValue(await readJarCookie("user"));
+  const accessToken = tokens?.accessToken ?? await readJarCookie("access_token");
+  if (config !== cfg || changingTarget || selectingAccount || removingAccount || browserIdentityChanging || !user?.id || !accessToken) return null;
+  return { userId: user.id, accessToken, apiUrl: cfg.apiUrl, accountKey: JSON.stringify([cfg.apiUrl, user.id]) };
+} });
 const SIRI_SHORTCUT_TEMPLATE_NAME = "Use Brian.shortcut";
 
 function siriShortcutTemplatePath(): string {
@@ -849,6 +858,7 @@ function createWindow(initialLoad: { useBrian?: boolean; route?: string; linkReq
       // Also cancel consent/pairing before a host exists; never reopen a window
       // from a late relay ready after the user closed the app window.
       embeddedBrowser.dispose();
+      void nativeComputer.stop();
     }
     // The capture lives in this window's renderer — with it gone the overlay
     // has nothing to mirror or control.
@@ -1714,6 +1724,7 @@ async function activateTarget(
   if (cfg.envTargetOverride || changingTarget || recorderOverlay) return false;
   changingTarget = true;
   embeddedBrowser.dispose();
+  void nativeComputer.stop();
   try {
     closeAuthServer();
     closeConnectorServer();
@@ -2297,7 +2308,7 @@ function persistSession(sess: DesktopSession): boolean {
   const tokens = parseStoredTokens(serializeTokens(sess, Date.now()));
   if (!tokens) return false;
   tokens.user ??= readStoredTokens()?.user;
-  if (tokens.user?.id !== readStoredTokens()?.user?.id) embeddedBrowser.dispose();
+  if (tokens.user?.id !== readStoredTokens()?.user?.id) { embeddedBrowser.dispose(); void nativeComputer.stop(); }
   return deploymentAccounts.put(accountTarget(), tokens);
 }
 
@@ -2306,12 +2317,13 @@ function persistRendererTokens(input: unknown): void {
   const tokens = serialized ? parseStoredTokens(serialized) : null;
   if (!tokens) return;
   tokens.user ??= readStoredTokens()?.user;
-  if (tokens.user?.id !== readStoredTokens()?.user?.id) embeddedBrowser.dispose();
+  if (tokens.user?.id !== readStoredTokens()?.user?.id) { embeddedBrowser.dispose(); void nativeComputer.stop(); }
   deploymentAccounts.put(accountTarget(), tokens);
 }
 
 function clearStoredTokens(): void {
   embeddedBrowser.dispose();
+  void nativeComputer.stop();
   const tokens = readStoredTokens();
   if (tokens) deploymentAccounts.remove(deploymentAccountKey({ target: accountTarget(), tokens }));
 }
@@ -2980,6 +2992,7 @@ async function completeSignIn(code: string): Promise<void> {
   if (browserIdentityChanging) return;
   browserIdentityChanging = true;
   embeddedBrowser.dispose();
+  void nativeComputer.stop();
   try { await completeSignInImpl(code); }
   finally { browserIdentityChanging = false; }
 }
@@ -3211,6 +3224,7 @@ async function switchAccount(accountId: string): Promise<SwitchResult> {
   if (browserIdentityChanging) return { ok: false, error: "switch" };
   browserIdentityChanging = true;
   embeddedBrowser.dispose();
+  void nativeComputer.stop();
   try { return await switchAccountImpl(accountId); }
   finally { browserIdentityChanging = false; }
 }
@@ -3282,6 +3296,7 @@ async function signOut(): Promise<void> {
   if (browserIdentityChanging) return;
   browserIdentityChanging = true;
   embeddedBrowser.dispose();
+  void nativeComputer.stop();
   try { await signOutImpl(); }
   finally { browserIdentityChanging = false; }
 }
@@ -3521,7 +3536,7 @@ function refreshSessionInPlace(): Promise<RefreshOutcome> {
     if (sessionRefreshInFlight) return sessionRefreshInFlight;
     const run = (async (): Promise<RefreshOutcome> => {
       const refreshToken = await readJarCookie("refresh_token");
-      if (!refreshToken) { embeddedBrowser.dispose(); return "signed-out"; }
+      if (!refreshToken) { embeddedBrowser.dispose(); void nativeComputer.stop(); return "signed-out"; }
       let result: DesktopSession | null;
       try {
         if (cfg.target === "local") {
@@ -3548,6 +3563,7 @@ function refreshSessionInPlace(): Promise<RefreshOutcome> {
         // The refresh token itself is dead (revoked or >30d idle) — a real sign-out.
         browserIdentityChanging = true;
         embeddedBrowser.dispose();
+        void nativeComputer.stop();
         try {
           for (const name of AUTH_COOKIE_NAMES) {
             await targetSession().cookies.remove(cfg.appUrl, name);
@@ -3959,6 +3975,7 @@ function buildTrayMenu(): Menu {
   const update = updateMenuItem();
   const template: MenuItemConstructorOptions[] = [
     { label: "Open Use Brian", click: () => focusWindow(ensureWindow()) },
+    { label: "Stop controlling this computer", click: () => void nativeComputer.stop() },
     { label: "Quick Capture", click: () => summonAndCapture() },
     { label: "Start Recording", click: () => summonAndRecord() },
     {
@@ -4487,6 +4504,11 @@ if (!gotLock) {
     }
   });
 
+  ipcMain.handle("Use Brian:computer-control", async (event, input: unknown) => {
+    if (changingTarget || selectingAccount || removingAccount || browserIdentityChanging || !trustedTokenSender(event)) return { ok: false };
+    return nativeComputer.handle(input);
+  });
+
   ipcMain.handle("Use Brian:browser-control", async (event, input: unknown) => {
     const trusted = () => !changingTarget && !selectingAccount && !removingAccount &&
       !browserIdentityChanging && trustedTokenSender(event);
@@ -4550,6 +4572,7 @@ if (!gotLock) {
     if (recoveredLink) linkNavigation.restore(recoveredLink);
     refreshAppMenu();
     tray = createTray();
+    nativeComputer.install();
     syncAwakeBrianMode();
     screen.on("display-added", positionBrianPet);
     screen.on("display-removed", positionBrianPet);
@@ -4580,6 +4603,7 @@ if (!gotLock) {
 
   app.on("will-quit", () => {
     embeddedBrowser.dispose();
+    void nativeComputer.stop();
     globalShortcut.unregisterAll();
     stopAwakeBrianBlocker();
   });

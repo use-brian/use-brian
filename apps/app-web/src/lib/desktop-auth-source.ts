@@ -1,3 +1,4 @@
+import type { ComputerControl } from "./native-computer";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Desktop auth source — the Bearer-token half of the auth seam.
@@ -88,6 +89,8 @@ export type DesktopBrowserControlMessage =
   | { type: "pair"; relayUrl: string; pairingToken: string; automatic?: boolean; expectedControlEpoch?: number };
 
 export interface DesktopBridge {
+  /** Native authority and tokens remain in main; commands require local consent. */
+  computerControl?: ComputerControl;
   /** Pair resolves successfully only once the embedded browser relay is ready. */
   browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; controlEpoch?: number; hasControl?: boolean; connected?: boolean; automaticBlocked?: boolean; browserProfileId?: string; workspaceId?: string }>;
   /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */

@@ -1,3 +1,4 @@
+import { hardenMacBootstrap } from "./electron-fuses.mjs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,9 @@ async function availableSigningIdentity(context) {
 export default async function signSiriExtension(context) {
   if (context.electronPlatformName !== "darwin") return;
 
+  // Fuse changes and readback MUST precede any signing or credential lookup.
+  await hardenMacBootstrap(context);
+
   const extensionPath = join(
     context.appOutDir,
     `${context.packager.appInfo.productFilename}.app`,
@@ -51,6 +55,17 @@ export default async function signSiriExtension(context) {
       "The Siri extension could not find the Developer ID identity from CSC_LINK.",
     );
   }
+
+  // Sign the adjacent fixture bundle, not only its Mach-O executable. The helper
+  // authenticates this exact resource-tree location and the parent's signing team.
+  const fixturePath = join(context.appOutDir,
+    `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources",
+    "computer-control", "NativeComputerFixture.app");
+  const fixtureArgs = ["--force", "--sign", identity];
+  if (identity !== "-") fixtureArgs.push("--timestamp", "--options", "runtime");
+  if (keychain) fixtureArgs.push("--keychain", keychain);
+  execFileSync("/usr/bin/codesign", [...fixtureArgs, fixturePath], { stdio: "inherit" });
+  execFileSync("/usr/bin/codesign", ["--verify", "--strict", fixturePath], { stdio: "inherit" });
 
   const args = [
     "--force",

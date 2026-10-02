@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "kind": "ad-hoc-library-load-diagnostic",
+  "status": "passed-diagnostic",
+  "phase": "complete",
+  "failure": "none",
+  "executionAttempted": true,
+  "observedDifferential": true,
+  "productionAuthority": false,
+  "certificateAuthentication": false,
+  "electronAcceptance": false,
+  "loadedBootstrapProof": false,
+  "kernelSigningEvidence": false,
+  "opaquePolicyValidation": false,
+  "cases": {
+    "baselineAllowed": {"result": "loaded", "loaded": true, "functionMatched": true},
+    "baselineDisallowed": {"result": "loaded", "loaded": true, "functionMatched": true},
+    "constrainedAllowed": {"result": "loaded", "loaded": true, "functionMatched": true},
+    "constrainedDisallowed": {"result": "dlopen-null", "loaded": false, "functionMatched": false}
+  },
+  "provenance": {
+    "macOS": "26.6.2",
+    "macOSBuild": "25G83",
+    "architecture": "arm64",
+    "sdk": "26.5",
+    "node": "25.5.0",
+    "appleClang": "21.0.0",
+    "appleClangBuild": "2100.1.1.101",
+    "signing": "ad-hoc",
+    "deploymentTarget": "14.0",
+    "codesign": "macOS system tool; version identified by macOS build"
+  }
+}

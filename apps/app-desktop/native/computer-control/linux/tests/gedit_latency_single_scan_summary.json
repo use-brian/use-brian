@@ -1,0 +1,43 @@
+{
+  "runtimeChanges": [
+    "one final full semantic scan; capture pre/post scans unchanged",
+    "bounded getText(0,4097) then one fresh characterCount"
+  ],
+  "requestBudgetMs": 3500,
+  "editorTreeBudgetMs": 1800,
+  "fixtureTreeBudgetMs": 300,
+  "axTextUtf16Units": 4096,
+  "timingAccepted": false,
+  "productionAuthorityAccepted": false,
+  "unitTests": 145,
+  "historicalEvidence": {
+    "file": "tests/gedit_latency_results.json",
+    "sha256": "ea9f525e7423c201a4ff78399ee9a83067d3c013865e0f5feb98c61f602adeb6",
+    "additionalUserReportedColdTreeMs": 1905
+  },
+  "runs": [
+    {
+      "file": "gedit_latency_single_scan_run1_summary.json",
+      "scriptFailures": 0,
+      "incompleteExpectedPostObservations": 1
+    },
+    {
+      "file": "gedit_latency_single_scan_run2.json",
+      "scriptFailures": 5,
+      "actualFailedExpectedRequests": 4,
+      "explanation": "Four cold partial observations and one reopened-document readiness failure. The then-new reporter additionally misclassified six intentional capture denials as failedExpected; raw evidence is preserved, not rewritten."
+    },
+    {
+      "file": "gedit_latency_single_scan_run3.json",
+      "scriptFailures": 5,
+      "failedExpectedRequests": 5,
+      "explanation": "Four cold partial observations; one cold endApproval watchdog failure at 3910.482 ms. No warm operations reached."
+    }
+  ],
+  "verificationNotes": [
+    "Native bounded-offset probe passed before adopting read optimization and again after it.",
+    "native_timing and focus passed; fixture initially failed on obsolete object() readiness stub; check()-capable test-only stub fixed, fixture then passed.",
+    "No successful timing/authority claim for failed or partial observations; no effect retries.",
+    "No application payloads or AX values stored in timing evidence."
+  ]
+}

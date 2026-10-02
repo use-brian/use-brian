@@ -23,6 +23,9 @@ mac:
     - dmg
     - zip
   hardenedRuntime: true
+  # Reuse electron-builder's selected identity/keychain and osx-sign; do not
+  # give the native helper Electron's JIT/library-validation exceptions.
+  sign: scripts/sign-mac-app.mjs
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
@@ -31,7 +34,14 @@ mac:
   extraFiles:
     - from: native/siri-companion/build/Release/Brian Siri.appex
       to: Extensions/Brian Siri.appex
+  binaries:
+    - Contents/Resources/computer-control/brian-native-computer-helper
+    - Contents/Resources/computer-control/NativeComputerFixture.app/Contents/MacOS/NativeComputerFixture
   extraResources:
+    - from: native/computer-control/build/brian-native-computer-helper
+      to: computer-control/brian-native-computer-helper
+    - from: native/computer-control/build/NativeComputerFixture.app
+      to: computer-control/NativeComputerFixture.app
     - from: native/siri-companion/Use Brian.shortcut
       to: siri/Use Brian.shortcut
   # Dock live recording: macOS shows this string on the one-time microphone
@@ -102,6 +112,17 @@ dmg:
 win:
   target:
     - nsis
+  # Helper and managed assemblies are signed when a Windows signing identity is
+  # configured. Unsigned development builds do NOT pass native acceptance.
+  signExts:
+    - .exe
+    - .dll
+  extraResources:
+    - from: native/computer-control/windows/out/win-x64
+      to: native/computer-control/windows
+      filter:
+        - "**/*"
+        - "!**/*.pdb"
 nsis:
   # Assisted installer (not one-click), per-user so first run never needs admin/UAC.
   oneClick: false
@@ -116,6 +137,20 @@ linux:
     - AppImage
   category: Office
   executableName: use-brian
+  # Host dependencies are declared in dependencies.json; absence fails closed.
+  # This is not an unrestricted/Wayland input path or an acceptance claim.
+  extraResources:
+    - from: native/computer-control/linux
+      to: native/computer-control/linux
+      filter:
+        - contract.py
+        - x11.py
+        - xinput.py
+        - safety.py
+        - atspi_backend.py
+        - helper.py
+        - fixture.py
+        - dependencies.json
 # Where `electron-builder --publish always` uploads artifacts. The marketing CTA
 # links the "latest" GitHub Release asset, which must be public-readable for an
 # unauthenticated download. The desktop source is open (this app lives in the

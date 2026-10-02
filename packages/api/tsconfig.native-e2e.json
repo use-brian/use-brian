@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "rootDir": "../..",
+    "noEmit": true
+  },
+  "include": ["test/native-computer-e2e.test.ts"]
+}

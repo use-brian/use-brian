@@ -227,6 +227,7 @@ const bridge = {
   // inset in `.is-canvas-desktop`) without shipping a new desktop build.
   platform: process.platform,
   // Main validates the trusted sender; websites never receive this preload.
+  computerControl: (message) => ipcRenderer.invoke("Use Brian:computer-control", message),
   browserControl: (message) => ipcRenderer.invoke("Use Brian:browser-control", message),
   // Native macOS traffic lights stay in window coordinates while page zoom
   // scales app-web's CSS pixels. Expose only the current numeric factor so the

@@ -1,0 +1,101 @@
+{
+  "sessions": 5,
+  "failedSessions": 0,
+  "overBudgetRequests": 0,
+  "failedExpectedRequests": 1,
+  "timingAccepted": false,
+  "productionAuthorityAccepted": false,
+  "results": [
+    {
+      "phase": "cold",
+      "operation": "start",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 2.293,
+      "p95Ms": 2.61,
+      "maxMs": 2.61
+    },
+    {
+      "phase": "cold",
+      "operation": "observe",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 148.639,
+      "p95Ms": 151.509,
+      "maxMs": 151.509
+    },
+    {
+      "phase": "cold",
+      "operation": "begin",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 143.644,
+      "p95Ms": 184.333,
+      "maxMs": 184.333
+    },
+    {
+      "phase": "cold",
+      "operation": "end",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 278.231,
+      "p95Ms": 2855.895,
+      "maxMs": 2855.895
+    },
+    {
+      "phase": "cold",
+      "operation": "execute",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 295.225,
+      "p95Ms": 307.587,
+      "maxMs": 307.587
+    },
+    {
+      "phase": "warm",
+      "operation": "start",
+      "n": 20,
+      "success": 20,
+      "p50Ms": 2.557,
+      "p95Ms": 18.534,
+      "maxMs": 30.65
+    },
+    {
+      "phase": "warm",
+      "operation": "observe",
+      "n": 55,
+      "success": 55,
+      "p50Ms": 152.877,
+      "p95Ms": 1492.353,
+      "maxMs": 1552.811
+    },
+    {
+      "phase": "warm",
+      "operation": "begin",
+      "n": 25,
+      "success": 25,
+      "p50Ms": 141.332,
+      "p95Ms": 1437.853,
+      "maxMs": 1448.323
+    },
+    {
+      "phase": "warm",
+      "operation": "end",
+      "n": 25,
+      "success": 25,
+      "p50Ms": 305.126,
+      "p95Ms": 1810.564,
+      "maxMs": 2333.94
+    },
+    {
+      "phase": "warm",
+      "operation": "execute",
+      "n": 25,
+      "success": 24,
+      "p50Ms": 300.754,
+      "p95Ms": 2827.425,
+      "maxMs": 3382.587
+    }
+  ],
+  "caveat": "Original reporter exited 0 despite 24/25 complete warm execute post-observations. One partial post-observation is retained as a failure; its individual elapsed time was not persisted. No pooled quantiles are reconstructed."
+}

@@ -1,0 +1,116 @@
+{
+  "sessions": 5,
+  "failedSessions": 2,
+  "overBudgetRequests": 2,
+  "requestBudgetMs": 3500,
+  "timingAccepted": false,
+  "productionAuthorityAccepted": false,
+  "quantile": "nearest rank; failures included; deliberate denials excluded",
+  "coldDefinition": "first positive lifecycle after fresh process/session; no AX tree warmup before observation; not OS/page-cache cold",
+  "warmDefinition": "subsequent valid requests against the same application process",
+  "results": [
+    {
+      "phase": "cold",
+      "operation": "start",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 2.502,
+      "p95Ms": 3.289,
+      "maxMs": 3.289
+    },
+    {
+      "phase": "cold",
+      "operation": "observe",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 155.398,
+      "p95Ms": 463.405,
+      "maxMs": 463.405
+    },
+    {
+      "phase": "cold",
+      "operation": "begin",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 138.316,
+      "p95Ms": 564.373,
+      "maxMs": 564.373
+    },
+    {
+      "phase": "cold",
+      "operation": "end",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 284.988,
+      "p95Ms": 1111.417,
+      "maxMs": 1111.417
+    },
+    {
+      "phase": "cold",
+      "operation": "execute",
+      "n": 5,
+      "success": 5,
+      "p50Ms": 520.613,
+      "p95Ms": 2738.354,
+      "maxMs": 2738.354
+    },
+    {
+      "phase": "warm",
+      "operation": "start",
+      "n": 16,
+      "success": 16,
+      "p50Ms": 1.971,
+      "p95Ms": 16.616,
+      "maxMs": 16.616
+    },
+    {
+      "phase": "warm",
+      "operation": "observe",
+      "n": 41,
+      "success": 41,
+      "p50Ms": 140.177,
+      "p95Ms": 1458.665,
+      "maxMs": 1472.878
+    },
+    {
+      "phase": "warm",
+      "operation": "begin",
+      "n": 19,
+      "success": 19,
+      "p50Ms": 132.207,
+      "p95Ms": 1398.767,
+      "maxMs": 1398.767
+    },
+    {
+      "phase": "warm",
+      "operation": "end",
+      "n": 19,
+      "success": 19,
+      "p50Ms": 267.789,
+      "p95Ms": 2821.319,
+      "maxMs": 2821.319
+    },
+    {
+      "phase": "warm",
+      "operation": "execute",
+      "n": 19,
+      "success": 17,
+      "p50Ms": 407.315,
+      "p95Ms": 4269.942,
+      "maxMs": 4269.942
+    }
+  ],
+  "regressions": "99 unit tests; native fixture, focus and concurrent GTK isolation suites",
+  "priorOptimizedRuns": [
+    {
+      "sessions": 5,
+      "failedSessions": 1,
+      "maxExecuteMs": 3664.806
+    },
+    {
+      "sessions": 5,
+      "failedSessions": 1,
+      "maxExecuteMs": 3944.945
+    }
+  ]
+}

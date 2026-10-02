@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const read = (path: string) =>
   readFileSync(new URL(path, import.meta.url), "utf8");
@@ -115,4 +115,123 @@ describe("[COMP:app-desktop/siri] App Intents packaging", () => {
     expect(builder).toContain("to: siri/Use Brian.shortcut");
     expect(template.subarray(0, 4).toString("ascii")).toBe("AEA1");
   });
+});
+
+describe("macOS native fixture signing hooks (mocked tools, not native signing)", () => {
+  it("discovers the identity before signing the adjacent fixture and preserves extension signing", async () => {
+    const execFileSync = vi.fn((tool: string, _args: string[], _options: unknown) => tool === "/usr/bin/security"
+      ? "1) ABCDEF0123456789ABCDEF0123456789ABCDEF01 Developer ID Application: Test" : "");
+    const hardenMacBootstrap = vi.fn(async () => {});
+    vi.doMock("../../scripts/electron-fuses.mjs", () => ({ hardenMacBootstrap }));
+    vi.doMock("node:child_process", () => ({ execFileSync }));
+    for (const key of ["CSC_NAME", "CSC_LINK", "CSC_KEYCHAIN"]) vi.stubEnv(key, "");
+    try {
+      const { default: sign } = await import(new URL("../../scripts/sign-siri-extension.mjs", import.meta.url).href);
+      await sign({ electronPlatformName: "darwin", appOutDir: "/output", packager: {
+        appInfo: { productFilename: "Use Brian" },
+        codeSigningInfo: { value: Promise.resolve({ keychainFile: "/temporary/keychain" }) },
+      } });
+      expect(hardenMacBootstrap).toHaveBeenCalledOnce();
+      expect(hardenMacBootstrap.mock.invocationCallOrder[0]).toBeLessThan(execFileSync.mock.invocationCallOrder[0]);
+      expect(execFileSync.mock.calls[0]?.[0]).toBe("/usr/bin/security");
+      const calls = execFileSync.mock.calls;
+      const fixture = "/output/Use Brian.app/Contents/Resources/computer-control/NativeComputerFixture.app";
+      const signed = calls.find(([, args]) => args.includes("--sign") && args.at(-1) === fixture)?.[1];
+      expect(signed).toEqual(["--force", "--sign", "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+        "--timestamp", "--options", "runtime", "--keychain", "/temporary/keychain", fixture]);
+      expect(calls.some(([, args]) => args.includes("--sign") && args.at(-1)?.endsWith("Brian Siri.appex"))).toBe(true);
+    } finally { vi.doUnmock("node:child_process"); vi.doUnmock("../../scripts/electron-fuses.mjs"); vi.unstubAllEnvs(); vi.resetModules(); }
+  });
+
+  it("verifies helper and fixture with the release parent team; missing team fails closed", async () => {
+    const execFileSync = vi.fn((_tool: string, _args: string[], _options: unknown) => "");
+    let helperXML = '<plist version="1.0"><dict/></plist>';
+    const spawnSync = vi.fn((_tool: string, args: string[]) => ({ status: 0,
+      stdout: args.at(-1)?.endsWith("brian-native-computer-helper") ? helperXML : "",
+      stderr: args.includes("--verbose=4") ? "TeamIdentifier=ABCDE12345" : "com.apple.security.app-sandbox" }));
+    const verifyMacBootstrap = vi.fn(async (_app: string) => {});
+    const verifyPackagedNativeBootstrap = vi.fn(async () => {});
+    vi.doMock("../../scripts/mac-release-bootstrap.mjs", () => ({ verifyPackagedNativeBootstrap }));
+    vi.doMock("../../scripts/electron-fuses.mjs", () => ({ verifyMacBootstrap }));
+    vi.doMock("node:child_process", () => ({ execFileSync, spawnSync }));
+    try {
+      const { default: verify } = await import(new URL("../../scripts/verify-siri-extension.mjs", import.meta.url).href);
+      const context = { electronPlatformName: "darwin", appOutDir: "/output", packager: {
+        appInfo: { productFilename: "Use Brian" }, platformSpecificBuildOptions: { identity: "Developer ID Application: Test" },
+      } };
+      await verify(context);
+      expect(verifyMacBootstrap).toHaveBeenCalledWith("/output/Use Brian.app");
+      expect(verifyPackagedNativeBootstrap).toHaveBeenCalledWith("/output/Use Brian.app", "ABCDE12345");
+      expect(verifyMacBootstrap.mock.invocationCallOrder[0]).toBeLessThan(execFileSync.mock.invocationCallOrder[0]);
+      const checks = execFileSync.mock.calls.filter(([, args]) => args.includes("-R"));
+      expect(checks).toHaveLength(4);
+      for (const [, args] of checks) {
+        const requirement = args[args.indexOf("-R") + 1];
+        expect(requirement).toContain('certificate leaf[subject.OU] = "ABCDE12345"');
+        expect(requirement).toContain('certificate 1[field.1.2.840.113635.100.6.2.6] exists');
+        expect(requirement).toContain('certificate leaf[field.1.2.840.113635.100.6.1.13] exists');
+      }
+      for (const xml of [
+        '<plist><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>',
+        '<plist><dict><key>com.apple.security.cs.disable-library-validation</key><true/></dict></plist>',
+        '<plist><dict><key>unknown</key><false/></dict></plist>',
+        '<plist><array/></plist>', '<plist><date>2026-01-01T00:00:00Z</date></plist>',
+      ]) {
+        helperXML = xml;
+        await expect(verify(context)).rejects.toThrow('empty entitlement profile');
+      }
+      helperXML = '';
+      await expect(verify(context)).rejects.toThrow('Could not verify native helper entitlements');
+      helperXML = '<plist version="1.0"><dict/></plist>';
+      expect(checks[0][1].join(" ")).toContain('identifier "ai.usebrian.desktop"');
+      expect(checks[2][1].join(" ")).toContain('identifier "com.usebrian.NativeComputerFixture"');
+      expect(checks[3][1].at(-1)).toBe("/output/Use Brian.app/Contents/Frameworks/Electron Framework.framework");
+      expect(checks[3][1]).toContain("--all-architectures");
+      // The normal default-keychain identity path has no CSC_* configuration.
+      // Its developer-signed artifact must never enter the local ad-hoc branch.
+      for (const key of ['CSC_LINK', 'CSC_NAME', 'CSC_KEYCHAIN']) vi.stubEnv(key, '');
+      execFileSync.mockClear();
+      await verify({ ...context, packager: { ...context.packager, platformSpecificBuildOptions: {} } });
+      expect(execFileSync.mock.calls.some(([, args]) => args.includes('--sign'))).toBe(false);
+      expect(execFileSync.mock.calls.filter(([, args]) => args.includes('-R'))).toHaveLength(4);
+      execFileSync.mockImplementation((_tool, args) => {
+        if (args.includes("--verify") && args.at(-1)?.endsWith("Electron Framework.framework")) throw new Error("framework invalid seal");
+        return "";
+      });
+      await expect(verify(context)).rejects.toThrow("framework invalid seal");
+      execFileSync.mockImplementation((_tool, args) => {
+        if (args.includes("-R") && args.at(-1)?.endsWith("NativeComputerFixture.app")) throw new Error("fixture wrong team or signature");
+        return "";
+      });
+      await expect(verify(context)).rejects.toThrow("fixture wrong team or signature");
+      execFileSync.mockImplementation((_tool, args) => {
+        if (args.includes("--verify") && args.at(-1)?.endsWith("NativeComputerFixture.app")) throw new Error("fixture missing or invalid seal");
+        return "";
+      });
+      await expect(verify(context)).rejects.toThrow("fixture missing or invalid seal");
+      execFileSync.mockReturnValue("");
+      spawnSync.mockReturnValue({ status: 0, stdout: "", stderr: "TeamIdentifier=not set" });
+      await expect(verify(context)).rejects.toThrow("non-ad-hoc signing team");
+      execFileSync.mockClear();
+      verifyMacBootstrap.mockRejectedValue(new Error("unsafe fuse"));
+      await expect(verify(context)).rejects.toThrow("unsafe fuse");
+      expect(execFileSync).not.toHaveBeenCalled();
+    } finally { vi.doUnmock("node:child_process"); vi.doUnmock("../../scripts/electron-fuses.mjs"); vi.doUnmock("../../scripts/mac-release-bootstrap.mjs"); vi.unstubAllEnvs(); vi.resetModules(); }
+  });
+});
+
+
+it("afterPack refuses fuse failures before signing and skips unsupported platforms", async () => {
+  const hardenMacBootstrap = vi.fn(async () => { throw new Error("unknown fuse"); });
+  const execFileSync = vi.fn();
+  vi.doMock("../../scripts/electron-fuses.mjs", () => ({ hardenMacBootstrap }));
+  vi.doMock("node:child_process", () => ({ execFileSync }));
+  try {
+    const { default: sign } = await import(new URL("../../scripts/sign-siri-extension.mjs", import.meta.url).href);
+    await sign({ electronPlatformName: "linux" });
+    await sign({ electronPlatformName: "win32" });
+    expect(hardenMacBootstrap).not.toHaveBeenCalled();
+    await expect(sign({ electronPlatformName: "darwin" })).rejects.toThrow("unknown fuse");
+    expect(execFileSync).not.toHaveBeenCalled();
+  } finally { vi.doUnmock("node:child_process"); vi.doUnmock("../../scripts/electron-fuses.mjs"); vi.resetModules(); }
 });

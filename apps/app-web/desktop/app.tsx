@@ -115,6 +115,7 @@ const ChatPage = lazy(() => import("@/app/w/[workspaceId]/chat/page"));
 const ShopifyPage = lazy(() => import("@/app/w/[workspaceId]/shopify/page"));
 const AssociationPage = lazy(() => import("@/app/w/[workspaceId]/association/page"));
 const CustomHomeAppPage = lazy(() => import("@/app/w/[workspaceId]/apps/[appId]/page"));
+const NativeComputerPage = lazy(() => import("@/app/w/[workspaceId]/computer/native/page"));
 const ComputerLayout = lazy(() => import("@/app/w/[workspaceId]/computer/layout"));
 const BrowsersIndexPage = lazy(() => import("@/app/w/[workspaceId]/computer/page"));
 const ComputerTakeoverPage = lazy(() => import("@/app/w/[workspaceId]/computer/[sessionId]/page"));
@@ -230,6 +231,7 @@ const OPERATOR_ROUTE_ELEMENTS: Record<OperatorAppKey, ReactNode> = {
     <Route key="browsers" path="computer" element={<ComputerShell />}>
       <Route index element={<BrowsersIndexPage />} />
       <Route path="profiles" element={<BrowserProfilesRoute />} />
+      <Route path="native" element={<NativeComputerPage />} />
       <Route path=":sessionId" element={<ComputerTakeoverRoute />} />
     </Route>
   ),

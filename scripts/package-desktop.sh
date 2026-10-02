@@ -38,6 +38,7 @@ fi
 
 PUBLISH=0
 SKIP_BUILD=0
+NATIVE_PACKAGE_CHECK=0
 BUMP=""
 SET_VERSION=""
 ARCH_ARGS=()
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --publish) PUBLISH=1 ;;
     --arm64) ARCH_ARGS=(--arm64) ;;
+    --native-package-check) NATIVE_PACKAGE_CHECK=1 ;;
     --no-build|--skip-build) SKIP_BUILD=1 ;;
     --bump)
       BUMP="${2:-}"; shift
@@ -56,11 +58,12 @@ while [[ $# -gt 0 ]]; do
     --version=*) SET_VERSION="${1#--version=}" ;;
     -h|--help)
       cat <<'USAGE'
-usage: package-desktop.sh [--bump patch|minor|major | --version X.Y.Z] [--arm64] [--publish] [--no-build]
+usage: package-desktop.sh [--bump patch|minor|major | --version X.Y.Z] [--arm64] [--publish] [--no-build] [--native-package-check]
   --bump LEVEL     increment apps/app-desktop/package.json (patch|minor|major) before building
   --version X.Y.Z  set apps/app-desktop/package.json to an exact version before building
   --publish        (re)sign+notarize, then upload the dmg+zip+update feed to GitHub Releases
   --arm64          pin the Apple Silicon architecture (used by automated releases)
+  --native-package-check  run the R1 package-copy admission regression; forbids publish/no-build
   --no-build       skip tsc + electron-builder; reuse existing release/ artifacts
 The version change is written to package.json but NOT committed; the run prints
 the git command to commit it. --bump/--version cannot combine with --no-build.
@@ -70,6 +73,13 @@ USAGE
   esac
   shift
 done
+
+# The explicit R1 check uses private copies and the same selected signing
+# identity. It neither enables native control nor authorizes release publication.
+if [[ "$NATIVE_PACKAGE_CHECK" == "1" && ( "$PUBLISH" == "1" || "$SKIP_BUILD" == "1" ) ]]; then
+  echo "error: --native-package-check cannot combine with --publish or --no-build." >&2
+  exit 1
+fi
 
 # --bump and --version are mutually exclusive — one increments, the other sets.
 if [[ -n "$BUMP" && -n "$SET_VERSION" ]]; then
@@ -170,8 +180,9 @@ else
   pnpm --filter @use-brian/app-desktop run build
   echo "==> Building Siri App Intents extension"
   pnpm --filter @use-brian/app-desktop run build:siri
+  pnpm --filter @use-brian/app-desktop run build:native-computer
   echo "==> Packaging + signing + notarizing the app (Apple notary, a few min)"
-  pnpm --filter @use-brian/app-desktop exec electron-builder --mac ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} --publish never
+  BRIAN_NATIVE_PACKAGE_CHECK="$NATIVE_PACKAGE_CHECK" pnpm --filter @use-brian/app-desktop exec electron-builder --mac ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} --publish never
 fi
 
 # electron-builder signs + notarizes + staples the .app (it submits the .zip),

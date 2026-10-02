@@ -17,6 +17,8 @@ for (const file of [
   "pet-preload.cjs",
   "embedded-browser-preload.cjs",
   "embedded-browser.html",
+  "native-computer-indicator.html",
+  "native-computer-indicator-preload.cjs",
   "signin.html",
   "offline.html",
   "brian-pet.html",

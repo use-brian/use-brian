@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "kind": "static-format-fixture",
+  "productionAuthority": false,
+  "kernelEvidence": false,
+  "cmsAuthentication": false,
+  "executed": false,
+  "derPolicyValidation": "unsupported",
+  "policyPlist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n  <key>validation-category</key><integer>6</integer>\n  <key>team-identifier</key><string>ZZZZZZZZZZ</string>\n  <key>cdhash</key>\n  <dict><key>$in</key><array>\n    <data>ERERERERERERERERERERERERERE=</data>\n    <data>IiIiIiIiIiIiIiIiIiIiIiIiIiI=</data>\n  </array></dict>\n</dict>\n</plist>\n",
+  "rawLibraryConstraintBase64": "+t6BgQAAALdwgawCAQGwgaYwCQwEY2NhdAIBADAJDARjb21wAgEBMIGCDARyZXFzsHowPwwGY2RoYXNosDUwMwwDJGluMCwEFBERERERERERERERERERERERERERBBQiIiIiIiIiIiIiIiIiIiIiIiIiIjAdDA90ZWFtLWlkZW50aWZpZXIMClpaWlpaWlpaWlowGAwTdmFsaWRhdGlvbi1jYXRlZ29yeQIBBjAJDAR2ZXJzAgEB",
+  "provenance": {
+    "macOS": "26.6.2",
+    "macOSBuild": "25G83",
+    "architecture": "arm64",
+    "sdk": "26.5",
+    "node": "25.5.0",
+    "appleClang": "21.0.0",
+    "appleClangBuild": "2100.1.1.101",
+    "codesign": "macOS system tool; version identified by macOS build",
+    "signing": "ad-hoc",
+    "deploymentTarget": "14.0"
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "interpreter": "/usr/bin/python3",
+  "interpreterArgs": [
+    "-Es"
+  ],
+  "minimumPython": "3.11",
+  "pythonModules": [
+    "pyatspi",
+    "gi"
+  ],
+  "sharedLibraries": [
+    "libX11.so.6",
+    "libXi.so.6",
+    "libXrandr.so.2"
+  ],
+  "typelibs": [
+    "Atspi-2.0",
+    "Gio-2.0",
+    "GLib-2.0"
+  ],
+  "services": [
+    "session D-Bus",
+    "AT-SPI2 registry",
+    "system D-Bus org.freedesktop.login1"
+  ],
+  "desktop": [
+    "local logind X11 session",
+    "XI2 2.2",
+    "RANDR",
+    "EWMH window manager"
+  ],
+  "fixtureOnly": [
+    "Gtk-3.0",
+    "Atk-1.0",
+    "pycairo"
+  ],
+  "testOnly": [
+    "Xvfb",
+    "Openbox",
+    "libXtst.so.6",
+    "gedit 50.0 (existing editor cohort integration)"
+  ],
+  "debianPackages": [
+    "python3",
+    "python3-pyatspi",
+    "python3-gi",
+    "python3-cairo",
+    "gir1.2-atspi-2.0",
+    "gir1.2-gtk-3.0",
+    "at-spi2-core",
+    "libx11-6",
+    "libxi6",
+    "libxrandr2",
+    "dbus-user-session"
+  ],
+  "testedNativeStack": {
+    "python": "3.14.7",
+    "pyatspi": "2.58.1",
+    "atSpi2": "2.60.6",
+    "gtk3": "3.24.52",
+    "xorgServer": "21.1.24",
+    "openbox": "3.6.1",
+    "gedit": "50.0"
+  },
+  "nativeGeditTest": {
+    "nixpkgsRevision": "b6c8664de9b6cc07fe5666a29f91884ba81197c4",
+    "nixpkgsNarHash": "sha256-k8Fu4c9Z+4Nh7mUr0cfw++ITQiyEhlWxoJBOkI3tOcQ=",
+    "package": "/nix/store/pbdrndbn9wfzl5j9dhyyykiacrgyia9l-gedit-50.0",
+    "executable": "/nix/store/pbdrndbn9wfzl5j9dhyyykiacrgyia9l-gedit-50.0/bin/.gedit-wrapped",
+    "scope": "Unsaved buffer on isolated Xvfb/D-Bus; real backend/broker; simulated logind/consent/lease. No production acceptance.",
+    "timingEvidence": {
+      "simulatedApprovalCompletionMs": [
+        733,
+        733,
+        7833,
+        732
+      ],
+      "productionRequestBudgetMs": 3500,
+      "productionTimingAccepted": false,
+      "postOptimization": {
+        "report": "tests/gedit_latency_results.json",
+        "sessions": 5,
+        "failedSessions": 2,
+        "requestBudgetMs": 3500,
+        "maxExecuteMs": 4269.942,
+        "productionTimingAccepted": false
+      }
+    }
+  },
+  "releaseStatus": "Experimental; pin and audit dependencies per distro artifact. No packaged desktop acceptance.",
+  "experimentalClick": {
+    "advertised": false,
+    "nativeProbe": "tests/native_xvfb.py",
+    "reason": "Core XTEST source is shared across clients; Openbox delays raw release beyond the server-grab provenance boundary. No private-pipe click execution."
+  },
+  "runtimeFiles": [
+    "helper.py",
+    "contract.py",
+    "atspi_backend.py",
+    "safety.py",
+    "x11.py",
+    "xinput.py",
+    "fixture.py"
+  ]
+}
