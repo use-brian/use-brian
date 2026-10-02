@@ -48,7 +48,7 @@ import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, fetchSlackProfile, ensureAssistantMember, channelLinkBindsHere, type ChannelUserStore } from '../db/channel-user-store.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
-import { mergeShadowUser } from '../db/linked-accounts.js'
+import { completeLinkClaim } from './link-claim.js'
 import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
 import {
   parseFileContent,
@@ -733,16 +733,16 @@ export function slackRoutes(options: SlackRouteOptions): Router {
               providerId: incoming.userId,
               providerMetadata: { channelId: incoming.channelId },
             })
-            mergeShadowUser(code.userId, incoming.userId, 'slack', {
-              reason: 'link-code',
+            const claim = await completeLinkClaim({
+              provider: 'slack',
+              realUserId: code.userId,
+              providerId: incoming.userId,
               evidence: { codeId: code.id, channelId: incoming.channelId },
-            }).catch((err) => {
-              console.error('[slack] link-code merge failed:', err)
+              receivingAssistant: { id: assistant.id, name: assistant.name ?? null },
+              analytics: options.analytics,
             })
-            const linkedAssistant = await findAssistantById(code.assistantId)
-            const assistantName = linkedAssistant?.name ?? 'your assistant'
             await adapter.sendMessage(incoming.channelId, {
-              text: `Linked to "${assistantName}". Your past conversations here are now connected to your account.`,
+              text: claim.text,
             }, threadTs ? { threadTs } : undefined).catch((err) => {
               console.error('[slack] link confirmation send failed:', err)
             })

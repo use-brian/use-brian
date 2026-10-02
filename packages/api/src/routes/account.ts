@@ -10,6 +10,9 @@ import {
 } from '../db/users.js'
 import { isAllowedMime } from './files.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
+import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 import type { LinkCodeStore } from '../db/link-codes.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
@@ -206,6 +209,75 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
     } catch (err) {
       console.error('[account] list linked accounts failed:', err)
       res.status(500).json({ error: 'Failed to list linked accounts' })
+    }
+  })
+
+  // ── GET /api/account/channel-identities ───────────────────────
+  //
+  // Who the caller is on each chat channel beyond explicit links: providers
+  // whose sender was matched to this account by email (channel_user_cache),
+  // and - for owners/admins of `workspaceId` only - each of that workspace's
+  // channels' email-matching status (the newest channel_email_lookup_* row,
+  // written on change by the channel route). Read by Settings -> Account ->
+  // Connected accounts and the Studio channel footer.
+  // Spec: docs/plans/channel-identity-binding.md §3, §4.
+
+  router.get('/channel-identities', async (req, res) => {
+    const userId = req.userId
+    if (!userId) {
+      res.status(401).json({ error: 'Missing or invalid Authorization header' })
+      return
+    }
+    const rawWorkspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : null
+    const workspaceId = rawWorkspaceId && UUID_PATTERN.test(rawWorkspaceId) ? rawWorkspaceId : null
+    try {
+      const matches = await query<{ provider: string; providerId: string; displayName: string | null }>(
+        `SELECT DISTINCT ON (provider) provider, provider_user_id AS "providerId", display_name AS "displayName"
+           FROM channel_user_cache
+          WHERE user_id = $1 AND email IS NOT NULL
+          ORDER BY provider, cached_at DESC`,
+        [userId],
+      )
+      let emailMatching: Array<{
+        channelId: string
+        status: 'on' | 'off'
+        reason: string | null
+        missingScopes: string[]
+        providerCode: string | null
+        at: string
+      }> = []
+      const role = workspaceId ? await getWorkspaceRoleSystem(userId, workspaceId) : null
+      const emailMatchingVisible = Boolean(workspaceId) && (role === 'owner' || role === 'admin')
+      if (emailMatchingVisible) {
+        const rows = await query<{ channelId: string; eventName: string; metadata: Record<string, unknown> | null; at: Date }>(
+          `SELECT DISTINCT ON (ae.metadata->>'integration_id')
+                  ae.metadata->>'integration_id' AS "channelId", ae.event_name AS "eventName",
+                  ae.metadata, ae.created_at AS at
+             FROM analytics_events ae
+             JOIN channels c ON c.id::text = ae.metadata->>'integration_id'
+            WHERE ae.event_name IN ('channel_email_lookup_ok', 'channel_email_lookup_unavailable')
+              AND c.workspace_id = $1
+              AND ae.created_at > now() - interval '30 days'
+            ORDER BY ae.metadata->>'integration_id', ae.created_at DESC`,
+          [workspaceId],
+        )
+        emailMatching = rows.rows.map((row) => {
+          const meta = row.metadata ?? {}
+          const scopes = typeof meta.missing_scopes === 'string' ? meta.missing_scopes : ''
+          return {
+            channelId: row.channelId,
+            status: row.eventName === 'channel_email_lookup_ok' ? 'on' : 'off',
+            reason: typeof meta.reason === 'string' ? meta.reason : null,
+            missingScopes: scopes ? scopes.split(',').filter(Boolean) : [],
+            providerCode: typeof meta.provider_code === 'string' ? meta.provider_code : null,
+            at: new Date(row.at).toISOString(),
+          }
+        })
+      }
+      res.json({ emailMatches: matches.rows, emailMatching, emailMatchingVisible })
+    } catch (err) {
+      console.error('[account] channel identities failed:', err)
+      res.status(500).json({ error: 'Failed to load channel identities' })
     }
   })
 

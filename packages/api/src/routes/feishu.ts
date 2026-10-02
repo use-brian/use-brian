@@ -27,6 +27,7 @@ import {
   composeVoiceTurnText,
   describeTranscriptionFailure,
   parseFileContent,
+  sanitize as sanitizeAnalytics,
   transcribeFirstAudio,
   TRANSCRIPTION_DISABLED_REASON,
   type ContentBlock,
@@ -54,7 +55,7 @@ import {
   resolveChannelUser,
 } from '../db/channel-user-store.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
-import { mergeShadowUser } from '../db/linked-accounts.js'
+import { completeLinkClaim } from './link-claim.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -187,13 +188,78 @@ function credentialsForApi(credentials: FeishuCredentials) {
   }
 }
 
+/**
+ * Email matching status per Feishu integration, as last REPORTED by this
+ * process. Feishu reveals a sender's email only when the app holds the
+ * contact-read scopes and the sender is inside the app's contact range;
+ * without it, every sender silently becomes an email-less shadow that is
+ * never a workspace member. So the outcome is an analytics row - written
+ * only when it changes (first lookup per process, then each transition), so
+ * the newest `channel_email_lookup_*` row for an integration is its current
+ * status and the volume stays at a handful of rows. Studio and Settings read
+ * it to tell an admin which permission to grant.
+ * Spec: docs/plans/channel-identity-binding.md §3.
+ */
+const feishuEmailLookupReported = new Map<string, string>()
+
+type FeishuEmailLookupReport = {
+  integrationId: string
+  userId: string
+  assistantId: string
+  analytics?: FeishuRouteOptions['analytics']
+}
+
+/** Exported for tests. */
+export function reportFeishuEmailLookup(
+  report: FeishuEmailLookupReport | undefined,
+  outcome:
+    | { status: 'ok' }
+    | { status: 'unavailable'; reason: 'lookup_denied'; providerCode?: string; missingScopes?: string[] },
+): void {
+  if (!report?.analytics) return
+  const key = outcome.status === 'ok' ? 'ok' : `${outcome.reason}:${outcome.providerCode ?? ''}`
+  if (feishuEmailLookupReported.get(report.integrationId) === key) return
+  feishuEmailLookupReported.set(report.integrationId, key)
+  report.analytics.logEvent({
+    userId: report.userId,
+    assistantId: report.assistantId,
+    eventName: outcome.status === 'ok' ? 'channel_email_lookup_ok' : 'channel_email_lookup_unavailable',
+    channelType: 'feishu',
+    metadata: {
+      integration_id: sanitizeAnalytics(report.integrationId),
+      ...(outcome.status === 'unavailable'
+        ? {
+            reason: sanitizeAnalytics(outcome.reason),
+            ...(outcome.providerCode ? { provider_code: sanitizeAnalytics(outcome.providerCode) } : {}),
+            ...(outcome.missingScopes?.length
+              ? { missing_scopes: sanitizeAnalytics(outcome.missingScopes.join(',')) }
+              : {}),
+          }
+        : {}),
+    },
+  })
+}
+
+/** Scope names Feishu lists in an access-denied message ("... required: [a, b]"). */
+export function feishuMissingScopes(message: string): string[] {
+  const match = /\[([^\]]+)\]/.exec(message)
+  if (!match) return []
+  return match[1].split(',').map((scope) => scope.trim()).filter((scope) => /^[a-z0-9_.:]+$/i.test(scope))
+}
+
 async function fetchFeishuSenderProfile(
   api: ReturnType<typeof createFeishuApi>,
   openId: string,
   fallbackName: string | null,
+  report?: FeishuEmailLookupReport,
 ): Promise<{ email: string | null; displayName: string | null }> {
   try {
     const profile = await api.getUserProfile(openId)
+    // Only a sender WITH an email proves matching works. A profile without
+    // one is per-sender (no email set, or the email scope missing - Feishu
+    // does not say which), so it reports nothing rather than telling an
+    // admin to grant a scope they may already hold.
+    if (profile.email) reportFeishuEmailLookup(report, { status: 'ok' })
     return {
       email: profile.email,
       displayName: profile.displayName ?? fallbackName,
@@ -202,6 +268,19 @@ async function fetchFeishuSenderProfile(
     // Existing installations may not have approved the new contact scopes yet.
     // Keep chat available on the isolated shadow lane until they do.
     console.warn('[feishu] sender profile lookup unavailable; using anonymous identity:', error)
+    // Only an app-level permission denial (Feishu names the missing scopes)
+    // is a status; a per-sender failure such as a user outside the app's
+    // contact range must not flip the whole channel to "off".
+    const err = error as { providerCode?: number | string; message?: string }
+    const missingScopes = feishuMissingScopes(err.message ?? '')
+    if (missingScopes.length > 0) {
+      reportFeishuEmailLookup(report, {
+        status: 'unavailable',
+        reason: 'lookup_denied',
+        ...(err.providerCode !== undefined ? { providerCode: String(err.providerCode) } : {}),
+        missingScopes,
+      })
+    }
     return { email: null, displayName: fallbackName }
   }
 }
@@ -669,15 +748,17 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
                 brand: credentials.brand,
               },
             })
-            mergeShadowUser(code.userId, incoming.userId, 'feishu', {
-              reason: 'link-code',
+            const claim = await completeLinkClaim({
+              provider: 'feishu',
+              realUserId: code.userId,
+              providerId: incoming.userId,
               evidence: { codeId: code.id, channelId: incoming.channelId },
-            }).catch((error) => console.error('[feishu] link-code merge failed:', error))
-            const linkedAssistant = await findAssistantById(code.assistantId)
-            const assistantName = linkedAssistant?.name ?? 'your assistant'
+              receivingAssistant: { id: assistant.id, name: assistant.name ?? null },
+              analytics: options.analytics,
+            })
             await adapter.sendMessage(
               incoming.channelId,
-              { text: `Linked to "${assistantName}". Your past Feishu/Lark conversations are now connected to your account.` },
+              { text: claim.text },
               incoming.messageId ? { threadTs: incoming.messageId } : undefined,
             ).catch((error) => console.error('[feishu] link confirmation send failed:', error))
             return
@@ -727,6 +808,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             api,
             incoming.userId,
             incoming.senderDisplay ?? null,
+            { integrationId: channelRowId, userId: ownerId, assistantId: assistant.id, analytics: options.analytics },
           ),
         )
         channelUserId = resolved.user.id

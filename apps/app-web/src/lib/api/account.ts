@@ -138,13 +138,9 @@ export async function revokeAllAccountSessions(): Promise<boolean> {
 // Settings → Account → Connected accounts. Wire contracts:
 // - `GET    /api/account/linked-accounts` lists linked provider identities.
 // - `DELETE /api/account/linked-accounts/:id` unlinks one.
-// - `POST   /api/account/telegram/link-code` mints a 6-char code bound to
-//   the user's first-owned assistant and returns the official bot's
-//   @username for the t.me deep link (null when unresolvable).
-// - `POST   /api/account/slack/link-code` mints the same code shape for
-//   Slack (no deep link; pasted to the Brian app in Slack).
-// - `POST   /api/account/feishu/link-code` mints the same code shape for
-//   Feishu/Lark (pasted to Brian in a DM or an addressed group message).
+// - Link codes are minted through `createChannelLinkCode(codeEndpoint)`
+//   below, with the endpoint taken from the `CHANNEL_IDENTITY` registry
+//   (@use-brian/shared), so every channel shares one row component.
 // See docs/architecture/platform/auth.md → "Linked accounts".
 
 export type LinkedAccount = {
@@ -176,87 +172,77 @@ export async function unlinkAccount(id: string): Promise<boolean> {
   return res.ok;
 }
 
-export type TelegramLinkCode = {
+// ── Channel identities (unified connect surface) ─────────────────────
+// Spec: docs/plans/channel-identity-binding.md §4. One response shape for
+// every channel's link code, so Settings and the Studio channel footer share
+// one row component driven by `CHANNEL_IDENTITY` (@use-brian/shared).
+
+export type ChannelLinkCode = {
   code: string;
   expiresAt: string;
-  botUsername: string | null;
-};
-
-/** Mint a Telegram link code. Resolves `null` on failure. */
-export async function createTelegramLinkCode(): Promise<TelegramLinkCode | null> {
-  try {
-    const res = await authFetch(`${API_URL}/api/account/telegram/link-code`, {
-      method: "POST",
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as TelegramLinkCode;
-  } catch {
-    return null;
-  }
-}
-
-export type SlackLinkCode = {
-  code: string;
-  expiresAt: string;
+  /** Telegram: the bot that receives `/start <code>` (deep link). */
+  botUsername?: string | null;
+  /** WhatsApp: the official number to send the code to. */
+  officialNumber?: string | null;
 };
 
 /**
- * Mint a Slack link code (`POST /api/account/slack/link-code`). The user
- * sends it to the Brian app in Slack; the Slack message handler redeems it and
- * from then on that Slack id routes to this account BEFORE the profile-email
- * match. Resolves `null` on failure (503 no store, 409 no assistant).
- * See docs/architecture/channels/channel-user-identity.md -> "Slack".
+ * Mint a link code at a registry `codeEndpoint`. Resolves `null` on any
+ * non-OK response (503 no store or no bot on this installation, 409 no
+ * assistant), which the row shows as "not available here".
  */
-export async function createSlackLinkCode(): Promise<SlackLinkCode | null> {
+export async function createChannelLinkCode(
+  codeEndpoint: string,
+): Promise<ChannelLinkCode | null> {
   try {
-    const res = await authFetch(`${API_URL}/api/account/slack/link-code`, {
-      method: "POST",
-    });
+    const res = await authFetch(`${API_URL}${codeEndpoint}`, { method: "POST" });
     if (!res.ok) return null;
-    return (await res.json()) as SlackLinkCode;
+    return (await res.json()) as ChannelLinkCode;
   } catch {
     return null;
   }
 }
 
-export type FeishuLinkCode = {
-  code: string;
-  expiresAt: string;
+export type ChannelEmailMatch = {
+  provider: string;
+  providerId: string;
+  displayName: string | null;
 };
 
-/** Mint a Feishu/Lark link code. Resolves `null` on a non-OK response. */
-export async function createFeishuLinkCode(): Promise<FeishuLinkCode | null> {
-  try {
-    const res = await authFetch(`${API_URL}/api/account/feishu/link-code`, {
-      method: "POST",
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as FeishuLinkCode;
-  } catch {
-    return null;
-  }
-}
-
-export type WhatsappLinkCode = {
-  code: string;
-  expiresAt: string;
-  /** The official number to send the code to — always present on success. */
-  officialNumber: string;
+export type ChannelEmailMatching = {
+  channelId: string;
+  status: "on" | "off";
+  reason: string | null;
+  missingScopes: string[];
+  providerCode: string | null;
+  at: string;
 };
 
-/**
- * Mint a WhatsApp link code. Resolves `null` on failure, including the
- * hosted-only 503 (OSS) and the 503 raised when the official bot isn't paired
- * — in both cases there is nowhere to send a code, so there is no code.
- */
-export async function createWhatsappLinkCode(): Promise<WhatsappLinkCode | null> {
+export type ChannelIdentities = {
+  /** Providers whose sender was matched to this account by email. */
+  emailMatches: ChannelEmailMatch[];
+  /** Per-channel email-matching status; only returned to workspace admins. */
+  emailMatching: ChannelEmailMatching[];
+  /** True when the caller is an owner/admin of the requested workspace. */
+  emailMatchingVisible: boolean;
+};
+
+/** `GET /api/account/channel-identities`. Resolves empty lists on failure. */
+export async function getChannelIdentities(
+  workspaceId?: string | null,
+): Promise<ChannelIdentities> {
+  const empty: ChannelIdentities = { emailMatches: [], emailMatching: [], emailMatchingVisible: false };
   try {
-    const res = await authFetch(`${API_URL}/api/account/whatsapp/link-code`, {
-      method: "POST",
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as WhatsappLinkCode;
+    const qs = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
+    const res = await authFetch(`${API_URL}/api/account/channel-identities${qs}`);
+    if (!res.ok) return empty;
+    const data = (await res.json()) as Partial<ChannelIdentities>;
+    return {
+      emailMatches: data.emailMatches ?? [],
+      emailMatching: data.emailMatching ?? [],
+      emailMatchingVisible: data.emailMatchingVisible === true,
+    };
   } catch {
-    return null;
+    return empty;
   }
 }

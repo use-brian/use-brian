@@ -135,6 +135,7 @@ import {
 } from "@/components/ui/searchable-select";
 import { StudioTopbarActions } from "@/components/studio/studio-topbar";
 import { ScrollableNav } from "@/components/scrollable-nav";
+import { ChannelIdentityFooter } from "@/components/channel-identity/channel-identity";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
 import {
   Bot,
@@ -1235,6 +1236,9 @@ export function ChannelDetail({
         )}
       </div>
       )}
+
+      {/* Who the viewer is on this channel, and how to connect. */}
+      <ChannelIdentityFooter channel={channel} workspaceId={workspaceId} />
 
       {/* Disconnect — destructive, confirmed via the shared confirmDialog. */}
       <div className="flex flex-col gap-2 border-t border-border pt-3">
