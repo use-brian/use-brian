@@ -112,7 +112,7 @@ export type MsTeamsRouteOptions = {
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
    *  ride content blocks with no reference, as before. */
   fileStore?: import('@use-brian/core').FileStore
-  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   workflowStore?: import('@use-brian/core').WorkflowStore

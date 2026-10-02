@@ -164,7 +164,7 @@ type SlackRouteOptions = {
   filesApi?: import('@use-brian/core').FilesApi
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
-  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   /** Transient upload cache (`file_cache`). When present, inbound images are
    *  cached so the turn carries a promotable `<attached_file id="…">` tag
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
@@ -1183,7 +1183,7 @@ type ProcessMessageParams = {
   filesApi?: import('@use-brian/core').FilesApi
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
-  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   /** Transient upload cache (`file_cache`). When present, inbound images are
    *  cached so the turn carries a promotable `<attached_file id="…">` tag
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
