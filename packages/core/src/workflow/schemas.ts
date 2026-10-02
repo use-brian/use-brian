@@ -121,6 +121,17 @@ const pageAnchorSchema = z.union([
   z.object({ fromStep: stepIdSchema }).strict(),
 ])
 
+/**
+ * Reserved `deliver.channelId` / `failureDelivery.channelId` reference meaning
+ * "the chat this workflow is being authored from". Chat authoring resolves it
+ * to the session's concrete chat id BEFORE this schema parses
+ * (`resolveCurrentChatDeliveries` in tools.ts), so a persisted definition never
+ * carries it; the definition-level refine below rejects it anywhere it arrives
+ * unresolved (REST builder, brain MCP), where there is no authoring chat.
+ * See docs/architecture/features/workflow.md → "Authoring validation".
+ */
+export const CURRENT_CHAT_CHANNEL_ID = 'current'
+
 /** Shared step-output and workflow-failure delivery shape. */
 const workflowDeliverySchema = z.union([
   z.object({
@@ -777,6 +788,32 @@ export const WorkflowDefinitionSchema = z
         message: 'failureDelivery.channelIntegrationId is only supported for telegram and feishu delivery.',
         path: ['failureDelivery', 'channelIntegrationId'],
       })
+    }
+
+    // `"current"` is resolved by chat authoring before this parse; reaching
+    // here means a surface with no authoring chat, which must not persist it.
+    const currentChatIssue = (path: (string | number)[]) =>
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `channelId "${CURRENT_CHAT_CHANNEL_ID}" means the chat the workflow is being authored from, and this surface has no authoring chat. Set the concrete platform chat id instead.`,
+        path,
+      })
+    for (const [i, step] of def.steps.entries()) {
+      if (
+        step.type === 'assistant_call' &&
+        step.deliver &&
+        'channelId' in step.deliver &&
+        step.deliver.channelId === CURRENT_CHAT_CHANNEL_ID
+      ) {
+        currentChatIssue(['steps', i, 'deliver', 'channelId'])
+      }
+    }
+    if (
+      def.failureDelivery &&
+      'channelId' in def.failureDelivery &&
+      def.failureDelivery.channelId === CURRENT_CHAT_CHANNEL_ID
+    ) {
+      currentChatIssue(['failureDelivery', 'channelId'])
     }
 
     // Bot integrations are part of Telegram and Feishu delivery identity.
