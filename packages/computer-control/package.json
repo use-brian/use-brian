@@ -1,0 +1,10 @@
+{
+  "name": "@use-brian/computer-control",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": { "./*.js": { "types": "./dist/*.d.ts", "default": "./dist/*.js" } },
+  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "test": "vitest run" },
+  "dependencies": { "zod": "^3.24" },
+  "devDependencies": { "typescript": "^5.7", "vitest": "^3", "@types/node": "^20.19.39" }
+}

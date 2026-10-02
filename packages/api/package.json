@@ -48,7 +48,8 @@
     "pg": "^8",
     "tsx": "^4",
     "yjs": "13.6.31",
-    "zod": "^3.24"
+    "zod": "^3.24",
+    "@use-brian/computer-control": "workspace:*"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.3",

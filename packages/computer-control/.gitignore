@@ -1,0 +1,5 @@
+# TypeScript source-adjacent compiler output is not package source.
+/src/*.js
+/src/*.js.map
+/src/*.d.ts
+/src/*.d.ts.map

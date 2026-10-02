@@ -42,7 +42,8 @@
     "tldts": "7.4.3",
     "unpdf": "^1.6.2",
     "yjs": "13.6.31",
-    "zod": "^3.24"
+    "zod": "^3.24",
+    "@use-brian/computer-control": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.19.39",

@@ -9,23 +9,32 @@
   "main": "dist/bootstrap.js",
   "scripts": {
     "copy:assets": "node scripts/copy-static.mjs",
-    "build": "pnpm --filter @use-brian/browser-control build && tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs",
-    "dev": "pnpm --filter @use-brian/browser-control build && tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs && electron dist/bootstrap.js",
+    "build": "pnpm --filter @use-brian/computer-control build && pnpm --filter @use-brian/browser-control build && tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs",
+    "dev": "pnpm --filter @use-brian/computer-control build && pnpm --filter @use-brian/browser-control build && tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs && electron dist/bootstrap.js",
     "start": "electron dist/bootstrap.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:browser-docking": "pnpm run build && electron scripts/test-browser-docking.mjs",
     "build:renderer": "pnpm --filter \"app-web^...\" run build && pnpm --filter app-web build:desktop",
     "build:siri": "bash native/siri-companion/build.sh",
-    "package": "pnpm run build:renderer && pnpm run build && pnpm run build:siri && electron-builder --mac",
-    "package:win": "pnpm run build:renderer && pnpm run build && electron-builder --win --x64 --publish never",
-    "package:linux": "pnpm run build:renderer && pnpm run build && electron-builder --linux AppImage --publish never"
+    "build:native-computer": "node scripts/build-native-computer.mjs",
+    "build:native-computer:win": "node scripts/build-native-computer.mjs win32",
+    "build:native-computer:linux": "node scripts/build-native-computer.mjs linux",
+    "test:native-computer-smoke": "node native/computer-control/smoke.mjs",
+    "package": "pnpm run build:renderer && pnpm run build && pnpm run build:native-computer && pnpm run build:siri && electron-builder --mac",
+    "package:win": "pnpm run build:renderer && pnpm run build && pnpm run build:native-computer:win && electron-builder --win --x64 --publish never",
+    "package:linux": "pnpm run build:renderer && pnpm run build && pnpm run build:native-computer:linux && electron-builder --linux AppImage --publish never",
+    "test:mac-bootstrap": "node --test scripts/electron-fuses.test.mjs scripts/build-native-computer.test.mjs scripts/mac-asar-integrity.test.mjs scripts/mac-bootstrap-anchor.test.mjs scripts/mac-bootstrap-inventory.test.mjs scripts/mac-bootstrap-inventory-verifier.test.mjs scripts/mac-library-constraints.test.mjs scripts/mac-library-constraint-policy.test.mjs scripts/mac-native-signing-policy.test.mjs scripts/mac-packaged-admission-check.test.mjs"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
+    "@electron/fuses": "2.1.3",
+    "@electron/osx-sign": "1.3.1",
     "@types/node": "^20.19.39",
     "electron": "^43.2.0",
     "electron-builder": "^25.0.0",
     "js-yaml": "^4.2.0",
+    "plist": "3.1.1",
     "typescript": "^5.7",
     "vitest": "^3"
   },
@@ -34,6 +43,7 @@
     "@use-brian/firefox-companion": "workspace:*",
     "electron-updater": "^6.8.9",
     "zod": "^3.24",
-    "@use-brian/browser-control": "workspace:*"
+    "@use-brian/browser-control": "workspace:*",
+    "@use-brian/computer-control": "workspace:*"
   }
 }

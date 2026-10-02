@@ -60,6 +60,9 @@ importers:
       '@use-brian/browser-control':
         specifier: workspace:*
         version: link:../../packages/browser-control
+      '@use-brian/computer-control':
+        specifier: workspace:*
+        version: link:../../packages/computer-control
       '@use-brian/firefox-companion':
         specifier: workspace:*
         version: link:../firefox-companion
@@ -73,6 +76,15 @@ importers:
         specifier: ^3.24
         version: 3.25.76
     devDependencies:
+      '@electron/asar':
+        specifier: 3.4.1
+        version: 3.4.1
+      '@electron/fuses':
+        specifier: 2.1.3
+        version: 2.1.3
+      '@electron/osx-sign':
+        specifier: 1.3.1
+        version: 1.3.1
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.43
@@ -85,6 +97,9 @@ importers:
       js-yaml:
         specifier: ^4.2.0
         version: 4.2.0
+      plist:
+        specifier: 3.1.1
+        version: 3.1.1
       typescript:
         specifier: ^5.7
         version: 5.9.3
@@ -352,6 +367,9 @@ importers:
       '@use-brian/api':
         specifier: workspace:*
         version: link:../../packages/api
+      '@use-brian/computer-control':
+        specifier: workspace:*
+        version: link:../../packages/computer-control
       express:
         specifier: ^5
         version: 5.2.1
@@ -636,6 +654,9 @@ importers:
       '@use-brian/channels':
         specifier: workspace:*
         version: link:../channels
+      '@use-brian/computer-control':
+        specifier: workspace:*
+        version: link:../computer-control
       '@use-brian/core':
         specifier: workspace:*
         version: link:../core
@@ -788,6 +809,22 @@ importers:
         specifier: ^3
         version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(sass@1.51.0)(tsx@4.22.4)
 
+  packages/computer-control:
+    dependencies:
+      zod:
+        specifier: ^3.24
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.39
+        version: 20.19.43
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(sass@1.51.0)(tsx@4.22.4)
+
   packages/core:
     dependencies:
       '@anthropic-ai/sdk':
@@ -823,6 +860,9 @@ importers:
       '@use-brian/brian-kb':
         specifier: workspace:*
         version: link:../brian-kb
+      '@use-brian/computer-control':
+        specifier: workspace:*
+        version: link:../computer-control
       '@use-brian/office-model':
         specifier: workspace:*
         version: link:../office-model
@@ -1578,6 +1618,11 @@ packages:
   '@electron/asar@3.4.1':
     resolution: {integrity: sha512-i4/rNPRS84t0vSRa2HorerGRXWyF4vThfHesw0dmcWHp+cspK743UanA0suA5Q5y8kzY2y6YKrvbIUn69BCAiA==}
     engines: {node: '>=10.12.0'}
+    hasBin: true
+
+  '@electron/fuses@2.1.3':
+    resolution: {integrity: sha512-LoKJUXNiJ4JM8IIrUltSHI+8pkogaGj5wmJx81jE/Wk3g2w1/kfMbTEKNoY5kitGE8hiC12h32R/1SlywFtxXg==}
+    engines: {node: '>=22.12.0'}
     hasBin: true
 
   '@electron/get@5.1.0':
@@ -10026,6 +10071,8 @@ snapshots:
       commander: 5.1.0
       glob: 7.2.3
       minimatch: 3.1.5
+
+  '@electron/fuses@2.1.3': {}
 
   '@electron/get@5.1.0':
     dependencies:
