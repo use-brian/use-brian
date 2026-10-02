@@ -1,6 +1,16 @@
 import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
+  mobileAuth: {
+    "title": "Brian モバイルにログインしますか？",
+    "description": "自分のスマートフォンでログインを開始した場合のみ続行してください。モバイルアプリに Brian アカウントへのアクセスを許可します。",
+    "ios": "デバイス：Brian for iPhone",
+    "android": "デバイス：Brian for Android",
+    "confirm": "ログインを確認",
+    "cancel": "キャンセル",
+    "error": "ログインを完了できません。モバイルアプリからやり直してください。"
+},
+
   workflowPublicationConsent: {
     "title": "生成済み出力の公開",
     "intro": "保存済みのこのステップが、あなたのプライベートなコンテキストから生成したテキストを固定のTelegram宛先に公開することを許可します。ワークフローの保存とは別の操作です。",

@@ -12,6 +12,16 @@
 import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
+  mobileAuth: {
+    "title": "登录 Brian 移动版？",
+    "description": "仅在您自己的手机上开始登录时继续。这将允许移动应用访问您的 Brian 账号。",
+    "ios": "设备：Brian iPhone 版",
+    "android": "设备：Brian Android 版",
+    "confirm": "确认登录",
+    "cancel": "取消",
+    "error": "无法完成登录。请从移动应用重新开始。"
+},
+
   workflowPublicationConsent: {
     "title": "生成输出的发布",
     "intro": "允许此已保存步骤将根据你的私人背景信息生成的文字发布到固定的 Telegram 目的地。这与保存工作流是分开的操作。",

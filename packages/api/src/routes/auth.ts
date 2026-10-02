@@ -7,6 +7,7 @@ import { backfillUserProfileFromProvider, findOrCreateUser, findUserById, findUs
 import { query } from '../db/client.js'
 import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
 import type { MagicLinkConsumed, MagicLinkLocale, MagicLinkStore } from '../db/magic-link-store.js'
+import { isMobileClient, isS256Challenge, type MobileAuthStore } from '../db/mobile-auth-store.js'
 import type { DesktopAuthStore } from '../db/desktop-auth-store.js'
 import type { SmtpClient } from '../email/smtp-client.js'
 import { createHash, timingSafeEqual } from 'node:crypto'
@@ -79,6 +80,7 @@ export function authRoutes(
   desktopAuthStore?: DesktopAuthStore,
   oidcAuth?: OidcAuthDeps,
   sessions: AuthSessionStore = authSessionStore,
+  mobileAuthStore?: MobileAuthStore,
 ): Router {
   const router = Router()
 
@@ -811,6 +813,51 @@ export function authRoutes(
         },
       }),
     })
+  })
+
+  // Mobile is deliberately separate from the legacy desktop protocol.
+  // Bearer-only human admission: browser cookies are never accepted by the API.
+  router.get('/mobile/account', requireAuth(jwtSecret, sessions), async (req, res) => {
+    res.set('Cache-Control', 'no-store')
+    const user = await findUserById(req.userId!)
+    if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+    res.json({ user: { id: user.id, email: user.email, name: user.name } })
+  })
+
+  router.post('/mobile/code', requireAuth(jwtSecret, sessions), async (req, res) => {
+    res.set('Cache-Control', 'no-store')
+    if (!mobileAuthStore) { res.status(503).json({ error: 'mobile_signin_unavailable' }); return }
+    const { clientId, redirectUri, challenge } = req.body ?? {}
+    if (!isMobileClient(clientId, redirectUri) || !isS256Challenge(challenge)) {
+      res.status(400).json({ error: 'invalid_mobile_request' }); return
+    }
+    try {
+      const { code, expiresAt } = await mobileAuthStore.create({ userId: req.userId!, clientId, redirectUri, challenge })
+      res.json({ code, expiresAt: expiresAt.toISOString() })
+    } catch {
+      res.status(503).json({ error: 'mobile_signin_unavailable' })
+    }
+  })
+
+  router.post('/mobile/exchange', async (req, res) => {
+    res.set('Cache-Control', 'no-store')
+    if (!mobileAuthStore) { res.status(503).json({ error: 'mobile_signin_unavailable' }); return }
+    const { code, verifier, clientId, redirectUri } = req.body ?? {}
+    if (!isMobileClient(clientId, redirectUri) || typeof code !== 'string' ||
+        !/^[A-Za-z0-9_-]{43}$/.test(code) || typeof verifier !== 'string' ||
+        !/^[A-Za-z0-9._~-]{43,128}$/.test(verifier)) {
+      res.status(400).json({ error: 'invalid_mobile_request' }); return
+    }
+    try {
+      const consumed = await mobileAuthStore.consume({ code, verifier, clientId, redirectUri })
+      if (!consumed) { res.status(400).json({ error: 'invalid_mobile_code' }); return }
+      const user = await findUserById(consumed.userId)
+      if (!user) { res.status(400).json({ error: 'invalid_mobile_code' }); return }
+      const tokens = await createSessionTokens(user.id, jwtSecret, req, sessions)
+      res.json({ ...tokens, user: { id: user.id, email: user.email, name: user.name, avatarUrl: user.avatarUrl } })
+    } catch {
+      res.status(503).json({ error: 'mobile_signin_unavailable' })
+    }
   })
 
   // ── Desktop app sign-in (RFC 8252 + PKCE handoff) ──────────────
