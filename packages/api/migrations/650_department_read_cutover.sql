@@ -79,8 +79,15 @@ $$;
 -- no department is General. Audit history keeps what it recorded. Triggers are
 -- bypassed for this one relabel: it neither versions content nor fires the
 -- sync above (the reconcile below runs once for every workspace anyway).
-SET LOCAL session_replication_role = replica;
-DO $$ DECLARE r record; BEGIN
+-- The bypass is by trigger name on each table, which the table owner may do.
+-- session_replication_role would need a superuser, and neither the self-host
+-- recipe nor a managed Postgres migrates as one. Every trigger returns to the
+-- state it was found in, and only a table holding a row to relabel is touched.
+-- A table that FORCEs row level security binds its owner too: the relabel
+-- would be filtered to nothing by the write policy, or refused outright in a
+-- session the baseline left at row_security = off (a fresh install). FORCE is
+-- lifted for the relabel and restored, so the owner reads and writes every row.
+DO $$ DECLARE r record; trg text; trgs text[]; pending boolean; forced boolean; BEGIN
   FOR r IN
     SELECT c.table_name, c.column_name
       FROM information_schema.columns c
@@ -89,13 +96,31 @@ DO $$ DECLARE r record; BEGIN
        AND c.column_name ILIKE '%compartments'
        AND c.table_name NOT IN ('analytics_events', 'context_scope_reclassification_events')
   LOOP
+    SELECT k.relforcerowsecurity INTO forced FROM pg_catalog.pg_class k
+     WHERE k.oid = format('public.%I', r.table_name)::regclass;
+    IF forced THEN EXECUTE format('ALTER TABLE public.%I NO FORCE ROW LEVEL SECURITY', r.table_name); END IF;
     EXECUTE format(
-      'UPDATE public.%I SET %I = ARRAY(SELECT k FROM unnest(%I) AS k WHERE k LIKE ''team:%%'' ORDER BY k)
-        WHERE EXISTS (SELECT 1 FROM unnest(%I) AS k WHERE k IS NULL OR k NOT LIKE ''team:%%'')',
-      r.table_name, r.column_name, r.column_name, r.column_name);
+      'SELECT EXISTS (SELECT 1 FROM public.%I AS x
+                       WHERE EXISTS (SELECT 1 FROM unnest(x.%I) AS k WHERE k IS NULL OR k NOT LIKE ''team:%%''))',
+      r.table_name, r.column_name) INTO pending;
+    IF pending THEN
+      SELECT coalesce(array_agg(g.tgname ORDER BY g.tgname), '{}') INTO trgs
+        FROM pg_catalog.pg_trigger g
+       WHERE g.tgrelid = format('public.%I', r.table_name)::regclass AND NOT g.tgisinternal AND g.tgenabled = 'O';
+      FOREACH trg IN ARRAY trgs LOOP
+        EXECUTE format('ALTER TABLE public.%I DISABLE TRIGGER %I', r.table_name, trg);
+      END LOOP;
+      EXECUTE format(
+        'UPDATE public.%I SET %I = ARRAY(SELECT k FROM unnest(%I) AS k WHERE k LIKE ''team:%%'' ORDER BY k)
+          WHERE EXISTS (SELECT 1 FROM unnest(%I) AS k WHERE k IS NULL OR k NOT LIKE ''team:%%'')',
+        r.table_name, r.column_name, r.column_name, r.column_name);
+      FOREACH trg IN ARRAY trgs LOOP
+        EXECUTE format('ALTER TABLE public.%I ENABLE TRIGGER %I', r.table_name, trg);
+      END LOOP;
+    END IF;
+    IF forced THEN EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', r.table_name); END IF;
   END LOOP;
 END $$;
-SET LOCAL session_replication_role = origin;
 DELETE FROM public.member_compartment_grants WHERE compartment_key NOT LIKE 'team:%';
 DELETE FROM public.workspace_group_compartment_grants WHERE compartment_key NOT LIKE 'team:%';
 DELETE FROM public.workspace_compartments WHERE managed_by IS NULL;
