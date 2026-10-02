@@ -32,7 +32,7 @@ export type LiveInteractionRuntimeDeps = {
   /** KB tools are per-turn in chat, NOT registered in boot's allTools. */
   knowledgeStore: Parameters<typeof createKnowledgeTools>[0]
   usageStore?: UsageStore
-  createTranscriptionToken?: LiveInteractionDeps['createTranscriptionToken']
+  voiceTranscriptionEnabled?: boolean
   onError?: LiveInteractionDeps['onError']
 }
 const approved = ['searchBrain', 'browseBrain', 'searchKnowledge', 'browseKnowledge', 'readKnowledgeEntry', 'searchRecording', 'listRecordings']
@@ -114,7 +114,7 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
   }
   const answer = createInteractionAnswerAdapter(deps.provider, deps.model)
   const service = createLiveInteractionService({
-    store, authorize, authorizeJob, createTranscriptionToken: deps.createTranscriptionToken, onError: deps.onError,
+    store, authorize, authorizeJob, voiceTranscriptionEnabled: deps.voiceTranscriptionEnabled, onError: deps.onError,
     evaluateRule: (input, signal) => createInteractionRuleEvaluator(deps.provider, deps.model, {
       onUsage: !preview.getStore() && detectorCapture ? meter(detectorCapture, 'overhead:classifier') : undefined,
     })(input, signal),

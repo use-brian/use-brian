@@ -19,17 +19,6 @@ const binding = z.object({
   chatSessionId: uuid,
   assistantId: uuid,
 });
-const utterance = z
-  .object({
-    id: z.string().min(1).max(256),
-    source: z.enum(["microphone", "system"]),
-    text: z.string().max(8000),
-    startMs: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    endMs: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    discontinuity: z.boolean().optional(),
-    previousId: z.string().min(1).max(256).nullable().optional(),
-  })
-  .refine((u) => u.endMs >= u.startMs && u.previousId !== u.id);
 export type RecordingInteractionRouteDeps =
   | LiveInteractionDeps
   | { service: LiveInteractionService };
@@ -78,27 +67,6 @@ export function recordingInteractionRoutes(
   router.post(
     "/start",
     route((r, u) => service.create(u, binding.parse(r.body))),
-  );
-  router.post(
-    "/:captureId/token",
-    route((r, u) =>
-      service.token(
-        u,
-        uuid.parse(r.params.captureId),
-        z.enum(["microphone", "system"]).parse(r.body?.source),
-      ),
-    ),
-  );
-  router.post(
-    "/:captureId/utterances",
-    route(async (r, u) => {
-      await service.ingest(
-        u,
-        uuid.parse(r.params.captureId),
-        utterance.parse(r.body),
-      );
-      return { ok: true };
-    }),
   );
   router.post(
     "/:captureId/question",

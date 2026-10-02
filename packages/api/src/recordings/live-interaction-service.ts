@@ -1,4 +1,4 @@
-/** Integration: createLiveInteractionService({store?,authorize,evaluateRule?,answer,publish,createTranscriptionToken?}).
+/** Integration: createLiveInteractionService({store?,authorize,evaluateRule?,answer,publish,voiceTranscriptionEnabled?}).
  * authorize(userId,binding) checks workspace/page/chat/assistant access AND relationships.
  * publish({capture,job,signal}) must upsert canonical messages using stable message IDs.
  * onText receives cumulative text. Parent calls start()/runWorkers(); no boot side effects.
@@ -6,7 +6,6 @@
 import { randomUUID } from "node:crypto";
 import {
   DEFAULT_INTERACTION_RULE,
-  type InteractionSource,
   type InteractionUtterance,
   type InteractionJob,
 } from "@use-brian/shared";
@@ -32,9 +31,7 @@ export type LiveInteractionDeps = {
     binding: Binding & { id?: string },
   ) => Promise<boolean>;
   authorizeJob?: (capture: Capture, job: InteractionJob) => Promise<boolean>;
-  createTranscriptionToken?: (
-    source: InteractionSource,
-  ) => Promise<{ value: string; expiresAt: number }>;
+  voiceTranscriptionEnabled?: boolean;
   evaluateRule?: (
     input: { rule: string; text: string; pending?: string },
     signal: AbortSignal,
@@ -349,7 +346,7 @@ export function createLiveInteractionService(deps: LiveInteractionDeps) {
   }
   return {
     store,
-    available: !!deps.createTranscriptionToken,
+    available: !!deps.voiceTranscriptionEnabled,
     getCapture,
     getJob,
     tickDetector,
@@ -378,8 +375,8 @@ export function createLiveInteractionService(deps: LiveInteractionDeps) {
     },
     async create(userId: string, binding: Binding) {
       await authorize(userId, binding);
-      if (!deps.createTranscriptionToken)
-        throw new InteractionError(503, "Streaming transcription unavailable");
+      if (!deps.voiceTranscriptionEnabled)
+        throw new InteractionError(503, "Live transcription unavailable");
       rateLimit(userId, "start", 6);
       const s = await store.settings(userId);
       return store.create({
@@ -390,15 +387,6 @@ export function createLiveInteractionService(deps: LiveInteractionDeps) {
         ruleVersion: s.version,
         state: "listening",
       });
-    },
-    async token(userId: string, id: string, source: InteractionSource) {
-      const c = await getCapture(userId, id);
-      if (c.state !== "listening")
-        throw new InteractionError(409, "Capture stopped");
-      if (!deps.createTranscriptionToken)
-        throw new InteractionError(503, "Streaming transcription unavailable");
-      rateLimit(userId, "token", 12);
-      return deps.createTranscriptionToken(source);
     },
     async ingest(userId: string, id: string, u: InteractionUtterance) {
       await getCapture(userId, id);

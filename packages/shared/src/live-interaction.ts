@@ -23,8 +23,14 @@ export type InteractionJob = {
  * GET /settings -> { rule, available }; PUT /settings {rule} -> {rule}
  * POST /preview {rule,text} -> {question: string|null}
  * POST /start {workspaceId,pageId,chatSessionId,assistantId} -> InteractionCapture
- * POST /:captureId/token {source} -> {value:string,expiresAt:number} (transcription-only WebRTC credential)
- * POST /:captureId/utterances InteractionUtterance -> {ok:true}
+ * Audio enters through POST /api/recordings/live/chunk (existing ~30-second windows):
+ * multipart audio + interactionCaptureId + interactionSource ('microphone'|'mixed').
+ * Mixed capture may include isolated microphone audio; main audio is system context only.
+ * Mic-only audio is transcribed once; mixed isolated audio uses the same configured ASR.
+ * Text is server-generated; no token or client utterance endpoint exists.
+ * Optional discontinuity='true' breaks pending questions at pause boundaries.
+ * Chunk response may include interactionError:true without losing the canonical transcript.
+ * Wait for all live windows to finish before POST /:captureId/stop.
  * POST /:captureId/question {id:uuid,action:'submit'|'cancel',text?:string} -> {ok:true}
  * Owner-only, durable request-id deduplication. Submit requires nonempty text (max 8000),
  * bypasses the speech rule, and allows correction after stop. Both actions clear pending

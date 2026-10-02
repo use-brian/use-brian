@@ -538,6 +538,26 @@ describe("[COMP:recordings/live-interaction] durable interaction store", () => {
       answer: "saved",
     });
   });
+  it("creates with existing ASR enabled and durably deduplicates authorized window-source retries", async () => {
+    await db.exec("DELETE FROM live_interaction_captures");
+    const authorize = vi.fn(async () => true);
+    const service = createLiveInteractionService({ store, authorize, voiceTranscriptionEnabled: true,
+      answer: async () => "", publish: async () => {} });
+    const c = await service.create(owner, { workspaceId: workspace, pageId: page, chatSessionId: chat, assistantId: assistant });
+    const utterance = { id: 'session:chunk:microphone', source: 'microphone' as const,
+      text: 'Hey Brian summarize?', startMs: 0, endMs: 30000 };
+    await Promise.all([service.ingest(owner, c.id, utterance), service.ingest(owner, c.id, utterance)]);
+    expect(await store.listUtterances(c.id)).toHaveLength(1);
+    await service.tickDetector();
+    await service.ingest(owner, c.id, utterance);
+    await service.tickDetector();
+    expect((await store.listJobs(owner, workspace, chat)).filter(j => j.captureId === c.id)).toHaveLength(1);
+    await expect(service.ingest(other, c.id, { ...utterance, id: 'forged' })).rejects.toMatchObject({ status: 403 });
+    authorize.mockResolvedValue(false);
+    await expect(service.ingest(owner, c.id, { ...utterance, id: 'revoked' })).rejects.toMatchObject({ status: 403 });
+    expect(await store.listUtterances(c.id)).toHaveLength(1);
+    expect(authorize).toHaveBeenCalledWith(owner, expect.objectContaining({ chatSessionId: chat, pageId: page, workspaceId: workspace }));
+  });
   it("resets pending speech on an explicit discontinuity even without a missing predecessor", async () => {
     await db.exec("DELETE FROM live_interaction_captures");
     const c = await store.create(makeCapture());

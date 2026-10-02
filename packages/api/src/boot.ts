@@ -507,7 +507,6 @@ import { startWatchCleanup } from './recordings/watch-maintenance.js'
 import { transcribeAudio as transcribeWatchAudio } from '@use-brian/core'
 import { recordingInteractionRoutes } from './routes/recording-interaction.js'
 import { createLiveInteractionRuntime } from './recordings/live-interaction-runtime.js'
-import { createInteractionTranscriptionToken } from './recordings/live-interaction-transcription.js'
 import { createLedgerPayloadStore } from './ledger/payload-store.js'
 import { createDocGateway } from './doc/doc-gateway.js'
 import { createFilesApi, createSingletonFilesClientResolver, workspaceFileReadRevision, type FilesClientResolver } from './files/files-api.js'
@@ -5890,13 +5889,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   // Shared by hosted and standalone: interaction answers are independent of
   // the batch recording worker and the currently streaming chat turn.
-  const interactionKey = process.env.LIVE_INTERACTION_OPENAI_API_KEY?.trim()
   const liveInteraction = filesBlobClient ? createLiveInteractionRuntime({
     provider, model: backgroundModel, tools: allTools, embedder: sharedEmbedder,
     savedViewStore, workspaceStore, knowledgeStore, usageStore,
     payloads: createLedgerPayloadStore(filesBlobClient),
-    createTranscriptionToken: interactionKey && voiceTranscription.enabled
-      ? createInteractionTranscriptionToken(interactionKey) : undefined,
+    voiceTranscriptionEnabled: voiceTranscription.enabled,
     onError: () => console.error('[live-interaction] background operation failed'),
   }) : null
   if (liveInteraction) {
@@ -5924,6 +5921,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       usageStore,
       // Window-audio persistence + the assembled-windows finalize fallback.
       filesResolver,
+      liveInteraction: liveInteraction ?? undefined,
     }))
   }
 

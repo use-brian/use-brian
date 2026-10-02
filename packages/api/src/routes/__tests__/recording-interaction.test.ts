@@ -28,9 +28,8 @@ describe("[COMP:recordings/live-interaction] routes and authorization", () => {
     expect((await request(app).get("/settings")).status).toBe(401);
     expect(authorize).not.toHaveBeenCalled();
   });
-  it("rejects unauthorized binding before capture creation or token issuance", async () => {
-    const create = vi.fn(),
-      token = vi.fn();
+  it("rejects unauthorized binding before capture creation", async () => {
+    const create = vi.fn();
     const app = express()
       .use(express.json())
       .use((req, _res, next) => {
@@ -41,7 +40,7 @@ describe("[COMP:recordings/live-interaction] routes and authorization", () => {
         recordingInteractionRoutes({
           store: { create } as unknown as LiveInteractionStore,
           authorize: async () => false,
-          createTranscriptionToken: token,
+          voiceTranscriptionEnabled: true,
           answer: async () => "",
           publish: async () => {},
         }),
@@ -59,7 +58,6 @@ describe("[COMP:recordings/live-interaction] routes and authorization", () => {
       ).status,
     ).toBe(403);
     expect(create).not.toHaveBeenCalled();
-    expect(token).not.toHaveBeenCalled();
   });
   it("rejects another owner even if workspace authorizer allows access", async () => {
     const service = createLiveInteractionService({
@@ -178,9 +176,8 @@ describe("[COMP:recordings/live-interaction] routes and authorization", () => {
       status: 403,
     });
   });
-  it("limits start, token and paid previews before invoking adapters", async () => {
+  it("limits start and paid previews before invoking adapters", async () => {
     const create = vi.fn(async () => ({}));
-    const token = vi.fn(async () => ({ value: "token", expiresAt: 0 }));
     const evaluateRule = vi.fn(async () => ({ action: "ignore" as const }));
     const service = createLiveInteractionService({
       store: {
@@ -189,7 +186,7 @@ describe("[COMP:recordings/live-interaction] routes and authorization", () => {
         capture: async () => ({ id, ownerId: id, state: "listening" }),
       } as unknown as LiveInteractionStore,
       authorize: async () => true,
-      createTranscriptionToken: token,
+      voiceTranscriptionEnabled: true,
       evaluateRule,
       answer: async () => "",
       publish: async () => {},
@@ -208,7 +205,6 @@ describe("[COMP:recordings/live-interaction] routes and authorization", () => {
         6,
         create,
       ],
-      [`/${id}/token`, { source: "microphone" }, 12, token],
       ["/preview", { rule: "custom", text: "hello" }, 10, evaluateRule],
     ] as const) {
       for (let n = 0; n < max; n++)
@@ -217,7 +213,7 @@ describe("[COMP:recordings/live-interaction] routes and authorization", () => {
       expect(adapter).toHaveBeenCalledTimes(max);
     }
   });
-  it("validates and forwards explicit utterance discontinuities", async () => {
+  it("removes token and client-supplied utterance routes", async () => {
     const ingest = vi.fn(async () => {});
     const service = createLiveInteractionService({
       store: {
@@ -245,14 +241,27 @@ describe("[COMP:recordings/live-interaction] routes and authorization", () => {
     };
     expect(
       (await request(app).post(`/${id}/utterances`).send(body)).status,
-    ).toBe(200);
-    expect(ingest).toHaveBeenCalledWith(id, body);
+    ).toBe(404);
+    expect((await request(app).post(`/${id}/token`).send({ source: 'microphone' })).status).toBe(404);
+    expect(ingest).not.toHaveBeenCalled();
     expect(
       (
         await request(app)
           .post(`/${id}/utterances`)
           .send({ ...body, discontinuity: "true" })
       ).status,
-    ).toBe(400);
+    ).toBe(404);
+  });
+  it.each([true, false])('uses voice transcription enabled=%s for availability and creation', async enabled => {
+    const create = vi.fn(async () => ({ id }));
+    const service = createLiveInteractionService({
+      store: { create, settings: async () => ({ rule: 'custom', version: 1 }) } as unknown as LiveInteractionStore,
+      voiceTranscriptionEnabled: enabled, authorize: async () => true,
+      answer: async () => '', publish: async () => {},
+    });
+    expect(service.available).toBe(enabled);
+    const result = service.create(id, { workspaceId: id, pageId: id, chatSessionId: id, assistantId: id });
+    if (enabled) await expect(result).resolves.toEqual({ id });
+    else { await expect(result).rejects.toMatchObject({ status: 503 }); expect(create).not.toHaveBeenCalled(); }
   });
 });

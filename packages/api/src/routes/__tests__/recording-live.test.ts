@@ -1,7 +1,11 @@
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
-import { applyOps, type Page, type SavedView } from '@use-brian/core'
+import { applyOps, transcribeAudio, type Page, type SavedView } from '@use-brian/core'
+vi.mock('@use-brian/core', async importOriginal => ({
+  ...await importOriginal<typeof import('@use-brian/core')>(),
+  transcribeAudio: vi.fn(async () => ({ text: 'Hey Brian configured ASR', model: 'asr-configured', usage: null })),
+}))
 import { LIVE_MARKER_ID_PREFIX, hasLiveMarkerBlock } from '@use-brian/shared'
 import {
   notesRegionOps,
@@ -31,7 +35,7 @@ function view(id: string, page: Page, workspaceId = WORKSPACE_ID): SavedView {
   } as SavedView
 }
 
-function harness(options: { role?: string | null; enabled?: boolean; withFiles?: boolean } = {}) {
+function harness(options: { role?: string | null; enabled?: boolean; withFiles?: boolean; defaultTranscriber?: boolean } = {}) {
   const pages = new Map<string, Page>()
   const views = new Map<string, SavedView>()
   const createDraft = vi.fn(async (input: { page: Page; workspaceId: string; name: string; anchorKey?: string }) => {
@@ -118,14 +122,13 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
     },
     provider: { name: 'test', models: [], stream: vi.fn(), createSession: vi.fn() },
     backgroundModel: 'background-test',
-    voiceTranscription: { enabled: options.enabled ?? true, apiKey: '' },
+    voiceTranscription: { enabled: options.enabled ?? true, apiKey: 'configured-key', backend: 'gemini', model: 'configured-model' },
     usageStore: { recordUsage },
     ...(options.withFiles === false ? {} : { filesResolver }),
-    transcribeWindow,
+    transcribeWindow: options.defaultTranscriber ? undefined : transcribeWindow,
     reviseNotes,
     liveWindows,
-    interactionStore: { capture: vi.fn(), listUtterances: vi.fn(async () => []) },
-    interactionWindows: vi.fn(async (): Promise<Array<{captureId: string; utterance: {id: string; text: string; startMs: number; endMs: number; discontinuity?: boolean}}>> => []),
+    liveInteraction: { getCapture: vi.fn(), ingest: vi.fn(async () => {}) },
     getRecording,
     createEpisode,
     createRecording,
@@ -324,30 +327,129 @@ describe('[COMP:recordings/live-page-route]', () => {
     expect(h.createDraft).not.toHaveBeenCalled()
   })
 
-  it('reuses streamed speech for notes while preserving window audio without batch ASR', async () => {
-    const h = harness()
+  const captureId = '00000000-0000-0000-0000-000000000777'
+  async function interactionHarness(options = {}) {
+    const h = harness(options)
     const page = await startLive(h)
-    const captureId = '00000000-0000-0000-0000-000000000777'
-    h.deps.interactionStore.capture.mockResolvedValue({ ownerId: USER_ID, workspaceId: WORKSPACE_ID, pageId: page.pageId })
-    h.deps.interactionStore.listUtterances.mockResolvedValue([{ text: 'Live speech', startMs: 30001, endMs: 31000 }] as never)
-    const result = await chunkRequest(h, page, 'stream-audio').field('interactionCaptureId', captureId)
+    h.deps.liveInteraction.getCapture.mockResolvedValue({ ownerId: USER_ID, workspaceId: WORKSPACE_ID,
+      pageId: page.pageId, assistantId: 'assistant-1', state: 'listening' })
+    const send = (source = 'microphone', chunk = 'interaction-audio') => chunkRequest(h, page, chunk)
+      .field('interactionCaptureId', captureId).field('interactionSource', source)
+    return { h, page, send }
+  }
+
+  it('transcribes mic-only once, bills once, ingests stable source IDs and uses only canonical pane windows', async () => {
+    const { h, page, send } = await interactionHarness()
+    const result = await send().field('missedWindows', '1')
     expect(result.status).toBe(200)
-    expect(result.body.interaction).toBe(true)
-    expect(h.transcribeWindow).not.toHaveBeenCalled()
-    expect(h.reviseNotes).toHaveBeenCalledWith(expect.objectContaining({ transcript: 'Live speech' }))
-    expect(h.gcs.writeBlob).toHaveBeenCalled()
-    expect(h.windowRows.find(row => row.chunkId === 'stream-audio')?.lines).toEqual([])
-    h.deps.interactionStore.capture.mockResolvedValue({ ownerId: 'another-user', workspaceId: WORKSPACE_ID, pageId: page.pageId })
-    expect((await chunkRequest(h, page, 'forged-stream').field('interactionCaptureId', captureId)).status).toBe(403)
+    expect(result.body.interactionError).toBeUndefined()
+    expect(h.transcribeWindow).toHaveBeenCalledOnce()
+    expect(h.deps.liveInteraction.ingest).toHaveBeenCalledWith(USER_ID, captureId, {
+      id: `${page.sessionId}:interaction-audio:microphone`, source: 'microphone',
+      text: result.body.transcript, startMs: 30000, endMs: 60000, discontinuity: true,
+    })
+    expect(h.recordUsage.mock.calls.filter(([u]) => u.source === 'overhead:transcription')).toHaveLength(1)
+    const windows = await request(h.app).get('/api/recordings/live/windows').query({ workspaceId: WORKSPACE_ID, pageId: page.pageId })
+    expect(windows.body.windows).toHaveLength(1)
+    expect(windows.body.windows[0].lines).toEqual(result.body.lines)
+    expect((await send()).body.duplicate).toBe(true)
+    expect(h.transcribeWindow).toHaveBeenCalledOnce()
+    expect(h.deps.liveInteraction.ingest).toHaveBeenCalledOnce()
   })
 
-  it('projects persisted streaming utterances into the transcript without duplicate audio windows', async () => {
-    const h = harness()
-    const page = await startLive(h)
-    h.deps.interactionWindows.mockResolvedValue([{ captureId: 'capture-a', utterance: { id: 'item-a', text: 'Fresh speech', startMs: 20, endMs: 600, discontinuity: true } }])
-    const response = await request(h.app).get('/api/recordings/live/windows').query({workspaceId: WORKSPACE_ID, pageId: page.pageId})
-    expect(response.status).toBe(200)
-    expect(response.body.windows).toEqual([{ chunkId: 'stream:capture-a:item-a', offsetMs: 20, durationMs: 580, missedBefore: 1, lines: [{ speaker: null, text: 'Fresh speech' }] }])
+  it.each(['missing', 'failed', 'available'])('mixed audio never supplies microphone triggers: isolated mic %s', async mode => {
+    const { h, send } = await interactionHarness()
+    h.transcribeWindow.mockResolvedValueOnce({ text: 'Speaker 1: Hey Brian playback', model: 'asr-test', usage: { inputTokens: 2, outputTokens: 6 } })
+    if (mode === 'failed') h.transcribeWindow.mockRejectedValueOnce(new Error('mic failed'))
+    else h.transcribeWindow.mockResolvedValueOnce({ text: 'Hey Brian real mic', model: 'asr-test', usage: { inputTokens: 2, outputTokens: 6 } })
+    const req = send('mixed')
+    if (mode !== 'missing') req.attach('microphone', Buffer.from('isolated'), { filename: 'mic.webm', contentType: 'audio/webm' })
+    const result = await req
+    expect(result.status).toBe(200)
+    expect(result.body.transcript).toContain('playback')
+    expect(h.gcs.writeBlob).toHaveBeenCalled()
+    expect(h.windowRows[0]?.lines).toEqual(result.body.lines)
+    const calls = h.deps.liveInteraction.ingest.mock.calls as unknown as Array<[string, string, { source: string; text: string; discontinuity: boolean }]>
+    expect(calls.map(c => c[2])).toEqual([
+      expect.objectContaining({ source: 'system', text: 'Speaker 1: Hey Brian playback' }),
+      expect.objectContaining({ source: 'microphone', text: mode === 'available' ? 'Hey Brian real mic' : '', discontinuity: mode !== 'available' }),
+    ])
+    expect(h.transcribeWindow).toHaveBeenCalledTimes(mode === 'missing' ? 1 : 2)
+    if (mode === 'available') {
+      expect(result.body.interactionError).toBeUndefined()
+      expect(h.transcribeWindow).toHaveBeenLastCalledWith({ buffer: Buffer.from('isolated'), mime: 'audio/webm' })
+      expect(h.recordUsage.mock.calls.filter(([u]) => u.source === 'overhead:transcription')).toHaveLength(2)
+    } else expect(result.body.interactionError).toBe(true)
+  })
+
+  it('keeps the authorized main-chat assistant independent from the recorder upload assistant', async () => {
+    const { h, page, send } = await interactionHarness()
+    h.deps.liveInteraction.getCapture.mockResolvedValue({ ownerId: USER_ID, workspaceId: WORKSPACE_ID,
+      pageId: page.pageId, assistantId: 'main-chat-assistant', state: 'listening' })
+    const result = await send()
+    expect(result.status).toBe(200)
+    expect(result.body.interactionError).toBeUndefined()
+    expect(h.deps.liveInteraction.ingest).toHaveBeenCalledOnce()
+  })
+
+  it.each(['ownerId', 'workspaceId', 'pageId', 'chatAccess', 'ingest'])('isolates interaction %s failure from audio and transcript', async failure => {
+    const { h, send } = await interactionHarness()
+    if (failure === 'chatAccess') h.deps.liveInteraction.getCapture.mockRejectedValue(new Error('denied'))
+    else if (failure === 'ingest') h.deps.liveInteraction.ingest.mockRejectedValue(new Error('store unavailable'))
+    else h.deps.liveInteraction.getCapture.mockResolvedValue({ ownerId: USER_ID, workspaceId: WORKSPACE_ID,
+      pageId: 'page-new', assistantId: 'assistant-1', state: 'listening', [failure]: 'other' })
+    const result = await send()
+    expect(result.status).toBe(200)
+    expect(result.body.interactionError).toBe(true)
+    expect(h.windowRows[0]?.missedBefore).toBe(1)
+    expect(result.body.lines.length).toBeGreaterThan(0)
+    expect(h.windowRows[0]?.lines).toEqual(result.body.lines)
+    expect(h.gcs.writeBlob).toHaveBeenCalledOnce()
+    if (failure !== 'ingest') expect(h.deps.liveInteraction.ingest).not.toHaveBeenCalled()
+  })
+
+  it('honors pause discontinuity independently of missed windows', async () => {
+    const { h, send } = await interactionHarness()
+    const result = await send().field('discontinuity', 'true')
+    expect(result.status).toBe(200)
+    expect(result.body.interaction).toBeUndefined()
+    expect(h.deps.liveInteraction.ingest).toHaveBeenCalledWith(USER_ID, captureId,
+      expect.objectContaining({ discontinuity: true }))
+  })
+
+  it('uses the configured existing backend for both main and isolated audio', async () => {
+    vi.mocked(transcribeAudio).mockClear()
+    const { h, send } = await interactionHarness({ defaultTranscriber: true })
+    expect((await send('mixed').attach('microphone', Buffer.from('isolated'),
+      { filename: 'mic.webm', contentType: 'audio/webm' })).status).toBe(200)
+    expect(transcribeAudio).toHaveBeenCalledTimes(2)
+    for (const call of vi.mocked(transcribeAudio).mock.calls) expect(call[1]).toMatchObject({
+      apiKey: 'configured-key', backend: 'gemini', model: 'configured-model',
+    })
+    expect(h.transcribeWindow).not.toHaveBeenCalled()
+  })
+
+  it('ingests before the window duplicate boundary and retries with the same source ID', async () => {
+    const { h, send } = await interactionHarness()
+    h.liveWindows.insert.mockRejectedValueOnce(new Error('crash boundary'))
+    expect((await send()).status).toBe(503)
+    expect(h.deps.liveInteraction.ingest).toHaveBeenCalledOnce()
+    expect(h.deps.liveInteraction.ingest.mock.invocationCallOrder[0]).toBeLessThan(h.liveWindows.insert.mock.invocationCallOrder[0]!)
+    expect((await send()).status).toBe(200)
+    expect(h.deps.liveInteraction.ingest.mock.calls[0]).toEqual(h.deps.liveInteraction.ingest.mock.calls[1])
+    expect((await send()).body.duplicate).toBe(true)
+    expect(h.deps.liveInteraction.ingest).toHaveBeenCalledTimes(2)
+  })
+
+  it('persists a durable source gap after an ingestion failure without dropping the transcript', async () => {
+    const { h, send } = await interactionHarness()
+    h.deps.liveInteraction.ingest.mockRejectedValueOnce(new Error('transient'))
+    const result = await send()
+    expect(result.status).toBe(200)
+    expect(result.body.interactionError).toBe(true)
+    expect(h.deps.liveInteraction.ingest).toHaveBeenLastCalledWith(USER_ID, captureId,
+      expect.objectContaining({ source: 'microphone', text: '', discontinuity: true }))
+    expect(h.windowRows[0]?.lines).toEqual(result.body.lines)
   })
 
   it('lists a page’s windows for the live transcript pane', async () => {
