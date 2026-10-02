@@ -14,6 +14,7 @@ import { OrganizationChartView } from './organization-chart';
 import { OrganizationTopbar } from './organization-topbar';
 import { OrganizationTopbarSlotProvider } from './organization-chrome';
 import { TeamsContextSection } from '@/components/settings-modal/sections/context-scopes-section';
+import { DepartmentAccessPanel, HomeDepartmentControls } from '@/components/organization/department-access-panel';
 import { WorkspaceMembersSection } from '@/components/settings-modal/workspace-sections';
 import { WorkspaceAccessView } from '@/components/workspace-access/workspace-access';
 
@@ -34,7 +35,7 @@ export function OrganizationHub() {
       <div key={`${workspaceId}:${me.id}:${section}`} className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full min-w-0 max-w-7xl px-4 pb-28 pt-5 md:px-8">
           {mode.readySimple&&!mode.data?.canAdminister&&(section==='access'||section==='departments')?<WorkspaceModeSummary/>:section === 'structure' ? <OrganizationChartView /> : section === 'access' ? <WorkspaceAccessView selection={{kind:'requests'}} /> :
-            section === 'departments' ? <TeamsContextSection renderAccessSettings={id=><WorkspaceAccessView embedded selection={{kind:'department',id}}/>} /> :
+            section === 'departments' ? <div className="space-y-6"><HomeDepartmentControls /><TeamsContextSection renderAccessSettings={id=><div className="space-y-6"><DepartmentAccessPanel departmentId={id} /><WorkspaceAccessView embedded selection={{kind:'department',id}}/></div>} /></div> :
             <div className={memberId?'grid items-start gap-6 lg:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.2fr)]':''}><WorkspaceMembersSection
                 memberTarget={memberId ? { workspaceId, memberId } : undefined}
                 clearMember={() => router.push(organizationHref(workspaceId, 'people'))}

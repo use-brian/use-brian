@@ -37,6 +37,8 @@ const ERRORS: Record<string, number> = {
   department_last_owner: 409,
   department_owner_edge_required: 409,
   department_actor_required: 401,
+  department_home_not_allowed: 403,
+  department_home_requires_edge: 409,
 }
 
 async function asActor<T>(actor: string, work: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -97,6 +99,37 @@ export function createDepartmentStore() {
         .map(row => ({ departmentId: row.departmentId, principal: { kind: row.kind, id: row.id },
           clearance: row.clearance, expiresAt: row.expiresAt, origin: row.origin })))
     },
+    /** Departments the caller may see (D25, P4, I2): their own, plus name and owners of all for the workspace owner. */
+    async directory(actor: string, workspaceId: string): Promise<DepartmentDirectoryEntry[]> {
+      return asActor(actor, async (client) => (await client.query<{
+        departmentId: string; name: string; status: 'active' | 'archived'; revision: string; myClearance: DepartmentClearance | null; isOwner: boolean; ownerIds: string[]
+      }>(`SELECT department_id AS "departmentId", name, status, revision::text, my_clearance AS "myClearance",
+                 is_owner AS "isOwner", owner_ids AS "ownerIds" FROM public.department_directory($1)`, [workspaceId])).rows
+        .map(r => ({ ...r, revision: Number(r.revision) })))
+    },
+    /** D24: set or clear (null) a person's or assistant's home department. */
+    async setHome(actor: string, workspaceId: string, principal: DepartmentPrincipal, departmentId: string | null): Promise<void> {
+      await asActor(actor, async (client) => {
+        await client.query('SELECT public.department_set_home($1,$2,$3,$4)', [workspaceId, principal.kind, principal.id, departmentId])
+      })
+    },
+    /** The caller's and their workspace assistants' homes (only principals the caller may see). */
+    async homes(actor: string, workspaceId: string): Promise<{ principal: DepartmentPrincipal; departmentId: string | null }[]> {
+      return asActor(actor, async (client) => {
+        const me = (await client.query<{ home: string | null }>(
+          'SELECT home_department_id AS home FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspaceId, actor])).rows[0]
+        const assistants = (await client.query<{ id: string; home: string | null }>(
+          'SELECT id, home_department_id AS home FROM assistants WHERE workspace_id=$1 ORDER BY id', [workspaceId])).rows
+        return [
+          ...(me ? [{ principal: { kind: 'user' as const, id: actor }, departmentId: me.home }] : []),
+          ...assistants.map(a => ({ principal: { kind: 'assistant' as const, id: a.id }, departmentId: a.home })),
+        ]
+      })
+    },
+    /** True when the department belongs to the workspace (route parameter check; reveals nothing else). */
+    async inWorkspace(actor: string, workspaceId: string, departmentId: string): Promise<boolean> {
+      return (await this.directory(actor, workspaceId)).some(d => d.departmentId === departmentId)
+    },
     /** clearance_in(P, D) of the reference predicate: expired is absent (I6).
      * Read under RLS, so a non-member learns nothing about D (I2). */
     async clearanceIn(actor: string, principal: DepartmentPrincipal, departmentId: string): Promise<DepartmentClearance | null> {
@@ -110,3 +143,14 @@ export function createDepartmentStore() {
 }
 
 export type DepartmentStore = ReturnType<typeof createDepartmentStore>
+
+export type DepartmentDirectoryEntry = {
+  departmentId: string
+  name: string
+  status: 'active' | 'archived'
+  revision: number
+  /** The caller's own clearance in it; null when only the workspace owner's governance view shows it. */
+  myClearance: DepartmentClearance | null
+  isOwner: boolean
+  ownerIds: string[]
+}

@@ -228,11 +228,20 @@ async function admitDepartmentWrite(
     sources.push({ id: '__inherited__', workspaceId, tier: parent?.sensitivity ?? input.sensitivity,
       departmentIds: [...new Set([...inheritedDepartments, ...requested])], userId: null })
   }
+  // D24: a write naming no department lands in the writer's home department
+  // (the acting assistant's, else the person's). An explicit General choice by
+  // the person keeps General, and tells the stamp trigger so for this write.
+  const explicitGeneral = input.destination?.kind === 'general'
+  const home = (await client.query<{ home: string | null }>(
+    `SELECT coalesce((SELECT a.home_department_id FROM assistants a WHERE a.id=$3 AND a.workspace_id=$1),
+                     (SELECT m.home_department_id FROM workspace_members m WHERE m.workspace_id=$1 AND m.user_id=$2)) AS home`,
+    [workspaceId, userId, grant?.assistantId ?? null])).rows[0]?.home ?? null
+  if (explicitGeneral) await client.query("SELECT set_config('app.explicit_general','true',true)")
   const result = referenceWrite(snapshot, {
     principal,
     assistant: grant?.assistantId ? { kind: 'assistant', id: grant.assistantId } : null,
     credential: grant?.cap ? { issuerUserId: userId, cap: grant.cap, binding: grant.binding, scope: 'read_write' } : null,
-  }, { requestedTier: input.sensitivity, sources }, {
+  }, { requestedTier: input.sensitivity, sources, homeDepartment: home, explicitGeneral }, {
     workspaceId, department: destination ?? grant?.contextDepartment ?? null, now: new Date(),
   })
   if (!result.allowed) throw new WorkspaceAccessError('context_not_available', 404)
@@ -242,7 +251,7 @@ async function admitDepartmentWrite(
   const admitted: ResourceAdmission = {
     policyRevision: policy.revision,
     origin: parent ? 'inherited' : visibility === 'private' ? 'private' : 'explicit',
-    departmentId: destination ?? grant?.contextDepartment ?? null,
+    departmentId: destination ?? grant?.contextDepartment ?? (result.row.departmentIds.length === 1 && !parent ? result.row.departmentIds[0] : null),
     envelope: { visibility, sensitivity: result.row.tier,
       compartments: canonical([...result.row.departmentIds.map(d => TEAM + d), ...otherKeys]), projectIds },
   }

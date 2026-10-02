@@ -4,6 +4,8 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { getPool, getAppPool, queryWithRLS } from '../client.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
@@ -29,7 +31,7 @@ async function user() {
 }
 async function workspace(ownerId:string) {
   const id=randomUUID()
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Member floor fixture',$2)",[id,ownerId])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Member floor fixture',$2,false)",[id,ownerId])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','public')",[id,ownerId])
   return id
 }

@@ -560,7 +560,9 @@ import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { contextScopeRoutes } from './routes/context-scopes.js'
 import { workspaceAccessRoutes } from './routes/workspace-access.js'
+import { departmentRoutes } from './routes/departments.js'
 import { createOrganizationTools, createWorkspaceAccessTools } from './workspace-access/tools.js'
+import { createDepartmentTools } from './workspace-access/department-tools.js'
 import { createWorkspaceMigrationTools } from './workspace-access/migration-tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore, isDurableOfficeArtifact } from './db/office-artifacts.js'
@@ -4298,7 +4300,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
-  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools()]) allTools.set(tool.name,tool)
+  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools()]) allTools.set(tool.name,tool)
 
   for (const tool of Object.values(createInternalLinkTools(internalLinkService))) {
     allTools.set(tool.name, tool)
@@ -6392,6 +6394,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   startBrainStreamFanout()
 
   app.use('/api', requireAuth(env.JWT_SECRET), workspaceAccessRoutes())
+  app.use('/api', requireAuth(env.JWT_SECRET), departmentRoutes())
   app.use('/api', requireAuth(env.JWT_SECRET), contextScopeRoutes({
     workspaceStore,
     connectorInstanceStore,

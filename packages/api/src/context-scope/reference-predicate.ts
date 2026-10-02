@@ -155,9 +155,10 @@ export type WriteResult =
   | { allowed: false; denial: Denial; row: Omit<Row, 'id'> }
 
 /**
- * WRITE(P, A, R_new, ctx) of §4. The new row is stamped with ctx.department,
- * or with the union of every source actually read this turn when the row is
- * derived (I12), at the max of the requested tier and every source tier, and
+ * WRITE(P, A, R_new, ctx) of §4. The new row is stamped with ctx.department
+ * and the union of every source actually read this turn (I12); when that is
+ * empty, with the writer's home department (D24) unless a person explicitly
+ * chose General, at the max of the requested tier and every source tier, and
  * must be readable by the assistant's clearances alone (the write ceiling).
  */
 export function write(snapshot: AccessSnapshot, reader: Reader, input: {
@@ -165,9 +166,14 @@ export function write(snapshot: AccessSnapshot, reader: Reader, input: {
   /** Every row actually read this turn that the new row derives from. */
   sources: readonly Row[]
   userId?: string | null
+  /** The writer's home department (D24): where a write naming no department lands. */
+  homeDepartment?: string | null
+  /** A person explicitly chose General: the home does not apply. */
+  explicitGeneral?: boolean
 }, ctx: Ctx): WriteResult {
   const departments = new Set<string>(ctx.department ? [ctx.department] : [])
   for (const s of input.sources) for (const d of s.departmentIds) departments.add(d)
+  if (departments.size === 0 && input.homeDepartment && !input.explicitGeneral) departments.add(input.homeDepartment)
   const row: Omit<Row, 'id'> = {
     workspaceId: ctx.workspaceId,
     tier: maxTier([input.requestedTier, ...input.sources.map(s => s.tier)]),

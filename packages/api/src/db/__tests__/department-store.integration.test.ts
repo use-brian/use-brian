@@ -55,7 +55,8 @@ const edgeOf = (rows: Awaited<ReturnType<typeof edges>>, d: string, p: string) =
 /** Ava owns the workspace, Jun is an admin, Maya and Priya are members, Omar is a former member. */
 async function workspace() {
   const ava = await user()
-  const w = (await q(`INSERT INTO workspaces(name,purpose,owner_user_id,is_personal) VALUES('Fictional Co','test',$1,false) RETURNING id`, [ava])).rows[0].id as string
+  // Born on the legacy model, as every workspace was before the cutover (650).
+  const w = (await q(`INSERT INTO workspaces(name,purpose,owner_user_id,is_personal,department_read_v2) VALUES('Fictional Co','test',$1,false,false) RETURNING id`, [ava])).rows[0].id as string
   await q(`INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')`, [w, ava])
   const jun = await member(w, 'admin', 'confidential')
   const maya = await member(w, 'member', 'internal')
@@ -103,9 +104,10 @@ describeIf('[COMP:access/department-store] Department owners and edges', () => {
     expect(new Date(edgeOf(first, f.sales.id, f.maya)!.x).getTime()).toBe(expires.getTime())
     expect(edgeOf(first, f.finance.id, f.priya)).toMatchObject({ c: 'confidential', o: 'member' })
     expect(edgeOf(first, f.platform.id, f.priya)).toBeUndefined()
-    // Ops reaches Platform and its Finance bundle, at its own clearance.
+    // Ops reaches Platform (assigned) and its Finance bundle, at its own clearance.
     expect(edgeOf(first, f.platform.id, ops)).toMatchObject({ c: 'internal', o: 'assistant' })
-    expect(edgeOf(first, f.finance.id, ops)).toMatchObject({ c: 'internal', o: 'assistant' })
+    // Reach through a bundle, not an explicit assignment: kept, tagged for review (D23).
+    expect(edgeOf(first, f.finance.id, ops)).toMatchObject({ c: 'internal', o: 'migrated' })
     expect(edgeOf(first, f.sales.id, ops)).toBeUndefined()
     // Owners: the live manager, plus each Team's creator.
     const owners = (await q('SELECT department_id AS d,user_id AS u FROM department_owners WHERE workspace_id=$1', [f.w])).rows
@@ -231,5 +233,75 @@ describeIf('[COMP:access/department-store] Department owners and edges', () => {
     expect(edgeOf(rows, board.id, f.priya)).toMatchObject({ c: 'confidential', o: 'owner' })
     expect(edgeOf(rows, board.id, primary)).toMatchObject({ c: 'confidential', o: 'primary' })
     expect((await q('SELECT user_id FROM department_owners WHERE department_id=$1', [board.id])).rows).toEqual([{ user_id: f.priya }])
+  })
+})
+
+describeIf('[COMP:access/department-store] After the cutover: edges, home departments and the directory (651)', () => {
+  /** A v2 workspace as the cutover leaves it: flagged, reconciled. */
+  async function flagged() {
+    const f = await workspace()
+    // The cutover's order: reconcile the legacy state, then flip.
+    await q('SELECT department_edges_reconcile($1)', [f.w])
+    await q('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.w])
+    return f
+  }
+
+  it('D23: a role never re-derives an edge; a removed migrated edge stays removed after any sync', async () => {
+    const f = await flagged()
+    // Jun (admin) holds a migrated edge in Sales only because of the role.
+    const migrated = (await edges(f.w)).find(e => e.d === f.sales.id && e.p === f.jun)
+    expect(migrated?.o).toBe('migrated')
+    await store.removeEdge(f.ava, f.sales.id, { kind: 'user', id: f.jun })
+    // Any legacy membership write re-runs the reconcile (650 sync).
+    const newcomer = await member(f.w, 'admin', 'confidential')
+    await q('SELECT department_edges_reconcile($1)', [f.w])
+    const after = await edges(f.w)
+    expect(edgeOf(after, f.sales.id, f.jun)).toBeUndefined()
+    expect(after.filter(e => e.p === newcomer)).toEqual([])
+    // A real membership still derives an edge.
+    await q('INSERT INTO workspace_group_members(group_id,user_id) VALUES($1,$2)', [f.platform.id, newcomer])
+    expect(edgeOf(await edges(f.w), f.platform.id, newcomer)).toMatchObject({ o: 'member', c: 'confidential' })
+  })
+
+  it('D24: a write naming no department lands in the writer\'s home; explicit General and labelled writes are untouched', async () => {
+    const f = await flagged()
+    await store.setEdge(f.jun, f.platform.id, { kind: 'user', id: f.maya }, 'internal', null)
+    await expect(store.setHome(f.maya, f.w, { kind: 'user', id: f.maya }, f.finance.id)).rejects.toMatchObject({ code: 'department_home_requires_edge' })
+    await expect(store.setHome(f.maya, f.w, { kind: 'user', id: f.priya }, f.platform.id)).rejects.toMatchObject({ code: 'department_home_not_allowed' })
+    await store.setHome(f.maya, f.w, { kind: 'user', id: f.maya }, f.platform.id)
+    const task = async (labels: string[] = []) => (await q(`INSERT INTO tasks(workspace_id,title,created_by_user_id,compartments) VALUES($1,'bg',$2,$3) RETURNING compartments`, [f.w, f.maya, labels])).rows[0].compartments
+    expect(await task()).toEqual([f.platform.key])
+    expect(await task([f.finance.key])).toEqual([f.finance.key])
+    const c = await pool.connect()
+    try {
+      await c.query('BEGIN')
+      await c.query("SELECT set_config('app.explicit_general','true',true)")
+      expect((await c.query(`INSERT INTO tasks(workspace_id,title,created_by_user_id) VALUES($1,'general',$2) RETURNING compartments`, [f.w, f.maya])).rows[0].compartments).toEqual([])
+    } finally { await c.query('ROLLBACK'); c.release() }
+    // The assistant's home wins over the person's.
+    const ops = (await q(`INSERT INTO assistants(name,workspace_id,kind,clearance,owner_user_id) VALUES('Ops',$1,'standard','internal',$2) RETURNING id`, [f.w, f.maya])).rows[0].id
+    await store.setEdge(f.jun, f.platform.id, { kind: 'assistant', id: ops }, 'internal', null)
+    await q('INSERT INTO workspace_group_members(group_id,user_id) VALUES($1,$2)', [f.finance.id, f.maya])
+    await store.setEdge(f.jun, f.finance.id, { kind: 'assistant', id: ops }, 'internal', null)
+    await store.setHome(f.maya, f.w, { kind: 'assistant', id: ops }, f.finance.id)
+    expect((await q(`INSERT INTO tasks(workspace_id,user_id,created_by_user_id,created_by_assistant_id,title) VALUES($1,$2,$2,$3,'dream') RETURNING compartments`, [f.w, f.maya, ops])).rows[0].compartments).toEqual([f.finance.key])
+    // A flag-off workspace is never stamped.
+    await q('UPDATE workspaces SET department_read_v2=false WHERE id=$1', [f.w])
+    expect(await task()).toEqual([])
+    await q('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.w])
+    // Losing the edge loses the home.
+    await store.removeEdge(f.jun, f.platform.id, { kind: 'user', id: f.maya })
+    expect((await q('SELECT home_department_id h FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.w, f.maya])).rows[0].h).toBeNull()
+  })
+
+  it('directory: members see their departments; the workspace owner sees names and owners only; an admin sees nothing it is not in', async () => {
+    const f = await flagged()
+    const board = await team(f.w, f.priya, 'Board')
+    const ids = (rows: { departmentId: string }[]) => rows.map(r => r.departmentId)
+    expect(ids(await store.directory(f.priya, f.w))).toContain(board.id)
+    expect(ids(await store.directory(f.jun, f.w))).not.toContain(board.id)
+    const owners = (await store.directory(f.ava, f.w)).find(d => d.departmentId === board.id)
+    expect(owners).toMatchObject({ myClearance: null, isOwner: false, ownerIds: [f.priya] })
+    expect(await store.listEdges(f.ava, board.id)).toEqual([])
   })
 })
