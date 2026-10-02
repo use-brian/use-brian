@@ -1,8 +1,10 @@
 "use client";
 
 /**
- * Bottom-bar chip + tray for the workspace brain-intake queue. Renders in the
- * persistent sync footer, beside the connectivity indicator and OUTSIDE its
+ * Status-row chip + tray for the workspace brain-intake queue. Renders in the
+ * workspace status row (the left sidebar's last row; it floats in the
+ * bottom-left corner while the sidebar is collapsed), beside the connectivity
+ * indicator and OUTSIDE its
  * live region (a progress tick must never re-announce "Online"), and renders
  * nothing while the workspace queue is empty. The chip summarises the queue
  * in one phrase; clicking it toggles a non-modal panel anchored above the bar
@@ -105,7 +107,7 @@ export function BrainIntakeTray({ workspaceId }: { workspaceId: string }) {
         aria-label={expanded ? t.hideTray : t.showTray}
         onClick={() => setIntakeTrayExpanded(workspaceId, !expanded)}
         className={cn(
-          // The footer is 28px tall; the pseudo-element extends the hit area
+          // The status row is 28px tall; the pseudo-element extends the hit area
           // to a 44px touch target without growing the row.
           "relative inline-flex h-full min-w-0 items-center gap-1.5 rounded px-1.5 text-[11px] font-medium transition-colors",
           "after:absolute after:inset-x-0 after:-top-2 after:-bottom-2 after:content-['']",
