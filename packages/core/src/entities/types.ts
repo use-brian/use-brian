@@ -155,6 +155,8 @@ export type EntityListRow = Pick<
 >
 
 export type EntityCreateParams = {
+  /** Exact canonical inputs captured by a trusted producer, never body labels. */
+  derivation?: import('../security/derived-scope.js').DerivedWriteEvidence
   kind: EntityKind
   displayName: string
   workspaceId: string

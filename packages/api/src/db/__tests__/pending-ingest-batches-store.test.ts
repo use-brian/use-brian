@@ -122,6 +122,35 @@ describe('[COMP:brain/pending-ingest-batches-store] appendBatchEvent early flush
 })
 
 describe('[COMP:api/programmatic-capture] atomic pooled append', () => {
+  it('reads duplicate receipts on the checked-out connection without pool reentry', async () => {
+    const calls: string[] = []
+    let released = false
+    const client = {
+      async query<R extends Record<string, unknown>>(text: string) {
+        calls.push(text)
+        const rows = text.includes('SELECT r.status')
+          ? [{ status: 'queued', batchId: 'original-batch', firesAt: null }] : []
+        return { rows: rows as unknown as R[] }
+      },
+      release() { released = true },
+    }
+    const result = await appendProgrammaticBatchEvent({
+      workspaceId: 'workspace', assistantId: 'assistant', ruleId: 'rule',
+      partitionKey: 'session:original', firesAt: new Date(),
+      episodeSensitivity: 'internal', compartments: [], projectIds: [],
+      event: { eventId: 'duplicate', content: 'must not append',
+        occurredAt: new Date().toISOString(), receivedAt: new Date().toISOString(),
+        role: 'user', metadata: {}, principalKind: 'api_key', principalId: 'key' },
+    }, {
+      async connect() { return client },
+      async query() { throw new Error('pool reentry while connection is checked out') },
+    })
+    expect(result).toEqual({ duplicate: true, status: 'queued', batchId: 'original-batch', firesAt: null })
+    expect(calls.some(sql => sql.includes('INSERT INTO pending_ingest_batches'))).toBe(false)
+    expect(calls.at(-1)).toBe('COMMIT')
+    expect(released).toBe(true)
+  })
+
   it('commits the idempotency receipt and concurrent-safe batch upsert together', async () => {
     const calls: Call[] = []
     const client = {

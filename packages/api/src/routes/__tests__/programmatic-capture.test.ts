@@ -55,6 +55,7 @@ function app(deps: ReturnType<typeof makeDeps>) {
   value.use(express.json())
   value.use((req, _res, next) => {
     ;(req as { userId?: string }).userId = 'user-1'
+    req.authSessionId = 'session-1'
     next()
   })
   value.use(
@@ -101,7 +102,7 @@ describe('[COMP:api/programmatic-capture] management routes', () => {
       .send({ profileId: PID })
     expect(response.status).toBe(204)
     expect(deps.store.setAssistantProfile).toHaveBeenCalledWith({
-      actingUserId: 'user-1', workspaceId: WID, assistantId: AID, profileId: PID,
+      actingUserId: 'user-1', authSessionId: 'session-1', workspaceId: WID, assistantId: AID, profileId: PID,
     })
   })
 

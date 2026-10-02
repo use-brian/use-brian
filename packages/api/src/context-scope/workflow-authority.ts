@@ -1,3 +1,5 @@
+import type { PoolClient } from 'pg'
+import { createDbContextScopeStore } from '../db/context-scope-store.js'
 import { accessCeilingContains, ContextScopeAccumulator, createExecutionContext, intersectAccessCeilings, parseAuthoringAuthority, pinAccessCeiling, pinAuthoringAuthority, scopeGrantContains, unionScopeRequirements, WORKFLOW_SCOPE_EVIDENCE_VAR, type AccessCeiling, type AuthoringAuthority, type GoalRecord, type ResolvedExecutionAccess, type WorkflowRunRecord } from '@use-brian/core'
 import { query, queryWithRLS, runWithAgentAccess } from '../db/client.js'
 import { findAssistantById } from '../db/users.js'
@@ -23,17 +25,41 @@ function goalUnavailable(): Error {
   return Object.assign(new Error('Goal execution permissions are missing or changed. Review permissions and confirm the goal again.'), { reason: 'goal_authority_unavailable' })
 }
 
+/** Transaction-scoped authority metadata; never a second grant model. */
+function authoringDeps(client?: PoolClient): import('./resolve-turn-scope.js').ResolveTurnScopeDeps {
+  if (!client) return {
+    resolveReadCeilings: (actor, workspace, clearance, compartments) =>
+      resolveOperationCeilingsSystem(actor, workspace, clearance, compartments, true),
+  }
+  const execute: typeof query = (sql, values) => client.query(sql, values)
+  return {
+    store: createDbContextScopeStore(client),
+    resolveReadCeilings: (actor, workspace, clearance, compartments) =>
+      resolveOperationCeilingsSystem(actor, workspace, clearance, compartments, true, execute),
+    resolveWorkspaceRole: async (actor: string, workspace: string) =>
+      (await client.query('SELECT role FROM workspace_members WHERE user_id=$1 AND workspace_id=$2', [actor, workspace])).rows[0]?.role ?? null,
+  }
+}
+async function authoringAssistant(id: string, client?: PoolClient) {
+  if (!client) return findAssistantById(id)
+  return (await client.query<import('./resolve-turn-scope.js').TurnScopeAssistant>(`SELECT id,workspace_id AS "workspaceId",kind,clearance,compartments,
+    default_compartments AS "defaultCompartments",team_scope_mode AS "teamScopeMode",
+    default_workspace_group_id AS "defaultWorkspaceGroupId",project_scope_mode AS "projectScopeMode",
+    default_project_id AS "defaultProjectId" FROM assistants WHERE id=$1`, [id])).rows[0]
+}
+
 type AuthoringBinding = { contextGroupId: string | null; contextProjectId: string | null }
 
 async function resolveSavedAuthoringCeiling(
   value: unknown,
   expected: { userId: string; workspaceId: string },
   binding: AuthoringBinding,
+  client?: PoolClient,
 ): Promise<{ authority: AuthoringAuthority; ceiling: AccessCeiling }> {
   const authority = parseAuthoringAuthority(value)
   if (!authority || authority.ceiling.userId !== expected.userId
     || authority.ceiling.workspaceId !== expected.workspaceId) throw unavailable()
-  const assistant = await findAssistantById(authority.assistantId)
+  const assistant = await authoringAssistant(authority.assistantId, client)
   if (!assistant || assistant.workspaceId !== expected.workspaceId) throw unavailable()
   let current: AccessCeiling
   try {
@@ -42,7 +68,7 @@ async function resolveSavedAuthoringCeiling(
       assistant,
       workspaceId: expected.workspaceId,
       key: binding,
-    })
+    }, ...(client ? [authoringDeps(client)] : []))
     if (!accessCeilingContains(current, authority.ceiling)) throw unavailable()
   } catch {
     throw unavailable()
@@ -57,8 +83,8 @@ export async function captureAuthoringAuthoritySystem(params: {
   assistantId: string
   contextGroupId?: string | null
   contextProjectId?: string | null
-}): Promise<AuthoringAuthority> {
-  const assistant = await findAssistantById(params.assistantId)
+}, client?: PoolClient): Promise<AuthoringAuthority> {
+  const assistant = await authoringAssistant(params.assistantId, client)
   if (!assistant || assistant.workspaceId !== params.workspaceId) throw unavailable()
   try {
     const scope = await resolveTurnScopeSystem({
@@ -69,10 +95,7 @@ export async function captureAuthoringAuthoritySystem(params: {
         contextGroupId: params.contextGroupId ?? null,
         contextProjectId: params.contextProjectId ?? null,
       },
-    }, {
-      resolveReadCeilings: (actor, workspace, clearance, compartments) =>
-        resolveOperationCeilingsSystem(actor, workspace, clearance, compartments, true),
-    })
+    }, authoringDeps(client))
     return pinAuthoringAuthority(scope.access)
   } catch {
     throw unavailable()
@@ -87,18 +110,15 @@ export async function resolveWorkflowAuthoringScope(params: {
   authoringAuthority: AuthoringAuthority
   contextGroupId: string | null
   contextProjectId: string | null
-}): Promise<ResolvedTurnScope> {
-  const saved = await resolveSavedAuthoringCeiling(params.authoringAuthority, params, params)
-  const assistant = await findAssistantById(params.assistantId)
+}, client?: PoolClient): Promise<ResolvedTurnScope> {
+  const saved = await resolveSavedAuthoringCeiling(params.authoringAuthority, params, params, client)
+  const assistant = await authoringAssistant(params.assistantId, client)
   if (!assistant || assistant.workspaceId !== params.workspaceId) throw unavailable()
   try {
     const scope = await resolveTurnScopeSystem({
       userId: params.userId, workspaceId: params.workspaceId, assistant,
       key: { contextGroupId: params.contextGroupId, contextProjectId: params.contextProjectId },
-    }, {
-      resolveReadCeilings: (actor, workspace, clearance, compartments) =>
-        resolveOperationCeilingsSystem(actor, workspace, clearance, compartments, true),
-    })
+    }, authoringDeps(client))
     const bounded = intersectAccessCeilings(pinAccessCeiling(scope.access), saved.ceiling)
     if (!scopeGrantContains(bounded.mutationCompartments, scope.writeCompartments)
       || !scopeGrantContains(bounded.projectIds, scope.writeProjectIds)) throw unavailable()
@@ -107,6 +127,16 @@ export async function resolveWorkflowAuthoringScope(params: {
   } catch {
     throw unavailable()
   }
+}
+
+/** Same saved-authority contract as run initialization, resolved on the
+ * dispatch transaction before its queue claim is consumed. No fresh consent. */
+export async function captureScheduledWorkflowRunAuthoritySystem(
+  params: Parameters<typeof resolveWorkflowAuthoringScope>[0], client: PoolClient,
+): Promise<StoredAuthority> {
+  const scope = await resolveWorkflowAuthoringScope(params, client)
+  return { version: 1, assistantId: params.assistantId,
+    ceiling: pinAccessCeiling(scope.access), workflowAuthoringAuthority: params.authoringAuthority, sourceGoal: null }
 }
 
 /** The durable run binding survives edits to input and cannot change actors. */

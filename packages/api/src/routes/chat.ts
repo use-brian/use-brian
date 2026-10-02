@@ -1,3 +1,4 @@
+import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
 import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
 import { closeProviderError } from './chat-provider-error.js'
@@ -12,7 +13,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isSharedAudienceSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isSharedAudienceSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
@@ -2844,7 +2845,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           ? (req.body as { appOrigin: string }).appOrigin
           : null
         const appOrigin = rawOrigin && KNOWN_ORIGINS.has(rawOrigin) ? rawOrigin : null
-        session = await findOrCreateSession({
+        const createSession = appOrigin === 'chat' && req.userId && req.authSessionId && req.authVersion !== undefined
+          ? (params: Parameters<typeof findOrCreateSession>[0]) => createPersonalWebSession({ ...params, workspaceId: assistant.workspaceId },
+            { actorUserId: req.userId!, authSessionId: req.authSessionId!, authVersion: req.authVersion! })
+          : findOrCreateSession
+        session = await createSession({
           assistantId: assistant.id,
           userId: user.id,
           channelType: 'web',
@@ -3443,6 +3448,10 @@ export function chatRoutes(options: WebChatOptions): Router {
             senderUserId: user.id,
             scope: inputMessageScope,
           })
+          dispatchPersistedWebInput({
+            workspaceId: assistant.workspaceId, session, userId: user.id,
+            stored, text: rawMessage ?? '', replay: !!truncateFromMessageId,
+          })
           sendEvent('user_message_saved', { id: stored.id, senderUserId: user.id })
           publishSessionEvent({
             kind: 'user_message_saved',
@@ -4036,6 +4045,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         // them apart.
         senderUserId: isMultiParticipantSession(session) ? user.id : null,
         scope: inputMessageScope,
+      })
+      // Reused room rows and regenerate/edit (including seeded kickoffs) are
+      // not new inbound events. Use human text, not model/attachment context.
+      dispatchPersistedWebInput({
+        workspaceId: assistant.workspaceId, session, userId: user.id,
+        stored: storedUserMsg, text: rawMessage ?? '',
+        replay: !!prePersistedUserMsg || !!truncateFromMessageId,
       })
       const storedUserSource = await readSessionMessageScopeSource(
         assistant.workspaceId,
@@ -7719,6 +7735,10 @@ export function chatRoutes(options: WebChatOptions): Router {
                     : {}),
                   scope: inputMessageScope,
                 }))
+                dispatchPersistedWebInput({
+                  workspaceId: assistant.workspaceId, session, userId: user.id,
+                  stored: storedQueued, text: queuedInput.text,
+                })
                 const queuedSource = await readSessionMessageScopeSource(
                   assistant.workspaceId,
                   storedQueued.id,

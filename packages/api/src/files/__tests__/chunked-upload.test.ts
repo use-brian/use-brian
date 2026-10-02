@@ -178,7 +178,11 @@ describe('[COMP:files/chunked-upload] durable direct upload', () => {
         async forWorkspace() { return { gcs, bucket: 'bucket', byo: false } },
         async forUri() { return gcs },
       },
-      filesStore: files,
+      filesStore: {...files, async finalizeUpload(actor,input,id,access) {
+        const file=await files.create(actor,input,access)
+        await uploads.markCompleted(actor,id)
+        return file
+      }},
       uploadsStore: uploads,
       auditStore: { append: vi.fn(), list: vi.fn() },
       ...(storageLimitBytesFor ? { storageLimitBytesFor } : {}),

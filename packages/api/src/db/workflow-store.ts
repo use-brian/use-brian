@@ -1,3 +1,10 @@
+import { prepareScheduleEdit, applyScheduleEdit, scheduleEditRow } from '../workspace-access/workflow-schedule-edit.js'
+import { insertWorkflowScheduleJob } from './job-store.js'
+import { isDeepStrictEqual } from 'node:util'
+import { captureScheduledWorkflowRunAuthoritySystem, captureAuthoringAuthoritySystem } from '../context-scope/workflow-authority.js'
+import type { PoolClient } from 'pg'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { admitOperationalAuthoring, lockOperationalPolicy, readWorkflowScheduleAuthority, type OperationalHumanAuthor } from '../workspace-access/operational-admission.js'
 /**
  * Workflow store + run store, backed by PostgreSQL.
  *
@@ -36,7 +43,7 @@ import type {
   WorkflowTrigger,
   WorkflowTriggerKind,
 } from '@use-brian/core'
-import { query, queryWithRLS } from './client.js'
+import { getPool, getAppPool, applyRLSGucs, rollbackAndRelease, query, queryWithRLS } from './client.js'
 import { readWorkflowOutcomeWithLineage } from '../crm-operations/workflow-copy-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
@@ -156,10 +163,36 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
   }
 }
 
+async function withWorkflowWrite<T>(userId: string, id: string,
+  operation: (client: PoolClient, policy: Awaited<ReturnType<typeof lockOperationalPolicy>>) => Promise<T>): Promise<T | null> {
+  // Every lane, the reviewed schedule edit included, runs on the RLS-enforced
+  // app connection. Audit 2026-10-02: the reviewed lane once switched to the
+  // owner pool only to reach the receipt table, which has no app policy; that
+  // bypassed RLS on every other table it touched. Receipts are now reached
+  // through the actor-bound SECURITY DEFINER functions of migration 647.
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client,userId)
+    const pointer = (await client.query<{ workspaceId: string }>('SELECT workspace_id AS "workspaceId" FROM workflows WHERE id=$1', [id])).rows[0]
+    if (!pointer) { await client.query('COMMIT'); return null }
+    const policy = await lockOperationalPolicy(client,pointer.workspaceId)
+    const current = (await client.query<{ workspaceId: string }>('SELECT workspace_id AS "workspaceId" FROM workflows WHERE id=$1 FOR UPDATE', [id])).rows[0]
+    if (!current) { await client.query('COMMIT'); return null }
+    if (current.workspaceId !== pointer.workspaceId) throw new WorkspaceAccessError('access_policy_conflict',409)
+    const result = await operation(client,policy)
+    await client.query('COMMIT')
+    return result
+  } finally { await rollbackAndRelease(client) }
+}
+
 export type WorkflowStoreHooks = {
+  /** Canonical workspace-primary lookup, using the insertion transaction. */
+  resolveAuthoringPrimary?: (workspaceId: string, client: PoolClient) => Promise<string | null>
   onChanged?: (userId: string, workspaceId: string) => void
 }
 
+// Provenance is per call, never an identity attached to the shared store.
 export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore {
   const fireChanged = (userId: string, workspaceId: string): void => {
     try {
@@ -185,43 +218,101 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       contextGroupId,
       contextProjectId,
       authoringAuthority,
-    }) {
-      if (!authoringAuthority) {
-        throw Object.assign(new Error('Workflow authoring permissions are missing. Review the workflow from a current workspace turn.'), { reason:'workflow_authority_unavailable' })
-      }
-      const result = await queryWithRLS<WorkflowRow>(
-        userId,
-        `INSERT INTO workflows (
-           workspace_id, created_by, name, description, definition, trigger,
-           webhook_slug, webhook_secret,
-           model_alias, max_turns, research_mode, managed_by,
-           context_group_id, context_project_id, authoring_authority
-         )
-         VALUES (
-           $1, $2, $3, $4, $5, COALESCE($6::jsonb, '{"kind":"manual"}'::jsonb),
-           $7, $8,
-           COALESCE($9, 'pro'), $10, COALESCE($11, false), $12, $13, $14, $15::jsonb
-         )
-         RETURNING ${WORKFLOW_SELECT}`,
-        [
-          workspaceId,
-          userId,
-          name,
-          description ?? null,
-          JSON.stringify(definition),
-          trigger ? JSON.stringify(trigger) : null,
-          webhookSlug ?? null,
-          webhookSecret ?? null,
-          modelAlias ?? null,
-          maxTurns ?? null,
-          researchMode ?? null,
-          managedBy ?? null,
-          contextGroupId ?? null,
-          contextProjectId ?? null,
-          JSON.stringify(authoringAuthority),
-        ],
-      )
+    }, options) {
+      const client = await getAppPool().connect()
+      let schedulePublished = false
+      const result = await (async () => {
+        try {
+          await client.query('BEGIN')
+          await applyRLSGucs(client, userId)
+          const policy = await lockOperationalPolicy(client, workspaceId)
+          const provenance = options?.authoring
+          if (provenance?.kind === 'authenticated-workflow-rest' && provenance.expectedPolicyRevision !== undefined
+            && provenance.expectedPolicyRevision !== policy?.revision) {
+            throw new WorkspaceAccessError('access_policy_conflict', 409)
+          }
+          let humanAuthor: OperationalHumanAuthor | undefined
+          if (policy && policy.setupState !== 'legacy') {
+            if (policy.setupState !== 'ready') throw new WorkspaceAccessError('access_mode_setup_required', 409)
+            if (provenance?.kind === 'authenticated-workflow-rest') {
+              if (!provenance.authSessionId || provenance.userId !== userId || managedBy) {
+                throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
+              }
+              // No atomic schedule adapter or canonical event/webhook lineage
+              // proof yet. Refuse before publishing a definition or firing row.
+              if ((trigger && trigger.kind !== 'manual' && trigger.kind !== 'schedule') || definition.principal) throw new WorkspaceAccessError('workflow_source_authoring_not_ready', 409)
+              const assistantId = await hooks?.resolveAuthoringPrimary?.(workspaceId, client)
+              if (!assistantId) throw new WorkspaceAccessError('workflow_authoring_primary_unavailable', 409)
+              humanAuthor = { userId, assistantId, expectedPolicyRevision: provenance.expectedPolicyRevision }
+            } else if (provenance?.kind === 'internal-human') {
+              humanAuthor = provenance
+            }
+          } else if (!authoringAuthority && provenance?.kind === 'authenticated-workflow-rest') {
+            // The historical route captured General (explicit nulls) before
+            // creation. Keep that behavior, and never renew supplied consent.
+            authoringAuthority = await provenance.captureLegacyAuthority(async () => {
+              const assistantId = await hooks?.resolveAuthoringPrimary?.(workspaceId, client)
+              if (!assistantId) throw new WorkspaceAccessError('workflow_authoring_primary_unavailable', 409)
+              return captureAuthoringAuthoritySystem({
+                userId, workspaceId, assistantId,
+                contextGroupId: contextGroupId ?? null,
+                contextProjectId: contextProjectId ?? null,
+              }, client)
+            })
+          }
+          const admitted = await admitOperationalAuthoring(client, {
+            userId, workspaceId, contextGroupId, contextProjectId, authoringAuthority,
+          }, managedBy ? undefined : humanAuthor)
+          contextGroupId = admitted.contextGroupId
+          contextProjectId = admitted.contextProjectId
+          authoringAuthority = admitted.authoringAuthority ?? undefined
+          if (!authoringAuthority) {
+            throw Object.assign(new Error('Workflow authoring permissions are missing. Review the workflow from a current workspace turn.'), { reason:'workflow_authority_unavailable' })
+          }
+          const inserted = await client.query<WorkflowRow>(
+            `INSERT INTO workflows (
+               workspace_id, created_by, name, description, definition, trigger,
+               webhook_slug, webhook_secret,
+               model_alias, max_turns, research_mode, managed_by,
+               context_group_id, context_project_id, authoring_authority
+             )
+             VALUES (
+               $1, $2, $3, $4, $5, COALESCE($6::jsonb, '{"kind":"manual"}'::jsonb),
+               $7, $8,
+               COALESCE($9, 'pro'), $10, COALESCE($11, false), $12, $13, $14, $15::jsonb
+             )
+             RETURNING ${WORKFLOW_SELECT}`,
+            [
+              workspaceId,
+              userId,
+              name,
+              description ?? null,
+              JSON.stringify(definition),
+              trigger ? JSON.stringify(trigger) : null,
+              webhookSlug ?? null,
+              webhookSecret ?? null,
+              modelAlias ?? null,
+              maxTurns ?? null,
+              researchMode ?? null,
+              managedBy ?? null,
+              contextGroupId ?? null,
+              contextProjectId ?? null,
+              JSON.stringify(authoringAuthority),
+            ],
+          )
+          if (policy?.setupState === 'ready' && trigger?.kind === 'schedule') {
+            if (provenance?.kind !== 'authenticated-workflow-rest') throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
+            await insertWorkflowScheduleJob(client, workspaceId, inserted.rows[0].id)
+            schedulePublished = true
+          }
+          await client.query('COMMIT')
+          return inserted
+        } finally {
+          await rollbackAndRelease(client)
+        }
+      })()
       const record = rowToWorkflow(result.rows[0])
+      if (schedulePublished) options?.onSchedulePublished?.()
       notifyWorkspaceChange(record.workspaceId, 'workflow', 'create', record.id)
       fireChanged(userId, record.workspaceId)
       return record
@@ -247,7 +338,31 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       )
       return result.rows.map(rowToWorkflow)
     },
-    async update(userId, id, fields) {
+    async prepareScheduleEdit(userId,id,fields,proof) {
+      return withWorkflowWrite(userId,id,(client,policy) => prepareScheduleEdit(client,userId,id,fields,proof,policy,hooks?.resolveAuthoringPrimary))
+    },
+    async update(userId, id, fields, proof) {
+      const result = await withWorkflowWrite(userId,id,async (client,policy) => {
+        const current = await scheduleEditRow(client,id)
+        const reviewed = !!proof?.reviewId
+        if (reviewed) {
+          const applied = await applyScheduleEdit(client,userId,id,fields,proof!,policy)
+          if (applied.replayRow) {
+            const saved = applied.replayRow as WorkflowRow
+            saved.createdAt = new Date(saved.createdAt)
+            saved.updatedAt = new Date(saved.updatedAt)
+            if (saved.lifecycleTransitionedAt) saved.lifecycleTransitionedAt = new Date(saved.lifecycleTransitionedAt)
+            return { rows: [saved] }
+          }
+          fields = applied.fields
+        }
+        else if ((policy?.setupState !== 'legacy' || current.schedule_authoring_pinned) &&
+          (current.trigger.kind === 'schedule' || fields.trigger?.kind === 'schedule' || current.schedule_authoring_pinned) &&
+          (fields.definition !== undefined || fields.trigger !== undefined || fields.enabled === true || fields.authoringAuthority !== undefined ||
+            fields.modelAlias !== undefined || fields.maxTurns !== undefined || fields.researchMode !== undefined ||
+            fields.contextGroupId !== undefined || fields.contextProjectId !== undefined)) {
+          throw new WorkspaceAccessError(current.schedule_authoring_pinned ? 'workflow_schedule_reapproval_required' : 'workflow_schedule_review_required',409)
+        }
       const sets: string[] = []
       const values: unknown[] = []
       let idx = 1
@@ -280,12 +395,11 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
 
       if (sets.length === 0) {
         // Nothing to patch — read back current state.
-        const cur = await queryWithRLS<WorkflowRow>(
-          userId,
+        const cur = await client.query<WorkflowRow>(
           `SELECT ${WORKFLOW_SELECT} FROM workflows WHERE id = $1`,
           [id],
         )
-        return cur.rows[0] ? rowToWorkflow(cur.rows[0]) : null
+        return cur
       }
 
       if (fields.lifecycleState === undefined) {
@@ -296,13 +410,27 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
         sets.push(`lifecycle_state = CASE WHEN lifecycle_state = 'stale' THEN 'active' ELSE lifecycle_state END`)
       }
 
+
+      if (reviewed) { sets.push(`schedule_authoring_user_id = $${idx}`); values.push(userId); idx++ }
       values.push(id)
-      const result = await queryWithRLS<WorkflowRow>(
-        userId,
-        `UPDATE workflows SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${WORKFLOW_SELECT}`,
-        values,
-      )
-      if (!result.rows[0]) return null
+      const updated = await client.query<WorkflowRow>(`UPDATE workflows SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${WORKFLOW_SELECT}`,values)
+      if (reviewed) {
+        // Replacement invalidates every old claim, but never touches saved runs.
+        await client.query('DELETE FROM scheduled_jobs WHERE workflow_id=$1 AND workflow_step_run_id IS NULL', [id])
+        if (updated.rows[0]?.enabled && updated.rows[0]?.trigger?.kind === 'schedule') {
+          await insertWorkflowScheduleJob(client,current.workspace_id,id)
+        }
+      } else if (fields.enabled === false) {
+        await client.query(`UPDATE scheduled_jobs SET enabled=false,schedule_claim_id=NULL,schedule_claim_expires_at=NULL
+          WHERE workflow_id=$1 AND workflow_step_run_id IS NULL`, [id])
+      }
+      if (reviewed) {
+        // Save the exact committed response; retries never replace the row again.
+        await client.query('SELECT workflow_schedule_review_save_result($1,$2::jsonb)', [proof!.reviewId,JSON.stringify(updated.rows[0])])
+      }
+      return updated
+      })
+      if (!result?.rows[0]) return null
       const record = rowToWorkflow(result.rows[0])
       notifyWorkspaceChange(record.workspaceId, 'workflow', 'update', record.id)
       fireChanged(userId, record.workspaceId)
@@ -330,16 +458,13 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       return (result.rowCount ?? 0) > 0
     },
     async delete(userId, id) {
-      const result = await queryWithRLS<{ workspaceId: string }>(
-        userId,
-        `DELETE FROM workflows WHERE id = $1 RETURNING workspace_id AS "workspaceId"`,
-        [id],
-      )
-      if (result.rows[0]) {
+      const result = await withWorkflowWrite(userId,id,client => client.query<{ workspaceId: string }>(
+        `DELETE FROM workflows WHERE id = $1 RETURNING workspace_id AS "workspaceId"`,[id]))
+      if (result?.rows[0]) {
         notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'delete', id)
         fireChanged(userId, result.rows[0].workspaceId)
       }
-      return result.rowCount !== null && result.rowCount > 0
+      return (result?.rowCount ?? 0) > 0
     },
     async findByWebhookSlugSystem(slug) {
       // System lookup — bypasses RLS so the public webhook receiver can
@@ -499,9 +624,67 @@ export function extractTriggerPageId(
   return typeof pageId === 'string' && pageId.length > 0 ? pageId : null
 }
 
+/** Workspace-first, one-client dispatch. A queue object is not authority:
+ * claim identity, parent version, actor, binding and live consent are checked
+ * again immediately before run insertion and frozen there. */
+async function createScheduledRun(params: Parameters<WorkflowRunStore['createRun']>[0]): Promise<WorkflowRunRecord> {
+  const client = await getPool().connect()
+  let run: WorkflowRunRecord
+  try {
+    await client.query('BEGIN')
+    const policy = await lockOperationalPolicy(client, params.workspaceId)
+    if (!params.scheduledJob) {
+      const pinned = (await client.query(`SELECT 1 FROM workflows WHERE id=$1 AND schedule_authoring_pinned
+        UNION ALL SELECT 1 FROM scheduled_jobs WHERE workflow_id=$1 AND workflow_authoring_snapshot IS NOT NULL
+        UNION ALL SELECT 1 FROM workflow_runs WHERE workflow_id=$1 AND scheduled_job_snapshot IS NOT NULL LIMIT 1`, [params.workflowId])).rows.length > 0
+      if (pinned || (policy && policy.setupState !== 'legacy')) throw new WorkspaceAccessError('workflow_schedule_claim_required', 409)
+      // Unchanged legacy schedule semantics; even this read/insert uses the
+      // already checked-out connection (embedded max:1 must not re-enter).
+      const result = await client.query<RunRow>(`INSERT INTO workflow_runs(workflow_id,workspace_id,triggered_by,trigger_kind,input,
+        context_group_id,context_project_id,context_compartments,context_project_ids)
+        SELECT w.id,w.workspace_id,$3,'schedule',$4::jsonb,w.context_group_id,w.context_project_id,
+          CASE WHEN g.compartment_key IS NULL THEN ARRAY[]::text[] ELSE ARRAY[g.compartment_key] END,
+          CASE WHEN w.context_project_id IS NULL THEN ARRAY[]::uuid[] ELSE ARRAY[w.context_project_id] END
+        FROM workflows w LEFT JOIN workspace_groups g ON g.id=w.context_group_id WHERE w.id=$1 AND w.workspace_id=$2
+        RETURNING ${RUN_SELECT}`, [params.workflowId,params.workspaceId,params.triggeredBy,JSON.stringify(params.input ?? {})])
+      if (!result.rows[0]) throw new WorkspaceAccessError('workflow_schedule_authority_unavailable', 409)
+      run = rowToRun(result.rows[0])
+    } else {
+      const source = await readWorkflowScheduleAuthority(client, params.workspaceId, params.workflowId)
+      const job = (await client.query<{ snapshot: unknown; actor: string; assistant: string }>(`SELECT workflow_authoring_snapshot AS snapshot,
+        user_id AS actor,assistant_id AS assistant FROM scheduled_jobs WHERE id=$1 AND workflow_id=$2
+        AND workflow_authoring_snapshot IS NOT NULL AND schedule_claim_id=$3 AND NOT schedule_claim_consumed
+        AND enabled AND schedule_claim_expires_at>clock_timestamp() FOR UPDATE`, [params.scheduledJob.id,params.workflowId,params.scheduledJob.claimId])).rows[0]
+      if (!job) throw new WorkspaceAccessError('workflow_schedule_claim_unavailable', 409)
+      if (!isDeepStrictEqual(job.snapshot,source.snapshot) || job.actor !== source.userId || job.assistant !== source.assistantId
+        || (params.triggeredBy != null && params.triggeredBy !== source.userId)
+        || !isDeepStrictEqual(params.input ?? {}, {})) throw new WorkspaceAccessError('workflow_schedule_binding_conflict', 409)
+      const authority = await captureScheduledWorkflowRunAuthoritySystem({ userId: source.userId,workspaceId: params.workspaceId,
+        assistantId: source.assistantId,authoringAuthority: source.authority,
+        contextGroupId: source.contextGroupId,contextProjectId: source.contextProjectId }, client)
+      const result = await client.query<RunRow>(`INSERT INTO workflow_runs(workflow_id,workspace_id,triggered_by,trigger_kind,input,
+        context_group_id,context_project_id,context_compartments,context_project_ids,execution_authority,
+        scheduled_job_id,scheduled_job_claim_id,scheduled_job_snapshot)
+        VALUES($1,$2,$3,'schedule','{}'::jsonb,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::jsonb) RETURNING ${RUN_SELECT}`,
+      [params.workflowId,params.workspaceId,source.userId,source.contextGroupId,source.contextProjectId,source.compartments,source.projectIds,
+        JSON.stringify(authority),params.scheduledJob.id,params.scheduledJob.claimId,JSON.stringify(source.snapshot)])
+      await client.query('UPDATE scheduled_jobs SET schedule_claim_consumed=true WHERE id=$1', [params.scheduledJob.id])
+      run = rowToRun(result.rows[0])
+    }
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally { client.release() }
+  notifyWorkspaceChange(params.workspaceId,'workflow_run','create',run.id)
+  return run
+}
+
 export function createDbWorkflowRunStore(): WorkflowRunStore {
   return {
-    async createRun({ workflowId, workspaceId, triggeredBy, triggerKind, input }) {
+    async createRun({ workflowId, workspaceId, triggeredBy, triggerKind, input, scheduledJob }) {
+      if (triggerKind === 'schedule') return createScheduledRun({ workflowId, workspaceId, triggeredBy, triggerKind, input, scheduledJob })
+      if (scheduledJob) throw new WorkspaceAccessError('workflow_schedule_binding_conflict', 409)
       // System-level write: the route handler authorized the run by
       // resolving the workflow via the user's RLS view; the run record
       // itself is system-owned.

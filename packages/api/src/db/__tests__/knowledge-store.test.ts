@@ -1,11 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { AccessContext } from '@use-brian/core'
 
-vi.mock('../client.js', () => ({
-  query: vi.fn(),
-  queryWithRLS: vi.fn(),
-  getPool: vi.fn(),
-}))
+const { resourceQuery } = vi.hoisted(() => ({ resourceQuery: vi.fn() }))
+vi.mock('../client.js', () => {
+  const transactionQuery = async (sql: string, values?: unknown[]) => {
+    if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: 'false' }] }
+    if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql) || sql.includes('set_config') || sql.includes('FROM workspaces WHERE id=')) return { rows: [] }
+    if (sql.trimStart().startsWith('SELECT') && sql.includes('FROM workspace_access_policies')) return { rows: [] }
+    return resourceQuery(sql, values)
+  }
+  const pool = { connect: async () => ({ query: transactionQuery, release: vi.fn() }) }
+  return {
+    query: (sql: string, values?: unknown[]) => sql.includes("SELECT setup_state='ready'") ? Promise.resolve({ rows: [] }) : resourceQuery(sql, values),
+    queryWithRLS: vi.fn(), getPool: () => pool, getAppPool: () => pool,
+    applyRLSGucs: vi.fn(), rollbackAndRelease: vi.fn(),
+  }
+})
 
 // Capture the `knowledge` workflow-event-source emissions the store publishes.
 const { published } = vi.hoisted(() => ({ published: [] as Array<Record<string, unknown>> }))
@@ -16,9 +26,8 @@ vi.mock('../../knowledge-event-fanout.js', () => ({
 }))
 
 import { createDbKnowledgeStore } from '../knowledge-store.js'
-import { query } from '../client.js'
 
-const mockQuery = vi.mocked(query)
+const mockQuery = resourceQuery
 const store = createDbKnowledgeStore()
 
 // Default viewer with passthrough clearance — matches DEFAULT_CLEARANCE
@@ -298,7 +307,7 @@ describe('[COMP:api/knowledge-store] sources', () => {
       const source = await store.createSource({ workspaceId: 't1', sourceType: 'github', repo: 'org/repo' })
       expect(source.repo).toBe('org/repo')
       // 6th param is the bound connector_instance_id — null when not supplied.
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'github', 'org/repo', 'main', '', null])
+      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'github', 'org/repo', 'main', '', null, null, null, null, null])
     })
 
     it('binds the picked connector_instance_id when supplied', async () => {
@@ -308,7 +317,7 @@ describe('[COMP:api/knowledge-store] sources', () => {
       } as never)
 
       await store.createSource({ workspaceId: 't1', sourceType: 'github', repo: 'org/repo', connectorInstanceId: 'ci_1' })
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'github', 'org/repo', 'main', '', 'ci_1'])
+      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'github', 'org/repo', 'main', '', 'ci_1', null, null, null, null])
     })
   })
 
@@ -476,7 +485,7 @@ describe('[COMP:api/knowledge-event-fanout] lifecycle emission', () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ ...entryRow, __inserted: true }], rowCount: 1 } as never)
     await store.upsertByPath({
       workspaceId: 't1', path: 'products/vault', title: 'Vault',
-      content: 'body', sensitivity: 'internal', sourceId: 'src1',
+      content: 'body', sensitivity: 'internal',
     })
     const sql = mockQuery.mock.calls[0][0] as string
     expect(sql).toContain('(xmax = 0) AS "__inserted"')
@@ -487,7 +496,7 @@ describe('[COMP:api/knowledge-event-fanout] lifecycle emission', () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ ...entryRow, __inserted: false }], rowCount: 1 } as never)
     await store.upsertByPath({
       workspaceId: 't1', path: 'products/vault', title: 'Vault',
-      content: 'body2', sensitivity: 'internal', sourceId: 'src1',
+      content: 'body2', sensitivity: 'internal',
     })
     expect(published[0]).toMatchObject({ action: 'updated' })
   })
@@ -530,17 +539,9 @@ describe('[COMP:api/knowledge-event-fanout] lifecycle emission', () => {
     })
   })
 
-  it('deleteByTeamAndPath emits a delete carrying the removed row', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [entryRow], rowCount: 1 } as never)
-    await store.deleteByTeamAndPath('t1', 'products/vault')
-    const sql = mockQuery.mock.calls[0][0] as string
-    expect(sql).toContain('RETURNING')
-    expect(published[0]).toMatchObject({ entryId: 'e1', action: 'deleted', writtenBy: 'user' })
-  })
-
-  it('emits nothing when the delete matched no row', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    await store.deleteByTeamAndPath('t1', 'missing')
+  it.each(['products/vault', 'missing'])('rejects an unfenced sync deletion (%s) without SQL or events', async path => {
+    await expect(store.deleteByTeamAndPath('t1', path)).rejects.toThrow('knowledge_sync_authority_required')
+    expect(mockQuery).not.toHaveBeenCalled()
     expect(published).toHaveLength(0)
   })
 

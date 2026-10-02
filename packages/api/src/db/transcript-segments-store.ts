@@ -12,13 +12,14 @@
  *     `embedding` NULL so the async embedding worker claims them. Idempotent on
  *     `(recording_id, segment_index)`.
  *
- * The store runs on the system pool (background transcription job, no per-user
- * RLS context) — same pattern as the embedding worker.
+ * Segment publication runs on the app role with per-call current-actor and
+ * exact-version canonical file/recording evidence captured before processing.
  *
  * [COMP:brain/transcript-segments-store]
  */
 
-import { getPool, query } from './client.js'
+import { query } from './client.js'
+import { publishRecordingIntakeSegments, type RecordingSegmentProvenance } from './recording-intake-admission.js'
 
 /** One diarized speaker-turn from the transcription step. */
 export type Utterance = {
@@ -245,63 +246,14 @@ export type InsertTranscriptSegmentsParams = {
  * Insert packed segments. Idempotent on `(recording_id, segment_index)` so a
  * retried transcription job re-inserts the same segments without duplicating.
  * Leaves `embedding` NULL — the async embedding worker claims and vectorizes
- * the rows. Runs on the system pool (background job, no per-user RLS context).
+ * the rows. Output and exact lineage share the app-role transaction.
  *
  * @returns the number of rows actually inserted (excludes idempotent skips).
  */
-export async function insertTranscriptSegments(
-  params: InsertTranscriptSegmentsParams,
-): Promise<number> {
-  const { recordingId, workspaceId, createdByUserId, visibility, sensitivity, segments } = params
-  if (visibility.userId === null && visibility.assistantId === null) {
-    throw new Error('insertTranscriptSegments: visibility requires userId or assistantId (DB CHECK)')
-  }
-  const valid = segments.filter((s) => hasReadableContent(s.text))
-  if (valid.length === 0) return 0
-
-  const client = await getPool().connect()
-  try {
-    await client.query('BEGIN')
-    let inserted = 0
-    for (const s of valid) {
-      const res = await client.query(
-        `INSERT INTO transcript_segments (
-           workspace_id, recording_id, transcript_file_id, segment_index,
-           start_ms, end_ms, speaker, speaker_ids, segment_text, utterance_refs,
-           user_id, assistant_id, source, sensitivity, created_by_user_id,
-           compartments, project_ids, kind
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'recording',$13,$14,$15,$16,$17)
-         ON CONFLICT (recording_id, segment_index) DO NOTHING`,
-        [
-          workspaceId,
-          recordingId,
-          params.transcriptFileId ?? null,
-          s.segmentIndex,
-          s.startMs,
-          s.endMs,
-          s.speaker,
-          s.speakerIds.length > 0 ? s.speakerIds : null,
-          s.text,
-          JSON.stringify(s.utteranceRefs),
-          visibility.userId,
-          visibility.assistantId,
-          sensitivity,
-          createdByUserId,
-          params.compartments ?? [],
-          params.projectIds ?? [],
-          s.kind ?? 'speech',
-        ],
-      )
-      inserted += res.rowCount ?? 0
-    }
-    await client.query('COMMIT')
-    return inserted
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw err
-  } finally {
-    client.release()
-  }
+export async function insertTranscriptSegments(params: InsertTranscriptSegmentsParams, provenance?: RecordingSegmentProvenance): Promise<number> {
+  if (!provenance || provenance.recordingId !== params.recordingId) throw new Error('recording_intake_provenance_required')
+  if (params.transcriptFileId) throw new Error('transcript_file_binding_required')
+  return publishRecordingIntakeSegments(params.workspaceId, params.createdByUserId, params.segments.filter(s => hasReadableContent(s.text)), provenance)
 }
 
 /**

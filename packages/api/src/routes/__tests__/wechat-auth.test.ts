@@ -10,10 +10,17 @@
  * persistence endpoint (get_updates_buf merge into credentials).
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { isBoundWechatOwner, wechatRoutes } from '../wechat.js'
+
+vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
+vi.mock('../../db/channels-store.js', () => ({ getChannelForWebhook: vi.fn(), resolveRoutingForSurface: vi.fn(async () => null) }))
+vi.mock('../../chat-archive/live-writer.js', () => ({ archiveUnroutedInbound: vi.fn(async () => {}) }))
+vi.mock('../../db/client.js', () => ({ query: vi.fn(async () => ({ rows: [] })), getPool: vi.fn() }))
+import { dispatchIncomingMessageEvent } from '../../message-events.js'
+import { getChannelForWebhook } from '../../db/channels-store.js'
 
 describe('[COMP:api/wechat-inbound] QR-bound owner identity', () => {
   const credentials = {
@@ -47,6 +54,7 @@ function buildApp(connectorSecret: string) {
         },
       },
     ]),
+    getByChannelForWebhook: vi.fn(async () => ({ id: 'int-1', credentials: { ilink_bot_id: 'bot' }, config: {} })),
     mergeCredentialsSystem: vi.fn(async () => {}),
   }
   const app = express()
@@ -140,5 +148,39 @@ describe('[COMP:api/wechat-inbound] cursor persistence', () => {
       .set('x-connector-secret', 's3cret')
       .send({ channelId: 'chan-1' })
     expect(res.status).toBe(400)
+  })
+})
+
+
+describe('wechat workflow message ingress', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(getChannelForWebhook).mockResolvedValue({ workspaceId: 'ws-1', channelType: 'wechat', status: 'active', enabledCapabilities: [] } as never)
+  })
+  const message = { userId: 'peer', channelId: 'peer', messageId: 'm1', text: 'hello', timestamp: 1700000000000 }
+  it.each([false, true])('emits without routing, chat enabled=%s', async (chat) => {
+    vi.mocked(getChannelForWebhook).mockResolvedValue({ workspaceId: 'ws-1', channelType: 'wechat', status: 'active', enabledCapabilities: chat ? ['chat'] : [] } as never)
+    const { app } = buildApp('secret')
+    await request(app).post('/internal/wechat/inbound').set('X-Connector-Secret', 'secret').send({ channelId: 'chan-1', message })
+    await vi.waitFor(() => expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce())
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledWith({ workspaceId: 'ws-1', integrationId: 'int-1', providerAccountId: 'bot', incoming: { ...message, channelType: 'wechat', timestamp: 1700000000 } })
+  })
+  it('emits media-only messages without downloading the attachment', async () => {
+    const { app } = buildApp('secret')
+    await request(app).post('/internal/wechat/inbound').set('X-Connector-Secret', 'secret')
+      .send({ channelId: 'chan-1', message: { ...message, text: '', mediaType: 'photo' } })
+    await vi.waitFor(() => expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce())
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledWith(expect.objectContaining({
+      incoming: expect.objectContaining({ channelType: 'wechat', text: '', mediaType: 'photo' }),
+    }))
+  })
+  it.each(['auth', 'blocked', 'self', 'streaming', 'inactive', 'missing integration', 'empty', 'cursor'])('excludes %s', async (mode) => {
+    const { app, integrationStore } = buildApp('secret')
+    if (mode === 'inactive') vi.mocked(getChannelForWebhook).mockResolvedValue(null)
+    if (mode === 'missing integration') integrationStore.getByChannelForWebhook.mockResolvedValue(null as never)
+    if (mode === 'blocked') integrationStore.getByChannelForWebhook.mockResolvedValue({ id: 'int-1', credentials: { ilink_bot_id: 'bot' }, config: { userAccessMode: 'blocklist', blockedUserIds: ['peer'] } })
+    await request(app).post(`/internal/wechat/${mode === 'cursor' ? 'cursor' : 'inbound'}`).set('X-Connector-Secret', mode === 'auth' ? 'wrong' : 'secret').send(mode === 'cursor' ? { channelId: 'chan-1', getUpdatesBuf: 'next' } : { channelId: 'chan-1', message: { ...message, ...(mode === 'empty' ? { text: '' } : {}), ...(mode === 'self' ? { raw: { message_type: 2 } } : {}), ...(mode === 'streaming' ? { raw: { message_type: 1, message_state: 1 } } : {}) } })
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
   })
 })

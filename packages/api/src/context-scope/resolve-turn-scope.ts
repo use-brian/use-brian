@@ -23,6 +23,7 @@ import {
   type AccessCeiling,
   type ResourceScope,
   type ScopeSource,
+  type DepartmentReadGrant,
 } from '@use-brian/core'
 import {
   createDbContextScopeStore,
@@ -32,6 +33,8 @@ import {
 } from '../db/context-scope-store.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 import { getWorkspaceRoleSystem, resolveOperationCeilingsSystem } from '../db/workspace-store.js'
+import { query as systemQuery } from '../db/client.js'
+import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from './department-resolver.js'
 
 export type TurnScopeAssistant = {
   id: string
@@ -149,6 +152,8 @@ export type ResolveTurnScopeDeps = {
   store?: ContextScopeStore
   resolveReadCeilings?: typeof resolveOperationCeilingsSystem
   resolveWorkspaceRole?: typeof getWorkspaceRoleSystem
+  /** Permission model v2 snapshot reads, for a workspace whose flag is on. Defaults to the database. */
+  departmentRead?: { query: <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }>; now?: () => Date }
 }
 
 function selectedBinding(input: ResolveTurnScopeInput): {
@@ -320,6 +325,7 @@ async function resolveScope(
           input.assistant.teamScopeMode === 'all' ? null : input.assistant.compartments,
         )
 
+
   // The legacy fused resolver returns the empty grant for non-members. That is
   // a valid external-client projection, so the typed membership refusal is
   // reserved for assigned-Team resolution where membership is authority.
@@ -379,6 +385,17 @@ async function resolveScope(
     activeProject = { id: project.id, name: project.name, status: project.status }
   }
 
+  // Permission model v2: the membership read above also reports the
+  // workspace's v2 flag. For a flagged workspace the read grant is computed
+  // from edges and base clearance alone (resolveDepartmentGrant) and decides
+  // every read; the legacy-shaped ceilings stay on `access` only as the
+  // compatibility envelope persisted by workflow authority and authority
+  // leases, until Phases 3-5 move those to the grant.
+  const flagged = oldCeilings as { departmentReadV2?: boolean; departmentQuery?: <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }> }
+  const departmentRead = flagged.departmentReadV2
+    ? await resolveDepartmentGrant(input, workspaceId, binding.groupId, deps.departmentRead
+      ?? { query: flagged.departmentQuery ?? systemQuery as <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }> })
+    : undefined
   return applyProjection({
     access: {
       workspaceId,
@@ -390,6 +407,7 @@ async function resolveScope(
       mutationCompartments,
       projectIds: effectiveProjectIds,
       systemRead: input.systemRead,
+      ...(departmentRead ? { departmentRead } : {}),
     },
     activeGroupId: activeTeam?.id ?? null,
     activeProjectId: activeProject?.id ?? null,
@@ -404,6 +422,38 @@ async function resolveScope(
     activeTeam,
     activeProject,
   })
+}
+
+/**
+ * Permission model v2 read grant (workspace flag on): edges and base clearance
+ * only, through the reference predicate. No role universe, read bundle, read
+ * grant, manager, access or classification mode, Team scope mode or readiness
+ * constant is an input. The bound department is ctx.department; an issued
+ * anonymous surface acts as (issuer, A) capped at A's clearance (K3); an
+ * external principal is anonymous.
+ */
+async function resolveDepartmentGrant(
+  input: ResolveTurnScopeInput,
+  workspaceId: string,
+  contextDepartment: string | null,
+  deps: NonNullable<ResolveTurnScopeDeps['departmentRead']>,
+): Promise<DepartmentReadGrant> {
+  const external = input.memberMode === 'external'
+  // resolveScope already refused an assistant from another workspace, so an
+  // id with no assistant row here is a member-only probe (access inspection
+  // passes the member's own id): no assistant acts, identity in min().
+  const acting = (await deps.query<{ id: string }>('SELECT id FROM assistants WHERE id = $1 AND workspace_id = $2',
+    [input.assistant.id, workspaceId])).rows.length > 0
+  const read = {
+    workspaceId,
+    userId: input.userId,
+    assistantId: acting ? input.assistant.id : null,
+    contextDepartment,
+    credential: input.memberMode === 'assistant' ? { cap: input.assistant.clearance, binding: null } : null,
+  }
+  const loaded = await loadDepartmentSnapshot(deps.query, read)
+  const principal = external ? { kind: 'anonymous' as const, id: 'anonymous' } : loaded.principal
+  return resolveDepartmentReadGrant(loaded.snapshot, principal, read, deps.now?.() ?? new Date())
 }
 
 /** Trusted prompt fact; empty for a legacy company-wide turn. */

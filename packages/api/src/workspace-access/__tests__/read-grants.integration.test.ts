@@ -16,12 +16,14 @@ import { createEntity,updateEntity } from '../../db/entities-store.js'
 import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 const pool=getPool()
 async function fixture(){
   const workspaceId=randomUUID(),owner=randomUUID(),member=randomUUID(),other=randomUUID()
   for(const id of [owner,member,other])await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
-  await pool.query(`INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Access fixture',$2)`,[workspaceId,owner])
+  await pool.query(`INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Access fixture',$2,false)`,[workspaceId,owner])
   for(const id of [owner,member,other])await pool.query(`INSERT INTO workspace_members(workspace_id,user_id,role,team_scope_mode) VALUES($1,$2,$3,'assigned')`,[workspaceId,id,id===owner?'owner':'member'])
   const groups=createDbWorkspaceGroupStore()
   const finance=await groups.createTeam(owner,workspaceId,{name:'Finance',key:'finance'})
@@ -92,6 +94,25 @@ describe('[COMP:api/workspace-access] database read grants and immutable authori
     const source=(await pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,memory.id])).rows[0].source
     const derived=await runWithAgentAccess(pinAccessCeiling(scope.access),()=>createMemory({workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.member,createdByUserId:f.member,summary:'Protected derived explanation',sensitivity:'public',compartments:[],derivation:{producer:'fixture:read-grant',sources:[source]}}))
     expect(derived).toMatchObject({compartments:[f.finance.compartmentKey],sensitivity:'internal'})
+  })
+  it.each(['departments','simple'])('preserves protected read-grant derivation without granting mutation in ready %s',async mode=>{
+    const f=await fixture()
+    const memory=await createMemory({workspaceId:f.workspaceId,assistantId:f.assistantId,userId:null,createdByUserId:f.owner,summary:'Read-only source',sensitivity:'internal',compartments:[f.finance.compartmentKey!]})
+    const grant=await f.grant()
+    await pool.query("UPDATE workspace_access_policies SET setup_state='ready',access_mode=$2,default_department_id=$3 WHERE workspace_id=$1",[f.workspaceId,mode,f.research.id])
+    const scope=await resolveTurnScopeSystem(f.input)
+    const source=(await pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,memory.id])).rows[0].source
+    const create=(extra:string[]=[])=>runWithAgentAccess(pinAccessCeiling(scope.access),()=>createMemory({
+      workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.member,createdByUserId:f.member,summary:'Protected derivative',
+      sensitivity:'public',compartments:extra,derivation:{producer:'ready-read-grant',sources:[source]},
+    }))
+    expect(await create()).toMatchObject({compartments:[f.finance.compartmentKey],sensitivity:'internal'})
+    await expect(create([f.delivery.compartmentKey!])).rejects.toMatchObject({code:mode==='simple'?'access_mode_destination_conflict':'context_not_available'})
+    await expect(runWithAgentAccess(pinAccessCeiling(scope.access),()=>createMemory({workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.member,createdByUserId:f.member,summary:'Direct source edit intent',sensitivity:'internal',compartments:[f.finance.compartmentKey!]}))).rejects.toMatchObject({code:'context_not_available'})
+    await pool.query('UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1',[grant.id,f.owner])
+    await expect(create()).rejects.toMatchObject({code:'context_not_available'})
+    expect((await pool.query('SELECT count(*)::int n FROM memories WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(2)
+    expect((await pool.query('SELECT summary FROM memories WHERE id=$1',[memory.id])).rows[0].summary).toBe('Read-only source')
   })
   it('keeps read grants read-only through real Memory HTTP actions',async()=>{
     const f=await fixture()

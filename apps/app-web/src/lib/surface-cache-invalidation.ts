@@ -129,6 +129,8 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         // brand voice created from chat reaches the Feed gate too.
         `feed-workspace:${workspaceId}`,
       ];
+    case "brian:organization-changed":
+      return [`workspace-access:${workspaceId}:`, `organization:${workspaceId}:`, `scope-review:${workspaceId}:`];
     case WORKSPACE_IDENTITY_REFRESH_EVENT:
       // `workspace_config`: the workspace's name / role projection, which the
       // Feed shell's record carries (name, role, canDraft) - report E's
@@ -187,6 +189,7 @@ export const SURFACE_CACHE_SPINE_EVENTS: readonly string[] = [
   HOME_APPS_REFRESH_EVENT,
   GOAL_REFRESH_EVENT,
   WORKSPACE_IDENTITY_REFRESH_EVENT,
+  "brian:organization-changed",
 ];
 
 /**
@@ -215,7 +218,7 @@ export function applySpineEventToSurfaceCache(
     invalidateSurfaceCache(`office-artifact:${workspaceId}:`);
     invalidateSurfaceCache(`office-snapshot:${workspaceId}:`);
   }
-  if (event === WORKSPACE_IDENTITY_REFRESH_EVENT) {
+  if (event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed") {
     // Authority changes purge even an unmounted directory/access surface.
     invalidateSurfaceCache(`organization:${workspaceId}:`);
     invalidateSurfaceCache(`workspace-access:${workspaceId}:`);

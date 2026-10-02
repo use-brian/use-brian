@@ -1,3 +1,5 @@
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { admitEntityLinkCreate } from '../workspace-access/entity-link-create-admission.js'
 import type {
   AccessContext,
   EdgeType,
@@ -10,7 +12,7 @@ import type {
 import type { Sensitivity } from '@use-brian/core'
 import type pg from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
-import { queryWithRLS } from './client.js'
+import { queryWithRLS, getAppPool, applyRLSGucs } from './client.js'
 
 /**
  * `entity_links` store. Schema spec:
@@ -136,6 +138,19 @@ export async function createEntityLink(
   params: EntityLinkCreateParams,
   transactionClient?: pg.PoolClient,
 ): Promise<EntityLinkRecord> {
+  if (!transactionClient) {
+    const client = await getAppPool().connect()
+    try {
+      await client.query('BEGIN')
+      await applyRLSGucs(client, actorUserId)
+      const link = await createEntityLink(actorUserId, params, client)
+      await client.query('COMMIT')
+      return link
+    } catch (error) { await client.query('ROLLBACK'); throw error }
+    finally { client.release() }
+  }
+  const admission = await admitEntityLinkCreate(transactionClient, actorUserId, params)
+  params = admission.params
   const run = transactionClient
     ? transactionClient.query.bind(transactionClient)
     : <T extends pg.QueryResultRow>(sql: string, values: unknown[]) => queryWithRLS<T>(actorUserId, sql, values)
@@ -167,6 +182,9 @@ export async function createEntityLink(
        ON CONFLICT (workspace_id, source_kind, source_id, target_kind, target_id, edge_type)
          WHERE valid_to IS NULL AND retracted_at IS NULL
          DO UPDATE SET
+           ${admission.ready ? `user_id = EXCLUDED.user_id,
+           assistant_id = EXCLUDED.assistant_id,
+           sensitivity = EXCLUDED.sensitivity,` : ''}
            compartments = ARRAY(
              SELECT DISTINCT unnest(entity_links.compartments || EXCLUDED.compartments)
              ORDER BY 1
@@ -175,6 +193,13 @@ export async function createEntityLink(
              SELECT DISTINCT unnest(entity_links.project_ids || EXCLUDED.project_ids)
              ORDER BY 1
            )
+         ${admission.ready ? `WHERE NOT entity_links.scope_held
+           AND (entity_links.user_id IS NULL OR entity_links.user_id = EXCLUDED.user_id)
+           AND (entity_links.assistant_id IS NULL OR entity_links.assistant_id = EXCLUDED.assistant_id)
+           AND entity_links.compartments <@ EXCLUDED.compartments
+           AND entity_links.project_ids <@ EXCLUDED.project_ids
+           AND array_position(ARRAY['public','internal','confidential'],entity_links.sensitivity)
+             <= array_position(ARRAY['public','internal','confidential'],EXCLUDED.sensitivity)` : ''}
        RETURNING ${FULL_SELECT}`,
       [
         params.sourceKind,
@@ -196,6 +221,7 @@ export async function createEntityLink(
       ],
     )
     if (result.rows[0]) return toLink(result.rows[0])
+    if (admission.ready) throw new WorkspaceAccessError('context_not_available', 404)
 
     const existing = await run<EntityLinkRow>(
       `SELECT ${FULL_SELECT} FROM entity_links

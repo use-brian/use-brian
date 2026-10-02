@@ -4,6 +4,8 @@ import type { AccessContext, EntityCreateParams, CrmOperationsContext } from '@u
 import { getAppPool, getPool } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import {
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
   createEntity,
   updateEntity,
   supersedeEntity,
@@ -27,7 +29,7 @@ const pool = getPool()
 async function fixture() {
   const workspaceId = randomUUID(), userId = randomUUID(), assistantId = randomUUID(), projectId = randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [userId])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Entity mutation fixture',$2)", [workspaceId, userId])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Entity mutation fixture',$2,false)", [workspaceId, userId])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, userId])
   await pool.query("UPDATE workspace_members SET clearance='confidential' WHERE workspace_id=$1 AND user_id=$2", [workspaceId,userId])
   await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind) VALUES($1,'Fixture assistant',$2,$3,'standard')", [assistantId, workspaceId, userId])

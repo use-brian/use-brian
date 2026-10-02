@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 /**
  * Microsoft Teams webhook route — the Bot Framework messaging endpoint.
@@ -112,7 +113,7 @@ export type MsTeamsRouteOptions = {
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
    *  ride content blocks with no reference, as before. */
   fileStore?: import('@use-brian/core').FileStore
-  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   workflowStore?: import('@use-brian/core').WorkflowStore
@@ -203,9 +204,9 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
     }
 
     try {
-      // 4. Channel must be active + chat-enabled.
+      // 4. Require an active channel. Chat capability is gated after workflow dispatch.
       const channel = await getChannelForWebhook(channelId)
-      if (!channel || channel.status !== 'active' || !channel.enabledCapabilities.includes('chat')) {
+      if (!channel || channel.status !== 'active') {
         return
       }
 
@@ -222,6 +223,27 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         botId,
         config: cfg,
       })
+      // Normalize independently of mention gating, including attachment-only
+      // messages. Keep the conversational adapter and its gates unchanged.
+      const eventIncoming = createMsTeamsAdapter({
+        appId: creds.app_id, appPassword: creds.app_password,
+        tenantId: creds.tenant_id, serviceUrl, botId,
+        config: { ...cfg, requireMention: false, preserveMentionOnly: true },
+      }).parseIncoming(req.body)
+      if (eventIncoming && msteamsUserAllowed(cfg, eventIncoming.userId)) {
+        await dispatchIncomingMessageEvent({
+          workspaceId: channel.workspaceId, integrationId: integration.id,
+          // Adapters use milliseconds; the workflow envelope expects seconds.
+          incoming: {
+            ...eventIncoming, timestamp: eventIncoming.timestamp / 1000, channelType: 'msteams',
+            mentions: [...new Set<string>((req.body.entities ?? [])
+              .filter((entity: { type?: string }) => entity.type === 'mention')
+              .map((entity: { mentioned?: { id?: string } }) => entity.mentioned?.id)
+              .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0))],
+          },
+        })
+      }
+      if (!channel.enabledCapabilities.includes('chat')) return
       const incoming = adapter.parseIncoming(req.body)
       if (!incoming) return
 

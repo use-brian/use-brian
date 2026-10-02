@@ -2,6 +2,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import type { AccessContext } from '@use-brian/core'
 import pg from 'pg'
 
+const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+await assertLocalFixture()
+
 function ctxOf(userId: string, workspaceId: string, assistantId: string = userId): AccessContext {
   return { workspaceId, userId, assistantId, assistantKind: 'standard', clearance: 'confidential' }
 }
@@ -9,15 +12,13 @@ function ctxOf(userId: string, workspaceId: string, assistantId: string = userId
 /**
  * Integration test for createDbEpisodesStore + the episodes schema
  * defined in migration 129 (company-brain WU-3.1). Requires a local
- * PostgreSQL database named `sidanclaw` with that migration applied.
- * Skips silently when the DB is unavailable or the migration hasn't
- * been applied yet.
+ * disposable PostgreSQL fixture with the current migrations applied.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {
@@ -34,7 +35,8 @@ async function canConnect(): Promise<boolean> {
 }
 
 const ok = await canConnect()
-const describeIf = ok ? describe : describe.skip
+if (!ok) throw new Error('Disposable episode fixture unavailable')
+const describeIf = describe
 
 afterAll(async () => {
   if (pool) await pool.end()
@@ -83,7 +85,6 @@ describeIf('[COMP:brain/episodes-store] episodes store (integration)', () => {
   >
 
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     const mod = await import('../episodes-store.js')
     store = mod.createDbEpisodesStore()
   })

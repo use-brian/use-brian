@@ -191,8 +191,6 @@ export type DeliveryOutcome =
 export type DeliveryAudienceDenialDetail =
   /** No approval covers this conversation and the output was not public. */
   | 'unbound'
-  /** A personal-group approval exists but membership could not be proven now. */
-  | 'personal_group_unverified'
   /** An approval exists but the output needs more than it grants (e.g. personal context). */
   | 'evidence_exceeds_audience'
 

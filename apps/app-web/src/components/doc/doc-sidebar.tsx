@@ -151,6 +151,14 @@ import { LiveActiveBadge } from "@/components/live/live-active-badge";
 import { useLiveRoster } from "@/components/live/use-live-roster";
 import { summarizeRosterItems } from "@/lib/live-roster";
 
+/**
+ * Height of the workspace status row: 28px plus the bottom safe-area inset.
+ * Shared by the slot this sidebar reserves and by the overlay
+ * `WorkspaceChrome` lays over it, so the two halves cannot drift.
+ */
+export const WORKSPACE_STATUS_ROW_HEIGHT_CLASS =
+  "h-[calc(1.75rem+env(safe-area-inset-bottom))]";
+
 export type SidebarMove = ContextAwareReparentMove;
 
 /** Section-collapse localStorage key (per workspace) — the section analog of
@@ -1011,6 +1019,17 @@ export function DocSidebar(props: Props) {
       <div className="border-t border-sidebar-border px-2 py-1.5">
         <PalettePicker />
       </div>
+
+      {/* Reserved row for the workspace status overlay (sync label + intake
+          chip). `WorkspaceChrome` pins that overlay to the bottom-left corner
+          at this sidebar's width, so while the sidebar is open the label reads
+          as its last row; collapsed, this slot leaves with the sidebar and the
+          label floats over the surface. Empty on purpose. */}
+      <div
+        data-doc-sidebar-status-slot
+        aria-hidden
+        className={`shrink-0 border-t border-sidebar-border ${WORKSPACE_STATUS_ROW_HEIGHT_CLASS}`}
+      />
     </aside>
   );
 }

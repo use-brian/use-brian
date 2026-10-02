@@ -75,22 +75,15 @@ export async function detectAndResolveNags(params: {
     return { resolved: 0, jobIds: [] }
   }
 
+  const jobIds: string[] = []
   for (const job of resolved) {
-    // Clear activeNag.
-    await jobStore.setState(job.id, {})
-
-    // Rewind the parent's `next_run_at` to the normal schedule. Without
-    // this, the executor's most recent `now + nagIntervalMins * 60_000`
-    // override stays on the row and the parent re-fires on that interval
-    // forever (re-opening activeNag and looping). The same-day `once`
-    // follow-up row cancel UPDATE we used to issue here is gone with the
-    // collapsed-chain model — there are no follow-up rows to cancel.
-    const nextRunAt = computeNextRun(job.schedule, job.timezone)
-    await jobStore.update(job.id, { nextRunAt })
+    const observedNag = job.state.activeNag
+    // No job-ID-only fallback: a newer fire may have replaced the cycle
+    // since listActiveNagsForUser, and unrelated failure state must survive.
+    if (observedNag && await jobStore.resolveActiveNag?.(
+      job.id, userId, observedNag, computeNextRun(job.schedule, job.timezone),
+    )) jobIds.push(job.id)
   }
 
-  return {
-    resolved: resolved.length,
-    jobIds: resolved.map((j) => j.id),
-  }
+  return { resolved: jobIds.length, jobIds }
 }

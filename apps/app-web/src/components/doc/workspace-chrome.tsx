@@ -86,7 +86,7 @@ import {
   desktopTitlebarInsetCssPx,
   resolveDesktopZoomFactor,
 } from "@/lib/desktop-titlebar";
-import { DocSidebar } from "./doc-sidebar";
+import { DocSidebar, WORKSPACE_STATUS_ROW_HEIGHT_CLASS } from "./doc-sidebar";
 import { InboxPanel } from "./inbox-panel";
 import { WorkspaceFileDropBoundary } from "./workspace-file-drop";
 import { BrainIntakeTray } from "@/components/chrome/brain-intake-tray";
@@ -846,12 +846,30 @@ export function WorkspaceChrome({
           </div>
         )}
       </div>
-      {/* Reserved app chrome: sync changes never cover or resize the editor.
-          The brain-intake chip + tray share the row but sit OUTSIDE the sync
-          live region, so an upload tick never re-announces the sync sentence. */}
+      {/* Workspace status row. Contained in the LEFT SIDEBAR, not a full-width
+          bar: this overlay is pinned to the bottom-left corner at the sidebar's
+          width and paints nothing of its own, so over the slot the sidebar
+          reserves (`data-doc-sidebar-status-slot`) it reads as the sidebar's
+          last row, and once the sidebar collapses (or the phone drawer closes)
+          the same label floats over the surface with no background. One node
+          for every sidebar state: it never moves or remounts, so the intake
+          tray keeps its state and the live region is not re-announced. Only
+          its children take pointer events. The brain-intake chip + tray share
+          the row but sit OUTSIDE the sync live region, so an upload tick never
+          re-announces the sync sentence. */}
       <div
         data-workspace-footer
-        className="relative flex h-[calc(1.75rem+env(safe-area-inset-bottom))] shrink-0 items-center gap-2 border-t border-sidebar-border bg-sidebar py-0 pl-3 pr-20 pb-[env(safe-area-inset-bottom)] text-[11px]"
+        className={cn(
+          "pointer-events-none absolute bottom-0 left-0 flex w-64 max-w-full items-center gap-2 py-0 pl-3 pr-2 pb-[env(safe-area-inset-bottom)] text-[11px] [&>*]:pointer-events-auto",
+          WORKSPACE_STATUS_ROW_HEIGHT_CLASS,
+          // The sidebar wrapper is a `z-40` layer in BOTH layouts: a fixed drawer
+          // on a phone, and a flex item on desktop (flex items honor z-index
+          // even when `static`). Rise above it whenever the sidebar is showing,
+          // or its surface paints over the label. While the label floats, stay
+          // unlayered, below the fixed phone toolbars and the chat button.
+          sidebarOpen && "z-40",
+          !sidebarCollapsed && "md:z-40",
+        )}
       >
         <div
           data-workspace-sync-status
@@ -860,7 +878,7 @@ export function WorkspaceChrome({
           aria-atomic="true"
           title={syncDescription || syncTitle}
           className={cn(
-            "flex min-w-0 shrink items-center gap-2",
+            "relative z-10 flex min-w-0 shrink items-center gap-2",
             hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
           )}
         >
@@ -869,8 +887,8 @@ export function WorkspaceChrome({
           ) : (
             <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
           )}
-          <span className="shrink-0 font-medium">{syncTitle}</span>
-          {syncDescription ? <span className="sr-only min-w-0 opacity-80 md:not-sr-only md:truncate">{syncDescription}</span> : null}
+          <span className="min-w-0 truncate font-medium">{syncTitle}</span>
+          {syncDescription ? <span className="sr-only">{syncDescription}</span> : null}
         </div>
         <BrainIntakeTray workspaceId={workspaceId} />
       </div>

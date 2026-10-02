@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ToolContext } from '@use-brian/core'
 import { createOrganizationTools, createWorkspaceAccessTools } from '../tools.js'
 import { WorkspaceAccessError } from '../policy.js'
+import { SCOPE_REVIEW_KINDS, sourceAdapter } from '../scope-review-registry.js'
 
 const mocks=vi.hoisted(()=>({read:vi.fn(),write:vi.fn(),orgPrepare:vi.fn(),access:vi.fn(),history:vi.fn(),selectedRequest:vi.fn(),prepare:vi.fn(),command:vi.fn(),scopeInventory:vi.fn(),scopeReview:vi.fn(),scopeCommand:vi.fn()}))
 vi.mock('../../db/org-chart-store.js',()=>({getOrganizationChart:mocks.read,executeOrganizationCommand:mocks.write,OrganizationError:class extends Error{constructor(readonly code:string,readonly status:number){super(code)}}}))
@@ -110,6 +111,17 @@ describe('[COMP:api/workspace-access] native operation parity',()=>{
 })
 
 describe('[COMP:api/workspace-scope-review] attended tool parity',()=>{
+  it('lets Brian inspect every registered family without inventing new classification actions',async()=>{
+    const inspect=createWorkspaceAccessTools().find(tool=>tool.name==='inspectScopeReview')!
+    for(const kind of SCOPE_REVIEW_KINDS){
+      expect(inspect.inputSchema.safeParse({kind}).success).toBe(true)
+      await inspect.execute({kind},context)
+      expect(mocks.scopeInventory).toHaveBeenLastCalledWith('workspace','verified-member',kind,undefined,undefined,undefined)
+    }
+    expect(inspect.inputSchema.safeParse({kind:'unknown_table'}).success).toBe(false)
+    expect(sourceAdapter('session_message').actions).toEqual(['hold'])
+    expect(sourceAdapter('office_artifact').actions).toEqual(['confirm_general','hold'])
+  })
   it.each(['scope_review_impact_too_large','scope_review_impact_missing'])('explains recovery for %s without recommending a blind retry',async(code)=>{
     const manage=createWorkspaceAccessTools().find(tool=>tool.name==='manageScopeReview')!
     mocks.scopeCommand.mockRejectedValueOnce(new WorkspaceAccessError(code,409))

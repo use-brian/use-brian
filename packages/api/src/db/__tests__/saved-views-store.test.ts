@@ -7,10 +7,18 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../client.js', () => ({
-  query: vi.fn(),
-  queryWithRLS: vi.fn(),
-}))
+vi.mock('../client.js', () => {
+  const queryWithRLS = vi.fn()
+  let actor: string
+  const client = { query: (sql: string, values?: unknown[]) => {
+    if (sql.includes('current_setting')) return Promise.resolve({ rows: [{ value: 'false' }] })
+    if (/^(BEGIN|COMMIT|ROLLBACK|SELECT id FROM workspaces)/.test(sql)
+      || sql.includes('set_config') || sql.includes('FROM workspace_access_policies')) return Promise.resolve({ rows: [] })
+    return queryWithRLS(actor, sql, values)
+  } }
+  return { query: vi.fn(), queryWithRLS, getAppPool: () => ({ connect: async () => client }),
+    applyRLSGucs: async (_client: unknown, userId: string) => { actor = userId }, rollbackAndRelease: vi.fn() }
+})
 
 import { createDbSavedViewStore, getPageTreeNeighborhood } from '../saved-views-store.js'
 import { query, queryWithRLS } from '../client.js'
@@ -123,12 +131,12 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
     // /views/draft route defers), the teamspace tri-state pair — explicit flag
     // ($15, false = let the SQL CASE inherit/default) + teamspace id ($16,
     // null), born state ($17), and the Project tri-state pair ($18/$19).
-    expect(params[params.length - 3]).toBe('draft')
-    expect(params[params.length - 4]).toBeNull()
-    expect(params[params.length - 5]).toBe(false)
-    expect(params[params.length - 6]).toBe(false)
-    expect(params[params.length - 7]).toBeNull()
-    const when = params[params.length - 8] as Date
+    expect(params[16]).toBe('draft')
+    expect(params[15]).toBeNull()
+    expect(params[14]).toBe(false)
+    expect(params[13]).toBe(false)
+    expect(params[12]).toBeNull()
+    const when = params[11] as Date
     expect(when.getTime() - now.getTime()).toBe(30 * 24 * 60 * 60 * 1000)
     vi.useRealTimers()
   })
@@ -156,9 +164,9 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
       state: 'saved',
     })
     const [, , params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(params[params.length - 3]).toBe('saved')
+    expect(params[16]).toBe('saved')
     // auto_prune_at ($12) — null, not a date 30 days out.
-    expect(params[params.length - 8]).toBeNull()
+    expect(params[11]).toBeNull()
   })
 
   it('an explicit autoPruneDays cannot re-arm the prune on a born-saved row', async () => {
@@ -181,7 +189,7 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
       autoPruneDays: 1,
     })
     const [, , params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(params[params.length - 8]).toBeNull()
+    expect(params[11]).toBeNull()
   })
 
   it('respects custom autoPruneDays', async () => {
@@ -219,7 +227,7 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
     // Trailing params: auto_prune_at ($12), anchor_key ($13),
     // created_event_pending ($14), teamspace pair ($15/$16), state ($17),
     // and Project pair ($18/$19).
-    const when = params[params.length - 8] as Date
+    const when = params[11] as Date
     expect(when.getTime() - now.getTime()).toBe(24 * 60 * 60 * 1000)
     vi.useRealTimers()
   })
@@ -246,7 +254,7 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
     expect(sql).toContain('anchor_key')
     // anchor_key is $13 — ahead of created_event_pending ($14), the
     // teamspace pair ($15/$16), born state ($17), and Project pair ($18/$19).
-    expect(params[params.length - 7]).toBe('wf-1:s1')
+    expect(params[12]).toBe('wf-1:s1')
   })
 
   it('threads an explicit teamspace placement to the trailing param pair (mig 313)', async () => {
@@ -273,8 +281,8 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
     const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(sql).toContain('teamspace_id')
     // The pair sits at $15/$16, ahead of state and the Project pair.
-    expect(params[params.length - 5]).toBe(true)
-    expect(params[params.length - 4]).toBeNull()
+    expect(params[14]).toBe(true)
+    expect(params[15]).toBeNull()
   })
 
   it('findIdByAnchorKey resolves a page id by (workspace, anchor_key), RLS-scoped (mig 279)', async () => {
@@ -579,7 +587,7 @@ describe('[COMP:api/saved-views-store] page-lifecycle emit (writtenBy → isSyst
     // teamspace pair $15/$16, state, and Project pair).
     const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(sql).toContain('created_event_pending')
-    expect(params[params.length - 6]).toBe(true)
+    expect(params[13]).toBe(true)
   })
 
   it('commitCreatedEvent emits `created` once when it wins the flip', async () => {
@@ -689,7 +697,7 @@ describe('[COMP:api/saved-views-store] idempotent offline creation', () => {
     const [user, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(user).toBe(USER_ID)
     expect(sql).toContain('ON CONFLICT (id) DO NOTHING')
-    expect(params[19]).toBe(VIEW_ID)
+    expect(params[20]).toBe(VIEW_ID)
   })
   it('returns the existing page without overwriting edits or emitting creation again', async () => {
     const emit = vi.fn()

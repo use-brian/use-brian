@@ -17,12 +17,27 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../client.js', () => ({
   query: vi.fn(),
+  getPool: vi.fn(),
+  getAppPool: vi.fn(),
+  applyRLSGucs: vi.fn(async () => {}),
+}))
+// A workspace-visible session is created in an admitted transaction
+// (session-create-admission); its admission is covered by its own suite.
+vi.mock('../../workspace-access/session-create-admission.js', () => ({
+  admitSessionCreate: vi.fn(async (_client: unknown, params: unknown) => params),
+  admitPersonalWebSession: vi.fn(),
 }))
 
-import { query } from '../client.js'
+import { getPool, query } from '../client.js'
 import { findOrCreateSession, findSessionById, findSessionByChannel } from '../sessions.js'
 
 const mockQuery = vi.mocked(query)
+// The transaction client routes statements through the same mock, minus control statements.
+const txClient = {
+  query: (sql: string, values?: unknown[]) => /^(BEGIN|COMMIT|ROLLBACK)/.test(sql) ? Promise.resolve({ rows: [] }) : mockQuery(sql as never, values as never),
+  release: vi.fn(),
+}
+const insertCall = () => mockQuery.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO sessions')) as [string, unknown[]]
 
 const A = '00000000-0000-0000-0000-0000000000a1'
 const U = '00000000-0000-0000-0000-0000000000a2'
@@ -54,13 +69,15 @@ function row(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(getPool).mockReturnValue({ connect: async () => txClient } as never)
 })
 
 describe('[COMP:api/session-visibility] Session visibility dimension', () => {
   const WS = '00000000-0000-0000-0000-0000000000a3'
 
   it('findOrCreateSession persists visibility=workspace + workspace_id when asked', async () => {
-    mockQuery.mockResolvedValue({ rows: [row({ visibility: 'workspace' })] } as never)
+    // No session to resume, so the admitted transaction inserts one.
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never).mockResolvedValue({ rows: [row({ visibility: 'workspace' })] } as never)
 
     const session = await findOrCreateSession({
       assistantId: A,
@@ -72,8 +89,8 @@ describe('[COMP:api/session-visibility] Session visibility dimension', () => {
       effectiveClearance: 'confidential',
     })
 
-    expect(mockQuery).toHaveBeenCalledTimes(1)
-    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(mockQuery).toHaveBeenCalledTimes(2)
+    const [sql, params] = insertCall()
     // visibility is the 7th INSERT param, workspace_id the 8th, and
     // effective_clearance the 9th (all RLS-support; migrations 223–224).
     expect(sql).toContain('visibility')
@@ -103,7 +120,7 @@ describe('[COMP:api/session-visibility] Session visibility dimension', () => {
   })
 
   it('the ON CONFLICT branch does not overwrite visibility', async () => {
-    mockQuery.mockResolvedValue({ rows: [row()] } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never).mockResolvedValue({ rows: [row()] } as never)
     await findOrCreateSession({
       assistantId: A,
       userId: U,
@@ -111,7 +128,7 @@ describe('[COMP:api/session-visibility] Session visibility dimension', () => {
       channelId: 'c-1',
       visibility: 'workspace',
     })
-    const [sql] = mockQuery.mock.calls[0] as [string]
+    const [sql] = insertCall()
     // Inspect only the DO UPDATE SET clause (between DO UPDATE and RETURNING):
     // it touches last_active_at only — never visibility. (RETURNING does
     // project visibility, which is why we don't slice the whole tail.)

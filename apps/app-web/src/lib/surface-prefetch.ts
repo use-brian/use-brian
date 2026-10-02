@@ -81,8 +81,8 @@ export function workspaceAccessCacheKey(workspaceId: string, userId: string): st
   return `workspace-access:${workspaceId}:${userId}`;
 }
 
-export function scopeReviewCacheKey(workspaceId:string,userId:string,kind:string,after:string,reviewId:string,reviewAfter:string=''):string {
-  return `scope-review:${workspaceId}:${userId}:${kind}:${after}:${reviewId}:${reviewAfter}`;
+export function scopeReviewCacheKey(workspaceId:string,userId:string,kind:string,after:string,reviewId:string,reviewAfter:string='',includeClassified=false):string {
+  return `scope-review:${workspaceId}:${userId}:${kind}:${after}:${reviewId}:${reviewAfter}${includeClassified?':classified':''}`;
 }
 
 export function organizationCacheKey(workspaceId: string, userId: string): string {
@@ -1022,3 +1022,18 @@ export function pageDirectoryCacheKey(workspaceId: string, viewerId: string): st
 export function tokenUsageCacheKey(workspaceId: string): string {
   return `token-usage:models:${workspaceId}${viewerSuffix()}`;
 }
+
+/** Shares the access authority invalidation family, scoped to the shell viewer. */
+export function workspaceAccessModeCacheKey(workspaceId:string,userId:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:mode`;
+}
+
+export function workspaceAccessMigrationCacheKey(workspaceId:string,userId:string,kind:'list'|'plan',cursor=''):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:migration:${kind}:${cursor}`;
+}
+
+export function workspaceCreationContextCacheKey(workspaceId:string,userId:string):string {return `${workspaceAccessCacheKey(workspaceId,userId)}:creation-context`;}
+
+export function connectorSetupCacheKey(workspaceId:string,userId:string,setupId:string):string{return `${workspaceAccessCacheKey(workspaceId,userId)}:connector-setup:${setupId}`;}
+
+export function connectorReconnectCacheKey(workspaceId:string,userId:string,instanceId:string):string{return `${workspaceAccessCacheKey(workspaceId,userId)}:connector-reconnect:${instanceId}`;}

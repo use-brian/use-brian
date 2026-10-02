@@ -1,9 +1,13 @@
+import { z } from 'zod'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { webChatSourcesHandler, WEB_CHAT_SOURCE_SQL, type WebChatSourceSession } from './_web-chat-sources.js'
+import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { findFeedThreadDraft } from '../content-planning/collaboration-service.js'
 import { getFeedCollaboration } from '../db/feed-collaboration-store.js'
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
 import { mayAssistantAnswerInRoom, DOC_DOCK_RESUME_ROW } from './_room-binding.js'
 import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
@@ -245,6 +249,17 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   const setSessionTyping = opts.setSessionTyping ?? noopSetSessionTyping
   const getSessionPresence = opts.getSessionPresence ?? emptySessionPresence
   const router = Router()
+
+  // Register before /:id routes. Explicit JWT required; no local default user.
+  router.get('/incoming-event-sources', webChatSourcesHandler({
+    isWorkspaceMember: async (userId, workspaceId) =>
+      !!await getWorkspaceRoleSystem(userId, workspaceId),
+    listCandidates: async (workspaceId) =>
+      (await query<WebChatSourceSession>(WEB_CHAT_SOURCE_SQL, [workspaceId])).rows,
+    canReadSession: async (userId, session) =>
+      !!await getUserAssistant(userId, session.assistantId) &&
+      !(await gateSessionRead(userId, session)),
+  }))
 
   router.get('/', async (req, res) => {
     try {
@@ -515,17 +530,42 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
    * assistant's clearance, so a shared chat can never be more readable than
    * the assistant it runs on.
    */
+  // Explicit authenticated personal chat creation/resumption. This route is
+  // mounted by the production session router; proof never comes from JSON.
+  router.post('/personal', async (req, res) => {
+    if (!req.userId || !req.authSessionId || req.authVersion === undefined) return void res.status(401).json({ error: 'authenticated_session_required' })
+    const parsed = z.object({
+      assistantId: z.string().uuid(), workspaceId: z.string().uuid(), channelId: z.string().uuid(),
+      contextGroupId: z.string().uuid().nullable().optional(), contextProjectId: z.string().uuid().nullable().optional(),
+      expectedPolicyRevision: z.string().regex(/^\d+$/).optional(),
+    }).strict().safeParse(req.body)
+    if (!parsed.success) return void res.status(400).json({ error: 'invalid_personal_session_request' })
+    try {
+      const session = await createPersonalWebSession({ ...parsed.data, userId: req.userId, channelType: 'web', appOrigin: 'chat' },
+        { actorUserId: req.userId, authSessionId: req.authSessionId, authVersion: req.authVersion })
+      res.status(201).json({ session })
+    } catch (error) {
+      if (error instanceof WorkspaceAccessError) return void res.status(error.status).json({ error: error.code })
+      if (error instanceof ContextNotAvailableError) return void res.status(404).json({ error: error.code })
+      throw error
+    }
+  })
+
   router.post('/workspace', async (req, res) => {
     try {
       const jwtUserId = (req as { userId?: string }).userId
       const user = await resolveUser(jwtUserId)
       if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
 
-      const { workspaceId, assistantId, contextGroupId, contextProjectId } = req.body as {
+      const { workspaceId, assistantId, contextGroupId, contextProjectId, expectedPolicyRevision } = req.body as {
         workspaceId?: string
         assistantId?: string
         contextGroupId?: string | null
         contextProjectId?: string | null
+        expectedPolicyRevision?: string
+      }
+      if (expectedPolicyRevision !== undefined && typeof expectedPolicyRevision !== 'string') {
+        res.status(400).json({ error: 'invalid_policy_revision' }); return
       }
       if (!workspaceId) {
         res.status(400).json({ error: 'Missing workspaceId' })
@@ -598,6 +638,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const session = await createWorkspaceChatSession({
         assistantId: assistant.id,
         starterUserId: user.id,
+        ...(jwtUserId ? { authenticatedHuman: true as const } : {}),
+        ...(expectedPolicyRevision !== undefined ? { expectedPolicyRevision } : {}),
         workspaceId,
         effectiveClearance: scopedAssistant?.clearance ?? null,
         ...(contextGroupId !== undefined ? { contextGroupId } : {}),
@@ -616,6 +658,15 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         contextProjectId: session.contextProjectId,
       })
     } catch (err) {
+      if (['40001', '40P01'].includes((err as { code?: string }).code ?? '')) {
+        res.status(409).json({ error: 'access_policy_conflict' }); return
+      }
+      if (err instanceof WorkspaceAccessError) {
+        res.status(err.status).json({ error: err.code }); return
+      }
+      if (err instanceof ContextNotAvailableError) {
+        res.status(404).json({ error: err.code }); return
+      }
       console.error('Workspace session create error:', err)
       res.status(500).json({ error: 'Failed to start a workspace chat' })
     }
@@ -1188,6 +1239,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         replyToText,
         senderUserId: user.id,
         scope: messageScope,
+      })
+      dispatchPersistedWebInput({
+        workspaceId, session, userId: user.id, stored, text,
       })
       publishSessionEvent({
         kind: 'user_message_saved',

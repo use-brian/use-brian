@@ -1,6 +1,6 @@
 "use client";
 
-/** Module controls inside Association; read-only state in assistant settings. [COMP:app-web/association] */
+/** Module controls inside Association; a one-line read-only note in assistant settings. [COMP:app-web/association] */
 import Link from "next/link";
 import { useState } from "react";
 import type { WorkspaceModuleAction } from "@use-brian/shared";
@@ -18,13 +18,23 @@ export function useAssociationModule(workspaceId: string) {
     () => getAssociationModuleSnapshot(workspaceId));
 }
 
-export function AssociationModuleControls({ workspaceId, readOnly = false }: { workspaceId: string; readOnly?: boolean }) {
+/** Read-only module state for the assistant's Association tool grants; never the admin panel. */
+export function AssociationModuleNote({ workspaceId }: { workspaceId: string }) {
+  const t = useT().associationPage;
+  const { data, error } = useAssociationModule(workspaceId);
+  if (!data && !error) return null;
+  return <p className="text-xs text-muted-foreground" data-association-module-note>
+    {data ? `${t.moduleStateLabel}: ${t.states[data.module.state]}. ${t.savedPermissions}` : t.loadFailed}
+  </p>;
+}
+
+export function AssociationModuleControls({ workspaceId }: { workspaceId: string }) {
   const t = useT().associationPage;
   const { data, error, refresh } = useAssociationModule(workspaceId);
   const [pending, setPending] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   async function act(action: WorkspaceModuleAction) {
-    if (!data?.canManage || error || pending || readOnly) return;
+    if (!data?.canManage || error || pending) return;
     const expectedVersion = data.module.version;
     const descriptions = { enable: t.enableConfirm, request_disable: t.disableConfirm, finish_disable: t.finishConfirm };
     const labels = { enable: t.enable, request_disable: t.disable, finish_disable: t.finish };
@@ -44,17 +54,17 @@ export function AssociationModuleControls({ workspaceId, readOnly = false }: { w
   }
   return <section className="my-4 space-y-3 rounded-xl border border-border p-4" data-association-module>
     <h2 className="font-semibold">{t.moduleTitle}</h2>
-    <p className="text-sm text-muted-foreground">{readOnly ? t.savedPermissions : t.moduleDescription}</p>
+    <p className="text-sm text-muted-foreground">{t.moduleDescription}</p>
     {!data && !error && <ListSurfaceSkeleton rows={2} />}
     {data && <>
       <p role="status" className="text-sm font-medium">{t.states[data.module.state]}</p>
       <p className="text-sm text-muted-foreground">{t.stateDescriptions[data.module.state]}</p>
-      {!readOnly && data.canManage && <div className="flex flex-wrap gap-2">
+      {data.canManage && <div className="flex flex-wrap gap-2">
         {data.module.state === "disabled" && <Button className="min-h-11" disabled={pending || !!error} onClick={() => void act("enable")}>{t.enable}</Button>}
         {data.module.state === "enabled" && <Button className="min-h-11" variant="outline" disabled={pending || !!error} onClick={() => void act("request_disable")}>{t.disable}</Button>}
         {data.module.state === "draining" && <Button className="min-h-11" variant="outline" disabled={pending || !!error} onClick={() => void act("finish_disable")}>{t.finish}</Button>}
       </div>}
-      {!readOnly && !data.canManage && <p className="text-sm text-muted-foreground">{t.ownerOnly}</p>}
+      {!data.canManage && <p className="text-sm text-muted-foreground">{t.ownerOnly}</p>}
       <Link className="inline-flex min-h-11 items-center text-sm text-primary underline" href={`/w/${workspaceId}/association?section=orders`}>{t.history}</Link>
     </>}
     {(error || saveError) && <p role="alert" className="text-sm text-destructive">{saveError ?? t.loadFailed}</p>}

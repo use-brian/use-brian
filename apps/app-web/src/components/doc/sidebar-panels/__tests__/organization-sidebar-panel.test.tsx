@@ -5,6 +5,7 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 
 const navigation = vi.hoisted(() => ({ query: "" }));
+vi.mock("@/components/context/mode-aware-context",()=>({useWorkspaceAccessMode:()=>({data:undefined})}));
 vi.mock("next/navigation", () => ({ useSearchParams: () => new URLSearchParams(navigation.query) }));
 vi.mock("next/link", () => ({
   default: ({ href, children, ...props }: { href: string; children: React.ReactNode } & React.AnchorHTMLAttributes<HTMLAnchorElement>) => <a href={href} {...props}>{children}</a>,

@@ -18,6 +18,7 @@ import { SurfaceSkeletonFor } from '@/components/chrome/surface-skeleton';
 import { History, RefreshCw, ScanSearch } from 'lucide-react';
 import { OrganizationTopbarActions, organizationTopbarActionCls } from '@/components/organization/organization-chrome';
 import { ScopeReviewPanel } from './scope-review';
+import {MigrationProgressPanel} from './migration-progress';
 import {AccessExplanationPanel,AccessEventsPanel} from './access-inspection';
 
 const fieldClass='min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
@@ -66,6 +67,7 @@ function WorkspaceAccessPanel({selection,embedded}:{selection?:AccessSelection;e
   // The Access section's own actions ride the Organization top bar; embedded
   // person/department panels keep their Refresh beside the data it reloads.
   return <main className={historyVisible?'min-w-0 space-y-6':embedded?'min-w-0 space-y-5':'min-w-0 space-y-5 pt-6'}>{header}
+    {historyVisible&&data.canAdminister?<MigrationProgressPanel/>:null}
     {data.readiness?.ready!==true?<p role="status" className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.notReady}</p>:null}
     {historyVisible?<OrganizationTopbarActions>
       {data.canAdminister?<button type="button" aria-label={t.reviewData} title={t.reviewData} onClick={()=>setReviewOpen(true)} className={organizationTopbarActionCls}><ScanSearch aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.reviewData}</span></button>:null}

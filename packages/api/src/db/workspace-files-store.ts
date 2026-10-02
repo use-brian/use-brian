@@ -1,4 +1,6 @@
-import type { WorkspaceFilesStore } from '@use-brian/core'
+import { readFileSessionBinding, type FileSessionBinding } from '../workspace-access/file-publication-admission.js'
+import { applyRLSGucs, getAppPool, rollbackAndRelease } from './client.js'
+import type { WorkspaceFilesStore, DerivedWriteEvidence, WorkspaceFileCreateInput, AccessContext, WorkspaceFile } from '@use-brian/core'
 import {
   createWorkspaceFile,
   getWorkspaceFileById,
@@ -26,8 +28,28 @@ import {
  * layer of defense. `supersede` runs both writes on a single connection
  * with RLS engaged for the duration of the transaction.
  */
-export function createDbWorkspaceFilesStore(): WorkspaceFilesStore {
+export type DerivedWorkspaceFilesStore = WorkspaceFilesStore & {
+  prepareSessionOwned(userId: string, workspaceId: string, path: string, access?: AccessContext): Promise<FileSessionBinding>
+  createSessionOwned(userId: string, input: WorkspaceFileCreateInput, binding: FileSessionBinding, access?: AccessContext): Promise<WorkspaceFile>
+  finalizeUpload(userId: string, input: WorkspaceFileCreateInput, uploadId: string, access?: AccessContext): Promise<WorkspaceFile>
+  createDerived(userId: string, input: WorkspaceFileCreateInput, evidence: DerivedWriteEvidence, access?: AccessContext): Promise<WorkspaceFile>
+}
+
+export function createDbWorkspaceFilesStore(): DerivedWorkspaceFilesStore {
   return {
+    async prepareSessionOwned(userId,workspaceId,path,access) {
+      const client=await getAppPool().connect()
+      try {
+        await client.query('BEGIN'); await applyRLSGucs(client,userId)
+        const binding=await readFileSessionBinding(client,userId,workspaceId,path,access)
+        await client.query('COMMIT'); return binding
+      } finally { await rollbackAndRelease(client) }
+    },
+    createSessionOwned(userId,input,binding,access) { return createWorkspaceFile(userId,input,{access,sessionBinding:binding}) },
+    finalizeUpload(userId,input,uploadId,access) { return createWorkspaceFile(userId,input,{access,uploadId}) },
+    createDerived(userId, input, evidence, access) {
+      return createWorkspaceFile(userId, input, { access, derivation: evidence })
+    },
     create(userId, input, access) {
       return createWorkspaceFile(userId, input, { access })
     },

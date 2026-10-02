@@ -24,9 +24,34 @@ import { query, getPool } from '../client.js'
 const mockQuery = vi.mocked(query)
 const mockGetPool = vi.mocked(getPool)
 
+/**
+ * createMemory/updateMemory run in a transaction that first resolves the
+ * workspace and its admission policy. This client answers those steps as a
+ * legacy workspace and forwards every other statement to `query`, so the
+ * INSERT assertions below read `mockQuery.mock.calls[0]` as before.
+ */
+function adm(sql: string): { rows: unknown[]; rowCount: number } | undefined {
+  if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return { rows: [], rowCount: 0 }
+  if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: null }], rowCount: 1 }
+  if (sql.includes('set_config(') || sql.includes('FROM workspaces WHERE id=$1 FOR UPDATE')) return { rows: [], rowCount: 0 }
+  if (sql.includes('FROM workspace_access_policies')) return { rows: [], rowCount: 0 }
+  return undefined
+}
+function forwardingClient() {
+  return {
+    query: vi.fn(async (sql: string, params?: unknown[]) => {
+      if (adm(sql)) return adm(sql)
+      if (sql.startsWith('SELECT workspace_id AS "workspaceId",kind FROM assistants')) return { rows: [{ workspaceId: 'w_1', kind: 'standard' }], rowCount: 1 }
+      return mockQuery(sql as never, params as never)
+    }),
+    release: vi.fn(),
+  }
+}
+
 beforeEach(() => {
   mockQuery.mockReset()
   mockGetPool.mockReset()
+  mockGetPool.mockReturnValue({ connect: vi.fn(async () => forwardingClient()) } as never)
 })
 
 describe('[COMP:api/memory-store] createMemory', () => {
@@ -195,7 +220,10 @@ describe('[COMP:api/memory-store] updateMemory access scoping', () => {
       query: vi.fn(async (sql: string, params?: unknown[]) => {
         calls.push([sql, params])
         if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return undefined
-        if (sql.includes('FOR UPDATE')) return { rows: lockRows, rowCount: lockRows.length }
+        // The row exists; whether the viewer may lock it is the lock SELECT's call.
+        if (sql.startsWith('SELECT workspace_id AS "workspaceId" FROM memories WHERE id=$1')) return { rows: [{ workspaceId: 'w_1' }], rowCount: 1 }
+        if (adm(sql)) return adm(sql)
+        if (sql.includes('FROM memories') && sql.includes('FOR UPDATE')) return { rows: lockRows, rowCount: lockRows.length }
         return { rows: [], rowCount: 0 }
       }),
       release: vi.fn(),
@@ -216,7 +244,7 @@ describe('[COMP:api/memory-store] updateMemory access scoping', () => {
     const calls = makeClient([]) // no row visible to the viewer → returns null
     const result = await updateMemory('11111111-1111-1111-1111-111111111111', { summary: 'x' }, ctx)
     expect(result).toBeNull()
-    const lock = calls.find((c) => (c[0] as string).includes('FOR UPDATE'))!
+    const lock = calls.find((c) => (c[0] as string).includes('FROM memories') && (c[0] as string).includes('FOR UPDATE'))!
     // The bare form is `WHERE id = $1 AND valid_to IS NULL FOR UPDATE`; the
     // scoped form inserts the projection between valid_to and FOR UPDATE and
     // appends the ctx params after the id.
@@ -228,10 +256,11 @@ describe('[COMP:api/memory-store] updateMemory access scoping', () => {
   it('runs unscoped (system path) when no access is passed', async () => {
     const calls = makeClient([])
     await updateMemory('11111111-1111-1111-1111-111111111111', { summary: 'x' })
-    const lock = calls.find((c) => (c[0] as string).includes('FOR UPDATE'))!
-    expect(lock[0]).toContain('WHERE id = $1 AND valid_to IS NULL')
+    const lock = calls.find((c) => (c[0] as string).includes('FROM memories') && (c[0] as string).includes('FOR UPDATE'))!
+    // The lock is pinned to the workspace the row was discovered in, never widened by a predicate.
+    expect(lock[0]).toContain('WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL')
     expect(lock[0]).toMatch(/valid_to IS NULL\s+FOR UPDATE/)
-    expect(lock[1]).toEqual(['11111111-1111-1111-1111-111111111111'])
+    expect(lock[1]).toEqual(['11111111-1111-1111-1111-111111111111', 'w_1'])
   })
 })
 

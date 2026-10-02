@@ -524,6 +524,7 @@ async function fakeKeyStore(
     async updateCaptureBinding() {
       return false
     },
+    async rotate() { return null },
     async touchLastUsedAt() {
       /* noop */
     },

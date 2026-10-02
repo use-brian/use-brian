@@ -7,6 +7,7 @@
  * with a fake FilesApi without pulling pg or @google-cloud/storage.
  */
 
+import type { DerivedWriteEvidence } from '../security/derived-scope.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type {
   FileSensitivity,
@@ -16,6 +17,8 @@ import type {
 } from './types.js'
 
 export type FilesContext = {
+  /** Per-call trusted source snapshots from the executing tool accumulator. Never a transport field. */
+  derivation?: DerivedWriteEvidence
   workspaceId: string
   userId: string
   assistantId?: string | null

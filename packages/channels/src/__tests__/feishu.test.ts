@@ -13,6 +13,7 @@ function makeApi() {
   return {
     send: vi.fn<FeishuApi['send']>(async () => ({ messageId: `om_${++nextId}` })),
     editMessage: vi.fn<FeishuApi['editMessage']>(async () => {}),
+    editPost: vi.fn<FeishuApi['editPost']>(async () => {}),
     updateCard: vi.fn<FeishuApi['updateCard']>(async () => {}),
     recallMessage: vi.fn<FeishuApi['recallMessage']>(async () => {}),
     addReaction: vi.fn<FeishuApi['addReaction']>(async () => 'reaction_1'),
@@ -206,27 +207,46 @@ describe('[COMP:channels/feishu] outbound delivery', () => {
     expect(api.send.mock.calls[0][2]).toMatchObject({ replyTo: 'om_trigger' })
   })
 
-  it('refuses to flatten Markdown into Feishu plain-text edits', async () => {
+  it('edits Markdown as a rich-text post and keeps overflow rich-text', async () => {
     const api = makeApi()
     const adapter = createFeishuAdapter({ api })
 
-    await expect(adapter.editMessage('oc_chat', 'om_status', {
-      text: '**Formatted answer**',
+    await adapter.editMessage('oc_chat', 'om_status', {
+      text: `**Formatted answer**\n${'x'.repeat(4000)}`,
       format: 'markdown',
-    })).rejects.toThrow('rich-text posts')
+    }, { threadTs: 'om_trigger' })
+    expect(api.editPost).toHaveBeenCalledTimes(1)
+    expect(api.editPost.mock.calls[0][0]).toBe('om_status')
+    expect(api.send.mock.calls[0][1]).toHaveProperty('markdown')
     expect(api.editMessage).not.toHaveBeenCalled()
-    expect(api.send).not.toHaveBeenCalled()
   })
 
-  it('uses editable status, recall, delete, and reactions', async () => {
+  it('sends an action card without repeating an already edited answer', async () => {
+    const api = makeApi()
+    const adapter = createFeishuAdapter({ api })
+
+    await adapter.sendMessage('oc_chat', {
+      text: '',
+      actions: [{ id: 'allow', label: 'Allow', data: 'mcp_confirm:example:allow' }],
+    }, { threadTs: 'om_trigger' })
+
+    expect(api.send).toHaveBeenCalledOnce()
+    expect((api.send.mock.calls[0][1] as { card: { elements: object[] } }).card.elements)
+      .toContainEqual(expect.objectContaining({
+        tag: 'action',
+        actions: [expect.objectContaining({ value: { data: 'mcp_confirm:example:allow' } })],
+      }))
+    expect(api.send.mock.calls[0][2]).toMatchObject({ replyTo: 'om_trigger' })
+  })
+
+  it('uses rich-text status without recalling it, while retaining explicit delete and reactions', async () => {
     const api = makeApi()
     const adapter = createFeishuAdapter({ api })
     await expect(adapter.sendStatus('oc_chat', 'Thinking...', { threadTs: 'om_1' }))
       .resolves.toBe('om_1')
-    await adapter.clearStatus?.('oc_chat', { messageId: 'om_status' })
     await adapter.deleteMessage?.('oc_chat', 'om_delete')
     await adapter.reactToMessage?.('oc_chat', 'om_1', '👀')
-    expect(api.recallMessage).toHaveBeenCalledWith('om_status')
+    expect(api.send.mock.calls[0][1]).toEqual({ markdown: 'Thinking...' })
     expect(api.recallMessage).toHaveBeenCalledWith('om_delete')
     expect(api.addReaction).toHaveBeenCalledWith('om_1', 'EYES')
   })

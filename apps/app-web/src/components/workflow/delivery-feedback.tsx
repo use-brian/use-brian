@@ -47,9 +47,8 @@ export function DeliveryOutcomeFeedback({ output, workspaceId }: { output: unkno
   const unverified = valid && status === "skipped" && outcome.reason === "delivery_audience_unverified";
   // Only known, coarse policy codes select copy. Never render raw server detail.
   const audienceMessage = unverified && outcome.detail === "unbound" ? copy.unbound
-    : unverified && outcome.detail === "personal_group_unverified" ? copy.personalGroupUnverified
-      : unverified && outcome.detail === "evidence_exceeds_audience" ? copy.evidenceExceedsAudience
-        : copy.unverified;
+    : unverified && outcome.detail === "evidence_exceeds_audience" ? copy.evidenceExceedsAudience
+      : copy.unverified;
   return (
     <div className={cn("rounded-md border p-3 text-sm", {
       "border-green-500/40 bg-green-500/5": status === "delivered",

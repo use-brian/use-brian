@@ -23,7 +23,10 @@ function fakeFactory(response: unknown = {
       buffer: Buffer.from('hello'),
       contentType: 'text/plain',
     })),
-    rawClient: { request: vi.fn(async () => response) },
+    rawClient: {
+      request: vi.fn(async () => response),
+      im: { v1: { message: { update: vi.fn(async () => ({ code: 0, msg: 'ok' })) } } },
+    },
   }
   const factory = vi.fn(() => channel) as unknown as FeishuChannelFactory
   return { factory, channel }
@@ -61,7 +64,40 @@ describe('[COMP:channels/feishu] official SDK client', () => {
     })
   })
 
-  it('forwards edits, cards, recall, reactions, message lookup, and resource downloads', async () => {
+  it('sends rich-text edits through the typed message update API', async () => {
+    const { factory, channel } = fakeFactory()
+    const api = createFeishuApi({ appId: 'cli', appSecret: 's', brand: 'feishu' }, factory)
+
+    await api.editPost('om_status', '**Formatted answer**')
+
+    expect(channel.rawClient.im.v1.message.update).toHaveBeenCalledWith({
+      path: { message_id: 'om_status' },
+      data: {
+        msg_type: 'post',
+        content: JSON.stringify({
+          zh_cn: { title: '', content: [[{ tag: 'md', text: '**Formatted answer**' }]] },
+        }),
+      },
+    })
+  })
+
+  it('surfaces a rejected rich-text edit as a sanitized provider error', async () => {
+    const { factory, channel } = fakeFactory()
+    channel.rawClient.im.v1.message.update.mockResolvedValueOnce({
+      code: 230001,
+      msg: 'Message cannot be edited',
+    })
+    const api = createFeishuApi({ appId: 'cli', appSecret: 's', brand: 'feishu' }, factory)
+
+    await expect(api.editPost('om_status', '**Answer**')).rejects.toMatchObject({
+      name: 'FeishuApiError',
+      operation: 'edit_post',
+      providerCode: 230001,
+      message: 'Message cannot be edited',
+    })
+  })
+
+  it('forwards plain edits, cards, recall, reactions, message lookup, and resource downloads', async () => {
     const { factory, channel } = fakeFactory()
     const api = createFeishuApi({ appId: 'cli', appSecret: 's', brand: 'feishu' }, factory)
     await api.editMessage('om_1', 'updated')

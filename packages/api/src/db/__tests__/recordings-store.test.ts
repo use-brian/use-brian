@@ -58,22 +58,9 @@ beforeEach(() => {
 })
 
 describe('[COMP:recordings/recordings-store] create', () => {
-  it('writes on the owner pool and is idempotent on the anchor id', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [ROW] } as never)
-    await createRecording({
-      id: 'rec-1',
-      workspaceId: 'ws-1',
-      mime: 'audio/mp4',
-      gcsKey: 'ws-1/recordings/f1',
-      assistantId: 'a-1',
-      createdByUserId: 'u-1',
-    })
-    const [sql, values] = mockQuery.mock.calls[0]!
-    // Idempotent: a retried upload-url for the same Episode must not 23505.
-    expect(sql).toMatch(/ON CONFLICT \(id\) DO UPDATE/)
-    expect(values![0]).toBe('rec-1')
-    // The route did the membership check; the worker has no user context.
-    expect(mockRls).not.toHaveBeenCalled()
+  it('rejects missing per-call provenance without an owner-pool escape', async () => {
+    await expect(createRecording({ id: 'rec-1', workspaceId: 'ws-1', mime: 'audio/mp4', gcsKey: 'key', assistantId: 'a-1', createdByUserId: 'u-1' })).rejects.toThrow('recording_intake_provenance_required')
+    expect(mockQuery).not.toHaveBeenCalled()
   })
 
   it('BIGINT columns come back from pg as strings and are normalized to numbers', async () => {

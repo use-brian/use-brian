@@ -12,7 +12,8 @@
  * Component tag: [COMP:api/connector-instance-store].
  */
 
-import { query, queryWithRLS } from './client.js'
+import { query, queryWithRLS, getPool } from './client.js'
+import { refreshShopifyInstanceCredentials } from '../connectors/shopify-rotation.js'
 import { encryptCredentials, decryptCredentials } from './credential-crypto.js'
 import type { ChannelCredentials } from './channel-integrations.js'
 import {
@@ -280,6 +281,8 @@ export type ConnectorInstanceStore = {
    * correct here — a background worker holds no session user.
    */
   updateCredentialsSystem(id: string, credentials: ConnectorCredentials | OAuthCredentials): Promise<void>
+  /** Internal verified provider rotation; no caller-supplied credential/proof. */
+  refreshShopifyCredentialsSystem?(id: string): Promise<ConnectorCredentials | null>
 
   /**
    * Record connector liveness with no acting user (migration 294). Called at
@@ -702,6 +705,10 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
         [id, JSON.stringify(mailboxSync), expectedRequestedAt],
       )
       return (result.rowCount ?? 0) > 0
+    },
+
+    async refreshShopifyCredentialsSystem(id) {
+      return refreshShopifyInstanceCredentials(getPool(), requireKey(encryptionKey, 'rotate Shopify credentials'), id)
     },
 
     async updateCredentialsSystem(id, credentials) {

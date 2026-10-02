@@ -1,3 +1,4 @@
+import { withExternalKeyActor } from '../db/external-key-admission.js'
 /**
  * Brain key management routes — the Settings ▸ Programmatic access surface.
  *
@@ -141,15 +142,15 @@ export function brainKeysRoutes(opts: Options): Router {
           return
         }
       }
-      const created = await opts.brainKeyStore.create({
+      const created = await withExternalKeyActor(req.userId!, req.authSessionId, () => opts.brainKeyStore.create({
         workspaceId,
         name: parsed.data.name,
         scope: parsed.data.scope,
         maxClearance: parsed.data.maxClearance ?? null,
-        contextGroupId,
-        contextProjectId,
+        contextGroupId: parsed.data.contextGroupId,
+        contextProjectId: parsed.data.contextProjectId,
         actingUserId: req.userId!,
-      })
+      }))
       // `key` (plaintext) is returned ONLY here — never again.
       res.json({
         id: created.id,
@@ -174,8 +175,33 @@ export function brainKeysRoutes(opts: Options): Router {
         })
         return
       }
+      if ((err as Error).message.startsWith('external_key_')) {
+        res.status(409).json({ error: 'external_key_admission_required' }); return
+      }
       console.error('[brain-keys] create failed:', err)
       res.status(500).json({ error: 'Failed to create brain key' })
+    }
+  })
+
+  router.post('/:keyId/rotate', async (req, res) => {
+    const workspaceId = await gate(req, res)
+    if (!workspaceId) return
+    const keyId = typeof req.params.keyId === 'string' ? req.params.keyId : ''
+    if (!UUID_RE.test(keyId) || !z.object({}).strict().safeParse(req.body ?? {}).success) {
+      res.status(400).json({ error: 'Invalid input' }); return
+    }
+    try {
+      const created = await withExternalKeyActor(req.userId!, req.authSessionId,
+        () => opts.brainKeyStore.rotate(req.userId!, workspaceId, keyId))
+      if (!created) { res.status(404).json({ error: 'Brain key not found' }); return }
+      const { plaintext, ...row } = created
+      res.json({ ...row, key: plaintext })
+    } catch (err) {
+      if ((err as Error).message.startsWith('external_key_')) {
+        res.status(409).json({ error: 'external_key_admission_required' }); return
+      }
+      console.error('[brain-keys] rotation failed:', err)
+      res.status(500).json({ error: 'Failed to rotate brain key' })
     }
   })
 

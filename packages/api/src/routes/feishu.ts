@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 import { resolveChannelQuestion } from './channel-questions.js'
 /**
@@ -587,6 +588,8 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     if (!integration) return
     const eventMessage = workflowEventMessage(value)
     if (!eventMessage) return
+    const config = (integration.config ?? {}) as ChannelIntegrationConfig
+    if (!feishuUserAllowed(config, eventMessage.senderId)) return
     if (!actionData && !workflowCallback && !await claimChannelEvent(channelRowId, eventMessage.messageId)) return
 
     await persistFeishuSeenChat(
@@ -602,7 +605,6 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     if (!channel.enabledCapabilities.includes('chat')) return
     const credentials = integration.credentials as FeishuCredentials
     const api = createFeishuApi(credentialsForApi(credentials))
-    const config = (integration.config ?? {}) as ChannelIntegrationConfig
     const replyInThread = config.replyInThread ?? true
     const adapter = createFeishuAdapter({
       api,
@@ -765,21 +767,32 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       else await withChatLock(`feishu:${targetSession}`, run)
     })
     } finally {
-      if (options.workflowEventDispatcher && !actionData && !workflowCallback) {
+      if (!actionData && !workflowCallback && eventMessage.senderId !== integration.botUserId) {
         const mentionIds = eventMessage.mentions
           .map((mention) => mention.openId ?? mention.userId ?? mention.key)
           .filter((id): id is string => typeof id === 'string' && id.length > 0)
-        await options.workflowEventDispatcher.dispatch({
+        await dispatchIncomingMessageEvent({
           workspaceId: channel.workspaceId,
-          source: {
-            type: 'channel',
-            channelIntegrationId: integration.id,
-            channel: 'feishu',
+          integrationId: integration.id,
+          incoming: {
+            channelType: 'feishu',
+            userId: eventMessage.senderId,
+            channelId: eventMessage.chatId,
+            messageId: eventMessage.messageId,
+            threadId: eventMessage.threadId,
+            replyToMessageId: eventMessage.replyToMessageId,
+            files: eventMessage.resources.map(resource => ({
+              url: '',
+              name: resource.fileName ?? resource.type,
+              mimeType: resource.type === 'file' ? 'application/octet-stream'
+                : resource.type === 'sticker' ? 'image/*' : `${resource.type}/*`,
+            })),
+            text: eventMessage.content,
+            mentions: mentionIds,
+            isGroupChat: eventMessage.chatType === 'group',
+            timestamp: eventMessage.createTime / 1000,
+            raw: value,
           },
-          text: eventMessage.content || null,
-          actorId: eventMessage.senderId,
-          channelId: eventMessage.chatId,
-          mentions: mentionIds,
           isBot: eventMessage.senderIsBot === true || eventMessage.senderType === 'bot',
           payload: {
             text: eventMessage.content,
@@ -790,9 +803,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             user: eventMessage.senderId,
             is_bot: eventMessage.senderIsBot === true || eventMessage.senderType === 'bot',
           },
-        }).catch((error) => {
-          console.error('[feishu] workflow event dispatch failed:', error)
-        })
+        }, options.workflowEventDispatcher)
       }
       if (options.feishuWebhookIngestor && !actionData && !workflowCallback) {
         await dispatchFeishuIngest({
@@ -983,6 +994,8 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     // carried by the adapter so replies still land in the existing topic.
     const replyTarget = incoming.messageId
     let statusMessageId: string | undefined
+    let fallbackReplySent = false
+    let pendingConfirmation = false
     let lastStatusUpdate = 0
     const timeline: Array<{ id: string; name: string; description?: string; done: boolean }> = []
 
@@ -1011,11 +1024,25 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             replyTarget ? { threadTs: replyTarget } : undefined,
           )
         } else {
-          await adapter.editMessage(incoming.channelId, statusMessageId, { text })
+          await adapter.editMessage(incoming.channelId, statusMessageId, {
+            text,
+            format: 'markdown',
+          })
         }
       } catch {
         // Progress is best-effort; the final send remains authoritative.
       }
+    }
+
+    async function replaceStatus(text: string): Promise<string | undefined> {
+      if (!statusMessageId) return undefined
+      const messageId = statusMessageId
+      await adapter.editMessage(incoming.channelId, messageId, {
+        text,
+        format: 'markdown',
+      }, replyTarget ? { threadTs: replyTarget } : undefined)
+      statusMessageId = undefined
+      return messageId
     }
 
     await processChannelMessage({
@@ -1115,28 +1142,42 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
         async onConfirmationRequired(request) {
           const messageId = await adapter.sendMessage(incoming.channelId, confirmationMessage(request), replyTarget ? { threadTs: replyTarget } : undefined)
           channelConfirmations.bindMessage(params.scope, request.toolCallId, messageId)
+          pendingConfirmation = true
+          if (statusMessageId) {
+            await adapter.editMessage(incoming.channelId, statusMessageId, {
+              text: 'Waiting for your decision below.',
+              format: 'markdown',
+            }).catch(() => {})
+          }
         },
         async sendResponse(text, documents, _question, actions) {
           const reply = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
             || (documents?.length || actions?.length ? '' : "I couldn't generate a reply. Please rephrase or try again.")
-          // The SDK's editMessage path always writes msg_type=text. Replacing
-          // the status with Markdown would therefore expose markers such as
-          // **bold** instead of rendering a Feishu rich-text post. Keep the
-          // status visible until the rich send succeeds so a provider failure
-          // cannot make the turn disappear entirely.
-          const progressMessageId = statusMessageId
+          const replyOptions = replyTarget ? { threadTs: replyTarget } : undefined
+          const statusAnswer = reply || (actions?.length
+            ? 'Choose an option below.'
+            : 'Attachments follow below.')
+          let editedMessageId: string | undefined
+          if (statusMessageId) {
+            // Status was sent as a rich-text post, so the first answer can
+            // replace it without leaving Feishu's recalled-message tombstone.
+            editedMessageId = await replaceStatus(statusAnswer).catch(() => undefined)
+          }
+          if (editedMessageId) {
+            if (documents?.length || actions?.length) {
+              await adapter.sendMessage(incoming.channelId, {
+                text: '', documents, actions,
+              }, replyOptions)
+            }
+            return { channelMessageId: editedMessageId }
+          }
           const channelMessageId = await adapter.sendMessage(
             incoming.channelId,
             { text: reply, format: 'markdown', documents, actions },
-            replyTarget ? { threadTs: replyTarget } : undefined,
+            replyOptions,
           )
-          if (progressMessageId) {
-            await adapter.clearStatus?.(
-              incoming.channelId,
-              { messageId: progressMessageId },
-            ).catch(() => {})
-            if (statusMessageId === progressMessageId) statusMessageId = undefined
-          }
+          fallbackReplySent = true
+          await replaceStatus('Response sent below.').catch(() => {})
           return { channelMessageId }
         },
         async onDowngraded(resetsAt) {
@@ -1147,20 +1188,23 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           return null
         },
         async sendError(error) {
-          if (statusMessageId) {
-            await adapter.clearStatus?.(incoming.channelId, { messageId: statusMessageId }).catch(() => {})
-            statusMessageId = undefined
-          }
+          const errorText = channelUserErrorText(error)
+          if (await replaceStatus(errorText).catch(() => undefined)) return
           await adapter.sendMessage(
             incoming.channelId,
-            { text: channelUserErrorText(error) },
+            { text: errorText },
             replyTarget ? { threadTs: replyTarget } : undefined,
           )
+          fallbackReplySent = true
         },
         async onCleanup() {
           if (statusMessageId) {
-            await adapter.clearStatus?.(incoming.channelId, { messageId: statusMessageId }).catch(() => {})
-            statusMessageId = undefined
+            const text = pendingConfirmation
+              ? 'Waiting for your decision below.'
+              : fallbackReplySent
+                ? 'Response sent below.'
+                : "I couldn't complete this reply. Please try again."
+            await replaceStatus(text).catch(() => {})
           }
         },
       },

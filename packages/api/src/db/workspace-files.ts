@@ -1,6 +1,8 @@
+import { admitSessionFile, admitUploadedFile, readFileSessionBinding, type FileSessionBinding } from '../workspace-access/file-publication-admission.js'
 import { randomUUID } from 'node:crypto'
 import type {
   AccessContext,
+  DerivedWriteEvidence,
   EntityLinksStore,
   FileSensitivity,
   WorkspaceFile,
@@ -16,6 +18,10 @@ import { assertAuthorshipPresent } from './authorship-guard.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 import { emitDocumentedByEdges } from './edge-hooks.js'
+import { admitDerivedFile } from '../workspace-access/file-derived-admission.js'
+import { admitFileCreate } from '../workspace-access/file-create-admission.js'
+import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
+import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
 
 const FULL_SELECT = `
   id, workspace_id as "workspaceId", path, parent_path as "parentPath",
@@ -198,6 +204,12 @@ export async function createWorkspaceFile(
   input: WorkspaceFileCreateInput,
   opts: {
     access?: AccessContext
+    /** Optional admission preview fence; checked under the workspace lock. */
+    expectedPolicyRevision?: string
+    /** Trusted canonical snapshots from this call, never HTTP/model input. */
+    derivation?: DerivedWriteEvidence
+    sessionBinding?: FileSessionBinding
+    uploadId?: string
     entityLinks?: EntityLinksStore
     /** Entity ids this file documents — each gets a `documented_by`
      *  edge (WU-1.7). Optional; empty/absent means no edge emission. */
@@ -206,8 +218,10 @@ export async function createWorkspaceFile(
     commitSha?: string
   } = {},
 ): Promise<WorkspaceFile> {
+  // An owner/author on the input is not a substitute for the executing actor.
+  if (!userId) throw Object.assign(new Error('File creation requires an executing actor.'), { code: 'file_admission_provenance_required' })
   const access = fileMutationAccess(userId, input.workspaceId, opts.access)
-  assertExecutionResourceScope({ workspaceId: input.workspaceId,
+  if (!opts.derivation) assertExecutionResourceScope({ workspaceId: input.workspaceId,
     userId: input.userId ?? null, assistantId: input.assistantId ?? null,
     sensitivity: input.sensitivity ?? 'internal', compartments: input.compartments ?? [],
     projectIds: input.projectIds ?? [] }, 'mutation', access)
@@ -217,60 +231,95 @@ export async function createWorkspaceFile(
   // insert if it would land NULL — mig 128 leaves the column nullable
   // for legacy rows, so the guard, not the schema, enforces.
   assertAuthorshipPresent('createWorkspaceFile', input.createdByUserId)
-  // When the caller supplies an id (the files-api does, so the GCS key
-  // and DB row share the same uuid), use it; otherwise let the DB
-  // default `gen_random_uuid()` fire.
-  const cols: string[] = [
-    'workspace_id', 'path', 'parent_path', 'name', 'title', 'summary',
-    'mime', 'size_bytes', 'tags', 'related_ids', 'storage_uri',
-    'sensitivity', 'metadata',
-    'user_id', 'assistant_id', 'source', 'source_episode_id',
-    'created_by_user_id', 'created_by_assistant_id', 'compartments', 'project_ids',
-  ]
-  const values: unknown[] = [
-    input.workspaceId,
-    input.path,
-    input.parentPath,
-    input.name,
-    input.title ?? null,
-    input.summary ?? null,
-    input.mime,
-    input.sizeBytes,
-    input.tags ?? [],
-    input.relatedIds ?? [],
-    input.storageUri,
-    input.sensitivity ?? 'internal',
-    JSON.stringify(input.metadata ?? {}),
-    input.userId ?? null,
-    input.assistantId ?? null,
-    input.source ?? 'user',
-    input.sourceEpisodeId ?? null,
-    input.createdByUserId,
-    input.createdByAssistantId ?? null,
-    input.compartments ?? [],
-    input.projectIds ?? [],
-  ]
-  if (input.id) {
-    cols.unshift('id')
-    values.unshift(input.id)
+  const client = await getAppPool().connect()
+  let file: WorkspaceFile
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, userId)
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[input.workspaceId])
+    input = opts.sessionBinding ? await admitSessionFile(client,userId,input,opts.sessionBinding,access)
+      : opts.uploadId ? await admitUploadedFile(client,userId,input,opts.uploadId,access)
+      : opts.derivation
+      ? await admitDerivedFile(client, userId, input, opts.derivation, access, opts.expectedPolicyRevision)
+      : await admitFileCreate(client, userId, input, opts.expectedPolicyRevision)
+    // Recheck the resolved destination, not only the caller's pre-default labels.
+    if (!opts.derivation) assertExecutionResourceScope({ workspaceId: input.workspaceId,
+      userId: input.userId ?? null, assistantId: input.assistantId ?? null,
+      sensitivity: input.sensitivity ?? 'internal', compartments: input.compartments ?? [],
+      projectIds: input.projectIds ?? [] }, 'mutation', access)
+    // When the caller supplies an id (the files-api does, so the GCS key
+    // and DB row share the same uuid), use it; otherwise let the DB
+    // default `gen_random_uuid()` fire.
+    const cols: string[] = [
+      'workspace_id', 'path', 'parent_path', 'name', 'title', 'summary',
+      'mime', 'size_bytes', 'tags', 'related_ids', 'storage_uri',
+      'sensitivity', 'metadata',
+      'user_id', 'assistant_id', 'source', 'source_episode_id',
+      'created_by_user_id', 'created_by_assistant_id', 'compartments', 'project_ids',
+    ]
+    const values: unknown[] = [
+      input.workspaceId,
+      input.path,
+      input.parentPath,
+      input.name,
+      input.title ?? null,
+      input.summary ?? null,
+      input.mime,
+      input.sizeBytes,
+      input.tags ?? [],
+      input.relatedIds ?? [],
+      input.storageUri,
+      input.sensitivity ?? 'internal',
+      JSON.stringify(input.metadata ?? {}),
+      input.userId ?? null,
+      input.assistantId ?? null,
+      input.source ?? 'user',
+      input.sourceEpisodeId ?? null,
+      input.createdByUserId,
+      input.createdByAssistantId ?? null,
+      input.compartments ?? [],
+      input.projectIds ?? [],
+    ]
+    if (input.id) {
+      cols.unshift('id')
+      values.unshift(input.id)
+    }
+    const placeholders = values.map((_, i) => `$${i + 1}`).join(', ')
+    const workspaceParam = cols.indexOf('workspace_id') + 1
+    const teamParam = cols.indexOf('compartments') + 1
+    values.push(userId)
+    const actorParam = values.length
+    const result = opts.derivation
+      ? await client.query<FileRow>(`SELECT ${FULL_SELECT} FROM create_source_derived_file($1::jsonb,$2::jsonb)`,
+        [JSON.stringify(input), JSON.stringify(opts.derivation)])
+      : await client.query<FileRow>(
+      `INSERT INTO workspace_files (${cols.join(', ')})
+       SELECT ${placeholders}
+       WHERE EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id=$${workspaceParam} AND user_id=$${actorParam})
+         AND (effective_member_team_compartments($${actorParam},$${workspaceParam}) IS NULL
+           OR $${teamParam}::text[] <@ effective_member_team_compartments($${actorParam},$${workspaceParam}))
+       RETURNING ${FULL_SELECT}`,
+      values,
+    )
+    if (!result.rows[0]) throw Object.assign(new Error('The operation exceeds current department access.'), { code: 'scope_operation_denied' })
+    file = toRecord(result.rows[0])
+    if (opts.sessionBinding) await client.query(`INSERT INTO workspace_file_session_bindings(file_id,artifact_id,workspace_id,owner_user_id,snapshot,bound_scope)
+      VALUES($1,$2,$3,$4,$5,$6::jsonb)`,[file.id,opts.sessionBinding.artifactId,input.workspaceId,userId,opts.sessionBinding.snapshot,
+        JSON.stringify({sensitivity:file.sensitivity,compartments:file.compartments,projectIds:file.projectIds})])
+    if (opts.sessionBinding?.pending) {
+      const role=input.path.split('/')[4]
+      if (!['source','snapshot','signature','preview','release'].includes(role??'') || typeof input.metadata?.contentSha256!=='string') throw new Error('pdf_intake_asset_changed')
+      await client.query(`INSERT INTO office_pdf_session_assets(artifact_id,workspace_id,owner_user_id,file_id,role,content_sha256)
+        VALUES($1,$2,$3,$4,$5,$6)`,[opts.sessionBinding.artifactId,input.workspaceId,userId,file.id,role,input.metadata.contentSha256])
+    }
+    if (opts.uploadId) await client.query("UPDATE workspace_file_uploads SET status='completed',completed_at=now(),updated_at=now() WHERE id=$1",[opts.uploadId])
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    await rollbackAndRelease(client)
   }
-  const placeholders = values.map((_, i) => `$${i + 1}`).join(', ')
-  const workspaceParam = cols.indexOf('workspace_id') + 1
-  const teamParam = cols.indexOf('compartments') + 1
-  values.push(userId)
-  const actorParam = values.length
-  const result = await queryWithRLS<FileRow>(
-    userId,
-    `INSERT INTO workspace_files (${cols.join(', ')})
-     SELECT ${placeholders}
-     WHERE EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id=$${workspaceParam} AND user_id=$${actorParam})
-       AND (effective_member_team_compartments($${actorParam},$${workspaceParam}) IS NULL
-         OR $${teamParam}::text[] <@ effective_member_team_compartments($${actorParam},$${workspaceParam}))
-     RETURNING ${FULL_SELECT}`,
-    values,
-  )
-  if (!result.rows[0]) throw Object.assign(new Error('The operation exceeds current department access.'), { code: 'scope_operation_denied' })
-  const file = toRecord(result.rows[0])
 
   // Fire-and-forget `documented_by` edges (entity → file) — `void`,
   // never awaited on the caller's path, never able to throw into the
@@ -780,7 +829,7 @@ export async function supersedeWorkspaceFile(
 ): Promise<WorkspaceFile | null> {
   access = fileMutationAccess(userId, workspaceId, access)
   const agent = currentAgentAccess()
-  if (patch.editorUserId !== userId || (agent?.userId !== undefined && agent.userId !== userId)) {
+  if (!userId || patch.editorUserId !== userId || (agent?.userId !== undefined && agent.userId !== userId)) {
     throw Object.assign(new Error('The operation requires the executing author.'), { code: 'scope_operation_denied' })
   }
   const client = await getAppPool().connect()
@@ -790,6 +839,13 @@ export async function supersedeWorkspaceFile(
     // seeded sentinel and never leaks onto the pooled connection.
     await client.query('BEGIN')
     await applyRLSGucs(client, userId)
+    // Serialize mode/authority before locking the predecessor. A successor is
+    // admitted from this mutation-authorized canonical row, not root metadata.
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
+    const policy = await readAdmissionPolicy(client, workspaceId)
+    if (policy && policy.setupState !== 'legacy') {
+      await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [workspaceId, userId])
+    }
 
     const sourceGuard = fileSourceGuard(userId, access, 3)
     const current = await client.query<FileRow>(
@@ -809,6 +865,9 @@ export async function supersedeWorkspaceFile(
       await client.query('ROLLBACK')
       return null
     }
+    const sessionRecord=(await client.query('SELECT artifact_id FROM workspace_file_session_bindings WHERE file_id=$1',[old.id])).rows[0]
+    const sessionBinding=sessionRecord ? await readFileSessionBinding(client,userId,workspaceId,patch.path??old.path,access) : undefined
+    if (sessionRecord && sessionBinding?.artifactId!==sessionRecord.artifact_id) throw Object.assign(new Error('Session binding changed'),{code:'scope_operation_denied'})
     const sourceScope = { ...old, compartments: old.compartments ?? [], projectIds: old.projectIds ?? [] }
     assertExecutionResourceScope(sourceScope, 'read', access)
     assertExecutionResourceScope(sourceScope, 'mutation', access)
@@ -816,10 +875,23 @@ export async function supersedeWorkspaceFile(
     if (patch.sensitivity !== undefined && nextSensitivity !== patch.sensitivity) {
       throw Object.assign(new Error('Lowering sensitivity requires an audited release.'), { code: 'scope_declassification_required' })
     }
-    assertExecutionResourceScope({ ...sourceScope, sensitivity: nextSensitivity,
+    let after = { sensitivity: nextSensitivity,
       compartments: unionScopeRequirements(old.compartments, patch.compartments),
-      projectIds: unionScopeRequirements(old.projectIds, patch.projectIds) }, 'mutation', access)
+      projectIds: unionScopeRequirements(old.projectIds, patch.projectIds) }
+    assertExecutionResourceScope({ ...sourceScope, ...after }, 'mutation', access)
     const newId = randomUUID()
+
+    // Close segments while the locked, mutation-authorized predecessor is
+    // still current. Retiring it first holds its descendants and makes their
+    // live-parent SELECT policy hide them from this app-role UPDATE. Keep RLS
+    // engaged; destination denial or insert failure rolls back both closes.
+    // The successor is re-indexed separately from its new bytes.
+    await client.query(
+      `UPDATE file_segments
+          SET valid_to = now()
+        WHERE file_id = $1 AND workspace_id = $2 AND valid_to IS NULL`,
+      [id, workspaceId],
+    )
 
     await client.query(
       `UPDATE workspace_files
@@ -829,17 +901,27 @@ export async function supersedeWorkspaceFile(
       [newId, id, workspaceId],
     )
 
-    // Same-transaction segment close (large-content-artifacts §Phase 2.1):
-    // the old version's derived file_segments leave the current window with
-    // their parent, so retrieval never mixes superseded content with the new
-    // version. The caller re-indexes the NEW row (indexFileArtifact) when it
-    // has the new bytes' parsed text.
-    await client.query(
-      `UPDATE file_segments
-          SET valid_to = now()
-        WHERE file_id = $1 AND valid_to IS NULL`,
-      [id],
-    )
+    // Retiring the predecessor advances the policy revision via canonical
+    // scope triggers. Resolve immediately before INSERT so the one-use receipt
+    // fences that current revision. Any denial rolls back both closes above;
+    // the verified predecessor and workspace remain locked throughout.
+    if (policy && policy.setupState !== 'legacy') {
+      const visibility = old.userId ? 'private' : 'workspace'
+      const admitted = await admitWorkspaceResource(client, workspaceId, userId, {
+        writerKind: 'workspace_file',
+        rowVisibility: { userId: old.userId, assistantId: old.assistantId },
+        visibility, sensitivity: nextSensitivity,
+        inherited: { visibility, sensitivity: old.sensitivity,
+          compartments: sourceScope.compartments, projectIds: sourceScope.projectIds },
+        inheritedAuthority: 'mutation',
+        // Supersede patches add requirements; [] means no additions, not a
+        // new root's explicit General destination. Never erase the prior floor.
+        requestedLabels: { compartments: patch.compartments?.length ? patch.compartments : undefined,
+          projectIds: patch.projectIds?.length ? patch.projectIds : undefined },
+      })
+      after = admitted.envelope
+      assertExecutionResourceScope({ ...sourceScope, ...after }, 'mutation', access)
+    }
 
     const inserted = await client.query<FileRow>(
       `INSERT INTO workspace_files (
@@ -856,11 +938,10 @@ export async function supersedeWorkspaceFile(
          $13, $14,
          $15, $16, $17, $18,
          now(), $19, $20,
-         ARRAY(SELECT DISTINCT unnest($21::text[] || $22::text[]) ORDER BY 1),
-         ARRAY(SELECT DISTINCT unnest($23::uuid[] || $24::uuid[]) ORDER BY 1)
+         $21::text[], $22::uuid[]
        WHERE EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id=$2 AND user_id=$19)
          AND (effective_member_team_compartments($19,$2) IS NULL
-           OR ($21::text[] || $22::text[]) <@ effective_member_team_compartments($19,$2))
+           OR $21::text[] <@ effective_member_team_compartments($19,$2))
        RETURNING ${FULL_SELECT}`,
       [
         newId,
@@ -875,7 +956,7 @@ export async function supersedeWorkspaceFile(
         patch.tags ?? old.tags,
         patch.relatedIds ?? old.relatedIds,
         patch.storageUri,
-        nextSensitivity,
+        after.sensitivity,
         JSON.stringify(patch.metadata ?? old.metadata ?? {}),
         old.userId,
         old.assistantId,
@@ -883,14 +964,14 @@ export async function supersedeWorkspaceFile(
         old.sourceEpisodeId,
         patch.editorUserId,
         patch.editorAssistantId ?? null,
-        old.compartments ?? [],
-        patch.compartments ?? [],
-        old.projectIds ?? [],
-        patch.projectIds ?? [],
+        after.compartments,
+        after.projectIds,
       ],
     )
 
     if (!inserted.rows[0]) throw Object.assign(new Error('The operation exceeds current department access.'), { code: 'scope_operation_denied' })
+    if (sessionBinding) await client.query(`INSERT INTO workspace_file_session_bindings(file_id,artifact_id,workspace_id,owner_user_id,snapshot,bound_scope)
+      VALUES($1,$2,$3,$4,$5,$6::jsonb)`,[newId,sessionBinding.artifactId,workspaceId,userId,sessionBinding.snapshot,JSON.stringify(after)])
     await client.query('COMMIT')
     return toRecord(inserted.rows[0])
   } catch (err) {

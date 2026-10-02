@@ -13,6 +13,7 @@ const ASSISTANT = '33333333-3333-4333-8333-333333333333'
 const APPROVER = '44444444-4444-4444-8444-444444444444'
 const PROJECT = '55555555-5555-4555-8555-555555555555'
 const OTHER_ASSISTANT = '77777777-7777-4777-8777-777777777777'
+const OTHER_USER = '88888888-8888-4888-8888-888888888888'
 
 // Current-label revalidation reads the database; these tests exercise the
 // per-source policy, so every source is reported unchanged.
@@ -336,108 +337,110 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
   })
 })
 
-// ── Personal groups (a group binding that names its only human) ──
+// ── Linked members speaking in an approved group ──
 
-function personalGroupIntegration(channelType = 'telegram') {
-  return {
-    channelType,
-    credentials: { bot_token: '1000001:FICTIONAL', webhook_secret: 'x' },
-    config: {
-      deliveryAudienceBindings: [{
-        version: 1,
-        channelId: '-100777',
-        audienceType: 'group',
-        clearance: 'internal',
-        compartments: [],
-        projectIds: [],
-        recipientUserId: USER,
-        expiresAt: null,
-        approvedByUserId: USER,
-        approvedAt: '2026-09-29T00:00:00.000Z',
-      }],
-    },
+const SPEAKER_GROUP = '-100777'
+
+function approvedGroupDeps(options: {
+  speakerRole: 'owner' | 'admin' | 'member' | null
+  live?: AccessCeiling | (() => Promise<AccessCeiling>)
+  recipientUserId?: string | null
+}) {
+  const binding = {
+    version: 1,
+    channelId: SPEAKER_GROUP,
+    audienceType: 'group',
+    clearance: 'confidential',
+    compartments: [],
+    projectIds: [],
+    recipientUserId: options.recipientUserId ?? null,
+    expiresAt: null,
+    approvedByUserId: APPROVER,
+    approvedAt: '2026-09-29T00:00:00.000Z',
   }
-}
-
-function personalGroupAuthorizer(verified: boolean, channelType = 'telegram') {
-  const verifyPersonalGroup = vi.fn(async () => verified)
-  const deps = {
+  const live = options.live ?? ceiling({ clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [] })
+  return {
     integrationStore: {
-      getCredentialsForAssistantSystem: vi.fn(async () => personalGroupIntegration(channelType)),
-      getCredentialsForAssistantIntegrationSystem: vi.fn(async () => personalGroupIntegration(channelType)),
+      getCredentialsForAssistantSystem: vi.fn(async () => ({ config: { deliveryAudienceBindings: [binding] } })),
+      getCredentialsForAssistantIntegrationSystem: vi.fn(async () => ({ config: { deliveryAudienceBindings: [binding] } })),
     } as unknown as ChannelIntegrationStore,
     findAssistant: vi.fn(async () => ({ id: ASSISTANT, workspaceId: WS })) as never,
     findSession: vi.fn(async () => null),
     findChannelSession: vi.fn(async () => null),
-    getWorkspaceRole: vi.fn(async () => 'owner' as const),
-    resolveLiveAccess: vi.fn(async () => ceiling({ compartments: [], mutationCompartments: [], projectIds: [] })),
-    verifyPersonalGroup,
+    getWorkspaceRole: vi.fn(async (userId: string) => (userId === APPROVER ? 'owner' : options.speakerRole)) as never,
+    resolveLiveAccess: vi.fn(typeof live === 'function' ? live : async () => live),
   }
-  return { deps, verifyPersonalGroup }
 }
 
-const personalGroupInput = {
+const speakerInput = {
   workspaceId: WS,
   assistantId: ASSISTANT,
   userId: USER,
   channelType: 'telegram',
-  channelId: '-100777:topic:15',
+  channelId: `${SPEAKER_GROUP}:topic:15`,
   recipientType: 'group' as const,
+  recipientMode: 'member' as const,
+  groupSpeaker: true,
 }
 
-describe('[COMP:api/delivery-authority] personal group bindings', () => {
-  // 2026-09-29: an owner's single-person Telegram hub was refused on every
-  // turn because group bindings could never carry personal context.
-  it('delivers the recipient personal context while membership is verified', async () => {
-    const { deps, verifyPersonalGroup } = personalGroupAuthorizer(true)
-    await expect(createDeliveryAudienceAuthorizer(deps)({
-      ...personalGroupInput,
-      scopeEvidence: {
-        sensitivity: 'internal',
-        compartments: [],
-        projectIds: [],
-      },
-    })).resolves.toMatchObject({ allowed: true })
-    expect(verifyPersonalGroup).toHaveBeenCalledWith({
-      channelType: 'telegram',
-      chatId: '-100777',
-      recipientUserId: USER,
-      botToken: '1000001:FICTIONAL',
+const ownPersonalRow = { sensitivity: 'internal' as const, compartments: [], projectIds: [], sources: [source('own-memory', null)] }
+
+describe('[COMP:api/delivery-authority] a linked member speaking in an approved group', () => {
+  // 2026-10-01: group bindings could never carry personal context, so an
+  // owner's own topic-routed Telegram group refused every turn that touched
+  // their memories. Who else is in the group is the call of the owner or
+  // admin who added the bot, so the speaker's role is not checked.
+  it.each(['owner', 'admin', 'member'] as const)('delivers the %s their own personal context', async (role) => {
+    const deps = approvedGroupDeps({ speakerRole: role })
+    await expect(createDeliveryAudienceEnvelopeResolver(deps)(speakerInput)).resolves.toMatchObject({
+      allowed: true,
+      source: 'binding',
+      // Capped by both the binding (confidential) and live access (internal).
+      ceiling: { userId: USER, clearance: 'internal' },
     })
-    await expect(createDeliveryAudienceEnvelopeResolver(deps)(personalGroupInput))
-      .resolves.toMatchObject({ allowed: true, source: 'binding', ceiling: { userId: USER } })
+    await expect(createDeliveryAudienceAuthorizer(deps)({ ...speakerInput, scopeEvidence: ownPersonalRow }))
+      .resolves.toMatchObject({ allowed: true })
   })
 
-  it('refuses with a personal-group reason when membership cannot be proven', async () => {
-    const { deps } = personalGroupAuthorizer(false)
-    await expect(createDeliveryAudienceEnvelopeResolver(deps)(personalGroupInput)).resolves.toEqual({
-      allowed: false,
-      reason: 'delivery_audience_unverified',
-      detail: 'personal_group_unverified',
-      diagnostic: 'personal_group_unverified',
+  it('keeps a sender who is not a workspace member at the shared binding', async () => {
+    const deps = approvedGroupDeps({
+      speakerRole: null,
+      live: async () => { throw Object.assign(new Error('gone'), { code: 'context_not_available' }) },
     })
-    await expect(createDeliveryAudienceAuthorizer(deps)({
-      ...personalGroupInput,
-      scopeEvidence: { sensitivity: 'public', compartments: [], projectIds: [] },
-    })).resolves.toEqual({
-      allowed: false,
-      reason: 'delivery_audience_unverified',
-      detail: 'personal_group_unverified',
-      diagnostic: 'personal_group_unverified',
-    })
+    await expect(createDeliveryAudienceEnvelopeResolver(deps)(speakerInput))
+      .resolves.toMatchObject({ allowed: true, source: 'binding', ceiling: { userId: '' } })
+    await expect(createDeliveryAudienceAuthorizer(deps)({ ...speakerInput, scopeEvidence: ownPersonalRow }))
+      .resolves.toMatchObject({ allowed: false, detail: 'evidence_exceeds_audience' })
   })
 
-  it('never widens past the recipient own live access', async () => {
-    const { deps } = personalGroupAuthorizer(true)
+  it('never elevates a caller that is not a live group turn', async () => {
+    // Workflows, relays and replays address the group on someone's behalf.
+    const deps = approvedGroupDeps({ speakerRole: 'owner' })
+    const { groupSpeaker: _omitted, ...onBehalf } = speakerInput
+    await expect(createDeliveryAudienceEnvelopeResolver(deps)(onBehalf))
+      .resolves.toMatchObject({ allowed: true, ceiling: { userId: '' } })
+    await expect(createDeliveryAudienceEnvelopeResolver(deps)({ ...speakerInput, recipientMode: 'external' }))
+      .resolves.toMatchObject({ allowed: true, ceiling: { userId: '' } })
+  })
+
+  it('never delivers another member\'s personal rows to the speaker', async () => {
+    const deps = approvedGroupDeps({ speakerRole: 'admin' })
     await expect(createDeliveryAudienceAuthorizer(deps)({
-      ...personalGroupInput,
-      scopeEvidence: { sensitivity: 'confidential', compartments: [], projectIds: [] },
-    })).resolves.toEqual({
-      allowed: false,
-      reason: 'delivery_audience_unverified',
-      detail: 'evidence_exceeds_audience',
-      diagnostic: 'clearance',
-    })
+      ...speakerInput,
+      scopeEvidence: { ...ownPersonalRow, sources: [source('foreign-memory', null, OTHER_USER)] },
+    })).resolves.toMatchObject({ allowed: false })
+  })
+
+  it('degrades to the shared binding when the speaker lookup fails', async () => {
+    const deps = approvedGroupDeps({ speakerRole: 'owner', live: async () => { throw new Error('db timeout') } })
+    await expect(createDeliveryAudienceEnvelopeResolver(deps)(speakerInput))
+      .resolves.toMatchObject({ allowed: true, ceiling: { userId: '' } })
+  })
+
+  it('still refuses a group binding that names a single recipient', async () => {
+    const deps = approvedGroupDeps({ speakerRole: 'owner', recipientUserId: USER })
+    await expect(createDeliveryAudienceEnvelopeResolver(deps)(speakerInput))
+      .resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', diagnostic: 'binding_audience_mismatch' })
   })
 })
 

@@ -88,9 +88,23 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
     async claim(params: { userId: string; leaseToken: string; leaseMs: number; jobKinds?: OfficeGenerationJobRow['jobKind'][] }): Promise<OfficeGenerationJobRow | null> {
       const result = await db<OfficeGenerationJobRow>(params.userId, `
         WITH candidate AS (
-          SELECT id FROM office_generation_jobs
+          SELECT id FROM office_generation_jobs pending
            WHERE job_kind = ANY($3::text[]) AND status IN ('queued','running') AND cancel_requested_at IS NULL
              AND next_attempt_at <= now()
+             AND (authority_projection->'creationBinding'->>'protocol' IS DISTINCT FROM 'office_prompt_only_v1'
+               OR (initiated_by_user_id=$4::uuid AND EXISTS (
+                 SELECT 1 FROM auth_sessions s JOIN users u ON u.id=s.user_id
+                   WHERE s.id::text=pending.authority_projection->'creationBinding'->>'authSessionId'
+                     AND s.user_id=pending.initiated_by_user_id AND s.revoked_at IS NULL
+                     AND s.expires_at>clock_timestamp() AND s.auth_version=u.auth_version)
+                 AND EXISTS (
+                 SELECT 1 FROM office_artifacts a WHERE a.id=pending.artifact_id AND a.workspace_id=pending.workspace_id
+                   AND a.lifecycle_state='active'
+                   AND office_artifact_scope_allows(a.id,a.workspace_id,true)
+                   AND to_jsonb(a.compartments)=authority_projection->'compartments'
+                   AND to_jsonb(a.project_ids)=authority_projection->'projectIds'
+                   AND a.sensitivity=authority_projection->>'sensitivity'
+                   AND to_jsonb(a.visibility_user_ids)=authority_projection->'visibilityUserIds')))
              AND (lease_expires_at IS NULL OR lease_expires_at < now())
            ORDER BY next_attempt_at, created_at
            FOR UPDATE SKIP LOCKED LIMIT 1
@@ -102,7 +116,7 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
                updated_at = now()
           FROM candidate c WHERE j.id = c.id
         RETURNING ${CLAIMED_JOB_COLUMNS}
-      `, [params.leaseToken, params.leaseMs, params.jobKinds ?? ['create']])
+      `, [params.leaseToken, params.leaseMs, params.jobKinds ?? ['create'], params.userId])
       return result.rows[0] ?? null
     },
 

@@ -205,6 +205,22 @@ describe('[COMP:scheduling/trigger-orchestration] Trigger-orchestration runner',
     expect(written.getTime()).toBeLessThanOrEqual(after + 15 * 60_000 + 200)
   })
 
+  it('uses only the atomic claim-fenced nag write and fails closed on stale or missing claims', async () => {
+    const advanceScheduleClaimNag = vi.fn().mockResolvedValue(true)
+    const jobStore = makeJobStore({ advanceScheduleClaimNag })
+    const runWorkflowFromJob = vi.fn().mockResolvedValue('ok')
+    const executor = createJobExecutor({ jobStore, runWorkflowFromJob })
+    const job = { ...baseJob, nagIntervalMins: 5, requiresScheduleClaim: true, scheduleClaimId: 'claim' }
+    await executor(job)
+    expect(advanceScheduleClaimNag).toHaveBeenCalledWith(job.id, 'claim', expect.objectContaining({ cycleDate: expect.any(String) }), expect.any(Date))
+    advanceScheduleClaimNag.mockResolvedValue(false)
+    await expect(executor(job)).rejects.toMatchObject({ code: 'workflow_schedule_claim_unavailable' })
+    await expect(executor({ ...job, scheduleClaimId: null })).rejects.toMatchObject({ code: 'workflow_schedule_claim_unavailable' })
+    expect(runWorkflowFromJob).toHaveBeenCalledTimes(1)
+    expect(jobStore.setState).not.toHaveBeenCalled()
+    expect(jobStore.update).not.toHaveBeenCalled()
+  })
+
   it('does not open activeNag or advance next_run_at for a single-fire job (no nagIntervalMins)', async () => {
     const jobStore = makeJobStore()
     const executor = createJobExecutor({

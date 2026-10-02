@@ -15,7 +15,7 @@ type SourceAdapter = {
   workspacePredicate: string
 }
 
-const DIRECT_ACTIONS = ['confirm_general', 'assign_team', 'hold'] as const
+const DIRECT_ACTIONS = ['confirm_general', 'assign_team', 'consolidate_default', 'hold'] as const
 const IMPACT_ACTIONS = ['confirm_general', 'hold'] as const
 const HOLD_ACTIONS = ['hold'] as const
 
@@ -44,7 +44,7 @@ export const SCOPE_REVIEW_SOURCE_ADAPTERS: Readonly<Record<ScopeReviewKind, Sour
   office_artifact: { table: 'office_artifacts', category: 'impact', actions: IMPACT_ACTIONS, from: 'office_artifacts r', workspacePredicate: 'r.workspace_id=$1' },
 })
 
-export const SCOPE_REVIEW_KINDS = Object.freeze(Object.keys(SCOPE_REVIEW_SOURCE_ADAPTERS) as ScopeReviewKind[])
+export const SCOPE_REVIEW_KINDS = Object.freeze(Object.keys(SCOPE_REVIEW_SOURCE_ADAPTERS) as [ScopeReviewKind, ...ScopeReviewKind[]])
 
 export function sourceAdapter(kind: ScopeReviewKind): SourceAdapter {
   return SCOPE_REVIEW_SOURCE_ADAPTERS[kind]

@@ -16,6 +16,7 @@ const mocks=vi.hoisted(()=>({registry:vi.fn(),fetch:vi.fn(),prepare:vi.fn(),save
 vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>mocks.viewer}));
 vi.mock('@/lib/api/workspace-access',()=>({fetchWorkspaceAccess:mocks.fetch,fetchWorkspaceDepartmentRegistry:mocks.registry,prepareWorkspaceAccessCommand:mocks.prepare,saveWorkspaceAccessCommand:mocks.save,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:mocks.confirm}));
+vi.mock('@/components/organization/department-access-panel',()=>({AssistantHomeDepartment:({assistantId}:{assistantId:string})=><p>home-picker:{assistantId}</p>}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:vi.fn(async(url:string)=>({ok:true,json:async()=>url.includes('/assistants?')?{assistants:[{id:'assistant',name:'Research assistant'}]}:{members:[{userId:'person',userName:'Riley'}]}}))}));
 const team={id:'team',name:'Research',key:'research',description:null,color:null,status:'active',readAll:false,readGrantGroupIds:[],memberCount:0,members:[],assistantIds:[]};
 vi.mock('@/lib/api/context-scopes',()=>({
@@ -44,9 +45,13 @@ function expectApplied(){expect(mocks.save).toHaveBeenCalledWith('workspace',{ty
 function Harness(){const change=useDepartmentChange('workspace');return <><button onClick={()=>void change.save({type:'department.archive',teamId:'team'},'Research')}>Change</button><button onClick={()=>void change.save({type:'department.archive',teamId:'other'},'Other')}>Other</button><DepartmentChangeFeedback change={change}/></>;}
 
 describe('[COMP:app-web/context-scope] reviewed Team and assistant editors',()=>{
-  it('separates department identity, membership, read scope and lifecycle into named panels',async()=>{
-    await render(<TeamsContextSection/>);
-    for(const heading of [t.departmentPickerLabel,t.createTeamTitle,t.departmentDetailsTitle,t.membershipTitle,t.readAccessTitle,t.departmentLifecycleTitle])expect(host.textContent).toContain(heading);
+  it('separates department identity and lifecycle, and leaves who reads it to the department panel',async()=>{
+    await render(<TeamsContextSection renderAccessSettings={id=><p>roster:{id}</p>}/>);
+    for(const heading of [t.departmentPickerLabel,t.createTeamTitle,t.departmentDetailsTitle,t.departmentLifecycleTitle])expect(host.textContent).toContain(heading);
+    expect(host.textContent).toContain('roster:team');
+    // Membership checkboxes and Team-to-Team read packages are retired (D26): one roster.
+    for(const retired of [t.membershipTitle,t.readAccessTitle,t.readAllTeams,t.saveAccess])expect(host.textContent).not.toContain(retired);
+    expect(host.querySelector('[role="checkbox"]')).toBeNull();
   });
   it('uses current registry capabilities and shows only the authorized related units',async()=>{
     mocks.registry.mockImplementation(async()=>({...registry(),canAdminister:false}));await render(<TeamsContextSection/>);
@@ -80,22 +85,16 @@ describe('[COMP:app-web/context-scope] reviewed Team and assistant editors',()=>
     expect(mocks.prepare).toHaveBeenCalledWith('workspace',{type:'department.create',name:'Design',key:'design'},'15',expect.any(String));
     expect(mocks.save).not.toHaveBeenCalled();expect(host.textContent).toContain('Research');
   });
-  it('reviews membership without silently changing legacy mode',async()=>{
-    await render(<TeamsContextSection/>);await checkbox('Riley');
-    expect(mocks.prepare).toHaveBeenCalledWith('workspace',{type:'department.member.set',teamId:'team',userId:'person',enabled:true,activateAssigned:false},'15',expect.any(String));
-    expect(mocks.confirm.mock.calls[0][0].description).toContain('Riley');expectApplied();
-  });
-  it('reviews assistant assignment through the same canonical endpoint',async()=>{
-    await render(<TeamsContextSection/>);await checkbox('Research assistant');
-    expect(mocks.prepare.mock.calls[0][1]).toEqual({type:'department.assistant.set',teamId:'team',assistantId:'assistant',enabled:true});expectApplied();
-  });
-  it('shows read package changes before committing and archives with one confirmation',async()=>{
-    await render(<TeamsContextSection/>);await checkbox(t.readAllTeams);expect(mocks.prepare).not.toHaveBeenCalled();
-    await click(t.saveAccess);expect(mocks.prepare.mock.calls[0][1]).toEqual({type:'department.read_bundle.set',teamId:'team',readAll:true,groupIds:[]});expectApplied();
-    mocks.confirm.mockClear();await click(t.archiveTeam);expect(mocks.confirm).toHaveBeenCalledTimes(1);expect(mocks.prepare.mock.calls[1][1]).toEqual({type:'department.archive',teamId:'team'});
+  it('archives with one confirmation',async()=>{
+    await render(<TeamsContextSection/>);
+    await click(t.archiveTeam);expect(mocks.confirm).toHaveBeenCalledTimes(1);expect(mocks.prepare.mock.calls[0][1]).toEqual({type:'department.archive',teamId:'team'});expectApplied();
   });
   it('saves full assistant audience and defaults only after review',async()=>{
-    await render(<AssistantContextSettings workspaceId="workspace" assistantId="assistant" canManage/>);await click(t.saveContext);
+    await render(<AssistantContextSettings workspaceId="workspace" assistantId="assistant" canManage/>);
+    // Departments are set in Organization > Departments; the home picker replaces the default Team.
+    expect(host.textContent).toContain(t.assistantDepartmentsNote);expect(host.textContent).toContain('home-picker:assistant');
+    expect(host.textContent).not.toContain(t.teamAccessMode);
+    await click(t.saveContext);
     expect(mocks.prepare.mock.calls[0][1]).toEqual({type:'assistant.audience.set',assistantId:'assistant',teamMode:'all',teamIds:[],defaultGroupId:null,projectMode:'all',projectIds:[],defaultProjectId:null});expectApplied();expect(host.textContent).toContain(t.saved);
   });
   it('exposes retry in the assistant editor and refreshes after the same receipt succeeds',async()=>{
@@ -132,8 +131,8 @@ describe('[COMP:app-web/workspace-access] shared command confirmation lifetime',
     mocks.config.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}));
     await click(t.saveContext);
     await render(<AssistantContextSettings workspaceId="workspace" assistantId="other-assistant" canManage/>);
-    await act(async()=>finish({teamMode:'assigned',teamIds:['team'],defaultGroupId:'team',projectMode:'all',projectIds:[],defaultProjectId:null}));
-    expect(host.querySelector(`[aria-label="${t.teamAccessMode}"]`)?.textContent).toContain(t.allTeams);
+    await act(async()=>finish({teamMode:'assigned',teamIds:['team'],defaultGroupId:'team',projectMode:'assigned',projectIds:[],defaultProjectId:null}));
+    expect(host.querySelector(`[aria-label="${t.projectAccessMode}"]`)?.textContent).toContain(t.allProjects);
     expect(host.textContent).not.toContain(t.saved);
   });
   it('cancels an assistant review when switching to another assistant',async()=>{

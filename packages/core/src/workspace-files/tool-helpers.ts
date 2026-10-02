@@ -90,7 +90,9 @@ export function ctxFor(context: {
     compartmentGrant: context.compartments,
     projectGrant: context.projectIds,
   })
+  const sources = context.scopeAccumulator?.evidence.sources
   return {
+    ...(sources?.length ? { derivation: { producer: 'workspace-file-tool', sources } } : {}),
     userId: context.userId,
     workspaceId: context.workspaceId!,
     assistantId: context.assistantId ?? null,

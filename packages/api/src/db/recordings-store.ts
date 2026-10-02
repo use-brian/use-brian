@@ -12,7 +12,8 @@
  * `recording_jobs.recording_id`, `blueprint_records.source_id`, the
  * `recording-synthesis:<id>` anchor key — keeps resolving unchanged.
  *
- * TWO POOLS, on purpose:
+ * Creation uses the canonical app-role intake transaction (migration 642).
+ * Existing read/state-patch APIs retain their prior pools:
  *   - `query()` (owner pool, RLS-open) for the WORKER + route writes. The worker
  *     has no user context, and the route did its own membership check before
  *     writing. Mirrors `recording-jobs-store.ts`.
@@ -25,6 +26,9 @@
 
 import type { AccessContext } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
+import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
+import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
+import { recordingIntakeTransaction, admitRecordingIntakeParent, type RecordingIntakeAuthority, type RecordingIntakeParent } from './recording-intake-admission.js'
 import { buildAccessPredicate } from './access-predicate.js'
 
 export type RecordingKind = 'memo' | 'meeting'
@@ -109,13 +113,10 @@ function toRecording(row: Record<string, unknown>): Recording {
   }
 }
 
-/**
- * Create the recording row for an anchor Episode. Called by `/upload-url` right
- * after `createEpisode`, with the SAME id — the FK on `id` means a typo'd or
- * missing anchor is rejected by the database rather than creating an orphan.
- *
- * Idempotent: a retried upload-url call for the same Episode is a no-op rather
- * than a 23505.
+/** Canonical file adoption: Episode, recording and exact lineage are committed
+ * together on the app role. Per-call provenance is mandatory; upload/channel
+ * callers without an admitted file parent fail closed pending their adapters.
+ * The parent binding, not an unverified Episode JSON field, serializes retries.
  */
 export async function createRecording(input: {
   id: string
@@ -132,33 +133,19 @@ export async function createRecording(input: {
   userId?: string | null
   sensitivity?: string
   createdByUserId: string
-}): Promise<Recording> {
-  const { rows } = await query<Record<string, unknown>>(
-    `INSERT INTO recordings (
-       id, workspace_id, mime, gcs_key, storage_uri, file_name, title, kind, status, bytes,
-       user_id, assistant_id, sensitivity, created_by_user_id
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'memo'), COALESCE($9, 'awaiting_upload'), $10, $11, $12, COALESCE($13, 'internal'), $14)
-     ON CONFLICT (id) DO UPDATE SET updated_at = now()
-     RETURNING ${COLS}`,
-    [
-      input.id,
-      input.workspaceId,
-      input.mime,
-      input.gcsKey,
-      input.storageUri ?? null,
-      input.fileName ?? null,
-      input.title ?? null,
-      input.kind ?? null,
-      input.status ?? null,
-      input.bytes ?? null,
-      input.userId ?? null,
-      input.assistantId,
-      input.sensitivity ?? null,
-      input.createdByUserId,
-    ],
-  )
-  return toRecording(rows[0]!)
+}, provenance?: RecordingIntakeAuthority & { parent: RecordingIntakeParent }): Promise<Recording> {
+  if (!provenance) throw new Error('recording_intake_provenance_required')
+  return recordingIntakeTransaction(provenance, async client => {
+    const scope = await admitRecordingIntakeParent(client, provenance, input.workspaceId, provenance.parent)
+    if (input.createdByUserId !== provenance.actorUserId) throw new Error('recording_intake_actor_mismatch')
+    const policy = await readAdmissionPolicy(client, input.workspaceId)
+    if (policy?.setupState === 'ready') await admitWorkspaceResource(client, input.workspaceId, provenance.actorUserId, {
+      writerKind: 'episode', rowVisibility: scope, visibility: scope.userId ? 'private' : 'workspace', sensitivity: scope.sensitivity,
+      inherited: { ...scope, visibility: scope.userId ? 'private' : 'workspace' }, inheritedAuthority: 'read',
+    })
+    const result = await client.query(`SELECT ${COLS} FROM publish_file_recording($1::jsonb,$2::uuid)`, [JSON.stringify(provenance.parent), input.id])
+    return toRecording(result.rows[0])
+  })
 }
 
 /**

@@ -1,16 +1,18 @@
 /** Authenticated Office artifact routes. [COMP:api/office-routes] */
 import { Router } from 'express'
+import { officeAuthoredShellRoutes } from './office-authored-shell.js'
 import {officeMetadataRoute,sendOfficeMetadata} from './office-metadata.js'
 import type {OfficeMetadataReply} from '../db/office-read-projection.js'
 import { z } from 'zod'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
-import type { OfficeArtifactToolProjection, OfficeToolPort } from '@use-brian/core'
-import { OfficeGenerationUnavailableError } from '../office/service.js'
+import type { OfficeArtifactToolProjection } from '@use-brian/core'
+import { OfficeGenerationUnavailableError, type OfficeService } from '../office/service.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { ResolvedOfficeAccess } from '../office/access.js'
 
 export type OfficeArtifactsRouteDeps = {
-  service: OfficeToolPort
+  service: OfficeService
   generationAvailable(family?: 'document' | 'presentation' | 'spreadsheet'): boolean
   list(userId: string, workspaceId: string, view: 'active' | 'archived' | 'trash' | 'retained'): Promise<OfficeArtifactToolProjection[]>
   restoreVersion(params: { userId: string; artifactId: string; targetVersionId: string; expectedVersion: number; summary: string }): Promise<{ id: string; version: number } | null>
@@ -45,6 +47,7 @@ const CreateSchema = z.object({
 
 export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
   const router = Router()
+  router.use(officeAuthoredShellRoutes())
   const versionsReply=async(userId:string,artifactId:string):Promise<OfficeMetadataReply>=>{
     const access=await deps.resolveAccess(userId,artifactId)
     if(!access)return {status:404,body:{error:'Office artifact not found'}}
@@ -79,19 +82,23 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     const body = CreateSchema.safeParse(req.body)
     if (!body.success) return void res.status(400).json({ error: 'Invalid Office creation request', issues: body.error.issues })
     try {
-      // Direct human creation starts in Workspace General. Assistant-driven
-      // creation uses the trusted turn resolver through the Office tool.
-      const created = await deps.service.create({
+      const input = {
         userId,
         ...body.data,
-        sensitivity: 'internal',
+        sensitivity: 'internal' as const,
         compartments: [],
         projectIds: [],
         compartmentGrant: [],
         projectGrant: null,
-      })
+      }
+      const admitted = req.authSessionId && req.authVersion !== undefined && deps.service.createAuthenticated
+        ? await deps.service.createAuthenticated(input, {actorUserId:userId,workspaceId:body.data.workspaceId,sessionId:req.authSessionId})
+        : null
+      const created = admitted ?? await deps.service.create(input)
+      res.setHeader('Cache-Control','no-store')
       res.status(202).json(created)
     } catch (cause) {
+      if (cause instanceof WorkspaceAccessError) return void res.status(cause.status).json({error:cause.code})
       if (cause instanceof OfficeGenerationUnavailableError) return void res.status(503).json({ error: cause.code })
       throw cause
     }

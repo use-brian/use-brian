@@ -9,7 +9,11 @@
  * [COMP:api/programmatic-capture]
  */
 
-import { query, queryWithRLS } from './client.js'
+import type { ResourceDestination } from '@use-brian/shared'
+import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
+import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
+import { programmaticIntakeClient } from './programmatic-intake-context.js'
+import { getAppPool, applyRLSGucs, query, queryWithRLS } from './client.js'
 
 export type CapturePartitionBy = 'connection' | 'user' | 'session' | 'subject'
 export type CaptureRoutingMode = 'realtime' | 'scheduled' | 'drop'
@@ -32,7 +36,10 @@ export type ProgrammaticCaptureRule = {
   scopeBindingMode?: 'inherit' | 'explicit'
 }
 
+type IntakeBinding = { actor: string; session: string; policyRevision: string; sensitivity: CaptureSensitivity; compartments: string[]; projectIds: string[] }
+
 export type ProgrammaticCaptureProfile = {
+  intakeBinding?: IntakeBinding | null
   id: string
   workspaceId: string
   name: string
@@ -46,6 +53,8 @@ export type ProgrammaticCaptureProfile = {
 }
 
 export type ProgrammaticCaptureTarget = {
+  intakeBinding?: IntakeBinding | null
+  accessSetupState?: 'legacy' | 'ready'
   workspaceId: string
   ownerUserId: string
   assistantId: string
@@ -63,6 +72,8 @@ export type ProgrammaticCaptureTarget = {
 
 export type ProgrammaticCaptureBatchTarget = Pick<
   ProgrammaticCaptureTarget,
+  | 'intakeBinding'
+  | 'accessSetupState'
   | 'workspaceId'
   | 'ownerUserId'
   | 'assistantId'
@@ -93,13 +104,16 @@ export type ProgrammaticCaptureStore = {
   listProfiles(actingUserId: string, workspaceId: string): Promise<ProgrammaticCaptureProfile[]>
   createProfile(input: {
     actingUserId: string
+    authSessionId?: string
     workspaceId: string
     name: string
     partitionBy: CapturePartitionBy
     enabled: boolean
+    destination?: ResourceDestination | null
   }): Promise<ProgrammaticCaptureProfile>
   updateProfile(input: {
     actingUserId: string
+    authSessionId?: string
     workspaceId: string
     profileId: string
     name: string
@@ -109,12 +123,14 @@ export type ProgrammaticCaptureStore = {
   deleteProfile(actingUserId: string, workspaceId: string, profileId: string): Promise<boolean>
   addRule(input: {
     actingUserId: string
+    authSessionId?: string
     workspaceId: string
     profileId: string
     rule: CaptureRuleInput
   }): Promise<ProgrammaticCaptureRule | null>
   updateRule(input: {
     actingUserId: string
+    authSessionId?: string
     workspaceId: string
     profileId: string
     ruleId: string
@@ -122,12 +138,14 @@ export type ProgrammaticCaptureStore = {
   }): Promise<ProgrammaticCaptureRule | null>
   deleteRule(input: {
     actingUserId: string
+    authSessionId?: string
     workspaceId: string
     profileId: string
     ruleId: string
   }): Promise<boolean>
   setAssistantProfile(input: {
     actingUserId: string
+    authSessionId?: string
     workspaceId: string
     assistantId: string
     profileId: string | null
@@ -153,7 +171,8 @@ const PROFILE_COLS = `
   enabled,
   created_by AS "createdBy",
   created_at AS "createdAt",
-  updated_at AS "updatedAt"
+  updated_at AS "updatedAt",
+  intake_binding AS "intakeBinding"
 ` as const
 
 const RULE_COLS = `
@@ -234,25 +253,55 @@ function validateSchedule(rule: CaptureRuleInput): void {
   }
 }
 
+async function captureWrite<R extends Record<string, unknown>>(input: {actingUserId:string;authSessionId?:string;workspaceId:string}, sql:string, params:unknown[]) {
+  const client=await getAppPool().connect()
+  try {
+    await client.query('BEGIN'); await applyRLSGucs(client,input.actingUserId)
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[input.workspaceId])
+    const policy=await readAdmissionPolicy(client,input.workspaceId)
+    if(policy?.setupState==='ready') {
+      const proof=await client.query('SELECT programmatic_configuration_actor($1,$2,$3) AS allowed',[input.workspaceId,input.actingUserId,input.authSessionId ?? null])
+      if(!proof.rows[0]?.allowed)throw new Error('capture_configuration_denied')
+    }
+    await client.query("SELECT set_config('app.capture_session',$1,true)",[input.authSessionId ?? ''])
+    const result=await client.query<R>(sql,params)
+    await client.query('COMMIT');return result
+  } catch(error) {await client.query('ROLLBACK');throw error} finally {client.release()}
+}
+
 export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
   return {
     listProfiles: loadProfiles,
 
     async createProfile(input) {
-      const result = await queryWithRLS<ProfileRow>(
-        input.actingUserId,
-        `INSERT INTO programmatic_capture_profiles
-           (workspace_id, name, partition_by, enabled, created_by)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING ${PROFILE_COLS}`,
-        [input.workspaceId, input.name, input.partitionBy, input.enabled, input.actingUserId],
-      )
-      return { ...result.rows[0]!, assistantIds: [], rules: [] }
+      const client = await getAppPool().connect()
+      try {
+        await client.query('BEGIN')
+        await applyRLSGucs(client, input.actingUserId)
+        await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [input.workspaceId])
+        const policy = await readAdmissionPolicy(client, input.workspaceId)
+        let binding: IntakeBinding | null = null
+        if (policy?.setupState === 'ready') {
+          const proof = await client.query('SELECT programmatic_configuration_actor($1,$2,$3) AS allowed', [input.workspaceId,input.actingUserId,input.authSessionId ?? null])
+          if (!proof.rows[0]?.allowed) throw new Error('capture_configuration_denied')
+          if (input.destination === null) throw new Error('capture_destination_conflict')
+          const admitted = await admitWorkspaceResource(client,input.workspaceId,input.actingUserId, {
+            visibility:'workspace', sensitivity:'internal', destination:input.destination,
+          })
+          binding = { actor:input.actingUserId, session:input.authSessionId!, policyRevision:admitted.policyRevision, ...admitted.envelope }
+        }
+        if(binding)await client.query("SELECT set_config('app.capture_admission',$1,true)",[JSON.stringify(binding)])
+        const result = await client.query<ProfileRow>(`INSERT INTO programmatic_capture_profiles
+          (workspace_id,name,partition_by,enabled,created_by,intake_binding) VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING ${PROFILE_COLS}`,
+          [input.workspaceId,input.name,input.partitionBy,input.enabled,input.actingUserId, binding ? JSON.stringify(binding) : null])
+        await client.query('COMMIT')
+        return { ...result.rows[0]!, assistantIds:[], rules:[] }
+      } catch(error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
     },
 
     async updateProfile(input) {
-      const result = await queryWithRLS<ProfileRow>(
-        input.actingUserId,
+      const result = await captureWrite<ProfileRow>(
+        input,
         `UPDATE programmatic_capture_profiles
             SET name = $3, partition_by = $4, enabled = $5, updated_at = now()
           WHERE id = $1 AND workspace_id = $2
@@ -277,10 +326,25 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
 
     async addRule(input) {
       validateSchedule(input.rule)
+      const client = await getAppPool().connect()
+      try {
+      await client.query('BEGIN')
+      await applyRLSGucs(client,input.actingUserId)
+      await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[input.workspaceId])
+      await client.query("SELECT set_config('app.capture_session',$1,true)",[input.authSessionId ?? ''])
+      const profile = (await client.query<{intake_binding: IntakeBinding | null}>(
+        'SELECT intake_binding FROM programmatic_capture_profiles WHERE id=$1 AND workspace_id=$2 FOR UPDATE',[input.profileId,input.workspaceId])).rows[0]
+      if (profile?.intake_binding) {
+        const b=profile.intake_binding
+        // A rule inherits its saved profile, never current mode/assistant defaults.
+        if ((input.rule.compartments !== undefined && JSON.stringify(input.rule.compartments)!==JSON.stringify(b.compartments))
+          || (input.rule.projectIds !== undefined && JSON.stringify(input.rule.projectIds)!==JSON.stringify(b.projectIds))
+          || (input.rule.episodeSensitivity != null && input.rule.episodeSensitivity!==b.sensitivity)) throw new Error('capture_binding_mismatch')
+        input={...input,rule:{...input.rule, compartments:b.compartments,projectIds:b.projectIds,episodeSensitivity:b.sensitivity,scopeBindingMode:'explicit'}}
+      }
       let ruleOrder = input.rule.ruleOrder
       if (ruleOrder === undefined) {
-        const tail = await queryWithRLS<{ max: number | null }>(
-          input.actingUserId,
+        const tail = await client.query<{ max: number | null }>(
           `SELECT MAX(r.rule_order) AS max
              FROM ingest_rules r
              JOIN programmatic_capture_profiles p ON p.id = r.capture_profile_id
@@ -289,8 +353,7 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
         )
         ruleOrder = (tail.rows[0]?.max ?? -1) + 1
       }
-      const result = await queryWithRLS<ProgrammaticCaptureRule>(
-        input.actingUserId,
+      const result = await client.query<ProgrammaticCaptureRule>(
         `INSERT INTO ingest_rules AS r
            (connector_instance_id, capture_profile_id, source, rule_order,
             filter_type, filter_params, routing_mode, routing_schedule,
@@ -316,14 +379,16 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
           input.rule.scopeBindingMode ?? 'inherit',
         ],
       )
+      await client.query('COMMIT')
       const row = result.rows[0]
       return row ? { ...row, compartments: row.compartments ?? [], projectIds: row.projectIds ?? [] } : null
+      } catch(error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
     },
 
     async updateRule(input) {
       validateSchedule(input.rule)
-      const result = await queryWithRLS<ProgrammaticCaptureRule>(
-        input.actingUserId,
+      const result = await captureWrite<ProgrammaticCaptureRule>(
+        input,
         `UPDATE ingest_rules r
             SET rule_order = $4,
                 filter_type = $5,
@@ -375,8 +440,8 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
     },
 
     async setAssistantProfile(input) {
-      const result = await queryWithRLS<{ id: string }>(
-        input.actingUserId,
+      const result = await captureWrite<{ id: string }>(
+        input,
         `UPDATE assistants a
             SET capture_profile_id = $3, updated_at = now()
           WHERE a.id = $1 AND a.workspace_id = $2
@@ -396,7 +461,7 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
     async resolveTargetSystem(input) {
       if (!input.assistantId) return null
       type TargetRow = Omit<ProgrammaticCaptureTarget, 'rules'>
-      const result = await query<TargetRow>(
+      const result = await (programmaticIntakeClient.getStore()?.query.bind(programmaticIntakeClient.getStore()) ?? query)<TargetRow>(
         `SELECT a.workspace_id AS "workspaceId",
                 w.owner_user_id AS "ownerUserId",
                 a.id AS "assistantId",
@@ -407,6 +472,8 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
                 a.context_binding_origin AS "assistantDefaultBindingOrigin",
                 coalesce(wap.classification_mode,'legacy') AS "classificationMode",
                 p.id AS "profileId",
+                wap.setup_state AS "accessSetupState",
+                p.intake_binding AS "intakeBinding",
                 p.name AS "profileName",
                 p.partition_by AS "partitionBy"
            FROM workspaces w
@@ -441,7 +508,7 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
     },
 
     async resolveBatchTargetSystem(workspaceId, assistantId, ruleId) {
-      const result = await query<ProgrammaticCaptureBatchTarget>(
+      const result = await (programmaticIntakeClient.getStore()?.query.bind(programmaticIntakeClient.getStore()) ?? query)<ProgrammaticCaptureBatchTarget>(
         `SELECT a.workspace_id AS "workspaceId",
                 w.owner_user_id AS "ownerUserId",
                 a.id AS "assistantId",
@@ -452,6 +519,8 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
                 a.context_binding_origin AS "assistantDefaultBindingOrigin",
                 coalesce(wap.classification_mode,'legacy') AS "classificationMode",
                 p.id AS "profileId",
+                wap.setup_state AS "accessSetupState",
+                p.intake_binding AS "intakeBinding",
                 p.name AS "profileName"
            FROM assistants a
            JOIN workspaces w ON w.id = a.workspace_id
@@ -459,11 +528,12 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
            JOIN ingest_rules r ON r.id = $3 AND r.source = 'programmatic'
            JOIN programmatic_capture_profiles p
              ON p.id = r.capture_profile_id AND p.workspace_id = a.workspace_id
-          WHERE a.workspace_id = $1 AND a.id = $2
+          WHERE a.workspace_id = $1 AND a.id = $2 AND p.enabled = true
           LIMIT 1`,
         [workspaceId, assistantId, ruleId],
       )
       const target = result.rows[0]
+      if (target && 'intakeBinding' in target && target.intakeBinding && !programmaticIntakeClient.getStore()) return null
       return target
         ? { ...target, assistantDefaultCompartments: target.assistantDefaultCompartments ?? [] }
         : null

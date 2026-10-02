@@ -147,6 +147,7 @@ import {
   isTrustedCaptureOrigin,
   selectPrimaryDisplaySource,
 } from "./system-audio-policy.js";
+import { windowsAppUserModelId } from "./app-identity.js";
 import { buildAppMenu } from "./menu.js";
 import {
   buildUninstallScript,
@@ -4030,6 +4031,12 @@ function createTray(): Tray {
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────
+
+// Windows: claim the installer shortcuts' AppUserModelID before any window
+// exists, so the taskbar groups this process with its own pin however it was
+// launched (only a launch through the shortcut inherits the id on its own).
+const appUserModelId = windowsAppUserModelId(process.platform, app.isPackaged);
+if (appUserModelId) app.setAppUserModelId(appUserModelId);
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {

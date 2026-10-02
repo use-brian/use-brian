@@ -1,3 +1,4 @@
+import { createExternalKey } from './external-key-admission.js'
 /**
  * API key store — per-assistant credentials for the public API surface.
  *
@@ -253,8 +254,9 @@ export function createDbApiKeyStore(): ApiKeyStore {
       const { plaintext, secret, prefix } = mintPlaintext(id)
       const keyHash = await hashSecret(secret)
 
-      const result = await queryWithRLS<ApiKeyRowWithHash>(
+      const result = await createExternalKey<ApiKeyRowWithHash>(
         params.actingUserId,
+        { assistantId: params.assistantId },
         `INSERT INTO api_keys (id, assistant_id, name, key_hash, key_prefix, scope, audience, anonymous_context, tool_policy, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING ${COLS_PUBLIC}, key_hash as "keyHash"`,

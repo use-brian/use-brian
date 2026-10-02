@@ -14,6 +14,8 @@ import type { ExtractionApplicationRun } from './application.js'
 import type { FrozenExtractionPlan } from './extraction-plan.js'
 
 export type PipelineBSourceEnvelope = {
+  /** Captured before extraction; replay must never refresh this evidence. */
+  derivation?: import('../security/derived-scope.js').DerivedWriteEvidence
   workspaceId: string
   episodeId: string
   userId: string | null

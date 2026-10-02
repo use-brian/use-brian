@@ -3,10 +3,10 @@ import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ pipeline: vi.fn(), resolveUser: vi.fn() }))
+const mocks = vi.hoisted(() => ({ pipeline: vi.fn(), resolveUser: vi.fn(), channelType: 'wechat' }))
 vi.mock('../channel-pipeline.js', () => ({ processChannelMessage: mocks.pipeline }))
 vi.mock('../../db/channels-store.js', () => ({
-  getChannelForWebhook: vi.fn(async () => ({ status: 'active', enabledCapabilities: ['chat'], workspaceId: 'workspace' })),
+  getChannelForWebhook: vi.fn(async () => ({ channelType: mocks.channelType, status: 'active', enabledCapabilities: ['chat'], workspaceId: 'workspace' })),
   resolveRoutingForSurface: vi.fn(async () => ({ assistantId: 'assistant', modelAlias: 'pro' })),
 }))
 vi.mock('../../db/users.js', () => ({ findAssistantById: vi.fn(async () => ({ id: 'assistant', ownerUserId: 'owner', workspaceId: 'workspace' })) }))
@@ -23,6 +23,7 @@ const cloudCredentials = {
 }
 
 function setup(provider: 'wechat' | 'whatsapp', identified: boolean) {
+  mocks.channelType = provider
   const app = express()
   app.use(express.json({ verify(req, _res, buf) { (req as express.Request & { rawBody?: string }).rawBody = buf.toString() } }))
   const questionStore = { isQuestionMessage: vi.fn() }

@@ -424,6 +424,14 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    */
   externalGuest?: boolean
   /**
+   * The sender reached Brian through their own verified linked account for
+   * this provider (the same Telegram account connected to their Brian
+   * account), not a shadow, merged-guest or allowlist identity. Only such a
+   * workspace member receives their personal context in an approved group.
+   * See scoped-context.md -> "Personal context in approved groups".
+   */
+  senderLinkedIdentity?: boolean
+  /**
    * Explicit owner opt-in for an external guest to use the connected tools
    * enabled for this assistant. Does not relax memory, workspace-file, skill,
    * private-context, or long-term-persistence boundaries.
@@ -1089,6 +1097,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // A DM from a non-member goes back to that same guest, judged as the
     // guest the turn ran as - never as a member lookup that cannot succeed.
     recipientMode: memberMode === 'external' ? 'external' as const : 'member' as const,
+    // The verified sender of this group message gets their own personal
+    // context here; see `groupSpeakerCeiling`.
+    groupSpeaker: isGroupChat && senderIsWorkspaceMember && params.senderLinkedIdentity === true,
   }
   const audienceEnvelope = isGroupChat && assistant.workspaceId
     ? await resolveDeliveryAudienceEnvelope(audienceInput)
@@ -1130,9 +1141,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       session,
       memberMode,
       ignoreSessionBinding: isGroupChat,
-      // A group reads only rows the whole group may see (decision D4). A
-      // personal group - bound to one recipient whose sole-human membership
-      // is proven at every check - is that person's own audience.
+      // A group reads only rows the whole group may see (decision D4),
+      // unless the envelope names the speaker: a linked member speaking in
+      // an approved group also reads their own personal rows.
       sharedAudience: isGroupChat && !(audienceEnvelope?.allowed && audienceEnvelope.ceiling.userId),
       identity: senderIsWorkspaceMember
         ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }

@@ -7,7 +7,6 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Archive, Check, Plus, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DepartmentChangeFeedback, useDepartmentChange } from "@/components/workspace-access/use-department-change";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -40,8 +39,6 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
   const dictionary = useT(), t = dictionary.contextScope, accessCopy = dictionary.workspaceAccess;
   const [name, setName] = useState("");
   const [selectedId, setSelectedId] = useState("");
-  const [grantIds, setGrantIds] = useState<string[]>([]);
-  const [readAll, setReadAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editDescription, setEditDescription] = useState("");
@@ -50,12 +47,10 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
   const resource=useCachedResource(key,()=>fetchWorkspaceDepartmentRegistry(workspaceId));
   const change=useDepartmentChange(workspaceId,async(_result,isCurrent)=>{if(isCurrent())await resource.refresh();},selectedId);
   const data=useProtectedProjection(key,resource.data,()=>{
-    change.cancelReview();setName("");setEditName("");setEditDescription("");setEditColor("");setGrantIds([]);setReadAll(false);
+    change.cancelReview();setName("");setEditName("");setEditDescription("");setEditColor("");
   },resource.refresh);
   const teams=data?.teams??[];
   const selected=teams.find(team=>team.id===selectedId)??null;
-  const members=(data?.people??[]).map(person=>({userId:person.id,userName:person.name}));
-  const assistants=data?.assistants??[];
   const canManage=data?.canAdminister===true;
   const save=(command:DepartmentAccessCommand,description:string)=>data?change.save(command,description,data.policyRevision):Promise.resolve(null);
   useEffect(()=>{
@@ -70,12 +65,10 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
   },[workspaceId,key]);
   useEffect(()=>{if(data&&!selectedId&&data.teams[0])setSelectedId(data.teams[0].id);},[data,selectedId]);
   // Equal metadata renewals preserve unfinished drafts; object identity does not.
-  const selectedBundle=selected?.readGrantGroupIds.join(',');
   useEffect(()=>{
-    setGrantIds((selected?.readGrantGroupIds??[]).filter(id=>id!==selected?.id));
-    setReadAll(selected?.readAll??false);setEditName(selected?.name??"");
+    setEditName(selected?.name??"");
     setEditDescription(selected?.description??"");setEditColor(selected?.color??"");
-  },[selectedId,selected?.name,selected?.description,selected?.color,selected?.readAll,selectedBundle]);
+  },[selectedId,selected?.name,selected?.description,selected?.color]);
 
   async function create() {
     const trimmed = name.trim();
@@ -92,16 +85,6 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
     }
   }
 
-  async function saveGrants() {
-    if (!selected) return;
-    setError(null);
-    try {
-      if (!await save({ type: "department.read_bundle.set", teamId: selected.id, readAll, groupIds: grantIds }, `${t.saveAccess}: ${selected.name}`)) return;
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : t.updateFailed);
-    }
-  }
-
   async function saveTeamDetails() {
     if (!selected || !editName.trim()) return;
     setError(null);
@@ -111,22 +94,6 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
         description: editDescription.trim() || null,
         color: editColor.trim() || null,
       }, `${t.saveTeamDetails}: ${selected.name}`)) return;
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
-  }
-
-  async function setMember(userId: string, enabled: boolean) {
-    if (!selected) return;
-    setError(null);
-    try {
-      if (!await save({ type: "department.member.set", teamId: selected.id, userId, enabled, activateAssigned: false }, `${t.teamMembersTitle}: ${selected.name}. ${members.find(member => member.userId === userId)?.userName ?? t.members}. ${t.membershipModeHint}`)) return;
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
-  }
-
-  async function setAssistant(assistantId: string, enabled: boolean) {
-    if (!selected) return;
-    setError(null);
-    try {
-      if (!await save({ type: "department.assistant.set", teamId: selected.id, assistantId, enabled }, `${t.teamAssistantsTitle}: ${selected.name}. ${assistants.find(assistant => assistant.id === assistantId)?.name ?? t.teamAssistantsTitle}`)) return;
     } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
@@ -187,67 +154,12 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
                   <Button size="sm" variant="outline" className="min-h-11 self-start" onClick={() => void saveTeamDetails()} disabled={change.busy || !editName.trim()}>
                     <Check className="size-4" />{t.saveTeamDetails}
                   </Button>
-                </div> : <p className="text-sm text-muted-foreground">{selected.description || t.flatGrantHint}</p>}
-              <p className="text-xs text-muted-foreground">{t.flatGrantHint}</p>
-            </section>
-            <section className="space-y-4 rounded-xl border border-border bg-background p-4 md:p-5">
-              <h3 className="font-semibold">{t.membershipTitle}</h3>
-              <div className="grid gap-5 md:grid-cols-2">
-                <div>
-                  <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.teamMembersTitle}</h4>
-                  <p className="mb-3 text-xs text-muted-foreground">{t.membershipModeHint}</p>
-                  <div className="space-y-2">
-                    {members.map((member) => (
-                      <label key={member.userId} className="flex min-h-11 items-center gap-2 rounded-lg border border-border/70 px-3 py-2 text-sm">
-                        <Checkbox checked={selected.memberIds.includes(member.userId)} disabled={!canManage || change.busy}
-                          onCheckedChange={(value) => void setMember(member.userId, Boolean(value))} />
-                        {member.userName || dictionary.workspaceAccess.unnamed}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.teamAssistantsTitle}</h4>
-                  <div className="space-y-2">
-                    {assistants.map((assistant) => (
-                      <label key={assistant.id} className="flex min-h-11 items-center gap-2 rounded-lg border border-border/70 px-3 py-2 text-sm">
-                        <Checkbox checked={selected.assistantIds.includes(assistant.id)} disabled={!canManage || change.busy}
-                          onCheckedChange={(value) => void setAssistant(assistant.id, Boolean(value))} />
-                        {assistant.name}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </section>
-            <section className="space-y-4 rounded-xl border border-border bg-background p-4 md:p-5">
-              <h3 className="font-semibold">{t.readAccessTitle}</h3>
-              <label className="flex items-center gap-2 text-sm">
-                <Checkbox checked={readAll} onCheckedChange={(value) => setReadAll(Boolean(value))} disabled={!canManage || change.busy} />
-                {t.readAllTeams}
-              </label>
-              {!readAll ? (
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {teams.filter((team) => team.id !== selected.id && team.status === "active").map((team) => (
-                    <label key={team.id} className="flex items-center gap-2 rounded-lg border border-border/70 px-3 py-2 text-sm">
-                      <Checkbox checked={grantIds.includes(team.id)} disabled={!canManage || change.busy}
-                        onCheckedChange={(value) => setGrantIds((current) => value ? [...new Set([...current, team.id])] : current.filter((id) => id !== team.id))} />
-                      {team.name}
-                    </label>
-                  ))}
-                </div>
-              ) : null}
-              <div className="rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                {readAll
-                  ? t.accessPreviewAll
-                  : `${t.accessPreviewPrefix} ${[selected.name, ...teams.filter((team) => grantIds.includes(team.id)).map((team) => team.name)].join(", ")}`}
-              </div>
-              <div className="space-y-2 text-sm">
+                </div> : selected.description ? <p className="text-sm text-muted-foreground">{selected.description}</p> : null}
+              <div className="space-y-2 border-t border-border/70 pt-4 text-sm">
                 <h4 className="font-medium">{accessCopy.relatedOrgUnits}</h4>
                 {selected.orgUnits.length?<ul>{selected.orgUnits.map(unit=><li key={unit.id}><Link className="flex min-h-11 items-center underline" href={organizationHref(workspaceId)}>{unit.name}</Link></li>)}</ul>:<p className="text-muted-foreground">{accessCopy.noVisibleOrgUnits}</p>}
-                <p className="text-muted-foreground">{format(accessCopy.requestPolicyHint,{defaultDays:data.requestPolicy.defaultDays,maxDays:data.requestPolicy.maxDays})}</p>
+                <p className="text-xs text-muted-foreground">{format(accessCopy.requestPolicyHint,{defaultDays:data.requestPolicy.defaultDays,maxDays:data.requestPolicy.maxDays})}</p>
               </div>
-              {canManage ? <Button size="sm" className="min-h-11" disabled={change.busy} onClick={() => void saveGrants()}><Check className="size-4" />{t.saveAccess}</Button> : null}
             </section>
             {renderAccessSettings?<section className="rounded-xl border border-border bg-background p-4 md:p-5">{renderAccessSettings(selected.id)}</section>:null}
             {canManage && selected.status === "active" ? <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-muted/20 p-4"><h3 className="font-medium">{t.departmentLifecycleTitle}</h3><Button variant="ghost" size="sm" className="min-h-11 text-destructive hover:text-destructive" disabled={change.busy} onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button></section> : null}

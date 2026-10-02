@@ -88,8 +88,16 @@ dmg:
       path: /Applications
 # ── Windows (Tier 1, ship-fast) ─────────────────────────────────────────────
 # Produces an NSIS installer (usebrian.exe, via the stable artifactName above).
-# electron-builder auto-generates the Windows .ico from build/icon.png (1024x1024),
-# exactly as it derives the mac .icns — so no separate icon asset is needed.
+# The icon is the committed build/icon.ico, NOT a conversion of build/icon.png:
+# electron-builder's PNG conversion emits a single 256px entry, Windows then
+# point-samples it down to taskbar sizes, and the mark's thin grid seams alias
+# into stray black lines. icon.ico carries one hand-rendered, seam-free entry per
+# shell size (regenerate with `python3 build/make-dmg-art.py --ico`). It is named
+# explicitly so a missing file fails the build instead of silently falling back.
+#
+# `appId` above is also the AppUserModelID the installer stamps on the Start
+# Menu / desktop shortcuts. The running app must claim the same id
+# (src/app-identity.ts) or Windows shows it as a second taskbar app.
 #
 # Code signing is DEFERRED: with no signing config present, electron-builder emits
 # an UNSIGNED installer (Windows SmartScreen then shows "unknown publisher"). That
@@ -100,6 +108,7 @@ dmg:
 # the NSIS installer writes the registry keys. See
 # docs/architecture/features/app-desktop.md → "Build, sign, ship (Windows)".
 win:
+  icon: build/icon.ico
   target:
     - nsis
 nsis:

@@ -9,7 +9,11 @@ const state = vi.hoisted(() => ({
   buildTools: vi.fn(),
 }))
 
-vi.mock('../auth.js', () => ({ authenticateBrainRequest: state.authenticate }))
+vi.mock('../auth.js', () => ({
+  authenticateBrainRequest: state.authenticate,
+  // These fixtures authenticate Home apps, not rotatable Brain credentials.
+  getAuthenticatedBrainCredentialCurrent: () => undefined,
+}))
 vi.mock('../tools.js', () => ({
   buildBrainTools: state.buildTools,
   resolveAgentCapabilities: async () => new Set(),

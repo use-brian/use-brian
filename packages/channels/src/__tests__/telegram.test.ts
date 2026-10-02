@@ -2296,3 +2296,28 @@ describe('[COMP:channels/telegram] media group (album) merge', () => {
     }
   })
 })
+
+describe('Telegram passive normalization mode', () => {
+  const message = { message_id: 10, date: 1700000000, from: { id: 42, first_name: 'User' }, chat: { id: -100, type: 'supergroup' }, text: 'room chatter' }
+  const normal = createTelegramAdapter({ token: 'token', botUsername: 'bot' })
+  const passive = createTelegramAdapter({ token: 'token', botUsername: 'bot', config: { normalizePassive: true } })
+  it.each([
+    message,
+    { ...message, text: undefined, photo: [{ file_id: 'photo', width: 1, height: 1 }] },
+    { ...message, chat: { id: -100, type: 'channel' }, from: undefined },
+  ])('normalizes passive text, media and posts without altering reply defaults', msg => {
+    expect(normal.parseIncoming({ message: msg })).toBeNull()
+    expect(passive.parseIncoming({ message: msg })).toMatchObject({ messageId: '10', timestamp: 1700000000000 })
+  })
+  it('keeps self/service/automatic-forward/callback exclusions', () => {
+    for (const msg of [
+      { ...message, from: { id: 1, is_bot: true } },
+      { ...message, is_automatic_forward: true },
+      { ...message, new_chat_members: [{ id: 1 }] },
+    ]) expect(passive.parseIncoming({ message: msg })).toBeNull()
+    expect(passive.parseIncoming({ callback_query: { message } })).toBeNull()
+    expect(passive.parseIncoming({ message: { text: 'invalid' } })).toBeNull()
+    expect(passive.parseIncoming({ message: { ...message, from: undefined } })).toBeNull()
+    expect(passive.parseIncoming(null)).toBeNull()
+  })
+})

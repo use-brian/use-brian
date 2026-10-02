@@ -22,6 +22,15 @@ export async function validateDerivedMemoryInputs(
   return floor
 }
 
+/** Entity/knowledge metadata adapter preserves app-role read authority. */
+export async function validateDerivedEntityInputs(
+  client: Pick<pg.PoolClient, 'query'>, evidence: DerivedWriteEvidence,
+): Promise<ResourceScope> {
+  const floor = deriveResourceScope(evidence)
+  await revalidateScopeSources(client, floor.workspaceId, evidence.sources, 'read_entity_derivation_source')
+  return floor
+}
+
 /**
  * Inputs of a model-driven write (decision D3). Same exact-version lineage
  * as `validateDerivedMemoryInputs`, but only the LABEL floor comes back: the
@@ -55,6 +64,7 @@ async function revalidateScopeSources(
   client: Pick<pg.PoolClient, 'query'>,
   workspaceId: string,
   sources: readonly ScopeSource[],
+  reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source',
 ): Promise<void> {
   const unique = new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
   // All writers use the same lock order, including mixed primitive prompts.
@@ -62,7 +72,7 @@ async function revalidateScopeSources(
   for(const source of list)if(source.workspaceId!==workspaceId)throw new DerivedScopeError('scope_workspace_mismatch')
   if(list.length===0)return
   const { rows }=await client.query<{ord:number;snapshot:CanonicalEvidenceRow|null}>(
-    `SELECT t.ord::int AS ord, read_scope_source($1, t.kind, t.id) AS snapshot
+    `SELECT t.ord::int AS ord, ${reader}($1, t.kind, t.id) AS snapshot
        FROM unnest($2::text[], $3::uuid[]) WITH ORDINALITY AS t(kind, id, ord)`,
     [workspaceId,list.map(source=>source.resourceKind),list.map(source=>source.resourceId)],
   )

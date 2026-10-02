@@ -2,6 +2,7 @@
 // durable workspace file without duplicating it into file_segments.
 
 import type { FilesApi, FilesContext } from '@use-brian/core'
+import { recordingTranscriptEvidence, type RecordingSegmentProvenance } from '../db/recording-intake-admission.js'
 import { formatTranscript, type TranscriptLineSource } from '@use-brian/shared'
 
 export type PersistTranscriptInput = {
@@ -35,10 +36,15 @@ export function createTranscriptArtifactWriter(deps: {
 }) {
   return async function persistTranscript(
     input: PersistTranscriptInput,
+    provenance?: RecordingSegmentProvenance,
   ): Promise<PersistedTranscript | null> {
     try {
       if (input.utterances.length === 0) return null
 
+      if (!provenance || provenance.actorUserId !== input.actingUserId || provenance.recordingId !== input.recordingId
+        || provenance.parent.workspaceId !== input.workspaceId) throw new Error('recording_intake_provenance_required')
+      const derivation = recordingTranscriptEvidence(provenance)
+      const parent = provenance.parent
       const text = formatTranscript(input.utterances)
       if (!text.trim()) return null
 
@@ -47,9 +53,10 @@ export function createTranscriptArtifactWriter(deps: {
       const ctx: FilesContext = {
         workspaceId: input.workspaceId,
         userId: input.actingUserId,
-        ...(input.assistantId ? { assistantId: input.assistantId } : {}),
-        writeCompartments: input.compartments ?? [],
-        writeProjectIds: input.projectIds ?? [],
+        ...(parent.assistantId ? { assistantId: parent.assistantId } : {}),
+        derivation,
+        writeCompartments: [...parent.compartments],
+        writeProjectIds: [...parent.projectIds],
       }
       const bytes = Buffer.from(text, 'utf8')
       const stored = await deps.filesApi.writeBytes(ctx, {
@@ -57,7 +64,7 @@ export function createTranscriptArtifactWriter(deps: {
         bytes,
         mime: 'text/markdown',
         title: input.title ? `Transcript - ${input.title}` : 'Transcript',
-        sensitivity: input.sensitivity as never,
+        sensitivity: parent.sensitivity,
       })
       if (!stored.ok) {
         console.warn('[transcript-artifact] writeBytes failed (non-fatal):', stored.error)

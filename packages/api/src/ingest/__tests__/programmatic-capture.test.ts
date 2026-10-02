@@ -188,6 +188,25 @@ describe('[COMP:api/programmatic-capture] routed producer', () => {
     expect(db.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }))
   })
 
+  it.each(['legacy', 'review', 'strict'] as const)('keeps explicit empty bindings pinned in %s classification', async classificationMode => {
+    const configured = target([rule({ scopeBindingOrigin: 'explicit', scopeBindingMode: 'explicit' })])
+    configured.classificationMode = classificationMode
+    const route = createProgrammaticCaptureRouter({ store: store(configured), ingest: vi.fn() })
+    await route(AUTH, { eventId: 'pinned', sessionId: 'session', content: 'private intake payload' })
+    expect(db.append).toHaveBeenCalledWith(expect.objectContaining({ compartments: [], projectIds: [] }))
+  })
+
+  it.each(['legacy', 'review', 'strict'] as const)('does not release held rules in %s classification', async classificationMode => {
+    const configured = target([rule({ scopeBindingOrigin: 'held', scopeBindingMode: 'explicit', routingMode: 'realtime', routingSchedule: null })])
+    configured.classificationMode = classificationMode
+    const ingest = vi.fn()
+    const route = createProgrammaticCaptureRouter({ store: store(configured), ingest })
+    await route(AUTH, { eventId: 'held', sessionId: 'session', content: 'private intake payload' })
+    expect(ingest).not.toHaveBeenCalled()
+    expect(db.reserve).not.toHaveBeenCalled()
+    expect(db.append).toHaveBeenCalledWith(expect.objectContaining({ scopeHeld: true }))
+  })
+
   it('persists a strict legacy binding on hold before any extraction',async()=>{
     const ingest=vi.fn(),strict=target([rule({scopeBindingOrigin:'legacy',scopeBindingMode:'inherit'})])
     strict.classificationMode='strict';strict.assistantDefaultBindingOrigin='explicit'

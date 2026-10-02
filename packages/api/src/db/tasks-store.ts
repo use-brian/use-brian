@@ -1,5 +1,5 @@
 import type { EntityLinksStore, TaskRecord, TaskStore } from '@use-brian/core'
-import { createTask, findRecentDuplicateTask, findTasksByExternalRefSystem, getTaskById, listTasks, resolveTaskById, updateTask } from './tasks.js'
+import { createTask, findTasksByExternalRefSystem, getTaskById, listTasks, resolveTaskById, updateTask } from './tasks.js'
 
 /**
  * Create a TaskStore backed by PostgreSQL.
@@ -38,25 +38,15 @@ export function createDbTaskStore(
   const { entityLinks, onTaskTerminal, onTaskCreate } = deps
   return {
     async create({ userId, ...params }) {
-      // Create idempotency: a retry / double-fire of the same logical create
-      // (identical content, scope, author and provenance within a short window)
-      // returns the EXISTING task instead of inserting a duplicate. Guarding
-      // here (not just in `createTask`) is deliberate — it also short-circuits
-      // `onTaskCreate`, so a deduped create never mints a second autopilot
-      // draft goal for a task that already has one. Blank placeholder rows are
-      // exempt (see `findRecentDuplicateTask`). Best-effort by construction:
-      // the window is small enough that a false negative just falls through to
-      // the insert. See docs/architecture/features/tasks.md → "Create idempotency".
-      const dup = await findRecentDuplicateTask(userId, params)
-      if (dup) return dup
+      // Admission and dedup share the writer transaction; only inserts emit hooks.
       // `linkedEntityIds` is not on the `TaskStore.create` interface
       // yet (a follow-up type widening) — read it via a permissive
       // cast and thread it into `createTask` for the `mentioned` edge.
       const extras = params as typeof params & { linkedEntityIds?: readonly string[] }
-      const record = await createTask(userId, { ...params, linkedEntityIds: extras.linkedEntityIds }, entityLinks)
-      // Autopilot: a top-level task auto-drafts a bound goal. Fire-and-forget —
-      // drafting a goal must never fail or block the task write.
-      if (onTaskCreate && record.parentId === null) onTaskCreate(record, userId)
+      const record = await createTask(userId, { ...params, linkedEntityIds: extras.linkedEntityIds }, entityLinks, undefined, {
+        deduplicate: true,
+        onInserted: task => { if (onTaskCreate && task.parentId === null) onTaskCreate(task, userId) },
+      })
       return record
     },
     getById(ctx, id) {
