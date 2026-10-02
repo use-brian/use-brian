@@ -219,6 +219,8 @@ function entitySourceGuard(actorUserId: string, access: AccessContext | undefine
 }
 
 export async function createEntity(params: EntityCreateParams, transactionClient?: pg.PoolClient): Promise<EntityRecord> {
+  // Fail fast, before any connection or admission read (WU-4.5).
+  assertAuthorshipPresent('createEntity', params.createdByUserId)
   if (!transactionClient) {
     const client = await getAppPool().connect()
     try {

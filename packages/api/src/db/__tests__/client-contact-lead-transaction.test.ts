@@ -55,6 +55,10 @@ const client = {
     if (flat.startsWith('BEGIN') || flat.startsWith('COMMIT') || flat.startsWith('ROLLBACK')) {
       return { rows: [], rowCount: 0 }
     }
+    // Brain admission reads the workspace access policy under a scoped bypass;
+    // no policy row means a legacy workspace, which admits this intake.
+    if (flat.includes("current_setting('app.system_bypass'")) return { rows: [{ value: null }], rowCount: 1 }
+    if (flat.includes('FROM workspace_access_policies')) return { rows: [], rowCount: 0 }
     if (flat.includes('SELECT entity_id AS "entityId"')) {
       return { rows: [{ entityId: anchoredContactId }], rowCount: 1 }
     }

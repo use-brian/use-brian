@@ -38,7 +38,9 @@ const insertQuery = vi.fn()
 const transactionQuery = vi.fn(async (sql: string, values?: unknown[]) =>
   sql.includes('INSERT INTO workflows') ? insertQuery(sql, values)
     : sql.startsWith('SELECT workspace_id') ? { rows: [{ workspaceId: 'ws-1' }], rowCount: 1 }
-    : sql.startsWith('UPDATE workflows') || sql.startsWith('DELETE FROM workflows') ? queryWithRLS('u-1', sql, values)
+    // The update's schedule-edit guard reads the current row first: a manual, unpinned workflow.
+    : sql.startsWith('SELECT to_jsonb(w) AS row') ? { rows: [{ row: { trigger: { kind: 'manual' }, schedule_authoring_pinned: false } }], rowCount: 1 }
+    : sql.startsWith('UPDATE workflows') || sql.startsWith('DELETE FROM workflows') || /FROM workflows WHERE id = \$1\s*$/.test(sql.trim()) ? queryWithRLS('u-1', sql, values)
     : { rows: [], rowCount: 0 })
 const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)

@@ -374,7 +374,9 @@ describe('[COMP:api/workflows-route] schedule trigger → backing scheduled_jobs
       .send({ enabled: false })
 
     expect(res.status).toBe(200)
-    expect(workflowStore.update).toHaveBeenCalledWith('u-1', 'wf-1', expect.objectContaining({ enabled: false }))
+    // Every REST write carries the authenticated authoring proof.
+    expect(workflowStore.update).toHaveBeenCalledWith('u-1', 'wf-1', expect.objectContaining({ enabled: false }),
+      expect.objectContaining({ kind: 'authenticated-workflow-rest', userId: 'u-1' }))
   })
 })
 
