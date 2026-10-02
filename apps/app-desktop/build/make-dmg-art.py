@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Regenerate the macOS packaging artwork in this directory.
+"""Regenerate the packaging artwork in this directory.
 
 Produces, from `icon.original.png` (the flat 512px brand mark):
 
   icon.png            1024px rounded-squircle app icon (+ subtle cyan rim light)
+  icon.ico            Windows app icon: one hand-rendered entry per shell size
   background.png      660x420  install-window backdrop (1x)
   background@2x.png   1320x840 install-window backdrop (2x)
   background.tiff     HiDPI bundle of the two, used by electron-builder
@@ -16,8 +17,11 @@ the brand glow / arrow are drawn around icon centres (175,240) and (485,240) in 
 Requires: Pillow, numpy, and macOS `tiffutil` (for the HiDPI .tiff).
 Run:      python3 build/make-dmg-art.py [--preview]
           --preview also writes /tmp/dmg_preview.png (a faux install window).
+          --ico regenerates only icon.ico (no tiffutil, so it runs anywhere).
 """
+import io
 import os
+import struct
 import subprocess
 import sys
 
@@ -106,6 +110,117 @@ def build_icon():
     out.alpha_composite(rim)
     out.save(os.path.join(ROOT, "icon.png"))
     print("icon.png  (1024, rounded squircle + rim light)")
+
+
+# ── Windows .ico ─────────────────────────────────────────────────────────────
+# Windows never resamples an icon well: it draws the entry that matches the
+# requested size and point-samples the next larger one for every size the file
+# lacks. The master's 2px grid seams are exactly the detail that cannot survive
+# that - shrunk to a taskbar size they land on some pixel rows and miss others,
+# which reads as stray black lines across the mark. So the .ico is not a resize
+# of icon.png: every entry is drawn at its own size from the cell grid below,
+# with no seams, and each cell edge snapped to a whole pixel.
+TILE = (6, 10, 18)    # tile fill (sampled from the mark)
+EYE = (10, 22, 40)    # eye fill (sampled from the mark)
+# The mark as a 7x6 cell grid, mirroring icon.original.png (check_mark_grid
+# fails the run if the master is redrawn without updating this).
+MARK_ROWS = [(2, 3, 4), (1, 2, 3, 4, 5), (0, 1, 2, 3, 4, 5, 6),
+             (0, 1, 2, 3, 4, 5, 6), (1, 2, 3, 4, 5), (2, 4)]
+MARK_EYES = [(2, 2), (4, 2)]              # (col, row)
+MARK_ORIGIN, MARK_PITCH = (56, 85), 57    # grid origin + cell pitch in the 512px master
+MARK_SPAN = 7 * MARK_PITCH / 512          # mark width as a fraction of the tile
+EYE_SPAN = 26 / MARK_PITCH                # eye edge as a fraction of a cell
+# One entry per size the shell asks for across the 100/125/150/200% scale
+# factors: 16/24/32/48 base sizes, the taskbar's 24 -> 30/36/48, plus 256.
+ICO_SIZES = [16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256]
+
+
+def check_mark_grid():
+    src = Image.open(os.path.join(ROOT, "icon.original.png")).convert("RGB")
+    ox, oy = MARK_ORIGIN
+    for r in range(6):
+        for c in range(7):
+            # Sample near the cell corner (clear of the eye) for fill, centre for the eye.
+            fill = src.getpixel((ox + c * MARK_PITCH + 8, oy + r * MARK_PITCH + 8))
+            mid = src.getpixel((ox + c * MARK_PITCH + MARK_PITCH // 2, oy + r * MARK_PITCH + MARK_PITCH // 2))
+            want = CYAN if c in MARK_ROWS[r] else TILE
+            want_mid = EYE if (c, r) in MARK_EYES else want
+            if fill != want or mid != want_mid:
+                raise SystemExit(f"icon.original.png cell ({c},{r}) no longer matches MARK_ROWS/MARK_EYES")
+
+
+def snap_grid(size, cells, pitch):
+    """Cell boundaries centred on the tile, each rounded away from the centre
+    line so the left and right (top and bottom) halves stay mirror images."""
+    out = []
+    for i in range(cells + 1):
+        d = (i - cells / 2) * pitch
+        r = int(abs(d) + 0.5)
+        out.append(size // 2 + (r if d >= 0 else -r))
+    return out
+
+
+def render_win_icon(size, ss=8):
+    # Tile + rim light: supersampled, so the rounded corners antialias.
+    big = size * ss
+    radius = round(0.2237 * big)
+    tile = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    ImageDraw.Draw(tile).rounded_rectangle([0, 0, big - 1, big - 1], radius=radius, fill=(*TILE, 255))
+    rim = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    inset, width = round(2 * big / 1024), max(1, round(3 * big / 1024))
+    ImageDraw.Draw(rim).rounded_rectangle(
+        [inset, inset, big - 1 - inset, big - 1 - inset], radius=radius - inset,
+        outline=(*CYAN, 38), width=width)
+    tile.alpha_composite(rim)
+    out = tile.resize((size, size), Image.LANCZOS)
+
+    # Mark: drawn straight onto the device grid, never resampled.
+    pitch = MARK_SPAN * size / 7
+    xs, ys = snap_grid(size, 7, pitch), snap_grid(size, 6, pitch)
+    d = ImageDraw.Draw(out)
+    for r, cols in enumerate(MARK_ROWS):
+        for c in cols:
+            d.rectangle([xs[c], ys[r], xs[c + 1] - 1, ys[r + 1] - 1], fill=(*CYAN, 255))
+    e = max(1, round(EYE_SPAN * pitch))
+    for c, r in MARK_EYES:
+        pad = (xs[c + 1] - xs[c] - e) // 2
+        ex = xs[c] + pad if c < 3 else xs[c + 1] - pad - e   # mirrored about the centre
+        ey = ys[r] + (ys[r + 1] - ys[r] - e + 1) // 2
+        d.rectangle([ex, ey, ex + e - 1, ey + e - 1], fill=(*EYE, 255))
+    return out
+
+
+def ico_bitmap(im):
+    """32-bit BGRA DIB + 1bpp AND mask, the encoding every shell path reads."""
+    s = im.width
+    px = np.asarray(im)[::-1]                       # DIB rows run bottom-up
+    xor = px[..., [2, 1, 0, 3]].tobytes()
+    mask = np.zeros((s, ((s + 31) // 32) * 32), np.uint8)
+    mask[:, :s] = px[..., 3] == 0
+    and_mask = np.packbits(mask, axis=1).tobytes()
+    header = struct.pack("<IiiHHIIiiII", 40, s, s * 2, 1, 32, 0, len(xor) + len(and_mask), 0, 0, 0, 0)
+    return header + xor + and_mask
+
+
+def build_ico():
+    check_mark_grid()
+    blobs = []
+    for s in ICO_SIZES:
+        im = render_win_icon(s)
+        if s < 256:
+            blobs.append(ico_bitmap(im))
+        else:  # 256 is PNG-compressed by convention
+            buf = io.BytesIO()
+            im.save(buf, "PNG")
+            blobs.append(buf.getvalue())
+    out = struct.pack("<HHH", 0, 1, len(blobs))
+    offset = 6 + 16 * len(blobs)
+    for s, blob in zip(ICO_SIZES, blobs):
+        out += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(blob), offset)
+        offset += len(blob)
+    with open(os.path.join(ROOT, "icon.ico"), "wb") as f:
+        f.write(out + b"".join(blobs))
+    print(f"icon.ico  ({len(ICO_SIZES)} sizes, pixel-snapped, no grid seams)")
 
 
 def build_bg(scale):
@@ -240,7 +355,12 @@ def build_preview():
 
 
 if __name__ == "__main__":
+    if "--ico" in sys.argv:
+        build_ico()
+        print("DONE")
+        sys.exit(0)
     build_icon()
+    build_ico()
     build_backgrounds()
     if "--preview" in sys.argv:
         build_preview()
