@@ -234,6 +234,14 @@ export type DeliveryAudienceBinding = {
   clearance: Sensitivity
   compartments: string[]
   projectIds: string[]
+  /**
+   * Company-wide reach: no Team or Project cap (both arrays stay empty), so
+   * the turn runs with universe Team/Project grants and the assistant's
+   * company-wide connector catalogs become available. Absent = false, which
+   * keeps the empty arrays meaning "General only". Clearance still caps.
+   * See scoped-context.md -> "Company-wide group approval".
+   */
+  companyWide?: boolean
   /** Exact current member for a private destination; null for shared audiences. */
   recipientUserId: string | null
   expiresAt: string | null

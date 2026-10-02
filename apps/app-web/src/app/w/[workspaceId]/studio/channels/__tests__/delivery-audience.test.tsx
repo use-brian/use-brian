@@ -350,3 +350,25 @@ it("shows departments by name, removes one from an approval, and drops labels v2
   await click(copy.save);
   expectWrite([{ ...input(legacy), compartments: [] }]);
 });
+
+describe("[COMP:app-web/channel-delivery-audiences] Whole company approval", () => {
+  it("approves a group for the whole company, dropping its department and project caps", async () => {
+    await render(); await click(copy.edit);
+    expect(host.textContent).toContain(copy.wholeCompanyHint);
+    await act(async () => host.querySelector<HTMLElement>('[role="switch"]')!.click());
+    // The department and project pickers no longer apply.
+    expect(host.querySelector(`button[aria-label="${copy.chooseDepartment}"]`)).toBeNull();
+    expect(host.querySelector('input[id$="-projects"]')).toBeNull();
+    await click(copy.save);
+    expectWrite([{ ...input(first), compartments: [], projectIds: [], companyWide: true }, input(second)]);
+  });
+  it("shows a company-wide approval and keeps it when another approval is edited", async () => {
+    const wide: DeliveryAudienceBinding = { ...first, compartments: [], projectIds: [], companyWide: true };
+    await render(channel([wide, second]));
+    expect(host.textContent).toContain(copy.wholeCompany);
+    await act(async () => [...host.querySelectorAll("button")].filter((node) => node.textContent?.trim() === copy.edit)[1].click());
+    expect(host.querySelector('[role="switch"]')).toBeNull();
+    await click(copy.save);
+    expectWrite([input(wide), input(second)]);
+  });
+});

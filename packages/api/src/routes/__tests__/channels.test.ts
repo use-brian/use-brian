@@ -86,7 +86,7 @@ import {
   createDiscordApi,
   createSlackApi,
 } from '@use-brian/channels'
-import { channelsRoutes, normalizeWhatsAppPhoneNumber } from '../channels.js'
+import { channelsRoutes, deliveryAudienceBindingInputSchema, normalizeWhatsAppPhoneNumber } from '../channels.js'
 import { queryWithRLS } from '../../db/client.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
@@ -2131,5 +2131,27 @@ describe('[COMP:api/channels-route] custom channels', () => {
     expect(res.status).toBe(204)
     expect(customChannelStore.enqueue).toHaveBeenCalledWith('chan-cu', { type: 'disconnect', peerId: null, payload: {} })
     expect(deleteChannel).toHaveBeenCalledWith('user-1', 'chan-cu')
+  })
+})
+
+describe('[COMP:api/channels-route] company-wide delivery audience binding schema', () => {
+  const group = {
+    channelId: '-1001234567890', audienceType: 'group' as const, clearance: 'internal' as const,
+    compartments: [] as string[], projectIds: [] as string[],
+  }
+
+  it('accepts a company-wide group with no Teams or Projects', () => {
+    expect(deliveryAudienceBindingInputSchema.safeParse({ ...group, companyWide: true }).success).toBe(true)
+    expect(deliveryAudienceBindingInputSchema.safeParse(group).success).toBe(true)
+  })
+
+  it('rejects company-wide alongside Teams, Projects, or a single recipient', () => {
+    expect(deliveryAudienceBindingInputSchema.safeParse({ ...group, companyWide: true, compartments: ['team:sales'] }).success).toBe(false)
+    expect(deliveryAudienceBindingInputSchema.safeParse({
+      ...group, companyWide: true, projectIds: ['55555555-5555-4555-8555-555555555555'],
+    }).success).toBe(false)
+    expect(deliveryAudienceBindingInputSchema.safeParse({
+      ...group, audienceType: 'individual', companyWide: true, recipientUserId: '22222222-2222-4222-8222-222222222222',
+    }).success).toBe(false)
   })
 })

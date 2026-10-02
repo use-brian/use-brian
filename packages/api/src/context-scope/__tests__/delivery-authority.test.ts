@@ -3,9 +3,11 @@ import type { AccessCeiling, ScopeSource } from '@use-brian/core'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { Session } from '../../db/sessions.js'
 import {
+  bindingCeiling,
   createDeliveryAudienceAuthorizer,
   createDeliveryAudienceEnvelopeResolver,
 } from '../delivery-authority.js'
+import { connectorExposureAllowed } from '../connector-exposure.js'
 
 const WS = '11111111-1111-4111-8111-111111111111'
 const USER = '22222222-2222-4222-8222-222222222222'
@@ -345,18 +347,21 @@ function approvedGroupDeps(options: {
   speakerRole: 'owner' | 'admin' | 'member' | null
   live?: AccessCeiling | (() => Promise<AccessCeiling>)
   recipientUserId?: string | null
+  companyWide?: boolean
+  compartments?: string[]
 }) {
   const binding = {
     version: 1,
     channelId: SPEAKER_GROUP,
     audienceType: 'group',
     clearance: 'confidential',
-    compartments: [],
+    compartments: options.compartments ?? [],
     projectIds: [],
     recipientUserId: options.recipientUserId ?? null,
     expiresAt: null,
     approvedByUserId: APPROVER,
     approvedAt: '2026-09-29T00:00:00.000Z',
+    ...(options.companyWide ? { companyWide: true } : {}),
   }
   const live = options.live ?? ceiling({ clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [] })
   return {
@@ -537,5 +542,64 @@ describe('[COMP:api/delivery-authority] non-member recipients', () => {
       recipientMode: 'external',
       scopeEvidence: { sensitivity: 'internal' as const, sources: guestInput.scopeEvidence.sources },
     })).resolves.toMatchObject({ allowed: false, diagnostic: 'clearance' })
+  })
+})
+
+describe('[COMP:api/delivery-authority] company-wide group approval', () => {
+  // 2026-10-01: an approved group's empty Team/Project lists mean General
+  // only, so every company-wide connector (Google Calendar in the incident)
+  // was withheld from the group with no way to approve it wider.
+  const universe = ceiling({ compartments: null, mutationCompartments: null, projectIds: null })
+  const groupBinding = {
+    version: 1 as const, channelId: SPEAKER_GROUP, audienceType: 'group' as const, clearance: 'internal' as const,
+    compartments: [], projectIds: [], recipientUserId: null, expiresAt: null,
+    approvedByUserId: APPROVER, approvedAt: '2026-09-29T00:00:00.000Z',
+  }
+
+  it('maps a company-wide binding to universe Team and Project axes, clearance still capped', () => {
+    expect(bindingCeiling(WS, { ...groupBinding, companyWide: true })).toMatchObject({
+      clearance: 'internal', compartments: null, mutationCompartments: null, projectIds: null,
+    })
+    expect(bindingCeiling(WS, groupBinding)).toMatchObject({
+      compartments: [], mutationCompartments: [], projectIds: [],
+    })
+  })
+
+  it('fails narrow when a stored entry carries companyWide alongside lists or a recipient', () => {
+    expect(bindingCeiling(WS, { ...groupBinding, companyWide: true, compartments: ['team:sales'] }))
+      .toMatchObject({ compartments: ['team:sales'], projectIds: [] })
+    expect(bindingCeiling(WS, { ...groupBinding, companyWide: true, recipientUserId: USER }))
+      .toMatchObject({ compartments: [], projectIds: [] })
+  })
+
+  it('lets a company-wide group turn reach an unbounded connector; a General-only group cannot', async () => {
+    const turnOf = (c: AccessCeiling) => ({
+      effectiveCompartments: c.compartments,
+      effectiveProjectIds: c.projectIds,
+      access: { mutationCompartments: c.mutationCompartments },
+    })
+    const unbounded = { compartments: [], projectIds: [] }
+
+    const wide = await createDeliveryAudienceEnvelopeResolver(
+      approvedGroupDeps({ speakerRole: 'owner', companyWide: true, live: universe }),
+    )(speakerInput)
+    expect(wide.allowed).toBe(true)
+    if (!wide.allowed) return
+    expect(wide.ceiling).toMatchObject({ compartments: null, projectIds: null })
+    expect(connectorExposureAllowed(turnOf(wide.ceiling), unbounded)).toBe(true)
+
+    // Same group, no speaker elevation: the shared ceiling is company-wide too.
+    const { groupSpeaker: _omitted, ...onBehalf } = speakerInput
+    const shared = await createDeliveryAudienceEnvelopeResolver(
+      approvedGroupDeps({ speakerRole: 'owner', companyWide: true, live: universe }),
+    )(onBehalf)
+    expect(shared.allowed && connectorExposureAllowed(turnOf(shared.ceiling), unbounded)).toBe(true)
+
+    const general = await createDeliveryAudienceEnvelopeResolver(
+      approvedGroupDeps({ speakerRole: 'owner', live: universe }),
+    )(speakerInput)
+    expect(general.allowed).toBe(true)
+    if (!general.allowed) return
+    expect(connectorExposureAllowed(turnOf(general.ceiling), unbounded)).toBe(false)
   })
 })
