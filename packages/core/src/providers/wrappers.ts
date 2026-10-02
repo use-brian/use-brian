@@ -109,7 +109,8 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
     const controller = new AbortController()
     const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal
     // Admission retries share this window; they cannot extend it or become idle replays.
-    const httpRetryWindow = { deadline: Date.now() + (firstChunkTimeoutMs ?? timeoutMs), rateLimited: false }
+    const callerDeadline = request.httpRetryWindow?.deadline ?? Infinity
+    const httpRetryWindow = { deadline: Math.min(callerDeadline, Date.now() + (firstChunkTimeoutMs ?? timeoutMs)), rateLimited: request.httpRetryWindow?.rateLimited ?? false }
     const stream = inner({ ...request, signal, httpRetryWindow })
     const iterator = stream[Symbol.asyncIterator]()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -123,7 +124,7 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
         : sawReasoningChunk
           ? ' (reasoning window — no deliverable chunk)'
           : ' (no deliverable chunk — prefill window)'
-      httpRetryWindow.deadline = Date.now() + windowMs
+      httpRetryWindow.deadline = Math.min(callerDeadline, Date.now() + windowMs)
       return new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => {
