@@ -2143,6 +2143,7 @@ function deliveryAudienceInput(
     projectIds: binding.projectIds,
     recipientUserId: binding.recipientUserId,
     expiresAt: binding.expiresAt,
+    ...(binding.companyWide ? { companyWide: true } : {}),
   };
 }
 
@@ -2197,6 +2198,7 @@ function TelegramDeliveryAudiences({
         projectIds: existing?.projectIds ?? [],
         recipientUserId: null,
         expiresAt: existing?.expiresAt ?? null,
+        ...(existing?.companyWide ? { companyWide: true } : {}),
       });
     }
 

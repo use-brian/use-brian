@@ -5,6 +5,7 @@ import { X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { ChannelConfigUpdateError, updateChannelConfig, type Channel, type DeliveryAudienceBindingInput } from "@/lib/api/channels";
 
 import { SearchableSelect, type SearchableSelectItem } from "@/components/ui/searchable-select";
@@ -23,6 +24,8 @@ type Draft = {
   clearance: "public" | "internal" | "confidential";
   /** Department keys (`team:<id>`): the only labels the v2 read honours. */
   compartments: string[];
+  /** Group only: replaces the department and project lists with no cap. */
+  companyWide: boolean;
   projects: string;
   recipient: string;
   expires: string;
@@ -39,6 +42,7 @@ function toInput(binding: DeliveryAudienceBindingInput): DeliveryAudienceBinding
     clearance: binding.clearance, compartments: binding.compartments,
     projectIds: binding.projectIds, recipientUserId: binding.recipientUserId ?? null,
     expiresAt: binding.expiresAt ?? null,
+    ...(binding.companyWide ? { companyWide: true } : {}),
   };
 }
 
@@ -119,6 +123,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
       // Only department keys are honoured since the v2 cutover; any other
       // label on an older approval is dropped when it is next saved.
       compartments: (binding?.compartments ?? []).filter((value) => value.startsWith("team:")), projects: binding?.projectIds.join(", ") ?? "",
+      companyWide: binding?.companyWide === true && binding.audienceType === "group",
       recipient: binding?.recipientUserId ?? "", expires: binding?.expiresAt ?? "" });
     setError(null);
     setInvalidFields([]);
@@ -167,8 +172,9 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
   function save() {
     if (!draft) return;
     const channelId = draft.channelId.trim();
-    const compartments = [...new Set(draft.compartments)];
-    const projectIds = list(draft.projects);
+    const companyWide = draft.companyWide && draft.audienceType === "group";
+    const compartments = companyWide ? [] : [...new Set(draft.compartments)];
+    const projectIds = companyWide ? [] : list(draft.projects);
     const recipientUserId = draft.audienceType === "individual" ? draft.recipient.trim() || null : null;
     const expires = draft.expires.trim();
     const expiry = expires ? Date.parse(expires) : null;
@@ -202,7 +208,8 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
     }
     const binding: DeliveryAudienceBindingInput = { channelId, audienceType: draft.audienceType,
       clearance: draft.clearance, compartments, projectIds, recipientUserId,
-      expiresAt: expiry === null ? null : new Date(expiry).toISOString() };
+      expiresAt: expiry === null ? null : new Date(expiry).toISOString(),
+      ...(companyWide ? { companyWide: true } : {}) };
     const next = bindings.map(toInput);
     if (draft.index === null) next.push(binding);
     else next[draft.index] = binding;
@@ -238,7 +245,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
         <p className="break-all font-mono text-sm">{binding.channelId}</p>
         <p className="text-sm">{binding.audienceType === "group" ? copy.group : copy.individual} · {t.studioPage.channels.clearance[binding.clearance]}</p>
         <dl className="space-y-1 break-words text-xs text-muted-foreground">
-          <div><dt>{copy.compartments}</dt><dd>{binding.compartments.some((value) => value.startsWith("team:")) ? binding.compartments.filter((value) => value.startsWith("team:")).map(departmentName).join(", ") : copy.generalOnly}</dd></div>
+          <div><dt>{copy.compartments}</dt><dd>{binding.companyWide ? copy.wholeCompany : binding.compartments.some((value) => value.startsWith("team:")) ? binding.compartments.filter((value) => value.startsWith("team:")).map(departmentName).join(", ") : copy.generalOnly}</dd></div>
           {binding.projectIds.length > 0 && <div><dt>{copy.projects}</dt><dd>{binding.projectIds.join(", ")}</dd></div>}
           {binding.recipientUserId && <div><dt>{copy.recipient}</dt><dd>{binding.recipientUserId}</dd></div>}
           <div><dt>{copy.expires}</dt><dd>{binding.expiresAt ?? copy.noExpiry}{binding.expiresAt && Date.parse(binding.expiresAt) <= Date.now() ? ` (${copy.expired})` : ""}</dd></div>
@@ -260,14 +267,14 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
         const audienceType = channel.channelType === "telegram" ? (bare.startsWith("-") ? "group" : "individual")
           : channel.channelType === "slack" ? (value.startsWith("D") ? "individual" : "group")
           : channel.channelType === "whatsapp" ? (value.endsWith("@g.us") ? "group" : "individual") : draft.audienceType;
-        setDraft({ ...draft, channelId: value, audienceType, recipient: audienceType === "group" ? "" : draft.recipient });
+        setDraft({ ...draft, channelId: value, audienceType, recipient: audienceType === "group" ? "" : draft.recipient, companyWide: audienceType === "group" && draft.companyWide });
       })}
       {field("channelId", copy.destination, copy.destinationHint)}
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1">
           <label id={`${id}-type`} className="text-sm font-medium">{copy.audienceType}</label>
           <Select value={draft.audienceType} disabled={busy || stale} onValueChange={(value) => {
-            if (value === "group" || value === "individual") setDraft({ ...draft, audienceType: value, recipient: value === "group" ? "" : draft.recipient });
+            if (value === "group" || value === "individual") setDraft({ ...draft, audienceType: value, recipient: value === "group" ? "" : draft.recipient, companyWide: value === "group" && draft.companyWide });
           }}>
             <SelectTrigger aria-labelledby={`${id}-type`} className="min-h-11 w-full"><SelectValue>{draft.audienceType === "group" ? copy.group : copy.individual}</SelectValue></SelectTrigger>
             <SelectContent><SelectItem value="group">{copy.group}</SelectItem><SelectItem value="individual">{copy.individual}</SelectItem></SelectContent>
@@ -283,6 +290,16 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
           </Select>
         </div>
       </div>
+      {draft.audienceType === "group" && <div className="flex items-start gap-3">
+        <Switch id={`${id}-company-wide`} aria-describedby={`${id}-company-wide-hint`} checked={draft.companyWide}
+          disabled={busy || stale} className="mt-0.5"
+          onCheckedChange={(checked) => setDraft({ ...draft, companyWide: checked })} />
+        <div className="space-y-1">
+          <label htmlFor={`${id}-company-wide`} className="text-sm font-medium">{copy.wholeCompany}</label>
+          <p id={`${id}-company-wide-hint`} className="text-xs text-muted-foreground">{copy.wholeCompanyHint}</p>
+        </div>
+      </div>}
+      {!(draft.companyWide && draft.audienceType === "group") && <>
       <div className="space-y-2">
         <p id={`${id}-departments`} className="text-sm font-medium">{copy.compartments}</p>
         {draft.compartments.length > 0 ? <ul aria-labelledby={`${id}-departments`} className="flex flex-wrap gap-2">
@@ -307,6 +324,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
         if (value) setDraft({ ...draft, projects: [...new Set([...list(draft.projects), value])].join(", ") });
       })}
       {field("projects", copy.projects, copy.projectsHint)}
+      </>}
       {draft.audienceType === "individual" && picker(copy.chooseMember, draft.recipient, options.members, (value) => {
         if (value) setDraft({ ...draft, recipient: value });
       })}
