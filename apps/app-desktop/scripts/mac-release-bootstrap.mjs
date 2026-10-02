@@ -35,7 +35,7 @@ function context(app, identity) {
   // team. Bind the staged parent's signer to that exact selected certificate
   // before obtaining the team used by the independently verifying inventory.
   if (!/^[A-Fa-f0-9]{40}$/.test(identity ?? '')) fail();
-  command(['--verify', '--strict', '--all-architectures', '-R', `${developerID} and certificate leaf = H"${identity}" and identifier "ai.usebrian.desktop"`, app]);
+  command(['--verify', '--strict', '--all-architectures', '-R', `=${developerID} and certificate leaf = H"${identity}" and identifier "ai.usebrian.desktop"`, app]);
   const result = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', app], { encoding: 'utf8', timeout: 120000, maxBuffer: 65536 });
   if (result.status !== 0) fail();
   const team = `${result.stdout}\n${result.stderr}`.match(/^TeamIdentifier=([A-Z0-9]{10})$/m)?.[1];
@@ -49,7 +49,7 @@ async function approval(app, team, architectures) {
 }
 function verifyBindings(app, expected, team) {
   const helper = join(app, nativeHelperRelativePath);
-  command(['--verify', '--strict', '--all-architectures', '-R', `${developerID} and certificate leaf[subject.OU] = "${team}"`, helper]);
+  command(['--verify', '--strict', '--all-architectures', '-R', `=${developerID} and certificate leaf[subject.OU] = "${team}"`, helper]);
   verifyNativeHelperEntitlements(helper);
   verifyBootstrapApprovalCoverage(bytes(helper), expected);
   const parent = bytes(join(app, 'Contents/MacOS/Use Brian'));
@@ -64,7 +64,7 @@ export function captureUnstampedHelper(app) { return bytes(join(app, nativeHelpe
 
 export async function verifyPackagedNativeBootstrap(app, team) {
   if (process.platform !== 'darwin' || !['arm64', 'x64'].includes(process.arch) || !/^[A-Z0-9]{10}$/.test(team ?? '')) fail();
-  command(['--verify', '--strict', '--all-architectures', '-R', `${developerID} and certificate leaf[subject.OU] = "${team}" and identifier "ai.usebrian.desktop"`, app]);
+  command(['--verify', '--strict', '--all-architectures', '-R', `=${developerID} and certificate leaf[subject.OU] = "${team}" and identifier "ai.usebrian.desktop"`, app]);
   const expected = await approval(app, team, [process.arch === 'arm64' ? 'arm64' : 'x86_64']);
   verifyBindings(app, expected, team);
 }

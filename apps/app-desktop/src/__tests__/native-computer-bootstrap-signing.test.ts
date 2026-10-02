@@ -40,6 +40,9 @@ describe('R1 release bootstrap signing composition', () => {
     signCalls = []; constraintPath = undefined;
     execFileSync.mockImplementation((tool, args) => {
       expect(tool).toBe('/usr/bin/codesign'); signCalls.push(args);
+      // Model codesign's CLI boundary, not just fragments of policy text:
+      // without '=', -R loads a file rather than compiling an expression.
+      if (args.includes('-R')) expect(args[args.indexOf('-R') + 1]).toMatch(/^=anchor apple generic and /);
       if (args.includes('--library-constraint')) {
         constraintPath = args[args.indexOf('--library-constraint') + 1];
         const value = plist.parse(readFileSync(constraintPath!, 'utf8')) as any;

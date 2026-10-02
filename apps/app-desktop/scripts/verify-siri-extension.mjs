@@ -126,7 +126,8 @@ export default async function verifySiriExtension(context) {
       [fixturePath, "com.usebrian.NativeComputerFixture"],
       [frameworkPath, null],
     ]) {
-      const requirement = sameTeam + (identifier ? ` and identifier "${identifier}"` : "");
+      // codesign interprets -R as a filename unless the expression starts '='.
+      const requirement = "=" + sameTeam + (identifier ? ` and identifier "${identifier}"` : "");
       execFileSync("/usr/bin/codesign", ["--verify", "--strict", "--all-architectures", "-R", requirement, path], { stdio: "inherit" });
     }
     // Verify the final artifact, not just the options passed to the signer.

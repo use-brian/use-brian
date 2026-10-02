@@ -167,6 +167,7 @@ describe("macOS native fixture signing hooks (mocked tools, not native signing)"
       expect(checks).toHaveLength(4);
       for (const [, args] of checks) {
         const requirement = args[args.indexOf("-R") + 1];
+        expect(requirement).toMatch(/^=anchor apple generic and /);
         expect(requirement).toContain('certificate leaf[subject.OU] = "ABCDE12345"');
         expect(requirement).toContain('certificate 1[field.1.2.840.113635.100.6.2.6] exists');
         expect(requirement).toContain('certificate leaf[field.1.2.840.113635.100.6.1.13] exists');

@@ -51,7 +51,7 @@ export async function runAdmissionComposition({ constrained, baseline, stock, ro
   await step('/usr/bin/codesign', [...rootArgs, baseline]);
   const identity = rootArgs[rootArgs.indexOf('--sign') + 1];
   await step('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--all-architectures', '-R',
-    `certificate leaf = H"${identity}" and identifier "ai.usebrian.desktop"`, baseline]);
+    `=certificate leaf = H"${identity}" and identifier "ai.usebrian.desktop"`, baseline]);
   for (const app of [baseline, constrained]) {
     fs.rmSync(join(app, framework), { recursive: true });
     await step('/usr/bin/ditto', [join(stock, framework), join(app, framework)]);
@@ -94,7 +94,7 @@ export async function checkPackagedAdmission(options, approval) {
     return result;
   };
   try {
-    const requirement = `certificate leaf = H"${identity}" and identifier "ai.usebrian.desktop"`;
+    const requirement = `=certificate leaf = H"${identity}" and identifier "ai.usebrian.desktop"`;
     await step('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--all-architectures', '-R', requirement, app]);
     const display = await step('/usr/bin/codesign', ['--display', '--verbose=4', app]);
     const team = `${display.stdout}\n${display.stderr}`.match(/^TeamIdentifier=([A-Z0-9]{10})$/m)?.[1];

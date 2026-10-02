@@ -59,7 +59,7 @@ test('copy-only root removal/re-sign precedes identical substitutions and fixed 
       assert.deepEqual(c[2], { ...env, ELECTRON_RUN_AS_NODE: '1' }); assert.equal(c[3], true);
     }
     assert.ok(!calls.slice(0, 3).some(c => c[1].includes(constrained)));
-    assert.ok(calls[2][1].includes(`certificate leaf = H"${'a'.repeat(40)}" and identifier "ai.usebrian.desktop"`));
+    assert.ok(calls[2][1].includes(`=certificate leaf = H"${'a'.repeat(40)}" and identifier "ai.usebrian.desktop"`));
     calls.length = 0;
     for (const app of [baseline, constrained]) fs.mkdirSync(join(app, 'Contents/Frameworks/Electron Framework.framework'), { recursive: true });
     await assert.rejects(runAdmissionComposition({ baseline, constrained, stock, rootArgs, directory, env }, async (...args) => {
