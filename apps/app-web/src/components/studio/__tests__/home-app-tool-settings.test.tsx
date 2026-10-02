@@ -8,19 +8,24 @@ import { en } from '@/lib/i18n/dictionaries/en';
 import type { Dictionary } from '@/lib/i18n/dictionaries';
 import { authFetch } from '@/lib/auth-fetch';
 import { HomeAppToolSettings } from '../home-app-tool-settings';
+import { resetSurfaceCache } from '@/lib/surface-cache';
 vi.mock('@/lib/auth-fetch', () => ({ authFetch: vi.fn() }));
+const snapshot = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/api/association', () => ({ getAssociationModuleSnapshot: snapshot }));
+vi.mock('@/lib/surface-prefetch', () => ({ associationModuleCacheKey: (workspaceId: string) => `association-module:${workspaceId}:viewer` }));
 const fetchMock = vi.mocked(authFetch);
 let root: Root;
 let container: HTMLDivElement;
 const response = (body: unknown, ok = true) => ({ ok, json: async () => body }) as Response;
-const render = async () => act(async () => {
-  root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><HomeAppToolSettings assistantId="assistant-one" /></I18nProvider>);
+const render = async (workspaceId?: string) => act(async () => {
+  root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><HomeAppToolSettings assistantId="assistant-one" workspaceId={workspaceId} /></I18nProvider>);
 });
 const button = (label: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
-  fetchMock.mockReset();
+  fetchMock.mockReset(); snapshot.mockReset(); resetSurfaceCache();
+  snapshot.mockResolvedValue({ module: { workspaceId: 'w1', state: 'disabled', version: 1 }, canManage: true });
   fetchMock.mockResolvedValue(response({ grants: HOME_APP_TOOL_CAPABILITIES.map((capability) => ({ capability, enabled: true })) }));
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
@@ -56,5 +61,19 @@ describe('[COMP:app-web/home-app-tool-settings] per-assistant switches', () => {
     await act(async () => button('Page').click());
     expect(button('Page').getAttribute('aria-checked')).toBe('true');
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(en.assistant.toolsTab.homeApps.save);
+  });
+  it('shows module state as a note inside the Association card, never the module panel', async () => {
+    await render('w1');
+    const t = en.associationPage;
+    const note = container.querySelector('[data-association-module-note]')!;
+    expect(note.textContent).toBe(`${t.moduleStateLabel}: ${t.states.disabled}. ${t.savedPermissions}`);
+    expect(note.closest('.rounded-xl')?.querySelector('h3')?.textContent).toBe(en.assistant.toolsTab.homeApps.association);
+    expect(container.querySelector('[data-association-module]')).toBeNull();
+    expect(container.textContent).not.toContain(t.moduleTitle);
+    expect(container.textContent).not.toContain(t.refresh);
+    expect(snapshot).toHaveBeenCalledExactlyOnceWith('w1');
+    await act(async () => root.unmount()); root = createRoot(container);
+    await render();
+    expect(container.querySelector('[data-association-module-note]')).toBeNull();
   });
 });

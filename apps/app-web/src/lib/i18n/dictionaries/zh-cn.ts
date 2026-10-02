@@ -1636,6 +1636,7 @@ export const zhCN: Dictionary = {
     "next": "下一页",
     "name": "协会",
     "moduleTitle": "协会工作区模块",
+    "moduleStateLabel": "工作区模块",
     "moduleDescription": "管理此工作区的票券预订。“在首页显示”和助手权限是独立设置。",
     "savedPermissions": "已保存的助手权限与工作区模块状态相互独立。停用模块会保留权限设置。",
     "states": {

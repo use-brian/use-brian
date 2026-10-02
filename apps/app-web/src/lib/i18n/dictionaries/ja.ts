@@ -1625,6 +1625,7 @@ export const ja: Dictionary = {
     "next": "次のページ",
     "name": "協会",
     "moduleTitle": "協会ワークスペースモジュール",
+    "moduleStateLabel": "ワークスペースモジュール",
     "moduleDescription": "このワークスペースのチケット予約を管理します。ホームへの表示とアシスタントの権限は別の設定です。",
     "savedPermissions": "保存済みのアシスタント権限とモジュールの状態は別々です。モジュールを無効にしても権限の設定は保持されます。",
     "states": {

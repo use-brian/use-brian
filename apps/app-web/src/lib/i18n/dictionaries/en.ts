@@ -1638,6 +1638,7 @@ export const en = {
     "next": "Next page",
     "name": "Association",
     "moduleTitle": "Association workspace module",
+    "moduleStateLabel": "Workspace module",
     "moduleDescription": "Control ticket reservations for this workspace. Show in Home and assistant permissions are separate settings.",
     "savedPermissions": "Saved assistant permissions are separate from workspace module state. Disabling the module preserves those permissions.",
     "states": {

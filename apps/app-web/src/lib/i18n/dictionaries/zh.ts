@@ -1625,6 +1625,7 @@ export const zh: Dictionary = {
     "next": "下一頁",
     "name": "協會",
     "moduleTitle": "協會工作區模組",
+    "moduleStateLabel": "工作區模組",
     "moduleDescription": "管理此工作區的票券預訂。「顯示於首頁」和助理權限是獨立設定。",
     "savedPermissions": "已儲存的助理權限與工作區模組狀態互相獨立。停用模組會保留權限設定。",
     "states": {
