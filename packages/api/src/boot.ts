@@ -501,6 +501,10 @@ import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
 import { createMeetingTagsTool } from './recordings/meeting-tags-tool.js'
 import { recordingLiveRoutes } from './routes/recording-live.js'
+import { watchRecordingRoutes } from './routes/watch-recording.js'
+import { createWatchService, authorizeWatchDestination } from './recordings/watch-service.js'
+import { startWatchCleanup } from './recordings/watch-maintenance.js'
+import { transcribeAudio as transcribeWatchAudio } from '@use-brian/core'
 import { createDocGateway } from './doc/doc-gateway.js'
 import { createFilesApi, createSingletonFilesClientResolver, workspaceFileReadRevision, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
@@ -5866,6 +5870,21 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         : {}),
     }))
   }
+  let stopWatchCleanup: (() => Promise<void>) | undefined
+  // Dedicated opaque device credentials must mount before the broad human /api guards.
+  // Explicit deployment identity prevents credentials crossing installations sharing a DB.
+  if (process.env.WATCH_RECORDING_ENABLED === 'true' && process.env.WATCH_RECORDING_DEPLOYMENT && filesApi && filesResolver) {
+    app.use('/api/watch/v1', watchRecordingRoutes({
+      deployment: process.env.WATCH_RECORDING_DEPLOYMENT, provisioningKey: env.JWT_SECRET,
+      humanAuth: requireAuth(env.JWT_SECRET), authorize: authorizeWatchDestination,
+      service: createWatchService({ pages: savedViewStore, files: filesApi,
+        ...(voiceTranscription.enabled ? { transcribe: async (buffer: Buffer) => (await transcribeWatchAudio(
+          { buffer, mime: 'audio/mp4' }, { apiKey: voiceTranscription.apiKey, backend: voiceTranscription.backend, model: voiceTranscription.model },
+        )).text } : {}),
+      }),
+    }))
+    stopWatchCleanup = startWatchCleanup()
+  }
   if (usesOpenStandaloneRoutes(profile) && filesResolver && filesBlobClient) {
     app.use('/api/recordings', requireAuth(env.JWT_SECRET), openRecordingsRoutes({
       filesResolver,
@@ -9661,6 +9680,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   async function shutdown(): Promise<void> {
+    await stopWatchCleanup?.() // Watch boot lifecycle: stop and drain retention work.
     console.log('Shutting down — flushing analytics...')
     consolidationWorker.stop()
     skillReviewWorker.stop()
