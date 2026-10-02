@@ -10,7 +10,7 @@ const identity = "A".repeat(40);
 const directories: string[] = [];
 const existingKeychains = ["/Users/example/Library/Keychains/login.keychain-db", "/tmp/certificate archive.keychain-db"];
 
-function run({ fail = "", pathCertificate = false, exitAfterPrepare = 0, initialKeychains = existingKeychains, missingChain = false } = {}) {
+function run({ fail = "", pathCertificate = false, exitAfterPrepare = 0, initialKeychains = existingKeychains, missingChain = false, missingBuilder = false } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "desktop-keychain-test-"));
   directories.push(directory);
   // Nested dependency layout ensures app-builder-lib is resolved from builder.
@@ -24,6 +24,7 @@ function run({ fail = "", pathCertificate = false, exitAfterPrepare = 0, initial
     writeFileSync(join(directory, path, "package.json"), "{}");
   }
   if (!missingChain) writeFileSync(join(library, "certs/root_certs.keychain"), "dummy-public-chain", { mode: 0o644 });
+  if (missingBuilder) rmSync(builder, { recursive: true });
   const log = join(directory, "calls.jsonl");
   writeFileSync(log, "");
   const password = "fixture-certificate-password";
@@ -139,11 +140,22 @@ describe("[COMP:app-desktop/packaging] release signing keychain", () => {
   it("refuses a missing bundled public chain without importing or changing the search list", () => {
     const result = run({ missingChain: true });
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("could not copy installed electron-builder public Apple chain");
+    expect(result.stderr).toContain("stage=copy-public-chain, code=ENOENT");
+    expect(result.stderr).not.toContain(result.directory);
     expect(result.stderr).not.toContain(result.password);
     expect(result.calls.every(args => args[0] === "delete-keychain")).toBe(true);
     expect(result.finalKeychains).toEqual(existingKeychains);
     expect(readdirSync(result.directory).some(name => name.startsWith("usebrian-signing."))).toBe(false);
+  });
+
+  it("distinguishes missing builder installation without exposing loader paths or credentials", () => {
+    const result = run({ missingBuilder: true });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("stage=resolve-builder, code=MODULE_NOT_FOUND");
+    expect(result.stderr).not.toContain(result.directory);
+    expect(result.stderr).not.toContain(result.password);
+    expect(result.calls.every(args => args[0] === "delete-keychain")).toBe(true);
+    expect(result.finalKeychains).toEqual(existingKeychains);
   });
 
   it("restores an originally empty search list", () => {

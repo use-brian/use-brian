@@ -48,13 +48,23 @@ desktop_keychain_prepare() {
 import { chmodSync, copyFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+let stage = 'resolve-builder';
 try {
   const builder = createRequire(process.argv[2]).resolve('electron-builder/package.json');
+  stage = 'resolve-builder-library';
   const library = createRequire(builder).resolve('app-builder-lib/package.json');
+  stage = 'copy-public-chain';
   copyFileSync(join(dirname(library), 'certs/root_certs.keychain'), process.argv[3]);
+  stage = 'restrict-public-chain-permissions';
   chmodSync(process.argv[3], 0o600);
-} catch {
-  console.error('error: could not copy installed electron-builder public Apple chain (app-builder-lib/certs/root_certs.keychain).');
+} catch (error) {
+  // Do not print exception messages/stacks: loader and filesystem errors may
+  // contain local paths or configuration. Only fixed stages/codes leave here.
+  const codes = new Set(['MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED',
+    'ERR_INVALID_ARG_TYPE', 'ERR_INVALID_ARG_VALUE', 'ENOENT', 'EACCES', 'EPERM',
+    'ENOTDIR', 'EISDIR', 'EROFS', 'ENOSPC', 'EMFILE', 'ENFILE']);
+  const code = codes.has(error?.code) ? error.code : 'UNKNOWN';
+  console.error(`error: could not copy installed electron-builder public Apple chain (stage=${stage}, code=${code}).`);
   process.exitCode = 1;
 }
 NODE
