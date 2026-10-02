@@ -1,3 +1,4 @@
+import { assertNativeInput } from './native-strict.js'
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 /**
  * Document adaptation — the one seam where inline media becomes readable text
@@ -279,6 +280,7 @@ export function wrapDocumentAdaptation(
       // `stream` is synchronous by signature, so the async swap happens inside
       // the generator — the first `next()` awaits it before anything dispatches.
       return (async function* () {
+        if (request.nativeStrict) { assertNativeInput(request); yield* provider.stream(request); return }
         const messages = await adapt(request.messages)
         debugDocumentFlow('document_adaptation', { model: request.model, before: request.messages, messages })
         yield* provider.stream(messages === request.messages ? request : { ...request, messages })

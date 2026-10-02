@@ -14,6 +14,7 @@ describe('[COMP:connectors/builtin-primitive-switch] mini-app defaults', () => {
     expect(params).not.toContain('tasks')
     expect(params).not.toContain('crm')
     expect(params).not.toContain('files')
+    expect(params).not.toContain('native_computer')
     expect(params).not.toContain('association')
     expect(params).not.toContain('home_app:association:read')
     expect(params).not.toContain('home_app:association:write')

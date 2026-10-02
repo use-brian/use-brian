@@ -122,6 +122,7 @@ export function createCodexAppServerProvider(
     models,
 
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
+      if (request.nativeStrict) throw new Error('native_unsupported_adapter')
       const session = createSession({
         model: request.model,
         systemPrompt: request.systemPrompt,

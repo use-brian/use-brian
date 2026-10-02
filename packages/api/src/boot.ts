@@ -1,3 +1,9 @@
+import { nativeAccountingFor } from './computer-use/accounting-capability.js'
+import type { NativeAccountingCapability } from './computer-use/accounting.js'
+import { createNativeComputerBootRuntimeFactory, createNativeAttemptRecorder } from './computer-use/boot-runtime.js'
+import { composeNativeComputerTool, type NativeRuntimeFactory, type NativeRunObserverFactory } from './computer-use/composition.js'
+import { nativeComputerRoutes } from './routes/native-computer.js'
+import { NativeComputerService } from './computer-use/service.js'
 import { createBrowserFileBridge } from './sandbox/browser-files.js'
 import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
 import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher,setFeedLinkedInRecovery} from './content-planning/linkedin-authority.js'
@@ -930,6 +936,8 @@ export interface OpenApiEnv {
   // Computer-use local mode (docs/architecture/engine/computer-use.md §4):
   // the browser-relay's HTTP base + shared secret. Unset (open default) →
   // the local browser backend reports not_configured.
+  NATIVE_COMPUTER_ENABLED?: string
+  NATIVE_COMPUTER_DEPLOYMENT_ID?: string
   BROWSER_RELAY_URL?: string
   PROTECTED_BROWSER_FILL_SINGLE_INSTANCE?: string
   PROTECTED_BROWSER_FILL_EXTENSION_ORIGINS?: string
@@ -1028,6 +1036,11 @@ export interface EpisodeIngestorDeps {
  * connectors absent.
  */
 export interface OpenApiPorts {
+  /** Optional native runtime override. Default uses existing workspace model routing. */
+  nativeComputerRuntimeFactory?: NativeRuntimeFactory
+  nativeAccounting?: NativeAccountingCapability
+  /** Trusted host metadata observer only; absent by default, never enabled by UI/env/model. */
+  nativeComputerObserverFactory?: NativeRunObserverFactory
   feedHistorySql?: string;
   // ── Billing — open default: allow-all / no-op ──
   /** Real DB credit gate; default allows every turn. */
@@ -1921,6 +1934,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const cacheStore = createDbCacheStore()
   const fileStore = createDbFileStore()
   const usageStore = ports.usageStore
+  const nativeAccounting = ports.nativeAccounting ?? nativeAccountingFor(usageStore)
   const analyticsStore = createDbAnalyticsStore()
   const analytics = new AnalyticsLogger(analyticsStore)
 
@@ -2128,7 +2142,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const workspaceDecisionRoutingStore = createWorkspaceDecisionRoutingStore()
   const decisionEvaluationProfileStore = createDecisionEvaluationProfileStore()
-  const recordDecisionUsage = createDecisionAttemptUsageRecorder(usageStore)
+  const recordDecisionUsage = createDecisionAttemptUsageRecorder(usageStore, { nativeAcknowledgements: true, nativeAccounting })
   const operatorDecisionDefault = parseOperatorDecisionDefault(
     env.DECISION_DEFAULT_MODE,
     env.DECISION_DEFAULT_MODEL,
@@ -2149,14 +2163,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   decisionRuntime = createDecisionRuntime({
+    nativeAccounting,
     llmProvider: provider,
     defaultLlmModel: () => backgroundModelFor(configuredProviders),
     typesafeApiKey: env.TYPESAFE_API_KEY,
     configureAdapters: ports.configureDecisionAdapters,
     resolveRoute: workspaceDecisionRouteResolver,
     onAttempt: async (attempt) => {
-      await recordDecisionUsage(attempt)
-      await ports.recordDecisionAttempt?.(attempt)
+      const acknowledgement = await recordDecisionUsage(attempt)
+      if (attempt.nativeBillingPreparation) {
+        // Native metadata observers cannot delay/fail an already committed
+        // central receipt or turn its result into another model attempt.
+        void Promise.resolve().then(() => ports.recordDecisionAttempt?.(attempt)).catch(() => {})
+      } else await ports.recordDecisionAttempt?.(attempt)
+      return acknowledgement
     },
     onOutcome: ports.recordDecisionOutcome,
   })
@@ -4978,6 +4998,35 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })
     },
   })
+  const nativeComputerService = (env.NATIVE_COMPUTER_ENABLED ?? process.env.NATIVE_COMPUTER_ENABLED) === 'true' && browserRelayUrl && env.BROWSER_RELAY_SECRET && (env.NATIVE_COMPUTER_DEPLOYMENT_ID ?? process.env.NATIVE_COMPUTER_DEPLOYMENT_ID)
+    ? new NativeComputerService({ relayUrl: browserRelayUrl, relaySecret: env.BROWSER_RELAY_SECRET, jwtSecret: env.JWT_SECRET, deploymentId: (env.NATIVE_COMPUTER_DEPLOYMENT_ID ?? process.env.NATIVE_COMPUTER_DEPLOYMENT_ID)! }) : null
+  if (nativeComputerService) {
+    const visionModel = process.env.NATIVE_COMPUTER_VISION_MODEL
+    const visionAccepted = process.env.NATIVE_COMPUTER_VISION_ACCEPTED === 'true'
+    const configuredBudget = {
+      tokens: Number(process.env.NATIVE_COMPUTER_TOKEN_BUDGET ?? 262144),
+      costUsd: Number(process.env.NATIVE_COMPUTER_COST_BUDGET_USD ?? 26.2144),
+      attemptTokens: 32768,
+      attemptCostUsd: Number(process.env.NATIVE_COMPUTER_ATTEMPT_COST_USD ?? 3.2768),
+    }
+    const runtime = ports.nativeComputerRuntimeFactory ?? createNativeComputerBootRuntimeFactory({
+      provider, configuredProviders, resolveWorkspaceCustomLlm, getWorkspacePlan,
+      checkCreditBudget: ports.checkCreditBudget, decisionRuntime, usageStore, nativeAccounting, budget: configuredBudget,
+      recordAttempt: createNativeAttemptRecorder(nativeComputerService),
+      resolveGrounder: async context => {
+        // An explicit evaluated exact model is required, never generic vision alone.
+        if (!visionAccepted || !visionModel || !context.workspaceId || !registryRow(visionModel)?.capabilities.vision
+          || ensureServableModel(visionModel, configuredProviders) !== visionModel) return null
+        // Do not send a custom-endpoint workspace's images to a platform model.
+        if (await resolveWorkspaceCustomLlm({ workspaceId: context.workspaceId, requestedTier: 'standard', allowDefault: true, allowFailureFallback: false })) return null
+        return { provider, model: visionModel, nativeGrounding: true, providerKeySource: 'platform' }
+      },
+    })
+    // Even a host-supplied runtime cannot bypass unsupported-store admission.
+    // The service/inspection routes remain available; only task execution closes.
+    allTools.set('nativeComputerTask', composeNativeComputerTool(nativeComputerService, nativeAccounting ? runtime : undefined, ports.nativeComputerObserverFactory))
+  }
+
   allTools.set('browserNavigate', computerTools.browserNavigate)
   allTools.set('browserOpenTab', computerTools.browserOpenTab)
   allTools.set('browserListTabs', computerTools.browserListTabs)
@@ -6249,6 +6298,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       computerTools.setSessionBackendOverride(sessionId, backend)
     },
   }))
+
+  app.use('/api/native-computer', requireAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask')))
 
   app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
     jwtSecret: env.JWT_SECRET,

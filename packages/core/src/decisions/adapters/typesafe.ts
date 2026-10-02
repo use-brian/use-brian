@@ -1,5 +1,6 @@
 /** TypeSafe System One / Jev decision adapter. [COMP:decisions/typesafe] */
 
+import { nativeDecisionMetadata, nativeDecisionResponse } from '../native-provenance.js'
 import type {
   DecisionAnswer,
   DecisionCapabilities,
@@ -24,6 +25,8 @@ export const TYPESAFE_JEV_CAPABILITIES: DecisionCapabilities = {
 }
 
 export type TypeSafeTransportRequest = {
+  /** Trusted native invocation policy; never populated from response/state. */
+  nativeStrict?: true
   url: string
   headers: Record<string, string>
   body: JsonValue
@@ -47,6 +50,7 @@ export function createFetchTypeSafeTransport(fetchFn: typeof fetch = fetch): Typ
       headers: request.headers,
       body: JSON.stringify(request.body),
       signal: request.signal,
+      ...(request.nativeStrict ? { redirect: 'error' as const } : {}),
     })
     let body: unknown
     try {
@@ -208,6 +212,7 @@ export function createTypeSafeDecisionProvider(options: {
 
   return {
     id: 'typesafe',
+    supportsNativeStrict: true,
     capabilities,
     async evaluate(request): Promise<DecisionResponse> {
       assertDecisionCapabilities(request, capabilities)
@@ -225,6 +230,7 @@ export function createTypeSafeDecisionProvider(options: {
         let wire: TypeSafeTransportResponse
         try {
           wire = await transport({
+            ...(request.nativeStrict ? { nativeStrict: true as const } : {}),
             url: options.endpoint ?? DEFAULT_ENDPOINT,
             headers: {
               authorization: `Bearer ${options.apiKey}`,
@@ -240,9 +246,9 @@ export function createTypeSafeDecisionProvider(options: {
         } catch (error) {
           if (controller.signal.aborted) {
             const kind = request.signal?.aborted ? 'cancelled' : 'timeout'
-            throw new DecisionProviderError(kind, kind === 'cancelled' ? 'decision call cancelled' : 'decision deadline exhausted', { dispatched: true, cause: error })
+            throw new DecisionProviderError(kind, kind === 'cancelled' ? 'decision call cancelled' : 'decision deadline exhausted', { dispatched: true, ...(!request.nativeStrict ? { cause: error } : {}) })
           }
-          throw new DecisionProviderError('transport', 'TypeSafe transport failed', { dispatched: true, cause: error })
+          throw new DecisionProviderError('transport', 'TypeSafe transport failed', { dispatched: true, ...(!request.nativeStrict ? { cause: error } : {}) })
         }
         if (wire.status < 200 || wire.status >= 300) throw statusFailure(wire)
         const body = asRecord(wire.body, 'response')
@@ -252,13 +258,25 @@ export function createTypeSafeDecisionProvider(options: {
           : undefined
         const response: DecisionResponse = {
           providerId: 'typesafe',
+          ...(request.nativeStrict ? { nativeMetadata: nativeDecisionMetadata({
+            actualModel: body.model ?? null,
+            usage: usage ? { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens } : null,
+          }) } : {}),
           model: { catalogId: request.model.catalogId, wireId: model },
           answers: parseAnswers(request, body),
           ...(usage && typeof usage.input_tokens === 'number' && typeof usage.output_tokens === 'number'
             ? { usage: { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens } }
             : {}),
         }
-        return validateDecisionResponse(request, response)
+        return validateDecisionResponse(request, request.nativeStrict ? nativeDecisionResponse(response) : response)
+      } catch (error) {
+        if (!request.nativeStrict) throw error
+        // Response validation can interpolate provider-controlled probability
+        // keys. Neither those messages nor nested transport causes may escape.
+        throw new DecisionProviderError(error instanceof DecisionProviderError ? error.kind : 'invalid_response',
+          'TypeSafe native request failed', { dispatched: true,
+            ...(error instanceof DecisionProviderError ? { status: error.status, retryAfterMs: error.retryAfterMs } : {}),
+          })
       } finally {
         if (timeout !== undefined) clearTimeout(timeout)
         request.signal?.removeEventListener('abort', onAbort)

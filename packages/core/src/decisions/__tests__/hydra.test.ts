@@ -17,6 +17,7 @@ function response(value: 'ordinary' | 'research' = 'ordinary'): DecisionResponse
   const request = decisionRequest()
   return {
     providerId: 'fixture-primary',
+    nativeMetadata: { actualModel: request.model.wireId, usage: { inputTokens: 8, outputTokens: 2 } },
     model: request.model,
     answers: [{
       kind: 'choice',
@@ -31,6 +32,7 @@ function response(value: 'ordinary' | 'research' = 'ordinary'): DecisionResponse
 function provider(evaluate: DecisionProvider['evaluate']): DecisionProvider {
   return {
     id: 'fixture-primary',
+    supportsNativeStrict: true,
     capabilities: {
       primitives: ['choice'],
       batch: true,
@@ -342,4 +344,113 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
       mode: 'shadow', primary, profile: profile('shadow'), operatorOverride: true,
     })).toThrow(/only for hybrid/)
   })
+})
+
+// Native primary providers can ignore AbortSignal. Late settlement is accounting
+// only: no accepted result, profile authority, or side effect can be resurrected.
+describe('native primary invocation lifecycle', () => {
+  function nativeRequest(signal?: AbortSignal) {
+    const request = decisionRequest()
+    return { ...request, operation: { ...request.operation, id: 'computer.next-action' }, signal }
+  }
+  function nativeProfile() {
+    return { ...profile(), operationId: 'computer.next-action' }
+  }
+  it.each(['success', 'failure'] as const)('Stop returns before late %s; one stable ledger identity, no late decide', async ending => {
+    let resolve!: (value: DecisionResponse) => void, reject!: (reason: Error) => void, started!: () => void
+    const gate = new Promise<DecisionResponse>((yes, no) => { resolve = yes; reject = no })
+    const dispatched = new Promise<void>(yes => { started = yes })
+    const abort = new AbortController(), records: DecisionAttemptRecord[] = []
+    const op = operation(), decide = vi.spyOn(op, 'decide')
+    const result = executeDecisionCascade({ request: nativeRequest(abort.signal), operation: op,
+      route: { mode: 'hybrid', primary: provider(async () => { started(); return gate }), profile: nativeProfile(), allowSyntheticProfile: true },
+      onAttempt: r => { records.push(r) },
+    })
+    const rejected = expect(result).rejects.toMatchObject({ kind: 'cancelled' })
+    await dispatched; abort.abort(); await rejected
+    expect(records.filter(r => r.stage === 'primary_decision')).toHaveLength(2)
+    expect(records.every(r => r.invocationState === 'pending' && !r.usage)).toBe(true)
+    if (ending === 'success') resolve(response())
+    else reject(new Error('raw late credential'))
+    await vi.waitFor(() => expect(records.at(-1)?.invocationState).toBe('settled'))
+    expect(new Set(records.map(r => r.invocationId)).size).toBe(1)
+    expect(records.at(-1)).toMatchObject({ interrupted: true, outcome: ending === 'success' ? 'success' : 'error' })
+    expect(records.filter(r => r.usage)).toHaveLength(ending === 'success' ? 1 : 0)
+    expect(decide).not.toHaveBeenCalled()
+    expect(JSON.stringify(records)).not.toContain('raw late credential')
+  })
+  it('never dispatches a registered legacy adapter without the native contract', async () => {
+    const evaluate = vi.fn(async () => response()), legacy = provider(evaluate)
+    delete (legacy as { supportsNativeStrict?: true }).supportsNativeStrict
+    const op = operation(), complete = vi.spyOn(op, 'completeWithLlm')
+    const result = await executeDecisionCascade({ request: nativeRequest(), operation: op,
+      route: { mode: 'hybrid', primary: legacy, profile: nativeProfile(), allowSyntheticProfile: true } })
+    expect(result.path).toBe('safe_default')
+    expect(evaluate).not.toHaveBeenCalled()
+    expect(complete).not.toHaveBeenCalled()
+  })
+  it.each(['absent', 'unknown', 'mismatched', 'missing usage', 'malformed usage'])('rejects %s provenance before decide and without another model invocation', async mode => {
+    const records: DecisionAttemptRecord[] = [], op = operation()
+    const decide = vi.spyOn(op, 'decide'), complete = vi.spyOn(op, 'completeWithLlm')
+    const evaluate = vi.fn(async request => {
+      expect(request.nativeStrict).toBe(true)
+      const result = response()
+      if (mode === 'absent') delete result.nativeMetadata
+      else result.nativeMetadata = { actualModel: mode === 'unknown' ? null : mode === 'mismatched' ? 'other-model' : request.model.wireId,
+        usage: mode === 'missing usage' ? null : mode === 'malformed usage' ? { inputTokens: -1, outputTokens: 1 } : { inputTokens: 1, outputTokens: 1 } }
+      return result
+    })
+    const result = await executeDecisionCascade({ request: nativeRequest(), operation: op,
+      route: { mode: 'hybrid', primary: provider(evaluate), profile: nativeProfile(), allowSyntheticProfile: true,
+        allowOperationalFailover: true, allowInvalidResponseRecovery: true }, onAttempt: r => { records.push(r) } })
+    expect(result.path).toBe('safe_default')
+    expect(decide).not.toHaveBeenCalled()
+    expect(complete).not.toHaveBeenCalled()
+    expect(evaluate).toHaveBeenCalledOnce()
+    expect(records).toHaveLength(2)
+    expect(new Set(records.map(r => r.invocationId)).size).toBe(1)
+    expect(records.at(-1)).toMatchObject({ invocationState: 'settled', outcome: 'error' })
+  })
+  it('never-settling native primary remains pending without fallback', async () => {
+    const records: DecisionAttemptRecord[] = []
+    const result = await executeDecisionCascade({ request: nativeRequest(), operation: operation(),
+      route: { mode: 'hybrid', primary: provider(() => new Promise(() => {})), profile: nativeProfile(), allowSyntheticProfile: true },
+      onAttempt: r => { records.push(r) },
+    })
+    expect(result.path).toBe('safe_default')
+    const primary = records.filter(r => r.stage === 'primary_decision')
+    expect(primary).toHaveLength(2)
+    expect(primary.every(r => r.invocationState === 'pending' && !r.usage)).toBe(true)
+  })
+  it('downstream audit failure cannot emit primary billable usage twice', async () => {
+    const records: DecisionAttemptRecord[] = []
+    let fail = true
+    await executeDecisionCascade({ request: nativeRequest(), operation: operation(),
+      route: { mode: 'hybrid', primary: provider(async () => response()), profile: nativeProfile(), allowSyntheticProfile: true },
+      onAttempt: r => {
+        records.push(r)
+        if (r.stage === 'primary_decision' && r.usage && fail) { fail = false; throw new Error('audit unavailable') }
+      },
+    })
+    expect(records.filter(r => r.stage === 'primary_decision' && r.usage)).toHaveLength(1)
+  })
+})
+
+it.each([true, false])('primary duration is monotonic only for native=%s; wall clock remains the deadline source', async native => {
+  let wall = 1000, monotonic = 100
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => monotonic)
+  try {
+    const request = decisionRequest()
+    if (native) request.operation = { ...request.operation, id: 'computer.next-action' }
+    const records: DecisionAttemptRecord[] = []
+    await executeDecisionCascade({ request, operation: operation(), now: () => wall,
+      route: { mode: 'hybrid', primary: provider(async incoming => {
+        expect(incoming.deadlineAt).toBe(1050)
+        wall += 60000; monotonic += 37.4
+        return response()
+      }), profile: { ...profile(), operationId: request.operation.id }, allowSyntheticProfile: true },
+      onAttempt: record => { records.push(record) },
+    })
+    expect(records.find(r => r.stage === 'primary_decision' && r.outcome === 'success')!.latencyMs).toBe(native ? 37 : 60000)
+  } finally { clock.mockRestore() }
 })

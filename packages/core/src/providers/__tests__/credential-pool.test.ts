@@ -113,3 +113,67 @@ describe('[COMP:providers/credential-pool] credential-resolving provider', () =>
     expect(recordSecond).not.toHaveBeenCalled()
   })
 })
+
+describe('native credential spend provenance', () => {
+  const knownActual = 'claude-haiku-4-5-20251001'
+  type Metadata = Extract<StreamChunk, { type: 'message_end' }>['nativeMetadata']
+  async function run(metadata: Metadata) {
+    const recordSpend = vi.fn(async (_cost: number) => {})
+    const pool: ExternalCredentialPool = {
+      resolve: vi.fn().mockResolvedValue({ credentialId: 'native', provider: 'fixture', secret: 'secret', source: 'managed', recordSpend }),
+    }
+    const terminal: StreamChunk = {
+      type: 'message_end', stopReason: 'end_turn',
+      usage: { inputTokens: 1_000_000, outputTokens: 1_000_000, calculatedCostUsd: 999 },
+      ...(metadata === undefined ? {} : { nativeMetadata: metadata }),
+    }
+    const provider = wrapCredentialPoolProvider({
+      providerId: 'fixture', pool,
+      create: () => ({
+        ...providerFor('secret'),
+        async *stream() {
+          yield { type: 'message_start', model: 'claude-sonnet-4-6' } as const
+          yield terminal
+        },
+      }),
+    })
+    const chunks = await drain(provider.stream({ nativeStrict: true, model: 'claude-sonnet-4-6', systemPrompt: '', messages: [] }))
+    expect(chunks.at(-1)).toBe(terminal) // accounting does not rewrite billing evidence
+    expect(pool.resolve).toHaveBeenCalledTimes(1)
+    return recordSpend
+  }
+
+  it.each([undefined, { actualModel: null, usage: { inputTokens: 10, outputTokens: 5 } },
+    { actualModel: 'unknown-actual', usage: { inputTokens: 10, outputTokens: 5, calculatedCostUsd: 999 } },
+    { actualModel: knownActual, usage: null }])('does not price missing or unpriced evidence: %j', async metadata => {
+    expect(await run(metadata)).not.toHaveBeenCalled()
+  })
+
+  it('uses known actual-model rates rather than requested or synthetic-start models', async () => {
+    const spend = await run({ actualModel: knownActual, usage: { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000 } })
+    expect(spend).toHaveBeenCalledExactlyOnceWith(7.35) // Haiku: 1 + 5 + 0.10 + 1.25
+  })
+
+  it.each([999, 0, -1, NaN, Infinity])('ignores adapter calculatedCostUsd=%s', async calculatedCostUsd => {
+    const spend = await run({ actualModel: knownActual, usage: { inputTokens: 1_000_000, outputTokens: 1_000_000, calculatedCostUsd } })
+    expect(spend).toHaveBeenCalledExactlyOnceWith(6)
+  })
+
+  it('accepts explicit zero without manufacturing positive spend from an override', async () => {
+    expect(await run({ actualModel: knownActual, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, calculatedCostUsd: 999 } })).not.toHaveBeenCalled()
+    expect(await run({ actualModel: knownActual, usage: { inputTokens: 0, outputTokens: 1_000_000 } })).toHaveBeenCalledExactlyOnceWith(5)
+  })
+
+  it.each(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'])('rejects malformed %s at the credential boundary', async field => {
+    for (const value of [null, -1, 0.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      const usage = { inputTokens: 10, outputTokens: 5, [field]: value }
+      expect(await run({ actualModel: knownActual, usage } as Metadata)).not.toHaveBeenCalled()
+    }
+  })
+
+  it('rejects missing required counters and unsafe prompt totals', async () => {
+    for (const usage of [{ inputTokens: 0 }, { outputTokens: 0 }, { inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: 0, cacheReadTokens: 1 }]) {
+      expect(await run({ actualModel: knownActual, usage } as Metadata)).not.toHaveBeenCalled()
+    }
+  })
+})

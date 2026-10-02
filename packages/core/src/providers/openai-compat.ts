@@ -1,3 +1,4 @@
+import { NativeEvidence, nativeUsage, nativeGuard, assertNativeInput } from './native-strict.js'
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 /**
  * OpenAI-compatible chat-completions provider.
@@ -292,6 +293,7 @@ async function* streamCompat(
   systemPrompt: string,
   messages: Message[],
   options: {
+    nativeStrict?: true
     runtimeSystemContext?: string
     tools?: ToolDefinition[]
     maxTokens?: number
@@ -349,7 +351,7 @@ async function* streamCompat(
       : {}),
   }
 
-  debugDocumentFlow('openai_wire', { model: recordedModel, messages, wire: ccMessages })
+  if (!options.nativeStrict) debugDocumentFlow('openai_wire', { model: recordedModel, messages, wire: ccMessages })
   const res = await (cfg.fetchFn ?? fetch)(`${cfg.baseURL}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -358,12 +360,17 @@ async function* streamCompat(
     },
     body: JSON.stringify(body),
     signal: options.signal,
+    ...(options.nativeStrict ? { redirect: 'error' as const } : {}),
   })
+  if (options.nativeStrict && (!res.ok || !res.body)) {
+    await res.body?.cancel().catch(() => {})
+    throw new Error('native_http_failure')
+  }
   const errorDetail = !res.ok ? (await res.text().catch(() => '')).slice(0, 500) : ''
   // A few compatible endpoints require one system message. Preserve both
   // sections and their authority; retry only an explicit shape rejection,
   // before any output, and never repeat this compatibility retry.
-  if (res.status === 400 && systemParts.length > 1 && !combineSystemMessages &&
+  if (!options.nativeStrict && res.status === 400 && systemParts.length > 1 && !combineSystemMessages &&
       /only (?:one|a single) system message|multiple system messages (?:are )?(?:not supported|not allowed)|system message must be (?:at the beginning|the first)/i.test(errorDetail)) {
     yield* streamCompat(cfg, wireModel, recordedModel, systemPrompt, messages, options, omitSchema, true)
     return
@@ -372,7 +379,7 @@ async function* streamCompat(
   // json_schema is one of the first things a smaller endpoint drops; degrading
   // to json_object costs output quality, whereas propagating the 400 would
   // break every extraction call on that deployment.
-  if (res.status === 400 && options.responseSchema && !omitSchema) {
+  if (!options.nativeStrict && res.status === 400 && options.responseSchema && !omitSchema) {
     const detail = errorDetail.slice(0, 300)
     console.warn(
       `[openai-compat:${cfg.label}] endpoint rejected response_format json_schema; retrying with json_object${detail ? `: ${detail}` : ''}`,
@@ -405,6 +412,7 @@ async function* streamCompat(
   // answer is already in front of the user), and drives the content-free
   // diagnostic below.
   let sawContent = false
+  const evidence = new NativeEvidence()
   let frames = 0
 
   for await (const payload of sseData(res)) {
@@ -413,8 +421,18 @@ async function* streamCompat(
     try {
       event = JSON.parse(payload) as CCStreamEvent
     } catch {
+      if (options.nativeStrict) throw new Error('native_invalid_stream')
       console.warn(`[openai-compat:${cfg.label}] unparseable SSE payload (${payload.slice(0, 120)}…) — skipped`)
       continue
+    }
+    if (options.nativeStrict) {
+      evidence.observeModel((event as CCStreamEvent & { model?: unknown }).model)
+      if (event.usage !== undefined) {
+        const u = event.usage
+        evidence.usage = u ? nativeUsage(u.prompt_tokens, u.completion_tokens, u.prompt_tokens_details?.cached_tokens === undefined ? 0 : u.prompt_tokens_details.cached_tokens) : null
+      }
+      if (event.error !== undefined) throw new Error('native_stream_failure')
+      if (event.choices?.some(choice => choice.delta?.tool_calls?.length)) throw new Error('native_unsupported_output')
     }
     if (event.usage) usage = extractCCUsage(event.usage)
     // An error frame used to fall through the `if (!choice) continue` below
@@ -481,7 +499,7 @@ async function* streamCompat(
   // finish reason and no usage, the endpoint hung up mid-completion and said
   // nothing about why. Neither case is thrown here; both are named, because
   // the shape of the frames is the only evidence the next investigation gets.
-  if (!sawContent) {
+  if (!sawContent && !options.nativeStrict) {
     console.warn(
       `[openai-compat:${cfg.label}] stream produced no content: ${frames} SSE frame(s), ` +
       `finish_reason=${finishReason ?? 'none'}, usage=${usage.inputTokens}/${usage.outputTokens}` +
@@ -492,7 +510,7 @@ async function* streamCompat(
   for (const call of openCalls.values()) {
     if (call.started) yield { type: 'tool_use_end', id: call.id }
   }
-  yield { type: 'message_end', stopReason: mapCCStopReason(finishReason, sawToolCalls), usage }
+  yield { type: 'message_end', stopReason: mapCCStopReason(finishReason, sawToolCalls), usage, ...(options.nativeStrict ? { nativeMetadata: evidence.metadata() } : {}) }
 }
 
 // ── Provider ───────────────────────────────────────────────────
@@ -544,6 +562,13 @@ export function createOpenAICompatProvider(options: OpenAICompatProviderOptions)
     models: options.models ? [...options.models] : [...providerModelIds(providerKey)],
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
+      if (request.nativeStrict) {
+        return nativeGuard((async function* () {
+          assertNativeInput(request)
+          if (!cfg.supportsVision && request.messages.some(m => typeof m.content !== 'string' && m.content.some(b => b.type === 'image'))) throw new Error('native_unsupported_input')
+          yield* streamCompat(cfg, resolveWireModel(request.model), resolveRecordedModel(request.model), request.systemPrompt, request.messages, request)
+        })())
+      }
       return streamCompat(cfg, resolveWireModel(request.model), resolveRecordedModel(request.model), request.systemPrompt, request.messages, {
         runtimeSystemContext: request.runtimeSystemContext,
         tools: request.tools,

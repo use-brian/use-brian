@@ -117,6 +117,8 @@ export function createLlmDecisionProvider(options: {
     id: options.providerId ?? `llm:${options.provider.name}`,
     capabilities,
     async evaluate(request): Promise<DecisionResponse> {
+      // The legacy accumulator synthesizes identity/usage. Never dispatch it for native work.
+      if (request.nativeStrict) throw new DecisionProviderError('policy_denied', 'Native provenance unsupported')
       assertDecisionCapabilities(request, capabilities)
       if (request.signal?.aborted) throw new DecisionProviderError('cancelled', 'decision call cancelled')
       if (request.deadlineAt !== undefined && request.deadlineAt <= Date.now()) {

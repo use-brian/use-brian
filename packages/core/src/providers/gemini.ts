@@ -1,3 +1,4 @@
+import { NativeEvidence, nativeUsage, nativeGuard, assertNativeInput } from './native-strict.js'
 import type { HttpRetryWindow } from './types.js'
 /**
  * Gemini provider using REST API directly (not the SDK).
@@ -76,6 +77,8 @@ type GeminiCandidate = {
 }
 
 type GeminiStreamChunk = {
+  modelVersion?: string
+  error?: unknown
   candidates?: GeminiCandidate[]
   usageMetadata?: {
     promptTokenCount?: number
@@ -474,6 +477,7 @@ async function* streamGeminiSSE(
   signal?: AbortSignal,
   mode?: 'stateful_delta' | 'stateless_full',
   httpRetryWindow?: HttpRetryWindow,
+  nativeStrict = false,
 ): AsyncGenerator<GeminiStreamChunk> {
   // AI Studio and Vertex speak the same wire format; only host + auth differ,
   // and the injected transport owns both. Everything below here is identical.
@@ -490,16 +494,22 @@ async function* streamGeminiSSE(
   // stuck-session-sweeper.md for the recovery path.
   const send = (body: GeminiRequest) => {
     const serialized = JSON.stringify(body)
-    debugDocumentFlow('gemini_wire', { model: modelId, mode, gemini: body })
-    return retryHttp(attemptSignal => fetch(url, {
+    if (!nativeStrict) debugDocumentFlow('gemini_wire', { model: modelId, mode, gemini: body })
+    const attempt = (attemptSignal?: AbortSignal) => fetch(url, {
       method: 'POST',
       headers,
       body: serialized,
       signal: attemptSignal,
-    }))
+      ...(nativeStrict ? { redirect: 'error' as const } : {}),
+    })
+    return nativeStrict ? attempt(signal) : retryHttp(attempt)
   }
 
   let response = await send(request)
+  if (nativeStrict && (!response.ok || !response.body)) {
+    await response.body?.cancel().catch(() => {})
+    throw new Error('native_http_failure')
+  }
 
   // Fail-open on a rejected responseSchema. Gemini accepts only a subset of
   // JSON Schema, and a schema it dislikes comes back as a 400 for the WHOLE
@@ -509,7 +519,7 @@ async function* streamGeminiSSE(
   // about it. The caller still validates the output, exactly as it did before
   // schemas existed.
   if (
-    response.status === 400 &&
+    !nativeStrict && response.status === 400 &&
     request.generationConfig &&
     'responseSchema' in request.generationConfig
   ) {
@@ -549,46 +559,53 @@ async function* streamGeminiSSE(
   // buffer was a plausible vector. 8 MB is generous for any real SSE event.
   const MAX_SSE_BUFFER_BYTES = 8 * 1024 * 1024
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
 
-    buffer += decoder.decode(value, { stream: true })
-    if (buffer.length > MAX_SSE_BUFFER_BYTES) {
-      throw new Error(
-        `Gemini SSE buffer exceeded ${MAX_SSE_BUFFER_BYTES} bytes without a newline ` +
-        `(actual: ${buffer.length}) — aborting to avoid OOM.`,
-      )
-    }
+      buffer += decoder.decode(value, { stream: true })
+      if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+        throw new Error(
+          `Gemini SSE buffer exceeded ${MAX_SSE_BUFFER_BYTES} bytes without a newline ` +
+          `(actual: ${buffer.length}) — aborting to avoid OOM.`,
+        )
+      }
 
-    // Parse SSE events
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? '' // keep incomplete line
+      // Parse SSE events
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? '' // keep incomplete line
 
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        const data = line.slice(6).trim()
-        if (data) {
-          try {
-            yield JSON.parse(data) as GeminiStreamChunk
-          } catch {
-            // skip malformed JSON
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim()
+          if (data) {
+            try {
+              yield JSON.parse(data) as GeminiStreamChunk
+            } catch {
+              if (nativeStrict) throw new Error('native_invalid_stream')
+              // skip malformed JSON
+            }
           }
         }
       }
     }
-  }
 
-  // Process any remaining buffer
-  if (buffer.startsWith('data: ')) {
-    const data = buffer.slice(6).trim()
-    if (data) {
-      try {
-        yield JSON.parse(data) as GeminiStreamChunk
-      } catch {
-        // skip
+    // Process any remaining buffer
+    if (buffer.startsWith('data: ')) {
+      const data = buffer.slice(6).trim()
+      if (data) {
+        try {
+          yield JSON.parse(data) as GeminiStreamChunk
+        } catch {
+          if (nativeStrict) throw new Error('native_invalid_stream')
+          // skip
+        }
       }
     }
+  } finally {
+    if (nativeStrict) await reader.cancel().catch(() => {})
+    reader.releaseLock()
   }
 }
 
@@ -624,14 +641,14 @@ export function resolveGeminiThinkingLevel(
 
 function buildRequest(
   contents: GeminiContent[],
-  options: { systemPrompt: string; runtimeSystemContext?: string; historySystemContext?: string[]; tools?: ToolDefinition[]; maxTokens?: number; temperature?: number; thinkingLevel?: ThinkingLevel; responseFormat?: 'json'; responseSchema?: Record<string, unknown> },
+  options: { nativeStrict?: true; systemPrompt: string; runtimeSystemContext?: string; historySystemContext?: string[]; tools?: ToolDefinition[]; maxTokens?: number; temperature?: number; thinkingLevel?: ThinkingLevel; responseFormat?: 'json'; responseSchema?: Record<string, unknown> },
   modelId: string,
 ): GeminiRequest {
   // Universal choke point: every request (stateless stream() AND stateful
   // session path) is assembled here, so enforce the input-part contract once,
   // for all of them. Drops reasoning / content-less parts that would 400.
   const usesLatestContract = usesGemini36RequestContract(modelId)
-  const safeContents = normalizeGeminiRequestContents(contents, modelId)
+  const safeContents = options.nativeStrict ? contents : normalizeGeminiRequestContents(contents, modelId)
   const systemParts = systemContextParts(options)
 
   const toolEntries: GeminiToolEntry[] = []
@@ -702,6 +719,32 @@ function buildRequest(
       })(),
     },
   }
+}
+
+async function* streamNativeGemini(transport: GoogleTransport, request: ProviderRequest): AsyncGenerator<StreamChunk> {
+  assertNativeInput(request)
+  const modelId = resolveModel(request.model)
+  const contents: GeminiContent[] = request.messages.filter(m => m.role !== 'system').map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: messagesToGeminiParts([m]) }))
+  const body = buildRequest(contents, { ...request, historySystemContext: extractHistorySystemContext(request.messages) }, modelId)
+  const evidence = new NativeEvidence()
+  let stopReason: StopReason = 'incomplete'
+  for await (const data of streamGeminiSSE(transport, modelId, body, request.signal, 'stateless_full', request.httpRetryWindow, true)) {
+    if (data.error !== undefined) throw new Error('native_stream_failure')
+    evidence.observeModel(data.modelVersion)
+    if (data.usageMetadata !== undefined) {
+      const u = data.usageMetadata
+      evidence.usage = u ? nativeUsage(u.promptTokenCount, u.candidatesTokenCount,
+        u.cachedContentTokenCount === undefined ? 0 : u.cachedContentTokenCount,
+        u.thoughtsTokenCount === undefined ? 0 : u.thoughtsTokenCount) : null
+    }
+    const candidate = data.candidates?.[0]
+    for (const part of candidate?.content?.parts ?? []) {
+      if (part.functionCall) throw new Error('native_unsupported_output')
+      if (part.text) yield { type: part.thought ? 'thinking_delta' : 'text_delta', text: part.text }
+    }
+    if (candidate?.finishReason) stopReason = candidate.finishReason === 'STOP' ? 'end_turn' : candidate.finishReason === 'MAX_TOKENS' ? 'max_tokens' : candidate.finishReason === 'SAFETY' ? 'safety' : 'incomplete'
+  }
+  yield { type: 'message_end', stopReason, usage: evidence.usage ?? { inputTokens: 0, outputTokens: 0 }, nativeMetadata: evidence.metadata() }
 }
 
 async function* convertStreamChunks(
@@ -847,6 +890,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
 
     // Stateless single-shot
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
+      if (request.nativeStrict) { yield* nativeGuard(streamNativeGemini(transport, request)); return }
       const modelId = resolveModel(request.model)           // real Google model name (URL + thinking config)
       const recordId = recordedModelId(request.model, modelId) // billing/tier key recorded on the turn
       const contents = toGeminiContents(request.messages)

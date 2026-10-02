@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto'
+import type { NativeAccountingCapability, NativeUsageReceipt } from '../computer-use/accounting.js'
 import { describe, expect, it, vi } from 'vitest'
 import {
   DecisionAdapterRegistry,
+  NATIVE_NEXT_ACTION, NATIVE_VERIFY_PROGRESS,
   type DecisionProvider,
   type DecisionResponse,
   type LLMProvider,
@@ -439,5 +442,92 @@ describe('[COMP:decisions/runtime] decision composition', () => {
         allowSyntheticProfile: true,
       }),
     }))).rejects.toThrow(/versions/)
+  })
+})
+
+it('native receipts require durable preparation and real capability acknowledgement; non-native void contract is unchanged', async () => {
+  const key = { nativeSessionId: randomUUID(), invocationId: randomUUID() }, intentHash = 'a'.repeat(64)
+  let release!: () => void
+  const gate = new Promise<void>(r => { release = r })
+  const receipt: NativeUsageReceipt = { version: 1,kind: 'native_usage_inserted',backend: 'oss-native-v1',key,intentHash,ledgerId: randomUUID(),amountUsd: '0.0100000000' }
+  const reconcile = vi.fn(async () => { await gate; return { status: 'recorded' as const,receipt } })
+  const capability: NativeAccountingCapability = { backend: 'oss-native-v1',reconcile,admit: async () => ({ status: 'admitted' }),prepare: async () => ({ status: 'not_ready' }),reconcileBatch: async () => [] }
+  const recordUsage = vi.fn(async () => {})
+  const record = createDecisionAttemptUsageRecorder({ recordUsage } as never, { nativeAcknowledgements: true,nativeAccounting: capability })
+  const attempt: DecisionRuntimeAttempt = {
+    nativeMetadata: { actualModel: 'jev-1.13.0', usage: { inputTokens: 8, outputTokens: 1 } },
+    runId: 'run',operationId: 'computer.next-action',attempt: 1,stage: 'primary_decision',invocationId: key.invocationId,invocationState: 'settled',
+    providerId: 'typesafe',modelCatalogId: 'typesafe-jev-1.13',modelWireId: 'jev-1.13.0',latencyMs: 5,outcome: 'success',usage: { inputTokens: 8,outputTokens: 1 },
+    workspaceId: 'workspace',configuredMode: 'hybrid',effectiveMode: 'hybrid',operatorOverride: false,
+    trustedBillingContext: { userId: 'user',actorUserId: 'actor',assistantId: 'assistant',sessionId: 'conversation',taskId: 'task',nativeSessionId: key.nativeSessionId },
+  }
+  expect(await record(attempt)).toBeUndefined(); expect(reconcile).not.toHaveBeenCalled()
+  // A claimed prepared intent cannot bypass the central provenance check.
+  expect(await record({ ...attempt, nativeMetadata: undefined, nativeBillingPreparation: { status: 'prepared', intentHash } })).toBeUndefined()
+  expect(await record({ ...attempt, modelWireId: 'synthetic-request', nativeBillingPreparation: { status: 'prepared', intentHash } })).toBeUndefined()
+  expect(reconcile).not.toHaveBeenCalled()
+  let acknowledged = false
+  const pending = record({ ...attempt,nativeBillingPreparation: { status: 'prepared',intentHash } }).then(value => { acknowledged = true; return value })
+  await Promise.resolve(); expect(acknowledged).toBe(false); expect(recordUsage).not.toHaveBeenCalled()
+  release()
+  expect(await pending).toMatchObject({ kind: 'native_primary_billing_recorded',receipt,actualCostUsd: 0.01 })
+  const legacy: (a: DecisionRuntimeAttempt) => Promise<void> = createDecisionAttemptUsageRecorder({ recordUsage } as never)
+  await expect(legacy({ ...attempt,operationId: 'unrelated',trustedBillingContext: undefined })).resolves.toBeUndefined()
+  expect(recordUsage).toHaveBeenCalledTimes(1)
+})
+
+it('unsupported hosted native stores never receive unkeyed writes or fabricate receipts', async () => {
+  const recordUsage = vi.fn(async () => {})
+  const record = createDecisionAttemptUsageRecorder({ recordUsage } as never, { nativeAcknowledgements: true })
+  const attempt: DecisionRuntimeAttempt = { runId: 'run',operationId: 'computer.verify-progress',attempt: 1,stage: 'primary_decision',
+    invocationId: randomUUID(),invocationState: 'settled',providerId: 'typesafe',modelCatalogId: 'typesafe-jev-1.13',modelWireId: 'jev-1.13.0',
+    latencyMs: 5,outcome: 'success',usage: { inputTokens: 8,outputTokens: 1 },workspaceId: 'workspace',configuredMode: 'hybrid',effectiveMode: 'hybrid',operatorOverride: false,
+    trustedBillingContext: { userId: 'user',actorUserId: 'actor',assistantId: 'assistant',sessionId: 'conversation',taskId: 'task',nativeSessionId: randomUUID() },
+    nativeBillingPreparation: { status: 'prepared',intentHash: 'a'.repeat(64) } }
+  expect(await Promise.all([record(attempt),record(attempt)])).toEqual([undefined,undefined])
+  expect(recordUsage).not.toHaveBeenCalled()
+})
+
+describe('direct native decision admission', () => {
+  it.each([NATIVE_NEXT_ACTION, NATIVE_VERIFY_PROGRESS])('denies $id without a native port even with a claimed admission hook and acceptance flags', async ref => {
+    const primary = primaryProvider(), evaluate = vi.spyOn(primary, 'evaluate')
+    const resolveRoute = vi.fn(() => ({ mode: 'hybrid' as const,primaryModelId: 'typesafe-jev-1.13',allowSyntheticProfile: true,allowOperationalFailover: true }))
+    const runtime = createDecisionRuntime({ llmProvider: fixtureLlm(),defaultLlmModel: 'fixture-llm',
+      adapters: new DecisionAdapterRegistry().register('typesafe', () => primary),resolveRoute })
+    const operation = resultOperation(), complete = vi.spyOn(operation, 'completeWithLlm')
+    const prepareNativeAttempt = vi.fn(async () => ({ status: 'admitted' as const }))
+    await expect(runtime.run({ request: { ...request(),operation: ref },operation,workspaceId: 'workspace',
+      trustedBillingContext: { userId: 'user',actorUserId: 'actor',assistantId: 'assistant',sessionId: 'conversation',taskId: 'task',nativeSessionId: randomUUID() },
+      prepareNativeAttempt })).rejects.toThrow('Native accounting admission unavailable')
+    expect(resolveRoute).not.toHaveBeenCalled()
+    expect(prepareNativeAttempt).not.toHaveBeenCalled()
+    expect(evaluate).not.toHaveBeenCalled()
+    expect(complete).not.toHaveBeenCalled()
+  })
+  it('rejects a registered legacy adapter before native admission or dispatch', async () => {
+    const primary = primaryProvider(), evaluate = vi.spyOn(primary, 'evaluate')
+    const prepareNativeAttempt = vi.fn(async () => ({ status: 'admitted' as const }))
+    const capability: NativeAccountingCapability = { backend: 'oss-native-v1', admit: async () => ({ status: 'admitted' }),
+      prepare: async () => ({ status: 'not_ready' }), reconcile: async () => ({ status: 'not_ready' }), reconcileBatch: async () => [] }
+    const runtime = createDecisionRuntime({ nativeAccounting: capability, llmProvider: fixtureLlm(), defaultLlmModel: 'fixture-llm',
+      adapters: new DecisionAdapterRegistry().register('typesafe', () => primary),
+      resolveRoute: () => ({ mode: 'hybrid', primaryModelId: 'typesafe-jev-1.13', allowSyntheticProfile: true }) })
+    const operation = resultOperation(), complete = vi.spyOn(operation, 'completeWithLlm')
+    await expect(runtime.run({ request: { ...request(), operation: NATIVE_NEXT_ACTION }, operation,
+      trustedBillingContext: { userId: 'user', actorUserId: 'actor', assistantId: 'assistant', sessionId: 'conversation', taskId: 'task', nativeSessionId: randomUUID() },
+      prepareNativeAttempt })).rejects.toThrow('Native accounting admission unavailable')
+    expect(prepareNativeAttempt).not.toHaveBeenCalled()
+    expect(evaluate).not.toHaveBeenCalled()
+    expect(complete).not.toHaveBeenCalled()
+  })
+  it.each([NATIVE_NEXT_ACTION, NATIVE_VERIFY_PROGRESS])('denies unscoped $id observation before any Jev inference', async ref => {
+    const primary = primaryProvider(), evaluate = vi.spyOn(primary, 'evaluate')
+    const resolveRoute = vi.fn(() => ({ mode: 'shadow' as const,primaryModelId: 'typesafe-jev-1.13',allowSyntheticProfile: true }))
+    const runtime = createDecisionRuntime({ llmProvider: fixtureLlm(),defaultLlmModel: 'fixture-llm',
+      adapters: new DecisionAdapterRegistry().register('typesafe', () => primary),resolveRoute })
+    const operation = resultOperation()
+    await expect(runtime.observe({ request: { ...request(),operation: ref },operation })).rejects.toThrow('scoped accounting run path')
+    expect(resolveRoute).not.toHaveBeenCalled()
+    expect(evaluate).not.toHaveBeenCalled()
   })
 })

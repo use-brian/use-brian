@@ -100,6 +100,8 @@ export type DecisionModelRef = {
 }
 
 export type DecisionRequest = {
+  /** Native-only: no synthetic identity, usage, or adapter recovery. */
+  nativeStrict?: true
   runId: string
   operation: DecisionOperationRef
   model: DecisionModelRef
@@ -119,7 +121,11 @@ export type DecisionUsage = {
   costUsd?: number
 }
 
+export type DecisionNativeMetadata = { actualModel: string | null; usage: DecisionUsage | null }
+
 export type DecisionResponse = {
+  /** Explicit upstream evidence; model/usage alone are not native provenance. */
+  nativeMetadata?: DecisionNativeMetadata
   providerId: string
   model: DecisionModelRef
   answers: DecisionAnswer[]
@@ -175,6 +181,8 @@ export type DecisionCapabilities = {
 }
 
 export interface DecisionProvider {
+  /** Adapter contract: explicit upstream provenance and one physical attempt. */
+  readonly supportsNativeStrict?: true
   readonly id: string
   readonly capabilities: DecisionCapabilities
   evaluate(request: DecisionRequest): Promise<DecisionResponse>

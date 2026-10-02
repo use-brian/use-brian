@@ -297,6 +297,16 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['automation', 'browser', 'workspace'],
   },
   {
+    id: 'native_computer',
+    name: 'This computer',
+    description: 'Attended native desktop control. Requires explicit assistant access, a local session approval and OS permissions. Separate from browser access.',
+    category: 'official',
+    auth_type: 'none',
+    oauth_required: false,
+    enabled: true,
+    tags: ['automation', 'desktop', 'workspace'],
+  },
+  {
     id: 'gcs',
     name: 'Google Cloud Storage',
     description: 'Store your workspace file bytes in your own Google Cloud Storage bucket, under your own key. Your files, your bucket, revocable by you.',

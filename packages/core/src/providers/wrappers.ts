@@ -31,6 +31,7 @@ export type StreamWrapper = (inner: StreamFn) => StreamFn
  */
 export function wrapContextBudget(): StreamWrapper {
   return (inner) => async function* (request) {
+    if (request.nativeStrict) { yield* inner(request); return }
     const inputLimit = request.inputTokenLimit ?? resolveInputTokenLimit(request.model)
     const budget = Math.floor(inputLimit * MODEL_CONTEXT_FIT_RATIO)
     const fitted = fitMessagesToBudget(request.messages, budget)
@@ -106,6 +107,7 @@ export const DEFAULT_FIRST_CHUNK_MS = 90_000
  */
 export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number): StreamWrapper {
   return (inner) => async function* (request) {
+    if (request.nativeStrict) { yield* inner(request); return }
     const controller = new AbortController()
     const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal
     // Admission retries share this window; they cannot extend it or become idle replays.
@@ -175,6 +177,7 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
  */
 export function wrapLog(options?: { verbose?: boolean }): StreamWrapper {
   return (inner) => async function* (request) {
+    if (request.nativeStrict) { yield* inner(request); return }
     const start = Date.now()
     let chunkCount = 0
 
@@ -197,6 +200,7 @@ export function wrapLog(options?: { verbose?: boolean }): StreamWrapper {
  */
 export function wrapSanitizeToolNames(): StreamWrapper {
   return (inner) => async function* (request) {
+    if (request.nativeStrict) { yield* inner(request); return }
     for await (const chunk of inner(request)) {
       if (chunk.type === 'tool_use_start') {
         yield { ...chunk, name: chunk.name.trim() }
@@ -215,6 +219,7 @@ export function wrapSanitizeToolNames(): StreamWrapper {
  */
 export function wrapRepairToolCallArgs(): StreamWrapper {
   return (inner) => async function* (request) {
+    if (request.nativeStrict) { yield* inner(request); return }
     const buffers = new Map<string, string>()
 
     for await (const chunk of inner(request)) {
@@ -573,6 +578,7 @@ function combineUsage(a?: TokenUsage, b?: TokenUsage): TokenUsage {
  */
 export function wrapTextLoopPrevention(): StreamWrapper {
   return (inner) => async function* (request) {
+    if (request.nativeStrict) { yield* inner(request); return }
     const result = yield* streamWithDetection(inner, request)
 
     if (!result) return // stream completed normally

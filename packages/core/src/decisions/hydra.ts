@@ -4,6 +4,8 @@
  * [COMP:decisions/hydra]
  */
 
+import { nativeDecisionResponse } from './native-provenance.js'
+import { randomUUID } from 'node:crypto'
 import type {
   DecisionDisposition,
   DecisionFailureKind,
@@ -62,6 +64,12 @@ export type DecisionAttemptStage =
   | 'llm_only'
 
 export type DecisionAttemptRecord = {
+  nativeMetadata?: DecisionResponse['nativeMetadata']
+  /** Native invocation reconciliation; pending events never carry billable usage.
+   * Logical timeout does not mean the underlying provider promise has drained. */
+  invocationId?: string
+  invocationState?: 'pending' | 'settled'
+  interrupted?: boolean
   runId: string
   operationId: string
   attempt: number
@@ -444,15 +452,63 @@ export async function executeDecisionCascade<T>(
   let primaryResponse: DecisionResponse | undefined
   let primaryFailure: DecisionProviderError | undefined
   let disposition: DecisionDisposition<T> | undefined
+  // Keep unrelated decision accounting unchanged. Native LLM completions own
+  // their stream lifecycle at the adapter; only primary provider promises need
+  // reconciliation here. The central API recorder still bills primary usage.
+  const invocationId = ['computer.next-action', 'computer.verify-progress'].includes(request.operation.id) ? randomUUID() : undefined
+  const primaryDurationStart = invocationId ? performance.now() : primaryStartedAt
+  const primaryDuration = () => invocationId
+    ? Math.max(0, Math.round(performance.now() - primaryDurationStart))
+    : Math.max(0, now() - primaryStartedAt)
+  let providerPromise: Promise<DecisionResponse> | undefined
+  let providerSettled = false
+  let providerResult: DecisionResponse | undefined
+  const primaryBase = { runId: request.runId, operationId: request.operation.id, attempt: primaryAttempt,
+    stage: 'primary_decision' as const, providerId: route.primary!.id,
+    modelCatalogId: request.model.catalogId, modelWireId: request.model.wireId }
+  let usageEmitted = false
+  const emitPrimary = (record: DecisionAttemptRecord) => {
+    // A downstream audit failure must never re-bill a successful provider when
+    // it is caught by the logical cascade. Non-native tracing stays unchanged.
+    if (invocationId) {
+      const response = providerResult
+      record = { ...record, nativeMetadata: response?.nativeMetadata ?? { actualModel: null, usage: null },
+        ...(response ? { modelCatalogId: response.model.catalogId, modelWireId: response.model.wireId, usage: response.usage } : { usage: undefined }) }
+    }
+    if (invocationId && record.usage) {
+      if (usageEmitted) return emit({ ...record, usage: undefined })
+      usageEmitted = true
+    }
+    return emit(record)
+  }
+  const admitted = invocationId ? emitPrimary({ ...primaryBase, invocationId, invocationState: 'pending', interrupted: false,
+    outcome: 'error', latencyMs: 0 }) : Promise.resolve()
+  // Pre-aborted requests may never enter dispatch; still observe ledger errors.
+  void admitted.catch(() => {})
   try {
     primaryResponse = await withDeadline({
       parent: request.signal,
       deadlineAt: primaryDeadline,
       now,
-      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline }),
+      call: (signal) => {
+        const dispatch = () => {
+          if (invocationId && route.primary!.supportsNativeStrict !== true) {
+            throw new DecisionProviderError('policy_denied', 'Native provenance unsupported')
+          }
+          if (signal.aborted) throw new DecisionProviderError('cancelled', 'decision call cancelled')
+          return route.primary!.evaluate({ ...request, ...(invocationId ? { nativeStrict: true as const } : {}), signal, deadlineAt: primaryDeadline })
+        }
+        providerPromise = (invocationId ? admitted.then(dispatch) : dispatch())
+          .then(response => { providerSettled = true; providerResult = invocationId ? nativeDecisionResponse(response) : response; return providerResult }, error => { providerSettled = true; throw error })
+        return providerPromise
+      },
     })
+    if (invocationId && (!primaryResponse.nativeMetadata?.actualModel || !primaryResponse.nativeMetadata.usage || primaryResponse.nativeMetadata.actualModel !== request.model.wireId)) {
+      throw new DecisionProviderError('policy_denied', 'Native provider provenance unavailable', { dispatched: true })
+    }
     disposition = operation.decide(primaryResponse, { profile })
-    await emit({
+    await emitPrimary({
+      ...(invocationId ? { invocationId, invocationState: 'settled' as const, interrupted: false } : {}),
       runId: request.runId,
       operationId: request.operation.id,
       attempt: primaryAttempt,
@@ -460,7 +516,7 @@ export async function executeDecisionCascade<T>(
       providerId: primaryResponse.providerId,
       modelCatalogId: primaryResponse.model.catalogId,
       modelWireId: primaryResponse.model.wireId,
-      latencyMs: Math.max(0, now() - primaryStartedAt),
+      latencyMs: primaryDuration(),
       outcome: 'success',
       disposition: disposition.kind,
       ...(disposition.kind === 'follow_up' ? { followUpReason: disposition.reason } : {}),
@@ -468,7 +524,11 @@ export async function executeDecisionCascade<T>(
     })
   } catch (error) {
     primaryFailure = normalizeDecisionFailure(error)
-    await emit({
+    const pending = !!providerPromise && !providerSettled
+    const pendingReport = emitPrimary({
+      ...(invocationId ? { invocationId, invocationState: pending ? 'pending' as const : 'settled' as const,
+        interrupted: primaryFailure.kind === 'timeout' || primaryFailure.kind === 'cancelled',
+        ...(!pending && providerResult?.usage ? { usage: providerResult.usage } : {}) } : {}),
       runId: request.runId,
       operationId: request.operation.id,
       attempt: primaryAttempt,
@@ -476,15 +536,31 @@ export async function executeDecisionCascade<T>(
       providerId: route.primary!.id,
       modelCatalogId: request.model.catalogId,
       modelWireId: request.model.wireId,
-      latencyMs: Math.max(0, now() - primaryStartedAt),
+      latencyMs: primaryDuration(),
       outcome: 'error',
       failureKind: primaryFailure.kind,
     })
+    if (invocationId && pending) {
+      // Attach once even if settlement raced the pending audit write. Never call
+      // decide(), validateResult(), or resume the cascade with this late value.
+      void pendingReport.catch(() => {}).then(() => providerPromise!.then(response => emitPrimary({ ...primaryBase, invocationId,
+        invocationState: 'settled', interrupted: true, latencyMs: primaryDuration(),
+        providerId: response.providerId, modelCatalogId: response.model.catalogId, modelWireId: response.model.wireId,
+        outcome: 'success', ...(response.usage ? { usage: response.usage } : {}) }),
+      () => emitPrimary({ ...primaryBase, invocationId, invocationState: 'settled', interrupted: true,
+        latencyMs: primaryDuration(), outcome: 'error' })))
+        .catch(() => { /* Durable pending audit remains unresolved; never retry a charge blindly. */ })
+    }
+    if (invocationId && (primaryFailure.kind === 'timeout' || primaryFailure.kind === 'cancelled')) {
+      void pendingReport.catch(() => {})
+    } else await pendingReport
   }
 
   if (request.signal?.aborted || primaryFailure?.kind === 'cancelled') {
     throw new DecisionProviderError('cancelled', 'decision call cancelled')
   }
+
+  if (invocationId && primaryFailure) return safe(primaryFailure.kind)
 
   if (route.mode === 'shadow') {
     try {

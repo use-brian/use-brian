@@ -4,6 +4,13 @@ import { createLlmDecisionProvider } from '../adapters/llm.js'
 import { decisionRequest, llmProviderWithJson } from './fixtures.js'
 
 describe('[COMP:decisions/llm] constrained LLM adapter', () => {
+  it('rejects native calls before the synthetic accumulator can dispatch', async () => {
+    const calls: ProviderRequest[] = []
+    const provider = createLlmDecisionProvider({ provider: llmProviderWithJson({}, calls) })
+    expect(provider.supportsNativeStrict).toBeUndefined()
+    await expect(provider.evaluate({ ...decisionRequest(), nativeStrict: true })).rejects.toMatchObject({ kind: 'policy_denied', dispatched: false })
+    expect(calls).toHaveLength(0)
+  })
   it('compiles questions to one constrained call and keeps unavailable uncertainty honest', async () => {
     const calls: ProviderRequest[] = []
     const provider = createLlmDecisionProvider({

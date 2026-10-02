@@ -1,3 +1,4 @@
+import { nativeGuard } from './native-strict.js'
 /**
  * Routing provider — model id → provider instance, per request.
  *
@@ -147,6 +148,11 @@ export function createRoutingProvider(
     models: Object.values(providers).flatMap((p) => p.models),
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
+      if (request.nativeStrict) {
+        return nativeGuard((async function* () {
+          yield* effectiveFor(request.model, false).stream(request)
+        })())
+      }
       const model = request.allowProviderFallback === false
         ? request.model
         : options?.resolveModel?.(request.model, {

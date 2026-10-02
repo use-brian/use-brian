@@ -1,3 +1,5 @@
+import { counter, nativeGuard } from './native-strict.js'
+import { bracketFor, modelRates } from '@use-brian/shared/model-registry'
 /**
  * Open runtime seam for a hosted deployment to select provider credentials.
  * The open edition supplies no pool and keeps using its environment values.
@@ -20,6 +22,29 @@ export type ExternalCredentialLease = {
 }
 export type ExternalCredentialPool = {
   resolve(provider: string, systemFallback?: string): Promise<ExternalCredentialLease | null>
+}
+
+/** Credential spend only, not a durable native billing receipt. Unknown evidence
+ * stays unknown: never use legacy fallback rates or adapter cost overrides. */
+function nativeCredentialCost(metadata: Extract<StreamChunk, { type: 'message_end' }>['nativeMetadata']): number | null {
+  if (!metadata || typeof metadata.actualModel !== 'string' || !metadata.usage) return null
+  const rates = modelRates(metadata.actualModel)
+  if (!rates) return null
+  const { inputTokens, outputTokens } = metadata.usage
+  const cacheReadTokens = metadata.usage.cacheReadTokens === undefined ? 0 : metadata.usage.cacheReadTokens
+  const cacheWriteTokens = metadata.usage.cacheWriteTokens === undefined ? 0 : metadata.usage.cacheWriteTokens
+  if (!counter(inputTokens) || !counter(outputTokens) || !counter(cacheReadTokens) || !counter(cacheWriteTokens)) return null
+  const promptTokens = inputTokens + cacheReadTokens
+  if (!counter(promptTokens)) return null
+  const bracket = bracketFor(rates, promptTokens)
+  if (!bracket || ![bracket.inPerMTok, bracket.outPerMTok, rates.cacheReadPerMTok, rates.cacheWritePerMTok]
+    .every(rate => Number.isFinite(rate) && rate >= 0)) return null
+  // Compute from whitelisted counters only; calculatedCostUsd is intentionally ignored.
+  const cost = (inputTokens / 1_000_000) * bracket.inPerMTok
+    + (outputTokens / 1_000_000) * bracket.outPerMTok
+    + (cacheReadTokens / 1_000_000) * rates.cacheReadPerMTok
+    + (cacheWriteTokens / 1_000_000) * rates.cacheWritePerMTok
+  return Number.isFinite(cost) && cost >= 0 ? cost : null
 }
 
 async function recordLeaseSpend(
@@ -79,6 +104,23 @@ export function wrapCredentialPoolProvider(options: {
     models: template.models,
 
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
+      if (request.nativeStrict) {
+        yield* nativeGuard((async function* () {
+          const resolved = await resolveProvider()
+          // Never meter synthetic message_start/usage in the strict lane.
+          for await (const chunk of resolved.provider.stream(request)) {
+            if (chunk.type === 'message_end') {
+              const cost = nativeCredentialCost(chunk.nativeMetadata)
+              if (cost !== null && cost > 0) {
+                try { await resolved.lease.recordSpend(cost) }
+                catch { console.error('native_credential_accounting_failure') }
+              }
+            }
+            yield chunk
+          }
+        })())
+        return
+      }
       const resolved = await resolveProvider()
       yield* meteredStream(resolved.provider.stream(request), resolved.lease, request.model)
     },

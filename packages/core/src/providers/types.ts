@@ -31,7 +31,14 @@ export type StreamChunk =
    */
   | { type: 'tool_use_end'; id: string; providerSignature?: string }
   | { type: 'grounding_metadata'; sources: Array<{ url: string; title: string }> }
-  | { type: 'message_end'; stopReason: StopReason; usage: TokenUsage }
+  | {
+      type: 'message_end'
+      stopReason: StopReason
+      /** Legacy accounting shape; not authoritative for native callers. */
+      usage: TokenUsage
+      /** Strict native callers must use ONLY this upstream evidence. */
+      nativeMetadata?: { actualModel: string | null; usage: TokenUsage | null }
+    }
 
 /**
  * `'incomplete'` means the stream ended without the provider ever stating WHY —
@@ -170,6 +177,8 @@ export type ProviderSession = {
 
 /** Legacy stateless interface — still useful for single-turn calls */
 export type ProviderRequest = {
+  /** Trusted internal opt-in: single attempt, private errors, upstream evidence only. */
+  nativeStrict?: true
   httpRetryWindow?: HttpRetryWindow
   model: string
   /** See `SessionOptions.allowProviderFallback`. */
@@ -208,7 +217,7 @@ export type ProviderRequest = {
    * Providers that don't support it ignore it, so this is always additive.
    *
    * Fail-open by contract: a provider that has its schema REJECTED must retry
-   * without it rather than fail the call — a bad schema degrades output
+   * without it rather than fail the call (except nativeStrict: never retry) — a bad schema degrades output
    * quality, it must never take the caller offline.
    */
   responseSchema?: Record<string, unknown>

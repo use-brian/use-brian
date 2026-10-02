@@ -10,7 +10,8 @@ import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, DEFAULT_HOME_APP_TOOL_CAPABILITIES } f
 export const DEFAULT_ON_BUILTIN_CAPABILITIES: readonly string[] = [
   ...BUILTIN_PRIMITIVE_CONNECTOR_IDS,
   ...DEFAULT_HOME_APP_TOOL_CAPABILITIES,
-].filter((id) => id !== 'files').sort()
+// Native desktop access is explicit opt-in, never a default built-in grant.
+].filter((id) => id !== 'files' && id !== 'native_computer').sort()
 
 type QueryFn = (sql: string, params: unknown[]) => Promise<unknown>
 

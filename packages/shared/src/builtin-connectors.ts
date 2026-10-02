@@ -333,6 +333,9 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   // layer writes (see docs/plans/byo-google-storage.md). Present here so it
   // counts as an official (non-custom-MCP) connector via OFFICIAL_CONNECTOR_IDS;
   // the empty tool list means it surfaces no governable tools of its own.
+  native_computer: [
+    { name: 'nativeComputerTask', description: 'Operate the explicitly approved local desktop task; requires separate native consent and local action approval', classification: 'write', defaultPolicy: 'ask' },
+  ],
   gcs: [],
   s3: [],
   local: [],
@@ -652,6 +655,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'getBrand',
     'updateBrandDraft',
   ],
+  native_computer: ['nativeComputerTask'],
   // Computer use (docs/architecture/engine/computer-use.md): wired at boot
   // from packages/core/src/sandbox/tools.ts, always present (a missing
   // extension/sandbox backend returns a clear tool error, never a hang).

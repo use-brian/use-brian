@@ -245,6 +245,7 @@ export function wrapEndpointFallback(
     models: primary.models,
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
+      if (request.nativeStrict) return primary.stream(request)
       return attempt(
         () => primary.stream(request),
         () => fallback.stream(request),

@@ -211,6 +211,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   updateBrandDraft: 'Propose a brand change',
 
   // Computer use (docs/architecture/engine/computer-use.md)
+  nativeComputerTask: 'Work on this computer with local approval',
   browserNavigate: 'Open a page in the browser',
   browserOpenTab: 'Open a new browser tab',
   browserListTabs: 'List browser tabs',

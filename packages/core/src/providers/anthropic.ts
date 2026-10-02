@@ -1,3 +1,4 @@
+import { NativeEvidence, nativeUsage, nativeGuard, assertNativeInput } from './native-strict.js'
 /**
  * Anthropic provider — fallback only, text-first scope.
  *
@@ -228,6 +229,38 @@ function buildSystem(systemPrompt: string, runtimeSystemContext?: string, histor
   }))
 }
 
+async function* streamNativeAnthropic(client: Anthropic, request: ProviderRequest): AsyncGenerator<StreamChunk> {
+  assertNativeInput(request)
+  if (request.messages.some(m => typeof m.content !== 'string' && m.content.some(b => b.type === 'image' && !ANTHROPIC_IMAGE_MIMES.has(b.mimeType as AnthropicImageBlock['source']['media_type'])))) throw new Error('native_unsupported_input')
+  const evidence = new NativeEvidence()
+  const stream = await client.messages.create({
+    model: resolveModel(request.model), max_tokens: request.maxTokens ?? 4096,
+    system: buildSystem(request.systemPrompt, request.runtimeSystemContext, extractHistorySystemContext(request.messages)),
+    messages: toAnthropicMessages(request.messages), stream: true,
+    ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+  }, { signal: request.signal, maxRetries: 0 })
+  let raw: Record<string, unknown> = {}
+  let finalOutput: unknown
+  let stopReason: StopReason = 'incomplete'
+  let stopped = false
+  for await (const event of stream) {
+    if (event.type === 'message_start') {
+      evidence.observeModel(event.message.model)
+      raw = { ...event.message.usage }
+    } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+      throw new Error('native_unsupported_output')
+    } else if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+      yield { type: 'text_delta', text: event.delta.text }
+    } else if (event.type === 'message_delta') {
+      raw = { ...raw, ...event.usage }
+      finalOutput = event.usage?.output_tokens
+      if (event.delta.stop_reason) stopReason = mapStopReason(event.delta.stop_reason)
+    } else if (event.type === 'message_stop') stopped = true
+  }
+  evidence.usage = nativeUsage(raw.input_tokens, finalOutput, raw.cache_read_input_tokens === undefined ? 0 : raw.cache_read_input_tokens, 0, raw.cache_creation_input_tokens === undefined ? 0 : raw.cache_creation_input_tokens, false)
+  yield { type: 'message_end', stopReason: stopped ? stopReason : 'incomplete', usage: evidence.usage ?? { inputTokens: 0, outputTokens: 0 }, nativeMetadata: evidence.metadata() }
+}
+
 async function* streamAnthropic(
   client: Anthropic,
   modelId: string,
@@ -241,6 +274,7 @@ async function* streamAnthropic(
     temperature?: number
     tools?: ToolDefinition[]
     signal?: AbortSignal
+    httpRetryWindow?: ProviderRequest['httpRetryWindow']
   },
 ): AsyncGenerator<StreamChunk> {
   // Text-only fallback. Tools are intentionally omitted — see file header
@@ -277,7 +311,9 @@ async function* streamAnthropic(
       messages: sanitized,
       stream: true,
     },
-    { signal: options.signal },
+    // The SDK cannot consult our mutable admission deadline between retries.
+    // A caller-supplied restriction therefore disables SDK retries entirely.
+    { signal: options.signal, ...(options.httpRetryWindow ? { maxRetries: 0 } : {}) },
   )
 
   let stopReason: StopReason = 'end_turn'
@@ -346,6 +382,12 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): LLMP
     ...(options.baseURL ? { baseURL: options.baseURL } : {}),
   })
 
+  const nativeClient = new Anthropic({
+    apiKey: options.apiKey,
+    ...(options.baseURL ? { baseURL: options.baseURL } : {}),
+    maxRetries: 0, fetchOptions: { redirect: 'error' }, logLevel: 'off',
+  })
+
   return {
     name: 'anthropic',
     // Active anthropic registry rows — exactly ['claude-haiku-4-5'] today.
@@ -353,6 +395,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): LLMP
     models: [...providerModelIds('anthropic')],
 
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
+      if (request.nativeStrict) { yield* nativeGuard(streamNativeAnthropic(nativeClient, request)); return }
       const modelId = resolveModel(request.model)
       const messages = toAnthropicMessages(request.messages)
       yield* streamAnthropic(client, modelId, request.systemPrompt, messages, {
@@ -362,6 +405,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): LLMP
         temperature: request.temperature,
         tools: request.tools,
         signal: request.signal,
+        httpRetryWindow: request.httpRetryWindow,
       })
     },
 
@@ -377,9 +421,6 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): LLMP
 
       return {
         async *send(messages: Message[], sendOpts?: SendOptions): AsyncIterable<StreamChunk> {
-          // Suppress unused-var warning while preserving the SendOptions
-          // signature — Anthropic has no per-call thinking-level toggle.
-          void sendOpts
           historySystemContext = [...historySystemContext, ...extractHistorySystemContext(messages)]
           const incoming = toAnthropicMessages(messages)
           if (history.length === 0) {
@@ -395,7 +436,8 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): LLMP
             maxTokens: opts.maxTokens,
             temperature: opts.temperature,
             tools: opts.tools,
-            signal: opts.signal,
+            signal: sendOpts?.signal ?? opts.signal,
+            httpRetryWindow: sendOpts?.httpRetryWindow,
           })
         },
       }

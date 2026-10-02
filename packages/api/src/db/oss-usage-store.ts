@@ -1,3 +1,5 @@
+import { createOssNativeAccounting } from './oss-native-accounting.js'
+import { registerNativeAccounting } from '../computer-use/accounting-capability.js'
 /**
  * Standalone/open UsageStore implementation.
  *
@@ -20,7 +22,7 @@ function totalOf(rows: Array<{ total: string }> | undefined): number {
 }
 
 export function createOssUsageStore(): UsageStore {
-  return {
+  const store: UsageStore = {
     async recordUsage(params) {
       const modelTier = params.modelTier ?? tierForModel(params.model)
       const tail = [
@@ -184,6 +186,8 @@ export function createOssUsageStore(): UsageStore {
       }))
     },
   }
+  registerNativeAccounting(store, createOssNativeAccounting())
+  return store
 }
 
 /** Workspace telemetry, including overhead. Zero COGS is not proof of free BYO usage. */

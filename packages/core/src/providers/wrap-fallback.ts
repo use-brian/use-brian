@@ -179,6 +179,7 @@ export function wrapFallback(
   const fallbackModelName = opts?.fallbackModel ?? fallback.models[0] ?? fallback.name
 
   async function* runStream(request: ProviderRequest): AsyncIterable<StreamChunk> {
+    if (request.nativeStrict) { yield* primary.stream(request); return }
     // Phase 1 — try the primary. We must peek the first chunk to detect
     // whether the primary failed BEFORE emitting anything; mid-stream
     // errors fall through to the caller without a swap (we've already
