@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 /** Official Meta WhatsApp Cloud API webhook route. */
 import { Router } from 'express'
@@ -126,7 +127,7 @@ export function whatsappCloudExternalConnectorToolsAllowed(
 }
 
 export async function dispatchWhatsAppCloudWorkflowEvent(input: {
-  dispatcher: WorkflowEventDispatcher
+  dispatcher?: WorkflowEventDispatcher
   workspaceId: string
   channelIntegrationId: string
   config: ChannelIntegrationConfig
@@ -141,17 +142,12 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
     phoneNumberId?: unknown
     groupId?: unknown
   } | null
-  await dispatcher.dispatch({
+  await dispatchIncomingMessageEvent({
     workspaceId,
-    source: { type: 'channel', channelIntegrationId, channel: 'whatsapp' },
-    text: incoming.text,
-    actorId: incoming.userId,
-    channelId: incoming.channelId,
-    mentions: [],
+    integrationId: channelIntegrationId,
+    incoming: { ...incoming, channelType: 'whatsapp' },
     isBot: false,
-    isGroupChat: incoming.isGroupChat,
     providerAccountId,
-    occurredAt: new Date(incoming.timestamp * 1000).toISOString(),
     payload: {
       text: incoming.text,
       message_id: incoming.messageId,
@@ -161,7 +157,7 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
       message_type: typeof raw?.message?.type === 'string' ? raw.message.type : null,
       media_type: incoming.mediaType ?? null,
     },
-  })
+  }, dispatcher)
 }
 
 export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router {
@@ -323,16 +319,14 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
         routing, scope, questionIntegrationId: channelIntegrationId,
       }))
     } finally {
-      if (options.workflowEventDispatcher) {
-        await dispatchWhatsAppCloudWorkflowEvent({
-          dispatcher: options.workflowEventDispatcher,
-          workspaceId: channel.workspaceId,
-          channelIntegrationId,
-          config,
-          providerAccountId: credentials.phone_number_id,
-          incoming,
-        }).catch((err) => console.error('[whatsapp-cloud] workflow event dispatch failed:', err))
-      }
+      await dispatchWhatsAppCloudWorkflowEvent({
+        dispatcher: options.workflowEventDispatcher,
+        workspaceId: channel.workspaceId,
+        channelIntegrationId,
+        config,
+        providerAccountId: credentials.phone_number_id,
+        incoming,
+      }).catch((err) => console.error('[whatsapp-cloud] workflow event dispatch failed:', err))
     }
   }
 

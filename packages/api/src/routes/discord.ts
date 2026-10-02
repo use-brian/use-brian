@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 import { resolveChannelQuestion } from './channel-questions.js'
@@ -308,10 +309,10 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
   async function processInbound(channelId: string, incoming: IncomingMessage, actionData?: string, workflowCallback?: { data: string; messageId: string }): Promise<void> {
 
     try {
-      // 1. Channel must be active and chat-enabled.
+      // 1. Channel must be active; chat capability is gated after workflow dispatch.
       const channel = await getChannelForWebhook(channelId)
-      if (!channel || channel.status !== 'active' || !channel.enabledCapabilities.includes('chat')) {
-        console.warn(`[discord] channel ${channelId} not accepting chat — ignoring inbound`)
+      if (!channel || channel.status !== 'active') {
+        console.warn(`[discord] channel ${channelId} not active — ignoring inbound`)
         return
       }
 
@@ -336,6 +337,32 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         const blocked = cfg.blockedUserIds ?? []
         if (blocked.includes(incoming.userId)) return
       }
+
+      // Connector input is already normalized. Interactions must never become
+      // message events, and self/webhook echoes must not reach either lane.
+      const raw = incoming.raw as { author?: { bot?: boolean }; webhook_id?: string; mentions?: Array<{ id?: string }>; mention_roles?: string[] } | undefined
+      if (incoming.userId === integration.botUserId || raw?.author?.bot || raw?.webhook_id) return
+      if (!actionData && !workflowCallback) {
+        await dispatchIncomingMessageEvent({
+          workspaceId: channel.workspaceId,
+          integrationId: integration.id,
+          // Adapters use milliseconds; the workflow envelope expects seconds.
+          incoming: {
+            ...incoming, timestamp: incoming.timestamp / 1000, channelType: 'discord',
+            mentions: [...new Set([
+              ...(raw?.mentions ?? []).map(user => user.id),
+              ...(raw?.mention_roles ?? []),
+            ].filter((id): id is string => typeof id === 'string' && id.length > 0))],
+          },
+        })
+      }
+      if (!channel.enabledCapabilities.includes('chat')) return
+      // Event normalization retains standalone @bot messages, but empty chat
+      // turns must remain suppressed (native callbacks use a separate lane).
+      if (!actionData && !workflowCallback && !incoming.text.trim() && !incoming.files?.length) return
+      // The connector now forwards passive messages for workflows. Retain its
+      // historical mention/reply gate here, before any conversational work.
+      if (!actionData && !workflowCallback && incoming.isGroupChat && !incoming.isMentioned) return
 
       // 3. Resolve the answering assistant (per Discord-channel surface, else default).
       const routing = await resolveRoutingForSurface(channelId, incoming.channelId)

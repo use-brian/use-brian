@@ -230,6 +230,8 @@ export type RequireMentionConfig =
 export type TelegramAdapterConfig = {
   /** Verified linked supergroups (getChat.linked_chat_id), not forum topics. */
   discussionChatIds?: string[]
+  /** Normalize passive messages for event consumers without changing reply defaults. */
+  normalizePassive?: boolean
   requireMention?: RequireMentionConfig // default: true — respond when @mentioned or replied to in groups
   ackReaction?: string                  // default: '' — no reaction
 }
@@ -467,7 +469,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     const requireMention = resolveRequireMention(chatIdStr, topicId)
     // Broadcast posts have no trustworthy human author. Require explicit
     // addressing even in answer-all mode; never capture an unaddressed post.
-    if (msg.chat.type === 'channel' && !mentioned && !invokedByCommand) return null
+    if (!options.config?.normalizePassive && msg.chat.type === 'channel' && !mentioned && !invokedByCommand) return null
 
     // Skip service messages
     if (msg.new_chat_members || msg.left_chat_member) return null
@@ -550,8 +552,8 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     // assistants that were never addressed. The per-topic `requireMention`
     // overrides are the user's own statement of which topics a bot owns, so a
     // topic-bound bot outside its topics keeps the historical drop.
-    if (unaddressed && isBoundToOtherTopics(chatIdStr, topicId)) return null
-    if (unaddressed && !capturable) return null
+    if (!options.config?.normalizePassive && unaddressed && isBoundToOtherTopics(chatIdStr, topicId)) return null
+    if (!options.config?.normalizePassive && unaddressed && !capturable) return null
 
     // Must have text or media
     if (!text && !mediaUrl) return null
@@ -826,8 +828,17 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
 
     parseIncoming(webhookPayload: unknown): IncomingMessage | null {
       const update = webhookPayload as TelegramUpdate
-      const msg = update.message ?? update.channel_post
+      const msg = update?.message ?? update?.channel_post
       if (!msg) return null
+      // Event consumers can run before conversational routing. Reject malformed
+      // envelopes rather than inventing message/sender identifiers for them.
+      if (options.config?.normalizePassive && (
+        !Number.isFinite(msg.message_id) || !Number.isFinite(msg.date) ||
+        !Number.isFinite(msg.chat?.id) ||
+        (!msg.from?.id && !msg.sender_chat?.id && msg.chat?.type !== 'channel') ||
+        (msg.text !== undefined && typeof msg.text !== 'string') ||
+        (msg.caption !== undefined && typeof msg.caption !== 'string')
+      )) return null
       return parseMessage(msg)
     },
 

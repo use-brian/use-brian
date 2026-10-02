@@ -139,6 +139,8 @@ function mediaTypeFromMime(mime: string | undefined): IncomingMessage['mediaType
 // ── Adapter ────────────────────────────────────────────────────
 
 export type DiscordAdapterConfig = {
+  /** Event normalization only: retain messages emptied by stripping @bot. */
+  preserveMentionOnly?: boolean
   /** Only respond in guild (server) channels when the bot is @mentioned. Default: true. DMs always respond. */
   requireMention?: boolean
   /**
@@ -225,7 +227,8 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
       : undefined
 
     // Must carry text or at least one attachment.
-    if (!text && !files?.length) return null
+    const mentionOnly = config.preserveMentionOnly && mentioned && !!msg.content?.trim()
+    if (!text && !files?.length && !mentionOnly) return null
 
     // Surface the first attachment through the Telegram-style single-media
     // fields too, so downstream code that reads `mediaUrl` still works while

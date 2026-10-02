@@ -13,7 +13,6 @@ import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { resolveLiveAccessCeilingSystem } from './resolve-turn-scope.js'
 import { scopeEvidenceFailureOf, validateAudienceScopeEvidence, type ScopeEvidenceFailure } from './caller-evidence.js'
 import { roomAudienceCeiling } from '../routes/_room-binding.js'
-import { createPersonalGroupVerifier, type VerifyPersonalGroup } from './personal-group-membership.js'
 
 export type DeliveryAudienceInput = {
   workspaceId: string
@@ -32,6 +31,16 @@ export type DeliveryAudienceInput = {
    * find them.
    */
   recipientMode?: 'member' | 'external' | 'assistant'
+  /**
+   * Set ONLY by a live channel turn in a group, where `userId` is the human
+   * who just spoke there through their own linked provider account (the same
+   * Telegram account connected to their Brian account). A workspace member
+   * speaking in an approved group may receive their own personal context in
+   * the reply: who else is in that group was chosen by the owner or admin who
+   * added the bot, not a reason to refuse.
+   * Workflows, relays and replays never set it, so they stay at the binding.
+   */
+  groupSpeaker?: boolean
   scopeEvidence?: ScopeEvidence
 }
 
@@ -59,7 +68,6 @@ export type DeliveryAudienceDiagnostic =
   | 'binding_expired'
   | 'binding_approver_not_admin'
   | 'binding_recipient_conflict'
-  | 'personal_group_unverified'
   | 'no_binding_ceiling'
 
 type Denial = {
@@ -119,15 +127,6 @@ type Dependencies = {
   getWorkspaceRole?: typeof getWorkspaceRoleSystem
   resolveLiveAccess?: typeof resolveLiveAccessCeilingSystem
   validateEvidence?: typeof validateAudienceScopeEvidence
-  verifyPersonalGroup?: VerifyPersonalGroup
-}
-
-// One process-wide verifier so its short success cache spans the several
-// checks a single turn makes (authorizers are created per turn).
-let defaultPersonalGroupVerifier: VerifyPersonalGroup | null = null
-function personalGroupVerifier(): VerifyPersonalGroup {
-  defaultPersonalGroupVerifier ??= createPersonalGroupVerifier()
-  return defaultPersonalGroupVerifier
 }
 
 function denial(detail?: DeliveryAudienceDenialDetail, diagnostic?: DeliveryAudienceDiagnostic): Denial {
@@ -181,8 +180,8 @@ type CeilingResult =
  * A workspace member as a RECIPIENT. Labels (clearance, Teams, Projects) stay
  * capped by the answering assistant, whose reads produced the evidence; the
  * assistant-visibility axis is dropped because assistants are readers, not
- * audiences. A member receiving on their own screen, DM or personal group
- * may see any of their assistants' rows (decision D2). Consults keep the
+ * audiences. A member receiving on their own screen, DM, or an approved
+ * group they are speaking in may see any of their assistants' rows (decision D2). Consults keep the
  * axis: there the receiver IS an assistant (`validateCallerScopeEvidence`).
  */
 async function memberCeiling(
@@ -254,7 +253,6 @@ function resolvedDependencies(dependencies: Dependencies) {
     resolveLiveAccess: dependencies.resolveLiveAccess ?? resolveLiveAccessCeilingSystem,
     validateEvidence: dependencies.validateEvidence ?? validateAudienceScopeEvidence,
     integrationStore: dependencies.integrationStore,
-    verifyPersonalGroup: dependencies.verifyPersonalGroup ?? personalGroupVerifier(),
   }
 }
 
@@ -319,22 +317,7 @@ async function resolveEnvelope(
 
     let candidate = bindingCeiling(input.workspaceId, binding)
     if (binding.recipientUserId) {
-      if (binding.audienceType === 'group') {
-        // A personal group: the recipient's own context may reach it only
-        // while every human in it is provably that recipient. Re-proven on
-        // every check, so a join takes effect before the next restricted
-        // token rather than whenever the approval is next reviewed.
-        const credentials = integration?.credentials as { bot_token?: string } | undefined
-        const verified = await deps.verifyPersonalGroup({
-          channelType: input.channelType,
-          chatId: parsed.chatId,
-          recipientUserId: binding.recipientUserId,
-          botToken: credentials?.bot_token ?? null,
-        })
-        if (!verified) return envelopeDenied('personal_group_unverified', 'personal_group_unverified')
-      } else if (binding.audienceType !== 'individual') {
-        return envelopeDenied(undefined, 'binding_audience_mismatch')
-      }
+      if (binding.audienceType !== 'individual') return envelopeDenied(undefined, 'binding_audience_mismatch')
       const current = await memberCeiling(
         input.workspaceId,
         input.assistantId,
@@ -349,9 +332,35 @@ async function resolveEnvelope(
     if (ceiling && ceiling.userId !== candidate.userId) return envelopeDenied(undefined, 'binding_recipient_conflict')
     ceiling = ceiling ? intersectAccessCeilings(ceiling, candidate) : candidate
   }
-  return ceiling
-    ? { allowed: true, ceiling, source: 'binding' }
-    : envelopeDenied(undefined, 'no_binding_ceiling')
+  if (!ceiling) return envelopeDenied(undefined, 'no_binding_ceiling')
+  if (inferredType === 'group' && !ceiling.userId) {
+    const speaker = await groupSpeakerCeiling(input, ceiling, deps)
+    if (speaker) return { allowed: true, ceiling: speaker, source: 'binding' }
+  }
+  return { allowed: true, ceiling, source: 'binding' }
+}
+
+/**
+ * A workspace member speaking in an approved group, through their own linked
+ * account, gets their own personal context, still capped by the group's
+ * approved labels and their own live access. Their role does not matter: the
+ * group's audience was chosen by the owner or admin who added the bot, and
+ * everyone in it reads every reply whoever asks. Guests stay at the shared
+ * binding, which reads only unowned rows. A failed lookup (including a sender
+ * who is not a member) degrades to that shared ceiling rather than refusing.
+ */
+async function groupSpeakerCeiling(
+  input: DeliveryAudienceInput,
+  shared: AccessCeiling,
+  deps: ReturnType<typeof resolvedDependencies>,
+): Promise<AccessCeiling | null> {
+  if (!input.groupSpeaker || !input.userId || (input.recipientMode ?? 'member') !== 'member') return null
+  const member = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps)
+  if (!member.ceiling) {
+    console.warn('[delivery-authority] group speaker kept at the shared ceiling:', member.diagnostic)
+    return null
+  }
+  return intersectAccessCeilings({ ...shared, userId: input.userId }, member.ceiling)
 }
 
 /** Resolve the current recipient ceiling before prompt/tool assembly. */

@@ -550,3 +550,15 @@ describe('[COMP:channels/discord] respondToInteraction', () => {
     await expect(respondToInteraction('IID', 'ITOKEN', { type: 6 })).rejects.toThrow()
   })
 })
+
+describe('Discord mention-only event normalization', () => {
+  const raw = { id: 'message', channel_id: 'room', guild_id: 'guild', author: { id: 'human' }, content: '<@bot>', mentions: [{ id: 'bot' }] }
+  it('opts in without admitting empty messages or changing the conversational default', () => {
+    const chat = createDiscordAdapter({ token: 'token', botUserId: 'bot' })
+    const events = createDiscordAdapter({ token: 'token', botUserId: 'bot', config: { requireMention: false, preserveMentionOnly: true } })
+    expect(chat.parseIncoming(raw)).toBeNull()
+    expect(events.parseIncoming(raw)).toMatchObject({ text: '', isMentioned: true, raw })
+    expect(events.parseIncoming({ ...raw, content: '   ' })).toBeNull()
+    expect(events.parseIncoming({ ...raw, author: { id: 'bot', bot: true } })).toBeNull()
+  })
+})

@@ -922,7 +922,7 @@ export async function listConnectedWorkflowToolSources(
 
 export type WorkspaceChannelOption = {
   id: string;
-  channelType: "slack" | "telegram" | "whatsapp" | "feishu";
+  channelType: "slack" | "telegram" | "whatsapp" | "feishu" | "discord" | "msteams" | "wechat" | "custom" | "web";
   displayName: string;
 };
 
@@ -1038,13 +1038,28 @@ export async function listWorkspaceSlackChannels(
   return Array.isArray(data.channels) ? data.channels : [];
 }
 
-export async function listWorkspaceChannelOptions(
+/** Authorized web sessions use their stable DB id as the event source id. */
+export async function listWorkspaceWebChatOptions(
   workspaceId: string,
 ): Promise<WorkspaceChannelOption[]> {
   const res = await authFetch(
-    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels`,
+    `${API_URL}/api/sessions/incoming-event-sources?workspaceId=${encodeURIComponent(workspaceId)}`,
   );
   if (!res.ok) return [];
+  const data = (await res.json()) as { sources?: WorkspaceChannelOption[] };
+  return Array.isArray(data?.sources) ? data.sources : [];
+}
+
+export async function listWorkspaceChannelOptions(
+  workspaceId: string,
+): Promise<WorkspaceChannelOption[]> {
+  // Independent failures: a workspace without a bot integration can still
+  // select a workflow dock / assistant chat as an incoming event source.
+  const [res, webChats] = await Promise.all([
+    authFetch(`${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels`).catch(() => null),
+    listWorkspaceWebChatOptions(workspaceId).catch(() => []),
+  ]);
+  if (!res?.ok) return webChats;
   type Row = {
     channelType: WorkspaceChannelOption["channelType"];
     displayName: string;
@@ -1055,9 +1070,8 @@ export async function listWorkspaceChannelOptions(
   };
   const data = (await res.json()) as { channels?: Row[] } | null;
   const rows = Array.isArray(data?.channels) ? data!.channels : [];
-  // The event dispatcher routes through `channel_integrations.id`, so a
-  // channel without an attached integration row is unselectable.
-  return rows
+  // Installed channels use channel_integrations.id; web uses sessions.id.
+  const integrations = rows
     .filter(
       (r) =>
         r.status === "active" &&
@@ -1072,4 +1086,5 @@ export async function listWorkspaceChannelOptions(
           ? `${r.displayName} (${r.integrationLabel})`
           : r.displayName,
     }));
+  return [...integrations, ...webChats];
 }

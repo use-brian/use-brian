@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { webChatSourcesHandler, WEB_CHAT_SOURCE_SQL, type WebChatSourceSession } from './_web-chat-sources.js'
+import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { findFeedThreadDraft } from '../content-planning/collaboration-service.js'
 import { getFeedCollaboration } from '../db/feed-collaboration-store.js'
@@ -247,6 +249,17 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   const setSessionTyping = opts.setSessionTyping ?? noopSetSessionTyping
   const getSessionPresence = opts.getSessionPresence ?? emptySessionPresence
   const router = Router()
+
+  // Register before /:id routes. Explicit JWT required; no local default user.
+  router.get('/incoming-event-sources', webChatSourcesHandler({
+    isWorkspaceMember: async (userId, workspaceId) =>
+      !!await getWorkspaceRoleSystem(userId, workspaceId),
+    listCandidates: async (workspaceId) =>
+      (await query<WebChatSourceSession>(WEB_CHAT_SOURCE_SQL, [workspaceId])).rows,
+    canReadSession: async (userId, session) =>
+      !!await getUserAssistant(userId, session.assistantId) &&
+      !(await gateSessionRead(userId, session)),
+  }))
 
   router.get('/', async (req, res) => {
     try {
@@ -1226,6 +1239,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         replyToText,
         senderUserId: user.id,
         scope: messageScope,
+      })
+      dispatchPersistedWebInput({
+        workspaceId, session, userId: user.id, stored, text,
       })
       publishSessionEvent({
         kind: 'user_message_saved',

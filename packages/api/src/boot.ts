@@ -625,6 +625,7 @@ import { setMediaTokenSecret } from './media-token.js'
 import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
 import { setBrandEventDispatcher } from './brand-event-fanout.js'
+import { setMessageEventDispatcher } from './message-events.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecordingWithBookkeeping } from './recordings/process-recording.js'
 import { createRecordingFrameAnalyzer } from './recordings/frame-analysis.js'
@@ -7969,6 +7970,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // into on create / draft update / approve / supersede, covering the Studio
   // routes, the `updateBrandDraft` chat tool, and the brain-MCP bridge.
   setBrandEventDispatcher(workflowEventDispatcher)
+  setMessageEventDispatcher(workflowEventDispatcher)
 
   const crmDomainEventWorker = createCrmDomainEventWorker({
     store: createDbCrmDomainEventOutboxStore(),

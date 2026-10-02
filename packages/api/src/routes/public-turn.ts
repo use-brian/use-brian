@@ -902,6 +902,14 @@ export async function executePublicTurn(
     : null
   const turnProvider = customLlmRuntime?.provider ?? deps.provider
 
+  // Deliberately do NOT publish to the workspace incoming-message dispatcher.
+  // Its workflow/goal subscribers do not carry this turn's authority, public
+  // floor, client compartments, or tool policy. Publishing even after saving
+  // would let a public visitor trigger workspace-authority automation and
+  // expose client-isolated text. This applies to all public pipeline lanes,
+  // including internal-member keys, until dispatch supports scoped authority.
+  // Any future opt-in must use session.id, never the external sessionId or
+  // externalUserId, for source integration/channel identity.
   // ── 7. Persist user message ──────────────────────────────
   const userContent: ContentBlock[] = [{ type: 'text', text: body.message }]
   const storedUserMsg = await addSessionMessage({

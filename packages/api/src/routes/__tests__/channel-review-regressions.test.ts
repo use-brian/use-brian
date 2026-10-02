@@ -1,10 +1,10 @@
 import express from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-const mocks = vi.hoisted(() => ({ pipeline: vi.fn(), resolveUser: vi.fn() }))
+const mocks = vi.hoisted(() => ({ pipeline: vi.fn(), resolveUser: vi.fn(), channelType: 'wechat' }))
 vi.mock('../channel-pipeline.js', () => ({ processChannelMessage: mocks.pipeline }))
 vi.mock('../../db/channels-store.js', () => ({
-  getChannelForWebhook: async () => ({ status: 'active', enabledCapabilities: ['chat'], workspaceId: 'workspace' }),
+  getChannelForWebhook: async () => ({ channelType: mocks.channelType, status: 'active', enabledCapabilities: ['chat'], workspaceId: 'workspace' }),
   resolveRoutingForSurface: async () => ({ assistantId: 'assistant', modelAlias: 'pro' }),
 }))
 vi.mock('../../db/users.js', () => ({ findAssistantById: async () => ({ id: 'assistant', ownerUserId: 'owner', workspaceId: 'workspace' }) }))
@@ -22,6 +22,7 @@ import { channelQuestions } from '../channel-questions.js'
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.channelType = 'wechat'
   mocks.pipeline.mockResolvedValue(undefined)
   mocks.resolveUser.mockResolvedValue({ user: { id: 'actor' }, isIdentified: true })
 })
@@ -54,6 +55,7 @@ it.each(['bound', 'shadow', 'resolver failure', 'no resolver'])('WeChat identity
   })
 })
 it.each([true, false])('successive Feishu choices preserve the session (initial binding session: %s)', async initialSession => {
+  mocks.channelType = 'feishu'
   const app = express(); app.use(express.json())
   app.use('/feishu', feishuRoutes({ connectorSecret: 'secret', tools: new Map(), channelUserStore: {},
     integrationStore: integrationStore({ app_id: 'app', app_secret: 'secret', brand: 'feishu' }),
@@ -87,6 +89,7 @@ it.each([true, false])('successive Feishu choices preserve the session (initial 
 })
 
 it.each([2000, 2001])('Discord selects delivery using rendered action length %i', async renderedLength => {
+  mocks.channelType = 'discord'
   const actions = [{ id: 'next', label: 'Next', data: 'ask:test:0', replyText: 'Next' }]
   const suffixLength = denormalizeActions({ text: 'x', actions }).text.length - 1
   const text = 'x'.repeat(renderedLength - suffixLength)

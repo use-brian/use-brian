@@ -1,3 +1,6 @@
+import { expectMentionMatches } from './incoming-event-assertions.js'
+import { dispatchIncomingMessageEvent } from '../../message-events.js'
+vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
 import type { ChannelQuestionStore } from '../../workflow/channel-questions.js'
 import { channelQuestionActions, resolveChannelQuestion } from '../channel-questions.js'
 import { channelConfirmations, type ChannelInteractionScope } from '../channel-interactions.js'
@@ -140,6 +143,8 @@ vi.mock('../../db/workspace-store.js', () => ({
     teamRoleCalls.push({ userId, workspaceId })
     return teamRoleResponse
   }),
+  getWorkspaceMembershipWithClearanceSystem: vi.fn(async () =>
+    teamRoleResponse ? { role: teamRoleResponse, clearance: 'confidential' as const } : null),
 }))
 
 // billingPartyForAssistant performs a DB query against `teams` to resolve
@@ -174,6 +179,7 @@ const pipelineCalls: Array<{
   userId: string
   actorChannelId?: string | null
   isIdentified: boolean
+  senderLinkedIdentity: boolean
   externalGuest: boolean
   externalGuestConnectorTools: boolean
   isGroupChat: boolean
@@ -206,6 +212,7 @@ vi.mock('../channel-pipeline.js', () => ({
     userId: string
     actorChannelId?: string | null
     isIdentified: boolean
+    senderLinkedIdentity?: boolean
     externalGuest?: boolean
     externalGuestConnectorTools?: boolean
     isGroupChat: boolean
@@ -236,6 +243,7 @@ vi.mock('../channel-pipeline.js', () => ({
       userId: params.userId,
       actorChannelId: params.actorChannelId,
       isIdentified: params.isIdentified,
+      senderLinkedIdentity: params.senderLinkedIdentity === true,
       externalGuest: params.externalGuest === true,
       externalGuestConnectorTools: params.externalGuestConnectorTools === true,
       isGroupChat: params.isGroupChat,
@@ -356,6 +364,7 @@ vi.mock('../../db/episodes-store.js', () => ({
 import {
   telegramByoRoutes,
   telegramIncomingFailureText,
+  withBotAddApproval,
   persistSeenChat,
   telegramLinkBindsHere,
   shouldUseUniversalTelegramIntake,
@@ -512,16 +521,24 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
   })
 
   // 2026-09-29: an approved group was told it was "not approved" when the
-  // reply actually needed personal context the approval does not grant.
+  // reply actually needed context the approval does not grant.
+  it('keeps an existing group approval exactly as an admin configured it', () => {
+    const existing = {
+      version: 1 as const, channelId: '-100555', audienceType: 'group' as const, clearance: 'internal' as const,
+      compartments: ['team:finance'], projectIds: [], recipientUserId: null, expiresAt: null,
+      approvedByUserId: 'admin_a', approvedAt: '2026-09-01T00:00:00.000Z',
+    }
+    const config = { deliveryAudienceBindings: [existing] }
+    expect(withBotAddApproval(config, {
+      chatId: '-100555', approvedByUserId: 'admin_b', clearance: 'confidential', approvedAt: '2026-10-01T00:00:00.000Z',
+    })).toBe(config)
+  })
+
   it('does not tell an approved group it is unapproved', () => {
     expect(telegramIncomingFailureText('-1002000000001:topic:15', {
       reason: 'delivery_audience_unverified',
       detail: 'evidence_exceeds_audience',
-    })).toContain('set it to personal replies')
-    expect(telegramIncomingFailureText('-1002000000001', {
-      reason: 'delivery_audience_unverified',
-      detail: 'personal_group_unverified',
-    })).toMatch(/could not confirm that you are the only person.*bot is a group admin/)
+    })).toContain('not approved to receive')
   })
 })
 
@@ -1734,6 +1751,7 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
   })
 
   it('uses verified linked-chat metadata to scope nested comments and outbound replies', async () => {
+    vi.mocked(dispatchIncomingMessageEvent).mockClear()
     linkedDiscussionChatId = -10010
     const app = makeGuestApp([], null, false, 'allow_all')
     for (const root of [30, 40]) {
@@ -1746,6 +1764,7 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
       await flushMicrotasks(); await flushMicrotasks()
     }
     expect(pipelineCalls).toHaveLength(2)
+    expect(vi.mocked(dispatchIncomingMessageEvent).mock.calls.map(([input]) => input.incoming.channelId)).toEqual(['-10020:discussion:30', '-10020:discussion:40'])
     expect(adapterSendCalls.map(c => c.channelId)).toEqual(expect.arrayContaining(['-10020:discussion:30', '-10020:discussion:40']))
   })
 
@@ -2054,9 +2073,22 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
     expect(pipelineCalls[0]).toMatchObject({
       userId: 'shadow_unlisted_group_sender',
       isGroupChat: true,
+      senderLinkedIdentity: false,
       externalGuest: true,
       externalGuestConnectorTools: false,
     })
+  })
+
+  // Personal context in a group needs the SAME Telegram account the member
+  // connected to Brian; a shadow or allowlisted sender never qualifies.
+  it('marks a group sender as linked only through their own linked Telegram account', async () => {
+    const app = makeGuestApp([], { userId: 'owner_1', assistantId: 'assistant_1' }, true, 'allow_all')
+    await postUpdate(app, buildGroupMessage(42, 'hello', 'ownerhandle'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({ userId: 'owner_1', isGroupChat: true, senderLinkedIdentity: true })
   })
 
   it('silently ignores an unlisted stranger, including when the list is empty', async () => {
@@ -2304,6 +2336,53 @@ describe('[COMP:api/telegram-byo-route] group add-protection', () => {
 
     expect(leaveChatCalls).toEqual([])
     expect(teamRoleCalls).toEqual([{ userId: 'team_admin_user', workspaceId: 'team_1' }])
+  })
+
+  // 2026-10-01: the add IS the approval. A workspace owner/admin adding the
+  // bot through their own linked Telegram account approves the group.
+  it('approves the group for workspace replies when a team admin adds the bot', async () => {
+    const { findAssistantById } = await import('../../db/users.js')
+    vi.mocked(findAssistantById).mockResolvedValueOnce({
+      id: 'assistant_1', name: 'Team Bot', ownerUserId: 'owner_1', workspaceId: 'team_1',
+      defaultModelAlias: 'gemini-flash', systemPrompt: null,
+    } as never)
+    teamRoleResponse = 'admin'
+    const integrationStore = makeIntegrationStore()
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: integrationStore as never,
+      linkedAccountStore: makeLinkedAccountStore({ userId: 'team_admin_user', assistantId: 'assistant_1' }) as never,
+      capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+
+    await postUpdate(app, buildGroupAdd({ adderTgId: 42, chatId: -1002000000009 }))
+    await vi.waitFor(() => expect(integrationStore.mergeConfigSystem).toHaveBeenCalledTimes(2))
+
+    expect(leaveChatCalls).toEqual([])
+    // One merge records seenChats; the other is the approval.
+    const mutators = integrationStore.mergeConfigSystem.mock.calls.map((call) => (call as unknown[])[1] as (c: object) => { deliveryAudienceBindings?: unknown[] })
+    const approved = mutators.map((mutate) => mutate({}).deliveryAudienceBindings).find(Boolean)
+    expect(approved).toEqual([expect.objectContaining({
+      channelId: '-1002000000009', audienceType: 'group', clearance: 'confidential',
+      compartments: [], projectIds: [], recipientUserId: null, approvedByUserId: 'team_admin_user',
+    })])
+  })
+
+  it('never approves a group for a personal (no workspace) bot', async () => {
+    const integrationStore = makeIntegrationStore()
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: integrationStore as never,
+      linkedAccountStore: makeLinkedAccountStore({ userId: 'owner_1', assistantId: 'assistant_1' }) as never,
+      capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+
+    await postUpdate(app, buildGroupAdd({ adderTgId: 42 }))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    const mutators = integrationStore.mergeConfigSystem.mock.calls.map((call) => (call as unknown[])[1] as (c: object) => { deliveryAudienceBindings?: unknown[] })
+    expect(mutators.some((mutate) => mutate({}).deliveryAudienceBindings)).toBe(false)
   })
 
   it('leaves when the adder is only a team member (not admin or owner)', async () => {
@@ -3004,5 +3083,114 @@ describe('[COMP:api/telegram-byo-route] unverified workflow authority', () => {
     await flushMicrotasks(); await flushMicrotasks()
     expect(pipelineCalls).toHaveLength(0)
     expect(adapterSendCalls.at(-1)?.text).toContain('identity could not be verified')
+  })
+})
+
+
+describe.each([{ capabilities: [] }, { capabilities: ['chat'] }])('Telegram incoming workflow events ($capabilities)', ({ capabilities }) => {
+  it('does not turn button callbacks into incoming-message events', async () => {
+    vi.mocked(dispatchIncomingMessageEvent).mockClear()
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore() as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    await postUpdate(app, { update_id: 99, callback_query: {
+      id: 'callback', from: { id: 42 }, data: 'unknown:callback',
+      message: { message_id: 1, date: 1700000000, chat: { id: 42, type: 'private' }, text: 'button message' },
+    } })
+    await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['addressed text', { text: '@testbot hello' }, {}, 1],
+    ['passive text', { text: 'room chatter' }, {}, 1],
+    ['passive photo', { photo: [{ file_id: 'photo', width: 1, height: 1 }] }, {}, 1],
+    ['blocked sender', { text: 'blocked' }, { userAccessMode: 'blocklist', blockedUserIds: ['42'] }, 0],
+    ['empty allowlist', { text: 'denied' }, { userAccessMode: 'allowlist', allowedUserIds: [] }, 0],
+    ['self echo', { text: 'bot', from: { id: 999999, is_bot: true } }, {}, 0],
+    ['automatic forward', { text: 'forward', is_automatic_forward: true }, {}, 0],
+  ])('%s is handled before disabled chat/routing', async (_name, fields, config, count) => {
+    vi.mocked(dispatchIncomingMessageEvent).mockClear()
+    const { getChannelForWebhook } = await import('../../db/channels-store.js')
+    vi.mocked(getChannelForWebhook).mockResolvedValueOnce({
+      workspaceId: 'ws_1', status: 'active', enabledCapabilities: capabilities,
+    } as never)
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore(config) as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    await postUpdate(app, { update_id: 123, message: {
+      message_id: 456, date: 1700000000, from: { id: 42, first_name: 'User' },
+      chat: { id: -100, type: 'supergroup' }, ...fields,
+    } })
+    await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledTimes(count as number)
+    if (count) expect(dispatchIncomingMessageEvent).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws_1', integrationId: 'integ_1',
+      incoming: expect.objectContaining({ channelType: 'telegram', messageId: '456', userId: '42', timestamp: 1700000000 }),
+    }))
+  })
+})
+
+
+describe('Telegram workflow provider identity', () => {
+  function app() {
+    return createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore() as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+  }
+  async function disableChat() {
+    vi.mocked(dispatchIncomingMessageEvent).mockClear()
+    const { getChannelForWebhook } = await import('../../db/channels-store.js')
+    vi.mocked(getChannelForWebhook).mockResolvedValueOnce({ workspaceId: 'ws', status: 'active', enabledCapabilities: [] } as never)
+  }
+  it.each(['text', 'caption'])('matches Telegram %s entity IDs and handles using UTF-16 offsets', async field => {
+    await disableChat()
+    const text = '😀 @Other Human @TESTBOT'
+    await postUpdate(app(), { update_id: 1, message: {
+      message_id: 1, date: 1700000000, from: { id: 42 }, chat: { id: -100, type: 'supergroup' },
+      [field]: text, [field === 'text' ? 'entities' : 'caption_entities']: [
+        { type: 'mention', offset: 3, length: 6 },
+        { type: 'text_mention', offset: 10, length: 5, user: { id: 123 } },
+        { type: 'text_mention', offset: 10, length: 5, user: { id: 123 } },
+        { type: 'mention', offset: 16, length: 8 },
+      ],
+    } })
+    await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+    await expectMentionMatches(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0], ['@other', '123', '@testbot', '999999'])
+  })
+  it('uses one canonical discussion for direct and nested passive replies with chat disabled', async () => {
+    linkedDiscussionChatId = -10010
+    mockResolveTelegramRouting.mockClear()
+    mockResolveAnyRouting.mockClear()
+    const destinations: string[] = []
+    for (const reply of [{ message_id: 30, is_automatic_forward: true }, { message_id: 31 }]) {
+      await disableChat()
+      await postUpdate(app(), { update_id: 2, message: {
+        message_id: 32, date: 1700000000, from: { id: 42 }, chat: { id: -10020, type: 'supergroup' },
+        ...('is_automatic_forward' in reply ? {} : { message_thread_id: 30 }),
+        reply_to_message: reply, text: 'passive comment',
+      } })
+      await flushMicrotasks()
+      expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+      destinations.push(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0].incoming.channelId)
+    }
+    expect(destinations).toEqual(['-10020:discussion:30', '-10020:discussion:30'])
+    expect(mockResolveTelegramRouting).not.toHaveBeenCalled()
+    expect(mockResolveAnyRouting).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(0)
+  })
+  it('does not dispatch a room-scoped event when nested discussion metadata lookup fails', async () => {
+    await disableChat()
+    chatLookupFails = true
+    await postUpdate(app(), { update_id: 3, message: {
+      message_id: 33, date: 1700000000, from: { id: 42 }, chat: { id: -10020, type: 'supergroup' },
+      message_thread_id: 30, reply_to_message: { message_id: 31 }, text: 'comment',
+    } })
+    await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
   })
 })
