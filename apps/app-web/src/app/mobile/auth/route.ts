@@ -10,7 +10,9 @@ const CALLBACK = "usebrian-mobile://auth";
 const TTL = 600;
 const headers = {
   "Cache-Control": "no-store",
-  "Referrer-Policy": "no-referrer",
+  // Not `no-referrer`: under it browsers send `Origin: null` on the consent
+  // form's same-origin POST, which the origin check below must reject.
+  "Referrer-Policy": "same-origin",
   "X-Frame-Options": "DENY",
   "X-Content-Type-Options": "nosniff",
   "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' usebrian-mobile:; frame-ancestors 'none'; base-uri 'none'",
@@ -67,7 +69,11 @@ function callback(tx: Transaction, result: Record<string, string>, url: URL) {
   return setCookie(new Response(null, { status: 303, headers: { ...headers, Location: location } }), url, "", 0);
 }
 
-/** GET authenticates and shows consent. It NEVER mints a code. */
+/**
+ * GET authenticates and shows consent. It NEVER mints a code.
+ * Like `/desktop/auth`, once a well-formed transaction exists every failure
+ * returns to the app as `error=…` rather than stranding the browser here.
+ */
 export async function GET(request: Request) {
   const url = publicAppUrl(request.url);
   const tx = transaction(url.searchParams);
@@ -79,37 +85,43 @@ export async function GET(request: Request) {
       headers: { Authorization: `Bearer ${accessToken}` }, cache: "no-store", redirect: "error",
     });
     if (account.status === 401) return login(url);
-    if (!account.ok) return error(request, 503);
+    if (!account.ok) return callback(tx, { error: "server_error" }, url);
     const { user } = await account.json() as { user: { id: string; email: string | null; name: string | null } };
     const nonce = `${Date.now()}.${randomBytes(32).toString("base64url")}`;
     const csrf = `${nonce}.${signature(accessToken, tx, nonce)}`;
     const t = dictionary(request);
     const fields = { ...tx, csrf };
     return setCookie(html(`<h1>${escape(t.title)}</h1><p>${escape(t.description)}</p><p>${escape(user.email || user.name || user.id)}</p><p>${escape(tx.clientId === "brian-ios" ? t.ios : t.android)}</p><form method="post" action="/mobile/auth">${Object.entries(fields).map(([name, value]) => `<input type="hidden" name="${name}" value="${escape(value)}">`).join("")}<button name="decision" value="allow" type="submit">${escape(t.confirm)}</button><button name="decision" value="deny" type="submit">${escape(t.cancel)}</button></form>`), url, csrf);
-  } catch { return error(request, 503); }
+  } catch { return callback(tx, { error: "server_error" }, url); }
 }
 
 export async function POST(request: Request) {
   const url = publicAppUrl(request.url);
-  // Do not trust forwarded host/origin headers. Behind ingress configure AUTHED_APP_URL.
-  if (request.headers.get("origin") !== url.origin ||
-      request.headers.get("sec-fetch-site") === "cross-site" ||
-      request.headers.get("content-type")?.split(";")[0] !== "application/x-www-form-urlencoded") return error(request, 403);
   const body = await request.text();
   if (body.length > 4096) return error(request, 400);
   const form = new URLSearchParams(body);
   const tx = transaction(form);
+  // No well-formed transaction means no app is waiting on a state to answer.
+  if (!tx) return error(request, 400);
+  // A rejection carries only an error, never a code, so answering a forged
+  // request gives it nothing it could not already navigate to itself.
+  const reject = () => callback(tx, { error: "invalid_request" }, url);
+  // Do not trust forwarded host/origin headers. Behind ingress configure AUTHED_APP_URL.
+  if (request.headers.get("origin") !== url.origin ||
+      request.headers.get("sec-fetch-site") === "cross-site" ||
+      request.headers.get("content-type")?.split(";")[0] !== "application/x-www-form-urlencoded") return reject();
   const accessToken = token(request);
+  if (!accessToken) return callback(tx, { error: "login_required" }, url);
   const csrf = form.get("csrf") ?? "";
   const cookie = parseLastCookie(request.headers.get("cookie") ?? "", cookieName(url)) ?? "";
   const [timestamp, random, mac, ...extra] = csrf.split(".");
   const age = Date.now() - Number(timestamp);
-  if (!tx || !accessToken || form.getAll("csrf").length !== 1 || form.getAll("decision").length !== 1 ||
+  if (form.getAll("csrf").length !== 1 || form.getAll("decision").length !== 1 ||
       !/^[0-9]{13}$/.test(timestamp ?? "") || !/^[A-Za-z0-9_-]{43}$/.test(random ?? "") ||
       !/^[A-Za-z0-9_-]{43}$/.test(mac ?? "") || extra.length || age < 0 || age > TTL * 1000 ||
-      !equal(csrf, cookie) || !equal(mac, signature(accessToken, tx, `${timestamp}.${random}`))) return error(request, 403);
+      !equal(csrf, cookie) || !equal(mac, signature(accessToken, tx, `${timestamp}.${random}`))) return reject();
   if (form.get("decision") === "deny") return callback(tx, { error: "access_denied" }, url);
-  if (form.get("decision") !== "allow") return error(request, 400);
+  if (form.get("decision") !== "allow") return reject();
   try {
     const response = await fetch(`${INTERNAL_API_URL}/auth/mobile/code`, {
       method: "POST", cache: "no-store", redirect: "error",

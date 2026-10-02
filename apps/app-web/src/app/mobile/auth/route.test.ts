@@ -29,6 +29,13 @@ function post(csrf: string, cookie: string, changes: Record<string, string> = {}
     body: new URLSearchParams({ ...tx, csrf, decision: "allow", ...changes }),
   }));
 }
+function appCallback(response: Response) {
+  expect(response.status).toBe(303);
+  const callback = new URL(response.headers.get("location")!);
+  expect(`${callback.protocol}//${callback.host}`).toBe("usebrian-mobile://auth");
+  expect(callback.searchParams.has("code")).toBe(false);
+  return callback.searchParams;
+}
 
 describe("[COMP:app-web/mobile-auth-bridge] explicit native sign-in", () => {
   it("requires state/client/challenge before even sending the user to login", async () => {
@@ -53,6 +60,9 @@ describe("[COMP:app-web/mobile-auth-bridge] explicit native sign-in", () => {
     expect(html).not.toContain("browser-secret");
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    // `no-referrer` makes browsers send `Origin: null` on the consent POST,
+    // which fails the origin check and breaks every confirmation.
+    expect(response.headers.get("referrer-policy")).toBe("same-origin");
     expect(response.headers.get("set-cookie")).toContain("__Host-mobile_auth=");
     expect(response.headers.get("set-cookie")).toContain("HttpOnly; SameSite=Strict");
   });
@@ -73,23 +83,47 @@ describe("[COMP:app-web/mobile-auth-bridge] explicit native sign-in", () => {
   it.each<{ headers?: Record<string, string>; fields?: Record<string, string> }>([
     { headers: { origin: "https://evil.example" } },
     { headers: { origin: "" } },
+    { headers: { origin: "null" } },
     { headers: { "sec-fetch-site": "cross-site" } },
     { headers: { cookie: "access_token=another-account" } },
     { fields: { csrf: "forged" } },
     { fields: { state: "t".repeat(32) } },
     { fields: { clientId: "brian-android" } },
     { fields: { challenge: "A".repeat(43) } },
-  ])("blocks CSRF or transaction substitution %j", async ({ headers, fields }) => {
+    { fields: { decision: "maybe" } },
+  ])("blocks CSRF or transaction substitution %j without minting", async ({ headers, fields }) => {
     const { csrf, cookie } = await confirmation();
-    expect((await post(csrf, cookie, fields, headers)).status).toBe(403);
+    const result = appCallback(await post(csrf, cookie, fields, headers));
+    expect(result.get("error")).toBe("invalid_request");
+    expect(result.get("state")).toBe(fields?.state ?? tx.state);
     expect(fetchMock).not.toHaveBeenCalled();
   });
   it("rejects confirmation after 10 minutes", async () => {
     vi.useFakeTimers();
     const { csrf, cookie } = await confirmation();
     vi.advanceTimersByTime(601_000);
-    expect((await post(csrf, cookie)).status).toBe(403);
+    expect(appCallback(await post(csrf, cookie)).get("error")).toBe("invalid_request");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("returns to the app when the browser session is gone at confirmation", async () => {
+    const { csrf, cookie } = await confirmation();
+    const result = appCallback(await post(csrf, cookie, {}, { cookie }));
+    expect(result.get("error")).toBe("login_required");
+    expect(result.get("state")).toBe(tx.state);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("keeps the error page only when there is no transaction to answer", async () => {
+    const { csrf, cookie } = await confirmation();
+    const response = await post(csrf, cookie, { state: "bad" });
+    expect(response.status).toBe(400);
+    expect(response.headers.get("location")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("returns to the app when the account cannot be verified", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 503 }));
+    const result = appCallback(await GET(new Request(url, { headers: { cookie: "access_token=browser-secret" } })));
+    expect(result.get("error")).toBe("server_error");
+    expect(result.get("state")).toBe(tx.state);
   });
   it("cancel echoes state without issuing credentials", async () => {
     const { csrf, cookie } = await confirmation();
