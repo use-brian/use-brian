@@ -28,6 +28,9 @@ export type LiveWindow = {
   mime: string;
   startMs: number;
   endMs: number;
+  microphone?: { blob: Blob; mime: string };
+  interactionSource?: "microphone" | "mixed";
+  discontinuity?: boolean;
 };
 
 export function decodeLiveDestination(value: string): {
@@ -110,7 +113,8 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
       });
       failedWindowsRef.current.set(page, 0);
       // Same-tab pane append (other tabs converge via the pane's poll).
-      if (!result.duplicate && !result.interaction) {
+      if (result.interactionError) page.onInteractionGap?.();
+      if (!result.duplicate) {
         dispatchLiveTranscriptWindow({
           pageId: page.pageId,
           chunkId,
@@ -121,6 +125,7 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
         });
       }
     } catch {
+      if (page.interactionCaptureId) page.onInteractionGap?.();
       // Window failures are isolated. The durable local recording continues,
       // and the next independently-decodable window still gets a chance.
       failedWindowsRef.current.set(page, missedBefore + 1);

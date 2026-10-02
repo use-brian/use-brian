@@ -30,7 +30,7 @@ export const zhCN: Dictionary = {
 
     "title": "互动",
     "personal": "个人录音互动设置",
-    "description": "只有麦克风语音会触发问题。系统音频仅提供上下文。周围人声或扬声器声音仍可能进入麦克风。回答会显示在原来的聊天中。",
+    "description": "使用现有的实时转录，每30秒批量处理，而非流式传输。只有麦克风语音会触发问题。系统音频仅提供上下文。周围人声或扬声器声音仍可能进入麦克风。回答会显示在原来的聊天中。",
     "rule": "自然语言规则",
     "save": "保存规则",
     "defaultRule": "使用 Hey Brian 默认规则",
@@ -38,7 +38,7 @@ export const zhCN: Dictionary = {
     "preview": "预览规则",
     "noMatch": "未匹配任何问题。",
     "saved": "已保存，适用于后续语音。",
-    "unavailable": "流式互动不可用，仍可继续录音。",
+    "unavailable": "实时转录互动不可用，仍可继续录音。",
     "error": "互动失败或部分语音丢失。录音仍在继续。",
     "recording": "录音",
     "queued": "排队中",

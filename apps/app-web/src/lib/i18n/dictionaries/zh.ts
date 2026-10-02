@@ -19,7 +19,7 @@ export const zh: Dictionary = {
 
     "title": "互動",
     "personal": "個人錄音互動設定",
-    "description": "只有麥克風語音會觸發問題。系統音訊僅提供上下文。周圍人聲或喇叭聲仍可能進入麥克風。回答會顯示在原本的聊天中。",
+    "description": "使用既有的即時轉錄，每30秒批次處理，而非串流。只有麥克風語音會觸發問題。系統音訊僅提供上下文。周圍人聲或喇叭聲仍可能進入麥克風。回答會顯示在原本的聊天中。",
     "rule": "自然語言規則",
     "save": "儲存規則",
     "defaultRule": "使用 Hey Brian 預設規則",
@@ -27,7 +27,7 @@ export const zh: Dictionary = {
     "preview": "預覽規則",
     "noMatch": "未匹配任何問題。",
     "saved": "已儲存，適用於後續語音。",
-    "unavailable": "串流互動無法使用，仍可繼續錄音。",
+    "unavailable": "即時轉錄互動無法使用，仍可繼續錄音。",
     "error": "互動失敗或部分語音遺失。錄音仍在繼續。",
     "recording": "錄音",
     "queued": "排隊中",

@@ -291,3 +291,31 @@ it("keeps uploading audio windows before and after the validated interaction mar
   expect(bodies.map((body) => body.get("interactionCaptureId"))).toEqual([null, "validated-capture", null]);
   expect(bodies.every((body) => (body.get("audio") as Blob).size === 5)).toBe(true);
 });
+
+it("uploads explicit mixed source plus isolated microphone and pause discontinuity alongside original audio", async () => {
+  mockAuthFetch.mockClear();
+  mockAuthFetch.mockImplementation(async () => json({ ok: true, interactionError: true }));
+  const page: LiveRecordingPage = { pageId: "page", sessionId: "session", title: "Meeting", notesHeadingId: "notes", markerBlockId: "marker", interactionCaptureId: "capture" };
+  const params = { workspaceId: "w", assistantId: "a", page, chunkId: "dual", blob: new Blob(["mixed context"]), mime: "audio/webm", startMs: 1000, endMs: 31000 };
+  const response = await streamLiveRecordingWindow({ ...params, interactionSource: "mixed", microphone: { blob: new Blob(["isolated mic"], { type: "audio/webm" }), mime: "audio/webm" }, discontinuity: true });
+  expect(response.interactionError).toBe(true);
+  const body = mockAuthFetch.mock.calls[0][1]?.body as FormData;
+  expect(body.get("interactionCaptureId")).toBe("capture");
+  expect(body.get("interactionSource")).toBe("mixed");
+  expect(body.get("discontinuity")).toBe("true");
+  expect(body.get("offsetMs")).toBe("1000"); expect(body.get("durationMs")).toBe("30000");
+  expect(await (body.get("audio") as Blob).text()).toBe("mixed context");
+  expect(await (body.get("microphone") as Blob).text()).toBe("isolated mic");
+
+  await streamLiveRecordingWindow({ ...params, interactionSource: "microphone" });
+  const micOnly = mockAuthFetch.mock.calls[1][1]?.body as FormData;
+  expect(micOnly.get("interactionSource")).toBe("microphone");
+  expect(micOnly.has("microphone")).toBe(false); expect(micOnly.has("discontinuity")).toBe(false);
+
+  // Encoder failure remains explicitly mixed with NO mic file, so the server
+  // fails closed for triggers while retaining the normal context transcription.
+  await streamLiveRecordingWindow({ ...params, interactionSource: "mixed" });
+  const failed = mockAuthFetch.mock.calls[2][1]?.body as FormData;
+  expect(failed.get("interactionSource")).toBe("mixed");
+  expect(failed.has("microphone")).toBe(false); expect(failed.has("audio")).toBe(true);
+});

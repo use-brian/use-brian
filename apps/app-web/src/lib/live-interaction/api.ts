@@ -4,9 +4,6 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 export type { InteractionCapture, InteractionJob, InteractionSource } from "../../../../../packages/shared/src/live-interaction";
 export { DEFAULT_INTERACTION_RULE } from "../../../../../packages/shared/src/live-interaction";
 
-import type { InteractionUtterance as SharedInteractionUtterance } from "../../../../../packages/shared/src/live-interaction";
-export type InteractionUtterance = SharedInteractionUtterance & { discontinuity?: boolean };
-
 export class InteractionRequestError extends Error {
   constructor(public status: number) { super(`Interaction ${status}`); }
 }

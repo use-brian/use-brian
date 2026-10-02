@@ -64,6 +64,7 @@ export type RecordingEstimate = {
 export type LiveRecordingPage = {
   /** Validated server capture; absent until interaction /start succeeds. */
   interactionCaptureId?: string;
+  onInteractionGap?: () => void;
   pageId: string;
   title: string;
   /** The capture session — keys the server-side transcript windows + assembly. */
@@ -116,13 +117,24 @@ export async function streamLiveRecordingWindow(params: {
   startMs: number;
   endMs: number;
   missedWindows?: number;
-}): Promise<{ ok: boolean; transcript?: string; lines?: LiveTranscriptLine[]; notes?: string; duplicate?: boolean; interaction?: boolean }> {
+  microphone?: { blob: Blob; mime: string };
+  interactionSource?: "microphone" | "mixed";
+  discontinuity?: boolean;
+}): Promise<{ ok: boolean; transcript?: string; lines?: LiveTranscriptLine[]; notes?: string; duplicate?: boolean; interactionError?: boolean }> {
   const body = new FormData();
   body.set("workspaceId", params.workspaceId);
   body.set("assistantId", params.assistantId);
   body.set("pageId", params.page.pageId);
   body.set("sessionId", params.page.sessionId);
-  if (params.page.interactionCaptureId) body.set("interactionCaptureId", params.page.interactionCaptureId);
+  if (params.page.interactionCaptureId) {
+    body.set("interactionCaptureId", params.page.interactionCaptureId);
+    // Source identity comes from acquisition, never ASR speaker labels.
+    if (params.interactionSource) body.set("interactionSource", params.interactionSource);
+    if (params.interactionSource === "mixed" && params.microphone) {
+      body.set("microphone", params.microphone.blob, `microphone-${params.chunkId}.webm`);
+    }
+  }
+  if (params.discontinuity) body.set("discontinuity", "true");
   body.set("notesHeadingId", params.page.notesHeadingId);
   body.set("markerBlockId", params.page.markerBlockId);
   body.set("chunkId", params.chunkId);

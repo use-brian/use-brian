@@ -32,7 +32,7 @@ export const en = {
 
     "title": "Interaction",
     "personal": "Personal recording interaction",
-    "description": "Only microphone speech triggers questions. System audio supplies context only. Room speech and speaker bleed may still reach your microphone. Answers appear in the original chat.",
+    "description": "Uses existing live transcription in 30-second batches, not streaming. Only microphone speech triggers questions. System audio supplies context only. Room speech and speaker bleed may still reach your microphone. Answers appear in the original chat.",
     "rule": "Natural-language rule",
     "save": "Save rule",
     "defaultRule": "Use Hey Brian default",
@@ -40,7 +40,7 @@ export const en = {
     "preview": "Preview rule",
     "noMatch": "No question matched.",
     "saved": "Saved. Changes apply to subsequent speech.",
-    "unavailable": "Streaming interaction is unavailable. Durable recording still works.",
+    "unavailable": "Live transcription interaction is unavailable. Durable recording still works.",
     "error": "Interaction failed or speech was missed. Durable recording continues.",
     "recording": "Recording",
     "queued": "Queued",
