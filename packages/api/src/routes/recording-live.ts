@@ -47,6 +47,8 @@ import {
   type LiveTranscriptLine,
 } from '../db/live-transcript-store.js'
 import { createEpisode } from '../db/episodes-store.js'
+import { query } from '../db/client.js'
+import { createLiveInteractionStore, type LiveInteractionStore } from '../db/live-interaction-store.js'
 import { createRecording, getRecording } from '../db/recordings-store.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
@@ -93,6 +95,9 @@ export type RecordingLiveRouteDeps = {
     listBySession: typeof listLiveWindowsBySession
     clearAudio: typeof clearLiveWindowAudio
   }
+  interactionStore?: Pick<LiveInteractionStore, 'capture' | 'listUtterances'>
+  /** Streaming transcript projection; injectable for isolated route tests. */
+  interactionWindows?: (workspaceId: string, pageId: string) => Promise<Array<{ captureId: string; utterance: { id: string; text: string; startMs: number; endMs: number; discontinuity?: boolean } }>>
   getRecording?: typeof getRecording
   createEpisode?: typeof createEpisode
   createRecording?: typeof createRecording
@@ -491,6 +496,19 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
       return void res.status(409).json({ error: 'Live page anchors are no longer available' })
     }
 
+    // Interaction already transcribes both source streams over WebRTC. Keep
+    // window AUDIO for upload recovery, never pay to transcribe it a second time.
+    const interactionCaptureId = req.body.interactionCaptureId
+    if (interactionCaptureId !== undefined) {
+      if (typeof interactionCaptureId !== 'string' || !/^[0-9a-f-]{36}$/i.test(interactionCaptureId)) {
+        return void res.status(400).json({ error: 'Invalid interaction capture' })
+      }
+      const capture = await (deps.interactionStore ?? createLiveInteractionStore()).capture(interactionCaptureId)
+      if (!capture || capture.ownerId !== userId || capture.workspaceId !== workspaceId || capture.pageId !== pageId) {
+        return void res.status(403).json({ error: 'Interaction capture does not match this recording' })
+      }
+    }
+
     // 1. Persist the window bytes FIRST (best-effort): even when transcription
     //    fails, the audio must survive for the finalize fallback — the window
     //    may end up being the only copy of this stretch of the meeting that
@@ -519,7 +537,11 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
     //    shows the gap.
     let transcription: LiveTranscriptionResult
     try {
-      transcription = deps.transcribeWindow
+      transcription = interactionCaptureId
+        ? { text: (await (deps.interactionStore ?? createLiveInteractionStore()).listUtterances(interactionCaptureId))
+            .filter(u => u.endMs > offsetMs && u.startMs < offsetMs + durationMs)
+            .map(u => u.text).join('\n'), model: '', usage: null }
+        : deps.transcribeWindow
         ? await deps.transcribeWindow({ buffer: req.file.buffer, mime: req.file.mimetype })
         : await transcribeAudio(
             { buffer: req.file.buffer, mime: req.file.mimetype },
@@ -558,7 +580,7 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
       await windows.insert({
         chunkId, sessionId, workspaceId, pageId,
         offsetMs, durationMs, missedBefore: missedWindows,
-        lines, audioKey,
+        lines: interactionCaptureId ? [] : lines, audioKey,
       })
     } catch (error) {
       console.error('[recording-live] window insert failed:', error)
@@ -600,7 +622,7 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
       console.error('[recording-live] notes revision failed:', error)
     }
 
-    res.json({ ok: true, transcript, lines, ...(notesText !== undefined ? { notes: notesText } : {}) })
+    res.json({ ok: true, transcript, lines, ...(interactionCaptureId ? { interaction: true } : {}), ...(notesText !== undefined ? { notes: notesText } : {}) })
   })
 
   // The live transcript pane's read: one page's windows, capture order.
@@ -619,14 +641,22 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
       return void res.status(404).json({ error: 'Page not found' })
     }
     const rows = await windows.listByPage(workspaceId, pageId)
+    const streamed = deps.interactionWindows ? await deps.interactionWindows(workspaceId, pageId) : (await query<{ captureId: string; utterance: { id: string; text: string; startMs: number; endMs: number; discontinuity?: boolean } }>(
+      `SELECT c.id AS "captureId", u.data AS utterance
+       FROM live_interaction_captures c JOIN live_interaction_utterances u ON u.capture_id=c.id
+       WHERE c.workspace_id=$1 AND c.page_id=$2 AND u.data->>'source' <> 'manual' ORDER BY u.cursor`, [workspaceId, pageId])).rows
     res.json({
-      windows: rows.map((row) => ({
+      windows: [...rows.filter(row => !streamed.length || row.lines.length > 0).map((row) => ({
         chunkId: row.chunkId,
         offsetMs: row.offsetMs,
         durationMs: row.durationMs,
         missedBefore: row.missedBefore,
         lines: row.lines,
-      })),
+      })), ...streamed.map(({ captureId, utterance: u }) => ({
+        chunkId: `stream:${captureId}:${u.id}`, offsetMs: u.startMs,
+        durationMs: Math.max(1, u.endMs - u.startMs), missedBefore: u.discontinuity ? 1 : 0,
+        lines: u.text.trim() ? [{ speaker: null, text: u.text }] : [],
+      }))].sort((a, b) => a.offsetMs - b.offsetMs),
     })
   })
 

@@ -505,6 +505,10 @@ import { watchRecordingRoutes } from './routes/watch-recording.js'
 import { createWatchService, authorizeWatchDestination } from './recordings/watch-service.js'
 import { startWatchCleanup } from './recordings/watch-maintenance.js'
 import { transcribeAudio as transcribeWatchAudio } from '@use-brian/core'
+import { recordingInteractionRoutes } from './routes/recording-interaction.js'
+import { createLiveInteractionRuntime } from './recordings/live-interaction-runtime.js'
+import { createInteractionTranscriptionToken } from './recordings/live-interaction-transcription.js'
+import { createLedgerPayloadStore } from './ledger/payload-store.js'
 import { createDocGateway } from './doc/doc-gateway.js'
 import { createFilesApi, createSingletonFilesClientResolver, workspaceFileReadRevision, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
@@ -5884,6 +5888,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }))
     stopWatchCleanup = startWatchCleanup()
   }
+  // Shared by hosted and standalone: interaction answers are independent of
+  // the batch recording worker and the currently streaming chat turn.
+  const interactionKey = process.env.LIVE_INTERACTION_OPENAI_API_KEY?.trim()
+  const liveInteraction = filesBlobClient ? createLiveInteractionRuntime({
+    provider, model: backgroundModel, tools: allTools, embedder: sharedEmbedder,
+    savedViewStore, workspaceStore, knowledgeStore, usageStore,
+    payloads: createLedgerPayloadStore(filesBlobClient),
+    createTranscriptionToken: interactionKey && voiceTranscription.enabled
+      ? createInteractionTranscriptionToken(interactionKey) : undefined,
+    onError: () => console.error('[live-interaction] background operation failed'),
+  }) : null
+  if (liveInteraction) {
+    app.use('/api/recordings/interaction', requireAuth(env.JWT_SECRET), recordingInteractionRoutes({ service: liveInteraction }))
+    if (runWorkers) liveInteraction.start()
+  }
+
   if (usesOpenStandaloneRoutes(profile) && filesResolver && filesBlobClient) {
     app.use('/api/recordings', requireAuth(env.JWT_SECRET), openRecordingsRoutes({
       filesResolver,
@@ -9712,6 +9732,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     gdriveCatalogWorker?.stop()
     linkedinImportWorker?.stop()
     recordingProcessWorker?.stop()
+    await liveInteraction?.stop()
     officeLifecycleWorker.stop()
     await codexProviderManager?.close()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)

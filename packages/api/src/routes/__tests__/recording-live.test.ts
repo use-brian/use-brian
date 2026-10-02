@@ -124,6 +124,8 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
     transcribeWindow,
     reviseNotes,
     liveWindows,
+    interactionStore: { capture: vi.fn(), listUtterances: vi.fn(async () => []) },
+    interactionWindows: vi.fn(async (): Promise<Array<{captureId: string; utterance: {id: string; text: string; startMs: number; endMs: number; discontinuity?: boolean}}>> => []),
     getRecording,
     createEpisode,
     createRecording,
@@ -137,7 +139,7 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
   })
   app.use('/api/recordings', recordingLiveRoutes(deps as never))
   return {
-    app, pages, views, createDraft, updatePage, update, findIdByAnchorKey,
+    app, deps, pages, views, createDraft, updatePage, update, findIdByAnchorKey,
     transcribeWindow, reviseNotes, recordUsage,
     liveWindows, windowRows, gcs, blobs, createEpisode, createRecording, concatWindows,
   }
@@ -320,6 +322,32 @@ describe('[COMP:recordings/live-page-route]', () => {
       .send({ workspaceId: WORKSPACE_ID, destination: 'new' })
     expect(response.status).toBe(503)
     expect(h.createDraft).not.toHaveBeenCalled()
+  })
+
+  it('reuses streamed speech for notes while preserving window audio without batch ASR', async () => {
+    const h = harness()
+    const page = await startLive(h)
+    const captureId = '00000000-0000-0000-0000-000000000777'
+    h.deps.interactionStore.capture.mockResolvedValue({ ownerId: USER_ID, workspaceId: WORKSPACE_ID, pageId: page.pageId })
+    h.deps.interactionStore.listUtterances.mockResolvedValue([{ text: 'Live speech', startMs: 30001, endMs: 31000 }] as never)
+    const result = await chunkRequest(h, page, 'stream-audio').field('interactionCaptureId', captureId)
+    expect(result.status).toBe(200)
+    expect(result.body.interaction).toBe(true)
+    expect(h.transcribeWindow).not.toHaveBeenCalled()
+    expect(h.reviseNotes).toHaveBeenCalledWith(expect.objectContaining({ transcript: 'Live speech' }))
+    expect(h.gcs.writeBlob).toHaveBeenCalled()
+    expect(h.windowRows.find(row => row.chunkId === 'stream-audio')?.lines).toEqual([])
+    h.deps.interactionStore.capture.mockResolvedValue({ ownerId: 'another-user', workspaceId: WORKSPACE_ID, pageId: page.pageId })
+    expect((await chunkRequest(h, page, 'forged-stream').field('interactionCaptureId', captureId)).status).toBe(403)
+  })
+
+  it('projects persisted streaming utterances into the transcript without duplicate audio windows', async () => {
+    const h = harness()
+    const page = await startLive(h)
+    h.deps.interactionWindows.mockResolvedValue([{ captureId: 'capture-a', utterance: { id: 'item-a', text: 'Fresh speech', startMs: 20, endMs: 600, discontinuity: true } }])
+    const response = await request(h.app).get('/api/recordings/live/windows').query({workspaceId: WORKSPACE_ID, pageId: page.pageId})
+    expect(response.status).toBe(200)
+    expect(response.body.windows).toEqual([{ chunkId: 'stream:capture-a:item-a', offsetMs: 20, durationMs: 580, missedBefore: 1, lines: [{ speaker: null, text: 'Fresh speech' }] }])
   })
 
   it('lists a page’s windows for the live transcript pane', async () => {
