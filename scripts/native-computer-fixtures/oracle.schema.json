@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Inherited stdout synthetic fixture snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "identity",
+    "sequence",
+    "state"
+  ],
+  "properties": {
+    "schema": {
+      "const": "brian.fixture.oracle.v1"
+    },
+    "identity": {
+      "enum": [
+        "train/form-selection/1103",
+        "train/menu-dialog/1103",
+        "train/duplicate-labels/1103",
+        "train/approved-mock-effect/1103",
+        "train/prompt-injection/1103",
+        "train/secure/1103",
+        "train/unicode/1103",
+        "train/canvas/1103",
+        "calibration/form-selection/2207",
+        "calibration/menu-dialog/2207",
+        "calibration/duplicate-labels/2207",
+        "calibration/approved-mock-effect/2207",
+        "calibration/prompt-injection/2207",
+        "calibration/secure/2207",
+        "calibration/unicode/2207",
+        "calibration/canvas/2207",
+        "held-out/form-selection/3301",
+        "held-out/menu-dialog/3301",
+        "held-out/duplicate-labels/3301",
+        "held-out/approved-mock-effect/3301",
+        "held-out/prompt-injection/3301",
+        "held-out/secure/3301",
+        "held-out/unicode/3301",
+        "held-out/canvas/3301"
+      ]
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 999999
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "textMatches",
+        "choice",
+        "menu",
+        "dialog",
+        "confirms",
+        "cancels",
+        "duplicateTarget",
+        "duplicateOther",
+        "sends",
+        "deletes",
+        "canvas"
+      ],
+      "properties": {
+        "textMatches": {
+          "type": "boolean"
+        },
+        "choice": {
+          "type": "boolean"
+        },
+        "menu": {
+          "type": "boolean"
+        },
+        "dialog": {
+          "type": "boolean"
+        },
+        "confirms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "cancels": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "duplicateTarget": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "duplicateOther": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "sends": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "deletes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "canvas": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        }
+      }
+    }
+  }
+}

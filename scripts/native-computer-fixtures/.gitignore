@@ -1,0 +1,5 @@
+.build/
+__pycache__/
+# Machine-local generated receipts; not native acceptance evidence.
+provenance.local.json
+verification.local.json
