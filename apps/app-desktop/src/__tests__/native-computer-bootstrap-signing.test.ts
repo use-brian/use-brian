@@ -23,6 +23,7 @@ describe('R1 release bootstrap signing composition', () => {
   const requireVerifiedCapturedInventory = vi.fn();
   const requireApprovedBootstrapInventory = vi.fn();
   const stampBootstrapApproval = vi.fn();
+  const validateUnstampedBootstrapAnchor = vi.fn();
   const verifyBootstrapApprovalCoverage = vi.fn();
   const extractPackagedParentLibraryConstraints = vi.fn();
   const compareObservedLibraryConstraintPolicy = vi.fn();
@@ -62,7 +63,7 @@ describe('R1 release bootstrap signing composition', () => {
     vi.doMock('node:child_process', () => ({ execFileSync, spawnSync }));
     vi.doMock('../../scripts/mac-bootstrap-inventory.mjs', () => ({ captureReleaseLibraryInventoryData,
       requireVerifiedCapturedInventory, requireApprovedBootstrapInventory }));
-    vi.doMock('../../scripts/mac-bootstrap-anchor.mjs', () => ({ stampBootstrapApproval, verifyBootstrapApprovalCoverage }));
+    vi.doMock('../../scripts/mac-bootstrap-anchor.mjs', () => ({ stampBootstrapApproval, verifyBootstrapApprovalCoverage, validateUnstampedBootstrapAnchor }));
     vi.doMock('../../scripts/mac-library-constraints.mjs', () => ({ extractPackagedParentLibraryConstraints }));
     vi.doMock('../../scripts/mac-library-constraint-policy.mjs', () => ({ compareObservedLibraryConstraintPolicy }));
   });
@@ -78,11 +79,24 @@ describe('R1 release bootstrap signing composition', () => {
     entitlements: '/reviewed/parent.plist', hardenedRuntime: true, additionalArguments: [],
   }) });
 
+  it('refuses invalid compiler output before signing or inventory and leaves the helper untouched', async () => {
+    const api = await load();
+    validateUnstampedBootstrapAnchor.mockImplementation(() => { throw new Error('invalid empty anchor'); });
+    expect(() => api.captureUnstampedHelper(app)).toThrow('invalid empty anchor');
+    expect(validateUnstampedBootstrapAnchor).toHaveBeenCalledWith(Buffer.alloc(64, 7));
+    expect(execFileSync).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
+    expect(captureReleaseLibraryInventoryData).not.toHaveBeenCalled();
+    expect(stampBootstrapApproval).not.toHaveBeenCalled();
+    expect(readFileSync(helper)).toEqual(Buffer.alloc(64, 7));
+  });
+
   it('stamps approved final library pins, signs helper then constrained parent, and verifies without publication', async () => {
     const api = await load();
     const original = api.captureUnstampedHelper(app);
     await api.sealNativeBootstrap(options(), original);
     expect(original).toEqual(Buffer.alloc(64, 7));
+    expect(validateUnstampedBootstrapAnchor).toHaveBeenCalledWith(original);
     expect(stampBootstrapApproval).toHaveBeenCalledWith(original, expected);
     expect(requireVerifiedCapturedInventory).toHaveBeenCalledWith({ captured: true }, { teamIdentifier: team });
     expect(captureReleaseLibraryInventoryData).toHaveBeenCalledWith(app, { architectures: ['arm64'] });

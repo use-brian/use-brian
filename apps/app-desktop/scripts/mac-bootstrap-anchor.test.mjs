@@ -7,11 +7,41 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { bootstrapAnchorSize, bootstrapElectronVersion, emptyBootstrapApprovalRecord as empty,
   encodeBootstrapApprovalRecord as encode, decodeBootstrapApprovalRecord as decode,
-  readBootstrapApproval as read, stampBootstrapApproval as stamp, verifyBootstrapApprovalCoverage as verify } from './mac-bootstrap-anchor.mjs';
+  readBootstrapApproval as read, stampBootstrapApproval as stamp, verifyBootstrapApprovalCoverage as verify,
+  validateUnstampedBootstrapAnchor as preflight } from './mac-bootstrap-anchor.mjs';
 import { approval, thin, fat, rehash, fatRehash, component, cdOffset, anchorOffset, signatureOffset } from './mac-bootstrap-anchor.test-fixtures.mjs';
 const reject = fn => assert.throws(fn, { code: 'ERR_MAC_BOOTSTRAP_ANCHOR', message: 'Bootstrap anchor: unsupported, malformed, unsealed, or mismatched data' });
 const sourceURL = new URL('../native/computer-control/BootstrapApprovalAnchor.c', import.meta.url);
 const headerURL = new URL('../native/computer-control/BootstrapApprovalAnchor.h', import.meta.url);
+
+test('empty-anchor preflight is read-only, checks every slice and retains the failed invariant', () => {
+  for (const bytes of [thin(), thin({ signed: false }), fat()]) {
+    const before = Buffer.from(bytes);
+    assert.equal(preflight(bytes), undefined);
+    assert.deepEqual(bytes, before);
+  }
+  for (const bytes of [stamp(thin(), approval()), thin({ flags: 0x10000 }),
+    fat(thin({ cpu: 0x01000007 }), thin({ flags: 0x10000 }))]) reject(() => preflight(bytes));
+  assert.throws(() => preflight(thin({ flags: 0x10000 })), error => {
+    assert.equal(error.code, 'ERR_MAC_BOOTSTRAP_ANCHOR');
+    assert.match(error.stack, /at coverage \(/);
+    return true;
+  });
+});
+
+test('foreign failures cannot impersonate anchor diagnostics with a matching error code', () => {
+  const bytes = thin(), original = Buffer.prototype.readUInt32BE;
+  const foreign = Object.assign(new Error('PRIVATE_DIAGNOSTIC'), { code: 'ERR_MAC_BOOTSTRAP_ANCHOR' });
+  try {
+    Buffer.prototype.readUInt32BE = () => { throw foreign; };
+    assert.throws(() => preflight(bytes), error => {
+      assert.notEqual(error, foreign);
+      assert.equal(error.code, 'ERR_MAC_BOOTSTRAP_ANCHOR');
+      assert.ok(!error.stack.includes('PRIVATE_DIAGNOSTIC'));
+      return true;
+    });
+  } finally { Buffer.prototype.readUInt32BE = original; }
+});
 
 test('canonical binary record, empty refuses, no circular main/team/path fields', () => {
   const pristine = empty(); assert.equal(pristine.length, bootstrapAnchorSize); assert.equal(pristine[34], 0);

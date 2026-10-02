@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import plist from 'plist';
 import { captureReleaseLibraryInventoryData, requireVerifiedCapturedInventory,
   requireApprovedBootstrapInventory } from './mac-bootstrap-inventory.mjs';
-import { stampBootstrapApproval, verifyBootstrapApprovalCoverage } from './mac-bootstrap-anchor.mjs';
+import { stampBootstrapApproval, verifyBootstrapApprovalCoverage, validateUnstampedBootstrapAnchor } from './mac-bootstrap-anchor.mjs';
 import { extractPackagedParentLibraryConstraints } from './mac-library-constraints.mjs';
 import { compareObservedLibraryConstraintPolicy } from './mac-library-constraint-policy.mjs';
 import { nativeHelperRelativePath, nativeHelperEntitlements, verifyNativeHelperEntitlements } from './mac-native-signing-policy.mjs';
@@ -60,7 +60,11 @@ function verifyBindings(app, expected, team) {
 
 // Capture the original empty/linker-only helper BEFORE the ordinary signer.
 // stampBootstrapApproval later refuses a pre-signed or already-populated anchor.
-export function captureUnstampedHelper(app) { return bytes(join(app, nativeHelperRelativePath)); }
+export function captureUnstampedHelper(app) {
+  const original = bytes(join(app, nativeHelperRelativePath));
+  validateUnstampedBootstrapAnchor(original);
+  return original;
+}
 
 export async function verifyPackagedNativeBootstrap(app, team) {
   if (process.platform !== 'darwin' || !['arm64', 'x64'].includes(process.arch) || !/^[A-Z0-9]{10}$/.test(team ?? '')) fail();

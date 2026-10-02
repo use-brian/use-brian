@@ -41,8 +41,10 @@ export const bootstrapAnchorSize = 1376;
 export const bootstrapElectronVersion = '43.2.0';
 const MARKER = Buffer.from('425249414e5f424f4f5453545241505f414e43484f525f56318ca1d3f9b76042', 'hex');
 const SECTION = '__br_bootstrap', MAX_BYTES = 128 * 1024 * 1024;
-const fail = () => { const e = new Error('Bootstrap anchor: unsupported, malformed, unsealed, or mismatched data'); e.code = 'ERR_MAC_BOOTSTRAP_ANCHOR'; throw e; };
-const guard = action => { try { return action(); } catch { fail(); } };
+// Keep our invariant's source location without exposing foreign exception text.
+const anchorFailures = new WeakSet();
+const fail = () => { const e = new Error('Bootstrap anchor: unsupported, malformed, unsealed, or mismatched data'); e.code = 'ERR_MAC_BOOTSTRAP_ANCHOR'; anchorFailures.add(e); throw e; };
+const guard = action => { try { return action(); } catch (error) { if (anchorFailures.has(error)) throw error; fail(); } };
 const { isProxy, isUint8Array, isSharedArrayBuffer } = types;
 const { getPrototypeOf, getOwnPropertyDescriptor: descriptor, getOwnPropertyDescriptors: descriptors } = Object;
 const { apply, ownKeys } = Reflect;
@@ -284,14 +286,22 @@ function sameRecords(bytes, locations, expected) {
 export function readBootstrapApproval(bytes) {
   return guard(() => { const b = copy(bytes, 32, MAX_BYTES); return record(sameRecords(b, slots(b))); });
 }
+function unstampedSlots(b) {
+  const locations = slots(b), empty = emptyBootstrapApprovalRecord();
+  for (const s of locations) {
+    if (!b.subarray(s.anchor, s.anchor + bootstrapAnchorSize).equals(empty)) fail();
+    if (s.signature) coverage(b, s, true);
+  }
+  return locations;
+}
+/** Read-only build preflight. No approval is fabricated, returned or stamped. */
+export function validateUnstampedBootstrapAnchor(bytes) {
+  return guard(() => { unstampedSlots(copy(bytes, 32, MAX_BYTES)); });
+}
 /** Empty anchor only; ALL slices validated before changing a detached copy. */
 export function stampBootstrapApproval(bytes, approval) {
   return guard(() => {
-    const b = copy(bytes, 32, MAX_BYTES), expected = encode(approval), locations = slots(b), empty = emptyBootstrapApprovalRecord();
-    for (const s of locations) {
-      if (!b.subarray(s.anchor, s.anchor + bootstrapAnchorSize).equals(empty)) fail();
-      if (s.signature) coverage(b, s, true);
-    }
+    const b = copy(bytes, 32, MAX_BYTES), expected = encode(approval), locations = unstampedSlots(b);
     for (const s of locations) expected.copy(b, s.anchor);
     sameRecords(b, slots(b), expected);
     return b; // Signature is STALE if linker-signed. Final signing is mandatory.
