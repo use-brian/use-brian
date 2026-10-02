@@ -33,6 +33,9 @@ describe("[COMP:app-web/live-recording-page] default destination", () => {
         workspaceId: "workspace-1", destination: "meeting-notes", folderName: "Meeting notes",
       });
       expect(mocks.push).toHaveBeenCalled();
+      mocks.push.mockClear(); mocks.confirm.mockResolvedValueOnce(true);
+      expect(await hook.prepare(false)).toEqual({ pageId: "page-1" });
+      expect(mocks.push).not.toHaveBeenCalled();
     } finally {
       act(() => root.unmount());
       vi.clearAllMocks();

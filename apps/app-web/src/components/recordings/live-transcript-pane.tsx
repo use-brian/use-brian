@@ -101,6 +101,7 @@ export function LiveTranscriptPane({
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<LiveTranscriptWindowDetail>).detail;
       if (!detail || detail.pageId !== pageId) return;
+      setLoaded(true);
       setWindows((prev) =>
         mergeLiveWindows(prev, [
           {
@@ -158,7 +159,7 @@ export function LiveTranscriptPane({
           ) : (
             <ol className="space-y-1">
               {windows.map((w) => (
-                <li key={w.chunkId}>
+                <li key={w.chunkId} id={w.chunkId}>
                   {w.missedBefore > 0 ? (
                     <p className="px-2 py-0.5 text-xs italic text-muted-foreground">
                       {t.recordings.liveTranscriptGap.replace(

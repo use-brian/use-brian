@@ -50,7 +50,7 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
   const router = useRouter();
   const failedWindowsRef = useRef(new WeakMap<LiveRecordingPage, number>());
 
-  const prepare = useCallback(async (): Promise<LiveRecordingPage | null> => {
+  const prepare = useCallback(async (navigate = true): Promise<LiveRecordingPage | null> => {
     const pages = await listViews({ workspaceId, state: "saved" }).catch(() => []);
     const items: SearchableSelectItem[] = [
       { value: LIVE_MEETING_NOTES, label: t.liveMeetingNotesFolder },
@@ -91,7 +91,7 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("doc:draft-created"));
     }
-    router.push(docPagePath(workspaceId, page.pageId));
+    if (navigate) router.push(docPagePath(workspaceId, page.pageId));
     return page;
   }, [router, t, workspaceId]);
 
@@ -110,7 +110,7 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
       });
       failedWindowsRef.current.set(page, 0);
       // Same-tab pane append (other tabs converge via the pane's poll).
-      if (!result.duplicate) {
+      if (!result.duplicate && !result.interaction) {
         dispatchLiveTranscriptWindow({
           pageId: page.pageId,
           chunkId,

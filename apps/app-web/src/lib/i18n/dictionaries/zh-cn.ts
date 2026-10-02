@@ -22,6 +22,35 @@ export const zhCN: Dictionary = {
     "error": "无法完成登录。请从移动应用重新开始。"
 },
 
+  liveInteraction: {
+    personalOnly: "互动功能仅适用于您自己的个人聊天。请打开个人聊天以使用此功能。",
+    "askNow": "立即提问",
+    "cancelPending": "取消待处理问题",
+    "editQuestion": "编辑并重新提交",
+
+    "title": "互动",
+    "personal": "个人录音互动设置",
+    "description": "只有麦克风语音会触发问题。系统音频仅提供上下文。周围人声或扬声器声音仍可能进入麦克风。回答会显示在原来的聊天中。",
+    "rule": "自然语言规则",
+    "save": "保存规则",
+    "defaultRule": "使用 Hey Brian 默认规则",
+    "sample": "语音示例",
+    "preview": "预览规则",
+    "noMatch": "未匹配任何问题。",
+    "saved": "已保存，适用于后续语音。",
+    "unavailable": "流式互动不可用，仍可继续录音。",
+    "error": "互动失败或部分语音丢失。录音仍在继续。",
+    "recording": "录音",
+    "queued": "排队中",
+    "running": "回答中",
+    "completed": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "cancel": "取消",
+    "retry": "重试",
+    "listening": "聆听中",
+    "stop": "停止互动"
+},
   workflowPublicationConsent: {
     "title": "生成输出的发布",
     "intro": "允许此已保存步骤将根据你的私人背景信息生成的文字发布到固定的 Telegram 目的地。这与保存工作流是分开的操作。",

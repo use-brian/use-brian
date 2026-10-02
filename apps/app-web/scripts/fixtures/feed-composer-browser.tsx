@@ -27,6 +27,7 @@ const recorder: DockRecorderApi = {
   notice: null, clearNotices: noop, onPressStart: noop, onPressEnd: noop,
   stop: noop, discard: noop, pause: noop, resume: noop, level: () => 0,
   computerAudioAvailable: false, includeComputerAudio: false, setIncludeComputerAudio: noop,
+  interactionAvailable: false, interactionEnabled: false, interactionStatus: "idle", setInteractionEnabled: () => {},
   livePageEnabled: false, setLivePageEnabled: noop, includesSystemAudio: () => false,
   screenCaptureAvailable: false, capturePickerAvailable: false, captureSource: 'mic',
   setCaptureSource: noop, capturesScreen: () => false, recovery: [], saveRecovery: async () => {}, discardRecovery: async () => {},

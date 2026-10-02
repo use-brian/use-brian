@@ -67,6 +67,8 @@ describe("[COMP:app-web/recorder-engine] Capture audio mixer", () => {
       },
     });
 
+    expect(result.microphoneStream).toBe(microphone);
+    expect(result.systemStream).toBeNull();
     expect(result.recordingStream).toBe(microphone);
     expect(result.inputStreams).toEqual([microphone]);
     expect(result.includesSystemAudio).toBe(false);
@@ -94,6 +96,9 @@ describe("[COMP:app-web/recorder-engine] Capture audio mixer", () => {
     expect(videoTrack.stop).toHaveBeenCalledOnce();
     expect(micTrack.stop).not.toHaveBeenCalled();
     expect(systemTrack.stop).not.toHaveBeenCalled();
+    expect(result.microphoneStream).toBe(microphone);
+    expect(result.systemStream).toBe(system);
+    expect(result.microphoneStream).not.toBe(output);
     expect(result.recordingStream).toBe(output);
     expect(result.inputStreams).toEqual([microphone, system]);
     expect(result.includesSystemAudio).toBe(true);

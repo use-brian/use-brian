@@ -10,6 +10,8 @@ vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 import { authFetch } from "@/lib/auth-fetch";
 import {
   startRecordingUpload,
+  streamLiveRecordingWindow,
+  type LiveRecordingPage,
   estimateRecording,
   processRecording,
   RecordingApiError,
@@ -274,4 +276,18 @@ describe("[COMP:web/recording-upload] recordings SDK", () => {
     expect(res.status).toBe("queued");
     expect(res.jobId).toBe("job-1");
   });
+});
+
+it("keeps uploading audio windows before and after the validated interaction marker arrives", async () => {
+  mockAuthFetch.mockImplementation(async () => json({ ok: true }));
+  const page: LiveRecordingPage = { pageId: "page", sessionId: "session", title: "Meeting", notesHeadingId: "notes", markerBlockId: "marker" };
+  const params = { workspaceId: "w", assistantId: "a", page, chunkId: "one", blob: new Blob(["audio"]), mime: "audio/webm", startMs: 0, endMs: 30000 };
+  await streamLiveRecordingWindow(params);
+  page.interactionCaptureId = "validated-capture";
+  await streamLiveRecordingWindow({ ...params, chunkId: "two" });
+  delete page.interactionCaptureId;
+  await streamLiveRecordingWindow({ ...params, chunkId: "three" });
+  const bodies = mockAuthFetch.mock.calls.map(([, init]) => init?.body as FormData);
+  expect(bodies.map((body) => body.get("interactionCaptureId"))).toEqual([null, "validated-capture", null]);
+  expect(bodies.every((body) => (body.get("audio") as Blob).size === 5)).toBe(true);
 });

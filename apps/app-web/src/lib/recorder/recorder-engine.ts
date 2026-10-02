@@ -60,6 +60,7 @@ type CaptureResult = {
 export interface RecorderEngine {
   /** Recorder clock: wall time since start, minus paused time. */
   elapsedMs(): number;
+  interactionSources(): { microphone: MediaStream; system: MediaStream | null };
   /** 0..1 RMS capture-bus level for the live meter; 0 when unavailable. */
   level(): number;
   /** True when the recorded track contains both mic and computer playback. */
@@ -340,6 +341,7 @@ export async function createRecorderEngine(opts?: {
       }
       return Math.min(1, Math.sqrt(sum / levelBuf.length) * 3);
     },
+    interactionSources: () => ({ microphone: captureAudio.microphoneStream, system: captureAudio.systemStream }),
     includesSystemAudio: () => captureAudio.includesSystemAudio,
     capturesVideo: () => capturesVideo,
     paused: () => pausedSince !== null,
