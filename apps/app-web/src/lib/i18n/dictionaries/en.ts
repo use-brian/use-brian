@@ -14,6 +14,16 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  mobileAuth: {
+    "title": "Sign in to Brian mobile?",
+    "description": "Only continue if you started sign-in on your own phone. This gives the mobile app access to your Brian account.",
+    "ios": "Device: Brian for iPhone",
+    "android": "Device: Brian for Android",
+    "confirm": "Confirm sign-in",
+    "cancel": "Cancel",
+    "error": "Unable to complete sign-in. Start again from the mobile app."
+},
+
   workflowPublicationConsent: {
     "title": "Prepared-output publication",
     "intro": "Allow this saved step to publish generated text derived from your private context to its fixed Telegram destination. This is separate from saving the workflow.",

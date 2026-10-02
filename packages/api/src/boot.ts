@@ -736,6 +736,7 @@ import type { AppStoreScope } from '@use-brian/brian-app'
 import { resolveWriteTarget } from './brain-mcp/tools.js'
 import { enginesMcpRoutes, enginesMcpEnabled } from './engines-mcp/server.js'
 import { createDbOAuthClientStore } from './db/oauth-client-store.js'
+import { createDbMobileAuthStore } from './db/mobile-auth-store.js'
 import { createDbDesktopAuthStore } from './db/desktop-auth-store.js'
 import { createDbOAuthAuthorizationStore } from './db/oauth-authorization-store.js'
 import { oauthRoutes, oauthMetadataRoutes } from './brain-mcp/oauth/index.js'
@@ -2502,6 +2503,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             },
           }
         : undefined,
+      undefined, // default human session store
+      createDbMobileAuthStore(),
     ),
   )
 
