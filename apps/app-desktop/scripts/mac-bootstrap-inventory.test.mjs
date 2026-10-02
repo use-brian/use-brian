@@ -110,6 +110,34 @@ test('exact library architecture set is trusted, never inferred; excludes execut
   for (const expected of [[], ['arm64', 'arm64'], ['arm64e'], ['x86_64'], ['arm64', 'x86_64', 'arm64']]) rejection(() => extract(nativeFile(), expected));
   for (const wide of [false, true]) assert.equal(extract(universal(undefined, undefined, wide), ['arm64', 'x86_64']).architectures.length, 2);
 });
+test('arm64 package permits universal Siri only as an excluded executable, never as library pins', t => {
+  const f = tree(t);
+  const siri = 'Contents/Extensions/Brian Siri.appex/Contents/MacOS/Brian Siri';
+  const arm = nativeFile({ type: 2, signed: false });
+  const intel = nativeFile({ type: 2, cpu: 0x01000007, signed: false });
+  const baseline = capture(f.root, options).candidateCDHashes;
+  for (const wide of [false, true]) {
+    f.put(siri, universal(arm, intel, wide));
+    const result = capture(f.root, options);
+    assert.deepEqual(result.candidateCDHashes, baseline);
+    const excluded = result.excludedExecutables.find(file => file.relativePath === siri);
+    assert.equal(excluded.machType, 'MH_EXECUTE');
+    assert.deepEqual(excluded.architectures.map(slice => slice.architecture), ['arm64', 'x86_64']);
+    assert.ok(excluded.architectures.every(slice => !Object.hasOwn(slice, 'cdHash')));
+    rejection(() => extract(universal(arm, intel, wide), ['arm64']));
+  }
+  f.put(siri, intel); // An executable with no target-compatible slice still refuses.
+  rejection(() => capture(f.root, options));
+  f.put(siri, arm);
+  for (const type of [6, 8]) {
+    f.put('Contents/Frameworks/extra.dylib', universal(nativeFile({ type }), nativeFile({ type, cpu: 0x01000007 })));
+    rejection(() => capture(f.root, options));
+  }
+  f.put(siri, universal(arm, nativeFile({ type: 6, cpu: 0x01000007 })));
+  fs.rmSync(join(f.root, 'Contents/Frameworks/extra.dylib'));
+  rejection(() => capture(f.root, options)); // Mixed executable/library slices remain invalid.
+});
+
 test('pinned physical Electron framework path must exist and be MH_DYLIB, not an alias or executable', t => {
   for (const bytes of [Buffer.from('resource'), nativeFile({ type: 2 }), nativeFile({ type: 8 })]) {
     const f = tree(t, bytes); rejection(() => capture(f.root, options));

@@ -16,7 +16,8 @@
 // is ordinary data, but MZ plus a bounded PE signature refuses. Magic buried in
 // ordinary resources is NOT treated as executable content. Mach-O MH_DYLIB and
 // MH_BUNDLE must have the EXACT trusted architecture set. MH_EXECUTE is separately
-// recorded/excluded (architectures may be a subset); its signature is NOT checked
+// recorded/excluded (must contain a target slice; extra supported slices are
+// allowed, e.g. universal Siri in an arm64 app); its signature is NOT checked
 // or included, avoiding circular helper/main/Siri CDHash pins. Other types refuse.
 // All physical dylibs/addons are candidates, NOT established non-Apple code.
 //
@@ -273,10 +274,13 @@ function parseMach(b, expected, externalHash, check) {
   for (const s of all) {
     check(); const part = b.subarray(s.offset, s.offset + s.size), parsed = commands(part, s);
     if (type !== undefined && parsed.type !== type) fail(); type = parsed.type;
-    if (!expected.includes(s.architecture)) fail();
+    // Executables are not library pins. The shipped Siri executable is universal
+    // even in a single-architecture Electron package; still validate every slice.
+    if (type !== 2 && !expected.includes(s.architecture)) fail();
     const data = type === 2 ? {} : directory(part, parsed.signature, externalHash, check);
     result.push(Object.freeze({ architecture: s.architecture, sliceOffset: s.offset, sliceSize: s.size, ...data }));
   }
+  if (type === 2 && !result.some(r => expected.includes(r.architecture))) fail();
   if (type !== 2 && (result.length !== expected.length || expected.some(a => !result.some(r => r.architecture === a)))) fail();
   return Object.freeze({ machType: type === 2 ? 'MH_EXECUTE' : type === 6 ? 'MH_DYLIB' : 'MH_BUNDLE',
     architectures: Object.freeze(result.sort((a, b) => a.architecture.localeCompare(b.architecture))) });
