@@ -77,7 +77,7 @@ export const inventoryLimits = Object.freeze({ entries: 50000, directories: 2048
 // Preserve the precise failed invariant in our own stack traces. Filesystem or
 // caller exceptions remain sanitized; a forged public error code is not enough.
 const inventoryFailures = new WeakSet();
-const fail = () => { const e = new Error('Release library inventory data rejected: unsupported, changed, malformed, or bounded capture failure'); e.code = 'ERR_MAC_BOOTSTRAP_INVENTORY'; inventoryFailures.add(e); throw e; };
+const fail = diagnostics => { const e = new Error('Release library inventory data rejected: unsupported, changed, malformed, or bounded capture failure'); e.code = 'ERR_MAC_BOOTSTRAP_INVENTORY'; if (diagnostics) Object.assign(e, diagnostics); inventoryFailures.add(e); throw e; };
 const guard = fn => { try { return fn(); } catch (error) { if (inventoryFailures.has(error)) throw error; fail(); } };
 const sha = b => createHash('sha256').update(b).digest();
 const { isProxy, isUint8Array, isSharedArrayBuffer } = types;
@@ -231,7 +231,13 @@ function directory(b, signature, externalHash, check) {
   }
   disjoint(ranges); ranges.sort((a, b) => a.offset - b.offset);
   for (let i = 1; i < ranges.length; i++) zero(sb.subarray(ranges[i - 1].offset + ranges[i - 1].size, ranges[i].offset));
-  const last = ranges.at(-1); zero(sb.subarray(last.offset + last.size));
+  const last = ranges.at(-1), indexedEnd = last.offset + last.size;
+  if (sb.subarray(indexedEnd).some(value => value !== 0)) fail({
+    inventoryCheck: 'signature-tail',
+    allocatedSignatureBytes: sb.length, declaredSignatureBytes: length, indexedEnd,
+    nonzeroInsideDeclaredSignature: sb.subarray(indexedEnd, length).some(value => value !== 0),
+    nonzeroOutsideDeclaredSignature: sb.subarray(length).some(value => value !== 0),
+  });
   const cd = blobs.get(0); if (!cd || cd.length < 88) fail();
   const version = cd.readUInt32BE(8), header = new Map([[0x20400, 88], [0x20500, 96], [0x20600, 108]]).get(version);
   if (!header || cd.length < header || cd[36] !== 32 || cd[37] !== 2 || cd[38] !== 0 || ![12, 14].includes(cd[39])) fail();

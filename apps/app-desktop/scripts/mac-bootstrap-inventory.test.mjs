@@ -46,6 +46,26 @@ test('inventory failures retain the actual internal check without exposing forei
   });
 });
 
+test('signature-tail diagnostics distinguish declared content from allocation without publishing bytes', () => {
+  const bytes = nativeFile(), declared = bytes.readUInt32BE(sig + 4);
+  bytes[sig + declared] = 1;
+  for (const inside of [false, true]) {
+    bytes.writeUInt32BE(declared + (inside ? 1 : 0), sig + 4);
+    assert.throws(() => extract(bytes, ['arm64']), error => {
+      assert.equal(error.code, 'ERR_MAC_BOOTSTRAP_INVENTORY');
+      assert.equal(error.inventoryCheck, 'signature-tail');
+      assert.equal(error.allocatedSignatureBytes, bytes.length - sig);
+      assert.equal(error.declaredSignatureBytes, declared + (inside ? 1 : 0));
+      assert.equal(error.indexedEnd, declared);
+      assert.equal(error.nonzeroInsideDeclaredSignature, inside);
+      assert.equal(error.nonzeroOutsideDeclaredSignature, !inside);
+      assert.deepEqual(Object.keys(error).sort(), ['code', 'inventoryCheck', 'allocatedSignatureBytes',
+        'declaredSignatureBytes', 'indexedEnd', 'nonzeroInsideDeclaredSignature', 'nonzeroOutsideDeclaredSignature'].sort());
+      return true;
+    });
+  }
+});
+
 test('pure extraction binds CDHash to complete SHA256 CodeDirectory and pages, never authenticates opaque CMS', () => {
   for (const version of [0x20400, 0x20500, 0x20600]) for (const page of [12, 14]) {
     const bytes = nativeFile({ version, page, team: true, extra: [[0x10000, blob(0xfade0b01, Buffer.from('NOT CMS'))]] });
