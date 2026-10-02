@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { InteractionSessionUnavailable } from "../dock-recorder-bridge";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +9,9 @@ import { memorySpoolStore, type SpoolSessionMeta, type SpoolStore } from "../rec
 import type { LiveRecordingPage } from "@/lib/api/recordings";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const mocks = vi.hoisted(() => ({ createEngine: vi.fn(), uploadVoiceClip: vi.fn(), store: null as SpoolStore | null }));
+const mocks = vi.hoisted(() => ({ createEngine: vi.fn(), interactionRequest: vi.fn(), startInteraction: vi.fn(), uploadVoiceClip: vi.fn(), store: null as SpoolStore | null }));
+vi.mock("@/lib/live-interaction/api", () => ({ interactionRequest: mocks.interactionRequest }));
+vi.mock("@/lib/live-interaction/capture", () => ({ startInteractionCapture: mocks.startInteraction }));
 vi.mock("../recorder-engine", () => ({ createRecorderEngine: mocks.createEngine }));
 vi.mock("../recorder-spool", async (original) => ({
   ...await original<typeof import("../recorder-spool")>(),
@@ -31,6 +34,7 @@ function makeEngine(durationMs = 180_000, liveWindowsDone?: Promise<void>) {
   let flush = Promise.resolve();
   const engine: RecorderEngine = {
     elapsedMs: () => durationMs, level: () => 0, includesSystemAudio: () => false,
+    setInteractionEnabled: vi.fn(),
     capturesVideo: () => false, paused: () => false,
     pause: vi.fn(), resume: vi.fn(), cancel: vi.fn(),
     latch(store, meta) {
@@ -66,6 +70,7 @@ describe("[COMP:app-web/dock-recorder] non-blocking saves", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mocks.store = memorySpoolStore();
+    mocks.interactionRequest.mockResolvedValue({ available: false });
     options = {
       enabled: true, workspaceId: "workspace-1", assistantId: "assistant-1", captureNamePrefix: "Recording",
       sendVoiceClip: vi.fn().mockResolvedValue(true), onMeetingCapture: vi.fn().mockResolvedValue(queued),
@@ -80,6 +85,114 @@ describe("[COMP:app-web/dock-recorder] non-blocking saves", () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.resetAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps unavailable interaction off and records normally without starting an interaction session", async () => {
+    const engine = makeEngine(); await render();
+    expect(api.interactionAvailable).toBe(false);
+    act(() => api.setInteractionEnabled(true));
+    expect(api.interactionEnabled).toBe(false);
+    await start(); await stop();
+    expect(engine.stop).toHaveBeenCalledOnce();
+    expect(mocks.startInteraction).not.toHaveBeenCalled();
+  });
+
+  it("leaves available interaction opt-in rather than changing ordinary recording", async () => {
+    mocks.interactionRequest.mockResolvedValue({ available: true });
+    makeEngine(); await render(); await start(); await stop();
+    expect(api.interactionAvailable).toBe(true);
+    expect(mocks.startInteraction).not.toHaveBeenCalled();
+  });
+
+  it("explains unsupported visible chats without creating a page or calling interaction backend", async () => {
+    mocks.interactionRequest.mockResolvedValue({ available: true });
+    options.ensureInteractionSession = vi.fn().mockRejectedValue(new InteractionSessionUnavailable());
+    options.prepareLivePage = vi.fn();
+    makeEngine(); await render();
+    act(() => api.setInteractionEnabled(true));
+    await act(async () => { api.onPressStart(); api.onPressEnd(); });
+    expect(api.phase.kind).toBe("idle");
+    expect(api.interactionStatus).toBe("unavailable");
+    expect(options.prepareLivePage).not.toHaveBeenCalled();
+    expect(mocks.startInteraction).not.toHaveBeenCalled();
+  });
+
+  it("binds interaction to the existing chat and disables triggers without stopping transcription", async () => {
+    mocks.interactionRequest.mockResolvedValue({ available: true });
+    const capture = { pause: vi.fn(), stop: vi.fn().mockResolvedValue(undefined) };
+    mocks.startInteraction.mockResolvedValue(capture);
+    const order: string[] = [];
+    options.ensureInteractionSession = vi.fn(async () => { order.push("chat"); return "existing-chat"; });
+    options.prepareLivePage = vi.fn(async () => { order.push("page"); return { pageId: "live-page", sessionId: "live-upload", title: "Meeting", notesHeadingId: "heading", markerBlockId: "marker" }; });
+    const engine = makeEngine(); await render();
+    act(() => api.setInteractionEnabled(true));
+    expect(api.livePageEnabled).toBe(true);
+    act(() => api.setLivePageEnabled(false)); expect(api.livePageEnabled).toBe(true);
+    await start();
+    expect(order).toEqual(["chat", "page"]);
+    expect(options.prepareLivePage).toHaveBeenCalledWith(false);
+    expect(mocks.startInteraction.mock.calls[0][0]).toEqual({ workspaceId: "workspace-1", assistantId: "assistant-1", pageId: "live-page", chatSessionId: "existing-chat" });
+    expect(api.interactionStatus).toBe("listening");
+    expect(api.interactionChatSessionId).toBe("existing-chat");
+    await act(async () => api.pause()); expect(engine.pause).toHaveBeenCalledOnce();
+    await act(async () => api.resume()); expect(engine.resume).toHaveBeenCalledOnce();
+    await act(async () => api.setInteractionEnabled(false));
+    expect(capture.stop).toHaveBeenCalledOnce();
+    expect(mocks.startInteraction.mock.calls[0][2].aborted).toBe(true);
+    expect(engine.setInteractionEnabled).toHaveBeenCalledWith(false);
+    expect(api.interactionChatSessionId).toBeNull();
+    expect(engine.stop).not.toHaveBeenCalled(); // durable recording continues
+    await stop(); expect(engine.stop).toHaveBeenCalledOnce();
+  });
+
+  it("waits for session setup before uploading and clears triggers on disable", async () => {
+    mocks.interactionRequest.mockResolvedValue({ available: true });
+    const connecting = deferred<{ pause: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }>();
+    mocks.startInteraction.mockReturnValue(connecting.promise);
+    const page: LiveRecordingPage = { pageId: "p", sessionId: "s", title: "Meeting", notesHeadingId: "n", markerBlockId: "m" };
+    options.ensureInteractionSession = vi.fn().mockResolvedValue("chat");
+    options.prepareLivePage = vi.fn().mockResolvedValue(page);
+    const markers: (string | undefined)[] = [];
+    options.streamLiveWindow = vi.fn(async (_window, destination) => { markers.push(destination.interactionCaptureId); });
+    makeEngine(); await render(); act(() => api.setInteractionEnabled(true)); await start();
+    const window = { blob: new Blob(["audio"]), mime: "audio/webm", startMs: 0, endMs: 30_000 };
+    const upload = mocks.createEngine.mock.calls[0][0].onLiveWindow;
+    const uploading = upload(window);
+    expect(markers).toEqual([]);
+    const onStarted = mocks.startInteraction.mock.calls[0][3];
+    act(() => onStarted("validated"));
+    const capture = { pause: vi.fn(), stop: vi.fn().mockResolvedValue(undefined) };
+    await act(async () => connecting.resolve(capture));
+    await uploading;
+    await act(async () => api.setInteractionEnabled(false));
+    onStarted("stale");
+    await upload(window);
+    expect(markers).toEqual(["validated", undefined]);
+    expect(capture.stop).toHaveBeenCalledOnce();
+    await stop();
+  });
+
+  it("stops server interaction only after final windows drain without blocking local stop or clearing a newer capture", async () => {
+    mocks.interactionRequest.mockResolvedValue({ available: true });
+    options.ensureInteractionSession = vi.fn().mockResolvedValue("chat");
+    options.prepareLivePage = vi.fn(async () => ({ pageId: crypto.randomUUID(), sessionId: crypto.randomUUID(), title: "Meeting", notesHeadingId: "n", markerBlockId: "m" }));
+    const oldStop = vi.fn().mockResolvedValue(undefined); const newStop = vi.fn().mockResolvedValue(undefined);
+    mocks.startInteraction.mockImplementationOnce(async (_binding, _gap, _signal, ready) => { ready("old"); return { captureId: "old", stop: oldStop }; })
+      .mockImplementationOnce(async (_binding, _gap, _signal, ready) => { ready("new"); return { captureId: "new", stop: newStop }; });
+    const uploads = deferred<void>();
+    makeEngine(180_000, uploads.promise); makeEngine();
+    await render(); act(() => api.setInteractionEnabled(true)); await start();
+    expect(api.interactionCaptureId).toBe("old");
+    await stop();
+    expect(api.phase.kind).toBe("idle");
+    expect(oldStop).not.toHaveBeenCalled();
+    expect(mocks.startInteraction.mock.calls[0][2].aborted).toBe(false);
+    await start(); expect(api.interactionCaptureId).toBe("new");
+    await act(async () => uploads.resolve());
+    expect(oldStop).toHaveBeenCalledOnce(); expect(newStop).not.toHaveBeenCalled();
+    expect(api.phase.kind).toBe("latched"); expect(api.interactionCaptureId).toBe("new");
+    await stop(); expect(newStop).toHaveBeenCalledOnce();
   });
 
   it("releases after the local flush, serializes saves, and never resets a newer capture", async () => {

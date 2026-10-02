@@ -38,6 +38,7 @@ vi.mock("@/lib/recordings/use-recording-summary", () => ({
 
 vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({
+    liveInteraction: { title: "Interaction", description: "Microphone only", unavailable: "Streaming unavailable" },
     recordings: {
       uploadingProgress: "Uploading {percent}%",
       estimating: "Checking recording...",
@@ -150,6 +151,7 @@ function recorder(overrides: Partial<DockRecorderApi> = {}): DockRecorderApi {
     computerAudioAvailable: false,
     includeComputerAudio: false,
     setIncludeComputerAudio: vi.fn(),
+    interactionAvailable: false, interactionEnabled: false, interactionStatus: "idle", setInteractionEnabled: vi.fn(),
     livePageEnabled: false,
     setLivePageEnabled: vi.fn(),
     includesSystemAudio: () => false,
@@ -173,6 +175,14 @@ function mount(rec: DockRecorderApi): void {
 }
 
 describe("[COMP:app-web/dock-recorder] DockRecorderButton", () => {
+  it("disables unavailable interaction with an explanation but leaves ordinary recording enabled", () => {
+    mount(recorder());
+    const interaction = container!.querySelector('button[aria-label="Interaction"]') as HTMLButtonElement;
+    expect(interaction.disabled).toBe(true);
+    expect(container!.textContent).toContain("Streaming unavailable");
+    expect((container!.querySelector('button[aria-label="Record"]') as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("keeps Record enabled and shows background progress independently of dismissible outcomes", () => {
     const rec = recorder({
       savingCount: 2,
@@ -185,7 +195,7 @@ describe("[COMP:app-web/dock-recorder] DockRecorderButton", () => {
     mount(rec);
     act(() => root!.render(<><DockRecorderButton rec={rec} /><DockRecorderNotice rec={rec} /></>));
     expect((container!.querySelector('[aria-label="Record"]') as HTMLButtonElement).disabled).toBe(false);
-    expect(container!.querySelectorAll('[role="status"]')).toHaveLength(2);
+    expect(container!.querySelectorAll('[role="status"]')).toHaveLength(3); // includes unavailable interaction
     expect(container!.textContent).toContain("Saving in background (2)");
     expect(container!.textContent).toContain("First recording queued");
     act(() => root!.render(<DockRecorderNotice rec={{ ...rec, notice: null }} />));

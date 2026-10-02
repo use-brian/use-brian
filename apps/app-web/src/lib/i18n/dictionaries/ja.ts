@@ -1,6 +1,45 @@
 import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
+  mobileAuth: {
+    "title": "Brian モバイルにログインしますか？",
+    "description": "自分のスマートフォンでログインを開始した場合のみ続行してください。モバイルアプリに Brian アカウントへのアクセスを許可します。",
+    "ios": "デバイス：Brian for iPhone",
+    "android": "デバイス：Brian for Android",
+    "confirm": "ログインを確認",
+    "cancel": "キャンセル",
+    "error": "ログインを完了できません。モバイルアプリからやり直してください。"
+},
+
+  liveInteraction: {
+    personalOnly: "対話機能は自分の個人チャットでのみ利用できます。個人チャットを開いてください。",
+    "askNow": "今すぐ質問",
+    "cancelPending": "保留中の質問をキャンセル",
+    "editQuestion": "編集して再送信",
+
+    "title": "対話",
+    "personal": "個人の録音対話設定",
+    "description": "ストリーミングではなく、既存のライブ文字起こしを30秒単位で使用します。マイクの音声だけが質問のきっかけになります。システム音声は文脈にのみ使用します。周囲の声やスピーカーの音がマイクに入る場合があります。回答は元のチャットに表示されます。",
+    "rule": "自然言語のルール",
+    "save": "ルールを保存",
+    "defaultRule": "Hey Brian の既定に戻す",
+    "sample": "発話の例",
+    "preview": "ルールを試す",
+    "noMatch": "質問に一致しませんでした。",
+    "saved": "保存しました。以降の発話に適用されます。",
+    "unavailable": "ライブ文字起こしによる対話は利用できません。録音は継続できます。",
+    "error": "対話に失敗したか音声が欠落しました。録音は継続します。",
+    "recording": "録音",
+    "queued": "待機中",
+    "running": "回答中",
+    "completed": "完了",
+    "failed": "失敗",
+    "cancelled": "キャンセル済み",
+    "cancel": "キャンセル",
+    "retry": "再試行",
+    "listening": "聞き取り中",
+    "stop": "対話を停止"
+},
   workflowPublicationConsent: {
     "title": "生成済み出力の公開",
     "intro": "保存済みのこのステップが、あなたのプライベートなコンテキストから生成したテキストを固定のTelegram宛先に公開することを許可します。ワークフローの保存とは別の操作です。",

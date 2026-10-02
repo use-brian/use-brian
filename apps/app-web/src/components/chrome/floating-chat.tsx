@@ -1,6 +1,8 @@
 "use client";
 
 
+import { canonicalInteractionAdditions } from "@/lib/live-interaction/canonical";
+import { LiveInteractionJobs, LiveInteractionQuestionControls } from "./live-interaction-jobs";
 import { availableAppWidth, subscribeAppViewport } from "@/lib/app-viewport";
 
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
@@ -254,6 +256,7 @@ import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
 import { useLiveRecordingPage } from "@/lib/recordings/use-live-recording-page";
 import {
   getDockRecorderSessionId,
+  ensureDockRecorderInteractionSession,
   publishDockRecorderController,
   sendDockRecorderVoiceClip,
 } from "@/lib/recorder/dock-recorder-bridge";
@@ -3002,6 +3005,7 @@ export function FloatingChat({
   // the recording ingestion flow (the full cost + blueprint +
   // destination confirm), stamped kind='meeting' — a recorder-originated
   // long capture is a meeting, and kind routes the transcriber ladder.
+  const interactionT = useT().liveInteraction;
   const liveRecording = useLiveRecordingPage(workspaceId, activeAssistantId);
   // Capture saves have their own serial lane. Never gate chat/attachments on
   // this uploader's busy state: the recorder reports its background progress.
@@ -3016,6 +3020,23 @@ export function FloatingChat({
       uploadProgress: captureUpload.uploadProgress,
       message: captureUpload.message,
     },
+    ensureInteractionSession: () => ensureDockRecorderInteractionSession(async () => {
+      const existing = sessionIdRef.current;
+      if (existing) return existing;
+      const epoch = threadEpochRef.current;
+      const response = await authFetch(`${API_URL}/api/sessions/personal`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId, assistantId: activeAssistantId, channelId: crypto.randomUUID() }),
+      });
+      if (!response.ok) throw new Error("Could not create interaction chat");
+      const { session: created } = await response.json();
+      // A concurrent typed send or navigation wins. Never replace its binding.
+      if (threadEpochRef.current !== epoch) throw new Error("Chat changed");
+      if (sessionIdRef.current) return sessionIdRef.current;
+      sessionIdRef.current = created.id;
+      session.setSession(created.id);
+      return created.id;
+    }),
     getSessionId: () =>
       getDockRecorderSessionId(() => sessionIdRef.current ?? undefined),
     sendVoiceClip: (fileId: string) =>
@@ -3550,6 +3571,28 @@ export function FloatingChat({
           ref={scrollRef}
           className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5"
         >
+          {recorder.interactionChatSessionId && recorder.interactionChatSessionId === session.state.sessionId && recorder.interactionStatus !== "idle" && (
+            <div className="space-y-2 rounded-lg border p-3">
+              <p role={recorder.interactionStatus === "gap" ? "alert" : "status"} className="text-sm">
+                {recorder.interactionStatus === "unavailable" ? interactionT.personalOnly : recorder.interactionStatus === "gap" ? interactionT.error : interactionT.listening}
+              </p>
+              {recorder.interactionCaptureId && <LiveInteractionQuestionControls key={recorder.interactionCaptureId} captureId={recorder.interactionCaptureId} />}
+              <button type="button" className="min-h-11 text-sm underline" onClick={() => recorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
+            </div>
+          )}
+          <LiveInteractionJobs
+            workspaceId={workspaceId}
+            sessionId={session.state.sessionId}
+            messageIds={new Set(messages.map((message) => message.id))}
+            onCanonical={(sid, rows, ids) => {
+              if (sessionIdRef.current !== sid) return;
+              // Refresh ONLY canonical voice-job rows. Never reload or replace
+              // the typed turn, optimistic user message, or streaming buffer.
+              for (const message of canonicalInteractionAdditions(session.state.messages, mapSessionRows(rows, t.toolNarration, false), ids)) {
+                session.dispatch({ type: "message/append", message });
+              }
+            }}
+          />
           {showEmpty ? (
             <div className="flex h-full items-center justify-center px-6">
               <div className="text-center space-y-1.5">
@@ -4157,6 +4200,7 @@ function coercePayload(data: unknown): Record<string, unknown> {
 function mapSessionRows(
   rows: Awaited<ReturnType<typeof fetchSessionMessages>>,
   narration: NarrationDict,
+  coalesce = true,
 ): MessageWithViews[] {
   // Each call's outcome lives on the tool_result carrier row the transcript
   // never renders — index them once so a failed call restores as `retried`.
@@ -4206,7 +4250,7 @@ function mapSessionRows(
     );
   // One assistant row per query-loop round in storage; one reply per run on
   // screen (the Chat app's fold, so a multi-step run keeps one receipt).
-  return coalesceAssistantRunMessages(mapped);
+  return coalesce ? coalesceAssistantRunMessages(mapped) : mapped;
 }
 
 /**

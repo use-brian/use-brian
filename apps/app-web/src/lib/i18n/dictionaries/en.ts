@@ -14,6 +14,45 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  mobileAuth: {
+    "title": "Sign in to Brian mobile?",
+    "description": "Only continue if you started sign-in on your own phone. This gives the mobile app access to your Brian account.",
+    "ios": "Device: Brian for iPhone",
+    "android": "Device: Brian for Android",
+    "confirm": "Confirm sign-in",
+    "cancel": "Cancel",
+    "error": "Unable to complete sign-in. Start again from the mobile app."
+},
+
+  liveInteraction: {
+    personalOnly: "Interaction is available only in your personal chat. Open a personal chat to use it.",
+    "askNow": "Ask now",
+    "cancelPending": "Cancel pending question",
+    "editQuestion": "Edit & resubmit",
+
+    "title": "Interaction",
+    "personal": "Personal recording interaction",
+    "description": "Uses existing live transcription in 30-second batches, not streaming. Only microphone speech triggers questions. System audio supplies context only. Room speech and speaker bleed may still reach your microphone. Answers appear in the original chat.",
+    "rule": "Natural-language rule",
+    "save": "Save rule",
+    "defaultRule": "Use Hey Brian default",
+    "sample": "Sample speech",
+    "preview": "Preview rule",
+    "noMatch": "No question matched.",
+    "saved": "Saved. Changes apply to subsequent speech.",
+    "unavailable": "Live transcription interaction is unavailable. Durable recording still works.",
+    "error": "Interaction failed or speech was missed. Durable recording continues.",
+    "recording": "Recording",
+    "queued": "Queued",
+    "running": "Answering",
+    "completed": "Completed",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "cancel": "Cancel",
+    "retry": "Retry",
+    "listening": "Listening",
+    "stop": "Stop interaction"
+},
   workflowPublicationConsent: {
     "title": "Prepared-output publication",
     "intro": "Allow this saved step to publish generated text derived from your private context to its fixed Telegram destination. This is separate from saving the workflow.",

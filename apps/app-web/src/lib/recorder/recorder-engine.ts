@@ -60,6 +60,7 @@ type CaptureResult = {
 export interface RecorderEngine {
   /** Recorder clock: wall time since start, minus paused time. */
   elapsedMs(): number;
+  setInteractionEnabled(enabled: boolean): void;
   /** 0..1 RMS capture-bus level for the live meter; 0 when unavailable. */
   level(): number;
   /** True when the recorded track contains both mic and computer playback. */
@@ -112,7 +113,13 @@ export async function createRecorderEngine(opts?: {
     mime: string;
     startMs: number;
     endMs: number;
+    microphone?: { blob: Blob; mime: string };
+    interactionSource?: "microphone" | "mixed";
+    discontinuity?: boolean;
   }) => Promise<void> | void;
+  /** Isolate pre-mix microphone only for interaction mixed captures. */
+  interactionEnabled?: boolean;
+  onInteractionGap?: () => void;
   /** Injectable only for deterministic tests; production uses 30 seconds. */
   liveWindowMs?: number;
 }): Promise<RecorderEngine> {
@@ -201,81 +208,131 @@ export async function createRecorderEngine(opts?: {
   let liveRemainingMs = opts?.liveWindowMs ?? LIVE_TRANSCRIPT_WINDOW_MS;
   let liveCancelled = false;
   let liveQueue: Promise<void> = Promise.resolve();
+  let interactionEnabled = opts?.interactionEnabled === true;
+  let discontinuity = false;
+  let liveFlush: Promise<void> = Promise.resolve();
+  let endLiveWindow: (() => void) | null = null;
 
   const clearLiveTimer = () => {
     if (liveTimer) clearTimeout(liveTimer);
     liveTimer = null;
   };
 
-  const enqueueLiveWindow = (blob: Blob, mime: string, startMs: number, endMs: number) => {
+  const enqueueLiveWindow = (blob: Blob, mime: string, startMs: number, endMs: number, microphone: { blob: Blob; mime: string } | undefined, gap: boolean) => {
     if (!opts?.onLiveWindow || liveCancelled || endMs <= startMs) return;
     liveQueue = liveQueue
-      .then(() => opts.onLiveWindow!({ blob, mime, startMs, endMs }))
+      .then(() => opts.onLiveWindow!({ blob, mime, startMs, endMs, microphone,
+        interactionSource: captureAudio.includesSystemAudio ? "mixed" : "microphone", discontinuity: gap }))
       .catch(() => {});
   };
 
   const startLiveWindow = () => {
-    if (!opts?.onLiveWindow || closed || liveCancelled) return;
+    if (!opts?.onLiveWindow || closed || liveCancelled || pausedSince !== null) return;
     liveParts = [];
+    const gap = discontinuity;
+    discontinuity = false;
     liveWindowStartedAt = elapsedMs();
-    liveRemainingMs = opts.liveWindowMs ?? LIVE_TRANSCRIPT_WINDOW_MS;
     const rolling = new MediaRecorder(liveStream, {
       ...(liveMime ? { mimeType: liveMime } : {}),
       audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
     });
+    let resolveFlush!: () => void;
+    liveFlush = new Promise<void>((resolve) => { resolveFlush = resolve; });
+    let microphoneRecorder: MediaRecorder | null = null;
+    let microphoneDone: Promise<{ blob: Blob; mime: string } | undefined> = Promise.resolve(undefined);
+    // Source isolation is only extra encoding, never another input acquisition
+    // or ASR pass for mic-only captures. Missing mic stays explicitly mixed so
+    // the server fails closed for triggers while preserving context audio.
+    if (interactionEnabled && captureAudio.includesSystemAudio) {
+      try {
+        const mic = new MediaRecorder(captureAudio.microphoneStream, {
+          ...(liveMime ? { mimeType: liveMime } : {}), audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
+        });
+        microphoneRecorder = mic;
+        const parts: Blob[] = [];
+        let failed = false;
+        microphoneDone = new Promise((resolve) => {
+          mic.ondataavailable = (event) => { if (event.data.size) parts.push(event.data); };
+          mic.onerror = () => { failed = true; resolve(undefined); opts?.onInteractionGap?.(); };
+          mic.onstop = () => {
+            const mime = mic.mimeType || liveMime || "audio/webm";
+            const blob = new Blob(parts, { type: mime });
+            if (!blob.size) opts?.onInteractionGap?.();
+            resolve(failed || !blob.size ? undefined : { blob, mime });
+          };
+        });
+        mic.start();
+      } catch {
+        if (microphoneRecorder?.state === "recording") {
+          try { microphoneRecorder.stop(); } catch { /* release owns inputs */ }
+        }
+        microphoneRecorder = null;
+        microphoneDone = Promise.resolve(undefined);
+        opts?.onInteractionGap?.();
+      }
+    }
+    liveRemainingMs = opts.liveWindowMs ?? LIVE_TRANSCRIPT_WINDOW_MS;
     liveRecorder = rolling;
     rolling.ondataavailable = (event) => {
       if (event.data.size > 0) liveParts.push(event.data);
     };
-    rolling.onstop = () => {
-      const endMs = elapsedMs();
-      const mime = rolling.mimeType || liveMime || "audio/webm";
-      enqueueLiveWindow(new Blob(liveParts, { type: mime }), mime, liveWindowStartedAt, endMs);
-      liveParts = [];
-      if (!closed && !liveCancelled) startLiveWindow();
+    let stoppedAt: number | undefined;
+    const stopMicrophone = () => {
+      const mic = microphoneRecorder;
+      microphoneRecorder = null;
+      if (mic && mic.state !== "inactive") {
+        try { mic.stop(); } catch { microphoneDone = Promise.resolve(undefined); opts?.onInteractionGap?.(); }
+      }
     };
+    let flushed = false;
+    const flush = () => {
+      if (flushed) return;
+      flushed = true;
+      const endMs = stoppedAt ?? elapsedMs();
+      const mime = rolling.mimeType || liveMime || "audio/webm";
+      const blob = new Blob(liveParts, { type: mime });
+      const startMs = liveWindowStartedAt;
+      stopMicrophone();
+      void microphoneDone.then((microphone) => {
+        enqueueLiveWindow(blob, mime, startMs, endMs, microphone, gap);
+        liveParts = [];
+        liveRecorder = null;
+        endLiveWindow = null;
+        resolveFlush();
+        if (!closed && !liveCancelled && pausedSince === null) startLiveWindow();
+      });
+    };
+    rolling.onstop = flush;
+    const stopRolling = () => {
+      stoppedAt ??= elapsedMs();
+      stopMicrophone();
+      if (rolling.state !== "inactive") {
+        try { rolling.stop(); } catch { flush(); }
+      }
+    };
+    endLiveWindow = stopRolling;
     // A provisional encoder failure must never stop the durable recording.
     // Stop this window; its empty/partial blob is reported as a missed window,
     // and onstop starts a fresh container for the next one.
     rolling.onerror = () => {
       clearLiveTimer();
-      if (rolling.state !== "inactive") {
-        try {
-          rolling.stop();
-        } catch {
-          // The next full recording remains authoritative.
-          if (!closed && !liveCancelled) startLiveWindow();
-        }
-      } else if (!closed && !liveCancelled) {
-        startLiveWindow();
-      }
+      // MediaRecorder errors still deliver final data and a stop event. Do not
+      // flush early: that data belongs to this window, not its replacement.
+      stopRolling();
     };
     rolling.start();
     liveTimerStartedAt = Date.now();
     liveTimer = setTimeout(() => {
       liveTimer = null;
-      if (rolling.state !== "inactive") rolling.stop();
+      stopRolling();
     }, liveRemainingMs);
   };
 
   const stopLiveWindow = (cancel: boolean): Promise<void> => {
     clearLiveTimer();
     if (cancel) liveCancelled = true;
-    const rolling = liveRecorder;
-    liveRecorder = null;
-    if (!rolling || rolling.state === "inactive") return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      const previousStop = rolling.onstop;
-      rolling.onstop = (event) => {
-        if (!cancel) previousStop?.call(rolling, event);
-        resolve();
-      };
-      try {
-        rolling.stop();
-      } catch {
-        resolve();
-      }
-    });
+    endLiveWindow?.();
+    return liveFlush;
   };
 
   // ── chunks + spool ───────────────────────────────────────────────────
@@ -319,6 +376,7 @@ export async function createRecorderEngine(opts?: {
     startLiveWindow();
   } catch (error) {
     closed = true;
+    void stopLiveWindow(true);
     try {
       recorder.stop();
     } catch {
@@ -340,23 +398,31 @@ export async function createRecorderEngine(opts?: {
       }
       return Math.min(1, Math.sqrt(sum / levelBuf.length) * 3);
     },
+    setInteractionEnabled: (enabled) => { interactionEnabled = enabled; },
     includesSystemAudio: () => captureAudio.includesSystemAudio,
     capturesVideo: () => capturesVideo,
     paused: () => pausedSince !== null,
     pause() {
       if (recorder.state === "recording") {
         recorder.pause();
-        if (liveRecorder?.state === "recording") {
+        pausedSince = Date.now();
+        if (opts?.interactionEnabled) {
+          discontinuity = true;
+          void stopLiveWindow(false);
+        } else if (liveRecorder?.state === "recording") {
           liveRemainingMs = Math.max(1, liveRemainingMs - (Date.now() - liveTimerStartedAt));
           clearLiveTimer();
           liveRecorder.pause();
         }
-        pausedSince = Date.now();
       }
     },
     resume() {
       if (recorder.state === "paused") {
         recorder.resume();
+        if (pausedSince !== null) {
+          pausedTotal += Date.now() - pausedSince;
+          pausedSince = null;
+        }
         if (liveRecorder?.state === "paused") {
           liveRecorder.resume();
           liveTimerStartedAt = Date.now();
@@ -365,10 +431,8 @@ export async function createRecorderEngine(opts?: {
             liveTimer = null;
             if (rolling.state !== "inactive") rolling.stop();
           }, liveRemainingMs);
-        }
-        if (pausedSince !== null) {
-          pausedTotal += Date.now() - pausedSince;
-          pausedSince = null;
+        } else if (!liveRecorder) {
+          void liveFlush.then(() => { if (!liveRecorder) startLiveWindow(); });
         }
       }
     },

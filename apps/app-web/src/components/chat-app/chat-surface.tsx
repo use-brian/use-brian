@@ -1,6 +1,8 @@
 "use client";
 
 
+import { LiveInteractionJobs, LiveInteractionQuestionControls } from "@/components/chrome/live-interaction-jobs";
+import { canonicalInteractionAdditions } from "@/lib/live-interaction/canonical";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Chat operator app — the full-page, ChatGPT-style chat surface at
@@ -347,6 +349,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const tChat = useT().chat;
   const tAttach = useT().attachments;
   const tRecordings = useT().recordings;
+  const interactionT = useT().liveInteraction;
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -1153,7 +1156,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Map persisted rows into transcript messages. Assistant rows restore
    *  their `tool_use` blocks as a done-status receipt (re-narrated from each
    *  call's input, no timings — same as the dock's history restore). */
-  const mapTranscriptRows = useCallback((rows: DocSessionMessage[]): SurfaceMessage[] => {
+  const mapTranscriptRows = useCallback((rows: DocSessionMessage[], coalesce = true): SurfaceMessage[] => {
     // Each call's outcome lives on the tool_result carrier row the transcript
     // never renders — index them once so a failed call restores as `retried`.
     const outcomes = collectToolResults(rows);
@@ -1200,7 +1203,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           (m.fileAttachments?.length ?? 0) > 0 ||
           (m.documents?.length ?? 0) > 0,
       );
-    return coalesceAssistantRunMessages(persistedRows);
+    return coalesce ? coalesceAssistantRunMessages(persistedRows) : persistedRows;
   }, [tChat.toolNarration]);
 
   /** Load a thread's persisted transcript into the reducer through the
@@ -3099,8 +3102,30 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       registerDockRecorderChatTarget({
         sendVoiceClip: (fileId) => send({ text: "", fileIds: [fileId] }),
         getSessionId: () => sessionIdRef.current ?? undefined,
+        ...(!isRoomView && view === "personal" ? { ensureInteractionSession: async () => {
+          if (sessionIdRef.current) return sessionIdRef.current;
+          if (!activeAssistant) throw new Error(t.errorGeneric);
+          const epoch = sessionEpochRef.current;
+          const assistantId = activeAssistant.id;
+          const channelId = freshChannelIdRef.current ??= crypto.randomUUID();
+          const response = await authFetch(`${API_URL}/api/sessions/personal`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workspaceId, assistantId, channelId, contextGroupId: pickedContextGroupId, contextProjectId: pickedContextProjectId }),
+          });
+          if (!response.ok) throw new Error(t.errorGeneric);
+          const { session: created } = await response.json();
+          if (sessionEpochRef.current !== epoch) throw new Error("Chat changed");
+          if (sessionIdRef.current) return sessionIdRef.current;
+          sessionIdRef.current = created.id;
+          hydratedRef.current = created.id;
+          sessionAssistantRef.current.set(created.id, assistantId);
+          chat.setSession(created.id);
+          selectSession(created.id, "personal", true);
+          dispatchChatSessionsRefresh(workspaceId);
+          return created.id as string;
+        } } : {}),
       }),
-    [send],
+    [send, isRoomView, view, activeAssistant, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.setSession, selectSession, t.errorGeneric],
   );
 
   // The mid-turn flush runs inside `send`'s own `onDone`; the ref is the only
@@ -4339,6 +4364,27 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 projects={contextProjects}
               />
             ) : null}
+            {dockRecorder?.interactionChatSessionId && dockRecorder.interactionChatSessionId === activeSessionId && dockRecorder.interactionStatus !== "idle" && (
+              <div className="space-y-2 rounded-lg border p-3">
+                <p role={dockRecorder.interactionStatus === "gap" ? "alert" : "status"} className="text-sm">
+                  {dockRecorder.interactionStatus === "gap" ? interactionT.error : interactionT.listening}
+                </p>
+                {dockRecorder.interactionCaptureId && <LiveInteractionQuestionControls key={dockRecorder.interactionCaptureId} captureId={dockRecorder.interactionCaptureId} />}
+                <button type="button" className="min-h-11 text-sm underline" onClick={() => dockRecorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
+              </div>
+            )}
+            {!isRoomView && view === "personal" && <LiveInteractionJobs
+              workspaceId={workspaceId}
+              sessionId={activeSessionId}
+              messageIds={new Set(chat.state.messages.map((message) => message.id))}
+              onCanonical={(sid, rows, ids) => {
+                if (sessionIdRef.current !== sid) return;
+                // Per-job additions only: never hydrate over a typed stream.
+                for (const message of canonicalInteractionAdditions(chat.state.messages, mapTranscriptRows(rows, false), ids)) {
+                  chat.dispatch({ type: "message/append", message });
+                }
+              }}
+            />}
             {chat.state.messages.length === 0 &&
               !chat.state.isStreaming &&
               !remoteActive &&

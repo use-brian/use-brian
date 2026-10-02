@@ -56,6 +56,9 @@ export type CaptureAudio = {
   /** The stream handed to MediaRecorder: one audio track, plus the display
    *  video track when `captureScreen` was requested and granted. */
   recordingStream: MediaStream;
+  /** Explicit pre-mixer sources. Borrowed, never stopped by consumers. */
+  microphoneStream: MediaStream;
+  systemStream: MediaStream | null;
   /** Original inputs whose ended events represent real capture loss. */
   inputStreams: MediaStream[];
   /** Owned by the capture and closed on stop/cancel. Null when nothing mixes. */
@@ -112,6 +115,8 @@ export async function acquireCaptureAudio(opts: {
   if (!opts.includeSystemAudio && !captureScreen) {
     return {
       recordingStream: microphone,
+      microphoneStream: microphone,
+      systemStream: null,
       inputStreams: [microphone],
       audioContext: null,
       analyser: null,
@@ -228,6 +233,8 @@ export async function acquireCaptureAudio(opts: {
 
     return {
       recordingStream,
+      microphoneStream: microphone,
+      systemStream: mixSystemAudio ? display : null,
       inputStreams: [microphone, display],
       audioContext: context,
       analyser,

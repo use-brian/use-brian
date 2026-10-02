@@ -1,6 +1,45 @@
 import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
+  mobileAuth: {
+    "title": "登入 Brian 行動版？",
+    "description": "僅在您自己的手機上開始登入時繼續。這將允許行動應用程式存取您的 Brian 帳號。",
+    "ios": "裝置：Brian iPhone 版",
+    "android": "裝置：Brian Android 版",
+    "confirm": "確認登入",
+    "cancel": "取消",
+    "error": "無法完成登入。請從行動應用程式重新開始。"
+},
+
+  liveInteraction: {
+    personalOnly: "互動功能僅適用於您自己的個人聊天。請開啟個人聊天以使用此功能。",
+    "askNow": "立即提問",
+    "cancelPending": "取消待處理問題",
+    "editQuestion": "編輯並重新提交",
+
+    "title": "互動",
+    "personal": "個人錄音互動設定",
+    "description": "使用既有的即時轉錄，每30秒批次處理，而非串流。只有麥克風語音會觸發問題。系統音訊僅提供上下文。周圍人聲或喇叭聲仍可能進入麥克風。回答會顯示在原本的聊天中。",
+    "rule": "自然語言規則",
+    "save": "儲存規則",
+    "defaultRule": "使用 Hey Brian 預設規則",
+    "sample": "語音範例",
+    "preview": "預覽規則",
+    "noMatch": "未匹配任何問題。",
+    "saved": "已儲存，適用於後續語音。",
+    "unavailable": "即時轉錄互動無法使用，仍可繼續錄音。",
+    "error": "互動失敗或部分語音遺失。錄音仍在繼續。",
+    "recording": "錄音",
+    "queued": "排隊中",
+    "running": "回答中",
+    "completed": "已完成",
+    "failed": "失敗",
+    "cancelled": "已取消",
+    "cancel": "取消",
+    "retry": "重試",
+    "listening": "聆聽中",
+    "stop": "停止互動"
+},
   workflowPublicationConsent: {
     "title": "生成輸出的發布",
     "intro": "允許此已儲存步驟將根據你的私人背景資訊生成的文字發布到固定的 Telegram 目的地。這與儲存工作流程是分開的操作。",

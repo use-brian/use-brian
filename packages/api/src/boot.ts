@@ -501,6 +501,13 @@ import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
 import { createMeetingTagsTool } from './recordings/meeting-tags-tool.js'
 import { recordingLiveRoutes } from './routes/recording-live.js'
+import { watchRecordingRoutes } from './routes/watch-recording.js'
+import { createWatchService, authorizeWatchDestination } from './recordings/watch-service.js'
+import { startWatchCleanup } from './recordings/watch-maintenance.js'
+import { transcribeAudio as transcribeWatchAudio } from '@use-brian/core'
+import { recordingInteractionRoutes } from './routes/recording-interaction.js'
+import { createLiveInteractionRuntime } from './recordings/live-interaction-runtime.js'
+import { createLedgerPayloadStore } from './ledger/payload-store.js'
 import { createDocGateway } from './doc/doc-gateway.js'
 import { createFilesApi, createSingletonFilesClientResolver, workspaceFileReadRevision, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
@@ -736,6 +743,7 @@ import type { AppStoreScope } from '@use-brian/brian-app'
 import { resolveWriteTarget } from './brain-mcp/tools.js'
 import { enginesMcpRoutes, enginesMcpEnabled } from './engines-mcp/server.js'
 import { createDbOAuthClientStore } from './db/oauth-client-store.js'
+import { createDbMobileAuthStore } from './db/mobile-auth-store.js'
 import { createDbDesktopAuthStore } from './db/desktop-auth-store.js'
 import { createDbOAuthAuthorizationStore } from './db/oauth-authorization-store.js'
 import { oauthRoutes, oauthMetadataRoutes } from './brain-mcp/oauth/index.js'
@@ -2502,6 +2510,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             },
           }
         : undefined,
+      undefined, // default human session store
+      createDbMobileAuthStore(),
     ),
   )
 
@@ -5863,6 +5873,34 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         : {}),
     }))
   }
+  let stopWatchCleanup: (() => Promise<void>) | undefined
+  // Dedicated opaque device credentials must mount before the broad human /api guards.
+  if (process.env.WATCH_RECORDING_ENABLED === 'true' && filesApi && filesResolver) {
+    app.use('/api/watch/v1', watchRecordingRoutes({
+      provisioningKey: env.JWT_SECRET,
+      humanAuth: requireAuth(env.JWT_SECRET), authorize: authorizeWatchDestination,
+      service: createWatchService({ pages: savedViewStore, files: filesApi,
+        ...(voiceTranscription.enabled ? { transcribe: async (buffer: Buffer) => (await transcribeWatchAudio(
+          { buffer, mime: 'audio/mp4' }, { apiKey: voiceTranscription.apiKey, backend: voiceTranscription.backend, model: voiceTranscription.model },
+        )).text } : {}),
+      }),
+    }))
+    stopWatchCleanup = startWatchCleanup()
+  }
+  // Shared by hosted and standalone: interaction answers are independent of
+  // the batch recording worker and the currently streaming chat turn.
+  const liveInteraction = filesBlobClient ? createLiveInteractionRuntime({
+    provider, model: backgroundModel, tools: allTools, embedder: sharedEmbedder,
+    savedViewStore, workspaceStore, knowledgeStore, usageStore,
+    payloads: createLedgerPayloadStore(filesBlobClient),
+    voiceTranscriptionEnabled: voiceTranscription.enabled,
+    onError: () => console.error('[live-interaction] background operation failed'),
+  }) : null
+  if (liveInteraction) {
+    app.use('/api/recordings/interaction', requireAuth(env.JWT_SECRET), recordingInteractionRoutes({ service: liveInteraction }))
+    if (runWorkers) liveInteraction.start()
+  }
+
   if (usesOpenStandaloneRoutes(profile) && filesResolver && filesBlobClient) {
     app.use('/api/recordings', requireAuth(env.JWT_SECRET), openRecordingsRoutes({
       filesResolver,
@@ -5883,6 +5921,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       usageStore,
       // Window-audio persistence + the assembled-windows finalize fallback.
       filesResolver,
+      liveInteraction: liveInteraction ?? undefined,
     }))
   }
 
@@ -9658,6 +9697,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   async function shutdown(): Promise<void> {
+    await stopWatchCleanup?.() // Watch boot lifecycle: stop and drain retention work.
     console.log('Shutting down — flushing analytics...')
     consolidationWorker.stop()
     skillReviewWorker.stop()
@@ -9690,6 +9730,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     gdriveCatalogWorker?.stop()
     linkedinImportWorker?.stop()
     recordingProcessWorker?.stop()
+    await liveInteraction?.stop()
     officeLifecycleWorker.stop()
     await codexProviderManager?.close()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)
