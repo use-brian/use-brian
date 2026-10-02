@@ -13,7 +13,7 @@ type ResourceOptions=Awaited<ReturnType<typeof getCrmScopeResources>>;
 function ResourceSelection({dimension,value,onChange,resources,disabled}:{dimension:CrmScopeDimension;value:"all"|string[]|undefined;onChange:(value:"all"|string[]|undefined)=>void;resources:ResourceOptions;disabled:boolean}) {
   const t=useT().associationPage.admin;
   const values=Array.isArray(value)?value:[];
-  return <div className="space-y-2 rounded-lg border border-border p-3"><h5 className="text-sm font-medium">{t[dimension]}</h5>
+  return <div className="space-y-2 border-l-2 border-border pl-3"><h5 className="text-sm font-medium">{t[dimension]}</h5>
     <AssociationToggle label={t.allResources} checked={value==="all"} disabled={disabled} onChange={checked=>onChange(checked?"all":undefined)}/>
     {value!=="all"&&(dimension==="providerKeys"?<AssociationField label={t.providerKeysInput} multiline value={values.join("\n")} disabled={disabled} onChange={v=>{const selected=v.split("\n");onChange(selected.length?selected:undefined);}}/>:<div className="max-h-48 overflow-y-auto">{resources[dimension].map(row=><AssociationToggle key={row.id} label={`${row.label} (${row.id})`} checked={values.includes(row.id)} disabled={disabled} onChange={checked=>{const next=checked?[...values,row.id]:values.filter(id=>id!==row.id);onChange(next.length?next:undefined);}}/>)}</div>)}
   </div>;
@@ -43,13 +43,13 @@ export function AssociationCredentialForm({workspaceId,rotate,disabled,onSaved}:
     </fieldset>
     <p className="text-sm text-muted-foreground">{t.admin.scopeHelp}</p>
     <AssociationListState data={catalog.data&&resources.data} error={catalog.error||resources.error} refresh={()=>Promise.all([catalog.refresh(),resources.refresh()])}>
-      <div className="space-y-2">{catalog.data?.operations.map(operation=>{const selected=grants.find(row=>row.operation===operation);return <div key={operation} className="rounded-xl border border-border p-3">
+      <div className="divide-y divide-border">{catalog.data?.operations.map(operation=>{const selected=grants.find(row=>row.operation===operation);return <div key={operation} className="py-3">
         <AssociationToggle label={operation} checked={!!selected} disabled={unavailable} onChange={checked=>setGrants(rows=>checked?[...rows,{operation,selectors:{}}]:rows.filter(row=>row.operation!==operation))}/>
         {selected?<div className="space-y-2">{catalog.data!.selectors[operation].length===0?<p className="text-sm text-muted-foreground">{t.admin.workspaceScope}</p>:catalog.data!.selectors[operation].map(dimension=><ResourceSelection key={dimension} dimension={dimension} value={selected.selectors[dimension]} resources={resources.data!} disabled={unavailable} onChange={value=>selectors(operation,dimension,value)}/>)}</div>:null}
       </div>;})}</div>
     </AssociationListState>
     {action.feedback}{(uncertain||!!intent.reference&&!secret)?<p role="alert" className="text-sm text-destructive">{t.admin.uncertainKey}</p>:null}
-    {secret?<div className="space-y-2 rounded-xl border border-border p-3"><p className="text-sm">{t.admin.secretHelp}</p><input className="min-h-11 w-full rounded-lg border border-border bg-background px-3 text-base" readOnly autoComplete="off" spellCheck={false} value={secret} aria-label={t.admin.keys} onFocus={e=>e.target.select()}/><Button type="button" className="min-h-11" variant="outline" onClick={()=>setSecret(null)}>{t.admin.dismissSecret}</Button></div>:null}
+    {secret?<div className="space-y-2 rounded-xl bg-muted/40 p-3"><p className="text-sm">{t.admin.secretHelp}</p><input className="min-h-11 w-full rounded-lg border border-border bg-background px-3 text-base" readOnly autoComplete="off" spellCheck={false} value={secret} aria-label={t.admin.keys} onFocus={e=>e.target.select()}/><Button type="button" className="min-h-11" variant="outline" onClick={()=>setSecret(null)}>{t.admin.dismissSecret}</Button></div>:null}
     <div className="flex flex-wrap gap-2"><Button type="submit" className="min-h-11" disabled={unavailable||!grants.length}>{t.admin.createKey}</Button>{(attempted||!!intent.reference)?<Button type="button" className="min-h-11" variant="outline" disabled={action.pending||disabled} onClick={()=>void newRequest()}>{t.admin.reviewNewKey}</Button>:null}</div>
   </form>;
 }

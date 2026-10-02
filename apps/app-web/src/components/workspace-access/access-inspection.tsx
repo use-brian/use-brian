@@ -51,7 +51,7 @@ function AccessExplanationContent({data,memberId,assistantId,close}:Props&{membe
       <p className="text-sm text-muted-foreground">{t.currentPreviewHint}</p>
       <p className="text-sm text-muted-foreground">{t.resourceCheckRequired}</p>
       <h3 className="font-medium">{t.accessPaths}</h3><p className="text-sm text-muted-foreground">{t.scopePathHint}</p>
-      {!explanation.paths.length?<p className="text-sm">{t.noAccessPaths}</p>:<ul className="space-y-2">{explanation.paths.map((path,index)=><li key={`${path.kind}:${path.grantId??path.sourceTeamId??index}`} className="rounded-lg border border-border p-3 text-sm">
+      {!explanation.paths.length?<p className="text-sm">{t.noAccessPaths}</p>:<ul className="divide-y divide-border">{explanation.paths.map((path,index)=><li key={`${path.kind}:${path.grantId??path.sourceTeamId??index}`} className="py-3 text-sm">
         <p>{pathLabels[path.kind]}{path.sourceTeamId?`: ${data.teams.find(team=>team.id===path.sourceTeamId)?.name??t.unlistedScope}`:''}</p>
         <p>{reach(path.targetTeamIds)}</p>{path.expiresAt?<p>{t.expires}: <time dateTime={path.expiresAt}>{new Date(path.expiresAt).toLocaleString()}</time></p>:null}
       </li>)}</ul>}
@@ -77,7 +77,7 @@ function AccessEventsContent({data,close}:Props){
   return <section className="min-w-0 space-y-3 rounded-xl border border-border p-4" aria-label={t.accessAudit}>
     <header className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">{t.accessAudit}</h2><Button className="min-h-11" variant="ghost" onClick={close}>{t.close}</Button></header>
     {!page?resource.error?<><p role="alert">{t.historyChanged}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>:<>
-      {!page.events.length?<p className="text-sm">{t.auditEmpty}</p>:<ul className="space-y-2">{page.events.map(event=><li key={event.id} className="rounded-lg border border-border p-3 text-sm">
+      {!page.events.length?<p className="text-sm">{t.auditEmpty}</p>:<ul className="divide-y divide-border">{page.events.map(event=><li key={event.id} className="py-3 text-sm">
         <p>{label(event.kind)}</p><p>{event.actor?.name||t.unnamed}</p><time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
       </li>)}</ul>}
       {page.nextCursor?<Button variant="outline" className="min-h-11" onClick={()=>setAfter(page.nextCursor!)}>{t.olderEvents}</Button>:null}

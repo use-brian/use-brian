@@ -141,7 +141,7 @@ export function CampaignEmailPanel(props: { workspaceId: string; campaignId: str
   }
 
   return (
-    <section className="space-y-4 rounded-xl border border-border p-4" data-campaign-email>
+    <section className="space-y-4 border-t border-border pt-4" data-campaign-email>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div><h3 className="flex items-center gap-2 font-medium"><Mail className="size-4" aria-hidden />{t.title}</h3><p className="text-xs text-muted-foreground">{t.description}</p></div>
         {draft ? <Button variant="outline" size="sm" render={<Link href={`/w/${props.workspaceId}/feed/email/posts/${draft.sessionId}`} />}>{t.openDraft}</Button> : null}
@@ -167,8 +167,8 @@ export function CampaignEmailPanel(props: { workspaceId: string; campaignId: str
             <Button type="button" variant="outline" onClick={renderPreview} disabled={busy || !draft.metadata}>{t.preview}</Button>
             <Button type="button" variant="outline" onClick={reviewAudience} disabled={busy || !draft.metadata}>{t.reviewAudience}</Button>
           </div>
-          {preview ? <div className="space-y-2 rounded-lg bg-muted/60 p-3"><strong className="text-sm">{preview.subject}</strong>{preview.preheader ? <p className="text-xs text-muted-foreground">{preview.preheader}</p> : null}<pre className="whitespace-pre-wrap font-sans text-sm">{preview.text}</pre></div> : null}
-          {audience ? <div className="space-y-3 rounded-lg bg-muted/60 p-3">
+          {preview ? <div className="space-y-2 border-l-2 border-border pl-3"><strong className="text-sm">{preview.subject}</strong>{preview.preheader ? <p className="text-xs text-muted-foreground">{preview.preheader}</p> : null}<pre className="whitespace-pre-wrap font-sans text-sm">{preview.text}</pre></div> : null}
+          {audience ? <div className="space-y-3 border-t border-border pt-3">
             <p className="text-sm">{t.matched}: {audience.counts.matched} · {t.eligible}: {audience.counts.eligible} · {t.excluded}: {audience.counts.excluded}</p>
             {audience.excluded.length ? <ul className="space-y-1 text-xs text-muted-foreground">{audience.excluded.slice(0, 20).map((item) => <li key={item.contactId}>{item.address ?? item.contactId}: {item.reasons.join(", ")}</li>)}</ul> : null}
             {audience.eligible.length ? <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
@@ -177,7 +177,7 @@ export function CampaignEmailPanel(props: { workspaceId: string; campaignId: str
               <Button type="button" disabled={busy || !sender?.broadcastCapable} onClick={approveAndSend}><Send className="size-4" aria-hidden />{t.approveAndSend}</Button>
             </div> : <p className="text-xs text-muted-foreground">{t.noEligible}</p>}
           </div> : null}
-          {dispatch ? <div className="space-y-3 rounded-lg border border-border p-3" data-campaign-dispatch>
+          {dispatch ? <div className="space-y-3 border-t border-border pt-3" data-campaign-dispatch>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div><strong className="text-sm">{t.deliveryResults}</strong><p className="text-xs text-muted-foreground">{t.dispatchState}: {dispatch.dispatch.state}</p></div>
               <div className="flex gap-2">

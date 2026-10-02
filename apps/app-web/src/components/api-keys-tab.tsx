@@ -329,7 +329,7 @@ function ApiModelTierPanel({
         </p>
       </div>
       {error && <p className="text-[12px] text-red-500">{error}</p>}
-      <div className="rounded-md border border-border">
+      <div className="[&>div]:px-0">
         <ModelTierRow
           label={t.apiKeys.modelTier.label}
           value={tier}

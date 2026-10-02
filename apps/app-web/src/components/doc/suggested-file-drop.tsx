@@ -294,18 +294,18 @@ export function SuggestedFileDrop({
       {offline && (
         <p
           role="status"
-          className="mt-3 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-700/60 dark:bg-amber-950 dark:text-amber-100"
+          className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100"
         >
           {t.ingestOffline}
         </p>
       )}
 
       {items.length > 0 && (
-        <ul className="mt-3 flex flex-col gap-1.5">
+        <ul className="mt-3 flex flex-col divide-y divide-border/70">
           {items.map((i) => (
             <li
               key={i.localId}
-              className="flex items-center gap-2.5 rounded-lg border border-border/70 bg-background px-2.5 py-1.5"
+              className="flex items-center gap-2.5 py-1.5"
             >
               <StatusIcon status={i.status} />
               <div className="min-w-0 flex-1">

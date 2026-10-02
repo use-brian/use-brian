@@ -545,7 +545,7 @@ function EndpointPanel({ t }: { t: Dictionary }) {
         <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1.5">
           {t.programmaticAccess.endpointUrlLabel}
         </div>
-        <div className="flex items-center gap-1.5 rounded-lg border border-border bg-muted/50 py-1 pl-3 pr-1">
+        <div className="flex items-center gap-1.5 rounded-lg bg-muted/50 py-1 pl-3 pr-1">
           <code className="flex-1 font-mono text-[12px] break-all py-1">{BRAIN_MCP_URL}</code>
           <button
             type="button"
@@ -874,9 +874,9 @@ function CaptureProfilesSection({
             {profile.rules.length === 0 ? (
               <p className="text-[12px] text-muted-foreground">{t.programmaticAccess.capture.noRules}</p>
             ) : (
-              <ol className="flex flex-col gap-1.5">
+              <ol className="flex flex-col divide-y divide-border">
                 {profile.rules.map((rule, index) => (
-                  <li key={rule.id} className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2 text-[12px]">
+                  <li key={rule.id} className="flex items-center gap-2 py-2 text-[12px]">
                     <span className="text-muted-foreground tabular-nums">{index + 1}.</span>
                     <span className="font-medium">{t.programmaticAccess.capture.filters[rule.filterType]}</span>
                     <span className="text-muted-foreground truncate flex-1">{JSON.stringify(rule.filterParams)}</span>
@@ -1279,7 +1279,7 @@ function CreateKeyForm({
         </div>
 
         {error && (
-          <div className="text-[12px] text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+          <div className="text-[12px] text-destructive bg-destructive/10 rounded-lg px-3 py-2">
             {error}
           </div>
         )}

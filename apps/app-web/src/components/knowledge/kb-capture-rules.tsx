@@ -246,13 +246,13 @@ export function KbCaptureRules({
       {rules === null ? (
         <p className="text-xs text-muted-foreground">{copy.loading}</p>
       ) : rules.length === 0 && editingId === null ? (
-        <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+        <div className="text-xs text-muted-foreground">
           {copy.empty}
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="divide-y divide-border">
           {rules.map((rule) => (
-            <div key={rule.id} className="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5">
+            <div key={rule.id} className="flex items-start gap-3 py-2.5">
               <button
                 type="button"
                 role="switch"
@@ -301,7 +301,7 @@ export function KbCaptureRules({
       )}
 
       {editingId !== null && (
-        <div className="space-y-3 rounded-lg border border-border bg-background px-3 py-3">
+        <div className="space-y-3 border-t border-border pt-3">
           <h3 className="text-xs font-medium">{editingId === "new" ? copy.newTitle : copy.editTitle}</h3>
           <div className="grid gap-3 md:grid-cols-2">
             <label className="space-y-1 text-xs">

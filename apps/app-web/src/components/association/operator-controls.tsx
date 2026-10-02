@@ -99,7 +99,7 @@ export function AssociationContactPicker({workspaceId,onSelect,selected,onClear,
   const [draft,setDraft]=useState(""),[query,setQuery]=useState("");
   useEffect(()=>{const handle=setTimeout(()=>setQuery(draft.trim()),300);return ()=>clearTimeout(handle);},[draft]);
   const data=useCachedResource(selected?null:associationPageCacheKey(workspaceId,"contact-lookup",{query}),()=>fetchCrmLookup(workspaceId,"contact",query,50));
-  if(selected)return <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 rounded-xl border border-primary/30 bg-primary/5 px-3 py-2 text-sm" data-selected-contact>
+  if(selected)return <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 rounded-xl bg-primary/5 px-3 py-2 text-sm" data-selected-contact>
     <span className="min-w-0"><span className="block font-medium">{selected.name}</span>{selected.hint?<span className="block text-xs text-muted-foreground">{selected.hint}</span>:null}</span>
     {onClear?<Button type="button" variant="ghost" size="sm" className="min-h-11 md:min-h-8" onClick={onClear}><X aria-hidden className="size-4"/>{t.ux.clear}</Button>:null}
   </div>;

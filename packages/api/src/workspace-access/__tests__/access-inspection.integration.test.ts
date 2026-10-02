@@ -12,7 +12,8 @@ import {createWorkspaceAccessTools} from '../tools.js'
 // coverage keeps this incomplete release gated; this mock is not certification.
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
 // serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
-vi.mock('../readiness.js',()=>({getDepartmentalReadinessSystem:async()=>({ready:true,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:[]})}))
+const readiness=vi.hoisted(()=>vi.fn(async()=>({ready:true,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:[]})))
+vi.mock('../readiness.js',()=>({getDepartmentalReadinessSystem:readiness}))
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
@@ -58,6 +59,16 @@ describe('[COMP:api/workspace-access] current authority explanations and audit',
     await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.member])
     await expect(getWorkspaceDepartmentRegistry(f.workspaceId,f.member)).rejects.toMatchObject({code:'not_found'})
     await expect(getWorkspaceDepartmentRegistry(f.workspaceId,f.owner,{unexpected:true})).rejects.toMatchObject({code:'invalid_command'})
+  })
+  it('never runs the departmental readiness audit for read-only inspection',async()=>{
+    // The audit introspects the catalog and counts every scoped row family;
+    // the registry, explanation and audit reads never return it.
+    const f=await fixture()
+    readiness.mockClear()
+    await getWorkspaceDepartmentRegistry(f.workspaceId,f.owner)
+    await explainWorkspaceAccess(f.workspaceId,f.owner,{memberId:f.member})
+    await getWorkspaceAccessEvents(f.workspaceId,f.owner)
+    expect(readiness).not.toHaveBeenCalled()
   })
   it('keeps independent grants visible after revocation and never turns a read grant into editing',async()=>{
     const f=await fixture(),first=await f.grant(),second=await f.grant()

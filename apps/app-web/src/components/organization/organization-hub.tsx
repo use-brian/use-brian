@@ -4,7 +4,7 @@
  * navigation lives in the sidebar panel and the top bar, never in the page.
  * [COMP:app-web/organization-chart] */
 import {useWorkspaceAccessMode,WorkspaceModeSummary} from '@/components/context/mode-aware-context';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useT } from '@/lib/i18n/client';
 import { useWorkspaceContext } from '@/lib/workspace-context';
@@ -14,7 +14,7 @@ import { OrganizationChartView } from './organization-chart';
 import { OrganizationTopbar } from './organization-topbar';
 import { OrganizationTopbarSlotProvider } from './organization-chrome';
 import { TeamsContextSection } from '@/components/settings-modal/sections/context-scopes-section';
-import { DepartmentAccessPanel, HomeDepartmentControls } from '@/components/organization/department-access-panel';
+import { DepartmentAccessPanel, HomeDepartmentControls, warmDepartmentsSection } from '@/components/organization/department-access-panel';
 import { WorkspaceMembersSection } from '@/components/settings-modal/workspace-sections';
 import { WorkspaceAccessView } from '@/components/workspace-access/workspace-access';
 
@@ -27,6 +27,12 @@ export function OrganizationHub() {
   const section = organizationSection(params.get('section'));
   const memberId = section === 'people' ? params.get('member') : null;
   const [actionSlot, setActionSlot] = useState<HTMLElement | null>(null);
+  // Departments renders its panels only once the registry gate has painted;
+  // start their reads now, beside the registry, instead of after it.
+  const summaryOnly = mode.readySimple && !mode.data?.canAdminister;
+  useEffect(() => {
+    if (section === 'departments' && !summaryOnly) warmDepartmentsSection(workspaceId, me.id);
+  }, [section, summaryOnly, workspaceId, me.id]);
   return <div className="flex h-full min-h-0 min-w-0 flex-col">
     <OrganizationTopbar workspaceId={workspaceId} section={section} slotRef={setActionSlot} />
     <h1 className="sr-only">{t.title}</h1>

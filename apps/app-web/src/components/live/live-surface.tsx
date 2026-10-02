@@ -274,7 +274,7 @@ function LiveStatusZone({
       ) : (
         <div
           aria-label={emptyLabel}
-          className="mt-4 flex min-h-16 flex-1 items-center gap-3 rounded-2xl border border-dashed border-current/15 px-4 text-current/25"
+          className="mt-4 flex min-h-16 flex-1 items-center gap-3 px-4 text-current/25"
         >
           <Icon className="size-4" strokeWidth={1.6} aria-hidden />
           <span className="h-px flex-1 bg-current/20" aria-hidden />

@@ -258,7 +258,7 @@ export function FeedCampaigns(props: {
               <div>
                 <h2 className="text-lg font-semibold">{selected.name}</h2>
                 <p className="text-sm text-muted-foreground">{selected.objective}</p>
-                <div className="mt-3 rounded-lg bg-muted/60 p-3 text-sm">
+                <div className="mt-3 text-sm">
                   <strong>{tc.resultsTitle}</strong>
                   {!results ? <p className="mt-1 text-muted-foreground">{tc.resultsLoading}</p>
                     : results.state === "available" ? (

@@ -272,7 +272,7 @@ function SupportDiagnosticsCard() {
           )}
 
           {preview && (
-            <div className="rounded-lg border border-border bg-background p-3 space-y-3">
+            <div className="border-t border-amber-500/20 pt-4 space-y-3">
               <div className="text-xs font-medium">{t.supportPreviewTitle}</div>
               <ul className="space-y-1">
                 {preview.categories.map((category) => (

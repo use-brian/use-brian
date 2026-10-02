@@ -207,11 +207,11 @@ export function CreateWorkflowModal({ onClose }: Props) {
               />
             </div>
 
-            <div className="border border-border rounded-md bg-card overflow-hidden">
-              <div className="px-4 py-2 border-b border-border text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            <div className="border-t border-border pt-4">
+              <div className="pb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 {t.workflowPage.builder.firstStepHeading}
               </div>
-              <div className="p-4 flex flex-col gap-3">
+              <div className="flex flex-col gap-3">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-medium text-muted-foreground">
                     {t.workflowPage.builder.assistantPickerLabel}

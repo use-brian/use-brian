@@ -1,22 +1,22 @@
 /** Current-policy explanations and content-free audit. [COMP:api/workspace-access] */
 import type { PoolClient } from 'pg'
 import { canRead, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
-import type { WorkspaceDepartmentRegistry, WorkspaceAccessExplanation, WorkspaceAccessEvents, WorkspaceAccessOverview } from '@use-brian/shared'
+import type { WorkspaceDepartmentRegistry, WorkspaceAccessExplanation, WorkspaceAccessEvents } from '@use-brian/shared'
 import { getPool } from '../db/client.js'
 import { createDbContextScopeStore } from '../db/context-scope-store.js'
 import { getOrganizationChartInTransaction } from '../db/org-chart-store.js'
 import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
 import { ContextNotAvailableError, resolveTurnScopeSystem, type TurnScopeAssistant } from '../context-scope/resolve-turn-scope.js'
-import { getWorkspaceAccessInTransaction } from './service.js'
+import { getWorkspaceAccessDirectoryInTransaction, type WorkspaceAccessDirectory } from './service.js'
 import { workspaceAccessExplanationQuerySchema, workspaceAccessHistoryQuerySchema } from './commands.js'
 import { WorkspaceAccessError, DEFAULT_GRANT_DAYS, MAX_DELEGATED_GRANT_DAYS } from './policy.js'
 
-type Inspection = {client:PoolClient;view:WorkspaceAccessOverview}
+type Inspection = {client:PoolClient;view:WorkspaceAccessDirectory}
 async function inspect<T>(workspaceId:string,userId:string,run:(snapshot:Inspection)=>Promise<T>):Promise<T>{
   const client=await getPool().connect()
   try{
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
-    const view=await getWorkspaceAccessInTransaction(client,workspaceId,userId)
+    const view=await getWorkspaceAccessDirectoryInTransaction(client,workspaceId,userId)
     const result=await run({client,view})
     await client.query('COMMIT')
     return result
@@ -91,7 +91,7 @@ export async function explainWorkspaceAccess(workspaceId:string,userId:string,in
     const action=selection.action??'read',sensitivity=selection.sensitivity??'internal'
     const target=teams.find(team=>team.id===selection.targetTeamId)
     const grant=action==='read'?scope.access.compartments:scope.access.mutationCompartments
-    const subjectView=memberId===userId?view:await getWorkspaceAccessInTransaction(client,workspaceId,memberId)
+    const subjectView=memberId===userId?view:await getWorkspaceAccessDirectoryInTransaction(client,workspaceId,memberId)
     return {workspaceId,policyRevision:view.policyRevision,validForMs:Math.min(view.validForMs,subjectView.validForMs),memberId,
       assistantId:selection.assistantId??null,contextTeamId:selection.contextTeamId??null,contextProjectId:selection.contextProjectId??null,
       choices:{assistants:directory.subjects.filter(subject=>subject.kind==='assistant').map(({id,name})=>({id,name})),projects:projectRows},

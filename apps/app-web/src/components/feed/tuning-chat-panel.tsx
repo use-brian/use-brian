@@ -1086,7 +1086,7 @@ export const TuningChatPanel = forwardRef<
           {error && errorCode === "budget_exhausted" && renderPlanGate ? (
             renderPlanGate(error)
           ) : error ? (
-            <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+            <div className="rounded-xl bg-destructive/10 p-3 text-xs text-destructive">
               {error}
               {recoveryFailed && sessionIdRef.current ? <Button size="sm" variant="outline" className="mt-2" onClick={() => recoverSessionRef.current(sessionIdRef.current!)}>{t.retry}</Button> : null}
             </div>
@@ -1138,7 +1138,7 @@ export const TuningChatPanel = forwardRef<
             <div className="min-w-0 flex-1 border-l-2 border-primary/60 pl-2"><p className="text-xs font-medium text-muted-foreground">{tGoal.replyingToMessage}</p><p className="truncate text-xs text-muted-foreground">{condenseQuote(session.state.replyTo.text)}</p></div>
             <Button type="button" variant="ghost" size="icon" className="size-11 md:size-8 shrink-0" aria-label={tGoal.replyCancel} onClick={() => session.setReplyTo(null)}><X className="size-3.5" aria-hidden /></Button>
           </div> : null}
-          {props.feedSelection ? <div className="mx-2.5 mt-2.5 flex items-start gap-2 rounded-md border bg-muted/30 p-2" data-feed-selection-attachment>
+          {props.feedSelection ? <div className="mx-2.5 mt-2.5 flex items-start gap-2 rounded-md bg-muted/40 p-2" data-feed-selection-attachment>
             <div className="min-w-0 flex-1"><p className="text-xs font-medium">{tc.selection}</p><blockquote className="line-clamp-3 whitespace-pre-wrap break-words text-xs text-muted-foreground">{props.feedSelection.quote || tc.post}</blockquote></div>
             <Button type="button" variant="ghost" size="icon" className="size-11 md:size-8 shrink-0" aria-label={tc.post} onClick={props.onClearFeedSelection}><X className="size-3.5" aria-hidden /></Button>
           </div> : null}

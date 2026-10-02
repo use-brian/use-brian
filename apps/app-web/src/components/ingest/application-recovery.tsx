@@ -61,9 +61,9 @@ export function ApplicationRecovery({ workspaceId }: { workspaceId: string }) {
       ) : items?.length === 0 ? (
         <p className="mt-3 text-xs text-muted-foreground">{copy.empty}</p>
       ) : (
-        <ul className="mt-3 space-y-2">
+        <ul className="mt-3 divide-y divide-border">
           {items?.map((item) => (
-            <li key={item.episodeId} className="rounded-md border border-border px-3 py-2 text-xs">
+            <li key={item.episodeId} className="py-2 text-xs">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-mono text-[11px] text-muted-foreground">{item.episodeId}</span>
                 <span className="font-medium">

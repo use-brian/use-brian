@@ -95,6 +95,8 @@ const RAIL_INPUT_CLS =
 
 /** The rail's `size="sm"` selects: 36px on a phone, the primitive's 28px above. */
 const RAIL_SELECT_CLS = "w-full min-h-9 sm:min-h-0";
+/** RailCard face inside the bordered step card: header + fields, no wash. */
+const RAIL_IN_CARD = "rounded-none bg-transparent p-0";
 
 const PROMPT_MAX = 8000;
 const PROMPT_WARN_AT = 7200;
@@ -387,9 +389,11 @@ export function StepEditor({
 
         {/* ── Properties rail — tuning only (Execution + Output) ────────── */}
         {hasRail && (
-          <aside className="mt-6 flex flex-col gap-3 text-sm lg:mt-0">
+          // Inside the step card the rail is a hairline column, not a stack
+          // of tinted sub-cards: one frame per region.
+          <aside className="mt-6 flex flex-col gap-5 border-t border-border/60 pt-5 text-sm lg:mt-0 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
             {isAssistant && (
-              <RailCard title={b.stepRailExecutionHeading}>
+              <RailCard title={b.stepRailExecutionHeading} className={RAIL_IN_CARD}>
                 <ExecutionFields
                   step={step}
                   toolGroups={toolGroups}
@@ -400,7 +404,7 @@ export function StepEditor({
               </RailCard>
             )}
 
-            <RailCard title={b.stepRailOutputHeading}>
+            <RailCard title={b.stepRailOutputHeading} className={RAIL_IN_CARD}>
               <div className="flex flex-col gap-2.5">
                 {step.type === "assistant_call" && (
                   <WorkflowDeliveryField
@@ -1414,7 +1418,7 @@ function SkillsField({
       {skills.length === 0 && extraSelected.length === 0 ? (
         <div className="text-xs text-muted-foreground">{b.skillsEmpty}</div>
       ) : (
-        <div className="flex flex-col gap-2 rounded-lg border border-border bg-background p-2">
+        <div className="flex flex-col gap-2">
           {/* Search bar (template-gallery pattern). Composite field: the box
               draws the focus ring; the inner input opts out of the global
               :focus-visible ring (`focus-visible:shadow-none`). */}

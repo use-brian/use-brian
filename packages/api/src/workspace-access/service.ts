@@ -64,7 +64,12 @@ async function historyIds(client:PoolClient,p:Principal,all:Team[],kind:'request
   const ids=rows.slice(0,50).map(row=>row.id);
   return {ids,nextCursor:rows.length>50?ids[ids.length-1]:null};
 }
-async function overview(client:PoolClient,p:Principal,history?:WorkspaceAccessHistoryQuery & {kind:'requests'|'grants';requestId?:string}):Promise<WorkspaceAccessOverview>{
+/** The overview minus request/grant history and departmental readiness. The
+ * readiness audit introspects the catalog and counts every scoped row family
+ * in the workspace, so read-only inspection surfaces that never return it
+ * (registry, explanation, audit) must not pay for it on every refresh. */
+export type WorkspaceAccessDirectory=Omit<WorkspaceAccessOverview,'readiness'|'requests'|'grants'|'nextRequestCursor'|'nextGrantCursor'|'appliedCommand'|'commandReceipt'>
+async function directory(client:PoolClient,p:Principal):Promise<{all:Team[];visible:Team[];view:WorkspaceAccessDirectory}>{
   const all=await teams(client,p)
   const reach=(await client.query<{reach:string[]|null}>('SELECT effective_member_read_compartments($1,$2) AS reach',[p.userId,p.workspaceId])).rows[0].reach
   const visible=all.filter(t=>t.status==='active'&&(isAccessAdmin(p.role)||t.directoryVisibility==='workspace'||t.managerIds.includes(p.userId)||reach===null||reach.includes(t.compartmentKey)))
@@ -76,6 +81,12 @@ async function overview(client:PoolClient,p:Principal,history?:WorkspaceAccessHi
     FROM workspace_members WHERE workspace_id=$1 AND ($2::boolean OR user_id=$3)`,[p.workspaceId,isAccessAdmin(p.role),p.userId])
   const teamIds=(reach:string[]|null)=>reach===null?null:visible.filter(team=>reach.includes(team.compartmentKey)).map(team=>team.id)
   for(const person of people){const setting=settings.rows.find(row=>row.id===person.id);if(setting)person.access={clearance:setting.clearance,effectiveClearance:isAccessAdmin(person.role)?'confidential':setting.clearance,teamScopeMode:setting.teamScopeMode,readTeamIds:teamIds(setting.readReach),membershipTeamIds:teamIds(setting.membershipReach),hasUnlistedReadScope:setting.readReach?.some(key=>!visible.some(team=>team.compartmentKey===key))??false,hasUnlistedMembershipScope:setting.membershipReach?.some(key=>!visible.some(team=>team.compartmentKey===key))??false}}
+  const policy=(await client.query<{revision:string;mode:WorkspaceAccessOverview['classificationMode']}>('SELECT revision::text,classification_mode AS mode FROM workspace_access_policies WHERE workspace_id=$1',[p.workspaceId])).rows[0]
+  return{all,visible,view:{validForMs:await projectionLifetime(client,p.workspaceId,p.userId),workspaceId:p.workspaceId,policyRevision:policy?.revision??'1',classificationMode:policy?.mode??'legacy',canAdminister:isAccessAdmin(p.role),people,teams:visible.map(t=>({id:t.id,name:t.name,directoryVisibility:t.directoryVisibility,requestable:t.requestable,canManageMembers:canManageMembers(p,t),canApprove:isAccessAdmin(p.role)||t.capabilities.includes('approve_read_requests'),expandedPackage:t.expanded||t.readAll||t.bundle.some(key=>key!==t.compartmentKey),memberIds:t.memberIds.filter(id=>people.some(m=>m.id===id)),assistantIds:isAccessAdmin(p.role)||t.managerIds.includes(p.userId)?t.assistantIds:[],managerIds:t.managerIds.filter(id=>people.some(m=>m.id===id)),managers:isAccessAdmin(p.role)?t.managers:[]}))}}
+}
+async function overview(client:PoolClient,p:Principal,history?:WorkspaceAccessHistoryQuery & {kind:'requests'|'grants';requestId?:string}):Promise<WorkspaceAccessOverview>{
+  const {all,visible,view}=await directory(client,p)
+  const people=view.people
   const requestPage=history?.requestId?{ids:(await client.query<{id:string}>('SELECT id FROM workspace_access_requests WHERE workspace_id=$1 AND id=$2 AND can_view_department_request(id,$3)',[p.workspaceId,history.requestId,p.userId])).rows.map(row=>row.id),nextCursor:null}:history?.kind==='grants'?{ids:[],nextCursor:null}:await historyIds(client,p,all,'requests',history?.after);
   const grantPage=history?.kind==='requests'?{ids:[],nextCursor:null}:await historyIds(client,p,all,'grants',history?.after);
   const memberName=(id:string)=>people.find(m=>m.id===id)?.name??null
@@ -97,8 +108,7 @@ async function overview(client:PoolClient,p:Principal,history?:WorkspaceAccessHi
     if(!isAccessAdmin(p.role)&&!beneficiary&&!team.capabilities.includes('approve_read_requests'))continue
     grants.push({...grant,status:grant.revokedAt?'revoked':grant.expiresAt&&grant.expiresAt<=p.now?'expired':grant.startsAt>p.now?'scheduled':'active',targetTeamName:team.name,beneficiaryName:grant.beneficiaryKind==='member'?memberName(grant.beneficiaryId):visible.find(t=>t.id===grant.beneficiaryId)?.name??null,startsAt:grant.startsAt.toISOString(),expiresAt:grant.expiresAt?.toISOString()??null,revokedAt:grant.revokedAt?.toISOString()??null,canRevoke:!grant.revokedAt&&(isAccessAdmin(p.role)||team.capabilities.includes('approve_read_requests')||(grant.beneficiaryKind==='member'&&beneficiary))})
   }
-  const policy=(await client.query<{revision:string;mode:WorkspaceAccessOverview['classificationMode']}>('SELECT revision::text,classification_mode AS mode FROM workspace_access_policies WHERE workspace_id=$1',[p.workspaceId])).rows[0]
-  return{nextRequestCursor:requestPage.nextCursor,nextGrantCursor:grantPage.nextCursor,readiness:await getDepartmentalReadinessSystem(p.workspaceId,client.query.bind(client)),validForMs:await projectionLifetime(client,p.workspaceId,p.userId),workspaceId:p.workspaceId,policyRevision:policy?.revision??'1',classificationMode:policy?.mode??'legacy',canAdminister:isAccessAdmin(p.role),people,teams:visible.map(t=>({id:t.id,name:t.name,directoryVisibility:t.directoryVisibility,requestable:t.requestable,canManageMembers:canManageMembers(p,t),canApprove:isAccessAdmin(p.role)||t.capabilities.includes('approve_read_requests'),expandedPackage:t.expanded||t.readAll||t.bundle.some(key=>key!==t.compartmentKey),memberIds:t.memberIds.filter(id=>people.some(m=>m.id===id)),assistantIds:isAccessAdmin(p.role)||t.managerIds.includes(p.userId)?t.assistantIds:[],managerIds:t.managerIds.filter(id=>people.some(m=>m.id===id)),managers:isAccessAdmin(p.role)?t.managers:[]})),requests,grants}
+  return{...view,nextRequestCursor:requestPage.nextCursor,nextGrantCursor:grantPage.nextCursor,readiness:await getDepartmentalReadinessSystem(p.workspaceId,client.query.bind(client)),requests,grants}
 }
 
 export async function getWorkspaceAccess(workspaceId:string,userId:string):Promise<WorkspaceAccessOverview>{
@@ -355,6 +365,11 @@ export async function executeDepartmentAccessInTransaction(client:PoolClient,wor
 
 export async function getWorkspaceAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,lock=false):Promise<WorkspaceAccessOverview>{
   return overview(client,await principal(client,workspaceId,userId,lock))
+}
+
+/** Read-only inspection: same visibility and lifetime, no history or readiness audit. */
+export async function getWorkspaceAccessDirectoryInTransaction(client:PoolClient,workspaceId:string,userId:string):Promise<WorkspaceAccessDirectory>{
+  return (await directory(client,await principal(client,workspaceId,userId))).view
 }
 
 /** Trusted canonical entry for the common approval protocol; ordinary HTTP writers require saved reviews. */

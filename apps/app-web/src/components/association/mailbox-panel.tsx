@@ -29,7 +29,7 @@ export function AssociationMailboxPolicyForm({workspaceId,instanceId,policy,disa
         {selected.filter(key=>!purposes.data?.some(row=>row.purposeKey===key)).map(key=><AssociationToggle key={key} label={key} checked disabled={unavailable} onChange={()=>setSelected(values=>values.filter(value=>value!==key))}/>)}
       </div></AssociationListState>
       <h4 className="text-sm font-medium">{t.admin.templates}</h4>
-      {templates.map(row=><div key={row.id} className="space-y-2 rounded-lg border border-border p-3"><AssociationField label={t.admin.templateKey} required maxLength={63} value={row.key} onChange={key=>setTemplates(values=>values.map(item=>item.id===row.id?{...item,key}:item))}/>
+      {templates.map(row=><div key={row.id} className="space-y-2 border-t border-border pt-3"><AssociationField label={t.admin.templateKey} required maxLength={63} value={row.key} onChange={key=>setTemplates(values=>values.map(item=>item.id===row.id?{...item,key}:item))}/>
         <Select value={row.purpose} disabled={unavailable} onValueChange={value=>{if(value)setTemplates(values=>values.map(item=>item.id===row.id?{...item,purpose:value}:item));}}><SelectTrigger aria-label={t.manage.purpose} className="min-h-11 w-full"><SelectValue placeholder={t.manage.choose}/></SelectTrigger><SelectContent>{selected.map(key=><SelectItem key={key} value={key}>{purposes.data?.find(p=>p.purposeKey===key)?.label ?? key}</SelectItem>)}</SelectContent></Select>
         <Button type="button" className="min-h-11" variant="ghost" onClick={()=>setTemplates(values=>values.filter(item=>item.id!==row.id))}>{t.admin.removeTemplate}</Button>
       </div>)}
