@@ -16,6 +16,8 @@ import { createJobExecutor } from '../../scheduling/executor.js'
 import { createDbJobStore } from '../job-store.js'
 import { resolveWorkflowRunScope } from '../../context-scope/workflow-authority.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 const pool = getPool()
 // Legacy jobs arrive leased; pinned jobs are claimed only at dispatch time.
@@ -30,7 +32,7 @@ async function claimDueJobs(jobs: ReturnType<typeof createDbJobStore>) {
 async function fixture(mode: 'simple' | 'departments' = 'simple') {
   const w = randomUUID(), owner = randomUUID(), member = randomUUID(), assistant = randomUUID()
   for (const id of [owner, member]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Session admission',$2)", [w, owner])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Session admission',$2,false)", [w, owner])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [w, owner])
   async function team() {
     const id = randomUUID(), key = `team:${id}`

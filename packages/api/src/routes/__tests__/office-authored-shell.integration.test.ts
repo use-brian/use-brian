@@ -24,6 +24,8 @@ import { createOfficeService } from '../../office/service.js'
 import { officeArtifactRoutes } from '../office-artifacts.js'
 import { WorkspaceAccessError } from '../../workspace-access/policy.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 const pool = getPool(), secret = 'office-authored-shell-fixture-secret'
 afterAll(async () => { await getAppPool().end(); await pool.end() })
@@ -55,7 +57,7 @@ app.use(((error, _req, res, _next) => {
 async function fixture(mode = 'simple', ready = true) {
   const owner = randomUUID(), userId = randomUUID(), workspaceId = randomUUID()
   for (const id of [owner,userId]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Office HTTP',$2)",[workspaceId,owner])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Office HTTP',$2,false)",[workspaceId,owner])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode) VALUES($1,$2,'owner','confidential','assigned'),($1,$3,'member','internal','assigned')",[workspaceId,owner,userId])
   const groups = createDbWorkspaceGroupStore()
   const team = await groups.createTeam(owner,workspaceId,{name:'Shared',key:'shared'})

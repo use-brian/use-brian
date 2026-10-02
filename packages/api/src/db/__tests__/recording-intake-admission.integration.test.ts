@@ -19,13 +19,15 @@ import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
 import { admitRecordingIntakeParent, captureRecordingIntakeParent, recordingIntakeTransaction } from '../recording-intake-admission.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 const pool = getPool()
 afterAll(async () => { await getAppPool().end(); await pool.end() })
 async function fixture() {
   const workspaceId = randomUUID(), userId = randomUUID(), otherId = randomUUID()
   for (const id of [userId, otherId]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Recording intake',$2)", [workspaceId, userId])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Recording intake',$2,false)", [workspaceId, userId])
   for (const id of [userId, otherId]) await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')", [workspaceId, id])
   const team = await createDbWorkspaceGroupStore().createTeam(userId, workspaceId, { name: 'Default', key: 'default' })
   await pool.query("UPDATE workspace_access_policies SET access_mode='simple',setup_state='ready',default_department_id=$2 WHERE workspace_id=$1", [workspaceId, team.id])

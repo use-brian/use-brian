@@ -708,7 +708,7 @@ export async function resolveOperationCeilingsSystem(
   assistantCompartments: string[] | null,
   requireMembership = false,
   authorityQuery: typeof query = query,
-): Promise<{ clearance: Sensitivity; compartments: string[] | null; mutationCompartments: string[] | null; departmentReadV2?: boolean }> {
+): Promise<{ clearance: Sensitivity; compartments: string[] | null; mutationCompartments: string[] | null; departmentReadV2?: boolean; departmentQuery?: typeof query }> {
   if (!workspaceId) return {
     clearance: assistantClearance, compartments: assistantCompartments,
     mutationCompartments: assistantCompartments,
@@ -730,7 +730,9 @@ export async function resolveOperationCeilingsSystem(
     mutationCompartments: effectiveReadCompartments(member?.role ?? null,member ? member.mutationCompartments : [],assistantCompartments),
     // Permission model v2 flag (migration 649), read through to_jsonb so an
     // older schema reads "off". The resolver switches paths on it.
-    ...(member?.departmentReadV2 === 'true' ? { departmentReadV2: true } : {}),
+    // The v2 snapshot must read on the same connection (a caller's transaction
+    // or single-connection pool), so the query used here travels with the flag.
+    ...(member?.departmentReadV2 === 'true' ? { departmentReadV2: true, departmentQuery: authorityQuery } : {}),
   }
 }
 

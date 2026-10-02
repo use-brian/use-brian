@@ -23,6 +23,7 @@ import {
   type AccessCeiling,
   type ResourceScope,
   type ScopeSource,
+  type DepartmentReadGrant,
 } from '@use-brian/core'
 import {
   createDbContextScopeStore,
@@ -324,13 +325,6 @@ async function resolveScope(
           input.assistant.teamScopeMode === 'all' ? null : input.assistant.compartments,
         )
 
-  // Permission model v2: the membership read above also reports the
-  // workspace's v2 flag. A flagged workspace resolves from edges and base
-  // clearance alone; none of the legacy ceilings computed above is used.
-  if ((oldCeilings as { departmentReadV2?: boolean }).departmentReadV2) {
-    const departmentRead = deps.departmentRead ?? { query: systemQuery as <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }> }
-    return applyProjection(await resolveDepartmentScope(input, workspaceId, binding, departmentRead))
-  }
 
   // The legacy fused resolver returns the empty grant for non-members. That is
   // a valid external-client projection, so the typed membership refusal is
@@ -391,6 +385,17 @@ async function resolveScope(
     activeProject = { id: project.id, name: project.name, status: project.status }
   }
 
+  // Permission model v2: the membership read above also reports the
+  // workspace's v2 flag. For a flagged workspace the read grant is computed
+  // from edges and base clearance alone (resolveDepartmentGrant) and decides
+  // every read; the legacy-shaped ceilings stay on `access` only as the
+  // compatibility envelope persisted by workflow authority and authority
+  // leases, until Phases 3-5 move those to the grant.
+  const flagged = oldCeilings as { departmentReadV2?: boolean; departmentQuery?: <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }> }
+  const departmentRead = flagged.departmentReadV2
+    ? await resolveDepartmentGrant(input, workspaceId, binding.groupId, deps.departmentRead
+      ?? { query: flagged.departmentQuery ?? systemQuery as <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }> })
+    : undefined
   return applyProjection({
     access: {
       workspaceId,
@@ -402,6 +407,7 @@ async function resolveScope(
       mutationCompartments,
       projectIds: effectiveProjectIds,
       systemRead: input.systemRead,
+      ...(departmentRead ? { departmentRead } : {}),
     },
     activeGroupId: activeTeam?.id ?? null,
     activeProjectId: activeProject?.id ?? null,
@@ -419,76 +425,35 @@ async function resolveScope(
 }
 
 /**
- * Permission model v2 (workspace flag on): edges and base clearance only, via
- * the reference predicate. The legacy inputs (role universe, read bundles,
- * read grants, managers, access and classification modes, Team scope mode,
- * readiness) are not consulted. The legacy clearance and compartment axes are
- * left neutral; `access.departmentRead` alone decides department and tier, in
- * the store predicate and, through `applyRLSGucs`, in RLS (migration 649).
- * Projects are a lens, not a wall (D8): the bound Project is a write tag only.
+ * Permission model v2 read grant (workspace flag on): edges and base clearance
+ * only, through the reference predicate. No role universe, read bundle, read
+ * grant, manager, access or classification mode, Team scope mode or readiness
+ * constant is an input. The bound department is ctx.department; an issued
+ * anonymous surface acts as (issuer, A) capped at A's clearance (K3); an
+ * external principal is anonymous.
  */
-async function resolveDepartmentScope(
+async function resolveDepartmentGrant(
   input: ResolveTurnScopeInput,
   workspaceId: string,
-  binding: { groupId: string | null; projectId: string | null; historical: boolean },
+  contextDepartment: string | null,
   deps: NonNullable<ResolveTurnScopeDeps['departmentRead']>,
-): Promise<ResolvedTurnScope> {
+): Promise<DepartmentReadGrant> {
   const external = input.memberMode === 'external'
-  // An issued anonymous surface acts as (issuer, A) capped at A's clearance (K3).
-  const issued = input.memberMode === 'assistant'
+  // resolveScope already refused an assistant from another workspace, so an
+  // id with no assistant row here is a member-only probe (access inspection
+  // passes the member's own id): no assistant acts, identity in min().
+  const acting = (await deps.query<{ id: string }>('SELECT id FROM assistants WHERE id = $1 AND workspace_id = $2',
+    [input.assistant.id, workspaceId])).rows.length > 0
   const read = {
     workspaceId,
     userId: input.userId,
-    assistantId: input.assistant.id,
-    contextDepartment: binding.groupId,
-    credential: issued ? { cap: input.assistant.clearance, binding: null } : null,
+    assistantId: acting ? input.assistant.id : null,
+    contextDepartment,
+    credential: input.memberMode === 'assistant' ? { cap: input.assistant.clearance, binding: null } : null,
   }
   const loaded = await loadDepartmentSnapshot(deps.query, read)
   const principal = external ? { kind: 'anonymous' as const, id: 'anonymous' } : loaded.principal
-  const grant = resolveDepartmentReadGrant(loaded.snapshot, principal, read, deps.now?.() ?? new Date())
-  let activeTeam: ResolvedTurnScope['activeTeam'] = null
-  if (binding.groupId) {
-    const team = (await deps.query<{ id: string; name: string; key: string; compartmentKey: string; status: 'active' | 'archived' }>(
-      `SELECT id, name, key, compartment_key AS "compartmentKey", status FROM workspace_groups
-        WHERE workspace_id = $1 AND id = $2 AND kind = 'team'`, [workspaceId, binding.groupId])).rows[0]
-    if (!team) throw new ContextNotAvailableError('team', 'not_found')
-    requireActiveOrHistorical('team', team.status, binding.historical)
-    // A bound department the reader holds no edge in is not a context they can enter.
-    if (!grant.departments[team.id]) throw new ContextNotAvailableError('team', 'outside_grant')
-    activeTeam = team
-  }
-  let activeProject: ResolvedTurnScope['activeProject'] = null
-  if (binding.projectId) {
-    const project = (await deps.query<{ id: string; name: string; status: 'active' | 'archived' }>(
-      'SELECT id, name, status FROM workspace_projects WHERE workspace_id = $1 AND id = $2',
-      [workspaceId, binding.projectId])).rows[0]
-    if (!project) throw new ContextNotAvailableError('project', 'not_found')
-    requireActiveOrHistorical('project', project.status, binding.historical)
-    activeProject = project
-  }
-  return {
-    access: {
-      workspaceId,
-      userId: input.userId,
-      assistantId: input.assistant.id,
-      assistantKind: input.assistant.kind,
-      clearance: 'confidential',
-      compartments: null,
-      mutationCompartments: null,
-      projectIds: null,
-      systemRead: input.systemRead,
-      departmentRead: external ? { ...grant, userId: input.userId } : grant,
-    },
-    activeGroupId: activeTeam?.id ?? null,
-    activeProjectId: activeProject?.id ?? null,
-    effectiveCompartments: null,
-    effectiveProjectIds: null,
-    // WRITE stamps ctx.department; the bound Project stays a tag (D8).
-    writeCompartments: external || !activeTeam ? [] : [activeTeam.compartmentKey],
-    writeProjectIds: external || !activeProject ? [] : [activeProject.id],
-    activeTeam,
-    activeProject,
-  }
+  return resolveDepartmentReadGrant(loaded.snapshot, principal, read, deps.now?.() ?? new Date())
 }
 
 /** Trusted prompt fact; empty for a legacy company-wide turn. */

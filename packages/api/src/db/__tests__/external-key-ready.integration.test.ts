@@ -19,6 +19,8 @@ import { requireAuth } from '../../auth/middleware.js'
 import { createTokens } from '../../auth/jwt.js'
 import { withExternalKeyActor } from '../external-key-admission.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 process.env.PG_POOL_MAX='1'
 const pool=getPool(), secret='external-key-integration-only'
@@ -26,7 +28,7 @@ afterAll(async()=>{await getAppPool().end();await pool.end()})
 async function fixture(onProbe?: () => Promise<void>) {
  const actor=randomUUID(), w=randomUUID(), a=randomUUID()
  await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[actor])
- await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Keys',$2)",[w,actor])
+ await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Keys',$2,false)",[w,actor])
  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[w,actor])
  await pool.query("INSERT INTO assistants(id,workspace_id,name,kind,clearance) VALUES($1,$2,'Primary','primary','internal')",[a,w])
  const team=await createDbWorkspaceGroupStore().createTeam(actor,w,{name:'Shared',key:'shared'})
@@ -176,7 +178,7 @@ describe('A11 ready external key admission: real HTTP and app-role SQL',()=>{
  })
  it('blocks API authority changes across ready/legacy boundaries but permits bookkeeping and revoke',async()=>{
   const f=await fixture(), otherWorkspace=randomUUID(), otherAssistant=randomUUID()
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Legacy source',$2)",[otherWorkspace,f.actor])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Legacy source',$2,false)",[otherWorkspace,f.actor])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[otherWorkspace,f.actor])
   await pool.query("INSERT INTO assistants(id,workspace_id,name,kind) VALUES($1,$2,'Legacy primary','primary')",[otherAssistant,otherWorkspace])
   const apiStore=createDbApiKeyStore()

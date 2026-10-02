@@ -15,13 +15,15 @@ import { createEntity } from '../entities-store.js'
 import { admitFileCreate } from '../../workspace-access/file-create-admission.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 const pool = getPool()
 
 async function fixture(mode: 'simple' | 'departments' | 'legacy' = 'simple') {
   const workspaceId = randomUUID(), userId = randomUUID(), member = randomUUID(), projectId = randomUUID()
   for (const id of [userId, member]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'File admission fixture',$2)", [workspaceId, userId])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'File admission fixture',$2,false)", [workspaceId, userId])
   for (const id of [userId, member]) await pool.query('INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,$3)', [workspaceId, id, id === userId ? 'owner' : 'member'])
   await pool.query("UPDATE workspace_members SET clearance='confidential' WHERE workspace_id=$1 AND user_id=$2", [workspaceId, userId])
   await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Fixture','fixture',$3)", [projectId, workspaceId, userId])

@@ -4,6 +4,8 @@ import pg, { type PoolClient } from 'pg'
 import { refreshShopifyInstanceCredentials } from '../shopify-rotation.js'
 import request from 'supertest'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 const provider = vi.hoisted(() => ({ graphql: vi.fn(), exchange: vi.fn(), refresh: vi.fn(), hmac: vi.fn() }))
 vi.mock('../../shopify/client.js', async original => ({ ...await original<typeof import('../../shopify/client.js')>(),
   shopifyGraphql: provider.graphql, exchangeShopifyAuthorizationCode: provider.exchange, refreshShopifyTokens: provider.refresh, verifyShopifyOAuthQueryHmac: provider.hmac,
@@ -30,7 +32,7 @@ beforeEach(() => {
 async function fixture(afterSetupQuery?: (sql: string, client: PoolClient) => Promise<void>) {
   const actor = randomUUID(), workspaceId = randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [actor])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Shopify',$2)", [workspaceId, actor])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Shopify',$2,false)", [workspaceId, actor])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, actor])
   const team = await createDbWorkspaceGroupStore().createTeam(actor, workspaceId, { name: 'Shared', key: 'shared' })
   await pool.query("UPDATE workspace_access_policies SET setup_state='ready',access_mode='simple',default_department_id=$2 WHERE workspace_id=$1", [workspaceId, team.id])

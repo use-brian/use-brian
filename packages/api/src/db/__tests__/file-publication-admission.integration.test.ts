@@ -9,13 +9,15 @@ import {createChunkedFileUploadService,chunkedUploadPartKey} from '../../files/c
 import {createFilesApi} from '../../files/files-api.js'
 import type {FilesContext} from '@use-brian/core'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 const pool=getPool()
 afterAll(async()=>{await getAppPool().end();await pool.end()})
 async function fixture(){
  const workspaceId=randomUUID(),userId=randomUUID(),assistantId=randomUUID(),projectId=randomUUID()
  await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[userId])
- await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Publication fixture',$2)",[workspaceId,userId])
+ await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Publication fixture',$2,false)",[workspaceId,userId])
  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[workspaceId,userId])
  await pool.query("INSERT INTO assistants(id,workspace_id,owner_user_id,name,kind,clearance) VALUES($1,$2,$3,'Publication','primary','confidential')",[assistantId,workspaceId,userId])
  await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Project','project',$3)",[projectId,workspaceId,userId])

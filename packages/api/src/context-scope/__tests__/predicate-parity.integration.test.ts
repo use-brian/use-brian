@@ -113,6 +113,9 @@ describeIf('[COMP:access/predicate-parity] RLS, store predicate and turn resolve
       await q(`INSERT INTO workspace_compartments(workspace_id,key,label,created_by,managed_by,managed_ref_id) VALUES($1,$2,$3,$4,'team',$5)`,
         [WORKSPACE, `team:${id}`, name, creators[id], id])
     }
+    // Legacy membership writes above were synced into derived edges (650);
+    // the matrix is exactly §4.1's edges, so keep only owner edges and seed the rest.
+    await q(`DELETE FROM department_edges WHERE workspace_id=$1 AND origin <> 'owner'`, [WORKSPACE])
     for (const e of shiftedEdges) {
       const column = e.principal.kind === 'user' ? 'user_id' : 'assistant_id'
       await q(`INSERT INTO department_edges(workspace_id,department_id,principal_kind,${column},clearance,expires_at,origin)
