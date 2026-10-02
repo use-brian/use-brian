@@ -2,6 +2,7 @@ import type { FilesApi, SavedViewStore } from '@use-brian/core'
 import { LIVE_MARKER_ID_PREFIX } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import type { PoolClient } from 'pg'
+import { enqueueRecordingJob } from '../db/recording-jobs-store.js'
 import { createRecording, getRecordingSystem } from '../db/recordings-store.js'
 import { captureRecordingIntakeParent } from '../db/recording-intake-admission.js'
 import { validateWatchAudio } from './watch-media.js'
@@ -78,12 +79,29 @@ export function createWatchService(deps: {
   }
   async function retry(g: Grant, clientId: string) {
     const c = await watchStore.get(g, clientId)
-    if (c.state === 'finalized') return status(g, clientId)
-    if (!deps.transcribe) throw new WatchError(503, 'live_transcription_unavailable')
     await withCaptureLock(c.id, async db => {
       const c = await watchStore.get(g, clientId)
-      if (c.state === 'finalized') return
       await authorize(g)
+      if (c.state === 'finalized') {
+        // Explicit recovery only: never republish media or alter canonical scope.
+        await db.query('BEGIN')
+        try {
+          const failed = await db.query(`SELECT id FROM recordings
+            WHERE id=$1 AND workspace_id=$2 AND status='failed' AND valid_to IS NULL FOR UPDATE`,
+          [c.recording_id, g.workspace_id])
+          if (failed.rows.length) {
+            const job = await enqueueRecordingJob({ recordingId: c.recording_id,
+              workspaceId: g.workspace_id, actingUserId: g.owner_id }, db)
+            // The active-job unique index also protects against non-watch enqueues.
+            if (job.enqueued) await db.query("UPDATE recordings SET status='queued' WHERE id=$1 AND status='failed'", [c.recording_id])
+          }
+          await authorize(g)
+          await watchStore.assertLive(c.id, db)
+          await db.query('COMMIT')
+        } catch (error) { await db.query('ROLLBACK'); throw error }
+        return
+      }
+      if (!deps.transcribe) throw new WatchError(503, 'live_transcription_unavailable')
       await ensurePage(g, c, db)
       const rows = await watchStore.windows(c.id)
       let sequence = 0, processed = 0

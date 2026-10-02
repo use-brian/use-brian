@@ -20,9 +20,9 @@ import { createLocalFilesClient } from '../../files/local-files-client.js'
 import { localFilesTransferRoutes } from '../../routes/local-files-transfer.js'
 import { openRecordingsRoutes } from '../../routes/recordings.js'
 import { watchRecordingRoutes } from '../../routes/watch-recording.js'
-import { claimNextRecordingJob, enqueueRecordingJob, hasCompletedRecordingJob, markRecordingJobDone } from '../../db/recording-jobs-store.js'
+import { claimNextRecordingJob, enqueueRecordingJob, hasCompletedRecordingJob, markRecordingJobFailed, markRecordingJobDone } from '../../db/recording-jobs-store.js'
 import { captureRecordingSegmentProvenance, recordingIntakeTransaction } from '../../db/recording-intake-admission.js'
-import { getRecording } from '../../db/recordings-store.js'
+import { getRecording, updateRecording } from '../../db/recordings-store.js'
 import { authorizeWatchDestination, createWatchService } from '../watch-service.js'
 import { watchStore, sha256 } from '../watch-store.js'
 import { processOpenRecordingWithBookkeeping } from '../process-recording.js'
@@ -149,9 +149,24 @@ describe('watch → canonical file/Episode/recording/page → real queue/process
     expect(fileRead.ok).toBe(true)
     if (!fileRead.ok) throw new Error('canonical media not readable')
     expect(sha256(Buffer.from(fileRead.value.bytes))).toBe(sha256(playbackBytes))
-    const job = await claimNextRecordingJob()
+    let job = await claimNextRecordingJob()
     expect(job).toMatchObject({ recordingId: c.recording_id, actingUserId: f.userId, status: 'processing' })
     if (!job) throw new Error('watch queue job missing')
+    // Exhausted worker failure: only explicit /retry can start a new job.
+    await pool.query('UPDATE recording_jobs SET attempts=3 WHERE id=$1', [job.id])
+    expect(await markRecordingJobFailed(job.id, 'fixture exhausted failure')).toEqual({ retrying: false })
+    await updateRecording(c.recording_id, { status: 'failed', lastError: 'fixture exhausted failure' })
+    const retryProcessing = () => request(f.server).post(`${path}/retry`).set('Authorization', `Bearer ${f.tokens.accessToken}`)
+    expect((await f.service.status(f.grant, clientId)).processing).toBe('failed')
+    expect((await counts()).jobs).toBe(1) // GET must not implicitly enqueue.
+    expect((await retryProcessing().expect(200)).body.processing).toBe('queued')
+    expect((await retryProcessing().expect(200)).body.processing).toBe('queued')
+    expect((await counts()).jobs).toBe(2)
+    job = await claimNextRecordingJob()
+    if (!job) throw new Error('explicit recovery job missing')
+    await updateRecording(c.recording_id, { status: 'processing' })
+    expect((await retryProcessing().expect(200)).body.processing).toBe('processing')
+    expect((await counts()).jobs).toBe(2)
     const processed = await processOpenRecordingWithBookkeeping(job, {
       filesResolver: f.resolver, fallbackStorage: f.storage, filesApi: f.files,
       transcriber: { name: 'watch-fixture', transcribe: async input => {
@@ -171,8 +186,9 @@ describe('watch → canonical file/Episode/recording/page → real queue/process
     expect(after?.status).toBe('processed'); expect(after?.transcriptFileId).toBeTruthy()
     expect((await queryWithRLS(f.userId, 'SELECT segment_text AS text,scope_held FROM transcript_segments WHERE recording_id=$1', [c.recording_id])).rows).toEqual([{ text: 'Canonical watch transcript.', scope_held: false }])
     expect((await pool.query('SELECT occurred_at,source_ref,scope_version FROM episodes WHERE id=$1', [c.recording_id])).rows[0]).toEqual(episodeBefore)
-    await f.service.finalize(f.grant, clientId, intent) // completed job must not be queued a second time
-    expect(await counts()).toEqual({ pages: 1, recordings: 1, episodes: 1, jobs: 1, media: 1 })
+    await f.service.finalize(f.grant, clientId, intent) // completed job must not be queued again
+    expect((await retryProcessing().expect(200)).body.processing).toBe('processed')
+    expect(await counts()).toEqual({ pages: 1, recordings: 1, episodes: 1, jobs: 2, media: 1 })
     expect(await claimNextRecordingJob()).toBeNull()
   }, 60000)
 })

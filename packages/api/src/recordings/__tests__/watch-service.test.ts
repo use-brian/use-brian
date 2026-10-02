@@ -2,13 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import type { Capture, Grant, Window } from '../watch-store.js'
 const mocks = vi.hoisted(() => ({
-  get: vi.fn(), assertLive: vi.fn(), upload: vi.fn(), windows: vi.fn(), seal: vi.fn(), sql: vi.fn(), insert: vi.fn(), createRecording: vi.fn(), captureParent: vi.fn(), getRecording: vi.fn(), concat: vi.fn(), validate: vi.fn(),
+  enqueue: vi.fn(), get: vi.fn(), assertLive: vi.fn(), upload: vi.fn(), windows: vi.fn(), seal: vi.fn(), sql: vi.fn(), insert: vi.fn(), createRecording: vi.fn(), captureParent: vi.fn(), getRecording: vi.fn(), concat: vi.fn(), validate: vi.fn(),
 }))
 vi.mock('../watch-store.js', async importOriginal => {
   const original = await importOriginal<typeof import('../watch-store.js')>()
   return { ...original, watchStore: { get: mocks.get, windows: mocks.windows, seal: mocks.seal, assertLive: mocks.assertLive, upload: mocks.upload },
     withCaptureLock: async (_id: string, work: (db: {query: typeof mocks.sql}) => unknown) => work({ query: mocks.sql }) }
 })
+vi.mock('../../db/recording-jobs-store.js', () => ({ enqueueRecordingJob: mocks.enqueue }))
 vi.mock('../../db/client.js', () => ({ query: mocks.sql }))
 vi.mock('../../db/live-transcript-store.js', () => ({ insertLiveWindow: mocks.insert }))
 vi.mock('../../db/recordings-store.js', () => ({ createRecording: mocks.createRecording, getRecordingSystem: mocks.getRecording }))
@@ -30,6 +31,7 @@ function harness() {
 }
 beforeEach(() => {
   vi.resetAllMocks()
+  mocks.enqueue.mockResolvedValue({ enqueued: true, jobId: 'retry-job' })
   g = { id: randomUUID(), owner_id: randomUUID(), workspace_id: randomUUID(), assistant_id: randomUUID() } as Grant
   c = { id: randomUUID(), page_id: randomUUID(), recording_id: randomUUID(), client_id: randomUUID(), state: 'open', page_prepared: true, page_prepare_started: true, expires_at: new Date(Date.now() + 3600000), metadata: { title: 'Meeting' } } as Capture
   windows = [window(0), window(1)]
@@ -104,6 +106,45 @@ describe('watch service recovery and ordering', () => {
     await h.service.finalize(g, c.client_id, input)
     expect(mocks.createRecording).toHaveBeenCalledTimes(1)
     expect(mocks.concat).toHaveBeenCalledTimes(1)
+  })
+  it('explicitly queues finalized failed processing without requiring live transcription', async () => {
+    const h = harness(); c.state = 'finalized'
+    const service = createWatchService({ pages: h.pages as never, files: h.files as never, authorize: h.authorize })
+    await service.retry(g, c.client_id)
+    expect(mocks.enqueue).toHaveBeenCalledWith({ recordingId: c.recording_id, workspaceId: g.workspace_id, actingUserId: g.owner_id }, expect.objectContaining({ query: mocks.sql }))
+    expect(mocks.sql.mock.calls.map(([sql]) => sql)).toEqual(['BEGIN', expect.stringContaining('FOR UPDATE'), expect.stringContaining("SET status='queued'"), 'COMMIT'])
+    expect(h.authorize).toHaveBeenCalledTimes(2)
+    expect(h.files.writeBytes).not.toHaveBeenCalled()
+    expect(mocks.createRecording).not.toHaveBeenCalled()
+  })
+  it.each(['queued', 'processing', 'processed'])('does not enqueue finalized %s processing', async processing => {
+    const h = harness(); c.state = 'finalized'
+    mocks.getRecording.mockResolvedValue({ status: processing })
+    mocks.sql.mockResolvedValue({ rows: [] }) // failed-only locked SELECT finds no row
+    expect((await h.service.retry(g, c.client_id)).processing).toBe(processing)
+    expect(mocks.enqueue).not.toHaveBeenCalled()
+    expect(h.transcribe).not.toHaveBeenCalled()
+  })
+  it('does not overwrite worker status when an active job already exists', async () => {
+    const h = harness(); c.state = 'finalized'
+    mocks.enqueue.mockResolvedValue({ enqueued: false, jobId: null })
+    await h.service.retry(g, c.client_id)
+    expect(mocks.sql.mock.calls.some(([sql]) => sql.includes('UPDATE recordings'))).toBe(false)
+  })
+  it('rejects finalized retries after destination authorization is lost', async () => {
+    const h = harness(); c.state = 'finalized'
+    h.authorize.mockRejectedValue(new Error('destination_unavailable'))
+    await expect(h.service.retry(g, c.client_id)).rejects.toThrow('destination_unavailable')
+    expect(mocks.enqueue).not.toHaveBeenCalled()
+  })
+  it('rolls back enqueue/status together if the capture expires during retry', async () => {
+    const h = harness(); c.state = 'finalized'
+    mocks.enqueue.mockImplementation(async () => {
+      c.expires_at = new Date(0)
+      return { enqueued: true, jobId: 'retry-job' }
+    })
+    await expect(h.service.retry(g, c.client_id)).rejects.toThrow('capture_expired')
+    expect(mocks.sql.mock.calls.at(-1)?.[0]).toBe('ROLLBACK')
   })
   it('leaves sealed intent recoverable on storage failure; never enqueues prematurely', async () => {
     const h = harness()
