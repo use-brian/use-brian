@@ -189,12 +189,19 @@ describe('[COMP:api/workspace-access] canonical request and approval transaction
     const f=await fixture(),app=appFor(f.manager),path=`/api/workspaces/${f.workspaceId}/groups/${f.target.id}/members`
     expect((await reviewedLegacy(app,f.workspaceId,f.manager).put(`${path}/${f.stranger}`).send({})).status).toBe(204)
     expect((await reviewedLegacy(app,f.workspaceId,f.manager).put(`${path}/${f.manager}`).send({})).status).toBe(403)
+    // Read bundles exist only in a workspace rolled back to the legacy read (D26).
+    await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1',[f.workspaceId])
     await execute(f.workspaceId,f.owner,{type:'department.read_bundle.set',teamId:f.target.id,readAll:true,groupIds:[]})
     expect((await reviewedLegacy(app,f.workspaceId,f.manager).delete(`${path}/${f.stranger}`)).status).toBe(403)
     expect((await reviewedLegacy(appFor(f.owner),f.workspaceId,f.owner).delete(`${path}/${f.stranger}`)).status).toBe(204)
   })
-  it('validates bundle references before any write and archives through the same service',async()=>{
+  it('refuses read bundles in a v2 workspace, validates them after a legacy rollback, and archives through the same service',async()=>{
     const f=await fixture(),other=await fixture(),app=appFor(f.owner),base=`/api/workspaces/${f.workspaceId}/groups/${f.target.id}`
+    const retired=await reviewedLegacy(app,f.workspaceId,f.owner).put(`${base}/read-grants`).send({readAll:true,groupIds:[]})
+    expect(retired.status).toBe(410)
+    expect(retired.body.error).toBe('department_read_bundle_retired')
+    expect((await pool.query('SELECT read_all FROM workspace_groups WHERE id=$1',[f.target.id])).rows[0].read_all).toBe(false)
+    await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1',[f.workspaceId])
     const denied=await reviewedLegacy(app,f.workspaceId,f.owner).put(`${base}/read-grants`).send({readAll:true,groupIds:[other.target.id]})
     expect(denied.status).toBe(404)
     expect((await pool.query('SELECT read_all FROM workspace_groups WHERE id=$1',[f.target.id])).rows[0].read_all).toBe(false)

@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
   breakGlass: vi.fn(), setHome: vi.fn(), confirm: vi.fn(), prompt: vi.fn(),
 }));
 vi.mock('@/lib/workspace-context', () => ({ useWorkspaceContext: () => mocks.viewer }));
-vi.mock('@/lib/api/mentions', () => ({ listWorkspaceMembers: async () => [{ id: 'owner-fixture', name: 'Ava Example' }, { id: 'member-fixture', name: 'Maya Example' }] }));
+vi.mock('@/lib/api/mentions', () => ({ listWorkspaceMembers: async () => [{ id: 'owner-fixture', name: 'Ava Example' }, { id: 'member-fixture', name: 'Maya Example' }, { id: 'new-fixture', name: 'Noor Example' }] }));
 vi.mock('@/lib/api/studio', () => ({ listAssistants: async () => [{ id: 'assistant-fixture', name: 'Ops' }] }));
 vi.mock('@/components/ui/confirm-dialog', () => ({ confirmDialog: mocks.confirm }));
 vi.mock('@/components/ui/prompt-dialog', () => ({ promptDialog: mocks.prompt }));
@@ -36,6 +36,26 @@ async function render(node: React.ReactNode) {
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });
 }
 const buttons = () => [...host.querySelectorAll<HTMLButtonElement>('button')].map(b => b.textContent ?? '');
+const flush = () => act(async () => { await new Promise(r => setTimeout(r, 0)); });
+const t = en.departmentAccess;
+async function openActions(name: string) {
+  const trigger = host.querySelector<HTMLButtonElement>(`[aria-label="${t.actionsLabel.replace('{name}', name)}"]`);
+  expect(trigger, `actions for ${name}`).not.toBeNull();
+  await act(async () => { trigger!.click(); });
+  await flush();
+}
+async function chooseItem(text: string) {
+  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(node => node.textContent?.trim() === text);
+  expect(item, `menu item ${text}`).toBeDefined();
+  await act(async () => { item!.click(); });
+  await flush();
+}
+async function setDate(input: HTMLInputElement, value: string) {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
 
 beforeEach(() => {
   mocks.viewer.me.id = 'owner-fixture';
@@ -44,37 +64,94 @@ beforeEach(() => {
   mocks.edges.mockResolvedValue({ edges: [
     { departmentId: D, principal: { kind: 'user', id: 'owner-fixture' }, clearance: 'confidential', expiresAt: null, origin: 'owner' },
     { departmentId: D, principal: { kind: 'user', id: 'member-fixture' }, clearance: 'internal', expiresAt: null, origin: 'migrated' },
+    { departmentId: D, principal: { kind: 'assistant', id: 'assistant-fixture' }, clearance: 'confidential', expiresAt: null, origin: 'primary' },
   ] });
+  mocks.setEdge.mockResolvedValue({ revision: 6 });
   mocks.removeEdge.mockResolvedValue({ revision: 6 });
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 
 describe('[COMP:app-web/department-access] Organization > Departments: who reads a department and home departments', () => {
-  it('shows an owner each member with clearance, owner and carried-over markers, and editing controls', async () => {
+  it('groups people and assistants, with clearance, owner, carried-over and every-department markers', async () => {
     await render(<DepartmentAccessPanel departmentId={D} />);
+    expect(host.textContent).toContain(t.people);
+    expect(host.textContent).toContain(t.assistants);
     expect(host.textContent).toContain('Maya Example');
-    expect(host.textContent).toContain(en.departmentAccess.carriedOver);
-    expect(host.textContent).toContain(en.departmentAccess.owner);
-    expect(host.querySelector(`[aria-label="${en.departmentAccess.clearanceLabel.replace('{name}', 'Maya Example')}"]`)).not.toBeNull();
-    expect(buttons().some(b => b.includes(en.departmentAccess.makeOwner))).toBe(true);
+    expect(host.textContent).toContain(t.carriedOver);
+    expect(host.textContent).toContain(t.owner);
+    expect(host.textContent).toContain(t.everyDepartment);
+    expect(host.querySelector(`[aria-label="${t.clearanceLabel.replace('{name}', 'Maya Example')}"]`)).not.toBeNull();
+    // The primary assistant's access is fixed: no clearance control and no actions.
+    expect(host.querySelector(`[aria-label="${t.clearanceLabel.replace('{name}', 'Ops')}"]`)).toBeNull();
+    expect(host.querySelector(`[aria-label="${t.actionsLabel.replace('{name}', 'Ops')}"]`)).toBeNull();
+    await openActions('Maya Example');
+    expect([...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim())).toEqual([t.setEndDate, t.makeOwner, t.remove]);
   });
 
-  it('removes a member only after confirmation, binding the department revision', async () => {
+  it('removes a member from the row menu only after confirmation, binding the department revision', async () => {
     mocks.confirm.mockResolvedValue(true);
     await render(<DepartmentAccessPanel departmentId={D} />);
-    const remove = [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.trim() === en.departmentAccess.remove)!;
-    await act(async () => { remove.click(); });
-    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
-    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ description: en.departmentAccess.removeDescription.replace('{name}', 'Maya Example') }));
+    await openActions('Maya Example');
+    await chooseItem(t.remove);
+    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ description: t.removeDescription.replace('{name}', 'Maya Example') }));
     expect(mocks.removeEdge).toHaveBeenCalledWith(W, D, { principal: { kind: 'user', id: 'member-fixture' }, expectedRevision: 5 });
+  });
+
+  it('sets an end date from the row menu as the end of the chosen day', async () => {
+    await render(<DepartmentAccessPanel departmentId={D} />);
+    await openActions('Maya Example');
+    await chooseItem(t.setEndDate);
+    const input = host.querySelector<HTMLInputElement>('li input[type="date"]')!;
+    await setDate(input, '2099-03-04');
+    await act(async () => { [...host.querySelectorAll('button')].find(b => b.textContent?.trim() === t.saveEndDate)!.click(); });
+    await flush();
+    expect(mocks.setEdge).toHaveBeenCalledWith(W, D, { principal: { kind: 'user', id: 'member-fixture' }, clearance: 'internal', expiresAt: new Date('2099-03-04T23:59:59').toISOString(), expectedRevision: 5 });
+    expect(host.querySelector('li input[type="date"]')).toBeNull();
+  });
+
+  it('adds a person with the chosen clearance and an optional end date', async () => {
+    await render(<DepartmentAccessPanel departmentId={D} />);
+    expect(host.textContent).toContain(t.addTitle);
+    await act(async () => { host.querySelector<HTMLButtonElement>(`button[aria-label="${t.addWho}"]`)!.click(); });
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(node => node.textContent?.startsWith('Noor Example'));
+    expect(option).toBeDefined();
+    // People already in the department are not offered again.
+    expect([...document.querySelectorAll('[role="option"]')].some(node => node.textContent?.startsWith('Maya Example'))).toBe(false);
+    await act(async () => { option!.click(); });
+    const until = [...host.querySelectorAll<HTMLInputElement>('input[type="date"]')].at(-1)!;
+    await setDate(until, '2099-01-31');
+    await act(async () => { [...host.querySelectorAll('button')].find(b => b.textContent?.trim() === t.add)!.click(); });
+    await flush();
+    expect(mocks.setEdge).toHaveBeenCalledWith(W, D, { principal: { kind: 'user', id: 'new-fixture' }, clearance: 'internal', expiresAt: new Date('2099-01-31T23:59:59').toISOString(), expectedRevision: 5 });
+  });
+
+  it('explains a removal the panel cannot make instead of failing silently', async () => {
+    mocks.confirm.mockResolvedValue(true);
+    const { DepartmentRequestError } = await import('@/lib/api/departments');
+    mocks.removeEdge.mockRejectedValue(new DepartmentRequestError('department_access_via_grant'));
+    await render(<DepartmentAccessPanel departmentId={D} />);
+    await openActions('Maya Example');
+    await chooseItem(t.remove);
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(t.errorViaGrant);
+  });
+
+  it('a grant-derived row shows temporary access and no actions', async () => {
+    mocks.edges.mockResolvedValue({ edges: [
+      { departmentId: D, principal: { kind: 'user', id: 'owner-fixture' }, clearance: 'confidential', expiresAt: null, origin: 'owner' },
+      { departmentId: D, principal: { kind: 'user', id: 'member-fixture' }, clearance: 'internal', expiresAt: '2099-01-01T00:00:00.000Z', origin: 'grant' },
+    ] });
+    await render(<DepartmentAccessPanel departmentId={D} />);
+    expect(host.textContent).toContain(t.viaGrant);
+    expect(host.querySelector(`[aria-label="${t.actionsLabel.replace('{name}', 'Maya Example')}"]`)).toBeNull();
   });
 
   it('a non-owner member sees the roster read-only', async () => {
     mocks.departments.mockResolvedValue({ departments: [entry({ isOwner: false })], homes: [] });
     await render(<DepartmentAccessPanel departmentId={D} />);
-    expect(host.textContent).toContain(en.departmentAccess.readOnly);
-    expect(buttons().some(b => b.includes(en.departmentAccess.remove))).toBe(false);
+    expect(host.textContent).toContain(t.readOnly);
+    expect(host.querySelector(`[aria-label="${t.actionsLabel.replace('{name}', 'Maya Example')}"]`)).toBeNull();
+    expect(host.textContent).not.toContain(t.addTitle);
   });
 
   it('the workspace owner outside a department sees only break-glass, which asks for confirmation and a reason', async () => {
@@ -82,9 +159,9 @@ describe('[COMP:app-web/department-access] Organization > Departments: who reads
     mocks.confirm.mockResolvedValue(true); mocks.prompt.mockResolvedValue('Owner left the company');
     await render(<DepartmentAccessPanel departmentId={D} />);
     expect(host.textContent).not.toContain('Maya Example');
-    const join = [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.includes(en.departmentAccess.breakGlass))!;
+    const join = [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.includes(t.breakGlass))!;
     await act(async () => { join.click(); });
-    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    await flush();
     expect(mocks.breakGlass).toHaveBeenCalledWith(W, D, 'Owner left the company');
   });
 

@@ -187,7 +187,10 @@ describeIf('[COMP:access/department-store] Department owners and edges', () => {
     const f = await workspace()
     await q('SELECT department_edges_reconcile($1)', [f.w])
     const base = async () => (await q('SELECT user_id,clearance,role FROM workspace_members WHERE workspace_id=$1 ORDER BY user_id', [f.w])).rows
-    const elsewhere = async () => (await q('SELECT * FROM department_edges WHERE workspace_id=$1 AND department_id<>$2 ORDER BY id', [f.w, f.platform.id])).rows
+    // Adding or removing someone also writes their Team membership (652), which
+    // re-runs the reconcile; that may touch updated_at, never what an edge grants.
+    const elsewhere = async () => (await q(`SELECT id, department_id, principal_kind, user_id, assistant_id, clearance, expires_at, origin
+                                              FROM department_edges WHERE workspace_id=$1 AND department_id<>$2 ORDER BY id`, [f.w, f.platform.id])).rows
     const beforeBase = await base(), beforeOther = await elsewhere()
     await store.setEdge(f.jun, f.platform.id, { kind: 'user', id: f.maya }, 'confidential', null)
     await store.addOwner(f.jun, f.platform.id, f.maya)
@@ -303,5 +306,50 @@ describeIf('[COMP:access/department-store] After the cutover: edges, home depart
     const owners = (await store.directory(f.ava, f.w)).find(d => d.departmentId === board.id)
     expect(owners).toMatchObject({ myClearance: null, isOwner: false, ownerIds: [f.priya] })
     expect(await store.listEdges(f.ava, board.id)).toEqual([])
+  })
+
+  it('D26: one roster: the panel and Team membership move together, and a removal sticks', async () => {
+    const f = await flagged()
+    const isMember = async (d: string, u: string) => (await q('SELECT 1 FROM workspace_group_members WHERE group_id=$1 AND user_id=$2', [d, u])).rows.length === 1
+    // Adding Maya in the panel makes her a Team member, at the clearance the owner chose.
+    await store.setEdge(f.jun, f.platform.id, { kind: 'user', id: f.maya }, 'public', null)
+    expect(await isMember(f.platform.id, f.maya)).toBe(true)
+    await q('SELECT department_edges_reconcile($1)', [f.w])
+    expect(edgeOf(await edges(f.w), f.platform.id, f.maya)).toMatchObject({ c: 'public', o: 'store' })
+    // Removing her ends the membership, so no later sync brings her back.
+    await store.removeEdge(f.jun, f.platform.id, { kind: 'user', id: f.maya })
+    expect(await isMember(f.platform.id, f.maya)).toBe(false)
+    await member(f.w, 'member')
+    await q('SELECT department_edges_reconcile($1)', [f.w])
+    expect(edgeOf(await edges(f.w), f.platform.id, f.maya)).toBeUndefined()
+    // The other direction: ending the membership elsewhere ends a panel-written edge too.
+    await store.setEdge(f.jun, f.platform.id, { kind: 'user', id: f.maya }, 'internal', null)
+    await q('DELETE FROM workspace_group_members WHERE group_id=$1 AND user_id=$2', [f.platform.id, f.maya])
+    expect(edgeOf(await edges(f.w), f.platform.id, f.maya)).toBeUndefined()
+    // An owner's edge survives losing the membership (Jun created Platform).
+    await q('DELETE FROM workspace_group_members WHERE group_id=$1 AND user_id=$2', [f.platform.id, f.jun])
+    expect(edgeOf(await edges(f.w), f.platform.id, f.jun)?.c).toBe('confidential')
+    // Assistants: assignment and edge move together.
+    const ops = (await q(`INSERT INTO assistants(name,workspace_id,kind,clearance) VALUES('Ops',$1,'standard','internal') RETURNING id`, [f.w])).rows[0].id
+    await store.setEdge(f.jun, f.platform.id, { kind: 'assistant', id: ops }, 'internal', null)
+    expect((await q('SELECT 1 FROM workspace_group_assistants WHERE group_id=$1 AND assistant_id=$2', [f.platform.id, ops])).rows).toHaveLength(1)
+    await store.removeEdge(f.jun, f.platform.id, { kind: 'assistant', id: ops })
+    expect((await q('SELECT 1 FROM workspace_group_assistants WHERE group_id=$1 AND assistant_id=$2', [f.platform.id, ops])).rows).toHaveLength(0)
+    expect(edgeOf(await edges(f.w), f.platform.id, ops)).toBeUndefined()
+  })
+
+  it('D26: sources the panel cannot end are refused by name instead of silently returning', async () => {
+    const f = await flagged()
+    const primary = (await q(`INSERT INTO assistants(name,workspace_id,kind,clearance) VALUES('Brian',$1,'primary','confidential') RETURNING id`, [f.w])).rows[0].id
+    await q('SELECT department_edges_reconcile($1)', [f.w])
+    await expect(store.removeEdge(f.jun, f.platform.id, { kind: 'assistant', id: primary })).rejects.toMatchObject({ code: 'department_primary_assistant' })
+    // Maya reads Platform through an approved access grant.
+    const request = (await q(`INSERT INTO workspace_access_requests(workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,reason,starts_at,expires_at,payload_hash,policy_revision,status,decided_by,decided_at)
+      VALUES($1,$2,'member',$2,$3,'audit',now()-interval '1 minute',now()+interval '7 days',repeat('b',64),1,'approved',$4,now()) RETURNING id`, [f.w, f.maya, f.platform.id, f.jun])).rows[0].id
+    await q(`INSERT INTO workspace_access_grants(workspace_id,request_id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,approved_by)
+      SELECT workspace_id,id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,decided_by FROM workspace_access_requests WHERE id=$1`, [request])
+    expect(edgeOf(await edges(f.w), f.platform.id, f.maya)?.o).toBe('grant')
+    await expect(store.removeEdge(f.jun, f.platform.id, { kind: 'user', id: f.maya })).rejects.toMatchObject({ code: 'department_access_via_grant' })
+    expect(edgeOf(await edges(f.w), f.platform.id, f.maya)?.o).toBe('grant')
   })
 })

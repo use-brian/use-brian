@@ -39,6 +39,8 @@ const ERRORS: Record<string, number> = {
   department_actor_required: 401,
   department_home_not_allowed: 403,
   department_home_requires_edge: 409,
+  department_primary_assistant: 409,
+  department_access_via_grant: 409,
 }
 
 async function asActor<T>(actor: string, work: (client: PoolClient) => Promise<T>): Promise<T> {

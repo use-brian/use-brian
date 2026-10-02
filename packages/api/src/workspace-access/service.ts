@@ -263,6 +263,13 @@ export async function executeDepartmentAccessInTransaction(client:PoolClient,wor
         } else if(command.type==='department.archive') {
           await store.archiveTeam(userId,team.id)
         } else if(command.type==='department.read_bundle.set') {
+          // Retired by the v2 cutover (D23, D26): in a v2 workspace Team-to-Team
+          // read packages and "read every Team" create no access, so the command
+          // is refused rather than saved as an inert setting. Per-person access
+          // is an edge set through manageDepartments / Organization -> Departments.
+          // A workspace rolled back to the legacy read keeps the command.
+          const v2=(await client.query<{v2:boolean}>(`SELECT coalesce((to_jsonb(w)->>'department_read_v2')::boolean,false) AS v2 FROM workspaces w WHERE id=$1`,[workspaceId])).rows[0]?.v2===true
+          if(v2)throw new WorkspaceAccessError('department_read_bundle_retired',410)
           const selected=command.groupIds.map(id=>all.find(row=>row.id===id&&row.status==='active'))
           if(team.status!=='active'||selected.some(row=>!row))throw new WorkspaceAccessError('not_found',404)
           await store.setTeamReadBundle(userId,team.id,{readAll:command.readAll,compartmentKeys:selected.map(row=>row!.compartmentKey)})
