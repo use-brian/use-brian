@@ -21,6 +21,8 @@ type Listener = () => void;
 export type DockRecorderChatTarget = {
   sendVoiceClip(fileId: string): Promise<boolean>;
   getSessionId(): string | undefined;
+  /** Omit for unsupported surfaces (feed / shared rooms). Never fall back. */
+  ensureInteractionSession?: () => Promise<string>;
 };
 
 let controller: DockRecorderApi | null = null;
@@ -98,7 +100,8 @@ export function sendDockRecorderVoiceClip(
 export function getDockRecorderSessionId(
   fallback: () => string | undefined,
 ): string | undefined {
-  return activeTarget()?.getSessionId() ?? fallback();
+  const target = activeTarget();
+  return target ? target.getSessionId() : fallback();
 }
 
 /** Test-only reset for the module singleton. */
@@ -106,4 +109,13 @@ export function resetDockRecorderBridgeForTest(): void {
   controller = null;
   targets.clear();
   emitController();
+}
+
+export class InteractionSessionUnavailable extends Error {}
+
+export function ensureDockRecorderInteractionSession(fallback: () => Promise<string>): Promise<string> {
+  const target = activeTarget();
+  if (!target) return fallback();
+  if (!target.ensureInteractionSession) return Promise.reject(new InteractionSessionUnavailable());
+  return target.ensureInteractionSession();
 }

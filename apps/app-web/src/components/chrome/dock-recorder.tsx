@@ -308,6 +308,8 @@ export function DockRecorderButton({
   const outsideRef = useRef(false);
   const computerAudioId = useId();
   const livePageId = useId();
+  const interactionId = useId();
+  const interactionT = useT().liveInteraction;
 
   // While a press-gesture is unresolved, resolve release from ANYWHERE in
   // the document — a finger sliding off the button must still stop.
@@ -465,11 +467,19 @@ export function DockRecorderButton({
                 </label>
                 <Switch
                   id={livePageId}
+                  disabled={rec.interactionEnabled}
                   checked={rec.livePageEnabled}
                   onCheckedChange={rec.setLivePageEnabled}
                   aria-label={t.streamToPage}
                 />
               </div>
+              <div className="flex items-center justify-between gap-4">
+                <label htmlFor={interactionId} className="text-sm">{interactionT.title}</label>
+                <Switch id={interactionId} disabled={!rec.interactionAvailable} checked={rec.interactionEnabled} onCheckedChange={rec.setInteractionEnabled} aria-label={interactionT.title} />
+              </div>
+              <p className="text-xs text-muted-foreground">{interactionT.description}</p>
+              {rec.interactionStatus === "unavailable" && <p role="alert" className="text-xs">{interactionT.personalOnly}</p>}
+              {rec.interactionAvailable === false && <p role="status" className="text-xs">{interactionT.unavailable}</p>}
             </div>
           </PopoverContent>
         </Popover>
