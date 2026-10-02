@@ -571,14 +571,22 @@ REVOKE ALL ON FUNCTION public.department_lock(uuid, bigint) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.department_bump(uuid) FROM PUBLIC;
 
 -- ── Backfill ──────────────────────────────────────────────────────────────
+-- The issuer guard refuses any later change to issuer_user_id, NULL->value
+-- included, so this one-time stamp of existing keys runs with it off too.
+-- (Fixed 2026-10-02: the first production apply raised
+-- credential_issuer_immutable on the first existing key and rolled back.)
 ALTER TABLE public.brain_keys DISABLE TRIGGER external_key_admission;
 ALTER TABLE public.brain_keys DISABLE TRIGGER programmatic_key_binding_version;
+ALTER TABLE public.brain_keys DISABLE TRIGGER brain_keys_issuer;
 ALTER TABLE public.api_keys DISABLE TRIGGER external_key_admission;
+ALTER TABLE public.api_keys DISABLE TRIGGER api_keys_issuer;
 UPDATE public.brain_keys SET issuer_user_id = created_by WHERE issuer_user_id IS NULL AND created_by IS NOT NULL;
 UPDATE public.api_keys SET issuer_user_id = created_by WHERE issuer_user_id IS NULL AND created_by IS NOT NULL;
 ALTER TABLE public.brain_keys ENABLE TRIGGER external_key_admission;
 ALTER TABLE public.brain_keys ENABLE TRIGGER programmatic_key_binding_version;
+ALTER TABLE public.brain_keys ENABLE TRIGGER brain_keys_issuer;
 ALTER TABLE public.api_keys ENABLE TRIGGER external_key_admission;
+ALTER TABLE public.api_keys ENABLE TRIGGER api_keys_issuer;
 
 SELECT public.department_edges_reconcile(w.id) FROM public.workspaces w ORDER BY w.id;
 
