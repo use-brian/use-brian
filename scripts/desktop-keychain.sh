@@ -3,6 +3,8 @@
 # Spec: docs/architecture/features/app-desktop.md -> "Release keychain".
 set +x
 
+DESKTOP_SIGNING_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
 DESKTOP_SIGNING_DIR=""
 DESKTOP_SIGNING_KEYCHAIN=""
 DESKTOP_SIGNING_RESTORE_SEARCH_LIST=0
@@ -35,9 +37,30 @@ desktop_keychain_security() {
 desktop_keychain_prepare() {
   DESKTOP_SIGNING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/usebrian-signing.XXXXXX")" || return 1
   DESKTOP_SIGNING_KEYCHAIN="$DESKTOP_SIGNING_DIR/signing.keychain-db"
+  local public_chain="$DESKTOP_SIGNING_DIR/root_certs.keychain"
   local certificate="$DESKTOP_SIGNING_DIR/certificate.p12"
   local keychain_password identities keychains keychain
   keychain_password="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')" || return 1
+
+  # Reuse the installed builder's public Apple chain. CSC_KEYCHAIN bypasses
+  # electron-builder's createKeychain path, which normally installs this chain.
+  if ! node --input-type=module - "$DESKTOP_SIGNING_SCRIPT_DIR/../apps/app-desktop/package.json" "$public_chain" <<'NODE'
+import { chmodSync, copyFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+try {
+  const builder = createRequire(process.argv[2]).resolve('electron-builder/package.json');
+  const library = createRequire(builder).resolve('app-builder-lib/package.json');
+  copyFileSync(join(dirname(library), 'certs/root_certs.keychain'), process.argv[3]);
+  chmodSync(process.argv[3], 0o600);
+} catch {
+  console.error('error: could not copy installed electron-builder public Apple chain (app-builder-lib/certs/root_certs.keychain).');
+  process.exitCode = 1;
+}
+NODE
+  then
+    return 1
+  fi
 
   # Node reads the secret from the environment, never from command arguments.
   if ! node --input-type=module - "$certificate" <<'NODE'
@@ -87,7 +110,7 @@ NODE
     -T /usr/bin/codesign -T /usr/bin/productbuild -P "$CSC_KEY_PASSWORD" || return 1
   desktop_keychain_security set-key-partition-list -S apple-tool:,apple: -s \
     -k "$keychain_password" "$DESKTOP_SIGNING_KEYCHAIN" || return 1
-  desktop_keychain_security "${DESKTOP_SIGNING_SEARCH_LIST_ARGS[@]}" "$DESKTOP_SIGNING_KEYCHAIN" || return 1
+  desktop_keychain_security "${DESKTOP_SIGNING_SEARCH_LIST_ARGS[@]}" "$DESKTOP_SIGNING_KEYCHAIN" "$public_chain" || return 1
   identities="$(security find-identity -v -p codesigning "$DESKTOP_SIGNING_KEYCHAIN" 2>/dev/null)" || return 1
   CSC_NAME="$(printf '%s\n' "$identities" | awk '/Developer ID Application/ {print $2; exit}')"
   if [[ -z "$CSC_NAME" ]]; then
