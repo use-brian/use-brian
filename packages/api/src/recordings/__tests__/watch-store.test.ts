@@ -24,7 +24,7 @@ beforeAll(async () => {
   await db.query('INSERT INTO users VALUES($1)', [ownerId])
   await db.query('INSERT INTO workspaces VALUES($1)', [workspaceId])
   await db.query('INSERT INTO assistants VALUES($1)', [assistantId])
-  await db.exec(readFileSync(new URL('../../../migrations/650_watch_recording.sql', import.meta.url), 'utf8'))
+  await db.exec(readFileSync(new URL('../../../migrations/653_watch_recording.sql', import.meta.url), 'utf8'))
 }, 60000)
 afterAll(async () => { await db.close() })
 

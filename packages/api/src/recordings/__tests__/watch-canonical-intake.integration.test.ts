@@ -1,4 +1,4 @@
-/** Full canonical schema (including migration 650), real app-role stores and local
+/** Full canonical schema (including migration 653), real app-role stores and local
  * disk media. Only model/Pipeline-B semantics are deterministic fixture seams. */
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -34,8 +34,8 @@ const pool = getPool(), exec = promisify(execFile)
 const servers: Server[] = []
 let directory: string, first: Buffer, second: Buffer, full: Buffer
 beforeAll(async () => {
-  expect((await pool.query("SELECT name FROM _migrations WHERE name IN ('643_recording_segment_publication.sql','650_watch_recording.sql') ORDER BY name")).rows).toEqual([
-    { name: '643_recording_segment_publication.sql' }, { name: '650_watch_recording.sql' },
+  expect((await pool.query("SELECT name FROM _migrations WHERE name IN ('643_recording_segment_publication.sql','653_watch_recording.sql') ORDER BY name")).rows).toEqual([
+    { name: '643_recording_segment_publication.sql' }, { name: '653_watch_recording.sql' },
   ])
   // Same post-migration app-role fixture grant as page-placement-admission.integration.test.ts.
   await pool.query('GRANT EXECUTE ON FUNCTION lock_page_placement_teamspace(uuid,uuid) TO assurance_app')
@@ -92,7 +92,7 @@ describe('watch → canonical file/Episode/recording/page → real queue/process
   it.each(['windows', 'full'] as const)('publishes and processes %s intake once, preserving capturedAt and app-role readability', async source => {
     const f = await fixture(), clientId = randomUUID(), capturedAt = '2026-01-03T04:05:06.000Z'
     const c = await watchStore.create(f.grant, clientId, { capturedAt, title: `Watch ${source}`, source: 'apple-watch' })
-    await f.service.prepare(f.grant, c) // REAL saved-view store/placement + migration-650 publication guard.
+    await f.service.prepare(f.grant, c) // REAL saved-view store/placement + migration-653 publication guard.
     await f.service.prepare(f.grant, c)
     expect(await f.pages.getById(f.userId, c.page_id)).toMatchObject({ id: c.page_id, workspaceId: f.workspaceId })
     const path = `/api/watch/v1/sessions/${clientId}`

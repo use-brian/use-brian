@@ -24,7 +24,7 @@ describe.skipIf(!url)('[COMP:api/mobile-auth-store] PostgreSQL atomic redemption
     state.query = (sql, params) => pool.query(sql, params)
     await pool.query('CREATE TABLE users (id UUID PRIMARY KEY)')
     await pool.query('INSERT INTO users VALUES ($1)', [userId])
-    await pool.query(await readFile(new URL('../../../migrations/651_mobile_auth.sql', import.meta.url), 'utf8'))
+    await pool.query(await readFile(new URL('../../../migrations/654_mobile_auth.sql', import.meta.url), 'utf8'))
   })
   afterAll(async () => {
     if (pool) { await pool.query(`DROP SCHEMA ${schema} CASCADE`); await pool.end() }

@@ -11,7 +11,7 @@ The phone and watch clients live in **[use-brian/brian-mobile](https://github.co
 
 - Mobile browser authorization confirmation and client/redirect-bound PKCE redemption: [mobile-auth-contract.md](mobile-auth-contract.md).
 - Scoped device grants, owner recovery relay, durable audio receipt, full-file fallback, canonical recording intake/processing and retention: [WATCH_RECORDING_API.md](../../packages/api/WATCH_RECORDING_API.md).
-- Migrations `650_watch_recording.sql` and `651_mobile_auth.sql`; opt-in deployment configuration in `.env.example`.
+- Migrations `653_watch_recording.sql` and `654_mobile_auth.sql`; opt-in deployment configuration in `.env.example`.
 
 No Flutter, Android, iOS, watchOS source or mobile CI is included in this API branch. The earlier unpublished combined branch remains as a local backup (`backup/watchos-monorepo-before-split`) and is not the PR source.
 

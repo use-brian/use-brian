@@ -27,7 +27,7 @@ describe.skipIf(process.env.WATCH_POSTGRES_TEST !== '1')('watch real PostgreSQL 
       CREATE TABLE episodes(id uuid PRIMARY KEY,workspace_id uuid,assistant_id uuid,created_by_user_id uuid,source_kind text,occurred_at timestamptz);
       CREATE TABLE workspace_files(id uuid PRIMARY KEY,workspace_id uuid,created_by_user_id uuid,path text);
       CREATE TABLE saved_views(id uuid PRIMARY KEY,workspace_id uuid,created_by uuid,linked_recording_id uuid);`)
-    await pool.query(await readFile(new URL('../../../migrations/650_watch_recording.sql', import.meta.url), 'utf8'))
+    await pool.query(await readFile(new URL('../../../migrations/653_watch_recording.sql', import.meta.url), 'utf8'))
   }, 120000)
   afterAll(async () => {
     await pool?.end()

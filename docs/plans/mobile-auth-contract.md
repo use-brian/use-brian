@@ -59,7 +59,7 @@ Authorization: existing **human** `Authorization: Bearer <accessToken>` with nor
 
 200: `{ "code": "<32 random bytes, base64url>", "expiresAt": "<ISO timestamp>" }`.
 
-The user is derived exclusively from the bearer. Migration `651_mobile_auth.sql` stores only the SHA-256 code hash, bound user/client/redirect/challenge, creation time, expiry and consumption time. TTL is **120 seconds**. API mint is a bearer-authorized operation, not cookie-authorized; the ambient-browser CSRF boundary is the web confirmation POST.
+The user is derived exclusively from the bearer. Migration `654_mobile_auth.sql` stores only the SHA-256 code hash, bound user/client/redirect/challenge, creation time, expiry and consumption time. TTL is **120 seconds**. API mint is a bearer-authorized operation, not cookie-authorized; the ambient-browser CSRF boundary is the web confirmation POST.
 
 ### POST `/auth/mobile/exchange`
 
@@ -86,7 +86,7 @@ Use existing API `POST /auth/refresh` with `{ refreshToken }`; use returned acce
 
 ## Deployment and verification
 
-Apply migration 651 before serving this feature. `boot.ts` passes `createDbMobileAuthStore()` as the new final optional `authRoutes` dependency, after the existing session store. No watch route wiring was changed by the mobile-auth work.
+Apply migration 654 before serving this feature. `boot.ts` passes `createDbMobileAuthStore()` as the new final optional `authRoutes` dependency, after the existing session store. No watch route wiring was changed by the mobile-auth work.
 
 Used/expired code rows remain inert and may be periodically deleted by deployment maintenance (`DELETE FROM mobile_auth_codes WHERE expires_at < NOW() - INTERVAL '1 day'`). This patch adds no background retention worker. Exclude auth query strings/bodies from proxy logging; do not log codes, verifier, state or credentials. Gateway authentication remains distinct and is not bypassed by this protocol.
 
