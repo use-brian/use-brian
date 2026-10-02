@@ -7,17 +7,17 @@ import { runMachOTests } from './macho-library-constraint.mjs';
 
 const vectors = bootstrapVectors();
 test('independent JS record/geometry/coverage oracle has deterministic scoped verdicts', () => {
-  assert.equal(vectors.length, 6286);
-  assert.equal(vectors.filter(v => v.expected.match).length, 135);
-  assert.equal(vectors.filter(v => v.mode === 'bind').length, 756);
-  assert.equal(vectors.filter(v => v.mode === 'bind' && v.expected.match).length, 26);
+  assert.equal(vectors.length, 6290);
+  assert.equal(vectors.filter(v => v.expected.match).length, 136);
+  assert.equal(vectors.filter(v => v.mode === 'bind').length, 760);
+  assert.equal(vectors.filter(v => v.mode === 'bind' && v.expected.match).length, 27);
   assert.deepEqual(bootstrapVectors(), vectors);
   assert.equal(vectors.filter(v => v.name.startsWith('record-truncated-')).length, 1376);
   assert.equal(vectors.filter(v => v.name.startsWith('record-byte-flip-')).length, 4128);
   for (const v of vectors) if (v.expected.error) assert.equal(v.expected.error, 'ERR_SWIFT_BOOTSTRAP_APPROVAL');
 });
 test('library corpus is unchanged; generic verifier does not relax its slot-11 requirement', () => {
-  assert.deepEqual(runMachOTests('--portable'), { vectors: 5347, matches: 46, narrowerNativeRejections: 3, swiftExecuted: false });
+  assert.deepEqual(runMachOTests('--portable'), { vectors: 5350, matches: 47, narrowerNativeRejections: 3, swiftExecuted: false });
   const { macho } = bootstrapSourceGuards();
   assert(macho.includes('guard special == 11'));
   assert(macho.includes('constraint.size <= Limits.constraintBytes'));
@@ -59,7 +59,7 @@ test('no second plaintext marker constant or runtime fallback in production Swif
   // runner; this source guard does not pretend to establish linker behavior.
 });
 test('portable mode cannot silently claim real Swift or compiler-marker acceptance', () => {
-  assert.deepEqual(runBootstrapTests('--portable'), { vectors: 6286, matches: 135,
-    bindingVectors: 756, bindingMatches: 26, swiftExecutions: 0, compiledMarkerAbsent: false });
+  assert.deepEqual(runBootstrapTests('--portable'), { vectors: 6290, matches: 136,
+    bindingVectors: 760, bindingMatches: 27, swiftExecutions: 0, compiledMarkerAbsent: false });
   for (const mode of ['', '--fake', undefined]) assert.throws(() => runBootstrapTests(mode));
 });

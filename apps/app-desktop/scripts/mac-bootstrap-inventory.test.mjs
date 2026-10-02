@@ -46,24 +46,37 @@ test('inventory failures retain the actual internal check without exposing forei
   });
 });
 
-test('signature-tail diagnostics distinguish declared content from allocation without publishing bytes', () => {
+test('unused signature allocation is captured but is not interpreted as signature content', t => {
   const bytes = nativeFile(), declared = bytes.readUInt32BE(sig + 4);
-  bytes[sig + declared] = 1;
-  for (const inside of [false, true]) {
-    bytes.writeUInt32BE(declared + (inside ? 1 : 0), sig + 4);
-    assert.throws(() => extract(bytes, ['arm64']), error => {
-      assert.equal(error.code, 'ERR_MAC_BOOTSTRAP_INVENTORY');
-      assert.equal(error.inventoryCheck, 'signature-tail');
-      assert.equal(error.allocatedSignatureBytes, bytes.length - sig);
-      assert.equal(error.declaredSignatureBytes, declared + (inside ? 1 : 0));
-      assert.equal(error.indexedEnd, declared);
-      assert.equal(error.nonzeroInsideDeclaredSignature, inside);
-      assert.equal(error.nonzeroOutsideDeclaredSignature, !inside);
-      assert.deepEqual(Object.keys(error).sort(), ['code', 'inventoryCheck', 'allocatedSignatureBytes',
-        'declaredSignatureBytes', 'indexedEnd', 'nonzeroInsideDeclaredSignature', 'nonzeroOutsideDeclaredSignature'].sort());
-      return true;
-    });
-  }
+  const f = tree(t, bytes), before = capture(f.root, options);
+  const original = extract(bytes, ['arm64']);
+  bytes.fill(0xa5, sig + declared);
+  const padded = extract(bytes, ['arm64']);
+  assert.equal(padded.productionAuthority, false);
+  assert.equal(padded.architectures[0].cdHash, original.architectures[0].cdHash);
+  assert.equal(padded.architectures[0].codeDirectorySHA256, original.architectures[0].codeDirectorySHA256);
+  assert.notEqual(padded.architectures[0].signatureContainerSHA256, original.architectures[0].signatureContainerSHA256);
+  f.put(electron, bytes);
+  const after = capture(f.root, options);
+  assert.deepEqual(after.candidateCDHashes, before.candidateCDHashes);
+  assert.notEqual(after.libraries[0].fileSHA256, before.libraries[0].fileSHA256);
+
+  // The identical nonzero byte becomes invalid if included in the declared body.
+  bytes.writeUInt32BE(declared + 1, sig + 4);
+  assert.throws(() => extract(bytes, ['arm64']), error => {
+    assert.equal(error.code, 'ERR_MAC_BOOTSTRAP_INVENTORY');
+    assert.equal(error.inventoryCheck, 'signature-tail');
+    assert.equal(error.allocatedSignatureBytes, bytes.length - sig);
+    assert.equal(error.declaredSignatureBytes, declared + 1);
+    assert.equal(error.indexedEnd, declared);
+    assert.equal(error.nonzeroInsideDeclaredSignature, true);
+    assert.equal(error.nonzeroOutsideDeclaredSignature, true);
+    assert.deepEqual(Object.keys(error).sort(), ['code', 'inventoryCheck', 'allocatedSignatureBytes',
+      'declaredSignatureBytes', 'indexedEnd', 'nonzeroInsideDeclaredSignature', 'nonzeroOutsideDeclaredSignature'].sort());
+    return true;
+  });
+  bytes.writeUInt32BE(declared - 1, sig + 4);
+  rejection(() => extract(bytes, ['arm64'])); // Indexed blob cannot extend into unused allocation.
 });
 
 test('pure extraction binds CDHash to complete SHA256 CodeDirectory and pages, never authenticates opaque CMS', () => {
@@ -320,7 +333,8 @@ const changes = {
   segmentOverlap: b => b.writeBigUInt64LE(0n, 144), vmOverlap: b => b.writeBigUInt64LE(0n, 128),
   segmentOverflow: b => b.writeBigUInt64LE(2n ** 63n, 144), sectionTable: b => b.writeUInt32LE(1, 96),
   signatureBeforeHeader: b => b.writeUInt32LE(0, 184), signatureExtent: b => b.writeUInt32LE(1, 188),
-  unsignedTrailingData: b => b[b.length - 1] = 1, containerMagic: b => b.writeUInt32BE(0xfade0cc1, sig),
+  unsignedTrailingData: b => { const end = b.readUInt32BE(sig + 4); b[sig + end] = 1; b.writeUInt32BE(end + 1, sig + 4); },
+  containerMagic: b => b.writeUInt32BE(0xfade0cc1, sig),
   containerLength: b => b.writeUInt32BE(0xffffffff, sig + 4), count: b => b.writeUInt32BE(66, sig + 8),
   alternateCD: b => b.writeUInt32BE(0x1000, sig + 12), unknownSlot: b => b.writeUInt32BE(99, sig + 12),
   componentOverlap: b => b.writeUInt32BE(12, sig + 16), componentOverflow: b => b.writeUInt32BE(0xffffffff, sig + 16),

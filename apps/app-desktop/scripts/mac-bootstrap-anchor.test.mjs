@@ -179,7 +179,7 @@ test('SuperBlob duplicate/alternate/unknown/overlap/padding/length/profile cases
     b => b.writeUInt32BE(0xffffffff, signatureOffset + 16), b => b.writeUInt32BE(12, signatureOffset + 16),
     b => b.writeUInt32BE(0xffffffff, signatureOffset + 4), b => b.writeUInt32BE(1, signatureOffset + 4),
     b => b.writeUInt32BE(65, signatureOffset + 8), b => b.writeUInt32BE(0xfade0cc1, signatureOffset),
-    b => b[b.length - 1] = 1,
+    b => { b.writeUInt32BE(b.length - signatureOffset, signatureOffset + 4); b[b.length - 1] = 1; },
   ]) { const b = thin(); change(b); reject(() => stamp(b, approval())); }
   for (const [version, field] of [[0x20500, 92], [0x20600, 96], [0x20600, 100], [0x20600, 104]]) {
     const b = thin({ version }); b[cdOffset(b) + field] = 1; reject(() => stamp(b, approval()));
@@ -208,7 +208,11 @@ test('every truncated thin artifact and deterministic malformed mutations give s
   let seed = 0x12abcdef;
   const next = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return seed >>> 0; };
   for (let i = 0; i < 500; i++) {
-    const b = Buffer.from(original); b[next() % b.length] ^= 1 << (next() % 8);
+    const b = Buffer.from(original);
+    let at = next() % (signatureOffset + b.readUInt32BE(signatureOffset + 4));
+    // Extending declared length into zero allocation is also structurally valid.
+    if (at >= signatureOffset + 4 && at < signatureOffset + 8) at = signatureOffset;
+    b[at] ^= 1 << (next() % 8);
     reject(() => stamp(b, approval()));
   }
 });
@@ -304,4 +308,19 @@ test('coverage deliberately cannot authenticate CMS or its mutation; result neve
   const before = Buffer.from(b), second = verify(b, approval());
   assert.deepEqual(second, first); assert.deepEqual(b, before);
   reject(() => stamp(b, approval()));
+});
+
+test('unused signature allocation changes neither CDHash nor approval; declared bounds stay strict', () => {
+  const b = rehash(stamp(thin(), approval())), before = verify(b, approval());
+  const cd = cdOffset(b), cdBytes = Buffer.from(b.subarray(cd, cd + b.readUInt32BE(cd + 4)));
+  const length = b.readUInt32BE(signatureOffset + 4), end = signatureOffset + length;
+  b.fill(0xa5, end);
+  assert.deepEqual(verify(b, approval()), before);
+  assert.deepEqual(b.subarray(cd, cd + cdBytes.length), cdBytes);
+  assert.deepEqual(read(b), read(rehash(stamp(thin(), approval()))));
+  b.writeUInt32BE(length + 1, signatureOffset + 4); reject(() => verify(b, approval()));
+  b.writeUInt32BE(length - 1, signatureOffset + 4); reject(() => verify(b, approval()));
+  b.writeUInt32BE(length, signatureOffset + 4);
+  cdBytes.copy(b, end); b.writeUInt32BE(length, signatureOffset + 16);
+  reject(() => verify(b, approval())); // Even a valid CD outside the declared length is not a component.
 });

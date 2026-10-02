@@ -232,7 +232,8 @@ function coverage(bytes, slice, linkerOnly = false) {
   }
   disjoint(ranges); ranges.sort((a, b) => a.offset - b.offset);
   for (let i = 1; i < ranges.length; i++) requireZero(sb.subarray(ranges[i - 1].offset + ranges[i - 1].size, ranges[i].offset));
-  const last = ranges.at(-1); requireZero(sb.subarray(last.offset + last.size));
+  // Validate only declared SuperBlob bytes, not unused signature allocation.
+  const last = ranges.at(-1); requireZero(sb.subarray(last.offset + last.size, length));
   const cd = components.get(0); if (!cd || cd.length < 88) fail();
   const version = cd.readUInt32BE(8), header = new Map([[0x20400, 88], [0x20500, 96], [0x20600, 108]]).get(version);
   if (!header || cd.length < header || cd[36] !== 32 || cd[37] !== 2 || cd[38] !== 0 || ![12, 14].includes(cd[39])) fail();

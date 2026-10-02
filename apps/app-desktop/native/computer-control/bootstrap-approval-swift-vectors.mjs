@@ -175,7 +175,7 @@ export function bootstrapVectors() {
   addBind('mapped-trailing', valid, { record: Buffer.concat([encode(approval()), Buffer.alloc(1)]) });
   addBind('empty-disk', thin());
   for (const where of [24, 400, anchorOffset - 1, anchorOffset, anchorOffset + 64, anchorOffset + 1200, anchorOffset + 1376, signatureOffset - 1,
-    signatureOffset, cdOffset(valid) + 12, valid.length - 1]) {
+    signatureOffset, cdOffset(valid) + 12, signatureOffset + valid.readUInt32BE(signatureOffset + 4) - 1]) {
     const b = Buffer.from(valid); b[where] ^= 1; addBind(`signed-mutation-${where}`, b, { hash: oldHash });
   }
   const repaired = Buffer.from(valid); repaired[anchorOffset + 64] ^= 1; rehash(repaired);
@@ -192,8 +192,20 @@ export function bootstrapVectors() {
   let seed = 0x12345678;
   const next = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return seed >>> 0; };
   for (let i = 0; i < 250; i++) {
-    const b = Buffer.from(valid); b[next() % b.length] ^= 1 << (next() % 8);
+    const b = Buffer.from(valid); b[next() % (signatureOffset + b.readUInt32BE(signatureOffset + 4))] ^= 1 << (next() % 8);
     addBind(`artifact-tamper-${i}`, b, { hash: oldHash });
   }
+  const allocation = Buffer.from(valid), declared = allocation.readUInt32BE(signatureOffset + 4);
+  allocation.fill(0xa5, signatureOffset + declared);
+  addBind('nonzero-unused-allocation-same-kernel-hash', allocation, { hash: oldHash, want: true });
+  allocation.writeUInt32BE(declared + 1, signatureOffset + 4);
+  addBind('nonzero-declared-tail', allocation, { hash: oldHash });
+  allocation.writeUInt32BE(declared - 1, signatureOffset + 4);
+  addBind('component-crosses-declared-end', allocation, { hash: oldHash });
+  allocation.writeUInt32BE(declared, signatureOffset + 4);
+  const cd = cdOffset(valid);
+  valid.copy(allocation, signatureOffset + declared, cd, cd + valid.readUInt32BE(cd + 4));
+  allocation.writeUInt32BE(declared, signatureOffset + 16);
+  addBind('component-header-outside-declared-end', allocation, { hash: oldHash });
   return vectors;
 }

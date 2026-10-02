@@ -163,7 +163,7 @@ test('unknown CD flags / executable segment range reject with matching synthetic
     f => f.bytes.writeBigUInt64BE(2n ** 63n, f.cdOffset + 64),
   ]) { const f = fixture(); mutate(f); rebind(f); reject(f); }
 });
-test('zero signature allocation padding supported, nonzero hidden content refused', () => {
+test('unused allocation is opaque; declared tail and indexed extents remain strict', () => {
   const f = fixture(), old = f.bytes.length;
   f.bytes = Buffer.concat([f.bytes, Buffer.alloc(32)]);
   f.bytes.writeUInt32LE(f.bytes.length - f.signature, 188);
@@ -171,7 +171,16 @@ test('zero signature allocation padding supported, nonzero hidden content refuse
   f.expected.slice.size = f.bytes.length;
   rebind(f);
   assert.deepEqual(extract(f.bytes, f.expected).rawBlob, f.raw);
-  f.bytes[old] = 1; reject(f);
+  const before = extract(f.bytes, f.expected), cdHash = Buffer.from(f.expected.cdHash);
+  f.bytes[old] = 1;
+  assert.deepEqual(extract(f.bytes, f.expected), before);
+  assert.deepEqual(f.expected.cdHash, cdHash);
+  const length = old - f.signature;
+  f.bytes.writeUInt32BE(length + 1, f.signature + 4); reject(f); // Nonzero declared tail.
+  f.bytes.writeUInt32BE(length - 1, f.signature + 4); reject(f); // Component crosses declared end.
+  f.bytes.writeUInt32BE(length, f.signature + 4);
+  f.raw.copy(f.bytes, old);
+  f.bytes.writeUInt32BE(length, f.signature + 24); reject(f); // Header in unused allocation.
 });
 test('multi-page coverage checks every page, including short last page', () => {
   // Move the signature and rebuild the CD page table, preserving opaque blob.

@@ -11,13 +11,13 @@ const nativeURL = new URL('../../scripts/fixtures/mac-library-constraint.arm64-m
 test('fixed synthetic corpus has independent verdict labels and deterministic bytes', () => {
   const before = readFileSync(nativeURL, 'utf8');
   const vectors = machoVectors();
-  assert.equal(vectors.length, 5347);
-  assert.equal(vectors.filter(v => v.want).length, 46);
+  assert.equal(vectors.length, 5350);
+  assert.equal(vectors.filter(v => v.want).length, 47);
   assert.deepEqual(machoVectors(), vectors);
   const beforeVectors = JSON.stringify(vectors);
   const verdicts = vectors.map(oracle);
   assert.equal(JSON.stringify(vectors), beforeVectors);
-  assert.equal(verdicts.filter(v => v.match).length, 46);
+  assert.equal(verdicts.filter(v => v.match).length, 47);
   assert.equal(vectors.filter(v => v.name.startsWith('deterministic-signed-byte-tamper-')).length, 500);
   assert(vectors.filter(v => v.name.startsWith('every-truncated-prefix-')).length > 4500);
   assert.equal(readFileSync(nativeURL, 'utf8'), before);
@@ -110,6 +110,6 @@ test('production SHA256 is unconditional CryptoKit; only temporary Linux test im
 });
 
 test('portable mode reports no Swift execution and requires an explicit valid mode', () => {
-  assert.deepEqual(runMachOTests('--portable'), { vectors: 5347, matches: 46, narrowerNativeRejections: 3, swiftExecuted: false });
+  assert.deepEqual(runMachOTests('--portable'), { vectors: 5350, matches: 47, narrowerNativeRejections: 3, swiftExecuted: false });
   for (const mode of [undefined, '', '--native', '--fake-crypto']) assert.throws(() => runMachOTests(mode));
 });

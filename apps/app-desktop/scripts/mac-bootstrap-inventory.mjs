@@ -232,7 +232,10 @@ function directory(b, signature, externalHash, check) {
   disjoint(ranges); ranges.sort((a, b) => a.offset - b.offset);
   for (let i = 1; i < ranges.length; i++) zero(sb.subarray(ranges[i - 1].offset + ranges[i - 1].size, ranges[i].offset));
   const last = ranges.at(-1), indexedEnd = last.offset + last.size;
-  if (sb.subarray(indexedEnd).some(value => value !== 0)) fail({
+  // LC_CODE_SIGNATURE may reserve more bytes than the embedded SuperBlob uses.
+  // Re-signing can leave nonzero bytes in that unused allocation. Never parse
+  // them as signature content; indexed blobs and gaps stay within `length`.
+  if (sb.subarray(indexedEnd, length).some(value => value !== 0)) fail({
     inventoryCheck: 'signature-tail',
     allocatedSignatureBytes: sb.length, declaredSignatureBytes: length, indexedEnd,
     nonzeroInsideDeclaredSignature: sb.subarray(indexedEnd, length).some(value => value !== 0),

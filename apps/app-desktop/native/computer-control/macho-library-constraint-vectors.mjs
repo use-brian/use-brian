@@ -167,7 +167,16 @@ export function machoVectors() {
   padding.bytes.writeUInt32LE(padding.bytes.length - padding.signature, 188);
   padding.bytes.writeBigUInt64LE(BigInt(padding.bytes.length - padding.signature), 152);
   padding.expected.slice.size = padding.bytes.length; rebind(padding); add('zero-signature-padding', padding, true);
-  padding.bytes[oldSize] = 1; add('hidden-signature-padding', padding);
+  padding.bytes[oldSize] = 1; add('nonzero-unused-signature-allocation', padding, true);
+  const declared = oldSize - padding.signature;
+  padding.bytes.writeUInt32BE(declared + 1, padding.signature + 4);
+  add('hidden-signature-padding', padding); // Nonzero tail INSIDE declared SuperBlob.
+  padding.bytes.writeUInt32BE(declared - 1, padding.signature + 4);
+  add('component-crosses-declared-end', padding);
+  padding.bytes.writeUInt32BE(declared, padding.signature + 4);
+  padding.raw.copy(padding.bytes, oldSize);
+  padding.bytes.writeUInt32BE(declared, padding.signature + 24);
+  add('component-header-outside-declared-end', padding);
   for (const page of [12, 14]) {
     const signature = page === 12 ? 9000 : 34000;
     const f = rebuilt(nativeDER, { signature, page }); add(`multi-page-${page}`, f, true, { policy: true });

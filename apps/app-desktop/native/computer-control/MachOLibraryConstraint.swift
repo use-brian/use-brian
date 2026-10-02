@@ -327,7 +327,7 @@ enum MachOLibraryConstraint {
                 result[type] = try part(boundedSB, offset, size)
                 ranges.append(Region(offset: offset, size: size))
             }
-            try gaps(sb, ranges, includeTail: true) // Includes allocation padding after SuperBlob length.
+            try gaps(boundedSB, ranges, includeTail: true) // Unused allocation is outside the SuperBlob.
             guard result[0] != nil else { throw Failure.rejected }
             return result
         }

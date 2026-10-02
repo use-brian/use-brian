@@ -30,7 +30,7 @@ export function machoSourceGuards() {
     'let mainCDHash: [UInt8]', 'let activeSliceOffset: UInt64', 'struct MainImageContext',
     'actual', 'for page in 0..<pages', 'equal(embedded, digest(blob))', 'case rejected',
     'signature.end == view.size', 'limit == signature.offset', 'special == 11',
-    'hashes + pages * 32 == cd.size', 'hashStart >= header', 'try gaps(sb, ranges, includeTail: true)',
+    'hashes + pages * 32 == cd.size', 'hashStart >= header', 'try gaps(boundedSB, ranges, includeTail: true)',
     'let bytes: [UInt8]', 'result.append(byte)', 'artifactBytes = 512 * 1024 * 1024',
     'signatureBytes = 16 * 1024 * 1024', 'constraintBytes = 4096', 'for slice in all']) assert(source.includes(item), item);
   assert(!/FileHandle|FileManager|ProcessInfo|CommandLine|Data\(contentsOf|URL\(|getenv|print\(|csops|SecCode|Unsafe|bytesNoCopy|#if|canImport|fatalError|precondition|try!|as!/.test(code));

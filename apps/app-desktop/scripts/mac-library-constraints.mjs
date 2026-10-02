@@ -155,10 +155,10 @@ function components(sb) {
     ranges.push({ offset, size }); result.set(type, sb.subarray(offset, offset + size));
   }
   disjoint(ranges);
-  // Permit zero alignment/allocation padding only, not hidden unindexed blobs.
+  // Unindexed bytes inside the SuperBlob must be zero; unused allocation is not a blob.
   ranges.sort((a, b) => a.offset - b.offset);
   for (let i = 1; i < ranges.length; i++) zero(sb.subarray(ranges[i - 1].offset + ranges[i - 1].size, ranges[i].offset));
-  const last = ranges.at(-1); zero(sb.subarray(last.offset + last.size));
+  const last = ranges.at(-1); zero(sb.subarray(last.offset + last.size, length));
   if (!result.has(0) || !result.has(11) || result.get(11).length <= 8) fail('missing CodeDirectory/library constraint');
   return result;
 }
