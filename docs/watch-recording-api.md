@@ -8,8 +8,9 @@ Apply migrations `653_watch_recording.sql` and `654_mobile_auth.sql`. Configure 
 
 ```env
 WATCH_RECORDING_ENABLED=true
-WATCH_RECORDING_DEPLOYMENT=<stable-unique-installation-id>
 ```
+
+Device credentials are scoped by database grants and stored token hashes; owner/workspace authorization and the server signing key protect access and upload capabilities.
 
 Live transcription additionally requires enabled voice transcription. Keep the owner PostgreSQL pool at least two connections (`PG_POOL_MAX`, default four). Deploy the web app as well as the API for browser login. Gateway authentication is separate; these credentials do not bypass Cloudflare or other access policies. Never log credentials, authorization query strings or audio bodies.
 
@@ -32,7 +33,7 @@ Base path: `/api/watch/v1`. Human endpoints use the phone's ordinary Bearer acce
 | `GET /grants` | `{grants:[{grantId, deviceId, workspaceId, assistantId, label, revokedAt, expiresAt}]}` |
 | `DELETE /grants/:grantId` | Owner-only, idempotent; 204 |
 
-IDs are UUIDs; label is 1–80 characters. Only the selected workspace's primary assistant is supported. Provisioning is idempotent for owner/device/workspace/deployment while nonrevoked; replay never resets rotated credentials. Changed assistant/label conflicts. After rotation or expiry, recover existing captures through relay rather than provisioning a replacement namespace. Limit: ten active grants/user.
+IDs are UUIDs; label is 1–80 characters. Only the selected workspace's primary assistant is supported. Provisioning is idempotent for owner/device/workspace while nonrevoked; replay never resets rotated credentials. Changed assistant/label conflicts. After rotation or expiry, recover existing captures through relay rather than provisioning a replacement namespace. Limit: ten active grants/user.
 
 Device access lasts 15 minutes; grants last 90 days. `POST /renew` with `{renewalToken}` returns replacement credentials. The watch alone coordinates rotation and atomically persists replacements. Reuse of a consumed renewal token revokes the grant; an ambiguous successful response requires phone recovery, not repeated renewal. Human tokens cannot substitute on direct device session paths.
 
@@ -69,7 +70,7 @@ For a stopped complete capture, `POST /sessions/:clientId/full-upload` (or relay
 }
 ```
 
-Resolve only against the pinned API origin. PUT the exact M4A bytes with the returned headers, **without a Brian Authorization header**. Chunked/compressed transfer is not accepted. The five-minute signed capability binds deployment, grant, capture, descriptor and device/relay authority. Membership, revocation and expiry are rechecked before durable receipt. The API enforces length, checksum and probed media duration before storing immutable bytes.
+Resolve only against the pinned API origin. PUT the exact M4A bytes with the returned headers, **without a Brian Authorization header**. Chunked/compressed transfer is not accepted. The five-minute signed capability binds grant, capture, descriptor and device/relay authority. Membership, revocation and expiry are rechecked before durable receipt. The API enforces length, checksum and probed media duration before storing immutable bytes.
 
 Renew by replaying the same descriptor; it creates no new recording. Reconcile `GET` status `fullUpload:{sha256,bytes,durationMs,received}` after timeouts. Existing URLs remain valid until their original expiry but cannot replace accepted bytes. Configure gateway limits for up to 64 MiB and a five-minute body deadline.
 

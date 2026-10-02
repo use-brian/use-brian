@@ -77,11 +77,11 @@ async function fixture() {
     expect(bytes.length).toBeGreaterThan(1000)
     return 'Speaker 1: Deterministic watch transcript.'
   } })
-  const tokens = await watchStore.provision({ ownerId: userId, workspaceId, assistantId, deviceId: randomUUID(), deployment: 'canonical-fixture', label: 'Watch', provisioningKey: signingSecret })
-  const grant = await watchStore.authenticate(tokens.accessToken, 'canonical-fixture')
+  const tokens = await watchStore.provision({ ownerId: userId, workspaceId, assistantId, deviceId: randomUUID(), label: 'Watch', provisioningKey: signingSecret })
+  const grant = await watchStore.authenticate(tokens.accessToken)
   const humanAuth: express.RequestHandler = (req, _res, next) => { req.userId = userId; next() }
   app.use('/api/local-files', localFilesTransferRoutes({ client: storage, signingSecret }))
-  app.use('/api/watch/v1', watchRecordingRoutes({ deployment: 'canonical-fixture', provisioningKey: signingSecret, humanAuth, authorize: authorizeWatchDestination, service }))
+  app.use('/api/watch/v1', watchRecordingRoutes({ provisioningKey: signingSecret, humanAuth, authorize: authorizeWatchDestination, service }))
   app.use('/api/recordings', humanAuth, openRecordingsRoutes({ filesResolver: resolver, enqueueJob: enqueueRecordingJob, hasProcessed: hasCompletedRecordingJob,
     getRole: async (actor, workspace) => (await queryWithRLS(actor, 'SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspace, actor])).rows[0]?.role ?? null,
   }))

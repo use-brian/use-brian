@@ -9,7 +9,7 @@ export class WatchError extends Error {
 export type Grant = {
   id: string; owner_id: string; device_id: string; workspace_id: string; assistant_id: string
   authMode?: 'relay'
-  deployment: string; label: string; revoked_at: Date | null; expires_at: Date; access_expires_at: Date
+  label: string; revoked_at: Date | null; expires_at: Date; access_expires_at: Date
 }
 export type Capture = {
   id: string; grant_id: string; client_id: string; metadata: { capturedAt: string; title: string; source: string }
@@ -49,15 +49,15 @@ export async function transaction<T>(work: (db: PoolClient) => Promise<T>): Prom
 }
 
 export const watchStore = {
-  async provision(input: { ownerId: string; deviceId: string; workspaceId: string; assistantId: string; deployment: string; label: string; provisioningKey: string }) {
+  async provision(input: { ownerId: string; deviceId: string; workspaceId: string; assistantId: string; label: string; provisioningKey: string }) {
     return transaction(async db => {
       await db.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [input.ownerId])
       const existing = (await db.query<Grant & { access_hash: string }>(`SELECT * FROM recording_device_grants
-        WHERE owner_id=$1 AND device_id=$2 AND workspace_id=$3 AND deployment=$4 AND revoked_at IS NULL FOR UPDATE`,
-      [input.ownerId, input.deviceId, input.workspaceId, input.deployment])).rows[0]
+        WHERE owner_id=$1 AND device_id=$2 AND workspace_id=$3 AND revoked_at IS NULL FOR UPDATE`,
+      [input.ownerId, input.deviceId, input.workspaceId])).rows[0]
       const id = existing?.id ?? randomUUID()
       // Reproducible only with the server secret; no stored plaintext/encrypted token cache.
-      const derive = (kind: string) => createHmac('sha256', input.provisioningKey).update(JSON.stringify(['watch-provision-v1', input.deployment, id, kind])).digest('base64url')
+      const derive = (kind: string) => createHmac('sha256', input.provisioningKey).update(JSON.stringify(['watch-provision-v1', id, kind])).digest('base64url')
       const tokens = { accessToken: `wra_${derive('access')}`, renewalToken: `wrr_${derive('renewal')}`, expiresIn: 900, audience: 'watch-recording-v1' }
       if (existing) {
         if (existing.assistant_id !== input.assistantId || existing.label !== input.label) throw new WatchError(409, 'provisioning_conflict')
@@ -67,33 +67,33 @@ export const watchStore = {
       }
       const count = await db.query('SELECT count(*)::int AS n FROM recording_device_grants WHERE owner_id=$1 AND revoked_at IS NULL AND expires_at>now()', [input.ownerId])
       if (count.rows[0].n >= 10) throw new WatchError(429, 'device_limit')
-      await db.query(`INSERT INTO recording_device_grants(id,owner_id,device_id,workspace_id,assistant_id,deployment,label,access_hash,access_expires_at,expires_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()+interval '15 minutes',now()+interval '90 days')`,
-      [id, input.ownerId, input.deviceId, input.workspaceId, input.assistantId, input.deployment, input.label, sha256(tokens.accessToken)])
+      await db.query(`INSERT INTO recording_device_grants(id,owner_id,device_id,workspace_id,assistant_id,label,access_hash,access_expires_at,expires_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,now()+interval '15 minutes',now()+interval '90 days')`,
+      [id, input.ownerId, input.deviceId, input.workspaceId, input.assistantId, input.label, sha256(tokens.accessToken)])
       await db.query('INSERT INTO recording_device_renewals(hash,grant_id) VALUES($1,$2)', [sha256(tokens.renewalToken), id])
       return { grantId: id, ...tokens }
     })
   },
-  async relay(ownerId: string, grantId: string, deployment: string): Promise<Grant> {
-    const { rows } = await query<Grant>(`SELECT * FROM recording_device_grants WHERE id=$1 AND owner_id=$2 AND deployment=$3 AND revoked_at IS NULL`, [grantId, ownerId, deployment])
+  async relay(ownerId: string, grantId: string): Promise<Grant> {
+    const { rows } = await query<Grant>(`SELECT * FROM recording_device_grants WHERE id=$1 AND owner_id=$2 AND revoked_at IS NULL`, [grantId, ownerId])
     if (!rows[0]) throw new WatchError(404, 'relay_grant_not_found')
     // Expired device credentials/grant do not prevent a currently authenticated owner recovering audio.
     return { ...rows[0], authMode: 'relay' }
   },
-  async authenticate(token: string, deployment: string): Promise<Grant> {
+  async authenticate(token: string): Promise<Grant> {
     if (!/^wra_[A-Za-z0-9_-]{43}$/.test(token)) throw new WatchError(401, 'invalid_device_access')
-    const { rows } = await query<Grant>(`SELECT * FROM recording_device_grants WHERE access_hash=$1 AND deployment=$2 AND revoked_at IS NULL AND expires_at>now() AND access_expires_at>now()`, [sha256(token), deployment])
+    const { rows } = await query<Grant>(`SELECT * FROM recording_device_grants WHERE access_hash=$1 AND revoked_at IS NULL AND expires_at>now() AND access_expires_at>now()`, [sha256(token)])
     if (!rows[0]) throw new WatchError(401, 'invalid_device_access')
     return rows[0]
   },
-  async renew(token: string, deployment: string, authorize: (grant: Grant) => Promise<void>) {
+  async renew(token: string, authorize: (grant: Grant) => Promise<void>) {
     if (!/^wrr_[A-Za-z0-9_-]{43}$/.test(token)) throw new WatchError(401, 'invalid_device_renewal')
-    const found = await query<Grant>(`SELECT g.* FROM recording_device_grants g JOIN recording_device_renewals r ON r.grant_id=g.id WHERE r.hash=$1 AND g.deployment=$2`, [sha256(token), deployment])
+    const found = await query<Grant>(`SELECT g.* FROM recording_device_grants g JOIN recording_device_renewals r ON r.grant_id=g.id WHERE r.hash=$1`, [sha256(token)])
     if (!found.rows[0]) throw new WatchError(401, 'invalid_device_renewal')
     await authorize(found.rows[0])
     const tokens = credentials()
     const ok = await transaction(async db => {
-      const { rows } = await db.query(`SELECT g.*,r.used_at FROM recording_device_grants g JOIN recording_device_renewals r ON r.grant_id=g.id WHERE r.hash=$1 AND g.deployment=$2 FOR UPDATE OF g,r`, [sha256(token), deployment])
+      const { rows } = await db.query(`SELECT g.*,r.used_at FROM recording_device_grants g JOIN recording_device_renewals r ON r.grant_id=g.id WHERE r.hash=$1 FOR UPDATE OF g,r`, [sha256(token)])
       const grant = rows[0]
       if (!grant || grant.revoked_at || new Date(grant.expires_at).getTime() <= Date.now()) return false
       if (grant.used_at) {

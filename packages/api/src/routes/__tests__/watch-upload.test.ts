@@ -9,7 +9,7 @@ vi.mock('../../recordings/watch-store.js', async original => ({
 import { watchRecordingRoutes } from '../watch-recording.js'
 import { sha256, WatchError, type watchStore, type Grant, type Capture } from '../../recordings/watch-store.js'
 import { verifyWatchUpload, signWatchUpload } from '../../recordings/watch-upload.js'
-const deployment = 'test-deployment', key = 'test-server-signing-secret', audio = Buffer.from('full M4A fixture')
+const key = 'test-server-signing-secret', audio = Buffer.from('full M4A fixture')
 function harness() {
   const g = { id: randomUUID(), owner_id: randomUUID(), workspace_id: randomUUID(), assistant_id: randomUUID() }
   const c = { id: randomUUID(), client_id: randomUUID(), state: 'open' }
@@ -28,7 +28,7 @@ function harness() {
   }
   const validateAudio = vi.fn(async () => {}), authorize = vi.fn(async () => {})
   const app = express(); app.use(express.json())
-  app.use('/api/watch/v1', watchRecordingRoutes({ deployment, provisioningKey: key, authorize,
+  app.use('/api/watch/v1', watchRecordingRoutes({ provisioningKey: key, authorize,
     humanAuth: (req, res, next) => { if (req.headers.authorization !== 'Bearer human') return void res.sendStatus(401); req.userId = g.owner_id; next() },
     service: {} as never, store: store as unknown as typeof watchStore, validateAudio,
   }))
@@ -43,22 +43,22 @@ describe('API-owned signed full-file staging', () => {
     const second = (await h.initialize().expect(200)).body
     expect(first.sessionId).toBe(second.sessionId)
     expect(first.uploadHeaders).toEqual({ 'Content-Type': 'audio/mp4', 'Content-Length': String(audio.length) })
-    expect(verifyWatchUpload(new URL(first.uploadUrl, 'https://api.test').searchParams.get('token'), key, deployment, h.c.id)).toMatchObject({ sha256: sha256(audio), bytes: audio.length, mode: 'device' })
+    expect(verifyWatchUpload(new URL(first.uploadUrl, 'https://api.test').searchParams.get('token'), key, h.c.id)).toMatchObject({ sha256: sha256(audio), bytes: audio.length, mode: 'device' })
     await request(h.app).put(first.uploadUrl).set('Content-Type', 'audio/mp4').send(audio).expect(200)
     expect(h.store.receiveFull).toHaveBeenCalledTimes(1)
     await request(h.app).put(second.uploadUrl).set('Content-Type', 'audio/mp4').send(audio).expect(200)
     expect(h.validateAudio).toHaveBeenCalledTimes(1)
     expect((await h.initialize()).body.received).toBe(true)
   })
-  it('rejects tampering, expiry, path/deployment substitution and altered descriptors', async () => {
+  it('rejects tampering, expiry, path/key substitution and altered descriptors', async () => {
     const h = harness(), response = await h.initialize()
     const url = new URL(response.body.uploadUrl, 'https://api.test'), token = url.searchParams.get('token')!
-    const claims = verifyWatchUpload(token, key, deployment, h.c.id)
+    const claims = verifyWatchUpload(token, key, h.c.id)
     const expired = signWatchUpload({ ...claims, expires: Date.now() - 1 }, key)
     await request(h.app).put(`${url.pathname}?token=${expired}`).set('Content-Type', 'audio/mp4').send(audio).expect(401)
     await request(h.app).put(`${url.pathname}?token=${token}x`).set('Content-Type', 'audio/mp4').send(audio).expect(401)
     await request(h.app).put(`/api/watch/v1/uploads/${randomUUID()}?token=${token}`).set('Content-Type', 'audio/mp4').send(audio).expect(401)
-    expect(() => verifyWatchUpload(token, key, 'different-deployment', h.c.id)).toThrow('invalid_upload_token')
+    expect(() => verifyWatchUpload(token, 'different-signing-key', h.c.id)).toThrow('invalid_upload_token')
     await request(h.app).post(`/api/watch/v1/sessions/${h.c.client_id}/full-upload`).set('Authorization', 'Bearer device').send({ ...h.input, sha256: sha256('different') }).expect(409)
     expect(h.store.receiveFull).not.toHaveBeenCalled()
   })
@@ -83,7 +83,7 @@ describe('API-owned signed full-file staging', () => {
   it('relay mints a capability for the SAME grant without sharing renewal tokens', async () => {
     const h = harness(), response = await h.initialize(true).expect(200)
     const token = new URL(response.body.uploadUrl, 'https://api.test').searchParams.get('token')!
-    expect(verifyWatchUpload(token, key, deployment, h.c.id)).toMatchObject({ mode: 'relay', grantId: h.g.id })
+    expect(verifyWatchUpload(token, key, h.c.id)).toMatchObject({ mode: 'relay', grantId: h.g.id })
     await request(h.app).put(response.body.uploadUrl).set('Content-Type', 'audio/mp4').send(audio).expect(200)
     expect(h.authorize).toHaveBeenLastCalledWith(expect.objectContaining({ id: h.g.id, authMode: 'relay' }))
     h.store.relay.mockRejectedValue(new WatchError(404, 'relay_grant_not_found'))

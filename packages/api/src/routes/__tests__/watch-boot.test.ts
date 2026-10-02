@@ -8,7 +8,7 @@ describe('watch boot registration regression', () => {
     expect(mount).toBeLessThan(boot.indexOf("app.use('/api', requireAuth(env.JWT_SECRET)"))
     const section = boot.slice(mount - 220, mount + 700)
     expect(section).toContain("process.env.WATCH_RECORDING_ENABLED === 'true'")
-    expect(section).toContain('WATCH_RECORDING_DEPLOYMENT')
+    expect(section).toContain("if (process.env.WATCH_RECORDING_ENABLED === 'true' && filesApi && filesResolver)")
     expect(section).toContain('humanAuth: requireAuth(env.JWT_SECRET)')
     expect(section).toContain('authorize: authorizeWatchDestination')
     expect(section).toContain('createWatchService({ pages: savedViewStore, files: filesApi')

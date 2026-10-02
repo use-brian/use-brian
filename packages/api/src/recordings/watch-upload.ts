@@ -9,7 +9,7 @@ export const fullUploadInput = z.object({
   durationMs: z.number().int().min(1).max(LIMITS.durationMs),
 }).strict()
 const claimsSchema = fullUploadInput.extend({
-  audience: z.literal('watch-full-upload-v1'), deployment: z.string(), captureId: z.string().uuid(), clientId: z.string().uuid(),
+  audience: z.literal('watch-full-upload-v1'), captureId: z.string().uuid(), clientId: z.string().uuid(),
   grantId: z.string().uuid(), ownerId: z.string().uuid(), mode: z.enum(['device', 'relay']), expires: z.number().int(),
 }).strict()
 export type UploadClaims = z.infer<typeof claimsSchema>
@@ -18,7 +18,7 @@ export function signWatchUpload(claims: UploadClaims, key: string) {
   const signature = createHmac('sha256', key).update(`watch-full-upload-v1.${body}`).digest('base64url')
   return `${body}.${signature}`
 }
-export function verifyWatchUpload(token: unknown, key: string, deployment: string, captureId: string): UploadClaims {
+export function verifyWatchUpload(token: unknown, key: string, captureId: string): UploadClaims {
   if (typeof token !== 'string' || token.length > 2048) throw new WatchError(401, 'invalid_upload_token')
   const parts = token.split('.')
   if (parts.length !== 2) throw new WatchError(401, 'invalid_upload_token')
@@ -28,7 +28,7 @@ export function verifyWatchUpload(token: unknown, key: string, deployment: strin
   let claims: UploadClaims
   try { claims = claimsSchema.parse(JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'))) }
   catch { throw new WatchError(401, 'invalid_upload_token') }
-  if (claims.deployment !== deployment || claims.captureId !== captureId || claims.expires <= Date.now()) throw new WatchError(401, 'invalid_upload_token')
+  if (claims.captureId !== captureId || claims.expires <= Date.now()) throw new WatchError(401, 'invalid_upload_token')
   return claims
 }
 
@@ -36,7 +36,7 @@ export function verifyWatchUpload(token: unknown, key: string, deployment: strin
  * No cloud write URL is issued, and a staged snapshot can never be overwritten.
  */
 export function createWatchUploads(deps: {
-  deployment: string; key: string; authorize: (g: Grant) => Promise<void>; store?: typeof watchStore
+  key: string; authorize: (g: Grant) => Promise<void>; store?: typeof watchStore
   validateAudio?: typeof validateWatchAudio
 }) {
   const store = deps.store ?? watchStore
@@ -46,7 +46,7 @@ export function createWatchUploads(deps: {
       return withCaptureLock(c.id, async () => {
         await deps.authorize(grant)
         const descriptor = await store.initializeUpload(grant, c, input)
-        const claims: UploadClaims = { ...input, audience: 'watch-full-upload-v1', deployment: deps.deployment,
+        const claims: UploadClaims = { ...input, audience: 'watch-full-upload-v1',
           captureId: c.id, clientId, grantId: grant.id, ownerId: grant.owner_id, mode: grant.authMode === 'relay' ? 'relay' : 'device', expires: Date.now() + 300000 }
         return { uploadUrl: `/api/watch/v1/uploads/${c.id}?token=${signWatchUpload(claims, deps.key)}`, method: 'PUT',
           uploadHeaders: { 'Content-Type': 'audio/mp4', 'Content-Length': String(input.bytes) }, expiresAt: new Date(claims.expires).toISOString(),
@@ -54,8 +54,8 @@ export function createWatchUploads(deps: {
       })
     },
     async receive(req: Request, res: Response) {
-      const claims = verifyWatchUpload(req.query.token, deps.key, deps.deployment, String(req.params.captureId))
-      const grant = await store.relay(claims.ownerId, claims.grantId, deps.deployment)
+      const claims = verifyWatchUpload(req.query.token, deps.key, String(req.params.captureId))
+      const grant = await store.relay(claims.ownerId, claims.grantId)
       grant.authMode = claims.mode === 'relay' ? 'relay' : undefined
       await deps.authorize(grant) // Rechecks revocation, membership, destination and (device-mode) grant expiry.
       await withCaptureLock(claims.captureId, async db => {
@@ -73,7 +73,7 @@ export function createWatchUploads(deps: {
           await new Promise<void>((resolve, reject) => raw({ type: 'audio/mp4', limit: claims.bytes, inflate: false })(req, res, error => error ? reject(error) : resolve()))
           if (!Buffer.isBuffer(req.body) || req.body.length !== claims.bytes || sha256(req.body) !== claims.sha256) throw new WatchError(422, 'checksum_or_length_mismatch')
           if (!descriptor.received) await (deps.validateAudio ?? validateWatchAudio)(req.body, claims.durationMs, LIMITS.durationMs)
-          verifyWatchUpload(req.query.token, deps.key, deps.deployment, claims.captureId) // Expiry also checked at receipt.
+          verifyWatchUpload(req.query.token, deps.key, claims.captureId) // Expiry also checked at receipt.
           await deps.authorize(grant)
           await store.receiveFull(grant, c.id, req.body, db)
           res.json({ received: true, sessionId: c.id, sha256: claims.sha256, bytes: claims.bytes })

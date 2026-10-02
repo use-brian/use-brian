@@ -37,8 +37,8 @@ describe.skipIf(process.env.WATCH_POSTGRES_TEST !== '1')('watch real PostgreSQL 
   async function fixtures() {
     const ownerId = randomUUID(), workspaceId = randomUUID(), assistantId = randomUUID()
     await pool.query('INSERT INTO users VALUES($1)', [ownerId]); await pool.query('INSERT INTO workspaces VALUES($1)', [workspaceId]); await pool.query('INSERT INTO assistants VALUES($1)', [assistantId])
-    const input = { ownerId, workspaceId, assistantId, deviceId: randomUUID(), label: 'Watch', deployment: 'test', provisioningKey: 'server-key' }
-    const tokens = await watchStore.provision(input), g = await watchStore.authenticate(tokens.accessToken, 'test')
+    const input = { ownerId, workspaceId, assistantId, deviceId: randomUUID(), label: 'Watch', provisioningKey: 'server-key' }
+    const tokens = await watchStore.provision(input), g = await watchStore.authenticate(tokens.accessToken)
     const meta = { capturedAt: '2026-01-01T00:00:00Z', title: 'Capture', source: 'apple-watch' }
     const c = await watchStore.create(g, randomUUID(), meta)
     return { input, g, c, meta }

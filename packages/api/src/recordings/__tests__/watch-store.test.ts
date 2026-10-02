@@ -11,8 +11,8 @@ vi.mock('../../db/client.js', () => ({
 import { watchStore, sha256 } from '../watch-store.js'
 const ownerId = randomUUID(), workspaceId = randomUUID(), assistantId = randomUUID(), deviceId = randomUUID()
 async function grant() {
-  const tokens = await watchStore.provision({ ownerId, workspaceId, assistantId, deviceId: randomUUID(), provisioningKey: 'test-server-key', deployment: 'test', label: 'Watch' })
-  return { tokens, g: await watchStore.authenticate(tokens.accessToken, 'test') }
+  const tokens = await watchStore.provision({ ownerId, workspaceId, assistantId, deviceId: randomUUID(), provisioningKey: 'test-server-key', label: 'Watch' })
+  return { tokens, g: await watchStore.authenticate(tokens.accessToken) }
 }
 const meta = { capturedAt: '2026-01-01T00:00:00Z', title: 'Meeting', source: 'apple-watch' }
 const audio = Buffer.from('audio')
@@ -30,7 +30,7 @@ afterAll(async () => { await db.close() })
 
 describe('watch persisted security and receipts (real SQL)', () => {
   it('provisioning replay returns the same grant and secrets, never resets a rotated grant', async () => {
-    const input = { ownerId, workspaceId, assistantId, deviceId, deployment: 'test', label: 'Watch', provisioningKey: 'test-server-key' }
+    const input = { ownerId, workspaceId, assistantId, deviceId, label: 'Watch', provisioningKey: 'test-server-key' }
     const first = await watchStore.provision(input)
     const second = await watchStore.provision(input)
     expect(second.grantId).toBe(first.grantId)
@@ -38,22 +38,21 @@ describe('watch persisted security and receipts (real SQL)', () => {
     expect(second.renewalToken).toBe(first.renewalToken)
     expect((await db.query('SELECT id FROM recording_device_grants WHERE device_id=$1', [deviceId])).rows).toHaveLength(1)
     await expect(watchStore.provision({ ...input, label: 'Changed' })).rejects.toMatchObject({ message: 'provisioning_conflict' })
-    await watchStore.renew(first.renewalToken, 'test', async () => {})
+    await watchStore.renew(first.renewalToken, async () => {})
     await expect(watchStore.provision(input)).rejects.toMatchObject({ message: 'grant_already_rotated_use_relay' })
     await watchStore.revoke(ownerId, first.grantId)
   })
   it('human relay recovers the same grant after credential/grant expiry but never after revocation', async () => {
     const { tokens, g } = await grant()
     await db.query("UPDATE recording_device_grants SET expires_at=now()-interval '1 day',access_expires_at=now()-interval '1 day' WHERE id=$1", [g.id])
-    await expect(watchStore.authenticate(tokens.accessToken, 'test')).rejects.toMatchObject({ status: 401 })
-    const relay = await watchStore.relay(ownerId, g.id, 'test')
+    await expect(watchStore.authenticate(tokens.accessToken)).rejects.toMatchObject({ status: 401 })
+    const relay = await watchStore.relay(ownerId, g.id)
     expect(relay).toMatchObject({ id: g.id, authMode: 'relay', workspace_id: workspaceId })
     const clientId = randomUUID(), c = await watchStore.create(relay, clientId, meta)
     expect((await watchStore.get(g, clientId)).id).toBe(c.id)
-    await expect(watchStore.relay(randomUUID(), g.id, 'test')).rejects.toMatchObject({ status: 404 })
-    await expect(watchStore.relay(ownerId, g.id, 'other')).rejects.toMatchObject({ status: 404 })
+    await expect(watchStore.relay(randomUUID(), g.id)).rejects.toMatchObject({ status: 404 })
     await watchStore.revoke(ownerId, g.id)
-    await expect(watchStore.relay(ownerId, g.id, 'test')).rejects.toMatchObject({ status: 404 })
+    await expect(watchStore.relay(ownerId, g.id)).rejects.toMatchObject({ status: 404 })
     await db.query("UPDATE watch_captures SET expires_at=now()-interval '1 day' WHERE id=$1", [c.id])
   })
   it('stamps original capturedAt during canonical episode INSERT before provenance is read', async () => {
@@ -76,23 +75,23 @@ describe('watch persisted security and receipts (real SQL)', () => {
     await db.exec('ROLLBACK')
     await db.query("UPDATE watch_captures SET expires_at=now()-interval '1 day' WHERE id=$1", [c.id])
   })
-  it('stores only hashed credentials, binds deployment, rotates and commits replay revocation', async () => {
+  it('stores only hashed credentials, rejects unknown tokens, rotates and commits replay revocation', async () => {
     const { tokens, g } = await grant()
     expect((await db.query<{access_hash:string}>('SELECT access_hash FROM recording_device_grants WHERE id=$1', [g.id])).rows[0].access_hash).toBe(sha256(tokens.accessToken))
-    await expect(watchStore.authenticate(tokens.accessToken, 'other')).rejects.toMatchObject({ status: 401 })
-    const rotated = await watchStore.renew(tokens.renewalToken, 'test', async () => {})
-    await expect(watchStore.authenticate(tokens.accessToken, 'test')).rejects.toMatchObject({ status: 401 })
-    expect((await watchStore.authenticate(rotated.accessToken, 'test')).id).toBe(g.id)
-    await expect(watchStore.renew(tokens.renewalToken, 'test', async () => {})).rejects.toMatchObject({ status: 401 })
-    await expect(watchStore.authenticate(rotated.accessToken, 'test')).rejects.toMatchObject({ status: 401 })
+    await expect(watchStore.authenticate(`wra_${sha256('unknown-token').slice(0, 43)}`)).rejects.toMatchObject({ status: 401 })
+    const rotated = await watchStore.renew(tokens.renewalToken, async () => {})
+    await expect(watchStore.authenticate(tokens.accessToken)).rejects.toMatchObject({ status: 401 })
+    expect((await watchStore.authenticate(rotated.accessToken)).id).toBe(g.id)
+    await expect(watchStore.renew(tokens.renewalToken, async () => {})).rejects.toMatchObject({ status: 401 })
+    await expect(watchStore.authenticate(rotated.accessToken)).rejects.toMatchObject({ status: 401 })
   })
   it('revocation is owner-scoped and membership loss blocks renewal', async () => {
     const { tokens, g } = await grant()
     await watchStore.revoke(randomUUID(), g.id)
-    await expect(watchStore.authenticate(tokens.accessToken, 'test')).resolves.toMatchObject({ id: g.id })
-    await expect(watchStore.renew(tokens.renewalToken, 'test', async () => { throw new Error('membership removed') })).rejects.toThrow('membership removed')
+    await expect(watchStore.authenticate(tokens.accessToken)).resolves.toMatchObject({ id: g.id })
+    await expect(watchStore.renew(tokens.renewalToken, async () => { throw new Error('membership removed') })).rejects.toThrow('membership removed')
     await watchStore.revoke(ownerId, g.id)
-    await expect(watchStore.authenticate(tokens.accessToken, 'test')).rejects.toMatchObject({ status: 401 })
+    await expect(watchStore.authenticate(tokens.accessToken)).rejects.toMatchObject({ status: 401 })
   })
   it('client id is durable and grant-scoped; conflicting metadata cannot redirect it', async () => {
     const { g } = await grant(), id = randomUUID()

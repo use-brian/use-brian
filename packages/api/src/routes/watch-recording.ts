@@ -12,7 +12,7 @@ const finalize = z.object({ expectedWindows: z.number().int().min(0).max(LIMITS.
 const windowQuery = z.object({ sequence: z.coerce.number().int().min(0).max(LIMITS.windows - 1), offsetMs: z.coerce.number().int().min(0), durationMs: z.coerce.number().int().min(1).max(60000), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().refine(v => v.offsetMs + v.durationMs <= LIMITS.durationMs)
 
 export function watchRecordingRoutes(deps: {
-  deployment: string; provisioningKey: string; humanAuth: RequestHandler; authorize: (grant: Pick<Grant, 'owner_id' | 'workspace_id' | 'assistant_id'>) => Promise<void>
+  provisioningKey: string; humanAuth: RequestHandler; authorize: (grant: Pick<Grant, 'owner_id' | 'workspace_id' | 'assistant_id'>) => Promise<void>
   service: WatchService; store?: typeof watchStore; validateAudio?: typeof validateWatchAudio
 }): Router {
   const router = Router(), store = deps.store ?? watchStore
@@ -21,7 +21,7 @@ export function watchRecordingRoutes(deps: {
     if (!req.userId) throw new WatchError(401, 'human_auth_required')
     const input = provision.parse(req.body)
     await deps.authorize({ owner_id: req.userId, workspace_id: input.workspaceId, assistant_id: input.assistantId })
-    res.status(201).json(await store.provision({ ...input, ownerId: req.userId, deployment: deps.deployment, provisioningKey: deps.provisioningKey }))
+    res.status(201).json(await store.provision({ ...input, ownerId: req.userId, provisioningKey: deps.provisioningKey }))
   })
   router.get('/grants', deps.humanAuth, async (req, res) => {
     if (!req.userId) throw new WatchError(401, 'human_auth_required')
@@ -33,9 +33,9 @@ export function watchRecordingRoutes(deps: {
   })
   router.post('/renew', async (req, res) => {
     const { renewalToken } = z.object({ renewalToken: z.string().max(100) }).strict().parse(req.body)
-    res.json(await store.renew(renewalToken, deps.deployment, deps.authorize))
+    res.json(await store.renew(renewalToken, deps.authorize))
   })
-  const uploads = createWatchUploads({ deployment: deps.deployment, key: deps.provisioningKey, authorize: deps.authorize, store, validateAudio: deps.validateAudio })
+  const uploads = createWatchUploads({ key: deps.provisioningKey, authorize: deps.authorize, store, validateAudio: deps.validateAudio })
   // Signed byte ingress is deliberately before device middleware; its capability is single-capture upload-only.
   router.put('/uploads/:captureId', uploads.receive)
   const sessions = Router()
@@ -72,7 +72,7 @@ export function watchRecordingRoutes(deps: {
   // Same router, same immutable grant/session namespace. No device renewal secret on the phone.
   router.use('/relay/:grantId', deps.humanAuth, async (req, res, next) => {
     if (!req.userId) throw new WatchError(401, 'human_auth_required')
-    const grant = await store.relay(req.userId, uuid.parse(req.params.grantId), deps.deployment)
+    const grant = await store.relay(req.userId, uuid.parse(req.params.grantId))
     await deps.authorize(grant)
     res.locals.grant = grant
     next()
@@ -80,7 +80,7 @@ export function watchRecordingRoutes(deps: {
   router.use(async (req, res, next) => {
     const header = req.headers.authorization
     if (!header?.startsWith('Bearer ')) throw new WatchError(401, 'device_auth_required')
-    const grant = await store.authenticate(header.slice(7), deps.deployment)
+    const grant = await store.authenticate(header.slice(7))
     await deps.authorize(grant)
     res.locals.grant = grant
     next()

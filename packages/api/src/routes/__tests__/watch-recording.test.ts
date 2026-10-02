@@ -22,7 +22,7 @@ function harness() {
   const service = { prepare: vi.fn(async () => {}), status: vi.fn(async () => ({ clientId, state: 'open' })), retry: vi.fn(async () => ({ clientId })), finalize: vi.fn(async () => ({ state: 'finalized' })) }
   const authorize = vi.fn(async () => {}), validateAudio = vi.fn(async () => {})
   const app = express(); app.use(express.json())
-  app.use('/api/watch/v1', watchRecordingRoutes({ deployment: 'test', provisioningKey: 'server-secret', authorize, service: service as unknown as WatchService, store: store as unknown as typeof watchStore, validateAudio,
+  app.use('/api/watch/v1', watchRecordingRoutes({ provisioningKey: 'server-secret', authorize, service: service as unknown as WatchService, store: store as unknown as typeof watchStore, validateAudio,
     humanAuth: (req, res, next) => { if (req.headers.authorization !== 'Bearer human') return void res.status(401).json({ error: 'human_required' }); req.userId = owner; next() } }))
   app.get('/api/general', requireAuth('test'), (_req, res) => { res.json({ secret: true }) })
   return { app, store, service, authorize, validateAudio }
@@ -35,13 +35,13 @@ describe('watch v1 Express boundaries', () => {
     await request(h.app).get('/api/general').set('Authorization', 'Bearer device').expect(401)
     const input = { workspaceId: randomUUID(), assistantId: randomUUID(), deviceId: randomUUID(), label: 'Watch' }
     await request(h.app).post('/api/watch/v1/grants').set('Authorization', 'Bearer human').send(input).expect(201)
-    expect(h.store.provision).toHaveBeenCalledWith({ ...input, ownerId: owner, deployment: 'test', provisioningKey: 'server-secret' })
+    expect(h.store.provision).toHaveBeenCalledWith({ ...input, ownerId: owner, provisioningKey: 'server-secret' })
     await request(h.app).get(base).set('Authorization', 'Bearer human').expect(401)
   })
   it('uses identical session handlers for owner relay without any watch token, and blocks grant substitution', async () => {
     const h = harness(), relay = `/api/watch/v1/relay/${grantId}/sessions/${clientId}`
     await request(h.app).get(relay).set('Authorization', 'Bearer human').expect(200)
-    expect(h.store.relay).toHaveBeenCalledWith(owner, grantId, 'test')
+    expect(h.store.relay).toHaveBeenCalledWith(owner, grantId)
     expect(h.service.status).toHaveBeenCalledWith(expect.objectContaining({ id: grantId, authMode: 'relay' }), clientId)
     await request(h.app).get(relay).set('Authorization', 'Bearer device').expect(401)
     await request(h.app).get(`/api/watch/v1/relay/${randomUUID()}/sessions/${clientId}`).set('Authorization', 'Bearer human').expect(404)

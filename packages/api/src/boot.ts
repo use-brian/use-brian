@@ -5872,10 +5872,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   let stopWatchCleanup: (() => Promise<void>) | undefined
   // Dedicated opaque device credentials must mount before the broad human /api guards.
-  // Explicit deployment identity prevents credentials crossing installations sharing a DB.
-  if (process.env.WATCH_RECORDING_ENABLED === 'true' && process.env.WATCH_RECORDING_DEPLOYMENT && filesApi && filesResolver) {
+  if (process.env.WATCH_RECORDING_ENABLED === 'true' && filesApi && filesResolver) {
     app.use('/api/watch/v1', watchRecordingRoutes({
-      deployment: process.env.WATCH_RECORDING_DEPLOYMENT, provisioningKey: env.JWT_SECRET,
+      provisioningKey: env.JWT_SECRET,
       humanAuth: requireAuth(env.JWT_SECRET), authorize: authorizeWatchDestination,
       service: createWatchService({ pages: savedViewStore, files: filesApi,
         ...(voiceTranscription.enabled ? { transcribe: async (buffer: Buffer) => (await transcribeWatchAudio(

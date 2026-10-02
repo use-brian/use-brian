@@ -4,13 +4,13 @@ CREATE TABLE recording_device_grants (
  id uuid PRIMARY KEY, owner_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
  device_id uuid NOT NULL, workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
  assistant_id uuid NOT NULL REFERENCES assistants(id) ON DELETE CASCADE,
- deployment text NOT NULL, label text NOT NULL,
+ label text NOT NULL,
  access_hash text NOT NULL UNIQUE, access_expires_at timestamptz NOT NULL,
  revoked_at timestamptz, expires_at timestamptz NOT NULL,
  created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ON recording_device_grants(owner_id,workspace_id);
-CREATE UNIQUE INDEX recording_device_provisioning_identity ON recording_device_grants(owner_id,device_id,workspace_id,deployment) WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX recording_device_provisioning_identity ON recording_device_grants(owner_id,device_id,workspace_id) WHERE revoked_at IS NULL;
 CREATE TABLE recording_device_renewals (
  hash text PRIMARY KEY, grant_id uuid NOT NULL REFERENCES recording_device_grants(id) ON DELETE CASCADE,
  used_at timestamptz
