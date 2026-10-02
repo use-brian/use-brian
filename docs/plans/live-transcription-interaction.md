@@ -44,7 +44,7 @@ Interaction is opt-in for web and Electron. Personal natural-language rules reco
 
 ## Configuration
 
-1. Apply migration `653_live_interaction.sql`.
+1. Apply migration `655_live_interaction.sql`.
 2. Enable/configure Brian's existing voice/live transcription (`VOICE_TRANSCRIPTION_ENABLED` and the deployment's existing media backend/model credentials).
 3. Run the existing API worker composition (`runWorkers`) and enable Interaction in the recorder menu.
 4. Configure personal rules under Settings > General.
