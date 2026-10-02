@@ -7,6 +7,7 @@ import regressions. The opt-in browser test uses the live official catalog.
 
 | COMP tag | doc path | source path | test path |
 | --- | --- | --- | --- |
+| app-web/native-computer | packages/api/src/computer-use/INTEGRATION.md | apps/app-web/src/lib/native-computer.ts; apps/app-web/src/components/computer/native-computer-page.tsx; apps/app-web/src/components/computer/native-computer-coordinator.tsx | apps/app-web/src/lib/__tests__/native-computer.test.ts; apps/app-web/src/components/computer/__tests__/native-computer.test.tsx |
 | app-web/workflow-publication-consent | docs/workflow-publication-consent.md | apps/app-web/src/components/workflow/publication-consent.tsx; apps/app-web/src/lib/api/workflow-publication-consent.ts | apps/app-web/src/components/workflow/__tests__/publication-consent.test.tsx; apps/app-web/src/lib/__tests__/workflow-publication-consent.test.ts |
 | workflow/publication-consent | docs/workflow-publication-consent.md | packages/api/src/workflow/publication-consent.ts; packages/api/src/workflow/channel-delivery.ts | packages/api/src/workflow/__tests__/publication-consent.test.ts; packages/api/src/workflow/__tests__/publication-consent.integration.test.ts; packages/api/src/workflow/__tests__/channel-delivery.test.ts |
 | api/workflow-publication | docs/workflow-publication-consent.md | packages/api/src/routes/workflow-publication.ts | packages/api/src/routes/__tests__/workflow-publication.test.ts |
