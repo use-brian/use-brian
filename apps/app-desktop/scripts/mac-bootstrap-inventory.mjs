@@ -73,8 +73,11 @@ export const canonicalElectronLibrary = 'Contents/Frameworks/Electron Framework.
 export const inventoryLimits = Object.freeze({ entries: 50000, directories: 2048, links: 1024,
   depth: 48, pathBytes: 2048, fileBytes: 512 * 1024 * 1024, totalReadBytes: 4 * 1024 ** 3,
   nativeFiles: 256, cdHashes: 64, deadlineMs: 30000 });
-const fail = () => { const e = new Error('Release library inventory data rejected: unsupported, changed, malformed, or bounded capture failure'); e.code = 'ERR_MAC_BOOTSTRAP_INVENTORY'; throw e; };
-const guard = fn => { try { return fn(); } catch { fail(); } };
+// Preserve the precise failed invariant in our own stack traces. Filesystem or
+// caller exceptions remain sanitized; a forged public error code is not enough.
+const inventoryFailures = new WeakSet();
+const fail = () => { const e = new Error('Release library inventory data rejected: unsupported, changed, malformed, or bounded capture failure'); e.code = 'ERR_MAC_BOOTSTRAP_INVENTORY'; inventoryFailures.add(e); throw e; };
+const guard = fn => { try { return fn(); } catch (error) { if (inventoryFailures.has(error)) throw error; fail(); } };
 const sha = b => createHash('sha256').update(b).digest();
 const { isProxy, isUint8Array, isSharedArrayBuffer } = types;
 const { getPrototypeOf, getOwnPropertyDescriptor: prop, getOwnPropertyDescriptors: props } = Object;

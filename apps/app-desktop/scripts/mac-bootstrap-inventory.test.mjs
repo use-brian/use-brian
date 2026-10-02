@@ -28,6 +28,24 @@ function patched(name, implementation, action) {
   try { return action(); } finally { fs[name] = original; }
 }
 
+test('inventory failures retain the actual internal check without exposing foreign error text', t => {
+  assert.throws(() => extract(Buffer.alloc(0), ['arm64']), error => {
+    assert.equal(error.code, 'ERR_MAC_BOOTSTRAP_INVENTORY');
+    assert.match(error.stack, /at copy \(/);
+    return true;
+  });
+  const f = tree(t);
+  const foreign = Object.assign(new Error('PRIVATE_FILESYSTEM_DIAGNOSTIC'), { code: 'ERR_MAC_BOOTSTRAP_INVENTORY' });
+  patched('lstatSync', () => () => { throw foreign; }, () => {
+    assert.throws(() => capture(f.root, options), error => {
+      assert.notEqual(error, foreign);
+      assert.equal(error.code, 'ERR_MAC_BOOTSTRAP_INVENTORY');
+      assert.ok(!error.stack.includes('PRIVATE_FILESYSTEM_DIAGNOSTIC'));
+      return true;
+    });
+  });
+});
+
 test('pure extraction binds CDHash to complete SHA256 CodeDirectory and pages, never authenticates opaque CMS', () => {
   for (const version of [0x20400, 0x20500, 0x20600]) for (const page of [12, 14]) {
     const bytes = nativeFile({ version, page, team: true, extra: [[0x10000, blob(0xfade0b01, Buffer.from('NOT CMS'))]] });
