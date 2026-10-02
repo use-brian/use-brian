@@ -166,17 +166,25 @@ function externalAudienceType(channelType: string, channelId: string): 'individu
   return null
 }
 
-function bindingCeiling(
+export function bindingCeiling(
   workspaceId: string,
   binding: DeliveryAudienceBinding,
 ): AccessCeiling {
+  // Company-wide is an explicit universe (null), never the empty arrays:
+  // `[]` means General only, which withholds every unbounded connector.
+  // A stored entry that somehow carries both fails narrow to its lists; only
+  // a group-wide entry (no recipient) may be company-wide.
+  const companyWide = binding.companyWide === true
+    && binding.compartments.length === 0
+    && binding.projectIds.length === 0
+    && !binding.recipientUserId
   return {
     workspaceId,
     userId: binding.recipientUserId ?? '',
     clearance: binding.clearance,
-    compartments: [...binding.compartments],
-    mutationCompartments: [...binding.compartments],
-    projectIds: [...binding.projectIds],
+    compartments: companyWide ? null : [...binding.compartments],
+    mutationCompartments: companyWide ? null : [...binding.compartments],
+    projectIds: companyWide ? null : [...binding.projectIds],
     visibilityAssistantIds: null,
   }
 }
