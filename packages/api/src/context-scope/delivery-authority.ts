@@ -20,6 +20,15 @@ export type DeliveryAudienceInput = {
   userId: string
   channelType: string
   channelId: string
+  /**
+   * The session key when it differs from the chat: a thread-scoped channel
+   * session (`<chat>:thread:<root>`, Feishu / Slack reply-in-thread). The
+   * recipient's personal session lives under THIS id, so the individual-DM
+   * lookup must use it; looking under the bare chat finds no session (or an
+   * older one owned by someone else) and judges the member as anonymous.
+   * Bindings stay keyed by `channelId`.
+   */
+  sessionChannelId?: string
   channelIntegrationId?: string
   sessionId?: string
   recipientType?: 'individual' | 'group'
@@ -273,7 +282,7 @@ async function resolveEnvelope(
       assistantId: input.assistantId,
       userId: input.userId,
       channelType: input.channelType,
-      channelId: input.channelId,
+      channelId: input.sessionChannelId ?? input.channelId,
     })
     if (personalSession && !isSharedAudienceSession(personalSession)) {
       const member = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps, input.recipientMode)

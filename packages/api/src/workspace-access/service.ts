@@ -201,7 +201,13 @@ async function auditState(client:PoolClient,workspaceId:string,command:Departmen
 }
 
 /** Trusted transaction entry. Transport callers must use the saved-review protocol. */
-export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand):Promise<WorkspaceAccessOverview>{
+type AppliedCommand=NonNullable<WorkspaceAccessOverview['appliedCommand']>
+/** `projection:'directory'` is for a SIMULATED command (saved-review preview):
+ * the caller reads only the audit event, so the result skips the departmental
+ * readiness audit, which locks and reads every scoped row in the workspace. */
+export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand):Promise<WorkspaceAccessOverview>
+export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand,projection:'directory'):Promise<WorkspaceAccessDirectory&{appliedCommand?:AppliedCommand}>
+export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand,projection:'overview'|'directory'='overview'):Promise<WorkspaceAccessOverview|(WorkspaceAccessDirectory&{appliedCommand?:AppliedCommand})>{
     const p=await principal(client,workspaceId,userId,true),all=await teams(client,p)
     const before=await auditState(client,workspaceId,command)
     let subjectId:string
@@ -358,7 +364,7 @@ export async function executeDepartmentAccessInTransaction(client:PoolClient,wor
         await client.query('UPDATE pending_approvals SET status=$2,responded_at=now(),responded_by=$3,reject_reason=$4 WHERE id=$1',[r.approvalId,command.decision,userId,command.decision==='rejected'?command.reason??null:null])
       }
     }
-    const result=await overview(client,p)
+    const result=projection==='directory'?(await directory(client,p)).view:await overview(client,p)
     const event=await client.query<{id:string}>(`INSERT INTO workspace_access_events(workspace_id,actor_user_id,kind,subject_id,policy_revision,changes) VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING id`,[workspaceId,userId,command.type,subjectId,result.policyRevision,JSON.stringify({command,before,after:await auditState(client,workspaceId,command,subjectId)})])
     return {...result,appliedCommand:{type:command.type,subjectId,auditEventId:event.rows[0].id}}
 }
@@ -368,8 +374,8 @@ export async function getWorkspaceAccessInTransaction(client:PoolClient,workspac
 }
 
 /** Read-only inspection: same visibility and lifetime, no history or readiness audit. */
-export async function getWorkspaceAccessDirectoryInTransaction(client:PoolClient,workspaceId:string,userId:string):Promise<WorkspaceAccessDirectory>{
-  return (await directory(client,await principal(client,workspaceId,userId))).view
+export async function getWorkspaceAccessDirectoryInTransaction(client:PoolClient,workspaceId:string,userId:string,lock=false):Promise<WorkspaceAccessDirectory>{
+  return (await directory(client,await principal(client,workspaceId,userId,lock))).view
 }
 
 /** Trusted canonical entry for the common approval protocol; ordinary HTTP writers require saved reviews. */

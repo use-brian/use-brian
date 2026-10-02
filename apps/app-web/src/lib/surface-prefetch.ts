@@ -980,6 +980,11 @@ export function departmentEdgesCacheKey(workspaceId:string,userId:string,departm
   return `departments:${workspaceId}:${userId}:edges:${departmentId}`;
 }
 
+/** Every listed department's reader edges, for the department cards; same family prefix. */
+export function departmentReadersCacheKey(workspaceId:string,userId:string,departmentIds:string[]):string {
+  return `departments:${workspaceId}:${userId}:readers:${departmentIds.join(',')}`;
+}
+
 /** Registry snapshots share the access invalidation namespace and viewer scope. */
 export function workspaceDepartmentRegistryCacheKey(workspaceId:string,userId:string):string {
   return `${workspaceAccessCacheKey(workspaceId,userId)}:registry`;

@@ -83,7 +83,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { MoreHorizontal } from "lucide-react";
+import { ArrowLeft, Crown, Mail, MoreHorizontal, ShieldCheck, UserPlus, UserRound, UsersRound } from "lucide-react";
+import { Chip, OrgAvatar, StatStrip, StatTile } from "@/components/organization/org-visuals";
 import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
@@ -1477,16 +1478,25 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
   }
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-lg font-semibold">{memberTarget?t.organization.memberDetails:t.chrome.settingsModal.workspace.members}</h2>
-      {memberTarget?<><Button className="min-h-11" variant="outline" onClick={clearMember??(()=>openWorkspaceSettings('ws-organization'))}>{clearMember?t.organization.showAllMembers:t.workspaceAccess.organization}</Button>{shownMembers.length===0?<p role="status" className="text-sm">{t.organization.memberUnavailable}</p>:null}</>:null}
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold">{memberTarget?t.organization.memberDetails:t.chrome.settingsModal.workspace.members}</h2>
+        {memberTarget?<Button size="sm" className="max-sm:min-h-11" variant="outline" onClick={clearMember??(()=>openWorkspaceSettings('ws-organization'))}><ArrowLeft aria-hidden className="size-3.5"/>{clearMember?t.organization.showAllMembers:t.workspaceAccess.organization}</Button>:null}
+      </div>
+      {memberTarget&&shownMembers.length===0?<p role="status" className="text-sm">{t.organization.memberUnavailable}</p>:null}
+      {!memberTarget?<StatStrip label={t.organization.peopleOverview}>
+        <StatTile icon={UsersRound} tone="blue" label={t.organization.statMembers} value={data.members.length}/>
+        <StatTile icon={ShieldCheck} tone="purple" label={t.organization.statAdmins} value={data.members.filter(m=>m.role!=="member").length}/>
+        {isAdmin && managementEnabled ? <StatTile icon={Mail} tone={pending.length?"orange":"gray"} label={t.organization.statInvites} value={pending.length}/> : null}
+      </StatStrip>:null}
+      <div className={isAdmin && managementEnabled && !memberTarget ? "grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_22rem]" : "space-y-5"}>
 
       {/* Invite panel — the primary action; the "Invite members" chrome
           button deep-links straight here. */}
       {isAdmin && managementEnabled && !memberTarget && (
-        <div className="border-t border-border pt-6 space-y-3">
+        <section className="min-w-0 space-y-3 rounded-xl border border-border bg-card p-4 xl:sticky xl:top-4 xl:col-start-2 xl:row-start-1">
           <div>
-            <h3 className="text-sm font-medium">{t.workspaceDetailInline.inviteHeading}</h3>
+            <h3 className="flex items-center gap-1.5 text-sm font-medium"><UserPlus aria-hidden className="size-4 text-muted-foreground"/>{t.workspaceDetailInline.inviteHeading}</h3>
             <p className="text-[12px] text-muted-foreground mt-0.5">
               {format(t.workspaceDetailInline.inviteDescription, { workspace: data.name })}
             </p>
@@ -1581,12 +1591,13 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
               ))}
             </div>
           )}
-        </div>
+        </section>
       )}
+      <div className="min-w-0 space-y-5 xl:col-start-1 xl:row-start-1">
 
       {/* Pending invitations */}
       {isAdmin && managementEnabled && !memberTarget && pending.length > 0 && (
-        <div className="border-t border-border pt-6 space-y-3">
+        <div className="space-y-2">
           <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {format(t.workspaceDetailInline.pendingHeading, { count: pending.length })}
           </h3>
@@ -1649,90 +1660,91 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
         </div>
       )}
 
-      {/* Current members */}
-      <div className="border-t border-border pt-6 space-y-3">
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+      {/* Current members: a card grid; the focused view is the same card alone. */}
+      <section className="space-y-3">
+        {/* The stat tiles already count members; the label stays visible only to separate the roster from pending invitations. */}
+        <h3 className={isAdmin && managementEnabled && !memberTarget && pending.length > 0 ? "flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground" : "sr-only"}>
           {format(t.workspaceDetailInline.membersHeader, { count: shownMembers.length })}
         </h3>
         {transferError && (
           <p role="alert" className="text-[13px] text-red-400">{transferError}</p>
         )}
-        <div className="space-y-1.5">
-          {shownMembers.map((m) => (
-            <div
+        <ul className={memberTarget ? "grid gap-3" : "grid gap-3 sm:grid-cols-2 2xl:grid-cols-3"}>
+          {shownMembers.map((m) => {
+            const display = m.userName ?? m.email ?? t.organization.unnamedPerson;
+            const role = m.role === "owner" ? t.workspaceAccess.owner : m.role === "admin" ? t.workspaceAccess.admin : t.workspaceAccess.memberRole;
+            return (
+            <li
               key={m.userId}
-              className="flex items-center justify-between py-2 px-3 rounded-lg bg-muted/30"
+              className="flex min-w-0 items-start gap-3 rounded-xl border border-border bg-card p-3"
             >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center text-[11px] font-bold text-primary shrink-0">
-                  {(m.userName ?? m.email ?? "?").charAt(0).toUpperCase()}
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium truncate">
-                    {selectMember&&!memberTarget?<button type="button" className="min-h-11 max-w-full truncate text-left hover:underline focus-visible:underline" onClick={()=>selectMember(m.userId)}>{m.userName ?? m.email ?? t.organization.unnamedPerson}</button>:m.userName ?? m.email ?? t.organization.unnamedPerson}
-                    {m.email === currentUser?.email && (
-                      <span className="text-muted-foreground ml-1">{t.workspaceDetailInline.you}</span>
-                    )}
-                  </div>
-                  {m.email && m.userName && (
-                    <div className="text-[11px] text-muted-foreground truncate">{m.email}</div>
+              <OrgAvatar name={display} seed={m.userId} size={36} />
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center text-sm font-medium">
+                  {selectMember&&!memberTarget?<button type="button" className="max-w-full truncate text-left hover:underline focus-visible:underline max-sm:min-h-11" onClick={()=>selectMember(m.userId)}>{display}</button>:<span className="truncate">{display}</span>}
+                  {m.email === currentUser?.email && (
+                    <span className="ml-1 shrink-0 font-normal text-muted-foreground">{t.workspaceDetailInline.you}</span>
                   )}
                 </div>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <span className="text-[11px] text-muted-foreground bg-muted px-2 py-0.5 rounded-full capitalize">
-                  {m.role}
-                </span>
-                {isOwner && managementEnabled && m.role !== "owner" && (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger
-                      render={
-                        <button
-                          type="button"
-                          aria-label={format(t.workspaceDetailInline.rowActionsAria, {
-                            name: m.userName ?? m.email ?? m.userId,
-                          })}
-                          className="inline-flex size-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground aria-expanded:bg-muted sm:size-7"
-                        >
-                          <MoreHorizontal className="size-4" aria-hidden />
-                        </button>
-                      }
-                    />
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        onClick={() =>
-                          changeRole(m.userId, m.role === "admin" ? "member" : "admin")
-                        }
-                      >
-                        {m.role === "admin"
-                          ? t.workspaceDetailInline.demoteToMember
-                          : t.workspaceDetailInline.promoteToAdmin}
-                      </DropdownMenuItem>
-                      {/* Personal workspaces are never transferable. */}
-                      {!data.isPersonal && (
-                        <DropdownMenuItem
-                          onClick={() => {
-                            setTransferError(null);
-                            setTransferTarget(m.userId);
-                          }}
-                        >
-                          {t.workspaceDetailInline.transferOwnershipTitle}
-                        </DropdownMenuItem>
-                      )}
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onClick={() => removeMember(m.userId, m.userName ?? m.email ?? "")}
-                      >
-                        {t.workspaceDetailInline.remove}
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                {m.email && m.userName && (
+                  <div className="truncate text-xs text-muted-foreground">{m.email}</div>
                 )}
+                <div className="mt-2 flex flex-wrap gap-1">
+                  <Chip icon={m.role === "owner" ? Crown : m.role === "admin" ? ShieldCheck : UserRound} tone={m.role === "owner" ? "orange" : m.role === "admin" ? "purple" : undefined}>{role}</Chip>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+              {isOwner && managementEnabled && m.role !== "owner" && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <button
+                        type="button"
+                        aria-label={format(t.workspaceDetailInline.rowActionsAria, {
+                          name: m.userName ?? m.email ?? m.userId,
+                        })}
+                        className="-mr-1 -mt-1 inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground aria-expanded:bg-muted sm:size-7"
+                      >
+                        <MoreHorizontal className="size-4" aria-hidden />
+                      </button>
+                    }
+                  />
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onClick={() =>
+                        changeRole(m.userId, m.role === "admin" ? "member" : "admin")
+                      }
+                    >
+                      {m.role === "admin"
+                        ? t.workspaceDetailInline.demoteToMember
+                        : t.workspaceDetailInline.promoteToAdmin}
+                    </DropdownMenuItem>
+                    {/* Personal workspaces are never transferable. */}
+                    {!data.isPersonal && (
+                      <DropdownMenuItem
+                        onClick={() => {
+                          setTransferError(null);
+                          setTransferTarget(m.userId);
+                        }}
+                      >
+                        {t.workspaceDetailInline.transferOwnershipTitle}
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onClick={() => removeMember(m.userId, m.userName ?? m.email ?? "")}
+                    >
+                      {t.workspaceDetailInline.remove}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+            </li>
+            );
+          })}
+        </ul>
+      </section>
+      </div>
       </div>
       <TypeToConfirmDialog
         open={transferTarget !== null}

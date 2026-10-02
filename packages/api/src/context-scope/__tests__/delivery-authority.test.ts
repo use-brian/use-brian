@@ -539,3 +539,38 @@ describe('[COMP:api/delivery-authority] non-member recipients', () => {
     })).resolves.toMatchObject({ allowed: false, diagnostic: 'clearance' })
   })
 })
+
+describe('[COMP:api/delivery-authority] thread-scoped channel DM', () => {
+  // Feishu / Slack reply-in-thread key the session by `<chat>:thread:<root>`,
+  // while delivery targets the bare chat. The member's personal session lives
+  // under the thread key only.
+  const threadKey = 'oc_chat:thread:om_root'
+  const threadSession = session({ channelType: 'feishu', channelId: threadKey, visibility: 'owner' })
+  const findChannelSession = vi.fn(async (query: { channelId: string }) =>
+    query.channelId === threadKey ? threadSession : null)
+  const authorize = createDeliveryAudienceAuthorizer({
+    findAssistant: vi.fn(async () => ({ id: ASSISTANT, workspaceId: WS })) as never,
+    findSession: vi.fn(async () => null),
+    findChannelSession: findChannelSession as never,
+    getWorkspaceRole: vi.fn(async () => null),
+    resolveLiveAccess: vi.fn(async () => ceiling()),
+  })
+  const input = {
+    workspaceId: WS,
+    assistantId: ASSISTANT,
+    userId: USER,
+    channelType: 'feishu',
+    channelId: 'oc_chat',
+    recipientType: 'individual' as const,
+    scopeEvidence: { sources: [source('own-memory', ASSISTANT)] },
+  }
+
+  it('finds the member personal session under the thread key and delivers their own rows', async () => {
+    await expect(authorize({ ...input, sessionChannelId: threadKey })).resolves.toMatchObject({ allowed: true })
+    expect(findChannelSession).toHaveBeenLastCalledWith(expect.objectContaining({ channelId: threadKey }))
+  })
+
+  it('judges the member as anonymous when only the bare chat is looked up', async () => {
+    await expect(authorize(input)).resolves.toMatchObject({ allowed: false })
+  })
+})

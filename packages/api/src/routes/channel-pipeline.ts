@@ -1092,6 +1092,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     userId,
     channelType,
     channelId,
+    sessionChannelId,
     channelIntegrationId: params.channelIntegrationId,
     recipientType: isGroupChat ? 'group' as const : 'individual' as const,
     // A DM from a non-member goes back to that same guest, judged as the
@@ -1221,6 +1222,42 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       compartments: decision.evidence.compartments,
       projectIds: decision.evidence.projectIds,
     })
+  }
+  /**
+   * Every pre-generation audience check refuses the same way: one analytics
+   * row and a reply to the person waiting. A refusal that escapes instead
+   * unwinds into the channel route's detached catch and the person hears
+   * nothing at all (the compaction-time check did exactly that until
+   * 2026-10-03). Returns false when the turn must stop.
+   */
+  const deliveryAudienceAdmitsTurn = async (): Promise<boolean> => {
+    try {
+      await assertDeliveryAudience()
+      return true
+    } catch (err) {
+      if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
+      console.warn(`[${channelType}] channel turn refused before generation:`, (err as Error).name,
+        isDeliveryAudienceUnverifiedError(err) ? err.diagnostic ?? '' : '')
+      // A refusal that ends the turn before any reply is exactly the one that
+      // must leave a row: without it the only trace is a console line, and the
+      // incident is invisible to the id-keyed SQL triage path.
+      analytics?.logEvent({
+        userId, assistantId: assistant.id, sessionId: session.id,
+        eventName: 'chat_route_error', channelType,
+        metadata: {
+          error_type: sanitizeAnalytics((err as Error).name),
+          stage: sanitizeAnalytics('pre_generation'),
+          ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
+            ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
+            : {}),
+        },
+      })
+      if (isDeliveryAudienceUnverifiedError(err)) {
+        await hooks.sendError(err)
+      }
+      await hooks.onCleanup?.()
+      return false
+    }
   }
 
   const filterHistoryForAudience = async <T extends {
@@ -1645,7 +1682,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
   // runProactiveCompaction owns stamping + tool-result pairing + summary
   // prepending internally. See docs/architecture/context-engine/compaction.md.
-  await assertDeliveryAudience()
+  if (!(await deliveryAudienceAdmitsTurn())) return
   const compactionResult = await runProactiveCompaction({
     sessionMessages: dbMessages,
     timezone: userTimezone,
@@ -2262,32 +2299,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
 
   // ── Processing start ──
-  try {
-    await assertDeliveryAudience()
-  } catch (err) {
-    if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
-    console.warn(`[${channelType}] channel turn refused before generation:`, (err as Error).name,
-      isDeliveryAudienceUnverifiedError(err) ? err.diagnostic ?? '' : '')
-    // A refusal that ends the turn before any reply is exactly the one that
-    // must leave a row: without it the only trace is a console line, and the
-    // incident is invisible to the id-keyed SQL triage path.
-    analytics?.logEvent({
-      userId, assistantId: assistant.id, sessionId: session.id,
-      eventName: 'chat_route_error', channelType,
-      metadata: {
-        error_type: sanitizeAnalytics((err as Error).name),
-        stage: sanitizeAnalytics('pre_generation'),
-        ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
-          ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
-          : {}),
-      },
-    })
-    if (isDeliveryAudienceUnverifiedError(err)) {
-      await hooks.sendError(err)
-    }
-    await hooks.onCleanup?.()
-    return
-  }
+  if (!(await deliveryAudienceAdmitsTurn())) return
   await hooks.onProcessingStart?.()
 
   await updateSessionStatus(session.id, 'running')

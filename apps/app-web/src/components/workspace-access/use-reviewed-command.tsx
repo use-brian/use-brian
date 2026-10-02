@@ -89,7 +89,7 @@ export function useReviewedCommand<C,V extends Review,R>(options:{
       const code = cause instanceof Error ? cause.message : '';
       if (['organization_conflict', 'access_policy_conflict', 'access_review_expired', 'access_review_changed', 'not_found', 'unauthorized', 'migration_expired', 'migration_not_active', 'migration_actor_required', 'migration_item_applied'].includes(code)) pending.current = null;
       setRetryAvailable(Boolean(pending.current?.confirmed));
-      setError(options.errorMessage?.(code) ?? (['organization_conflict', 'request_review_stale', 'access_policy_conflict'].includes(code) ? t.stale : code === 'access_review_expired' ? t.reviewExpired : code === 'departmental_enforcement_incomplete' ? t.notReady : t.saveError));
+      setError(options.errorMessage?.(code) ?? (['organization_conflict', 'request_review_stale', 'access_policy_conflict'].includes(code) ? t.stale : code === 'access_review_expired' ? t.reviewExpired : code === 'access_busy' ? t.reviewBusy : code === 'departmental_enforcement_incomplete' ? t.notReady : t.saveError));
       return null;
     } finally {
       clearTimeout(expiry);

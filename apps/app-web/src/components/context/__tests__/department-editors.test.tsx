@@ -16,7 +16,9 @@ const mocks=vi.hoisted(()=>({registry:vi.fn(),fetch:vi.fn(),prepare:vi.fn(),save
 vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>mocks.viewer}));
 vi.mock('@/lib/api/workspace-access',()=>({fetchWorkspaceAccess:mocks.fetch,fetchWorkspaceDepartmentRegistry:mocks.registry,prepareWorkspaceAccessCommand:mocks.prepare,saveWorkspaceAccessCommand:mocks.save,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:mocks.confirm}));
-vi.mock('@/components/organization/department-access-panel',()=>({AssistantHomeDepartment:({assistantId}:{assistantId:string})=><p>home-picker:{assistantId}</p>}));
+vi.mock('@/components/organization/department-access-panel',()=>({AssistantHomeDepartment:({assistantId}:{assistantId:string})=><p>home-picker:{assistantId}</p>,
+  useDepartmentReaders:()=>({edges:new Map([['team',[{departmentId:'team',principal:{kind:'user',id:'person'},clearance:'internal',expiresAt:null,origin:'store'}]]]),directory:[{departmentId:'team',name:'Research',status:'active',revision:1,myClearance:'confidential',isOwner:true,ownerIds:['person']}]}),
+  clearanceCounts:(edges:Array<{clearance:'public'|'internal'|'confidential'}>)=>edges.reduce((c,e)=>({...c,[e.clearance]:c[e.clearance]+1}),{public:0,internal:0,confidential:0})}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:vi.fn(async(url:string)=>({ok:true,json:async()=>url.includes('/assistants?')?{assistants:[{id:'assistant',name:'Research assistant'}]}:{members:[{userId:'person',userName:'Riley'}]}}))}));
 const team={id:'team',name:'Research',key:'research',description:null,color:null,status:'active',readAll:false,readGrantGroupIds:[],memberCount:0,members:[],assistantIds:[]};
 vi.mock('@/lib/api/context-scopes',()=>({
@@ -46,9 +48,19 @@ function Harness(){const change=useDepartmentChange('workspace');return <><butto
 
 describe('[COMP:app-web/context-scope] reviewed Team and assistant editors',()=>{
   it('separates department identity and lifecycle, and leaves who reads it to the department panel',async()=>{
-    await render(<TeamsContextSection renderAccessSettings={id=><p>roster:{id}</p>}/>);
-    for(const heading of [t.departmentPickerLabel,t.createTeamTitle,t.departmentDetailsTitle,t.departmentLifecycleTitle])expect(host.textContent).toContain(heading);
-    expect(host.textContent).toContain('roster:team');
+    await render(<TeamsContextSection renderAccessSettings={(id,panel)=><p>{panel}:{id}</p>}/>);
+    for(const heading of [t.createTeamTitle,t.departmentDetailsTitle,t.departmentLifecycleTitle])expect(host.textContent).toContain(heading);
+    // The department cards are the picker: one pressed card per selection, with its reader summary.
+    const cards=host.querySelector(`ul[aria-label="${t.departmentPickerLabel}"]`)!;
+    expect(cards.querySelector('button[aria-pressed="true"]')?.textContent).toContain('Research');
+    expect(cards.textContent).toContain(t.readerCount.replace('{count}','1'));
+    // Readers is the default panel; Policy and Details stay mounted but hidden, so drafts survive a switch.
+    const panel=(name:string)=>host.querySelector<HTMLElement>(`[role="tabpanel"][id$="-panel-${name}"]`)!;
+    expect(panel('readers').hidden).toBe(false);expect(panel('readers').textContent).toBe('readers:team');
+    expect(panel('policy').hidden).toBe(true);expect(panel('policy').textContent).toBe('policy:team');
+    expect(panel('details').hidden).toBe(true);
+    await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(tab=>tab.textContent?.includes(t.detailsTab))!.click());
+    expect(panel('details').hidden).toBe(false);expect(panel('readers').hidden).toBe(true);
     // Membership checkboxes and Team-to-Team read packages are retired (D26): one roster.
     for(const retired of [t.membershipTitle,t.readAccessTitle,t.readAllTeams,t.saveAccess])expect(host.textContent).not.toContain(retired);
     expect(host.querySelector('[role="checkbox"]')).toBeNull();

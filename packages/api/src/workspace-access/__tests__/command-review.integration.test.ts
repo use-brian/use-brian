@@ -36,7 +36,8 @@ describe('[COMP:api/workspace-access] immutable command review and application',
     const command={type:'workspace.classification.set' as const,mode:'strict' as const,expectedPolicyRevision:current.policyRevision,expectedInventoryRevision:'2'}
     await expect(prepareDepartmentCommand(f.workspaceId,f.member,{command,expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'admin_required'})
     await expect(prepareDepartmentCommand(f.workspaceId,f.owner,{command:{...command,expectedInventoryRevision:'3'},expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'scope_review_changed'})
-    mocks.readiness.mockResolvedValueOnce({ready:false,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:['operation_separation']}).mockResolvedValueOnce({ready:false,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:['operation_separation']})
+    // One answer: the strict-mode gate is the review's only readiness read.
+    mocks.readiness.mockResolvedValueOnce({ready:false,enforcementVersion:2,requiredEnforcementVersion:2,missingCapabilities:['operation_separation']})
     await expect(prepareDepartmentCommand(f.workspaceId,f.owner,{command,expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'departmental_enforcement_incomplete'})
     const review=await prepareDepartmentCommand(f.workspaceId,f.owner,{command,expectedPolicyRevision:current.policyRevision,idempotencyKey:randomUUID()})
     expect(review.changes).toContainEqual({field:'classification_mode',before:[{kind:'code',value:'review'}],after:[{kind:'code',value:'strict'}]})
@@ -117,6 +118,19 @@ describe('[COMP:api/workspace-access] immutable command review and application',
     expect((await request(pageApp).post(pagePath).set(headers).send({userId:f.member})).status).toBe(201)
     expect((await pool.query("SELECT 1 FROM workspace_access_events WHERE workspace_id=$1 AND kind='department.member.set'",[f.workspaceId])).rows).toHaveLength(1)
     expect((await pool.query('SELECT 1 FROM workspace_group_members WHERE group_id=$1 AND user_id=$2',[teamId,f.member])).rows).toHaveLength(1)
+  })
+  it('prepares a department create without the readiness audit and applies it with one',async()=>{
+    // The audit reads and locks every scoped row in the workspace. On a large
+    // workspace running it in the review made the review outlive its own
+    // confirmation window, so a department could never be created.
+    const f=await fixture(),intent=await f.intent(create)
+    mocks.readiness.mockClear()
+    const review=await prepareDepartmentCommand(f.workspaceId,f.owner,intent)
+    expect(mocks.readiness).not.toHaveBeenCalled()
+    const applied=await applyDepartmentCommand(f.workspaceId,f.owner,apply(review))
+    expect(mocks.readiness).toHaveBeenCalledTimes(1)
+    expect(applied.readiness.ready).toBe(true)
+    expect(applied.teams.map(team=>team.name)).toContain('Research')
   })
   it('previews canonical effects without leaking writes, revisions, audit or approval rows',async()=>{
     const f=await fixture(),intent=await f.intent(create),review=await prepareDepartmentCommand(f.workspaceId,f.owner,intent)

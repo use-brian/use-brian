@@ -819,7 +819,7 @@ export function DocSidebar(props: Props) {
         href={`/w/${workspaceId}/organization`}
         {...intentPrefetch(`/w/${workspaceId}/organization`)}
         aria-current={surfaceActive("organization") ? "page" : undefined}
-        className={`mx-2 mb-1.5 flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm hover:bg-sidebar-accent ${surfaceActive("organization") ? "bg-sidebar-accent font-medium" : "text-muted-foreground"}`}
+        className={`mx-2 mb-1.5 flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm hover:bg-sidebar-accent max-md:min-h-11 ${surfaceActive("organization") ? "bg-sidebar-accent font-medium" : "text-muted-foreground"}`}
       >
         <Users className="size-4 shrink-0" />
         {copy.organization.title}
