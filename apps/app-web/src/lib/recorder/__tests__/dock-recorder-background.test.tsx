@@ -98,6 +98,22 @@ describe("[COMP:app-web/dock-recorder] non-blocking saves", () => {
     expect(mocks.startInteraction).not.toHaveBeenCalled();
   });
 
+  it.each(["pending", "failed"])("uploads the full recording even when live windows are %s and interaction is disabled", async (state) => {
+    const windows = deferred<void>();
+    options.prepareLivePage = vi.fn().mockResolvedValue({ pageId: "page", sessionId: "live",
+      title: "Meeting", notesHeadingId: "notes", markerBlockId: "marker" });
+    makeEngine(180_000, windows.promise);
+    await render(); act(() => api.setLivePageEnabled(true)); await start(); await stop();
+    expect(api.interactionAvailable).toBe(false);
+    expect(options.onMeetingCapture).toHaveBeenCalledWith(expect.any(File), {
+      pageId: "page", sessionId: "live", liveWindowsDone: windows.promise,
+    });
+    expect(api.phase.kind).toBe("idle");
+    expect(api.savingCount).toBe(0);
+    await act(async () => state === "failed" ? windows.reject(new Error("ASR unavailable")) : windows.resolve());
+    expect(api.notice?.kind).toBe("queued");
+  });
+
   it("leaves available interaction opt-in rather than changing ordinary recording", async () => {
     mocks.interactionRequest.mockResolvedValue({ available: true });
     makeEngine(); await render(); await start(); await stop();
@@ -187,6 +203,7 @@ describe("[COMP:app-web/dock-recorder] non-blocking saves", () => {
     await stop();
     expect(api.phase.kind).toBe("idle");
     expect(oldStop).not.toHaveBeenCalled();
+    expect(options.onMeetingCapture).toHaveBeenCalledOnce(); // upload starts before live-window drain
     expect(mocks.startInteraction.mock.calls[0][2].aborted).toBe(false);
     await start(); expect(api.interactionCaptureId).toBe("new");
     await act(async () => uploads.resolve());
@@ -307,14 +324,14 @@ describe("[COMP:app-web/dock-recorder] non-blocking saves", () => {
     makeEngine(180_000, windowsDone.promise); makeEngine();
     await render(); act(() => api.setLivePageEnabled(true)); await start(); await stop();
     expect(api.phase.kind).toBe("idle");
-    expect(originalUpload).not.toHaveBeenCalled();
+    expect(originalUpload).toHaveBeenCalledOnce();
     options = { ...options, assistantId: "assistant-2", onMeetingCapture: replacementUpload };
     await render(); await start();
     const window = { blob: new Blob(["window"]), mime: "audio/webm", startMs: 0, endMs: 30_000 };
     await mocks.createEngine.mock.calls[0][0].onLiveWindow(window);
     expect(options.streamLiveWindow).toHaveBeenLastCalledWith(window, pages[0]);
     await act(async () => windowsDone.resolve());
-    expect(originalUpload).toHaveBeenCalledWith(expect.any(File), { pageId: "page-a", sessionId: "session-a" });
+    expect(originalUpload).toHaveBeenCalledWith(expect.any(File), { pageId: "page-a", sessionId: "session-a", liveWindowsDone: windowsDone.promise });
     expect(replacementUpload).not.toHaveBeenCalled();
     expect(api.phase.kind).toBe("latched");
     await stop();
