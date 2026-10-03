@@ -81,6 +81,27 @@ fences the experiment and terminates owned processes, **not pending OS input**.
 Release any held physical button yourself. Do not interpret cancellation, process
 exit, neutral state or the eight-second collection interval as a released stream.
 
+### Pre-start refusal diagnostics
+
+A consented report with `started:false` means no child experiment was started.
+Older builds collapse all such failures to `preflight-unavailable`; that result
+alone cannot identify a missing permission. Current builds add a nullable closed
+`preflightFailure` code and use it as the blocked reason:
+
+- `cancelled-before-start`: cancellation was already pending.
+- `input-not-neutral`: release buttons/modifiers; keep hands off during startup.
+- `fixture-not-frontmost`: the fixture lost foreground. No automatic refocus/retry.
+- `listen-permission-unavailable` / `post-permission-unavailable`: the respective
+  macOS permission preflight refused. Review Input Monitoring / Accessibility
+  for the actual test process or responsible launcher in the disposable login;
+  granting Use Brian permission is not permission for this standalone harness.
+- `observer-unavailable`: listen-only tap creation/source/enablement failed.
+- `fixture-window-unavailable`: the owned window could not be resolved.
+- `consent-bootstrap-unavailable`: native consent/bootstrap validation refused.
+
+These diagnostics neither request permissions nor relax any guard. Do not run
+`normal` or other emitting cases to diagnose a blocked `null` case.
+
 ### Permissions and signing
 
 The harness only calls permission preflight APIs. Missing TCC permissions/tap

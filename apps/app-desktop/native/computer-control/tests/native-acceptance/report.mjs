@@ -7,15 +7,22 @@ const allowed = new Map([
   [2, [60, 61, 62, 63, 64]], [3, [3, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 80, 86, 92, 93, 95, 96, 97, 98, 99, 100]],
   [4, [6, 7, 8, 9, 81, 82, 83]], [5, [83, 90]],
 ]);
+export const preflightFailures = Object.freeze(['cancelled-before-start', 'input-not-neutral', 'fixture-not-frontmost',
+  'listen-permission-unavailable', 'post-permission-unavailable', 'observer-unavailable',
+  'fixture-window-unavailable', 'consent-bootstrap-unavailable']);
 const sameKeys = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).sort().join(',') === [...keys].sort().join(',');
 export function classify(report) {
   const result = (verdict, reason) => ({ verdict, reason, productionAcceptance: false });
   const unknown = reason => result('inconclusive', reason);
-  if (!sameKeys(report, ['schema', 'case', 'productionAcceptance', 'consented', 'started', 'lost', 'records', 'localCounts', 'os', 'architecture']) ||
+  const hasPreflight = Object.hasOwn(report ?? {}, 'preflightFailure');
+  if (!sameKeys(report, ['schema', 'case', 'productionAcceptance', 'consented', 'started', 'lost', 'records', 'localCounts', 'os', 'architecture', ...(hasPreflight ? ['preflightFailure'] : [])]) ||
       report.schema !== 'native-mechanism-experiment.v1' || !cases.includes(report.case) || report.productionAcceptance !== false ||
       !['consented', 'started', 'lost'].every(k => typeof report[k] === 'boolean') ||
       typeof report.os !== 'string' || report.os.length > 128 || !['arm64', 'x86_64'].includes(report.architecture) ||
       !Array.isArray(report.records) || report.records.length > 2048) return unknown('invalid-report');
+  if (hasPreflight && report.preflightFailure !== null &&
+      (!preflightFailures.includes(report.preflightFailure) || !report.consented || report.started || report.records.length))
+    return unknown('invalid-report');
   const seq = new Map(), times = new Map();
   for (const r of report.records) {
     if (!sameKeys(r, ['source', 'code', 'sequence', 'ticks']) || !allowed.get(r.source)?.includes(r.code) ||
@@ -33,7 +40,7 @@ export function classify(report) {
   const tick = (s, c) => BigInt(rows(s, c)[0]?.ticks ?? '0');
   const before = (s, a, b) => one(s, a) && one(s, b) && tick(s, a) <= tick(s, b);
   if (!report.consented) return report.started || report.records.length ? unknown('consent-violation') : result('blocked', 'consent-declined');
-  if (!report.started) return report.records.length ? unknown('invalid-preflight') : result('blocked', 'preflight-unavailable');
+  if (!report.started) return report.records.length ? unknown('invalid-preflight') : result('blocked', report.preflightFailure ?? 'preflight-unavailable');
   if (report.lost || has(0, 5) || has(1, 47) || has(0, 85)) return unknown('loss-or-scope-change');
   if (!before(0, 1, 2) || !one(0, 84) || !one(0, 4) || !one(0, 94) ||
       tick(0, 94) - tick(0, 2) < 7900000000n) return unknown('incomplete-observation-window');

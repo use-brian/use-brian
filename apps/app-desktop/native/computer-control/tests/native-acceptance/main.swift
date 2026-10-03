@@ -60,6 +60,8 @@ final class Supervisor: NSObject, NSApplicationDelegate {
     var records: [[String: Any]] = []
     var timer: Timer?
     var initialRect: CGRect?
+    // Fixed codes only: no OS errors, paths, window contents or credentials.
+    var preflightFailure: String?
     var startTime = 0.0
     var pausedAt: Double?
     var actionAt: Double?
@@ -101,12 +103,25 @@ final class Supervisor: NSObject, NSApplicationDelegate {
         CGEvent.tapEnable(tap: port, enable: true)
         return CGEvent.tapIsEnabled(tap: port)
     }
+    func refusePreflight(_ reason: String) {
+        preflightFailure = reason
+        end()
+    }
     func begin() {
-        guard consented, experiment_cancelled() == 0, neutral(), NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid(),
-              CGPreflightListenEventAccess(), CGPreflightPostEventAccess(), installObserver() else { end(); return }
+        guard consented else { end(); return }
+        guard experiment_cancelled() == 0 else { refusePreflight("cancelled-before-start"); return }
+        guard neutral() else { refusePreflight("input-not-neutral"); return }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() else {
+            refusePreflight("fixture-not-frontmost"); return
+        }
+        guard CGPreflightListenEventAccess() else { refusePreflight("listen-permission-unavailable"); return }
+        guard CGPreflightPostEventAccess() else { refusePreflight("post-permission-unavailable"); return }
+        guard installObserver() else { refusePreflight("observer-unavailable"); return }
         initialRect = windowRect(pid: getpid(), number: UInt32(window.windowNumber))
-        guard initialRect != nil else { end(); return }
-        guard experiment_gui_consent(scenario.index, UInt32(window.windowNumber)) == 1 else { end(); return }
+        guard initialRect != nil else { refusePreflight("fixture-window-unavailable"); return }
+        guard experiment_gui_consent(scenario.index, UInt32(window.windowNumber)) == 1 else {
+            refusePreflight("consent-bootstrap-unavailable"); return
+        }
         let ok = experiment_start(scenario.index, UInt32(window.windowNumber)) == 1
         started = true; startTime = ProcessInfo.processInfo.systemUptime
         record(0, .consent); record(0, .observerReady)
@@ -211,6 +226,7 @@ final class Supervisor: NSObject, NSApplicationDelegate {
         }
         let report: [String: Any] = ["schema": "native-mechanism-experiment.v1", "case": scenario.rawValue,
             "productionAcceptance": false, "consented": consented, "started": started,
+            "preflightFailure": preflightFailure.map { $0 as Any } ?? NSNull(),
             "lost": lost || experiment_lost() != 0, "records": records,
             "localCounts": ["0": experiment_count(0), "1": experiment_count(1), "2": experiment_count(2), "4": experiment_count(4)],
             "os": ProcessInfo.processInfo.operatingSystemVersionString,

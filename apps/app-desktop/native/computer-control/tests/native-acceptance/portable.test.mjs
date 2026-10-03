@@ -3,9 +3,27 @@ import assert from 'node:assert/strict';
 import { readFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { cases, classify } from './report.mjs';
+import { cases, classify, preflightFailures } from './report.mjs';
 import { command, decode, sourceFiles } from './run.mjs';
 const file = name => readFile(new URL(name, import.meta.url), 'utf8');
+
+test('pre-start refusals expose only closed reasons, never acceptance', async () => {
+  const main = await file('main.swift');
+  const blocked = { ...report('null'), started: false, records: [], localCounts: { 0: 0, 1: 0, 2: 0, 4: 0 } };
+  assert.equal(classify(blocked).reason, 'preflight-unavailable'); // old reports remain readable
+  for (const reason of preflightFailures) {
+    assert(main.includes(`refusePreflight("${reason}")`));
+    assert.deepEqual(classify({ ...blocked, preflightFailure: reason }), {
+      verdict: 'blocked', reason, productionAcceptance: false,
+    });
+    assert.equal(classify({ ...report('null'), preflightFailure: reason }).reason, 'invalid-report');
+    assert.equal(classify({ ...blocked, consented: false, preflightFailure: reason }).reason, 'invalid-report');
+  }
+  for (const reason of ['raw private error', {}, 1, false, undefined]) {
+    assert.equal(classify({ ...blocked, preflightFailure: reason }).reason, 'invalid-report');
+  }
+  assert.equal(classify({ ...report('null'), preflightFailure: null }).verdict, 'observed-as-specified');
+});
 
 // Entirely synthetic protocol fixtures, never OS/proxy/delivery evidence.
 function report(scenario = 'normal') {
@@ -143,7 +161,16 @@ test('malformed, mismatched and oversized transport cannot mint observations or 
 test('GUI consent is per-case, timed, and cannot start children before confirmation/neutral foreground checks', async () => {
   const main = await file('main.swift');
   assert(main.includes('alert.runModal()')); assert(main.includes('check.state == .on'));
-  assert(main.includes('timeInterval: 60')); assert(main.includes('guard consented, experiment_cancelled() == 0, neutral()'));
+  assert(main.includes('timeInterval: 60'));
+  const start = main.indexOf('func begin()');
+  let previous = start;
+  for (const guard of ['guard consented', 'guard experiment_cancelled() == 0', 'guard neutral()',
+    'guard NSWorkspace.shared.frontmostApplication', 'guard CGPreflightListenEventAccess()',
+    'guard CGPreflightPostEventAccess()', 'guard installObserver()', 'guard initialRect != nil',
+    'guard experiment_gui_consent', 'experiment_start(']) {
+    const index = main.indexOf(guard, start);
+    assert(index > previous, guard); previous = index;
+  }
   assert(main.includes('NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid()'));
   assert(main.indexOf('record(0, .consent)') < main.indexOf('experiment_launch_owner()'));
   assert(main.includes('styleMask: [.borderless]')); assert(main.includes('width: 500, height: 350'));
