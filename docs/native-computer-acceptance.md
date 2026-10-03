@@ -4,7 +4,18 @@
 
 ## Operator isolated-harness build and pre-start refusal
 
-The operator reports the isolated harness built with SDK 26.5 / Apple Swift 6.3.3 on arm64 macOS 26.6.2 (25G83), binary SHA-256 `f16cec33677197128a093fbd62f4b1da7ef71a8ed2450ac018ed4e3b78828208`. The first `null` run returned `consent-declined`; the next recorded `consented:true`, `started:false`, no records and `preflight-unavailable`. This establishes reported SDK compilation and a pre-start refusal, not a confirmed null callback or input acceptance. The old aggregate reason cannot identify which preflight failed. The harness now reports a closed pre-start reason for cancellation, neutrality, foreground, listen/post permissions, observer setup, owned-window lookup or native consent bootstrap, without changing ordering, requesting permissions or relaxing guards. Portable classifier/source tests cover the codes and reject inconsistent reports. The new diagnostic source still needs Mac compilation/execution.
+The operator reports the isolated harness built with SDK 26.5 / Apple Swift 6.3.3 on arm64 macOS 26.6.2 (25G83), binary SHA-256 `f16cec33677197128a093fbd62f4b1da7ef71a8ed2450ac018ed4e3b78828208`. The first `null` run returned `consent-declined`; the next recorded `consented:true`, `started:false`, no records and `preflight-unavailable`. This establishes reported SDK compilation and a pre-start refusal, not a confirmed null callback or input acceptance. The old aggregate reason cannot identify which preflight failed. The harness now reports a closed pre-start reason for cancellation, neutrality, foreground, listen/post permissions, observer setup, owned-window lookup or native consent bootstrap, without changing ordering, requesting permissions or relaxing guards. Portable classifier/source tests cover the codes and reject inconsistent reports. The subsequent operator reports below establish compilation/execution of that diagnostic revision, not production acceptance.
+
+### Operator observations at `0b685151`
+
+Same reported arm64 macOS 26.6.2 (25G83), SDK 26.5 / Swift 6.3.3; diagnostic binary SHA-256 `0ce85768103d6144c98318a99e97eb7e50d2a1f1dc5ff99d9ec14ab476335f40`:
+
+- An initial diagnostic run refused before starting with `input-not-neutral`. A subsequent `null` run confirmed the probe but became `loss-or-scope-change`: supervisor code 85 occurred approximately 7.18 seconds after launch, with untagged traffic/clicks recorded. `lost:false`; the records do not identify an authenticated physical source or which scope predicate changed.
+- A later hands-off `null` run returned `observed-as-specified / null-confirmed-only`: owner codes 10→11→19, downstream probe code 40, full observation interval, resources-stopped code 4 and no loss/scope-change record.
+- `normal` returned `observed-as-specified / one-pair-observed-not-release-proof`: owner insertion/return codes 16→17, observer down/up 42→43, fixture down/up/pair 60→61→62, terminal and full observation interval, no recorded loss/scope change. This establishes the reported single ordinary pair/fixture receipt, not global release, confinement, provenance or failure safety.
+- `paused-before-final-check` returned `observed-as-specified / precheck-refused-in-window`: actual stop acknowledgement 90, resume 86 after approximately three seconds, deadline-expired 96, refusal 18 and terminal 19. No pair insertion or observer/fixture pair was recorded. Resumed tap state was **enabled (92)**, not disabled (93); this is pre-check refusal evidence, not proof of stale-proxy rejection or timeout ordering.
+
+These are operator-supplied isolated-harness observations, not locally reproduced runs or signed production Host/provider/task acceptance. Every report retains `productionAcceptance:false`; the platform registry remains empty. No guards, budgets or neutrality policy were changed to obtain these results.
 
 ## Source/tooling completion follow-up — native acceptance still open
 
