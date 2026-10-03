@@ -158,7 +158,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      */
     async (
       file: File,
-      opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string },
+      opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string; liveWindowsDone?: Promise<void> },
     ): Promise<RecordingRunOutcome> => {
       if (operationActiveRef.current) {
         return { outcome: "failed", message: t.recordings.uploadInProgress };
@@ -201,6 +201,9 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           // than losing the meeting — the spool still keeps the lossless copy
           // for a later retry.
           if (!opts?.liveSessionId) throw uploadError;
+          // Only assembly depends on provisional uploads. Never hold the full
+          // recording upload behind slow live transcription or rolling notes.
+          await opts.liveWindowsDone;
           const fallback = await finalizeLiveRecording({
             workspaceId,
             assistantId,

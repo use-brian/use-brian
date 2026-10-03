@@ -3047,11 +3047,12 @@ export function FloatingChat({
     prepareLivePage: liveRecording.prepare,
     prepareCaptureSource: (initialSource) => pickCaptureSource(initialSource, tRecorder),
     streamLiveWindow: liveRecording.streamWindow,
-    onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string }) => {
+    onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string; liveWindowsDone?: Promise<void> }) => {
       const outcome = await captureUpload.run(file, {
         kind: "meeting",
         ...(live ? { existingPageId: live.pageId } : {}),
         ...(live?.sessionId ? { liveSessionId: live.sessionId } : {}),
+        ...(live?.liveWindowsDone ? { liveWindowsDone: live.liveWindowsDone } : {}),
       });
       // The recorder's own notice reports this outcome (queued / kept /
       // step-aware failure) on BOTH render sites, collapsed included — the
