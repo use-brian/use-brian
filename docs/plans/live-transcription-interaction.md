@@ -36,11 +36,11 @@ Interaction is opt-in for web and Electron. Personal natural-language rules reco
 
 ## Chat and lifecycle
 
-- Main chat and floating dock show separate answer cards and canonical chat messages. Refresh appends only the job's pair and never replaces a typed streaming buffer.
+- Main chat and floating dock show separate answer cards and canonical chat messages. Refresh appends only the job's pair and never replaces a typed streaming buffer. The floating chat launcher stays reachable while recording and saving; opening it does not restart capture or change the destination.
 - Interaction startup keeps the originating chat open rather than navigating to the live page. Switching chats cannot redirect jobs or expose another chat's answers/controls.
 - Feed/shared-room destinations are explicitly unavailable; supported destinations are personal web/Electron chats.
 - Accepted questions finish after recording stops unless cancelled. Reload restores jobs/messages, not microphone capture.
-- Capture data cascades with its page, chat, owner or workspace. Answers remain in canonical chat independently of the provisional transcript pane.
+- Capture data cascades with its page, chat, owner or workspace. Answers remain in canonical chat independently of the provisional transcript pane. A `Brian:` label in that pane is ASR speaker text, not an interaction answer. Default-rule question extraction excludes subsequent recognized `Brian:` or numbered-speaker turns without changing the stored transcript or treating labels as microphone provenance.
 
 ## Configuration
 
