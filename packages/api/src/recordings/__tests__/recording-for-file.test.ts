@@ -60,6 +60,19 @@ describe('canonical file adoption', () => {
     })
     expect(out).toEqual({ status: 'ok', recordingId: 'existing', adopted: false, alreadyProcessed: true })
   })
+  it.each(['memo', 'meeting', undefined] as const)('passes optional kind %s into atomic creation', async kind => {
+    const createRecording = vi.fn().mockResolvedValue({ id: 'existing', status: 'processed' })
+    await resolveRecordingForFile(mediaFile(), 'u-1', {
+      captureParent: vi.fn().mockResolvedValue(parent), createRecording,
+    }, { kind })
+    expect(createRecording).toHaveBeenCalledWith(expect.objectContaining({ kind }), { actorUserId: 'u-1', parent })
+  })
+  it('propagates an atomic kind conflict without adopting', async () => {
+    await expect(resolveRecordingForFile(mediaFile(), 'u-1', {
+      captureParent: vi.fn().mockResolvedValue(parent),
+      createRecording: vi.fn().mockRejectedValue(new Error('recording_kind_conflict')),
+    }, { kind: 'meeting' })).rejects.toThrow('recording_kind_conflict')
+  })
   it('classifies media', () => {
     expect(isMediaMime('audio/ogg')).toBe(true)
     expect(isMediaMime('video/mp4')).toBe(true)

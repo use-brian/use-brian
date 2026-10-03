@@ -250,7 +250,7 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
     expect(deps.createRecording).not.toHaveBeenCalled()
   })
 
-  it('runs canonical adoption with captured evidence and retries a failed kind update', async () => {
+  it('runs canonical adoption with captured evidence and retries atomic kind creation', async () => {
     const parent = { workspaceId: 'ws-1', resourceKind: 'workspace_file', resourceId: 'file-1', version: '1', mime: 'video/mp4', assistantId: null }
     const complete = vi.fn().mockResolvedValue({ id: 'file-1', workspaceId: 'ws-1', mime: 'video/mp4', sourceEpisodeId: 'forged' })
     const captureParent = vi.fn().mockResolvedValue(parent)
@@ -258,9 +258,10 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
       expect(provenance).toEqual({ actorUserId: 'user-1', parent })
       return { id: 'canonical-recording', status: 'awaiting_upload' }
     })
-    const updateRecording = vi.fn().mockRejectedValueOnce(new Error('lost connection')).mockResolvedValue({ id: 'canonical-recording', kind: 'meeting' })
+    const updateRecording = vi.fn()
     const { app } = makeApp({ chunkedFileUploads: { complete }, captureParent, createRecording, updateRecording })
     const body = { workspaceId: 'ws-1', assistantId: 'untrusted', uploadId: 'up-1', kind: 'meeting', parent: { resourceId: 'forged' } }
+    createRecording.mockRejectedValueOnce(new Error('lost connection'))
     expect((await request(app).post('/api/recordings/complete-upload').send(body)).status).toBe(503)
     for (let i = 0; i < 2; i++) {
       const response = await request(app).post('/api/recordings/complete-upload').send(body)
@@ -269,7 +270,22 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
     }
     expect(complete).toHaveBeenCalledWith({ workspaceId: 'ws-1', userId: 'user-1' }, 'up-1')
     expect(captureParent).toHaveBeenCalledWith({ actorUserId: 'user-1' }, 'ws-1', 'file-1')
-    expect(updateRecording).toHaveBeenLastCalledWith('canonical-recording', { kind: 'meeting' })
+    expect(createRecording).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'meeting' }), { actorUserId: 'user-1', parent })
+    expect(updateRecording).not.toHaveBeenCalled()
+  })
+
+  it('reports a conflicting kind as 409 without patching the existing recording', async () => {
+    const { app, deps } = makeApp({
+      chunkedFileUploads: { complete: vi.fn().mockResolvedValue({ id: 'file-1', workspaceId: 'ws-1', mime: 'audio/wav' }) },
+      captureParent: vi.fn().mockResolvedValue({ mime: 'audio/wav', assistantId: null }),
+      createRecording: vi.fn().mockRejectedValue(new Error('recording_kind_conflict')),
+    })
+    const response = await request(app).post('/api/recordings/complete-upload')
+      .send({ workspaceId: 'ws-1', assistantId: 'a', uploadId: 'up-1', kind: 'meeting' })
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({ error: 'recording_kind_conflict' })
+    expect(deps.updateRecording).not.toHaveBeenCalled()
+    expect(deps.enqueueJob).not.toHaveBeenCalled()
   })
 
   it('does not adopt when the chunked service rejects ownership', async () => {

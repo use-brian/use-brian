@@ -82,8 +82,45 @@ describe('atomic recording and segment publication', () => {
     expect(first.status).toBe(200)
     const retry = await request(app).post('/complete-upload').send(body)
     expect(retry.body).toEqual(first.body)
-    const rows = (await pool.query('SELECT id,kind,user_id,assistant_id FROM recordings WHERE workspace_id=$1', [f.workspaceId])).rows
-    expect(rows).toEqual([{ id: first.body.recordingId, kind, user_id: f.userId, assistant_id: null }])
+    const rows = (await pool.query(`SELECT r.id,r.kind,r.user_id,r.assistant_id,r.scope_version::text,
+      EXISTS(SELECT 1 FROM scope_derivations d WHERE d.resource_kind='recording' AND d.resource_id=r.id
+        AND d.resource_version=r.scope_version::text) AS has_lineage
+      FROM recordings r WHERE r.workspace_id=$1`, [f.workspaceId])).rows
+    expect(rows).toEqual([{ id: first.body.recordingId, kind, user_id: f.userId, assistant_id: null,
+      scope_version: '1', has_lineage: true }])
+    // The file-opening route omits kind. It must reuse the same intact binding.
+    expect(await resolveRecordingForFile(f.file, f.userId)).toMatchObject({ recordingId: first.body.recordingId, adopted: false })
+    const provenance = await captureRecordingSegmentProvenance(f.authority, f.workspaceId, first.body.recordingId)
+    expect(provenance.recordingVersion).toBe('1')
+    await insertTranscriptSegments({ recordingId: first.body.recordingId, workspaceId: f.workspaceId,
+      createdByUserId: f.userId, visibility: { userId: f.userId, assistantId: null },
+      sensitivity: 'confidential', segments: speech }, provenance)
+    const before = (await pool.query('SELECT scope_version::text,scope_held FROM transcript_segments WHERE recording_id=$1', [first.body.recordingId])).rows
+    await expect(resolveRecordingForFile(f.file, f.userId, {}, { kind: kind === 'meeting' ? 'memo' : 'meeting' }))
+      .rejects.toThrow('recording_kind_conflict')
+    expect((await pool.query('SELECT scope_version::text,scope_held FROM transcript_segments WHERE recording_id=$1', [first.body.recordingId])).rows).toEqual(before)
+  })
+  it('retains the legacy SQL signature and refuses invalid publication kinds', async () => {
+    const f = await fixture(), parent = await f.capture()
+    await expect(recordingIntakeTransaction(f.authority, client => client.query(
+      'SELECT * FROM publish_file_recording($1::jsonb,$2,$3)', [JSON.stringify(parent), randomUUID(), 'invalid'],
+    ))).rejects.toThrow('recording_kind_invalid')
+    const id = randomUUID()
+    const result = await recordingIntakeTransaction(f.authority, client => client.query(
+      'SELECT id,kind,scope_version::text FROM publish_file_recording($1::jsonb,$2)', [JSON.stringify(parent), id],
+    ))
+    expect(result.rows).toEqual([{ id, kind: 'memo', scope_version: '1' }])
+  })
+  it('reproduces the old post-adoption kind update without laundering its missing lineage', async () => {
+    const f = await fixture(), first = await resolveRecordingForFile(f.file, f.userId)
+    if (first.status !== 'ok') throw new Error('not adopted')
+    await updateRecording(first.recordingId, { kind: 'meeting' })
+    const snapshot = async () => (await pool.query(`SELECT r.scope_version::text,r.scope_held,
+      EXISTS(SELECT 1 FROM scope_derivations d WHERE d.resource_kind='recording' AND d.resource_id=r.id
+        AND d.resource_version=r.scope_version::text) AS has_lineage FROM recordings r WHERE r.id=$1`, [first.recordingId])).rows
+    expect(await snapshot()).toEqual([{ scope_version: '2', scope_held: false, has_lineage: false }])
+    await expect(resolveRecordingForFile(f.file, f.userId, {}, { kind: 'meeting' })).rejects.toThrow('recording_intake_source_changed')
+    expect(await snapshot()).toEqual([{ scope_version: '2', scope_held: false, has_lineage: false }])
   })
   it('adopts through production resolver, transcribes through production processor, records exact lineage, and retries without duplicates', async () => {
     const f = await fixture()
