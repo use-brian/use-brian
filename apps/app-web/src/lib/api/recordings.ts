@@ -3,14 +3,13 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * Recordings SDK (app-web) — the 3-step long-recording upload flow
  * (recording-to-brain). Mirrors the backend route `routes/recordings.ts`:
  *
- *   1. Publish the capture as a workspace file (chunked direct-to-storage
- *      upload) and resolve the recording derived from it -
- *      `startRecordingUpload`. The recording can only be born after its bytes.
- *   2. POST /api/recordings/:id/estimate → server-probed duration + surcharge.
- *   3. POST /api/recordings/:id/process  → transcribe + segment + ingest + bill.
+ *   1. POST /api/recordings/upload-url  → mint a signed PUT URL + Episode anchor.
+ *   2. PUT the bytes to the signed storage URL.
+ *   3. POST /api/recordings/:id/estimate → server-probed duration + surcharge.
+ *   4. POST /api/recordings/:id/process  → transcribe + segment + ingest + bill.
  *
- * An explicit processing surface shows the estimate (step 2) in a confirm
- * dialog before step 3. A chat attachment deliberately stops after step 2 and
+ * An explicit processing surface shows the estimate (step 3) in a confirm
+ * dialog before step 4. A chat attachment deliberately stops after step 3 and
  * carries the staged recording id into conversation first. See
  * `lib/recordings/use-recording-upload.ts` for both flows.
  */
@@ -190,7 +189,7 @@ export async function finalizeLiveRecording(params: {
   assistantId: string;
   sessionId: string;
   pageId?: string;
-}): Promise<{ recordingId: string; windowCount: number; coverageMs: number | null }> {
+}): Promise<{ recordingId: string; windowCount: number; coverageMs: number }> {
   const res = await authFetch(`${API_URL}/api/recordings/live/finalize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -236,74 +235,37 @@ export class RecordingApiError extends Error {
   }
 }
 
-/**
- * The capture IS stored as a workspace file, but its recording could not be
- * resolved from it. Distinct from an upload failure: the bytes left the
- * device, so a retry must not re-upload them (a duplicate "Name (2)" file) and
- * the live fallback must not assemble a second recording from the windows.
- * The stored media stays reachable from Files, where re-ingesting it resolves
- * the same recording.
- */
-export class RecordingResolveError extends RecordingApiError {
-  readonly fileId: string;
-  constructor(cause: RecordingApiError, fileId: string) {
-    super(cause.message, cause.status, cause.code);
-    this.name = "RecordingResolveError";
-    this.fileId = fileId;
-  }
-}
-
 async function asError(res: Response, fallback: string): Promise<RecordingApiError> {
   const body = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
   return new RecordingApiError(body.detail ?? body.error ?? fallback, res.status, body.error);
 }
 
-const PART_UPLOAD_ATTEMPTS = 3;
-/** Requests that are idempotent server-side (complete, resolve) retry this often. */
-const IDEMPOTENT_ATTEMPTS = 3;
-/** "Recording.webm", "Recording (2).webm", ... before giving up on a name. */
-const MAX_FILE_NAME_ATTEMPTS = 5;
+const LOCAL_RECORDING_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+const LOCAL_RECORDING_UPLOAD_ATTEMPTS = 3;
 
-type ChunkedUploadStart = {
-  uploadId: string;
-  fileId: string;
-  parts: Array<{ index: number; offset: number; sizeBytes: number; url: string }>;
-  /** Backend-mandated headers on every part PUT (Azure Blob: `x-ms-blob-type`). */
-  uploadHeaders?: Record<string, string>;
-};
-
-function numberedFileName(name: string, attempt: number): string {
-  if (attempt === 1) return name;
-  const dot = name.lastIndexOf(".");
-  return dot > 0
-    ? `${name.slice(0, dot)} (${attempt})${name.slice(dot)}`
-    : `${name} (${attempt})`;
+function isLocalFileTransferUrl(raw: string): boolean {
+  try {
+    return new URL(raw).pathname.endsWith("/api/local-files");
+  } catch {
+    return false;
+  }
 }
 
 async function putWithUploadProgress(input: {
   uploadUrl: string;
   body: Blob;
   mime: string;
+  contentRange?: string;
   /** Backend-mandated headers (Azure Blob: `x-ms-blob-type`). */
   uploadHeaders?: Record<string, string>;
   onProgress: (loadedBytes: number) => void;
 }): Promise<number> {
-  // `fetch` has no request-body progress, so browsers use XHR; non-browser
-  // and test callers keep fetch.
-  if (typeof XMLHttpRequest === "undefined") {
-    const put = await fetch(input.uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": input.mime, ...(input.uploadHeaders ?? {}) },
-      body: input.body,
-    });
-    if (put.ok) input.onProgress(input.body.size);
-    return put.status;
-  }
   return new Promise<number>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", input.uploadUrl);
     xhr.setRequestHeader("Content-Type", input.mime);
     for (const [name, value] of Object.entries(input.uploadHeaders ?? {})) xhr.setRequestHeader(name, value);
+    if (input.contentRange) xhr.setRequestHeader("Content-Range", input.contentRange);
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && event.total > 0) {
         input.onProgress(Math.min(input.body.size, event.loaded));
@@ -316,50 +278,17 @@ async function putWithUploadProgress(input: {
   });
 }
 
-const isRetryable = (status: number, code?: string) =>
-  status === 0 || status >= 500 || code === "busy";
-
-/**
- * POST a request the server makes idempotent (`/complete` repairs or resumes,
- * `/:fileId/recording` adopts), retrying a network drop, a 5xx, or `busy`.
- * `/complete` assembles the object inside the request, so a proxy timeout on a
- * large capture is not proof it failed — asking again is the recovery.
- */
-async function postIdempotent(url: string, body: unknown, fallback: string): Promise<Response> {
-  let lastError: RecordingApiError | null = null;
-  for (let attempt = 1; attempt <= IDEMPOTENT_ATTEMPTS; attempt += 1) {
-    try {
-      const res = await authFetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (res.ok) return res;
-      lastError = await asError(res, fallback);
-      if (!isRetryable(lastError.status, lastError.code)) throw lastError;
-    } catch (error) {
-      if (error instanceof RecordingApiError && !isRetryable(error.status, error.code)) throw error;
-      lastError = error instanceof RecordingApiError ? error : new RecordingApiError(fallback, 0);
-    }
-    if (attempt < IDEMPOTENT_ATTEMPTS) {
-      await new Promise((resolve) => globalThis.setTimeout(resolve, attempt * 1000));
-    }
-  }
-  throw lastError ?? new RecordingApiError(fallback, 0);
-}
-
-/** One bounded part PUT, retried on network and 5xx failures; a 4xx is final. */
-async function putPart(input: {
+async function putLocalRecordingRange(input: {
   uploadUrl: string;
   body: Blob;
-  uploadHeaders?: Record<string, string>;
+  mime: string;
+  contentRange: string;
   onProgress: (loadedBytes: number) => void;
 }): Promise<void> {
   let lastError: RecordingApiError | null = null;
-  for (let attempt = 1; attempt <= PART_UPLOAD_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= LOCAL_RECORDING_UPLOAD_ATTEMPTS; attempt += 1) {
     try {
-      // Parts are signed as opaque bytes; the file row carries the real MIME.
-      const status = await putWithUploadProgress({ ...input, mime: "application/octet-stream" });
+      const status = await putWithUploadProgress(input);
       if (status >= 200 && status < 300) return;
       lastError = new RecordingApiError(`Upload to storage failed (${status})`, status);
       if (status >= 400 && status < 500) throw lastError;
@@ -369,7 +298,7 @@ async function putPart(input: {
         : new RecordingApiError("Upload to storage failed (network error)", 0);
       if (lastError.status >= 400 && lastError.status < 500) throw lastError;
     }
-    if (attempt < PART_UPLOAD_ATTEMPTS) {
+    if (attempt < LOCAL_RECORDING_UPLOAD_ATTEMPTS) {
       await new Promise((resolve) => globalThis.setTimeout(resolve, attempt * 250));
     }
   }
@@ -377,21 +306,15 @@ async function putPart(input: {
 }
 
 /**
- * Publish the capture as a workspace file, then resolve the recording derived
- * from it. A recording is born from an admitted file (the canonical intake
- * contract), so the bytes go first: a chunked direct-to-storage upload
- * (`/api/files/uploads/start` → PUT each bounded part → `/complete`), then
- * `POST /api/files/:fileId/recording`, which creates the Episode + recording
- * from that file. Resolves the `recordingId` for the estimate/process steps.
- * `onProgress` (0..1) tracks the storage upload. Bounded parts also keep any
- * one request short behind a reverse proxy's origin-response timeout.
+ * Create the recording, then PUT the file straight to storage via the signed URL.
+ * Resolves the `recordingId` for the estimate/process steps. `onProgress` (0..1)
+ * tracks the storage upload.
  */
 export async function startRecordingUpload(params: {
   workspaceId: string;
-  /** Retained for callers; the recording inherits its scope from the file. */
   assistantId: string;
   file: File;
-  /** Fraction of the upload transferred, from 0 through 1. */
+  /** Fraction of the signed PUT body transferred, from 0 through 1. */
   onProgress?: (progress: number) => void;
   /**
    * Caller-declared recording kind — routes the transcriber ladder
@@ -400,97 +323,86 @@ export async function startRecordingUpload(params: {
    */
   kind?: "memo" | "meeting";
 }): Promise<{ recordingId: string }> {
-  const { workspaceId, file } = params;
-  const mime = recordingMimeForFile(file);
+  const mime = recordingMimeForFile(params.file);
   if (!mime) {
     throw new RecordingApiError("Only audio/video recordings are supported", 400);
   }
+  const mintRes = await authFetch(`${API_URL}/api/recordings/upload-url`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: params.workspaceId,
+      assistantId: params.assistantId,
+      fileName: params.file.name,
+      mime,
+      ...(params.kind ? { kind: params.kind } : {}),
+    }),
+  });
+  if (!mintRes.ok) throw await asError(mintRes, "Could not start the upload");
+  const { recordingId, uploadUrl, uploadHeaders } = (await mintRes.json()) as {
+    recordingId: string;
+    uploadUrl: string;
+    uploadHeaders?: Record<string, string>;
+  };
 
-  // Stored files are unique by path, so a capture whose name is taken (an
-  // earlier upload of the same file, a retried save) takes the next free
-  // numbered name rather than failing.
-  let start: ChunkedUploadStart | null = null;
-  for (let attempt = 1; attempt <= MAX_FILE_NAME_ATTEMPTS && !start; attempt += 1) {
-    const res = await authFetch(`${API_URL}/api/files/uploads/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId,
-        fileName: numberedFileName(file.name || "Recording", attempt),
+  // PUT bytes direct to storage. The Content-Type must match what the signed URL was
+  // minted with. `fetch` has no request-body progress, so callers that surface
+  // progress opt into XHR in the browser. Non-browser/test callers keep the
+  // existing fetch transport.
+  if (params.onProgress && typeof XMLHttpRequest !== "undefined") {
+    // The local-disk self-host exposes this signed URL through its API origin.
+    // One large PUT can outlive a reverse proxy's origin-response timeout,
+    // because the transfer route correctly answers only after the whole body is
+    // durable. Sequential ranges make each request bounded and resumable at the
+    // last acknowledged byte. Real GCS/S3 signed URLs keep one direct PUT.
+    if (isLocalFileTransferUrl(uploadUrl) && params.file.size > 0) {
+      for (let offset = 0; offset < params.file.size; offset += LOCAL_RECORDING_UPLOAD_CHUNK_BYTES) {
+        const end = Math.min(params.file.size, offset + LOCAL_RECORDING_UPLOAD_CHUNK_BYTES);
+        const body = params.file.slice(offset, end, mime);
+        await putLocalRecordingRange({
+          uploadUrl,
+          body,
+          mime,
+          contentRange: `bytes ${offset}-${end - 1}/${params.file.size}`,
+          onProgress: (loadedBytes) => {
+            params.onProgress?.(Math.min(1, (offset + loadedBytes) / params.file.size));
+          },
+        });
+        params.onProgress(Math.min(1, end / params.file.size));
+      }
+    } else {
+      const status = await putWithUploadProgress({
+        uploadUrl,
+        body: params.file,
         mime,
-        sizeBytes: file.size,
-      }),
-    });
-    if (res.status === 409) {
-      const err = await asError(res, "A file with that name already exists");
-      if (err.code === "conflict") continue;
-      throw err;
-    }
-    if (!res.ok) throw await asError(res, "Could not start the upload");
-    start = (await res.json()) as ChunkedUploadStart;
-  }
-  if (!start) {
-    throw new RecordingApiError("A file with that name already exists", 409, "conflict");
-  }
-
-  // Abort (which deletes the staged parts) only while the parts are still
-  // ours alone: once `/complete` may be assembling them, deleting would break
-  // an assembly that is about to succeed. A definitive 4xx from it still aborts.
-  let completed = false;
-  let mayBeAssembling = false;
-  try {
-    let doneBytes = 0;
-    for (const part of start.parts) {
-      const body = file.slice(part.offset, part.offset + part.sizeBytes);
-      await putPart({
-        uploadUrl: part.url,
-        body,
-        uploadHeaders: start.uploadHeaders,
-        onProgress: (loaded) => {
-          if (file.size > 0) params.onProgress?.(Math.min(1, (doneBytes + loaded) / file.size));
+        uploadHeaders,
+        onProgress: (loadedBytes) => {
+          if (params.file.size > 0) {
+            params.onProgress?.(Math.min(1, loadedBytes / params.file.size));
+          }
         },
       });
-      doneBytes += part.sizeBytes;
-      if (file.size > 0) params.onProgress?.(Math.min(1, doneBytes / file.size));
+      if (status < 200 || status >= 300) {
+        throw new RecordingApiError(`Upload to storage failed (${status})`, status);
+      }
     }
-    mayBeAssembling = true;
-    try {
-      await postIdempotent(
-        `${API_URL}/api/files/uploads/${encodeURIComponent(start.uploadId)}/complete`,
-        { workspaceId },
-        "Could not finish the upload",
-      );
-    } catch (error) {
-      if (error instanceof RecordingApiError && !isRetryable(error.status, error.code)) mayBeAssembling = false;
-      throw error;
+    params.onProgress(1);
+  } else {
+    const put = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: { "Content-Type": mime, ...(uploadHeaders ?? {}) },
+      body: params.file,
+    });
+    if (!put.ok) {
+      throw new RecordingApiError(`Upload to storage failed (${put.status})`, put.status);
     }
-    completed = true;
-  } finally {
-    if (!completed && !mayBeAssembling) {
-      await authFetch(`${API_URL}/api/files/uploads/${encodeURIComponent(start.uploadId)}`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspaceId }),
-      }).catch(() => undefined);
-    }
+    params.onProgress?.(1);
   }
-  params.onProgress?.(1);
 
-  let resolved: Response;
-  try {
-    resolved = await postIdempotent(
-      `${API_URL}/api/files/${encodeURIComponent(start.fileId)}/recording`,
-      { workspaceId, ...(params.kind ? { kind: params.kind } : {}) },
-      "Could not start the recording",
-    );
-  } catch (error) {
-    const cause = error instanceof RecordingApiError ? error : new RecordingApiError("Could not start the recording", 0);
-    throw new RecordingResolveError(cause, start.fileId);
-  }
-  const { recordingId } = (await resolved.json()) as { recordingId: string };
   return { recordingId };
 }
 
+/** Server-authoritative duration + surcharge estimate. Throws `too_long` / `could_not_read_duration`. */
 export async function estimateRecording(recordingId: string): Promise<RecordingEstimate> {
   const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/estimate`, { method: "POST" });
   if (!res.ok) throw await asError(res, "Could not read the recording");

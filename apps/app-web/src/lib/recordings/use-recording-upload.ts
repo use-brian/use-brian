@@ -42,7 +42,6 @@ import {
   linkLiveRecordingPage,
   finalizeLiveRecording,
   RecordingApiError,
-  RecordingResolveError,
   recordingMimeForFile,
   type RecordingQueued,
 } from "@/lib/api/recordings";
@@ -201,9 +200,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           // those into a usable (re-encoded, small-seam) recording rather
           // than losing the meeting — the spool still keeps the lossless copy
           // for a later retry.
-          // A stored capture whose recording could not be resolved must not
-          // be assembled a second time from the windows.
-          if (!opts?.liveSessionId || uploadError instanceof RecordingResolveError) throw uploadError;
+          if (!opts?.liveSessionId) throw uploadError;
           // Only assembly depends on provisional uploads. Never hold the full
           // recording upload behind slow live transcription or rolling notes.
           await opts.liveWindowsDone;

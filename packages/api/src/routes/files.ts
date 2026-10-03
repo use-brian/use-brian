@@ -582,11 +582,7 @@ export function fileRoutes(
       })
       return
     }
-    // Media is accepted here even though the shared multipart allowlist has no
-    // `video/`: a chunked upload stores bytes and parses nothing, and it is how
-    // the recorder publishes a capture as the canonical file a recording is
-    // derived from (POST /:fileId/recording next door).
-    if (!isAllowedMime(parsed.data.mime, parsed.data.fileName) && !isMediaMime(parsed.data.mime)) {
+    if (!isAllowedMime(parsed.data.mime, parsed.data.fileName)) {
       res.status(400).json({ error: 'unsupported_file_type', detail: `Unsupported file type: ${parsed.data.mime}` })
       return
     }
@@ -826,7 +822,7 @@ export function fileRoutes(
    * POST /api/files/:fileId/recording — the media half of "Re-ingest to brain".
    *
    * Answers WHICH recording owns this stored audio/video, adopting one when the
-   * file has never had a recording. Body: { workspaceId, kind? }. Answers
+   * file has never had a recording. Body: { workspaceId }. Answers
    * `200 { recordingId, adopted, alreadyProcessed }` - the last so the caller's
    * single confirmation can carry the duplicate-memory warning alongside the
    * cost, instead of discovering it as a 409 after the user already agreed.
@@ -852,19 +848,11 @@ export function fileRoutes(
       res.status(401).json({ error: 'Unauthorized' })
       return
     }
-    const body = (req.body ?? {}) as { workspaceId?: string; kind?: unknown }
+    const body = (req.body ?? {}) as { workspaceId?: string }
     if (!body.workspaceId || typeof body.workspaceId !== 'string') {
       res.status(400).json({ error: 'workspaceId is required' })
       return
     }
-    // Optional caller-declared kind for a recording this call creates — the
-    // live recorder passes 'meeting' (kind routes the transcriber ladder; the
-    // column default is 'memo'). A typo is a 400, never a silent coercion.
-    if (body.kind !== undefined && body.kind !== 'memo' && body.kind !== 'meeting') {
-      res.status(400).json({ error: 'invalid_kind', detail: "kind must be 'memo' or 'meeting'" })
-      return
-    }
-    const kind = body.kind as 'memo' | 'meeting' | undefined
 
     const assistant = await getWorkspacePrimaryAssistant(userId, body.workspaceId)
     if (!assistant || !assistant.workspaceId) {
@@ -894,7 +882,7 @@ export function fileRoutes(
       return
     }
 
-    const resolved = await resolveRecordingForFile(file, userId, {}, kind ? { kind } : {})
+    const resolved = await resolveRecordingForFile(file, userId)
     if (resolved.status === 'refused') {
       res.status(409).json({
         error: 'compartmented_media',

@@ -1,8 +1,13 @@
 /** OSS recording upload and queue routes. [COMP:recordings/open-routes] */
 
+import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
-import { getEpisodeByIdSystem } from '../db/episodes-store.js'
 import {
+  createEpisode,
+  getEpisodeByIdSystem,
+} from '../db/episodes-store.js'
+import {
+  createRecording,
   getRecording,
   listRecordings,
   LIST_RECORDINGS_LIMIT_MAX,
@@ -13,6 +18,7 @@ import { readRecordingRange } from '../db/retrieval-store.js'
 import { listTasksBySourceEpisode } from '../db/tasks.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import type { FilesClientResolver } from '../files/files-api.js'
+import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 import { probeRecordingDuration } from '../recordings/ffmpeg.js'
 import { InvalidRecordingBlueprintError } from '../recordings/resolve-blueprint.js'
 
@@ -32,6 +38,8 @@ type RouteDeps = {
   hasProcessed: (recordingId: string) => Promise<boolean>
   resolvePageWorkspace?: (userId: string, pageId: string) => Promise<string | null>
   probe?: typeof probeRecordingDuration
+  createEpisode?: typeof createEpisode
+  createRecording?: typeof createRecording
   getRecording?: typeof getRecording
   listRecordings?: typeof listRecordings
   resolveViewpoint?: typeof resolveWorkspaceViewpoint
@@ -127,20 +135,61 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
     })
   })
 
-  // Retired 2026-10-03. This minted the Episode + recording BEFORE any byte
-  // existed, which the canonical intake contract cannot express: a recording
-  // is derived from an admitted workspace file (`createRecording` requires that
-  // parent), so the row can only be born after the upload. Recorders now
-  // publish the capture as a file and resolve its recording. The route stays
-  // to answer a stale client honestly instead of half-writing an anchor.
-  // Spec: docs/architecture/media/recordings.md -> "Upload".
-  router.post('/upload-url', (_req, res) => {
-    res.status(410).json({
-      error: 'recording_upload_moved',
-      detail:
-        'Recordings upload as a workspace file: POST /api/files/uploads/start, PUT each part, ' +
-        'POST /api/files/uploads/:uploadId/complete, then POST /api/files/:fileId/recording.',
+  router.post('/upload-url', async (req, res) => {
+    const userId = userIdOf(req)
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const { workspaceId, assistantId, fileName, mime, kind } = (req.body ?? {}) as {
+      workspaceId?: string
+      assistantId?: string
+      fileName?: string
+      mime?: string
+      kind?: string
+    }
+    if (!workspaceId || !assistantId || !mime) {
+      return void res.status(400).json({ error: 'workspaceId, assistantId, and mime are required' })
+    }
+    if (!mime.startsWith('audio/') && !mime.startsWith('video/')) {
+      return void res.status(400).json({ error: 'Only audio/video recordings are supported' })
+    }
+    if (kind !== undefined && kind !== 'memo' && kind !== 'meeting') {
+      return void res.status(400).json({ error: "kind must be 'memo' or 'meeting'" })
+    }
+    if (!(await deps.getRole(userId, workspaceId))) {
+      return void res.status(403).json({ error: 'Not a member of this workspace' })
+    }
+
+    const fileId = randomUUID()
+    const key = buildStorageKey(workspaceId, `recordings/${fileId}`)
+    const resolved = await deps.filesResolver.forWorkspace(workspaceId)
+    const storageUri = buildStorageUri(resolved.bucket, workspaceId, `recordings/${fileId}`, resolved.uriScheme)
+    const episode = await (deps.createEpisode ?? createEpisode)(userId, {
+      sourceKind: 'recording',
+      sourceRef: { fileId, gcsKey: key, storageUri, fileName: fileName ?? null, mime, status: 'awaiting_upload' },
+      occurredAt: new Date(),
+      workspaceId,
+      userId: null,
+      assistantId,
+      createdByUserId: userId,
+      sensitivity: 'internal',
     })
+    await (deps.createRecording ?? createRecording)({
+      id: episode.id,
+      workspaceId,
+      mime,
+      gcsKey: key,
+      storageUri,
+      fileName: fileName ?? null,
+      title: fileName ?? null,
+      ...(kind ? { kind } : {}),
+      userId: null,
+      assistantId,
+      sensitivity: 'internal',
+      createdByUserId: userId,
+    })
+    const uploadUrl = await resolved.gcs.signedWriteUrl(key, { contentType: mime, ttlSec: 3600 })
+    // Azure Blob needs `x-ms-blob-type` on the PUT; GCS/S3/local send none.
+    const uploadHeaders = resolved.gcs.signedWriteHeaders
+    res.json({ recordingId: episode.id, uploadUrl, key, ...(uploadHeaders ? { uploadHeaders } : {}) })
   })
 
   router.get('/:recordingId/transcript', async (req, res) => {

@@ -1,7 +1,7 @@
 /** Canonical stored-file adoption. No byte copy and no Episode/creator inference. */
 import { randomUUID } from 'node:crypto'
 import type { WorkspaceFile } from '@use-brian/core'
-import { createRecording, type RecordingKind } from '../db/recordings-store.js'
+import { createRecording } from '../db/recordings-store.js'
 import { captureRecordingIntakeParent } from '../db/recording-intake-admission.js'
 
 export type RecordingForFileDeps = {
@@ -18,20 +18,13 @@ export function isMediaMime(mime: string): boolean {
 
 /** The input row is a locator only. The store resolves current bytes/scope,
  * creates the Episode and recording together, and serializes retry by parent. */
-export async function resolveRecordingForFile(
-  file: WorkspaceFile,
-  actingUserId: string,
-  deps: RecordingForFileDeps = {},
-  /** Applies only when this call creates the recording; an adopted one keeps its kind. */
-  options: { kind?: RecordingKind } = {},
-): Promise<RecordingForFileResult> {
+export async function resolveRecordingForFile(file: WorkspaceFile, actingUserId: string, deps: RecordingForFileDeps = {}): Promise<RecordingForFileResult> {
   const authority = { actorUserId: actingUserId }
   const parent = await (deps.captureParent ?? captureRecordingIntakeParent)(authority, file.workspaceId, file.id)
   const id = randomUUID()
   const recording = await (deps.createRecording ?? createRecording)({
     id, workspaceId: file.workspaceId, mime: parent.mime, gcsKey: '', assistantId: parent.assistantId,
     createdByUserId: actingUserId,
-    ...(options.kind ? { kind: options.kind } : {}),
   }, { ...authority, parent })
   return { status: 'ok', recordingId: recording.id, adopted: recording.id === id, alreadyProcessed: recording.status === 'processed' }
 }

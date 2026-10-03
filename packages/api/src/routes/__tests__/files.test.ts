@@ -938,20 +938,7 @@ describe('[COMP:api/files-recording-handoff] POST /:fileId/recording', () => {
     const res = await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1' })
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ recordingId: 'rec-1', adopted: false, alreadyProcessed: false })
-    expect(mockResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'f-1' }), 'u-1', {}, {})
-  })
-
-  it('passes a declared recording kind through to the recording it creates', async () => {
-    const res = await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1', kind: 'meeting' })
-    expect(res.status).toBe(200)
-    expect(mockResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'f-1' }), 'u-1', {}, { kind: 'meeting' })
-  })
-
-  it('refuses an unknown kind (400) rather than routing the wrong transcriber', async () => {
-    const res = await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1', kind: 'podcast' })
-    expect(res.status).toBe(400)
-    expect(res.body.error).toBe('invalid_kind')
-    expect(mockResolve).not.toHaveBeenCalled()
+    expect(mockResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'f-1' }), 'u-1')
   })
 
   it('reports an adoption so the caller can say the recording is new', async () => {

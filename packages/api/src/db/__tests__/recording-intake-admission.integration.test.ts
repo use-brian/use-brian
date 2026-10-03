@@ -98,21 +98,6 @@ describe('atomic recording and segment publication', () => {
     await expect(insertTranscriptSegments({ ...params, segments: [{ ...actualSpeech[0], text: 'different' }] }, provenance)).rejects.toThrow('segment_idempotency_conflict')
     expect((await pool.query('SELECT id FROM recordings WHERE workspace_id=$1', [f.workspaceId])).rows).toHaveLength(1)
   })
-  it('creates a meeting recording with its kind at birth, so transcription still matches the recorded lineage', async () => {
-    // Kind is semantic (it advances scope_version), so it must be chosen in the
-    // publishing INSERT (migration 658). A later kind update would leave the
-    // segment publisher no derivation for the recording's current version.
-    const f = await fixture()
-    const first = await resolveRecordingForFile(f.file, f.userId, {}, { kind: 'meeting' })
-    if (first.status !== 'ok') throw new Error('not adopted')
-    expect((await pool.query('SELECT kind,scope_version FROM recordings WHERE id=$1', [first.recordingId])).rows[0]).toEqual({ kind: 'meeting', scope_version: '1' })
-    // Adoption keeps the kind the recording was born with.
-    expect(await resolveRecordingForFile(f.file, f.userId, {}, { kind: 'memo' })).toMatchObject({ recordingId: first.recordingId, adopted: false })
-    expect((await pool.query('SELECT kind FROM recordings WHERE id=$1', [first.recordingId])).rows[0].kind).toBe('meeting')
-    const provenance = await captureRecordingSegmentProvenance(f.authority, f.workspaceId, first.recordingId)
-    expect(await insertTranscriptSegments({ recordingId: first.recordingId, workspaceId: f.workspaceId, createdByUserId: f.userId, visibility: { userId: f.userId, assistantId: null }, sensitivity: 'confidential', segments: speech }, provenance)).toBe(1)
-    await expect(recordingIntakeTransaction(f.authority, client => client.query('SELECT * FROM publish_file_recording($1::jsonb,$2,$3)', [JSON.stringify(provenance.parent), randomUUID(), 'podcast']))).rejects.toThrow('recording_kind_invalid')
-  })
   it.each(['scope', 'delete', 'held'] as const)('propagates later file %s through Episode, recording and both segment kinds', async change => {
     const f = await fixture(), first = await resolveRecordingForFile(f.file, f.userId)
     if (first.status !== 'ok') throw new Error('not adopted')

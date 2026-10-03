@@ -5932,10 +5932,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       backgroundModel,
       voiceTranscription,
       usageStore,
-      // Window-audio persistence + the assembled-windows finalize fallback,
-      // which publishes the assembly as the canonical file a recording derives from.
+      // Window-audio persistence + the assembled-windows finalize fallback.
       filesResolver,
-      ...(filesApi ? { files: filesApi } : {}),
       liveInteraction: liveInteraction ?? undefined,
     }))
   }

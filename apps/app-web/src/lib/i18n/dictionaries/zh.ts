@@ -11708,8 +11708,6 @@ export const zh: Dictionary = {
     linkError: "无法加载录音。",
     uploadFailed:
       "音频无法上传到存储,尚未开始处理。请检查网络连接。录音已保存在此设备上,可从录音器再次保存。",
-    storageFull:
-      "此工作區的儲存空間已滿,無法儲存錄音。請釋放空間或升級方案,再從錄音器重新儲存。錄音仍保留在此裝置上。",
     estimateFailed:
       "音频已上传,但无法读取时长。请从录音器再次保存重试。",
     processFailed:
