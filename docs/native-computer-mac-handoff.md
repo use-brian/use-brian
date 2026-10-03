@@ -2,7 +2,7 @@
 
 ## User instruction
 
-Deliver working Use Brian Mac computer use. Do not return progress-only reports, test counts, another packaging-only milestone, or a claim that an inspector completes the feature. The user selected **move this coding session to their Mac** so implementation and native verification can continue there. This document is a work transfer, not a release/availability announcement.
+Deliver working Use Brian Mac computer use. Do not return progress-only reports, test counts, another packaging-only milestone, or a claim that an inspector completes the feature. The user subsequently superseded the proposed Mac-session transfer: **finish writing code here first; verify only after the implementation phase is finished**. Do not ask for interim Mac rebuilds/tests. This document records a possible later verification handoff, not a request to move development or a release/availability announcement.
 
 ## Checkout and immediate action
 
@@ -14,7 +14,7 @@ Use the latest `feature/electron-native-computer-use` branch of `use-brian/use-b
 - `23b57954`: scoped, privacy-safe task-result notices after cleanup, including previously silent failures.
 - `795870c5`: latest integration evidence before this transfer.
 
-First confirm this session's shell is actually on Darwin, inspect the checkout/status, and read `docs/plans/electron-native-computer-use.md` completely. Then run the existing source compile/refusal check:
+Inspect the checkout/status and read `docs/plans/electron-native-computer-use.md` completely. Finish outstanding source integration before entering verification. When that phase is finished and Mac execution is actually available, confirm the shell is on Darwin and begin with the existing source compile/refusal check:
 
 ```sh
 bash apps/app-desktop/native/computer-control/mac-preflight.sh
@@ -34,7 +34,7 @@ API direct runs use a service-owned WeakMap binding to the exact execution conte
 
 ## Remaining work—not optional release claims
 
-1. Implement and verify the minimal click emitter/ownership cleanup. `ClickGuardian.swift`, `ClickGuardianTests.swift` and `ClickGuardian-CONTRACT.md` are an **unintegrated policy prototype**, not an emitter or available capability. They are not included by `build.sh` and do not grant authority. Resolve the concrete active-tap late-proxy/timeout issue described in the contract, or choose a smaller sound public-API mechanism. Preserve physical input, survive worker/parent death, fence uncertain ownership and prevent replay. Do not blindly post up, expand into keyboard/drag support, or enable `input` from synthetic evidence.
+1. The subsequent implementation-first changes add compiled click preparation, a same-binary private guardian host, concrete gated null-wake/tap candidate, input-stream tracking, and standing public kqueue lifetime fences. Main binds the transcript to the original approved request and requires observed owner exit plus non-ambiguous cleanup. Future accepted delivery permits only observation/capture readback, not another effect under the grant. **Native ownership behavior is unverified and the accepted-platform registry is empty.** Portable policy/transport checks are recorded in the current acceptance ledger. Resolve the concrete active-tap late-proxy/timeout issue described in `ClickGuardian-CONTRACT.md`, or choose a smaller sound public-API mechanism. Preserve physical input, survive worker/parent death, fence uncertainty and prevent replay. Do not blindly post up, add keyboard/drag support, or enable input from synthetic evidence.
 2. Finish the existing screenshot-to-configured-image-LLM action path with that executor. Reuse `packages/core/src/computer-use` and API boot/model runtime; no separate planner, OCR/CV service or observer platform. Jev requires its existing exact approved profile; otherwise use the configured LLM lane. Keep strict actual-model/usage provenance and accounting.
 3. Verify signed inspector, TextEdit/fixture tasks, actual provider calls, consent/permissions, Stop/takeover, modal/new-window refusal, privacy, capture geometry, termination/cleanup and no uncertain replay on the Mac. R1–R4 remain open where native evidence is missing. Finish onboarding/errors, supported limits, KB/docs and the compact acceptance matrix before claiming availability.
 
@@ -48,7 +48,7 @@ A real task also needs the feature-branch API/relay, normal authenticated accoun
 
 ## Verification already performed (not native acceptance)
 
-Latest parent runs: 1,046 desktop tests/53 files (three are local pending-CI checks), desktop/API/web typechecks; 170 API runtime/service tests and an overlapping 71 API/relay/revalidation selection including fake-OS E2E. Earlier current-native verification: 599 Node checks, 32 renderer/store tests, real Linux Foundation wire/dispatcher/approval/semantic/privacy/capture checks and generated envelope validation. Prototype ownership tests passed unoptimized and `-O`, including 45 revocation boundaries and exhaustive short traces. These are not Mac effects, input cleanup or live-provider acceptance. All evidence and earlier failures remain in `docs/native-computer-acceptance.md`.
+After the implementation-first pass: 603 native/build/signing Node tests, 1,111 desktop tests/54 files (three are local pending-CI checks), 38 web tests, 151 core-loop tests, 73 API/relay tests and desktop/web typechecks passed. The Foundation wire/click-policy runner passed in all three flag configurations, and the new guardian runner passed 10 portable ledger/tail cases. Mac-target Swift parsing passed but is not SDK typechecking. Earlier parent runs included API typechecking and 170 API runtime/service tests. Earlier current-native verification: 599 Node checks, 32 renderer/store tests, real Linux Foundation wire/dispatcher/approval/semantic/privacy/capture checks and generated envelope validation. Prototype ownership tests passed unoptimized and `-O`, including 45 revocation boundaries and exhaustive short traces. These are not Mac effects, input cleanup or live-provider acceptance. All evidence and earlier failures remain in `docs/native-computer-acceptance.md`.
 
 A credential-free Mac SDK GitHub workflow was prepared but **its push was rejected because the existing token lacks workflow scope**. No workflow ran. It is retained only in the Linux checkout/local branch `wip/native-mac-sdk-ci`; do not waste time expanding credentials to reproduce that now that work is moving to Mac. The feature commits above were pushed separately without it. No production workflow or signing credentials were changed.
 
