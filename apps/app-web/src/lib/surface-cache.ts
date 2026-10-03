@@ -275,10 +275,26 @@ export function invalidateSurfaceCache(prefix: string): void {
  * `workspace-access:<w>:<u>` prefixes the registry, mode and history slots,
  * and evicting the family whenever one projection expired blanked every
  * still-valid sibling to a skeleton.
+ *
+ * By default an in-flight load is detached too (a seed's own expiry discards
+ * the response of the request racing it). `keepInflight` drops only the VALUE
+ * and leaves the load attached, for a caller whose load result carries its own
+ * lifetime: a protected projection's deadline is measured from its request's
+ * start. Detaching there made every mounted consumer of one key start its own
+ * request on a single focus event (each consumer's listener evicted the load
+ * the previous one had just started), so N consumers sent N parallel requests
+ * for one projection - enough, on a slow endpoint, to exhaust the API's
+ * database pool.
  */
-export function evictSurfaceCacheKey(key: string): void {
+export function evictSurfaceCacheKey(key: string, options?: { keepInflight?: boolean }): void {
   if (!isBrowser() || !store.has(key)) return;
-  dropKeys([key]);
+  if (!options?.keepInflight || !inflight.has(key)) {
+    dropKeys([key]);
+    return;
+  }
+  disposeEntry(key);
+  store.set(key, { ...EMPTY, revalidating: true });
+  emit(key);
 }
 
 function dropKeys(dropped: string[]): void {

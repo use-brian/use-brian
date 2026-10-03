@@ -75,7 +75,7 @@ export function isOperatorAppKey(value: unknown): value is OperatorAppKey {
 }
 
 /** Fallback when config resolution has nothing to say (SSR, empty list). */
-export const DEFAULT_OPERATOR_APP: OperatorAppKey = "page";
+export const DEFAULT_OPERATOR_APP: OperatorAppKey = "chat";
 
 /** App key → the `WorkspaceSurface` route segment it lives on. Browsers reuses
  *  the existing `/computer` route family (the Take-Over live view + its new

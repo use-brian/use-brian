@@ -18,6 +18,7 @@ import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { listWorkspaceMembers } from "@/lib/api/mentions";
+import { useWorkspaceDirectory } from "@/lib/use-workspace-directory";
 import { listAssistants } from "@/lib/api/studio";
 import { fetchWorkspaceAccess, ORGANIZATION_CHANGED_EVENT } from "@/lib/api/workspace-access";
 import { invalidateSurfaceCache, seedSurfaceCache, useCachedResource, warmSurfaceCache } from "@/lib/surface-cache";
@@ -35,15 +36,13 @@ type Names = Map<string, string>;
 const key = (p: DepartmentPrincipal) => `${p.kind}:${p.id}`;
 
 /** People and assistant names, for rendering ids. Assistants come from the
- * shared Studio roster slot; members from the cached member directory. */
+ * shared Studio roster slot; members from the member directory, SUBSCRIBED
+ * rather than read once: the event spine's catch-up invalidates the directory
+ * while the first read is in flight, and a mount-only read kept that empty
+ * answer, so names fell back to "Person" and Add offered nobody. */
 function useNames(workspaceId: string) {
   const assistants = useCachedResource(assistantsCacheKey(workspaceId), () => listAssistants(workspaceId));
-  const [people, setPeople] = useState<Array<{ id: string; name: string }>>([]);
-  useEffect(() => {
-    let live = true;
-    void listWorkspaceMembers(workspaceId).then(rows => { if (live) setPeople(rows); }).catch(() => {});
-    return () => { live = false; };
-  }, [workspaceId]);
+  const people = useWorkspaceDirectory(workspaceId);
   return useMemo(() => {
     const roster = assistants.data ?? [];
     const names: Names = new Map();
@@ -398,7 +397,9 @@ export function HomeDepartmentControls() {
         <InfoNote>{t.summary}</InfoNote>
       </div>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      {mine ? picker(mine, t.mine, <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground"><UserRound className="size-3.5" /></span>) : null}
+      {mine ? picker(mine, t.mine, names.get(`user:${me.id}`)
+        ? <OrgAvatar name={names.get(`user:${me.id}`)!} seed={me.id} size={24} />
+        : <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground"><UserRound className="size-3.5" /></span>) : null}
       {assistants.length > 0 ? (
         <div className="space-y-2 border-t border-border/70 pt-3">
           <p className="text-xs font-medium uppercase text-muted-foreground">{t.assistants}</p>

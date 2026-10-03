@@ -48,7 +48,7 @@ export function useProtectedProjection<T>(key:string|null,data:ProtectedProjecti
     const revalidate=()=>{
       const current=readSurfaceCache<ProtectedProjection<unknown>>(key).data;
       const live=current!==undefined&&projectionRemainingMs(current)>0;
-      if(purgeOnForeground||!live||!refreshRef.current){purgeRef.current();evictSurfaceCacheKey(key);}
+      if(purgeOnForeground||!live||!refreshRef.current){purgeRef.current();evictSurfaceCacheKey(key,{keepInflight:!purgeOnForeground});}
       if(refreshRef.current)void refreshRef.current().catch(()=>{});
     };
     const visible=()=>{if(document.visibilityState==='visible')revalidate();};
@@ -59,12 +59,12 @@ export function useProtectedProjection<T>(key:string|null,data:ProtectedProjecti
   useEffect(()=>{
     if(!key||!data)return;
     const ttl=projectionRemainingMs(data);
-    if(!Number.isFinite(ttl)||ttl<=0){purgeRef.current();evictSurfaceCacheKey(key);return;}
+    if(!Number.isFinite(ttl)||ttl<=0){purgeRef.current();evictSurfaceCacheKey(key,{keepInflight:!purgeOnForeground});return;}
     const renew=refreshRef.current&&ttl>1_000?setTimeout(()=>{
       void refreshRef.current?.().catch(()=>{});
     },Math.max(500,Math.ceil(ttl-Math.min(5_000,ttl/2)))):undefined;
-    const timeout=setTimeout(()=>{purgeRef.current();evictSurfaceCacheKey(key);},Math.ceil(ttl));
+    const timeout=setTimeout(()=>{purgeRef.current();evictSurfaceCacheKey(key,{keepInflight:!purgeOnForeground});},Math.ceil(ttl));
     return()=>{clearTimeout(timeout);if(renew!==undefined)clearTimeout(renew);};
-  },[key,data]);
+  },[key,data,purgeOnForeground]);
   return key&&data&&projectionRemainingMs(data)>0&&accepted===identity?data:undefined;
 }

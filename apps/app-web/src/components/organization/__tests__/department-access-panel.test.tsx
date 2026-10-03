@@ -3,7 +3,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DepartmentAccessPanel, HomeDepartmentControls } from '../department-access-panel';
-import { resetSurfaceCache } from '@/lib/surface-cache';
+import { invalidateSurfaceCache, resetSurfaceCache } from '@/lib/surface-cache';
+import { protectProjection } from '@/lib/use-protected-projection';
 import { I18nProvider } from '@/lib/i18n/client';
 import { en } from '@/lib/i18n/dictionaries/en';
 import { ja } from '@/lib/i18n/dictionaries/ja';
@@ -15,10 +16,12 @@ const W = 'workspace-fixture', D = 'department-fixture';
 const mocks = vi.hoisted(() => ({
   viewer: { workspaceId: 'workspace-fixture', me: { id: 'owner-fixture' } },
   departments: vi.fn(), edges: vi.fn(), setEdge: vi.fn(), removeEdge: vi.fn(), addOwner: vi.fn(), removeOwner: vi.fn(),
-  breakGlass: vi.fn(), setHome: vi.fn(), confirm: vi.fn(), prompt: vi.fn(),
+  breakGlass: vi.fn(), setHome: vi.fn(), confirm: vi.fn(), prompt: vi.fn(), readDirectory: vi.fn(),
 }));
 vi.mock('@/lib/workspace-context', () => ({ useWorkspaceContext: () => mocks.viewer }));
-vi.mock('@/lib/api/mentions', () => ({ listWorkspaceMembers: async () => [{ id: 'owner-fixture', name: 'Ava Example' }, { id: 'member-fixture', name: 'Maya Example' }, { id: 'new-fixture', name: 'Noor Example' }] }));
+// The real directory projection and hook; only the network read is faked.
+vi.mock('@/lib/user', async (original) => ({ ...await original<typeof import('@/lib/user')>(), getUserInfo: () => ({ id: mocks.viewer.me.id }) }));
+vi.mock('@/lib/api/mentions', async (original) => ({ ...await original<typeof import('@/lib/api/mentions')>(), readWorkspaceMemberDirectory: mocks.readDirectory, listWorkspaceMembers: async () => [] }));
 vi.mock('@/lib/api/studio', () => ({ listAssistants: async () => [{ id: 'assistant-fixture', name: 'Ops' }] }));
 vi.mock('@/components/ui/confirm-dialog', () => ({ confirmDialog: mocks.confirm }));
 vi.mock('@/components/ui/prompt-dialog', () => ({ promptDialog: mocks.prompt }));
@@ -31,6 +34,9 @@ vi.mock('@/lib/api/departments', () => ({
 }));
 
 let root: Root, host: HTMLDivElement;
+const member = (userId: string, name: string) => ({ memberId: `m-${userId}`, userId, name, email: null, avatarUrl: null, role: 'member' as const, canDraft: false });
+const directory = () => protectProjection({ workspaceId: W, viewerId: mocks.viewer.me.id, validForMs: 30_000,
+  members: [member('owner-fixture', 'Ava Example'), member('member-fixture', 'Maya Example'), member('new-fixture', 'Noor Example')] }, performance.now());
 const entry = (over: object = {}) => ({ departmentId: D, name: 'Finance', status: 'active', revision: 5, myClearance: 'confidential', isOwner: true, ownerIds: ['owner-fixture'], ...over });
 async function render(node: React.ReactNode) {
   await act(async () => { root.render(<I18nProvider locale="en" dict={en}>{node}</I18nProvider>); });
@@ -61,7 +67,8 @@ async function setDate(input: HTMLInputElement, value: string) {
 beforeEach(() => {
   resetSurfaceCache();
   mocks.viewer.me.id = 'owner-fixture';
-  for (const m of [mocks.departments, mocks.edges, mocks.setEdge, mocks.removeEdge, mocks.addOwner, mocks.removeOwner, mocks.breakGlass, mocks.setHome, mocks.confirm, mocks.prompt]) m.mockReset();
+  for (const m of [mocks.departments, mocks.edges, mocks.setEdge, mocks.removeEdge, mocks.addOwner, mocks.removeOwner, mocks.breakGlass, mocks.setHome, mocks.confirm, mocks.prompt, mocks.readDirectory]) m.mockReset();
+  mocks.readDirectory.mockImplementation(async () => directory());
   mocks.departments.mockResolvedValue({ departments: [entry()], homes: [{ principal: { kind: 'user', id: 'owner-fixture' }, departmentId: null }] });
   mocks.edges.mockResolvedValue({ edges: [
     { departmentId: D, principal: { kind: 'user', id: 'owner-fixture' }, clearance: 'confidential', expiresAt: null, origin: 'owner' },
@@ -91,6 +98,20 @@ describe('[COMP:app-web/department-access] Organization > Departments: who reads
     expect([...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent?.trim())).toEqual([t.setEndDate, t.makeOwner, t.remove]);
   });
 
+  it('keeps member names when the directory is invalidated while its first read is in flight', async () => {
+    // The workspace event stream's catch-up (BRAIN_REFRESH / WORKSPACE_IDENTITY_REFRESH)
+    // drops the directory key during page load. A read made once on mount kept that
+    // empty answer for good: names fell back to "Person" and Add offered no people.
+    let finishFirst!: (value: ReturnType<typeof directory>) => void;
+    mocks.readDirectory.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }));
+    await render(<DepartmentAccessPanel departmentId={D} />);
+    await act(async () => invalidateSurfaceCache(`workspace-member-directory:${W}:`));
+    await act(async () => finishFirst(directory()));
+    await flush();
+    expect(mocks.readDirectory).toHaveBeenCalledTimes(2);
+    expect(host.textContent).toContain('Maya Example');
+    expect(host.querySelector(`[aria-label="${t.clearanceLabel.replace('{name}', 'Maya Example')}"]`)).not.toBeNull();
+  });
   it('removes a member from the row menu only after confirmation, binding the department revision', async () => {
     mocks.confirm.mockResolvedValue(true);
     await render(<DepartmentAccessPanel departmentId={D} />);

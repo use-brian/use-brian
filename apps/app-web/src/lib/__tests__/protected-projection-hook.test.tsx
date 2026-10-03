@@ -65,6 +65,49 @@ describe('[COMP:app-web/workspace-access] protected projection lifecycle', () =>
     expect(host.textContent).toBe('skeleton');
   });
 
+  it('sends ONE request when several consumers of a cold key see focus and visibility', async () => {
+    let resolve!: (value: ProtectedProjection<Snapshot>) => void;
+    const fetcher = vi.fn(() => new Promise<ProtectedProjection<Snapshot>>(r => { resolve = r; }));
+    await act(async () => root.render(<><Probe fetcher={fetcher} /><Probe fetcher={fetcher} /><Probe fetcher={fetcher} /></>));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    // Each consumer's listener used to evict the load the previous one had
+    // just started, so one focus became N parallel requests for one key.
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await act(async () => { resolve(project('loaded')); });
+    expect(host.textContent).toBe('loadedloadedloaded');
+  });
+
+  it('keeps an in-flight renewal attached when the old projection expires', async () => {
+    seedSurfaceCache(KEY, project('first', 10_000));
+    let resolve!: (value: ProtectedProjection<Snapshot>) => void;
+    const fetcher = vi.fn(() => new Promise<ProtectedProjection<Snapshot>>(r => { resolve = r; }));
+    await act(async () => root.render(<><Probe fetcher={fetcher} /><Probe fetcher={fetcher} /></>));
+    // Renewal fires 5s before expiry; let the deadline pass while it is slow.
+    await act(async () => { vi.advanceTimersByTime(10_500); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toBe('skeletonskeleton');
+    await act(async () => { resolve(project('second')); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toBe('secondsecond');
+  });
+
+  it('still detaches an in-flight load for foreground-purged bytes', async () => {
+    const fetcher = vi.fn(() => new Promise<ProtectedProjection<Snapshot>>(() => {}));
+    function BytesProbe() {
+      const resource = useCachedResource(KEY, fetcher);
+      useProtectedProjection(KEY, resource.data, purge, resource.refresh, { purgeOnForeground: true });
+      return null;
+    }
+    await act(async () => root.render(<BytesProbe />));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it('evicts exactly one key, leaving the projections it prefixes', () => {
     seedSurfaceCache(KEY, 'overview');
     seedSurfaceCache(`${KEY}:registry`, 'registry');
