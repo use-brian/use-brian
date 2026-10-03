@@ -18,13 +18,13 @@ export function isMediaMime(mime: string): boolean {
 
 /** The input row is a locator only. The store resolves current bytes/scope,
  * creates the Episode and recording together, and serializes retry by parent. */
-export async function resolveRecordingForFile(file: WorkspaceFile, actingUserId: string, deps: RecordingForFileDeps = {}): Promise<RecordingForFileResult> {
+export async function resolveRecordingForFile(file: WorkspaceFile, actingUserId: string, deps: RecordingForFileDeps = {}, options: { kind?: 'memo' | 'meeting' } = {}): Promise<RecordingForFileResult> {
   const authority = { actorUserId: actingUserId }
   const parent = await (deps.captureParent ?? captureRecordingIntakeParent)(authority, file.workspaceId, file.id)
   const id = randomUUID()
   const recording = await (deps.createRecording ?? createRecording)({
     id, workspaceId: file.workspaceId, mime: parent.mime, gcsKey: '', assistantId: parent.assistantId,
-    createdByUserId: actingUserId,
+    createdByUserId: actingUserId, kind: options.kind,
   }, { ...authority, parent })
   return { status: 'ok', recordingId: recording.id, adopted: recording.id === id, alreadyProcessed: recording.status === 'processed' }
 }

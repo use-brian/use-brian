@@ -516,7 +516,8 @@ describe('[COMP:recordings/live-page-route]', () => {
     expect(h.concatWindows).toHaveBeenCalledOnce()
     expect(h.createEpisode).not.toHaveBeenCalled()
     expect(h.deps.filesApi.writeBytes).toHaveBeenCalledWith({ workspaceId: WORKSPACE_ID, userId: USER_ID }, expect.objectContaining({ mime: 'audio/mp4' }))
-    expect(h.deps.updateRecording).toHaveBeenCalledWith('00000000-0000-0000-0000-00000000e901', { kind: 'meeting' })
+    expect(h.deps.createRecording).toHaveBeenCalledWith(expect.objectContaining({ kind: 'meeting' }), expect.objectContaining({ actorUserId: USER_ID }))
+    expect(h.deps.updateRecording).not.toHaveBeenCalled()
     expect(h.update).toHaveBeenCalledWith(USER_ID, page.pageId, {
       linkedRecordingId: '00000000-0000-0000-0000-00000000e901',
     })
