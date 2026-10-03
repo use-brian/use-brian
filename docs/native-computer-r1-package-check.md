@@ -43,6 +43,8 @@ bash scripts/package-desktop.sh --arm64 --native-package-check
 
 Do **not** publish, bump a version, dispatch the production release workflow, alter production settings, set acceptance flags or grant desktop permissions. The check explicitly refuses `--publish` and `--no-build`. Its build-only switch does not enable native control.
 
+With `--native-package-check`, the wrapper first runs the installed, version-checked Electron package's official installer and checks for its stock macOS runtime/framework files. Electron 43 installs this runtime lazily; electron-builder's separate download does not populate `node_modules/electron/dist`. This step may download the pinned **43.2.0** runtime and happens before keychain creation, version changes and builds. It does not update dependencies, sign anything or run the downloaded Electron app. Ordinary packaging without this opt-in is unchanged.
+
 The existing signing hook finalizes nested libraries with builder's selected certificate/keychain, authenticates the supported Electron 43.2.0 inventory and ASAR/fuses, stamps/signs the empty-entitlement helper, and signs the constrained parent last. Final binding checks run before notarization and read-only afterSign. The inventory verifier is build-host-only, not shipped.
 
 The explicit package check additionally uses **private temporary copies** while that same selected signing keychain is available:

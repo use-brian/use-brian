@@ -121,6 +121,34 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   exit 1
 fi
 
+# Electron 43 installs its runtime lazily; builder's separate download does not
+# populate node_modules/electron/dist. The opt-in differential needs that stock
+# copy. Use only the installed, version-checked package's official installer,
+# before creating a keychain, changing versions, or doing expensive builds.
+if [[ "$NATIVE_PACKAGE_CHECK" == "1" ]]; then
+  echo "==> Preparing pinned stock Electron for the native package check"
+  (
+    cd "$REPO_ROOT/apps/app-desktop"
+    node --input-type=module <<'NODE'
+import { createRequire } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
+import { statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { requireElectronVersion } from './scripts/mac-asar-integrity.mjs';
+const require = createRequire(resolve('package.json'));
+const packagePath = require.resolve('electron/package.json');
+requireElectronVersion(require(packagePath).version);
+execFileSync(process.execPath, [require.resolve('electron/install.js')], { stdio: 'inherit', timeout: 300000 });
+const stock = join(dirname(packagePath), 'dist/Electron.app');
+for (const file of ['Contents/MacOS/Electron',
+  'Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework',
+  'Contents/Frameworks/Electron Framework.framework/Versions/A/Resources/Info.plist']) {
+  if (!statSync(join(stock, file)).isFile()) throw new Error('Pinned stock Electron installation incomplete');
+}
+NODE
+  )
+fi
+
 # Own the keychain lifecycle: electron-builder 25 passes the certificate password
 # where security requires the separately generated keychain password.
 source "$REPO_ROOT/scripts/desktop-keychain.sh"
