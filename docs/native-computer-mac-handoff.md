@@ -1,10 +1,12 @@
 # Mac computer use — verification handoff
 
-## Current stop point: deadline counterexample
+## Current stop point: unsafe mechanism retired
 
 The operator's `last-check-to-post` run recorded deadline expiry, then a new down and fixture receipt of the pair while the tap still reported enabled. See the acceptance ledger and preserved observation in the experiment directory. **Pause further emitting cases pending engineering review.** This is not a reason to repeat trials, extend deadlines, add a purported atomic last check, or enable the platform registry. The instructions below describe the earlier verification handoff, not authorization to proceed past this finding. Source/tooling completion did not establish mechanism safety; this native finding now requires engineering resolution.
 
-## Scope and completed checks
+The engineering fix removes the physical emitters from production and experiment code. Profile acceptance and production coordinate dispatch now unconditionally refuse; helper `input:false` is explicit. The current harness rejects every non-null case in JS, Swift and C, including direct native entry points. AX semantics/capture remain unchanged and existing uncertain state stays fenced. This is not a functioning coordinate-input replacement: R3 remains engineering work. No further input test is requested. Pulling source does not replace an old binary; rebuilding with `bash build.sh` replaces the isolated artifact without launching it. Do not use old emitting binaries or `--record-build` to bless an old artifact. Current non-emitting guardian discovery expects 21 cases (15 portable).
+
+## Historical verification handoff (before retirement)
 
 Finish code/tooling in the engineering checkout; the operator executes finished tooling and verifies real Mac behavior, not an implementation backlog. No availability or full-completion claim follows. The accepted-platform registry remains empty and production coordinate input remains unavailable.
 

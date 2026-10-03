@@ -1,6 +1,6 @@
 # macOS computer use — release plan
 
-**Status: source/tooling implemented for verification; release acceptance remains open.** Production coordinate input remains unavailable with an empty accepted-platform registry; control rollout stays gated. This is not availability or a 100%-complete claim.
+**Status: the coordinate mechanism was retired after a native deadline counterexample; R3 needs a safe replacement.** Both production and experimental mouse emitters have been removed. Production input is unconditionally false, independent of profiles; only null remains runnable in the isolated harness. AX semantics and scoped capture remain implemented behind their existing consent/rollout gates. This is safety remediation, not working coordinate input or completed release acceptance.
 
 This is the active release scope, revised at the user's direction. It supersedes the [previous broad plan](archive/electron-native-computer-use-pre-release-rescope.md). The archive and [acceptance ledger](../native-computer-acceptance.md) preserve prior work and failures; their larger research/evaluation programmes are **not additional release gates**.
 
