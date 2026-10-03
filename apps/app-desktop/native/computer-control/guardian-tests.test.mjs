@@ -15,7 +15,7 @@ for (const line of tests.split('\n')) {
   const method = line.match(/^    func (test\w+)\(/);
   if (method) discovered.push(`GuardianTests.${suite}/${method[1]}`);
 }
-assert.equal(discovered.length, 16);
+assert.equal(discovered.length, 20);
 
 function fixture({ listing = discovered.join('\n'), fail } = {}) {
   const calls = [], logs = [];
@@ -95,6 +95,9 @@ test('Linux keeps the real corelibs XCTest main and runtime library options', as
         const contents = readFileSync(main, 'utf8');
         assert.match(contents, /XCTMain\(/);
         assert.doesNotMatch(contents, /ClickGuardianNativeGateTests/);
+        const portableNames = discovered.filter(name => !name.includes('ClickGuardianNativeGateTests/'));
+        assert.equal((contents.match(/\("test/g) ?? []).length, portableNames.length);
+        for (const name of portableNames) assert(contents.includes(name.replace('GuardianTests.', '').replace('/', '.')), name);
         assert(args.includes('/fixture/runtime lib'));
       }
       return '';

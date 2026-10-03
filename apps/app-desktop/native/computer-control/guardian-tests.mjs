@@ -27,6 +27,12 @@ function run(command, argv, capture = false) {
 // Explicitly register only the existing non-emitting tests. No source rewriting,
 // automatic discovery of future native tests, acceptance flags or permission calls.
 const portable = {
+  ClickGuardianPlatformSelectorTests: [
+    'testProductionRegistryIsEmptyAndRefuses',
+    'testOnlyExactVersionBuildArchitectureAndMechanismMatch',
+    'testTranslatedUnknownAndMissingMetadataRefuse',
+    'testMalformedAndDuplicateProfilesInvalidateEntireRegistry',
+  ],
   ClickGuardianNativeLedgerTests: [
     'testNoReadinessWithoutBoundedNullConfirmation',
     'testLateProbeCannotBeatDelayedTimer',
@@ -86,7 +92,7 @@ let package = Package(name: "GuardianChecks", platforms: [.macOS(.v14)], targets
     const expected = Object.entries({ ...portable, ...native }).flatMap(([suite, tests]) => tests.map(name => `GuardianTests.${suite}/${name}`));
     const listed = execute('xcrun', [...command, '--list-tests'], true);
     const discovered = listed.split(/\r?\n/).map(line => line.trim()).filter(line => line.startsWith('GuardianTests.'));
-    assert.deepEqual(discovered.sort(), [...expected].sort(), 'XCTest discovery must match exactly the 16 reviewed non-emitting tests');
+    assert.deepEqual(discovered.sort(), [...expected].sort(), 'XCTest discovery must match exactly the 20 reviewed non-emitting tests');
     const filter = `^(${expected.map(name => name.replaceAll('.', '\\.')).join('|')})$`;
     execute('xcrun', [...command, '--skip-build', '--filter', filter]);
   } else {
@@ -97,7 +103,7 @@ let package = Package(name: "GuardianChecks", platforms: [.macOS(.v14)], targets
       source('ClickGuardianNative.swift'), source('ClickGuardianNativeTests.swift'), main, '-o', binary]);
     execute(binary, []);
   }
-  log('PASS portable: 10 XCTest ledger/tail cases (synthetic bookkeeping only).');
+  log('PASS portable: 14 XCTest ledger/tail/selector cases (synthetic bookkeeping/configuration only).');
   if (darwin) {
     log('PASS Darwin: 6 non-emitting API XCTest cases; no event posting or permission request.');
     const fence = join(temporary, 'epoch-fence-tests');

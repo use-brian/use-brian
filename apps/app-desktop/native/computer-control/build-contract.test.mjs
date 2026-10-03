@@ -279,7 +279,9 @@ test('guardian native scope uses private descriptor, shared validators and indep
   assert(!/AXUIElement|signedProcess|parentValid|ProcessIdentity.read|DispatchQueue.*sync/.test(callback));
   assert(host.includes('guard lock.try() else { return false }'));
   assert(host.includes('takeUnretainedValue().invalidate()'));
-  assert(native.includes('static func acceptsCurrentPlatform() -> Bool { false }'));
+  assert.match(native, /static let profiles: \[ClickGuardianPlatformProfile\] = \[\]/);
+  assert.match(native, /static func acceptsCurrentPlatform\(\) -> Bool \{\s*guard !profiles.isEmpty else \{ return false \}[^\n]*\n\s*#if os\(macOS\)\s*guard let metadata = currentMetadata\(\)/);
+  assert(native.includes('ClickGuardianPlatformSelector.matches(profiles: profiles,'));
   assert(native.includes('place: .tailAppendEventTap'));
   assert(native.includes('tail.sealProducer()'));
   assert(native.indexOf('retainedUp = up') < native.indexOf('down.tapPostEvent(proxy)'));
@@ -312,7 +314,9 @@ test('accepted stream return keeps overlapping monitors and opens only readback'
   assert(host.indexOf('returnMonitoring()') < host.indexOf('guardianWrite(["kind": "workerMonitoring"'));
   assert(native.includes('else if monitorReturnAcknowledged && ownedStreamProven()'));
   assert(native.includes('static func hasPublicEpochFenceSupport() -> Bool'));
-  assert(native.includes('static func acceptsCurrentPlatform() -> Bool { false }'));
+  assert.match(native, /static let profiles: \[ClickGuardianPlatformProfile\] = \[\]/);
+  assert.match(native, /static func acceptsCurrentPlatform\(\) -> Bool \{\s*guard !profiles.isEmpty else \{ return false \}[^\n]*\n\s*#if os\(macOS\)\s*guard let metadata = currentMetadata\(\)/);
+  assert(native.includes('ClickGuardianPlatformSelector.matches(profiles: profiles,'));
   const capability = helper.slice(helper.indexOf('    func capabilities()', helper.indexOf('final class Broker:')), helper.indexOf('    func listTargets()', helper.indexOf('final class Broker:')));
   for (const token of ['!clickSpent', 'clickOwnerReady()', 'acceptsCurrentPlatform()', 'hasPublicEpochFenceSupport()',
     'trust.parentValid()', 'CGPreflightListenEventAccess()', 'CGPreflightPostEventAccess()', '"input": inputReady']) assert(capability.includes(token), token);

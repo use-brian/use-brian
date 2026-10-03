@@ -95,6 +95,56 @@ final class ClickGuardianNativeLedgerTests: XCTestCase {
     }
 }
 
+// Synthetic profiles exercise selection, never populate the production registry.
+final class ClickGuardianPlatformSelectorTests: XCTestCase {
+    private func profile(major: Int = 14, minor: Int = 5, patch: Int = 0,
+                         build: String = "23F79", architecture: String = "arm64",
+                         revision: Int = 1) -> ClickGuardianPlatformProfile {
+        ClickGuardianPlatformProfile(major: major, minor: minor, patch: patch,
+            build: build, architecture: architecture, mechanismRevision: revision)
+    }
+
+    func testProductionRegistryIsEmptyAndRefuses() {
+        XCTAssertTrue(ClickGuardianNativeAcceptedPlatforms.profiles.isEmpty)
+        XCTAssertFalse(ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform())
+        XCTAssertFalse(ClickGuardianPlatformSelector.matches(profiles: [], runtime: profile(), translated: false))
+    }
+
+    func testOnlyExactVersionBuildArchitectureAndMechanismMatch() {
+        let accepted = profile()
+        XCTAssertTrue(ClickGuardianPlatformSelector.matches(profiles: [accepted], runtime: accepted, translated: false))
+        let intel = profile(architecture: "x86_64")
+        XCTAssertTrue(ClickGuardianPlatformSelector.matches(profiles: [accepted, intel], runtime: intel, translated: false))
+        for mismatch in [profile(major: 15), profile(minor: 6), profile(patch: 1),
+                         profile(build: "23F80"), intel, profile(revision: 2)] {
+            XCTAssertFalse(ClickGuardianPlatformSelector.matches(profiles: [accepted], runtime: mismatch, translated: false))
+        }
+    }
+
+    func testTranslatedUnknownAndMissingMetadataRefuse() {
+        for translated in [true, nil] as [Bool?] {
+            XCTAssertFalse(ClickGuardianPlatformSelector.matches(profiles: [profile()], runtime: profile(), translated: translated))
+        }
+        XCTAssertFalse(ClickGuardianPlatformSelector.matches(profiles: [profile()], runtime: nil, translated: false))
+    }
+
+    func testMalformedAndDuplicateProfilesInvalidateEntireRegistry() {
+        let valid = profile()
+        let malformed = [profile(major: 0), profile(minor: -1), profile(patch: -1),
+            profile(build: ""), profile(build: "23F79\n"), profile(build: "23F79\0"),
+            profile(build: " 23F79"), profile(build: "23F79extra"), profile(build: "23F79\u{2028}"),
+            profile(build: String(repeating: "2", count: 65) + "F79"),
+            profile(architecture: "ARM64"), profile(architecture: "unknown"), profile(revision: 0)]
+        for bad in malformed {
+            XCTAssertFalse(ClickGuardianPlatformSelector.matches(profiles: [valid, bad], runtime: valid, translated: false))
+            XCTAssertFalse(ClickGuardianPlatformSelector.matches(profiles: [valid], runtime: bad, translated: false))
+        }
+        XCTAssertFalse(ClickGuardianPlatformSelector.matches(profiles: [valid, valid], runtime: valid, translated: false))
+        let other = profile(build: "23F80")
+        XCTAssertFalse(ClickGuardianPlatformSelector.matches(profiles: [valid, other, other], runtime: valid, translated: false))
+    }
+}
+
 #if os(macOS)
 import CoreGraphics
 

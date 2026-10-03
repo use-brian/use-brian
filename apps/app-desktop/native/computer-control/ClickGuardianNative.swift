@@ -87,19 +87,99 @@ struct ClickGuardianTailLedger {
     var complete: Bool { phase == .pairObserved && producerSealed && downSeen && upSeen }
 }
 
+// Configuration selection only: numeric macOS version is NOT enough. Exact OS
+// build, native process architecture and mechanism revision must also match.
+// Mechanism changes (including proxy/producer/monitor ordering) MUST bump the
+// revision and invalidate prior acceptance. Matching is NOT stale-proxy safety,
+// signing/attestation, provenance or native acceptance evidence.
+struct ClickGuardianPlatformProfile: Hashable {
+    let major: Int
+    let minor: Int
+    let patch: Int
+    let build: String
+    let architecture: String
+    let mechanismRevision: Int
+
+    var wellFormed: Bool {
+        major > 0 && minor >= 0 && patch >= 0 &&
+            build.utf8.count <= 64 &&
+            build.range(of: "\\A[0-9]+[A-Z][0-9]+[a-z]?\\z", options: .regularExpression) != nil &&
+            ["arm64", "x86_64"].contains(architecture) && mechanismRevision > 0
+    }
+}
+
+enum ClickGuardianPlatformSelector {
+    // Pure seam. Unknown translation state, any malformed entry, and duplicate
+    // entries invalidate the whole registry, even if another entry would match.
+    static func matches(profiles: [ClickGuardianPlatformProfile],
+                        runtime: ClickGuardianPlatformProfile?, translated: Bool?) -> Bool {
+        guard !profiles.isEmpty, profiles.allSatisfy({ $0.wellFormed }),
+              Set(profiles).count == profiles.count,
+              translated == false, let runtime = runtime, runtime.wellFormed else { return false }
+        return profiles.contains(runtime)
+    }
+}
+
+enum ClickGuardianNativeAcceptedPlatforms {
+    // Source-owned and immutable. NO accepted profiles or external overrides.
+    // Future entries still require native acceptance of stale-proxy, epoch-race
+    // and input-provenance behavior; metadata matching supplies none of that.
+    static let profiles: [ClickGuardianPlatformProfile] = []
+    static let mechanismRevision = 1
+
+    static func acceptsCurrentPlatform() -> Bool {
+        guard !profiles.isEmpty else { return false } // Do not probe metadata when empty.
+        #if os(macOS)
+        guard let metadata = currentMetadata() else { return false }
+        return ClickGuardianPlatformSelector.matches(profiles: profiles,
+            runtime: metadata.profile, translated: metadata.translated)
+        #else
+        return false
+        #endif
+    }
+
+    #if os(macOS)
+    private static func currentMetadata() -> (profile: ClickGuardianPlatformProfile, translated: Bool)? {
+        // Public APIs only, fixed-size buffers; no shell, files, environment or
+        // JSON. Failure/truncation/unknown translation values refuse selection.
+        var bytes = [UInt8](repeating: 0, count: 65)
+        var size = bytes.count
+        guard sysctlbyname("kern.osversion", &bytes, &size, nil, 0) == 0,
+              size > 1, size <= bytes.count, bytes[size - 1] == 0,
+              !bytes[..<(size - 1)].contains(0),
+              let build = String(bytes: bytes[..<(size - 1)], encoding: .utf8) else { return nil }
+        var translated: Int32 = 0
+        size = MemoryLayout<Int32>.size
+        let result = sysctlbyname("sysctl.proc_translated", &translated, &size, nil, 0)
+        if result != 0 {
+            // Apple's documented ENOENT means this translation facility is absent.
+            guard errno == ENOENT else { return nil }
+            translated = 0
+        } else {
+            guard size == MemoryLayout<Int32>.size, translated == 0 || translated == 1 else { return nil }
+        }
+        guard translated == 0 else { return nil }
+        let architecture: String
+        #if arch(arm64)
+        architecture = "arm64"
+        #elseif arch(x86_64)
+        architecture = "x86_64"
+        #else
+        return nil
+        #endif
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return (ClickGuardianPlatformProfile(major: version.majorVersion, minor: version.minorVersion,
+            patch: version.patchVersion, build: build, architecture: architecture,
+            mechanismRevision: mechanismRevision), false)
+    }
+    #endif
+}
+
 #if os(macOS)
+import Darwin
 import CoreGraphics
 import CoreFoundation
 import AppKit
-
-// Deliberately no accepted profiles. Future entries require source-owned review
-// of signed platform identity AND native acceptance (including stale proxies).
-// Neither a successful null probe nor OS version alone can populate this registry.
-// Lifetime epoch subscription is implemented; subscription/race behavior and
-// stale-proxy/input provenance still require native acceptance. No override.
-enum ClickGuardianNativeAcceptedPlatforms {
-    static func acceptsCurrentPlatform() -> Bool { false }
-}
 
 // Availability of the PUBLIC implementation, not installation success, a
 // numeric generation, or platform acceptance. Each scope must install/poll its
