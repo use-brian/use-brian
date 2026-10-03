@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { admissionMarker, admissionCanary, appendLocalCleanupWarning, requireAdmissionDifferential,
-  runAdmissionComposition, checkPackagedAdmission, admissionRootSigningArguments, cleanupAdmissionArtifacts } from './mac-packaged-admission-check.mjs';
+  runAdmissionComposition, checkPackagedAdmission, admissionRootSigningArguments, cleanupAdmissionArtifacts, admissionChildEnvironment } from './mac-packaged-admission-check.mjs';
 import { runPrivateChild } from './mac-library-constraint-fixture.mjs';
 
 const result = overrides => ({ ok: true, code: 0, signal: null, failure: null, closeConfirmed: true,
@@ -50,6 +50,32 @@ test('baseline signing files resolve in caller cwd before the private child chan
     assert.equal(inline[inline.indexOf('--requirements') + 1], '=designated => true');
     assert.ok(!inline.includes('--keychain'));
     assert.throws(() => admissionRootSigningArguments(options, { entitlements: join(directory, 'absent') }));
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('only fixed codesign receives builder keychain context; real canary child stays isolated', async () => {
+  const directory = fs.mkdtempSync(join(tmpdir(), 'admission-environment-test-'));
+  try {
+    const signingEnv = { HOME: '/original/home', PATH: '/original/bin', CSC_KEY_PASSWORD: 'fixture-secret',
+      APPLE_APP_SPECIFIC_PASSWORD: 'fixture-notary-secret', DYLD_INSERT_LIBRARIES: '/developer/override' };
+    const privateEnv = { HOME: directory, TMPDIR: directory, PATH: '/usr/bin:/bin', ELECTRON_RUN_AS_NODE: '1' };
+    const signer = admissionChildEnvironment('/usr/bin/codesign', false, privateEnv, signingEnv);
+    assert.deepEqual(signer, signingEnv);
+    signer.HOME = '/changed'; assert.equal(signingEnv.HOME, '/original/home');
+    for (const [command, attempt] of [['/usr/bin/ditto', false], ['/tmp/codesign', false],
+      ['/usr/bin/codesign', true], [process.execPath, true]]) {
+      const chosen = admissionChildEnvironment(command, attempt, privateEnv, signingEnv);
+      assert.deepEqual(chosen, privateEnv);
+      assert.equal(chosen.CSC_KEY_PASSWORD, undefined);
+      assert.equal(chosen.APPLE_APP_SPECIFIC_PASSWORD, undefined);
+      assert.equal(chosen.DYLD_INSERT_LIBRARIES, undefined);
+    }
+    const result = await runPrivateChild({ command: process.execPath,
+      args: ['-e', `process.stdout.write(JSON.stringify({ home: process.env.HOME, node: process.env.ELECTRON_RUN_AS_NODE,
+        leaked: ['CSC_KEY_PASSWORD','APPLE_APP_SPECIFIC_PASSWORD','DYLD_INSERT_LIBRARIES'].some(key => key in process.env) }));`],
+      directory, label: 'canary-environment', env: admissionChildEnvironment(process.execPath, true, privateEnv, signingEnv) });
+    assert.equal(result.ok, true);
+    assert.deepEqual(JSON.parse(result.stdout), { home: directory, node: '1', leaked: false });
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 

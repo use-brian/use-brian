@@ -46,6 +46,13 @@ export function admissionRootSigningArguments({ identity, keychain }, root) {
   return args;
 }
 
+// Only Apple's fixed signing tool inherits the already-working builder context.
+// Copy tools and executable canaries must never receive signing credentials,
+// developer overrides or the user's HOME from that context.
+export function admissionChildEnvironment(command, attempt, privateEnv, signingEnv) {
+  return { ...(command === '/usr/bin/codesign' && !attempt ? signingEnv : privateEnv) };
+}
+
 export function cleanupAdmissionArtifacts(directory, failure, uncertain) {
   if (uncertain) return; // No cleanup or later signaling while child death is uncertain.
   try {
@@ -111,11 +118,14 @@ export async function checkPackagedAdmission(options, approval) {
   const directory = fs.mkdtempSync(join(fs.realpathSync(tmpdir()), 'brian-packaged-admission-'));
   fs.chmodSync(directory, 0o700);
   const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: directory, TMPDIR: directory, LANG: 'C', LC_ALL: 'C' };
+  // sealNativeBootstrap successfully used this environment with the same signer.
+  // In particular, replacing HOME changes Security/keychain lookup semantics.
+  const signingEnv = { ...process.env };
   let sequence = 0, uncertain = false, failure;
   const evidence = [];
   const step = async (command, args, childEnv = env, attempt = false) => {
     const label = String(++sequence).padStart(2, '0');
-    const result = await runPrivateChild({ command, args, directory, label, env: childEnv, deadlineMs: attempt ? 15000 : 120000 });
+    const result = await runPrivateChild({ command, args, directory, label, env: admissionChildEnvironment(command, attempt, childEnv, signingEnv), deadlineMs: attempt ? 15000 : 120000 });
     uncertain ||= !result.closeConfirmed;
     evidence.push({ label, ...result });
     fs.writeFileSync(join(directory, `${label}.json`), JSON.stringify(result), { mode: 0o600, flag: 'wx' });
