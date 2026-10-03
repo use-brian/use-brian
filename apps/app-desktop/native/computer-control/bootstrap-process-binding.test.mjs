@@ -8,8 +8,8 @@ test('new collector is unwired, fixed self/parent only, offline and non-authoriz
   const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
   // Parent may later compile/call data-only diagnostics. The dispatcher barrier,
   // not module presence in build.sh, is the enduring authority invariant.
-  assert(helper.includes('probeOnlyResponse(request, clock: sourceClock)'));
-  assert(!/Broker\s*\(/.test(helper));
+  assert(helper.includes('dispatcher.response(request, clock: sourceClock)'));
+  assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
 });
 test('Mac v5 compiler regression: every validity check retains the public Swift offline option', () => {
   // Source regression, NOT a replacement for the operator's Mac SDK typecheck.

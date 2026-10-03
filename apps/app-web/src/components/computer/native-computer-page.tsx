@@ -41,6 +41,17 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   const target = targets.find(item => nativeTargetKey(item) === targetKey);
   const conversations = (chat.personal ?? []).filter(row => row.assistantId === assistantId);
   const active = phase === "active" || phase === "awaiting_action_approval" || phase === "awaiting_local_consent";
+  const canControl = state.status?.capabilities.semanticActions === true;
+  const canCapture = canControl && state.status?.capabilities.windowCapture === true;
+  // Forget unsupported preferences, but surface the change rather than silently
+  // treating a previously requested control run as an inspector run.
+  useEffect(() => {
+    if (allowControl && !canControl || allowCapture && (!allowControl || !canCapture)) {
+      if (!canControl) setControl(false);
+      setCapture(false);
+      setFailed(true);
+    }
+  }, [allowControl, allowCapture, canControl, canCapture]);
   // Discovery is read-only and must never interrupt a live grant/approval.
   useEffect(() => {
     if (active || busy || state.inspection) return;
@@ -61,8 +72,15 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   const valid = !state.inspection && ready && !!target && !!goal.trim() && chat.assistants.some(a => a.id === assistantId) && conversations.some(c => c.id === conversationId) && !!tasks.data?.some(row => row.id === taskId);
   async function start() {
     if (!valid || !target || busy) return;
+    // Recheck the live store as well: capabilities can change between render
+    // and click. Reject the requested run; never coerce it into inspector mode.
+    const capabilities = nativeComputer.snapshot().status?.capabilities;
+    if (allowControl && capabilities?.semanticActions !== true || allowCapture && (!allowControl || capabilities?.windowCapture !== true)) {
+      setFailed(true);
+      return;
+    }
     setBusy(true); setFailed(false);
-    const result = await nativeComputer.start(resumable ? "resume" : "start", { workspaceId, assistantId, conversationId, taskId, goal: goal.trim(), target, allowControl, allowCapture: allowControl && allowCapture });
+    const result = await nativeComputer.start(resumable ? "resume" : "start", { workspaceId, assistantId, conversationId, taskId, goal: goal.trim(), target, allowControl, allowCapture });
     setFailed(!result.ok); setBusy(false);
   }
   return <section className="h-full overflow-y-auto p-4 md:p-6"><div className="mx-auto max-w-2xl space-y-5">
@@ -104,8 +122,8 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
       {!targets.length ? <p className="text-sm">{t.noTargets}</p> : null}
       <label className="block space-y-1"><span>{t.goal}</span><textarea className="min-h-28 w-full rounded-md border bg-background p-3 text-base" maxLength={2000} value={goal} disabled={busy || active} onChange={e => setGoal(e.target.value)} /></label>
       <p className="text-sm">{allowControl ? t.observe : t.inspectorHelp}</p>
-      <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowControl} onCheckedChange={setControl} disabled={busy || active} />{t.control}</label>
-      <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowCapture} onCheckedChange={setCapture} disabled={busy || active || !allowControl || !state.status?.capabilities.windowCapture} />{t.capture}</label>
+      <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowControl} onCheckedChange={value => { setControl(value); if (!value) setCapture(false); }} disabled={busy || active || !canControl} />{t.control}</label>
+      <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowCapture} onCheckedChange={setCapture} disabled={busy || active || !allowControl || !canCapture} />{t.capture}</label>
       <p className="text-sm text-muted-foreground">{t.consent}</p>
       <Button className="min-h-11" disabled={!valid || busy || active} onClick={() => void start()}>{resumable ? t.resume : t.start}</Button>
     </> : null}

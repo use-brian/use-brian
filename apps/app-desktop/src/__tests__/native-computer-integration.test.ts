@@ -54,6 +54,7 @@ vi.mock('../computer-control/index.js', () => ({
   },
   PrivatePipeHelper: class {
     constructor(spec: unknown, onDeath: unknown, timeout: unknown, timing: unknown) { mocks.launches.push(spec); mocks.helperArgs.push([spec, onDeath, timeout, timing]); mocks.helpers.push(this) }
+    readinessDiagnostics = vi.fn(() => ({ requestTimedOut: false, exitObserved: true, exitCode: 77, exitSignal: null, spawnFailed: false }))
     capabilities = vi.fn(async () => mocks.readinessCaps)
     kill = vi.fn(() => mocks.readinessDeath)
   },
@@ -130,6 +131,36 @@ describe('trusted main native computer setup', () => {
     integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth }); integration.install()
     return getAuth
   }
+
+  it('packaged inspector opt-in authorizes only a one-shot read, not control/capture or pilot acceptance', async () => {
+    await packagedReadiness()
+    vi.stubEnv('NATIVE_COMPUTER_INSPECTOR_ENABLED', 'true')
+    integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth: async () => auth }); integration.install()
+    await discover()
+    controller().caps.semanticActions = false
+    for (const [allowControl, allowCapture] of [[true, false], [false, true], [true, true]]) {
+      expect(await integration.handle({ ...selection, allowControl, allowCapture })).toMatchObject({ ok: false })
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await integration.handle({ ...selection, allowControl: false, allowCapture: false })).toMatchObject({ ok: true, inspection: { id: 'local-ax' } })
+    expect(requests.some(row => row.path.endsWith('/run'))).toBe(false)
+    expect(requests.some(row => row.path.endsWith('/exchange'))).toBe(true)
+    expect(controller().start.mock.calls[0][0]).toMatchObject({ allowControl: false, allowCapture: false })
+    expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
+  })
+
+  it('readiness logs fixed lifecycle diagnostics, never raw helper or auth errors', async () => {
+    await packagedReadiness()
+    mocks.readinessCaps = { privateText: 'DO_NOT_LOG' }
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(await integration.handle({ type: 'check-readiness' })).toMatchObject({ ok: false })
+      expect(warning).toHaveBeenCalledWith('[native-computer] readiness failed', {
+        stage: 'validation', requestTimedOut: false, exitObserved: true, exitCode: 77, exitSignal: null, spawnFailed: false,
+      })
+      expect(JSON.stringify(warning.mock.calls)).not.toContain('DO_NOT_LOG')
+    } finally { warning.mockRestore() }
+  })
 
   it('explicit packaged readiness uses only capabilities with rollout disabled and retains the lease until death', async () => {
     const getAuth = await packagedReadiness()
@@ -226,7 +257,7 @@ describe('trusted main native computer setup', () => {
     expect(old.dispose).toHaveBeenCalledOnce()
     expect(old.listTargets).not.toHaveBeenCalled()
     expect(controller()).not.toBe(old)
-    expect(controller().capabilities).toHaveBeenCalledOnce()
+    expect(controller().capabilities).toHaveBeenCalledTimes(2)
     expect(controller().listTargets).toHaveBeenCalledOnce()
   })
   it.each(['darwin', 'win32', 'linux'] as const)('%s requires its own packaged acceptance, fixed readable files and Stop hooks', async platform => {
@@ -279,12 +310,19 @@ describe('trusted main native computer setup', () => {
     Object.defineProperty(process, 'platform', { value: platform })
     vi.useFakeTimers()
     try {
-      const approving = controller().options.approveGrant({ requester: 'User', identity: { workspaceId: 'w', deploymentId: 'd' }, goal: 'Read', targets: [target], expiresAt: Date.now() + 60000 }, new AbortController().signal)
+      const approving = controller().options.approveGrant({ requester: 'User', identity: { workspaceId: 'w', deploymentId: 'd' }, goal: 'Read', allowControl: true, targets: [target], expiresAt: Date.now() + 60000 }, new AbortController().signal)
       expect(await approving).toBe(true)
       const detail = vi.mocked(dialog.showMessageBox).mock.calls.at(-1)![0].detail!
       expect(detail).toContain('restore only the selected window'); expect(detail).toContain('fails closed')
       expect(detail).not.toContain('5 seconds'); expect(vi.getTimerCount()).toBe(0)
     } finally { vi.useRealTimers() }
+  })
+  it('Mac read-only consent explicitly promises no activation, raising or editing', async () => {
+    await controller().options.approveGrant({ requester: 'User', identity: { workspaceId: 'w', deploymentId: 'd' },
+      goal: 'Read', allowControl: false, allowCapture: false, targets: [target], expiresAt: Date.now() + 60000 }, new AbortController().signal)
+    const detail = vi.mocked(dialog.showMessageBox).mock.calls.at(-1)![0].detail!
+    expect(detail).toContain('will not activate, raise or edit')
+    expect(detail).not.toContain('restore only the selected window')
   })
   it('real action dialog denies missing/ambiguous context and displays exact parameters and parent context as quoted data', async () => {
     const approve = controller().options.approveAction as NativeControllerOptions['approveAction']
@@ -353,7 +391,7 @@ describe('trusted main native computer setup', () => {
   it('read-only pairs, waits for READY, then reads once locally without POST run or capture authority', async () => {
     await discover()
     const ready = deferred<void>(); mocks.ready = () => ready.promise
-    const result = integration.handle({ ...selection, allowControl: false, allowCapture: true })
+    const result = integration.handle({ ...selection, allowControl: false, allowCapture: false })
     await vi.waitFor(() => expect(mocks.relays).toHaveLength(1))
     expect(controller().inspectSelected).not.toHaveBeenCalled()
     ready.resolve()

@@ -55,8 +55,8 @@ test('private ABI, read-only calls, generation guards and no authority bypass in
   assert(header.includes('No result grants production authority'));
   const helper = await readFile(join(root, 'Helper.swift'), 'utf8');
   assert(!helper.includes('brian_kernel_signing_snapshot'));
-  assert(!/Broker\s*\(/.test(helper));
-  assert(helper.includes('probeOnlyResponse(request, clock: sourceClock)'));
+  assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
+  assert(helper.includes('dispatcher.response(request, clock: sourceClock)'));
   const build = await readFile(join(root, 'build.sh'), 'utf8');
   assert(!build.includes('KernelSigningSnapshotTests') && !build.includes('KernelSigningProbe'));
 });

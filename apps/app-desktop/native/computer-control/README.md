@@ -1,5 +1,21 @@
 # Killable macOS native helper
 
+## Current experimental R1 boundary
+
+This section supersedes the historical probe-only descriptions below. Signed Mac AX acceptance is still pending; this is not release completion. The operator reports signed/notarized arm64 Electron 43.2 framework-substitution differential success and private capabilities admission on retry. The initial admission failure remains unresolved.
+
+- Fresh-helper `capabilities` is metadata-only: all capabilities false, permissions unknown, no Broker construction or permission queries. Start/execute/approvals refuse before discovery.
+- Only explicit `listTargets` lazily initializes the retained Broker. Main must refresh capabilities afterward. The event tap is created only when AX is already trusted; the helper never prompts. Later AX readiness requires both AX permission and an enabled tap. Screen Recording permission is not queried.
+- Start requires `allowControl=false` AND `allowCapture=false`, exactly one discovered live target, enabled takeover monitoring and successful scope subscriptions. No foreground activation or AXRaise occurs. Both approvals always refuse; dispatcher and Broker reject all non-observe execution. Snapshot actions are empty.
+- Existing parent/channel, permission-loss, takeover, lock/sleep, deadline and window/sheet scope fencing remain. Unreadable child arrays mark observations partial instead of falsely complete. A failed start after scope-monitor installation requires a fresh helper.
+- Desktop permission UI, opt-in, readiness lifecycle and the existing API/relay authorization path remain desktop integration responsibilities—not a new local planner/service. Package admission and its budgets are unchanged.
+
+Verification: `node smoke.mjs --portable`, `node wire-boundary.mjs --foundation` (with a working Swift/Foundation toolchain), and `node --test *.test.mjs`. Foundation tests execute the production lazy adapter with read-only traps, all grant-flag combinations, forged approvals and non-observe actions; they do not execute AppKit/Security. Signed-parent `smoke.mjs --probe-only` deliberately sends no `listTargets` and remains a permissionless readiness check.
+
+Next operator check: signed-package Accessibility attribution/tap readiness, TextEdit/fixture discovery, explicit observation-only consent, bounded redacted snapshot, Stop, and denied permission/modal/window-identity refusals. Record every admission attempt. No control, capture or semantic execution is enabled, and no admission timeout is raised.
+
+## Historical implementation and acceptance notes
+
 **The user reports successful current-architecture Mac compilation and unsigned bootstrap refusal for the v2 preflight. This Linux workspace cannot reproduce that run; signing, positive parent trust, TCC and operational acceptance remain unverified. Keep the pilot disabled.**
 
 **Active delivery scope: macOS only, per user direction.** Windows/Linux are deferred; their historical implementation, failures and broader-plan requirements remain recorded, but are not gates for finishing the current macOS scope. No macOS safety, bootstrap, input-guardian, oracle/drain, genuine vision, fresh modal authorization, cohort or live-provider gate is waived. The user will run Mac tests personally. Commit/push/PR authorization is conditional on verified macOS scope; that condition is not yet met. Gates remain off and the helper remains probe-only.

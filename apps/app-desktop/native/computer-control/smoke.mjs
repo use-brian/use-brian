@@ -1,4 +1,5 @@
-// Probe-only protocol smoke, NOT signing/TCC/model/Stop acceptance. No operational requests may execute.
+// Metadata-only readiness smoke, NOT signing/TCC/model/Stop acceptance.
+// Deliberately never sends listTargets: explicit discovery initializes AX inspection.
 import { spawn } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
@@ -38,13 +39,13 @@ if (process.argv.includes('--portable')) {
   const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8')
   assert(helper.includes('"input": false'))
   const entry = helper.slice(helper.indexOf('guard let trust = ProcessTrust()'))
-  assert(!/Broker\s*\(|broker\.|NSWorkspace|AXUIElement|CGEvent|SCScreenshotManager/.test(entry))
-  assert(!/Broker\s*\(/.test(helper), 'No operational backend construction')
-  assert(entry.includes('probeOnlyResponse(request, clock: sourceClock)'))
-  assert(entry.indexOf('guard trust.parentValid()') < entry.indexOf('probeOnlyResponse('))
-  assert(helper.includes('Native authority disabled: parent loaded-framework proof is unenforced.'))
+  assert(entry.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'))
+  assert(entry.indexOf('guard trust.parentValid()') < entry.indexOf('dispatcher.response('))
+  assert(helper.includes('guard observationGrant(payload), grant == nil'))
+  assert(helper.includes('guard kind == "observe" else { return result("denied") }'))
+  assert(helper.includes('if childRead == nil { complete = false }'))
   for (const marker of ['CFGetTypeID(number) == CFBooleanGetTypeID()', 'CFGetTypeID(number) == CFNumberGetTypeID()',
-    'string.utf16.count <= max', 'validWireRequest(request)', 'validWirePayload("start", payload)',
+    'string.utf16.count <= max', 'validWireRequest(request)', 'observationGrant(payload)',
     'validWirePayload("endApproval", payload)', 'let approved = wireBool(payload["approved"])',
     '(Date().timeIntervalSince1970 * 1000).rounded(.down)', '"capturedAt": now(), "monotonicMs": monotonic()']) assert(helper.includes(marker), marker)
   assert(!helper.includes('candidate["allowControl"] is Bool'))
@@ -100,7 +101,7 @@ if (process.argv.includes('--parent-negative') || process.argv.includes('--boots
 if (!process.versions.electron || process.type !== 'browser') {
   throw new Error('Probe-only smoke requires integration into the signed packaged ai.usebrian.desktop main process; standalone Node cannot simulate parent authority. Use --parent-negative or --portable.')
 }
-assert(process.argv.slice(2).filter(arg => arg.startsWith('--')).every(arg => arg === '--probe-only'), 'Operational smoke modes are disabled pending real loaded-framework binding')
+assert(process.argv.slice(2).filter(arg => arg.startsWith('--')).every(arg => arg === '--probe-only'), 'Use explicit packaged inspector UI for AX acceptance; this harness checks permissionless readiness only')
 const binary = process.argv.slice(2).find(arg => !arg.startsWith('--')) ?? new URL('./build/brian-native-computer-helper', import.meta.url).pathname
 const child = spawn(binary, [], { stdio: ['pipe', 'pipe', 'inherit'] })
 let pending
@@ -137,8 +138,7 @@ try {
     for (const bit of ['axRead', 'semanticActions', 'windowCapture', 'input']) assert.equal(caps[bit], false)
     assert.equal(caps.accessibilityPermission, 'unknown')
     assert.equal(caps.capturePermission, 'unknown')
-    assert.deepEqual(caps.limitations, ['Native authority disabled: parent loaded-framework proof is unenforced.'])
-    assert.deepEqual(await request('listTargets', {}, diagnostics), [])
+    assert.deepEqual(caps.limitations, ['Experimental AX inspector: select discovery to initialize; control and capture disabled; signed Mac AX acceptance pending.'])
     const target = { appId: 'com.usebrian.NativeComputerFixture', processId: 42, processInstanceId: 'not-looked-up', windowId: 'not-looked-up', windowInstanceId: 'not-looked-up' }
     const identity = Object.fromEntries(['deploymentId', 'userId', 'workspaceId', 'deviceId', 'sessionId', 'conversationId', 'taskId'].map(key => [key, randomUUID()]))
     const grant = { protocol: 'native-computer-v1', identity, grantId: randomUUID(), epoch: 1, expiresAt: Date.now() + 60000, targets: [target], allowControl: true, allowCapture: true, requester: 'Untrusted protocol assertion', goal: 'Must never authorize' }
@@ -154,7 +154,6 @@ try {
       assert.equal(await request('endApproval', { command, leaseId, approved: true }, diagnostics), false)
       assert.deepEqual(await request('execute', { command, leaseId }, diagnostics), { commandId: command.commandId, code: 'denied', outcome: 'not_executed' })
     }
-    assert.deepEqual(await request('listTargets', {}, diagnostics), [])
   }
-  console.log('PASS signed-parent probe-only responses and direct protocol refusals. Not operational bootstrap/TCC/AX acceptance.')
+  console.log('PASS signed-parent metadata-only readiness responses and direct protocol refusals. Not operational bootstrap/TCC/AX acceptance.')
 } finally { child.kill('SIGKILL') }

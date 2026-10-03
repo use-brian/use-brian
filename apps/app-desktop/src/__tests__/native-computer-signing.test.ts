@@ -84,10 +84,12 @@ describe('native helper signing in the existing Mac release hook', () => {
     }
   });
 
-  it('uses the custom signer in the existing builder workflow, without changing authority', () => {
+  it('uses the custom signer while keeping native effects unavailable', () => {
     const config = readFileSync(new URL('../../electron-builder.yml', import.meta.url), 'utf8');
     expect(config).toContain('sign: scripts/sign-mac-app.mjs');
     const helper = readFileSync(new URL('../../native/computer-control/Helper.swift', import.meta.url), 'utf8');
-    expect(helper).toContain('guard let response = probeOnlyResponse(request, clock: sourceClock)');
+    expect(helper).toContain('ObservationDispatcher');
+    expect(helper).toContain('case "beginApproval", "endApproval": result = false');
+    expect(helper).toContain('wireBool(grant["allowControl"]) == false && wireBool(grant["allowCapture"]) == false');
   });
 });

@@ -59,6 +59,15 @@ test('anchor compiler failure stops before Swift/signing and removes private tem
   assert.equal(readFileSync(join(f.source, 'Helper.swift'), 'utf8'), '// dispatcher sentinel: not executed\n');
 });
 
+test('scope notification terminates even before grant activation without locks or AX queries', () => {
+  const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
+  const callback = helper.match(/let callback: AXObserverCallback = \{ _, _, _, _ in([\s\S]*?)\n        \}/)?.[1];
+  assert.ok(callback);
+  assert.equal(callback.replace(/\/\/[^\n]*/g, '').trim(), '_exit(71)');
+  // Source-level guard, not proof of native notification delivery: no active
+  // flag may swallow a transient window/sheet between subscription and Start.
+});
+
 test('mapped reader has only an own-symbol source and no admission/parent/environment override', () => {
   const reader = readFileSync(new URL('./BootstrapApprovalReader.swift', import.meta.url), 'utf8');
   assert.match(reader, /brian_bootstrap_approval_copy\(buffer.baseAddress, buffer.count, &written\)/);
@@ -66,6 +75,6 @@ test('mapped reader has only an own-symbol source and no admission/parent/enviro
   assert.match(reader, /decode\(record: bytes\)/);
   assert.doesNotMatch(reader, /ProcessInfo|FileHandle|URL\(|getenv|CommandLine|JSONSerialization/);
   const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
-  assert.doesNotMatch(helper, /Broker\s*\(/);
-  assert.match(helper, /probeOnlyResponse\(request, clock: sourceClock\)/);
+  assert.match(helper, /let dispatcher = ObservationDispatcher \{ Broker\(trust: trust\) \}/);
+  assert.match(helper, /dispatcher.response\(request, clock: sourceClock\)/);
 });

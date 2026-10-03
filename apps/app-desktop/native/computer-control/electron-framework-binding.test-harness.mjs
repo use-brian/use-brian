@@ -19,7 +19,7 @@ export function sourceGuards() {
   assert(parser.indexOf('try directory(')<parser.indexOf('try geometry('));
   assert(parser.indexOf('inventory.contains(hash)')<parser.indexOf('try geometry('));
   const helper=readFileSync(new URL('./Helper.swift',import.meta.url),'utf8');
-  assert(helper.includes('probeOnlyResponse(request, clock: sourceClock)')); assert(!/Broker\s*\(/.test(helper));
+  assert(helper.includes('dispatcher.response(request, clock: sourceClock)')); assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
   return source;
 }
 export function runFrameworkTests(mode) {

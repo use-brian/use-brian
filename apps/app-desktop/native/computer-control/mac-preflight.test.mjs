@@ -34,7 +34,7 @@ test('first handoff source guards: independent typecheck, unsigned build, no lau
 test('Mac compiler regression guards retain explicit trust and public AX sheet traversal', () => {
   // Source regressions only: the user-run preflight remains the SDK compiler.
   const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8')
-  const broker = helper.slice(helper.indexOf('final class Broker {'), helper.indexOf('guard let trust = ProcessTrust()'))
+  const broker = helper.slice(helper.indexOf('final class Broker: ObservationBackend {'), helper.indexOf('guard let trust = ProcessTrust()'))
   assert.match(broker, /private let trust: ProcessTrust/)
   assert.match(broker, /init\(trust: ProcessTrust\) \{\s*self\.trust = trust/)
   assert(!helper.includes('kAXSheetsAttribute'))
@@ -48,7 +48,7 @@ test('Mac compiler regression guards retain explicit trust and public AX sheet t
   assert.equal((broker.match(/hasNoSheetChildren\(/g) ?? []).length, 4)
   assert(broker.includes('completeSnapshot.refs.values.contains(where: { $0.node["role"] as? String == kAXSheetRole })'))
   assert(broker.includes('$0.node["role"] as? String != kAXSheetRole'))
-  assert(!/Broker\s*\(/.test(helper), 'Compile fixes cannot construct an operational backend')
+  assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'), 'Only explicit discovery initializes the backend')
 })
 
 test('non-Mac preflight refuses before invoking tools/build', { skip: process.platform === 'darwin' }, () => {

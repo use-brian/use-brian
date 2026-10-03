@@ -9,7 +9,7 @@ import ScreenCaptureKit
 import Security
 
 // A deliberately narrow, signed-parent-only macOS AX pilot. No shell, clipboard,
-// AppleScript, network or permission prompts. Capture/input are safe-fixture-only.
+// AppleScript, network or permission prompts. Observation only; no capture/input.
 // stdin/stdout are inherited private pipes. stdout is protocol-only.
 typealias Object = [String: Any]
 let proto = "native-computer-v1"
@@ -434,30 +434,50 @@ func privateResponse(requestId: String, method: String, result: Any, timing: Sou
        let diagnostics = timing.finish() { response["diagnostics"] = diagnostics }
     return response
 }
-// Unconditional authority barrier, NOT an attestation or configurable pilot gate.
-// The operational Broker remains unreachable until real loaded-framework binding
-// and native acceptance are implemented. No permission probes or target reads.
-let probeOnlyLimitation = "Native authority disabled: parent loaded-framework proof is unenforced."
-func probeOnlyResponse(_ request: Object, clock: SourceClock) -> Object? {
-    guard validWireRequest(request), let requestId = request["id"] as? String,
-          let method = request["method"] as? String, let payload = request["payload"] as? Object else { return nil }
-    let timing = SourceRequestTiming(request: request, clock: clock)
-    let result: Any
-    switch method {
-    case "capabilities":
-        result = ["protocol": proto, "platform": "darwin", "axRead": false,
-                  "semanticActions": false, "windowCapture": false, "input": false,
-                  "accessibilityPermission": "unknown", "capturePermission": "unknown",
-                  "limitations": [probeOnlyLimitation]] as Object
-    case "listTargets": result = [Object]()
-    case "start", "beginApproval", "endApproval": result = false
-    case "execute":
-        guard let command = payload["command"] as? Object, let commandId = command["commandId"] as? String else { return nil }
-        result = ["commandId": commandId, "outcome": "not_executed", "code": "denied"]
-    default: return nil
+// Fresh-helper readiness is metadata-only. Only explicit local discovery creates
+// the backend; no argument/environment switch can enable action authority.
+let probeOnlyLimitation = "Experimental AX inspector: select discovery to initialize; control and capture disabled; signed Mac AX acceptance pending."
+protocol ObservationBackend: AnyObject {
+    func capabilities() -> Object
+    func listTargets() -> [Object]
+    func start(_ payload: Object) -> Bool
+    func execute(_ payload: Object, timing: SourceRequestTiming?) -> Object
+}
+func observationGrant(_ payload: Object) -> Bool {
+    guard validWirePayload("start", payload), let grant = payload["grant"] as? Object else { return false }
+    return wireBool(grant["allowControl"]) == false && wireBool(grant["allowCapture"]) == false
+}
+final class ObservationDispatcher {
+    private var backend: ObservationBackend?
+    private let makeBackend: () -> ObservationBackend
+    init(makeBackend: @escaping () -> ObservationBackend) { self.makeBackend = makeBackend }
+    func response(_ request: Object, clock: SourceClock) -> Object? {
+        guard validWireRequest(request), let requestId = request["id"] as? String,
+              let method = request["method"] as? String, let payload = request["payload"] as? Object else { return nil }
+        let timing = SourceRequestTiming(request: request, clock: clock)
+        let result: Any
+        switch method {
+        case "capabilities":
+            result = backend?.capabilities() ?? ["protocol": proto, "platform": "darwin", "axRead": false,
+                "semanticActions": false, "windowCapture": false, "input": false,
+                "accessibilityPermission": "unknown", "capturePermission": "unknown",
+                "limitations": [probeOnlyLimitation]] as Object
+        case "listTargets":
+            if backend == nil { backend = makeBackend() }
+            result = backend!.listTargets()
+        case "start": result = observationGrant(payload) ? (backend?.start(payload) ?? false) : false
+        case "beginApproval", "endApproval": result = false
+        case "execute":
+            guard let command = payload["command"] as? Object, let commandId = command["commandId"] as? String else { return nil }
+            if let backend = backend, (command["action"] as? Object)?["kind"] as? String == "observe" {
+                result = backend.execute(payload, timing: timing)
+            } else {
+                result = ["commandId": commandId, "outcome": "not_executed", "code": "denied"]
+            }
+        default: return nil
+        }
+        return privateResponse(requestId: requestId, method: method, result: result, timing: timing)
     }
-    // Only handler timing, including refusals. No API span can be produced here.
-    return privateResponse(requestId: requestId, method: method, result: result, timing: timing)
 }
 // Closed role/subrole privacy policy, shared with the Foundation boundary tests.
 // nil means unreadable/malformed, not an absent optional attribute. A genuine
@@ -543,9 +563,9 @@ struct Snapshot {
     let refs: [String: Ref]
     let monotonic: Double
 }
-final class Broker {
+final class Broker: ObservationBackend {
     // Explicit dependency: top-level guard bindings are not class members.
-    // The probe-only entry point still never constructs this operational class.
+    // Created only by explicit discovery after signed-parent admission.
     private let trust: ProcessTrust
     var windows: [String: Window] = [:]
     var processes: [String: String] = [:]
@@ -562,7 +582,6 @@ final class Broker {
     let guardLock = NSLock()
     var watchdogDeadline: Double = 0
     var watchdogActive = false
-    var watchdogCapture = false
     var approvalCommand: Object?
     var approvedCommand: Object?
     var approvalOpen = false
@@ -584,21 +603,23 @@ final class Broker {
         self.trust = trust
         let types: [CGEventType] = [.keyDown, .keyUp, .flagsChanged, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp, .scrollWheel, .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
-        inputTap = CGEvent.tapCreate(tap: .cgAnnotatedSessionEventTap, place: .headInsertEventTap, options: .listenOnly, eventsOfInterest: mask, callback: { _, type, event, info in
-            guard let info = info else { return Unmanaged.passUnretained(event) }
-            Unmanaged<Broker>.fromOpaque(info).takeUnretainedValue().input(type, event)
-            return Unmanaged.passUnretained(event)
-        }, userInfo: Unmanaged.passUnretained(self).toOpaque())
-        if let tap = inputTap {
-            CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0), .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
+        if AXIsProcessTrusted() {
+            inputTap = CGEvent.tapCreate(tap: .cgAnnotatedSessionEventTap, place: .headInsertEventTap, options: .listenOnly, eventsOfInterest: mask, callback: { _, type, event, info in
+                guard let info = info else { return Unmanaged.passUnretained(event) }
+                Unmanaged<Broker>.fromOpaque(info).takeUnretainedValue().input(type, event)
+                return Unmanaged.passUnretained(event)
+            }, userInfo: Unmanaged.passUnretained(self).toOpaque())
+            if let tap = inputTap {
+                CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0), .commonModes)
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
         }
         DispatchQueue.global(qos: .userInteractive).async { [self] in
             while true {
                 usleep(50_000)
                 if brian_private_channel_alive() != 1 { _exit(70) }
-                guardLock.lock(); let deadline = watchdogDeadline; let active = watchdogActive; let capture = watchdogCapture; guardLock.unlock()
-                if brian_private_channel_alive() != 1 || getppid() != trust.parent.pid || (active && (monotonic() >= deadline || !AXIsProcessTrusted() || (capture && !CGPreflightScreenCaptureAccess()) || inputTap == nil || !CGEvent.tapIsEnabled(tap: inputTap!))) { _exit(70) }
+                guardLock.lock(); let deadline = watchdogDeadline; let active = watchdogActive; guardLock.unlock()
+                if brian_private_channel_alive() != 1 || getppid() != trust.parent.pid || (active && (monotonic() >= deadline || !AXIsProcessTrusted() || inputTap == nil || !CGEvent.tapIsEnabled(tap: inputTap!))) { _exit(70) }
             }
         }
         DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: nil) { _ in _exit(71) }
@@ -607,9 +628,9 @@ final class Broker {
     func capabilities() -> Object {
         let trusted = AXIsProcessTrusted()
         let ready = trusted && (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
-        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready, "windowCapture": ready && CGPreflightScreenCaptureAccess(), "input": false,
-                "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": CGPreflightScreenCaptureAccess() ? "granted" : "denied",
-                "limitations": ["macOS 14+ fixture and TextEdit document AX only; packaged acceptance pending.", "Coordinate input disabled: no surviving release owner. Capture: isolated safe fixture canvas only; TextEdit pixels denied. Keys/focus/drag unsupported. Fixture vertical AX scrollbar steps only.", "Input takeover revokes; only trusted parent approval interaction is excepted. Fresh foreground refs only."]]
+        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": false, "windowCapture": false, "input": false,
+                "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": "unknown",
+                "limitations": ["Experimental consented AX inspector only; signed Mac AX acceptance pending. Control, capture and focus restoration disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
     }
     func listTargets() -> [Object] {
         guard grant == nil, AXIsProcessTrusted() else { return [] }
@@ -669,13 +690,12 @@ final class Broker {
     private func monitorScope(_ window: Window) -> Bool {
         guard scopeObserver == nil else { return false }
         var observer: AXObserver?
-        let callback: AXObserverCallback = { _, _, _, context in
-            guard let context = context else { return }
-            let broker = Unmanaged<Broker>.fromOpaque(context).takeUnretainedValue()
-            broker.guardLock.lock(); let active = broker.watchdogActive; broker.guardLock.unlock()
-            // Never query AX on the callback: it must not wait on a blocked
-            // provider. Even a short-lived new window/sheet invalidates scope.
-            if active { _exit(71) }
+        let callback: AXObserverCallback = { _, _, _, _ in
+            // Installed only during a consented Start. Invalidate from the first
+            // subscription, including BEFORE grant/watchdog activation; otherwise
+            // a transient sheet during startup could be forgotten. Never query AX
+            // or wait for the worker/lock here: a provider may already be blocked.
+            _exit(71)
         }
         guard AXObserverCreate(pid_t(window.target["processId"] as! Int), callback, &observer) == .success,
               let observer = observer else { return false }
@@ -712,17 +732,16 @@ final class Broker {
         return false
     }
     func start(_ payload: Object) -> Bool {
-        guard validWirePayload("start", payload), grant == nil, let candidate = payload["grant"] as? Object,
+        guard observationGrant(payload), grant == nil, let candidate = payload["grant"] as? Object,
               let leaseId = wireString(payload["leaseId"]),
               // Schema permits epoch zero; this pilot retains its active-grant >0 rule.
               let epoch = wireInteger(candidate["epoch"]), epoch > 0,
               let expiry = wireInteger(candidate["expiresAt"]), expiry > now(), expiry <= now() + 900_000,
-              let capture = wireBool(candidate["allowCapture"]), (!capture || CGPreflightScreenCaptureAccess()),
-              let targets = candidate["targets"] as? [Object], inputTap != nil, AXIsProcessTrusted(), targets.allSatisfy({ liveWindow($0) != nil }) else { return false }
-        guard targets.count == 1, let window = liveWindow(targets[0]), monitorScope(window), restoreApprovedWindow(window) else { return false }
+              let targets = candidate["targets"] as? [Object], let tap = inputTap, CGEvent.tapIsEnabled(tap: tap), AXIsProcessTrusted(), targets.allSatisfy({ liveWindow($0) != nil }) else { return false }
+        guard targets.count == 1, let window = liveWindow(targets[0]), monitorScope(window), liveWindow(window.target) != nil, AXIsProcessTrusted(), CGEvent.tapIsEnabled(tap: tap) else { return false }
         guard brian_private_channel_alive() == 1 else { _exit(70) }
         grant = candidate; lease = leaseId; expiresMonotonic = monotonic() + expiry - now()
-        guardLock.lock(); watchdogDeadline = expiresMonotonic; watchdogCapture = capture; watchdogActive = true; guardLock.unlock()
+        guardLock.lock(); watchdogDeadline = expiresMonotonic; watchdogActive = true; guardLock.unlock()
         return true
     }
     func authorized(_ command: Object, _ leaseId: String) -> Bool {
@@ -749,21 +768,11 @@ final class Broker {
         let subrole = privacySubrole(element)
         // Unknown or unreadable classification never authorizes exporting text.
         let sensitive = !publicAXClassification(role, subrole)
-        var actions: [String] = []
-        let names = actionNames(element)
-        if !sensitive && bool(element, kAXEnabledAttribute) {
-            if names.contains(kAXPressAction) { actions.append("invoke") }
-            var settable: DarwinBoolean = false
-            if (role == kAXTextFieldRole || role == kAXTextAreaRole) && AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue { actions.append("setValue") }
-            if selectionAttribute(element) || (role == kAXRadioButtonRole && names.contains(kAXPressAction)) { actions.append("select") }
-            if role == kAXScrollBarRole, string(element, kAXOrientationAttribute) == kAXVerticalOrientationValue,
-               names.contains(kAXIncrementAction) || names.contains(kAXDecrementAction) { actions.append("scroll") }
-        }
         let exportedRole = boundedText(publicAXRoles.contains(role) ? role : "AXUnknown", 100)
         let title = sensitive ? "" : string(element, kAXTitleAttribute)
         let name = boundedText(sensitive ? "" : (title.isEmpty ? string(element, kAXDescriptionAttribute) : title), 4096)
         var complete = !sensitive && !exportedRole.truncated && !name.truncated
-        var result: Object = ["ref": ref, "role": exportedRole.text, "name": name.text, "enabled": bool(element, kAXEnabledAttribute), "focused": bool(element, kAXFocusedAttribute), "selected": bool(element, kAXSelectedAttribute) || (!sensitive && role == kAXRadioButtonRole && bool(element, kAXValueAttribute)), "sensitive": sensitive, "actions": actions]
+        var result: Object = ["ref": ref, "role": exportedRole.text, "name": name.text, "enabled": bool(element, kAXEnabledAttribute), "focused": bool(element, kAXFocusedAttribute), "selected": bool(element, kAXSelectedAttribute) || (!sensitive && role == kAXRadioButtonRole && bool(element, kAXValueAttribute)), "sensitive": sensitive, "actions": [String]()]
         if let parent = parent { result["parentRef"] = parent }
         if let rect = bounds(element) { result["bounds"] = rect }
         if !sensitive, let value = attr(element, kAXValueAttribute) as? String {
@@ -810,7 +819,9 @@ final class Broker {
             let key = id(); let read = node(element, key, parent); let value = read.value
             if !read.complete { complete = false }
             bytes += (try? JSONSerialization.data(withJSONObject: value).count) ?? 10000
-            let children = scopedChildren(element)
+            let childRead = attr(element, kAXChildrenAttribute) as? [AXUIElement]
+            if childRead == nil { complete = false }
+            let children = childRead ?? []
             nodes.append(value); refs[key] = Ref(element: element, node: value, children: children)
             // Secure/unknown subtree never leaves the helper, even via a child's name.
             if value["sensitive"] as? Bool == true { complete = false; continue }
@@ -854,7 +865,9 @@ final class Broker {
                 reachable(ref.element, in: window.element) && sameChildren(ref)
         }
     }
-    func beginApproval(_ payload: Object) -> Bool {
+    func beginApproval(_ payload: Object) -> Bool { return false }
+    // Retained R2 implementation, deliberately unreachable from R1 entry points.
+    private func retainedBeginApproval(_ payload: Object) -> Bool {
         guard validWirePayload("beginApproval", payload), approvalCommand == nil, let command = payload["command"] as? Object,
               let deadline = wireInteger(command["deadlineAt"]), validCommand(command), authorized(command, payload["leaseId"] as? String ?? ""),
               let action = command["action"] as? Object, let target = action["target"] as? Object,
@@ -865,7 +878,9 @@ final class Broker {
         guardLock.unlock()
         return true
     }
-    func endApproval(_ payload: Object) -> Bool {
+    func endApproval(_ payload: Object) -> Bool { return false }
+    // Retained R2 implementation, deliberately unreachable from R1 entry points.
+    private func retainedEndApproval(_ payload: Object) -> Bool {
         guardLock.lock(); approvalOpen = false; guardLock.unlock()
         defer { approvalCommand = nil }
         approvedCommand = nil
@@ -904,7 +919,10 @@ final class Broker {
             var receipt: Object = ["commandId": commandId, "outcome": outcome, "code": code]
             if let observation = observation { receipt["observation"] = observation }; return receipt
         }
-        guard validWirePayload("execute", payload), approvalCommand == nil, validCommand(command), let deadline = wireInteger(command["deadlineAt"]), authorized(command, payload["leaseId"] as? String ?? ""), let action = command["action"] as? Object, let kind = action["kind"] as? String, let target = action["target"] as? Object else { return result("denied") }
+        guard validWirePayload("execute", payload), let action = command["action"] as? Object, let kind = action["kind"] as? String else { return result("denied") }
+        // Absolute R1 barrier before even target/approval/capture revalidation.
+        guard kind == "observe" else { return result("denied") }
+        guard approvalCommand == nil, validCommand(command), let deadline = wireInteger(command["deadlineAt"]), authorized(command, payload["leaseId"] as? String ?? ""), let target = action["target"] as? Object else { return result("denied") }
         // No surviving release owner across SIGKILL/_exit; approval or flags cannot enable input.
         if kind == "click" { return result("unsupported") }
         commandDeadline = monotonic() + deadline - now()
@@ -1087,7 +1105,8 @@ func readExactly(_ length: Int) -> Data? {
     return data
 }
 guard let trust = ProcessTrust() else { _exit(77) }
-// Probe-only entry point: no operational backend or event-tap initialization.
+// Capturing the factory does not initialize AX or the takeover monitor.
+let dispatcher = ObservationDispatcher { Broker(trust: trust) }
 let sourceClock = SourceClock()
 DispatchQueue.global(qos: .userInitiated).async {
 while let header = readExactly(4) {
@@ -1096,7 +1115,7 @@ while let header = readExactly(4) {
           validWireRequest(request) else { exit(64) }
     guard trust.parentValid() else { _exit(77) }
     guard brian_private_channel_alive() == 1 else { _exit(70) }
-    guard let response = probeOnlyResponse(request, clock: sourceClock) else { exit(64) }
+    guard let response = dispatcher.response(request, clock: sourceClock) else { exit(64) }
     guard brian_private_channel_alive() == 1 else { _exit(70) }
     guard let output = try? JSONSerialization.data(withJSONObject: response), output.count <= maxBytes else { exit(65) }
     var size = UInt32(output.count).bigEndian

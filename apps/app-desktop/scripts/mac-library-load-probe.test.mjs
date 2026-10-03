@@ -187,5 +187,7 @@ test('native source guards: own files and public SHA256 metadata, no kernel fabr
   assert(!source.includes('dlopen(argv[')); assert(!source.includes('dlerror(' + ');'));
   assert(source.includes('productionAuthority\\\":false'));
   const helper = readFileSync(new URL('../native/computer-control/Helper.swift', import.meta.url), 'utf8');
-  assert(!helper.includes('LibraryConstraintLoadProbe')); assert(!/Broker\s*\(/.test(helper));
+  assert(!helper.includes('LibraryConstraintLoadProbe'));
+  assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
+  assert(helper.includes('case "beginApproval", "endApproval": result = false'));
 });

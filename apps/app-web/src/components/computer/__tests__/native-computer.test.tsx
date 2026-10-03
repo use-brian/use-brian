@@ -163,3 +163,82 @@ it("[COMP:app-web/native-computer] explicit readiness remains available when con
     expect(control.mock.calls.some(([m]) => ["start", "resume", "permissions"].includes(m.type))).toBe(false);
   } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); }
 });
+
+const fullCapabilities: NativeStatus["capabilities"] = {
+  protocol: "native-computer-v1", platform: "darwin", axRead: true,
+  semanticActions: true, windowCapture: true, input: true,
+  accessibilityPermission: "granted", capturePermission: "granted", limitations: [],
+};
+async function fillInspectorForm(el: HTMLElement) {
+  for (const [label, name] of [[en.nativeComputer.assistant, "Assistant"], [en.nativeComputer.conversation, "Conversation"], [en.nativeComputer.task, "Task"], [en.nativeComputer.target, "Document"]]) {
+    await act(async () => (el.querySelector(`[aria-label="${label}"]`) as HTMLElement).click());
+    await act(async () => Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(option => option.textContent?.includes(name))!.click());
+  }
+  await act(async () => {
+    const textarea = el.querySelector("textarea")!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, "Read document");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+it.each([true, false])("[COMP:app-web/native-computer] observation-only caps (axRead=%s) never request control or capture and retain errors", async axRead => {
+  setup.populated = true;
+  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: { ...fullCapabilities, axRead, semanticActions: false, windowCapture: false, input: false } };
+  const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
+  const control = vi.fn<ComputerControl>().mockImplementation(async m => m.type === "start" ? { ok: false, error: "private inspector error", status } : { ok: true, status, targets: [target] });
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); document.body.append(el); const root = createRoot(el);
+  try {
+    await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
+    const start = () => Array.from(el.querySelectorAll("button")).find(b => b.textContent === en.nativeComputer.start)!;
+    expect(start().disabled).toBe(true); // Existing conversation/task workflow is required.
+    for (const checkbox of el.querySelectorAll<HTMLElement>('[role="checkbox"]')) {
+      expect(checkbox.getAttribute("aria-disabled")).toBe("true");
+      await act(async () => checkbox.click());
+      expect(checkbox.getAttribute("aria-checked")).toBe("false");
+    }
+    await fillInspectorForm(el);
+    expect(start().disabled).toBe(false);
+    await act(async () => start().click());
+    expect(control).toHaveBeenCalledWith(expect.objectContaining({ type: "start", assistantId: "a", conversationId: "c", taskId: "t", allowControl: false, allowCapture: false }));
+    expect(control.mock.calls.some(([m]) => (m.type === "start" || m.type === "resume") && (m.allowControl || m.allowCapture))).toBe(false);
+    expect(el.querySelector('[role="alert"]')?.textContent).toBe(en.nativeComputer.error);
+    expect(el.textContent).not.toContain("private inspector error");
+  } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
+});
+
+it.each(["control", "capture"] as const)("[COMP:app-web/native-computer] rejects stale %s requests and visibly clears unsupported preferences", async lost => {
+  setup.populated = true;
+  let status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: fullCapabilities };
+  const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
+  const control = vi.fn<ComputerControl>().mockImplementation(async () => ({ ok: true, status, targets: [target] }));
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); document.body.append(el); const root = createRoot(el);
+  try {
+    await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
+    await fillInspectorForm(el);
+    const boxes = () => Array.from(el.querySelectorAll<HTMLElement>('[role="checkbox"]'));
+    await act(async () => boxes()[0].click());
+    await act(async () => boxes()[1].click());
+    expect(boxes().map(b => b.getAttribute("aria-checked"))).toEqual(["true", "true"]);
+    status = { ...status, epoch: 2, capabilities: { ...fullCapabilities, semanticActions: lost !== "control", windowCapture: false, input: false } };
+    // Simulate the live store changing before React has rendered the new caps.
+    const snapshot = vi.spyOn(nativeComputer, "snapshot").mockReturnValue({ ok: true, status });
+    try {
+      await act(async () => Array.from(el.querySelectorAll("button")).find(b => b.textContent === en.nativeComputer.start)!.click());
+      expect(control.mock.calls.some(([m]) => m.type === "start" || m.type === "resume")).toBe(false);
+      expect(el.querySelector('[role="alert"]')?.textContent).toBe(en.nativeComputer.error);
+    } finally { snapshot.mockRestore(); }
+    await act(async () => { await nativeComputer.check(); });
+    expect(boxes().map(b => b.getAttribute("aria-checked"))).toEqual([lost === "control" ? "false" : "true", "false"]);
+    expect(boxes()[1].getAttribute("aria-disabled")).toBe("true");
+    expect(boxes()[0].getAttribute("aria-disabled") === "true").toBe(lost === "control");
+    expect(el.querySelector('[role="alert"]')?.textContent).toBe(en.nativeComputer.error);
+    // Restoring support must not resurrect old consent preferences.
+    status = { ...status, capabilities: fullCapabilities };
+    await act(async () => { await nativeComputer.check(); });
+    expect(boxes().map(b => b.getAttribute("aria-checked"))).toEqual([lost === "control" ? "false" : "true", "false"]);
+    expect(control.mock.calls.some(([m]) => m.type === "start" || m.type === "resume")).toBe(false);
+  } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
+});

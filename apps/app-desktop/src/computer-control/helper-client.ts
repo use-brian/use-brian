@@ -59,6 +59,16 @@ export class PrivatePipeHelper implements NativeHelper {
   private timingClock?: { instanceId: string; clockId: string; endUs: number }
   private timingBusy = false
   private timingDropped = 0
+  private requestTimedOut = false
+  private exitObserved = false
+  private exitCode: number | null = null
+  private exitSignal: 'SIGKILL' | 'SIGTERM' | 'SIGABRT' | 'SIGSEGV' | 'SIGTRAP' | 'other' | null = null
+  private spawnFailed = false
+  /** Lifecycle scalars only, for an explicit main-process readiness failure. */
+  readinessDiagnostics() {
+    return { requestTimedOut: this.requestTimedOut, exitObserved: this.exitObserved,
+      exitCode: this.exitCode, exitSignal: this.exitSignal, spawnFailed: this.spawnFailed }
+  }
   private readonly exited: Promise<void>
   constructor(launch: string | HelperLaunchSpec, private readonly onDeath: (reason?: 'takeover') => void, private readonly timeoutMs = 4000, timing?: HelperTimingOptions) {
     if (timing?.enabled === true && typeof timing.onMetadata === 'function') this.timingCallback = timing.onMetadata
@@ -78,12 +88,18 @@ export class PrivatePipeHelper implements NativeHelper {
     let spawned = this.child.pid !== undefined
     this.child.once('spawn', () => { spawned = true })
     this.exited = new Promise(resolve => {
-      this.child.once('exit', code => { resolve(); this.fail(code === 73 ? 'takeover' : undefined) })
+      this.child.once('exit', (code, signal) => {
+        this.exitObserved = true
+        this.exitCode = Number.isInteger(code) && code! >= 0 && code! <= 255 ? code : null
+        this.exitSignal = signal === null ? null : signal === 'SIGKILL' || signal === 'SIGTERM' || signal === 'SIGABRT' || signal === 'SIGSEGV' || signal === 'SIGTRAP'
+          ? signal : 'other'
+        resolve(); this.fail(code === 73 ? 'takeover' : undefined)
+      })
       // 'error' also covers failed kill (e.g. EPERM), not just spawn failure.
       // Keep listening: repeated errors must neither release the lease nor
       // become unhandled EventEmitter errors after the first revocation.
       this.child.on('error', () => {
-        if (!spawned && this.child.pid === undefined) resolve()
+        if (!spawned && this.child.pid === undefined) { this.spawnFailed = true; resolve() }
         this.fail()
       })
     })
@@ -211,7 +227,7 @@ export class PrivatePipeHelper implements NativeHelper {
     if (body.length > MAX_MESSAGE_BYTES) return Promise.reject(new Error('Helper request too large'))
     const header = Buffer.alloc(4); header.writeUInt32BE(body.length)
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.fail(), this.timeoutMs)
+      const timer = setTimeout(() => { this.requestTimedOut = true; this.fail() }, this.timeoutMs)
       this.pending = { id, method, timingRequested, correlation, phase, apiPhase, resolve, reject, timer }
       this.child.stdin.write(Buffer.concat([header, body]), error => { if (error) this.fail() })
     })

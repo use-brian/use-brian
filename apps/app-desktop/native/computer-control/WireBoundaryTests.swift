@@ -135,7 +135,7 @@ func saveResponse(_ request: Object, _ context: SourceRequestTiming?, _ expected
     timingResponses.append(["envelope": response, "method": request["method"]!, "expectedTiming": expectedTiming])
     return response
 }
-for method in [SourceMethod.capabilities, .listTargets, .start, .beginApproval, .endApproval, .execute] {
+for method in [SourceMethod.capabilities, .start, .beginApproval, .endApproval, .execute] {
     for flag: Bool? in [nil, false, true] {
         let request = sourceRequest(method, diagnostics: flag)
         precondition(validWireRequest(request))
@@ -196,17 +196,33 @@ var otherRequest = apiRequest; otherRequest["id"] = "different_request"
 saveResponse(otherRequest, SourceRequestTiming(request: apiRequest, clock: clock), false)
 let fakeMethodRequest = sourceRequest(.listTargets)
 saveResponse(fakeMethodRequest, SourceRequestTiming(request: apiRequest, clock: clock), false)
-// Operation traps in this extraction: direct protocol calls cannot construct the
-// operational backend. AppKit/AX/SCK APIs are not even linked into this executable.
-final class Broker {
-    init() { fatalError("Operational Broker construction from probe protocol") }
-    func listTargets() -> [Object] { fatalError("Target read from probe protocol") }
-    func start(_ payload: Object) -> Bool { fatalError("Operational start") }
-    func execute(_ payload: Object, timing: SourceRequestTiming? = nil) -> Object { fatalError("Operational execute") }
+// Production adapter with a recording backend; widened action routing traps.
+final class TrapBackend: ObservationBackend {
+    var reads = 0; var starts = 0; var discoveries = 0; var queries = 0
+    func capabilities() -> Object {
+        queries += 1
+        return ["protocol": proto, "platform": "darwin", "axRead": true,
+            "semanticActions": false, "windowCapture": false, "input": false,
+            "accessibilityPermission": "granted", "capturePermission": "unknown", "limitations": []]
+    }
+    func listTargets() -> [Object] { discoveries += 1; return [] }
+    func start(_ payload: Object) -> Bool {
+        precondition(observationGrant(payload)); starts += 1; return true
+    }
+    func execute(_ payload: Object, timing: SourceRequestTiming?) -> Object {
+        let command = payload["command"] as! Object
+        precondition((command["action"] as! Object)["kind"] as? String == "observe")
+        reads += 1
+        return ["commandId": command["commandId"]!, "outcome": "not_executed", "code": "denied"]
+    }
 }
-var probeCount = 0
-func checkProbe(_ request: Object) {
-    guard let response = probeOnlyResponse(request, clock: clock) else {
+let backend = TrapBackend()
+var constructions = 0
+let dispatcher = ObservationDispatcher { constructions += 1; return backend }
+var initialized = false
+var dispatchCount = 0
+func checkDispatch(_ request: Object) {
+    guard let response = dispatcher.response(request, clock: clock) else {
         precondition(!validWireRequest(request), "Valid direct request must get a bounded refusal/probe")
         return
     }
@@ -215,13 +231,15 @@ func checkProbe(_ request: Object) {
     switch method {
     case "capabilities":
         let caps = response["result"] as! Object
-        for bit in ["axRead", "semanticActions", "windowCapture", "input"] { precondition(wireBool(caps[bit]) == false) }
-        precondition(caps["accessibilityPermission"] as? String == "unknown")
+        precondition(wireBool(caps["axRead"]) == initialized)
+        for bit in ["semanticActions", "windowCapture", "input"] { precondition(wireBool(caps[bit]) == false) }
+        precondition(caps["accessibilityPermission"] as? String == (initialized ? "granted" : "unknown"))
         precondition(caps["capturePermission"] as? String == "unknown")
-        precondition(caps["limitations"] as? [String] == ["Native authority disabled: parent loaded-framework proof is unenforced."])
+
         precondition(wireInteger(response["diagnosticsVersion"]) == 1)
     case "listTargets": precondition((response["result"] as! [Object]).isEmpty)
-    case "start", "beginApproval", "endApproval": precondition(wireBool(response["result"]) == false)
+    case "start": precondition(wireBool(response["result"]) == (initialized && observationGrant(request["payload"] as! Object)))
+    case "beginApproval", "endApproval": precondition(wireBool(response["result"]) == false)
     case "execute":
         let receipt = response["result"] as! Object
         let command = (request["payload"] as! Object)["command"] as! Object
@@ -237,25 +255,35 @@ func checkProbe(_ request: Object) {
         precondition(spans.count == 1 && !(spans[0]["phase"] as! String).hasPrefix("api_"))
     }
     timingResponses.append(["envelope": response, "method": method, "expectedTiming": timed, "probe": true])
-    probeCount += 1
+    dispatchCount += 1
 }
 // Replay direct wire vectors without Main, API, consent UI, permission or lease
 // service. Also exercise every valid action, including raw click/key requests.
+for ready in [false, true] {
+initialized = ready
+if ready {
+    checkDispatch(sourceRequest(.listTargets)); checkDispatch(sourceRequest(.listTargets))
+    precondition(constructions == 1 && backend.discoveries == 2)
+}
 for vector in vectors {
     let value = vector["value"] as? Object ?? [:]
-    if vector["kind"] as? String == "request" { checkProbe(value) }
+    if vector["kind"] as? String == "request", (value["method"] as? String != "listTargets" || !validWireRequest(value)) { checkDispatch(value) }
     if vector["kind"] as? String == "command", validWireCommand(value) {
         for flag: Bool? in [nil, false, true] {
             var request: Object = ["id": "direct", "method": "execute", "payload": ["command": value, "leaseId": "caller-chosen"]]
             if let flag = flag { request["diagnostics"] = flag }
-            checkProbe(request)
+            checkDispatch(request)
+            var payload = request["payload"] as! Object
+            request["method"] = "beginApproval"; checkDispatch(request)
+            request["method"] = "endApproval"; payload["approved"] = true
+            request["payload"] = payload; checkDispatch(request)
         }
     }
 }
 // A caller may assert consent/control/capture and repeat the full conversation;
-// none of it creates state or changes the empty discovery/capabilities response.
+// it never routes an authority-bearing grant or approval to the backend.
 for _ in 0..<2 {
-    for method in [SourceMethod.capabilities, .listTargets, .start, .beginApproval, .endApproval, .execute] {
+    for method in [SourceMethod.capabilities, .start, .beginApproval, .endApproval, .execute] {
         var request = sourceRequest(method)
         var payload = request["payload"] as! Object
         if method == .start {
@@ -266,9 +294,22 @@ for _ in 0..<2 {
         }
         if method == .endApproval { payload["approved"] = true }
         request["payload"] = payload
-        checkProbe(request)
+        checkDispatch(request)
     }
 }
-print("PASS \(probeCount) direct production probe/refusal responses with operation traps; no Broker construction, target reads or API spans. No native SDK execution.")
+for control in [false, true] {
+    for capture in [false, true] {
+        var request = sourceRequest(.start)
+        var payload = request["payload"] as! Object
+        var grant = payload["grant"] as! Object
+        grant["allowControl"] = control; grant["allowCapture"] = capture
+        payload["grant"] = grant; request["payload"] = payload
+        checkDispatch(request)
+    }
+}
+if !ready { precondition(constructions == 0 && backend.reads == 0 && backend.starts == 0 && backend.queries == 0) }
+}
+precondition(constructions == 1 && backend.reads > 0 && backend.starts > 0)
+print("PASS \(dispatchCount) lazy production dispatcher responses with observation-only traps; no native SDK execution.")
 try JSONSerialization.data(withJSONObject: timingResponses).write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
 print("PASS private timing default-off/negotiation, source intervals/nesting, status/privacy and bounded one-shot response tests. Foundation/Dispatch only; no native API dispatch or delivery evidence.")

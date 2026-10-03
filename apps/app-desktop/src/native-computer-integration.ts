@@ -59,8 +59,12 @@ export class NativeComputerIntegration {
   private session?: { id: string; auth: Auth }
   private requests = new AbortController()
   private deviceId = ''
-  private readonly enabled = process.env.NATIVE_COMPUTER_ENABLED === 'true' && supportedNativePlatform(process.platform)
+  private readonly controlEnabled = process.env.NATIVE_COMPUTER_ENABLED === 'true' && supportedNativePlatform(process.platform)
     && (!app.isPackaged || process.env[process.platform === 'darwin' ? 'NATIVE_COMPUTER_PILOT_ACCEPTED' : process.platform === 'win32' ? 'NATIVE_COMPUTER_WINDOWS_ACCEPTED' : 'NATIVE_COMPUTER_LINUX_ACCEPTED'] === 'true')
+  // Explicit local R1 development opt-in, not an assertion of pilot acceptance.
+  // It grants only access to setup; native code separately refuses all effects.
+  private readonly inspectorEnabled = process.platform === 'darwin' && app.isPackaged && process.env.NATIVE_COMPUTER_INSPECTOR_ENABLED === 'true'
+  private readonly enabled = this.controlEnabled || this.inspectorEnabled
   private readonly helperTiming?: HelperTimingOptions
   constructor(private readonly options: NativeIntegrationOptions) {
     // Snapshot the callback once. PrivatePipeHelper captures original per-request
@@ -127,17 +131,25 @@ export class NativeComputerIntegration {
     let acquired = false
     let helper: PrivatePipeHelper | undefined
     let result: unknown = { ok: false }
+    let stage = 'lease'
     try {
       await lease.acquire(); acquired = true
       if (generation !== this.generation) return { ok: false }
+      stage = 'spawn'
       helper = new PrivatePipeHelper(this.helperLaunch(), () => {})
       this.readinessHelper = helper
-      const capabilities = CapabilitiesSchema.parse(await helper.capabilities())
+      stage = 'capabilities'
+      const advertised = await helper.capabilities()
+      stage = 'validation'
+      const capabilities = CapabilitiesSchema.parse(advertised)
       if (capabilities.platform !== 'darwin') throw new Error('Wrong helper platform')
+      stage = 'shutdown'
       await helper.kill() // Successful metadata is published only after confirmed death.
       if (generation !== this.generation) return { ok: false }
       result = { ok: true, readiness: { helperAdmitted: true, capabilities } }
     } catch {
+      // No raw exception, stderr, paths, account identity or desktop content.
+      console.warn('[native-computer] readiness failed', { stage, ...helper?.readinessDiagnostics() })
       result = { ok: false, error: 'Packaged helper admission could not be verified. No native control was enabled.' }
     } finally {
       // A failed/unconfirmed kill must not release the device lease or clear the
@@ -161,7 +173,7 @@ export class NativeComputerIntegration {
         `Task: ${JSON.stringify(grant.goal)}`, `Selected windows (data): ${JSON.stringify(grant.targets.map(target => ({ displayName: this.selection.find(item => sameTarget(item, target))?.displayName, appId: target.appId, windowId: target.windowId })))}`,
         grant.allowControl ? 'Control: every action requires your local approval.' : 'Observation only. No input.',
         grant.allowCapture ? 'Scoped screenshot fallback is allowed for supported windows.' : 'No screenshot capture.',
-        this.foregroundNotice(),
+        grant.allowControl || process.platform !== 'darwin' ? this.foregroundNotice() : 'Read-only inspection: Brian will not activate, raise or edit the selected window.',
         grant.allowControl ? 'Accessibility text and approved images are sent to your configured model provider. Local execution is not local inference.' : 'AX inspector: one read of the selected window is shown locally, then the session ends automatically. No model task or screenshot capture.',
         `Expires: ${new Date(grant.expiresAt).toLocaleTimeString()}. Stop: ${this.stopShortcut.label}.`,
       ].join('\n\n'), signal),
@@ -330,6 +342,10 @@ export class NativeComputerIntegration {
     }
     if (input.type === 'check-readiness') return this.checkReadiness()
     if (!this.enabled || !this.ready) return { ok: false, error: 'Native control unavailable' }
+    if ((input.type === 'start' || input.type === 'resume') &&
+      ((!this.controlEnabled && (input.allowControl || input.allowCapture)) || (!input.allowControl && input.allowCapture))) {
+      return { ok: false, error: 'This inspector supports observation only, without control or screenshots.' }
+    }
     // An auth read begun in an old generation cannot restore its scope after Stop.
     const authGeneration = this.generation
     let auth: Auth | null
@@ -395,6 +411,9 @@ export class NativeComputerIntegration {
           await controller.capabilities()
         }
         const targets = await controller.listTargets()
+        // Discovery lazily initializes the Mac inspector. The first capabilities
+        // request deliberately stays a permissionless bootstrap probe.
+        if (process.platform === 'darwin') await controller.capabilities()
         if (generation !== this.generation || this.controller !== controller) return { ok: false, status: this.redactedStatus() }
         this.selection = targets
         return { ok: true, targets: structuredClone(this.selection), status: controller.status(), deviceId: this.deviceId }

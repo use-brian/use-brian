@@ -59,6 +59,20 @@ describe('native private pipe', () => {
     }
     expect(mocked.spawn).not.toHaveBeenCalled()
   })
+  it('readiness lifecycle distinguishes bootstrap refusal from timeout without retaining stderr', async () => {
+    const first = fakeChild(); const refused = new PrivatePipeHelper('/packaged/helper', () => {})
+    const request = refused.capabilities(); const rejection = expect(request).rejects.toThrow('Native helper unavailable')
+    first.child.stderr.write('PRIVATE_DIAGNOSTIC_MUST_NOT_BE_RETAINED')
+    first.child.emit('exit', 77, null)
+    await rejection; await refused.kill()
+    expect(refused.readinessDiagnostics()).toEqual({ requestTimedOut: false, exitObserved: true, exitCode: 77, exitSignal: null, spawnFailed: false })
+    expect(JSON.stringify(refused.readinessDiagnostics())).not.toContain('PRIVATE_DIAGNOSTIC')
+    fakeChild(); const timedOut = new PrivatePipeHelper('/packaged/helper', () => {}, 10)
+    await expect(timedOut.capabilities()).rejects.toThrow('Native helper unavailable')
+    await timedOut.kill()
+    expect(timedOut.readinessDiagnostics()).toEqual({ requestTimedOut: true, exitObserved: true, exitCode: null, exitSignal: 'SIGKILL', spawnFailed: false })
+    expect(mocked.spawn).toHaveBeenCalledTimes(2) // explicit instances, never an automatic retry
+  })
   it('reports native physical-input exit as takeover, not an automatic reconnect', async () => {
     const { child } = fakeChild(); const death = vi.fn()
     const helper = new PrivatePipeHelper('/packaged/helper', death)

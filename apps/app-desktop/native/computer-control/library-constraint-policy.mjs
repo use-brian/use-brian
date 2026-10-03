@@ -203,7 +203,7 @@ export function checkPolicySourceGuards() {
   assert(!helper.includes('LibraryConstraintPolicy'));
   assert(build.includes('LibraryConstraintPolicy.swift'));
   assert(build.includes('BootstrapApprovalAnchor.c'));
-  assert(helper.includes('probeOnlyResponse(request, clock: sourceClock)')); assert(!/Broker\s*\(/.test(helper));
+  assert(helper.includes('dispatcher.response(request, clock: sourceClock)')); assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
   assert.throws(() => verifyLibraryConstraintPolicy(validResult(2)), { code: 'ERR_MAC_LIBRARY_CONSTRAINT_POLICY_UNSUPPORTED' });
   return source;
 }

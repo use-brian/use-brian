@@ -40,7 +40,7 @@ export function machoSourceGuards() {
   assert(source.includes('let policyStatus = "unsupported"'));
   const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
   // Parent may compile/link these data-only modules unused; admission must stay disabled.
-  assert(helper.includes('probeOnlyResponse(request, clock: sourceClock)')); assert(!/Broker\s*\(/.test(helper));
+  assert(helper.includes('dispatcher.response(request, clock: sourceClock)')); assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
   assert.throws(() => verifyLibraryConstraintPolicy(), { code: 'ERR_MAC_LIBRARY_CONSTRAINT_POLICY_UNSUPPORTED' });
   return source;
 }
