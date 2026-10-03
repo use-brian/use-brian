@@ -36,7 +36,7 @@ test('Mac compiler regression guards retain explicit trust and public AX sheet t
   const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8')
   const broker = helper.slice(helper.indexOf('final class Broker: ObservationBackend {'), helper.indexOf('guard let trust = ProcessTrust()'))
   assert.match(broker, /private let trust: ProcessTrust/)
-  assert.match(broker, /init\(trust: ProcessTrust\) \{\s*self\.trust = trust/)
+  assert.match(broker, /init\(trust: ProcessTrust, guardianInvalidation: \(\(\) -> Void\)\? = nil\) \{\s*self\.trust = trust\s*self\.guardianInvalidation = guardianInvalidation/)
   assert(!helper.includes('kAXSheetsAttribute'))
   assert(!helper.includes('activateIgnoringOtherApps'))
   assert.match(broker, /app\.activate\(options: \[\]\)/)

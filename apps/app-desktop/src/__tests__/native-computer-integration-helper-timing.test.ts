@@ -113,6 +113,7 @@ function install(observer?: NativeIntegrationOptions['helperTimingObserver']) {
 }
 async function discover() {
   await integration.handle({ type: 'workspace-changed', workspaceId: selection.workspaceId })
+  await tick() // Discovery must wait for confirmed scope teardown.
   expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: true })
 }
 describe('trusted main helper timing port with real pipe adapter', () => {
@@ -131,6 +132,7 @@ describe('trusted main helper timing port with real pipe adapter', () => {
     expect(await integration.handle({ type: 'status' })).toMatchObject({ status: { capabilities: { axRead: false, semanticActions: false, windowCapture: false, input: false } } })
     expect(mocks.spawn).not.toHaveBeenCalled()
     await integration.handle({ type: 'workspace-changed', workspaceId: selection.workspaceId })
+  await tick() // Discovery must wait for confirmed scope teardown.
     expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: true, status: { state: 'ready', capabilities: { axRead: true, semanticActions: accepted, windowCapture: false, input: false } } })
     expect(requests.map(r => r.method)).toEqual(['capabilities', 'listTargets', 'capabilities'])
     expect(mocks.spawn).toHaveBeenCalledOnce()
@@ -207,7 +209,7 @@ describe('trusted main helper timing port with real pipe adapter', () => {
         expect(mocks.acquire).toHaveBeenCalledTimes(1)
         expect(mocks.spawn).toHaveBeenCalledWith(
           '/fixture/Use Brian.app/Contents/Resources/computer-control/brian-native-computer-helper', [],
-          expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'], shell: false }),
+          expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe', 'pipe'], shell: false }),
         )
         if (mode === 'stop-hung-metadata') {
           expect(held).toBeDefined()
@@ -229,11 +231,11 @@ describe('trusted main helper timing port with real pipe adapter', () => {
       }
       const result = await readiness
       expect(result).toEqual(mode === 'success' ? {
-        ok: true, readiness: { helperAdmitted: true, capabilities: {
+        ok: true, cleanupPending: false, readiness: { helperAdmitted: true, capabilities: {
           protocol: 'native-computer-v1', platform: 'darwin', axRead: true, semanticActions: true,
           windowCapture: false, input: false, accessibilityPermission: 'granted', capturePermission: 'denied', limitations: [],
         } },
-      } : { ok: false })
+      } : { ok: false, cleanupPending: false })
       expect(mocks.release).toHaveBeenCalledTimes(1)
       expect(requests.map(request => request.method)).toEqual(['capabilities'])
       expect(getAuth).not.toHaveBeenCalled()
@@ -249,15 +251,15 @@ describe('trusted main helper timing port with real pipe adapter', () => {
     let resolveAuth!: (value: typeof auth) => void
     const lateAuth = new Promise<typeof auth>(resolve => { resolveAuth = resolve })
     const getAuth = vi.fn(async () => auth)
-    getAuth.mockResolvedValueOnce(auth).mockResolvedValueOnce(auth).mockImplementationOnce(() => lateAuth)
+    getAuth.mockResolvedValueOnce(auth).mockImplementationOnce(() => lateAuth)
     options.getAuth = getAuth
     const start = integration.handle(selection)
     await vi.waitFor(() => expect(child.kill).toHaveBeenCalled())
     expect(getAuth).toHaveBeenCalledTimes(1)
-    expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: false, error: 'Native setup busy' })
+    expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: false, cleanupPending: true })
     expect(mocks.spawn).toHaveBeenCalledTimes(1)
     child.emit('exit', null, 'SIGKILL')
-    await vi.waitFor(() => expect(getAuth).toHaveBeenCalledTimes(3))
+    await vi.waitFor(() => expect(getAuth).toHaveBeenCalledTimes(2))
     if (mode === 'stop') await integration.handle({ type: 'stop' })
     expect(await start).toMatchObject({ ok: false })
     expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: true })

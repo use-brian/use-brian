@@ -10,11 +10,14 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/brian-native-build.XXXXXXXX")"
 chmod 700 "$work"
 trap 'rm -rf "$work"' EXIT
 cp Helper.swift "$work/main.swift"
+# Private build-only bridge: preserve the pre-existing bootstrap identity header.
+printf '#include "%s/ProcessIdentity.h"\n#include <stdint.h>\nvoid *brian_epoch_fence_create(int32_t pid);\nint32_t brian_epoch_fence_poll(void *fence);\nvoid brian_epoch_fence_destroy(void *fence);\n' "$PWD" > "$work/NativeBridge.h"
 xcrun clang -O2 -Wall -Wextra -Werror -target "$(uname -m)-apple-macosx14.0" -c ProcessIdentity.c -o "$out/ProcessIdentity.o"
 xcrun clang -O2 -Wall -Wextra -Werror -target "$(uname -m)-apple-macosx14.0" -c BootstrapApprovalAnchor.c -o "$out/BootstrapApprovalAnchor.o"
+xcrun clang -O2 -std=c11 -Wall -Wextra -Werror -target "$(uname -m)-apple-macosx14.0" -c ProcessEpochFence.c -o "$out/ProcessEpochFence.o"
 # The compiled anchor is EMPTY and refuses use. Linking these bounded parsers
 # neither stamps an approval nor enables the probe-only operational dispatcher.
-xcrun swiftc -O -swift-version 5 -import-objc-header ProcessIdentity.h -target "$(uname -m)-apple-macosx14.0" -framework AppKit -framework ApplicationServices -framework CryptoKit -framework ScreenCaptureKit -framework Security "$work/main.swift" LibraryConstraintPolicy.swift MachOLibraryConstraint.swift BootstrapApproval.swift BootstrapApprovalReader.swift ElectronFrameworkBinding.swift BootstrapProcessBinding.swift "$out/ProcessIdentity.o" "$out/BootstrapApprovalAnchor.o" -o "$out/brian-native-computer-helper"
+xcrun swiftc -O -swift-version 5 -import-objc-header "$work/NativeBridge.h" -target "$(uname -m)-apple-macosx14.0" -framework AppKit -framework ApplicationServices -framework CryptoKit -framework ScreenCaptureKit -framework Security "$work/main.swift" ClickIntent.swift ClickGuardianNative.swift ClickGuardianHost.swift ProcessEpochFence.swift LibraryConstraintPolicy.swift MachOLibraryConstraint.swift BootstrapApproval.swift BootstrapApprovalReader.swift ElectronFrameworkBinding.swift BootstrapProcessBinding.swift "$out/ProcessIdentity.o" "$out/ProcessEpochFence.o" "$out/BootstrapApprovalAnchor.o" -o "$out/brian-native-computer-helper"
 xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx14.0" -framework AppKit Fixture.swift -o "$out/NativeComputerFixture.app/Contents/MacOS/NativeComputerFixture"
 cat > "$out/NativeComputerFixture.app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>

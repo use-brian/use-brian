@@ -58,7 +58,11 @@ test('macOS fixture is adjacent, explicitly signed, and verified with the deskto
   for (const marker of ['NativeComputerFixture.app', 'fixtureArgs', '"--keychain", keychain', '"--verify", "--strict", fixturePath']) assert.ok(signer.includes(marker), marker)
   for (const marker of ['NativeComputerFixture.app', 'brian-native-computer-helper', 'ai.usebrian.desktop', 'com.usebrian.NativeComputerFixture', 'anchor apple generic', 'certificate leaf[subject.OU]', '"--all-architectures", "-R", requirement', 'if (!team) throw']) assert.ok(verifier.includes(marker), marker)
   const build = readFileSync(resolve(root, 'native/computer-control/build.sh'), 'utf8')
-  for (const marker of ['xcrun clang', 'ProcessIdentity.c', '-import-objc-header ProcessIdentity.h', '-framework Security', '"$out/ProcessIdentity.o"']) assert.ok(build.includes(marker), marker)
+  for (const marker of ['xcrun clang', 'ProcessIdentity.c', '-framework Security', '"$out/ProcessIdentity.o"']) assert.ok(build.includes(marker), marker)
+  assert.ok(build.includes(String.raw`printf '#include "%s/ProcessIdentity.h"\n#include <stdint.h>\nvoid *brian_epoch_fence_create(int32_t pid);\nint32_t brian_epoch_fence_poll(void *fence);\nvoid brian_epoch_fence_destroy(void *fence);\n' "$PWD" > "$work/NativeBridge.h"`))
+  assert.match(build, /xcrun clang[^\n]* -c ProcessEpochFence\.c -o "\$out\/ProcessEpochFence\.o"/)
+  const helperLink = build.split('\n').find(line => line.startsWith('xcrun swiftc ') && line.includes('-o "$out/brian-native-computer-helper"'))
+  for (const marker of ['-import-objc-header "$work/NativeBridge.h"', '"$out/ProcessIdentity.o"', '"$out/ProcessEpochFence.o"']) assert.ok(helperLink?.includes(marker), marker)
 })
 
 test('macOS inspector source keeps failed privacy reads and changed window/modal scope closed', () => {
@@ -75,7 +79,7 @@ test('macOS inspector source keeps failed privacy reads and changed window/modal
   for (const guard of ['currentWindows.count == window.applicationWindows.count',
     'currentWindows.filter({ CFEqual($0, expected) }).count == 1', 'supportedWindowScope(window.element)',
     'guard let focused = attr(window.application, kAXFocusedWindowAttribute)', 'supportedWindowScope(focused as! AXUIElement)']) assert.ok(live.includes(guard), guard)
-  assert.ok(live.includes('defer { if !intact && grant != nil { _exit(71) } }'))
+  assert.match(live, /defer \{ if !intact && grant != nil \{\s*if let invalidate = guardianInvalidation \{ invalidate\(\) \} else \{ _exit\(71\) \}\s*\} \}/)
   for (const notification of ['kAXWindowCreatedNotification', 'kAXUIElementDestroyedNotification', 'kAXSheetCreatedNotification']) assert.ok(live.includes(notification))
   const callback = live.match(/let callback: AXObserverCallback = \{ _, _, _, _ in([\s\S]*?)\n        \}/)?.[1]
   assert.equal(callback?.replace(/\/\/[^\n]*/g, '').trim(), '_exit(71)')
@@ -88,7 +92,13 @@ test('macOS inspector source keeps failed privacy reads and changed window/modal
   assert.ok(observe.indexOf('liveWindow(window.target) != nil') < observe.indexOf('let read = node('))
   assert.ok(observe.lastIndexOf('liveWindow(window.target) != nil') > observe.indexOf('let read = node('))
   assert.ok(observe.lastIndexOf('liveWindow(window.target) != nil') < observe.indexOf('snapshots[observationId] ='))
-  assert.ok(swift.includes('"axRead": ready, "semanticActions": ready, "windowCapture": ready && captureReady, "input": false'))
+  assert.ok(swift.includes('"axRead": ready, "semanticActions": ready && !clickSpent, "windowCapture": ready && captureReady, "input": inputReady'))
+  const input = swift.slice(swift.indexOf('        let inputReady ='), swift.indexOf('        return ["protocol": proto', swift.indexOf('        let inputReady =')))
+  for (const gate of ['ready && captureReady && !clickSpent && clickOwnerReady()', 'ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform()', 'ClickGuardianNativeIdentitySupport.hasPublicEpochFenceSupport()', 'CGPreflightListenEventAccess()', 'CGPreflightPostEventAccess()']) assert.ok(input.includes(gate), gate)
+  const candidate = readFileSync(resolve(root, 'native/computer-control/ClickGuardianNative.swift'), 'utf8')
+  assert.match(candidate, /static func acceptsCurrentPlatform\(\) -> Bool \{ false \}/)
+  const fresh = swift.slice(swift.indexOf('        case "capabilities":'), swift.indexOf('        case "listTargets":'))
+  assert.ok(fresh.includes('"semanticActions": false, "windowCapture": false, "input": false'))
   assert.ok(swift.includes('inputTap.map { CGEvent.tapIsEnabled(tap: $0) }'))
 })
 

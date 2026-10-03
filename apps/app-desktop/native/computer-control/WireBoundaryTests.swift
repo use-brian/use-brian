@@ -452,3 +452,42 @@ for kind in ["invoke", "select", "setValue", "scroll"] { precondition(semanticKi
 print("PASS \(policyChecks) production semantic node-policy checks: exact cohort, grant, enabled, privacy, role and native support gates. No native effect delivery claimed.")
 try JSONSerialization.data(withJSONObject: timingResponses).write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
 print("PASS private timing default-off/negotiation, source intervals/nesting, status/privacy and bounded one-shot response tests. Foundation/Dispatch only; no native API dispatch or delivery evidence.")
+
+// Local approval is a distinct exact matcher, never semantic admission or input
+// execution authority. Mutate every top-level, identity, target and action field.
+for kind in ["capture", "click"] {
+    var local = baselineCommand
+    var action: Object = ["kind": kind, "target": (baselineCommand["action"] as! Object)["target"]!, "observationId": "observation"]
+    if kind == "click" { action["frameId"] = "frame"; action["x"] = 10; action["y"] = 20 }
+    local["action"] = action
+    precondition(exactLocalCommand(local, local))
+    precondition(!exactSemanticCommand(local, local))
+    precondition(supportedExecution(local) == (kind == "capture"))
+    for key in local.keys {
+        var changed = local; changed[key] = NSNull()
+        precondition(!exactLocalCommand(changed, local))
+    }
+    for key in action.keys {
+        var changed = local; var operation = action
+        operation[key] = ["x", "y"].contains(key) ? 21 : "different"
+        changed["action"] = operation
+        precondition(!exactLocalCommand(changed, local))
+    }
+    for container in ["identity", "target"] {
+        let original = container == "identity" ? local["identity"] as! Object : action["target"] as! Object
+        for key in original.keys {
+            var nested = original; nested[key] = key == "processId" ? 43 : "different"
+            var changed = local
+            if container == "identity" { changed["identity"] = nested }
+            else { var operation = action; operation["target"] = nested; changed["action"] = operation }
+            precondition(!exactLocalCommand(changed, local))
+        }
+    }
+    var changed = local; changed["commandId"] = "other-command"
+    precondition(!exactLocalCommand(changed, local))
+    changed = local; changed["deadlineAt"] = 8_000
+    precondition(!exactLocalCommand(changed, local))
+}
+precondition(!exactLocalCommand(approvedSemantic, approvedSemantic))
+precondition(!exactLocalCommand(baselineCommand, baselineCommand))
+precondition(!exactLocalCommand([:], [:]))

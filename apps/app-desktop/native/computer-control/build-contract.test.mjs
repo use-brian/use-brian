@@ -39,15 +39,17 @@ test('build compiles linked bootstrap sources with a private main.swift copy; un
   const f = fixture(t);
   assert.equal(f.result.status, 0, f.result.stderr);
   assert.match(f.result.stderr, /UNSIGNED development artifacts/);
-  assert.equal(f.calls.length, 4);
+  assert.equal(f.calls.length, 5);
   assert(f.calls[0].args.includes('ProcessIdentity.c'));
   assert(f.calls[1].args.includes('BootstrapApprovalAnchor.c'));
-  const helper = f.calls[2];
-  for (const file of ['LibraryConstraintPolicy.swift', 'MachOLibraryConstraint.swift', 'BootstrapApproval.swift', 'BootstrapApprovalReader.swift', 'BootstrapProcessBinding.swift', 'ElectronFrameworkBinding.swift']) assert(helper.args.includes(file), file);
+  assert(f.calls[2].args.includes('ProcessEpochFence.c'));
+  const helper = f.calls[3];
+  for (const file of ['ClickIntent.swift', 'ClickGuardianNative.swift', 'ClickGuardianHost.swift', 'ProcessEpochFence.swift', 'LibraryConstraintPolicy.swift', 'MachOLibraryConstraint.swift', 'BootstrapApproval.swift', 'BootstrapApprovalReader.swift', 'BootstrapProcessBinding.swift', 'ElectronFrameworkBinding.swift']) assert(helper.args.includes(file), file);
   assert(helper.args.some(a => a.endsWith('/BootstrapApprovalAnchor.o')));
   assert.equal(helper.mainSource, readFileSync(join(f.source, 'Helper.swift'), 'utf8'));
   assert.equal(helper.temporaryMode, 0o700);
-  assert(f.calls[3].args.includes('Fixture.swift'));
+  assert(f.calls[4].args.includes('Fixture.swift'));
+  assert(helper.args.some(a => a.endsWith('/ProcessEpochFence.o')));
   assert.deepEqual(readdirSync(f.temporary), []);
 });
 
@@ -190,4 +192,149 @@ test('semantic approval and effect guards precede restoration and native dispatc
     'now() < expiry', 'monotonic() < expiresMonotonic', 'monotonic() < commandDeadline', 'now() < deadline',
     'same($0, target)', 'liveWindow(target) != nil', 'AXIsProcessTrusted()', 'brian_private_channel_alive() == 1']) assert(authority.includes(gate), gate);
   // These are placement regressions, not native AX/Stop delivery evidence.
+});
+
+test('click preparation uses native cache, unchanged PNG and anchored ages without releasing input', () => {
+  const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
+  const broker = helper.slice(helper.indexOf('final class Broker:'));
+  const section = (from, to) => broker.slice(broker.indexOf(from), broker.indexOf(to));
+  assert(broker.includes('private func clickOwnerReady() -> Bool { guardianInvalidation == nil && brian_pipe_endpoints_alive(3, 3) == 1 }'));
+  const native = section('    private func clickSnapshot(', '    func prepareClick(');
+  for (const gate of ['authorized(command, leaseId)', 'captureAuthority(grant)', 'CGPreflightScreenCaptureAccess()',
+    'CGEvent.tapIsEnabled(tap: tap)', 'liveWindow(target)', 'fresh(action, window)', 'unchanged(snapshot, window)',
+    'safeCanvas(window, snapshot)', 'let frame = frame', 'let captured = frameMonotonic', 'bounds(window.element)',
+    'currentLayout: layout()', 'frameObservationID: frameObservation', 'observationMonotonicMs: snapshot.monotonic',
+    'grantDeadlineMonotonicMs: expiresMonotonic', 'commandDeadlineMonotonicMs: deadline']) assert(native.includes(gate), gate);
+  const prepare = section('    func prepareClick(', '    func handoffClick(');
+  for (const gate of ['clickOwnerReady()', 'let approved = approvedCommand', 'exactLocalCommand(command, approved)',
+    'let before = clickSnapshot(command, leaseId)', 'pixels(command, action, window, snapshot)',
+    'png.base64EncodedString() == before.frame["data"] as? String', 'Double(width)', 'Double(height)',
+    'let after = clickSnapshot(command, leaseId)', 'same(before.frame, after.frame)',
+    'before.frameMonotonicMs == after.frameMonotonicMs', 'snapshot: after']) assert(prepare.includes(gate), gate);
+  assert(prepare.indexOf('exactLocalCommand') < prepare.indexOf('pixels(command,'));
+  assert(prepare.indexOf('let after = clickSnapshot') > prepare.indexOf('png.base64EncodedString()'));
+  assert(!/frameMonotonic\s*=|snapshots\[.*\]\s*=|approvedCommand\s*=/.test(prepare));
+  const local = section('    private func beginLocalApproval(', '    func beginApproval(');
+  assert(local.includes('let anchored = monotonic() + min(30_000, deadline - now())'));
+  assert(local.includes('let retained = min(localDeadlines[commandID] ?? anchored, anchored)'));
+  assert(local.includes('localDeadlines[commandID] = retained'));
+  assert(local.includes('exactLocalCommand(command, pending)'));
+  assert(local.includes('approvedCommand = pending'));
+  assert(local.includes('prepareClick(command, leaseId:'));
+  assert(local.includes('restored.inputMonotonic = monotonic()'));
+  assert(!local.includes('Snapshot(observation:'));
+  assert(!local.includes('frameMonotonic ='));
+  assert(!local.includes('permittedSemantic'));
+  const capture = section('    private func capture(', '    func reachable(');
+  assert(capture.indexOf('let captureStarted = monotonic()') < capture.indexOf('pixels(command,'));
+  assert(capture.includes('frameMonotonic = captureStarted'));
+  assert(capture.includes('snapshots[frameObservation] = Snapshot(observation: observation, refs: snapshot.refs, monotonic: snapshot.monotonic, inputMonotonic: snapshot.inputMonotonic)'));
+  // Only capture may set a non-nil frame time; approval cannot rejuvenate it.
+  assert.equal((broker.match(/frameMonotonic = captureStarted/g) ?? []).length, 1);
+  const execute = section('    func execute(', '    func rect(');
+  assert(helper.includes('let prepared = prepareClick(command, leaseId:'));
+  assert(helper.includes('guardianWorkerHandoff(requestID: requestID, descriptor: prepared.descriptor'));
+  assert(execute.includes('guard supportedExecution(command) else { return result("denied") }'));
+  assert(execute.includes('if kind == "click" { return result("unsupported") }'));
+  assert(helper.includes('return kind == "observe" || kind == "capture" || semanticKind(kind)'));
+  assert(helper.includes('if let backend = backend, supportedExecution(command)'));
+  assert.equal((helper.match(/"input": false/g) ?? []).length, 1);
+  assert(helper.includes('"input": inputReady'));
+  assert(!/CGEvent\(mouseEventSource:|\.post\(tap:|CGEventPost/.test(helper));
+  const intent = readFileSync(new URL('./ClickIntent.swift', import.meta.url), 'utf8');
+  for (const gate of ['equal(command, approved)', 'equal(embeddedFrame, frame)', 'equal(bounds, s.currentBounds)',
+    'frame["displayLayoutVersion"] as? String == s.currentLayout', 'clock.monotonicMs - timestamp < 5_000',
+    's.frameObservationID', 'rect.0 + x * scaleX', 'rect.1 + y * scaleY']) assert(intent.includes(gate), gate);
+  // Source placement only: not evidence of an owner, native delivery or release.
+});
+
+// Source contracts only. Not native lifecycle, cleanup or platform acceptance.
+test('guardian native scope uses private descriptor, shared validators and independent invalidation', () => {
+  const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
+  const host = readFileSync(new URL('./ClickGuardianHost.swift', import.meta.url), 'utf8');
+  const native = readFileSync(new URL('./ClickGuardianNative.swift', import.meta.url), 'utf8');
+  assert(helper.includes('helperArguments.isEmpty || helperArguments == ["--click-guardian"]'));
+  assert(helper.indexOf('guard let trust = ProcessTrust()') < helper.indexOf('ClickGuardianHost(trust: trust).run()'));
+  assert(helper.includes('let handoff = backend?.handoffClick(payload, requestID: requestId)'));
+  assert(helper.includes('reservedClicks.insert(prepared.binding.commandID)'));
+  assert(helper.includes('reservedFrames.insert(prepared.binding.frameID)'));
+  assert(helper.includes('uniqueCanvasWindow(window, descriptor.windowNumber)'));
+  assert(helper.includes('for _ in 0..<2'));
+  assert(helper.includes('discoverTargets(only: descriptor.pid, standingFence: epochFence)'));
+  assert(host.includes('liveness.pinEpochFences(worker: workerFence, parent: parentFence)'));
+  assert(helper.includes('clickTransferred = true'));
+  assert(helper.includes('if clickSpent || clickTransferred'));
+  assert(helper.includes('guard readbackOnly, readbackMonitorInstalled,'));
+  assert(helper.includes('ClickScopeDescriptor.digest(png) == descriptor.pngDigest'));
+  assert(host.includes('broker.reconstructClick'));
+  for (const token of ['value.removeValue(forKey: "ref")', 'value.removeValue(forKey: "parentRef")',
+    'value["parentIndex"] = parentIndex', 'options: [.sortedKeys]', 'String(identity.birth)', 'ProcessIdentity.read(identity.pid) == identity',
+    'descriptor.matchesProcess(nativeTarget)', 'broker.reconstructClick', 'broker.revalidateGuardianClick',
+    'candidate.startProbe()', 'candidate.execute(intent)', 'prepared?.validates(intent)',
+    'candidate.sequenceAttempted', 'case .inputStreamReleasedCandidate']) assert(host.includes(token), token);
+  assert(!host.includes('nativeScopeUnavailable'));
+  assert(!host.includes('_AXUIElementGetWindow'));
+  assert(!host.includes('brian_kernel_signing_snapshot('));
+  const callback = host.slice(host.indexOf('let candidate = ClickGuardianNative(validateCurrentScope:'), host.indexOf('self.candidate = candidate'));
+  assert(!/AXUIElement|signedProcess|parentValid|ProcessIdentity.read|DispatchQueue.*sync/.test(callback));
+  assert(host.includes('guard lock.try() else { return false }'));
+  assert(host.includes('takeUnretainedValue().invalidate()'));
+  assert(native.includes('static func acceptsCurrentPlatform() -> Bool { false }'));
+  assert(native.includes('place: .tailAppendEventTap'));
+  assert(native.includes('tail.sealProducer()'));
+  assert(native.indexOf('retainedUp = up') < native.indexOf('down.tapPostEvent(proxy)'));
+  assert(native.includes('return Unmanaged.passRetained(up)'));
+  assert(native.includes('tail.complete, let port = tap, let end = tailTap'));
+});
+
+// Placement only, not execution/native acceptance. These tests are written only.
+test('accepted stream return keeps overlapping monitors and opens only readback', () => {
+  const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
+  const host = readFileSync(new URL('./ClickGuardianHost.swift', import.meta.url), 'utf8');
+  const native = readFileSync(new URL('./ClickGuardianNative.swift', import.meta.url), 'utf8');
+  const start = helper.indexOf('    func handoffClick(', helper.indexOf('final class Broker:'));
+  const handoff = helper.slice(start, helper.indexOf('    private func localApprovalKind', start));
+  assert(handoff.includes('guard !clickSpent, validWirePayload("execute", payload)'));
+  assert(handoff.indexOf('clickSpent = true') < handoff.indexOf('guardianWorkerHandoff('));
+  assert(handoff.includes('installReadbackMonitor(command, descriptor: prepared.descriptor)'));
+  assert(handoff.includes('result == "delivered", clickTransferred, readbackMonitorInstalled'));
+  assert(handoff.includes('return receipt("executed", "ok")'));
+  assert(!handoff.includes('clickTransferred = false'));
+  assert(!handoff.includes('clickSpent = false'));
+  assert(!handoff.includes('reservedFrames.removeAll'));
+  const returning = handoff.slice(handoff.indexOf('    private func installReadbackMonitor'));
+  for (const token of ['descriptor.matches(command)', 'descriptor.matchesProcess(window.identity)',
+    'same(b, descriptor.bounds)', 'layout() == descriptor.displayLayout', 'uniqueCanvasWindow(window, descriptor.windowNumber)',
+    'safeCanvas(window, snapshot)', 'AXObserverAddNotification', 'watchdogActive = true',
+    'CGEvent.tapEnable(tap: tap, enable: true)', 'CGEvent.tapIsEnabled(tap: tap), currentPublicScope()']) assert(returning.includes(token), token);
+  assert(host.includes('candidate.completeMonitorReturn() == .inputStreamReleasedCandidate'));
+  assert(host.includes('finish(reason: "monitorReturned")'));
+  assert(host.indexOf('returnMonitoring()') < host.indexOf('guardianWrite(["kind": "workerMonitoring"'));
+  assert(native.includes('else if monitorReturnAcknowledged && ownedStreamProven()'));
+  assert(native.includes('static func hasPublicEpochFenceSupport() -> Bool'));
+  assert(native.includes('static func acceptsCurrentPlatform() -> Bool { false }'));
+  const capability = helper.slice(helper.indexOf('    func capabilities()', helper.indexOf('final class Broker:')), helper.indexOf('    func listTargets()', helper.indexOf('final class Broker:')));
+  for (const token of ['!clickSpent', 'clickOwnerReady()', 'acceptsCurrentPlatform()', 'hasPublicEpochFenceSupport()',
+    'trust.parentValid()', 'CGPreflightListenEventAccess()', 'CGPreflightPostEventAccess()', '"input": inputReady']) assert(capability.includes(token), token);
+  assert(helper.includes('clickSpent && (!readbackOnly || !["observe", "capture"].contains(kind))'));
+  assert(helper.includes('Native refs/snapshot keep their original actions'));
+});
+
+test('public standing epoch fences span admission and authenticated monitor overlap', () => {
+  const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
+  const host = readFileSync(new URL('./ClickGuardianHost.swift', import.meta.url), 'utf8');
+  const c = readFileSync(new URL('./ProcessEpochFence.c', import.meta.url), 'utf8');
+  const discovery = helper.slice(helper.indexOf('    private func discoverTargets'), helper.indexOf('    func liveWindow'));
+  assert(discovery.indexOf('ProcessEpochFence(pid:') < discovery.indexOf('trust.target('));
+  assert(discovery.includes('epochFence: epochFence'));
+  assert(host.indexOf('let targetFence = ProcessEpochFence(') < host.indexOf('let (nativeTarget, appID) = trust.target('));
+  assert(host.includes('leaseId: lease, epochFence: targetFence'));
+  assert(helper.includes('let originalFence = admittedWindow.epochFence'));
+  assert(helper.includes('return originalFence.clean()'));
+  assert(host.includes('!transferred, transfer(), guardianWrite(["kind": "workerTransferred"'));
+  assert(!host.includes('DispatchSource.makeProcessSource'));
+  assert(host.includes('&& window.epochFence.clean()'));
+  for (const token of ['NOTE_EXEC | NOTE_EXIT', 'EV_RECEIPT', 'FD_CLOEXEC', 'receipt.data != 0',
+    'atomic_flag_test_and_set', 'if (n != 0) atomic_store', 'const struct timespec zero = {0, 0}']) assert(c.includes(token), token);
+  assert(!c.includes('proc_pidinfo'));
 });

@@ -237,8 +237,12 @@ if (args.includes('--foundation')) {
     const aliases = helper.match(/^typealias Object = .*$/m)[0] + '\n' + helper.match(/^let proto = .*$/m)[0];
     const clock = helper.match(/^func monotonic\(\).*$/m)[0];
     const tests = await readFile(new URL('./WireBoundaryTests.swift', import.meta.url), 'utf8');
+    const clickIntent = await readFile(new URL('./ClickIntent.swift', import.meta.url), 'utf8');
+    // Reuse the existing pure validator suite, not an alternate schema. This
+    // runner owns main.swift; remove only the suite's standalone entry attribute.
+    const clickTests = (await readFile(new URL('./ClickIntentTests.swift', import.meta.url), 'utf8')).replace('@main\n', '');
     const main = join(temporary, 'main.swift'), binary = join(temporary, 'wire-tests'), data = join(temporary, 'vectors.json'), timingOutput = join(temporary, 'timings.json');
-    await writeFile(main, `import Foundation\nimport CoreFoundation\nimport Dispatch\n${aliases}\n${block}\n${clock}\n${tests}`);
+    await writeFile(main, `import Foundation\nimport CoreFoundation\nimport Dispatch\n${aliases}\n${block}\n${clock}\n${clickIntent}\n${tests}\n${clickTests}\nClickIntentTests.main()`);
     await writeFile(data, JSON.stringify(vectors));
     const libraries = args.filter(arg => arg.startsWith('--library-path=')).flatMap(arg => {
       const path = arg.slice('--library-path='.length); return ['-L', path, '-Xlinker', '-rpath', '-Xlinker', path];

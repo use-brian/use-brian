@@ -1,3 +1,6 @@
+import { ClickGuardianClient, type GuardianHandoff, type NativeClickScope } from './click-guardian-client.js'
+import { isDeepStrictEqual } from 'node:util'
+import type { Duplex } from 'node:stream'
 import { HelperTimingEventSchema, HelperTimingSchema, type HelperMethod, type HelperTimingCorrelation, type HelperTimingEvent } from '@use-brian/computer-control/helper-timing.js'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { posix, win32 } from 'node:path'
@@ -12,7 +15,8 @@ export interface NativeHelper {
   endApproval(command: NativeCommand, leaseId: string, approved: boolean): Promise<boolean>
   execute(command: NativeCommand, leaseId: string): Promise<NativeReceipt>
   /** Attempts SIGKILL immediately, never queues behind AX. Resolves only after
-   * confirmed exit or proven spawn failure, not a failed kill attempt. */
+   * confirmed worker exit/spawn failure AND owner safety, never a failed kill
+   * attempt, uncertain cleanup, process death alone after emission, or timeout. */
   kill(): Promise<void>
 }
 /** Trusted main constructor configuration only. Never derive from IPC/grants/env.
@@ -70,6 +74,32 @@ export class PrivatePipeHelper implements NativeHelper {
       exitCode: this.exitCode, exitSignal: this.exitSignal, spawnFailed: this.spawnFailed }
   }
   private readonly exited: Promise<void>
+  private readonly guardian?: ClickGuardianClient
+  private killed?: Promise<void>
+  private grantSnapshot?: { grant: NativeGrant; leaseId: string }
+  private approvedSnapshot?: { command: NativeCommand; leaseId: string }
+  private clickSpent = false
+  private readbackOnly = false
+  private executeSnapshot?: { id: string; command: NativeCommand; leaseId: string }
+  private bindGuardian(id: string, descriptor: NativeClickScope): GuardianHandoff | undefined {
+    const execute = this.executeSnapshot
+    if (this.dead || this.pending?.method !== 'execute' || this.pending.id !== id || execute?.id !== id
+      || execute.command.action.kind !== 'click') throw new Error('Unbound guardian handoff')
+    const scope = this.grantSnapshot
+    const approved = this.approvedSnapshot
+    this.approvedSnapshot = undefined // burn before handoff; never retry
+    if (!scope || !approved || execute.leaseId !== scope.leaseId || approved.leaseId !== scope.leaseId
+      || !isDeepStrictEqual(execute.command, approved.command)
+      || !isDeepStrictEqual(descriptor.command, approved.command)
+      || !isDeepStrictEqual(execute.command.identity, scope.grant.identity)
+      || execute.command.epoch !== scope.grant.epoch || execute.command.grantId !== scope.grant.grantId
+      || !scope.grant.allowControl || !scope.grant.allowCapture
+      || Date.now() >= scope.grant.expiresAt || Date.now() >= execute.command.deadlineAt
+      || !scope.grant.targets.some(target => isDeepStrictEqual(target, execute.command.action.target))) return undefined
+    if (this.clickSpent) return undefined
+    this.clickSpent = true
+    return { requestId: id, command: execute.command, grant: scope.grant, leaseId: scope.leaseId, descriptor }
+  }
   constructor(launch: string | HelperLaunchSpec, private readonly onDeath: (reason?: 'takeover') => void, private readonly timeoutMs = 4000, timing?: HelperTimingOptions) {
     if (timing?.enabled === true && typeof timing.onMetadata === 'function') this.timingCallback = timing.onMetadata
     // Legacy string form is macOS-only. Specs are created in main, never accepted by IPC.
@@ -81,8 +111,11 @@ export class PrivatePipeHelper implements NativeHelper {
     if (spec.platform === 'linux') {
       if (spec.executable !== '/usr/bin/python3' || spec.args.length !== 2 || spec.args[0] !== '-Es' || !posix.isAbsolute(spec.args[1]) || posix.basename(spec.args[1]) !== 'helper.py') throw new Error('Fixed Linux launch required')
     } else if (spec.args.length) throw new Error('Helper arguments forbidden')
-    this.child = spawn(spec.executable, [...spec.args], { stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true,
-      cwd: paths.dirname(spec.platform === 'linux' ? spec.args[1] : spec.executable), env: launchEnvironment(spec.platform) })
+    this.child = spawn(spec.executable, [...spec.args], { stdio: spec.platform === 'darwin' ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true,
+      cwd: paths.dirname(spec.platform === 'linux' ? spec.args[1] : spec.executable), env: launchEnvironment(spec.platform) }) as ChildProcessWithoutNullStreams
+    if (spec.platform === 'darwin') this.guardian = new ClickGuardianClient(spec.executable, this.child.pid,
+      this.child.stdio?.[3] as Duplex | undefined, (id, descriptor) => this.bindGuardian(id, descriptor), () => this.fail(),
+      id => !this.dead && this.pending?.id === id && this.pending.method === 'execute' && this.executeSnapshot?.id === id)
     // Node assigns PID synchronously on successful spawn, before emitting
     // 'spawn'. An immediate Stop must still wait for exit in that interval.
     let spawned = this.child.pid !== undefined
@@ -112,6 +145,9 @@ export class PrivatePipeHelper implements NativeHelper {
   private fail(reason?: 'takeover'): void {
     if (this.dead) return
     this.dead = true
+    this.guardian?.revoke()
+    this.approvedSnapshot = undefined
+    this.executeSnapshot = undefined
     if (this.pending) { this.reportTiming(this.pending, undefined, true); clearTimeout(this.pending.timer); this.pending.reject(new Error('Native helper unavailable')); this.pending = undefined }
     this.buffer = Buffer.alloc(0)
     // Independent revocation: do not flush queued commands with end(), and do
@@ -136,8 +172,19 @@ export class PrivatePipeHelper implements NativeHelper {
       const response = JSON.parse(this.buffer.subarray(4, size + 4).toString('utf8')) as { id?: unknown; ok?: unknown; result?: unknown; diagnostics?: unknown; diagnosticsVersion?: unknown }
       if (!this.pending || response.id !== this.pending.id || response.ok !== true || this.buffer.length !== size + 4) throw new Error('Invalid helper response')
       const pending = this.pending
+      if (this.guardian && !this.guardian.acceptsWorkerResponse(pending.id)) throw new Error('Premature worker response')
+      if (pending.method === 'execute' && this.executeSnapshot?.command.action.kind === 'click') {
+        const result = response.result as { outcome?: unknown; commandId?: unknown; code?: unknown } | null
+        if (result?.outcome === 'executed') {
+          if (Object.keys(result).length !== 3 || result.code !== 'ok' || result.commandId !== this.executeSnapshot.command.commandId
+            || !this.guardian?.acceptsExecutedClick(pending.id, this.executeSnapshot.command.commandId)) throw new Error('Unproven click delivery')
+          this.readbackOnly = true
+        }
+      }
       this.negotiateDiagnostics(pending, response.result, response.diagnosticsVersion)
       this.pending = undefined
+      this.executeSnapshot = undefined
+      if (pending.method === 'execute') this.approvedSnapshot = undefined
       this.buffer = Buffer.alloc(0)
       clearTimeout(pending.timer)
       pending.resolve(response.result)
@@ -215,7 +262,13 @@ export class PrivatePipeHelper implements NativeHelper {
     const id = randomUUID()
     // Capture primitives before any await/callback. No target/value/goal/ref or
     // helper-supplied identity enters diagnostic correlation.
-    const p = payload as { command?: NativeCommand; grant?: NativeGrant }
+    // Detach authority from mutable caller objects before serialization/await.
+    payload = JSON.parse(JSON.stringify(payload)) as unknown
+    const p = payload as { command?: NativeCommand; grant?: NativeGrant; leaseId?: string }
+    if (this.clickSpent && (method === 'start' || method === 'beginApproval' || method === 'endApproval'
+      || (method === 'execute' && (!this.readbackOnly || !p.command || !['observe', 'capture'].includes(p.command.action.kind))))) {
+      return Promise.reject(new Error('Click grant effects are spent; readback only'))
+    }
     const authority = p.command ?? p.grant
     const correlation = authority ? Object.freeze({ sessionId: authority.identity.sessionId, epoch: authority.epoch,
       ...(p.command ? { commandId: p.command.commandId } : {}) }) : undefined
@@ -229,22 +282,35 @@ export class PrivatePipeHelper implements NativeHelper {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.requestTimedOut = true; this.fail() }, this.timeoutMs)
       this.pending = { id, method, timingRequested, correlation, phase, apiPhase, resolve, reject, timer }
+      this.executeSnapshot = method === 'execute' && p.command && p.leaseId
+        ? { id, command: p.command, leaseId: p.leaseId } : undefined
       this.child.stdin.write(Buffer.concat([header, body]), error => { if (error) this.fail() })
     })
   }
   async capabilities(): Promise<NativeCapabilities> { return CapabilitiesSchema.parse(await this.request('capabilities', {})) }
   async listTargets(): Promise<DiscoveredTarget[]> { return DiscoveredTargetSchema.array().max(128).parse(await this.request('listTargets', {})) }
   async start(grant: NativeGrant, leaseId: string): Promise<void> {
-    if (await this.request('start', { grant, leaseId }) !== true) throw new Error('Helper refused grant')
+    const snapshot = JSON.parse(JSON.stringify({ grant, leaseId })) as { grant: NativeGrant; leaseId: string }
+    if (await this.request('start', snapshot) !== true) throw new Error('Helper refused grant')
+    if (!this.dead) this.grantSnapshot = snapshot
   }
   async beginApproval(command: NativeCommand, leaseId: string): Promise<boolean> {
+    this.approvedSnapshot = undefined
     return await this.request('beginApproval', { command, leaseId }) === true
   }
   async endApproval(command: NativeCommand, leaseId: string, approved: boolean): Promise<boolean> {
-    return await this.request('endApproval', { command, leaseId, approved }) === true
+    this.approvedSnapshot = undefined
+    const snapshot = JSON.parse(JSON.stringify({ command, leaseId })) as { command: NativeCommand; leaseId: string }
+    const accepted = await this.request('endApproval', { ...snapshot, approved }) === true
+    if (accepted && approved && !this.dead) this.approvedSnapshot = snapshot
+    return accepted
   }
   async execute(command: NativeCommand, leaseId: string): Promise<NativeReceipt> {
     return ReceiptSchema.parse(await this.request('execute', { command, leaseId }))
   }
-  kill(): Promise<void> { this.fail(); return this.exited }
+  kill(): Promise<void> {
+    this.fail()
+    // Worker death alone is insufficient when a surviving owner may have emitted.
+    return this.killed ??= Promise.all([this.exited, this.guardian?.waitForSafety() ?? Promise.resolve()]).then(() => {})
+  }
 }

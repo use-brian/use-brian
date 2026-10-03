@@ -444,6 +444,11 @@ protocol ObservationBackend: AnyObject {
     func beginApproval(_ payload: Object) -> Bool
     func endApproval(_ payload: Object) -> Bool
     func execute(_ payload: Object, timing: SourceRequestTiming?) -> Object
+    func handoffClick(_ payload: Object, requestID: String) -> Object?
+}
+extension ObservationBackend {
+    // Non-native/metadata backends have no private descriptor producer.
+    func handoffClick(_ payload: Object, requestID: String) -> Object? { nil }
 }
 func observationGrant(_ payload: Object) -> Bool {
     guard validWirePayload("start", payload), let grant = payload["grant"] as? Object else { return false }
@@ -469,6 +474,14 @@ func exactSemanticCommand(_ command: Object, _ approved: Object) -> Bool {
     guard validWireCommand(command), validWireCommand(approved),
           let action = command["action"] as? Object, let kind = action["kind"] as? String,
           semanticKind(kind) else { return false }
+    return NSDictionary(dictionary: command).isEqual(to: approved)
+}
+// Explicit local pixel approval is not semantic/ref approval. Whole-object
+// equality binds every field, including frame, coordinates, deadline and identity.
+func exactLocalCommand(_ command: Object, _ approved: Object) -> Bool {
+    guard validWireCommand(command), validWireCommand(approved),
+          let action = command["action"] as? Object,
+          let kind = action["kind"] as? String, ["capture", "click"].contains(kind) else { return false }
     return NSDictionary(dictionary: command).isEqual(to: approved)
 }
 // Pure policy used by live AX reads and portable tests. Native attributes are
@@ -514,7 +527,10 @@ final class ObservationDispatcher {
         case "endApproval": result = backend?.endApproval(payload) ?? false
         case "execute":
             guard let command = payload["command"] as? Object, let commandId = command["commandId"] as? String else { return nil }
-            if let backend = backend, supportedExecution(command) {
+            if let action = command["action"] as? Object, action["kind"] as? String == "click",
+               let handoff = backend?.handoffClick(payload, requestID: requestId) {
+                result = handoff
+            } else if let backend = backend, supportedExecution(command) {
                 result = backend.execute(payload, timing: timing)
             } else {
                 result = ["commandId": commandId, "outcome": "not_executed", "code": "denied"]
@@ -628,7 +644,7 @@ func bounds(_ element: AXUIElement) -> Object? {
     return ["x": point.x, "y": point.y, "width": size.width, "height": size.height]
 }
 func layout() -> String {
-    let description = DispatchQueue.main.sync { NSScreen.screens.map { "\($0.frame):\($0.backingScaleFactor)" }.joined(separator: "|") }
+    let description = DispatchQueue.main.sync { NSScreen.screens.map { "\($0.frame):\($0.backingScaleFactor)" }.sorted().joined(separator: "|") }
     return SHA256.hash(data: Data(description.utf8)).map { String(format: "%02x", $0) }.joined()
 }
 func lastInputAge() -> Double {
@@ -643,6 +659,7 @@ struct Window {
     let applicationWindows: [AXUIElement]
     let launch: Date
     let identity: ProcessIdentity
+    let epochFence: ProcessEpochFence
 }
 struct Ref {
     let element: AXUIElement
@@ -653,6 +670,7 @@ struct Snapshot {
     let observation: Object
     let refs: [String: Ref]
     let monotonic: Double
+    var inputMonotonic: Double? = nil // Local dialog input checkpoint, never observation age.
 }
 final class Broker: ObservationBackend {
     // Explicit dependency: top-level guard bindings are not class members.
@@ -666,6 +684,19 @@ final class Broker: ObservationBackend {
     var snapshots: [String: Snapshot] = [:]
     var frame: Object?
     var frameObservation = ""
+    private var frameMonotonic: Double?
+    private var localCommandDeadline: Double?
+    private var localDeadlines: [String: Double] = [:] // Session lifetime; never renew a command ID.
+    // Private owner preparation is available; this is NOT platform/input acceptance.
+    private func clickOwnerReady() -> Bool { guardianInvalidation == nil && brian_pipe_endpoints_alive(3, 3) == 1 }
+    private let guardianInvalidation: (() -> Void)?
+    private var reservedClicks = Set<String>()
+    private var reservedFrames = Set<String>()
+    private var clickTransferred = false // never reset; the old effect producer stays closed
+    private var clickSpent = false // at most ONE attempted click in this consented grant
+    private var readbackOnly = false
+    private var readbackMonitorInstalled = false
+    private var readbackDescriptor: ClickScopeDescriptor?
     var lastCapture = -Double.infinity
     var journal: [String: Object] = [:]
     var seen: [String: Data] = [:]
@@ -690,8 +721,12 @@ final class Broker: ObservationBackend {
         _exit(73)
     }
     var commandDeadline = Double.infinity
-    init(trust: ProcessTrust) {
+    init(trust: ProcessTrust, guardianInvalidation: (() -> Void)? = nil) {
         self.trust = trust
+        self.guardianInvalidation = guardianInvalidation
+        // Guardian uses the same native readers, not the worker's exiting tap,
+        // watchdog or notification callbacks. It owns revocable prepared scope.
+        if guardianInvalidation != nil { return }
         let types: [CGEventType] = [.keyDown, .keyUp, .flagsChanged, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp, .scrollWheel, .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         if AXIsProcessTrusted() {
@@ -721,15 +756,31 @@ final class Broker: ObservationBackend {
         let ready = trusted && (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
         // Broker exists only after explicit discovery. Never prompt for permission.
         let captureReady = CGPreflightScreenCaptureAccess()
-        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready, "windowCapture": ready && captureReady, "input": false,
+        let inputReady = ready && captureReady && !clickSpent && clickOwnerReady() &&
+            ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform() &&
+            ClickGuardianNativeIdentitySupport.hasPublicEpochFenceSupport() &&
+            windows.values.contains(where: { $0.epochFence.clean() }) && trust.parentValid() &&
+            CGPreflightListenEventAccess() && CGPreflightPostEventAccess()
+        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready && !clickSpent, "windowCapture": ready && captureReady, "input": inputReady,
                 "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": captureReady ? "granted" : "denied",
-                "limitations": ["Consented TextEdit document and fixture semantic actions only. Capture requires control+capture consent and the public, unoccluded safe fixture canvas; no TextEdit or general-window screenshots. Coordinate input and general focus/keys disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
+                "limitations": ["Consented TextEdit/fixture AX actions. Capture requires control+capture consent and a public, unoccluded fixture canvas. One accepted-profile click per grant, then readback only. Unaccepted platform; public lifetime epoch fence required; keys/focus disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
     }
-    func listTargets() -> [Object] {
+    func listTargets() -> [Object] { discoverTargets(only: nil) }
+    private func discoverTargets(only pid: pid_t?, standingFence: ProcessEpochFence? = nil) -> [Object] {
         guard grant == nil, AXIsProcessTrusted() else { return [] }
+        let applications: [NSRunningApplication]
+        if let pid = pid {
+            guard let app = NSRunningApplication(processIdentifier: pid) else { return [] }
+            applications = [app]
+        } else { applications = NSWorkspace.shared.runningApplications }
         var next: [String: Window] = [:]
-        for app in NSWorkspace.shared.runningApplications {
-            guard let (identity, appId) = trust.target(app.processIdentifier),
+        for app in applications {
+            // Subscribe before ANY birth/signature/window pinning. Reuse a
+            // prior admission fence, never replace a poisoned lifetime.
+            let prior = windows.values.first { $0.identity.pid == app.processIdentifier }?.epochFence
+            guard let epochFence = standingFence ?? prior ?? ProcessEpochFence(pid: app.processIdentifier),
+                  epochFence.pid == app.processIdentifier, epochFence.clean(),
+                  let (identity, appId) = trust.target(app.processIdentifier),
                   let launch = app.launchDate, !app.isTerminated else { continue }
             let processKey = "\(app.processIdentifier):\(launch.timeIntervalSince1970)"
             let processInstance = processes[processKey] ?? id()
@@ -740,10 +791,10 @@ final class Broker: ObservationBackend {
                   applicationWindows.count <= 32 else { continue }
             for window in applicationWindows {
                 guard bounds(window) != nil else { continue }
-                if !supportedWindowScope(window) { continue }
+                if !supportedWindowScope(window) || !epochFence.clean() { continue }
                 let previous = windows.values.first { ($0.target["processId"] as? Int) == Int(app.processIdentifier) && $0.launch == launch && CFEqual($0.element, window) }
                 let target: Object = previous?.target ?? ["appId": appId, "processId": Int(app.processIdentifier), "processInstanceId": processInstance, "windowId": id(), "windowInstanceId": id()]
-                next[target["windowInstanceId"] as! String] = Window(target: target, element: window, application: ax, applicationWindows: applicationWindows, launch: launch, identity: identity)
+                next[target["windowInstanceId"] as! String] = Window(target: target, element: window, application: ax, applicationWindows: applicationWindows, launch: launch, identity: identity, epochFence: epochFence)
                 if next.count >= 128 { break }
             }
         }
@@ -762,8 +813,10 @@ final class Broker: ObservationBackend {
         var intact = false
         // Scope loss is sticky: closing a modal later must never resurrect this
         // grant. Parent cleanup/reauthorization must use a new helper and epoch.
-        defer { if !intact && grant != nil { _exit(71) } }
-        guard validWireTarget(target), let key = target["windowInstanceId"] as? String, let window = windows[key], same(window.target, target), let pid = wireInteger(target["processId"], min: 1, max: Double(Int32.max)),
+        defer { if !intact && grant != nil {
+            if let invalidate = guardianInvalidation { invalidate() } else { _exit(71) }
+        } }
+        guard validWireTarget(target), let key = target["windowInstanceId"] as? String, let window = windows[key], same(window.target, target), window.epochFence.clean(), let pid = wireInteger(target["processId"], min: 1, max: Double(Int32.max)),
               let (identity, appId) = trust.target(pid_t(pid)), identity == window.identity, appId == target["appId"] as? String,
               let app = NSRunningApplication(processIdentifier: pid_t(pid)), !app.isTerminated, app.launchDate == window.launch,
               let currentWindows = attr(window.application, kAXWindowsAttribute) as? [AXUIElement],
@@ -777,6 +830,7 @@ final class Broker: ObservationBackend {
         guard let focused = attr(window.application, kAXFocusedWindowAttribute),
               CFGetTypeID(focused) == AXUIElementGetTypeID(),
               supportedWindowScope(focused as! AXUIElement) else { return nil }
+        guard window.epochFence.clean() else { return nil }
         intact = true
         return window
     }
@@ -845,6 +899,20 @@ final class Broker: ObservationBackend {
         return true
     }
     func authorized(_ command: Object, _ leaseId: String) -> Bool {
+        if clickSpent || clickTransferred {
+            guard readbackOnly, readbackMonitorInstalled,
+                  let action = command["action"] as? Object,
+                  let kind = action["kind"] as? String, ["observe", "capture"].contains(kind),
+                  let target = action["target"] as? Object, let window = liveWindow(target),
+                  let descriptor = readbackDescriptor, descriptor.matchesProcess(window.identity),
+                  let current = bounds(window.element), same(current, descriptor.bounds),
+                  layout() == descriptor.displayLayout, uniqueCanvasWindow(window, descriptor.windowNumber),
+                  let tap = inputTap, CGEvent.tapIsEnabled(tap: tap) else { return false }
+        }
+        return scopedAuthority(command, leaseId)
+    }
+    // Internal scope validation during a handoff is NOT reopening dispatch.
+    private func scopedAuthority(_ command: Object, _ leaseId: String) -> Bool {
         guard validCommand(command), wireString(leaseId) != nil, trust.parentValid(), let grant = grant, leaseId == lease, command["protocol"] as? String == proto,
               let identity = command["identity"] as? Object, let owner = grant["identity"] as? Object, same(identity, owner),
               command["grantId"] as? String == grant["grantId"] as? String, wireInteger(command["epoch"]) == wireInteger(grant["epoch"]),
@@ -906,7 +974,7 @@ final class Broker: ObservationBackend {
         }
     }
     func observe(_ command: Object, _ window: Window) -> Object? {
-        guard brian_private_channel_alive() == 1 else { _exit(70) }
+        guard brian_private_channel_alive() == 1 else { if let invalidate = guardianInvalidation { invalidate(); return nil }; _exit(70) }
         guard liveWindow(window.target) != nil, let rect = bounds(window.element),
               let identity = command["identity"] as? Object else { return nil }
         let started = monotonic(); let observationId = id()
@@ -914,7 +982,7 @@ final class Broker: ObservationBackend {
         var queue: [(AXUIElement, String?, Int)] = [(window.element, nil, 0)]
         var visited: [AXUIElement] = []; var complete = true; var bytes = 0
         while !queue.isEmpty {
-            guard brian_private_channel_alive() == 1 else { _exit(70) }
+            guard brian_private_channel_alive() == 1 else { if let invalidate = guardianInvalidation { invalidate(); return nil }; _exit(70) }
             if nodes.count >= 500 || monotonic() - started > 300 || bytes > 400_000 { complete = false; break }
             let (element, parent, depth) = queue.removeFirst()
             if visited.contains(where: { CFEqual($0, element) }) { continue }
@@ -936,9 +1004,9 @@ final class Broker: ObservationBackend {
         if bytes > 400_000 || monotonic() - started > 300 { complete = false }
         let observation: Object = ["identity": identity, "epoch": command["epoch"]!, "id": observationId, "capturedAt": now(), "monotonicMs": monotonic(), "target": window.target,
                                    "foreground": NSWorkspace.shared.frontmostApplication?.processIdentifier == pid_t(window.target["processId"] as! Int), "bounds": rect, "displayLayoutVersion": layout(), "completeness": complete ? "complete" : "partial", "nodes": nodes]
-        frame = nil; frameObservation = ""
+        frame = nil; frameObservation = ""; frameMonotonic = nil
         snapshots.removeAll() // One latest observation; no cross-window cached authority.
-        guard brian_private_channel_alive() == 1 else { _exit(70) }
+        guard brian_private_channel_alive() == 1 else { if let invalidate = guardianInvalidation { invalidate(); return nil }; _exit(70) }
         // Recheck after traversal, before any local text can leave the helper.
         // Changed window/sheet scope is a refusal, not a partial approved result.
         guard liveWindow(window.target) != nil, let finalBounds = bounds(window.element), same(rect, finalBounds) else { return nil }
@@ -951,7 +1019,7 @@ final class Broker: ObservationBackend {
               snapshot.observation["displayLayoutVersion"] as? String == layout(), let previous = snapshot.observation["bounds"] as? Object, let rect = bounds(window.element), same(rect, previous),
               NSWorkspace.shared.frontmostApplication?.processIdentifier == pid_t(window.target["processId"] as! Int),
               let focused = attr(window.application, kAXFocusedWindowAttribute), CFEqual(focused, window.element),
-              lastInputAge() >= monotonic() - snapshot.monotonic else { return nil }
+              lastInputAge() >= monotonic() - (snapshot.inputMonotonic ?? snapshot.monotonic) else { return nil }
         return snapshot
     }
     func sameChildren(_ ref: Ref) -> Bool {
@@ -981,7 +1049,212 @@ final class Broker: ObservationBackend {
         }
         return true
     }
+    // Native-only assembly. No request-supplied frame, clock or transform is used.
+    private func clickSnapshot(_ command: Object, _ leaseId: String) -> ClickIntent.Snapshot? {
+        guard authorized(command, leaseId), captureAuthority(grant),
+              CGPreflightScreenCaptureAccess(), let tap = inputTap, CGEvent.tapIsEnabled(tap: tap),
+              let action = command["action"] as? Object, action["kind"] as? String == "click",
+              let target = action["target"] as? Object, let window = liveWindow(target),
+              let snapshot = fresh(action, window), unchanged(snapshot, window), safeCanvas(window, snapshot),
+              let frame = frame, let captured = frameMonotonic,
+              let currentBounds = bounds(window.element), let deadline = localCommandDeadline else { return nil }
+        return ClickIntent.Snapshot(frame: frame, observation: snapshot.observation, target: window.target,
+            currentBounds: currentBounds, currentLayout: layout(), frameObservationID: frameObservation,
+            frameMonotonicMs: captured, observationMonotonicMs: snapshot.monotonic,
+            grantDeadlineMonotonicMs: expiresMonotonic, commandDeadlineMonotonicMs: deadline)
+    }
+    // Owner integration interface: call on the serialized Broker lane immediately
+    // before reservation/handoff. Arithmetic evidence only; never permission to post.
+    // Returns a private descriptor only; the surviving owner must independently reconstruct scope.
+    func prepareClick(_ command: Object, leaseId: String) -> ClickPreparedScope? {
+        guard clickOwnerReady(), let approved = approvedCommand,
+              exactLocalCommand(command, approved), let grant = grant,
+              let before = clickSnapshot(command, leaseId),
+              ClickIntent.validate(command: command, approved: approved, grant: grant, snapshot: before,
+                  clock: .init(wallMs: now(), monotonicMs: monotonic())) != nil else { return nil }
+        commandDeadline = before.commandDeadlineMonotonicMs
+        guardLock.lock(); watchdogDeadline = min(expiresMonotonic, commandDeadline); guardLock.unlock()
+        guard let action = command["action"] as? Object, let target = action["target"] as? Object,
+              let window = liveWindow(target), let snapshot = fresh(action, window),
+              let (png, width, height) = pixels(command, action, window, snapshot),
+              png.base64EncodedString() == before.frame["data"] as? String,
+              wireInteger(before.frame["width"]) == Double(width),
+              wireInteger(before.frame["height"]) == Double(height),
+              let after = clickSnapshot(command, leaseId), same(before.frame, after.frame),
+              before.frameMonotonicMs == after.frameMonotonicMs else { return nil }
+        // SCK/AX can block: repeat identity, lease, focus, geometry, layout and clocks
+        // AFTER the unchanged PNG comparison. Never replace/refresh the cached frame.
+        guard let binding = ClickIntent.validate(command: command, approved: approved, grant: grant, snapshot: after,
+            clock: .init(wallMs: now(), monotonicMs: monotonic())),
+              let number = visibleWindowID(window), uniqueCanvasWindow(window, number),
+              let descriptor = ClickScopeDescriptor.make(command: command, snapshot: after,
+                  native: snapshot, window: window, number: number, png: png, worker: trust.helper),
+              descriptor.fresh(), authorized(command, leaseId) else { return nil }
+        return ClickPreparedScope(binding: binding, descriptor: descriptor)
+    }
+    func handoffClick(_ payload: Object, requestID: String) -> Object? {
+        let command = payload["command"] as? Object ?? [:]
+        let commandID = command["commandId"] as? String ?? "invalid"
+        func receipt(_ outcome: String, _ code: String) -> Object {
+            ["commandId": commandID, "outcome": outcome, "code": code]
+        }
+        defer { approvedCommand = nil }
+        guard !clickSpent, validWirePayload("execute", payload), approvalCommand == nil,
+              let prepared = prepareClick(command, leaseId: payload["leaseId"] as? String ?? ""),
+              !reservedClicks.contains(prepared.binding.commandID),
+              !reservedFrames.contains(prepared.binding.frameID) else { return receipt("not_executed", "denied") }
+        clickSpent = true
+        reservedClicks.insert(prepared.binding.commandID)
+        reservedFrames.insert(prepared.binding.frameID)
+        // Burn the exact native approval BEFORE handing off. Worker never emits.
+        approvedCommand = nil
+        guard let action = command["action"] as? Object, let target = action["target"] as? Object,
+              let admittedWindow = liveWindow(target) else { return receipt("execution_unknown", "helper_error") }
+        let originalFence = admittedWindow.epochFence
+        guard let result = guardianWorkerHandoff(requestID: requestID, descriptor: prepared.descriptor, transfer: { [self] in
+            guard scopedAuthority(command, lease), prepared.descriptor.fresh(),
+                  let tap = inputTap, CGEvent.tapIsEnabled(tap: tap) else { return false }
+            // Guardian has confirmed its active monitor; transfer takeover only
+            // now, with no unmonitored gap. Worker scope callback stays _exit(71).
+            clickTransferred = true // irreversible closure of the old effect producer
+            guardLock.lock(); watchdogActive = false; guardLock.unlock()
+            DispatchQueue.main.sync { CGEvent.tapEnable(tap: tap, enable: false) }
+            // ownerPrepared means the independently subscribed guardian has
+            // pinned its native scope. Confirm OUR ORIGINAL subscription after
+            // that readiness, before the authenticated workerTransferred ack.
+            return originalFence.clean()
+        }, returnMonitoring: { [self] in
+            return installReadbackMonitor(command, descriptor: prepared.descriptor) && originalFence.clean()
+        }) else {
+            return receipt("execution_unknown", "helper_error")
+        }
+        if result == "delivered", clickTransferred, readbackMonitorInstalled, originalFence.clean() {
+            // Node sends this only AFTER a complete return transcript and owner
+            // observed exit. Stream delivery is not app/task success. Core must
+            // issue its own fresh completion observation, not reuse our probes.
+            readbackDescriptor = prepared.descriptor
+            readbackOnly = true
+            commandDeadline = .infinity
+            localCommandDeadline = nil
+            snapshots.removeAll(); frame = nil; frameObservation = ""; frameMonotonic = nil
+            guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
+            return receipt("executed", "ok")
+        }
+        return result == "refused" && !clickTransferred ? receipt("not_executed", "unsupported") : receipt("execution_unknown", "helper_error")
+    }
+    private func installReadbackMonitor(_ command: Object, descriptor: ClickScopeDescriptor) -> Bool {
+        guard clickSpent, clickTransferred, !readbackMonitorInstalled,
+              ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform(),
+              ClickGuardianNativeIdentitySupport.hasPublicEpochFenceSupport(), descriptor.matches(command),
+              let action = command["action"] as? Object, let target = action["target"] as? Object,
+              let window = liveWindow(target), descriptor.matchesProcess(window.identity),
+              let tap = inputTap, let observer = scopeObserver else { return false }
+        func currentPublicScope() -> Bool {
+            guard scopedAuthority(command, lease), descriptor.matchesProcess(window.identity),
+                  let b = bounds(window.element), same(b, descriptor.bounds), layout() == descriptor.displayLayout,
+                  uniqueCanvasWindow(window, descriptor.windowNumber),
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == window.identity.pid,
+                  let focus = attr(window.application, kAXFocusedWindowAttribute), CFEqual(focus, window.element),
+                  CGPreflightScreenCaptureAccess(), let observed = observe(command, window),
+                  let id = observed["id"] as? String, let snapshot = snapshots[id],
+                  safeCanvas(window, snapshot) else { return false }
+            return window.epochFence.clean() // Fresh public completeness, NOT equality with pre-click pixels/content.
+        }
+        guard currentPublicScope() else { return false }
+        // Preserve the existing unconditional worker _exit(71) callback and add
+        // the owner's scope coverage before acknowledging return. No new callback
+        // treats readback as permission to ignore a resize, focus change or sheet.
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        var subscriptions: [(AXUIElement, String)] = [(window.application, kAXFocusedWindowChangedNotification),
+            (window.application, kAXFocusedUIElementChangedNotification)]
+        for peer in window.applicationWindows {
+            for name in [kAXMovedNotification, kAXResizedNotification, kAXTitleChangedNotification, kAXLayoutChangedNotification] {
+                subscriptions.append((peer, name))
+            }
+        }
+        for (element, name) in subscriptions {
+            guard AXObserverAddNotification(observer, element, name as CFString, context) == .success else { return false }
+        }
+        // Overlap monitors: arm takeover/watchdog BEFORE acknowledgement. A
+        // physical event or scope change exits the worker; guardian stays alive.
+        DispatchQueue.main.sync {
+            guardLock.lock(); approvalOpen = false; watchdogActive = true
+            watchdogDeadline = min(expiresMonotonic, commandDeadline); guardLock.unlock()
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
+        guard CGEvent.tapIsEnabled(tap: tap), currentPublicScope(), brian_private_channel_alive() == 1 else { return false }
+        readbackMonitorInstalled = true
+        return true
+    }
+    private func localApprovalKind(_ command: Object) -> Bool {
+        guard let action = command["action"] as? Object, let kind = action["kind"] as? String else { return false }
+        return kind == "capture" || kind == "click"
+    }
+    private func beginLocalApproval(_ payload: Object) -> Bool {
+        guard clickOwnerReady(), validWirePayload("beginApproval", payload), approvalCommand == nil,
+              let command = payload["command"] as? Object, exactLocalCommand(command, command),
+              let deadline = wireInteger(command["deadlineAt"]), let commandID = wireString(command["commandId"]),
+              localDeadlines[commandID] != nil || localDeadlines.count < 512 else { return false }
+        // Anchor once at admission, not at approval completion or preparation.
+        let anchored = monotonic() + min(30_000, deadline - now())
+        let retained = min(localDeadlines[commandID] ?? anchored, anchored)
+        localDeadlines[commandID] = retained
+        localCommandDeadline = retained
+        commandDeadline = retained
+        var accepted = false
+        defer { if !accepted { localCommandDeadline = nil; commandDeadline = .infinity } }
+        guard authorized(command, payload["leaseId"] as? String ?? ""), captureAuthority(grant),
+              CGPreflightScreenCaptureAccess(), let tap = inputTap, CGEvent.tapIsEnabled(tap: tap),
+              let action = command["action"] as? Object, let target = action["target"] as? Object,
+              let window = liveWindow(target), let snapshot = fresh(action, window), safeCanvas(window, snapshot) else { return false }
+        if action["kind"] as? String == "click" {
+            guard let grant = grant, let native = clickSnapshot(command, payload["leaseId"] as? String ?? ""),
+                  ClickIntent.validate(command: command, approved: command, grant: grant, snapshot: native,
+                    clock: .init(wallMs: now(), monotonicMs: monotonic())) != nil else { return false }
+        }
+        approvedCommand = nil; approvalCommand = command
+        guardLock.lock(); approvalOpen = true; watchdogDeadline = min(expiresMonotonic, retained); guardLock.unlock()
+        accepted = true
+        return true
+    }
+    private func endLocalApproval(_ payload: Object) -> Bool {
+        guardLock.lock(); approvalOpen = false; guardLock.unlock()
+        var accepted = false
+        defer {
+            approvalCommand = nil
+            if !accepted { approvedCommand = nil; localCommandDeadline = nil; commandDeadline = .infinity }
+        }
+        approvedCommand = nil
+        guard clickOwnerReady(), validWirePayload("endApproval", payload),
+              let approved = wireBool(payload["approved"]), let command = payload["command"] as? Object,
+              let pending = approvalCommand, exactLocalCommand(command, pending),
+              authorized(command, payload["leaseId"] as? String ?? "") else { return false }
+        if !approved {
+            guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
+            return true
+        }
+        guard let action = command["action"] as? Object, let target = action["target"] as? Object,
+              let observationID = action["observationId"] as? String, let snapshot = snapshots[observationID],
+              monotonic() - snapshot.monotonic < 5_000,
+              let window = liveWindow(target), safeCanvas(window, snapshot), restoreApprovedWindow(window) else { return false }
+        // Permit only the completed trusted local dialog's input, without making
+        // old observations or frames young. The independent takeover tap stays live.
+        var restored = snapshot; restored.inputMonotonic = monotonic()
+        snapshots[observationID] = restored
+        guard fresh(action, window) != nil, safeCanvas(window, restored),
+              authorized(command, payload["leaseId"] as? String ?? ""), CGPreflightScreenCaptureAccess(),
+              let tap = inputTap, CGEvent.tapIsEnabled(tap: tap) else { return false }
+        approvedCommand = pending
+        if action["kind"] as? String == "click" {
+            guard prepareClick(command, leaseId: payload["leaseId"] as? String ?? "") != nil else { return false }
+        }
+        // Retain the original monotonic deadline through any later preparation.
+        accepted = true
+        return true
+    }
     func beginApproval(_ payload: Object) -> Bool {
+        guard !clickSpent else { return false } // readback capture uses session consent, not effect approval
+        if let command = payload["command"] as? Object, localApprovalKind(command) { return beginLocalApproval(payload) }
         guard validWirePayload("beginApproval", payload), approvalCommand == nil, let command = payload["command"] as? Object,
               let deadline = wireInteger(command["deadlineAt"]), validCommand(command), authorized(command, payload["leaseId"] as? String ?? ""),
               let action = command["action"] as? Object, let target = action["target"] as? Object,
@@ -993,6 +1266,7 @@ final class Broker: ObservationBackend {
         return true
     }
     func endApproval(_ payload: Object) -> Bool {
+        if let pending = approvalCommand, localApprovalKind(pending) { return endLocalApproval(payload) }
         guardLock.lock(); approvalOpen = false; guardLock.unlock()
         defer { approvalCommand = nil }
         approvedCommand = nil
@@ -1029,14 +1303,20 @@ final class Broker: ObservationBackend {
             if let observation = observation { receipt["observation"] = observation }; return receipt
         }
         guard validWirePayload("execute", payload), let action = command["action"] as? Object, let kind = action["kind"] as? String else { return result("denied") }
+        if clickSpent && (!readbackOnly || !["observe", "capture"].contains(kind)) { return result("denied") }
+        // Clicks use the private dispatcher handoff, never this AX executor.
         // Hard effect-class barrier, independent of grant or approval state.
         guard supportedExecution(command) else { return result("denied") }
         guard kind == "observe" || wireBool(grant?["allowControl"]) == true else { return result("denied") }
         guard kind != "capture" || captureAuthority(grant) else { return result("denied") }
         guard approvalCommand == nil, validCommand(command), let deadline = wireInteger(command["deadlineAt"]), authorized(command, payload["leaseId"] as? String ?? ""), let target = action["target"] as? Object else { return result("denied") }
-        // No surviving release owner across SIGKILL/_exit; approval or flags cannot enable input.
+        // No coordinate emitter exists in this AX executor; clicks use the private handoff.
         if kind == "click" { return result("unsupported") }
-        commandDeadline = monotonic() + deadline - now()
+        if let approved = approvedCommand, exactLocalCommand(command, approved), let anchored = localCommandDeadline {
+            commandDeadline = anchored
+        } else {
+            commandDeadline = monotonic() + deadline - now()
+        }
         guardLock.lock(); watchdogDeadline = min(expiresMonotonic, commandDeadline); guardLock.unlock()
         defer {
             commandDeadline = Double.infinity
@@ -1056,6 +1336,16 @@ final class Broker: ObservationBackend {
         guard let window = liveWindow(target) else { return finish(result("wrong_target")) }
         if kind == "observe" {
             guard let observation = observe(command, window), authorized(command, payload["leaseId"] as? String ?? "") else { return finish(result("expired")) }
+            if readbackOnly {
+                var exported = observation
+                // Remove effect affordances from the EXPORTED readback only.
+                // Native refs/snapshot keep their original actions so safeCanvas
+                // cannot misclassify an interactive subtree as a safe canvas.
+                exported["nodes"] = (observation["nodes"] as? [Object] ?? []).map { node -> Object in
+                    var value = node; value["actions"] = [String](); return value
+                }
+                return finish(result("ok", "executed", exported))
+            }
             return finish(result("ok", "executed", observation))
         }
         // Capture is authorized by the exact session grant, never by an action
@@ -1154,8 +1444,94 @@ final class Broker: ObservationBackend {
         }
         return nil
     }
+    func uniqueCanvasWindow(_ window: Window, _ number: CGWindowID) -> Bool {
+        guard let expected = bounds(window.element), let peers = attr(window.application, kAXWindowsAttribute) as? [AXUIElement],
+              peers.count <= 32,
+              peers.filter({ element in
+                  string(element, kAXTitleAttribute) == canvasTitle &&
+                  string(element, kAXIdentifierAttribute) == "brian-safe-canvas-v1" &&
+                  bounds(element).map { same($0, expected) } == true
+              }).count == 1,
+              let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [Object] else { return false }
+        let matches = entries.filter { entry in
+            guard entry[kCGWindowOwnerPID as String] as? Int == Int(window.identity.pid),
+                  entry[kCGWindowName as String] as? String == canvasTitle,
+                  let b = entry[kCGWindowBounds as String] as? Object,
+                  let r = CGRect(dictionaryRepresentation: b as CFDictionary) else { return false }
+            return r == rect(expected)
+        }
+        return matches.count == 1 && matches[0][kCGWindowNumber as String] as? UInt32 == number && visibleWindowID(window) == number
+    }
+
+    // Guardian-only reuse of observation/privacy/capture validators. Must run on
+    // its AX preparation queue, never in either input tap callback.
+    func reconstructClick(_ descriptor: ClickScopeDescriptor, command: Object, grant approvedGrant: Object,
+                          leaseId: String, epochFence: ProcessEpochFence, invalidate: @escaping () -> Void) -> ClickGuardianPreparedScope? {
+        guard guardianInvalidation != nil, descriptor.matches(command), descriptor.fresh(),
+              captureAuthority(approvedGrant), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { return nil }
+        guard epochFence.pid == descriptor.pid, epochFence.clean() else { return nil }
+        _ = discoverTargets(only: descriptor.pid, standingFence: epochFence)
+        let matches = windows.values.filter { window in
+            window.identity.pid == descriptor.pid && descriptor.matchesProcess(window.identity) &&
+                bounds(window.element).map { same($0, descriptor.bounds) } == true &&
+                uniqueCanvasWindow(window, descriptor.windowNumber)
+        }
+        guard matches.count == 1, let discovered = matches.first,
+              let action = command["action"] as? Object, let logicalTarget = action["target"] as? Object,
+              let key = logicalTarget["windowInstanceId"] as? String else { return nil }
+        // Logical IDs correlate approval only. Native AX handle, membership,
+        // standing epoch fence and CG window number above established the scope.
+        let window = Window(target: logicalTarget, element: discovered.element, application: discovered.application,
+            applicationWindows: discovered.applicationWindows, launch: discovered.launch, identity: discovered.identity, epochFence: discovered.epochFence)
+        windows = [key: window]; grant = approvedGrant; lease = leaseId
+        expiresMonotonic = descriptor.grantDeadline
+        commandDeadline = descriptor.commandDeadline
+        guard let prepared = ClickGuardianPreparedScope(window: window, descriptor: descriptor,
+                grantExpiresAt: wireInteger(approvedGrant["expiresAt"])!, invalidate: invalidate),
+              prepared.subscribe(), let observed = observe(command, window),
+              let observedID = observed["id"] as? String, let original = snapshots[observedID],
+              safeCanvas(window, original), ClickScopeDescriptor.fingerprint(original) == descriptor.fingerprint else { return nil }
+        var observation = original.observation
+        observation["id"] = descriptor.observationID
+        let snapshot = Snapshot(observation: observation, refs: original.refs, monotonic: original.monotonic)
+        snapshots = [descriptor.observationID: snapshot]
+        // Independently capture selected window twice, validating AX/privacy,
+        // membership, occlusion, display and geometry before/after BOTH captures.
+        for _ in 0..<2 {
+            guard prepared.validForPreparation(), descriptor.fresh(), authorized(command, leaseId),
+                  fresh(action, window) != nil, safeCanvas(window, snapshot),
+                  uniqueCanvasWindow(window, descriptor.windowNumber),
+                  ClickScopeDescriptor.fingerprint(snapshot) == descriptor.fingerprint,
+                  let (png, width, height) = pixels(command, action, window, snapshot),
+                  width == descriptor.width, height == descriptor.height,
+                  ClickScopeDescriptor.digest(png) == descriptor.pngDigest,
+                  descriptor.matchesProcess(window.identity), descriptor.fresh(),
+                  unchanged(snapshot, window), layout() == descriptor.displayLayout,
+                  uniqueCanvasWindow(window, descriptor.windowNumber) else { prepared.invalidate(); return nil }
+        }
+        guard prepared.validForPreparation(), let binding = descriptor.binding(command: command) else { return nil }
+        prepared.seal(binding: binding)
+        return prepared
+    }
+
+    func revalidateGuardianClick(_ prepared: ClickGuardianPreparedScope, command: Object) -> Bool {
+        guard guardianInvalidation != nil, prepared.validForPreparation(),
+              let action = command["action"] as? Object,
+              let snapshot = snapshots[prepared.descriptor.observationID],
+              prepared.descriptor.fresh(), authorized(command, lease),
+              safeCanvas(prepared.window, snapshot), uniqueCanvasWindow(prepared.window, prepared.descriptor.windowNumber),
+              let (png, width, height) = pixels(command, action, prepared.window, snapshot),
+              width == prepared.descriptor.width, height == prepared.descriptor.height,
+              ClickScopeDescriptor.digest(png) == prepared.descriptor.pngDigest,
+              ClickScopeDescriptor.fingerprint(snapshot) == prepared.descriptor.fingerprint,
+              prepared.descriptor.matchesProcess(prepared.window.identity), prepared.descriptor.fresh(),
+              uniqueCanvasWindow(prepared.window, prepared.descriptor.windowNumber),
+              prepared.validForPreparation(), let intent = prepared.intent(), prepared.validates(intent) else { return false }
+        return true
+    }
+
     private func pixels(_ command: Object, _ action: Object, _ window: Window, _ snapshot: Snapshot) -> (Data, Int, Int)? {
-        guard brian_private_channel_alive() == 1 else { _exit(70) }
+        guard brian_private_channel_alive() == 1 else { if let invalidate = guardianInvalidation { invalidate(); return nil }; _exit(70) }
         guard captureAuthority(grant), authorized(command, lease), fresh(action, window) != nil,
               safeCanvas(window, snapshot), CGPreflightScreenCaptureAccess(),
               let expectedBounds = snapshot.observation["bounds"] as? Object,
@@ -1188,7 +1564,7 @@ final class Broker: ObservationBackend {
         // Watchdog/parent kills this process on deadline even if SCK hangs.
         done.wait()
         guard captureStillValid(command, action, window, snapshot), visibleWindowID(window) == number else { return nil }
-        guard brian_private_channel_alive() == 1 else { _exit(70) }
+        guard brian_private_channel_alive() == 1 else { if let invalidate = guardianInvalidation { invalidate(); return nil }; _exit(70) }
         return output
     }
     private func captureStillValid(_ command: Object, _ action: Object, _ window: Window, _ snapshot: Snapshot) -> Bool {
@@ -1197,16 +1573,19 @@ final class Broker: ObservationBackend {
     }
     private func capture(_ command: Object, _ action: Object, _ window: Window) -> Object {
         func denied(_ code: String) -> Object { ["commandId": command["commandId"]!, "outcome": "not_executed", "code": code] }
-        frame = nil; frameObservation = "" // Failed attempts never leave a reusable frame.
+        frame = nil; frameObservation = ""; frameMonotonic = nil // Failed attempts never leave a reusable frame.
         guard captureAuthority(grant), authorized(command, lease), CGPreflightScreenCaptureAccess() else { return denied("denied") }
         guard monotonic() - lastCapture >= 1000, let snapshot = fresh(action, window), safeCanvas(window, snapshot) else { return denied("stale_observation") }
         lastCapture = monotonic()
+        let captureStarted = monotonic() // Conservative capture age, before asynchronous SCK.
         guard let (png, width, height) = pixels(command, action, window, snapshot),
               captureStillValid(command, action, window, snapshot) else { return denied("stale_observation") }
         let value: Object = ["id": id(), "mimeType": "image/png", "data": png.base64EncodedString(), "width": width, "height": height,
                              "bounds": snapshot.observation["bounds"]!, "displayLayoutVersion": snapshot.observation["displayLayoutVersion"]!]
         frame = value; frameObservation = action["observationId"] as! String
+        frameMonotonic = captureStarted
         var observation = snapshot.observation; observation["frame"] = value
+        snapshots[frameObservation] = Snapshot(observation: observation, refs: snapshot.refs, monotonic: snapshot.monotonic, inputMonotonic: snapshot.inputMonotonic)
         return ["commandId": command["commandId"]!, "outcome": "executed", "code": "ok", "observation": observation]
     }
     func reachable(_ target: AXUIElement, in window: AXUIElement) -> Bool {
@@ -1228,7 +1607,12 @@ func readExactly(_ length: Int) -> Data? {
     }
     return data
 }
+// Closed executable roles only; both pass the identical signed bootstrap and
+// private standard-pipe admission. No argument/environment can enable input.
+let helperArguments = Array(CommandLine.arguments.dropFirst())
+guard helperArguments.isEmpty || helperArguments == ["--click-guardian"] else { _exit(64) }
 guard let trust = ProcessTrust() else { _exit(77) }
+if helperArguments == ["--click-guardian"] { ClickGuardianHost(trust: trust).run() }
 // Capturing the factory does not initialize AX or the takeover monitor.
 let dispatcher = ObservationDispatcher { Broker(trust: trust) }
 let sourceClock = SourceClock()

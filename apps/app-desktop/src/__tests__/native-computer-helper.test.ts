@@ -1,16 +1,32 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
-import { PassThrough, Writable } from 'node:stream'
+import { Duplex, PassThrough, Writable } from 'node:stream'
 const mocked = vi.hoisted(() => ({ spawn: vi.fn() }))
 vi.mock('node:child_process', () => ({ spawn: mocked.spawn }))
+import type { NativeClickScope } from '../computer-control/click-guardian-client.js'
 import { PrivatePipeHelper } from '../computer-control/helper-client.js'
 import { NativeComputerController } from '../computer-control/controller.js'
 import { NATIVE_PROTOCOL, type NativeGrant } from '../computer-control/contracts.js'
 const platform = process.platform
+function descriptorFor(command?: Parameters<PrivatePipeHelper['execute']>[0]): NativeClickScope {
+  const target = { appId: 'com.usebrian.NativeComputerFixture', processId: 12, processInstanceId: 'p', windowId: 'w', windowInstanceId: 'wi' }
+  const fallback: Parameters<PrivatePipeHelper['execute']>[0] = { protocol: NATIVE_PROTOCOL, commandId: 'command', grantId: 'g',
+    identity: { deploymentId: 'd', userId: 'u', workspaceId: 'w', deviceId: 'device', sessionId: 's', conversationId: 'c', taskId: 't' },
+    epoch: 1, deadlineAt: Date.now() + 10000, action: { kind: 'click', target, observationId: 'o', frameId: 'f', x: 1, y: 2 } }
+  const generation = { pid: 12, birth: '10', executable: '/package/fixture' }
+  return { version: 1, command: structuredClone(command ?? fallback), worker: { ...generation, pid: 4242, executable: '/packaged/helper' },
+    process: generation, windowNumber: 32, bounds: { x: 0, y: 0, width: 100, height: 100 }, width: 100, height: 100,
+    pngDigest: 'a'.repeat(64), fingerprint: 'b'.repeat(64), displayLayout: 'c'.repeat(64), frameTime: 10, observationTime: 9,
+    grantDeadline: 1000, commandDeadline: 500, privacy: 'publicCompleteSafeCanvas' }
+}
 function fakeChild() {
-  let request: { id: string; method: string }
+  let request: { id: string; method: string; payload?: { command?: Parameters<PrivatePipeHelper['execute']>[0] } }
+  const sideReplies: unknown[] = []
+  const side = new Duplex({ read() {}, write(chunk: Buffer, _encoding, callback) {
+    sideReplies.push(JSON.parse(chunk.subarray(4).toString())); callback()
+  } })
   const child = Object.assign(new EventEmitter(), {
-    pid: 4242 as number | undefined,
+    pid: 4242 as number | undefined, stdio: [null, null, null, side],
     stdout: new PassThrough(), stderr: new PassThrough(),
     stdin: new Writable({ write(chunk: Buffer, _encoding, callback) { request = JSON.parse(chunk.subarray(4).toString()); callback() } }),
     kill: vi.fn(() => { queueMicrotask(() => child.emit('exit', null, 'SIGKILL')); return true }),
@@ -22,7 +38,12 @@ function fakeChild() {
     const header = Buffer.alloc(4); header.writeUInt32BE(body.length)
     child.stdout.write(header.subarray(0, 2)); child.stdout.write(Buffer.concat([header.subarray(2), body]))
   }
-  return { child, respond, lastRequest: () => request }
+  function handoff(id = request.id, descriptor = descriptorFor(request.payload?.command)) {
+    const body = Buffer.from(JSON.stringify({ kind: 'handoff', requestId: id, descriptor }))
+    const header = Buffer.alloc(4); header.writeUInt32BE(body.length)
+    side.emit('data', Buffer.concat([header, body]))
+  }
+  return { child, side, sideReplies, handoff, respond, lastRequest: () => request }
 }
 afterEach(() => { Object.defineProperty(process, 'platform', { value: platform }); vi.useRealTimers(); vi.clearAllMocks() })
 describe('native private pipe', () => {
@@ -30,7 +51,7 @@ describe('native private pipe', () => {
     const { child, respond } = fakeChild(); const death = vi.fn()
     const helper = new PrivatePipeHelper('/packaged/helper', death)
     const pending = helper.listTargets(); respond([]); expect(await pending).toEqual([])
-    expect(mocked.spawn).toHaveBeenCalledWith('/packaged/helper', [], expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }))
+    expect(mocked.spawn).toHaveBeenCalledWith('/packaged/helper', [], expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe', 'pipe'] }))
     await helper.kill(); expect(child.kill).toHaveBeenCalledWith('SIGKILL'); expect(death).toHaveBeenCalledOnce()
     await expect(helper.listTargets()).rejects.toThrow(); expect(mocked.spawn).toHaveBeenCalledOnce()
   })
@@ -591,4 +612,162 @@ it.skipIf(platform !== 'linux')('real POSIX private helper source timings bind t
       expect(events[1].timing.spans[0].endUs).toBeLessThanOrEqual(events[2].timing.spans[0].startUs)
     }
   } finally { await helper.kill(); vi.unstubAllEnvs() }
+})
+
+// Private side-channel admission: no renderer/model protocol is added.
+describe('guardian handoff binding to pending helper execute', () => {
+  const commandId = '12345678-1234-4234-8234-123456789015'
+  function authority() {
+    const identity = { deploymentId: 'd', userId: 'u', workspaceId: 'w', deviceId: 'device',
+      sessionId: '12345678-1234-4234-8234-123456789014', conversationId: 'c', taskId: 't' }
+    const target = { appId: 'com.usebrian.NativeComputerFixture', processId: 12, processInstanceId: 'p', windowId: 'w', windowInstanceId: 'wi' }
+    const grant: NativeGrant = { protocol: NATIVE_PROTOCOL, identity, grantId: 'g', epoch: 1, expiresAt: Date.now() + 60_000,
+      targets: [target], allowControl: true, allowCapture: true, requester: 'Brian', goal: 'test' }
+    const command: Parameters<PrivatePipeHelper['execute']>[0] = { protocol: NATIVE_PROTOCOL, identity, grantId: 'g', epoch: 1,
+      commandId, deadlineAt: Date.now() + 10_000, action: { kind: 'click', target, observationId: 'o', frameId: 'f', x: 1, y: 2 } }
+    return { grant, command }
+  }
+  it('rejects side-channel handoffs during metadata or with a foreign request id', async () => {
+    for (const foreign of [true, false]) {
+      const f = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+      const pending = expect(helper.capabilities()).rejects.toThrow()
+      f.handoff(foreign ? 'foreign' : f.lastRequest().id)
+      await pending; await helper.kill(); expect(mocked.spawn.mock.calls.at(-1)?.[1]).toEqual([])
+    }
+  })
+  it.each(['approval', 'session', 'epoch', 'command', 'scope', 'lease', 'descriptor'] as const)('refuses mismatched %s without launching an owner', async mismatch => {
+    const f = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const { grant, command } = authority()
+    const start = helper.start(grant, 'lease'); f.respond(true); await start
+    if (mismatch !== 'approval') {
+      const approval = helper.endApproval(command, 'lease', true); f.respond(true); await approval
+    }
+    const altered = structuredClone(command)
+    if (mismatch === 'session') altered.identity.sessionId = '12345678-1234-4234-8234-123456789099'
+    if (mismatch === 'epoch') altered.epoch++
+    if (mismatch === 'command') altered.commandId = '12345678-1234-4234-8234-123456789098'
+    if (mismatch === 'scope') altered.action.target.windowInstanceId = 'foreign'
+    const execute = helper.execute(altered, mismatch === 'lease' ? 'foreign' : 'lease')
+    const descriptor = descriptorFor(altered)
+    if (mismatch === 'descriptor') descriptor.command.commandId = 'another-command'
+    f.handoff(f.lastRequest().id, descriptor); expect(f.sideReplies).toEqual([{ kind: 'refused', requestId: f.lastRequest().id }])
+    f.respond({ commandId: altered.commandId, outcome: 'not_executed', code: 'denied' }); await execute
+    expect(mocked.spawn).toHaveBeenCalledOnce(); await helper.kill()
+  })
+  it.each([true, false])('kill waits for BOTH worker and owner (worker first=%s), never kills owner', async workerFirst => {
+    const f = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    if (!workerFirst) f.child.kill.mockImplementation(() => false)
+    const { grant, command } = authority()
+    const start = helper.start(grant, 'lease'); f.respond(true); await start
+    const approval = helper.endApproval(command, 'lease', true); f.respond(true); await approval
+    const owner = fakeChild().child // next spawn only; helper retains original worker
+    const execute = expect(helper.execute(command, 'lease')).rejects.toThrow()
+    f.handoff(); const id = f.lastRequest().id
+    const readyBody = Buffer.from(JSON.stringify({ kind: 'ready', state: 'unconstructed' }))
+    const readyHeader = Buffer.alloc(4); readyHeader.writeUInt32BE(readyBody.length)
+    owner.stdout.write(Buffer.concat([readyHeader, readyBody]))
+    expect(mocked.spawn).toHaveBeenCalledTimes(2)
+    let released = false; const death = helper.kill().then(() => { released = true })
+    await execute; await new Promise<void>(resolve => setImmediate(resolve)); expect(released).toBe(false)
+    expect(owner.kill).not.toHaveBeenCalled()
+    const body = Buffer.from(JSON.stringify({ kind: 'terminal', id, status: 'refused', cleanup: 'neverArmedNoEmission', reason: 'platformUnaccepted' }))
+    const header = Buffer.alloc(4); header.writeUInt32BE(body.length)
+    owner.stdout.write(Buffer.concat([header, body])); await Promise.resolve(); expect(released).toBe(false)
+    owner.emit('exit', 0, null); owner.emit('close', 0, null)
+    if (!workerFirst) {
+      await new Promise<void>(resolve => setImmediate(resolve)); expect(released).toBe(false)
+      f.child.emit('exit', null, 'SIGKILL')
+    }
+    await death; expect(released).toBe(true)
+  })
+})
+
+// Future accepted-owner wire transcripts only. These mocks never accept a native
+// platform/profile or prove AX/CG delivery; written tests, not executed here.
+describe('one-click grant followed by independent readback', () => {
+  const pack = (value: unknown) => {
+    const body = Buffer.from(JSON.stringify(value)); const header = Buffer.alloc(4); header.writeUInt32BE(body.length)
+    return Buffer.concat([header, body])
+  }
+  async function admittedClick() {
+    const worker = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const descriptor = descriptorFor(), command = descriptor.command
+    const grant: NativeGrant = { protocol: NATIVE_PROTOCOL, identity: command.identity, grantId: command.grantId,
+      epoch: command.epoch, expiresAt: Date.now() + 60_000, targets: [command.action.target],
+      allowControl: true, allowCapture: true, requester: 'Brian', goal: 'one click, then verify' }
+    const start = helper.start(grant, 'lease'); worker.respond(true); await start
+    const approval = helper.endApproval(command, 'lease', true); worker.respond(true); await approval
+    const owner = fakeChild().child
+    const pending = helper.execute(command, 'lease')
+    worker.handoff(worker.lastRequest().id, descriptor)
+    const id = worker.lastRequest().id
+    const ownerSays = (value: unknown) => owner.stdout.write(pack(value))
+    const workerSays = (kind: string, requestId = id) => worker.side.emit('data', pack({ kind, requestId }))
+    ownerSays({ kind: 'ready', state: 'unconstructed' })
+    ownerSays({ kind: 'prepared', id }); workerSays('workerTransferred')
+    const offerReturn = () => ownerSays({ kind: 'returnMonitor', id, cleanup: 'inputStreamReleasedCandidate' })
+    const terminal = () => ownerSays({ kind: 'terminal', id, status: 'sequenceAttemptedUnproven',
+      cleanup: 'inputStreamReleasedCandidate', reason: 'monitorReturned' })
+    const ownerDies = () => { owner.emit('exit', 0, null); owner.emit('close', 0, null) }
+    return { helper, worker, owner, descriptor, command, pending, id, ownerSays, workerSays, offerReturn, terminal, ownerDies }
+  }
+  it('exposes stream execution only after return acknowledgment and owner exit; then observes/captures freshly', async () => {
+    const f = await admittedClick()
+    f.offerReturn(); f.workerSays('workerMonitoring'); f.terminal()
+    expect(f.worker.sideReplies.some(value => (value as { kind: string }).kind === 'delivered')).toBe(false)
+    f.ownerDies()
+    expect(f.worker.sideReplies.at(-1)).toEqual({ kind: 'delivered', requestId: f.id })
+    f.worker.respond({ commandId: f.command.commandId, outcome: 'executed', code: 'ok' })
+    expect(await f.pending).toEqual({ commandId: f.command.commandId, outcome: 'executed', code: 'ok' })
+    // The click receipt contains NO completion observation/goal-success assertion.
+    const observation = { identity: f.command.identity, epoch: f.command.epoch, id: 'independent-readback',
+      capturedAt: Date.now(), monotonicMs: 100, target: f.command.action.target, foreground: true,
+      bounds: f.descriptor.bounds, displayLayoutVersion: f.descriptor.displayLayout, completeness: 'complete', nodes: [] }
+    const observe = { ...f.command, commandId: 'readback-observe', action: { kind: 'observe' as const, target: f.command.action.target } }
+    const observed = f.helper.execute(observe, 'lease')
+    f.worker.respond({ commandId: observe.commandId, outcome: 'executed', code: 'ok', observation })
+    expect((await observed).observation?.id).toBe('independent-readback')
+    const capture = { ...f.command, commandId: 'readback-capture', action: { kind: 'capture' as const,
+      target: f.command.action.target, observationId: observation.id } }
+    const captured = f.helper.execute(capture, 'lease')
+    f.worker.respond({ commandId: capture.commandId, outcome: 'executed', code: 'ok', observation: { ...observation,
+      frame: { id: 'new-readback-frame', mimeType: 'image/png', data: 'synthetic-wire-fixture', width: 100, height: 100,
+        bounds: f.descriptor.bounds, displayLayoutVersion: f.descriptor.displayLayout } } })
+    expect((await captured).observation?.frame?.id).toBe('new-readback-frame')
+    const lastRequest = f.worker.lastRequest().id
+    const target = f.command.action.target, observationId = observation.id
+    const effects: Parameters<PrivatePipeHelper['execute']>[0]['action'][] = [
+      { kind: 'click', target, observationId, frameId: 'new-readback-frame', x: 2, y: 2 },
+      { kind: 'invoke', target, observationId, ref: 'button' },
+      { kind: 'setValue', target, observationId, ref: 'field', text: 'not permitted' },
+      { kind: 'scroll', target, observationId, ref: 'scroll', deltaY: 1 },
+      { kind: 'key', target, observationId, key: 'Enter' },
+      { kind: 'focus', target, observationId },
+    ]
+    for (const action of effects) await expect(f.helper.execute({ ...f.command, commandId: `second-${action.kind}`, action }, 'lease')).rejects.toThrow('spent')
+    await expect(f.helper.execute(f.command, 'lease')).rejects.toThrow('spent') // no replay of the original
+    await expect(f.helper.beginApproval(f.command, 'lease')).rejects.toThrow('spent')
+    expect(f.worker.lastRequest().id).toBe(lastRequest)
+    expect(mocked.spawn).toHaveBeenCalledTimes(2) // no second owner
+    await f.helper.kill()
+  })
+  it('rejects executed worker output before normal owner death/transcript completion', async () => {
+    const f = await admittedClick()
+    const rejected = expect(f.pending).rejects.toThrow()
+    f.worker.respond({ commandId: f.command.commandId, outcome: 'executed', code: 'ok' })
+    await rejected
+    // A genuine never-armed refusal can release cleanup, but cannot retroactively
+    // turn the discarded early receipt into delivery.
+    f.ownerSays({ kind: 'terminal', id: f.id, status: 'refused', cleanup: 'neverArmedNoEmission', reason: 'revoked' })
+    f.ownerDies(); await f.helper.kill()
+  })
+  it('failed monitoring acknowledgement leaves the grant fenced after owner death', async () => {
+    const f = await admittedClick(); const rejected = expect(f.pending).rejects.toThrow()
+    f.offerReturn(); f.workerSays('workerMonitoring', 'stale-execute')
+    await rejected; f.terminal(); f.ownerDies()
+    let released = false; void f.helper.kill().then(() => { released = true })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(released).toBe(false)
+    expect(f.worker.sideReplies.some(value => (value as { kind: string }).kind === 'delivered')).toBe(false)
+  })
 })
