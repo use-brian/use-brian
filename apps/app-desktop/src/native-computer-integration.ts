@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync, accessSync, statSync, constants } from 'node:fs'
 import { join, posix, win32 } from 'node:path'
 import { z } from 'zod'
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, powerMonitor, screen, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, powerMonitor, screen, shell } from 'electron'
 import { NativeComputerController, NativeRelayClient, PrivatePipeHelper, LocalDeviceLease } from './computer-control/index.js'
 import { CapabilitiesSchema, CommandSchema, IdentitySchema, TargetSchema, DiscoveredTargetSchema, NATIVE_PROTOCOL, MAX_SESSION_MS, sameIdentity, sameTarget, type NativeGrant, type NativeCommand, type NativeStatus, type DiscoveredTarget } from '@use-brian/computer-control/protocol.js'
 
@@ -15,7 +15,7 @@ const selection = { workspaceId: z.string().uuid(), assistantId: z.string().uuid
 export const NativeUiRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('status') }).strict(), z.object({ type: z.literal('targets') }).strict(),
   z.object({ type: z.literal('check-readiness') }).strict(),
-  z.object({ type: z.literal('permissions') }).strict(), z.object({ type: z.literal('stop') }).strict(), z.object({ type: z.literal('disconnect') }).strict(),
+  z.object({ type: z.literal('permissions'), permission: z.enum(['accessibility', 'screen-recording']).optional() }).strict(), z.object({ type: z.literal('stop') }).strict(), z.object({ type: z.literal('disconnect') }).strict(),
   z.object({ type: z.literal('workspace-changed'), workspaceId: z.string().uuid() }).strict(),
   z.object({ type: z.literal('start'), ...selection }).strict(), z.object({ type: z.literal('resume'), ...selection }).strict(),
 ])
@@ -79,6 +79,16 @@ export class NativeComputerIntegration {
   private readonly stopShortcut = process.platform === 'darwin'
     ? { accelerator: 'CommandOrControl+Shift+Escape', label: '⌘⇧Esc' }
     : { accelerator: 'Control+Alt+Shift+Escape', label: 'Ctrl+Alt+Shift+Esc' }
+  // Rejections deliberately remain fenced: only confirmed teardown removes an entry.
+  private readonly teardown = new Set<Promise<void>>()
+  private readonly terminalControllers = new WeakSet<NativeComputerController>()
+  private trackCleanup(operation: () => Promise<void>): Promise<void> {
+    let pending: Promise<void>
+    try { pending = operation() } catch { pending = Promise.reject(new Error('Cleanup unconfirmed')) }
+    this.teardown.add(pending)
+    void pending.then(() => { this.teardown.delete(pending) }, () => {})
+    return pending
+  }
   private busy = false
   private session?: { id: string; auth: Auth }
   private requests = new AbortController()
@@ -168,7 +178,7 @@ export class NativeComputerIntegration {
       const capabilities = CapabilitiesSchema.parse(advertised)
       if (capabilities.platform !== 'darwin') throw new Error('Wrong helper platform')
       stage = 'shutdown'
-      await helper.kill() // Successful metadata is published only after confirmed death.
+      await this.trackCleanup(() => helper!.kill()) // Successful metadata is published only after confirmed death.
       if (generation !== this.generation) return { ok: false }
       result = { ok: true, readiness: { helperAdmitted: true, capabilities } }
     } catch {
@@ -178,8 +188,8 @@ export class NativeComputerIntegration {
     } finally {
       // A failed/unconfirmed kill must not release the device lease or clear the
       // busy fence. Stop remains able to signal the retained helper independently.
-      if (helper) await helper.kill()
-      if (acquired) await lease.release()
+      if (helper) await this.trackCleanup(() => helper!.kill())
+      if (acquired) await this.trackCleanup(() => lease.release())
       if (this.readinessHelper === helper) this.readinessHelper = undefined
       this.busy = false
     }
@@ -195,8 +205,8 @@ export class NativeComputerIntegration {
       approveGrant: (grant, signal) => this.consent('Allow Brian to use this computer?', [
         `Requester: ${JSON.stringify(grant.requester)}`, `Workspace: ${JSON.stringify(grant.identity.workspaceId)}`, `Deployment: ${JSON.stringify(grant.identity.deploymentId)}`,
         `Task: ${JSON.stringify(grant.goal)}`, `Selected windows (data): ${JSON.stringify(grant.targets.map(target => ({ displayName: this.selection.find(item => sameTarget(item, target))?.displayName, appId: target.appId, windowId: target.windowId })))}`,
-        grant.allowControl ? 'Control: every action requires your local approval.' : 'Observation only. No input.',
-        grant.allowCapture ? 'Scoped screenshot fallback is allowed for supported windows.' : 'No screenshot capture.',
+        grant.allowControl ? 'Initial semantic scope: TextEdit and supported fixtures only. Every action requires your local approval; unavailable capabilities are not substituted.' : 'Observation only. No input.',
+        grant.allowCapture ? 'Screenshot fallback: safe fixture canvas only, at most one click per grant, followed by fresh completion readback.' : 'No screenshot capture.',
         grant.allowControl || process.platform !== 'darwin' ? this.foregroundNotice() : 'Read-only inspection: Brian will not activate, raise or edit the selected window.',
         grant.allowControl ? 'Accessibility text and approved images are sent to your configured model provider. Local execution is not local inference.' : 'AX inspector: one read of the selected window is shown locally, then the session ends automatically. No model task or screenshot capture.',
         `Expires: ${new Date(grant.expiresAt).toLocaleTimeString()}. Stop: ${this.stopShortcut.label}.`,
@@ -234,7 +244,13 @@ export class NativeComputerIntegration {
         return current() && !!finalAuth && finalAuth.accessToken === requestToken &&
           this.authKey(finalAuth) === authIdentity && this.authKey(session.auth) === authIdentity
       },
-      onStatus: status => { if (this.controller === controller) this.changed(status) },
+      onStatus: status => { if (this.controller === controller) {
+        if (['stopped', 'paused_for_user', 'ended'].includes(status.state) && !this.terminalControllers.has(controller)) {
+          this.terminalControllers.add(controller)
+          this.trackCleanup(() => controller.stop())
+        }
+        this.changed(status)
+      } },
       onActivity: activity => { if (this.controller === controller) { this.activity = activity; this.sendIndicator() } },
     })
     this.completedInspection = undefined
@@ -318,8 +334,9 @@ export class NativeComputerIntegration {
     this.completedInspection = undefined
     // Main also calls Stop at logout/deployment changes, without an auth read.
     // Conservatively forget private grant data on every integration-level Stop.
-    const shutdown = this.controller?.identityChanged()
-    const readinessShutdown = this.readinessHelper?.kill()
+    if (this.controller) this.terminalControllers.add(this.controller)
+    const shutdown = this.controller && this.trackCleanup(() => this.controller!.identityChanged())
+    const readinessShutdown = this.readinessHelper && this.trackCleanup(() => this.readinessHelper!.kill())
     const relay = this.relay; this.relay = undefined; relay?.disconnect()
     const active = this.session; this.session = undefined
     // Local Stop never waits for a network revocation.
@@ -350,6 +367,12 @@ export class NativeComputerIntegration {
     return this.controller?.status()
   }
   async handle(raw: unknown): Promise<unknown> {
+    const result = await this.handleRequest(raw) as Record<string, unknown>
+    // Pending cleanup is device-wide, fixed metadata, including across account changes.
+    // Never send the previous task's status, targets or receipt with it.
+    return this.teardown.size ? { ok: result.ok, cleanupPending: true } : { ...result, cleanupPending: false }
+  }
+  private async handleRequest(raw: unknown): Promise<unknown> {
     const parsed = NativeUiRequestSchema.safeParse(raw)
     if (!parsed.success) return { ok: false, error: 'Invalid native request' }
     const input = parsed.data
@@ -364,6 +387,7 @@ export class NativeComputerIntegration {
       }
       return { ok: true, status: this.redactedStatus() }
     }
+    if (this.teardown.size) return { ok: input.type === 'status' }
     if (input.type === 'check-readiness') return this.checkReadiness()
     if (!this.enabled || !this.ready) return { ok: false, error: 'Native control unavailable' }
     if ((input.type === 'start' || input.type === 'resume') &&
@@ -388,7 +412,7 @@ export class NativeComputerIntegration {
     }
     this.authIdentity = authIdentity
     if (input.type === 'status') return { ok: true, status: this.authenticatedStatus(auth), deviceId: this.deviceId }
-    if (this.busy) return { ok: false, error: 'Native setup busy' }
+    if (this.teardown.size || this.busy) return { ok: false, error: 'Native setup busy' }
     this.busy = true
     const generation = this.generation
     let completionGeneration = generation
@@ -398,16 +422,33 @@ export class NativeComputerIntegration {
           return { ok: false, error: 'Stop the current native session before changing permissions.' }
         }
         if (process.platform !== 'darwin') return { ok: false, error: 'Configure desktop accessibility locally; readiness is checked by the helper.' }
-        if (await this.consent('Open Accessibility permissions?', 'Only enable Use Brian if you intend to start an attended computer session. Screen Recording is separate and optional. No control starts automatically.', this.requests.signal)) {
-          // Permission changes require a fresh helper/takeover monitor and fresh
-          // target identities. Never retain an inactive, failed event-tap setup.
-          const shutdown = this.stop()
-          completionGeneration = this.generation
-          await shutdown
-          if (completionGeneration !== this.generation) return { ok: false }
-          systemPreferences.isTrustedAccessibilityClient(true)
-          await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility')
+        // Renderer supplies a closed permission name, never a URL. Omitted name
+        // preserves the legacy Accessibility request without triggering an OS prompt.
+        const permission = input.permission ?? 'accessibility'
+        const destination = permission === 'accessibility'
+          ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
+          : 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+        const label = permission === 'accessibility' ? 'Accessibility' : 'Screen Recording'
+        const workspaceId = this.workspaceId
+        const controller = this.controller
+        const current = (expectedGeneration: number) => expectedGeneration === this.generation &&
+          workspaceId === this.workspaceId && this.controller === controller && this.authIdentity === authIdentity &&
+          !['active', 'awaiting_action_approval', 'awaiting_local_consent'].includes(controller?.status().state ?? '')
+        const revalidate = async (expectedGeneration: number) => {
+          const fresh = await this.readAuth(AbortSignal.any([this.requests.signal, AbortSignal.timeout(5000)]))
+          return current(expectedGeneration) && !!fresh && this.authKey(fresh) === authIdentity
         }
+        const allowed = await this.consent(`Open ${label} settings?`,
+          `Open only the macOS ${label} settings pane. Change permissions there yourself only if intended. Screen Recording is optional and separate from Accessibility. This does not request an OS permission prompt, capture the screen, or start control.`, this.requests.signal)
+        if (!allowed) return { ok: false }
+        if (!current(generation) || !await revalidate(generation) || !current(generation)) return { ok: false }
+        // Permission changes require fresh helper/target identities. Revalidate
+        // again after helper death: account replacement need not emit Stop.
+        const shutdown = this.stop()
+        completionGeneration = this.generation
+        await shutdown
+        if (!current(completionGeneration) || !await revalidate(completionGeneration) || !current(completionGeneration)) return { ok: false }
+        await shell.openExternal(destination)
         return { ok: true, status: this.controller?.status() }
       }
       if (input.type === 'targets') {
@@ -416,7 +457,7 @@ export class NativeComputerIntegration {
         // Reuse the discovery helper: its opaque window/process identities are stable.
         // Only an explicit local discovery after Stop creates a new helper.
         if (!this.controller || state === 'stopped' || state === 'paused_for_user' || state === 'ended') {
-          await this.controller?.dispose()
+          if (this.controller) await this.trackCleanup(() => this.controller!.dispose())
           if (generation !== this.generation) return { ok: false }
           this.makeController()
         }
@@ -429,7 +470,7 @@ export class NativeComputerIntegration {
         if (process.platform === 'darwin' && previousPermission !== 'granted' &&
           capabilities.accessibilityPermission === 'granted' && !capabilities.axRead) {
           this.selection = []
-          await controller.dispose()
+          await this.trackCleanup(() => controller.dispose())
           if (generation !== this.generation) return { ok: false }
           controller = this.makeController()
           await controller.capabilities()

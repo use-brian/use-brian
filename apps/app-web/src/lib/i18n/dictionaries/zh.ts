@@ -3,6 +3,7 @@ import type { Dictionary } from "./en";
 export const zh: Dictionary = {
   nativeComputer: {
     checkReadiness: "檢查 Mac 輔助程式就緒狀態",
+    cleanupPending: "尚未確認清理完成。清理完成前無法使用原生電腦存取。仍可使用停止。",
     readinessPassed: "封裝輔助程式准入檢查已通過。這不會啟用控制，也不會驗證 AX 任務。",
     readinessFailed: "無法確認封裝輔助程式的准入狀態。",
 
@@ -24,7 +25,9 @@ export const zh: Dictionary = {
     "intro": "讓 Brian 在這台電腦的指定應用程式中工作。不會自動啟動。",
     "unavailable": "僅限已啟用原生電腦試用功能及支援本機安全控制的桌面應用程式。無法設定時請聯絡管理員。",
     "permissionHelp": "請在系統設定中允許輔助使用。螢幕擷取為選用功能，需要另外授權。",
-    "permissions": "檢查權限",
+    "permissions": "開啟 Mac 輔助使用設定",
+    screenRecordingSettings: "開啟 Mac 螢幕錄製設定",
+    supportedScope: "啟用後的初始範圍：TextEdit 和支援的測試程式中的語意操作。截圖備援僅限安全的測試畫布：每次授權點擊一次，隨後重新讀取完成狀態。不可用功能保持停用，不會自動降級。唯讀檢查器絕不截圖。",
     "stop": "停止",
     "error": "無法完成請求。請檢查設定、權限及工作階段狀態後再試。",
     "contextHelp": "選擇現有任務及您自己的對話與助理。清單空白時請先建立。",

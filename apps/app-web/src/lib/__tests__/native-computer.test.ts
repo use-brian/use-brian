@@ -161,3 +161,50 @@ it.each(["stop", "workspace-changed", "disconnect"] as const)("[COMP:app-web/nat
   finish({ ok: true, readiness }); expect(await pending).toEqual({ ok: false });
   expect(owner.snapshot().readiness).toBeUndefined();
 });
+
+
+it("publishes cleanup polls during a hung start, keeps Stop available, and fences commands until confirmed cleanup", async () => {
+  let finish!: (result: DesktopComputerControlResult) => void;
+  const control = vi.fn<ComputerControl>().mockImplementation(async m => m.type === "start" ? new Promise(resolve => { finish = resolve; }) : { ok: true });
+  const owner = new NativeComputer(() => control);
+  await owner.enter("w");
+  const starting = owner.start("start", input);
+  control.mockResolvedValue({ ok: true, cleanupPending: true });
+  await owner.check();
+  expect(owner.snapshot()).toEqual({ ok: true, cleanupPending: true });
+  const calls = control.mock.calls.length;
+  for (const type of ["targets", "permissions", "check-readiness"] as const) await owner.send({ type });
+  await owner.start("resume", input);
+  expect(control).toHaveBeenCalledTimes(calls);
+  await owner.stop(); await owner.stop();
+  await owner.enter("other");
+  finish({ ok: true, inspection: { id: "private", capturedAt: 1, completeness: "complete", nodes: [] } });
+  await starting;
+  expect(owner.snapshot()).toEqual({ ok: true, cleanupPending: true });
+  control.mockRejectedValueOnce(new Error("private"));
+  await owner.check();
+  expect(owner.snapshot()).toEqual({ ok: false, cleanupPending: true });
+  control.mockResolvedValueOnce({ ok: true });
+  await owner.check();
+  expect(owner.snapshot().cleanupPending).toBe(true);
+  control.mockResolvedValue({ ok: true, cleanupPending: false });
+  await owner.check();
+  expect(owner.snapshot().cleanupPending).toBe(false);
+  await owner.send({ type: "targets" });
+  expect(control).toHaveBeenLastCalledWith({ type: "targets" });
+});
+
+
+it("an older status response cannot clear newly observed cleanup", async () => {
+  let finish!: (result: DesktopComputerControlResult) => void;
+  const control = vi.fn<ComputerControl>().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+    .mockResolvedValue({ ok: true, cleanupPending: true });
+  const owner = new NativeComputer(() => control);
+  const old = owner.check();
+  await owner.check();
+  finish({ ok: true, cleanupPending: false }); await old;
+  expect(owner.snapshot().cleanupPending).toBe(true);
+  control.mockResolvedValue({ ok: true, cleanupPending: false });
+  await owner.check();
+  expect(owner.snapshot().cleanupPending).toBe(false);
+});

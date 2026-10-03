@@ -35,7 +35,7 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   const [allowControl, setControl] = useState(false);
   const [allowCapture, setCapture] = useState(false);
   const [starting, setBusy] = useState(false);
-  const busy = starting || !!state.readinessPending;
+  const busy = starting || !!state.readinessPending || !!state.cleanupPending;
   const [failed, setFailed] = useState(false);
   const phase = state.status?.state ?? "unavailable";
   const target = targets.find(item => nativeTargetKey(item) === targetKey);
@@ -43,6 +43,11 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   const active = phase === "active" || phase === "awaiting_action_approval" || phase === "awaiting_local_consent";
   const canControl = state.status?.capabilities.semanticActions === true;
   const canCapture = canControl && state.status?.capabilities.windowCapture === true && state.status?.capabilities.input === true;
+  // Cleanup crosses account/workspace boundaries; keep no previous task form behind it.
+  useEffect(() => {
+    setAssistant(""); setConversation(""); setTask(""); setGoal(""); setTargets([]); setTarget("");
+    setControl(false); setCapture(false);
+  }, [workspaceId, state.cleanupPending]);
   // Forget unsupported preferences, but surface the change rather than silently
   // treating a previously requested control run as an inspector run.
   useEffect(() => {
@@ -70,6 +75,12 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   const resumable = phase === "paused_for_user" || phase === "stopped";
   const ready = phase === "ready" || phase === "ended" || resumable;
   const valid = !state.inspection && ready && !!target && !!goal.trim() && chat.assistants.some(a => a.id === assistantId) && conversations.some(c => c.id === conversationId) && !!tasks.data?.some(row => row.id === taskId);
+  async function openPermissions(permission: "accessibility" | "screen-recording") {
+    if (busy || active) return;
+    setBusy(true); setFailed(false);
+    try { setFailed(!(await nativeComputer.send({ type: "permissions", permission })).ok); }
+    finally { setBusy(false); }
+  }
   async function start() {
     if (!valid || !target || busy) return;
     // Recheck the live store as well: capabilities can change between render
@@ -85,17 +96,19 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   }
   return <section className="h-full overflow-y-auto p-4 md:p-6"><div className="mx-auto max-w-2xl space-y-5">
     <h1 className="text-xl font-semibold">{t.title}</h1><p className="text-sm text-muted-foreground">{t.intro}</p>
-    <p role="status">{t.states[phase]}</p>
+    <p className="text-sm text-muted-foreground">{t.supportedScope}</p>
+    <p role="status">{state.cleanupPending ? t.cleanupPending : t.states[phase]}</p>
     {!supported || phase === "unavailable" ? <p>{t.unavailable}</p> : null}
     {phase === "permission_required" ? <p>{t.permissionHelp}</p> : null}
     {supported ? <div className="flex flex-wrap gap-2">
       <Button className="min-h-11" variant="outline" disabled={busy || active} onClick={() => void nativeComputer.send({ type: "check-readiness" })}>{t.checkReadiness}</Button>
-      <Button className="min-h-11" variant="outline" disabled={busy || active} onClick={async () => { setFailed(!(await nativeComputer.send({ type: "permissions" })).ok); }}>{t.permissions}</Button>
+      <Button className="min-h-11" variant="outline" disabled={busy || active} onClick={() => void openPermissions("accessibility")}>{t.permissions}</Button>
+      <Button className="min-h-11" variant="outline" disabled={busy || active} onClick={() => void openPermissions("screen-recording")}>{t.screenRecordingSettings}</Button>
       <Button className="min-h-11" variant="destructive" onClick={async () => { setFailed(!(await nativeComputer.stop()).ok); }}>{t.stop}</Button>
     </div> : null}
     {supported && state.readiness?.helperAdmitted ? <p role="status">{t.readinessPassed}</p> : null}
     {supported && state.readinessFailed ? <p role="alert" className="text-destructive">{t.readinessFailed}</p> : null}
-    {state.inspection && state.status?.identity?.workspaceId === workspaceId ? <section aria-label={t.inspectorTitle} className="space-y-2">
+    {!state.cleanupPending && state.inspection && state.status?.identity?.workspaceId === workspaceId ? <section aria-label={t.inspectorTitle} className="space-y-2">
       <h2 className="font-semibold">{t.inspectorTitle}</h2>
       <p className="break-all text-sm">{t.inspectorSnapshot}: {state.inspection.id} · <time dateTime={new Date(state.inspection.capturedAt).toISOString()}>{new Date(state.inspection.capturedAt).toLocaleString()}</time> · {t.inspectorCompleteness[state.inspection.completeness]}</p>
       <p className="text-sm">{t.inspectorStatic}</p>
@@ -111,7 +124,7 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
     </section> : null}
     {failed ? <p role="alert" className="text-destructive">{t.error}</p> : null}
     {supported && (!chat.assistantsLoaded || !tasks.data && !tasks.error) ? <ListSurfaceSkeleton /> : null}
-    {supported ? <>
+    {supported && !state.cleanupPending ? <>
       <p className="text-sm">{t.contextHelp} <Link className="underline" href={`/w/${workspaceId}/tasks`}>{t.tasks}</Link>{" · "}<Link className="underline" href={`/w/${workspaceId}/chat`}>{t.chat}</Link></p>
       <div className="grid gap-4 md:grid-cols-2">
         <Picker label={t.assistant} value={assistantId} disabled={busy || active} options={chat.assistants.map(a => ({ id: a.id, name: a.name }))} onChange={id => { setAssistant(id); setConversation(""); }} />

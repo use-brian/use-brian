@@ -16,6 +16,7 @@ import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 export const en = {
   nativeComputer: {
     checkReadiness: "Check Mac helper readiness",
+    cleanupPending: "Cleanup is not yet confirmed. Native computer access remains unavailable until cleanup completes. Stop remains available.",
     readinessPassed: "Packaged helper admission passed. This does not enable control or verify AX tasks.",
     readinessFailed: "Packaged helper admission could not be verified.",
 
@@ -37,7 +38,9 @@ export const en = {
     "intro": "Let Brian work in one selected app on this computer. Nothing starts automatically.",
     "unavailable": "Available only in the desktop app with the native computer pilot enabled and supported local safety controls. Ask your administrator if setup is unavailable.",
     "permissionHelp": "Allow Accessibility in system settings. Screen capture is optional and needs a separate permission.",
-    "permissions": "Check permissions",
+    "permissions": "Open Mac Accessibility settings",
+    screenRecordingSettings: "Open Mac Screen Recording settings",
+    supportedScope: "Initial scope, when enabled: semantic actions in TextEdit and supported fixtures. Screenshot fallback is limited to a safe fixture canvas: one click per grant, then fresh completion readback. Unavailable capabilities stay disabled; no automatic fallback. The read-only inspector never captures screenshots.",
     "stop": "Stop",
     "error": "Could not complete the request. Check setup, permissions and session status, then try again.",
     "contextHelp": "Choose an existing task and your own conversation with its assistant. Create them first if the lists are empty.",

@@ -92,6 +92,7 @@ it.each(["active", "awaiting_local_consent", "awaiting_action_approval"] as cons
     await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
     const button = (label: string) => Array.from(el.querySelectorAll("button")).find(b => b.textContent === label)!;
     expect(button(en.nativeComputer.permissions).disabled).toBe(true);
+    expect(button(en.nativeComputer.screenRecordingSettings).disabled).toBe(true);
     expect(button(en.nativeComputer.checkReadiness).disabled).toBe(true);
     await act(async () => button(en.nativeComputer.permissions).click());
     expect(control).not.toHaveBeenCalledWith({ type: "permissions" });
@@ -126,6 +127,7 @@ it("[COMP:app-web/native-computer] Permissions is disabled while Start waits bef
     await act(async () => button(en.nativeComputer.start).click());
     expect(control).toHaveBeenLastCalledWith(expect.objectContaining({ type: "start" }));
     expect(button(en.nativeComputer.permissions).disabled).toBe(true);
+    expect(button(en.nativeComputer.screenRecordingSettings).disabled).toBe(true);
     expect(button(en.nativeComputer.checkReadiness).disabled).toBe(true);
     await act(async () => button(en.nativeComputer.permissions).click());
     expect(control).not.toHaveBeenCalledWith({ type: "permissions" });
@@ -207,9 +209,9 @@ it.each([true, false])("[COMP:app-web/native-computer] observation-only caps (ax
   } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
 });
 
-it("[COMP:app-web/native-computer] capture without input keeps semantic control available but never requests screenshot fallback", async () => {
+it.each(["input", "windowCapture"] as const)("[COMP:app-web/native-computer] missing %s keeps semantic control available but never requests screenshot fallback", async missing => {
   setup.populated = true;
-  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: { ...fullCapabilities, input: false } };
+  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: { ...fullCapabilities, [missing]: false } };
   const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
   const control = vi.fn<ComputerControl>().mockImplementation(async () => ({ ok: true, status, targets: [target] }));
   window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
@@ -264,4 +266,55 @@ it.each(["control", "capture", "input"] as const)("[COMP:app-web/native-computer
     expect(boxes().map(b => b.getAttribute("aria-checked"))).toEqual([lost === "control" ? "false" : "true", "false"]);
     expect(control.mock.calls.some(([m]) => m.type === "start" || m.type === "resume")).toBe(false);
   } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
+});
+
+it.each(["accessibility", "screen-recording"] as const)("[COMP:app-web/native-computer] explicit %s settings action waits for consent without starting control", async permission => {
+  let finish!: (value: Awaited<ReturnType<ComputerControl>>) => void;
+  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: fullCapabilities };
+  const control = vi.fn<ComputerControl>().mockImplementation(m => m.type === "permissions" ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ ok: true, status }));
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); const root = createRoot(el);
+  try {
+    await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
+    const button = (label: string) => Array.from(el.querySelectorAll("button")).find(b => b.textContent === label)!;
+    expect(control.mock.calls.some(([m]) => m.type === "permissions")).toBe(false);
+    expect(el.textContent).toContain(en.nativeComputer.supportedScope);
+    await act(async () => button(permission === "accessibility" ? en.nativeComputer.permissions : en.nativeComputer.screenRecordingSettings).click());
+    expect(control).toHaveBeenLastCalledWith({ type: "permissions", permission });
+    expect(button(en.nativeComputer.permissions).disabled).toBe(true);
+    expect(button(en.nativeComputer.screenRecordingSettings).disabled).toBe(true);
+    expect(button(en.nativeComputer.checkReadiness).disabled).toBe(true);
+    expect(button(en.nativeComputer.stop).disabled).toBe(false);
+    await act(async () => finish({ ok: false })); // local consent cancelled
+    expect(el.querySelector('[role="alert"]')?.textContent).toBe(en.nativeComputer.error);
+    expect(button(en.nativeComputer.screenRecordingSettings).disabled).toBe(false);
+    expect(control.mock.calls.some(([m]) => m.type === "start" || m.type === "resume")).toBe(false);
+  } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); }
+});
+
+
+it("shows fixed focus-free cleanup copy and disables setup but not repeated Stop", async () => {
+  const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: true, cleanupPending: true });
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); const root = createRoot(el);
+  const focus = vi.spyOn(HTMLElement.prototype, "focus");
+  try {
+    await act(async () => root.render(<><NativeComputerCoordinator workspaceId="w" /><NativeComputerPage workspaceId="w" /></>));
+    expect(el.textContent).toContain(en.nativeComputer.cleanupPending);
+    const buttons = Array.from(el.querySelectorAll("button"));
+    for (const label of [en.nativeComputer.permissions, en.nativeComputer.checkReadiness]) {
+      expect(buttons.find(b => b.textContent === label)?.disabled).toBe(true);
+    }
+    expect(el.querySelector("textarea")).toBeNull();
+    expect(buttons.some(b => b.textContent === en.nativeComputer.start)).toBe(false);
+    const stop = buttons.find(b => b.textContent === en.nativeComputer.stop)!;
+    expect(stop.disabled).toBe(false);
+    await act(async () => { stop.click(); stop.click(); });
+    expect(control.mock.calls.filter(([m]) => m.type === "stop")).toHaveLength(2);
+    expect(control.mock.calls.some(([m]) => m.type === "targets")).toBe(false);
+    expect(el.querySelector('[role="dialog"]')).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+  } finally { focus.mockRestore(); await act(async () => root.unmount()); }
 });

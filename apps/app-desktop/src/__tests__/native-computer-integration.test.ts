@@ -64,8 +64,8 @@ vi.mock('../computer-control/index.js', () => ({
     release = vi.fn(async () => {})
   },
 }))
-import { app, powerMonitor, globalShortcut, dialog, shell } from 'electron'
-import { NativeComputerIntegration } from '../native-computer-integration.js'
+import { app, powerMonitor, globalShortcut, dialog, shell, systemPreferences } from 'electron'
+import { NativeComputerIntegration, NativeUiRequestSchema } from '../native-computer-integration.js'
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 const target = { appId: 'editor', processId: 42, processInstanceId: 'process-instance', windowId: 'window', windowInstanceId: 'window-instance' }
@@ -173,6 +173,7 @@ describe('task result notices', () => {
     response.resolve(Response.json({ sessionId: uuid(6), data: { outcome: 'completed' } }))
     await vi.waitFor(() => expect(controller().identityChanged.mock.calls.length).toBe(previous + 1))
     expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(await integration.handle({ type: 'status' })).toEqual({ ok: true, cleanupPending: true })
     const completingController = controller()
     expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: false })
     expect(controller()).toBe(completingController) // Polling cannot consume the terminal result.
@@ -183,6 +184,7 @@ describe('task result notices', () => {
     death.resolve()
     if (change === 'success') await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalledTimes(1))
     else { await new Promise(resolve => setTimeout(resolve, 20)); expect(dialog.showMessageBox).not.toHaveBeenCalled() }
+    expect(await integration.handle({ type: 'status' })).toMatchObject({ cleanupPending: change === 'cleanup-failed' })
   })
 })
 
@@ -260,7 +262,7 @@ describe('trusted main native computer setup', () => {
     expect(lease.release).not.toHaveBeenCalled()
     expect(await integration.handle({ type: 'check-readiness' })).toMatchObject({ ok: false })
     death.resolve()
-    expect(await check).toEqual({ ok: false })
+    expect(await check).toEqual({ ok: false, cleanupPending: false })
     expect(lease.release).toHaveBeenCalledOnce()
   })
 
@@ -286,11 +288,76 @@ describe('trusted main native computer setup', () => {
     expect(controller().listTargets).toHaveBeenCalledOnce()
   })
 
-  it('permission setup is rejected during a live session without opening another dialog', async () => {
+  it('permission schema is closed and preserves the legacy request', () => {
+    for (const request of [{ type: 'permissions' }, { type: 'permissions', permission: 'accessibility' }, { type: 'permissions', permission: 'screen-recording' }]) {
+      expect(NativeUiRequestSchema.safeParse(request).success).toBe(true)
+    }
+    for (const extra of [{ permission: 'camera' }, { permission: 'Privacy_ScreenCapture' }, { permission: null }, { url: 'https://example.com' }, { permission: 'screen-recording', url: 'x-apple.systempreferences:anything' }]) {
+      expect(NativeUiRequestSchema.safeParse({ type: 'permissions', ...extra }).success).toBe(false)
+    }
+  })
+
+  it.each(['accessibility', 'screen-recording'] as const)('%s settings require consent and only open the exact pane without OS prompts', async permission => {
+    await discover()
+    vi.mocked(dialog.showMessageBox).mockClear(); vi.mocked(shell.openExternal).mockClear()
+    vi.mocked(systemPreferences.isTrustedAccessibilityClient).mockClear()
+    expect(await integration.handle({ type: 'permissions', permission })).toMatchObject({ ok: true })
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: `Open ${permission === 'accessibility' ? 'Accessibility' : 'Screen Recording'} settings?`, defaultId: 0, cancelId: 0 }))
+    expect(shell.openExternal).toHaveBeenCalledOnce()
+    expect(shell.openExternal).toHaveBeenCalledWith(`x-apple.systempreferences:com.apple.preference.security?${permission === 'accessibility' ? 'Privacy_Accessibility' : 'Privacy_ScreenCapture'}`)
+    expect(systemPreferences.isTrustedAccessibilityClient).not.toHaveBeenCalled()
+    expect(controller().start).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each(['accessibility', 'screen-recording'] as const)('%s cancellation opens nothing and does not start or stop a session', async permission => {
+    await discover()
+    const current = controller()
+    vi.mocked(shell.openExternal).mockClear()
+    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({ response: 0, checkboxChecked: false })
+    expect(await integration.handle({ type: 'permissions', permission })).toEqual({ ok: false, cleanupPending: false })
+    expect(shell.openExternal).not.toHaveBeenCalled()
+    expect(current.identityChanged).not.toHaveBeenCalled()
+    expect(current.start).not.toHaveBeenCalled()
+  })
+
+  it.each(['account', 'logout', 'workspace', 'stop', 'active'] as const)('rejects stale Screen Recording consent after %s changes', async change => {
+    await discover()
+    vi.mocked(dialog.showMessageBox).mockClear()
+    const consent = deferred<{ response: number; checkboxChecked: boolean }>()
+    vi.mocked(dialog.showMessageBox).mockReturnValueOnce(consent.promise)
+    vi.mocked(shell.openExternal).mockClear()
+    const setting = integration.handle({ type: 'permissions', permission: 'screen-recording' })
+    await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalled())
+    if (change === 'account') auth = { ...auth!, accountKey: 'replacement' }
+    if (change === 'logout') auth = null
+    if (change === 'workspace') await integration.handle({ type: 'workspace-changed', workspaceId: uuid(99) })
+    if (change === 'stop') await integration.stop()
+    if (change === 'active') controller().state = 'active'
+    consent.resolve({ response: 1, checkboxChecked: false })
+    expect(await setting).toMatchObject({ ok: false })
+    expect(shell.openExternal).not.toHaveBeenCalled()
+    expect(controller().start).not.toHaveBeenCalled()
+  })
+
+  it('revalidates account after permission helper shutdown', async () => {
+    await discover()
+    const death = deferred<void>()
+    controller().identityChanged.mockImplementationOnce(() => death.promise)
+    vi.mocked(shell.openExternal).mockClear()
+    const setting = integration.handle({ type: 'permissions', permission: 'screen-recording' })
+    await vi.waitFor(() => expect(controller().identityChanged).toHaveBeenCalledOnce())
+    auth = { ...auth!, accountKey: 'replacement' }
+    death.resolve()
+    expect(await setting).toMatchObject({ ok: false })
+    expect(shell.openExternal).not.toHaveBeenCalled()
+  })
+
+  it.each(['accessibility', 'screen-recording'] as const)('%s setup is rejected during a live session without opening another dialog', async permission => {
     await discover()
     controller().state = 'active'
     vi.mocked(dialog.showMessageBox).mockClear(); vi.mocked(shell.openExternal).mockClear()
-    expect(await integration.handle({ type: 'permissions' })).toMatchObject({ ok: false })
+    expect(await integration.handle({ type: 'permissions', permission })).toMatchObject({ ok: false })
     expect(dialog.showMessageBox).not.toHaveBeenCalled()
     expect(shell.openExternal).not.toHaveBeenCalled()
   })
@@ -648,7 +715,7 @@ describe('status identity isolation after invalidation', () => {
     try {
       const early = await integration.handle(type === 'workspace-changed' ? { type, workspaceId: uuid(90) } : { type })
       expectRedacted(early)
-      expect(early).toMatchObject({ ok: true, status: { state: 'stopped' } })
+      expect(early).toEqual({ ok: true, cleanupPending: true })
       expect(getAuth).toHaveBeenCalledTimes(calls)
       expect(current.grant).toBeUndefined()
       expect(current.stop).toHaveBeenCalledOnce()
@@ -845,4 +912,42 @@ it('helper timing is default-off, constructor-captured and not IPC/environment s
   integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth: async () => auth }); integration.install()
   controller().options.helperFactory(() => {})
   expect(mocks.helperArgs.at(-1)[3]).toBeUndefined()
+})
+
+
+describe('cleanup polling fence', () => {
+  it('tracks outstanding teardown across repeated Stop and account/workspace changes, blocks commands, and clears only on completion', async () => {
+    await discover()
+    await integration.handle(selection)
+    const current = controller(), death = deferred<void>()
+    current.stop.mockImplementation(async () => { current.state = 'stopped'; await death.promise })
+    vi.mocked(dialog.showMessageBox).mockClear()
+    const controllers = mocks.controllers.length
+    try {
+      expect(await integration.handle({ type: 'stop' })).toEqual({ ok: true, cleanupPending: true })
+      expect(await integration.handle({ type: 'stop' })).toEqual({ ok: true, cleanupPending: true })
+      auth = { ...auth!, accountKey: 'replacement', userId: uuid(99) }
+      expect(await integration.handle({ type: 'workspace-changed', workspaceId: uuid(98) })).toEqual({ ok: true, cleanupPending: true })
+      expect(await integration.handle({ type: 'status' })).toEqual({ ok: true, cleanupPending: true })
+      for (const command of [{ type: 'targets' }, selection, { ...selection, type: 'resume' }, { type: 'permissions' }, { type: 'check-readiness' }]) {
+        expect(await integration.handle(command)).toEqual({ ok: false, cleanupPending: true })
+      }
+      expect(mocks.controllers).toHaveLength(controllers)
+      expect(dialog.showMessageBox).not.toHaveBeenCalled()
+      expect(shell.openExternal).not.toHaveBeenCalled()
+    } finally { death.resolve(); await integration.stop() }
+    await integration.handle({ type: 'status' }) // detect replacement auth without recovering old scope
+    const result = await integration.handle({ type: 'status' })
+    expect(result).toMatchObject({ cleanupPending: false })
+    expect(result).not.toHaveProperty('status.identity')
+    expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: true, cleanupPending: false })
+  })
+  it('does not clear a rejected teardown with a later successful Stop', async () => {
+    await discover()
+    controller().identityChanged.mockRejectedValueOnce(new Error('private guardian uncertainty'))
+    expect(await integration.handle({ type: 'stop' })).toEqual({ ok: true, cleanupPending: true })
+    expect(await integration.handle({ type: 'stop' })).toEqual({ ok: true, cleanupPending: true })
+    expect(await integration.handle({ type: 'status' })).toEqual({ ok: true, cleanupPending: true })
+    expect(await integration.handle({ type: 'targets' })).toEqual({ ok: false, cleanupPending: true })
+  })
 })

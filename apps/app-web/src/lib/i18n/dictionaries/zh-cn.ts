@@ -14,6 +14,7 @@ import type { Dictionary } from "./en";
 export const zhCN: Dictionary = {
   nativeComputer: {
     checkReadiness: "检查 Mac 辅助程序就绪状态",
+    cleanupPending: "尚未确认清理完成。清理完成前无法使用原生电脑访问。仍可使用停止。",
     readinessPassed: "打包辅助程序准入检查已通过。这不会启用控制，也不会验证 AX 任务。",
     readinessFailed: "无法确认打包辅助程序的准入状态。",
 
@@ -35,7 +36,9 @@ export const zhCN: Dictionary = {
     "intro": "让 Brian 在这台电脑的指定应用中工作。不会自动启动。",
     "unavailable": "仅限已启用原生电脑试用功能及支持本机安全控制的桌面应用。无法设置时请联系管理员。",
     "permissionHelp": "请在系统设置中允许辅助功能。屏幕截图为可选功能，需要单独授权。",
-    "permissions": "检查权限",
+    "permissions": "打开 Mac 辅助功能设置",
+    screenRecordingSettings: "打开 Mac 屏幕录制设置",
+    supportedScope: "启用后的初始范围：TextEdit 和支持的测试程序中的语义操作。截图备用仅限安全的测试画布：每次授权点击一次，随后重新读取完成状态。不可用功能保持禁用，不会自动降级。只读检查器绝不截图。",
     "stop": "停止",
     "error": "无法完成请求。请检查设置、权限及会话状态后重试。",
     "contextHelp": "选择现有任务及您自己的对话与助手。列表为空时请先创建。",

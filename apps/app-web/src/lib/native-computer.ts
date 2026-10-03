@@ -25,12 +25,13 @@ export type NativeStatus = {
 /** allowControl=false selects the one-shot local inspector, not a remote read-only model task. */
 export type NativeStart = { workspaceId: string; assistantId: string; conversationId: string; taskId: string; goal: string; target: DiscoveredTarget; allowControl: boolean; allowCapture: boolean };
 export type DesktopComputerControlMessage =
-  | { type: "status" | "targets" | "permissions" | "check-readiness" | "stop" | "disconnect" }
+  | { type: "status" | "targets" | "check-readiness" | "stop" | "disconnect" }
+  | { type: "permissions"; permission?: "accessibility" | "screen-recording" }
   | { type: "workspace-changed"; workspaceId: string }
   | ({ type: "start" | "resume" } & NativeStart);
 export type NativeInspection = { id: string; capturedAt: number; completeness: "complete" | "partial" | "unavailable";
   nodes: { ref: string; parentRef?: string; role: string; name: string; value?: string; enabled: boolean; sensitive: boolean }[] };
-export type DesktopComputerControlResult = { ok: boolean; error?: string; status?: NativeStatus; targets?: DiscoveredTarget[]; deviceId?: string; inspection?: NativeInspection; readiness?: { helperAdmitted: true; capabilities: NativeStatus["capabilities"] } };
+export type DesktopComputerControlResult = { ok: boolean; cleanupPending?: boolean; error?: string; status?: NativeStatus; targets?: DiscoveredTarget[]; deviceId?: string; inspection?: NativeInspection; readiness?: { helperAdmitted: true; capabilities: NativeStatus["capabilities"] } };
 export type ComputerControl = (message: DesktopComputerControlMessage) => Promise<DesktopComputerControlResult>;
 
 /** A single persistent renderer owner. No automatic start, resume, pairing or API exchange. */
@@ -38,6 +39,7 @@ export class NativeComputer {
   private value: DesktopComputerControlResult & { readinessPending?: boolean; readinessFailed?: boolean } = { ok: false };
   private listeners = new Set<() => void>();
   private generation = 0;
+  private cleanupRevision = 0;
   private workspaceId = "";
   private starting?: number;
   constructor(private bridge: () => ComputerControl | undefined = () => desktopBridge()?.computerControl) {}
@@ -46,6 +48,8 @@ export class NativeComputer {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private publish(value: typeof this.value) { this.value = value; this.listeners.forEach(fn => fn()); }
   async send(message: DesktopComputerControlMessage) {
+    if (this.value.cleanupPending && ["start", "resume", "targets", "permissions", "check-readiness"].includes(message.type)) return { ok: false, cleanupPending: true };
+    const cleanupRevision = this.cleanupRevision;
     const readiness = message.type === "check-readiness";
     const polling = message.type === "status";
     const auxiliary = readiness || polling || message.type === "permissions" || message.type === "targets";
@@ -54,29 +58,40 @@ export class NativeComputer {
     const duringStart = auxiliary && this.starting === generation;
     if (beginsStart) this.starting = generation;
     if (readiness && !duringStart) this.publish({ ...this.value, readiness: undefined, readinessFailed: false, readinessPending: true });
+    if (["disconnect", "workspace-changed"].includes(message.type)) this.publish({ ok: false, ...(this.value.cleanupPending ? { cleanupPending: true } : {}) });
     if (["start", "resume", "disconnect", "workspace-changed", "stop"].includes(message.type)) this.publish({ ...this.value, inspection: undefined, readiness: undefined, readinessFailed: undefined, readinessPending: undefined });
     try {
       const result = await this.bridge()?.(message) ?? EMPTY;
       if (generation !== this.generation) return EMPTY;
-      if (duringStart || auxiliary && this.starting === generation) return result;
+      if (result.cleanupPending) {
+        ++this.cleanupRevision;
+        this.publish({ ok: result.ok, cleanupPending: true });
+        return result;
+      }
+      if (auxiliary && this.value.cleanupPending && cleanupRevision !== this.cleanupRevision) return result;
+      if (!this.value.cleanupPending && (duringStart || auxiliary && this.starting === generation)) return result;
       if (readiness) {
         this.publish({ ...this.value, readiness: result.ok ? result.readiness : undefined, readinessFailed: !result.ok || !result.readiness?.helperAdmitted, readinessPending: false });
         return result;
       }
       const previous = this.value;
+      if (previous.cleanupPending && result.cleanupPending !== false) {
+        this.publish({ ok: false, cleanupPending: true });
+        return result;
+      }
       const sameSession = result.ok && result.status?.identity && previous.status?.identity &&
         JSON.stringify(result.status.identity) === JSON.stringify(previous.status.identity) &&
         result.status.epoch === previous.status.epoch && ["active", "stopped"].includes(result.status.state);
       this.publish({ ...result, readiness: previous.readiness, readinessFailed: previous.readinessFailed, readinessPending: previous.readinessPending, ...(polling && sameSession && previous.inspection ? { inspection: previous.inspection } : {}) });
       return result;
     } catch {
-      if (generation === this.generation && !duringStart && !(auxiliary && this.starting === generation)) this.publish(readiness ? { ...this.value, readiness: undefined, readinessFailed: true, readinessPending: false } : EMPTY);
+      if (generation === this.generation && !duringStart && !(auxiliary && this.starting === generation)) this.publish(readiness ? { ...this.value, readiness: undefined, readinessFailed: true, readinessPending: false } : this.value.cleanupPending ? { ok: false, cleanupPending: true } : EMPTY);
       return EMPTY;
     } finally { if (beginsStart && this.starting === generation) this.starting = undefined; }
   }
   enter(workspaceId: string) {
     this.workspaceId = workspaceId;
-    this.publish(EMPTY);
+    this.publish(this.value.cleanupPending ? { ok: false, cleanupPending: true } : EMPTY);
     return this.send({ type: "workspace-changed", workspaceId });
   }
   clearInspection = () => { ++this.generation; this.publish({ ...this.value, inspection: undefined, readiness: undefined, readinessFailed: undefined, readinessPending: undefined }); };

@@ -22,7 +22,7 @@ export function NativeComputerCoordinator({ workspaceId }: { workspaceId: string
   if (!supported) return null;
   const state = result.status?.state ?? "unavailable";
   return <div className="flex flex-wrap items-center gap-2 border-b px-3 text-sm" aria-live="polite">
-    <Link className="inline-flex min-h-11 items-center underline" href={`/w/${workspaceId}/computer/native`}>{t.title}: {t.states[state]}</Link>
+    <Link className="inline-flex min-h-11 items-center underline" href={`/w/${workspaceId}/computer/native`}>{t.title}: {result.cleanupPending ? t.cleanupPending : t.states[state]}</Link>
     <Button className="min-h-11" variant="outline" onClick={() => void nativeComputer.stop()}>{t.stop}</Button>
   </div>;
 }
