@@ -1,3 +1,4 @@
+import { createMemory } from '../../db/memories.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
@@ -80,7 +81,7 @@ describe('[COMP:search/workspace-service] Real PostgreSQL search authority and s
 
   it('searches memories and entry bodies, folds chunks into their canonical knowledge entry',async()=>{
     const f=await fixture()
-    const memory=(await q("INSERT INTO memories(workspace_id,user_id,summary,detail,created_by_user_id) VALUES($1,$2,'Memory title','needle memory',$2) RETURNING id",[f.workspaceId,f.userId])).rows[0].id
+    const memory=(await createMemory({assistantId:f.assistant,workspaceId:f.workspaceId,userId:f.userId,summary:'Memory title',detail:'needle memory',createdByUserId:f.userId,sensitivity:'internal'})).id
     const entry=(await q("INSERT INTO knowledge_entries(workspace_id,path,title,content,created_by) VALUES($1,'fixture.md','Entry title','needle entry',$2) RETURNING id",[f.workspaceId,f.userId])).rows[0].id
     for(let i=0;i<3;i++)await q("INSERT INTO kb_chunks(workspace_id,source_path,chunk_index,chunk_text,title,created_by_user_id,user_id,source) VALUES($1,'fixture.md',$2,'needle chunk','Entry title',$3,$3,'user')",[f.workspaceId,i,f.userId])
     const found=await run(f,'knowledge')

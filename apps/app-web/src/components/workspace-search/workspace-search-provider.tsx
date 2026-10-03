@@ -39,7 +39,7 @@ export function WorkspaceSearchProvider({workspaceId,children}:{workspaceId:stri
   },[])
   const openSearch=useCallback(()=>{
     const blocking=[...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"], [role="alertdialog"]')]
-      .some(node=>!node.hasAttribute('data-workspace-search-dialog') && node.getClientRects().length>0)
+      .some(node=>!node.hasAttribute('data-workspace-search-dialog') && !node.closest('[aria-hidden="true"], [inert], [hidden]') && node.getClientRects().length>0)
     if (blocking) return false
     if (!open) restore.current=document.activeElement instanceof HTMLElement ? document.activeElement : button.current
     requestSidebarClose();setOpen(true)

@@ -98,6 +98,6 @@ describe('[COMP:app-web/workspace-search] persistent modal behavior',()=>{
     render(<WorkspaceSearchProvider workspaceId="ws"><WorkspaceSearchFallback/><textarea/></WorkspaceSearchProvider>);await tick()
     const editor=host.querySelector('textarea')!;key(editor,'k',{metaKey:true,isComposing:true});key(editor,'k',{ctrlKey:true,repeat:true});expect(document.querySelector('[data-workspace-search-dialog]')).toBeNull()
     const block=document.createElement('div');block.setAttribute('role','dialog');block.setAttribute('aria-modal','true');block.getClientRects=()=>[{width:10}] as unknown as DOMRectList;document.body.append(block)
-    key(editor,'k',{ctrlKey:true});expect(document.querySelector('[data-workspace-search-dialog]')).toBeNull();block.remove();key(editor,'k',{metaKey:true});await tick();expect(document.querySelector('[data-workspace-search-dialog]')).not.toBeNull()
+    key(editor,'k',{ctrlKey:true});expect(document.querySelector('[data-workspace-search-dialog]')).toBeNull();block.setAttribute('aria-hidden','true');key(editor,'k',{metaKey:true});await tick();expect(document.querySelector('[data-workspace-search-dialog]')).not.toBeNull();block.remove()
   })
 })

@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from 'react'
 import { Dialog } from '@base-ui/react/dialog'
+import { Button } from '@/components/ui/button'
 import { ArrowLeft, ArrowUpRight, Search, Send, X } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { WORKSPACE_SEARCH_FAMILIES, type WorkspaceSearchFamily, type WorkspaceSearchItem, type WorkspaceSearchResponse } from '@use-brian/shared'
@@ -118,12 +119,12 @@ export function WorkspaceSearchDialog({workspaceId,open,onClose}:{workspaceId:st
   const keys=[...(result?.items.map(item=>item.key)??[]),...(recipient&&query.trim()?['ask']:[])]
   const optionId=(key:string)=>`${listId}-${encodeURIComponent(key)}`
   const previewPanel=<section aria-label={t.preview} className={`${phonePreview?'flex':'hidden md:flex'} min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-auto p-4`}>
-    <button type="button" onClick={()=>setPhonePreview(false)} className="inline-flex min-h-11 items-center gap-2 self-start md:hidden"><ArrowLeft className="size-4" />{t.back}</button>
+    <button type="button" onClick={()=>setPhonePreview(false)} className="inline-flex min-h-8 max-md:min-h-11 items-center gap-2 self-start md:hidden"><ArrowLeft className="size-4" />{t.back}</button>
     {previewError?<p role="status">{t.unavailable}</p>:currentItem?<>
       <h3 className="break-words text-lg font-semibold">{preview?.title??currentItem.title}</h3>
       <p className="text-xs text-muted-foreground">{t.families[currentItem.kind]}{currentItem.updatedAt?` · ${new Date(currentItem.updatedAt).toLocaleDateString()}`:''}</p>
       <p className="whitespace-pre-wrap break-words text-sm">{preview?.text??currentItem.snippet}</p>
-      <button type="button" disabled={!preview||opening} onClick={()=>void openItem(currentItem)} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-primary px-3 text-primary-foreground disabled:opacity-50">{t.open}<ArrowUpRight className="size-4" /></button>
+      <Button type="button" disabled={!preview||opening} onClick={()=>void openItem(currentItem)}>{t.open}<ArrowUpRight className="size-4" /></Button>
     </>:<p className="text-sm text-muted-foreground">{selection.key==='ask'?t.privateHint:t.selectPreview}</p>}
   </section>
   return <Dialog.Root open={open} onOpenChange={value=>{if(!value)onClose()}}>
@@ -149,29 +150,29 @@ export function WorkspaceSearchDialog({workspaceId,open,onClose}:{workspaceId:st
           <button type="button" onClick={onClose} aria-label={t.close} className="inline-flex size-11 shrink-0 items-center justify-center rounded hover:bg-muted"><X className="size-4" /></button>
         </div>
         <div className="flex shrink-0 gap-1 overflow-x-auto border-b p-2" aria-label={t.title}>
-          {[undefined,...WORKSPACE_SEARCH_FAMILIES].map(family=><button key={family??'all'} type="button" aria-pressed={family===kind} onClick={()=>{invalidate();setKind(family)}} className={`min-h-11 shrink-0 rounded-md px-3 text-sm ${family===kind?'bg-accent font-medium':'text-muted-foreground hover:bg-muted'}`}>{family?t.families[family]:t.all}</button>)}
+          {[undefined,...WORKSPACE_SEARCH_FAMILIES].map(family=><button key={family??'all'} type="button" aria-pressed={family===kind} onClick={()=>{invalidate();setKind(family)}} className={`min-h-8 max-md:min-h-11 shrink-0 rounded-md px-3 text-sm ${family===kind?'bg-accent font-medium':'text-muted-foreground hover:bg-muted'}`}>{family?t.families[family]:t.all}</button>)}
         </div>
         <div className="flex min-h-0 flex-1 md:min-h-80">
           <div className={`${phonePreview?'hidden md:block':''} min-h-0 w-full overflow-y-auto p-2 md:w-1/2 md:border-r`}>
             {!query.trim()?<p className="p-4 text-sm text-muted-foreground">{t.blank}</p>:<>
               {state==='loading'?<p role="status" className="p-3 text-sm">{t.loading}</p>:null}
-              {(state==='error'||state==='partial')&&<div role="status" className="p-3 text-sm"><p>{state==='partial'?t.partial:t.error}</p><button type="button" className="min-h-11 underline" onClick={()=>{invalidate();setRevision(value=>value+1)}}>{t.retry}</button></div>}
+              {(state==='error'||state==='partial')&&<div role="status" className="p-3 text-sm"><p>{state==='partial'?t.partial:t.error}</p><button type="button" className="min-h-8 max-md:min-h-11 underline" onClick={()=>{invalidate();setRevision(value=>value+1)}}>{t.retry}</button></div>}
               {state==='complete'&&result?.items.length===0&&<p className="p-3 text-sm text-muted-foreground">{t.empty}</p>}
               <div role="listbox" id={listId} aria-label={t.title}>
                 {(result?.items??[]).map(item=><div key={item.key} role="option" id={optionId(item.key)} aria-selected={selection.key===item.key} onMouseDown={()=>choose(item.key)} className={`mb-1 rounded-lg ${selection.key===item.key?'bg-accent':''}`}>
-                  <button type="button" className="block min-h-11 w-full rounded-lg p-3 text-left hover:bg-muted" onFocus={()=>choose(item.key)} onClick={()=>{choose(item.key);void openItem(item)}}>
+                  <button type="button" className="block min-h-8 max-md:min-h-11 w-full rounded-lg p-3 text-left hover:bg-muted" onFocus={()=>choose(item.key)} onClick={()=>{choose(item.key);void openItem(item)}}>
                     <span className="block truncate text-sm font-medium">{item.title}</span><span className="block truncate text-xs text-muted-foreground">{t.families[item.kind]}{item.status && item.status in copy.brainPage.taskStatus ? ` · ${copy.brainPage.taskStatus[item.status as keyof typeof copy.brainPage.taskStatus]}` : ''} · {item.snippet}</span>
                   </button>
-                  <button type="button" className="min-h-11 px-3 text-sm underline md:hidden" onClick={()=>{choose(item.key);setPhonePreview(true)}}>{t.preview}</button>
+                  <button type="button" className="min-h-8 max-md:min-h-11 px-3 text-sm underline md:hidden" onClick={()=>{choose(item.key);setPhonePreview(true)}}>{t.preview}</button>
                 </div>)}
                 <div role="option" id={optionId('ask')} aria-selected={selection.key==='ask'} className={`rounded-lg ${selection.key==='ask'?'bg-accent':''}`}>
-                  <button type="button" disabled={!recipient||state==='loading'||sending} onFocus={()=>choose('ask')} onClick={()=>{choose('ask');void ask()}} className="flex min-h-11 w-full items-center gap-3 rounded-lg p-3 text-left hover:bg-muted disabled:opacity-50">
+                  <button type="button" disabled={!recipient||state==='loading'||sending} onFocus={()=>choose('ask')} onClick={()=>{choose('ask');void ask()}} className="flex min-h-8 max-md:min-h-11 w-full items-center gap-3 rounded-lg p-3 text-left hover:bg-muted disabled:opacity-50">
                     <Send className="size-4 shrink-0"/><span><span className="block text-sm font-medium">{recipient?format(t.ask,{assistant:recipient.name}):roster===null?t.assistantLoading:t.noAssistant}</span><span className="block text-xs text-muted-foreground">{t.privateHint}</span></span>
                   </button>
                 </div>
               </div>
-              {roster!==null&&!recipient&&<button type="button" className="min-h-11 px-3 text-sm underline" onClick={()=>{router.push(`/w/${workspaceId}/studio/assistants`);onClose()}}>{t.setup}</button>}
-              {result?.nextCursor&&<button type="button" disabled={more||state==='loading'} className="min-h-11 w-full text-sm underline" onClick={()=>void loadMore()}>{t.more}</button>}
+              {roster!==null&&!recipient&&<button type="button" className="min-h-8 max-md:min-h-11 px-3 text-sm underline" onClick={()=>{router.push(`/w/${workspaceId}/studio/assistants`);onClose()}}>{t.setup}</button>}
+              {result?.nextCursor&&<button type="button" disabled={more||state==='loading'} className="min-h-8 max-md:min-h-11 w-full text-sm underline" onClick={()=>void loadMore()}>{t.more}</button>}
             </>}
           </div>
           {previewPanel}

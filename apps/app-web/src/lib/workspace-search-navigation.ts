@@ -1,6 +1,6 @@
 import type { WorkspaceSearchTarget } from '@use-brian/shared'
 import { brainRowUrl } from './brain-deep-link'
-export const searchBrainPrimitive = { memories:'memory',people:'contact',companies:'company',deals:'deal',entities:'entity',tasks:'task',files:'workspace_file' } as const
+const searchBrainPrimitive = { memories:'memory',people:'contact',companies:'company',deals:'deal',entities:'entity',tasks:'task',files:'workspace_file' } as const
 export function workspaceSearchHref(workspaceId:string,target:WorkspaceSearchTarget):string {
   const base=`/w/${encodeURIComponent(workspaceId)}`,id=encodeURIComponent(target.id)
   switch(target.type) {

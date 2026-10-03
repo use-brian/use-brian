@@ -3204,7 +3204,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       const draft=captureComposerDraft();if(draft)updateRecoveryDrafts([...recoveryDrafts,draft]);
       handoffAssistantRef.current=handoff.assistantId;
       resetPane();setPendingRecordings([]);setReplyTo(null);pendingReplyRef.current=null;setSelectionQuote(null);
-      setPickedContextGroupId(null);setPickedContextProjectId(null);setResearchMode(false);setAskArmed(false);
+      setPickedContextGroupId(null);setPickedContextProjectId(null);setResearchMode(handoff.researchMode??false);setAskArmed(false);
       setPickedAssistantId(handoff.assistantId);seededRef.current=null;setRestoring(null);
       router.replace(personalChatHandoffPath(workspaceId,handoff.assistantId,handoff.requestId),{scroll:false});
     },
@@ -3710,13 +3710,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           "focus-within:border-ring [&_:focus-visible]:shadow-none",
         )}
       >
-        {recoveryDrafts.length>0 && <details className="border-b p-2 text-sm">
-        <summary className="min-h-11 cursor-pointer py-3">{searchCopy.savedDrafts}</summary>
-        {recoveryDrafts.map(draft=><button key={draft.id} type="button" disabled={att.uploading||recordingUpload.busy}
-          onClick={()=>restoreComposerDraft(draft)} className="flex min-h-11 w-full items-center gap-2 rounded px-2 text-left hover:bg-muted">
-          <span className="shrink-0">{searchCopy.restoreDraft}</span><span className="truncate">{draft.text||searchCopy.attachmentDraft}</span>
-        </button>)}
-      </details>}
       <ChatComposer
           value={editingText}
           onChange={setEditingText}
@@ -3970,9 +3963,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         className="bottom-full left-2 mb-1"
       />
       {recoveryDrafts.length>0 && <details className="border-b p-2 text-sm">
-        <summary className="min-h-11 cursor-pointer py-3">{searchCopy.savedDrafts}</summary>
+        <summary className="min-h-8 max-md:min-h-11 cursor-pointer py-3">{searchCopy.savedDrafts}</summary>
         {recoveryDrafts.map(draft=><button key={draft.id} type="button" disabled={att.uploading||recordingUpload.busy}
-          onClick={()=>restoreComposerDraft(draft)} className="flex min-h-11 w-full items-center gap-2 rounded px-2 text-left hover:bg-muted">
+          onClick={()=>restoreComposerDraft(draft)} className="flex min-h-8 max-md:min-h-11 w-full items-center gap-2 rounded px-2 text-left hover:bg-muted">
           <span className="shrink-0">{searchCopy.restoreDraft}</span><span className="truncate">{draft.text||searchCopy.attachmentDraft}</span>
         </button>)}
       </details>}
