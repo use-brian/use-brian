@@ -11966,6 +11966,9 @@ export const en = {
     confirmAlreadyProcessed:
       "This recording was already processed once. Running it again re-transcribes the audio and can duplicate the memories it extracted before.",
     linkError: "We could not load your recordings.",
+    uploadPrepareFailed: "The server could not prepare or admit this recording upload. Processing has not started. Keep the recording on this device and try again.",
+    uploadCompleteFailed: "The server could not complete this recording upload. Processing has not started. Keep the recording on this device and try again.",
+    serverSetupRequired: "The server needs ffmpeg and ffprobe configured before it can process this recording. Contact your administrator. Keep the local recording for retry.",
     uploadFailed:
       "The audio could not reach storage, so nothing was processed. Check your connection - the capture is kept on this device and can be saved again from the recorder.",
     estimateFailed:
