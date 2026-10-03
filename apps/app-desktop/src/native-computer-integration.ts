@@ -22,6 +22,30 @@ export const NativeUiRequestSchema = z.discriminatedUnion('type', [
 /** Local indicator IPC only; deliberately excludes identity, content and credentials. */
 export type NativeIndicatorData = Readonly<{ state: NativeStatus['state']; activity: NativeActivity | null; shortcut: string }>
 
+// Only allowlisted terminal codes become UI copy. Never display provider text,
+// reasons, errors, or arbitrary outcome strings (including duplicate receipts).
+const taskMessages = {
+  completed: 'The task completed.',
+  paused: 'The task paused before completion.',
+  cancelled: 'The task was cancelled.',
+  execution_unknown: 'The task ended with an uncertain execution result. Do not repeat actions without checking the application.',
+  unavailable: 'Native computer execution is unavailable.',
+  unsupported: 'This native computer task is not supported.',
+} as const
+const taskResultSchema = z.object({
+  sessionId: z.string().uuid(),
+  duplicate: z.literal(false).optional(), isError: z.boolean().optional(),
+  data: z.object({ duplicate: z.literal(false).optional(), outcome: z.enum(['completed', 'paused', 'cancelled', 'execution_unknown', 'unavailable', 'unsupported']) }),
+})
+function taskNotice(raw: unknown, sessionId: string): { type: 'info' | 'warning'; detail: string } {
+  const result = taskResultSchema.safeParse(raw)
+  if (!result.success || result.data.sessionId !== sessionId || (result.data.isError && result.data.data.outcome === 'completed')) {
+    return { type: 'warning', detail: 'The task could not be completed or its result could not be confirmed.' }
+  }
+  const outcome = result.data.data.outcome
+  return { type: outcome === 'completed' ? 'info' : 'warning', detail: taskMessages[outcome] }
+}
+
 type Auth = { userId: string; accessToken: string; apiUrl: string; accountKey: string }
 export type NativeIntegrationOptions = {
   directory: string
@@ -465,12 +489,32 @@ export class NativeComputerIntegration {
       }
       const runSignal = this.requests.signal
       // The server uses the approved grant goal; no free-form authority or action crosses IPC.
-      void this.request(auth, `/sessions/${created.identity.sessionId}/run`, 'POST', {}, runSignal).then(async rawResult => {
+      const controller = this.controller
+      const finishRun = async (notice: ReturnType<typeof taskNotice>) => {
         if (generation !== this.generation) return
-        const result = z.object({ data: z.object({ outcome: z.string().max(100) }).passthrough() }).passthrough().safeParse(rawResult)
-        await this.stop()
-        if (result.success) await dialog.showMessageBox({ type: 'info', title: 'This computer', message: 'Native computer task ended', detail: `Outcome: ${result.data.data.outcome}. Review the selected application before starting another task.`, buttons: ['OK'] })
-      }).catch(() => { if (generation === this.generation) void this.stop() })
+        // Automatic target polling must not replace the controller during cleanup
+        // and silently discard the result. Stop/account invalidation remain pre-busy.
+        this.busy = true
+        try {
+          const shutdown = this.stop() // closes local authority immediately
+          const completedGeneration = this.generation
+          const completionSignal = this.requests.signal
+          await shutdown // retain helper-death and lease-release barriers
+          if (completedGeneration !== this.generation) return
+          const finalAuth = await this.readAuth(AbortSignal.any([completionSignal, AbortSignal.timeout(5000)]))
+          if (completedGeneration !== this.generation || this.controller !== controller || !finalAuth ||
+            this.authKey(finalAuth) !== authIdentity || this.authIdentity !== authIdentity ||
+            this.workspaceId !== grant.identity.workspaceId) return
+          await dialog.showMessageBox({ ...notice, title: 'This computer', message: 'Native computer task ended',
+            detail: `${notice.detail} Review the selected application before starting another task.`, buttons: ['OK'], signal: completionSignal })
+        } finally { this.busy = false }
+      }
+      // Separate request rejection from cleanup/dialog failure; never retry or
+      // publish a result when local shutdown could not be confirmed.
+      void this.request(auth, `/sessions/${created.identity.sessionId}/run`, 'POST', {}, runSignal).then(
+        rawResult => finishRun(taskNotice(rawResult, created.identity.sessionId)),
+        () => finishRun({ type: 'warning', detail: 'The task request failed. Its result could not be confirmed.' }),
+      ).catch(() => {})
       return { ok: true, status: this.controller.status(), deviceId: this.deviceId }
     } catch {
       // A late failure from an invalidated request must not stop a newer scope.

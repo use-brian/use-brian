@@ -120,6 +120,72 @@ async function discover() {
 }
 const controller = () => mocks.controllers.at(-1)!
 
+describe('task result notices', () => {
+  async function runResponse(response: Promise<Response>) {
+    await discover()
+    const original = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((url: string, init: RequestInit) => url.endsWith('/run') ? response : original(url, init))
+    vi.mocked(dialog.showMessageBox).mockClear()
+    expect(await integration.handle(selection)).toMatchObject({ ok: true })
+  }
+  it.each(['completed', 'paused', 'cancelled', 'execution_unknown', 'unavailable', 'unsupported'])('shows fixed copy for %s', async outcome => {
+    await runResponse(Promise.resolve(Response.json({ sessionId: uuid(6), data: { outcome, reason: 'PRIVATE_REASON', text: 'PRIVATE_TEXT' } })))
+    await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalledTimes(1))
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ type: outcome === 'completed' ? 'info' : 'warning' }))
+    expect(JSON.stringify(vi.mocked(dialog.showMessageBox).mock.calls)).not.toContain('PRIVATE')
+    expect(controller().identityChanged).toHaveBeenCalled()
+    const signal = vi.mocked(dialog.showMessageBox).mock.calls[0][0].signal!
+    expect(signal.aborted).toBe(false)
+    await integration.handle({ type: 'stop' })
+    expect(signal.aborted).toBe(true)
+  })
+  it.each([
+    { data: 'Native runtime unavailable', isError: true },
+    { data: 'PRIVATE_ACCOUNTING_ERROR', isError: true },
+    { data: { outcome: 'PRIVATE_FOREIGN_OUTCOME' } },
+    { data: { outcome: 'x'.repeat(1000) } },
+    null, {}, { data: { outcome: 123 } },
+    { duplicate: true, data: { outcome: 'completed' } },
+    { data: { duplicate: true, outcome: 'completed' } },
+    { data: { outcome: 'completed' }, isError: true },
+    { sessionId: uuid(99), data: { outcome: 'completed' } },
+    { sessionId: undefined, data: { outcome: 'completed' } },
+  ])('warns without echoing malformed, foreign or duplicate data: %#', async body => {
+    await runResponse(Promise.resolve(Response.json({ sessionId: uuid(6), ...body })))
+    await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalledTimes(1))
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ type: 'warning',
+      detail: 'The task could not be completed or its result could not be confirmed. Review the selected application before starting another task.' }))
+  })
+  it.each(['http', 'rejection', 'json'])('surfaces %s failure', async failure => {
+    const response = deferred<Response>()
+    await runResponse(response.promise.then(value => { if (failure === 'rejection') throw new Error('PRIVATE_ERROR'); return value }))
+    response.resolve(new Response('PRIVATE_BODY', { status: failure === 'http' ? 503 : 200 }))
+    await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalledTimes(1))
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ type: 'warning',
+      detail: 'The task request failed. Its result could not be confirmed. Review the selected application before starting another task.' }))
+  })
+  it.each(['success', 'stop', 'workspace', 'account', 'sign-out', 'cleanup-failed'])('waits for cleanup and drops invalidated result: %s', async change => {
+    const response = deferred<Response>()
+    await runResponse(response.promise)
+    const death = deferred<void>()
+    controller().stop.mockImplementationOnce(() => death.promise.then(() => { if (change === 'cleanup-failed') throw new Error('PRIVATE'); }))
+    const previous = controller().identityChanged.mock.calls.length
+    response.resolve(Response.json({ sessionId: uuid(6), data: { outcome: 'completed' } }))
+    await vi.waitFor(() => expect(controller().identityChanged.mock.calls.length).toBe(previous + 1))
+    expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    const completingController = controller()
+    expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: false })
+    expect(controller()).toBe(completingController) // Polling cannot consume the terminal result.
+    if (change === 'stop') await integration.handle({ type: 'stop' })
+    if (change === 'workspace') await integration.handle({ type: 'workspace-changed', workspaceId: uuid(99) })
+    if (change === 'account') auth = { ...auth!, accountKey: 'replacement' }
+    if (change === 'sign-out') auth = null
+    death.resolve()
+    if (change === 'success') await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalledTimes(1))
+    else { await new Promise(resolve => setTimeout(resolve, 20)); expect(dialog.showMessageBox).not.toHaveBeenCalled() }
+  })
+})
+
 describe('trusted main native computer setup', () => {
   async function packagedReadiness() {
     await integration.stop()
