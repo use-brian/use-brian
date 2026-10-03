@@ -238,8 +238,8 @@ test('click preparation uses native cache, unchanged PNG and anchored ages witho
   assert(execute.includes('if kind == "click" { return result("unsupported") }'));
   assert(helper.includes('return kind == "observe" || kind == "capture" || semanticKind(kind)'));
   assert(helper.includes('if let backend = backend, supportedExecution(command)'));
-  assert.equal((helper.match(/"input": false/g) ?? []).length, 1);
-  assert(helper.includes('"input": inputReady'));
+  assert.equal((helper.match(/"input": false/g) ?? []).length, 2);
+  assert(!helper.includes('"input": inputReady'));
   assert(!/CGEvent\(mouseEventSource:|\.post\(tap:|CGEventPost/.test(helper));
   const intent = readFileSync(new URL('./ClickIntent.swift', import.meta.url), 'utf8');
   for (const gate of ['equal(command, approved)', 'equal(embeddedFrame, frame)', 'equal(bounds, s.currentBounds)',
@@ -280,12 +280,12 @@ test('guardian native scope uses private descriptor, shared validators and indep
   assert(host.includes('guard lock.try() else { return false }'));
   assert(host.includes('takeUnretainedValue().invalidate()'));
   assert.match(native, /static let profiles: \[ClickGuardianPlatformProfile\] = \[\]/);
-  assert.match(native, /static func acceptsCurrentPlatform\(\) -> Bool \{\s*guard !profiles.isEmpty else \{ return false \}[^\n]*\n\s*#if os\(macOS\)\s*guard let metadata = currentMetadata\(\)/);
-  assert(native.includes('ClickGuardianPlatformSelector.matches(profiles: profiles,'));
+  assert.match(native, /static func acceptsCurrentPlatform\(\) -> Bool \{\s*return false\s*\}/);
+  assert(!native.includes('currentMetadata()'));
   assert(native.includes('place: .tailAppendEventTap'));
-  assert(native.includes('tail.sealProducer()'));
-  assert(native.indexOf('retainedUp = up') < native.indexOf('down.tapPostEvent(proxy)'));
-  assert(native.includes('return Unmanaged.passRetained(up)'));
+  assert(!native.includes('tail.sealProducer()'));
+  assert(!native.includes('tapPostEvent('));
+  assert(!native.includes('Unmanaged.passRetained(up)'));
   assert(native.includes('tail.complete, let port = tap, let end = tailTap'));
 });
 
@@ -315,11 +315,12 @@ test('accepted stream return keeps overlapping monitors and opens only readback'
   assert(native.includes('else if monitorReturnAcknowledged && ownedStreamProven()'));
   assert(native.includes('static func hasPublicEpochFenceSupport() -> Bool'));
   assert.match(native, /static let profiles: \[ClickGuardianPlatformProfile\] = \[\]/);
-  assert.match(native, /static func acceptsCurrentPlatform\(\) -> Bool \{\s*guard !profiles.isEmpty else \{ return false \}[^\n]*\n\s*#if os\(macOS\)\s*guard let metadata = currentMetadata\(\)/);
-  assert(native.includes('ClickGuardianPlatformSelector.matches(profiles: profiles,'));
+  assert.match(native, /static func acceptsCurrentPlatform\(\) -> Bool \{\s*return false\s*\}/);
+  assert(!native.includes('currentMetadata()'));
   const capability = helper.slice(helper.indexOf('    func capabilities()', helper.indexOf('final class Broker:')), helper.indexOf('    func listTargets()', helper.indexOf('final class Broker:')));
-  for (const token of ['!clickSpent', 'clickOwnerReady()', 'acceptsCurrentPlatform()', 'hasPublicEpochFenceSupport()',
-    'trust.parentValid()', 'CGPreflightListenEventAccess()', 'CGPreflightPostEventAccess()', '"input": inputReady']) assert(capability.includes(token), token);
+  assert(capability.includes('"input": false'));
+  assert(capability.includes('"semanticActions": ready && !clickSpent'));
+  assert(!/acceptsCurrentPlatform|CGPreflightPostEventAccess|inputReady/.test(capability));
   assert(helper.includes('clickSpent && (!readbackOnly || !["observe", "capture"].contains(kind))'));
   assert(helper.includes('Native refs/snapshot keep their original actions'));
 });
@@ -341,4 +342,39 @@ test('public standing epoch fences span admission and authenticated monitor over
   for (const token of ['NOTE_EXEC | NOTE_EXIT', 'EV_RECEIPT', 'FD_CLOEXEC', 'receipt.data != 0',
     'atomic_flag_test_and_set', 'if (n != 0) atomic_store', 'const struct timespec zero = {0, 0}']) assert(c.includes(token), token);
   assert(!c.includes('proc_pidinfo'));
+});
+
+// Regression for the observed last-check-to-post deadline counterexample.
+// Proves source retirement, not atomic OS delivery or working coordinate input.
+test('retired coordinate path refuses before all preparation and preserves uncertainty', () => {
+  const native = readFileSync(new URL('./ClickGuardianNative.swift', import.meta.url), 'utf8');
+  const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
+  const host = readFileSync(new URL('./ClickGuardianHost.swift', import.meta.url), 'utf8');
+  const section = (source, from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+  const execute = section(native, '    func execute(', '    func revoke(').replace(/\/\/[^\n]*/g, '');
+  assert.match(execute, /checkLane\(\)\s*refuse\(\)\s*return status/);
+  assert.doesNotMatch(execute, /arm\(|reserve\(|validate\(|preallocate\(|nullWake\(|post\(|scheduleExpiry\(/);
+  assert.doesNotMatch(native, /tapPostEvent\(|passRetained\(up\)|tail\.reserve\(|ledger\.arm\(/);
+  const receive = section(native, '    private func receive(', '    // Allocation-only seam');
+  assert(receive.includes('return unchanged'));
+  assert.doesNotMatch(receive, /preallocate\(|\.post\(|passRetained/);
+  const handoff = section(helper.slice(helper.indexOf('final class Broker:')), '    func handoffClick(', '    private func installReadbackMonitor');
+  const refusal = handoff.indexOf('guard ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform()');
+  assert(refusal >= 0);
+  for (const token of ['defer { approvedCommand = nil }', 'prepareClick(', 'clickSpent = true',
+    'reservedClicks.insert', 'reservedFrames.insert', 'guardianWorkerHandoff(', 'clickTransferred = true']) {
+    assert(handoff.indexOf(token) > refusal, token);
+  }
+  assert(handoff.includes('return clickSpent || clickTransferred\n                ? receipt("execution_unknown", "helper_error") : receipt("not_executed", "unsupported")'));
+  const approval = section(helper, '    private func beginLocalApproval(', '    private func endLocalApproval(');
+  assert(approval.indexOf('action["kind"] as? String == "click" { return false }') < approval.indexOf('localDeadlines[commandID] = retained'));
+  const admit = section(host, '    private func admit(', '    private func acceptTransfer(');
+  const gate = admit.indexOf('guard ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform() else { finish(reason: "platformUnaccepted") }');
+  assert(gate > admit.indexOf('requestID = id'));
+  for (const token of ['ClickScopeDescriptor(wire:', 'ProcessEpochFence(pid:', 'Broker(trust:', 'broker.reconstructClick', 'candidate.startProbe()']) assert(admit.indexOf(token) > gate, token);
+  assert(host.includes('var status = "refused", cleanup = "neverArmedNoEmission"'));
+  assert(host.includes('if candidate.sequenceAttempted { status = "sequenceAttemptedUnproven" }'));
+  assert(host.includes('case .fencedLeaseRetained: cleanup = "fencedLeaseRetained"'));
+  assert(native.includes('if !everArmed && !sequenceAttempted { result = .neverArmedNoEmission }'));
+  assert(native.includes('else { result = .fencedLeaseRetained }'));
 });

@@ -305,6 +305,9 @@ final class ClickGuardianHost {
         guard !consumed, Set(message.keys) == Set(["kind", "id", "workerPid", "grant", "command", "leaseId", "descriptor"]),
               message["kind"] as? String == "admit", let id = wireString(message["id"]) else { finish(reason: "revoked") }
         consumed = true; requestID = id
+        // Protocol-compatible terminal refusal before descriptor reconstruction,
+        // epoch probes, Broker creation, null probe or monitor transfer.
+        guard ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform() else { finish(reason: "platformUnaccepted") }
         guard let raw = message["descriptor"] as? Object, let descriptor = ClickScopeDescriptor(wire: raw),
               let pid = wireInteger(message["workerPid"], min: 2, max: Double(Int32.max)),
               wireInteger(descriptor.worker["pid"]) == pid,

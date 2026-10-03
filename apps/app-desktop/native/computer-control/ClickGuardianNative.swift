@@ -1,4 +1,4 @@
-// Linked native candidate, UNVERIFIED. Production platform registry is EMPTY.
+// Retired coordinate mechanism. Production authorization is unconditionally false.
 // No transport/content API, environment switches, or claimed OS drain evidence.
 import Foundation
 import Dispatch
@@ -122,57 +122,16 @@ enum ClickGuardianPlatformSelector {
 
 enum ClickGuardianNativeAcceptedPlatforms {
     // Source-owned and immutable. NO accepted profiles or external overrides.
-    // Future entries still require native acceptance of stale-proxy, epoch-race
-    // and input-provenance behavior; metadata matching supplies none of that.
+    // Entries are metadata only; adding one cannot re-enable the retired mechanism.
     static let profiles: [ClickGuardianPlatformProfile] = []
     static let mechanismRevision = 1
 
+    // Retired after operator-last-check-to-post-25G83.json demonstrated a real
+    // deadline counterexample. Metadata entries can NEVER authorize this mechanism.
     static func acceptsCurrentPlatform() -> Bool {
-        guard !profiles.isEmpty else { return false } // Do not probe metadata when empty.
-        #if os(macOS)
-        guard let metadata = currentMetadata() else { return false }
-        return ClickGuardianPlatformSelector.matches(profiles: profiles,
-            runtime: metadata.profile, translated: metadata.translated)
-        #else
         return false
-        #endif
     }
 
-    #if os(macOS)
-    private static func currentMetadata() -> (profile: ClickGuardianPlatformProfile, translated: Bool)? {
-        // Public APIs only, fixed-size buffers; no shell, files, environment or
-        // JSON. Failure/truncation/unknown translation values refuse selection.
-        var bytes = [UInt8](repeating: 0, count: 65)
-        var size = bytes.count
-        guard sysctlbyname("kern.osversion", &bytes, &size, nil, 0) == 0,
-              size > 1, size <= bytes.count, bytes[size - 1] == 0,
-              !bytes[..<(size - 1)].contains(0),
-              let build = String(bytes: bytes[..<(size - 1)], encoding: .utf8) else { return nil }
-        var translated: Int32 = 0
-        size = MemoryLayout<Int32>.size
-        let result = sysctlbyname("sysctl.proc_translated", &translated, &size, nil, 0)
-        if result != 0 {
-            // Apple's documented ENOENT means this translation facility is absent.
-            guard errno == ENOENT else { return nil }
-            translated = 0
-        } else {
-            guard size == MemoryLayout<Int32>.size, translated == 0 || translated == 1 else { return nil }
-        }
-        guard translated == 0 else { return nil }
-        let architecture: String
-        #if arch(arm64)
-        architecture = "arm64"
-        #elseif arch(x86_64)
-        architecture = "x86_64"
-        #else
-        return nil
-        #endif
-        let version = ProcessInfo.processInfo.operatingSystemVersion
-        return (ClickGuardianPlatformProfile(major: version.majorVersion, minor: version.minorVersion,
-            patch: version.patchVersion, build: build, architecture: architecture,
-            mechanismRevision: mechanismRevision), false)
-    }
-    #endif
 }
 
 #if os(macOS)
@@ -323,17 +282,9 @@ final class ClickGuardianNative {
     @discardableResult
     func execute(_ value: NativeValidatedIntent) -> Status {
         checkLane()
-        guard status == .ready, ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform(),
-              ClickGuardianNativeIdentitySupport.hasPublicEpochFenceSupport(),
-              value.command != 0, value.x.isFinite, value.y.isFinite,
-              validate(value), ledger.arm(now: observations.now(), deadline: value.deadline) else { refuse(); return status }
-        everArmed = true
-        guard let wake = nullWake(tag: clickTag) else { refuse(); return status }
-        intent = value
-        status = .awaitingWake
-        scheduleExpiry()
-        guard status == .awaitingWake else { return status }
-        wake.post(tap: .cgSessionEventTap)
+        // Refuse before validation, arming, reservation, allocation or wake.
+        // A last check/timer cannot make a subsequent OS effect deadline-atomic.
+        refuse()
         return status
     }
 
@@ -385,8 +336,8 @@ final class ClickGuardianNative {
     func fencedCleanup() -> CleanupResult {
         checkLane()
         if let result = cleanupResult { return result }
-        // Empty registry prevents tail observations from ever releasing a live
-        // production lease. Even a future accepted result is INPUT STREAM ONLY,
+        // Unconditional retirement prevents tail observations from releasing a live
+        // production lease. The retained historical result is INPUT STREAM ONLY,
         // not proof of application consumption/success or global queue drain.
         let result: CleanupResult
         if !everArmed && !sequenceAttempted { result = .neverArmedNoEmission }
@@ -460,52 +411,9 @@ final class ClickGuardianNative {
                 ClickGuardianNativeIdentitySupport.hasPublicEpochFenceSupport() ? .ready : .probeConfirmedProductionOff
             return unchanged // observed null is NOT delivery/drain/ownership proof
         }
-        guard tag == clickTag, ledger.phase == .armed else { return unchanged }
-        guard ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform(),
-              ClickGuardianNativeIdentitySupport.hasPublicEpochFenceSupport(),
-              let value = intent, let tap = tap, CGEvent.tapIsEnabled(tap: tap),
-              ledger.consume(now: observations.now(), trustedScope: validate(value),
-                             neutral: observations.neutral()) else {
-            refuse(); return unchanged
-        }
-        intent = nil
-        cancelTimer()
-        let point = CGPoint(x: value.x, y: value.y)
-        // Both allocations precede the only down insertion. Failure has no input
-        // effects and consumes the command; no cleanup up is ever synthesized.
-        guard let (down, up) = Self.preallocate(point: point, tag: clickTag,
-                                                make: observations.mouseEvent) else {
-            refuse(); return unchanged
-        }
-        // Recheck after allocation, but this is NOT an atomic timeout barrier.
-        guard validate(value), observations.neutral(),
-              CGPreflightListenEventAccess(), CGPreflightPostEventAccess(),
-              CGEvent.tapIsEnabled(tap: tap), !ledger.revoked,
-              observations.now() < value.deadline else {
-            refuse(); return unchanged
-        }
-        guard let tailPort = tailTap, CGEvent.tapIsEnabled(tap: tailPort) else { refuse(); return unchanged }
-        let time = DispatchTime.now().uptimeNanoseconds
-        guard time < UInt64.max, tail.reserve(.init(command: value.command, tag: clickTag,
-            x: value.x, y: value.y, downTime: time, upTime: time + 1, deadline: value.deadline)) else { refuse(); return unchanged }
-        down.timestamp = time; up.timestamp = time + 1
-        retainedUp = up
-        producerIntent = value
-        // Seal BEFORE insertion: exactly these two immutable objects are the only
-        // producer sequence. No timer, child, callback retry or deferred up exists.
-        tail.sealProducer()
-        sequenceAttempted = true
-        status = .sequenceAttemptedUnproven
-        ledger.fence() // no replay, even if posting has no observable effect
-        scheduleExpiry() // lost tail/producer return cannot wait without a fence
-        guard status == .sequenceAttemptedUnproven else { return unchanged }
-        // KNOWN BLOCKER: suspension here may invalidate proxy ordering. A later
-        // enabled check cannot repair that race. Registry stays EMPTY pending
-        // trusted native acceptance of this exact boundary on a platform profile.
-        down.tapPostEvent(proxy)
-        // The original event is a null, NEVER physical input. Return the retained
-        // preallocated up from THIS callback (no second post, queue or timer).
-        return Unmanaged.passRetained(up)
+        // Retired click wakes never insert or replace events, even in stale state.
+        if tag == clickTag { refuse() }
+        return unchanged
     }
 
     // Allocation-only seam: cannot post and cannot grant platform acceptance.

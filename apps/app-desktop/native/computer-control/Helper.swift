@@ -756,14 +756,9 @@ final class Broker: ObservationBackend {
         let ready = trusted && (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
         // Broker exists only after explicit discovery. Never prompt for permission.
         let captureReady = CGPreflightScreenCaptureAccess()
-        let inputReady = ready && captureReady && !clickSpent && clickOwnerReady() &&
-            ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform() &&
-            ClickGuardianNativeIdentitySupport.hasPublicEpochFenceSupport() &&
-            windows.values.contains(where: { $0.epochFence.clean() }) && trust.parentValid() &&
-            CGPreflightListenEventAccess() && CGPreflightPostEventAccess()
-        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready && !clickSpent, "windowCapture": ready && captureReady, "input": inputReady,
+        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready && !clickSpent, "windowCapture": ready && captureReady, "input": false,
                 "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": captureReady ? "granted" : "denied",
-                "limitations": ["Consented TextEdit/fixture AX actions. Capture requires control+capture consent and a public, unoccluded fixture canvas. One accepted-profile click per grant, then readback only. Unaccepted platform; public lifetime epoch fence required; keys/focus disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
+                "limitations": ["Consented TextEdit/fixture AX actions. Capture requires control+capture consent and a public, unoccluded fixture canvas. Coordinate mechanism retired after a deadline counterexample; input/keys/focus disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
     }
     func listTargets() -> [Object] { discoverTargets(only: nil) }
     private func discoverTargets(only pid: pid_t?, standingFence: ProcessEpochFence? = nil) -> [Object] {
@@ -1067,6 +1062,7 @@ final class Broker: ObservationBackend {
     // before reservation/handoff. Arithmetic evidence only; never permission to post.
     // Returns a private descriptor only; the surviving owner must independently reconstruct scope.
     func prepareClick(_ command: Object, leaseId: String) -> ClickPreparedScope? {
+        guard ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform() else { return nil }
         guard clickOwnerReady(), let approved = approvedCommand,
               exactLocalCommand(command, approved), let grant = grant,
               let before = clickSnapshot(command, leaseId),
@@ -1097,6 +1093,12 @@ final class Broker: ObservationBackend {
         let commandID = command["commandId"] as? String ?? "invalid"
         func receipt(_ outcome: String, _ code: String) -> Object {
             ["commandId": commandID, "outcome": outcome, "code": code]
+        }
+        // Refusal must not spend semantic availability, reserve a frame/command,
+        // or transfer the existing takeover monitor. Prior uncertainty stays sticky.
+        guard ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform() else {
+            return clickSpent || clickTransferred
+                ? receipt("execution_unknown", "helper_error") : receipt("not_executed", "unsupported")
         }
         defer { approvedCommand = nil }
         guard !clickSpent, validWirePayload("execute", payload), approvalCommand == nil,
@@ -1191,6 +1193,8 @@ final class Broker: ObservationBackend {
         return kind == "capture" || kind == "click"
     }
     private func beginLocalApproval(_ payload: Object) -> Bool {
+        if let command = payload["command"] as? Object,
+           let action = command["action"] as? Object, action["kind"] as? String == "click" { return false }
         guard clickOwnerReady(), validWirePayload("beginApproval", payload), approvalCommand == nil,
               let command = payload["command"] as? Object, exactLocalCommand(command, command),
               let deadline = wireInteger(command["deadlineAt"]), let commandID = wireString(command["commandId"]),

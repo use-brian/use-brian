@@ -1,4 +1,35 @@
-# Click guardian — source-only, production input OFF
+# Coordinate mechanism retired — production input unavailable
+
+The observed `operator-last-check-to-post-25G83.json` deadline counterexample
+invalidates the active-tap down/returned-up mechanism. Suspension between the
+last check and OS insertion can cross the deadline. Another check or timer is
+not an atomic fix; no deadline, consent, or ownership requirement is relaxed.
+
+Production `execute` now refuses before validation, arming, reservation, event
+allocation or wake. The callback's down insertion and returned-up replacement
+have been removed entirely. `acceptsCurrentPlatform()` unconditionally returns
+false, independent of any future registry entries. The pure profile selector
+remains metadata-only and cannot authorize input.
+
+Helper capabilities explicitly report `input: false`. Click preparation,
+approval and handoff refuse before spending semantic availability, reserving
+commands/frames or transferring the takeover monitor. The host binds the request
+ID and sends the existing `platformUnaccepted` terminal refusal before scope
+reconstruction, probes or transfer. Consented AX and scoped SCK paths remain.
+
+Historical attempted/transferred-state uncertainty and cleanup fencing remain;
+retirement is not evidence for clearing an old lease. No blind up, automatic
+lease clear, delivery proof or working coordinate clicking is supplied. The
+allocation-only seam and deterministic ledger tests remain nonauthorizing.
+
+Verification for this remediation includes source refusal/ordering contracts,
+metadata-only selection regressions and non-emitting execute tests. Linux checks
+do not establish Mac SDK compatibility or native behavior. The historical
+candidate description below is retained for context, **not the current contract**.
+
+## Historical candidate contract (superseded by retirement)
+
+### Click guardian — source-only, production input OFF
 
 **R3 remains open. Candidate behavior is UNVERIFIED.**
 

@@ -110,6 +110,12 @@ final class ClickGuardianPlatformSelectorTests: XCTestCase {
         XCTAssertFalse(ClickGuardianPlatformSelector.matches(profiles: [], runtime: profile(), translated: false))
     }
 
+    func testMatchingCounterexampleMetadataNeverAuthorizesProduction() {
+        let observed = profile(major: 26, minor: 6, patch: 2, build: "25G83")
+        XCTAssertTrue(ClickGuardianPlatformSelector.matches(profiles: [observed], runtime: observed, translated: false))
+        XCTAssertFalse(ClickGuardianNativeAcceptedPlatforms.acceptsCurrentPlatform())
+    }
+
     func testOnlyExactVersionBuildArchitectureAndMechanismMatch() {
         let accepted = profile()
         XCTAssertTrue(ClickGuardianPlatformSelector.matches(profiles: [accepted], runtime: accepted, translated: false))
@@ -192,8 +198,8 @@ final class ClickGuardianNativeGateTests: XCTestCase {
         var allocations = 0
         var validations = 0
         var observations = ClickGuardianNative.Observations()
-        observations.now = { 10 }
-        observations.neutral = { true }
+        observations.now = { XCTFail("retired execute must not sample a deadline"); return 10 }
+        observations.neutral = { XCTFail("retired execute must not sample input"); return true }
         observations.mouseEvent = { _, _ in allocations += 1; return nil }
         let adapter = ClickGuardianNative(validateCurrentScope: { _ in
             validations += 1
@@ -203,6 +209,8 @@ final class ClickGuardianNativeGateTests: XCTestCase {
             command: 1, x: 100, y: 100, deadline: 10.5)
         XCTAssertEqual(adapter.execute(intent), .refused)
         XCTAssertEqual(adapter.execute(intent), .refused)
+        XCTAssertFalse(adapter.sequenceAttempted)
+        XCTAssertFalse(adapter.tailObservationComplete)
         XCTAssertEqual(allocations, 0)
         XCTAssertEqual(validations, 0)
         XCTAssertEqual(adapter.fencedCleanup(), .neverArmedNoEmission)

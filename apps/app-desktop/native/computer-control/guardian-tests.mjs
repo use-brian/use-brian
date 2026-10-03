@@ -29,6 +29,7 @@ function run(command, argv, capture = false) {
 const portable = {
   ClickGuardianPlatformSelectorTests: [
     'testProductionRegistryIsEmptyAndRefuses',
+    'testMatchingCounterexampleMetadataNeverAuthorizesProduction',
     'testOnlyExactVersionBuildArchitectureAndMechanismMatch',
     'testTranslatedUnknownAndMissingMetadataRefuse',
     'testMalformedAndDuplicateProfilesInvalidateEntireRegistry',
@@ -92,7 +93,7 @@ let package = Package(name: "GuardianChecks", platforms: [.macOS(.v14)], targets
     const expected = Object.entries({ ...portable, ...native }).flatMap(([suite, tests]) => tests.map(name => `GuardianTests.${suite}/${name}`));
     const listed = execute('xcrun', [...command, '--list-tests'], true);
     const discovered = listed.split(/\r?\n/).map(line => line.trim()).filter(line => line.startsWith('GuardianTests.'));
-    assert.deepEqual(discovered.sort(), [...expected].sort(), 'XCTest discovery must match exactly the 20 reviewed non-emitting tests');
+    assert.deepEqual(discovered.sort(), [...expected].sort(), 'XCTest discovery must match exactly the 21 reviewed non-emitting tests');
     const filter = `^(${expected.map(name => name.replaceAll('.', '\\.')).join('|')})$`;
     execute('xcrun', [...command, '--skip-build', '--filter', filter]);
   } else {
@@ -103,7 +104,7 @@ let package = Package(name: "GuardianChecks", platforms: [.macOS(.v14)], targets
       source('ClickGuardianNative.swift'), source('ClickGuardianNativeTests.swift'), main, '-o', binary]);
     execute(binary, []);
   }
-  log('PASS portable: 14 XCTest ledger/tail/selector cases (synthetic bookkeeping/configuration only).');
+  log('PASS portable: 15 XCTest ledger/tail/selector cases (synthetic bookkeeping/configuration only).');
   if (darwin) {
     log('PASS Darwin: 6 non-emitting API XCTest cases; no event posting or permission request.');
     const fence = join(temporary, 'epoch-fence-tests');

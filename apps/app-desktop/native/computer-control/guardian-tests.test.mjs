@@ -15,7 +15,7 @@ for (const line of tests.split('\n')) {
   const method = line.match(/^    func (test\w+)\(/);
   if (method) discovered.push(`GuardianTests.${suite}/${method[1]}`);
 }
-assert.equal(discovered.length, 20);
+assert.equal(discovered.length, 21);
 
 function fixture({ listing = discovered.join('\n'), fail } = {}) {
   const calls = [], logs = [];
