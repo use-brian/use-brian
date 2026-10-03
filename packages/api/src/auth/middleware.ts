@@ -58,6 +58,17 @@ export function requireAuth(
   }
 }
 
+/** Explicit read-only authentication: identical JWT/admission checks, no activity UPDATE.
+ * Callers must mount this only for deliberately read-only operations, not normal API traffic. */
+export function requireAuthWithoutTouch(
+  jwtSecret: string,
+  sessions: AuthSessionValidator = authSessionStore,
+) {
+  return requireAuth(jwtSecret, {
+    validateAccess: claims => sessions.validateAccess(claims, { touchLastSeen: false }),
+  })
+}
+
 /**
  * Optional auth — extracts userId if token present, but doesn't reject.
  * Allows both authenticated and guest access.

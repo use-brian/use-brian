@@ -1,3 +1,4 @@
+import { safeReadinessUrl, type ReadinessCode } from './readiness.js'
 import { z } from 'zod'
 import { NativeModelIdSchema, type Tool, type ToolContext } from '@use-brian/core'
 import { randomUUID, createHash } from 'node:crypto'
@@ -99,6 +100,55 @@ export class NativeComputerService {
   // use of a completed direct-run context must not become generic resolution.
   private readonly runContexts = new WeakSet<ToolContext>()
   constructor(private config: { relayUrl: string; relaySecret: string; jwtSecret: string; deploymentId: string }) {}
+  /** SELECT-only preflight. Never creates grants, expires sessions or clears unknown fences. */
+  async readiness(scope: NativeScope, authSessionId: string, deviceId: string): Promise<ReadinessCode[]> {
+    try {
+      safeReadinessUrl(this.config.relayUrl)
+      if (!GrantSchema.shape.identity.shape.deploymentId.safeParse(this.config.deploymentId).success
+        || !this.config.deploymentId.trim() || !this.config.relaySecret || !this.config.jwtSecret) return ['configuration_invalid']
+    } catch { return ['configuration_invalid'] }
+    try {
+      const schema = await query(`SELECT name FROM public._migrations WHERE name = ANY($1::text[])`,
+        [['620_native_computer_sessions.sql', '621_native_usage_receipts.sql']])
+      if (schema.rows.length !== 2) return ['schema_unavailable']
+      // Verify actual queried shape, not just migration ledger entries.
+      await query(`SELECT n.auth_session_id,n.run_state,n.state,n.device_id,n.deployment_id,
+        a.requested_model,b.admission,b.receipt FROM native_computer_sessions n
+        CROSS JOIN native_computer_inference_attempts a CROSS JOIN native_computer_billing_intents b LIMIT 0`)
+    } catch { return ['schema_unavailable'] }
+    try {
+      const auth = await query(`SELECT 1 FROM auth_sessions a JOIN users u ON u.id=a.user_id
+        WHERE a.id=$1 AND a.user_id=$2 AND a.revoked_at IS NULL AND a.expires_at>now()
+        AND a.auth_version=u.auth_version`, [authSessionId, scope.userId])
+      if (!auth.rows.length) return ['auth_session_denied']
+      if (!await this.authorized(scope)) return ['scope_denied']
+      try { await this.assertPolicy(scope) } catch { return ['policy_denied'] }
+      const busy = await query(`SELECT 1 FROM native_computer_sessions WHERE deployment_id=$1 AND device_id=$2
+        AND (state='execution_unknown' OR run_state IN ('running','execution_unknown')
+          OR (revoked_at IS NULL AND expires_at>now())) LIMIT 1`, [this.config.deploymentId, deviceId])
+      if (busy.rows.length) return ['device_busy']
+      // Exact native_computer_conversation_lease predicate: global across devices
+      // and deployments, including expired but not-yet-revoked rows. No cleanup here.
+      const conversationBusy = await query(`SELECT 1 FROM native_computer_sessions
+        WHERE user_id=$1 AND conversation_id=$2 AND revoked_at IS NULL LIMIT 1`,
+      [scope.userId, scope.conversationId])
+      if (conversationBusy.rows.length) return ['device_busy']
+    } catch { return ['check_failed'] }
+    try {
+      const response = await fetch(`${this.config.relayUrl.replace(/\/$/,'')}/internal/native-computer/readiness`, {
+        headers: { 'x-relay-secret': this.config.relaySecret }, redirect: 'error', signal: AbortSignal.timeout(5000),
+      })
+      if (!response.ok || !response.body) { await response.body?.cancel(); return ['relay_unavailable'] }
+      const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0
+      try {
+        while (true) { const { done, value } = await reader.read(); if (done) break
+          size += value.byteLength; if (size > 1024) throw new Error('Bound exceeded'); chunks.push(value) }
+      } finally { await reader.cancel() }
+      const parsed = z.object({ enabled: z.boolean(), protocol: z.literal('native-computer-v1') }).strict()
+        .parse(JSON.parse(Buffer.concat(chunks).toString()))
+      return parsed.enabled ? [] : ['relay_disabled']
+    } catch { return ['relay_unavailable'] }
+  }
   async relay(path: string, method = 'GET', body?: unknown): Promise<unknown> {
     const response = await fetch(`${this.config.relayUrl.replace(/\/$/,'')}/internal/native-computer${path}`, { method, headers: { 'x-relay-secret': this.config.relaySecret, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(35_000) })
     if (!response.ok) throw new Error('Native relay unavailable or lease denied')

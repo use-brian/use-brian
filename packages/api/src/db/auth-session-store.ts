@@ -40,7 +40,7 @@ type SessionAdmissionRow = {
 
 export type AuthSessionStore = {
   create(userId: string, client: AuthSessionClientInfo): Promise<{ id: string; authVersion: number } | null>
-  validateAccess(claims: AuthTokenClaims): Promise<boolean>
+  validateAccess(claims: AuthTokenClaims, options?: { touchLastSeen: boolean }): Promise<boolean>
   validateRefresh(claims: AuthTokenClaims, client: AuthSessionClientInfo): Promise<{ id: string; authVersion: number } | null>
   listForUser(userId: string): Promise<AuthSession[]>
   revokeForUser(userId: string, sessionId: string): Promise<boolean>
@@ -148,10 +148,11 @@ export function createAuthSessionStore(
   return {
     create: createSession,
 
-    async validateAccess(claims) {
+    async validateAccess(claims, options) {
       const row = await admission(claims)
       if (!row) return false
       if (
+        options?.touchLastSeen !== false &&
         claims.sessionId &&
         row.lastSeenAt &&
         row.lastSeenAt.getTime() < Date.now() - ACCESS_TOUCH_INTERVAL_MINUTES * 60_000

@@ -129,3 +129,33 @@ describe('[COMP:api/auth-sessions] device labels', () => {
     )).toBe('Chrome on macOS')
   })
 })
+
+describe('explicit read-only access validation', () => {
+  const claims = { userId: USER_ID, sessionId: SESSION_ID, authVersion: 2 }
+  const aged = { authVersion: 2, sessionId: SESSION_ID, sessionVersion: 2, lastSeenAt: new Date(Date.now() - 6 * 60_000) }
+  it('performs admission SELECT but no last_seen_at write for an aged session', async () => {
+    query.mockResolvedValue({ rows: [aged] })
+    await expect(store().validateAccess(claims, { touchLastSeen: false })).resolves.toBe(true)
+    expect(query).toHaveBeenCalledOnce()
+    expect(query.mock.calls[0]?.[0].trim()).toMatch(/^SELECT /)
+    for (const predicate of ['s.user_id = u.id', 's.revoked_at IS NULL', 's.expires_at > clock_timestamp()', 'u.auth_version = $3']) {
+      expect(query.mock.calls[0]?.[0]).toContain(predicate)
+    }
+    expect(query.mock.calls[0]?.[1]).toEqual([USER_ID, SESSION_ID, 2])
+  })
+  it('normal authentication still touches an aged session', async () => {
+    query.mockResolvedValue({ rows: [aged] })
+    await expect(store().validateAccess(claims)).resolves.toBe(true)
+    expect(query).toHaveBeenCalledTimes(2)
+    expect(query.mock.calls[1]?.[0]).toContain('UPDATE auth_sessions')
+    expect(query.mock.calls[1]?.[1]).toEqual([SESSION_ID, USER_ID])
+  })
+  it.each<{ rows: Array<Omit<typeof aged, 'sessionId'> & { sessionId: string | null }> }>([{ rows: [] }, { rows: [{ ...aged, sessionId: null }] }, { rows: [{ ...aged, sessionVersion: 1 }] }])(
+    'read-only mode does not waive session/user/version admission (%j)', async ({ rows }) => {
+      query.mockResolvedValue({ rows })
+      await expect(store().validateAccess(claims, { touchLastSeen: false })).resolves.toBe(false)
+      expect(query).toHaveBeenCalledOnce()
+      expect(query.mock.calls[0]?.[0].trim()).toMatch(/^SELECT /)
+    },
+  )
+})

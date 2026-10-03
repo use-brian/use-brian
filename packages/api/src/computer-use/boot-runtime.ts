@@ -3,7 +3,7 @@ import { NativeAccountingUnavailableError } from './accounting.js'
 import { nativeAccountingFor, nativePrice, validatedNativeReceipt } from './accounting-capability.js'
 import type { NativeAccountingCapability, NativeAttemptPreparation, NativeBillingSettlement } from './accounting.js'
 import { NATIVE_NEXT_ACTION, NATIVE_VERIFY_PROGRESS, type LLMProvider, type NativeDecisionRuntime, type UsageStore } from '@use-brian/core'
-import { registryRowForPricing, type ProviderAvailability } from '@use-brian/shared/model-registry'
+import { isRegistryModelAvailable, registryRow, registryRowForPricing, type ProviderAvailability } from '@use-brian/shared/model-registry'
 import type { WorkspaceCustomLlmResolver } from '../custom-llm-runtime.js'
 import type { CreditBudgetGate } from '../routes/route-helpers.js'
 import { resolveChatModelSelection } from '../model-resolution.js'
@@ -39,16 +39,98 @@ export type NativeBootOptions = {
   /** Metadata-only native attempts; primary billing remains centrally owned. */
   recordAttempt?: (record: NativeAuditRecord) => Promise<boolean | void>
   budget?: NativeModelRuntimeOptions['budget']
-  /** Deployment-reviewed exact route. Vision capability alone is NOT approval.
-   * Called with trusted workspace context; must enforce that workspace's data policy. */
-  resolveGrounder?: (context: Parameters<NativeRuntimeFactory>[0]) => Promise<{
+  /** Approval/data-policy check for the already resolved task route, NOT a
+   * second model resolver. A different provider/model/key source is refused.
+   * Called again before upload and before accepting output. */
+  resolveGrounder?: (context: Parameters<NativeRuntimeFactory>[0], route: {
+    provider: LLMProvider; model: string; providerKeySource: 'user' | 'platform'
+  }) => Promise<{
     provider: LLMProvider; model: string; nativeGrounding: true; providerKeySource: 'user' | 'platform'
   } | null>
+}
+
+/** Legacy environment model setting is an approval pin only. A different global
+ * hint must never select an alternative provider/model for the image upload. */
+export function createNativeConfiguredGrounderApproval(accepted: boolean, approvedModel?: string): NonNullable<NativeBootOptions['resolveGrounder']> {
+  return async (context, selected) => !accepted || !approvedModel || !context.workspaceId || selected.model !== approvedModel
+    ? null : { ...selected, nativeGrounding: true }
 }
 
 // Per grant, non-refundable. At $100 / million tokens this over-reserves the
 // built-in text lanes. Vision requires an explicitly larger reviewed budget.
 export const NATIVE_DEFAULT_BUDGET = { tokens: 262144, costUsd: 26.2144, attemptTokens: 32768, attemptCostUsd: 3.2768 }
+
+/** Persisted managed routes are exact selections, not tier hints. Mirror the
+ * routing provider's live credential/catalog gate; never substitute a model. */
+function managedModelAvailable(model: string, availability: ProviderAvailability): boolean {
+  const row = registryRow(model)
+  return !!row && isRegistryModelAvailable(row, availability)
+}
+
+export type NativeModelReadinessOptions = Pick<NativeBootOptions,
+  'provider' | 'configuredProviders' | 'resolveWorkspaceCustomLlm' | 'getWorkspacePlan' | 'checkCreditBudget' | 'budget'> & {
+  decisionRuntime: Pick<NativeDecisionRuntime, 'resolveRoute'>
+  imageApproval?: { accepted: boolean; model?: string }
+}
+export type NativeModelReadiness = {
+  blockers: ('model_unavailable' | 'credits_blocked' | 'budget_invalid' | 'provider_unsupported' | 'policy_denied')[]
+  warnings: ('vision_not_checked' | 'vision_image_unsupported' | 'vision_approval_unaccepted' | 'vision_approval_mismatch' | 'vision_budget_insufficient' | 'native_strict_adapter_unverified')[]
+  /** Route capability only, NOT approval, native input acceptance or a live probe. */
+  imageSupported: boolean
+  /** One reservation would fit; not a reservation or a whole-task guarantee. */
+  visionAttemptFitsBudget: boolean
+}
+
+/** Read-only configuration inspection. Existing resolvers read policy/config and
+ * construct providers; never call stream/createSession, runtime admission,
+ * accounting or reserve here. No endpoint/model identifiers leave this seam.
+ * Host-supplied getWorkspacePlan/checkCreditBudget/resolveRoute must be reads.
+ * Resolver errors propagate for the caller to report a bounded check failure. */
+export async function inspectNativeComputerModelReadiness(options: NativeModelReadinessOptions, workspaceId: string): Promise<NativeModelReadiness> {
+  const result: NativeModelReadiness = { blockers: [], warnings: ['vision_not_checked'], imageSupported: false, visionAttemptFitsBudget: false }
+  const budget = options.budget ?? NATIVE_DEFAULT_BUDGET
+  if (!Object.values(budget).every(n => Number.isFinite(n) && n > 0) || budget.attemptTokens < 32768
+    || budget.tokens < budget.attemptTokens || budget.costUsd < budget.attemptCostUsd) result.blockers.push('budget_invalid')
+  else {
+    const tokens = Math.max(budget.attemptTokens, 4 * 1024 * 1024 + 32768)
+    result.visionAttemptFitsBudget = budget.tokens >= tokens && budget.costUsd >= budget.attemptCostUsd * (tokens / budget.attemptTokens)
+  }
+  if (!workspaceId) { result.blockers.push('model_unavailable'); return result }
+  const plan = await options.getWorkspacePlan(workspaceId)
+  const budgetStatus = (await options.checkCreditBudget?.(workspaceId, plan))?.status ?? 'ok'
+  if (budgetStatus === 'blocked') { result.blockers.push('credits_blocked'); return result }
+  const llmRoutes = []
+  for (const operation of [NATIVE_NEXT_ACTION, NATIVE_VERIFY_PROGRESS]) {
+    const route = await options.decisionRuntime.resolveRoute({ workspaceId, kind: 'execution', evaluationSegment: 'global', operation, questionKinds: ['choice'] })
+    if (route.llm === null) { result.blockers.push('policy_denied'); return result }
+    if (route.llm) llmRoutes.push(route.llm)
+  }
+  const selection = resolveChatModelSelection('standard', plan, budgetStatus, options.configuredProviders)
+  const custom = await options.resolveWorkspaceCustomLlm({ workspaceId, requestedTier: selection.logicalTier, allowDefault: true, allowFailureFallback: false })
+  if ((!custom && options.configuredProviders.size === 0)
+    || (custom?.routeKind === 'managed' && !managedModelAvailable(custom.selector, options.configuredProviders))) {
+    result.blockers.push('model_unavailable'); return result
+  }
+  if (custom?.fallback.enabled || (custom && (custom.inputTokenLimit < 32768 || custom.maxTokens < 2048))) {
+    result.blockers.push('provider_unsupported'); return result
+  }
+  const model = custom?.selector ?? selection.servingModel
+  if (!NativeAttemptSchema.shape.requestedModel.safeParse(model).success) { result.blockers.push('model_unavailable'); return result }
+  const provider = custom?.provider ?? options.provider
+  // LLMProvider exposes no affirmative native-strict support flag. Never infer
+  // that contract from registration or vision support. Codex has an explicit
+  // native_unsupported_adapter guard; reject it including routed Hydra LLMs.
+  const unsupported = (p: LLMProvider, id: string) => p.name === 'openai-codex' || registryRow(id)?.provider === 'openai-codex'
+  if (unsupported(provider, model) || (!custom && llmRoutes.some(r => unsupported(r.provider, r.modelId)))) result.blockers.push('provider_unsupported')
+  result.warnings = ['native_strict_adapter_unverified']
+  result.imageSupported = (!custom || custom.routeKind === 'managed' && custom.supportsVision)
+    && !unsupported(provider, model) && registryRow(model)?.capabilities.vision === true && provider.models.includes(model)
+  if (!result.imageSupported) result.warnings.push('vision_image_unsupported')
+  if (!options.imageApproval?.accepted || !options.imageApproval.model) result.warnings.push('vision_approval_unaccepted')
+  else if (options.imageApproval.model !== model) result.warnings.push('vision_approval_mismatch')
+  if (!result.visionAttemptFitsBudget) result.warnings.push('vision_budget_insufficient')
+  return result
+}
 
 export function createNativeComputerBootRuntimeFactory(options: NativeBootOptions): NativeRuntimeFactory {
   return async (context, grant, trace) => {
@@ -62,28 +144,67 @@ export function createNativeComputerBootRuntimeFactory(options: NativeBootOption
     if (budgetStatus === 'blocked') return null
     // Honor an explicit denied LLM lane BEFORE sending AX data to the planner.
     for (const operation of [NATIVE_NEXT_ACTION, NATIVE_VERIFY_PROGRESS]) {
-      const decisionRoute = await options.decisionRuntime.resolveRoute({ workspaceId: context.workspaceId, kind: 'execution', evaluationSegment: 'global', operation, questionKinds: ['choice'] })
+      const decisionRoute = await options.decisionRuntime.resolveRoute({ workspaceId: context.workspaceId!, kind: 'execution', evaluationSegment: 'global', operation, questionKinds: ['choice'] })
       if (decisionRoute.llm === null) return null
     }
     const selection = resolveChatModelSelection('standard', plan, budgetStatus, options.configuredProviders)
     const custom = await options.resolveWorkspaceCustomLlm({ workspaceId: context.workspaceId, requestedTier: selection.logicalTier, allowDefault: true, allowFailureFallback: false })
-    if (!custom && options.configuredProviders.size === 0) return null
+    if ((!custom && options.configuredProviders.size === 0)
+      || (custom?.routeKind === 'managed' && !managedModelAvailable(custom.selector, options.configuredProviders))) return null
     if (custom?.fallback.enabled || (custom && (custom.inputTokenLimit < 32768 || custom.maxTokens < 2048))) return null
-    const grounder = await options.resolveGrounder?.(context)
-    if (grounder && (!grounder.nativeGrounding || !grounder.model || !grounder.provider.models.includes(grounder.model))) return null
     const selectedProvider = custom?.provider ?? options.provider
     const selectedModel = custom?.selector ?? selection.servingModel
+    const providerKeySource = custom?.providerKeySource ?? 'platform'
     // Reject unsafe identifiers before any inference, not at audit persistence.
-    if (!NativeAttemptSchema.shape.requestedModel.safeParse(selectedModel).success
-      || (grounder && !NativeAttemptSchema.shape.requestedModel.safeParse(grounder.model).success)) return null
-    // The concrete factory applies chat alias resolution again; custom: IDs are
-    // not registry aliases. Pin the already-resolved route at the provider seam.
+    if (!NativeAttemptSchema.shape.requestedModel.safeParse(selectedModel).success) return null
+    // Custom endpoint probes establish image support, but their opaque selector
+    // does not expose an immutable expected wire model to this runtime. Until
+    // that contract exists, retain text-only custom support; never upload to a
+    // platform substitute. Managed workspace routes have registry wire identity.
+    const imageSupported = (!custom || custom.routeKind === 'managed' && custom.supportsVision)
+      && registryRow(selectedModel)?.capabilities.vision === true
+      && selectedProvider.models.includes(selectedModel)
+    const selectedRoute = { provider: selectedProvider, model: selectedModel, providerKeySource }
+    const approvedImageRoute = async () => {
+      if (!imageSupported) return false
+      const approved = await options.resolveGrounder?.(context, selectedRoute)
+      return !!approved?.nativeGrounding && approved.provider === selectedProvider
+        && approved.model === selectedModel && approved.providerKeySource === providerKeySource
+    }
+    const imageApproved = await approvedImageRoute()
+    const assertImageRouteCurrent = async () => {
+      const currentPlan = await options.getWorkspacePlan(context.workspaceId!)
+      const currentBudget = (await options.checkCreditBudget?.(context.workspaceId!, currentPlan))?.status ?? 'ok'
+      if (currentBudget === 'blocked') throw new Error('Native image route denied')
+      const currentSelection = resolveChatModelSelection('standard', currentPlan, currentBudget, options.configuredProviders)
+      const current = await options.resolveWorkspaceCustomLlm({ workspaceId: context.workspaceId!, requestedTier: currentSelection.logicalTier, allowDefault: true, allowFailureFallback: false })
+      if ((current?.selector ?? currentSelection.servingModel) !== selectedModel
+        || (current?.routeKind ?? null) !== (custom?.routeKind ?? null)
+        || (current?.profileId ?? null) !== (custom?.profileId ?? null)
+        || (current?.providerKeySource ?? 'platform') !== providerKeySource
+        || current?.fallback.enabled || (current && (!current.supportsVision || current.inputTokenLimit < 32768 || current.maxTokens < 2048))
+        || (current?.routeKind === 'managed' && !managedModelAvailable(current.selector, options.configuredProviders))
+        || !selectedProvider.models.includes(selectedModel)
+        || (!current && (options.provider !== selectedProvider || options.configuredProviders.size === 0))) throw new Error('Native image route changed')
+      for (const operation of [NATIVE_NEXT_ACTION, NATIVE_VERIFY_PROGRESS]) {
+        const currentRoute = await options.decisionRuntime.resolveRoute({ workspaceId: context.workspaceId!, kind: 'execution', evaluationSegment: 'global', operation, questionKinds: ['choice'] })
+        if (currentRoute.llm === null) throw new Error('Native image data lane denied')
+      }
+      if (!await approvedImageRoute()) throw new Error('Native image approval revoked')
+    }
+    // Pin both modalities to the identical provider/model. Native strict mode
+    // and actual wire-model evidence remain independently enforced below.
     const pinnedProvider: LLMProvider = {
       name: selectedProvider.name, models: [selectedModel],
       createSession: selectedProvider.createSession.bind(selectedProvider),
-      stream: request => selectedProvider.stream({ ...request, model: selectedModel, allowProviderFallback: false }),
+      stream: async function* (request) {
+        if (custom?.routeKind === 'managed' && !managedModelAvailable(selectedModel, options.configuredProviders)) throw new Error('Native managed model unavailable')
+        yield* selectedProvider.stream({ ...request, model: selectedModel, allowProviderFallback: false })
+      },
     }
-    const route = { provider: pinnedProvider, model: selectedModel, plan, budgetStatus, grounder: grounder ?? undefined }
+    const grounder = imageApproved ? { provider: pinnedProvider, model: selectedModel,
+      nativeGrounding: true as const, providerKeySource, assertCurrent: assertImageRouteCurrent } : undefined
+    const route = { provider: pinnedProvider, model: selectedModel, plan, budgetStatus, grounder }
     const scope = { userId: context.userId, workspaceId: context.workspaceId, assistantId: context.assistantId,
       conversationId: context.sessionId, taskId: grant.identity.taskId }
     let accountingDenied = false

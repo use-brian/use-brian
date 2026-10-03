@@ -1,3 +1,4 @@
+import { nativeReadinessHandler } from './native-readiness.js'
 import { NativeRelay } from './native-relay.js'
 import { verifyNativeToken } from '@use-brian/api/auth/native-computer-token.js'
 import { GrantSchema, sameIdentity } from '@use-brian/computer-control/protocol.js'
@@ -72,6 +73,8 @@ app.get('/internal/browser/status/:userId', (req, res) => {
     }),
   )
 })
+
+app.get('/internal/native-computer/readiness', nativeReadinessHandler(nativeEnabled))
 
 app.use('/internal/native-computer', (_req, res, next) => {
   if (!nativeEnabled) { res.sendStatus(404); return }

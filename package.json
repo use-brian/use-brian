@@ -10,6 +10,7 @@
     "build": "turbo run build",
     "start": "node scripts/launch.mjs",
     "support": "node scripts/support.mjs",
+    "native:readiness": "node scripts/native-computer-readiness.mjs",
     "dev": "node scripts/launch.mjs",
     "dev:watch": "turbo run dev",
     "rig:up": "scripts/rig-up.sh",

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { Request, Response, NextFunction } from 'express'
-import { requireAuth, optionalAuth } from '../middleware.js'
+import { requireAuth, requireAuthWithoutTouch, optionalAuth } from '../middleware.js'
 import { createTokens } from '../jwt.js'
 
 const SECRET = 'middleware-test-secret'
@@ -133,4 +133,46 @@ describe('[COMP:api/auth] optionalAuth middleware', () => {
     expect(next).toHaveBeenCalledOnce()
     expect(req.userId).toBeUndefined()
   })
+})
+
+
+describe('explicit no-touch authentication', () => {
+  it('passes no-touch only after all normal JWT checks and binds the same identity', async () => {
+    const sessions = { validateAccess: vi.fn().mockResolvedValue(true) }
+    const session = { id: '00000000-0000-4000-a000-000000000099', authVersion: 2 }
+    const { accessToken } = createTokens(TEST_USER_A, SECRET, session)
+    const req = makeReq({ authorization: `Bearer ${accessToken}` }), next = vi.fn()
+    await requireAuthWithoutTouch(SECRET, sessions)(req, makeRes(), next)
+    expect(sessions.validateAccess).toHaveBeenCalledWith(expect.objectContaining({ userId: TEST_USER_A, sessionId: session.id, authVersion: 2 }), { touchLastSeen: false })
+    expect(next).toHaveBeenCalledOnce()
+    expect(req.authSessionId).toBe(session.id)
+    expect(req.authVersion).toBe(2)
+  })
+  it('does not waive signature, access-token kind, UUID, or revocation checks', async () => {
+    const sessions = { validateAccess: vi.fn().mockResolvedValue(false) }
+    const tokens = [createTokens(TEST_USER_A, 'wrong-secret').accessToken,
+      createTokens(TEST_USER_A, SECRET).refreshToken, createTokens('not-uuid', SECRET).accessToken]
+    for (const token of tokens) {
+      const next = vi.fn(), res = makeRes()
+      await requireAuthWithoutTouch(SECRET, sessions)(makeReq({ authorization: `Bearer ${token}` }), res, next)
+      expect(res.statusCode).toBe(401); expect(next).not.toHaveBeenCalled()
+    }
+    expect(sessions.validateAccess).not.toHaveBeenCalled()
+    const next = vi.fn(), res = makeRes()
+    await requireAuthWithoutTouch(SECRET, sessions)(makeReq({ authorization: `Bearer ${createTokens(TEST_USER_A, SECRET).accessToken}` }), res, next)
+    expect(sessions.validateAccess).toHaveBeenCalledOnce()
+    expect(res.statusCode).toBe(401); expect(next).not.toHaveBeenCalled()
+  })
+})
+it('no-touch authentication still rejects an expired access token before database admission', async () => {
+  vi.useFakeTimers()
+  try {
+    const token = createTokens(TEST_USER_A, SECRET).accessToken
+    vi.advanceTimersByTime(61 * 60_000)
+    const sessions = { validateAccess: vi.fn().mockResolvedValue(true) }, next = vi.fn(), res = makeRes()
+    await requireAuthWithoutTouch(SECRET, sessions)(makeReq({ authorization: `Bearer ${token}` }), res, next)
+    expect(res.statusCode).toBe(401)
+    expect(sessions.validateAccess).not.toHaveBeenCalled()
+    expect(next).not.toHaveBeenCalled()
+  } finally { vi.useRealTimers() }
 })

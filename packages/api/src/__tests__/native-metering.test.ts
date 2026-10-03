@@ -277,8 +277,10 @@ async function lateFixture(lane: 'text' | 'vision' | 'fallback' | 'primary', end
   const grant = { identity: { userId: id, workspaceId: id, conversationId: id, sessionId: id, taskId: id, deploymentId: 'deployment' }, epoch: 0, grantId: 'grant', allowCapture: true, targets: [target], goal: 'private late goal' } as NativeGrant
   const context = { userId: id, workspaceActorUserId: id, workspaceId: id, sessionId: id, assistantId: id } as ToolContext
   const input = { goal: grant.goal, signal: abort.signal, deadlineAt: Date.now() + 10000, candidates: [], observation: { target, foreground: true, nodes: [], id: 'observation', frame: { width: 1, height: 1, mimeType: 'image/png', data: 'private pixels' } } } as unknown as NativeModelInput
-  const native = (await createNativeComputerBootRuntimeFactory({ provider, configuredProviders: new Set(['gemini']), getWorkspacePlan: async () => 'enterprise', resolveWorkspaceCustomLlm: async () => null, decisionRuntime, usageStore,
-    resolveGrounder: async () => ({ provider, model: 'gpt-5.2', nativeGrounding: true, providerKeySource: 'user' }),
+  // The registry owns gpt-5.2 under openai-codex. This is a strict synthetic
+  // stream/accounting fixture, not evidence that the live Codex adapter supports native use.
+  const native = (await createNativeComputerBootRuntimeFactory({ provider, configuredProviders: new Set(['gemini', 'openai-codex']), getWorkspacePlan: async () => 'enterprise', resolveWorkspaceCustomLlm: async () => lane === 'vision' ? ({ provider, selector: 'gpt-5.2', routeKind: 'managed', profileId: null, fallback: { enabled: false }, inputTokenLimit: 32768, maxTokens: 2048, supportsVision: true, providerKeySource: 'user' } as never) : null, decisionRuntime, usageStore,
+    resolveGrounder: async (_context, selected) => ({ ...selected, nativeGrounding: true }),
     recordAttempt: async r => { records.push(r); return audit(r) },
     nativeAccounting: supported ? { ...capability, admit: supported === 'declined' ? async () => ({ status: 'unsupported' }) : capability.admit, prepare: async settlement => { records.push({ sessionId: id,grantId: 'grant',scope: { userId: id,workspaceId: id,assistantId: id,conversationId: id,taskId: id },attempt: settlement.attempt }); return capability.prepare(settlement) } } : undefined,
   })(context, grant, trace))!

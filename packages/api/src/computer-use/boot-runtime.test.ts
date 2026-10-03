@@ -1,3 +1,5 @@
+import { MutableProviderAvailability, registryRow } from '@use-brian/shared/model-registry'
+import { resolveChatModelSelection } from '../model-resolution.js'
 import { createOpenAICompatProvider } from '../../../core/src/providers/openai-compat.js'
 import { nativeAccountingFor, registerNativeAccounting } from './accounting-capability.js'
 import type { NativeBillingSettlement } from './accounting.js'
@@ -5,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { NativeRunTrace, NativeTraceEventSchema, NATIVE_NEXT_ACTION, calculateCost, type LLMProvider, type ToolContext, type NativeModelInput } from '@use-brian/core'
 import type { NativeGrant } from '@use-brian/computer-control/protocol.js'
-import { createNativeComputerBootRuntimeFactory, type NativeBootOptions } from './boot-runtime.js'
+import { createNativeComputerBootRuntimeFactory, createNativeConfiguredGrounderApproval, inspectNativeComputerModelReadiness, type NativeBootOptions } from './boot-runtime.js'
 
 function fixture() {
   const requests: unknown[] = []
@@ -45,7 +47,91 @@ function fixture() {
   return { options, provider, context, grant, input, requests, recordUsage, recordAttempt, runtime: (trace?: NativeRunTrace) => createNativeComputerBootRuntimeFactory(options)(context, grant, trace) }
 }
 
+function managedRoute(f: ReturnType<typeof fixture>, model: string, provider = f.provider, providerKeySource: 'platform' | 'user' = 'platform') {
+  provider.models = [...provider.models, model]
+  const row = registryRow(model)
+  if (row) f.options.configuredProviders = new Set([...f.options.configuredProviders, row.provider])
+  f.options.resolveWorkspaceCustomLlm = vi.fn(async () => ({ provider, selector: model, routeKind: 'managed', profileId: null,
+    fallback: { enabled: false }, inputTokenLimit: 32768, maxTokens: 2048, supportsVision: true, providerKeySource } as never))
+  f.options.resolveGrounder = async (_context, selected) => ({ ...selected, nativeGrounding: true })
+}
+
 describe('native boot composition', () => {
+  it.each(['default', 'vision', 'custom', 'blocked', 'policy', 'budget', 'missing', 'fallback'] as const)('inspects %s readiness without invoking models, reserving, or writing accounting', async scenario => {
+    const f = fixture()
+    managedRoute(f, 'claude-sonnet-4-6')
+    if (scenario === 'vision') f.options.budget = { tokens: 10000000, costUsd: 1000, attemptTokens: 32768, attemptCostUsd: 3.2768 }
+    if (scenario === 'custom' || scenario === 'fallback') {
+      const resolve = f.options.resolveWorkspaceCustomLlm
+      f.options.resolveWorkspaceCustomLlm = async args => ({ ...(await resolve(args))!, routeKind: 'custom',
+        selector: 'custom:00000000-0000-4000-8000-000000000000', fallback: { enabled: scenario === 'fallback' } as never })
+    }
+    if (scenario === 'blocked') f.options.checkCreditBudget = async () => ({ status: 'blocked' } as never)
+    if (scenario === 'policy') f.options.decisionRuntime.resolveRoute = async () => ({ mode: 'llm_only', llm: null })
+    if (scenario === 'budget') f.options.budget = { tokens: 1, costUsd: 1, attemptTokens: 1, attemptCostUsd: 1 }
+    if (scenario === 'missing') { f.options.resolveWorkspaceCustomLlm = async () => null; f.options.configuredProviders = new Set() }
+    const accounting = nativeAccountingFor(f.options.usageStore!)!
+    const admit = vi.spyOn(accounting, 'admit'), prepare = vi.spyOn(accounting, 'prepare'), reconcile = vi.spyOn(accounting, 'reconcile')
+    const result = await inspectNativeComputerModelReadiness(f.options, 'w')
+    const blockers: Partial<Record<typeof scenario, string>> = { blocked: 'credits_blocked', policy: 'policy_denied', budget: 'budget_invalid', missing: 'model_unavailable', fallback: 'provider_unsupported' }
+    const blocker = blockers[scenario]
+    expect(result.blockers).toEqual(blocker ? [blocker] : [])
+    expect(result.visionAttemptFitsBudget).toBe(scenario === 'vision')
+    if (!blocker) expect(result.imageSupported).toBe(scenario !== 'custom')
+    expect(f.requests).toHaveLength(0)
+    expect(f.provider.createSession).not.toHaveBeenCalled()
+    expect(f.options.decisionRuntime.run).not.toHaveBeenCalled()
+    expect(f.recordUsage).not.toHaveBeenCalled(); expect(f.recordAttempt).not.toHaveBeenCalled()
+    expect(admit).not.toHaveBeenCalled(); expect(prepare).not.toHaveBeenCalled(); expect(reconcile).not.toHaveBeenCalled()
+    expect(JSON.stringify(result)).not.toMatch(/gpt|custom:|modelId/)
+  })
+  it('does not report a built-in text task ready when its routed LLM completion is Codex', async () => {
+    const f = fixture()
+    f.options.decisionRuntime.resolveRoute = async () => ({ mode: 'llm_only', llm: { provider: { ...f.provider, name: 'openai-codex' }, modelId: 'gpt-5.6-luna' } })
+    const report = await inspectNativeComputerModelReadiness(f.options, 'w')
+    expect(report.blockers).toEqual(['provider_unsupported'])
+    expect(report.warnings).toContain('native_strict_adapter_unverified')
+    expect(f.requests).toHaveLength(0)
+    expect(f.options.decisionRuntime.run).not.toHaveBeenCalled()
+    expect(f.recordUsage).not.toHaveBeenCalled()
+  })
+  it.each(['credentials', 'catalog'] as const)('refuses a persisted managed model after its %s are removed, without substituting or invoking anything', async removed => {
+    const f = fixture(), model = 'claude-haiku-4-5', row = registryRow(model)!
+    managedRoute(f, model)
+    const availability = new MutableProviderAvailability(['gemini', row.provider])
+    availability.setModelCatalog(row.provider, new Set([row.apiModelId]))
+    f.options.configuredProviders = availability
+    expect((await inspectNativeComputerModelReadiness(f.options, 'w')).blockers).toEqual([])
+    const accounting = nativeAccountingFor(f.options.usageStore!)!
+    const admit = vi.spyOn(accounting, 'admit'), prepare = vi.spyOn(accounting, 'prepare'), reconcile = vi.spyOn(accounting, 'reconcile')
+    if (removed === 'credentials') availability.setStaticProvider(row.provider, false)
+    else availability.setModelCatalog(row.provider, new Set(['some-other-wire-model']))
+    // The stale facade still advertises the selected model, and Gemini remains
+    // configured. Neither is authority to serve or substitute the managed route.
+    expect(f.provider.models).toContain(model)
+    expect(availability.has('gemini')).toBe(true)
+    expect(await inspectNativeComputerModelReadiness(f.options, 'w')).toMatchObject({ blockers: ['model_unavailable'], imageSupported: false })
+    expect(await f.runtime()).toBeNull()
+    expect(f.requests).toHaveLength(0)
+    expect(f.provider.createSession).not.toHaveBeenCalled()
+    expect(f.options.decisionRuntime.run).not.toHaveBeenCalled()
+    expect(f.recordUsage).not.toHaveBeenCalled(); expect(f.recordAttempt).not.toHaveBeenCalled()
+    expect(admit).not.toHaveBeenCalled(); expect(prepare).not.toHaveBeenCalled(); expect(reconcile).not.toHaveBeenCalled()
+  })
+  it.each(['text', 'vision'] as const)('rechecks managed availability before %s provider dispatch on an existing runtime', async lane => {
+    const f = fixture(), model = 'claude-haiku-4-5', row = registryRow(model)!
+    managedRoute(f, model)
+    const availability = new MutableProviderAvailability(['gemini', row.provider])
+    f.options.configuredProviders = availability
+    f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
+    f.grant.allowCapture = true
+    f.input.observation.frame = { id: 'frame', width: 100, height: 100, mimeType: 'image/png', data: 'private', bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
+    const runtime = (await f.runtime())!
+    availability.setStaticProvider(row.provider, false)
+    await expect(lane === 'text' ? runtime.llm.plan!(f.input) : runtime.llm.vision!.propose(f.input)).rejects.toThrow()
+    expect(f.requests).toHaveLength(0)
+    expect(f.recordUsage).not.toHaveBeenCalled()
+  })
   it.each(['missing','unregistered'] as const)('denies %s native accounting before resolving models or exposing task effects', async mode => {
     const f = fixture()
     f.options.usageStore = mode === 'missing' ? undefined : { recordUsage: f.recordUsage } as unknown as NativeBootOptions['usageStore']
@@ -128,7 +214,7 @@ describe('native boot composition', () => {
     f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
     f.grant.allowCapture = true
     f.input.observation.frame = { width: 1, height: 1, mimeType: 'image/png', data: 'private image' } as never
-    f.options.resolveGrounder = async () => ({ provider: f.provider, model: 'exact-grounder', nativeGrounding: true, providerKeySource: 'user' })
+    managedRoute(f, 'gpt-5.2', f.provider, 'user')
     f.provider.stream = async function* (request) {
       yield { type: 'message_start', model: request.model }
       yield { type: 'text_delta', text: 'partial raw output' }
@@ -137,9 +223,9 @@ describe('native boot composition', () => {
     }
     await expect((await f.runtime())!.llm.vision!.propose(f.input)).rejects.toThrow()
     expect(f.recordAttempt).toHaveBeenCalledTimes(knownUsage ? 3 : 2)
-    expect(f.recordAttempt).toHaveBeenCalledWith(expect.objectContaining({ attempt: expect.objectContaining({ model: knownUsage ? 'exact-grounder' : null, lane: 'vision', outcome: 'failed', providerKeySource: 'user',
+    expect(f.recordAttempt).toHaveBeenCalledWith(expect.objectContaining({ attempt: expect.objectContaining({ model: knownUsage ? 'gpt-5.2' : null, lane: 'vision', outcome: 'failed', providerKeySource: 'user',
       usage: knownUsage ? { inputTokens: 5, outputTokens: 2 } : null,
-      incurredCostUsd: null, estimatedBilledCostUsd: knownUsage ? 0 : null }) }))
+      incurredCostUsd: knownUsage ? calculateCost('gpt-5.2', { inputTokens: 5, outputTokens: 2 }) : null, estimatedBilledCostUsd: knownUsage ? 0 : null }) }))
     expect(f.recordUsage).toHaveBeenCalledTimes(knownUsage ? 1 : 0)
     expect(JSON.stringify(f.recordAttempt.mock.calls)).not.toMatch(/private image|raw output|secret/)
   })
@@ -214,7 +300,7 @@ describe('native boot composition', () => {
     // alias. Only actual wire provenance can authorize the grounding output.
     const provider = createOpenAICompatProvider({ baseURL: 'https://mock.invalid/v1', label: 'fixture',
       wireModel, recordedModel: requestedModel, models: [requestedModel], fetchFn })
-    f.options.resolveGrounder = async () => ({ provider, model: requestedModel, nativeGrounding: true, providerKeySource: 'platform' })
+    managedRoute(f, requestedModel, provider)
     const runtime = (await f.runtime())!, useOutput = vi.fn()
     const result = runtime.llm.vision!.propose(f.input).then(value => { useOutput(value); return value })
     if (usable) await expect(result).resolves.toMatchObject({ kind: 'click', x: 10, y: 20 })
@@ -233,6 +319,95 @@ describe('native boot composition', () => {
     if (billable) expect(f.recordUsage).toHaveBeenCalledWith(expect.objectContaining({ model: actualModel,
       actualCostUsd: Number(calculateCost(actualModel, { inputTokens: usage!.prompt_tokens, outputTokens: usage!.completion_tokens }).toFixed(10)) }))
     else expect(records.at(-1)).toMatchObject({ incurredCostUsd: null, estimatedBilledCostUsd: null })
+  })
+  it('uses the resolved built-in task route for the image rather than a separate grounder', async () => {
+    const f = fixture()
+    const model = resolveChatModelSelection('standard', 'enterprise', 'ok', f.options.configuredProviders).servingModel
+    f.provider.models = [model]
+    f.options.resolveGrounder = createNativeConfiguredGrounderApproval(true, model)
+    f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
+    f.grant.allowCapture = true
+    f.input.observation.frame = { id: 'frame', width: 100, height: 100, data: 'private-pixels', mimeType: 'image/png', bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
+    f.provider.stream = async function* (request) {
+      f.requests.push(request)
+      yield { type: 'text_delta', text: 'null' }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 4 },
+        nativeMetadata: { actualModel: registryRow(model)!.apiModelId, usage: { inputTokens: 10, outputTokens: 4 } } }
+    }
+    const runtime = (await f.runtime())!
+    expect(await runtime.llm.vision!.propose(f.input)).toBeNull()
+    expect(f.requests).toHaveLength(1)
+    expect(f.requests[0]).toMatchObject({ model, nativeStrict: true, allowProviderFallback: false })
+    expect(f.recordUsage).toHaveBeenCalledTimes(1)
+  })
+  it.each(['gpt-5.2', 'claude-haiku-4-5'])('uses exactly the managed task provider/model for text and approved images: %s', async model => {
+    const f = fixture()
+    managedRoute(f, model)
+    f.options.resolveGrounder = createNativeConfiguredGrounderApproval(true, model)
+    f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
+    f.grant.allowCapture = true
+    f.input.observation.frame = { id: 'frame', width: 100, height: 100, data: 'private-pixels', mimeType: 'image/png', bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
+    f.provider.stream = async function* (request) {
+      f.requests.push(request)
+      const image = JSON.stringify(request.messages).includes('private-pixels')
+      yield { type: 'text_delta', text: image ? '{"x":10,"y":20}' : '{"steps":[]}' }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 4 }, nativeMetadata: { actualModel: model === 'claude-haiku-4-5' ? 'claude-haiku-4-5-20251001' : model, usage: { inputTokens: 10, outputTokens: 4 } } }
+    }
+    const runtime = (await f.runtime())!
+    await runtime.llm.plan!(f.input)
+    expect(await runtime.llm.vision!.propose(f.input)).toMatchObject({ kind: 'click', x: 10, y: 20 })
+    expect(f.requests).toHaveLength(2)
+    for (const request of f.requests) expect(request).toMatchObject({ model, nativeStrict: true, allowProviderFallback: false })
+    expect(JSON.stringify(f.requests[0])).not.toContain('private-pixels')
+    expect(JSON.stringify(f.requests[1])).toContain('private-pixels')
+    expect(f.recordUsage).toHaveBeenCalledTimes(2)
+  })
+  it.each(['different-global-hint', 'not-accepted', 'different-provider', 'different-key-source', 'no-image', 'registry-no-image', 'unknown-model', 'custom', 'custom-no-image'] as const)('does not expose images for %s or silently substitute a route', async scenario => {
+    const f = fixture()
+    managedRoute(f, scenario === 'unknown-model' ? 'unknown-model' : scenario === 'registry-no-image' ? 'qwen3.7-plus' : 'gpt-5.2')
+    if (scenario === 'different-global-hint') f.options.resolveGrounder = createNativeConfiguredGrounderApproval(true, 'claude-haiku-4-5')
+    if (scenario === 'not-accepted') f.options.resolveGrounder = createNativeConfiguredGrounderApproval(false, 'gpt-5.2')
+    if (scenario === 'different-provider') f.options.resolveGrounder = async (_c, r) => ({ ...r, provider: { ...f.provider }, nativeGrounding: true })
+    if (scenario === 'different-key-source') f.options.resolveGrounder = async (_c, r) => ({ ...r, providerKeySource: 'user', nativeGrounding: true })
+    if (['no-image', 'custom', 'custom-no-image'].includes(scenario)) {
+      const original = f.options.resolveWorkspaceCustomLlm
+      f.options.resolveWorkspaceCustomLlm = async args => ({ ...(await original(args))!,
+        ...(scenario.startsWith('custom') ? { routeKind: 'custom' as const, selector: 'custom:00000000-0000-4000-8000-000000000000' } : {}),
+        supportsVision: scenario === 'custom',
+      })
+    }
+    const runtime = (await f.runtime())!
+    if (scenario === 'unknown-model') expect(runtime).toBeNull()
+    else { expect(runtime).not.toBeNull(); expect(runtime.llm.vision).toBeUndefined() }
+    expect(f.requests).toHaveLength(0)
+    expect(f.recordUsage).not.toHaveBeenCalled()
+  })
+  it.each(['before-upload', 'during-upload', 'policy-revoked', 'approval-revoked', 'vision-revoked', 'provider-removed'] as const)('refuses a changed configured image route: %s', async when => {
+    const f = fixture()
+    managedRoute(f, 'gpt-5.2')
+    f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
+    f.grant.allowCapture = true
+    f.input.observation.frame = { id: 'frame', width: 100, height: 100, data: 'private-pixels', mimeType: 'image/png', bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
+    const runtime = (await f.runtime())!
+    const changeModel = () => { managedRoute(f, 'claude-haiku-4-5') }
+    f.provider.stream = async function* (request) {
+      f.requests.push(request)
+      changeModel()
+      yield { type: 'text_delta', text: '{"x":10,"y":20}' }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 4 }, nativeMetadata: { actualModel: 'gpt-5.2', usage: { inputTokens: 10, outputTokens: 4 } } }
+    }
+    if (when === 'before-upload') changeModel()
+    if (when === 'policy-revoked') f.options.decisionRuntime.resolveRoute = async () => ({ mode: 'llm_only', llm: null })
+    if (when === 'approval-revoked') f.options.resolveGrounder = async () => null
+    if (when === 'provider-removed') f.provider.models = []
+    if (when === 'vision-revoked') {
+      const resolve = f.options.resolveWorkspaceCustomLlm
+      f.options.resolveWorkspaceCustomLlm = async args => ({ ...(await resolve(args))!, supportsVision: false })
+    }
+    await expect(runtime.llm.vision!.propose(f.input)).rejects.toThrow()
+    expect(f.requests).toHaveLength(when === 'during-upload' ? 1 : 0)
+    // On-time consumed usage is still settled even when route drift denies output.
+    expect(f.recordUsage).toHaveBeenCalledTimes(when === 'during-upload' ? 1 : 0)
   })
   it('fails closed for identity, blocked credits, denied data lane and no provider', async () => {
     const f = fixture()
@@ -255,12 +430,12 @@ describe('native boot composition', () => {
   })
   it('requires separate exact grounding approval and reserves conservatively', async () => {
     const f = fixture()
-    f.options.resolveGrounder = async () => ({ provider: f.provider, model: 'exact-grounder', nativeGrounding: true, providerKeySource: 'user' })
+    managedRoute(f, 'gpt-5.2', f.provider, 'user')
     const runtime = (await f.runtime())!
     expect(runtime.llm.vision?.nativeGrounding).toBe(true)
     expect(await runtime.inferenceBudget!.reserve({ lane: 'vision', maxAttempts: 1, signal: f.input.signal, deadlineAt: f.input.deadlineAt })).toBe(false)
     f.options.resolveGrounder = async () => ({ provider: f.provider, model: 'not-approved-route', nativeGrounding: true, providerKeySource: 'user' })
-    expect(await f.runtime()).toBeNull()
+    expect((await f.runtime())!.llm.vision).toBeUndefined()
   })
 })
 

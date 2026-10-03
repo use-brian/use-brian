@@ -1,8 +1,9 @@
+import { createNativeComputerReadinessOptions, type ReadinessOptions } from './computer-use/readiness.js'
 import { nativeAccountingFor } from './computer-use/accounting-capability.js'
 import type { NativeAccountingCapability } from './computer-use/accounting.js'
-import { createNativeComputerBootRuntimeFactory, createNativeAttemptRecorder } from './computer-use/boot-runtime.js'
+import { createNativeConfiguredGrounderApproval, createNativeComputerBootRuntimeFactory, createNativeAttemptRecorder } from './computer-use/boot-runtime.js'
 import { composeNativeComputerTool, type NativeRuntimeFactory, type NativeRunObserverFactory } from './computer-use/composition.js'
-import { nativeComputerRoutes } from './routes/native-computer.js'
+import { nativeComputerAuth, nativeComputerRoutes } from './routes/native-computer.js'
 import { NativeComputerService } from './computer-use/service.js'
 import { createBrowserFileBridge } from './sandbox/browser-files.js'
 import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
@@ -5000,6 +5001,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   const nativeComputerService = (env.NATIVE_COMPUTER_ENABLED ?? process.env.NATIVE_COMPUTER_ENABLED) === 'true' && browserRelayUrl && env.BROWSER_RELAY_SECRET && (env.NATIVE_COMPUTER_DEPLOYMENT_ID ?? process.env.NATIVE_COMPUTER_DEPLOYMENT_ID)
     ? new NativeComputerService({ relayUrl: browserRelayUrl, relaySecret: env.BROWSER_RELAY_SECRET, jwtSecret: env.JWT_SECRET, deploymentId: (env.NATIVE_COMPUTER_DEPLOYMENT_ID ?? process.env.NATIVE_COMPUTER_DEPLOYMENT_ID)! }) : null
+  let nativeComputerReadiness: ReadinessOptions | undefined
   if (nativeComputerService) {
     const visionModel = process.env.NATIVE_COMPUTER_VISION_MODEL
     const visionAccepted = process.env.NATIVE_COMPUTER_VISION_ACCEPTED === 'true'
@@ -5009,19 +5011,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       attemptTokens: 32768,
       attemptCostUsd: Number(process.env.NATIVE_COMPUTER_ATTEMPT_COST_USD ?? 3.2768),
     }
-    const runtime = ports.nativeComputerRuntimeFactory ?? createNativeComputerBootRuntimeFactory({
+    const nativeModelOptions = {
       provider, configuredProviders, resolveWorkspaceCustomLlm, getWorkspacePlan,
       checkCreditBudget: ports.checkCreditBudget, decisionRuntime, usageStore, nativeAccounting, budget: configuredBudget,
       recordAttempt: createNativeAttemptRecorder(nativeComputerService),
-      resolveGrounder: async context => {
-        // An explicit evaluated exact model is required, never generic vision alone.
-        if (!visionAccepted || !visionModel || !context.workspaceId || !registryRow(visionModel)?.capabilities.vision
-          || ensureServableModel(visionModel, configuredProviders) !== visionModel) return null
-        // Do not send a custom-endpoint workspace's images to a platform model.
-        if (await resolveWorkspaceCustomLlm({ workspaceId: context.workspaceId, requestedTier: 'standard', allowDefault: true, allowFailureFallback: false })) return null
-        return { provider, model: visionModel, nativeGrounding: true, providerKeySource: 'platform' }
-      },
-    })
+      // Exact approval pin, never an alternate screenshot route. The factory
+      // checks live workspace policy, image support and provider identity.
+      resolveGrounder: createNativeConfiguredGrounderApproval(visionAccepted, visionModel),
+      imageApproval: { accepted: visionAccepted, model: visionModel },
+    }
+    const runtime = ports.nativeComputerRuntimeFactory ?? createNativeComputerBootRuntimeFactory(nativeModelOptions)
+    nativeComputerReadiness = createNativeComputerReadinessOptions(nativeAccounting, nativeModelOptions, !!ports.nativeComputerRuntimeFactory)
     // Even a host-supplied runtime cannot bypass unsupported-store admission.
     // The service/inspection routes remain available; only task execution closes.
     allTools.set('nativeComputerTask', composeNativeComputerTool(nativeComputerService, nativeAccounting ? runtime : undefined, ports.nativeComputerObserverFactory))
@@ -6299,7 +6299,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   }))
 
-  app.use('/api/native-computer', requireAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask')))
+  app.use('/api/native-computer', nativeComputerAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask'), nativeComputerReadiness))
 
   app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
     jwtSecret: env.JWT_SECRET,
