@@ -2,12 +2,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { admissionMarker, admissionCanary, appendLocalCleanupWarning, requireAdmissionDifferential,
-  runAdmissionComposition, checkPackagedAdmission } from './mac-packaged-admission-check.mjs';
+  runAdmissionComposition, checkPackagedAdmission, admissionRootSigningArguments, cleanupAdmissionArtifacts } from './mac-packaged-admission-check.mjs';
 import { runPrivateChild } from './mac-library-constraint-fixture.mjs';
 
 const result = overrides => ({ ok: true, code: 0, signal: null, failure: null, closeConfirmed: true,
@@ -22,6 +22,54 @@ test('local cleanup warning survives message-only and already-rendered stack log
   assert.ok(error.message.includes(warning));
   assert.ok(error.stack.includes(original));
   assert.ok(error.stack.includes(warning));
+});
+
+test('baseline signing files resolve in caller cwd before the private child changes cwd', async () => {
+  const directory = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'admission-signing-paths-')));
+  try {
+    const values = { entitlements: '<plist><dict/></plist>', keychain: 'fixture only', requirements: 'designated => true' };
+    for (const [name, value] of Object.entries(values)) fs.writeFileSync(join(directory, name), value);
+    const identity = 'a'.repeat(40);
+    const options = { identity, keychain: relative(process.cwd(), join(directory, 'keychain')) };
+    const root = { entitlements: relative(process.cwd(), join(directory, 'entitlements')),
+      requirements: relative(process.cwd(), join(directory, 'requirements')) };
+    const args = admissionRootSigningArguments(options, root);
+    assert.deepEqual(args, ['--force', '--sign', identity, '--timestamp', '--options', 'runtime',
+      '--entitlements', join(directory, 'entitlements'), '--keychain', join(directory, 'keychain'),
+      '--requirements', join(directory, 'requirements')]);
+    assert.ok(!args.includes('--deep')); assert.ok(!args.includes('--library-constraint'));
+    const childDirectory = join(directory, 'private-child'); fs.mkdirSync(childDirectory);
+    const checked = await runPrivateChild({ command: process.execPath,
+      args: ['-e', `const fs = require('node:fs'), a = process.argv.slice(1);
+        console.log(JSON.stringify(Object.fromEntries(['entitlements','keychain','requirements'].map(name =>
+          [name, fs.readFileSync(a[a.indexOf('--' + name) + 1], 'utf8')]))));`, '--', ...args],
+      directory: childDirectory, label: 'paths', env: { PATH: '/usr/bin:/bin' } });
+    assert.equal(checked.ok, true); assert.equal(checked.closeConfirmed, true);
+    assert.deepEqual(JSON.parse(checked.stdout), values);
+    const inline = admissionRootSigningArguments({ identity }, { ...root, requirements: '=designated => true' });
+    assert.equal(inline[inline.indexOf('--requirements') + 1], '=designated => true');
+    assert.ok(!inline.includes('--keychain'));
+    assert.throws(() => admissionRootSigningArguments(options, { entitlements: join(directory, 'absent') }));
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('confirmed failure retains private logs, removes app copies, and preserves uncertainty rules', () => {
+  const directory = fs.mkdtempSync(join(tmpdir(), 'admission-cleanup-test-'));
+  try {
+    for (const name of ['baseline', 'constrained']) fs.mkdirSync(join(directory, name));
+    fs.writeFileSync(join(directory, '08.stderr.log'), 'PRIVATE_TOOL_DIAGNOSTIC', { mode: 0o600 });
+    const failure = new Error('child 08 failed');
+    cleanupAdmissionArtifacts(directory, failure, true);
+    assert.ok(fs.existsSync(join(directory, 'baseline')));
+    cleanupAdmissionArtifacts(directory, failure, false);
+    for (const name of ['baseline', 'constrained']) assert.ok(!fs.existsSync(join(directory, name)));
+    assert.equal(fs.readFileSync(join(directory, '08.stderr.log'), 'utf8'), 'PRIVATE_TOOL_DIAGNOSTIC');
+    assert.equal(fs.statSync(join(directory, '08.stderr.log')).mode & 0o777, 0o600);
+    assert.ok(failure.stack.includes(directory));
+    assert.ok(!failure.stack.includes('PRIVATE_TOOL_DIAGNOSTIC'));
+    cleanupAdmissionArtifacts(directory, undefined, false);
+    assert.ok(!fs.existsSync(directory));
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('only exact successful baseline and closed, non-local refusal compose', () => {

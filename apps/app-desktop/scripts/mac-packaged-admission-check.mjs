@@ -35,6 +35,34 @@ export function appendLocalCleanupWarning(error, warning) {
   if (typeof error.stack === 'string' && !error.stack.includes(warning)) error.stack += `\n${warning}`;
 }
 
+// Resolve caller-relative signing files before runPrivateChild changes cwd.
+export function admissionRootSigningArguments({ identity, keychain }, root) {
+  const args = ['--force', '--sign', identity, '--timestamp', '--options', 'runtime',
+    '--entitlements', fs.realpathSync(root.entitlements)];
+  if (keychain) args.push('--keychain', fs.realpathSync(keychain));
+  if (root.requirements) args.push('--requirements', root.requirements.startsWith('=')
+    ? root.requirements : fs.realpathSync(root.requirements));
+  if (root.timestamp) args.push(`--timestamp=${root.timestamp}`);
+  return args;
+}
+
+export function cleanupAdmissionArtifacts(directory, failure, uncertain) {
+  if (uncertain) return; // No cleanup or later signaling while child death is uncertain.
+  try {
+    if (failure) {
+      for (const copy of ['baseline', 'constrained']) fs.rmSync(join(directory, copy), { recursive: true, force: true });
+      appendLocalCleanupWarning(failure, `Private package-check logs retained at ${directory}; app copies removed. Inspect the failed child's stderr log locally; do not upload the whole directory.`);
+    } else fs.rmSync(directory, { recursive: true, force: true });
+  } catch (error) {
+    const warning = `Local cleanup failed at ${directory}: ${error.code}; inspect retained private artifacts locally.`;
+    if (failure) appendLocalCleanupWarning(failure, warning);
+    else {
+      const refused = new Error('Packaged admission: local cleanup failed');
+      appendLocalCleanupWarning(refused, warning); throw refused;
+    }
+  }
+}
+
 export function requireAdmissionDifferential(baseline, constrained) {
   for (const result of [baseline, constrained]) {
     if (!result?.closeConfirmed || result.failure || result.killAttempted) fail('attempt incomplete or locally terminated');
@@ -69,10 +97,11 @@ export async function runAdmissionComposition({ constrained, baseline, stock, ro
 export async function checkPackagedAdmission(options, approval) {
   if (process.platform !== 'darwin' || !['arm64', 'x64'].includes(process.arch)) fail('native macOS required');
   encodeBootstrapApprovalRecord(approval); // exact anchor schema, pinned version
-  const { app, identity, keychain } = options;
+  const { app, identity } = options;
   if (!/^[a-f0-9]{40}$/i.test(identity ?? '') || fs.realpathSync(app) !== app || !app.endsWith('/Use Brian.app')) fail('resolved signing context required');
   const root = options.optionsForFile?.(app);
   if (!root || typeof root.entitlements !== 'string' || root.hardenedRuntime !== true || root.additionalArguments?.length || root.signatureFlags?.length) fail('unsupported root signing options');
+  const rootArgs = admissionRootSigningArguments(options, root);
   const stock = join(dirname(require.resolve('electron/package.json')), 'dist/Electron.app');
   requireElectronVersion(JSON.parse(read(require.resolve('electron/package.json'))).version);
   requireElectronVersion(plist.parse(read(join(stock, framework, 'Versions/A/Resources/Info.plist')).toString()).CFBundleVersion);
@@ -90,7 +119,7 @@ export async function checkPackagedAdmission(options, approval) {
     uncertain ||= !result.closeConfirmed;
     evidence.push({ label, ...result });
     fs.writeFileSync(join(directory, `${label}.json`), JSON.stringify(result), { mode: 0o600, flag: 'wx' });
-    if (!result.closeConfirmed || result.failure || (!attempt && !result.ok)) fail(`child ${label} failed`);
+    if (!result.closeConfirmed || result.failure || (!attempt && !result.ok)) fail(`child ${label} failed (code=${result.code}, signal=${result.signal}, failure=${result.failure}, closeConfirmed=${result.closeConfirmed})`);
     return result;
   };
   try {
@@ -111,10 +140,6 @@ export async function checkPackagedAdmission(options, approval) {
       await step('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--all-architectures', '-R', requirement, copy]);
       if (!read(join(copy, binary)).equals(parent)) fail('copy changed parent');
     }
-    const rootArgs = ['--force', '--sign', identity, '--timestamp', '--options', 'runtime', '--entitlements', root.entitlements];
-    if (keychain) rootArgs.push('--keychain', keychain);
-    if (root.requirements) rootArgs.push('--requirements', root.requirements);
-    if (root.timestamp) rootArgs.push(`--timestamp=${root.timestamp}`);
     const results = await runAdmissionComposition({ constrained, baseline, stock, rootArgs, directory, env }, async (command, args, childEnv, attempt) => {
       // Check both restored trees before either launch: root signatures are NOT
       // repaired after substitution. The baseline must exercise that same gap.
@@ -133,17 +158,7 @@ export async function checkPackagedAdmission(options, approval) {
     }
     throw error;
   } finally {
-    if (!uncertain) {
-      try { fs.rmSync(directory, { recursive: true, force: true }); }
-      catch (error) {
-        const warning = `Local cleanup failed at ${directory}: ${error.code}; inspect retained private artifacts locally.`;
-        if (failure) appendLocalCleanupWarning(failure, warning);
-        else {
-          const refused = new Error('Packaged admission: local cleanup failed');
-          appendLocalCleanupWarning(refused, warning); refused.admissionEvidence = evidence;
-          throw refused;
-        }
-      }
-    }
+    try { cleanupAdmissionArtifacts(directory, failure, uncertain); }
+    catch (error) { error.admissionEvidence = evidence; throw error; }
   }
 }

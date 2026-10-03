@@ -54,7 +54,7 @@ The explicit package check additionally uses **private temporary copies** while 
 - Substitute the installed pinned stock Electron framework in both copies. Run a fixed, bounded Node stdout marker directly, without a shell, helper, model call or desktop operation.
 - Require the baseline to print exactly the marker and exit successfully, and the constrained copy to refuse before that marker. A failed baseline, local timeout/kill, missing close evidence or cleanup failure is **not** a pass.
 
-This is one concrete package regression check, not a general observer/attestation system or operational acceptance. It does not test every substituted library or every process/pipe condition. Private copies are removed after confirmed completion. If termination is uncertain, the build refuses and gives a local cleanup warning; inspect locally, do not repeatedly signal an old PID or upload retained artifacts.
+This is one concrete package regression check, not a general observer/attestation system or operational acceptance. It does not test every substituted library or every process/pipe condition. Private copies are removed after confirmed completion. On a confirmed failure, bounded private logs are retained and their directory is printed with the failing child's status; inspect the numbered stderr log locally rather than uploading the whole directory. Successful runs remove logs too. If termination is uncertain, the build refuses and retains copies as well; inspect locally, do not repeatedly signal an old PID or upload retained artifacts. Signing-file paths are resolved in the packaging caller's directory before launching any child in its private working directory.
 
 ## Open the package and check its real helper
 
