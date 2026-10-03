@@ -47,9 +47,33 @@ describe('[COMP:brain/assistant-connector-grants-store] getForAssistantSystem', 
     expect(mockQuery.mock.calls[0][1]).toEqual(['a-1', 'gmail'])
   })
 
-  it('returns null when no row exists (the secure default)', async () => {
+  it('returns the registry default when no row exists: every write, no destructive', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    expect(await store.getForAssistantSystem('a-1', 'gmail')).toBeNull()
+    const grant = await store.getForAssistantSystem('a-1', 'gcal')
+    expect(grant.isDefault).toBe(true)
+    expect(grant.allowedActions).toEqual(
+      expect.arrayContaining(['googleCalendarCreateEvent', 'googleCalendarUpdateEvent']),
+    )
+    expect(grant.allowedActions).not.toContain('googleCalendarDeleteEvent')
+    expect(grant.allowedActions).not.toContain('googleCalendarListEvents')
+  })
+
+  it('derives the default from the provider of an instance governance id', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    const grant = await store.getForAssistantSystem('a-1', 'shopify:inst-1')
+    expect(grant.connectorId).toBe('shopify:inst-1')
+    expect(grant.allowedActions).toContain('shopifyCreateProduct')
+    expect(grant.allowedActions).not.toContain('shopifyRefundOrder')
+  })
+
+  it('an existing row, even an empty one, replaces the default', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'g-1', assistantId: 'a-1', connectorId: 'gcal', readAllowed: true, allowedActions: [] }],
+      rowCount: 1,
+    } as never)
+    const grant = await store.getForAssistantSystem('a-1', 'gcal')
+    expect(grant.isDefault).toBeUndefined()
+    expect(grant.allowedActions).toEqual([])
   })
 
   it('looks up only the exact account grant and never a provider fallback', async () => {

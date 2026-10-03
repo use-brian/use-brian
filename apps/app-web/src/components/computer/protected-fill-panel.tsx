@@ -59,7 +59,7 @@ function Panel({ task, workspaceId, sessionId }: { task: ComputerTask; workspace
     } catch { if (mounted.current) setFailed(true); }
   }
   return <details className="shrink-0 rounded-lg border p-3 text-sm">
-    <summary className="min-h-11 cursor-pointer font-medium">{t.title}</summary>
+    <summary className="min-h-8 max-sm:min-h-11 cursor-pointer font-medium">{t.title}</summary>
     <div className="max-h-[60dvh] space-y-3 overflow-y-auto pt-2">
       <p>{t.disclosure}</p>
       <p>{t.completion}</p>
@@ -70,26 +70,26 @@ function Panel({ task, workspaceId, sessionId }: { task: ComputerTask; workspace
         value={entityId} onValueChange={value => { setEntityId(value); reset(); }}
         items={contacts.map(c => ({ value: c.id, label: c.name }))}
         placeholder={t.record} searchPlaceholder={t.search} emptyMessage={t.empty}
-        aria-label={t.record} disabled={busy || !scope} className="min-h-11 text-base"
+        aria-label={t.record} disabled={busy || !scope} className="max-sm:min-h-11 text-base"
       />}
       <fieldset disabled={busy || !scope}>
         <legend>{t.fields}</legend>
         <div className="flex flex-wrap gap-x-4">
-          {protectedFields.map(field => <label key={field} className="flex min-h-11 items-center gap-2">
+          {protectedFields.map(field => <label key={field} className="flex min-h-8 max-sm:min-h-11 items-center gap-2">
             <Checkbox checked={fields.includes(field)} disabled={busy || !scope} onCheckedChange={checked => {
               setFields(current => checked ? [...current, field] : current.filter(f => f !== field)); reset();
             }} />{t[field]}
           </label>)}
         </div>
       </fieldset>
-      <label className="flex min-h-11 items-center gap-2">
+      <label className="flex min-h-8 max-sm:min-h-11 items-center gap-2">
         <Checkbox checked={approved} disabled={busy || !scope} onCheckedChange={setApproved} />{t.approve}
       </label>
-      <button type="button" className="min-h-11 rounded border px-3 disabled:opacity-50" disabled={!scope || busy || !approved || !entityId || !fields.length} onClick={() => void issue()}>{t.issue}</button>
+      <button type="button" className="min-h-8 max-sm:min-h-11 rounded border px-3 disabled:opacity-50" disabled={!scope || busy || !approved || !entityId || !fields.length} onClick={() => void issue()}>{t.issue}</button>
       {(failed || directory.error) ? <p role="alert">{t.error}</p> : null}
       {result && <div className="space-y-2" role="status">
         <p>{expired ? t.expired : t.handoff}</p>
-        <button type="button" className="min-h-11 rounded border px-3 disabled:opacity-50" disabled={expired} onClick={() => void copy()}>{copied ? t.copied : t.copy}</button>
+        <button type="button" className="min-h-8 max-sm:min-h-11 rounded border px-3 disabled:opacity-50" disabled={expired} onClick={() => void copy()}>{copied ? t.copied : t.copy}</button>
       </div>}
     </div>
   </details>;

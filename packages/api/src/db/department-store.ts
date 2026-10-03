@@ -10,7 +10,7 @@
  * No live read path consumes these edges until the Phase 2 flag flips.
  */
 import type { PoolClient } from 'pg'
-import { applyRLSGucs, getAppPool, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, query, rollbackAndRelease } from './client.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 
 export type DepartmentClearance = 'public' | 'internal' | 'confidential'
@@ -61,6 +61,25 @@ async function asActor<T>(actor: string, work: (client: PoolClient) => Promise<T
 }
 
 const revisionOf = (rows: { revision: string }[]) => Number(rows[0].revision)
+
+/**
+ * A person's live department reach in one workspace: department id to the
+ * clearance of their unexpired edge. System read (public columns only), used
+ * by display surfaces that filter a department-labelled resource by who may
+ * see it, such as the Studio connector list.
+ */
+export async function departmentClearancesForUserSystem(
+  userId: string,
+  workspaceId: string,
+): Promise<Map<string, DepartmentClearance>> {
+  const result = await query<{ department_id: string; clearance: DepartmentClearance }>(
+    `SELECT department_id, clearance FROM department_edges
+      WHERE workspace_id = $1 AND user_id = $2
+        AND (expires_at IS NULL OR expires_at > clock_timestamp())`,
+    [workspaceId, userId],
+  )
+  return new Map(result.rows.map((row) => [row.department_id, row.clearance]))
+}
 
 export function createDepartmentStore() {
   return {

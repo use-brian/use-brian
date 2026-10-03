@@ -206,7 +206,7 @@ export default function WorkflowRunDetailPage({
             ) ? (
               <>
                 <p>{t.workflowPage.builder.runDetail.sourceAccessChanged}</p>
-                <button type="button" className="mt-2 min-h-11 rounded-md border border-current px-3 text-sm font-medium"
+                <button type="button" className="mt-2 min-h-8 max-sm:min-h-11 rounded-md border border-current px-3 text-sm font-medium"
                   onClick={() => openWorkspaceSettings("ws-access")}>
                   {t.workflowPage.builder.runDetail.reviewDepartmentAccess}
                 </button>

@@ -108,7 +108,7 @@ export function SetupChecklist({ workspaceId }: { workspaceId: string }) {
           type="button"
           aria-label={t.dismissAriaLabel}
           onClick={onDismiss}
-          className="-mr-2 -mt-2 flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-muted/60 hover:text-foreground"
+          className="-mr-2 -mt-2 flex size-11 shrink-0 md:-mr-1 md:-mt-1 md:size-7 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-muted/60 hover:text-foreground"
         >
           <X className="size-4" aria-hidden />
         </button>

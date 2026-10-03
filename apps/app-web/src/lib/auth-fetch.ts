@@ -14,6 +14,11 @@
  */
 
 import { getUserInfo, setUserInfoCache } from "@/lib/user";
+import {
+  isConnectorPost,
+  withConnectWorkspace,
+  workspaceIdFromPath,
+} from "@/lib/connector-auto-expose";
 import { primaryAuthUrl } from "@/lib/primary-auth";
 import { ossSignedOutRedirect } from "@/lib/oss-entry";
 import {
@@ -255,9 +260,13 @@ function redirectToLogin(): void {
 }
 
 export async function authFetch(
-  url: string,
+  rawUrl: string,
   init: RequestInit = {},
 ): Promise<Response> {
+  // A connect made inside a workspace shares into that workspace, server side.
+  const url = isConnectorPost(rawUrl, init.method) && typeof window !== "undefined"
+    ? withConnectWorkspace(rawUrl, workspaceIdFromPath(window.location.pathname))
+    : rawUrl;
   let token = getAccessToken();
   if (!token) {
     const outcome = await tryRefreshToken();

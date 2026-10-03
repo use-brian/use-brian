@@ -17,7 +17,7 @@ Interaction is opt-in for web and Electron. Personal natural-language rules reco
 - The multipart contract is `audio`, optional isolated `microphone`, `interactionCaptureId`, `interactionSource` (`microphone` or `mixed`), and optional `discontinuity`. Missing/failed isolated microphone audio never falls back to detecting triggers in mixed playback.
 - Only server-generated transcription enters the durable interaction inbox. There are no browser transcript-ingestion or Realtime token endpoints.
 - Pause/resume and missing windows break pending question assembly. Failed interaction ingestion leaves a visible gap and preserves the normal audio/transcript path.
-- Stop flushes local encoders immediately; server interaction stop waits for accepted live-window uploads to drain in the background. A newer recording cannot overwrite an older recording's capture binding. Disabling interaction stops future triggers without stopping normal recording/transcription.
+- Stop flushes local encoders immediately and starts the full-recording upload without waiting for live transcription or notes. Only window-based assembly fallback (after full-file upload failure) waits for final live windows. Server interaction stop waits for accepted live-window uploads to drain in the background. A newer recording cannot overwrite an older recording's capture binding. Disabling interaction stops future triggers without stopping normal recording/transcription.
 - Input-source isolation is not biometric speaker authentication. Room speech or acoustic playback picked up by the microphone remains eligible microphone input. Echo cancellation is not a guarantee against acoustic bleed.
 
 ## Settings, durable processing and answers
@@ -36,11 +36,11 @@ Interaction is opt-in for web and Electron. Personal natural-language rules reco
 
 ## Chat and lifecycle
 
-- Main chat and floating dock show separate answer cards and canonical chat messages. Refresh appends only the job's pair and never replaces a typed streaming buffer.
+- Main chat and floating dock show separate answer cards and canonical chat messages. Refresh appends only the job's pair and never replaces a typed streaming buffer. The floating chat launcher stays reachable while recording and saving; opening it does not restart capture or change the destination.
 - Interaction startup keeps the originating chat open rather than navigating to the live page. Switching chats cannot redirect jobs or expose another chat's answers/controls.
 - Feed/shared-room destinations are explicitly unavailable; supported destinations are personal web/Electron chats.
 - Accepted questions finish after recording stops unless cancelled. Reload restores jobs/messages, not microphone capture.
-- Capture data cascades with its page, chat, owner or workspace. Answers remain in canonical chat independently of the provisional transcript pane.
+- Capture data cascades with its page, chat, owner or workspace. Answers remain in canonical chat independently of the provisional transcript pane. A `Brian:` label in that pane is ASR speaker text, not an interaction answer. Default-rule question extraction excludes subsequent recognized `Brian:` or numbered-speaker turns without changing the stored transcript or treating labels as microphone provenance.
 
 ## Configuration
 

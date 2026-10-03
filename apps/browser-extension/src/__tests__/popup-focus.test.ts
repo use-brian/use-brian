@@ -14,7 +14,7 @@ describe("[COMP:ext/agent] popup focus treatment", () => {
   it("uses the text field border as the only focus frame in both popup builds", () => {
     for (const popup of [chromiumPopup, firefoxPopup]) {
       expect(popup).toMatch(
-        /input:not\(\[type="checkbox"\]\):focus-visible \{[^}]*outline: none;[^}]*border-color: #2563eb;[^}]*box-shadow: none;/,
+        /input:not\(\[type="checkbox"\]\):focus-visible \{[^}]*outline: none;[^}]*border-color: var\(--ring\);[^}]*box-shadow: none;/,
       );
     }
   });

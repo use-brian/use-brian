@@ -9,13 +9,17 @@
  * Studio UI surface (`apps/web/src/components/studio/assistant-detail.tsx`)
  * mutates via the REST route in `packages/api/src/routes/assistant-connector-grants.ts`.
  *
- * Default: no grant row → no writes allowed (action denied with no audit
- * row). Reads pass through `assistant_connector_settings` (mig 019) as
- * before — this table is write-only governance.
+ * Default: no grant row → the registry default set
+ * (`defaultGrantedConnectorActions`: every `write` tool, no `destructive`
+ * one). Any row, even one with an empty `allowed_actions`, is an explicit
+ * Studio choice and replaces the default. Reads pass through
+ * `assistant_connector_settings` (mig 019) as before — this table is
+ * write-only governance.
  *
  * [COMP:brain/assistant-connector-grants-store]
  */
 
+import { defaultGrantedConnectorActions } from '@use-brian/shared'
 import { query, queryWithRLS } from './client.js'
 
 export type AssistantConnectorGrant = {
@@ -27,6 +31,11 @@ export type AssistantConnectorGrant = {
   grantedByUserId: string
   grantedAt: Date
   updatedAt: Date
+  /**
+   * True when no row exists and this is the synthesized registry default.
+   * Only `getForAssistantSystem` returns one; listings return real rows.
+   */
+  isDefault?: boolean
 }
 
 export type UpsertAssistantConnectorGrant = {
@@ -38,9 +47,10 @@ export type UpsertAssistantConnectorGrant = {
 
 export type AssistantConnectorGrantsStore = {
   /**
-   * Look up the grant for a single (assistant, connector). Returns
-   * `null` when no exact row exists — the safe default (no writes allowed).
-   * Instance-qualified connector ids never fall back to the provider row.
+   * Look up the effective grant for a single (assistant, connector). When no
+   * exact row exists it returns the synthesized registry default
+   * (`isDefault: true`), never `null`. Instance-qualified connector ids never
+   * fall back to the provider row.
    * System-level read because the runtime check inside
    * `assertActionAllowed` happens during a tool execute callback where
    * the acting user is the message author, not the assistant owner,
@@ -49,7 +59,7 @@ export type AssistantConnectorGrantsStore = {
   getForAssistantSystem(
     assistantId: string,
     connectorId: string,
-  ): Promise<AssistantConnectorGrant | null>
+  ): Promise<AssistantConnectorGrant>
 
   /** List every grant row for an assistant. Used by the Studio panel. */
   listForAssistant(userId: string, assistantId: string): Promise<AssistantConnectorGrant[]>
@@ -60,7 +70,10 @@ export type AssistantConnectorGrantsStore = {
    */
   upsert(userId: string, input: UpsertAssistantConnectorGrant): Promise<AssistantConnectorGrant>
 
-  /** Delete the grant row. Idempotent — returns false when no row matched. */
+  /**
+   * Delete the grant row, which resets the pair to the registry default.
+   * Idempotent — returns false when no row matched.
+   */
   delete(userId: string, assistantId: string, connectorId: string): Promise<boolean>
 }
 
@@ -84,7 +97,7 @@ export function createDbAssistantConnectorGrantsStore(): AssistantConnectorGrant
          LIMIT 1`,
         [assistantId, connectorId],
       )
-      return result.rows[0] ?? null
+      return result.rows[0] ?? defaultAssistantConnectorGrant(assistantId, connectorId)
     },
 
     async listForAssistant(userId, assistantId) {
@@ -131,5 +144,24 @@ export function createDbAssistantConnectorGrantsStore(): AssistantConnectorGrant
       )
       return (result.rowCount ?? 0) > 0
     },
+  }
+}
+
+/** The grant an untouched (assistant, connector) pair holds. */
+export function defaultAssistantConnectorGrant(
+  assistantId: string,
+  connectorId: string,
+): AssistantConnectorGrant {
+  const epoch = new Date(0)
+  return {
+    id: '',
+    assistantId,
+    connectorId,
+    readAllowed: true,
+    allowedActions: defaultGrantedConnectorActions(connectorId),
+    grantedByUserId: '',
+    grantedAt: epoch,
+    updatedAt: epoch,
+    isDefault: true,
   }
 }

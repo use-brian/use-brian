@@ -12,14 +12,15 @@ import { clearanceCounts, useDepartmentReaders } from "@/components/organization
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DepartmentChangeFeedback, useDepartmentChange } from "@/components/workspace-access/use-department-change";
+import type { ReviewCopy } from "@/components/workspace-access/use-reviewed-command";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { useT } from "@/lib/i18n/client";
 import { fetchWorkspaceDepartmentRegistry, ORGANIZATION_CHANGED_EVENT } from "@/lib/api/workspace-access";
-import { useCachedResource, invalidateSurfaceCache } from "@/lib/surface-cache";
+import { useCachedResource, invalidateSurfaceCache, markSurfaceCacheStale } from "@/lib/surface-cache";
 import { useProtectedProjection } from "@/lib/use-protected-projection";
 import { workspaceDepartmentRegistryCacheKey } from "@/lib/surface-prefetch";
-import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
+import { isCatchUpRefresh, WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import { SurfaceSkeletonFor } from "@/components/chrome/surface-skeleton";
 import { organizationHref } from "@/lib/organization-navigation";
 import { format } from "@/lib/i18n";
@@ -42,6 +43,7 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
   const { workspaceId, me } = useWorkspaceContext();
   const dictionary = useT(), t = dictionary.contextScope, accessCopy = dictionary.workspaceAccess;
   const [name, setName] = useState("");
+  const [adding, setAdding] = useState(false);
   const [selectedId, setSelectedId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -61,11 +63,14 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
   // On a phone the detail sits below every card; bring the chosen one into view.
   const choose=(id:string)=>{setSelectedId(id);if(isPhoneViewport())requestAnimationFrame(()=>detailRef.current?.scrollIntoView({block:'start',behavior:'smooth'}));};
   const {edges:readerEdges,directory}=useDepartmentReaders(teams.map(team=>team.id));
-  const save=(command:DepartmentAccessCommand,description:string)=>data?change.save(command,description,data.policyRevision):Promise.resolve(null);
+  const save=(command:DepartmentAccessCommand,description:ReviewCopy)=>data?change.save(command,description,data.policyRevision):Promise.resolve(null);
   useEffect(()=>{
     const purge=(event:Event)=>{
       const detail=(event as CustomEvent<{workspaceId?:string}>).detail;
       if(detail?.workspaceId&&detail.workspaceId!==workspaceId)return;
+      // Reconnect catch-up: revalidate behind the paint (a changed projection
+      // still purges drafts through useProtectedProjection's identity check).
+      if(isCatchUpRefresh(event)){markSurfaceCacheStale(key);return;}
       change.cancelReview();invalidateSurfaceCache(key);
     };
     window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);
@@ -85,9 +90,10 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
     if (!trimmed || !key) return;
     setError(null);
     try {
-      const result = await save({ type: "department.create", name: trimmed, key }, `${t.createTeam}: ${trimmed}`);
+      const result = await save({ type: "department.create", name: trimmed, key },
+        { title: format(t.createTeamReviewTitle, { name: trimmed }), description: t.createTeamReviewDescription, confirmLabel: t.createTeam });
       if (!result) return;
-      setName("");
+      setName("");setAdding(false);
       if (result.appliedCommand?.subjectId) setSelectedId(result.appliedCommand.subjectId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.updateFailed);
@@ -144,14 +150,23 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
       </span>:<span aria-hidden className={`block h-[38px] w-full rounded-md ${readerEdges?'':'animate-pulse bg-muted/50'}`}/>}
     </button></li>;
   };
-  const createDepartment=canManage?<li className="min-w-0"><section className="flex h-full flex-col justify-center gap-2 rounded-xl border border-dashed border-border p-3.5">
-    <h3 className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground"><Plus aria-hidden className="size-4"/>{t.createTeamTitle}</h3>
-    <div className="flex min-w-0 gap-2">
-      <input value={name} onChange={(event) => setName(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();void create();}}} placeholder={t.teamNamePlaceholder}
-        aria-label={t.teamNameLabel} className={`${fieldClass} w-full flex-1`} />
-      <Button className="max-sm:min-h-11" onClick={() => void create()} disabled={change.busy || !name.trim()}>{t.createTeam}</Button>
-    </div>
-  </section></li>:null;
+  // Collapsed, the whole card is the "add" target; expanded, it is a
+  // labelled form with the name field on its own row.
+  const createDepartment=canManage?<li className="min-w-0">{adding
+    ?<form onSubmit={event=>{event.preventDefault();void create();}} className="flex h-full flex-col gap-2.5 rounded-xl border border-foreground/30 bg-card p-3.5 shadow-sm">
+      <label className="grid gap-1.5 text-sm font-medium">{t.teamNameLabel}
+        <input autoFocus value={name} onChange={(event) => setName(event.target.value)} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();setAdding(false);setName("");}}}
+          placeholder={t.teamNameExample} className={`${fieldClass} w-full font-normal`} />
+      </label>
+      <div className="mt-auto flex justify-end gap-2">
+        <Button type="button" variant="ghost" className="max-sm:min-h-11" onClick={()=>{setAdding(false);setName("");}}>{t.cancel}</Button>
+        <Button type="submit" className="max-sm:min-h-11" disabled={change.busy || !name.trim()}>{t.createTeam}</Button>
+      </div>
+    </form>
+    :<button type="button" onClick={()=>setAdding(true)}
+      className="flex h-full min-h-[104px] w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border p-3.5 text-sm font-medium text-muted-foreground transition-colors hover:border-foreground/40 hover:bg-muted/40 hover:text-foreground focus-visible:outline focus-visible:outline-ring">
+      <span aria-hidden className="grid size-8 place-items-center rounded-lg bg-muted"><Plus className="size-4"/></span>{t.createTeamTitle}
+    </button>}</li>:null;
   const selectedTone=selected?departmentTone(selected.color,selected.id):'gray';
   const prefix=`department-${selected?.id??'none'}`;
   const readers=selected?readerEdges?.get(selected.id):undefined;

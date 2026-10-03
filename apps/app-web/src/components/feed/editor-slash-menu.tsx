@@ -79,12 +79,12 @@ export const FeedSlashMenu = forwardRef<FeedSlashMenuHandle, {
       className="w-80 max-w-[calc(100vw-1rem)] gap-1 p-1.5" data-feed-slash-menu
       onKeyDown={event => { if (onKeyDown(event.nativeEvent)) { event.preventDefault(); event.stopPropagation(); } }}>
       <div className="flex items-center justify-between pl-2 text-xs text-muted-foreground">
-        <span>{t.title}</span><Button variant="ghost" size="icon" className="size-11" aria-label={t.close}
+        <span>{t.title}</span><Button variant="ghost" size="icon" className="max-sm:size-11" aria-label={t.close}
           onMouseDown={event => event.preventDefault()} onClick={() => { onDismiss(); view.focus(); }}><X className="size-4" aria-hidden /></Button>
       </div>
       <div id={id} role="listbox" aria-label={t.title}>
         {options.map((item, index) => <Button key={item.id} id={`${id}-${item.id}`} type="button" role="option" aria-selected={index === active}
-          variant="ghost" className="min-h-11 h-auto w-full justify-start gap-3 whitespace-normal px-3 py-2 text-left aria-selected:bg-accent"
+          variant="ghost" className="max-sm:min-h-11 h-auto w-full justify-start gap-3 whitespace-normal px-3 py-2 text-left aria-selected:bg-accent"
           onMouseDown={event => event.preventDefault()} onPointerMove={event => { if (event.pointerType === 'mouse') setSelected(index); }}
           onClick={() => onSelect(item.id, query)}>
           <item.icon className="size-4 shrink-0" aria-hidden /><span><span className="block">{t[item.id]}</span>

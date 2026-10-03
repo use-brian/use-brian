@@ -38,7 +38,7 @@ export function AssociationChoice({label,value,onChange,values,disabled=false,la
   </Select></label>;
 }
 export function AssociationToggle({label,checked,onChange,disabled=false}:{label:string;checked:boolean;onChange:(checked:boolean)=>void;disabled?:boolean}) {
-  return <label className="flex min-h-11 items-center gap-2 text-sm"><Checkbox checked={checked} disabled={disabled} onCheckedChange={v=>onChange(v===true)} />{label}</label>;
+  return <label className="flex min-h-8 max-sm:min-h-11 items-center gap-2 text-sm"><Checkbox checked={checked} disabled={disabled} onCheckedChange={v=>onChange(v===true)} />{label}</label>;
 }
 export function useAssociationPage<K extends AssociationResource>(workspaceId:string,resource:K,query:AssociationListQuery={},enabled=true) {
   const scope=JSON.stringify(query);
@@ -99,7 +99,7 @@ export function AssociationContactPicker({workspaceId,onSelect,selected,onClear,
   const [draft,setDraft]=useState(""),[query,setQuery]=useState("");
   useEffect(()=>{const handle=setTimeout(()=>setQuery(draft.trim()),300);return ()=>clearTimeout(handle);},[draft]);
   const data=useCachedResource(selected?null:associationPageCacheKey(workspaceId,"contact-lookup",{query}),()=>fetchCrmLookup(workspaceId,"contact",query,50));
-  if(selected)return <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 rounded-xl bg-primary/5 px-3 py-2 text-sm" data-selected-contact>
+  if(selected)return <div className="flex max-sm:min-h-11 flex-wrap items-center justify-between gap-2 rounded-xl bg-primary/5 px-3 py-2 text-sm" data-selected-contact>
     <span className="min-w-0"><span className="block font-medium">{selected.name}</span>{selected.hint?<span className="block text-xs text-muted-foreground">{selected.hint}</span>:null}</span>
     {onClear?<Button type="button" variant="ghost" size="sm" className="min-h-11 md:min-h-8" onClick={onClear}><X aria-hidden className="size-4"/>{t.ux.clear}</Button>:null}
   </div>;
@@ -108,7 +108,7 @@ export function AssociationContactPicker({workspaceId,onSelect,selected,onClear,
       <label className="flex min-w-0 flex-col gap-1 text-sm">{label ?? m.contactSearch}<input className={`${associationInputClass} pl-9`} value={draft} placeholder={t.ux.searchPeople} autoComplete="off" onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();setQuery(draft.trim());}}}/></label></div>
     {data.error?<p role="alert" className="text-sm text-destructive">{m.loadFailed}</p>:null}
     {!data.data&&!data.error?<ListSurfaceSkeleton rows={2}/>:null}
-    <div className="max-h-48 divide-y divide-border overflow-y-auto rounded-lg border border-border">{data.data?.map(row=><button key={row.id} type="button" className="flex min-h-11 w-full flex-wrap items-center justify-between gap-2 px-3 text-left text-sm hover:bg-accent" disabled={!!data.error} onClick={()=>onSelect(row)}><span>{row.name}</span><span className="text-muted-foreground">{row.hint}</span></button>)}{data.data?.length===0?<p className="p-3 text-sm text-muted-foreground">{m.empty}</p>:null}</div>
+    <div className="max-h-48 divide-y divide-border overflow-y-auto rounded-lg border border-border">{data.data?.map(row=><button key={row.id} type="button" className="flex min-h-8 max-sm:min-h-11 w-full flex-wrap items-center justify-between gap-2 px-3 text-left text-sm hover:bg-accent" disabled={!!data.error} onClick={()=>onSelect(row)}><span>{row.name}</span><span className="text-muted-foreground">{row.hint}</span></button>)}{data.data?.length===0?<p className="p-3 text-sm text-muted-foreground">{m.empty}</p>:null}</div>
   </div>;
 }
 /** Stable request reference, kept out of the way inside a collapsed technical line. */

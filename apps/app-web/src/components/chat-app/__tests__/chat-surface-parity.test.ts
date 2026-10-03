@@ -175,11 +175,12 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
   });
 
   it("consumes the Home handoff only after Personal-chat roster validation", () => {
-    expect(source).toContain("takeChatHandoff(workspaceId, Date.now())");
-    expect(source).toContain("resolveChatHandoffAction({");
-    expect(source).toContain("assistantIds: assistants.map((row) => row.id)");
-    expect(source).toContain('if (action === "prefill")');
-    expect(source).toContain("void send({ text })");
+    expect(source).toContain("useChatHandoff({");
+    expect(source).toContain("async validateAssistant(id)");
+    expect(source).toContain("await listWorkspaceAssistants(workspaceId)");
+    expect(source).toContain("router.replace(personalChatHandoffPath(");
+    expect(source).toContain("return send({text:handoff.text");
+    expect(source).toContain("prefill(handoff)");
     expect(source).not.toContain('searchParams?.get("prompt")');
   });
 });

@@ -47,7 +47,7 @@ export function DraftCommentPanel(props: FeedCommentPanelProps) {
     {props.composer ? <CommentComposer key={`${props.composer.parentId ?? ''}:${props.composer.threadId ?? ''}:${JSON.stringify(props.composer.anchor.target)}`} {...props} composer={props.composer} /> : null}
     {!visible.length && props.snapshot ? <p className="text-sm text-muted-foreground">{t.noComments}</p> : null}
     {visible.map(thread => <article key={thread.id} data-feed-comment-id={thread.id} className={`space-y-3 ${props.focused ? '' : 'border-b border-border pb-4'}`}>
-      <button type="button" aria-expanded={active?.id === thread.id} className="w-full min-h-11 rounded-md text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => props.onThread(thread.id)}>
+      <button type="button" aria-expanded={active?.id === thread.id} className="w-full min-h-8 max-sm:min-h-11 rounded-md text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => props.onThread(thread.id)}>
         <span className="font-medium">{thread.authorKind === 'assistant' ? t.brian : (thread.authorName ?? `${t.author} ${thread.authorUserId.slice(0, 8)}`)}</span>
         <blockquote className="mt-2 line-clamp-3 whitespace-pre-wrap border-l-2 pl-2">{thread.anchor.quote || t.post}</blockquote>
       </button>

@@ -34,6 +34,6 @@ export function AssociationPrivacyPolicyForm({workspaceId,snapshot,disabled,onSa
         {period(p.openAfter,openAfter,setOpenAfter)}<h4 className="text-sm font-medium">{p.redactFields}</h4><div className="flex flex-wrap gap-3">{(["subject","message","metadata","notes"] as const).map(field=><AssociationToggle key={field} label={p[field]} checked={fields.includes(field)} disabled={disabled||action.pending} onChange={checked=>setFields(old=>checked?[...old,field]:old.filter(key=>key!==field))}/>)}</div>
         <div className="grid gap-3 md:grid-cols-2">{holdDomains.map(domain=><AssociationField key={domain} label={p[holdLabels[domain]]} multiline value={holds[domain]} onChange={value=>setHolds(old=>({...old,[domain]:value}))}/>)}</div>
       </div>:null}
-    </fieldset>{action.feedback}<Button type="submit" className="min-h-11" disabled={disabled||action.pending}>{t.manage.save}</Button>
+    </fieldset>{action.feedback}<Button type="submit" className="max-sm:min-h-11" disabled={disabled||action.pending}>{t.manage.save}</Button>
   </form>;
 }

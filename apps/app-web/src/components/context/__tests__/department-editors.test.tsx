@@ -93,7 +93,8 @@ describe('[COMP:app-web/context-scope] reviewed Team and assistant editors',()=>
   });
   it('prepares creation and cancellation never changes a Team',async()=>{
     mocks.confirm.mockResolvedValue(false);await render(<TeamsContextSection/>);
-    await input(host.querySelector<HTMLInputElement>(`input[placeholder="${t.teamNamePlaceholder}"]`)!,'Design');await click(t.createTeam);
+    await click(t.createTeamTitle);await input(host.querySelector<HTMLInputElement>(`input[placeholder="${t.teamNameExample}"]`)!,'Design');await click(t.createTeam);
+    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({title:'Create the Design department?',description:t.createTeamReviewDescription,confirmLabel:t.createTeam}));
     expect(mocks.prepare).toHaveBeenCalledWith('workspace',{type:'department.create',name:'Design',key:'design'},'15',expect.any(String));
     expect(mocks.save).not.toHaveBeenCalled();expect(host.textContent).toContain('Research');
   });
@@ -123,6 +124,15 @@ describe('[COMP:app-web/workspace-access] shared command confirmation lifetime',
     const signal=mocks.confirm.mock.calls[0][0].signal as AbortSignal;
     await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace'}})));expect(signal.aborted).toBe(true);
     await act(async()=>finish(true));expect(mocks.save).not.toHaveBeenCalled();
+  });
+  it('keeps an open confirmation through the stream catch-up',async()=>{
+    // The stream reconnects every ~5 minutes; its catch-up is not an authority
+    // change, so it must not close the dialog the viewer is reading.
+    let finish:(value:boolean)=>void=()=>{};mocks.confirm.mockImplementation(()=>new Promise<boolean>(resolve=>{finish=resolve}));
+    await render(<Harness/>);await click('Change');
+    const signal=mocks.confirm.mock.calls[0][0].signal as AbortSignal;
+    await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace',catchUp:true}})));expect(signal.aborted).toBe(false);
+    await act(async()=>finish(true));expect(mocks.save).toHaveBeenCalledTimes(1);
   });
   it('blocks another intent while a confirmed result is uncertain, then retries the saved receipt',async()=>{
     mocks.save.mockRejectedValueOnce(new TypeError('lost response'));await render(<Harness/>);await click('Change');await click('Other');

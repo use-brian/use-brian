@@ -60,14 +60,14 @@ export function AssociationModuleControls({ workspaceId }: { workspaceId: string
       <p role="status" className="text-sm font-medium">{t.states[data.module.state]}</p>
       <p className="text-sm text-muted-foreground">{t.stateDescriptions[data.module.state]}</p>
       {data.canManage && <div className="flex flex-wrap gap-2">
-        {data.module.state === "disabled" && <Button className="min-h-11" disabled={pending || !!error} onClick={() => void act("enable")}>{t.enable}</Button>}
-        {data.module.state === "enabled" && <Button className="min-h-11" variant="outline" disabled={pending || !!error} onClick={() => void act("request_disable")}>{t.disable}</Button>}
-        {data.module.state === "draining" && <Button className="min-h-11" variant="outline" disabled={pending || !!error} onClick={() => void act("finish_disable")}>{t.finish}</Button>}
+        {data.module.state === "disabled" && <Button className="max-sm:min-h-11" disabled={pending || !!error} onClick={() => void act("enable")}>{t.enable}</Button>}
+        {data.module.state === "enabled" && <Button className="max-sm:min-h-11" variant="outline" disabled={pending || !!error} onClick={() => void act("request_disable")}>{t.disable}</Button>}
+        {data.module.state === "draining" && <Button className="max-sm:min-h-11" variant="outline" disabled={pending || !!error} onClick={() => void act("finish_disable")}>{t.finish}</Button>}
       </div>}
       {!data.canManage && <p className="text-sm text-muted-foreground">{t.ownerOnly}</p>}
-      <Link className="inline-flex min-h-11 items-center text-sm text-primary underline" href={`/w/${workspaceId}/association?section=orders`}>{t.history}</Link>
+      <Link className="inline-flex min-h-8 max-sm:min-h-11 items-center text-sm text-primary underline" href={`/w/${workspaceId}/association?section=orders`}>{t.history}</Link>
     </>}
     {(error || saveError) && <p role="alert" className="text-sm text-destructive">{saveError ?? t.loadFailed}</p>}
-    <Button className="min-h-11" variant="ghost" disabled={pending} onClick={() => { setSaveError(null); void refresh(); }}>{t.refresh}</Button>
+    <Button className="max-sm:min-h-11" variant="ghost" disabled={pending} onClick={() => { setSaveError(null); void refresh(); }}>{t.refresh}</Button>
   </section>;
 }

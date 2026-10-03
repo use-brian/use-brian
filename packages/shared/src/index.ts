@@ -48,6 +48,7 @@ export * from './campaigns.js'
 export * from './workspace-access.js'
 export * from './workspace-access-mode.js'
 export * from './department-isolation-coverage.js'
+export * from './workspace-search.js'
 
 export * from './feed-linkedin.js'
 export { feedLinkedInPayloadSchema, feedLinkedInCloudRequestSchema, type FeedLinkedInCloudRequest } from './feed-linkedin-cloud.js'

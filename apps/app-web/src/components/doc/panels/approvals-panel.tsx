@@ -56,7 +56,7 @@ import {
   buildConfirmationPreview,
   getToolDisplayName,
 } from "@use-brian/shared";
-import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
+import { WORKSPACE_IDENTITY_REFRESH_EVENT, isCatchUpRefresh } from "@/lib/workspace-identity-events";
 import { openWorkspaceSettings } from "@/lib/workspace-settings-events";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -166,6 +166,9 @@ export function ApprovalsPanel() {
     const reset=(event:Event)=>{
       const detail=(event as CustomEvent<{workspaceId?:string}>).detail;
       if(detail?.workspaceId&&detail.workspaceId!==activeId)return;
+      // The reconnect catch-up changes nothing the viewer chose; a half-typed
+      // batch reason must survive it.
+      if(isCatchUpRefresh(event))return;
       setSelected(new Set());setFilter(NO_FILTER);setBatchReason("");setBatchError(null);setAssistantNames({});
     };
     window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,reset);
@@ -1657,6 +1660,6 @@ function DepartmentAccessBody({row}:{row:PendingApprovalRow}) {
     <p>{t.starts}: {payload.startsAt?new Date(payload.startsAt).toLocaleString():''}</p>
     <p>{t.expires}: {payload.expiresAt?new Date(payload.expiresAt).toLocaleString():t.ongoing}</p>
     <p>{t.readOnly}</p>{payload.beneficiaryKind==='team'?<p>{t.futureMembers}</p>:null}
-    <Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-access')}>{t.title}</Button>
+    <Button variant="outline" className="max-sm:min-h-11" onClick={()=>openWorkspaceSettings('ws-access')}>{t.title}</Button>
   </div>;
 }

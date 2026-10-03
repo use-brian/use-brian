@@ -346,7 +346,7 @@ export function AssistantDetail({
                     <SelectTrigger
                       size="sm"
                       aria-label={t.assistant.clearanceSelector.ariaLabel}
-                      className="min-h-11 w-auto gap-1 border-transparent bg-transparent px-2 py-0 text-[16px] hover:bg-muted/50 md:text-sm"
+                      className="max-sm:min-h-11 w-auto gap-1 border-transparent bg-transparent px-2 py-0 text-[16px] hover:bg-muted/50 md:text-sm"
                     >
                       <SelectValue>
                         <SensitivityBadge tier={assistant.clearance} size="xs" />

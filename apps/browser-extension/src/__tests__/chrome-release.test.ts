@@ -54,7 +54,7 @@ describe('[COMP:ext/chrome-release] Chrome Web Store release command', () => {
   })
 
   it('packages a new version for the canonical Store listing', () => {
-    expect(manifest.version).toBe('1.0.1')
+    expect(manifest.version).toBe('1.0.2')
     expect(script).toContain('nnmbbacnkekaoccmkmlfaghjaamgdpjn')
     expect(bridge).toContain(
       'chromewebstore.google.com/detail/use-brian-browser-agent/nnmbbacnkekaoccmkmlfaghjaamgdpjn',

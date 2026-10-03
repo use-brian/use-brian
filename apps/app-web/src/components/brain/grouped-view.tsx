@@ -465,7 +465,7 @@ export function BrainGroupedView({
   const selectionBox = (row: BrainRow) => {
     const key = `${row.kind}:${row.id}`;
     return (
-      <label className="flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center">
+      <label className="flex min-h-8 max-sm:min-h-11 min-w-8 max-sm:min-w-11 shrink-0 cursor-pointer items-center justify-center">
         <Checkbox
           aria-label={format(t.brainPage.groupedView.selectRow, { name: row.name })}
           checked={selectedKeys.has(key)}
@@ -621,7 +621,7 @@ export function BrainGroupedView({
     // bottom-right, so the last entry row isn't trapped behind it.
     <div className="relative flex-1 min-h-0 overflow-y-auto bg-background pb-28">
       <div className="flex flex-wrap items-center gap-x-3 px-4 py-2 border-b border-border text-sm">
-        <label className="flex min-h-11 cursor-pointer items-center gap-2">
+        <label className="flex min-h-8 max-sm:min-h-11 cursor-pointer items-center gap-2">
           <Checkbox
             aria-label={t.brainPage.groupedView.selectAll}
             checked={allSelected}
@@ -642,18 +642,18 @@ export function BrainGroupedView({
           type="button"
           disabled={busy || selectedKeys.size === 0}
           onClick={() => setSelectedKeys(new Set())}
-          className="min-h-11 px-2 rounded-md hover:bg-muted/40 disabled:opacity-50"
+          className="min-h-8 max-sm:min-h-11 px-2 rounded-md hover:bg-muted/40 disabled:opacity-50"
         >
           {t.brainPage.groupedView.clearSelection}
         </button>
         <button type="button" disabled={busy || !workspaceId || eligibleRows("confirm").length === 0}
           onClick={() => void runBulk("confirm")}
-          className="min-h-11 px-2 rounded-md hover:bg-muted/40 disabled:opacity-50">
+          className="min-h-8 max-sm:min-h-11 px-2 rounded-md hover:bg-muted/40 disabled:opacity-50">
           {format(t.brainPage.groupedView.bulkConfirm, { count: eligibleRows("confirm").length })}
         </button>
         <button type="button" disabled={busy || !workspaceId || eligibleRows("delete").length === 0}
           onClick={() => void runBulk("delete")}
-          className="min-h-11 px-2 rounded-md text-destructive hover:bg-muted/40 disabled:opacity-50">
+          className="min-h-8 max-sm:min-h-11 px-2 rounded-md text-destructive hover:bg-muted/40 disabled:opacity-50">
           {format(t.brainPage.groupedView.bulkDelete, { count: eligibleRows("delete").length })}
         </button>
         {busy && <span role="status">{t.brainPage.groupedView.bulkBusy}</span>}
@@ -726,7 +726,7 @@ export function BrainGroupedView({
                           disabled={busy}
                           onClick={() => onSelect(row)}
                           className={cn(
-                            "min-w-0 min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md",
+                            "min-w-0 max-sm:min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md",
                             "hover:border-primary/50 hover:bg-muted/40 transition-colors",
                           )}
                         >
@@ -841,7 +841,7 @@ export function BrainGroupedView({
                               disabled={busy}
                               onClick={() => onSelect(row)}
                               className={cn(
-                                "min-w-0 min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md opacity-60",
+                                "min-w-0 max-sm:min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md opacity-60",
                                 "transition-all hover:opacity-100 hover:border-primary/50 hover:bg-muted/40",
                               )}
                             >

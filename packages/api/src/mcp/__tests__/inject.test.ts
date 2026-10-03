@@ -2275,7 +2275,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     getConnectorConfig.mockReturnValue(undefined)
   })
 
-  it.each(['owned', 'exposed'] as const)('withholds %s provider catalogs from finite turns before credentials', async lane => {
+  it.each(['owned', 'exposed'] as const)('withholds %s department connectors from turns outside that department before credentials', async lane => {
     const diagnostics = vi.spyOn(console, 'info').mockImplementation(() => {})
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
     const instance = { ...exposedInstance, label: 'PRIVATE-CONNECTOR-LABEL', compartments: ['team:product'], projectIds: ['project'] }
@@ -2285,7 +2285,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     else connectorGrantStore.listForTargetSystem.mockResolvedValue([
       { grantedByUserId: 'grantor-1', instance, compartments: ['team:product'], projectIds: ['project'] },
     ])
-    const inject = async (mutationCompartments: string[]) => {
+    const inject = async (mutationCompartments: string[], expectRestriction = true) => {
       const tools = new Map()
       const result = await injectMcpTools({
         userId: 'owner-1', assistantId: 'a-1', tools,
@@ -2296,9 +2296,9 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
         contextScope: { effectiveCompartments: ['team:product', 'team:marketing'],
           effectiveProjectIds: ['project'], access: { mutationCompartments } },
       })
-      expect(result.unavailable.filter(message => message.includes('current execution scope'))).toEqual([
-        'Connector discovery is limited by the current execution scope. Provider catalogs require unrestricted scope; searching again cannot bypass this restriction.',
-      ])
+      expect(result.unavailable.filter(message => message.includes('current execution scope'))).toEqual(expectRestriction ? [
+        'Connector discovery is limited by the current execution scope. Some connectors belong to a department or Project this turn cannot reach; searching again cannot bypass this restriction.',
+      ] : [])
       expect(JSON.stringify(result.unavailable)).not.toContain(instance.id)
       expect(JSON.stringify(result.unavailable)).not.toContain(instance.label)
       expect(JSON.stringify(result.unavailable)).not.toContain('team:product')
@@ -2308,19 +2308,19 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     for (const name of PROBE_TOOLS) expect(denied.has(name)).toBe(false)
     expect(msGraphTokenResolvers).toHaveLength(0)
     expect(connectorInstanceStore.getCredentialsSystem).not.toHaveBeenCalled()
-    const matching = await inject(['team:product'])
-    for (const name of PROBE_TOOLS) expect(matching.has(name)).toBe(false)
-    expect(msGraphTokenResolvers).toHaveLength(0)
-    expect(connectorInstanceStore.getCredentialsSystem).not.toHaveBeenCalled()
-    // Two injections, each visiting multiple discovery lanes: one safe log each.
-    expect(diagnostics.mock.calls).toEqual(Array.from({ length: 2 }, () => [
+    // A turn inside the connector's department is its audience: tools load.
+    const matching = await inject(['team:product'], false)
+    for (const name of PROBE_TOOLS) expect(matching.has(name)).toBe(true)
+    expect(connectorInstanceStore.getCredentialsSystem).toHaveBeenCalled()
+    // Only the denied injection logs, once across its discovery lanes.
+    expect(diagnostics.mock.calls).toEqual(Array.from({ length: 1 }, () => [
       '[mcp-inject] connector discovery scope restriction',
       { assistantId: 'a-1', workspaceId: 'ws-1', reason: 'connector_exposure_outside_execution_scope' },
     ]))
     diagnostics.mockRestore()
   })
 
-  it.each(['owned', 'exposed'] as const)('injects %s provider catalogs only for a company-wide turn', async lane => {
+  it.each(['owned', 'exposed'] as const)('injects %s department connectors for a company-wide turn', async lane => {
     const tools = new Map()
     const diagnostics = vi.spyOn(console, 'info').mockImplementation(() => {})
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()

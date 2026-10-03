@@ -55,7 +55,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
         breadcrumbs={breadcrumbs}
         right={
           <div className="flex items-center gap-1.5">
-            <div className="flex max-w-[min(70vw,24rem)] items-center overflow-x-auto rounded-md border p-0.5" aria-label={t.fileFilters}>
+            <div className="flex max-w-[min(calc(100vw-10.5rem),24rem)] sm:max-w-[min(70vw,24rem)] items-center overflow-x-auto rounded-md border p-0.5" aria-label={t.fileFilters}>
               {(["all", "document", "presentation", "spreadsheet"] as const).map((item) => <Link key={item} href={filterHref(item)} aria-current={filter === item ? "page" : undefined} className={filter === item ? "rounded px-2 py-1 text-xs font-medium bg-foreground text-background" : "rounded px-2 py-1 text-xs text-muted-foreground hover:text-foreground"}>{item === "all" ? t.all : item === "document" ? t.documents : item === "presentation" ? t.presentations : t.spreadsheets}</Link>)}
             </div>
             <Link aria-label={t.newArtifact} title={t.newArtifact} className="inline-flex size-11 items-center justify-center gap-2 rounded-md bg-action text-sm font-medium text-action-foreground shadow-sm transition-colors hover:bg-action/85 sm:h-8 sm:w-auto sm:px-2.5" href={`${base}/new`}>

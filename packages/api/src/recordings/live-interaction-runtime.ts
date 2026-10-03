@@ -3,7 +3,7 @@ import { createKnowledgeTools, calculateCost, scopeGrantContains, type UsageStor
   type LLMProvider, type Tool, type Embedder, type SavedViewStore, type ScopeEvidence,
   type ToolContext } from '@use-brian/core'
 import { getPool } from '../db/client.js'
-import { findSessionById, addSessionMessage } from '../db/sessions.js'
+import { readSessionById, addSessionMessage } from '../db/sessions.js'
 import { findAssistantById } from '../db/users.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
@@ -63,7 +63,7 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
   async function resolve(userId: string, binding: Binding, signal: AbortSignal) {
     signal.throwIfAborted()
     const [session, assistant, role] = await Promise.all([
-      findSessionById(binding.chatSessionId), findAssistantById(binding.assistantId),
+      readSessionById(binding.chatSessionId), findAssistantById(binding.assistantId),
       deps.workspaceStore.getRole(userId, binding.workspaceId),
     ])
     if (!role || !session || !assistant || session.userId !== userId ||
@@ -78,11 +78,19 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
     })
     const page = await runWithAgentAccess(scopedAccess(resolved.turnScope), () => deps.savedViewStore.getById(userId, binding.pageId))
     if (!page || page.workspaceId !== binding.workspaceId) throw deny()
-    const compartments = page.teamspaceId ? (await getPool().query<{ compartmentKey: string }>(
-      `SELECT g.compartment_key AS "compartmentKey" FROM teamspaces t
-       JOIN workspace_groups g ON g.id=t.workspace_group_id WHERE t.id=$1 AND t.workspace_id=$2`,
-      [page.teamspaceId, binding.workspaceId])).rows.map(row => row.compartmentKey) : []
-    if (page.teamspaceId && !compartments.length) throw deny()
+    const compartments: string[] = []
+    if (page.teamspaceId) {
+      const teamspace = (await getPool().query<{ workspaceGroupId: string | null; compartmentKey: string | null }>(
+        `SELECT t.workspace_group_id AS "workspaceGroupId", g.compartment_key AS "compartmentKey" FROM teamspaces t
+         LEFT JOIN workspace_groups g ON g.id=t.workspace_group_id AND g.workspace_id=t.workspace_id
+         WHERE t.id=$1 AND t.workspace_id=$2`,
+        [page.teamspaceId, binding.workspaceId])).rows[0]
+      // The scoped page read above remains the access gate. A teamspace may
+      // legitimately have no linked group; that adds no compartment label.
+      // Missing teamspaces or unresolved linked groups still fail closed.
+      if (!teamspace || (teamspace.workspaceGroupId !== null && !teamspace.compartmentKey)) throw deny()
+      if (teamspace.compartmentKey) compartments.push(teamspace.compartmentKey)
+    }
     const pageEvidence: ScopeEvidence = { sensitivity: page.clearance, compartments,
       projectIds: page.projectId ? [page.projectId] : [] }
     return { ...resolved, session, assistant, pageEvidence }
@@ -199,6 +207,8 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
         if (!data.canonicalPublished) {
           // Serialize sequence allocation and freeze the destination binding during insertion.
           await tx.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE', [capture.chatSessionId])
+          // Revalidate under the lock using read-only lookups: a pooled recency
+          // touch would wait on our own transaction and prevent it from completing.
           const current = await resolve(capture.ownerId, capture, signal)
           await resolved.executionContext.security.authority.assertCurrent()
           const evidence = data.publicationEvidence as ScopeEvidence | undefined
@@ -233,7 +243,7 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
       // The dock may use a different assistant from the active main chat.
       // Resolve the immutable destination's assistant server-side, then perform
       // the usual owner/workspace/page checks before persisting the capture.
-      const session = await findSessionById(binding.chatSessionId)
+      const session = await readSessionById(binding.chatSessionId)
       if (!session || session.userId !== userId || !session.assistantId) throw deny()
       return service.create(userId, { ...binding, assistantId: session.assistantId })
     },

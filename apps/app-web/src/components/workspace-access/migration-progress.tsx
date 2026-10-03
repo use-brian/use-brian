@@ -4,11 +4,11 @@ import {useEffect,useRef,useState} from 'react';
 import type {DepartmentCommandReview,DepartmentAccessCommand,WorkspaceDepartmentRegistry} from '@use-brian/shared';
 import {useT} from '@/lib/i18n/client';
 import {useWorkspaceContext} from '@/lib/workspace-context';
-import {useCachedResource,invalidateSurfaceCache} from '@/lib/surface-cache';
+import {useCachedResource,invalidateSurfaceCache,markSurfaceCacheStale} from '@/lib/surface-cache';
 import {useProtectedProjection,projectionRemainingMs} from '@/lib/use-protected-projection';
 import {workspaceAccessModeCacheKey,workspaceAccessMigrationCacheKey,workspaceDepartmentRegistryCacheKey} from '@/lib/surface-prefetch';
 import {fetchWorkspaceDepartmentRegistry,fetchWorkspaceAccessMode,fetchMigrationPlans,fetchMigrationPlan,prepareMigrationItem,applyMigrationItem,setMigrationPlanState,ORGANIZATION_CHANGED_EVENT,isResourceMigrationItem,type MigrationItem,type PrincipalMigrationItem,type ResourceMigrationItem,type MigrationItemReviewResult,type MigrationItemApplyResult,type MigrationProjection} from '@/lib/api/workspace-access';
-import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
+import {WORKSPACE_IDENTITY_REFRESH_EVENT,isCatchUpRefresh} from '@/lib/workspace-identity-events';
 import {Button} from '@/components/ui/button';
 import {RefreshCw} from 'lucide-react';
 import {HowItWorks} from '@/components/organization/org-visuals';
@@ -78,7 +78,7 @@ function MigrationPanel(){
   const {workspaceId,me}=useWorkspaceContext(),t=useT().accessMigration;
   const [plan,setPlan]=useState<string|null>(null),[after,setAfter]=useState('');
   useEffect(()=>{
-    const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;invalidateSurfaceCache(`workspace-access:${workspaceId}:`);};
+    const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;if(isCatchUpRefresh(event))markSurfaceCacheStale(`workspace-access:${workspaceId}:`);else invalidateSurfaceCache(`workspace-access:${workspaceId}:`);};
     window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);
     return()=>{window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};
   },[workspaceId]);
@@ -90,7 +90,7 @@ function MigrationPanel(){
 }
 function LoadState({error,refresh}:{error:unknown;refresh:()=>Promise<unknown>}){
   const t=useT().workspaceAccess;
-  return error?<div role="alert"><p>{t.loadError}</p><Button className="min-h-11" variant="outline" onClick={()=>void refresh()}>{t.reload}</Button></div>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
+  return error?<div role="alert"><p>{t.loadError}</p><Button className="max-sm:min-h-11" variant="outline" onClick={()=>void refresh()}>{t.reload}</Button></div>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
 }
 function ModeSummary(){
   const {workspaceId,me}=useWorkspaceContext(),t=useT().accessMigration;
@@ -107,8 +107,8 @@ function PlanList({after,setAfter,inspect}:{after:string;setAfter:(value:string)
     {!data?<LoadState error={resource.error} refresh={resource.refresh}/>:<>{!data.plans.length?<p className="text-sm text-muted-foreground">{t.empty}</p>:data.plans.map(plan=><article className="space-y-2 border-t border-border pt-3 text-sm" key={plan.id}>
       <p className="break-all">{plan.id}</p><p>{statusLabel(plan.status,t)} · {t.target}: {t[plan.target_mode]}</p>
       <p>{t.appliedCount}: {plan.summary_counts.applied??0} / {plan.summary_counts.total??0}</p>
-      <Button className="min-h-11" variant="outline" onClick={()=>inspect(plan.id)}>{t.inspect}</Button>
-    </article>)}<div className="flex flex-wrap gap-2">{after?<Button className="min-h-11" variant="outline" onClick={()=>setAfter('')}>{t.back}</Button>:null}{data.plans.length===50?<Button className="min-h-11" variant="outline" onClick={()=>setAfter(data.plans.at(-1)!.id)}>{t.next}</Button>:null}</div></>}
+      <Button className="max-sm:min-h-11" variant="outline" onClick={()=>inspect(plan.id)}>{t.inspect}</Button>
+    </article>)}<div className="flex flex-wrap gap-2">{after?<Button className="max-sm:min-h-11" variant="outline" onClick={()=>setAfter('')}>{t.back}</Button>:null}{data.plans.length===50?<Button className="max-sm:min-h-11" variant="outline" onClick={()=>setAfter(data.plans.at(-1)!.id)}>{t.next}</Button>:null}</div></>}
   </div>;
 }
 function PlanDetail({planId}:{planId:string}){
@@ -167,13 +167,13 @@ function PlanDetail({planId}:{planId:string}){
     <p role="status">{t.appliedCount}: {applied} / {data.items.length}</p><p>{a.expires}: <time dateTime={data.expires_at}>{new Date(data.expires_at).toLocaleString()}</time></p>
     {expired?<p role="status">{t.expired}</p>:null}
     <ul className="list-inside list-disc">{data.blockers.map(code=><li key={code}>{migrationMessage(code,t)??t.unknownBlocker}</li>)}</ul>
-    <p>{t.refreshHint}</p><div className="flex flex-wrap gap-2"><Button variant="outline" className="min-h-11" disabled={busy||change.busy} onClick={()=>void resource.refresh()}>{a.reload}</Button>
-      {data.status!=='cancelled'?<><Button variant="outline" className="min-h-11" disabled={busy||change.busy||(data.status==='paused'&&expired)} onClick={()=>void state(data.status==='paused'?'proposed':'paused')}>{data.status==='paused'?t.resume:t.pause}</Button><Button variant="outline" className="min-h-11" disabled={busy||change.busy} onClick={()=>void state('cancelled')}>{t.cancel}</Button></>:null}</div>
+    <p>{t.refreshHint}</p><div className="flex flex-wrap gap-2"><Button variant="outline" className="max-sm:min-h-11" disabled={busy||change.busy} onClick={()=>void resource.refresh()}>{a.reload}</Button>
+      {data.status!=='cancelled'?<><Button variant="outline" className="max-sm:min-h-11" disabled={busy||change.busy||(data.status==='paused'&&expired)} onClick={()=>void state(data.status==='paused'?'proposed':'paused')}>{data.status==='paused'?t.resume:t.pause}</Button><Button variant="outline" className="max-sm:min-h-11" disabled={busy||change.busy} onClick={()=>void state('cancelled')}>{t.cancel}</Button></>:null}</div>
     {error?<p role="alert">{error}</p>:null}<DepartmentChangeFeedback change={change}/>
     {data.actor_user_id!==me.id?<p>{t.actor}</p>:null}
     {data.items.map(item=><article key={item.id} className="space-y-2 border-t border-border pt-3">{isResourceMigrationItem(item)?<><ResourceSummary item={item} names={registry}/><ScopeReviewEvidence job={{action:item.proposed_action.action,items:[{resourceId:item.proposed_action.resourceId,source:item.before_state.source,content:item.before_state.content,impact:item.after_state.impact??null,status:item.status==='applied'?'applied':item.status==='stale'?'stale':item.status==='cancelled'?'cancelled':'pending'}]}} names={registry}/><p>{t.resourceDisclaimer}</p></>:<><ActionSummary command={item.proposed_action} names={registry}/><ReachPreview item={item} names={registry}/></>}<p className="break-words">{item.reason}</p><p>{statusLabel(item.status,t)}</p>
       {item.diagnostic_code?<p>{migrationMessage(item.diagnostic_code,t)??t.unknownBlocker}</p>:null}
-      {item.status!=='applied'?<Button variant="outline" className="min-h-11" disabled={busy||change.busy||change.retryAvailable||expired||stopped||data.actor_user_id!==me.id||item.diagnostic_code==='scope_review_action_unsupported'} onClick={()=>void change.save(item.id,t.warning)}>{t.review}</Button>:null}
+      {item.status!=='applied'?<Button variant="outline" className="max-sm:min-h-11" disabled={busy||change.busy||change.retryAvailable||expired||stopped||data.actor_user_id!==me.id||item.diagnostic_code==='scope_review_action_unsupported'} onClick={()=>void change.save(item.id,t.warning)}>{t.review}</Button>:null}
     </article>)}
   </div>;
 }

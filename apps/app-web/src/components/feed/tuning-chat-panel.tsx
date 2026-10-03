@@ -75,6 +75,7 @@ import {
 } from "@/components/chrome/dock-recorder";
 import type { DockRecorderApi } from "@/lib/recorder/use-dock-recorder";
 import { registerDockRecorderChatTarget } from "@/lib/recorder/dock-recorder-bridge";
+import { useFloatingRecorderClearance } from "@/lib/recorder/floating-recorder-slot";
 import {
   Select,
   SelectContent,
@@ -312,6 +313,13 @@ export const TuningChatPanel = forwardRef<
   const stream = useMessageStream();
   const sessionStateRef = useRef(session.state);
   sessionStateRef.current = session.state;
+  // A docked rail's composer sits in the bottom-right corner at `lg`+, where
+  // the floating record button rests (WorkspaceChrome's FloatingRecorderHost).
+  // Registering it lifts that button above Send; the inline record control
+  // then only renders below `lg` so a screen never shows two.
+  const composerFooterRef = useRef<HTMLDivElement>(null);
+  useFloatingRecorderClearance(composerFooterRef, docked);
+  const inlineRecorderClass = docked ? "lg:hidden" : undefined;
   const appliedInputIdsRef = useRef(new Set<string>());
   // A retry must reproduce the original scope, never the current editor state.
   // Hydrated Feed messages do not carry that reference, so only locally known
@@ -952,7 +960,10 @@ export const TuningChatPanel = forwardRef<
 
       <div ref={containerRef}
         onScroll={() => { const el = containerRef.current; if (el) followBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }} className="flex-1 min-h-0 overflow-y-auto">
-        <div className="px-4 py-4 space-y-5">
+        {/* A docked rail pads by the floating recorder's reserve while the
+            button is lifted above its composer, so the newest message
+            scrolls clear of it. */}
+        <div className={cn("px-4 pt-4 space-y-5", docked ? "pb-[calc(1rem+var(--floating-recorder-reserve,0px))]" : "pb-4")}>
           {showEmpty ? (
             <EmptyState
               suggestions={suggestions}
@@ -1094,12 +1105,12 @@ export const TuningChatPanel = forwardRef<
         </div>
       </div>
 
-      <div className="shrink-0 border-t border-border/60 bg-card/60 backdrop-blur-sm px-3 pt-2.5 pb-3">
+      <div ref={composerFooterRef} className="shrink-0 border-t border-border/60 bg-card/60 backdrop-blur-sm px-3 pt-2.5 pb-3">
         {dockRecorder ? (
           <>
-            <DockRecorderRecovery rec={dockRecorder} className="mb-1.5" />
-            <DockRecorderNotice rec={dockRecorder} className="mb-1.5" />
-            <DockRecorderStrip rec={dockRecorder} className="mb-1.5" />
+            <DockRecorderRecovery rec={dockRecorder} className={cn("mb-1.5", inlineRecorderClass)} />
+            <DockRecorderNotice rec={dockRecorder} className={cn("mb-1.5", inlineRecorderClass)} />
+            <DockRecorderStrip rec={dockRecorder} className={cn("mb-1.5", inlineRecorderClass)} />
           </>
         ) : null}
 
@@ -1170,7 +1181,7 @@ export const TuningChatPanel = forwardRef<
             />
           </div>
           <div className="flex flex-wrap items-center gap-0.5 px-2 pb-2 pt-1 md:flex-nowrap">
-            {dockRecorder ? <DockRecorderButton rec={dockRecorder} /> : null}
+            {dockRecorder ? <DockRecorderButton rec={dockRecorder} className={inlineRecorderClass} /> : null}
             <ResearchModeToggle
               active={researchMode}
               exhausted={researchExhausted}

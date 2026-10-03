@@ -112,7 +112,8 @@ function accessCtx(ctx: FilesContext): AccessContext {
     userId: ctx.userId,
     assistantId: ctx.assistantId ?? '',
     assistantKind: ctx.assistantId ? ctx.assistantKind ?? 'standard' : 'primary',
-    ...(ctx.assistantId ? {} : { visibilityAssistantIds: [] }),
+    // A human scoped write may also see that one assistant's partition, never wider.
+    ...(ctx.assistantId ? {} : { visibilityAssistantIds: ctx.scopeAssistantId ? [ctx.scopeAssistantId] : [] }),
     clearance: ctx.clearance,
     compartments: ctx.compartments,
     mutationCompartments: ctx.mutationCompartments,
@@ -443,6 +444,8 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
         metadata: p.sessionOwned ? { officeSession: true, noIndex: true, contentSha256:createHash('sha256').update(bytes).digest('hex') }
           : path.startsWith('/office/anchors/') ? { noIndex: true } : undefined,
         userId: p.sessionOwned ? ctx.userId : null,
+        // Partition only; the row stays human-authored (createdByAssistantId null).
+        ...(!ctx.assistantId && ctx.scopeAssistantId ? { assistantId: ctx.scopeAssistantId } : {}),
         createdByUserId: ctx.userId,
         createdByAssistantId: ctx.assistantId ?? null,
       }, ac))

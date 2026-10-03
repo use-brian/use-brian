@@ -1,6 +1,7 @@
 /** Transactional native sender identity and mailbox grants. [COMP:crm/delivery-policy] */
 import type { PoolClient } from 'pg'
 import { CrmOperationsError, type CrmOperationsActor, type CrmNativeDeliveryAuthority } from '@use-brian/core'
+import { defaultGrantedConnectorActions } from '@use-brian/shared'
 import { connectorExposureAllowed } from '../context-scope/connector-exposure.js'
 import { connectorInstanceGovernanceId } from '../db/connector-instance-store.js'
 
@@ -50,8 +51,8 @@ export async function lockNativeDeliveryMailbox(client:PoolClient,workspaceId:st
   const exposures=(await client.query<{connectorInstanceId:string;compartments:string[];projectIds:string[]}>(`SELECT connector_instance_id AS "connectorInstanceId",compartments,project_ids AS "projectIds"
     FROM connector_grant WHERE target_type='workspace' AND target_id=$1 ORDER BY connector_instance_id FOR SHARE`,[workspaceId])).rows
   const visible=instances.filter(row=>row.scope==='workspace' || (workspace.personal && row.userId===workspace.owner)
-    ? connectorExposureAllowed(turn,row,'fixed-operation')
-    : exposures.some(grant=>grant.connectorInstanceId===row.id && connectorExposureAllowed(turn,grant,'fixed-operation')))
+    ? connectorExposureAllowed(turn,row)
+    : exposures.some(grant=>grant.connectorInstanceId===row.id && connectorExposureAllowed(turn,grant)))
   const selected=visible.find(row=>row.id===instanceId)
   if(!selected) throw denied()
   const owned=visible.filter(row=>row.provider===selected.provider && row.scope==='workspace')
@@ -74,7 +75,9 @@ export async function lockNativeDeliveryMailbox(client:PoolClient,workspaceId:st
   const sendAction={gmail:'gmailSendMessage',imap:'imapSendMessage',agentmail:'agentmailSendMessage'}[selected.provider]
   if(!sendAction) throw denied()
   const grant=await client.query<{actions:string[]}>(`SELECT allowed_actions AS actions FROM assistant_connector_grants WHERE assistant_id=$1 AND connector_id=$2 FOR SHARE`,[native.ceiling.assistantId,governance])
-  if(!grant.rows[0]?.actions.includes(sendAction)) throw denied()
+  // No row = the registry default grant (every write, sends included).
+  const actions=grant.rows[0]?.actions??defaultGrantedConnectorActions(selected.provider)
+  if(!actions.includes(sendAction)) throw denied()
   const policy=selected.scope==='workspace'
     ? await client.query(`SELECT policy FROM workspace_tool_policy WHERE workspace_id=$1 AND server_name IN($2,$3) AND tool_name=$4 FOR SHARE`,[workspaceId,selected.provider,exact,sendAction])
     : await client.query(`SELECT policy FROM mcp_tool_settings WHERE user_id=$1 AND assistant_id=$2 AND server_name IN($3,$4) AND tool_name=$5 FOR SHARE`,[selected.userId,native.ceiling.assistantId,selected.provider,exact,sendAction])

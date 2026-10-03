@@ -107,6 +107,8 @@ const WorkflowDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id
 const WorkflowRunDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page"));
 const OfficePage = lazy(() => import("@/app/w/[workspaceId]/office/page"));
 const NewOfficePage = lazy(() => import("@/app/w/[workspaceId]/office/new/page"));
+const WorkspaceRecordPage = lazy(() => import("@/app/w/[workspaceId]/records/[recordId]/page"));
+const RecordingDetailPage = lazy(() => import("@/app/w/[workspaceId]/recordings/[recordingId]/page"));
 const OfficeArtifactPage = lazy(() => import("@/app/w/[workspaceId]/office/[artifactId]/page"));
 const OfficeTemplatesPage = lazy(() => import("@/app/w/[workspaceId]/office/templates/page"));
 const OfficeTemplatePage = lazy(() => import("@/app/w/[workspaceId]/office/templates/[templateId]/page"));
@@ -301,6 +303,9 @@ export function App() {
                   element={<WorkspaceRedirect to="brain?view=skills" />}
                 />
               </Route>
+
+              <Route path="records/:recordId" element={<WorkspaceRecordPage />} />
+              <Route path="recordings/:recordingId" element={<RecordingDetailPage />} />
 
               {/* Workflow */}
               <Route path="workflow" element={<WorkflowPage />} />

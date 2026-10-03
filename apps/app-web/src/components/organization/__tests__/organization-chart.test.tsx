@@ -146,6 +146,18 @@ describe('[COMP:app-web/organization-chart] directory and configuration UX',()=>
     await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace-fixture'}})));
     expect(host.textContent).not.toContain('Research assistant');expect(host.textContent).not.toContain('Riley');expect(host.textContent).toContain(en.organization.loadError);
   });
+  it('keeps the open details through the stream catch-up, and a denied catch-up refresh still evicts',async()=>{
+    // The workspace stream reconnects every ~5 minutes; its catch-up must not
+    // blank the chart or close what the viewer opened.
+    await render();await click('Research assistant');
+    let finish!:(value:unknown)=>void;mocks.fetch.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+    await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace-fixture',catchUp:true}})));
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);expect(host.textContent).toContain('Riley');
+    await act(async()=>finish(fixture()));expect(host.textContent).toContain('Riley');
+    mocks.fetch.mockRejectedValue(new SurfaceCacheEvictionError(new Error('not_found')));
+    await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace-fixture',catchUp:true}})));
+    expect(host.textContent).not.toContain('Riley');expect(host.textContent).toContain(en.organization.loadError);
+  });
   it('never reuses an old viewer selection or directory on an account switch',async()=>{
     await render();await click('Research assistant');mocks.viewer.me.id='other-member';
     mocks.fetch.mockResolvedValue({...fixture(),canManage:false,subjects:[],units:[],placements:[]});await render();

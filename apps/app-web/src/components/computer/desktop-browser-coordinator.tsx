@@ -7,6 +7,7 @@ import { listBrowserProfiles } from "@/lib/api/computer";
 import { useCachedResource } from "@/lib/surface-cache";
 import { browserProfilesCacheKey } from "@/lib/surface-prefetch";
 import { useT } from "@/lib/i18n/client";
+import { Button } from "@/components/ui/button";
 
 export function DesktopBrowserState({ workspaceId, profileId, onConnectionChange }: {
   workspaceId: string; profileId?: string;
@@ -24,8 +25,8 @@ export function DesktopBrowserState({ workspaceId, profileId, onConnectionChange
     phase === "paused" ? c.desktop.paused : phase === "failed" ? c.desktop.failed : c.desktop.automatic;
   return <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-xs" aria-live="polite">
     <span>{c.desktop.title}: {label}</span>
-    {phase === "connected" ? <button type="button" className="min-h-11 rounded-md border px-3 hover:bg-accent" onClick={() => void browser.show().catch(() => {})}>{c.desktop.open}</button> : null}
-    {phase === "paused" || phase === "failed" ? <button type="button" className="min-h-11 rounded-md border px-3 hover:bg-accent" onClick={() => void browser.retry()}>{phase === "paused" ? c.desktop.resume : c.desktop.retry}</button> : null}
+    {phase === "connected" ? <Button variant="outline" size="xs" className="max-sm:min-h-11" onClick={() => void browser.show().catch(() => {})}>{c.desktop.open}</Button> : null}
+    {phase === "paused" || phase === "failed" ? <Button variant="outline" size="xs" className="max-sm:min-h-11" onClick={() => void browser.retry()}>{phase === "paused" ? c.desktop.resume : c.desktop.retry}</Button> : null}
   </div>;
 }
 

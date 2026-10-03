@@ -238,6 +238,10 @@ export type AuditStepView = {
   result?: string | null;
   /** Provider-call steps. */
   model?: string;
+  /** The exact request a full-fidelity model call put on the wire, as
+   *  payload refs: the system prompt (when one was sent), every message in
+   *  order, and the response. Absent on legacy traces. */
+  prompt?: ProviderPromptRefs;
   stopReason?: string;
   inputTokens?: number;
   outputTokens?: number;
@@ -253,6 +257,33 @@ export type AuditStepView = {
   approximate?: boolean;
   payloadRefs: string[];
 };
+
+export type ProviderPromptRefs = {
+  systemRef: string | null;
+  messageRefs: string[];
+  responseRef: string | null;
+};
+
+/**
+ * Split a `provider_call` event's refs (`[system?, ...messages, response]`,
+ * engine/turn-ledger.md) using its `messageCount`. Without the count the
+ * system prompt cannot be told from the first message, so every ref but the
+ * response is treated as a message.
+ */
+export function providerPromptRefs(
+  refs: readonly string[],
+  messageCount: number | undefined,
+): ProviderPromptRefs | undefined {
+  if (refs.length === 0) return undefined;
+  const responseRef = refs.at(-1) ?? null;
+  const body = refs.slice(0, -1);
+  const hasSystem = messageCount !== undefined && body.length === messageCount + 1;
+  return {
+    systemRef: hasSystem ? body[0]! : null,
+    messageRefs: hasSystem ? body.slice(1) : body,
+    responseRef,
+  };
+}
 
 export type TraceSummary = {
   fidelity: "full" | "legacy";
@@ -312,21 +343,26 @@ function parseRows(
       ? (metadata.nudgeVerdict as Record<string, unknown>)
       : {};
   const raw = Array.isArray(metadata.returnedRows) ? metadata.returnedRows : [];
-  const rows: RetrievedRow[] = [];
+  // One row per entry, in first-retrieved order: a seam that injected the
+  // same memory twice (two index passes in one turn) is one access, not two.
+  const rows = new Map<string, RetrievedRow>();
   for (const r of raw) {
     if (!r || typeof r !== "object") continue;
     const row = r as Record<string, unknown>;
     const rowId = asString(row.rowId) ?? asString(row.row_id);
     if (!rowId) continue;
+    const primitive = asString(row.primitive) ?? "other";
+    const key = `${primitive}:${rowId}`;
+    if (rows.has(key)) continue;
     const verdict = verdicts[rowId];
-    rows.push({
-      primitive: asString(row.primitive) ?? "other",
+    rows.set(key, {
+      primitive,
       rowId,
       source,
       verdict: verdict === "USED" || verdict === "UNUSED" ? verdict : null,
     });
   }
-  return { rows, source };
+  return { rows: [...rows.values()], source };
 }
 
 export function summarizeTrace(trace: TurnTrace): TraceSummary {
@@ -374,6 +410,7 @@ export function summarizeTrace(trace: TurnTrace): TraceSummary {
         view.model = asString(m.model);
         view.stopReason = asString(m.stopReason);
         view.turn = asNumber(m.turn);
+        view.prompt = providerPromptRefs(view.payloadRefs, asNumber(m.messageCount));
         const tokens = usageTokens(m.usage);
         view.inputTokens = tokens.input;
         view.outputTokens = tokens.output;
@@ -579,26 +616,110 @@ export function graphHighlightNames(summary: Pick<TraceSummary, "steps">): strin
 
 export type GraphAccessStep = {
   key: string;
+  /** The trace step this access belongs to (`AuditStepView.key`). */
+  stepKey: string;
   kind: "retrieval" | "tool_call";
   toolName?: string;
+  /** Retrieval accesses: the one entry this access lit, so the trace list
+   *  can mark the same row the graph is pulsing. */
+  rowId?: string;
   ids: string[];
   names: string[];
 };
 
 export const AUDIT_ACCESS_STEP_MS = 1400;
 
-/** Recorded accesses only, in execution order. Never infer a graph path. */
+/**
+ * Recorded accesses only, in execution order. Never infer a graph path.
+ * A retrieval step is replayed one entry at a time in the order it returned
+ * them; a brain-row tool call is one access.
+ */
 export function graphAccessSteps(summary: Pick<TraceSummary, "steps">): GraphAccessStep[] {
-  return [...summary.steps].sort((a, b) => a.ordinal - b.ordinal).flatMap((step) => {
-    if (step.kind !== "retrieval" &&
-      !(step.kind === "tool_call" && isBrainRowTool(step.toolName))) return [];
-    const scoped = { steps: [step], retrievedRows: step.rows ?? [] };
+  return [...summary.steps].sort((a, b) => a.ordinal - b.ordinal).flatMap((step): GraphAccessStep[] => {
+    if (step.kind === "retrieval") {
+      return (step.rows ?? []).map((row) => ({
+        key: `${step.key}:${row.primitive}:${row.rowId}`,
+        stepKey: step.key,
+        kind: "retrieval" as const,
+        rowId: row.rowId,
+        ids: [row.rowId],
+        names: [],
+      }));
+    }
+    if (!(step.kind === "tool_call" && isBrainRowTool(step.toolName))) return [];
+    const scoped = { steps: [step], retrievedRows: [] };
     const ids = graphHighlightIds(scoped);
     const names = graphHighlightNames(scoped);
     if (ids.length === 0 && names.length === 0) return [];
-    return [{ key: step.key, kind: step.kind as GraphAccessStep["kind"],
+    return [{ key: step.key, stepKey: step.key, kind: "tool_call" as const,
       toolName: step.toolName, ids, names }];
   });
+}
+
+// ── Raw prompt ──────────────────────────────────────────────────────
+
+export type PromptMessageView = {
+  role: "user" | "assistant" | "system" | "other";
+  text: string;
+};
+
+/**
+ * Render one recorded request message (`JSON.stringify(Message)`, the
+ * recorder's message payload) as readable text: text blocks verbatim, tool
+ * calls and results labelled with their JSON, media as a placeholder. A
+ * payload that is not a message JSON is shown as-is, never dropped.
+ */
+export function formatPromptMessage(raw: string): PromptMessageView {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { role: "other", text: raw };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { role: "other", text: raw };
+  }
+  const message = parsed as Record<string, unknown>;
+  const role =
+    message.role === "user" || message.role === "assistant" || message.role === "system"
+      ? message.role
+      : "other";
+  return { role, text: formatPromptContent(message.content) };
+}
+
+/** The response ref holds the content-block array, not a whole message. */
+export function formatPromptResponse(raw: string): PromptMessageView {
+  try {
+    return { role: "assistant", text: formatPromptContent(JSON.parse(raw) as unknown) };
+  } catch {
+    return { role: "assistant", text: raw };
+  }
+}
+
+function formatPromptContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return JSON.stringify(content ?? null, null, 2);
+  return content
+    .map((block) => {
+      if (!block || typeof block !== "object") return String(block);
+      const b = block as Record<string, unknown>;
+      switch (b.type) {
+        case "text":
+          return typeof b.text === "string" ? b.text : "";
+        case "tool_use":
+          return `[tool call: ${asString(b.name) ?? "tool"}]\n${JSON.stringify(b.input ?? {}, null, 2)}`;
+        case "tool_result":
+          return `[tool result${b.isError === true || b.is_error === true ? ", error" : ""}]\n${formatPromptContent(b.content)}`;
+        case "image":
+        case "document":
+        case "file":
+          return `[${b.type}]`;
+        default:
+          return JSON.stringify(b, null, 2);
+      }
+    })
+    .filter((part) => part.length > 0)
+    .join("\n\n");
 }
 
 // ── Presentation helpers ──────────────────────────────────────────────

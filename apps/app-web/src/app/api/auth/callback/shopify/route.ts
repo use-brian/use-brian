@@ -1,3 +1,4 @@
+import { withConnectWorkspace } from "@/lib/connector-auto-expose";
 import {SHOPIFY_SETUP_COOKIE,parseShopifySetupState,readSetupCookie} from "@/lib/shopify-setup-state";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
@@ -115,7 +116,7 @@ export async function GET(request: Request) {
     const params: Record<string, string> = {};
     for (const [key, value] of url.searchParams.entries()) params[key] = value;
     try {
-      const res = await fetch(`${API_URL}/api/connectors/shopify/oauth-callback`, {
+      const res = await fetch(withConnectWorkspace(`${API_URL}/api/connectors/shopify/oauth-callback`, workspaceId), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -232,7 +233,7 @@ export async function GET(request: Request) {
 
     const accessToken = accessTokenCookie;
 
-    const storeRes = await fetch(`${API_URL}/api/connectors/shopify/store-credentials`, {
+    const storeRes = await fetch(withConnectWorkspace(`${API_URL}/api/connectors/shopify/store-credentials`, workspaceId), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

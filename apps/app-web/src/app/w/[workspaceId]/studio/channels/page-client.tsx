@@ -12,9 +12,8 @@
  * channel" page.
  *
  * Mirrors Studio → Connectors / Events: a left rail groups every channel by
- * status — Needs attention (revoked/invalid) / Active / the hosted-only
- * official WhatsApp shared-bot pseudo-row — and the selected row's management
- * panel renders beside it (clearance + capabilities, bot behavior config,
+ * status — Needs attention (revoked/invalid) / Active — and the selected
+ * row's management panel renders beside it (clearance + capabilities, bot behavior config,
  * assistant routing, disconnect). Bucketing is the pure helper
  * `@/lib/channel-rail-groups` ([COMP:app-web/channel-rail-groups]).
  *
@@ -42,6 +41,7 @@ import { buildManifest } from "@/components/slack-setup-inline";
 import { buildTeamsAppPackage } from "@/lib/teams-app-package";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import {
+  availableRowKey,
   groupChannelRail,
   type ChannelRailGroupId,
 } from "@/lib/channel-rail-groups";
@@ -56,13 +56,10 @@ import {
   deleteWhatsappBotTrigger,
   setWhatsappBotAccess,
   setWhatsappBotBehavior,
-  getWhatsappOfficial,
-  unbindWhatsappOfficialGroup,
   type WhatsappGroup,
   type WhatsappBotConfig,
   type WhatsappBotSendScope,
   type WhatsappBotAccessMode,
-  type WhatsappOfficialBinding,
 } from "@/lib/api/whatsapp-ingest";
 import { deploymentCapabilities, isHostedEdition } from "@/lib/edition";
 import { modelTierPlanGateApplies } from "@/lib/plan-gate";
@@ -284,6 +281,29 @@ export function normalizeWhatsAppPhoneNumberInput(value: string): string | null 
 }
 
 const CLEARANCES: ChannelClearance[] = ["public", "internal", "confidential"];
+
+/** A platform the connect form can create a channel for. */
+type ChannelPlatform = "slack" | "telegram" | "discord" | "feishu" | "whatsapp" | "email" | "msteams" | "wechat" | "custom";
+
+/**
+ * Every platform this deployment can connect, in connect-modal tab order.
+ * Shared by the modal's tab strip and the rail's Available group so the two
+ * never disagree about what can be connected. Email needs a configured
+ * provider.
+ */
+function connectablePlatforms(emailConfigured: boolean): ChannelPlatform[] {
+  return [
+    "slack",
+    "telegram",
+    "discord",
+    "feishu",
+    "msteams",
+    "whatsapp",
+    "wechat",
+    "custom",
+    ...(emailConfigured ? (["email"] as const) : []),
+  ];
+}
 const CAPABILITIES: ChannelCapability[] = ["chat", "broadcast", "ingest"];
 
 /**
@@ -340,7 +360,8 @@ export default function StudioChannelsPage() {
   } = useChannelsData(activeId);
   const myClearance: ChannelClearance = membershipClearance ?? "internal";
   const [addOpen, setAddOpen] = useState(false);
-  // Master-detail selection — a rail row key (channel UUID or "official");
+  // Master-detail selection — a rail row key (a channel UUID, or
+  // `available:<platform>` for a not-yet-connected platform);
   // null / stale keys resolve to the first rail row.
   const [selected, setSelected] = useState<string | null>(null);
   // Phone single-pane (responsive contract M1 / M5): below `md` the rail and
@@ -348,11 +369,18 @@ export default function StudioChannelsPage() {
   // panel and Back returns to the rail. Inert on `md+`.
   const [detailOpen, setDetailOpen] = useState(false);
   const detailRef = useRef<HTMLDivElement>(null);
+  // The available platform whose inline connect form is open. Pinned so the
+  // row survives its own first connect while the form shows a one-time
+  // success screen (webhook URL, pairing code); cleared on Done.
+  const [pinnedPlatform, setPinnedPlatform] = useState<ChannelPlatform | null>(
+    null,
+  );
 
   // A workspace switch drops the selection and returns to the rail.
   useEffect(() => {
     setSelected(null);
     setDetailOpen(false);
+    setPinnedPlatform(null);
   }, [activeId]);
 
   const revealDetail = useCallback(() => {
@@ -400,8 +428,11 @@ export default function StudioChannelsPage() {
     [updateChannels],
   );
 
-  const onChannelCreated = useCallback(
-    async (created: Channel) => {
+  // Patch a freshly connected channel into the list. `select` jumps the
+  // detail panel to it; the inline Available panel passes false so its form
+  // can finish showing a one-time success screen, and selects on Done.
+  const installChannel = useCallback(
+    async (created: Channel, select: boolean) => {
       if (channels === null) {
         // The dialog opened before the list ever landed (nothing cached to
         // patch): let the in-flight or next load pick the new row up.
@@ -419,16 +450,26 @@ export default function StudioChannelsPage() {
           return [created, ...prev];
         });
       }
-      // Jump the detail panel to the fresh install - on a phone the pane
-      // swaps to it, so the user is not left looking at the rail.
-      setSelected(created.id);
-      revealDetail();
+      if (select) {
+        // Jump the detail panel to the fresh install - on a phone the pane
+        // swaps to it, so the user is not left looking at the rail.
+        setSelected(created.id);
+        revealDetail();
+      }
       // The backend may have seeded a default `channel_assistants` row when
       // `defaultAssistantId` was provided — pull routing so the new panel
       // shows it.
       await refreshRouting(created.id);
     },
     [channels, refreshChannels, updateChannels, refreshRouting, revealDetail],
+  );
+  const onChannelCreated = useCallback(
+    (created: Channel) => installChannel(created, true),
+    [installChannel],
+  );
+  const onInlineChannelCreated = useCallback(
+    (created: Channel) => installChannel(created, false),
+    [installChannel],
   );
 
   const onChannelDeleted = useCallback(
@@ -447,24 +488,26 @@ export default function StudioChannelsPage() {
   const tr = t.studioPage.channels;
 
   // ── Rail bucketing + selection resolution ─────────────────────
-  //
-  // The official shared bot (hosted-only, gated behind isHostedEdition() so
-  // the open OSS core never renders it — its backend lives in closed
-  // api-platform; docs/architecture/channels/whatsapp.md) joins the rail as a
-  // page-level pseudo-row: it has no `channels` row.
-  const officialPresent = isHostedEdition() && !!activeId;
-  const railGroups = groupChannelRail({
+  const { groups: railGroups, hiddenAvailable } = groupChannelRail({
     channels: channels ?? [],
-    official: officialPresent,
+    platforms: connectablePlatforms(emailConfigured),
+    pinnedPlatform,
   });
   const groupLabels: Record<ChannelRailGroupId, string> = {
     attention: tr.sectionAttention,
     active: tr.sectionActive,
-    official: tr.sectionOfficial,
+    available: tr.sectionAvailable,
   };
   const railOrder = railGroups.flatMap((g) => g.rows);
   const sel = railOrder.find((r) => r.key === selected) ?? railOrder[0] ?? null;
   const selKey = sel?.key ?? null;
+
+  // Leaving an available panel releases its pin.
+  useEffect(() => {
+    if (pinnedPlatform && selKey !== availableRowKey(pinnedPlatform)) {
+      setPinnedPlatform(null);
+    }
+  }, [pinnedPlatform, selKey]);
 
   const platformLabel = (type: Channel["channelType"]): string =>
     (tr.platforms as Partial<Record<Channel["channelType"], string>>)[type] ??
@@ -473,10 +516,14 @@ export default function StudioChannelsPage() {
   function railRowButton(row: (typeof railOrder)[number]) {
     const isSel = selKey === row.key;
     const isChannel = row.kind === "channel";
-    const label = isChannel ? row.channel.displayName : tr.whatsappOfficial.title;
+    const label = isChannel
+      ? row.channel.displayName
+      : tr.add.platform[row.platform];
     const subtitle = isChannel
       ? platformLabel(row.channel.channelType)
-      : platformLabel("whatsapp");
+      : tr.availableSubtitle;
+    const iconType = isChannel ? row.channel.channelType : row.platform;
+    // Available rows carry no status dot: nothing is connected yet.
     const dot: "on" | "attention" | null = !isChannel
       ? null
       : row.channel.status === "active"
@@ -499,9 +546,7 @@ export default function StudioChannelsPage() {
           )}
         >
           <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-            <ChannelTypeIcon
-              type={isChannel ? row.channel.channelType : "whatsapp"}
-            />
+            <ChannelTypeIcon type={iconType} />
           </span>
           <span className="min-w-0 flex-1">
             <span className="block truncate">{label}</span>
@@ -588,6 +633,28 @@ export default function StudioChannelsPage() {
                   <ul className="flex flex-col gap-0.5">
                     {g.rows.map(railRowButton)}
                   </ul>
+                  {g.id === "available" && hiddenAvailable.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setAddOpen(true)}
+                      className="mt-1 flex w-full items-center gap-2 rounded-md border border-dashed border-border px-2 py-2 text-left text-xs font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:bg-muted/60 hover:text-foreground min-h-11 sm:min-h-0"
+                    >
+                      <span
+                        aria-hidden
+                        className="grid h-7 w-7 shrink-0 grid-cols-2 gap-0.5 rounded-md bg-muted p-1.5"
+                      >
+                        <span className="rounded-[1px] bg-current opacity-70" />
+                        <span className="rounded-[1px] bg-current opacity-45" />
+                        <span className="rounded-[1px] bg-current opacity-45" />
+                        <span className="rounded-[1px] bg-current opacity-70" />
+                      </span>
+                      <span>
+                        {format(tr.moreChannels, {
+                          count: String(hiddenAvailable.length),
+                        })}
+                      </span>
+                    </button>
+                  )}
                 </div>
               ))}
             </nav>
@@ -602,15 +669,29 @@ export default function StudioChannelsPage() {
               <BackButton
                 label={tr.backToList}
                 onClick={() => setDetailOpen(false)}
-                className="min-h-11"
+                className="min-h-8 max-sm:min-h-11"
               />
             </div>
             {!sel ? (
               <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
                 {tr.selectPrompt}
               </div>
-            ) : sel.kind === "official" ? (
-              <WhatsappOfficialDetail workspaceId={activeId} />
+            ) : sel.kind === "available" ? (
+              <AvailableChannelPanel
+                key={sel.platform}
+                platform={sel.platform}
+                workspaceId={activeId}
+                assistants={assistants}
+                emailConfigured={emailConfigured}
+                emailDomains={emailDomains}
+                onEmailCreated={refreshEmailInboxes}
+                onPin={() => setPinnedPlatform(sel.platform)}
+                onCreated={onInlineChannelCreated}
+                onDone={(createdId) => {
+                  setPinnedPlatform(null);
+                  if (createdId) setSelected(createdId);
+                }}
+              />
             ) : (
               <ChannelDetail
                 key={sel.channel.id}
@@ -635,6 +716,88 @@ export default function StudioChannelsPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The rail's Available panel: a not-yet-connected platform's connect form,
+ * inline in the detail pane instead of the "+ Add channel" modal (the
+ * Studio → Connectors Available pattern). It reuses `AddChannelForm` locked to
+ * one platform, so the inline path and the modal can never drift.
+ *
+ * The form's one-time success screens (Slack webhook URL, Telegram pairing
+ * code, a custom bridge token) must survive the connect, so the panel pins its
+ * row (`onPin`) and the page installs the channel without selecting it; the
+ * form's Done selects the new channel. QR platforms (WhatsApp, WeChat) have no
+ * success screen and jump straight to the new channel.
+ */
+function AvailableChannelPanel({
+  platform,
+  workspaceId,
+  assistants,
+  emailConfigured,
+  emailDomains,
+  onEmailCreated,
+  onPin,
+  onCreated,
+  onDone,
+}: {
+  platform: ChannelPlatform;
+  workspaceId: string;
+  assistants: StudioAssistantSummary[];
+  emailConfigured: boolean;
+  emailDomains: EmailDomainSummary[];
+  onEmailCreated: () => void | Promise<void>;
+  onPin: () => void;
+  onCreated: (channel: Channel) => void | Promise<void>;
+  onDone: (createdId: string | null) => void;
+}) {
+  const t = useT();
+  const tr = t.studioPage.channels;
+  const createdIdRef = useRef<string | null>(null);
+  const jumpsOnConnect = platform === "whatsapp" || platform === "wechat";
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-3">
+        <div
+          aria-hidden
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"
+        >
+          <ChannelTypeIcon type={platform} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-[15px] font-semibold tracking-tight">
+            {tr.add.platform[platform]}
+          </h2>
+          <p className="text-[12px] text-muted-foreground">
+            {tr.availableBlurb[platform]}
+          </p>
+        </div>
+      </div>
+      <div className="rounded-lg border border-border px-4 py-4">
+        <AddChannelForm
+          workspaceId={workspaceId}
+          assistants={assistants}
+          emailConfigured={emailConfigured}
+          emailDomains={emailDomains}
+          onEmailCreated={onEmailCreated}
+          initialPlatform={platform}
+          lockPlatform
+          onCreated={async (channel) => {
+            createdIdRef.current = channel.id;
+            if (jumpsOnConnect) {
+              await onCreated(channel);
+              onDone(channel.id);
+              return;
+            }
+            onPin();
+            await onCreated(channel);
+          }}
+          onClose={() => onDone(createdIdRef.current)}
+        />
+      </div>
     </div>
   );
 }
@@ -2480,6 +2643,8 @@ export function AddChannelForm({
   emailConfigured = false,
   emailDomains = [],
   onEmailCreated,
+  initialPlatform = "slack",
+  lockPlatform = false,
 }: {
   workspaceId: string;
   assistants: StudioAssistantSummary[];
@@ -2488,12 +2653,14 @@ export function AddChannelForm({
   emailConfigured?: boolean;
   emailDomains?: EmailDomainSummary[];
   onEmailCreated?: () => void | Promise<void>;
+  /** The platform tab the form opens on. */
+  initialPlatform?: ChannelPlatform;
+  /** Hide the platform tab strip (the rail's inline Available panel). */
+  lockPlatform?: boolean;
 }) {
   const t = useT();
   const add = t.studioPage.channels.add;
-  const [platform, setPlatform] = useState<
-    "slack" | "telegram" | "discord" | "feishu" | "whatsapp" | "email" | "msteams" | "wechat" | "custom"
-  >("slack");
+  const [platform, setPlatform] = useState<ChannelPlatform>(initialPlatform);
 
   // WhatsApp pairs via QR (no token submit). After the connect stream reports
   // `connected`, the integration row lands shortly after — poll the channel
@@ -2739,7 +2906,7 @@ export function AddChannelForm({
               ? customName.trim().length > 0
               : dcBotToken.length > 0);
 
-  function pickPlatform(p: "slack" | "telegram" | "discord" | "feishu" | "whatsapp" | "email" | "msteams" | "wechat" | "custom"): void {
+  function pickPlatform(p: ChannelPlatform): void {
     setPlatform(p);
     setSuccess(null);
     setError(null);
@@ -2801,39 +2968,29 @@ export function AddChannelForm({
       {/* The platform strip outgrows the modal, so it rides ScrollableNav
           (hidden scrollbar + edge arrows) instead of painting a raw scroll
           bar between the tabs and their border. */}
-      <ScrollableNav className="flex gap-1 border-b border-border">
-        {(
-          [
-            "slack",
-            "telegram",
-            "discord",
-            "feishu",
-            "msteams",
-            "whatsapp",
-            "wechat",
-            "custom",
-            ...(emailConfigured ? ["email"] : []),
-          ] as Array<"slack" | "telegram" | "discord" | "feishu" | "whatsapp" | "email" | "msteams" | "wechat" | "custom">
-        ).map((p) => (
-          <button
-            key={p}
-            type="button"
-            onClick={() => pickPlatform(p)}
-            className={
-              TAB_BASE +
-              " " +
-              (platform === p
-                ? "border-primary font-medium text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground")
-            }
-          >
-            <span className="grid size-5 place-items-center text-muted-foreground">
-              <ChannelTypeIcon type={p} />
-            </span>
-            <span>{add.platform[p]}</span>
-          </button>
-        ))}
-      </ScrollableNav>
+      {!lockPlatform && (
+        <ScrollableNav className="flex gap-1 border-b border-border">
+          {connectablePlatforms(emailConfigured).map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => pickPlatform(p)}
+              className={
+                TAB_BASE +
+                " " +
+                (platform === p
+                  ? "border-primary font-medium text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground")
+              }
+            >
+              <span className="grid size-5 place-items-center text-muted-foreground">
+                <ChannelTypeIcon type={p} />
+              </span>
+              <span>{add.platform[p]}</span>
+            </button>
+          ))}
+        </ScrollableNav>
+      )}
 
       {platform === "whatsapp" ? (
         <WhatsappConnectTab
@@ -4916,140 +5073,6 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
  * the Studio → Events page now (the Channels/Events split — Channels owns the
  * chat/broadcast surface, Events owns ingestion).
  */
-// Official shared-bot surface (hosted-only), rendered as the detail panel of
-// the rail's "official" pseudo-row. The number is paired centrally; a
-// workspace doesn't pair it - users add the number to a group (which binds that
-// group to the adder's workspace) and manage their bound groups here. Backend:
-// packages/api-platform/src/routes/whatsapp-official-admin.ts.
-// [COMP:app-web/whatsapp-official-card]
-function WhatsappOfficialDetail({ workspaceId }: { workspaceId: string }) {
-  const t = useT();
-  const c = t.studioPage.channels.whatsappOfficial;
-  const [state, setState] = useState<{
-    officialNumber: string | null;
-    bindings: WhatsappOfficialBinding[];
-  } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [stopping, setStopping] = useState<string | null>(null);
-
-  const refresh = useCallback(() => {
-    getWhatsappOfficial(workspaceId)
-      .then((s) => {
-        setState({ officialNumber: s.officialNumber, bindings: s.bindings });
-        setError(null);
-      })
-      .catch(() => setError(c.loadError));
-  }, [workspaceId, c.loadError]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  async function onStop(groupJid: string) {
-    const ok = await confirmDialog({
-      title: c.stopConfirmTitle,
-      description: c.stopConfirmBody,
-      confirmLabel: c.stopConfirmCta,
-      cancelLabel: c.cancel,
-      variant: "destructive",
-    });
-    if (!ok) return;
-    setStopping(groupJid);
-    try {
-      await unbindWhatsappOfficialGroup(workspaceId, groupJid);
-      refresh();
-    } catch {
-      setError(c.stopError);
-    } finally {
-      setStopping(null);
-    }
-  }
-
-  return (
-    <div className="space-y-4">
-      {/* Header — brand mark, title, the shared number as the identity line. */}
-      <div className="flex items-start gap-3">
-        <div
-          aria-hidden
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted"
-        >
-          <ConnectorIcon connectorId="whatsapp" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate text-[15px] font-semibold tracking-tight">
-            {c.title}
-          </h2>
-          <p className="truncate text-[12px] text-muted-foreground">
-            {state?.officialNumber ?? c.numberUnconfigured}
-          </p>
-        </div>
-      </div>
-
-      <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
-        {c.intro}
-      </div>
-
-      <div className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
-        <div className="flex flex-col gap-1">
-          <span className="text-xs text-muted-foreground">{c.numberLabel}</span>
-          {state?.officialNumber ? (
-            <code className="text-sm font-medium">{state.officialNumber}</code>
-          ) : (
-            <span className="text-[13px] text-muted-foreground">
-              {c.numberUnconfigured}
-            </span>
-          )}
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium">{c.howToTitle}</span>
-          <ol className="list-decimal list-inside text-[13px] text-muted-foreground flex flex-col gap-1">
-            <li>{c.howToStep1}</li>
-            <li>{c.howToStep2}</li>
-            <li>{c.howToStep3}</li>
-          </ol>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-2 rounded-lg border border-border px-4 py-3">
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {c.groupsTitle}
-        </span>
-        {error ? (
-          <p className="text-xs text-amber-600 dark:text-amber-400">{error}</p>
-        ) : null}
-        {state === null ? null : state.bindings.length === 0 ? (
-          <p className="text-[13px] text-muted-foreground">{c.groupsEmpty}</p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {state.bindings.map((b) => (
-              <li
-                key={b.groupJid}
-                className="flex items-center justify-between gap-3 text-sm"
-              >
-                <span className="flex flex-col min-w-0">
-                  <code className="truncate text-[13px]">{b.groupJid}</code>
-                  <span className="text-xs text-muted-foreground">
-                    {b.boundByYou ? c.boundByYou : c.boundByTeammate}
-                  </span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => onStop(b.groupJid)}
-                  disabled={stopping === b.groupJid}
-                  className="shrink-0 text-xs font-medium rounded-md border border-border px-2 py-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                >
-                  {stopping === b.groupJid ? c.stopping : c.stopCta}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
   const t = useT();
   const wa = t.studioPage.ingestRules.whatsapp;

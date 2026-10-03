@@ -931,7 +931,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
               data-plan-brief-launcher-mobile
               onClick={() => setRail({ kind: "brief" })}
               aria-label={tp.contextEditBriefAria}
-              className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border border-border/60 bg-card px-3 text-xs font-medium transition-colors hover:bg-accent lg:hidden"
+              className="inline-flex min-h-8 max-sm:min-h-11 shrink-0 items-center gap-1.5 rounded-lg border border-border/60 bg-card px-3 text-xs font-medium transition-colors hover:bg-accent lg:hidden"
             >
               <ChevronRight className="size-3.5 text-muted-foreground" aria-hidden />
               {tp.mobileBriefLauncher}

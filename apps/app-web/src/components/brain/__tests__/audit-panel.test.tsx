@@ -89,7 +89,7 @@ describe("[COMP:app-web/brain-audit] transcript browsing and replay", () => {
     expect(container.querySelector("input")!.value).toBe("");
     expect(container.querySelectorAll("button[aria-pressed]")).toHaveLength(2);
   });
-  it("runs a finite replay, pauses, and restarts without changing the full highlight set", async () => {
+  it("loops the replay in retrieval order, pauses, and restarts without changing the full highlight set", async () => {
     await mount();
     expect(latestGraph().accessIds).toEqual([rowId]);
     const highlight = latestGraph().highlightIds;
@@ -101,8 +101,14 @@ describe("[COMP:app-web/brain-audit] transcript browsing and replay", () => {
     await act(async () => { vi.advanceTimersByTime(AUDIT_ACCESS_STEP_MS); });
     expect(latestGraph().accessNames).toEqual(["launch"]);
     expect(latestGraph().highlightIds).toBe(highlight);
-    await act(async () => { vi.advanceTimersByTime(AUDIT_ACCESS_STEP_MS); });
-    expect(latestGraph().accessPulseKey).toBeNull();
+    // The last access holds one extra beat, then the loop starts over with a
+    // fresh pulse key so the first entry pulses again.
+    const lastKey = latestGraph().accessPulseKey;
+    await act(async () => { vi.advanceTimersByTime(AUDIT_ACCESS_STEP_MS * 2); });
+    expect(latestGraph().accessIds).toEqual([rowId]);
+    expect(latestGraph().accessPulseKey).not.toBeNull();
+    expect(latestGraph().accessPulseKey).not.toBe(lastKey);
+    expect(container.querySelector('li[aria-current="step"]')).not.toBeNull();
   });
   it("uses static highlights and manual access steps with reduced motion", async () => {
     reducedMotion = true;

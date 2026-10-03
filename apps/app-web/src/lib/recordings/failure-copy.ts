@@ -22,6 +22,9 @@ export function recordingFailureMessage(
   const code = e instanceof RecordingApiError ? e.code : undefined;
   const detail =
     e instanceof RecordingApiError && e.message && e.status !== 0 ? e.message : null;
+  if (code === "recording_media_tools_unavailable") return t.recordings.serverSetupRequired;
+  if (code === "recording_upload_prepare_failed" || code === "recording_intake_provenance_required") return t.recordings.uploadPrepareFailed;
+  if (code === "recording_upload_complete_failed") return t.recordings.uploadCompleteFailed;
   if (code === "too_long") return t.recordings.tooLong;
   if (code === "could_not_read_duration") return t.recordings.cannotReadDuration;
   if (stage === "upload") return t.recordings.uploadFailed;

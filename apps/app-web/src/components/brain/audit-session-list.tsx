@@ -186,7 +186,7 @@ export function AuditSessionList({
               }}
               aria-pressed={active}
               className={cn(
-                "flex min-h-11 w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors",
+                "flex min-h-8 max-sm:min-h-11 w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors",
                 active
                   ? "doc-nav-active text-sidebar-foreground"
                   : "text-sidebar-foreground/85 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",

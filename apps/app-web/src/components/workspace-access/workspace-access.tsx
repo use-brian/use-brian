@@ -6,10 +6,10 @@ import type { DepartmentAccessCommand, DepartmentAccessTeam, WorkspaceAccessOver
 import { useProtectedProjection } from '@/lib/use-protected-projection';
 import { useWorkspaceContext } from '@/lib/workspace-context';
 import { useT } from '@/lib/i18n/client';
-import { useCachedResource, invalidateSurfaceCache } from '@/lib/surface-cache';
+import { useCachedResource, invalidateSurfaceCache, markSurfaceCacheStale } from '@/lib/surface-cache';
 import { workspaceAccessCacheKey, workspaceAccessHistoryCacheKey } from '@/lib/surface-prefetch';
 import { fetchWorkspaceAccess, fetchWorkspaceAccessHistory, ORGANIZATION_CHANGED_EVENT } from '@/lib/api/workspace-access';
-import { WORKSPACE_IDENTITY_REFRESH_EVENT } from '@/lib/workspace-identity-events';
+import { WORKSPACE_IDENTITY_REFRESH_EVENT, isCatchUpRefresh } from '@/lib/workspace-identity-events';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { SearchableSelect } from '@/components/ui/searchable-select';
@@ -23,11 +23,11 @@ import { ScopeReviewPanel } from './scope-review';
 import {MigrationProgressPanel} from './migration-progress';
 import {AccessExplanationPanel,AccessEventsPanel} from './access-inspection';
 
-const fieldClass='min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
+const fieldClass='min-h-8 max-sm:min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
 type Save=(command:DepartmentAccessCommand,description:string)=>Promise<boolean>;
 function Picker({label,value,onChange,items,disabled=false}:{label:string;value:string;onChange:(v:string)=>void;items:Array<{value:string;label:string}>;disabled?:boolean}) {
   const t=useT().workspaceAccess;
-  return <label className="grid gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} value={value} onValueChange={onChange} items={items} disabled={disabled} className="min-h-11" searchPlaceholder={t.search} emptyMessage={t.noResults}/></label>;
+  return <label className="grid gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} value={value} onValueChange={onChange} items={items} disabled={disabled} className="max-sm:min-h-11" searchPlaceholder={t.search} emptyMessage={t.noResults}/></label>;
 }
 type AccessSelection = {kind:'person';id:string}|{kind:'department';id:string}|{kind:'requests'};
 export function WorkspaceAccessView({selection,embedded=false}:{selection?:AccessSelection;embedded?:boolean}={}) {
@@ -51,6 +51,8 @@ function WorkspaceAccessPanel({selection,embedded}:{selection?:AccessSelection;e
     const purge=(event:Event)=>{
       const detail=(event as CustomEvent<{workspaceId?:string}>).detail;
       if(detail?.workspaceId&&detail.workspaceId!==workspaceId)return;
+      // Reconnect catch-up: revalidate behind the paint, keep open editors.
+      if(isCatchUpRefresh(event)){markSurfaceCacheStale(`workspace-access:${workspaceId}:`);return;}
       change.cancelReview();setRequestTeam(null);setEditTeam(null);setEditPerson(null);setInspection(null);invalidateSurfaceCache(`workspace-access:${workspaceId}:`);
     };
     window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);
@@ -64,7 +66,7 @@ function WorkspaceAccessPanel({selection,embedded}:{selection?:AccessSelection;e
   // Review owns its independently expiring administrator projection. A refresh
   // of the parent must not discard an in-progress saved-review selection.
   if(reviewOpen)return <ScopeReviewPanel teams={data?.canAdminister?data.teams:[]} close={()=>setReviewOpen(false)}/>;
-  if(!data) return resource.error?<main className="space-y-4">{header}<p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></main>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
+  if(!data) return resource.error?<main className="space-y-4">{header}<p role="alert">{t.loadError}</p><Button className="max-sm:min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></main>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
   const reload=()=>{change.clearError();invalidateSurfaceCache(key);};
   // The Access section's own actions ride the Organization top bar; embedded
   // person/department panels keep their Refresh beside the data it reloads.
@@ -168,7 +170,7 @@ function AccessRequestForm({data,team,viewerId,busy,save,close,renewal}:{renewal
     {duration==='custom'?<label className="grid gap-1 text-sm">{t.days}<input className={fieldClass} type="number" min="1" max="90" step="1" required value={days} disabled={busy} onChange={e=>setDays(e.target.value)}/></label>:null}
     <label className="grid gap-1 text-sm">{t.reason}<textarea className={`${fieldClass} min-h-24 py-2`} maxLength={1000} required value={reason} disabled={busy} onChange={e=>setReason(e.target.value)}/></label>
     <p className="text-sm text-muted-foreground">{t.readOnly}{kind==='team'?` ${t.futureMembers}`:''}</p>
-    <div className="flex flex-wrap gap-2"><Button className="min-h-11" type="submit" disabled={busy||!reason.trim()||!beneficiary}>{t.submit}</Button><Button type="button" className="min-h-11" variant="ghost" onClick={close}>{t.close}</Button></div>
+    <div className="flex flex-wrap gap-2"><Button className="max-sm:min-h-11" type="submit" disabled={busy||!reason.trim()||!beneficiary}>{t.submit}</Button><Button type="button" className="max-sm:min-h-11" variant="ghost" onClick={close}>{t.close}</Button></div>
   </form>;
 }
 function DepartmentEditor({data,team,busy,save,close}:{data:WorkspaceAccessOverview;team:DepartmentAccessTeam;busy:boolean;save:Save;close:()=>void}) {
@@ -176,13 +178,13 @@ function DepartmentEditor({data,team,busy,save,close}:{data:WorkspaceAccessOverv
   const [published,setPublished]=useState(team.directoryVisibility==='workspace'),[requestable,setRequestable]=useState(team.requestable),[person,setPerson]=useState(''),[manager,setManager]=useState(''),[manage,setManage]=useState(false),[approve,setApprove]=useState(false);
   const people=data.people.map(p=>({value:p.id,label:p.name||t.unnamed}));
   return <div className="grid gap-3 border-t border-border pt-3">
-    {data.canAdminister?<><label className="flex min-h-11 items-center gap-2 text-sm"><Checkbox checked={published} disabled={busy} onCheckedChange={v=>setPublished(Boolean(v))}/>{t.published}</label><label className="flex min-h-11 items-center gap-2 text-sm"><Checkbox checked={requestable} disabled={busy} onCheckedChange={v=>setRequestable(Boolean(v))}/>{t.requestable}</label><Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>void save({type:'department.configure',teamId:team.id,directoryVisibility:published?'workspace':'members',requestable},`${team.name}: ${t.published} (${published?t.enabled:t.disabled}), ${t.requestable} (${requestable?t.enabled:t.disabled})`)}>{t.save}</Button>
+    {data.canAdminister?<><label className="flex min-h-8 max-sm:min-h-11 items-center gap-2 text-sm"><Checkbox checked={published} disabled={busy} onCheckedChange={v=>setPublished(Boolean(v))}/>{t.published}</label><label className="flex min-h-8 max-sm:min-h-11 items-center gap-2 text-sm"><Checkbox checked={requestable} disabled={busy} onCheckedChange={v=>setRequestable(Boolean(v))}/>{t.requestable}</label><Button variant="outline" className="max-sm:min-h-11" disabled={busy} onClick={()=>void save({type:'department.configure',teamId:team.id,directoryVisibility:published?'workspace':'members',requestable},`${team.name}: ${t.published} (${published?t.enabled:t.disabled}), ${t.requestable} (${requestable?t.enabled:t.disabled})`)}>{t.save}</Button>
       <Picker label={t.manager} value={manager} onChange={id=>{setManager(id);const caps=team.managers.find(m=>m.userId===id)?.capabilities??[];setManage(caps.includes('manage_members'));setApprove(caps.includes('approve_read_requests'));}} items={people} disabled={busy}/>
-      <label className="flex min-h-11 items-center gap-2 text-sm"><Checkbox checked={manage} disabled={busy||(data.readiness?.ready!==true&&!team.managers.find(m=>m.userId===manager)?.capabilities.includes('manage_members'))} onCheckedChange={v=>setManage(Boolean(v))}/>{t.manageMembers}</label><label className="flex min-h-11 items-center gap-2 text-sm"><Checkbox checked={approve} disabled={busy||(data.readiness?.ready!==true&&!team.managers.find(m=>m.userId===manager)?.capabilities.includes('approve_read_requests'))} onCheckedChange={v=>setApprove(Boolean(v))}/>{t.approveRequests}</label>
-      <Button variant="outline" className="min-h-11" disabled={busy||!manager||(data.readiness?.ready!==true&&((manage&&!team.managers.find(m=>m.userId===manager)?.capabilities.includes('manage_members'))||(approve&&!team.managers.find(m=>m.userId===manager)?.capabilities.includes('approve_read_requests'))))} onClick={()=>void save({type:'department.manager.set',teamId:team.id,userId:manager,capabilities:[...(manage?['manage_members' as const]:[]),...(approve?['approve_read_requests' as const]:[])]},`${team.name}: ${people.find(p=>p.value===manager)?.label}. ${t.manageMembers} (${manage?t.enabled:t.disabled}), ${t.approveRequests} (${approve?t.enabled:t.disabled})`)}>{t.managerSave}</Button></>:null}
+      <label className="flex min-h-8 max-sm:min-h-11 items-center gap-2 text-sm"><Checkbox checked={manage} disabled={busy||(data.readiness?.ready!==true&&!team.managers.find(m=>m.userId===manager)?.capabilities.includes('manage_members'))} onCheckedChange={v=>setManage(Boolean(v))}/>{t.manageMembers}</label><label className="flex min-h-8 max-sm:min-h-11 items-center gap-2 text-sm"><Checkbox checked={approve} disabled={busy||(data.readiness?.ready!==true&&!team.managers.find(m=>m.userId===manager)?.capabilities.includes('approve_read_requests'))} onCheckedChange={v=>setApprove(Boolean(v))}/>{t.approveRequests}</label>
+      <Button variant="outline" className="max-sm:min-h-11" disabled={busy||!manager||(data.readiness?.ready!==true&&((manage&&!team.managers.find(m=>m.userId===manager)?.capabilities.includes('manage_members'))||(approve&&!team.managers.find(m=>m.userId===manager)?.capabilities.includes('approve_read_requests'))))} onClick={()=>void save({type:'department.manager.set',teamId:team.id,userId:manager,capabilities:[...(manage?['manage_members' as const]:[]),...(approve?['approve_read_requests' as const]:[])]},`${team.name}: ${people.find(p=>p.value===manager)?.label}. ${t.manageMembers} (${manage?t.enabled:t.disabled}), ${t.approveRequests} (${approve?t.enabled:t.disabled})`)}>{t.managerSave}</Button></>:null}
     <p className="text-sm text-muted-foreground">{t.membershipHint}{!data.canAdminister?` ${t.memberRestriction}`:''}</p>
-    {team.canManageMembers?<><Picker label={t.member} value={person} onChange={setPerson} items={people} disabled={busy}/><div className="flex flex-wrap gap-2"><Button variant="outline" className="min-h-11" disabled={busy||!person||team.memberIds.includes(person)||(!data.canAdminister&&data.readiness?.ready!==true)} onClick={()=>void save({type:'department.member.set',teamId:team.id,userId:person,enabled:true},`${t.add}: ${people.find(p=>p.value===person)?.label}. ${team.name}. ${t.membershipHint}`)}>{t.add}</Button><Button variant="outline" className="min-h-11" disabled={busy||!person||!team.memberIds.includes(person)} onClick={()=>void save({type:'department.member.set',teamId:team.id,userId:person,enabled:false},`${t.remove}: ${people.find(p=>p.value===person)?.label}. ${team.name}`)}>{t.remove}</Button></div></>:null}
-    <Button variant="ghost" className="min-h-11" onClick={close}>{t.close}</Button>
+    {team.canManageMembers?<><Picker label={t.member} value={person} onChange={setPerson} items={people} disabled={busy}/><div className="flex flex-wrap gap-2"><Button variant="outline" className="max-sm:min-h-11" disabled={busy||!person||team.memberIds.includes(person)||(!data.canAdminister&&data.readiness?.ready!==true)} onClick={()=>void save({type:'department.member.set',teamId:team.id,userId:person,enabled:true},`${t.add}: ${people.find(p=>p.value===person)?.label}. ${team.name}. ${t.membershipHint}`)}>{t.add}</Button><Button variant="outline" className="max-sm:min-h-11" disabled={busy||!person||!team.memberIds.includes(person)} onClick={()=>void save({type:'department.member.set',teamId:team.id,userId:person,enabled:false},`${t.remove}: ${people.find(p=>p.value===person)?.label}. ${team.name}`)}>{t.remove}</Button></div></>:null}
+    <Button variant="ghost" className="max-sm:min-h-11" onClick={close}>{t.close}</Button>
   </div>;
 }
 
@@ -206,7 +208,7 @@ function PersonAccessEditor({data,person,busy,save,close}:{data:WorkspaceAccessO
     <Picker label={t.scopeMode} value={mode} onChange={value=>setMode(value as typeof mode)} items={[...(access.teamScopeMode==='legacy'?[{value:'legacy',label:t.legacyMode}]:[]),{value:'assigned',label:t.assignedMode}]} disabled={busy}/>
     <p className="text-sm text-muted-foreground">{t.personChangeHint}</p>
     {blocked?<p role="status" className="text-sm">{t.notReady}</p>:null}
-    <div className="flex flex-wrap gap-2"><Button type="submit" className="min-h-11" disabled={busy||blocked||(clearance===access.clearance&&mode===access.teamScopeMode)}>{t.savePerson}</Button><Button type="button" variant="ghost" className="min-h-11" onClick={close}>{t.close}</Button></div>
+    <div className="flex flex-wrap gap-2"><Button type="submit" className="max-sm:min-h-11" disabled={busy||blocked||(clearance===access.clearance&&mode===access.teamScopeMode)}>{t.savePerson}</Button><Button type="button" variant="ghost" className="max-sm:min-h-11" onClick={close}>{t.close}</Button></div>
   </form>;
 }
 
@@ -214,8 +216,8 @@ function PersonAccessEditor({data,person,busy,save,close}:{data:WorkspaceAccessO
 function AccessHistorySection({kind,data,busy,save}:{kind:'requests'|'grants';data:WorkspaceAccessOverview;busy:boolean;save:Save}) {
   const [after,setAfter]=useState<string|null>(null),t=useT().workspaceAccess;
   const controls=(next:string|null)=><nav aria-label={kind==='requests'?t.requests:t.grants} className="flex flex-wrap gap-2">
-    {after?<Button className="min-h-11" variant="outline" onClick={()=>setAfter(null)}>{t.newestHistory}</Button>:null}
-    {next?<Button className="min-h-11" variant="outline" onClick={()=>setAfter(next)}>{kind==='requests'?t.olderRequests:t.olderGrants}</Button>:null}
+    {after?<Button className="max-sm:min-h-11" variant="outline" onClick={()=>setAfter(null)}>{t.newestHistory}</Button>:null}
+    {next?<Button className="max-sm:min-h-11" variant="outline" onClick={()=>setAfter(next)}>{kind==='requests'?t.olderRequests:t.olderGrants}</Button>:null}
   </nav>;
   const render=(history:Pick<WorkspaceAccessHistory,'requests'|'grants'|'nextCursor'>)=><AccessHistoryContent kind={kind} history={history} data={data} busy={busy} save={save} controls={controls(history.nextCursor)}/>;
   return after?<AccessHistoryPage key={after} kind={kind} after={after} revision={data.policyRevision} reset={()=>setAfter(null)} render={render}/>:render({requests:data.requests,grants:data.grants,nextCursor:(kind==='requests'?data.nextRequestCursor:data.nextGrantCursor)??null});
@@ -227,8 +229,8 @@ function AccessHistoryPage({kind,after,revision,reset,render}:{kind:'requests'|'
   const history=useProtectedProjection(key,resource.data,()=>{},resource.refresh);
   if(history)return render(history);
   return <section className="space-y-3"><h2 className="font-semibold">{kind==='requests'?t.requests:t.grants}</h2>
-    {resource.error?<><p role="alert">{t.historyChanged}</p><Button className="min-h-11" variant="outline" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>}
-    <Button className="min-h-11" variant="outline" onClick={reset}>{t.newestHistory}</Button>
+    {resource.error?<><p role="alert">{t.historyChanged}</p><Button className="max-sm:min-h-11" variant="outline" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>}
+    <Button className="max-sm:min-h-11" variant="outline" onClick={reset}>{t.newestHistory}</Button>
   </section>;
 }
 function AccessHistoryContent({kind,history,data,busy,save,controls}:{kind:'requests'|'grants';history:Pick<WorkspaceAccessHistory,'requests'|'grants'>;data:WorkspaceAccessOverview;busy:boolean;save:Save;controls:ReactNode}) {
@@ -242,14 +244,14 @@ function AccessHistoryContent({kind,history,data,busy,save,controls}:{kind:'requ
         <Interval starts={request.startsAt} expires={request.expiresAt}/><InfoNote>{t.readOnly}{request.beneficiaryKind==='team'?` ${t.futureMembers}`:''}</InfoNote>
         {request.status==='pending'&&!request.approvalId?<p className="text-sm">{t.waiting}</p>:null}
         <div className="flex flex-wrap gap-2">
-          {request.canDecide&&request.approvalId?(['approved','rejected'] as const).map(decision=><Button key={decision} variant={decision==='approved'?'default':'outline'} className="min-h-11" disabled={busy||(decision==='approved'&&data.readiness?.ready!==true)} onClick={()=>void save({type:'access.request.decide',requestId:request.id,expectedVersion:request.version,payloadHash:request.payloadHash,policyRevision:data.policyRevision,decision},`${decision==='approved'?t.approve:t.reject}: ${request.targetTeamName}. ${request.beneficiaryName??t.unnamed}. ${request.reason}. ${t.starts}: ${new Date(request.startsAt).toLocaleString()}. ${t.expires}: ${request.expiresAt?new Date(request.expiresAt).toLocaleString():t.ongoing}. ${t.readOnly} ${request.beneficiaryKind==='team'?t.futureMembers:''}`)}>{decision==='approved'?t.approve:t.reject}</Button>):null}
-          {request.canCancel?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>void save({type:'access.request.cancel',requestId:request.id,expectedVersion:request.version},`${t.cancel}: ${request.targetTeamName}`)}>{t.cancel}</Button>:null}
-          {data.canAdminister&&request.status==='pending'?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>void save({type:'access.request.assign',requestId:request.id},`${t.assign}: ${request.targetTeamName}`)}>{t.assign}</Button>:null}
+          {request.canDecide&&request.approvalId?(['approved','rejected'] as const).map(decision=><Button key={decision} variant={decision==='approved'?'default':'outline'} className="max-sm:min-h-11" disabled={busy||(decision==='approved'&&data.readiness?.ready!==true)} onClick={()=>void save({type:'access.request.decide',requestId:request.id,expectedVersion:request.version,payloadHash:request.payloadHash,policyRevision:data.policyRevision,decision},`${decision==='approved'?t.approve:t.reject}: ${request.targetTeamName}. ${request.beneficiaryName??t.unnamed}. ${request.reason}. ${t.starts}: ${new Date(request.startsAt).toLocaleString()}. ${t.expires}: ${request.expiresAt?new Date(request.expiresAt).toLocaleString():t.ongoing}. ${t.readOnly} ${request.beneficiaryKind==='team'?t.futureMembers:''}`)}>{decision==='approved'?t.approve:t.reject}</Button>):null}
+          {request.canCancel?<Button variant="outline" className="max-sm:min-h-11" disabled={busy} onClick={()=>void save({type:'access.request.cancel',requestId:request.id,expectedVersion:request.version},`${t.cancel}: ${request.targetTeamName}`)}>{t.cancel}</Button>:null}
+          {data.canAdminister&&request.status==='pending'?<Button variant="outline" className="max-sm:min-h-11" disabled={busy} onClick={()=>void save({type:'access.request.assign',requestId:request.id},`${t.assign}: ${request.targetTeamName}`)}>{t.assign}</Button>:null}
         </div></article>)}</div>
     </>:<>{!history.grants.length?<EmptyState bare icon={KeyRound}>{t.emptyGrants}</EmptyState>:null}
       <div className="divide-y divide-border">{history.grants.map(grant=><article key={grant.id} className="space-y-2 py-3 first:pt-0 last:pb-0"><HistoryTitle name={grant.targetTeamName} status={grant.status} label={t[grant.status]}/>
         <p className="flex items-center gap-2 text-sm"><OrgAvatar name={grant.beneficiaryName??t.unnamed} seed={grant.beneficiaryId} size={20} kind={grant.beneficiaryKind==='team'?'assistant':'member'}/><span className="font-medium">{grant.beneficiaryName??t.unnamed}</span></p>
-        <Interval starts={grant.startsAt} expires={grant.expiresAt}/><InfoNote>{t.readOnly}</InfoNote>{grant.canRevoke?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>void save({type:'access.grant.revoke',grantId:grant.id,reason:t.revoke},`${t.revoke}: ${grant.targetTeamName}`)}>{t.revoke}</Button>:null}{data.readiness?.ready===true&&(data.canAdminister||(grant.beneficiaryKind==='member'&&grant.beneficiaryId===me.id))&&data.teams.some(team=>team.id===grant.targetTeamId&&(team.requestable||data.canAdminister))?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>setRenewal(grant.id)}>{t.requestRenewal}</Button>:null}
+        <Interval starts={grant.startsAt} expires={grant.expiresAt}/><InfoNote>{t.readOnly}</InfoNote>{grant.canRevoke?<Button variant="outline" className="max-sm:min-h-11" disabled={busy} onClick={()=>void save({type:'access.grant.revoke',grantId:grant.id,reason:t.revoke},`${t.revoke}: ${grant.targetTeamName}`)}>{t.revoke}</Button>:null}{data.readiness?.ready===true&&(data.canAdminister||(grant.beneficiaryKind==='member'&&grant.beneficiaryId===me.id))&&data.teams.some(team=>team.id===grant.targetTeamId&&(team.requestable||data.canAdminister))?<Button variant="outline" className="max-sm:min-h-11" disabled={busy} onClick={()=>setRenewal(grant.id)}>{t.requestRenewal}</Button>:null}
         {renewal===grant.id&&data.readiness?.ready===true?<AccessRequestForm key={grant.id} renewal={grant} data={data} team={data.teams.find(team=>team.id===grant.targetTeamId)!} viewerId={me.id} busy={busy} save={save} close={()=>setRenewal(null)}/>:null}</article>)}</div>
     </>}
     {controls}

@@ -193,6 +193,27 @@ describe("[COMP:app-web/surface-cache-invalidation] marks stale without dropping
   });
 });
 
+describe("[COMP:app-web/surface-cache-invalidation] catch-up never purges authority surfaces", () => {
+  beforeEach(() => {
+    resetSurfaceCache();
+  });
+
+  it("a catch-up identity refresh keeps access data painted; a real one purges", async () => {
+    // The stream's reconnect catch-up fires every ~5 minutes. Purging on it
+    // blanked Organization -> Departments to a skeleton on that cadence.
+    await loadSurfaceCache("workspace-access:w1:u1:registry", async () => ({ teams: ["t1"] }));
+    await loadSurfaceCache("workspace-member-directory:w1:u1", async () => ["m1"]);
+    applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT, { workspaceId: "w1", catchUp: true }, "w1");
+    expect(readSurfaceCache("workspace-access:w1:u1:registry").data).toEqual({ teams: ["t1"] });
+    expect(isSurfaceCacheStale("workspace-access:w1:u1:registry")).toBe(true);
+    expect(readSurfaceCache("workspace-member-directory:w1:u1").data).toEqual(["m1"]);
+    // A server-sent workspace_config (every access command emits one) still purges.
+    applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT, { workspaceId: "w1" }, "w1");
+    expect(readSurfaceCache("workspace-access:w1:u1:registry").data).toBeUndefined();
+    expect(readSurfaceCache("workspace-member-directory:w1:u1").data).toBeUndefined();
+  });
+});
+
 /**
  * The `goal` primitive (Phase 3 step 3): the goals board, the Triage panel and
  * every goal detail used to rely on a local `refetchTick` only the acting tab

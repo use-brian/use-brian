@@ -40,7 +40,7 @@ export function TokenUsageSection() {
   return <section className="space-y-4" aria-busy={loading || revalidating}>
     <div className="flex items-center justify-between gap-3">
       <h2 className="text-lg font-semibold">{t.title}</h2>
-      <Button className="min-h-11" variant="outline" disabled={revalidating} onClick={() => void refresh()}>{t.refresh}</Button>
+      <Button className="max-sm:min-h-11" variant="outline" disabled={revalidating} onClick={() => void refresh()}>{t.refresh}</Button>
     </div>
     <p className="text-sm text-muted-foreground">{t.period}</p>
     <p className="text-sm text-muted-foreground">{t.description}</p>

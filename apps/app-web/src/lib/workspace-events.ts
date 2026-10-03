@@ -276,20 +276,26 @@ export function routeWorkspaceChange(
   }
 }
 
-/** Every domain event, for catch-up after a reconnect / tab wake. */
+/**
+ * Every domain event, for catch-up after a reconnect / tab wake. Each detail
+ * carries `catchUp: true` so an authority listener can revalidate behind its
+ * paint instead of purging (`isCatchUpRefresh`): nothing is known to have
+ * changed, and the stream reconnects every ~5 minutes.
+ */
 export function allDomainDispatches(workspaceId: string): DomainDispatch[] {
+  const catchUp = true as const;
   return [
-    { event: BRAIN_REFRESH_EVENT, detail: { workspaceId } },
-    { event: APPROVALS_REFRESH_EVENT, detail: { workspaceId } },
-    { event: WORKFLOW_REFRESH_EVENT, detail: { workspaceId, primitive: null } },
-    { event: SKILL_REFRESH_EVENT, detail: { workspaceId } },
-    { event: SCHEDULED_JOB_REFRESH_EVENT, detail: { workspaceId } },
-    { event: ASSISTANT_REFRESH_EVENT, detail: { workspaceId } },
-    { event: HOME_APPS_REFRESH_EVENT, detail: { workspaceId } },
-    { event: WORKSPACE_IDENTITY_REFRESH_EVENT, detail: { workspaceId } },
-    { event: INBOX_REFRESH_EVENT, detail: { workspaceId } },
-    { event: LIVE_REFRESH_EVENT, detail: { workspaceId } },
-    { event: GOAL_REFRESH_EVENT, detail: { workspaceId } },
+    { event: BRAIN_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: APPROVALS_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: WORKFLOW_REFRESH_EVENT, detail: { workspaceId, primitive: null, catchUp } },
+    { event: SKILL_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: SCHEDULED_JOB_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: ASSISTANT_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: HOME_APPS_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: WORKSPACE_IDENTITY_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: INBOX_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: LIVE_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: GOAL_REFRESH_EVENT, detail: { workspaceId, catchUp } },
   ];
 }
 
@@ -316,7 +322,10 @@ export function createRefreshFolder(opts: {
     fold(dispatch: DomainDispatch) {
       const slot = slots.get(dispatch.event);
       if (slot) {
-        slot.pending = dispatch;
+        // A real change folded into the window must not be downgraded to a
+        // catch-up by a later catch-up: listeners purge only on the former.
+        const keepReal = slot.pending !== null && slot.pending.detail.catchUp !== true && dispatch.detail.catchUp === true;
+        if (!keepReal) slot.pending = dispatch;
         return;
       }
       const handle = setTimer(() => {

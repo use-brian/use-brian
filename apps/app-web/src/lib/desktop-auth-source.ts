@@ -87,6 +87,11 @@ export type DesktopBrowserControlMessage =
   | { type: "status" | "request-control" | "show" | "disconnect" | "cancel" }
   | { type: "pair"; relayUrl: string; pairingToken: string; automatic?: boolean; expectedControlEpoch?: number };
 
+/** Mirrors the shell's `RendererUpdateStatus` (app-desktop `auto-update.ts`). */
+export type DesktopUpdateStatus =
+  | { phase: "downloading"; version: string; percent: number }
+  | { phase: "ready"; version: string };
+
 export interface DesktopBridge {
   /** Pair resolves successfully only once the embedded browser relay is ready. */
   browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; controlEpoch?: number; hasControl?: boolean; connected?: boolean; automaticBlocked?: boolean; browserProfileId?: string; workspaceId?: string }>;
@@ -123,6 +128,15 @@ export interface DesktopBridge {
    */
   setCaptureSource?: (id: string | null) => void;
   signIn: () => void;
+  /**
+   * Shell self-update status for the footer chip. Absent in browsers and in
+   * shells older than the chip; null when there is nothing to show.
+   */
+  getUpdateStatus?: () => Promise<DesktopUpdateStatus | null>;
+  /** Subscribe to update status pushes from the shell. */
+  onUpdateStatus?: (callback: (status: DesktopUpdateStatus | null) => void) => () => void;
+  /** Apply the staged update now; the shell relaunches into the new version. */
+  installUpdate?: () => void;
   /** Consume the pending native Siri request once; absent in browsers/old shells. */
   takeUseBrianPrompt?: () => string | null;
   /** Subscribe to one-shot native Use Brian wake-ups. */

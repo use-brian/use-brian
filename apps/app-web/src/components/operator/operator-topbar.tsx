@@ -1,5 +1,7 @@
 "use client";
 
+import { WorkspaceSearchSlot } from "@/components/workspace-search/workspace-search-provider";
+
 /**
  * Operator top bar — the ONE shared chrome row every non-Page operator app
  * surface (plus top-level Live) opens with, so workspace surfaces read as one
@@ -209,6 +211,7 @@ export function OperatorTopbar({
           {right}
         </div>
       )}
+      <WorkspaceSearchSlot />
     </div>
   );
 }

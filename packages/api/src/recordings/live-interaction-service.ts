@@ -69,22 +69,26 @@ export function defaultRuleDecision(
   pending?: string,
 ): RuleDecision {
   const combined = [pending, text].filter(Boolean).join(" ").trim();
-  const question = (value: string): RuleDecision => ({
-    action:
-      /\b(?:what|which|who|why|how|the|a|an|is|are|was|were|did|does|do|and|or|to|of|for|about)\s*$/i.test(
-        value,
-      )
-        ? "continue"
-        : "submit",
-    question: value,
-  });
+  const question = (value: string): RuleDecision => {
+    // A labeled ASR reply is not part of the preceding speaker's question.
+    // Only recognized line-start labels delimit turns; preserve ordinary newlines
+    // and the original persisted transcript. Labels never establish provenance.
+    value = value.split(/\r?\n[\t ]*(?:Speaker[\t ]+\d+|Brian)[\t ]*[:：]/i)[0]!.trim();
+    if (!value) return { action: "begin", question: "" };
+    return {
+      action:
+        /\b(?:what|which|who|why|how|the|a|an|is|are|was|were|did|does|do|and|or|to|of|for|about)\s*$/i.test(
+          value,
+        )
+          ? "continue"
+          : "submit",
+      question: value,
+    };
+  };
   if (/^(?:cancel|never mind|nevermind)[.!]?$/i.test(text.trim()))
     return { action: "cancel" };
-  const match = /\bhey[\s,]+brian\b[\s,:.!?]*(.*)$/is.exec(combined);
-  if (match)
-    return match[1]?.trim()
-      ? question(match[1].trim())
-      : { action: "begin", question: "" };
+  const match = /\bhey[\s,]+brian\b[\t ,:.!?，：。！？]*(.*)$/is.exec(combined);
+  if (match) return question(match[1] ?? "");
   if (pending !== undefined && !/^hey[\s,.!?]*$/i.test(pending))
     return combined ? question(combined) : { action: "begin", question: "" };
   if (/\bhey[\s,.!?]*$/i.test(combined))

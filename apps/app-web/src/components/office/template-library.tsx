@@ -290,7 +290,7 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
         {mutationFailed ? <p role="alert" className="mt-3 text-sm text-destructive">{t.lifecycleFailed}</p> : null}
         {templates === null ? list.error ? <div className="py-16 text-center text-sm">
           <p role="alert" className="text-destructive">{t.loadFailed}</p>
-          <button type="button" disabled={list.revalidating} onClick={() => void list.refresh()} className="mt-3 min-h-11 rounded border px-3 py-2 disabled:opacity-50">{copy.chat.retry}</button>
+          <button type="button" disabled={list.revalidating} onClick={() => void list.refresh()} className="mt-3 max-sm:min-h-11 rounded border px-3 py-2 disabled:opacity-50">{copy.chat.retry}</button>
         </div> : <GridSurfaceSkeleton chrome={false} padded={false} /> : templates.length === 0 ? (
           <section className="mt-8 rounded-xl border border-dashed p-8 text-center">
             <h2 className="font-medium">{t.noTemplates}</h2>

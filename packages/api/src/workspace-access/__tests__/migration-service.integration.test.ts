@@ -33,6 +33,16 @@ describe('[COMP:api/workspace-access] bounded durable migration',()=>{
     expect((await setMigrationPlanState(f.w,f.u,p.id,'cancelled')).status).toBe('cancelled')
     expect((await getMigrationPlan(f.w,f.u,p.id)).status).toBe('cancelled')
   })
+  it('lists plans without row-locking the workspace',async()=>{
+    // A read must not queue behind (or block) a writer holding the workspace row.
+    const f=await fixture(),p=await createMigrationPlan(f.w,f.u,f.input),holder=await pool.connect()
+    try{
+      await holder.query('BEGIN');await holder.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[f.w])
+      const listed=await Promise.race([listMigrationPlans(f.w,f.u),new Promise<'blocked'>(resolve=>setTimeout(()=>resolve('blocked'),2000))])
+      expect(listed).not.toBe('blocked')
+      expect((listed as {id:string}[]).map(plan=>plan.id)).toContain(p.id)
+    }finally{await holder.query('ROLLBACK');holder.release()}
+  })
   it('simulates without writes; checkpoints exact reviews, retries and blocks final completion',async()=>{
     const f=await fixture(),before=await getWorkspaceAccess(f.w,f.u)
     const p=await createMigrationPlan(f.w,f.u,f.input),retry=await createMigrationPlan(f.w,f.u,f.input)

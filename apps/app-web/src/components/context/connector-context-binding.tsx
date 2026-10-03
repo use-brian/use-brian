@@ -1,6 +1,10 @@
 "use client";
 
-/** Stable Team/Project exposure binding for one connector. [COMP:app-web/context-scope] */
+/**
+ * Project binding for one connector. The department is set from the header
+ * badge (`ConnectorDepartmentBadge`), so this saves only the Project.
+ * [COMP:app-web/context-scope]
+ */
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
@@ -62,10 +66,7 @@ export function ConnectorContextBinding({
     setSaved(false);
     setError(null);
     try {
-      await updateConnectorContext(workspaceId, instanceId, {
-        contextGroupId: teamId,
-        contextProjectId: projectId,
-      });
+      await updateConnectorContext(workspaceId, instanceId, { contextProjectId: projectId });
       setSaved(true);
     } catch {
       setError(t.updateFailed);
@@ -90,10 +91,8 @@ export function ConnectorContextBinding({
             onTeamChange={(value) => { setTeamId(value); setSaved(false); }}
             onProjectChange={(value) => { setProjectId(value); setSaved(false); }}
             disabled={saving}
+            hideTeam
           />
-          {teamId || projectId ? (
-            <p className="text-xs text-muted-foreground">{t.connectorProviderRootUnavailable}</p>
-          ) : null}
         </>
       )}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}

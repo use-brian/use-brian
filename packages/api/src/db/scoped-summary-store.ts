@@ -1,6 +1,7 @@
 import { deriveResourceScope, resourceScopeKey, type AccessContext, type DerivedWriteEvidence, type ScopeEvidence, type ScopeSource } from '@use-brian/core'
 import { getPool, query } from './client.js'
-import { createMemory, updateMemory, getSoul } from './memories.js'
+import { createMemory, getSoul } from './memories.js'
+import { beginBrainAdmission } from '../workspace-access/brain-create-admission.js'
 import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 
 /** Source-validated transaction; model-provided slot keys never confer authority. */
@@ -15,22 +16,39 @@ export async function writeScopedSummary(params: {
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
+    // Match canonical writers' workspace-before-resource lock order.
+    await beginBrainAdmission(client, floor.workspaceId)
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify(identity)])
-    const { rows } = await client.query<{ id: string; memoryId: string; held: boolean }>(
-      `SELECT s.id,s.memory_id AS "memoryId",m.scope_held AS held FROM memory_summary_slots s JOIN memories m ON m.id=s.memory_id
-       WHERE s.workspace_id=$1 AND s.owner_user_id=$2 AND s.owner_assistant_id=$3 AND s.kind=$4 AND s.slot_key=$5 AND s.scope_key=$6 FOR UPDATE OF s`,identity,
+    const { rows } = await client.query<{ memoryId: string }>(
+      `SELECT s.memory_id AS "memoryId" FROM memory_summary_slots s
+       JOIN memories m ON m.id=s.memory_id AND m.workspace_id=s.workspace_id
+       WHERE s.workspace_id=$1 AND s.owner_user_id=$2 AND s.owner_assistant_id=$3 AND s.kind=$4 AND s.slot_key=$5 AND s.scope_key=$6 FOR UPDATE OF s,m`,identity,
     )
     const common = { summary: params.content.slice(0,100),detail: params.content,
       sensitivity: floor.sensitivity,compartments: floor.compartments,projectIds: floor.projectIds,
       derivation: params.derivation }
-    // Held outputs have invalid lineage. Rebuild from the independently revalidated
-    // source set; never feed their old content into the model or inheritance floor.
-    const memory = rows[0] && !rows[0].held
-      ? await updateMemory(rows[0].memoryId,common,undefined,client)
-      : await createMemory({ ...common,workspaceId: floor.workspaceId,assistantId: params.assistantId,
-        userId: params.userId,createdByUserId: params.userId,createdByAssistantId: params.assistantId,
-        source: 'consolidation',tags: [`consolidation:${params.kind}`],scope: 'shared' },undefined,client)
-    if (!memory) throw new Error('scope_source_changed')
+    // A regenerated summary is not an edit of the previous output: its only
+    // inputs are the synthesis evidence. updateMemory would add the predecessor
+    // as an input, making later ancestor invalidation hold the current summary
+    // itself. Invalidate first, including old buggy chains, then let createMemory
+    // revalidate every input. A source depending on the retired output must fail,
+    // not be silently refreshed or released from holding.
+    const previous = rows[0]
+    if (previous) {
+      await client.query(`SELECT hold_scope_descendants($1,'memory',$2)`,[floor.workspaceId,previous.memoryId])
+      // Retire before validation so even a direct citation of this output is
+      // rejected. A failed create rolls back retirement and all descendant holds.
+      await client.query(`UPDATE memories SET valid_to=COALESCE(valid_to,now()),updated_at=now()
+        WHERE workspace_id=$1 AND id=$2`,[floor.workspaceId,previous.memoryId])
+    }
+    const memory = await createMemory({ ...common,workspaceId: floor.workspaceId,assistantId: params.assistantId,
+      userId: params.userId,createdByUserId: params.userId,createdByAssistantId: params.assistantId,
+      source: 'consolidation',tags: [`consolidation:${params.kind}`],scope: 'shared' },undefined,client)
+    if (previous) {
+      // Retain history without introducing a derivation edge to the predecessor.
+      await client.query(`UPDATE memories SET superseded_by=$3
+        WHERE workspace_id=$1 AND id=$2`,[floor.workspaceId,previous.memoryId,memory.id])
+    }
     await client.query(
       `INSERT INTO memory_summary_slots(workspace_id,owner_user_id,owner_assistant_id,kind,slot_key,scope_key,memory_id)
        VALUES($1,$2,$3,$4,$5,$6,$7)

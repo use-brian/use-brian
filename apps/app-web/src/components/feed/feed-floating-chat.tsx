@@ -72,6 +72,7 @@ import {
   DockRecorderStrip,
 } from "@/components/chrome/dock-recorder";
 import { useGlobalDockRecorder } from "@/lib/recorder/dock-recorder-bridge";
+import { claimFloatingRecorder } from "@/lib/recorder/floating-recorder-slot";
 
 type ChatAssistant = { id: string; name: string; iconSeed?: number };
 
@@ -380,6 +381,16 @@ export function FeedFloatingChat() {
 
   // No connected assistant yet — nothing to chat with. The feed home's
   // connect-account onboarding owns the empty state, so render nothing here.
+  // While this dock's launcher is up it renders the floating record button
+  // itself, so the chrome-level host stands down. Where a Refine/Plan rail
+  // owns the chat instead, the host takes over (floating-recorder-slot.ts).
+  const ownsFloatingRecorder =
+    !!activeAssistant && !postEditorOwnsChat && !planIndexOwnsChat;
+  useEffect(
+    () => (ownsFloatingRecorder ? claimFloatingRecorder() : undefined),
+    [ownsFloatingRecorder],
+  );
+
   if (!activeAssistant || postEditorOwnsChat || planIndexOwnsChat) return null;
 
   return (

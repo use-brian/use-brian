@@ -32,8 +32,8 @@ type Draft = {
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const list = (value: string) => [...new Set(value.split(",").map((v) => v.trim()).filter(Boolean))];
-const buttonClass = "min-h-11 rounded-md border border-border px-3 text-sm disabled:opacity-50";
-const inputClass = "min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 text-base md:text-sm";
+const buttonClass = "min-h-8 max-sm:min-h-11 rounded-md border border-border px-3 text-sm disabled:opacity-50";
+const inputClass = "min-h-8 max-sm:min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 text-base md:text-sm";
 
 /** Strip server-owned metadata: the config endpoint validates entries strictly. */
 function toInput(binding: DeliveryAudienceBindingInput): DeliveryAudienceBindingInput {
@@ -276,7 +276,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
           <Select value={draft.audienceType} disabled={busy || stale} onValueChange={(value) => {
             if (value === "group" || value === "individual") setDraft({ ...draft, audienceType: value, recipient: value === "group" ? "" : draft.recipient, companyWide: value === "group" && draft.companyWide });
           }}>
-            <SelectTrigger aria-labelledby={`${id}-type`} className="min-h-11 w-full"><SelectValue>{draft.audienceType === "group" ? copy.group : copy.individual}</SelectValue></SelectTrigger>
+            <SelectTrigger aria-labelledby={`${id}-type`} className="max-sm:min-h-11 w-full"><SelectValue>{draft.audienceType === "group" ? copy.group : copy.individual}</SelectValue></SelectTrigger>
             <SelectContent><SelectItem value="group">{copy.group}</SelectItem><SelectItem value="individual">{copy.individual}</SelectItem></SelectContent>
           </Select>
         </div>
@@ -285,7 +285,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
           <Select value={draft.clearance} disabled={busy || stale} onValueChange={(value) => {
             if (value === "public" || value === "internal" || value === "confidential") setDraft({ ...draft, clearance: value });
           }}>
-            <SelectTrigger aria-labelledby={`${id}-clearance`} className="min-h-11 w-full"><SelectValue>{t.studioPage.channels.clearance[draft.clearance]}</SelectValue></SelectTrigger>
+            <SelectTrigger aria-labelledby={`${id}-clearance`} className="max-sm:min-h-11 w-full"><SelectValue>{t.studioPage.channels.clearance[draft.clearance]}</SelectValue></SelectTrigger>
             <SelectContent>{(["public", "internal", "confidential"] as const).map((value) => <SelectItem key={value} value={value}>{t.studioPage.channels.clearance[value]}</SelectItem>)}</SelectContent>
           </Select>
         </div>
@@ -305,7 +305,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
         {draft.compartments.length > 0 ? <ul aria-labelledby={`${id}-departments`} className="flex flex-wrap gap-2">
           {draft.compartments.map((departmentKey) => {
             const name = departmentName(departmentKey);
-            return <li key={departmentKey} className="inline-flex min-h-11 items-center gap-1 rounded-full border border-border bg-muted/40 pl-3 pr-1 text-sm">
+            return <li key={departmentKey} className="inline-flex min-h-8 max-sm:min-h-11 items-center gap-1 rounded-full border border-border bg-muted/40 pl-3 pr-1 text-sm">
               {name}
               <button type="button" aria-label={format(copy.removeDepartment, { name })} disabled={busy || stale}
                 className="inline-flex size-9 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"

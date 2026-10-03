@@ -148,7 +148,7 @@ export function BlueprintsLibrary({
             </div>
             <Button
               variant="outline"
-              className="min-h-11 shrink-0 self-start sm:self-auto"
+              className="max-sm:min-h-11 shrink-0 self-start sm:self-auto"
               disabled={readOnly || installing}
               onClick={() => void installMeetingNotes()}
             >

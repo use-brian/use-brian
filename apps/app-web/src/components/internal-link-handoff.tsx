@@ -142,8 +142,8 @@ export function InternalLinkHandoff({ input }: { input: InternalLinkHandoffInput
       body={status === "resolving" ? t.browserResolving : status === "not-found" ? t.browserNotFound : t.handoffDescription}
     >
       <div className="mt-6 grid w-full gap-3 sm:grid-cols-2">
-        <Button className="min-h-11" onClick={openDesktop}>{t.openDesktop}</Button>
-        <Button className="min-h-11" variant="outline" onClick={continueBrowser}>{t.continueBrowser}</Button>
+        <Button className="max-sm:min-h-11" onClick={openDesktop}>{t.openDesktop}</Button>
+        <Button className="max-sm:min-h-11" variant="outline" onClick={continueBrowser}>{t.continueBrowser}</Button>
       </div>
       <p className="mt-4 text-xs text-muted-foreground">{t.desktopUnavailableHint}</p>
     </HandoffFrame>

@@ -132,7 +132,7 @@ export function ConfirmDialogProvider() {
             <Button
               variant="outline"
               size="sm"
-              className="min-h-11"
+              className="max-sm:min-h-11"
               onClick={() => resolveWith(false)}
             >
               {active?.cancelLabel ?? "Cancel"}
@@ -140,7 +140,7 @@ export function ConfirmDialogProvider() {
             <Button
               variant={active?.variant === "destructive" ? "destructive" : "default"}
               size="sm"
-              className="min-h-11"
+              className="max-sm:min-h-11"
               onClick={() => resolveWith(true)}
             >
               {active?.confirmLabel ?? "Confirm"}

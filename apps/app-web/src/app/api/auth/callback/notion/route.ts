@@ -1,3 +1,4 @@
+import { withConnectWorkspace } from "@/lib/connector-auto-expose";
 import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
@@ -125,7 +126,7 @@ export async function GET(request: Request) {
 
     // Send Notion access token to Express backend to store encrypted
     const storeRes = await fetch(
-      `${INTERNAL_API_URL}/api/connectors/notion/store-credentials`,
+      withConnectWorkspace(`${INTERNAL_API_URL}/api/connectors/notion/store-credentials`, workspaceId),
       {
         method: "POST",
         headers: {

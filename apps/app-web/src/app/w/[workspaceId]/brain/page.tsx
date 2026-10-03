@@ -1046,20 +1046,20 @@ function BrainPageInner() {
           />
           <DropdownMenuContent align="end">
             <DropdownMenuItem
-              className="min-h-11"
+              className="min-h-8 max-sm:min-h-11"
               onClick={() => setGroupsOpen(true)}
             >
               <Sparkles aria-hidden />
               {t.brainPage.skillGroups.cta}
             </DropdownMenuItem>
             <DropdownMenuItem
-              className="min-h-11"
+              className="min-h-8 max-sm:min-h-11"
               onClick={() => setImportOpen(true)}
             >
               <ArrowDownToLine aria-hidden />
               {t.brainPage.skillImport.importCta}
             </DropdownMenuItem>
-            <DropdownMenuItem className="min-h-11" onClick={openSkillCreator}>
+            <DropdownMenuItem className="min-h-8 max-sm:min-h-11" onClick={openSkillCreator}>
               <Plus aria-hidden />
               {t.brainPage.skills.newSkill}
             </DropdownMenuItem>

@@ -60,15 +60,15 @@ export type CreationContext=ReturnType<typeof useCreationContext>;
 export function ModeAwareCreationContext({context}:{context:CreationContext}){
  const t=useT().modeContext,a=useT().workspaceAccess;
  if(context.intent!=='new-shared')return <p className="text-sm">{context.intent==='private'?t.private:t.existing}</p>;
- if(!context.mode.data||!context.choices)return <div>{context.error?<p role="alert">{t.stale}</p>:<SurfaceSkeletonFor surface="organization" chrome={false}/>}<Button type="button" className="min-h-11" onClick={()=>void context.refresh()}>{a.reload}</Button></div>;
+ if(!context.mode.data||!context.choices)return <div>{context.error?<p role="alert">{t.stale}</p>:<SurfaceSkeletonFor surface="organization" chrome={false}/>}<Button type="button" className="max-sm:min-h-11" onClick={()=>void context.refresh()}>{a.reload}</Button></div>;
  return <section className="space-y-3 text-sm"><p>{context.mode.readySimple?t.shared:t.destination}</p>
   <ContextScopePicker teams={context.choices.teams} projects={context.choices.projects} teamId={context.teamId} projectId={context.projectId} onTeamChange={context.selectTeam} onProjectChange={context.selectProject} hideTeam={context.mode.readySimple}/>
   <p>{t.boundaries}</p>{!context.mode.readySimple&&!context.legacy&&!context.ready&&!context.reviewNeeded?<p>{t.choose}</p>:null}
-  {context.reviewNeeded?<div role="alert"><p>{t.stale}</p><Button type="button" className="min-h-11" onClick={context.review}>{t.review}</Button></div>:null}
+  {context.reviewNeeded?<div role="alert"><p>{t.stale}</p><Button type="button" className="max-sm:min-h-11" onClick={context.review}>{t.review}</Button></div>:null}
  </section>;
 }
 export function WorkspaceModeSummary(){
  const {workspaceId}=useWorkspaceContext(),mode=useWorkspaceAccessMode(),t=useT().accessMigration,m=useT().modeContext;
- if(!mode.data)return mode.error?<div role="alert"><p>{m.stale}</p><Button className="min-h-11" onClick={()=>void mode.refresh()}>{m.review}</Button></div>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
- return <section className="space-y-2 rounded-lg border border-border p-3 text-sm"><h3 className="font-semibold">{t.title}</h3><p>{t.current}: {t[mode.data.mode]} · {t.setup}: {t[mode.data.setupState]}</p><p>{mode.readySimple?m.shared:m.setup}</p><p>{m.boundaries}</p>{mode.data.canAdminister?<><p>{m.migration}</p><Link className="inline-flex min-h-11 items-center underline" href={organizationHref(workspaceId,'access')}>{t.plans}</Link></>:null}</section>;
+ if(!mode.data)return mode.error?<div role="alert"><p>{m.stale}</p><Button className="max-sm:min-h-11" onClick={()=>void mode.refresh()}>{m.review}</Button></div>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
+ return <section className="space-y-2 rounded-lg border border-border p-3 text-sm"><h3 className="font-semibold">{t.title}</h3><p>{t.current}: {t[mode.data.mode]} · {t.setup}: {t[mode.data.setupState]}</p><p>{mode.readySimple?m.shared:m.setup}</p><p>{m.boundaries}</p>{mode.data.canAdminister?<><p>{m.migration}</p><Link className="inline-flex min-h-8 max-sm:min-h-11 items-center underline" href={organizationHref(workspaceId,'access')}>{t.plans}</Link></>:null}</section>;
 }

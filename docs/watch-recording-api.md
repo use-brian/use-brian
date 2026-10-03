@@ -4,7 +4,7 @@ Clients live in [brian-mobile](https://github.com/use-brian/brian-mobile). All p
 
 ## Deployment
 
-Apply migrations `653_watch_recording.sql` and `654_mobile_auth.sql`. Configure Files API/storage, ffmpeg/ffprobe, the recording worker and transcription provider, then set:
+Apply migrations `653_watch_recording.sql`, `654_mobile_auth.sql` and `657_watch_assistant_destinations.sql`. Configure Files API/storage, ffmpeg/ffprobe, the recording worker and transcription provider, then set:
 
 ```env
 WATCH_RECORDING_ENABLED=true
@@ -33,7 +33,9 @@ Base path: `/api/watch/v1`. Human endpoints use the phone's ordinary Bearer acce
 | `GET /grants` | `{grants:[{grantId, deviceId, workspaceId, assistantId, label, revokedAt, expiresAt}]}` |
 | `DELETE /grants/:grantId` | Owner-only, idempotent; 204 |
 
-IDs are UUIDs; label is 1–80 characters. Only the selected workspace's primary assistant is supported. Provisioning is idempotent for owner/device/workspace while nonrevoked; replay never resets rotated credentials. Changed assistant/label conflicts. After rotation or expiry, recover existing captures through relay rather than provisioning a replacement namespace. Limit: ten active grants/user.
+IDs are UUIDs; label is 1–80 characters. The destination is any assistant the owner can use in that workspace: the owner is a current workspace member and not blocked from it, and a non-primary assistant has `internal` or `confidential` clearance (watch audio is `internal`, so a lower-cleared assistant could never read its own recording). Otherwise `403 destination_unavailable`; this is rechecked on every device, relay and upload request. Provisioning is idempotent for owner/device/workspace/assistant while nonrevoked; replay never resets rotated credentials. A changed label conflicts. Another assistant in the same workspace is a separate grant, so changing the selection never revokes a grant with queued captures. After rotation or expiry, recover existing captures through relay rather than provisioning a replacement namespace. Limit: ten active grants/user.
+
+Each capture freezes its scope when created. A primary destination keeps workspace-shared media, as before. Any other assistant scopes the canonical audio file, recording, transcript segments and transcript artifact to that assistant, and Pipeline B extracts into its brain. The recording stays human-authored and visible to workspace members, the primary and that assistant; other assistants cannot retrieve it.
 
 Device access lasts 15 minutes; grants last 90 days. `POST /renew` with `{renewalToken}` returns replacement credentials. The watch alone coordinates rotation and atomically persists replacements. Reuse of a consumed renewal token revokes the grant; an ambiguous successful response requires phone recovery, not repeated renewal. Human tokens cannot substitute on direct device session paths.
 

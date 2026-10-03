@@ -3047,11 +3047,12 @@ export function FloatingChat({
     prepareLivePage: liveRecording.prepare,
     prepareCaptureSource: (initialSource) => pickCaptureSource(initialSource, tRecorder),
     streamLiveWindow: liveRecording.streamWindow,
-    onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string }) => {
+    onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string; liveWindowsDone?: Promise<void> }) => {
       const outcome = await captureUpload.run(file, {
         kind: "meeting",
         ...(live ? { existingPageId: live.pageId } : {}),
         ...(live?.sessionId ? { liveSessionId: live.sessionId } : {}),
+        ...(live?.liveWindowsDone ? { liveWindowsDone: live.liveWindowsDone } : {}),
       });
       // The recorder's own notice reports this outcome (queued / kept /
       // step-aware failure) on BOTH render sites, collapsed included — the
@@ -3577,7 +3578,7 @@ export function FloatingChat({
                 {recorder.interactionStatus === "unavailable" ? interactionT.personalOnly : recorder.interactionStatus === "gap" ? interactionT.error : interactionT.listening}
               </p>
               {recorder.interactionCaptureId && <LiveInteractionQuestionControls key={recorder.interactionCaptureId} captureId={recorder.interactionCaptureId} />}
-              <button type="button" className="min-h-11 text-sm underline" onClick={() => recorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
+              <button type="button" className="min-h-8 max-sm:min-h-11 text-sm underline" onClick={() => recorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
             </div>
           )}
           <LiveInteractionJobs
@@ -4060,8 +4061,8 @@ export function FloatingChat({
 
       {/* Live-recording chrome (collapsed mode) — the recovery banner, the
           first-use/error notice, and the active recorder strip stack ABOVE
-          the launcher row; while a capture runs the strip IS the pill (the
-          launcher hides below). See docs/architecture/media/live-capture.md. */}
+          the launcher row. Keep chat reachable while capturing and saving;
+          opening it reuses the same recorder and originating chat session. */}
       {!isSidePanel && !expanded ? (
         <>
           <DockRecorderRecovery rec={recorder} />
@@ -4073,15 +4074,12 @@ export function FloatingChat({
           small avatar (its creature icon) beside a short text nudge; fades +
           scales out when the panel expands. While a turn runs it tints to
           primary and the nudge mirrors the live tool / stream label. Falls back
-          to a chat glyph until the identity resolves. Hidden while a LATCHED
-          recording's strip owns the pill (the record button itself stays
-          mounted through arming/holding — it anchors the live press gesture);
-          the record-dot button rides beside it otherwise. */}
-      {!isSidePanel &&
-        !(
-          (recorder.phase.kind === "latched" || recorder.phase.kind === "finishing") &&
-          !expanded
-        ) && (
+          to a chat glyph until the identity resolves. Recording never hides
+          the chat launcher: users can open the originating conversation to
+          type or read answers without stopping capture or navigating away.
+          The record button stays mounted through arming/holding so its live
+          press gesture keeps its anchor. */}
+      {!isSidePanel && (
           <div className="flex items-center gap-2">
             <button
               type="button"

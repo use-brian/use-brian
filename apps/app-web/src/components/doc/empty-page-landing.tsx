@@ -8,7 +8,7 @@
  *   │  badge + gradient title + "what do you want to see?"    │
  *   │  composer (+ attach files, research toggle, model       │
  *   │  picker) + one-tap starter prompts. On send / tap,      │
- *   │  builds a page. A quiet "Start with a blank page"       │
+ *   │  opens the Chat app. A quiet "Start with a blank page"  │
  *   │  button below skips the AI prompt (`onStartBlank`).     │
  *   ├─ recents ──────────────────────────────────────────────┤
  *   │  Up to 5 recently-opened pages as quick-link cards.     │
@@ -16,13 +16,12 @@
  *
  * The chatter is presentational: submitting (composer send or a starter-
  * prompt tap) calls `onSubmitPrompt` with the chosen model tier, research
- * flag, and any staged file ids. The shell implements that as "pre-create a
- * draft, navigate to it, then build it on the page" (the construction streams
- * onto the page body), threading the model/research/files through the
- * chat-seed so the build turn uses them. See `doc-shell.tsx` →
- * `handleBuildPage`. Attachments are uploaded here (before any draft/session
- * exists) and ride the build turn as `fileIds` — `fileId`s are
- * session-agnostic on the read path (`useFileAttachments`).
+ * flag, and any staged file ids. The shell hands that to a fresh Personal
+ * conversation in the Chat app (`doc-shell.tsx` → `handleLandingSubmit` →
+ * `lib/chat-handoff.ts`), where the reply is always visible and any page the
+ * assistant creates is linked in the transcript. Attachments are uploaded here
+ * (before any session exists) and ride the first Chat turn as `fileIds` —
+ * `fileId`s are session-agnostic on the read path (`useFileAttachments`).
  *
  * Tone: a document surface — tonally neutral; the palette brand (`--primary` /
  * `--ring`) appears only as the primary CTA, the focus ring, and small hover
@@ -93,13 +92,13 @@ import { RecordingUploadStatus } from "@/components/recordings/recording-upload-
 type BuildOptions = {
   model: ModelTier;
   researchMode: boolean;
-  /** Ready (`done`) attachment ids to feed the build turn, in chip order. */
+  /** Ready (`done`) attachment ids for the first Chat turn, in chip order. */
   fileIds: string[];
   /** Uploaded recordings staged without processing, in chip order. */
   attachedRecordingIds: string[];
-  /** Which workspace assistant drafts the page (the footer picker). Rides
-   *  the chat-seed so the dock switches its interlocutor for the build turn.
-   *  Absent while the primary hasn't resolved → the dock's own default. */
+  /** Which workspace assistant answers (the footer picker). Rides the
+   *  chat handoff as the conversation's assistant. Absent while the primary
+   *  hasn't resolved → the workspace primary. */
   assistantId?: string;
 };
 
@@ -117,10 +116,9 @@ type Props = {
   /** Open a card's page in the active tab. */
   onOpenCard: (id: string) => void;
   /**
-   * Build a page from a prompt — the shell pre-creates a draft, navigates
-   * to it, and streams the construction onto the page body, using the
-   * chosen model tier + research flag. Fired by the composer's send and by
-   * a starter-prompt tap.
+   * Hand the prompt to a fresh Chat conversation, with the chosen research
+   * flag and staged attachments (the model tier is shared by key). Fired by
+   * the composer's send and by a starter-prompt tap.
    */
   onSubmitPrompt: (text: string, opts: BuildOptions) => void;
   /**
@@ -178,8 +176,8 @@ export function EmptyPageLanding({
   const [pendingRecordings, setPendingRecordings] = useState<StagedRecording[]>([]);
   // File attachments staged on the landing. `fileId`s are session-agnostic on
   // the read path (see `useFileAttachments`), so we upload here — before any
-  // draft / session exists — and hand the ready ids to the build turn via the
-  // chat-seed (`onSubmitPrompt` → `handleBuildPage` → seed → `/api/chat`).
+  // session exists — and hand the ready ids to the first Chat turn
+  // (`onSubmitPrompt` → `handleLandingSubmit` → chat-handoff → `/api/chat`).
   const att = useFileAttachments(undefined, {
     onRouteMedia:
       workspaceId && assistantId

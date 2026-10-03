@@ -23,6 +23,7 @@ import { watchRecordingRoutes } from '../../routes/watch-recording.js'
 import { claimNextRecordingJob, enqueueRecordingJob, hasCompletedRecordingJob, markRecordingJobFailed, markRecordingJobDone } from '../../db/recording-jobs-store.js'
 import { captureRecordingSegmentProvenance, recordingIntakeTransaction } from '../../db/recording-intake-admission.js'
 import { getRecording, updateRecording } from '../../db/recordings-store.js'
+import { createEpisode } from '../../db/episodes-store.js'
 import { authorizeWatchDestination, createWatchService } from '../watch-service.js'
 import { watchStore, sha256 } from '../watch-store.js'
 import { processOpenRecordingWithBookkeeping } from '../process-recording.js'
@@ -53,6 +54,7 @@ afterAll(async () => {
 
 async function fixture() {
   const userId = randomUUID(), workspaceId = randomUUID(), assistantId = randomUUID(), outsider = randomUUID()
+  const writerId = randomUUID(), otherId = randomUUID(), publicId = randomUUID()
   for (const id of [userId, outsider]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
   await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Watch canonical fixture',$2)", [workspaceId, userId])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')", [workspaceId, userId])
@@ -60,6 +62,9 @@ async function fixture() {
   await pool.query("UPDATE workspace_access_policies SET access_mode='simple',setup_state='ready',default_department_id=$2 WHERE workspace_id=$1", [workspaceId, team.id])
   await pool.query("INSERT INTO teamspaces(workspace_id,name,sensitivity,is_default,workspace_group_id,created_by) VALUES($1,'Watch default','internal',true,$2,$3)", [workspaceId, team.id, userId])
   await pool.query("INSERT INTO assistants(id,workspace_id,name,kind,clearance) VALUES($1,$2,'Primary','primary','confidential')", [assistantId, workspaceId])
+  for (const [id, name, clearance] of [[writerId, 'Writer', 'internal'], [otherId, 'Other', 'internal'], [publicId, 'Public', 'public']]) {
+    await pool.query("INSERT INTO assistants(id,workspace_id,name,kind,clearance) VALUES($1,$2,$3,'standard',$4)", [id, workspaceId, name, clearance])
+  }
   const app = express(); app.use(express.json())
   const server = await new Promise<Server>(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
   servers.push(server)
@@ -85,7 +90,7 @@ async function fixture() {
   app.use('/api/recordings', humanAuth, openRecordingsRoutes({ filesResolver: resolver, enqueueJob: enqueueRecordingJob, hasProcessed: hasCompletedRecordingJob,
     getRole: async (actor, workspace) => (await queryWithRLS(actor, 'SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspace, actor])).rows[0]?.role ?? null,
   }))
-  return { userId, outsider, workspaceId, assistantId, team, app, server, storage, resolver, files, pages, service, tokens, grant }
+  return { userId, outsider, workspaceId, assistantId, writerId, otherId, publicId, team, app, server, storage, resolver, files, pages, service, tokens, grant, signingSecret }
 }
 
 describe('watch → canonical file/Episode/recording/page → real queue/processor', () => {
@@ -190,5 +195,70 @@ describe('watch → canonical file/Episode/recording/page → real queue/process
     expect((await retryProcessing().expect(200)).body.processing).toBe('processed')
     expect(await counts()).toEqual({ pages: 1, recordings: 1, episodes: 1, jobs: 2, media: 1 })
     expect(await claimNextRecordingJob()).toBeNull()
+  }, 60000)
+
+  // Mirrors Pipeline B step 1 (build-episode-ingestors.ts): the child episode it persists from a recording.
+  const pipelineBEpisode = (input: Parameters<NonNullable<Parameters<typeof processOpenRecordingWithBookkeeping>[1]['brainIngestor']>>[0]) => createEpisode(input.userId, {
+    sourceKind: input.sourceKind ?? 'voice_memo', sourceRef: input.sourceRef ?? {}, occurredAt: input.occurredAt ?? new Date(),
+    workspaceId: input.workspaceId, userId: input.userId, assistantId: input.assistantId, createdByUserId: input.userId,
+    createdByAssistantId: input.assistantId, sensitivity: input.sensitivity ?? 'internal', compartments: input.compartments,
+    projectIds: input.projectIds, summaryText: input.sourceLabel ?? null, parentEpisodeId: input.parentEpisodeId,
+  })
+  const ingested = (episodeId: string) => ({ episodeId, summaryText: '', entitiesWritten: [], edgesWritten: [], memoriesWritten: [], tasksWritten: [], ephemeralCount: 0, tags: [], sensitivity: null, extractionUsage: null, extracted: false, extractionState: 'skipped' as const, applicationState: 'not_started' as const, applicationRunId: null, applicationCounts: null })
+  const transcriber = { name: 'watch-fixture', transcribe: async (input: { durationMs: number }) => ({ utterances: [{ startMs: 0, endMs: input.durationMs, speaker: 'Speaker 1', text: 'Scoped watch transcript.' }], usages: [], windows: 1, truncated: false, degenerateWindows: 0 }) }
+  async function recordAndProcess(f: Awaited<ReturnType<typeof fixture>>, destination: string, brainIngestor: Parameters<typeof processOpenRecordingWithBookkeeping>[1]['brainIngestor']) {
+    const tokens = await watchStore.provision({ ownerId: f.userId, workspaceId: f.workspaceId, assistantId: destination, deviceId: randomUUID(), label: 'Watch', provisioningKey: f.signingSecret })
+    const grant = await watchStore.authenticate(tokens.accessToken), clientId = randomUUID()
+    const c = await watchStore.create(grant, clientId, { capturedAt: '2026-01-04T05:06:07.000Z', title: 'Scoped watch', source: 'apple-watch' })
+    await f.service.prepare(grant, c)
+    for (const [sequence, audio] of [[0, first], [1, second]] as const) {
+      await request(f.server).put(`/api/watch/v1/sessions/${clientId}/windows`).query({ sequence, offsetMs: sequence * 1000, durationMs: 1000, sha256: sha256(audio) })
+        .set('Authorization', `Bearer ${tokens.accessToken}`).set('Content-Type', 'audio/mp4').send(audio).expect(200)
+    }
+    expect(await f.service.finalize(grant, clientId, { source: 'windows', expectedWindows: 2, allowIncomplete: false })).toMatchObject({ state: 'finalized', recordingId: c.recording_id })
+    const job = await claimNextRecordingJob()
+    if (!job) throw new Error('watch queue job missing')
+    await processOpenRecordingWithBookkeeping(job, { filesResolver: f.resolver, fallbackStorage: f.storage, filesApi: f.files, transcriber: transcriber as never, brainIngestor })
+    await markRecordingJobDone(job.id)
+    return c
+  }
+
+  it('records into a chosen non-primary assistant partition end to end, visible to it and the primary only', async () => {
+    const f = await fixture()
+    // Destinations: any assistant the owner may use, cleared for the internal audio; never a blocked one.
+    await expect(authorizeWatchDestination({ owner_id: f.userId, workspace_id: f.workspaceId, assistant_id: f.publicId })).rejects.toMatchObject({ status: 403 })
+    await pool.query('UPDATE assistants SET blocked_user_ids=ARRAY[$2::uuid] WHERE id=$1', [f.otherId, f.userId])
+    await expect(authorizeWatchDestination({ owner_id: f.userId, workspace_id: f.workspaceId, assistant_id: f.otherId })).rejects.toMatchObject({ status: 403 })
+    await pool.query("UPDATE assistants SET blocked_user_ids='{}' WHERE id=$1", [f.otherId])
+    await authorizeWatchDestination({ owner_id: f.userId, workspace_id: f.workspaceId, assistant_id: f.writerId })
+    let child: string | undefined
+    const c = await recordAndProcess(f, f.writerId, async input => {
+      expect(input).toMatchObject({ parentEpisodeId: expect.any(String), assistantId: f.writerId, userId: f.userId })
+      child = (await pipelineBEpisode(input)).id // real admission of the scoped child episode
+      return ingested(child)
+    })
+    expect(child).toBeTruthy()
+    const recording = await getRecording(f.userId, c.recording_id)
+    expect(recording).toMatchObject({ assistantId: f.writerId, status: 'processed' })
+    expect((await pool.query('SELECT assistant_id,created_by_user_id,created_by_assistant_id FROM workspace_files WHERE id=$1', [recording!.mediaFileId])).rows[0])
+      .toEqual({ assistant_id: f.writerId, created_by_user_id: f.userId, created_by_assistant_id: null })
+    expect((await pool.query('SELECT assistant_id FROM episodes WHERE id=$1', [c.recording_id])).rows[0].assistant_id).toBe(f.writerId)
+    expect((await pool.query('SELECT DISTINCT assistant_id FROM transcript_segments WHERE recording_id=$1', [c.recording_id])).rows).toEqual([{ assistant_id: f.writerId }])
+    const read = (assistantId: string, assistantKind: 'primary' | 'standard') => f.files.stat({ userId: f.userId, workspaceId: f.workspaceId, assistantId, assistantKind }, recording!.mediaFileId!)
+    expect((await read(f.writerId, 'standard')).ok).toBe(true)
+    expect((await read(f.assistantId, 'primary')).ok).toBe(true)
+    expect((await read(f.otherId, 'standard')).ok).toBe(false)
+    expect((await f.files.stat({ userId: f.userId, workspaceId: f.workspaceId }, recording!.mediaFileId!)).ok).toBe(false) // workspace-shared human reads stay unwidened
+    expect((await queryWithRLS(f.outsider, 'SELECT id FROM recordings WHERE id=$1', [c.recording_id])).rows).toEqual([])
+  }, 60000)
+
+  it('hands Pipeline B a persistable owner for a primary (workspace-shared) recording', async () => {
+    const f = await fixture()
+    let child: string | undefined
+    await recordAndProcess(f, f.assistantId, async input => {
+      child = (await pipelineBEpisode(input)).id
+      return ingested(child)
+    })
+    expect(child).toBeTruthy()
   }, 60000)
 })

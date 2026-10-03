@@ -106,7 +106,10 @@ function accessCtx(ctx: FilesContext): AccessContext {
     workspaceId: ctx.workspaceId,
     userId: ctx.userId,
     assistantId: ctx.assistantId ?? '',
-    assistantKind: ctx.assistantKind ?? 'standard',
+    // Human callers need the primary SQL shape to avoid binding '' as a UUID,
+    // but may see only assistant-unowned rows (or their one selected partition).
+    assistantKind: ctx.assistantId ? ctx.assistantKind ?? 'standard' : 'primary',
+    ...(ctx.assistantId ? {} : { visibilityAssistantIds: ctx.scopeAssistantId ? [ctx.scopeAssistantId] : [] }),
     clearance: ctx.clearance,
     compartments: ctx.compartments,
     mutationCompartments: ctx.mutationCompartments,

@@ -213,6 +213,36 @@ describe('watch service recovery and ordering', () => {
     await h.service.finalize(g, c.client_id, { expectedWindows: 0, allowIncomplete: false, source: 'full' })
     expect(mocks.createRecording).toHaveBeenCalledTimes(1)
   })
+  it('publishes a non-primary destination into the capture partition, reading it back through that partition only', async () => {
+    const h = harness(), scope = randomUUID()
+    c.scope_assistant_id = scope
+    h.files.writeBytes.mockResolvedValue({ ok: true, value: { id: 'file', createdByUserId: g.owner_id, assistantId: scope, mime: 'audio/mp4' } } as never)
+    mocks.captureParent.mockResolvedValue({ mime: 'audio/mp4', assistantId: scope })
+    await h.service.finalize(g, c.client_id, { expectedWindows: 2, allowIncomplete: false })
+    const ctx = { workspaceId: g.workspace_id, userId: g.owner_id, scopeAssistantId: scope }
+    expect(h.files.stat).toHaveBeenCalledWith(ctx, `/recordings/watch/${c.id}.m4a`)
+    expect(h.files.writeBytes).toHaveBeenCalledWith(ctx, expect.objectContaining({ sensitivity: 'internal' }))
+    expect(mocks.captureParent).toHaveBeenCalledWith({ actorUserId: g.owner_id, access: { workspaceId: g.workspace_id, userId: g.owner_id,
+      assistantId: '', assistantKind: 'primary', visibilityAssistantIds: [scope] } }, g.workspace_id, 'file')
+    expect(mocks.createRecording).toHaveBeenCalledWith(expect.objectContaining({ assistantId: scope }), expect.anything())
+  })
+  it('refuses media or intake outside the capture partition before creating a recording', async () => {
+    const h = harness(), scope = randomUUID()
+    c.scope_assistant_id = scope
+    await expect(h.service.finalize(g, c.client_id, { expectedWindows: 2, allowIncomplete: false })).rejects.toMatchObject({ message: 'media_identity_conflict' })
+    h.files.writeBytes.mockResolvedValue({ ok: true, value: { id: 'file', createdByUserId: g.owner_id, assistantId: scope, mime: 'audio/mp4' } } as never)
+    await expect(h.service.finalize(g, c.client_id, { expectedWindows: 2, allowIncomplete: false })).rejects.toMatchObject({ message: 'media_identity_conflict' })
+    expect(mocks.createRecording).not.toHaveBeenCalled()
+  })
+  it('authorizes any assistant the owner may use that is cleared for the internal audio', async () => {
+    mocks.sql.mockResolvedValue({ rows: [{}] })
+    await authorizeWatchDestination({ owner_id: g.owner_id, workspace_id: g.workspace_id, assistant_id: g.assistant_id })
+    const [sql, params] = mocks.sql.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain("(a.kind='primary' OR a.clearance IN ('internal','confidential'))")
+    expect(sql).toMatch(/workspace_members m JOIN assistants a/)
+    expect(sql).toContain('blocked_user_ids')
+    expect(params).toEqual([g.owner_id, g.workspace_id, g.assistant_id])
+  })
   it('rechecks revocation before model publication and validates destination membership', async () => {
     const h = harness()
     h.authorize.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('revoked'))

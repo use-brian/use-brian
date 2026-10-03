@@ -14,12 +14,14 @@
  * callers (team members, inter-assistant consults, scheduled jobs).
  *
  * Two semantically-correct outcomes:
- *   - `{ ok: true }`                              — grant exists AND the
- *                                                   actionKind is in
- *                                                   `allowed_actions[]`.
- *   - `{ ok: false, reason: 'action_not_granted', details }` — the exact row
- *                                                   disappeared or no longer
- *                                                   names the action.
+ *   - `{ ok: true }`                              — the effective grant (the
+ *                                                   exact row, or the registry
+ *                                                   default when none exists)
+ *                                                   names the actionKind.
+ *   - `{ ok: false, reason: 'action_not_granted', details }` — it does not
+ *                                                   (a destructive action left
+ *                                                   at the default, or a row
+ *                                                   that no longer names it).
  *
  * [COMP:safety/assert-action-allowed]
  */
@@ -42,15 +44,10 @@ export async function assertActionAllowed(
   actionKind: string,
   displayConnectorId: string = connectorId,
 ): Promise<ActionAllowedResult> {
+  // Never null from the real store: an untouched pair resolves to the
+  // registry default (every write, no destructive). Tolerate a bare mock.
   const grant = await store.getForAssistantSystem(assistantId, connectorId)
-  if (!grant) {
-    return {
-      ok: false,
-      reason: 'action_not_granted',
-      details: `This assistant has no grant for ${displayConnectorId}. Ask the assistant's owner to enable ${actionKind} in Studio → Assistants → Tools.`,
-    }
-  }
-  if (!grant.allowedActions.includes(actionKind)) {
+  if (!grant?.allowedActions.includes(actionKind)) {
     return {
       ok: false,
       reason: 'action_not_granted',

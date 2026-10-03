@@ -26,14 +26,14 @@ function AccessExplanationContent({data,memberId,assistantId,close}:Props&{membe
   const resource=useCachedResource(key,()=>fetchWorkspaceAccessExplanation(workspaceId,query));
   const explanation=useProtectedProjection(key,resource.data,()=>{},resource.refresh);
   function pick(field:keyof WorkspaceAccessExplanationQuery,label:string,value:string,items:Array<{value:string;label:string}>){
-    return <label className="grid gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} className="min-h-11" value={value} items={items} onValueChange={next=>setSelection(old=>({...old,[field]:next==='none'?undefined:next}))}/></label>;
+    return <label className="grid gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} className="max-sm:min-h-11" value={value} items={items} onValueChange={next=>setSelection(old=>({...old,[field]:next==='none'?undefined:next}))}/></label>;
   }
   const reach=(ids:string[]|null)=>ids===null?t.allDepartments:[t.generalOnly,...data.teams.filter(team=>ids.includes(team.id)).map(team=>team.name)].join(', ');
   const pathLabels={trusted_role:t.pathTrusted,legacy:t.pathLegacy,membership:t.pathMembership,read_grant:t.pathGrant,team_read_grant:t.pathTeamGrant};
   return <section className="min-w-0 space-y-4 rounded-xl border border-border p-4" aria-label={t.explainAccess}>
-    <header className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">{t.explainAccess}</h2><Button variant="ghost" className="min-h-11" onClick={close}>{t.close}</Button></header>
-    <Button variant="outline" className="min-h-11" onClick={()=>setSelection({memberId})}>{t.resetExample}</Button>
-    {!explanation?resource.error?<><p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>:<>
+    <header className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">{t.explainAccess}</h2><Button variant="ghost" className="max-sm:min-h-11" onClick={close}>{t.close}</Button></header>
+    <Button variant="outline" className="max-sm:min-h-11" onClick={()=>setSelection({memberId})}>{t.resetExample}</Button>
+    {!explanation?resource.error?<><p role="alert">{t.loadError}</p><Button className="max-sm:min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>:<>
       <div className="grid gap-3 sm:grid-cols-2">
         {pick('assistantId',t.assistantCeiling,selection.assistantId??'none',[{value:'none',label:t.humanOnly},...explanation.choices.assistants.map(row=>({value:row.id,label:row.name||t.unnamed}))])}
         {pick('contextTeamId',t.contextDepartment,selection.contextTeamId??'none',[{value:'none',label:t.allDepartments},...data.teams.map(row=>({value:row.id,label:row.name}))])}
@@ -75,14 +75,14 @@ function AccessEventsContent({data,close}:Props){
   const page=useProtectedProjection(key,resource.data,()=>{},resource.refresh);
   const label=(kind:string)=>kind.startsWith('department.')?t.auditDepartment:kind.startsWith('access.request.')?t.auditRequest:kind==='access.grant.revoke'?t.auditGrant:kind==='member.access.set'?t.auditMember:kind==='assistant.audience.set'?t.auditAssistant:t.auditOther;
   return <section className="min-w-0 space-y-3 rounded-xl border border-border p-4" aria-label={t.accessAudit}>
-    <header className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">{t.accessAudit}</h2><Button className="min-h-11" variant="ghost" onClick={close}>{t.close}</Button></header>
-    {!page?resource.error?<><p role="alert">{t.historyChanged}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>:<>
+    <header className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">{t.accessAudit}</h2><Button className="max-sm:min-h-11" variant="ghost" onClick={close}>{t.close}</Button></header>
+    {!page?resource.error?<><p role="alert">{t.historyChanged}</p><Button className="max-sm:min-h-11" onClick={()=>void resource.refresh()}>{t.reload}</Button></>:<SurfaceSkeletonFor surface="organization" chrome={false}/>:<>
       {!page.events.length?<p className="text-sm">{t.auditEmpty}</p>:<ul className="divide-y divide-border">{page.events.map(event=><li key={event.id} className="py-3 text-sm">
         <p>{label(event.kind)}</p><p>{event.actor?.name||t.unnamed}</p><time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
       </li>)}</ul>}
-      {page.nextCursor?<Button variant="outline" className="min-h-11" onClick={()=>setAfter(page.nextCursor!)}>{t.olderEvents}</Button>:null}
+      {page.nextCursor?<Button variant="outline" className="max-sm:min-h-11" onClick={()=>setAfter(page.nextCursor!)}>{t.olderEvents}</Button>:null}
     </>}
-    {after?<Button variant="outline" className="min-h-11" onClick={()=>setAfter(undefined)}>{t.newestHistory}</Button>:null}
+    {after?<Button variant="outline" className="max-sm:min-h-11" onClick={()=>setAfter(undefined)}>{t.newestHistory}</Button>:null}
   </section>;
 }
 
@@ -90,7 +90,7 @@ function AccessEventsContent({data,close}:Props){
 export function AssistantAccessExplanation({assistantId}:{assistantId:string}){
   const {workspaceId,me}=useWorkspaceContext(),t=useT().workspaceAccess;
   const [open,setOpen]=useState(false);
-  return <div className="space-y-3"><Button variant="outline" className="min-h-11" onClick={()=>setOpen(value=>!value)}>{t.explainAccess}</Button>
+  return <div className="space-y-3"><Button variant="outline" className="max-sm:min-h-11" onClick={()=>setOpen(value=>!value)}>{t.explainAccess}</Button>
     {open?<AssistantExplanationData key={`${workspaceId}:${me.id}:${assistantId}`} assistantId={assistantId} close={()=>setOpen(false)}/>:null}
   </div>;
 }

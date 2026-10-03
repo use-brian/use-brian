@@ -14,6 +14,48 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  workspaceSearch: {
+    savedDrafts: "Saved unsent drafts",
+    restoreDraft: "Restore draft",
+    attachmentDraft: "Attachment draft",
+
+    "title": "Search workspace",
+    "shortcut": "Search (⌘/Ctrl+K)",
+    "placeholder": "Search or ask in {workspace}",
+    "blank": "Find workspace content, or ask your assistant in a new private chat.",
+    "all": "All",
+    "loading": "Searching…",
+    "empty": "No matches found. You can ask your assistant.",
+    "error": "Search could not finish. Your query is preserved.",
+    "partial": "Search is incomplete. Some sources are unavailable.",
+    "retry": "Retry",
+    "ask": "Ask {assistant} privately",
+    "privateHint": "Starts a new Personal conversation. Only sends when you choose Ask.",
+    "assistantLoading": "Loading assistants…",
+    "noAssistant": "No accessible default assistant.",
+    "setup": "Set up an assistant",
+    "open": "Open",
+    "preview": "Preview",
+    "back": "Back to results",
+    "close": "Close search",
+    "more": "Load more",
+    "unavailable": "This item is no longer available.",
+    "selectPreview": "Select a result to preview it.",
+    "recordTitle": "Record",
+    "assistantUnavailable": "This assistant is no longer available. Your message is saved as an unsent draft.",
+    "linkShortcut": "Link (⌘/Ctrl+Shift+K)",
+    "families": {
+        "pages": "Pages",
+        "knowledge": "Knowledge & memories",
+        "records": "Records",
+        "tasks": "Tasks",
+        "files": "Files & recordings",
+        "office": "Office",
+        "conversations": "Conversations",
+        "workflows": "Workflows"
+    }
+},
+
   mobileAuth: {
     "title": "Sign in to Brian mobile?",
     "description": "Only continue if you started sign-in on your own phone. This gives the mobile app access to your Brian account.",
@@ -2147,7 +2189,9 @@ export const en = {
     departmentLifecycleTitle: "Department lifecycle",
     projectsTitle: "Projects",
     projectsDescription: "Projects organize context across tasks, pages, CRM, files, and automation. They do not grant access by themselves.",
-    teamNamePlaceholder: "Department name",
+    teamNameExample: "For example, Finance or Sales",
+    createTeamReviewTitle: "Create the {name} department?",
+    createTeamReviewDescription: "It starts with the settings below. You can change any of them later from the department card.",
     projectNamePlaceholder: "Project name",
     createTeam: "Create department",
     createProject: "Create Project",
@@ -2209,8 +2253,11 @@ export const en = {
     workflowContextTitle: "Workflow context",
     workflowContextDescription: "Every run keeps this immutable Team and Project binding, including schedules and retries.",
     connectorContextTitle: "Connector context",
-    connectorContextDescription: "A connector binding records its Team and Project. Company-wide provider catalogs are withheld from scoped turns.",
-    connectorProviderRootUnavailable: "Generic provider tools stay unavailable in scoped turns because Brian has no verified provider root for them. Fixed-input operations appear only when their adapter enforces the selected source.",
+    connectorContextDescription: "A connector binding records its Project. Its department, set from the badge next to its name, decides who can see and use it.",
+    departmentGeneral: "General",
+    departmentUnknown: "Department",
+    departmentAriaLabel: "Connector department",
+    departmentUpdateFailed: "Could not change the department.",
     projectDetailBack: "Back to workspace",
     projectDetailNotFound: "Project not found.",
     projectDetailOverview: "Project content",
@@ -3020,26 +3067,26 @@ export const en = {
     emptyDraftDesc:
       "Ask the assistant in chat to fill this page, or add blocks below.",
     // Default-viewer landing (centre pane when no page is open): a chatter
-    // that hands a prompt to the chat to mint a new draft, plus
+    // that hands a prompt to a fresh conversation in the Chat app, plus
     // recently-opened pages as quick-link cards.
     // [COMP:app-web/empty-page-landing]
     landing: {
       title: "What do you want to see?",
       subtitle:
-        "Describe a view, a page, or a question and Use Brian drafts it for you.",
+        "Ask a question or describe a page. Use Brian answers in Chat and links any page it creates.",
       placeholder: "e.g. A board of open deals by stage",
-      send: "Create",
-      // Escape hatch from the "describe it and Use Brian drafts it" chatter: open
+      send: "Send",
+      // Escape hatch from the chatter: open
       // an empty page and write it yourself, no AI prompt. Sits under the
       // composer as a quiet text button.
       startBlank: "Start with a blank page",
       startFromTemplate: "Start from a template",
-      // Draft-assistant picker in the composer footer: which workspace
-      // assistant drafts the page. `assistantLabel` is the trigger's
+      // Assistant picker in the composer footer: which workspace assistant
+      // answers in Chat. `assistantLabel` is the trigger's
       // aria-label/tooltip; `assistantTitle` heads the popover list.
-      assistantLabel: "Choose the assistant that drafts this page",
-      assistantTitle: "Drafts with",
-      // Starter prompts — one tap mints a draft for that prompt. Keep each
+      assistantLabel: "Choose the assistant to chat with",
+      assistantTitle: "Chat with",
+      // Starter prompts: one tap opens Chat with that prompt. Keep each
       // short enough to read as a chip and to stand alone as a request.
       suggestions: [
         "My tasks due this week",
@@ -3047,14 +3094,6 @@ export const en = {
         "Summarize my pipeline",
       ],
       recentsTitle: "Jump back in",
-      // Page-body "drafting" indicator shown while the assistant builds the
-      // page after a landing prompt (so the WIP is visible without opening
-      // the chat). [COMP:app-web/page-build-indicator]
-      building: "Use Brian is drafting this page…",
-      buildingHint: "Building it live — no need to open the chat.",
-      buildingThinking: "Thinking…",
-      // Section label for the live reasoning stream (model's internal thinking).
-      buildingReasoning: "Reasoning",
     },
     // "Suggested for you" home surface — the assistant-curated dock that leads
     // the Home content pane. [COMP:app-web/home-suggested]
@@ -3474,6 +3513,10 @@ export const en = {
     offlinePending: "Offline ({count} pending)",
     offlineUnavailable: "Not available offline",
     offlineStatusOnline: "Online",
+    desktopUpdateReady: "Update",
+    desktopUpdateReadyTitle: "Version {version} is ready. Restart Use Brian to install it.",
+    desktopUpdateDownloading: "Updating {percent}%",
+    desktopUpdateDownloadingTitle: "Downloading version {version}",
     offlineSyncPausedTitle: "Sync needs attention",
     offlineSyncPausedBody: "{count} Feed drafts are saved on this device but sync is paused. Open the draft to retry sync or save as a new post.",
     offlineSyncPendingTitle: "Changes waiting to sync",
@@ -3520,12 +3563,6 @@ export const en = {
     deleteConfirmAction: "Delete",
     cancel: "Cancel",
     createDraftFailed: "Could not create draft: {message}",
-    // A landing build turn that died before it streamed anything. The dock
-    // stays collapsed on an autoSend build, so without these the page just
-    // stopped saying "drafting" and the user was told nothing (2026-09-01).
-    buildFailed: "Could not build this page: {message}",
-    buildNeverStarted:
-      "Could not build this page. The request did not start - try sending it again.",
     saveFailed: "Could not save: {message}",
     unsaveFailed: "Could not move to drafts: {message}",
     moveContextConfirmTitle: "Move page to a different context?",
@@ -4776,6 +4813,7 @@ export const en = {
       transferTitle: "Transfer to workspace",
       transferDesc: "Hand ownership to the workspace. It becomes team-owned: any cleared member can manage it, and it stops being your personal connection.",
       transferBtn: "Transfer",
+      personalConnectorPlaceholder: "Expose or transfer to workspace to enable connector settings.",
       transferringBtn: "Transferring...",
       transferConfirmTitle: "Transfer to the workspace?",
       transferConfirmDesc: "This connector becomes owned by {name}. Any member cleared for it can reconnect, edit, or remove it, and it stops being your personal connection. This cannot be undone.",
@@ -6424,8 +6462,34 @@ export const en = {
         },
       },
       graphHint:
-        "Highlighted entries were retrieved for this turn. A grouped bubble shows how many it holds.",
+        "Lit entries were retrieved for this turn and replay in retrieval order. A grouped bubble shows how many it holds.",
       openInChat: "Open in chat",
+      prompt: {
+        open: "Full prompt",
+        view: "View full prompt",
+        title: "Full prompt",
+        hint: "exactly what this model call sent and received",
+        system: "System prompt",
+        messageN: "Message {index}",
+        response: "Response",
+        roles: {
+          system: "System",
+          user: "User",
+          assistant: "Assistant",
+          response: "Response",
+          other: "Message",
+        },
+        copyAll: "Copy all",
+        copied: "Copied",
+        close: "Close",
+        round: "Round {turn}",
+        tokensIn: "{count} tokens in",
+        chars: "{count} chars",
+        loading: "Loading {loaded} of {total}…",
+        loadingOne: "Loading…",
+        erased: "This content was erased.",
+        unavailable: "Content unavailable.",
+      },
     },
     skills: {
       heading: "Skills",
@@ -8570,6 +8634,14 @@ export const en = {
       copy: "Copy document",
       copied: "Document copied",
       close: "Close document viewer",
+    },
+    // Card under a Chat reply for each Page the assistant created or edited
+    // that turn. [COMP:app-web/chat-page-links]
+    pageLink: {
+      open: "Open page",
+      openAria: "Open page {title}",
+      untitled: "Untitled page",
+      unavailable: "Page unavailable",
     },
     pins: {
       rowAria: "Pinned context",
@@ -10755,28 +10827,6 @@ export const en = {
         approvedAt: "Approved at",
         changed: "Audience settings changed elsewhere. Cancel and reopen the editor before saving.",
       },
-      whatsappOfficial: {
-        title: "Official WhatsApp bot",
-        intro: "Add our shared WhatsApp number to a group chat and it quietly reads that group into your brain. It follows whoever added it, so the group lands in that person's workspace.",
-        numberLabel: "Number to add",
-        numberUnconfigured: "The official bot isn't set up for this deployment yet.",
-        howToTitle: "How it works",
-        howToStep1: "Add the number above to your WhatsApp group.",
-        howToStep2: "Link your WhatsApp to your account first (Settings, then Account), or the bot will leave the group.",
-        howToStep3: "It reads the group silently and never sends. Remove it from the group anytime to stop.",
-        groupsTitle: "Groups it's reading",
-        groupsEmpty: "No groups yet. Add the bot to one to get started.",
-        boundByYou: "Added by you",
-        boundByTeammate: "Added by a teammate",
-        stopCta: "Stop ingesting",
-        stopping: "Stopping…",
-        stopConfirmTitle: "Stop ingesting this group?",
-        stopConfirmBody: "The bot stays in the group but stops reading it into your brain.",
-        stopConfirmCta: "Stop ingesting",
-        cancel: "Cancel",
-        loadError: "Couldn't load the official bot. Refresh to try again.",
-        stopError: "Couldn't stop ingesting. Try again.",
-      },
       noActiveWorkspace: "Select a workspace to see its channels.",
       loading: "Loading channels…",
       loadError: "Couldn't load channels. Refresh to try again.",
@@ -10786,7 +10836,20 @@ export const en = {
       selectPrompt: "Select a channel to manage it.",
       sectionAttention: "Needs attention",
       sectionActive: "Active",
-      sectionOfficial: "Official bot",
+      sectionAvailable: "Available to connect",
+      availableSubtitle: "Not connected",
+      moreChannels: "More channels ({count})",
+      availableBlurb: {
+        slack: "Answer in your Slack workspace. Create a Slack app from our manifest, then paste its bot token and signing secret.",
+        telegram: "Run your own Telegram bot. Create one with BotFather and paste its token.",
+        discord: "Answer in your Discord server. Paste a bot token, then invite the bot with the link we generate.",
+        feishu: "Answer in Feishu or Lark. Paste the app ID and secret from your developer console.",
+        whatsapp: "Link a WhatsApp number by scanning a QR code, or connect a WhatsApp Business account.",
+        msteams: "Answer in Microsoft Teams. Register an Azure bot, then upload the app package we build for you.",
+        wechat: "Link a personal WeChat account by scanning a QR code.",
+        custom: "Connect any other platform through a bridge process you run.",
+        email: "Give an assistant its own email address.",
+      },
       platforms: {
         telegram: "Telegram",
         slack: "Slack",
@@ -11582,7 +11645,7 @@ export const en = {
         goalsLabel: "Goals",
         goalsDesc: "Outcomes attached to tasks. Lets the assistant draft a goal, confirm it with you, and work the task against it.",
         configureLabel: "Agent configuration",
-        configureDesc: "When on, agents acting as this assistant can set up workflows, schedules, ingest rules, skills, assistants, and connectors. For supported OAuth connectors, the agent prepares setup, pauses only for your provider consent, and continues after the connection is verified. Consequential changes still require human approval in Approvals. Billing, access grants, and this capability remain human-controlled. Off by default.",
+        configureDesc: "When on, agents acting as this assistant can set up workflows, schedules, ingest rules, skills, assistants, and connectors. For supported OAuth connectors, the agent prepares setup, pauses only for your provider consent, and continues after the connection is verified. Consequential changes still require human approval in Approvals. Billing, access grants, and this capability remain human-controlled. On by default for the workspace's main assistant, off for other assistants.",
         configureAdminOnly: "Only a workspace owner or admin can change this",
       },
       // Team section
@@ -11962,6 +12025,9 @@ export const en = {
     confirmAlreadyProcessed:
       "This recording was already processed once. Running it again re-transcribes the audio and can duplicate the memories it extracted before.",
     linkError: "We could not load your recordings.",
+    uploadPrepareFailed: "The server could not prepare or admit this recording upload. Processing has not started. Keep the recording on this device and try again.",
+    uploadCompleteFailed: "The server could not complete this recording upload. Processing has not started. Keep the recording on this device and try again.",
+    serverSetupRequired: "The server needs ffmpeg and ffprobe configured before it can process this recording. Contact your administrator. Keep the local recording for retry.",
     uploadFailed:
       "The audio could not reach storage, so nothing was processed. Check your connection - the capture is kept on this device and can be saved again from the recorder.",
     estimateFailed:
@@ -12211,6 +12277,9 @@ export const en = {
         retry: "Retry",
         title: "In-app browser",
         description: "Connect the browser built into Use Brian. No extension is needed.",
+        externalTitle: "Pair existing Chrome or Edge",
+        externalDescription:
+          "Install the extension in the browser profile whose sign-ins you want to use. Completing the pairing replaces this profile's current in-app browser connection. Starting the in-app browser again switches it back.",
         connect: "Connect in-app browser",
         connected: "In-app browser connected",
         disconnected: "In-app browser not connected",
