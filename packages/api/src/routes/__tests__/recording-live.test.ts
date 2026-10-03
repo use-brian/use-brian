@@ -98,8 +98,25 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
     forWorkspace: vi.fn(async () => ({ gcs, bucket: 'test-bucket', uriScheme: 'gs' })),
     forUri: vi.fn(),
   }
-  const createEpisode = vi.fn(async () => ({ id: '00000000-0000-0000-0000-00000000e901' }))
-  const createRecording = vi.fn(async () => ({}))
+  const storedFiles = new Map<string, { id: string; path: string; mime: string }>()
+  const files = {
+    stat: vi.fn(async (_ctx: unknown, path: string) => {
+      const file = storedFiles.get(path)
+      return file ? { ok: true, value: file } : { ok: false, error: { kind: 'not_found' } }
+    }),
+    writeBytes: vi.fn(async (_ctx: unknown, params: { path: string; mime: string }) => {
+      const file = { id: '00000000-0000-0000-0000-0000000f11e1', path: params.path, mime: params.mime }
+      storedFiles.set(params.path, file)
+      return { ok: true, value: file }
+    }),
+  }
+  const parent = {
+    workspaceId: WORKSPACE_ID, resourceKind: 'workspace_file', resourceId: '00000000-0000-0000-0000-0000000f11e1',
+    version: '1', userId: null, assistantId: null, sensitivity: 'internal', compartments: [], projectIds: [],
+    storageUri: 'gs://test-bucket/x', mime: 'audio/mp4', name: 'x.m4a', sizeBytes: 2,
+  }
+  const captureParent = vi.fn(async () => parent)
+  const createRecording = vi.fn(async () => ({ id: '00000000-0000-0000-0000-00000000e901' }))
   const getRecording = vi.fn(async (_userId: string, id: string) =>
     id === 'rec-1' ? { id, workspaceId: WORKSPACE_ID } : null,
   )
@@ -124,13 +141,13 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
     backgroundModel: 'background-test',
     voiceTranscription: { enabled: options.enabled ?? true, apiKey: 'configured-key', backend: 'gemini', model: 'configured-model' },
     usageStore: { recordUsage },
-    ...(options.withFiles === false ? {} : { filesResolver }),
+    ...(options.withFiles === false ? {} : { filesResolver, files }),
     transcribeWindow: options.defaultTranscriber ? undefined : transcribeWindow,
     reviseNotes,
     liveWindows,
     liveInteraction: { getCapture: vi.fn(), ingest: vi.fn(async () => {}) },
     getRecording,
-    createEpisode,
+    captureParent,
     createRecording,
     concatWindows,
   }
@@ -144,7 +161,7 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
   return {
     app, deps, pages, views, createDraft, updatePage, update, findIdByAnchorKey,
     transcribeWindow, reviseNotes, recordUsage,
-    liveWindows, windowRows, gcs, blobs, createEpisode, createRecording, concatWindows,
+    liveWindows, windowRows, gcs, blobs, files, parent, captureParent, createRecording, concatWindows,
   }
 }
 
@@ -505,11 +522,61 @@ describe('[COMP:recordings/live-page-route]', () => {
       coverageMs: 60_000,
     })
     expect(h.concatWindows).toHaveBeenCalledOnce()
-    expect(h.createEpisode).toHaveBeenCalledOnce()
-    expect(h.createRecording).toHaveBeenCalledWith(expect.objectContaining({ kind: 'meeting' }))
+    // The assembly is published as the canonical file the recording derives
+    // from, and the recording is created WITH that file as its intake parent:
+    // createRecording refuses a call without provenance in production.
+    expect(h.files.writeBytes).toHaveBeenCalledWith(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      expect.objectContaining({ path: `/recordings/live/${page.sessionId}.m4a`, mime: 'audio/mp4' }),
+    )
+    expect(h.captureParent).toHaveBeenCalledWith({ actorUserId: USER_ID }, WORKSPACE_ID, h.parent.resourceId)
+    expect(h.createRecording).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: WORKSPACE_ID, kind: 'meeting', createdByUserId: USER_ID }),
+      { actorUserId: USER_ID, parent: h.parent },
+    )
     expect(h.update).toHaveBeenCalledWith(USER_ID, page.pageId, {
       linkedRecordingId: '00000000-0000-0000-0000-00000000e901',
     })
+  })
+
+  it('adopts the file a previous finalize already published instead of assembling again', async () => {
+    const h = harness()
+    const page = await startLive(h)
+    await chunkRequest(h, page, 'chunk-1', 0)
+    const body = { workspaceId: WORKSPACE_ID, sessionId: page.sessionId }
+    expect((await request(h.app).post('/api/recordings/live/finalize').send(body)).status).toBe(201)
+    // The first finalize reclaimed the window audio; a later spool Save must
+    // still adopt the published file rather than answer no_stored_windows.
+    h.windowRows.forEach((row) => { delete row.audioKey })
+    const retry = await request(h.app).post('/api/recordings/live/finalize').send(body)
+    expect(retry.status).toBe(201)
+    expect(retry.body.recordingId).toBe('00000000-0000-0000-0000-00000000e901')
+    expect(h.files.writeBytes).toHaveBeenCalledOnce()
+    expect(h.captureParent).toHaveBeenCalledTimes(2)
+  })
+
+  it('adopts the file a concurrent finalize published first (write conflict)', async () => {
+    const h = harness()
+    const page = await startLive(h)
+    await chunkRequest(h, page, 'chunk-1', 0)
+    const winner = { id: '00000000-0000-0000-0000-0000000f11e1', path: `/recordings/live/${page.sessionId}.m4a`, mime: 'audio/mp4' }
+    h.files.stat
+      .mockResolvedValueOnce({ ok: false, error: { kind: 'not_found' } } as never)
+      .mockResolvedValueOnce({ ok: true, value: winner } as never)
+    h.files.writeBytes.mockResolvedValueOnce({ ok: false, error: { kind: 'conflict' } } as never)
+    const response = await request(h.app)
+      .post('/api/recordings/live/finalize')
+      .send({ workspaceId: WORKSPACE_ID, sessionId: page.sessionId })
+    expect(response.status).toBe(201)
+    expect(h.captureParent).toHaveBeenCalledWith({ actorUserId: USER_ID }, WORKSPACE_ID, winner.id)
+  })
+
+  it('400s a session id that cannot name a file', async () => {
+    const h = harness()
+    const response = await request(h.app)
+      .post('/api/recordings/live/finalize')
+      .send({ workspaceId: WORKSPACE_ID, sessionId: '../escape' })
+    expect(response.status).toBe(400)
   })
 
   it('409s a finalize with no stored windows', async () => {

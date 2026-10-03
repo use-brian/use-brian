@@ -12,11 +12,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const api = vi.hoisted(() => ({
+const api = vi.hoisted(() => {
+  class RecordingApiError extends Error {
+    code?: string;
+    status = 0;
+  }
+  class RecordingResolveError extends RecordingApiError {
+    fileId = "file-1";
+  }
+  return {
+  RecordingApiError,
+  RecordingResolveError,
   startRecordingUpload: vi.fn(),
   estimateRecording: vi.fn(),
   finalizeLiveRecording: vi.fn(),
-}));
+  };
+});
 vi.mock("../confirm-and-process", () => ({
   confirmAndProcessRecording: vi.fn(async () => ({ outcome: "cancelled" })),
 }));
@@ -28,10 +39,8 @@ vi.mock("@/lib/api/recordings", () => ({
   linkLiveRecordingPage: vi.fn(async () => {}),
   finalizeLiveRecording: api.finalizeLiveRecording,
   recordingMimeForFile: (file: File) => file.type || "audio/webm",
-  RecordingApiError: class RecordingApiError extends Error {
-    code?: string;
-    status = 0;
-  },
+  RecordingApiError: api.RecordingApiError,
+  RecordingResolveError: api.RecordingResolveError,
 }));
 
 vi.mock("@/lib/api/views", () => ({
@@ -119,6 +128,17 @@ describe("[COMP:web/recording-upload] operation ownership", () => {
     expect(api.finalizeLiveRecording).not.toHaveBeenCalled();
     await act(async () => { finishWindows(); await saving; });
     expect(api.finalizeLiveRecording).toHaveBeenCalledWith({ workspaceId: "workspace-1", assistantId: "assistant-1", sessionId: "live" });
+  });
+
+  it("never assembles the windows into a second recording once the capture is stored", async () => {
+    api.startRecordingUpload.mockRejectedValueOnce(new api.RecordingResolveError("resolve failed"));
+    await act(async () => {
+      const result = await capture.run(new File(["audio"], "recording.webm"), {
+        liveSessionId: "live", liveWindowsDone: Promise.resolve(),
+      });
+      expect(result.outcome).toBe("failed");
+    });
+    expect(api.finalizeLiveRecording).not.toHaveBeenCalled();
   });
 
   it("allows chat attachments while an independent recorder save is uploading", async () => {

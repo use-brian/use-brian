@@ -46,11 +46,12 @@ import {
   listLiveWindowsBySession,
   type LiveTranscriptLine,
 } from '../db/live-transcript-store.js'
-import { createEpisode } from '../db/episodes-store.js'
 import type { LiveInteractionService } from '../recordings/live-interaction-service.js'
 import { createRecording, getRecording } from '../db/recordings-store.js'
 import type { FilesClientResolver } from '../files/files-api.js'
-import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
+import type { FilesApi } from '@use-brian/core'
+import { captureRecordingIntakeParent } from '../db/recording-intake-admission.js'
+import { buildStorageKey } from '../files/gcs-client.js'
 import { concatAudioWindows } from '../recordings/ffmpeg.js'
 
 const LIVE_WINDOW_MAX_BYTES = 2 * 1024 * 1024
@@ -84,6 +85,12 @@ export type RecordingLiveRouteDeps = {
   usageStore?: UsageStore
   /** Storage for window-audio persistence + finalize. Absent → finalize 503s and window audio is not kept. */
   filesResolver?: FilesClientResolver
+  /**
+   * Publishes the assembled audio as the canonical workspace file a recording
+   * is derived from (`createRecording` requires that file parent). Absent →
+   * finalize 503s.
+   */
+  files?: Pick<FilesApi, 'stat' | 'writeBytes'>
   transcribeWindow?: (input: { buffer: Buffer; mime: string }) => Promise<LiveTranscriptionResult>
   reviseNotes?: (input: { previousNotes: string; transcript: string }) => Promise<LiveNotesResult>
   // Injectable seams for tests; default to the real store/helpers.
@@ -96,7 +103,7 @@ export type RecordingLiveRouteDeps = {
   }
   liveInteraction?: Pick<LiveInteractionService, 'getCapture' | 'ingest'>
   getRecording?: typeof getRecording
-  createEpisode?: typeof createEpisode
+  captureParent?: typeof captureRecordingIntakeParent
   createRecording?: typeof createRecording
   concatWindows?: typeof concatAudioWindows
 }
@@ -732,77 +739,90 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
   router.post('/live/finalize', async (req, res) => {
     const userId = userIdOf(req)
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
-    if (!deps.filesResolver) {
+    if (!deps.filesResolver || !deps.files) {
       return void res.status(503).json({ error: 'Storage is not available for live assembly' })
     }
-    const { workspaceId, assistantId, sessionId, pageId } = (req.body ?? {}) as {
+    const files = deps.files
+    const { workspaceId, sessionId, pageId } = (req.body ?? {}) as {
       workspaceId?: string
-      assistantId?: string
       sessionId?: string
       pageId?: string
     }
-    if (!workspaceId || !assistantId || !sessionId) {
-      return void res.status(400).json({ error: 'workspaceId, assistantId, and sessionId are required' })
+    if (!workspaceId || !sessionId) {
+      return void res.status(400).json({ error: 'workspaceId and sessionId are required' })
+    }
+    // The session id names the published file, so it must be a plain token.
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) {
+      return void res.status(400).json({ error: 'Invalid sessionId' })
     }
     if (!(await deps.getRole(userId, workspaceId))) {
       return void res.status(403).json({ error: 'Not a member of this workspace' })
     }
     try {
       const rows = (await windows.listBySession(workspaceId, sessionId)).filter((row) => row.audioKey)
-      if (rows.length === 0) {
-        return void res.status(409).json({ error: 'no_stored_windows' })
-      }
       const resolved = await deps.filesResolver.forWorkspace(workspaceId)
-      const buffers: Buffer[] = []
-      for (const row of rows) {
-        const blob = await resolved.gcs.readBlob(row.audioKey!)
-        if (blob) buffers.push(blob.bytes)
-      }
-      if (buffers.length === 0) {
-        return void res.status(409).json({ error: 'no_stored_windows' })
-      }
-      const assembled = await (deps.concatWindows ?? concatAudioWindows)(buffers)
 
-      const fileId = randomUUID()
-      const key = buildStorageKey(workspaceId, `recordings/${fileId}`)
-      const storageUri = buildStorageUri(resolved.bucket, workspaceId, `recordings/${fileId}`, resolved.uriScheme)
-      const fileName = `Assembled meeting recording ${new Date().toISOString().slice(0, 10)}.m4a`
-      await resolved.gcs.writeBlob(key, assembled.buffer, {
+      // A recording is derived from a canonical workspace file: publish the
+      // assembled audio as that file, capture it as the intake parent, and let
+      // the store create the Episode + recording from it in one transaction.
+      // The path is keyed by the live session, so a retried finalize (a spool
+      // Save after the first one succeeded and reclaimed the windows, or a
+      // double submit) adopts the file — and, through its intake binding, the
+      // recording — instead of failing or minting a second one. Like watch
+      // audio, this is human-authored device audio with no assistant partition.
+      const ctx = { workspaceId, userId }
+      const path = `/recordings/live/${sessionId}.m4a`
+      let file = await files.stat(ctx, path)
+      if (!file.ok) {
+        if (file.error.kind !== 'not_found') {
+          console.error('[recording-live] finalize file lookup failed:', file.error)
+          return void res.status(503).json({ error: 'Could not assemble the live recording' })
+        }
+        const buffers: Buffer[] = []
+        for (const row of rows) {
+          const blob = await resolved.gcs.readBlob(row.audioKey!)
+          if (blob) buffers.push(blob.bytes)
+        }
+        if (buffers.length === 0) {
+          return void res.status(409).json({ error: 'no_stored_windows' })
+        }
+        const assembled = await (deps.concatWindows ?? concatAudioWindows)(buffers)
+        file = await files.writeBytes(ctx, {
+          path,
+          bytes: assembled.buffer,
+          mime: assembled.mime,
+          title: `Assembled meeting recording ${new Date().toISOString().slice(0, 10)}`,
+          sensitivity: 'internal',
+        })
+        // A concurrent finalize published the same path first: adopt it.
+        if (!file.ok && file.error.kind === 'conflict') file = await files.stat(ctx, path)
+        if (!file.ok) {
+          if (file.error.kind === 'quota_exceeded') {
+            return void res.status(413).json({ error: 'quota_exceeded' })
+          }
+          console.error('[recording-live] finalize file publication failed:', file.error)
+          return void res.status(503).json({ error: 'Could not assemble the live recording' })
+        }
+      }
+
+      const authority = { actorUserId: userId }
+      const parent = await (deps.captureParent ?? captureRecordingIntakeParent)(authority, workspaceId, file.value.id)
+      const recording = await (deps.createRecording ?? createRecording)({
+        id: randomUUID(),
         workspaceId,
-        createdByUserId: userId,
-        mime: assembled.mime,
-      })
-      const episode = await (deps.createEpisode ?? createEpisode)(userId, {
-        sourceKind: 'recording',
-        sourceRef: { fileId, gcsKey: key, storageUri, fileName, mime: assembled.mime, status: 'awaiting_upload' },
-        occurredAt: new Date(),
-        workspaceId,
-        userId: null,
-        assistantId,
-        createdByUserId: userId,
-        sensitivity: 'internal',
-      })
-      await (deps.createRecording ?? createRecording)({
-        id: episode.id,
-        workspaceId,
-        mime: assembled.mime,
-        gcsKey: key,
-        storageUri,
-        fileName,
-        title: fileName,
+        mime: parent.mime,
+        gcsKey: '',
+        assistantId: parent.assistantId,
         kind: 'meeting',
-        userId: null,
-        assistantId,
-        sensitivity: 'internal',
         createdByUserId: userId,
-      })
+      }, { ...authority, parent })
 
       // Best-effort: link the meeting page, then reclaim the window objects.
       if (pageId) {
         try {
           const view = await deps.savedViewStore.getById(userId, pageId)
           if (view && view.workspaceId === workspaceId) {
-            await deps.savedViewStore.update(userId, pageId, { linkedRecordingId: episode.id })
+            await deps.savedViewStore.update(userId, pageId, { linkedRecordingId: recording.id })
           }
         } catch (error) {
           console.error('[recording-live] finalize page link failed:', error)
@@ -817,9 +837,10 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
 
       const last = rows[rows.length - 1]
       res.status(201).json({
-        recordingId: episode.id,
+        recordingId: recording.id,
         windowCount: rows.length,
-        coverageMs: last.offsetMs + last.durationMs,
+        // An adopting retry may find the windows already reclaimed.
+        coverageMs: last ? last.offsetMs + last.durationMs : null,
       })
     } catch (error) {
       console.error('[recording-live] finalize failed:', error)

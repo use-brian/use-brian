@@ -11988,6 +11988,8 @@ export const en = {
     linkError: "We could not load your recordings.",
     uploadFailed:
       "The audio could not reach storage, so nothing was processed. Check your connection - the capture is kept on this device and can be saved again from the recorder.",
+    storageFull:
+      "The capture could not be stored because this workspace is out of storage. Free up space or upgrade, then save it again from the recorder - it is kept on this device.",
     estimateFailed:
       "The audio uploaded, but its length could not be read. Save it again from the recorder to retry.",
     processFailed:

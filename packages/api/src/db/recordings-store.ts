@@ -143,7 +143,9 @@ export async function createRecording(input: {
       writerKind: 'episode', rowVisibility: scope, visibility: scope.userId ? 'private' : 'workspace', sensitivity: scope.sensitivity,
       inherited: { ...scope, visibility: scope.userId ? 'private' : 'workspace' }, inheritedAuthority: 'read',
     })
-    const result = await client.query(`SELECT ${COLS} FROM publish_file_recording($1::jsonb,$2::uuid)`, [JSON.stringify(provenance.parent), input.id])
+    // Kind is fixed at birth: it is a semantic column, so a later update would
+    // advance scope_version past the lineage recorded here (migration 658).
+    const result = await client.query(`SELECT ${COLS} FROM publish_file_recording($1::jsonb,$2::uuid,$3::text)`, [JSON.stringify(provenance.parent), input.id, input.kind ?? 'memo'])
     return toRecording(result.rows[0])
   })
 }

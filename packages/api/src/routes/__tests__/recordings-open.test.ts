@@ -64,8 +64,6 @@ function makeApp(overrides: Record<string, unknown> = {}) {
     enqueueJob: vi.fn(async () => ({ enqueued: true, jobId: 'job-1' })),
     hasProcessed: vi.fn(async () => false),
     probe: vi.fn(async () => 65_000),
-    createEpisode: vi.fn(async () => episode),
-    createRecording: vi.fn(async () => ({})),
     getRecording: vi.fn(async () => recording),
     listRecordings: vi.fn(async () => [recording]),
     resolveViewpoint: vi.fn(async () => viewpoint),
@@ -236,8 +234,8 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
     expect(response.body.mime).toBe('video/mp4')
   })
 
-  it('creates a recording and returns the active storage backend upload URL', async () => {
-    const { app, deps, storage } = makeApp()
+  it('answers the retired upload-url mint with 410 and writes nothing', async () => {
+    const { app, storage } = makeApp()
     const response = await request(app).post('/api/recordings/upload-url').send({
       workspaceId: 'ws-1',
       assistantId: 'assistant-1',
@@ -245,16 +243,11 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
       mime: 'video/mp4',
     })
 
-    expect(response.status).toBe(200)
-    expect(response.body.recordingId).toBe('rec-1')
-    expect(response.body.uploadUrl).toMatch(/^http:\/\/localhost:4000\/api\/local-files/)
-    expect(storage.signedWriteUrl).toHaveBeenCalledWith(expect.stringMatching(/^ws-1\/recordings\//), {
-      contentType: 'video/mp4',
-      ttlSec: 3600,
-    })
-    expect(deps.createRecording).toHaveBeenCalledWith(expect.objectContaining({
-      storageUri: expect.stringMatching(/^file:\/\/\/data\/files\/ws-1\/recordings\//),
-    }))
+    // A recording derives from an admitted file, so it cannot be minted before
+    // its bytes exist; a stale client is told so instead of half-writing an Episode.
+    expect(response.status).toBe(410)
+    expect(response.body.error).toBe('recording_upload_moved')
+    expect(storage.signedWriteUrl).not.toHaveBeenCalled()
   })
 
   it('estimates without a hosted credit surcharge', async () => {

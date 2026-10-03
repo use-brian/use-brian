@@ -15,6 +15,7 @@ import {
   estimateRecording,
   processRecording,
   RecordingApiError,
+  RecordingResolveError,
   recordingMimeForFile,
 } from "../recordings";
 
@@ -38,221 +39,172 @@ describe("[COMP:web/recording-upload] recordings SDK", () => {
     expect(recordingMimeForFile({ name: "brief.pdf", type: "" })).toBeNull();
   });
 
-  it("startRecordingUpload mints a URL then PUTs the bytes direct to storage", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({ recordingId: "rec-1", uploadUrl: "https://gcs.example/put" }));
+  /** authFetch routed by URL: start → complete → file recording. */
+  function routeAuthFetch(overrides: { start?: Response[]; complete?: Response | Response[]; recording?: Response } = {}) {
+    const starts = overrides.start ?? [json({
+      uploadId: "up-1",
+      fileId: "file-1",
+      parts: [{ index: 0, offset: 0, sizeBytes: 3, url: "https://gcs.example/part-0" }],
+    }, 201)];
+    mockAuthFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/files/uploads/start")) return starts.shift() ?? json({ error: "unexpected" }, 500);
+      if (url.endsWith("/complete")) {
+        const c = overrides.complete;
+        return (Array.isArray(c) ? c.shift() : c) ?? json({ ok: true, fileId: "file-1" });
+      }
+      if (url.endsWith("/api/files/file-1/recording")) {
+        return overrides.recording ?? json({ recordingId: "rec-1", adopted: true, alreadyProcessed: false });
+      }
+      if (url.includes("/api/files/uploads/")) return new Response(null, { status: 204 });
+      return json({ error: "unexpected" }, 500);
+    });
+  }
+  const bodyOf = (url: string) => {
+    const call = mockAuthFetch.mock.calls.find(([input]) => String(input).endsWith(url));
+    return call ? JSON.parse((call[1] as RequestInit).body as string) : undefined;
+  };
+
+  it("startRecordingUpload publishes the capture as a file, then resolves its recording", async () => {
+    routeAuthFetch();
     const putFetch = vi.fn(async () => new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", putFetch);
 
     const file = new File([new Uint8Array([1, 2, 3])], "call.m4a", { type: "audio/mp4" });
-    const out = await startRecordingUpload({ workspaceId: "ws-1", assistantId: "a-1", file });
+    const out = await startRecordingUpload({ workspaceId: "ws-1", assistantId: "a-1", file, kind: "meeting" });
 
     expect(out.recordingId).toBe("rec-1");
-    // The mint call carries the file metadata.
-    const mintBody = JSON.parse((mockAuthFetch.mock.calls[0][1] as RequestInit).body as string);
-    expect(mintBody).toMatchObject({ workspaceId: "ws-1", assistantId: "a-1", fileName: "call.m4a", mime: "audio/mp4" });
-    // The bytes go to the signed URL via plain fetch (PUT), not authFetch.
-    expect(putFetch).toHaveBeenCalledWith("https://gcs.example/put", expect.objectContaining({ method: "PUT" }));
+    expect(bodyOf("/api/files/uploads/start")).toEqual({
+      workspaceId: "ws-1", fileName: "call.m4a", mime: "audio/mp4", sizeBytes: 3,
+    });
+    // The bytes go to the signed part URL via plain fetch (PUT), not authFetch.
+    expect(putFetch).toHaveBeenCalledWith("https://gcs.example/part-0", expect.objectContaining({ method: "PUT" }));
+    // The recording is resolved from the published file, carrying the kind.
+    expect(bodyOf("/api/files/file-1/recording")).toEqual({ workspaceId: "ws-1", kind: "meeting" });
+    const urls = mockAuthFetch.mock.calls.map(([input]) => String(input));
+    expect(urls.findIndex((u) => u.endsWith("/complete")))
+      .toBeLessThan(urls.findIndex((u) => u.endsWith("/file-1/recording")));
+    // The retired mint is never called.
+    expect(urls.some((u) => u.includes("/api/recordings/upload-url"))).toBe(false);
   });
 
-  it("startRecordingUpload throws a RecordingApiError when the storage PUT fails", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({ recordingId: "rec-1", uploadUrl: "https://gcs.example/put" }));
+  it("takes the next numbered name when the file name is already stored", async () => {
+    routeAuthFetch({
+      start: [
+        json({ error: "conflict", detail: "A file with that name already exists" }, 409),
+        json({ uploadId: "up-1", fileId: "file-1", parts: [{ index: 0, offset: 0, sizeBytes: 1, url: "https://gcs.example/p" }] }, 201),
+      ],
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 200 })));
+    const file = new File([new Uint8Array([1])], "Recording 2026-10-03 10.51.webm", { type: "audio/webm" });
+    await startRecordingUpload({ workspaceId: "ws-1", assistantId: "a-1", file });
+    const names = mockAuthFetch.mock.calls
+      .filter(([input]) => String(input).endsWith("/api/files/uploads/start"))
+      .map(([, init]) => JSON.parse((init as RequestInit).body as string).fileName);
+    expect(names).toEqual(["Recording 2026-10-03 10.51.webm", "Recording 2026-10-03 10.51 (2).webm"]);
+  });
+
+  it("throws a RecordingApiError and aborts the upload when a part PUT is refused", async () => {
+    routeAuthFetch();
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 403 })));
-    const file = new File([new Uint8Array([1])], "call.m4a", { type: "audio/mp4" });
-    await expect(startRecordingUpload({ workspaceId: "ws-1", assistantId: "a-1", file })).rejects.toBeInstanceOf(RecordingApiError);
+    const file = new File([new Uint8Array([1, 2, 3])], "call.m4a", { type: "audio/mp4" });
+    await expect(startRecordingUpload({ workspaceId: "ws-1", assistantId: "a-1", file }))
+      .rejects.toBeInstanceOf(RecordingApiError);
+    const methods = mockAuthFetch.mock.calls.map(([input, init]) => `${(init as RequestInit).method} ${String(input)}`);
+    expect(methods.some((m) => m.startsWith("DELETE ") && m.endsWith("/api/files/uploads/up-1"))).toBe(true);
+    expect(methods.some((m) => m.includes("/recording"))).toBe(false);
   });
 
-  it("reports signed PUT progress through browser upload events", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({ recordingId: "rec-1", uploadUrl: "https://gcs.example/put" }));
-    const progress = vi.fn();
+  it("surfaces the server's refusal when the recording cannot be resolved, naming the stored file", async () => {
+    routeAuthFetch({ recording: json({ error: "compartmented_media", detail: "restricted" }, 409) });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 200 })));
+    const file = new File([new Uint8Array([1, 2, 3])], "call.m4a", { type: "audio/mp4" });
+    const err = await startRecordingUpload({ workspaceId: "ws-1", assistantId: "a-1", file }).catch((e) => e);
+    // The bytes are stored, so this is not an upload failure.
+    expect(err).toBeInstanceOf(RecordingResolveError);
+    expect(err).toMatchObject({ status: 409, code: "compartmented_media", fileId: "file-1" });
+  });
+
+  it("asks /complete again after a gateway timeout instead of deleting parts mid-assembly", async () => {
+    vi.useFakeTimers();
+    try {
+      routeAuthFetch({ complete: [new Response("", { status: 524 }), json({ ok: true, fileId: "file-1" })] });
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 200 })));
+      const file = new File([new Uint8Array([1, 2, 3])], "call.m4a", { type: "audio/mp4" });
+      const pending = startRecordingUpload({ workspaceId: "ws-1", assistantId: "a-1", file });
+      await vi.runAllTimersAsync();
+      await expect(pending).resolves.toEqual({ recordingId: "rec-1" });
+      const calls = mockAuthFetch.mock.calls.map(([input, init]) => `${(init as RequestInit).method} ${String(input)}`);
+      expect(calls.filter((c) => c.endsWith("/complete"))).toHaveLength(2);
+      expect(calls.some((c) => c.startsWith("DELETE "))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the staged parts when /complete keeps timing out (the assembly may still land)", async () => {
+    vi.useFakeTimers();
+    try {
+      routeAuthFetch({ complete: [new Response("", { status: 504 }), new Response("", { status: 504 }), new Response("", { status: 504 })] });
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 200 })));
+      const file = new File([new Uint8Array([1, 2, 3])], "call.m4a", { type: "audio/mp4" });
+      const pending = startRecordingUpload({ workspaceId: "ws-1", assistantId: "a-1", file }).catch((e) => e);
+      await vi.runAllTimersAsync();
+      expect(await pending).toBeInstanceOf(RecordingApiError);
+      const calls = mockAuthFetch.mock.calls.map(([, init]) => (init as RequestInit).method);
+      expect(calls).not.toContain("DELETE");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports part PUT progress through browser upload events across bounded parts", async () => {
+    const partBytes = 8 * 1024 * 1024;
+    routeAuthFetch({
+      start: [json({
+        uploadId: "up-1",
+        fileId: "file-1",
+        parts: [
+          { index: 0, offset: 0, sizeBytes: partBytes, url: "https://gcs.example/part-0" },
+          { index: 1, offset: partBytes, sizeBytes: 3, url: "https://gcs.example/part-1" },
+        ],
+      }, 201)],
+    });
+    const requests: Array<{ url: string; type: string | undefined; size: number }> = [];
+    let failOnce = true;
 
     class FakeXMLHttpRequest {
-      static instance: FakeXMLHttpRequest | null = null;
       upload: { onprogress: ((event: ProgressEvent) => void) | null } = { onprogress: null };
       onload: (() => void) | null = null;
       onerror: (() => void) | null = null;
       onabort: (() => void) | null = null;
       status = 200;
-      method = "";
       url = "";
       headers = new Map<string, string>();
-      body: Document | XMLHttpRequestBodyInit | null = null;
-
-      constructor() {
-        FakeXMLHttpRequest.instance = this;
-      }
-
-      open(method: string, url: string) {
-        this.method = method;
-        this.url = url;
-      }
-
-      setRequestHeader(name: string, value: string) {
-        this.headers.set(name, value);
-      }
-
-      send(body: Document | XMLHttpRequestBodyInit | null) {
-        this.body = body;
-        this.upload.onprogress?.({
-          lengthComputable: true,
-          loaded: 4,
-          total: 10,
-        } as ProgressEvent);
-        this.onload?.();
-      }
-    }
-
-    vi.stubGlobal("XMLHttpRequest", FakeXMLHttpRequest);
-    const file = new File([new Uint8Array(10)], "call.m4a", { type: "audio/mp4" });
-    await expect(startRecordingUpload({
-      workspaceId: "ws-1",
-      assistantId: "a-1",
-      file,
-      onProgress: progress,
-    })).resolves.toEqual({ recordingId: "rec-1" });
-
-    expect(progress).toHaveBeenNthCalledWith(1, 0.4);
-    expect(progress).toHaveBeenLastCalledWith(1);
-    expect(FakeXMLHttpRequest.instance?.method).toBe("PUT");
-    expect(FakeXMLHttpRequest.instance?.url).toBe("https://gcs.example/put");
-    expect(FakeXMLHttpRequest.instance?.headers.get("Content-Type")).toBe("audio/mp4");
-    expect(FakeXMLHttpRequest.instance?.body).toBe(file);
-  });
-
-  it("splits local self-host recording uploads into bounded sequential ranges", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({
-      recordingId: "rec-local",
-      uploadUrl: "https://api.selfhost.example/api/local-files?action=write&signature=signed",
-    }));
-    const requests: Array<{
-      headers: Map<string, string>;
-      body: Blob;
-    }> = [];
-
-    class FakeXMLHttpRequest {
-      upload: { onprogress: ((event: ProgressEvent) => void) | null } = { onprogress: null };
-      onload: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      onabort: (() => void) | null = null;
-      status = 204;
-      headers = new Map<string, string>();
-
-      open() {}
-      setRequestHeader(name: string, value: string) {
-        this.headers.set(name, value);
-      }
+      open(_method: string, url: string) { this.url = url; }
+      setRequestHeader(name: string, value: string) { this.headers.set(name, value); }
       send(body: Document | XMLHttpRequestBodyInit | null) {
         const blob = body as Blob;
-        requests.push({ headers: new Map(this.headers), body: blob });
-        this.upload.onprogress?.({
-          lengthComputable: true,
-          loaded: blob.size,
-          total: blob.size,
-        } as ProgressEvent);
+        // One transient network failure on the second part is retried.
+        if (this.url.endsWith("part-1") && failOnce) { failOnce = false; this.onerror?.(); return; }
+        requests.push({ url: this.url, type: this.headers.get("Content-Type"), size: blob.size });
+        this.upload.onprogress?.({ lengthComputable: true, loaded: blob.size, total: blob.size } as ProgressEvent);
         this.onload?.();
       }
     }
 
     vi.stubGlobal("XMLHttpRequest", FakeXMLHttpRequest);
-    const firstPartBytes = 8 * 1024 * 1024;
-    const file = new File(
-      [new Uint8Array(firstPartBytes), new Uint8Array([1, 2, 3])],
-      "meeting.m4a",
-      { type: "audio/x-m4a" },
-    );
+    const file = new File([new Uint8Array(partBytes), new Uint8Array([1, 2, 3])], "meeting.m4a", { type: "audio/x-m4a" });
     const progress = vi.fn();
-    await expect(startRecordingUpload({
-      workspaceId: "ws-1",
-      assistantId: "a-1",
-      file,
-      onProgress: progress,
-    })).resolves.toEqual({ recordingId: "rec-local" });
+    await expect(startRecordingUpload({ workspaceId: "ws-1", assistantId: "a-1", file, onProgress: progress }))
+      .resolves.toEqual({ recordingId: "rec-1" });
 
-    expect(requests).toHaveLength(2);
-    expect(requests[0].headers.get("Content-Range")).toBe(
-      `bytes 0-${firstPartBytes - 1}/${file.size}`,
-    );
-    expect(requests[0].body.size).toBe(firstPartBytes);
-    expect(requests[1].headers.get("Content-Range")).toBe(
-      `bytes ${firstPartBytes}-${file.size - 1}/${file.size}`,
-    );
-    expect(requests[1].body.size).toBe(3);
+    expect(requests).toEqual([
+      { url: "https://gcs.example/part-0", type: "application/octet-stream", size: partBytes },
+      { url: "https://gcs.example/part-1", type: "application/octet-stream", size: 3 },
+    ]);
+    expect(progress).toHaveBeenCalledWith(partBytes / file.size);
     expect(progress).toHaveBeenLastCalledWith(1);
-  });
-
-  it("uses a retryable range for a small local self-host recording", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({
-      recordingId: "rec-local-small",
-      uploadUrl: "https://api.selfhost.example/api/local-files?action=write&signature=signed",
-    }));
-    const contentRanges: string[] = [];
-
-    class FakeXMLHttpRequest {
-      upload: { onprogress: ((event: ProgressEvent) => void) | null } = { onprogress: null };
-      onload: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      onabort: (() => void) | null = null;
-      status = 204;
-      headers = new Map<string, string>();
-
-      open() {}
-      setRequestHeader(name: string, value: string) {
-        this.headers.set(name, value);
-      }
-      send() {
-        contentRanges.push(this.headers.get("Content-Range") ?? "");
-        this.onload?.();
-      }
-    }
-
-    vi.stubGlobal("XMLHttpRequest", FakeXMLHttpRequest);
-    const file = new File([new Uint8Array([1, 2, 3])], "memo.m4a", { type: "audio/x-m4a" });
-    await expect(startRecordingUpload({
-      workspaceId: "ws-1",
-      assistantId: "a-1",
-      file,
-      onProgress: vi.fn(),
-    })).resolves.toEqual({ recordingId: "rec-local-small" });
-
-    expect(contentRanges).toEqual(["bytes 0-2/3"]);
-  });
-
-  it("retries a local range after a transient network failure", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({
-      recordingId: "rec-local-retry",
-      uploadUrl: "https://api.selfhost.example/api/local-files?action=write&signature=signed",
-    }));
-    let requestCount = 0;
-
-    class FakeXMLHttpRequest {
-      upload: { onprogress: ((event: ProgressEvent) => void) | null } = { onprogress: null };
-      onload: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      onabort: (() => void) | null = null;
-      status = 204;
-
-      open() {}
-      setRequestHeader() {}
-      send() {
-        requestCount += 1;
-        if (requestCount === 1) this.onerror?.();
-        else this.onload?.();
-      }
-    }
-
-    vi.stubGlobal("XMLHttpRequest", FakeXMLHttpRequest);
-    const file = new File(
-      [new Uint8Array(8 * 1024 * 1024), new Uint8Array([1])],
-      "meeting.m4a",
-      { type: "audio/x-m4a" },
-    );
-
-    await expect(startRecordingUpload({
-      workspaceId: "ws-1",
-      assistantId: "a-1",
-      file,
-      onProgress: vi.fn(),
-    })).resolves.toEqual({ recordingId: "rec-local-retry" });
-    expect(requestCount).toBe(3);
   });
 
   it("estimateRecording returns the duration + surcharge", async () => {
