@@ -139,7 +139,7 @@ int experiment_supervisor_init(void) {
 }
 int experiment_gui_consent(uint32_t scenario, uint32_t window) {
     // Called ONLY by the native GUI branch after its modal acknowledgement.
-    if (current_role != 0 || consented || scenario > 11 || !window ||
+    if (current_role != 0 || consented || scenario != 0 || !window ||
         !pins_current() || window_owner(window) != getpid()) return 0;
     admitted = (ExperimentConfig){.magic=0x42584d31, .scenario=scenario, .window=window, .supervisor=getpid(),
         .tag=(int64_t)(((uint64_t)arc4random() << 32 | arc4random()) & (INT64_MAX / 2))};
@@ -147,11 +147,11 @@ int experiment_gui_consent(uint32_t scenario, uint32_t window) {
     consented = 1; return 1;
 }
 int experiment_root_config(ExperimentConfig *out, uint32_t scenario, uint32_t window) {
-    if (current_role != 0 || !consented || admitted.scenario != scenario || admitted.window != window || !pins_current()) return 0;
+    if (scenario != 0 || current_role != 0 || !consented || admitted.scenario != scenario || admitted.window != window || !pins_current()) return 0;
     *out = admitted; return 1;
 }
 const char *experiment_claim_launch(uint32_t role) {
-    if (role < 1 || role > 3 || (claims & (1u << role)) || !pins_current()) return NULL;
+    if (admitted.scenario != 0 || role < 1 || role > 3 || (claims & (1u << role)) || !pins_current()) return NULL;
     if (current_role == 0) {
         if (!consented || role == 3 || (role == 1 && !issued[2])) return NULL;
     } else if (current_role != 1 || role != 3) return NULL;
@@ -195,7 +195,7 @@ static int pipe_info(int fd, int access, struct stat *s) {
         (flags & O_ACCMODE) == access && (flags & O_NONBLOCK);
 }
 int experiment_issue(int fd, uint32_t role, int32_t recipient, ExperimentConfig c, int record_fd, int command_fd) {
-    if (role < 1 || role > 3 || !(claims & (1u << role)) || issued[role] ||
+    if (c.scenario != 0 || role < 1 || role > 3 || !(claims & (1u << role)) || issued[role] ||
         c.scenario != admitted.scenario || c.window != admitted.window || c.tag != admitted.tag ||
         c.supervisor != admitted.supervisor) return 0;
     struct Pin *child = hold(recipient);
@@ -242,7 +242,7 @@ int experiment_accept(uint32_t expected, ExperimentConfig *out) {
     double start = seconds(); if (start < 0) return 0;
     double deadline = start + 2;
     Grant grant = {0};
-    if (!transfer(3, &grant, sizeof(grant), 0, deadline) || grant.recipient != getpid() || !grant.nonce) return 0;
+    if (!transfer(3, &grant, sizeof(grant), 0, deadline) || grant.config.scenario != 0 || grant.recipient != getpid() || !grant.nonce) return 0;
     struct Pin *worker = hold(grant.config.worker);
     if (!worker || !experiment_closed_topology(expected, grant.issuer_role, peer, uid,
         window_owner(grant.config.window), &self->id, &parent->id, &supervisor->id, &worker->id, &grant.config)) return 0;

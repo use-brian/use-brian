@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { cases, classify, preflightFailures } from './report.mjs';
+import { cases, historicalCases, runnableCases, classify, preflightFailures } from './report.mjs';
 import { command, decode, sourceFiles } from './run.mjs';
 const file = name => readFile(new URL(name, import.meta.url), 'utf8');
 
@@ -79,9 +79,18 @@ const verdict = r => classify(r).verdict;
 
 test('closed finite case list matches Swift exactly; no arbitrary target/PID/point/yes interface', async () => {
   assert.equal(cases.length, 12); assert.equal(new Set(cases).size, 12);
+  assert.deepEqual(historicalCases, ['null', 'normal', 'paused-before-final-check', 'last-check-to-post',
+    'after-down-stall', 'after-down-owner-death', 'worker-death-before-check', 'parent-death-before-check',
+    'worker-death-after-check', 'parent-death-after-check', 'physical-overlap', 'physical-before-check']);
   const swift = await file('Model.swift');
   for (const name of cases) assert(swift.includes(`"${name}"`) || swift.includes(`case ${name}`) || swift.includes(`, ${name},`));
-  for (const name of cases) assert.deepEqual(command(['--run', name], 'darwin'), { mode: 'run', scenario: name });
+  assert.equal(cases, historicalCases);
+  assert.deepEqual(runnableCases, ['null']);
+  assert.deepEqual(command(['--run', 'null'], 'darwin'), { mode: 'run', scenario: 'null' });
+  for (const name of historicalCases.slice(1)) {
+    assert.throws(() => command(['--run', name], 'darwin'));
+    assert.throws(() => command(['--run', name, '--override'], 'darwin'));
+  }
   for (const args of [[], ['--yes'], ['--run', 'normal', '--yes'], ['--run', 'unknown'], ['--pid', '123'], ['--point', '1,2']]) assert.throws(() => command(args, 'darwin'));
   assert.throws(() => command(['--run', 'normal'], 'linux'));
 });
@@ -196,21 +205,47 @@ test('GUI consent is per-case, timed, and cannot start children before confirmat
   assert(main.indexOf('record(0, .consent)') < main.indexOf('experiment_launch_owner()'));
   assert(main.includes('styleMask: [.borderless]')); assert(main.includes('width: 500, height: 350'));
 });
-test('exact emission sequence corresponds to candidate; shared allocation and pure ledger, no acceptance override', async () => {
-  const [adapter, candidate, build] = await Promise.all([file('Adapter.swift'), file('../../ClickGuardianNative.swift'), file('build.sh')]);
-  const insertion = 'down.tapPostEvent(proxy)', returned = 'return Unmanaged.passRetained(up)';
-  for (const s of [adapter, candidate]) {
-    assert.equal(s.split(insertion).length - 1, 1); assert.equal(s.split(returned).length - 1, 1);
-    assert(s.indexOf(insertion) < s.indexOf(returned));
-    assert(s.includes('retainedUp = up')); assert(s.includes('ledger.fence()'));
-    assert(s.includes('event.type = .null')); assert(s.includes('let unchanged = Unmanaged.passUnretained(event)'));
+test('retired harness has only one literal null post and no pair allocation or replacement return', async () => {
+  const adapter = await file('Adapter.swift');
+  for (const name of ['Adapter.swift', 'main.swift', 'Model.swift', 'Bootstrap.c', 'Experiment.c']) {
+    const source = await file(name);
+    assert(!/tapPostEvent|CGEventPost|passRetained|preallocate|mouseEvent|CGEventCreateMouseEvent/.test(source), name);
   }
-  assert(adapter.includes('ClickGuardianNative.preallocate')); assert(adapter.includes('ClickGuardianNativeLedger()'));
-  assert(!adapter.includes('acceptsCurrentPlatform')); assert(!adapter.includes('ClickGuardianHost('));
-  assert(candidate.includes('static let profiles: [ClickGuardianPlatformProfile] = []'))
-  assert(candidate.includes('guard !profiles.isEmpty else { return false }'));
-  assert(build.includes('"$root/ClickGuardianNative.swift"')); assert(!build.includes('sed '));
-  assert(!adapter.includes('up.post(')); assert(!adapter.includes('down.post('));
+  assert.equal((adapter.match(/\.post\(/g) ?? []).length, 1);
+  assert(adapter.includes('probe.post(tap: .cgSessionEventTap)'));
+  assert(adapter.includes('event.type = .null'));
+  assert(adapter.includes('return event.type == .null ? event : nil'));
+  assert(adapter.includes('let unchanged = Unmanaged.passUnretained(event)'));
+  assert(!adapter.includes('clickTag('));
+});
+test('direct native entrypoints reject non-null before initialization, pins, pipes or launches', async () => {
+  const [main, model, adapter, bootstrap, c, policy] = await Promise.all(
+    ['main.swift', 'Model.swift', 'Adapter.swift', 'Bootstrap.c', 'Experiment.c', 'BootstrapPolicy.h'].map(file));
+  assert(model.includes('var runnable: Bool { self == .null }'));
+  assert(main.indexOf('scenario.runnable else') < main.indexOf('experiment_supervisor_init()'));
+  assert(main.includes('config.scenario == Scenario.null.index else'));
+  assert(adapter.indexOf('guard c.scenario == Scenario.null.index') < adapter.indexOf('guard experiment_bootstrap_live()'));
+  assert(!adapter.includes('Scenario.allCases['));
+  for (const [name, guard] of [['experiment_gui_consent', 'scenario != 0'],
+    ['experiment_root_config', 'scenario != 0'], ['experiment_claim_launch', 'admitted.scenario != 0'],
+    ['experiment_issue', 'c.scenario != 0']]) {
+    const body = bootstrap.slice(bootstrap.indexOf(name + '(')).split('\n}')[0];
+    assert(body.split(/return (?:0|NULL);/)[0].includes(guard), name);
+  }
+  assert(bootstrap.indexOf('grant.config.scenario != 0') < bootstrap.indexOf('hold(grant.config.worker)'));
+  assert(policy.includes('c->scenario != 0'));
+  assert(c.includes('int experiment_start(uint32_t scenario, uint32_t window) {\n    if (scenario != 0) return 0;'));
+  assert(c.includes('static int launch(unsigned role) {\n    if (config.scenario != 0) return 0;'));
+});
+test('production retirement is unconditional, not merely an empty profile list', async () => {
+  const candidate = await file('../../ClickGuardianNative.swift');
+  const body = candidate.match(/static func acceptsCurrentPlatform\(\) -> Bool \{([\s\S]*?)\n    \}/)?.[1];
+  assert(body);
+  const code = body.replace(/\/\/[^\n]*/g, '').trim();
+  assert.equal(code, 'return false');
+  assert(!/tapPostEvent|passRetained\(up\)/.test(candidate));
+  const execute = candidate.match(/func execute\(_ value: NativeValidatedIntent\) -> Status \{([^]*?)\n    \}/)?.[1];
+  assert.equal(execute?.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').trim(), 'checkLane() refuse() return status');
 });
 test('real owner parent topology, checked suspension, group lifetime fence and bounded nonblocking records', async () => {
   const [c, main, adapter] = await Promise.all([file('Experiment.c'), file('main.swift'), file('Adapter.swift')]);
@@ -232,7 +267,7 @@ test('production build and packaging exclude this experiment; ordinary guardian 
   assert(packaging.includes('from: native/computer-control/build/brian-native-computer-helper'));
   assert(packaging.includes('from: native/computer-control/build/NativeComputerFixture.app'));
   assert(!build.includes('*.swift')); assert(!build.includes('find '));
-  assert(guardian.includes('20 reviewed non-emitting tests'));
+  assert(guardian.includes('21 reviewed non-emitting tests'));
   assert(sourceFiles.includes('../../ClickGuardianNative.swift'));
 });
 test('build script is syntax-valid and compile-only; no signing, permission or production script invocation', async () => {
@@ -280,7 +315,7 @@ test('native bootstrap policy compiles/runs synthetic identity and closed-topolo
   if (compile.error?.code === 'ENOENT') return t.skip('No local C compiler');
   assert.equal(compile.status, 0, compile.stderr);
   const run = spawnSync(binary, [], { encoding: 'utf8', timeout: 10000 });
-  assert.equal(run.status, 0, run.stderr); assert.match(run.stdout, /PASS 95 synthetic bootstrap/);
+  assert.equal(run.status, 0, run.stderr); assert.match(run.stdout, /PASS 131 synthetic bootstrap/);
 });
 test('bootstrap credentials and original lifetime pins precede private grant and any native wake', async () => {
   const [bootstrap, c, main, adapter, build] = await Promise.all(['Bootstrap.c', 'Experiment.c', 'main.swift', 'Adapter.swift', 'build.sh'].map(file));
@@ -339,6 +374,5 @@ test('release cue must follow the sample, and the GUI does not cue release merel
   assert(main.includes('Code.finalSampleNonNeutral.rawValue'));
   assert(main.includes('record(0, .heldReleaseCue)'));
   assert(main.includes('else if !heldSampleReceived'));
-  assert(adapter.indexOf('record(3, heldLeft ?') < adapter.indexOf('guard scope(), (sampledNeutral'));
-  for (const sample of ['NSEvent.pressedMouseButtons & 1', 'buttonState(.hidSystemState, button: .left)', 'buttonState(.combinedSessionState, button: .left)']) assert(adapter.includes(sample));
+  assert(!adapter.includes('heldLeft')); // retired; samples remain offline evidence only
 });

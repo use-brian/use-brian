@@ -36,6 +36,7 @@ static int nonblock(int fd) {
     return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 static int launch(unsigned role) {
+    if (config.scenario != 0) return 0;
     const char *exe = experiment_claim_launch(role);
     if (!exe) return 0;
     int p[2]; if (!experiment_bootstrap_pair(p)) return 0;
@@ -66,8 +67,9 @@ static int launch(unsigned role) {
     close(p[1]); return ok;
 }
 int experiment_start(uint32_t scenario, uint32_t window) {
+    if (scenario != 0) return 0;
     if (!experiment_root_config(&config, scenario, window)) return 0;
-    if (records[0] != -1 || scenario > 11 || !window || !pipe_owned(records) || !pipe_owned(commands)) return 0;
+    if (records[0] != -1 || scenario != 0 || !window || !pipe_owned(records) || !pipe_owned(commands)) return 0;
     if (!nonblock(records[0]) || !nonblock(records[1]) || !nonblock(commands[0]) || !nonblock(commands[1])) return 0;
     return launch(2) && launch(1);
 }

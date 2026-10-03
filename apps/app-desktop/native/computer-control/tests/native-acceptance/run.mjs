@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { cases, classify } from './report.mjs';
+import { runnableCases, classify } from './report.mjs';
 
 const local = name => fileURLToPath(new URL(name, import.meta.url));
 const binary = local('.build/NativeMechanismExperiment.app/Contents/MacOS/NativeMechanismExperiment');
@@ -18,7 +18,7 @@ async function identity() {
 export function command(args, platform) {
   if (platform !== 'darwin') throw new Error('mac-required');
   if (args.length === 1 && args[0] === '--record-build') return { mode: 'identity' };
-  if (args.length === 2 && args[0] === '--run' && cases.includes(args[1])) return { mode: 'run', scenario: args[1] };
+  if (args.length === 2 && args[0] === '--run' && runnableCases.includes(args[1])) return { mode: 'run', scenario: args[1] };
   throw new Error('closed-case-required');
 }
 export function decode(bytes, scenario) {

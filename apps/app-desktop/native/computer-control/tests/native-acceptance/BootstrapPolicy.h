@@ -25,7 +25,7 @@ static inline int experiment_closed_topology(uint32_t expected, uint32_t issuer_
         const ExperimentIdentity *supervisor, const ExperimentIdentity *worker,
         const ExperimentConfig *c) {
     if (expected < 1 || expected > 3 || c->role != expected || c->magic != 0x42584d31 ||
-        c->scenario > 11 || !c->window || c->tag <= 0 || c->tag > INT64_MAX / 2 ||
+        c->scenario != 0 || !c->window || c->tag <= 0 || c->tag > INT64_MAX / 2 ||
         socket_peer != self->ppid || socket_peer != issuer->pid || socket_uid != self->uid ||
         c->supervisor != supervisor->pid || window_owner != supervisor->pid ||
         self->pid == issuer->pid || self->pid == supervisor->pid ||

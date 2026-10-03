@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 import Darwin
 
-// Closed cases; arguments select a case, never a PID, point, command or authority.
+// Historical report numbering: never reorder or remove. Only null is runnable.
 enum Scenario: String, CaseIterable {
     case null, normal, beforeFinal = "paused-before-final-check"
     case lastCheck = "last-check-to-post", afterDown = "after-down-stall"
@@ -10,6 +10,7 @@ enum Scenario: String, CaseIterable {
     case workerBefore = "worker-death-before-check", parentBefore = "parent-death-before-check"
     case workerAfter = "worker-death-after-check", parentAfter = "parent-death-after-check"
     case overlap = "physical-overlap", held = "physical-before-check"
+    var runnable: Bool { self == .null }
     var index: UInt32 { UInt32(Self.allCases.firstIndex(of: self)!) }
     var before: Bool { [.beforeFinal, .workerBefore, .parentBefore, .held].contains(self) }
     var after: Bool { [.lastCheck, .workerAfter, .parentAfter, .overlap].contains(self) }

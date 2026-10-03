@@ -7,7 +7,7 @@ import Darwin
 let childRoles: [String: UInt32] = ["--owned-parent": 1, "--owned-worker": 2, "--owned-owner": 3]
 if CommandLine.arguments.count == 2, let role = childRoles[CommandLine.arguments[1]] {
     var config = ExperimentConfig()
-    guard experiment_child(role, &config) == 1 else { _exit(64) }
+    guard experiment_child(role, &config) == 1, config.scenario == Scenario.null.index else { _exit(64) }
     signal(SIGPIPE, SIG_IGN)
     alarm(15) // independent finite lifetime while runnable; SIGSTOP caveat in README
     if config.role == 1 { experiment_parent_run(); _exit(74) }
@@ -19,7 +19,7 @@ if CommandLine.arguments.count == 2, let role = childRoles[CommandLine.arguments
     owner.start()
 }
 guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--case",
-      let scenario = Scenario(rawValue: CommandLine.arguments[2]) else { _exit(64) }
+      let scenario = Scenario(rawValue: CommandLine.arguments[2]), scenario.runnable else { _exit(64) }
 guard experiment_supervisor_init() == 1 else { _exit(64) }
 signal(SIGPIPE, SIG_IGN)
 experiment_install_cancel_handler()
@@ -74,8 +74,8 @@ final class Supervisor: NSObject, NSApplicationDelegate {
         window.contentView = canvas; window.title = "Isolated native mechanism fixture"
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Hazardous local experiment: \(scenario.rawValue)"
-        alert.informativeText = "Use a DISPOSABLE ISOLATED Mac login. Global input may escape this fixture after focus loss or suspension. At most one synthetic pair; delayed/unmatched events may remain. No cleanup up, retry or production acceptance. Close other apps. Keep hands off except the physical-case cue. Cancel if unsure. Physical-overlap: click the blue target during the pause. Physical-before-check: keep its left button held until the explicit SAMPLE RECORDED cue, then release manually. On cancellation/end release manually; that is not a passing held-input case."
+        alert.messageText = "Retired mechanism: null probe only"
+        alert.informativeText = "Null probe only; all emitting cases are retired. Use a DISPOSABLE ISOLATED Mac login, close other apps, and keep hands off. No mouse pair, cleanup up, retry or production acceptance. Cancel if unsure."
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Consent to this one case")
         let check = NSButton(checkboxWithTitle: "I am in a disposable isolated login and accept these risks", target: nil, action: nil)

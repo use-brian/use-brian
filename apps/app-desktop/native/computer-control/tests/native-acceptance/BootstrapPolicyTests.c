@@ -12,14 +12,14 @@ static ExperimentIdentity identity(int pid, int ppid) {
 int main(void) {
     unsigned cases = 0;
     for (unsigned role = 1; role <= 3; role++) {
-        for (unsigned mutation = 0; mutation < 31; mutation++) {
+        for (unsigned mutation = 0; mutation < 43; mutation++) {
             ExperimentIdentity supervisor = identity(100, 50), parent = identity(101, 100);
             ExperimentIdentity worker = identity(102, 100), owner = identity(103, 101);
             ExperimentIdentity self = role == 1 ? parent : role == 2 ? worker : owner;
             ExperimentIdentity issuer = role == 3 ? parent : supervisor;
             uint32_t issuer_role = role == 3 ? 1 : 0, socket_uid = 501;
             int socket_peer = issuer.pid, window_pid = supervisor.pid;
-            ExperimentConfig c = {.magic=0x42584d31, .role=role, .scenario=11, .window=4,
+            ExperimentConfig c = {.magic=0x42584d31, .role=role, .scenario=0, .window=4,
                 .supervisor=100, .parent=role == 1 ? 101 : role == 3 ? 101 : 0, .worker=102, .tag=123};
             switch (mutation) {
             case 0: break; // three legal, closed process shapes
@@ -53,6 +53,8 @@ int main(void) {
             case 28: self.uid = self.ruid = self.svuid = 0; break;
             case 29: issuer.mapped_inode++; break; // path replacement is not mapped file identity
             case 30: self.mapped_device++; break;
+            // All eleven historical emitting indices and the uint32 boundary deny.
+            default: c.scenario = mutation == 42 ? UINT32_MAX : mutation - 30; break;
             }
             int ok = experiment_closed_topology(role, issuer_role, socket_peer, socket_uid, window_pid,
                 &self, &issuer, &supervisor, &worker, &c);
@@ -62,7 +64,7 @@ int main(void) {
     // The old exploit: foreign parent claims a different same-executable GUI
     // ancestor/window. Its actual identity/parentage must reject before config.
     ExperimentIdentity root = identity(100, 50), parent = identity(101, 999), worker = identity(102, 100), owner = identity(103, 101);
-    ExperimentConfig c = {.magic=0x42584d31, .role=3, .scenario=1, .window=4, .supervisor=100, .parent=101, .worker=102, .tag=123};
+    ExperimentConfig c = {.magic=0x42584d31, .role=3, .scenario=0, .window=4, .supervisor=100, .parent=101, .worker=102, .tag=123};
     assert(!experiment_closed_topology(3, 1, 101, 501, 100, &owner, &parent, &root, &worker, &c)); cases++;
     parent = identity(101, 100); worker = parent; c.worker = parent.pid;
     assert(!experiment_closed_topology(3, 1, 101, 501, 100, &owner, &parent, &root, &worker, &c)); cases++;

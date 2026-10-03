@@ -1,7 +1,10 @@
 // Observation-only checker: no process, input or production acceptance APIs.
-export const cases = Object.freeze(['null', 'normal', 'paused-before-final-check', 'last-check-to-post',
+export const historicalCases = Object.freeze(['null', 'normal', 'paused-before-final-check', 'last-check-to-post',
   'after-down-stall', 'after-down-owner-death', 'worker-death-before-check', 'parent-death-before-check',
   'worker-death-after-check', 'parent-death-after-check', 'physical-overlap', 'physical-before-check']);
+// Stable historical names/indices are report vocabulary, not execution authority.
+export const cases = historicalCases; // compatibility for offline consumers
+export const runnableCases = Object.freeze(['null']);
 const allowed = new Map([
   [0, [1, 2, 3, 4, 5, 84, 85, 94, 101]], [1, [40, 41, 42, 43, 44, 45, 46, 47]],
   [2, [60, 61, 62, 63, 64]], [3, [3, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 80, 86, 92, 93, 95, 96, 97, 98, 99, 100]],
