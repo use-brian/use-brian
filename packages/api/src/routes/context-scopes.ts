@@ -5,7 +5,7 @@
  * [COMP:api/context-scope-routes]
  */
 
-import { getDepartmentalReadinessSystem } from '../workspace-access/readiness.js'
+import { departmentalReadiness, getDepartmentalReadinessSystem } from '../workspace-access/readiness.js'
 import { departmentRouteReview, executeReviewedDepartmentRoute } from '../workspace-access/reviewed-route.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { Router, type Request, type Response } from 'express'
@@ -716,7 +716,11 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   router.get('/workspaces/:workspaceId/context/readiness', async (req, res) => {
     const access = await gate(req, res, true)
     if (!access) return
-    const [context,departmental]=await Promise.all([getReadiness(access.workspaceId),(options.getDepartmentalReadiness??getDepartmentalReadinessSystem)(access.workspaceId)])
+    // One evidence pass: the departmental verdict is a pure function of the
+    // context evidence, so deriving it avoids a second schema probe and a
+    // second inventory read on the same request.
+    const context=await getReadiness(access.workspaceId)
+    const departmental=options.getDepartmentalReadiness?await options.getDepartmentalReadiness(access.workspaceId):departmentalReadiness(context)
     res.json({...context,readyForActivation:context.readyForActivation&&departmental.ready,
       checks:[...context.checks.filter(check=>check.id!=='delegation'),{id:'delegation',ready:departmental.ready,blocking:true,detail:'Departmental access readiness',missing:departmental.missingCapabilities}],departmental})
   })

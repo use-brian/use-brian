@@ -43,8 +43,9 @@ const functions = [
   'read_scope_review_source','scope_review_registry_revision',
 ]
 
-function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string; withoutFunction?: string } = {}): ReadinessQuery {
+function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string; withoutFunction?: string; reviewed?: string | null; seen?: string[] } = {}): ReadinessQuery {
   return async <T extends Record<string, unknown>>(sql: string) => {
+    opts.seen?.push(sql)
     if (sql.includes('information_schema.columns')) {
       return {
         rows: columns
@@ -62,7 +63,7 @@ function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string;
     if (sql.includes('pg_proc')) {
       return {rows:functions.filter(name=>name!==opts.withoutFunction).map(name=>({name})) as unknown as T[]}
     }
-    if(sql.includes('reviewed_inventory_revision'))return {rows:[{revision:'2'}] as unknown as T[]}
+    if(sql.includes('reviewed_inventory_revision'))return {rows:[{revision:opts.reviewed===undefined?'2':opts.reviewed}] as unknown as T[]}
     if(sql.includes(' AS total')||sql.includes(' total,'))return {rows:[{total:'0',unresolved:'0',held:'0'}] as unknown as T[]}
     return { rows: [{ count: '3' }] as unknown as T[] }
   }
@@ -111,5 +112,30 @@ describe('[COMP:api/context-scope-routes] activation readiness', () => {
     const result=await getContextReadinessSystem('workspace',readinessQuery({withoutFunction:'member_operation_scope_allows'}))
     expect(result.checks.find(check=>check.id==='operation_separation')).toMatchObject({ready:false,missing:['member_operation_scope_allows']})
     expect(result.readyForActivation).toBe(false)
+  })
+
+  it('skips the per-row inventory walk until the inventory is acknowledged', async () => {
+    const seen: string[] = []
+    const result = await getContextReadinessSystem('workspace', readinessQuery({ reviewed: null, seen }))
+    expect(seen.some((sql) => sql.includes('read_scope_review_source'))).toBe(false)
+    expect(result.readyForActivation).toBe(false)
+    expect(result.checks.find((check) => check.id === 'scope_review')).toMatchObject({
+      ready: false,
+      missing: ['reviewed_inventory_revision'],
+    })
+  })
+
+  it('walks the inventory once it is acknowledged at the current registry revision', async () => {
+    const seen: string[] = []
+    await getContextReadinessSystem('workspace', readinessQuery({ seen }))
+    expect(seen.some((sql) => sql.includes('read_scope_review_source'))).toBe(true)
+  })
+
+  it('omits the informational Workspace General counts when asked', async () => {
+    const seen: string[] = []
+    const result = await getContextReadinessSystem('workspace', readinessQuery({ seen }), { legacyInventory: false })
+    expect(result.legacyGeneral).toEqual({})
+    expect(seen.some((sql) => sql.includes('cardinality(compartments)'))).toBe(false)
+    expect(result.readyForActivation).toBe(true)
   })
 })

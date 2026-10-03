@@ -46,5 +46,5 @@ export async function getDepartmentalReadinessSystem(
     return departmentalReadiness({ enforcementVersion: CONTEXT_SCOPE_ENFORCEMENT_VERSION,
       readyForActivation: false, checks: [], legacyGeneral: {} })
   }
-  return departmentalReadiness(await getContextReadinessSystem(workspaceId, queryFn))
+  return departmentalReadiness(await getContextReadinessSystem(workspaceId, queryFn, { legacyInventory: false }))
 }

@@ -25,7 +25,7 @@ const blocked: ContextReadiness = {
   legacyGeneral: {},
 }
 
-function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner') {
+function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner', opts: { deriveDepartmental?: boolean } = {}) {
   const workspaceStore = {
     getRole: vi.fn().mockResolvedValue(role),
   } as unknown as WorkspaceStore
@@ -100,7 +100,7 @@ function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner') {
     groupStore,
     contextStore,
     getReadiness,
-    getDepartmentalReadiness,
+    ...(opts.deriveDepartmental ? {} : { getDepartmentalReadiness }),
     connectorInstanceStore: connectorInstanceStore as never,
     connectorGrantStore: connectorGrantStore as never,
     reclassificationStore: reclassificationStore as never,
@@ -126,6 +126,14 @@ describe('[COMP:api/context-scope-routes] Teams and Projects REST contract', () 
     expect(response.status).toBe(200)
     expect(response.body.readyForActivation).toBe(false)
     expect(response.body.checks).toContainEqual(expect.objectContaining({id:'delegation',blocking:true,ready:false}))
+  })
+  it('derives the departmental verdict from the same evidence pass instead of probing twice',async()=>{
+    const {app,getReadiness}=makeApp('admin',{deriveDepartmental:true})
+    const response=await request(app).get(`/api/workspaces/${WID}/context/readiness`)
+    expect(response.status).toBe(200)
+    expect(getReadiness).toHaveBeenCalledTimes(1)
+    expect(response.body.departmental).toMatchObject({ready:false,missingCapabilities:expect.arrayContaining(['enforcement_version'])})
+    expect(response.body.readyForActivation).toBe(false)
   })
   it('hides a workspace from non-members', async () => {
     const { app } = makeApp(null)

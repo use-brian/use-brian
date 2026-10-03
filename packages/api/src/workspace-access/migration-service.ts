@@ -11,7 +11,7 @@ import {SCOPE_REVIEW_KINDS, sourceAdapter} from './scope-review-registry.js'
 import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 import {departmentCommandApplySchema, departmentAccessCommandSchema} from './commands.js'
 import {applyDepartmentCommand, prepareDepartmentCommand, hashCommandReviewIntent, withCommandReviewTransaction} from './command-review.js'
-import {executeDepartmentAccessInTransaction, getWorkspaceAccessInTransaction} from './service.js'
+import {executeDepartmentAccessInTransaction, getWorkspaceAccessDirectoryInTransaction} from './service.js'
 import {WorkspaceAccessError} from './policy.js'
 
 export type PrincipalMigrationAction = Extract<DepartmentAccessCommand,{type:'member.access.set'|'department.member.set'|'department.assistant.set'|'assistant.audience.set'}>
@@ -33,7 +33,12 @@ const blockers=['full_inventory_required','intake_certification_required','mode_
 type Plan={id:string;actor_user_id:string;status:string;proposal_hash:string;version:string;expires_at:Date;intended_population:{intentHash:string}}
 type Item={id:string;proposed_action:MigrationAction;status:string;version:string;command_review_id:string|null;scope_review_id:string|null;reason:string;evidence_versions:{policyRevision:string;reviewKey:string};idempotency_key:string}
 function fail(code:string):never{throw new WorkspaceAccessError(code,409)}
-async function admin(c:PoolClient,w:string,u:string){const view=await getWorkspaceAccessInTransaction(c,w,u,true);if(!view.canAdminister)throw new WorkspaceAccessError('admin_required');return view}
+// Plans read only the actor's role, policy revision and visible people: the
+// directory view. The full overview would also compose request/grant history
+// and the departmental readiness audit, which no migration step consumes.
+// Writers lock the policy; a plain read (`lock=false`) never row-locks the
+// workspace, so listing plans cannot serialize behind or block other writers.
+async function admin(c:PoolClient,w:string,u:string,lock=true){const view=await getWorkspaceAccessDirectoryInTransaction(c,w,u,lock);if(!view.canAdminister)throw new WorkspaceAccessError('admin_required');return view}
 // Nonblocking session lock spans canonical transactions/checkpoints, never human
 // input. Waiting on this lock while retaining a pooled connection can exhaust the
 // pool and starve the winning operation's canonical review transaction.
@@ -54,7 +59,7 @@ async function item(c:PoolClient,w:string,p:string,id:string){const row=(await c
 function active(p:Plan){if(['paused','cancelled','completed'].includes(p.status))fail('migration_not_active');if(p.expires_at.getTime()<=Date.now())fail('migration_expired')}
 function subject(a:MigrationAction){if(a.type==='resource.scope')return {kind:a.resourceKind,id:a.resourceId};return 'userId' in a?{kind:'member',id:a.userId}:{kind:'assistant',id:a.assistantId}}
 async function projection(c:PoolClient,w:string,u:string,a:PrincipalMigrationAction){
-  const view=await getWorkspaceAccessInTransaction(c,w,u),s=subject(a)
+  const view=await getWorkspaceAccessDirectoryInTransaction(c,w,u),s=subject(a)
   if(s.kind==='member')return {kind:s.kind,person:view.people.find(p=>p.id===s.id),reach:await resolveOperationCeilingsSystem(s.id,w,'confidential',null,true,(sql,values)=>c.query(sql,values)),resourceAuthorizationRequired:true}
   const principal=await createDbContextScopeStore(c).resolveAssistantPrincipalSystem(s.id,w)
   // getAssistantContextConfig uses queryWithRLS even on a transaction-bound store.
@@ -122,7 +127,7 @@ export async function createMigrationPlan(w:string,u:string,input:unknown){
   },reservedClient))
 }
 export async function getMigrationPlan(w:string,u:string,id:string){return serialized(w,reservedClient=>withCommandReviewTransaction(async c=>{await admin(c,w,u);await plan(c,w,id);await reconcile(c,w,id);return {...await plan(c,w,id),items:(await c.query('SELECT * FROM workspace_access_migration_items WHERE workspace_id=$1 AND plan_id=$2 ORDER BY created_at,id',[w,id])).rows,blockers,cancellationNotice:'Applied changes are immediate; pausing or cancellation does not roll them back.'}},reservedClient))}
-export async function listMigrationPlans(w:string,u:string,after?:string){if(after&&!z.string().uuid().safeParse(after).success)throw new WorkspaceAccessError('invalid_command',400);return withCommandReviewTransaction(async c=>{await admin(c,w,u);return (await c.query('SELECT * FROM workspace_access_migration_plans WHERE workspace_id=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT 50',[w,after??null])).rows})}
+export async function listMigrationPlans(w:string,u:string,after?:string){if(after&&!z.string().uuid().safeParse(after).success)throw new WorkspaceAccessError('invalid_command',400);return withCommandReviewTransaction(async c=>{await admin(c,w,u,false);return (await c.query('SELECT * FROM workspace_access_migration_plans WHERE workspace_id=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT 50',[w,after??null])).rows})}
 
 /** One item per review. Re-simulate at current policy; never carry blanket approval forward. */
 export async function prepareMigrationItem(w:string,u:string,p:string,id:string){return serialized(w,async reservedClient=>{
