@@ -688,6 +688,19 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
       try {
         await client.query('BEGIN')
 
+        // Lock the user row before anything references it: a concurrent
+        // second delete waits here, then finds the account gone or already
+        // tombstoned and answers 204 (the analytics FK below would otherwise
+        // contend with the teardown's lock, or fail on a deleted row).
+        const locked = await client.query<{ deleted_at: Date | null }>(
+          `SELECT deleted_at FROM users WHERE id = $1 FOR UPDATE`, [userId],
+        )
+        if (locked.rows.length === 0 || locked.rows[0]!.deleted_at) {
+          await client.query('COMMIT')
+          res.status(204).end()
+          return
+        }
+
         // Final analytics event goes FIRST — the user row still exists
         // so the FK is valid. It'll be cascade-deleted along with the user
         // below, but that's fine because analytics is fire-and-forget and

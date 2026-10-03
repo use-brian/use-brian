@@ -558,7 +558,10 @@ describe('[COMP:api/account-route] Account routes', () => {
     mockFindUserById.mockResolvedValueOnce({ id: 'u_1', stripeCustomerId: null } as never)
     const pool = mockPool()
     const mockClient = (await pool.connect()) as unknown as { query: ReturnType<typeof vi.fn> }
-    mockClient.query.mockResolvedValue({ rows: [], rowCount: 0 })
+    mockClient.query.mockImplementation(async (sql: string) =>
+      String(sql).includes('FOR UPDATE')
+        ? { rows: [{ deleted_at: null }], rowCount: 1 }
+        : { rows: [], rowCount: 0 })
 
     const res = await request(app).delete('/api/account')
     expect(res.status).toBe(204)
@@ -581,7 +584,10 @@ describe('[COMP:api/account-route] Account routes', () => {
     // The pool.connect().query calls
     const pool = mockPool()
     const mockClient = (await pool.connect()) as unknown as { query: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> }
-    mockClient.query.mockResolvedValue({ rows: [], rowCount: 0 })
+    mockClient.query.mockImplementation(async (sql: string) =>
+      String(sql).includes('FOR UPDATE')
+        ? { rows: [{ deleted_at: null }], rowCount: 1 }
+        : { rows: [], rowCount: 0 })
 
     const res = await request(app).delete('/api/account')
     expect(res.status).toBe(204)
@@ -592,12 +598,30 @@ describe('[COMP:api/account-route] Account routes', () => {
     expect(sql.indexOf('BEGIN')).toBeLessThan(sql.indexOf('COMMIT'))
   })
 
+  it('answers 204 without a teardown when a concurrent delete already tombstoned the account', async () => {
+    const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
+    mockFindUserById.mockResolvedValueOnce({ id: 'u_1', stripeCustomerId: null } as never)
+    const pool = mockPool()
+    const mockClient = (await pool.connect()) as unknown as { query: ReturnType<typeof vi.fn> }
+    mockClient.query.mockImplementation(async (sql: string) =>
+      String(sql).includes('FOR UPDATE')
+        ? { rows: [{ deleted_at: new Date() }], rowCount: 1 }
+        : { rows: [], rowCount: 0 })
+
+    const res = await request(app).delete('/api/account')
+    expect(res.status).toBe(204)
+    expect(mockTeardown).not.toHaveBeenCalled()
+  })
+
   it('reports a blocked teardown as a 500 with a code, after rolling back', async () => {
     const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
     mockFindUserById.mockResolvedValueOnce({ id: 'u_1', stripeCustomerId: null } as never)
     const pool = mockPool()
     const mockClient = (await pool.connect()) as unknown as { query: ReturnType<typeof vi.fn> }
-    mockClient.query.mockResolvedValue({ rows: [], rowCount: 0 })
+    mockClient.query.mockImplementation(async (sql: string) =>
+      String(sql).includes('FOR UPDATE')
+        ? { rows: [{ deleted_at: null }], rowCount: 1 }
+        : { rows: [], rowCount: 0 })
     mockTeardown.mockRejectedValueOnce(
       new AccountTeardownBlockedError([{ step: 'users', error: 'violates foreign key constraint' }]),
     )
