@@ -398,7 +398,7 @@ export function useDockRecorder(opts: {
    */
   onMeetingCapture: (
     file: File,
-    live?: { pageId: string; sessionId?: string },
+    live?: { pageId: string; sessionId?: string; liveWindowsDone?: Promise<void> },
   ) => Promise<MeetingCaptureOutcome>;
   /** Pre-flight confirm + destination creation; null means the user cancelled. */
   prepareLivePage?: (navigate?: boolean) => Promise<LiveRecordingPage | null>;
@@ -451,6 +451,9 @@ export function useDockRecorder(opts: {
     interactionRef.current = null;
     setInteractionCaptureId(null);
     setInteractionChatSessionId(null);
+    // Full-file upload no longer consumes this promise when interaction is off.
+    // Observe failures even when no interaction session needs closing.
+    void drain?.catch(() => {});
     if (pending) void (async () => {
       try { await drain; } catch { /* Still close this capture after a failed drain. */ }
       const capture = await pending;
@@ -590,7 +593,7 @@ export function useDockRecorder(opts: {
       blob: Blob,
       mime: string,
       durationMs: number,
-      recoveredLive?: { pageId?: string; sessionId?: string },
+      recoveredLive?: { pageId?: string; sessionId?: string; liveWindowsDone?: Promise<void> },
     ): Promise<boolean> => {
       // Never consult the current capture here: an older save may be queued
       // behind another upload while a different live page is recording.
@@ -619,7 +622,8 @@ export function useDockRecorder(opts: {
       const { notice: verdict, safeToDrop } = handOffVerdict(
         await onMeetingCapture(
           file,
-          livePageId ? { pageId: livePageId, ...(liveSessionId ? { sessionId: liveSessionId } : {}) } : undefined,
+          livePageId ? { pageId: livePageId, ...(liveSessionId ? { sessionId: liveSessionId } : {}),
+            ...(recoveredLive?.liveWindowsDone ? { liveWindowsDone: recoveredLive.liveWindowsDone } : {}) } : undefined,
         ),
       );
       setNotice(verdict);
@@ -856,9 +860,11 @@ export function useDockRecorder(opts: {
                 let safeToDrop = false;
                 try {
                   if (!skipHandOff) {
-                    await capture.liveWindowsDone;
                     if (mountedRef.current) {
-                      safeToDrop = await handOff(capture.blob, capture.mime, capture.durationMs, live ?? undefined);
+                      // Full-file upload is independent of provisional ASR/notes.
+                      // Only window-based fallback needs to await the final window.
+                      safeToDrop = await handOff(capture.blob, capture.mime, capture.durationMs,
+                        live ? { ...live, liveWindowsDone: capture.liveWindowsDone } : undefined);
                     }
                   }
                 } catch {

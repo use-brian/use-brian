@@ -15,14 +15,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({
   startRecordingUpload: vi.fn(),
   estimateRecording: vi.fn(),
+  finalizeLiveRecording: vi.fn(),
+}));
+vi.mock("../confirm-and-process", () => ({
+  confirmAndProcessRecording: vi.fn(async () => ({ outcome: "cancelled" })),
 }));
 
 vi.mock("@/lib/api/recordings", () => ({
   startRecordingUpload: api.startRecordingUpload,
   estimateRecording: api.estimateRecording,
   processRecording: vi.fn(),
-  linkLiveRecordingPage: vi.fn(),
-  finalizeLiveRecording: vi.fn(),
+  linkLiveRecordingPage: vi.fn(async () => {}),
+  finalizeLiveRecording: api.finalizeLiveRecording,
+  recordingMimeForFile: (file: File) => file.type || "audio/webm",
   RecordingApiError: class RecordingApiError extends Error {
     code?: string;
     status = 0;
@@ -86,6 +91,36 @@ afterEach(() => {
 });
 
 describe("[COMP:web/recording-upload] operation ownership", () => {
+  it("uploads the full file without waiting for live transcription", async () => {
+    api.startRecordingUpload.mockResolvedValueOnce({ recordingId: "full-recording" });
+    const pendingWindows = new Promise<void>(() => {});
+    await act(async () => {
+      const result = await capture.run(new File(["audio"], "recording.webm"), {
+        existingPageId: "page", liveSessionId: "live", liveWindowsDone: pendingWindows,
+      });
+      expect(result.outcome).toBe("cancelled"); // reached confirmation, despite pending windows
+    });
+    expect(api.startRecordingUpload).toHaveBeenCalledOnce();
+    expect(api.finalizeLiveRecording).not.toHaveBeenCalled();
+  });
+
+  it("waits for final windows only when a failed full upload needs window assembly", async () => {
+    api.startRecordingUpload.mockRejectedValueOnce(new Error("upload offline"));
+    api.finalizeLiveRecording.mockResolvedValueOnce({ recordingId: "assembled" });
+    let finishWindows!: () => void;
+    const liveWindowsDone = new Promise<void>((resolve) => { finishWindows = resolve; });
+    let saving!: ReturnType<HookValue["run"]>;
+    await act(async () => {
+      saving = capture.run(new File(["audio"], "recording.webm"), {
+        liveSessionId: "live", liveWindowsDone,
+      });
+    });
+    expect(api.startRecordingUpload).toHaveBeenCalledOnce();
+    expect(api.finalizeLiveRecording).not.toHaveBeenCalled();
+    await act(async () => { finishWindows(); await saving; });
+    expect(api.finalizeLiveRecording).toHaveBeenCalledWith({ workspaceId: "workspace-1", assistantId: "assistant-1", sessionId: "live" });
+  });
+
   it("allows chat attachments while an independent recorder save is uploading", async () => {
     let failUpload!: (error: Error) => void;
     api.startRecordingUpload.mockImplementationOnce(() => new Promise((_resolve, reject) => { failUpload = reject; }));
