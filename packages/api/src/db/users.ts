@@ -249,6 +249,12 @@ export async function findOrCreateUser(params: {
     // grant exists. Owner toggles via the assistant settings page.
     // See docs/plans/company-brain.md §17.
     //
+    // 'configure' (Agent configuration) is default-on for every primary so a
+    // first conversation can set the workspace up, including the in-chat
+    // Connect button for official OAuth connectors. Owners/admins can switch
+    // it off on the assistant's settings. See
+    // docs/architecture/integrations/agent-capability-surface.md.
+    //
     // 'files' / 'office' / 'computer' are the built-in workspace primitives.
     // Default-ON — switching one off is a
     // deliberate act, so a fresh assistant behaves exactly as before this
@@ -261,7 +267,8 @@ export async function findOrCreateUser(params: {
               ($1, 'crm',      $2, '§17 default-on at primary creation'),
               ($1, 'goals',    $2, 'goals default-on at primary creation'),
               ($1, 'views',    $2, 'doc-skill parity — default-on at primary creation'),
-              ($1, 'files',    $2, 'built-in primitive — default-on at primary creation')`,
+              ($1, 'files',    $2, 'built-in primitive — default-on at primary creation'),
+              ($1, 'configure', $2, 'agent configuration - default-on at primary creation')`,
       [assistant.rows[0].id, user.id],
     )
     // office / computer — seeded for EVERY assistant kind, not just primaries

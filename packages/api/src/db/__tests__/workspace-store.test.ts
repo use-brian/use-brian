@@ -142,6 +142,8 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       expect(capsInsertSql).toContain('INSERT INTO assistant_capabilities')
       expect(capsInsertSql).toContain("'tasks'")
       expect(capsInsertSql).toContain("'crm'")
+      // Agent configuration is default-on for every primary.
+      expect(capsInsertSql).toContain("'configure'")
       expect(capsInsertArgs).toEqual(['a_primary', 'u_1'])
 
       // Default "General" ROOM — a workspace-shared chat session seeded in

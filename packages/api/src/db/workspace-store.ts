@@ -1418,7 +1418,8 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
 
         // §17 — primary assistants default-on for Tasks (Q1) and CRM
         // (Q2) primitive grants, plus the built-in workspace primitives
-        // (files / office / computer). Matches findOrCreateUser's defaults so
+        // (files / office / computer), plus 'configure' (Agent configuration,
+        // default-on for every primary). Matches findOrCreateUser's defaults so
         // a workspace primary behaves identically to the Personal one — keep
         // the two lists in step.
         await client.query(
@@ -1428,7 +1429,8 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
                   ($1, 'crm',      $2, '§17 default-on at primary creation'),
                   ($1, 'goals',    $2, 'goals default-on at primary creation'),
                   ($1, 'views',    $2, 'doc-skill parity — default-on at primary creation'),
-                  ($1, 'files',    $2, 'built-in primitive — default-on at primary creation')`,
+                  ($1, 'files',    $2, 'built-in primitive — default-on at primary creation'),
+                  ($1, 'configure', $2, 'agent configuration - default-on at primary creation')`,
           [assistantResult.rows[0].id, userId],
         )
         await seedBuiltinPrimitiveCapabilities(
