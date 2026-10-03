@@ -1,6 +1,6 @@
 # R1 — check the integrated Mac package (source v2)
 
-This checks the actual Electron package and its existing private helper connection. It is **not R1 completion or release acceptance**. The helper remains probe-only: no AX, input, capture or task execution is enabled.
+This checks the actual Electron package and its existing private helper connection. It is **not R1 completion or release acceptance**. This metadata-only check sends no discovery/AX, input, capture or task requests. The operator-tested `609cee57` revision was unconditionally probe-only; current source adds a separate, default-off [experimental inspector](native-computer-r1-inspector.md). Leave `NATIVE_COMPUTER_INSPECTOR_ENABLED` unset for this package-only check. No inspector acceptance follows from it.
 
 ## Preferred: fetch the feature branch
 
