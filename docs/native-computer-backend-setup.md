@@ -70,6 +70,12 @@ Warnings always distinguish unverified JWT compatibility, live model behavior an
 
 `ready` can be true for AX/text configuration despite image warnings; it never means image execution or any Mac capability is accepted. The report contains no model IDs, provider URLs, grants or credentials. Warning arrays are bounded to **8**, with only the fixed codes above and the three always-present verification warnings. The old `vision_default_budget_insufficient` warning is replaced by `vision_budget_insufficient`.
 
+## Native task picker
+
+`GET /api/native-computer/context-tasks` accepts only UUID `workspaceId`, `assistantId`, `conversationId` query fields under normal session-backed authentication. It returns at most 500 `id/title` rows (titles capped at 256 characters), with `Cache-Control: no-store`. It intersects the native owned conversation/assistant/task, membership, native capability and current-task predicates with the established workspace viewpoint/task-read access predicate and user-scoped RLS. Clearance or compartment reduction must not disclose previously accessible task titles. This is discovery metadata, never a grant; create/run/dispatch still revalidate independently. The ordinary server routing/logging policy applies to context IDs in the URL; credentials and task content are never query fields.
+
+The app loads this list only after assistant/conversation selection, keys it by viewer and context, clears selection on context changes, ignores late replies from other contexts, and offers explicit retry on load failure. An empty list is not permission to invent a task ID: use a normally owned current task for the selected assistant with appropriate read access. No setup credential or task is fabricated by this route.
+
 ## Existing vision approval and budget controls
 
 These are trusted API deployment settings, not model/user grants. Readiness only reports them. Do **not** automatically enable approval, change the configured model, or raise budgets to clear a warning; review the exact non-production route, data destination and worst-case bounds first. Approval never enables Mac input or replaces local capture consent/permissions and platform acceptance.
@@ -93,7 +99,7 @@ app.use('/api/native-computer', nativeComputerAuth(env.JWT_SECRET),
   nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask'), nativeComputerReadiness))
 ```
 
-Do not leave an outer `requireAuth` before this helper: ordinary auth updates `last_seen_at` for sessions older than five minutes. `nativeComputerAuth` selects `requireAuthWithoutTouch` only for the readiness POST (including normal Express case/trailing-slash variants). Every other native route retains ordinary touching authentication. Both use exactly the same JWT signature/kind/expiry, UUID, user auth-version and session owner/revocation/expiry admission; only the optional activity UPDATE is suppressed. Request headers/body/query cannot opt other routes out of touching. The readiness route still independently requires a session-backed identity. No auth bypass or refresh/session creation is introduced.
+Do not leave an outer `requireAuth` before this helper: ordinary auth updates `last_seen_at` for sessions older than five minutes. `nativeComputerAuth` selects `requireAuthWithoutTouch` for the readiness POST and context-tasks GET (including normal Express case/trailing-slash variants). Other native routes retain ordinary touching authentication. Both use exactly the same JWT signature/kind/expiry, UUID, user auth-version and session owner/revocation/expiry admission; only the optional activity UPDATE is suppressed. Request headers/body/query cannot opt other routes out of touching. The readiness route still independently requires a session-backed identity. No auth bypass or refresh/session creation is introduced.
 
 The model readiness wiring uses `createNativeComputerReadinessOptions(nativeAccounting, nativeModelOptions, runtimeOverridden)`:
 

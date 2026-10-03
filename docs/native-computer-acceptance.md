@@ -2,6 +2,40 @@
 
 **Active delivery scope: the [macOS release plan](plans/electron-native-computer-use.md), revised at the user's direction.** Windows/Linux, broad comparative benchmarks, a separate vision-only baseline and generalized observer/attestation infrastructure are deferred, not release gates. Vision fallback means sending an approved selected-window screenshot to the existing configured image-capable LLM, not building a CV subsystem. Concrete admission, consent, Stop, input ownership, privacy, fresh modal authorization and real workflow/provider checks remain required. The user has an existing working Electron signing certificate/workflow; certificate provisioning is not a blocker or workstream. The records below preserve historical results and broader requirements, not a second active release checklist. The user will run Mac tests personally. The user subsequently authorized a work-in-progress feature-branch commit/push so the Mac checkout can fetch fixes directly. This is not release completion; a release PR remains conditional on verified release scope. Release/acceptance gates remain off. Current source and gating status are recorded below; older probe-only records are historical.
 
+## AX delivery audit after plan commit `abdcc89f` — portable integration, not acceptance
+
+Implemented fixes:
+
+- The actual controller → HTTP/WS relay → API `/run` → concrete configured-model runtime now has synthetic TextEdit assignment and fixture invoke/select/up-scroll regressions with exact approval, fresh complete-goal readback, denial, strict invocation metadata and uncertain receipt/duplicate-run no replay. These use fake native/provider/database dependencies; they are not live inference or durable provider settlement evidence.
+- Core offers both semantic scroll directions and retains `deltaY` in decision state; zero-delta generated proposals refuse. Next-action exact profile state is now **4**, progress remains **3**; stale profiles are not promoted.
+- Native discovery respects renderer Stop/workspace/cleanup fences. Trailing-slash native navigation and four-locale AX-only onboarding are corrected. Task selection now uses a bounded authenticated context endpoint instead of all workspace tasks, intersecting owned/current/native eligibility with established task-read clearance/compartment predicates and user-scoped RLS. Selection resets on context changes and cached load errors offer explicit retry.
+- Independent review caught title-disclosure risk in the initial system-query implementation and missing cold-load retry; both were corrected before commit and re-reviewed. SQL regressions cover clearance reduction, team/read-grant revocation and changes after viewpoint resolution. No acceptance flag, runtime deadline, budget, capture policy or emitter changed.
+
+**Engineering blockers, not just Mac testing:** [Task C feasibility](native-computer-visual-ax-design.md) proves the current capture/action intersection empty by source policy and documents non-atomic AX dispatch/queued-effect cancellation limits, also relevant to R2. No visual-semantic replacement was implemented on an indefensible contract. Packaged control requires the pilot-accepted flag while the current task prohibits enabling acceptance flags; inspector cannot run `/run`. Explicit policy/safety disposition is required. Original no-AX canvas scope remains open. The [rewritten final checklist](native-computer-mac-handoff.md) removes executable historical emitting instructions and clearly marks effect-task prerequisites/blocked steps.
+
+**Actual environment:** Linux, no supplied authorized non-production API origin/session/context/device inputs or matching live provider configuration. Inspected relevant environment variable names and repository environment-file presence only; no secret files, external credential stores or production services were accessed. Readiness and live inference were **not run**. No database migration, deployment, account fabrication, budget increase or native acceptance occurred. Existing user-owned CI files and six pending KB documents were preserved.
+
+### Fresh local verification
+
+Parent runs (selections overlap child/review runs; do not sum):
+
+| Command/scope | Result |
+| --- | --- |
+| `node --test scripts/__tests__/native-computer-readiness.test.mjs apps/app-desktop/scripts/*.test.mjs` | 544 passed |
+| `node --test apps/app-desktop/native/computer-control/*.test.mjs apps/app-desktop/native/computer-control/tests/native-acceptance/portable.test.mjs` | 115 passed; portable/source tests only |
+| `pnpm --filter @use-brian/app-desktop test` | 1,123 passed / 54 files, including 3 preserved user-local CI tests not committed here |
+| `pnpm --filter @use-brian/core exec vitest run src/computer-use` | 155 passed / 5 files |
+| `pnpm --filter @use-brian/api exec vitest run src/computer-use src/routes/__tests__/native-computer.test.ts test/native-computer-e2e.test.ts --maxWorkers=1` | 288 passed / 13 files, including 14 HTTP/WS E2E cases and synthetic PGlite access controls |
+| `pnpm --filter app-web exec vitest run src/components/computer/__tests__ src/lib/__tests__/native-computer.test.ts src/lib/__tests__/native-context-tasks.test.ts` | 104 passed / 12 files, including browser surfaces |
+| Relay / shared computer-control full tests | 50 / 36 passed |
+| Core, API, desktop, web, desktop-renderer, relay typechecks | Passed; API used 6 GiB Node heap; standalone E2E typecheck also passed in delegated verification |
+| Core, API, relay, shared protocols, desktop-main/assets and web desktop-renderer builds | Passed; renderer emitted existing large-chunk warnings. No services started or Mac package built |
+| Scoped web ESLint | Blocked before linting: existing config circular-JSON failure; identical on unchanged `src/lib/api/tasks.ts`. Config/manifests/lockfile unchanged |
+| KB lint | 40 errors / 105 warnings / 20 info, matching previously recorded baseline; new delivery note has no findings |
+| Independent review / `git diff --check` | Final review found no further actionable issues; whitespace checks passed |
+
+Logs are local under `/tmp/native-delivery/`; no raw desktop content or credentials were collected. Initial shell attempts lacked nested `pnpm`; a temporary Corepack shim supplied the repository-pinned 10.33.0 and builds then passed. One initial web package filter matched nothing and is not counted as a build; the corrected `app-web build:desktop` passed. The new isolated PGlite access-control test initially exceeded the default test-runner timeout under load; it uses the adjacent SQL suite's 60-second test budget, not a changed runtime deadline. No Apple SDK, AppKit/TCC, real provider, signed app or native safety result follows from these checks.
+
 ## Safety remediation: rejected mouse mechanism removed
 
 After the operator's post-deadline new-down counterexample, the unsafe `down.tapPostEvent(proxy)` / returned-up path was removed from both `ClickGuardianNative.swift` and the experiment adapter. Native `execute` now refuses before validation/arming/reservation/allocation/wake; platform acceptance is unconditionally false even if metadata profiles are added. Helper capability explicitly advertises `input:false`; click preparation/handoff and local click approval refuse before spending semantic availability or transferring the worker monitor. Host admission emits protocol-compatible `platformUnaccepted` before reconstruction/probing/transfer. Existing uncertainty remains fenced; no blind cleanup-up, stream-release promotion or lease reset was introduced.
