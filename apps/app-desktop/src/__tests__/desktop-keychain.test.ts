@@ -13,6 +13,19 @@ const existingKeychains = ["/Users/example/Library/Keychains/login.keychain-db",
 function run({ fail = "", pathCertificate = false, exitAfterPrepare = 0, initialKeychains = existingKeychains, missingChain = false, missingBuilder = false } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "desktop-keychain-test-"));
   directories.push(directory);
+  // TMPDIR may be inside a checkout, and NODE_PATH/global paths may contain a
+  // real builder. Keep real Node resolution, but only search fixture-local paths.
+  // Also prevent an ancestor package's type=module from affecting our stubs.
+  writeFileSync(join(directory, "package.json"), JSON.stringify({ type: "commonjs" }));
+  const resolver = join(directory, "fixture-resolution.cjs");
+  writeFileSync(resolver, `
+const Module = require('node:module');
+const { sep } = require('node:path');
+const nodeModulePaths = Module._nodeModulePaths;
+Module._nodeModulePaths = function (from) {
+  return nodeModulePaths.call(this, from).filter(path => path.startsWith(__dirname + sep));
+};
+`);
   // Nested dependency layout ensures app-builder-lib is resolved from builder.
   const builder = join(directory, "apps/app-desktop/node_modules/electron-builder");
   const library = join(builder, "node_modules/app-builder-lib");
@@ -87,6 +100,8 @@ exit "$TEST_EXIT"
     env: {
       ...process.env,
       PATH: `${directory}:${process.env.PATH}`,
+      NODE_PATH: "",
+      NODE_OPTIONS: `--no-global-search-paths --require=${JSON.stringify(resolver)}`,
       TMPDIR: directory,
       CSC_LINK: link,
       CSC_KEY_PASSWORD: password,
