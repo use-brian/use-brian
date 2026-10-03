@@ -2,11 +2,16 @@ import { describe, it, expect } from "vitest";
 
 import {
   INITIAL_UPDATE_STATE,
+  UPDATE_AUTO_INSTALL_IDLE_SECONDS,
   UPDATE_CHECK_INTERVAL_MS,
   UPDATE_INITIAL_CHECK_DELAY_MS,
+  UPDATE_OPEN_CHECK_MIN_INTERVAL_MS,
   describeUpdateState,
   reduceUpdateState,
+  rendererUpdateStatus,
+  shouldAutoInstall,
   shouldCheckInState,
+  shouldCheckOnOpen,
   shouldEnableAutoUpdate,
   type UpdateEvent,
   type UpdateState,
@@ -148,17 +153,66 @@ describe("[COMP:app-desktop/auto-update] Auto-update decision core", () => {
   });
 
   describe("check cadence", () => {
-    it("checks from idle and error only (busy/ready states skip)", () => {
+    it("checks unless electron-updater is busy, including while an update is staged", () => {
       expect(shouldCheckInState({ phase: "idle" })).toBe(true);
       expect(shouldCheckInState({ phase: "error", message: "x" })).toBe(true);
+      expect(shouldCheckInState({ phase: "ready", version: "1.2.3" })).toBe(true);
       expect(shouldCheckInState({ phase: "checking" })).toBe(false);
       expect(shouldCheckInState({ phase: "downloading", version: "1.2.3", percent: 5 })).toBe(false);
-      expect(shouldCheckInState({ phase: "ready", version: "1.2.3" })).toBe(false);
     });
 
-    it("delays the first check past launch and re-checks on a slow cadence", () => {
-      expect(UPDATE_INITIAL_CHECK_DELAY_MS).toBeGreaterThanOrEqual(5_000);
-      expect(UPDATE_CHECK_INTERVAL_MS).toBeGreaterThanOrEqual(60 * 60 * 1000);
+    it("a newer release found while one is staged supersedes it (no restart into the stale one)", () => {
+      const staged = run([{ kind: "available", version: "1.2.3" }, { kind: "downloaded", version: "1.2.3" }]);
+      expect(shouldCheckInState(staged)).toBe(true);
+      const after = [
+        { kind: "checking" },
+        { kind: "available", version: "1.2.4" },
+      ].reduce<UpdateState>((s, e) => reduceUpdateState(s, e as UpdateEvent), staged);
+      expect(after).toEqual({ phase: "downloading", version: "1.2.4", percent: 0 });
+    });
+
+    it("throttles app-open checks but always allows the first", () => {
+      const idle: UpdateState = { phase: "idle" };
+      expect(shouldCheckOnOpen(idle, null, 1_000)).toBe(true);
+      expect(shouldCheckOnOpen(idle, 1_000, 1_000 + UPDATE_OPEN_CHECK_MIN_INTERVAL_MS - 1)).toBe(false);
+      expect(shouldCheckOnOpen(idle, 1_000, 1_000 + UPDATE_OPEN_CHECK_MIN_INTERVAL_MS)).toBe(true);
+      expect(shouldCheckOnOpen({ phase: "checking" }, null, 1_000)).toBe(false);
+    });
+
+    it("checks soon after launch and at least hourly", () => {
+      expect(UPDATE_INITIAL_CHECK_DELAY_MS).toBeLessThanOrEqual(15_000);
+      expect(UPDATE_CHECK_INTERVAL_MS).toBeLessThanOrEqual(60 * 60 * 1000);
+    });
+  });
+
+  describe("renderer status", () => {
+    it("surfaces downloading and ready only", () => {
+      expect(rendererUpdateStatus({ phase: "idle" })).toBeNull();
+      expect(rendererUpdateStatus({ phase: "checking" })).toBeNull();
+      expect(rendererUpdateStatus({ phase: "error", message: "x" })).toBeNull();
+      expect(rendererUpdateStatus({ phase: "downloading", version: "1.2.3", percent: 41.6 })).toEqual({
+        phase: "downloading",
+        version: "1.2.3",
+        percent: 42,
+      });
+      expect(rendererUpdateStatus({ phase: "ready", version: "1.2.3" })).toEqual({ phase: "ready", version: "1.2.3" });
+    });
+  });
+
+  describe("auto-install", () => {
+    const ready: UpdateState = { phase: "ready", version: "1.2.3" };
+    const away = { windowVisible: false, recording: false, systemIdleSeconds: UPDATE_AUTO_INSTALL_IDLE_SECONDS };
+
+    it("installs a staged update only when nobody is using the app", () => {
+      expect(shouldAutoInstall({ state: ready, ...away })).toBe(true);
+      expect(shouldAutoInstall({ state: ready, ...away, windowVisible: true })).toBe(false);
+      expect(shouldAutoInstall({ state: ready, ...away, recording: true })).toBe(false);
+      expect(shouldAutoInstall({ state: ready, ...away, systemIdleSeconds: UPDATE_AUTO_INSTALL_IDLE_SECONDS - 1 })).toBe(false);
+    });
+
+    it("never installs without a staged update", () => {
+      expect(shouldAutoInstall({ state: { phase: "idle" }, ...away })).toBe(false);
+      expect(shouldAutoInstall({ state: { phase: "downloading", version: "1.2.3", percent: 90 }, ...away })).toBe(false);
     });
   });
 });

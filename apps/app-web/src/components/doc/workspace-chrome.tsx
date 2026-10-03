@@ -31,6 +31,7 @@
  */
 
 import { DesktopBrowserCoordinator } from "@/components/computer/desktop-browser-coordinator";
+import { DesktopUpdateChip } from "@/components/chrome/desktop-update-chip";
 import {
   createContext,
   useCallback,
@@ -890,6 +891,7 @@ export function WorkspaceChrome({
           <span className="min-w-0 truncate font-medium">{syncTitle}</span>
           {syncDescription ? <span className="sr-only">{syncDescription}</span> : null}
         </div>
+        <DesktopUpdateChip />
         <BrainIntakeTray workspaceId={workspaceId} />
       </div>
     </WorkspaceFileDropBoundary>

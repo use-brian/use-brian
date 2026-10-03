@@ -187,6 +187,7 @@ let messageBrianPending = false;
 const useBrianListeners = new Set();
 let useBrianPending = false;
 const brianNearbyListeners = new Set();
+const updateStatusListeners = new Set();
 const linkNavigationListeners = new Set();
 const linkDeliveryListeners = new Set();
 let pendingLinkDelivery = null;
@@ -208,6 +209,9 @@ ipcRenderer.on("Use Brian:use-brian", () => {
 ipcRenderer.on("Use Brian:brian-nearby-state", (_event, enabled) => {
   brianNearby = enabled === true;
   for (const listener of brianNearbyListeners) listener(brianNearby);
+});
+ipcRenderer.on("Use Brian:update-status", (_event, status) => {
+  for (const listener of updateStatusListeners) listener(status || null);
 });
 ipcRenderer.on("Use Brian:link-navigation-state", (_event, state) => {
   for (const listener of linkNavigationListeners) listener(state || null);
@@ -282,6 +286,16 @@ const bridge = {
     brianNearbyListeners.add(callback);
     return () => brianNearbyListeners.delete(callback);
   },
+  // Shell self-update chip (footer, beside the sync status): `null`, a
+  // `{ phase: "downloading", version, percent }`, or `{ phase: "ready", version }`.
+  // `installUpdate` applies a staged update now (the app relaunches).
+  getUpdateStatus: () => ipcRenderer.invoke("Use Brian:get-update-status"),
+  onUpdateStatus: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    updateStatusListeners.add(callback);
+    return () => updateStatusListeners.delete(callback);
+  },
+  installUpdate: () => ipcRenderer.send("Use Brian:install-update"),
   setCompanionContext: (workspaceId, assistantId) =>
     ipcRenderer.send("Use Brian:set-companion-context", workspaceId, assistantId),
   // The offline landing's "Retry" button asks the shell to reload the app now.

@@ -134,20 +134,95 @@ export function describeUpdateState(state: UpdateState): UpdateMenuItemState {
   }
 }
 
-// ── Cadence ────────────────────────────────────────────────────
-
-/** Delay before the first background check, so launch never competes with it. */
-export const UPDATE_INITIAL_CHECK_DELAY_MS = 15_000;
-
-/** Cadence of background checks while the app stays running (tray-resident). */
-export const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+// ── Renderer status ────────────────────────────────────────────
 
 /**
- * Whether a background tick should call `checkForUpdates()` in this state:
- * skip while electron-updater is already busy (`checking` / `downloading`) and
- * once an update is `ready` (restart applies it; re-checking the same version
- * would just re-download it).
+ * The slice of update state the app window renders as its footer chip, beside
+ * the sync status. Only states the user can act on or should expect: an
+ * in-flight download (so a restart now would not pick it up yet) and a staged
+ * update (the restart button). Everything else renders nothing.
+ */
+export type RendererUpdateStatus =
+  | { readonly phase: "downloading"; readonly version: string; readonly percent: number }
+  | { readonly phase: "ready"; readonly version: string };
+
+export function rendererUpdateStatus(state: UpdateState): RendererUpdateStatus | null {
+  if (state.phase === "downloading") {
+    return { phase: "downloading", version: state.version, percent: Math.round(state.percent) };
+  }
+  if (state.phase === "ready") return { phase: "ready", version: state.version };
+  return null;
+}
+
+// ── Cadence ────────────────────────────────────────────────────
+
+/** Delay before the launch check, so the first window paint never competes with it. */
+export const UPDATE_INITIAL_CHECK_DELAY_MS = 5_000;
+
+/** Cadence of background checks while the app stays running (tray-resident). */
+export const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Minimum spacing between checks fired by "the user opened the app" signals
+ * (app activate, window focus, wake from sleep). Opening the app always checks,
+ * but alt-tabbing ten times a minute must not hit the release feed ten times.
+ */
+export const UPDATE_OPEN_CHECK_MIN_INTERVAL_MS = 10 * 60 * 1000;
+
+/**
+ * Whether a check should run in this state: skip only while electron-updater
+ * is already busy (`checking` / `downloading`).
+ *
+ * `ready` DOES check. A staged update is not the end of the road: if a newer
+ * release ships while v(N) sits downloaded, refusing to check strands the shell
+ * on v(N) until the user restarts into it, and only then does it discover
+ * v(N+1) (the "restart into an old new update" bug). electron-updater serves a
+ * same-version re-check from its download cache without re-downloading, and the
+ * reducer keeps `ready` sticky unless a different version arrives.
  */
 export function shouldCheckInState(state: UpdateState): boolean {
-  return state.phase === "idle" || state.phase === "error";
+  return state.phase !== "checking" && state.phase !== "downloading";
+}
+
+/** Whether an "app opened" signal should fire a check now (throttled). */
+export function shouldCheckOnOpen(
+  state: UpdateState,
+  lastCheckAt: number | null,
+  now: number,
+): boolean {
+  if (!shouldCheckInState(state)) return false;
+  return lastCheckAt === null || now - lastCheckAt >= UPDATE_OPEN_CHECK_MIN_INTERVAL_MS;
+}
+
+// ── Auto-install ───────────────────────────────────────────────
+
+/** How long the machine must sit idle before a staged update installs itself. */
+export const UPDATE_AUTO_INSTALL_IDLE_SECONDS = 10 * 60;
+
+/** Cadence of the auto-install opportunity probe. */
+export const UPDATE_AUTO_INSTALL_PROBE_MS = 60 * 1000;
+
+export interface AutoInstallInput {
+  readonly state: UpdateState;
+  /** Any app window currently visible on screen. */
+  readonly windowVisible: boolean;
+  /** A dock live recording is latched (the overlay is up). */
+  readonly recording: boolean;
+  /** `powerMonitor.getSystemIdleTime()` in seconds. */
+  readonly systemIdleSeconds: number;
+}
+
+/**
+ * Whether to apply a staged update now, without a click. Only when nobody is
+ * using the app: no visible window, no live recording, and the machine idle
+ * long enough that a relaunch interrupts nothing. Otherwise the footer button
+ * and install-on-quit cover it; a restart is never forced on an active user.
+ */
+export function shouldAutoInstall(input: AutoInstallInput): boolean {
+  return (
+    input.state.phase === "ready" &&
+    !input.windowVisible &&
+    !input.recording &&
+    input.systemIdleSeconds >= UPDATE_AUTO_INSTALL_IDLE_SECONDS
+  );
 }
