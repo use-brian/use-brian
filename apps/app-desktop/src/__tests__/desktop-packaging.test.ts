@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -39,6 +39,29 @@ if ('${command}' === 'spctl') process.exit(${gatekeeperExit});
 }
 
 describe("[COMP:app-desktop/packaging] desktop packaging", () => {
+  it("ships nonempty tray images under dist without the build-resource directory", () => {
+    const root = mkdtempSync(join(tmpdir(), "desktop-tray-test-"));
+    dirs.push(root);
+    const desktop = join(root, "app-desktop");
+    const source = fileURLToPath(new URL("../../", import.meta.url));
+    for (const directory of ["scripts", "src", "build"]) {
+      cpSync(join(source, directory), join(desktop, directory), { recursive: true });
+    }
+    mkdirSync(join(desktop, "dist"));
+    mkdirSync(join(root, "app-web", "public"), { recursive: true });
+    copyFileSync(join(source, "../app-web/public/icon.png"), join(root, "app-web/public/icon.png"));
+    const result = spawnSync(process.execPath, [join(desktop, "scripts/copy-static.mjs")], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    rmSync(join(desktop, "build"), { recursive: true });
+    for (const name of ["icon.png", "trayTemplate.png", "trayTemplate@2x.png"]) {
+      const shipped = readFileSync(join(desktop, "dist/tray", name));
+      expect(shipped).toEqual(readFileSync(join(source, "build", name)));
+      expect(shipped.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+      expect(shipped.readUInt32BE(16)).toBeGreaterThan(0);
+      expect(shipped.readUInt32BE(20)).toBeGreaterThan(0);
+    }
+  });
+
   it("builds the desktop renderer's workspace dependencies before Vite", () => {
     const packageJson = JSON.parse(
       readFileSync(new URL("../../package.json", import.meta.url), "utf8"),

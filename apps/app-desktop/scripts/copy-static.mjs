@@ -7,7 +7,7 @@
 // on any Windows (CI or a build VM). `node` is cross-platform, so this works
 // identically on macOS, Linux, and Windows. Paths resolve relative to this file,
 // not the cwd, so it's robust regardless of where pnpm invokes it.
-import { copyFileSync } from "node:fs";
+import { copyFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,3 +26,10 @@ for (const file of [
 
 // The companion displays the canonical transparent app mark, not a reconstructed SVG.
 copyFileSync(join(pkgRoot, "..", "app-web", "public", "icon.png"), join(pkgRoot, "dist", "brian-logo.png"));
+
+// buildResources are installer inputs, not shipped runtime files. Keep tray
+// assets under dist/** so packaged apps and development load the same images.
+mkdirSync(join(pkgRoot, "dist", "tray"), { recursive: true });
+for (const file of ["icon.png", "trayTemplate.png", "trayTemplate@2x.png"]) {
+  copyFileSync(join(pkgRoot, "build", file), join(pkgRoot, "dist", "tray", file));
+}
