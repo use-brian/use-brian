@@ -2,12 +2,14 @@ import type { DecisionExecutionOperation, DecisionEvaluationProfile } from '../d
 import type { DecisionModelRef } from '../decisions/types.js'
 import type { NativeLlmAdapter, NativeModelInput, NativeSelection } from './types.js'
 
-export const NATIVE_NEXT_ACTION = { id: 'computer.next-action', version: '1', stateVersion: '3', questionVersion: '1' } as const
+export const NATIVE_NEXT_ACTION = { id: 'computer.next-action', version: '1', stateVersion: '4', questionVersion: '1' } as const
 export const NATIVE_VERIFY_PROGRESS = { id: 'computer.verify-progress', version: '1', stateVersion: '3', questionVersion: '1' } as const
 export function approvedNativeProfile(profile: DecisionEvaluationProfile | undefined, model?: DecisionModelRef, operationId: string = NATIVE_NEXT_ACTION.id): boolean {
-  return !!profile && profile.mode === 'hybrid' && profile.status === 'approved' && profile.evidence === 'recorded'
+  const operation = operationId === NATIVE_NEXT_ACTION.id ? NATIVE_NEXT_ACTION
+    : operationId === NATIVE_VERIFY_PROGRESS.id ? NATIVE_VERIFY_PROGRESS : undefined
+  return !!operation && !!profile && profile.mode === 'hybrid' && profile.status === 'approved' && profile.evidence === 'recorded'
     && profile.operationId === operationId && profile.operationVersion === '1'
-    && profile.stateVersion === '3' && profile.questionVersion === '1' && profile.evaluationSegment === 'global'
+    && profile.stateVersion === operation.stateVersion && profile.questionVersion === '1' && profile.evaluationSegment === 'global'
     && (!model || (profile.modelCatalogId === model.catalogId && profile.modelWireId === model.wireId))
 }
 export function createNativeDecisionOperation(input: NativeModelInput, adapter: NativeLlmAdapter, allowPrimary: boolean, operationId: string = NATIVE_NEXT_ACTION.id): DecisionExecutionOperation<NativeSelection> {

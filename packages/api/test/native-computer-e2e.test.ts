@@ -245,6 +245,123 @@ async function pair(overrides: Partial<Pick<NativeGrant, 'targets' | 'allowCaptu
 function command(): NativeCommand { return { protocol: 'native-computer-v1', identity: grant.identity, grantId: grant.grantId, epoch: grant.epoch, commandId: uuid(), deadlineAt: Date.now() + 2000, action: { kind: 'observe', target } } }
 
 describe('P1 native fake-OS end-to-end over loopback HTTP + WebSocket', () => {
+  it.each(['text', 'fixture', 'incomplete', 'denied', 'unknown'] as const)(
+    'configured AX /run: %s with whole-goal evidence, accounting and no replay', async scenario => {
+    const fixtureTask = scenario === 'fixture' || scenario === 'incomplete'
+    const axTarget = { ...target, appId: fixtureTask ? 'com.usebrian.NativeComputerFixture' : 'com.apple.TextEdit' }
+    const objectives = fixtureTask ? [
+      { role: 'AXCheckBox', name: 'Enabled', property: 'value', equals: '1' },
+      { role: 'AXRadioButton', name: 'Formal', property: 'selected', equals: true },
+      { role: 'AXScrollBar', name: 'Position', property: 'value', equals: '0' },
+    ] : [{ role: 'AXTextArea', name: 'Document', property: 'value', equals: 'Hello team' }]
+    helper.listTargets = async () => [axTarget]
+    // Production AX capability boundary: neither input nor capture is available.
+    helper.capabilities = async () => caps
+    const nodes = (seq: number): NativeObservation['nodes'] => {
+      const base = { enabled: true, focused: false, selected: false, sensitive: false, bounds }
+      return fixtureTask ? [
+        { ...base, ref: `toggle-${seq}`, role: 'AXCheckBox', name: 'Enabled', value: effects >= 1 && !(scenario === 'incomplete' && effects === 3) ? '1' : '0', actions: ['invoke'] },
+        { ...base, ref: `formal-${seq}`, role: 'AXRadioButton', name: 'Formal', selected: effects >= 2, actions: ['select'] },
+        { ...base, ref: `scroll-${seq}`, role: 'AXScrollBar', name: 'Position', value: effects >= 3 ? '0' : '1', actions: ['scroll'] },
+      ] : [{ ...base, ref: `document-${seq}`, role: 'AXTextArea', name: 'Document', value: effects ? 'Hello team' : '', actions: ['setValue'] }]
+    }
+    helper.execute = async c => {
+      calls.push(c)
+      if (c.action.kind === 'observe') {
+        await new Promise(resolve => setTimeout(resolve, 2))
+        const seq = observations.length + 1
+        const o: NativeObservation = { id: `ax-${seq}`, identity: c.identity, epoch: c.epoch,
+          target: axTarget, capturedAt: Date.now(), monotonicMs: seq, foreground: true,
+          bounds, displayLayoutVersion: 'fake-layout', completeness: 'complete', nodes: nodes(seq) }
+        observations.push(o)
+        return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: o }
+      }
+      expect(c.action).toMatchObject(fixtureTask
+        ? { kind: ['invoke', 'select', 'scroll'][effects], ...(effects === 2 ? { deltaY: -400 } : {}) }
+        : { kind: 'setValue', text: 'Hello team' })
+      effects++
+      return { commandId: c.commandId, outcome: scenario === 'unknown' ? 'execution_unknown' : 'executed', code: scenario === 'unknown' ? 'helper_error' : 'ok' }
+    }
+    approveAction.mockImplementation(async (c, _signal, context) => {
+      const latest = observations.at(-1)!
+      expect(c.action).toMatchObject({ target: axTarget, observationId: latest.id })
+      expect(context).toMatchObject({ commandId: c.commandId, observationId: latest.id })
+      const action = c.action
+      expect('ref' in action && latest.nodes.some(n => n.ref === action.ref)).toBe(true)
+      if (!fixtureTask) expect(c.action).toMatchObject({ kind: 'setValue', text: 'Hello team' })
+      return scenario !== 'denied'
+    })
+    const requests: ProviderRequest[] = []
+    const provider: LLMProvider = { name: 'synthetic', models: ['configured-ax'], createSession: vi.fn(),
+      stream: async function* (r) {
+        requests.push(r)
+        expect(requests.length).toBeLessThanOrEqual(fixtureTask ? 7 : 2)
+        expect(r).toMatchObject({ nativeStrict: true, allowProviderFallback: false, model: 'configured-ax' })
+        expect(r.httpRetryWindow!.deadline).toBeLessThanOrEqual(Date.now())
+        const content = r.messages[0]!.content as Array<{ type: string; text: string }>
+        expect(content.map(p => p.type)).toEqual(['text'])
+        const input = JSON.parse(content[0]!.text)
+        let reply: unknown
+        if (r.systemPrompt!.includes('Decompose the ENTIRE')) reply = { objectives }
+        else if (r.systemPrompt!.includes('Choose only supplied candidates')) {
+          const kind = ['invoke', 'select', 'scroll'][effects]
+          const candidate = input.candidates.find((c: { action: { kind: string; deltaY?: number } }) =>
+            c.action.kind === kind && (kind !== 'scroll' || c.action.deltaY === -400))
+          expect(candidate).toBeDefined(); reply = { id: candidate.id }
+        } else if (r.systemPrompt!.includes('Assess ALL parts')) {
+          expect(input.observationId).toBe(observations.at(-1)!.id)
+          expect(input.objectives).toEqual(objectives)
+          const complete = effects === (fixtureTask ? 3 : 1)
+          // Even a confident claim with valid current evidence for the other
+          // fields must not hide the regressed first objective.
+          reply = { status: complete ? 'complete' : 'continue', observationId: input.observationId,
+            evidence: complete ? objectives.filter(o => scenario !== 'incomplete' || o.name !== 'Enabled').map(o => ({
+              ref: input.nodes.find((n: { name: string }) => n.name === o.name).ref, property: o.property, equals: o.equals,
+            })) : [] }
+        } else {
+          expect(fixtureTask).toBe(false)
+          reply = { steps: [{ kind: 'setValue', ref: input.nodes[0].ref, text: 'Hello team' }], objectives }
+        }
+        yield { type: 'text_delta', text: JSON.stringify(reply) }
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 }, nativeMetadata: {
+          actualModel: 'configured-ax', usage: { inputTokens: 10, outputTokens: 5 } } }
+      },
+    }
+    const meter = vi.fn(async (_event: Parameters<import('../src/computer-use/model-runtime.js').NativeModelRuntimeOptions['meter']>[0]) => {})
+    const runtime = createNativeComputerModelRuntimeFactory({ localApprovalRequired: true,
+      resolve: async () => ({ provider, model: 'configured-ax', plan: 'enterprise', budgetStatus: 'ok' }),
+      // Existing default text reservation bounds, not expanded test budgets.
+      budget: { tokens: 262144, costUsd: 26.2144, attemptTokens: 32768, attemptCostUsd: 3.2768 }, meter,
+    })
+    app = express(); app.use(express.json())
+    app.use((req, _res, next) => { req.userId = scope.userId; req.authSessionId = authSessionId; next() })
+    app.use(nativeComputerRoutes(service, composeNativeComputerTool(service, runtime)))
+    const path = await pair({ targets: [axTarget], goal: fixtureTask ? 'Enable, select Formal, and scroll up' : 'Write Hello team' })
+    const result = await request(app).post(`${path}/run`).send({}).expect(200)
+    expect(result.body.data).toMatchObject({ outcome: scenario === 'unknown' ? 'execution_unknown'
+      : scenario === 'denied' || scenario === 'incomplete' ? 'paused' : 'completed', actions: fixtureTask ? 3 : 1 })
+    expect(effects).toBe(scenario === 'denied' ? 0 : fixtureTask ? 3 : 1)
+    expect(approveAction).toHaveBeenCalledTimes(fixtureTask ? 3 : 1)
+    expect(calls.some(c => c.action.kind === 'capture' || c.action.kind === 'click')).toBe(false)
+    expect(observations).toHaveLength(fixtureTask ? 4 : scenario === 'denied' || scenario === 'unknown' ? 1 : 2)
+    const settled = meter.mock.calls.map(([e]) => e).filter(e => e.invocationState === 'settled')
+    expect(settled).toHaveLength(requests.length)
+    expect(new Set(settled.map(e => e.attemptId)).size).toBe(requests.length)
+    expect(settled.every(e => e.lane === 'text' && e.model === 'configured-ax' && e.outcome === 'ok'
+      && e.usage?.inputTokens === 10 && e.usage.outputTokens === 5)).toBe(true)
+    // Local uncertainty revokes relay status before receipt publication; the
+    // API must retain the resulting transport uncertainty, never clear it.
+    if (scenario === 'unknown') expect(audits.filter(a => a.length === 5)).toContainEqual([
+      grant.identity.sessionId, calls.at(-1)!.commandId, 'setValue', 'execution_unknown', 'transport_error',
+    ])
+    expect(provider.createSession).not.toHaveBeenCalled()
+    const before = { calls: calls.length, requests: requests.length, accounting: meter.mock.calls.length }
+    expect((await request(app).post(`${path}/run`).send({}).expect(200)).body).toMatchObject({
+      duplicate: true, runState: scenario === 'unknown' ? 'execution_unknown' : 'finished',
+    })
+    expect({ calls: calls.length, requests: requests.length, accounting: meter.mock.calls.length }).toEqual(before)
+  }, 10000)
+
   it.each([true, false])('concrete runtime click/readback with effect capabilities downgraded (counter advances: %s)', async advances => {
     const canvasTarget = { ...target, appId: 'com.usebrian.NativeComputerFixture' }
     const full = { ...caps, input: true, windowCapture: true, capturePermission: 'granted' as const }

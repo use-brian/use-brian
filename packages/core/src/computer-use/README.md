@@ -211,7 +211,7 @@ NODE_OPTIONS=--max-old-space-size=6144 corepack pnpm --filter @use-brian/core ex
 NODE_OPTIONS=--max-old-space-size=6144 corepack pnpm --filter @use-brian/api exec tsc --noEmit
 ```
 
-## Document-only model context (current decision state version 3)
+## Document-only model context (next-action state 4; progress state 3)
 
 New exports: `nativeModelContext(input, objectives?, documentProjection?)`,
 `NativeGoalObjective`, and the readonly `NATIVE_DOCUMENT_APPS` cohort set.
@@ -239,15 +239,17 @@ continue to use full raw observations. Passive content cannot conceal a safety
 finding; non-document goals requiring omitted context must abstain. Completion
 still checks ALL evidence and whole-goal objectives on fresh complete raw AX.
 
-Both Jev/Hydra operations now use `stateVersion: '3'` (operation and question
-versions remain `1`). State includes `objectives` plus `context: { mode:
+Next-action uses `stateVersion: '4'`: directional scroll candidates include
+`deltaY` in decision state. Progress remains `stateVersion: '3'`; its state is
+unchanged. Operation and question versions remain `1`. State includes `objectives` plus `context: { mode:
 'document' | 'full', omittedPassiveNodes, completeness }`; next-action state now
 retains the full fields of the included nodes, including parent refs/focus/actions.
 LLM payloads use the same shared projection and explicit omission metadata.
 Instructions require abstention if omitted context is necessary for any part of
 the goal. All native primary profiles for state versions 1 and 2 fail the authority gate;
-parent evaluation/routing must explicitly approve state version 3 before native
-primary authority is enabled. No profiles are automatically promoted here.
+Next-action also rejects state-version-3 profiles. Parent evaluation/routing must
+explicitly approve the exact operation/state version before native primary
+authority is enabled. No profiles are automatically promoted here.
 
 The 24,000-byte UTF-8 JSON ceiling remains mandatory **after** projection for each
 Hydra request (including questions/request/profile metadata) and each direct LLM
@@ -317,9 +319,9 @@ same-valued duplicate field cannot serve as proof for both. Relabel/reparent/cyc
 changes fail closed. Inference refresh compares canonical parent relationships as
 well as node content/geometry, permitting only genuine ref churn to rebind.
 
-Both operations keep operation/question version 1 but require state version 3.
-State-version-1 and state-version-2 profiles are denied, **not** automatically
-approved or upgraded; parent routing/
+Both operations keep operation/question version 1. Next-action requires state
+version 4; progress requires state version 3. Mismatched profiles are denied,
+**not** automatically approved or upgraded; parent routing/
 evaluation fixtures must migrate explicitly after reviewed evidence. Rebuild core
 declarations before consuming the new types in API. No boot/meter/helper/service/
 shared files were modified. The earlier invalid boot observation mocks were corrected in the previously

@@ -120,6 +120,7 @@ export function createNativeComputerModelRuntimeFactory(options: NativeModelRunt
         if (NATIVE_DOCUMENT_APPS.has(o.target.appId) && action.kind !== 'setValue') return false
         if (action.kind === 'click') return !!o.frame && grant.allowCapture && o.target.appId === 'com.usebrian.NativeComputerFixture'
         if (action.kind === 'focus' || action.kind === 'key') return true
+        if (action.kind === 'scroll' && action.deltaY === 0) return false
         if (!('ref' in action)) return false
         const node = o.nodes.find(n => n.ref === action.ref)
         return !!node && !!nativeSelectorForNode(o, node) && node.enabled && !node.sensitive && node.actions.includes(action.kind as 'setValue')

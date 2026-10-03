@@ -81,6 +81,17 @@ function duplicateFields(o: NativeObservation, primary = '', secondary = 'untouc
 }
 
 describe('native model runtime', () => {
+  it('refuses a zero-delta fixture scroll before exact local approval', async () => {
+    const f = fixture([{ steps: [{ kind: 'scroll', ref: 'r1', deltaY: 0 }] }])
+    f.target.appId = 'com.usebrian.NativeComputerFixture'
+    const runtime = (await f.runtime())!, input = f.input()
+    input.observation.nodes[0]!.role = 'AXScrollBar'
+    input.observation.nodes[0]!.actions = ['scroll']
+    expect(await runtime.llm.plan!(input)).toEqual([])
+    for (const deltaY of [-400, 400]) expect(runtime.policy!.allows({ kind: 'scroll', target: f.target,
+      observationId: input.observation.id, ref: 'r1', deltaY }, input.observation)).toBe(true)
+  })
+
   it.each([-60000, 60000])('provider duration ignores a %s ms wall-clock jump', async jump => {
     const f = fixture([]), input = f.input(), runtime = (await f.runtime())!
     let mono = 100

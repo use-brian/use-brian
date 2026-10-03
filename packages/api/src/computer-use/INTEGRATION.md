@@ -131,8 +131,9 @@ Document-only model projection (TextEdit, System32 Notepad, gedit) retains every
 actionable/focused node, candidate ref, frozen-objective match and ancestor with
 exact values. Full raw observations still drive all safety/freshness/approval and
 whole-goal verification. The post-projection bound is 24,000 UTF-8 JSON bytes;
-fixtures are not projected. Both native decision operations use stateVersion 3
-with separate exact-profile gates; state-version-1 and state-version-2 profiles cannot authorize either.
+fixtures are not projected. Next-action uses stateVersion 4 (directional scroll candidates and `deltaY`);
+progress remains stateVersion 3. Separate exact-profile gates reject next-action
+state-version-3 profiles and any mismatched progress version. No profiles are promoted.
 
 `NativeNodeSelector` (`packages/core/src/computer-use/selector.ts`) uses exact `role`/`name` plus optional `ancestors`: 1–4 exact, contiguous, nearest-parent-first `{role,name}` entries, including any intervening wrappers. Grounding requires a unique match in the complete raw graph and validates the entire parent chain, even beyond the prefix. Frozen objective selectors survive genuine ref churn and remain unchanged on replan; they never use positional indices or persisted opaque refs. Grouped duplicate-field goals can resolve through unique semantic ancestry, but indistinguishable duplicates remain unsupported. Cycles, missing parents, relabelled/reparented or ambiguous/sensitive ancestry are refused. Projection retains all role/name rivals and their ancestors, including rival ancestor-label matches without a target descendant, so it cannot manufacture uniqueness. Each objective needs its own fresh evidence; one duplicate cannot prove two fields.
 

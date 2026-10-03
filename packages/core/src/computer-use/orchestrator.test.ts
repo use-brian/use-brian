@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { NATIVE_PROTOCOL } from '@use-brian/computer-control/protocol.js'
 import type { NativeGrant, NativeObservation, NativeStatus } from '@use-brian/computer-control/protocol.js'
 import { executeDecisionCascade, type DecisionCompletionRoute, type DecisionEvaluationProfile } from '../decisions/hydra.js'
-import { NativeComputerOrchestrator } from './orchestrator.js'
+import { buildNativeCandidates, NativeComputerOrchestrator } from './orchestrator.js'
 import { approvedNativeProfile, createNativeDecisionOperation, createNativeProgressOperation, NATIVE_VERIFY_PROGRESS, NATIVE_NEXT_ACTION } from './decision.js'
 import { createNativeComputerTools } from './tools.js'
 import type { NativeComputerProvider, NativeDecisionRuntime, NativeLlmAdapter, NativeSafetyPolicy, NativeInferenceBudget } from './types.js'
@@ -21,6 +21,41 @@ function fixture() {
   return { provider, llm, policy, options, observation, status }
 }
 describe('native orchestration', () => {
+  it('offers both semantic scroll directions without truncation or policy bypass', () => {
+    const f = fixture(), o = f.observation()
+    o.nodes[0]!.actions = ['scroll']
+    expect(buildNativeCandidates(o, f.policy).map(c => c.action)).toEqual([
+      expect.objectContaining({ kind: 'scroll', deltaY: 400 }),
+      expect.objectContaining({ kind: 'scroll', deltaY: -400 }),
+    ])
+    expect(buildNativeCandidates(o, { ...f.policy, allows: a => a.kind === 'scroll' && a.deltaY < 0 })).toEqual([
+      { id: 'c0', action: expect.objectContaining({ deltaY: -400 }) },
+    ])
+    o.nodes = Array.from({ length: 13 }, (_, i) => ({ ...o.nodes[0]!, ref: `r${i}`, name: `Scroll ${i}` }))
+    expect(buildNativeCandidates(o, f.policy)).toEqual([])
+  })
+  it('retains scroll direction in the bounded decision state', async () => {
+    const f = fixture()
+    f.provider.observe = async () => {
+      const o = f.observation(); o.nodes[0]!.actions = ['scroll']; return o
+    }
+    const run = vi.fn<NativeDecisionRuntime['run']>(async ({ request }) => {
+      expect(request.state).toMatchObject({ candidates: [
+        { id: 'c0', action: 'scroll', ref: 'r', deltaY: 400 },
+        { id: 'c1', action: 'scroll', ref: 'r', deltaY: -400 },
+      ] })
+      throw new Error('stop before dispatch')
+    })
+    const decisionRuntime: NativeDecisionRuntime = {
+      resolveRoute: async () => ({ mode: 'llm_only', operatorOverride: false }),
+      run: async options => { await run(options); throw new Error('unreachable') },
+      observe: async () => { throw new Error('not used') },
+    }
+    expect((await new NativeComputerOrchestrator({ ...f, decisionRuntime }).run(f.options)).outcome).toBe('paused')
+    expect(run).toHaveBeenCalledOnce()
+    expect(f.provider.execute).not.toHaveBeenCalled()
+  })
+
   it('AX-first lifecycle verifies fresh postcondition and never captures', async () => {
     const f = fixture(); const events: string[] = []
     const result = await new NativeComputerOrchestrator(f).run({ ...f.options, onProgress: e => events.push(e.phase) })
@@ -479,7 +514,7 @@ describe('native decision context byte admission', () => {
     expect(f.provider.execute).toHaveBeenCalledTimes(1)
   })
   it.each([false, true])('bounds the full request envelope plus profile at exactly 24000 UTF-8 bytes (progress: %s)', async progress => {
-    const profile: DecisionEvaluationProfile = { id: 'native', version: '1', mode: 'hybrid', operationId: progress ? 'computer.verify-progress' : 'computer.next-action', operationVersion: '1', stateVersion: NATIVE_NEXT_ACTION.stateVersion, questionVersion: '1', modelCatalogId: 'jev', modelWireId: 'pinned', evaluationSegment: 'global', status: 'approved', evidence: 'recorded', totalTimeoutMs: 1000, primaryTimeoutMs: 500, maxAttempts: 2, policy: { padding: '' } }
+    const profile: DecisionEvaluationProfile = { id: 'native', version: '1', mode: 'hybrid', operationId: progress ? 'computer.verify-progress' : 'computer.next-action', operationVersion: '1', stateVersion: (progress ? NATIVE_VERIFY_PROGRESS : NATIVE_NEXT_ACTION).stateVersion, questionVersion: '1', modelCatalogId: 'jev', modelWireId: 'pinned', evaluationSegment: 'global', status: 'approved', evidence: 'recorded', totalTimeoutMs: 1000, primaryTimeoutMs: 500, maxAttempts: 2, policy: { padding: '' } }
     const baseline = contextFixture(progress, ['value'], profile)
     await baseline.run()
     const { request, workspaceId } = vi.mocked(baseline.runtime.run).mock.calls[0]![0]
@@ -503,11 +538,14 @@ describe('native decision gate', () => {
     expect(approvedNativeProfile({ ...profile, questionVersion: '2' })).toBe(false)
     expect(approvedNativeProfile({ ...profile, stateVersion: '1' })).toBe(false)
     expect(approvedNativeProfile({ ...profile, stateVersion: '2' })).toBe(false)
+    expect(approvedNativeProfile({ ...profile, stateVersion: '3' })).toBe(false)
+    expect(approvedNativeProfile({ ...profile, operationId: 'unknown' }, undefined, 'unknown')).toBe(false)
     expect(approvedNativeProfile(profile, { catalogId: 'jev', wireId: 'new' })).toBe(false)
     const f = fixture(); const input = { goal: 'select', observation: f.observation(), candidates: [], signal: f.options.signal, deadlineAt: f.options.deadlineAt }
     const response = { providerId: 'jev', model: { catalogId: 'jev', wireId: 'pinned' }, answers: [{ kind: 'choice' as const, questionId: 'next', value: 'abstain', evidence: { source: 'native_distribution' as const, probabilities: { abstain: 1 } } }] }
     expect(createNativeDecisionOperation(input, f.llm, false).decide(response, { profile }).kind).toBe('follow_up')
     expect(createNativeDecisionOperation(input, f.llm, true).decide(response, { profile }).kind).toBe('complete')
+    expect(createNativeDecisionOperation(input, f.llm, true).decide(response, { profile: { ...profile, stateVersion: '3' } }).kind).toBe('follow_up')
   })
   it.each(['llm_only', 'shadow', 'hybrid'] as const)('composes existing runtime in %s mode, rejecting operatorOverride', async mode => {
     const f = fixture()
@@ -550,8 +588,11 @@ describe('native decision gate', () => {
     const response = { providerId: 'jev', model: { catalogId: 'jev', wireId: 'pinned' }, answers: [{ questionId: 'next', kind: 'choice' as const, value: 'complete', evidence: { source: 'native_distribution' as const, probabilities: { complete: 1 } } }] }
     const op = createNativeProgressOperation(input, f.llm, true)
     expect(op.decide(response, { profile }).kind).toBe('follow_up')
-    const progressProfile = { ...profile, operationId: NATIVE_VERIFY_PROGRESS.id }
+    const progressProfile = { ...profile, operationId: NATIVE_VERIFY_PROGRESS.id, stateVersion: NATIVE_VERIFY_PROGRESS.stateVersion }
+    expect(NATIVE_NEXT_ACTION.stateVersion).toBe('4')
+    expect(NATIVE_VERIFY_PROGRESS.stateVersion).toBe('3')
     expect(op.decide(response, { profile: progressProfile }).kind).toBe('complete')
+    expect(op.decide(response, { profile: { ...progressProfile, stateVersion: '4' } }).kind).toBe('follow_up')
     expect(op.decide(response, { profile: { ...progressProfile, stateVersion: '1' } }).kind).toBe('follow_up')
     expect(op.decide(response, { profile: { ...progressProfile, stateVersion: '2' } }).kind).toBe('follow_up')
     expect(op.decide(response, { profile: { ...progressProfile, status: 'operator_override' } }).kind).toBe('follow_up')
@@ -564,12 +605,12 @@ describe('native decision gate', () => {
     f.llm.verify = vi.fn(async () => ({ result: 'complete', providerId: 'llm', model: { catalogId: 'test', wireId: 'test' } }))
     const seen: string[] = []
     const runtime: NativeDecisionRuntime = {
-      resolveRoute: async ({ operation }) => ({ mode, profile: { ...profile, modelCatalogId: 'pinned', mode: mode === 'shadow' ? 'shadow' : 'hybrid', operationId: operation.id, shadowSampleRate: 1 } }), observe: vi.fn(),
+      resolveRoute: async ({ operation }) => ({ mode, profile: { ...profile, modelCatalogId: 'pinned', mode: mode === 'shadow' ? 'shadow' : 'hybrid', operationId: operation.id, stateVersion: operation.stateVersion, shadowSampleRate: 1 } }), observe: vi.fn(),
       run: ({ request, operation }) => {
         seen.push(request.operation.id)
         const value = request.operation.id === NATIVE_VERIFY_PROGRESS.id ? 'complete' : 'c0'
         return executeDecisionCascade({ request: { ...request, model: { catalogId: 'pinned', wireId: 'pinned' } }, route: { mode,
-          profile: { ...profile, modelCatalogId: 'pinned', mode: mode === 'shadow' ? 'shadow' : 'hybrid', operationId: request.operation.id, shadowSampleRate: 1 },
+          profile: { ...profile, modelCatalogId: 'pinned', mode: mode === 'shadow' ? 'shadow' : 'hybrid', operationId: request.operation.id, stateVersion: request.operation.stateVersion, shadowSampleRate: 1 },
           primary: { id: 'jev', supportsNativeStrict: true, capabilities: { primitives: ['choice'], batch: true, maxOptions: 32, maxQuestions: 1, maxRubricLevels: 0, maxInputTokens: 10000, uncertainty: ['native_distribution'] },
             evaluate: async () => ({ providerId: 'jev', nativeMetadata: { actualModel: 'pinned', usage: { inputTokens: 1, outputTokens: 1 } }, model: { catalogId: 'jev', wireId: 'pinned' }, answers: [{ questionId: 'next', kind: 'choice', value, evidence: { source: 'native_distribution', probabilities: { [value]: 1 } } }] }) },
         }, operation: { ...operation, completeWithLlm: context => operation.completeWithLlm({ ...context, llm: {} as DecisionCompletionRoute }) } })
@@ -616,7 +657,7 @@ describe('native decision gate', () => {
     f.llm.verify = vi.fn()
     const requests: string[] = []
     const runtime: NativeDecisionRuntime = {
-      resolveRoute: async ({ operation }) => ({ mode: 'hybrid', profile: { ...profile, operationId: operation.id } }), observe: vi.fn(),
+      resolveRoute: async ({ operation }) => ({ mode: 'hybrid', profile: { ...profile, operationId: operation.id, stateVersion: operation.stateVersion } }), observe: vi.fn(),
       run: async ({ request, operation }) => {
         requests.push(request.operation.id)
         const state = request.state as { nodes: NativeObservation['nodes']; context: { omittedPassiveNodes: number }; candidates?: unknown[] }
@@ -624,11 +665,11 @@ describe('native decision gate', () => {
         expect(state.nodes.map(n => n.ref)).toEqual(['root', 'r', 'result'])
         expect(state.nodes[1]!.parentRef).toBe('root')
         expect(state.nodes[2]!.value).toBe('ready')
-        expect(request.operation.stateVersion).toBe(NATIVE_NEXT_ACTION.stateVersion)
+        expect(request.operation.stateVersion).toBe(request.operation.id === NATIVE_NEXT_ACTION.id ? '4' : '3')
         const value = request.operation.id === NATIVE_VERIFY_PROGRESS.id ? 'complete' : 'c0'
         if (value === 'c0') expect(state.candidates).toEqual([{ id: 'c0', action: 'select', ref: 'r' }])
-        const disposition = operation.decide({ providerId: 'jev', model: { catalogId: 'jev', wireId: 'pinned' }, answers: [{ questionId: 'next', kind: 'choice', value, evidence: { source: 'native_distribution', probabilities: { [value]: 1 } } }] }, { profile: { ...profile, operationId: request.operation.id } })
-        if (disposition.kind !== 'complete') throw new Error('Expected approved v3 primary')
+        const disposition = operation.decide({ providerId: 'jev', model: { catalogId: 'jev', wireId: 'pinned' }, answers: [{ questionId: 'next', kind: 'choice', value, evidence: { source: 'native_distribution', probabilities: { [value]: 1 } } }] }, { profile: { ...profile, operationId: request.operation.id, stateVersion: request.operation.stateVersion } })
+        if (disposition.kind !== 'complete') throw new Error('Expected exact approved primary')
         return { runId: request.runId, result: operation.validateResult(disposition.result), attempts: 1, path: 'primary_complete' }
       },
     }
