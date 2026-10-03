@@ -18,8 +18,14 @@ import type { GcsFilesClient } from '../files/gcs-client.js'
 import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import { authSessionStore, type AuthSessionStore } from '../db/auth-session-store.js'
+import { AccountTeardownBlockedError, deleteAccountFootprint, type AccountTeardownResult, type AccountTeardownRule } from '../db/account-teardown.js'
 
 type AccountRouteOptions = {
+  /**
+   * Teardown rules for tables an edition adds to the open schema (the hosted
+   * overlay). See db/account-teardown.ts.
+   */
+  teardownRules?: Readonly<Record<string, AccountTeardownRule>>
   linkedAccountStore?: LinkedAccountStore
   /**
    * Shared link-code store for the Settings → Account → Connected accounts
@@ -678,7 +684,7 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
       // Single pooled client wrapping BEGIN/COMMIT. Every statement rolls
       // back together on failure — nothing half-deleted.
       const client = await getPool().connect()
-      let ownedAssistantsDeleted = 0
+      let removed: AccountTeardownResult = { mode: 'deleted', workspacesDeleted: 0, assistantsDeleted: 0 }
       try {
         await client.query('BEGIN')
 
@@ -699,24 +705,7 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
           ],
         )
 
-        // Delete solo-owned assistants (owner + zero other members).
-        // Cascades through all assistant-scoped children via migration 007.
-        const solo = await client.query(
-          `DELETE FROM assistants
-           WHERE owner_user_id = $1
-             AND NOT EXISTS (
-               SELECT 1 FROM assistant_members
-               WHERE assistant_id = assistants.id
-                 AND user_id <> $1
-             )`,
-          [userId],
-        )
-        ownedAssistantsDeleted = solo.rowCount ?? 0
-
-        // Finally, the user itself. Everything else (memberships in OTHER
-        // team assistants, personal usage_tracking, memories in other
-        // assistants, etc.) cascades via migration 007.
-        await client.query(`DELETE FROM users WHERE id = $1`, [userId])
+        removed = await deleteAccountFootprint(client, userId, options.teardownRules)
 
         await client.query('COMMIT')
       } catch (err) {
@@ -733,11 +722,21 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
         )
       }
       console.log(
-        `[account-delete] Deleted user ${userId}, ${ownedAssistantsDeleted} assistants cascaded`,
+        `[account-delete] ${removed.mode} user ${userId}: ${removed.workspacesDeleted} solo workspaces, ${removed.assistantsDeleted} other solo assistants`,
       )
 
       res.status(204).end()
     } catch (err) {
+      if (err instanceof AccountTeardownBlockedError) {
+        // A reference the teardown rule could not resolve. Not something
+        // the user can fix: log which tables refused (names only) so the
+        // rule can be extended, and keep the client on its error branch.
+        console.error(
+          `[account-delete] blocked for user ${userId}: ${err.blockers.map((b) => `${b.step}: ${b.error}`).join(' | ')}`,
+        )
+        res.status(500).json({ error: 'Failed to delete account', code: err.code })
+        return
+      }
       console.error('Delete account error:', err)
       res.status(500).json({ error: 'Failed to delete account' })
     }

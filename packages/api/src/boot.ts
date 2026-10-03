@@ -324,6 +324,7 @@ import {
 } from './sandbox/relay-transport.js'
 import { feedbackRoutes } from './routes/feedback.js'
 import { accountRoutes, accountAvatarPublicRoutes } from './routes/account.js'
+import type { AccountTeardownRule } from './db/account-teardown.js'
 import { memoryRoutes } from './routes/memories.js'
 import { createEntityMergeStore } from './db/entity-merge-store.js'
 import { assistantRoutes } from './routes/assistants.js'
@@ -1223,6 +1224,14 @@ export interface OpenApiPorts {
    * "Account linking".
    */
   getWhatsappOfficialNumber?: () => Promise<string | null>
+  /**
+   * Account-teardown rules for tables an edition adds on top of the open
+   * schema. The teardown fails closed on any unclassified foreign key to
+   * `users`, so an overlay that references `users` must classify its
+   * columns here. See docs/architecture/features/privacy-controls.md ->
+   * "Teardown order".
+   */
+  accountTeardownRules?: Readonly<Record<string, AccountTeardownRule>>
 
   /**
    * BYO-storage signer for the PUBLIC shared-page recording playback URL
@@ -5942,6 +5951,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     linkCodeStore,
     getTelegramBotUsername,
     getWhatsappOfficialNumber: ports.getWhatsappOfficialNumber,
+    teardownRules: ports.accountTeardownRules,
     blobClient: filesBlobClient ?? undefined,
     filesResolver: filesResolver ?? undefined,
     workspaceMembership: getWorkspaceMembershipWithClearanceSystem,
