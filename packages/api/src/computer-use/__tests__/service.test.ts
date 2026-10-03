@@ -4,7 +4,7 @@ import { query } from '../../db/client.js'
 import { NativeComputerService } from '../service.js'
 import type { NativeGrant, NativeCommand } from '@use-brian/computer-control/protocol.js'
 import { composeNativeComputerTool } from '../composition.js'
-import type { ToolContext } from '@use-brian/core'
+import type { Tool, ToolContext } from '@use-brian/core'
 import { createHash } from 'node:crypto'
 const q=vi.mocked(query)
 const scope={userId:'user',workspaceId:'workspace',assistantId:'assistant',conversationId:'conversation',taskId:'task'}
@@ -60,7 +60,8 @@ it('run rejects another auth session and returns metadata for consumed grants wi
  expect(execute).not.toHaveBeenCalled()
 })
 it('claim uses a durable atomic once-only latch and block policy denies',async()=>{
- const { s, grant } = await paired(true); vi.spyOn(s,'assertCurrent').mockResolvedValue()
+ const { s } = await paired(true); const grant=(await s.binding(scope))!.grant
+ vi.spyOn(s,'assertCurrent').mockResolvedValue()
  q.mockReset()
  q.mockResolvedValueOnce({rows:[{policy:'block'}]} as never)
  await expect(s.claimRun(scope,grant)).rejects.toThrow('blocked')
@@ -108,6 +109,130 @@ it('full-control grants still dispatch scoped AX and POST run executes its tool'
  const execute=vi.fn().mockResolvedValue({data:{outcome:'completed'}})
  expect(await s.run('session','user','auth',{execute} as never,new AbortController().signal)).toMatchObject({data:{outcome:'completed'}})
  expect(execute).toHaveBeenCalledOnce()
+})
+
+// Exercise the real service.run -> composition seam with two separately paired
+// devices. SQL/auth are fixtures; resolution, claims and teardown are production.
+async function pairedSessions(sameGoal: boolean, sameTask: boolean) {
+ const s = service(), verifier = 'v'.repeat(43)
+ const grants = ['A','B'].map(label => ({
+  protocol:'native-computer-v1' as const,
+  identity:{deploymentId:'deployment',deviceId:`device-${label}`,sessionId:`session-${label}`,userId:scope.userId,workspaceId:scope.workspaceId,conversationId:scope.conversationId,taskId:sameTask ? scope.taskId : `task-${label}`},
+  grantId:`grant-${label}`,epoch:1,expiresAt:Date.now()+60_000,
+  targets:[{appId:'com.apple.TextEdit',processId:1,processInstanceId:`p-${label}`,windowId:'w',windowInstanceId:`wi-${label}`}],
+  allowControl:true,allowCapture:false,requester:'user',goal:sameGoal ? 'Write a greeting' : `Write greeting ${label}`,
+ }))
+ const rows = new Map(grants.map(g => [g.identity.sessionId, {
+  ...scope,taskId:g.identity.taskId,id:g.identity.sessionId,deviceId:g.identity.deviceId,deploymentId:'deployment',
+  challenge:createHash('sha256').update(verifier).digest('base64url'),epoch:g.epoch,state:'active',
+  expiresAt:new Date(g.expiresAt),grantId:g.grantId,authSessionId:'auth',runState:null as string|null,revoked:false,
+ }]))
+ q.mockImplementation(async (sql,params) => {
+  const text=String(sql), row=rows.get(String(params?.[0]))
+  if(text.startsWith('SELECT id,user_id')) return {rows:row && !row.revoked ? [{...row}] : []} as never
+  if(text.startsWith('SELECT 1 FROM sessions')) return {rows:[{}]} as never
+  if(text.startsWith('SELECT policy')) return {rows:[]} as never
+  if(text.includes("SET run_state='running'")) {
+   if(!row || row.revoked || row.runState || row.state!=='active' || row.grantId!==params?.[1]) return {rows:[]} as never
+   row.runState='running'
+  }
+  if(text.includes('SET revoked_at=now()') && row) row.revoked=true
+  if(text.includes('SET run_state=CASE') && row) row.runState=String(params?.[2])
+  return {rows:row ? [{id:row.id}] : []} as never
+ })
+ const relay=vi.spyOn(s,'relay').mockResolvedValue({ok:true})
+ for(const grant of grants) await s.exchange(grant.identity.sessionId,'user',verifier,grant)
+ q.mockClear();relay.mockClear()
+ const context:ToolContext={userId:scope.userId,workspaceId:scope.workspaceId,assistantId:scope.assistantId,sessionId:scope.conversationId,appId:'test',channelType:'web',channelId:'session-B',activeCapabilities:new Set(['native_computer']),abortSignal:new AbortController().signal}
+ return {s,grants,rows,verifier,relay,context}
+}
+
+it.each([[true,true],[true,false],[false,true],[false,false]])('direct run B stays on B (same goal=%s, same task=%s)',async(sameGoal,sameTask)=>{
+ const {s,grants,context,relay}=await pairedSessions(sameGoal,sameTask)
+ const runtime=vi.fn().mockResolvedValue(null),claim=vi.spyOn(s,'claimRun'),finish=vi.spyOn(s,'finishRun')
+ const tool=composeNativeComputerTool(s,runtime)
+ await s.run('session-B','user','auth',tool,context.abortSignal)
+ expect(claim).toHaveBeenCalledTimes(1)
+ expect(claim.mock.calls[0][1]).toEqual(grants[1])
+ expect(claim.mock.calls[0][0].taskId).toBe(grants[1].identity.taskId)
+ expect(runtime).toHaveBeenCalledTimes(1)
+ expect(runtime.mock.calls[0][1]).toEqual(grants[1])
+ expect(finish).toHaveBeenCalledExactlyOnceWith('session-B','user',false)
+ expect(relay).toHaveBeenCalledExactlyOnceWith('/sessions/session-B','DELETE')
+ expect(q.mock.calls.filter(([sql])=>String(sql).includes("SET run_state='running'")).map(([,params])=>params?.[0])).toEqual(['session-B'])
+})
+
+it.each([[true,true],[true,false],[false,true],[false,false]])('generic ambiguous grants deny before claim or inference (same goal=%s, same task=%s)',async(sameGoal,sameTask)=>{
+ const {s,grants,context}=await pairedSessions(sameGoal,sameTask)
+ const runtime=vi.fn(),claim=vi.spyOn(s,'claimRun')
+ // channelId and model-supplied session fields cannot select a device.
+ const result=await composeNativeComputerTool(s,runtime).execute({goal:grants[1].goal,sessionId:'session-B'},context)
+ expect(result.isError).toBe(true)
+ expect(claim).not.toHaveBeenCalled();expect(runtime).not.toHaveBeenCalled()
+})
+
+it('generic task filters still disambiguate and empty/foreign task scopes deny',async()=>{
+ const {s,grants}=await pairedSessions(true,false)
+ expect((await s.binding(scope,['task-B']))?.grant).toEqual(grants[1])
+ expect(await s.binding(scope,[])).toBeNull()
+ expect(await s.binding(scope,['foreign'])).toBeNull()
+})
+
+it.each(['revoke-before','revoke-during','replace-before','replace-during'] as const)('pinned run never falls back to A on %s',async mode=>{
+ const {s,grants,verifier,context}=await pairedSessions(true,true)
+ const runtime=vi.fn(),claim=vi.spyOn(s,'claimRun'),composed=composeNativeComputerTool(s,runtime)
+ const invalidate=async()=>{
+  if(mode.startsWith('revoke')) await s.revoke('session-B','user')
+  else {
+   // Even replacement with identical wire identity must not revive the old pin.
+   await s.exchange('session-B','user',verifier,{...grants[1],goal:'Replacement goal'})
+  }
+ }
+ const tool={...composed,async execute(input:unknown,ctx:ToolContext){
+  if(mode.endsWith('before')) await invalidate()
+  else vi.spyOn(s,'authorized').mockImplementationOnce(async()=>{await invalidate();return true})
+  return composed.execute(input,ctx)
+ }}
+ expect(await s.run('session-B','user','auth',tool,context.abortSignal)).toMatchObject({isError:true})
+ expect(claim).not.toHaveBeenCalled();expect(runtime).not.toHaveBeenCalled()
+ // A remained eligible, so a fallback would have reached the claim.
+ await s.revoke('session-B','user')
+ expect((await s.binding(scope))?.grant).toEqual(grants[0])
+})
+
+it.each([false,true])('run context pin is object-specific and removed on completion (throws=%s)',async throws=>{
+ const {s,grants,context}=await pairedSessions(true,true)
+ let retained!:ToolContext
+ const tool={async execute(_input:unknown,ctx:ToolContext){
+  retained=ctx
+  expect((await s.binding(scope,undefined,ctx))?.grant).toEqual(grants[1])
+  expect(await s.binding(scope,undefined,{...ctx})).toBeNull()
+  expect(await s.binding(scope,[],ctx)).toBeNull()
+  expect(await s.binding({...scope,assistantId:'other'},undefined,ctx)).toBeNull()
+  if(throws) throw new Error('test failure')
+  return {data:'done'}
+ }} as Tool
+ const run=s.run('session-B','user','auth',tool,context.abortSignal)
+ if(throws) await expect(run).rejects.toThrow('test failure')
+ else await run
+ expect(await s.binding(scope,undefined,retained)).toBeNull()
+ await s.revoke('session-B','user')
+ expect((await s.binding(scope))?.grant).toEqual(grants[0])
+ expect(await s.binding(scope,undefined,retained)).toBeNull() // No late fallback to sole remaining A.
+ expect(await s.binding(scope,undefined,{...retained})).toBeNull() // Middleware cloning cannot turn a direct run into generic resolution.
+ expect(await s.binding(scope,undefined,{...context,channelType:'native-computer',channelId:'session-A'})).toBeNull() // Channel metadata is not a pin.
+})
+
+it('claim rejects a replacement grant after policy authorization awaits',async()=>{
+ const {s,grants,verifier}=await pairedSessions(true,true)
+ const tool={async execute(_input:unknown,ctx:ToolContext){
+  const original=(await s.binding(scope,undefined,ctx))!.grant
+  vi.spyOn(s,'assertPolicy').mockImplementationOnce(async()=>{await s.exchange('session-B','user',verifier,grants[1])})
+  expect(await s.claimRun(scope,original)).toBe(false)
+  return {data:'done'}
+ }} as Tool
+ await s.run('session-B','user','auth',tool,new AbortController().signal)
+ expect(q.mock.calls.some(([sql])=>String(sql).includes("SET run_state='running'"))).toBe(false)
 })
 
 it.each(['auth','capability','policy','digest','epoch','grantId','commandId','deadlineAt','foreign','success'] as const)('pending execution revalidation: %s', async mode => {

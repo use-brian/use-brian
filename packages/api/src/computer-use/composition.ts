@@ -25,7 +25,7 @@ export function composeNativeComputerTool(service: NativeComputerService, runtim
   return {...unavailable,async execute(input:unknown,context:ToolContext) {
     if(!context.workspaceId || !context.activeCapabilities?.has('native_computer') || !runtimeFactory || context.abortSignal.aborted) return {data:'Native computer unavailable',isError:true}
     await context.authority?.assertCurrent()
-    const binding=await service.binding({userId:context.userId,workspaceId:context.workspaceId,assistantId:context.assistantId,conversationId:context.sessionId},context.taskAuthority?.taskIds)
+    const binding=await service.binding({userId:context.userId,workspaceId:context.workspaceId,assistantId:context.assistantId,conversationId:context.sessionId},context.taskAuthority?.taskIds,context)
     if(!binding || (input as {goal?:unknown})?.goal!==binding.grant.goal) return {data:'Native task must match the locally approved goal',isError:true}
     const {scope,grant}=binding; const id=grant.identity.sessionId
     if(!await service.claimRun(scope,grant)) return {data:{sessionId:id,duplicate:true,runState:'claimed'},isError:false}

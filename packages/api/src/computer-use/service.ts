@@ -92,6 +92,12 @@ export class NativeComputerService {
   // allowControl=false is a one-shot LOCAL inspector grant. Remote read-only model tasks
   // were never implemented; pairing does not authorize any API worker or inference.
   private readonly grants = new Map<string, NativeGrant>()
+  // Only run() can bind an exact context to a requested session. Renderer/model
+  // fields (including channelId) are not authority, and a lost pin never falls back.
+  private readonly runBindings = new WeakMap<ToolContext, { grant: NativeGrant; scope: NativeScope }>()
+  // Remember only object provenance after cleanup, never grant authority. A late
+  // use of a completed direct-run context must not become generic resolution.
+  private readonly runContexts = new WeakSet<ToolContext>()
   constructor(private config: { relayUrl: string; relaySecret: string; jwtSecret: string; deploymentId: string }) {}
   async relay(path: string, method = 'GET', body?: unknown): Promise<unknown> {
     const response = await fetch(`${this.config.relayUrl.replace(/\/$/,'')}/internal/native-computer${path}`, { method, headers: { 'x-relay-secret': this.config.relaySecret, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(35_000) })
@@ -195,18 +201,37 @@ export class NativeComputerService {
     await query(`UPDATE native_computer_sessions SET state='execution_unknown',revoked_at=COALESCE(revoked_at,now()),epoch=epoch+1 WHERE id=$1 AND user_id=$2`,[id,userId])
     await this.relay(`/sessions/${id}`,'DELETE').catch(()=>{})
   }
-  async binding(scope: Omit<NativeScope,'taskId'>, taskIds?: readonly string[]) {
-    for (const [id,grant] of this.grants) {
-      if (grant.expiresAt<=Date.now()) { this.grants.delete(id); continue }
-      if (!grant.allowControl) continue
+  async binding(scope: Omit<NativeScope,'taskId'>, taskIds?: readonly string[], context?: ToolContext) {
+    const pinned = context && this.runBindings.get(context)
+    // A middleware clone loses the object pin; native-channel metadata can only
+    // deny that request, never supply authority or enable generic fallback.
+    if (context && !pinned && (this.runContexts.has(context) || context.channelType === 'native-computer')) return null
+    const matchesScope = (s: NativeScope) => s.userId === scope.userId && s.workspaceId === scope.workspaceId
+      && s.assistantId === scope.assistantId && s.conversationId === scope.conversationId
+      && (!taskIds || taskIds.includes(s.taskId))
+    if (pinned && !matchesScope(pinned.scope)) return null
+    let selected: { grant: NativeGrant; scope: NativeScope } | null = null
+    const entries = pinned ? [[pinned.grant.identity.sessionId, pinned.grant] as const] : this.grants
+    for (const [id,grant] of entries) {
+      const live = () => this.grants.get(id) === grant && grant.allowControl && grant.expiresAt > Date.now()
+        && (!pinned || this.runBindings.get(context!) === pinned)
+      if (grant.expiresAt <= Date.now() && this.grants.get(id) === grant) this.grants.delete(id)
+      if (!live()) continue
       const i=grant.identity
       if(i.userId!==scope.userId || i.workspaceId!==scope.workspaceId || i.conversationId!==scope.conversationId) continue
       const row=await this.get(id,scope.userId).catch(()=>null)
-      if (!row) { this.grants.delete(id); continue }
-      if(row.assistantId!==scope.assistantId || row.state!=='active' || (taskIds && !taskIds.includes(row.taskId))) continue
-      return {grant,scope:{...scope,taskId:row.taskId}}
+      if (!row && this.grants.get(id) === grant) this.grants.delete(id)
+      // Recheck after authorization awaits: revoke/replacement must not revive a
+      // cached grant or redirect a direct run to another eligible device.
+      if (!row || !live() || !matchesScope(row) || row.state!=='active'
+        || row.id !== i.sessionId || row.taskId !== i.taskId || row.deviceId !== i.deviceId
+        || row.deploymentId !== i.deploymentId || row.grantId !== grant.grantId || row.epoch !== grant.epoch
+        || (pinned && row.taskId !== pinned.scope.taskId)) continue
+      if (selected) return null // Generic assistant execution needs an unambiguous grant.
+      selected = {grant,scope:{...scope,taskId:row.taskId}}
     }
-    return null
+    return selected && this.grants.get(selected.grant.identity.sessionId) === selected.grant
+      && selected.grant.expiresAt > Date.now() ? selected : null
   }
   async assertCurrent(scope:NativeScope,id:string) {
     const row=await this.get(id,scope.userId)
@@ -224,7 +249,7 @@ export class NativeComputerService {
     await this.assertCurrent(scope,grant.identity.sessionId)
     await this.assertPolicy(scope)
     const current = this.grants.get(grant.identity.sessionId)
-    if (!grant.allowControl || !current?.allowControl || current.grantId !== grant.grantId || current.epoch !== grant.epoch || !sameIdentity(current.identity, grant.identity)) return false
+    if (!grant.allowControl || current !== grant || !current.allowControl || current.grantId !== grant.grantId || current.epoch !== grant.epoch || !sameIdentity(current.identity, grant.identity)) return false
     const r=await query(`UPDATE native_computer_sessions SET run_state='running' WHERE id=$1 AND grant_id=$2 AND run_state IS NULL AND state='active' AND revoked_at IS NULL AND expires_at>now() RETURNING id`,[grant.identity.sessionId,grant.grantId])
     return r.rows.length>0
   }
@@ -245,10 +270,15 @@ export class NativeComputerService {
     if(row.runState) return {sessionId:id,duplicate:true,runState:row.runState}
     await this.get(id,userId)
     const grant=this.grants.get(id)
-    if(!grant || grant.grantId!==row.grantId) throw new Error('Local grant unavailable')
+    if(!grant || grant.grantId!==row.grantId || grant.epoch!==row.epoch
+      || !sameIdentity(grant.identity, { deploymentId:row.deploymentId,deviceId:row.deviceId,sessionId:row.id,
+        userId:row.userId,workspaceId:row.workspaceId,conversationId:row.conversationId,taskId:row.taskId })) throw new Error('Local grant unavailable')
     if (!grant.allowControl) return {sessionId:id,data:{outcome:'unsupported',reason:'local_inspector_only'},isError:true}
     const context:ToolContext={userId,workspaceActorUserId:userId,workspaceId:row.workspaceId,assistantId:row.assistantId,sessionId:row.conversationId,appId:'native-computer',channelType:'native-computer',channelId:id,activeCapabilities:new Set(['native_computer']),abortSignal:signal}
-    return {sessionId:id,...await tool.execute({goal:grant.goal},context)}
+    this.runContexts.add(context)
+    this.runBindings.set(context, { grant, scope: { userId, workspaceId: row.workspaceId, assistantId: row.assistantId, conversationId: row.conversationId, taskId: row.taskId } })
+    try { return {sessionId:id,...await tool.execute({goal:grant.goal},context)} }
+    finally { this.runBindings.delete(context) }
   }
 
   /** Completion can arrive after cancellation/revocation; retain it against the

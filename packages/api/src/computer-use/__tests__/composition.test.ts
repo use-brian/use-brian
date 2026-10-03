@@ -23,6 +23,17 @@ it('Start and chat share the durable claim and dispose wiring after completion',
  await tool.execute({goal:'approved'},context)
  expect(runtime).toHaveBeenCalledTimes(1)
 })
+it('passes the exact context and task filter to service-owned binding; a denial never claims or resolves runtime',async()=>{
+ const service={binding:vi.fn().mockResolvedValue(null),claimRun:vi.fn()}
+ const runtime=vi.fn(),tool=composeNativeComputerTool(service as unknown as NativeComputerService,runtime)
+ const context:ToolContext={userId:'u',workspaceId:'w',assistantId:'a',sessionId:'c',appId:'native-computer',channelType:'native-computer',channelId:'requested-session',activeCapabilities:new Set(['native_computer']),abortSignal:new AbortController().signal,
+  taskAuthority:{kind:'realtime_thread_target',targetId:'target',channelType:'web',channelRef:'channel',threadRef:'thread',taskIds:['task-B'],expiresAt:new Date(Date.now()+60_000).toISOString()}}
+ expect((await tool.execute({goal:'approved',sessionId:'other-session'},context)).isError).toBe(true)
+ expect(service.binding).toHaveBeenCalledExactlyOnceWith({userId:'u',workspaceId:'w',assistantId:'a',conversationId:'c'},['task-B'],context)
+ expect(service.binding.mock.calls[0][2]).toBe(context)
+ expect(service.claimRun).not.toHaveBeenCalled();expect(runtime).not.toHaveBeenCalled()
+ expect(capture.construct).not.toHaveBeenCalled()
+})
 it('model goal cannot substitute for the locally approved goal',async()=>{
  const service={binding:vi.fn().mockResolvedValue({grant:{goal:'approved'}}),claimRun:vi.fn()}
  const runtime=vi.fn()

@@ -113,7 +113,11 @@ frames, goal or generated text is included in these usage records.
 
 Binding resolves user/workspace/assistant/conversation from ToolContext, not
 model IDs; if taskAuthority exists its task IDs further constrain the binding.
-Exactly one live native session per conversation is allowed. Raw grant remains
+Direct `/run` requests retain the exact session/grant selected by the authenticated
+route through a service-owned context binding. Revocation, replacement or a cloned
+native-channel context cannot fall back to another device. Generic assistant-tool
+resolution requires one unambiguous eligible grant after task filtering; multiple
+eligible grants refuse before inference or run claiming. Raw grant remains
 in API-process memory only. Restart requires fresh local consent; multi-instance
 API needs sticky session routing (no serialized grant fallback). Model goal must
 exactly equal the locally approved grant goal; local grant requester/task text
