@@ -11,10 +11,9 @@
  * (`files-api.ts`) stitches the two together, and is storage-backend agnostic
  * because both clients satisfy the same `GcsFilesClient` interface.
  *
- * Auth: always bring-your-own. A customer access-key/secret-key pair is passed
- * in explicitly and handed straight to the SDK — there is no ambient/default
- * S3 identity (unlike GCS's ADC path). The secret rides inside the opaque
- * `S3Credentials` object and is never logged.
+ * Auth: workspace bindings pass explicit customer credentials. Deployment
+ * defaults may omit credentials to use the AWS SDK default chain (IAM roles,
+ * web identity, standard AWS env credentials). Secrets are never logged.
  *
  * The client is a thin wrapper around `@aws-sdk/client-s3` — the returned
  * `GcsFilesClient` lets tests substitute an in-memory fake (see
@@ -70,12 +69,12 @@ function loadSdk(): Promise<S3Sdk> {
 /**
  * A customer S3 access-key pair. Only `accessKeyId` is meaningfully
  * identifying; `secretAccessKey` is the signing secret and rides along without
- * ever being logged. Extra fields (e.g. a session token) pass through via the
- * index signature.
+ * ever being logged. Temporary credentials may include a session token.
  */
 export type S3Credentials = {
   accessKeyId: string
   secretAccessKey: string
+  sessionToken?: string
   [k: string]: unknown
 }
 
@@ -91,7 +90,8 @@ export type S3ClientOptions = {
    * this; AWS does not. Defaults to true whenever a custom `endpoint` is set.
    */
   forcePathStyle?: boolean
-  credentials: S3Credentials
+  /** Omit only for deployment defaults to use the AWS SDK credential chain. */
+  credentials?: S3Credentials
 }
 
 /** Map our workspace-scoped metadata onto S3 user metadata (lowercase keys, ASCII). */
@@ -141,10 +141,13 @@ export function createS3FilesClient({
           region: region || 'us-east-1',
           ...(endpoint ? { endpoint } : {}),
           forcePathStyle: forcePathStyle ?? Boolean(endpoint),
-          credentials: {
-            accessKeyId: credentials.accessKeyId,
-            secretAccessKey: credentials.secretAccessKey,
-          },
+          ...(credentials ? {
+            credentials: {
+              accessKeyId: credentials.accessKeyId,
+              secretAccessKey: credentials.secretAccessKey,
+              ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
+            },
+          } : {}),
         })
         return { sdk, s3 }
       })()
