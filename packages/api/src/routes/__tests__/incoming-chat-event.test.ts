@@ -157,7 +157,10 @@ describe('route persistence boundaries', () => {
     }
     expect(body('export async function findOrCreateSession')).toContain('findOrCreateSessionInternal(')
     expect(body('async function findOrCreateSessionInternal')).toContain('insertSession(')
-    for (const loader of ['async function insertSession', 'export async function findSessionByChannel', 'export async function findSessionById']) {
+    // findSessionById is likewise a wrapper (it touches last_active_at); its
+    // projection lives in readSessionById.
+    expect(body('export async function findSessionById')).toContain('readSessionById(')
+    for (const loader of ['async function insertSession', 'export async function findSessionByChannel', 'export async function readSessionById']) {
       const implementation = body(loader)
       for (const field of ['effectiveClearance', 'contextGroupId', 'contextProjectId', 'contextCompartments']) {
         expect(implementation).toContain(`as "${field}"`)
