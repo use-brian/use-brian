@@ -1,6 +1,44 @@
 import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
+  workspaceSearch: {
+    "title": "搜尋工作空間",
+    "shortcut": "搜尋 (⌘/Ctrl+K)",
+    "placeholder": "搜尋 {workspace} 或提問",
+    "blank": "搜尋工作空間內容，或在新的私人對話中向助理提問。",
+    "all": "全部",
+    "loading": "搜尋中…",
+    "empty": "找不到相符項目。你可以向助理提問。",
+    "error": "無法完成搜尋。你的輸入已保留。",
+    "partial": "搜尋未完成。部分來源暫時無法使用。",
+    "retry": "重試",
+    "ask": "私下向 {assistant} 提問",
+    "privateHint": "開始新的個人對話。只有選擇提問時才會傳送。",
+    "assistantLoading": "正在載入助理…",
+    "noAssistant": "沒有可存取的預設助理。",
+    "setup": "設定助理",
+    "open": "開啟",
+    "preview": "預覽",
+    "back": "返回搜尋結果",
+    "close": "關閉搜尋",
+    "more": "載入更多",
+    "unavailable": "此項目已無法使用。",
+    "selectPreview": "選擇結果以預覽。",
+    "recordTitle": "記錄",
+    "assistantUnavailable": "此助理已無法使用。訊息已保留為未傳送的草稿。",
+    "linkShortcut": "連結 (⌘/Ctrl+Shift+K)",
+    "families": {
+        "pages": "頁面",
+        "knowledge": "知識與記憶",
+        "records": "記錄",
+        "tasks": "任務",
+        "files": "檔案與錄音",
+        "office": "Office",
+        "conversations": "對話",
+        "workflows": "工作流程"
+    }
+},
+
   mobileAuth: {
     "title": "登入 Brian 行動版？",
     "description": "僅在您自己的手機上開始登入時繼續。這將允許行動應用程式存取您的 Brian 帳號。",

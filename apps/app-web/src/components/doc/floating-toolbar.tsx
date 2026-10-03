@@ -138,6 +138,7 @@ export function ToolbarButtons({
 }) {
   const t = useT().docPage.floatingToolbar;
   const tc = useT().comments;
+  const searchCopy = useT().workspaceSearch;
   const [linkPopoverOpen, setLinkPopoverOpen] = useState(false);
   const [linkUrl, setLinkUrl] = useState("");
 
@@ -147,13 +148,13 @@ export function ToolbarButtons({
     setLinkPopoverOpen(true);
   };
 
-  // Cmd/Ctrl-K opens the link popover over the active selection — the
+  // Cmd/Ctrl-Shift-K opens the link popover over the active selection — the
   // Notion shortcut. Bound at the document level (the bubble menu only
   // mounts while a selection exists, so the handler is naturally scoped to
   // "there is something selected"). StarterKit owns Cmd-B/I/E for the marks.
   useEffect(() => {
     function onKey(e: globalThis.KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+      if (!e.isComposing && !e.repeat && e.shiftKey && !e.altKey && (e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         if (editor.state.selection.empty) return;
         e.preventDefault();
         handleLinkClick();
@@ -208,7 +209,7 @@ export function ToolbarButtons({
       <ToolbarButton
         active={editor.isActive("link") || linkPopoverOpen}
         onClick={handleLinkClick}
-        label={t.link}
+        label={searchCopy.linkShortcut}
       >
         <LinkIcon size={14} />
       </ToolbarButton>
@@ -297,6 +298,7 @@ export function SelectionCommentChip({
   onComment: () => void;
 }) {
   const tc = useT().comments;
+  const searchCopy = useT().workspaceSearch;
   const coarse = useCoarsePointer();
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 

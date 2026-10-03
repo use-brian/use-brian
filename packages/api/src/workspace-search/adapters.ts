@@ -117,3 +117,14 @@ export function createSearchAdapters(): SearchAdapters {
     }))
   }])) as SearchAdapters
 }
+
+/** Identity read for revocation-safe preview/open; no unbounded query or client ACL. */
+export async function readSearchItem(scope: {userId:string;workspaceId:string}, kind:WorkspaceSearchFamily, key:string, signal:AbortSignal) {
+  const rows=await searchDatabase<{key:string;id:string;title:string;body:string;target:SearchCandidate['target'];status:string|null}>(scope,signal,
+    `WITH authorized AS MATERIALIZED (${SEARCH_SOURCE_SQL[kind]})
+     SELECT key,id,title,left(body,4000) AS body,target,status FROM authorized WHERE key=$3
+       AND status IS DISTINCT FROM 'index_pending'
+       AND EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2) LIMIT 1`,[scope.workspaceId,scope.userId,key])
+  const row=rows[0]
+  return row ? {key:row.key,id:row.id,title:row.title,text:row.body,target:row.target,kind,status:row.status} : null
+}

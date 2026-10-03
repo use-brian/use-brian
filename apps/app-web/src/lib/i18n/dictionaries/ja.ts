@@ -1,6 +1,44 @@
 import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
+  workspaceSearch: {
+    "title": "ワークスペースを検索",
+    "shortcut": "検索 (⌘/Ctrl+K)",
+    "placeholder": "{workspace} を検索、または質問",
+    "blank": "ワークスペースの内容を検索するか、新しい非公開チャットでアシスタントに質問できます。",
+    "all": "すべて",
+    "loading": "検索中…",
+    "empty": "一致する項目がありません。アシスタントに質問できます。",
+    "error": "検索を完了できませんでした。入力は保持されています。",
+    "partial": "一部の情報源を検索できませんでした。",
+    "retry": "再試行",
+    "ask": "{assistant} に非公開で質問",
+    "privateHint": "新しい個人チャットを開始します。質問を選択した場合のみ送信します。",
+    "assistantLoading": "アシスタントを読み込み中…",
+    "noAssistant": "利用できる既定のアシスタントがありません。",
+    "setup": "アシスタントを設定",
+    "open": "開く",
+    "preview": "プレビュー",
+    "back": "検索結果に戻る",
+    "close": "検索を閉じる",
+    "more": "さらに読み込む",
+    "unavailable": "この項目は利用できなくなりました。",
+    "selectPreview": "結果を選択してプレビューします。",
+    "recordTitle": "レコード",
+    "assistantUnavailable": "このアシスタントは利用できなくなりました。メッセージは未送信の下書きとして保存されています。",
+    "linkShortcut": "リンク (⌘/Ctrl+Shift+K)",
+    "families": {
+        "pages": "ページ",
+        "knowledge": "知識と記憶",
+        "records": "レコード",
+        "tasks": "タスク",
+        "files": "ファイルと録音",
+        "office": "Office",
+        "conversations": "会話",
+        "workflows": "ワークフロー"
+    }
+},
+
   mobileAuth: {
     "title": "Brian モバイルにログインしますか？",
     "description": "自分のスマートフォンでログインを開始した場合のみ続行してください。モバイルアプリに Brian アカウントへのアクセスを許可します。",

@@ -12,6 +12,44 @@
 import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
+  workspaceSearch: {
+    "title": "搜索工作空间",
+    "shortcut": "搜索 (⌘/Ctrl+K)",
+    "placeholder": "搜索 {workspace} 或提问",
+    "blank": "搜索工作空间内容，或在新的私人对话中向助理提问。",
+    "all": "全部",
+    "loading": "搜索中…",
+    "empty": "找不到匹配项。你可以向助理提问。",
+    "error": "无法完成搜索。你的输入已保留。",
+    "partial": "搜索未完成。部分来源暂时无法使用。",
+    "retry": "重试",
+    "ask": "私下向 {assistant} 提问",
+    "privateHint": "开始新的个人对话。只有选择提问时才会发送。",
+    "assistantLoading": "正在加载助理…",
+    "noAssistant": "没有可访问的默认助理。",
+    "setup": "设置助理",
+    "open": "打开",
+    "preview": "预览",
+    "back": "返回搜索结果",
+    "close": "关闭搜索",
+    "more": "加载更多",
+    "unavailable": "此项目已无法使用。",
+    "selectPreview": "选择结果以预览。",
+    "recordTitle": "记录",
+    "assistantUnavailable": "此助理已无法使用。消息已保留为未发送的草稿。",
+    "linkShortcut": "链接 (⌘/Ctrl+Shift+K)",
+    "families": {
+        "pages": "页面",
+        "knowledge": "知识与记忆",
+        "records": "记录",
+        "tasks": "任务",
+        "files": "文件与录音",
+        "office": "Office",
+        "conversations": "对话",
+        "workflows": "工作流"
+    }
+},
+
   mobileAuth: {
     "title": "登录 Brian 移动版？",
     "description": "仅在您自己的手机上开始登录时继续。这将允许移动应用访问您的 Brian 账号。",

@@ -1,5 +1,7 @@
 "use client";
 
+import { WorkspaceSearchSlot } from "@/components/workspace-search/workspace-search-provider";
+
 /**
  * Brain top bar — the doc-style chrome row for the Brain surface (all three
  * sections AND the skill editor sub-route render it; there is never a second
@@ -194,6 +196,7 @@ export function BrainTopbar({
       {right && (
         <div className="flex shrink-0 items-center gap-2">{right}</div>
       )}
+      <WorkspaceSearchSlot />
     </div>
   );
 }

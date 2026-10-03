@@ -1,5 +1,7 @@
 "use client";
 
+import { WorkspaceSearchSlot } from "@/components/workspace-search/workspace-search-provider";
+
 /**
  * The Doc top "layer" — Notion's upper top-bar row, above the breadcrumb.
  *
@@ -227,6 +229,7 @@ export function DocTopBar({
           <Plus className="size-4" aria-hidden />
         </button>
       </div>
+      <WorkspaceSearchSlot />
     </div>
   );
 }

@@ -11,15 +11,13 @@
  *    them, see `operator-app-bar.tsx`), then the SURFACE rows Brain
  *    (→ `/w/[id]/brain`), Studio (→ `/studio`), Workflow (→ `/workflow`),
  *    then Live (the all-activity surface, occupying the former Inbox slot) and
- *    the Home-only Search utility. Inbox itself is nested as the first row of
+ *    Organization. Workspace search lives in the shared top-right header. Inbox itself is nested as the first row of
  *    Live's surface-aware sidebar panel with its unread-count badge.
  *    Items are icon-only with a hover/focus tooltip (name + ⌘ shortcut); exactly
  *    ONE item at a time expands into a labeled `.doc-nav-active` pill (icon +
  *    name), the way Notion emphasizes the current section. Normally that's the
- *    active surface (`activeSurface`, via `surfaceFromPathname`); when Search
- *    is open it owns the pill instead and the surface
- *    drops to a highlighted icon, so a label can never collide with a second
- *    pill and truncate. Studio shows a dismissable cold-start "Set up" nudge
+ *    active surface (`activeSurface`, via `surfaceFromPathname`). Studio shows
+ *    a dismissable cold-start "Set up" nudge
  *    while the workspace has no connected connector.
  *  - Teamspace sections (docs/architecture/features/teamspaces.md) — one
  *    collapsible section per teamspace the viewer belongs to (icon +
@@ -36,9 +34,7 @@
  *
  * The tree DnD lives in a `<DndContext>` *scoped to this sidebar* —
  * deliberately separate from the page-renderer's block-reorder context
- * (root CLAUDE.md / task brief). Search is a lightweight substring
- * filter over loaded rows, not a Cmd-K palette (its flat hit list is
- * NOT sectioned by teamspace).
+ * (root CLAUDE.md / task brief). Search is owned by WorkspaceChrome.
  *
  * Row expand/collapse state persists in `localStorage` keyed per
  * workspace (`doc:sidebar:collapsed:<workspaceId>`); section collapse
@@ -52,13 +48,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { inboxCacheKey, useIntentPrefetch, warmDocPage } from "@/lib/surface-prefetch";
+import { inboxCacheKey, useIntentPrefetch } from "@/lib/surface-prefetch";
 import {
   markSurfaceCacheStale,
   readSurfaceCache,
   useCachedResource,
 } from "@/lib/surface-cache";
-import { isPhoneViewport } from "@/lib/viewport";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
   DndContext,
@@ -78,7 +73,6 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
-  Search,
   SlidersHorizontal,
   Trash2,
   UserPlus,
@@ -115,8 +109,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { derivePageIcon, type ViewListRow } from "@/lib/api/views";
-import { PageIcon } from "./page-icon";
+import { type ViewListRow } from "@/lib/api/views";
 import type { Teamspace } from "@/lib/api/teamspaces";
 import {
   buildTree,
@@ -131,10 +124,8 @@ import { surfaceShortcutLabel } from "@/lib/surface-shortcuts";
 import { fetchInbox, type InboxPayload } from "@/lib/api/inbox";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
-import { DocSidebarRow } from "./doc-sidebar-row";
 import { HomeDock } from "./home-dock";
 import { SidebarTreeNode, parseDropId } from "./sidebar-tree-node";
-import { EmptySearchResults } from "./empty-states";
 import { BrainSidebarPanel } from "./sidebar-panels/brain-sidebar-panel";
 import { StudioSidebarPanel } from "./sidebar-panels/studio-sidebar-panel";
 import { OrganizationSidebarPanel } from "./sidebar-panels/organization-sidebar-panel";
@@ -254,7 +245,7 @@ function collapseKey(workspaceId: string): string {
  *  - `active && !labeled` -> the active background but still icon-only (the
  *                            highlighted-but-not-the-pill state).
  *
- * Callers enforce a single-pill invariant (see `surfacePill`/`searchPill`):
+ * Callers enforce a single-pill invariant (see `surfacePill`):
  * at most one item is ever `labeled`, so the one label fits and
  * two pills can't collide and truncate. `transition-all` eases the bg/grow.
  */
@@ -352,39 +343,11 @@ export function DocSidebar(props: Props) {
     };
   }, [inboxKey]);
 
-  // ── Search filter (lightweight client-side substring) ───────────────
-  // The page-title search only makes sense on Home (`'p'`), where the page tree
-  // is the body. Close + clear it when leaving Home so the single-pill nav logic
-  // (`searchPill` → `utilityPillOpen`) can't get stuck open on another surface.
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const q = query.trim().toLowerCase();
-  useEffect(() => {
-    if (sidebarSurface !== "p") {
-      setSearchOpen(false);
-      setQuery("");
-    }
-  }, [sidebarSurface]);
-
-  // ── One labeled pill at a time (keeps the row inside the ~240px bar) ──
-  // The active surface is normally THE pill (Notion-style "current section").
-  // Search is a toggle a user opens while on Home, so it owns the pill (full
-  // label) and Home drops to a highlighted icon. Inbox moved inside Live's
-  // sidebar panel, so it no longer competes for this primary-row label.
-  const searchPill = searchOpen;
-  const utilityPillOpen = searchPill;
-  /** True when surface `s` is the current route. */
-  const surfaceActive = (s: WorkspaceSurface) => props.activeSurface === s;
-  /** True when surface `s` should render as the labeled pill (no utility owns it). */
-  const surfacePill = (s: WorkspaceSurface) => surfaceActive(s) && !utilityPillOpen;
-  /** Home is the operator hub: it lights up for ANY operator-app surface
-   *  (Page / Tasks / Feed) — the app-bar row below shows which. */
+  // One primary surface owns the expanded navigation pill.
+  const surfaceActive = (surface: WorkspaceSurface) => props.activeSurface === surface;
+  const surfacePill = surfaceActive;
   const homeActive = activeOperatorApp !== null;
-  const homePill = homeActive && !utilityPillOpen;
-  const matches = useCallback(
-    (row: ViewListRow) => !q || row.name.toLowerCase().includes(q),
-    [q],
-  );
+  const homePill = homeActive;
 
   // ── Persisted expand/collapse state (per workspace) ─────────────────
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -487,18 +450,6 @@ export function DocSidebar(props: Props) {
   // and the prune worker spares them (same rule, server-side). Derived once
   // over the full row set and read by every row renderer below.
   const keptByAncestry = useMemo(() => savedAncestorIds(allRows), [allRows]);
-  // Search stays a flat hit list (the tree's nesting would otherwise bury a
-  // match under a collapsed parent) — saved hits and draft hits, each in its
-  // own section so the prune captions + Save affordance stay correct.
-  const searchHits = useMemo(
-    () => (q ? saved.filter(matches) : []),
-    [q, saved, matches],
-  );
-  const draftHits = useMemo(
-    () => (q ? drafts.filter(matches) : []),
-    [q, drafts, matches],
-  );
-
   // ── DnD ──────────────────────────────────────────────────────────────
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const sensors = useSensors(
@@ -676,15 +627,13 @@ export function DocSidebar(props: Props) {
       {/* Top nav — horizontal icon toolbar (Notion-style). Every item is an icon
           with a hover/focus tooltip (name + ⌘ shortcut); exactly ONE item at a
           time expands into a labeled `.doc-nav-active` pill that spells out its
-          name (see `searchPill`/`surfacePill` above) — the way Notion
+          name (see `surfacePill` above) — the way Notion
           emphasizes the current section. Order: Home / Brain / Studio / Workflow /
-          Live (primary surfaces), then Search (Home-only utility). When a utility is
-          open it owns the pill and the current surface stays a highlighted icon,
-          so a long label can't collide with a second pill and truncate. `pt-1`
+          Live / Organization. Only the active surface expands its label. `pt-1`
           keeps the Studio corner badge off the top edge.
           `data-doc-chrome`: in the desktop shell this whole title-bar zone is an
           OS window-drag handle, so the gaps between icons and the empty space to
-          the right of Search drag the window; the icon links/buttons opt back out
+          the right of the icons drag the window; the icon links/buttons opt back out
           via the `[data-doc-chrome] :is(a, button, …)` rule in globals.css. */}
       <nav data-doc-chrome className="flex flex-col items-stretch gap-0.5 px-2 pt-1 pb-1.5 md:flex-row md:items-center">
         {/* Home — first of the ⌘/Ctrl+1/2/3/4 surface shortcuts (wired in
@@ -696,7 +645,7 @@ export function DocSidebar(props: Props) {
             href={props.homeHref}
             {...intentPrefetch(props.homeHref)}
             aria-label={t.iconHomeAria}
-            className={navItemCls(homeActive, !utilityPillOpen)}
+            className={navItemCls(homeActive, true)}
           >
             <Home className="size-[17px] shrink-0" />
             {homePill ? (
@@ -714,7 +663,7 @@ export function DocSidebar(props: Props) {
             href={`/w/${workspaceId}/brain`}
             {...intentPrefetch(`/w/${workspaceId}/brain`)}
             aria-label={t.iconBrainAria}
-            className={navItemCls(surfaceActive("brain"), !utilityPillOpen)}
+            className={navItemCls(surfaceActive("brain"), true)}
           >
             <Brain className="size-[17px] shrink-0" />
             {surfacePill("brain") ? (
@@ -731,7 +680,7 @@ export function DocSidebar(props: Props) {
             href={`/w/${workspaceId}/studio/connectors`}
             {...intentPrefetch(`/w/${workspaceId}/studio/connectors`)}
             aria-label={t.iconStudioAria}
-            className={navItemCls(surfaceActive("studio"), !utilityPillOpen) + " relative"}
+            className={navItemCls(surfaceActive("studio"), true) + " relative"}
           >
             <SlidersHorizontal className="size-[17px] shrink-0" />
             {surfacePill("studio") ? (
@@ -751,7 +700,7 @@ export function DocSidebar(props: Props) {
             href={`/w/${workspaceId}/workflow`}
             {...intentPrefetch(`/w/${workspaceId}/workflow`)}
             aria-label={t.iconWorkflowAria}
-            className={navItemCls(surfaceActive("workflow"), !utilityPillOpen)}
+            className={navItemCls(surfaceActive("workflow"), true)}
           >
             <GitBranch className="size-[17px] shrink-0" />
             {surfacePill("workflow") ? (
@@ -768,7 +717,7 @@ export function DocSidebar(props: Props) {
             href={`/w/${workspaceId}/live`}
             {...intentPrefetch(`/w/${workspaceId}/live`)}
             aria-label={liveActiveCount > 0 ? liveActiveLabel : liveTitle}
-            className={navItemCls(surfaceActive("live"), !utilityPillOpen) + " relative"}
+            className={navItemCls(surfaceActive("live"), true) + " relative"}
           >
             <Activity className="size-[17px] shrink-0" />
             {surfacePill("live") ? (
@@ -790,40 +739,18 @@ export function DocSidebar(props: Props) {
             home-dock Autopilot card + the Brain task panel are its entry
             points (docs/architecture/features/goals.md). */}
 
-        {/* Search filters the page tree, so it's a Home-only utility. */}
-        {sidebarSurface === "p" && (
-          <Tooltip label={t.iconSearch}>
-            <button
-              type="button"
-              aria-label={t.iconSearchAria}
-              aria-pressed={searchOpen}
-              onClick={() => {
-                setSearchOpen((v) => {
-                  if (v) setQuery("");
-                  return !v;
-                });
-              }}
-              className={navItemCls(searchOpen, searchPill)}
-            >
-              <Search className="size-[17px] shrink-0" />
-              {searchPill ? (
-                <span className="whitespace-nowrap max-md:hidden">{t.iconSearch}</span>
-              ) : null}
-              <PhoneNavLabel>{t.iconSearch}</PhoneNavLabel>
-            </button>
-          </Tooltip>
-        )}
+        <Tooltip label={copy.organization.title}>
+          <Link href={`/w/${workspaceId}/organization`}
+            {...intentPrefetch(`/w/${workspaceId}/organization`)}
+            aria-label={copy.organization.title}
+            aria-current={surfaceActive("organization") ? "page" : undefined}
+            className={navItemCls(surfaceActive("organization"), true)}>
+            <Users className="size-[17px] shrink-0" aria-hidden />
+            {surfacePill("organization") && <span className="whitespace-nowrap max-md:hidden">{copy.organization.title}</span>}
+            <PhoneNavLabel>{copy.organization.title}</PhoneNavLabel>
+          </Link>
+        </Tooltip>
       </nav>
-
-      <Link
-        href={`/w/${workspaceId}/organization`}
-        {...intentPrefetch(`/w/${workspaceId}/organization`)}
-        aria-current={surfaceActive("organization") ? "page" : undefined}
-        className={`mx-2 mb-1.5 flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm hover:bg-sidebar-accent max-md:min-h-11 ${surfaceActive("organization") ? "bg-sidebar-accent font-medium" : "text-muted-foreground"}`}
-      >
-        <Users className="size-4 shrink-0" />
-        {copy.organization.title}
-      </Link>
 
       {/* Operator app-bar — the Home hub's second tier (Page / Tasks / CRM /
           Feed / Browsers / Chat + the workspace's custom apps), between the
@@ -845,21 +772,6 @@ export function DocSidebar(props: Props) {
         homeApps={props.homeApps}
         customApps={props.customApps}
       />
-
-      {/* Search input — revealed by the Search icon (Home only). */}
-      {searchOpen && sidebarSurface === "p" && (
-        <div className="px-2 pb-2">
-          <input
-            type="text"
-            value={query}
-            autoFocus={!isPhoneViewport()}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t.sidebarSearchPlaceholder}
-            aria-label={t.iconSearchAria}
-            className="h-11 w-full rounded-md border border-border bg-background px-2 text-[16px] text-foreground outline-none placeholder:text-muted-foreground md:h-7 md:text-sm"
-          />
-        </div>
-      )}
 
       <div className="doc-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-4">
         {/* The shared quiet Suggested-for-you row always leads the scrollable
@@ -908,61 +820,11 @@ export function DocSidebar(props: Props) {
 
         {sidebarSurface === "p" && (
           <>
-        {/* Search mode — flat hit lists (saved, then drafts). Nesting is
-            dropped here on purpose so a buried match isn't hidden under a
-            collapsed parent. */}
-        {q && (
-          <>
-            <SectionLabel>{t.sidebarFavorites}</SectionLabel>
-            {searchHits.length === 0 && draftHits.length === 0 ? (
-              <EmptySearchResults />
-            ) : (
-              <ul className="space-y-0.5">
-                {searchHits.map((row) => (
-                  <li key={row.id}>
-                    <FlatRow
-                      row={row}
-                      active={row.id === activeId}
-                      onSelect={props.onSelect}
-                      onAddChild={props.onAddChild}
-                      onRename={props.onRename}
-                      onDuplicate={props.onDuplicate}
-                      onUnsave={props.onUnsave}
-                      onDelete={props.onDelete}
-                    />
-                  </li>
-                ))}
-              </ul>
-            )}
-            {draftHits.length > 0 && (
-              <>
-                <SectionLabel>{t.sidebarDrafts}</SectionLabel>
-                <ul className="space-y-0.5">
-                  {draftHits.map((row) => (
-                    <li key={row.id}>
-                      <DocSidebarRow
-                        row={row}
-                        active={row.id === activeId}
-                        autoPruneAt={props.draftPruneByid[row.id] ?? null}
-                        inSavedSubtree={keptByAncestry.has(row.id)}
-                        onSelect={props.onSelect}
-                        onSave={props.onSave}
-                        onDelete={props.onDelete}
-                      />
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </>
-        )}
-
         {/* Teamspace sections + Private — one nested tree per section (saved
             and draft rows together; drafts keep their prune captions). A
             single `<DndContext>` spans every section so a row can be dragged
             between them, and each section HEADER is a drop zone that files
             the page at that section's root. */}
-        {!q && (
           <DndContext
             sensors={sensors}
             onDragStart={handleDragStart}
@@ -1007,7 +869,6 @@ export function DocSidebar(props: Props) {
               )}
             </PrivateGroupSection>
           </DndContext>
-        )}
           </>
         )}
       </div>
@@ -1540,138 +1401,5 @@ function TeamspaceSectionMenu({
         )}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-function SectionLabel({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={`mb-1 px-1 ${className}`}>
-      <span className="text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
-        {children}
-      </span>
-    </div>
-  );
-}
-
-/** A flat (non-tree) saved row — Recents + search hits. Same hover
- * affordances as the tree node (overflow `…` menu, then add-child `+`)
- * so every page row behaves identically, minus the nesting chevron +
- * DnD. The leading icon is a static glyph (the page emoji, else the
- * type-derived fallback) — flat rows have no children, so there's no
- * disclosure toggle and no emoji picker here (icons are set from the
- * page header). The title runs full-width at rest and truncates on hover
- * / focus to clear the out-of-flow row actions. */
-function FlatRow({
-  row,
-  active,
-  onSelect,
-  onAddChild,
-  onRename,
-  onDuplicate,
-  onUnsave,
-  onDelete,
-}: {
-  row: ViewListRow;
-  active: boolean;
-  onSelect: (id: string) => void;
-  onAddChild: (id: string) => void;
-  onRename: (id: string) => void;
-  onDuplicate: (id: string) => void;
-  onUnsave: (id: string) => void;
-  onDelete: (id: string) => void;
-}) {
-  const t = useT().docPage;
-  const title = row.name?.trim() ? row.name : t.breadcrumbUntitled;
-  const Icon = derivePageIcon({
-    entity: row.entity,
-    viewType: row.viewType,
-    nameOrigin: row.nameOrigin,
-  });
-  return (
-    <div
-      // Warm the page's metadata so opening it paints instantly
-      // (lib/surface-prefetch.ts).
-      onMouseEnter={() => warmDocPage(row.id)}
-      className={[
-        "group/row relative flex w-full items-center gap-1.5 rounded-md pl-2 pr-1 text-sm",
-        active
-          ? "doc-nav-active font-medium"
-          : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-      ].join(" ")}
-    >
-      <span className="flex size-5 shrink-0 items-center justify-center">
-        <PageIcon
-          icon={row.icon}
-          fallback={Icon}
-          emojiClassName="text-[15px] leading-none"
-          glyphClassName="size-4 text-sidebar-foreground/55"
-          imgClassName="size-4 rounded-[3px] object-cover"
-        />
-      </span>
-      <button
-        type="button"
-        onClick={() => onSelect(row.id)}
-        title={title}
-        className="doc-nav-title min-w-0 flex-1 truncate py-1 pr-[4.5rem] text-left md:pr-0 md:group-hover/row:pr-14 md:group-focus-within/row:pr-14"
-      >
-        {title}
-      </button>
-
-      {/* Hover affordances — overflow menu (…) then add-child (+). Out of
-          flow so the title runs full-width at rest; revealed on hover /
-          focus-within / while the … menu is open. */}
-      <div className="absolute inset-y-0 right-1 z-10 flex items-center gap-0.5 opacity-100 transition-opacity md:pointer-events-none md:opacity-0 md:group-hover/row:opacity-100 md:group-hover/row:pointer-events-auto md:group-focus-within/row:opacity-100 md:group-focus-within/row:pointer-events-auto has-[[aria-expanded=true]]:opacity-100 has-[[aria-expanded=true]]:pointer-events-auto">
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <button
-                type="button"
-                aria-label={t.sidebarRowMenu}
-                onClick={(e) => e.stopPropagation()}
-                className="flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground md:size-6"
-              >
-                <MoreHorizontal className="size-3.5" />
-              </button>
-            }
-          />
-          <DropdownMenuContent>
-            <DropdownMenuItem onClick={() => onRename(row.id)}>
-              {t.sidebarRowRename}
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onDuplicate(row.id)}>
-              {t.sidebarRowDuplicate}
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onUnsave(row.id)}>
-              {t.sidebarRowUnsave}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              variant="destructive"
-              onClick={() => onDelete(row.id)}
-            >
-              {t.sidebarRowDelete}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        <button
-          type="button"
-          aria-label={t.sidebarAddChildAria}
-          onClick={(e) => {
-            e.stopPropagation();
-            onAddChild(row.id);
-          }}
-          className="flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground md:size-6"
-        >
-          <Plus className="size-3.5" />
-        </button>
-      </div>
-    </div>
   );
 }

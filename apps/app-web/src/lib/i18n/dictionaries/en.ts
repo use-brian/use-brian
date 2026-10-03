@@ -14,6 +14,44 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  workspaceSearch: {
+    "title": "Search workspace",
+    "shortcut": "Search (⌘/Ctrl+K)",
+    "placeholder": "Search or ask in {workspace}",
+    "blank": "Find workspace content, or ask your assistant in a new private chat.",
+    "all": "All",
+    "loading": "Searching…",
+    "empty": "No matches found. You can ask your assistant.",
+    "error": "Search could not finish. Your query is preserved.",
+    "partial": "Search is incomplete. Some sources are unavailable.",
+    "retry": "Retry",
+    "ask": "Ask {assistant} privately",
+    "privateHint": "Starts a new Personal conversation. Only sends when you choose Ask.",
+    "assistantLoading": "Loading assistants…",
+    "noAssistant": "No accessible default assistant.",
+    "setup": "Set up an assistant",
+    "open": "Open",
+    "preview": "Preview",
+    "back": "Back to results",
+    "close": "Close search",
+    "more": "Load more",
+    "unavailable": "This item is no longer available.",
+    "selectPreview": "Select a result to preview it.",
+    "recordTitle": "Record",
+    "assistantUnavailable": "This assistant is no longer available. Your message is saved as an unsent draft.",
+    "linkShortcut": "Link (⌘/Ctrl+Shift+K)",
+    "families": {
+        "pages": "Pages",
+        "knowledge": "Knowledge & memories",
+        "records": "Records",
+        "tasks": "Tasks",
+        "files": "Files & recordings",
+        "office": "Office",
+        "conversations": "Conversations",
+        "workflows": "Workflows"
+    }
+},
+
   mobileAuth: {
     "title": "Sign in to Brian mobile?",
     "description": "Only continue if you started sign-in on your own phone. This gives the mobile app access to your Brian account.",

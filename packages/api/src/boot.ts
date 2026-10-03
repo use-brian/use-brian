@@ -654,7 +654,7 @@ import { createDbInternalLinkAliasStore } from './db/internal-link-alias-store.j
 import { createInternalLinkService } from './internal-link-service.js'
 import { workspaceSearchRoutes } from './routes/workspace-search.js'
 import { createWorkspaceSearchService } from './workspace-search/service.js'
-import { createSearchAdapters } from './workspace-search/adapters.js'
+import { createSearchAdapters, readSearchItem } from './workspace-search/adapters.js'
 import { createOfficeSearchProjector } from './workspace-search/office-projection.js'
 import { internalLinkRoutes } from './routes/internal-links.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
@@ -6706,6 +6706,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api', requireAuth(env.JWT_SECRET), internalLinkRoutes(internalLinkService))
   app.use('/api', requireAuth(env.JWT_SECRET), workspaceSearchRoutes({
     isMember: isWorkspaceMember,
+    readItem: readSearchItem,
     search: createWorkspaceSearchService(createSearchAdapters(), { key: Buffer.from(env.JWT_SECRET) }),
   }))
 

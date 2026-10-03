@@ -49,6 +49,16 @@ describe('[COMP:search/workspace-http] authenticated workspace search',()=>{
     expect((await request(second).get(path).query({q:'needle',cursor:response.body.nextCursor})).status).toBe(400)
     expect((await request(f.app).get(path).query({q:'needle',cursor:'forged'})).status).toBe(400)
   })
+  it('rechecks preview membership and returns unavailable without stale content',async()=>{
+    const f=fixture(),readItem=vi.fn(async()=>null)
+    const app=createTestApp('/api',workspaceSearchRoutes({search:f.search,isMember:f.isMember,readItem}),{userId:'viewer'})
+    expect((await request(app).get(`${path}/items/tasks/task%3Aone`)).status).toBe(404)
+    expect(readItem).toHaveBeenCalledWith({userId:'viewer',workspaceId},'tasks','task:one',expect.any(AbortSignal))
+    f.isMember.mockResolvedValue(false);readItem.mockClear()
+    expect((await request(app).get(`${path}/items/tasks/task%3Aone`)).status).toBe(403)
+    expect(readItem).not.toHaveBeenCalled()
+    expect((await request(app).get(`${path}/items/admin/task%3Aone`)).status).toBe(400)
+  })
   it('mounts the authenticated router and bounded projection lifecycle in common OSS boot',()=>{
     const source=readFileSync(new URL('../../boot.ts',import.meta.url),'utf8')
     expect(source).toContain("app.use('/api', requireAuth(env.JWT_SECRET), workspaceSearchRoutes({")

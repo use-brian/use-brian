@@ -30,6 +30,7 @@
  * [COMP:app-web/views-shell]
  */
 
+import { WorkspaceSearchProvider, WorkspaceSearchFallback } from "@/components/workspace-search/workspace-search-provider";
 import { DesktopBrowserCoordinator } from "@/components/computer/desktop-browser-coordinator";
 import { DesktopUpdateChip } from "@/components/chrome/desktop-update-chip";
 import {
@@ -623,6 +624,7 @@ export function WorkspaceChrome({
     : offlineState.offline ? t.offlineBannerBody : "";
 
   return (
+    <WorkspaceSearchProvider workspaceId={workspaceId}>
     <WorkspaceFileDropBoundary
       workspaceId={workspaceId}
       assistantId={chatAssistantId}
@@ -786,6 +788,7 @@ export function WorkspaceChrome({
             doc shell and its Yjs socket survive every switch. */}
         <ActiveOperatorAppContext.Provider value={activeOperatorApp}>
           <SurfaceTransition className="relative flex h-full min-w-0 flex-1 flex-col">
+            <WorkspaceSearchFallback />
             {children}
           </SurfaceTransition>
         </ActiveOperatorAppContext.Provider>
@@ -895,5 +898,6 @@ export function WorkspaceChrome({
         <BrainIntakeTray workspaceId={workspaceId} />
       </div>
     </WorkspaceFileDropBoundary>
+    </WorkspaceSearchProvider>
   );
 }

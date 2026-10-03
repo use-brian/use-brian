@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
-import { createSearchAdapters } from '../adapters.js'
+import { createSearchAdapters, readSearchItem } from '../adapters.js'
 import { createWorkspaceSearchService } from '../service.js'
 import { projectOfficeSearchBatch } from '../office-projection.js'
 import type { WorkspaceSearchFamily } from '@use-brian/shared'
@@ -63,7 +63,9 @@ describe('[COMP:search/workspace-service] Real PostgreSQL search authority and s
     expect(await run(f,'tasks')).toEqual([])
     await q("UPDATE department_edges SET clearance='confidential' WHERE department_id=$1 AND user_id=$2",[department,f.userId])
     expect((await run(f,'tasks')).map(row=>row.id)).toEqual([id])
+    expect(await readSearchItem(f,'tasks',`task:${id}`,new AbortController().signal)).toMatchObject({id,text:'needle confidential'})
     await q('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2',[department,f.userId])
+    expect(await readSearchItem(f,'tasks',`task:${id}`,new AbortController().signal)).toBeNull()
     expect(await run(f,'tasks')).toEqual([])
   })
 
