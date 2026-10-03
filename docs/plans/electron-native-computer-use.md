@@ -1,6 +1,6 @@
 # macOS computer use — release plan
 
-**Status: implementation in progress; native control is still disabled.**
+**Status: source/tooling implemented for verification; release acceptance remains open.** Production coordinate input remains unavailable with an empty accepted-platform registry; control rollout stays gated. This is not availability or a 100%-complete claim.
 
 This is the active release scope, revised at the user's direction. It supersedes the [previous broad plan](archive/electron-native-computer-use-pre-release-rescope.md). The archive and [acceptance ledger](../native-computer-acceptance.md) preserve prior work and failures; their larger research/evaluation programmes are **not additional release gates**.
 
@@ -59,29 +59,37 @@ Keep the implemented native protocol, separate relay namespace, API authorizatio
 
 Scope reduction is not permission to disable safeguards:
 
-- **Trusted launch:** private inherited helper channel, correct running parent/helper identity, existing signed Electron packaging and hardened bootstrap. Resolve the concrete known parent/bootstrap admission bypass for the supported package before removing the probe-only barrier. Static on-disk signatures alone must not be relabelled as proof of already-loaded code.
-- **Bounded bootstrap work:** finish only the release-package checks needed for that admission fix, or use a reviewed simpler design that demonstrably closes it. No general-purpose Mach-O/DER validation platform, arbitrary code-inventory service or whole-process memory attestation project.
+- **Trusted launch:** private inherited helper channel, correct running parent/helper identity, existing signed Electron packaging and hardened bootstrap. The supported-package admission fix and consented broker path are implemented; earlier signed admission passed, but current signed workflows still need verification. Static on-disk signatures alone must not be relabelled as proof of already-loaded code.
+- **Bounded bootstrap work:** retain the implemented release-package admission checks and verify their actual behavior. No general-purpose Mach-O/DER validation platform, arbitrary code-inventory service or whole-process memory attestation project.
 - **Consent and scope:** local session consent, exact app/window identity, native-only authorization, fresh epoch on Resume, and action-specific approval where required. Never automate Brian's consent UI, OS security prompts or credential surfaces.
 - **Stop:** independent local shortcut/tray/control UI, immediate dispatch revocation, no dependence on network/model/accounting/observers. Lock/sleep, permission loss, disconnect and helper failure revoke authority.
 - **Freshness and effects:** revalidate after approval/focus changes; changed windows/modals pause for fresh local authorization. Unknown effects/outcomes stop or ask the user, never retry an uncertain action.
-- **Input ownership:** implement only the minimal input needed for screenshot-proposed clicks. Before enabling it, prove owned press/release cleanup across takeover, overlap, partial delivery and helper/parent failure. Do not release physical user input or relinquish the lease while worker/input ownership is uncertain. General keyboard injection, drag and gesture support are not release requirements.
+- **Input ownership:** the minimal one-click guardian candidate is implemented, not accepted. Before enabling it, verify owned press/release cleanup across takeover, overlap, partial delivery and helper/parent failure. Do not release physical user input or relinquish the lease while worker/input ownership is uncertain. General keyboard injection, drag and gesture support are not release requirements.
 - **Privacy:** redact secure AX data before transmission; scoped, consented images only; no raw AX/text/images/credentials in routine logs.
 - **One loop, honest capabilities:** no alternate executor, silent permission expansion or false success. Unsupported combinations fail closed. Keep existing execution/Stop/watchdog budgets; do not increase them to hide failures.
 
-The current helper remains probe-only and `input=false` until the relevant implementation and native checks pass. This documentation change enables nothing.
+The current helper supports consented inspector/semantic/capture paths, not the historical probe-only boundary. Production `input=false` remains enforced by the empty accepted-platform registry. The isolated mechanism experiment cannot promote it. This documentation change enables nothing.
 
 ## 5. Ordered delivery milestones
 
 Work in this order. Each milestone must produce a useful integrated result, not another standalone research probe.
 
-| Milestone | Required implementation | Evidence to close it |
+The implementation column records the required source scope, now present for verification; it is not a Mac coding checklist. Native evidence can still expose defects requiring engineering correction.
+
+| Milestone | Required source scope | Evidence to close it |
 | --- | --- | --- |
 | **R1 — Packaged Mac inspector** | Close the supported-package admission gap; connect the existing helper/broker/discovery/consent path; finish permission readiness and selected-window AX inspection. Reuse the user's signing workflow. | On the packaged Mac app: select TextEdit/fixture, consent, see a bounded redacted snapshot, Stop, and refuse wrong-parent/channel/scope, denied permissions and lost identity. |
 | **R2 — Working AX task** | Run the existing API/relay/task loop against real macOS semantic actions. Complete TextEdit editing and fixture form/selection tasks with configured LLM planning, fresh completion checks and existing usage accounting. | Real UI outcomes, no unintended images, cancellation/takeover, stale refs, duplicate commands, lost receipts and modal/new-window refusal. No helper-only or fake-provider result counts as an end-to-end task. |
 | **R3 — Jev routing and screenshot fallback** | Exercise existing Jev decisions/fallback; keep exact approved-profile requirements. Integrate screenshot input to the configured image-capable LLM and minimal safe click execution in the same loop. | Approved Jev route and configured-LLM fallback behave correctly; the real canvas fixture completes via an actual screenshot/LLM call. Capture denial, no-image model, stale frame, bad coordinates and Stop refuse safely. |
 | **R4 — Release candidate** | Finish UI errors/onboarding, supported-target descriptions and rollback; package through the existing Electron release process; run the compact acceptance matrix below; update user/KB docs. | Recorded real-Mac results for the actual package/provider configuration, no open safety failure, reviewed default-off/opt-in rollout and regression results. Then cohesive commits, push and PR. |
 
-**Next work:** R1. Reuse the completed bootstrap pieces where necessary; do not expand them into new research tracks. After the admission fix, prioritize an actual inspector and task in the signed Electron app over more standalone format probes. Ask for another Mac run only when it closes a named milestone check or reproduces a specific defect.
+**Fresh next work is verification, not implementation transfer.** The operator already passed production source SDK preflight and corrected guardian 16 XCTest + public-header C syscall-fake tests at `2fe2e0d2`; do not repeat unchanged checks or request packaging-only tests. Source now pins images to the configured task route (global vision setting is approval only), decomposes before capture, monotonically reduces post-effect capabilities and publishes relay status before receipts. A real controller/relay/API/concrete-runtime regression verifies synthetic click/readback completion and unchanged-counter refusal; fake OS/provider/DB results do not close R3.
+
+Use [the handoff](../native-computer-mac-handoff.md) for exact fresh commands. First separate deployment-specific work: authenticated SELECT-only readiness with no-touch auth and protected token-file/stdin CLI, existing context IDs, supported accounting/migrations and existing non-production API/relay/provider configuration. [Backend setup](../native-computer-backend-setup.md) can run off-Mac; no deployment or credentials are provisioned or claimed. Readiness is not inference or acceptance, and default budgets cannot fund one conservative image attempt.
+
+The subsequent source-owned platform selector matches exact OS version/build/native architecture/mechanism revision and rejects malformed, duplicate or translated profiles. Its immutable registry remains empty; four portable matcher tests bring the current Mac runner to 20 non-emitting cases. One fresh SDK check covers this new source, not repeated unchanged evidence.
+
+Mac-only work: compile the new isolated `tests/native-acceptance` target, then inspect individual null/tap/death/physical-overlap cases with fresh GUI consent in a **disposable isolated login**, never the working desktop. Input can escape the fixture; a clean result is narrow observation with `productionAcceptance: false`, not ownership/drain proof or registry promotion. Separately build the current signed app through the existing workflow for meaningful inspector/backend execution and remaining R1–R4 checks. Keep unavailable production gates blocked; do not bypass them to obtain a result. Engineering owns any source correction here; the operator is not asked to finish code/tooling on Mac.
 
 ## 6. Compact release acceptance
 

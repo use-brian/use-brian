@@ -1,57 +1,90 @@
-# Continue Mac computer-use implementation on the Mac
+# Mac computer use — verification handoff
 
-## User instruction
+## Scope and completed checks
 
-Deliver working Use Brian Mac computer use. Do not return progress-only reports, test counts, another packaging-only milestone, or a claim that an inspector completes the feature. The user subsequently superseded the proposed Mac-session transfer: **finish writing code here first; verify only after the implementation phase is finished**. Do not ask for interim Mac rebuilds/tests. This document records a possible later verification handoff, not a request to move development or a release/availability announcement.
+Finish code/tooling in the engineering checkout; the operator executes finished tooling and verifies real Mac behavior, not an implementation backlog. No availability or full-completion claim follows. The accepted-platform registry remains empty and production coordinate input remains unavailable.
 
-## Checkout and immediate action
+The operator already passed the production source SDK preflight and, at **`2fe2e0d2`**, the corrected **16 non-emitting XCTest cases plus public-header C syscall-fake fence tests**. Do not repeat unchanged preflight/guardian checks or request another packaging-only test. The earlier XCTest overlay compilation failure remains in the acceptance ledger; the corrected run does not prove event delivery or physical ownership. Earlier signed/notarized arm64 Electron 43.2 admission/differential evidence at `609cee57` concerns an older package, not current AX/provider outcomes; its initial admission failure remains unexplained.
 
-Use the latest `feature/electron-native-computer-use` branch of `use-brian/use-brian`. Important pushed changes include:
-
-- `1d13292f`: consented TextEdit/fixture semantic task path and independent inspector-only capability ceiling.
-- `eb83ce67`: explicitly authorized safe-fixture-canvas capture; coordinate input remains disabled.
-- `a7a60c00`: API `/run` pins its exact native session/grant instead of choosing another device in the conversation.
-- `23b57954`: scoped, privacy-safe task-result notices after cleanup, including previously silent failures.
-- `795870c5`: latest integration evidence before this transfer.
-
-Inspect the checkout/status and read `docs/plans/electron-native-computer-use.md` completely. Finish outstanding source integration before entering verification. When that phase is finished and Mac execution is actually available, confirm the shell is on Darwin and begin with the existing source compile/refusal check:
+Since that run, source-owned platform selection was added: exact OS version/build, native architecture and mechanism revision, with malformed/duplicate/translated profiles refused. Its immutable registry is still **empty**. Four portable selector cases bring the current guardian runner to **20** non-emitting Mac cases (14 portable). This source change needs one fresh SDK check—not repetition of unchanged work:
 
 ```sh
-bash apps/app-desktop/native/computer-control/mac-preflight.sh
+bash apps/app-desktop/native/computer-control/mac-preflight.sh && \
+  node apps/app-desktop/native/computer-control/guardian-tests.mjs
 ```
 
-This deliberately compiles without release signing and performs negative refusal only. Fix any current SDK errors before packaging; do not count this as operational acceptance. Continue implementation rather than asking the user for another package-only rebuild.
+## Implemented source boundary
 
-## Implemented boundary
+Permissionless fresh readiness, lazy discovery, inspector-only capability ceiling, consented TextEdit/fixture semantics, scoped safe-canvas capture, approved frame/point binding, private same-binary guardian candidate, standing lifetime fences and uncertainty-retaining lease cleanup are implemented. The candidate is not accepted input ownership.
 
-The signed helper retains the existing hardened parent/private-channel/bootstrap admission. Fresh capabilities stays permissionless/all-false. Explicit discovery initializes Broker and refreshes readiness. Local consent, exact app/window instances, API authorization, relay READY, independent Stop, helper death and device-lease fencing are preserved.
+Images use the **same configured task provider/model** as text. `NATIVE_COMPUTER_VISION_MODEL` is only an exact approval pin, never a replacement route. Unsupported/custom-endpoint image identities, route/policy changes, absent approval and insufficient budgets refuse rather than substitute. Goal decomposition precedes capture; fresh observation follows decomposition before the frame freshness clock starts. After an effect the controller monotonically reduces capabilities; relay publishes status **before** the receipt. A candidate accepted click leaves fresh observation/capture readback, not a second effect. Completion needs independent whole-goal evidence. The real controller/relay/API/concrete-runtime regression covers advancing and unchanged synthetic canvas counters; its helper/provider/DB are fake, not native or live-provider evidence.
 
-Current native effects are limited to consented TextEdit document assignment and supported fixture semantics. Read-only inspection has no activation or actions. Complete/fresh state, exact per-command approval and revalidation surround effects; uncertain outcomes are never replayed. Verified public AX leaves may omit `AXChildren`; unknown/error/container reads and disappearing declared membership still refuse effects.
+## Deployment-specific readiness — may run off-Mac
 
-Capture needs both control and capture consent, Screen Recording permission, complete public AX, exact safe-canvas identity, unchanged geometry/layout and no occlusion. It uses selected-window SCK filtering with checks around asynchronous work. No TextEdit/general-window screenshots. **Input is still false.** UI and core refuse screenshot-click fallback before capture when input is unavailable.
+No backend is claimed deployed and no provisioning is authorized. Use an existing authorized **non-production** deployment with this API/relay revision, normal session-backed login, owned workspace/assistant/conversation/current task, explicit `native_computer` capability/tool policy, supported native accounting and migrations **620 + 621**. Use one API or existing sticky routing and one relay. API needs native enabled, deployment ID and its existing JWT/relay/database/provider settings; relay needs native enabled and matching secrets. The relay URL must be reachable by both API and Mac over HTTPS/WSS except permitted loopback. Linux localhost is not Mac localhost. Cloud login does not create a local DB account.
 
-API direct runs use a service-owned WeakMap binding to the exact execution context/session/grant. Lost/replaced/cloned native contexts cannot fall back to a different session. Generic assistant calls require an unambiguous eligible grant. Task notices allowlist outcomes and exact session identity, retain cleanup barriers, block interfering automatic discovery, recheck account/workspace/generation, and cancel after Stop. No raw provider errors are displayed.
+Follow [backend setup](native-computer-backend-setup.md) for existing build/start commands and inputs. With an existing access token in an owner-only regular file (0600 or stricter, no symlink), run from the repository root:
 
-## Remaining work—not optional release claims
+```sh
+pnpm native:readiness --non-production \
+  --api https://api.your-test-deployment.example \
+  --token-file /private/path/existing-access-token \
+  --workspace-id "$WORKSPACE_ID" --assistant-id "$ASSISTANT_ID" \
+  --conversation-id "$CONVERSATION_ID" --task-id "$TASK_ID" \
+  --device-id "$DEVICE_ID"
+```
 
-1. The subsequent implementation-first changes add compiled click preparation, a same-binary private guardian host, concrete gated null-wake/tap candidate, input-stream tracking, and standing public kqueue lifetime fences. Main binds the transcript to the original approved request and requires observed owner exit plus non-ambiguous cleanup. Future accepted delivery permits only observation/capture readback, not another effect under the grant. **Native ownership behavior is unverified and the accepted-platform registry is empty.** Portable policy/transport checks are recorded in the current acceptance ledger. Resolve the concrete active-tap late-proxy/timeout issue described in `ClickGuardian-CONTRACT.md`, or choose a smaller sound public-API mechanism. Preserve physical input, survive worker/parent death, fence uncertainty and prevent replay. Do not blindly post up, add keyboard/drag support, or enable input from synthetic evidence.
-2. Finish the existing screenshot-to-configured-image-LLM action path with that executor. Reuse `packages/core/src/computer-use` and API boot/model runtime; no separate planner, OCR/CV service or observer platform. Jev requires its existing exact approved profile; otherwise use the configured LLM lane. Keep strict actual-model/usage provenance and accounting.
-3. Verify signed inspector, TextEdit/fixture tasks, actual provider calls, consent/permissions, Stop/takeover, modal/new-window refusal, privacy, capture geometry, termination/cleanup and no uncertain replay on the Mac. R1–R4 remain open where native evidence is missing. Finish onboarding/errors, supported limits, KB/docs and the compact acceptance matrix before claiming availability.
+Use existing context IDs and the intended desktop device ID. `--token-file -` accepts credential-manager stdin; never paste tokens in arguments, history or reports. The protected CLI issues one authenticated SELECT-only readiness POST; `nativeComputerAuth` is wired in boot and suppresses auth session activity UPDATE only for this route. No grants, expiry cleanup, reservations, accounting writes, inference or commands occur. Exit 0 means configuration checks passed, **not** native/live-model acceptance. Review blockers and warnings, including exact image approval and effective budget. Default text budgets cannot fund one conservative image reservation (4227072 units / $422.7072 at defaults); do not automatically raise bounds or enable approval. Live-provider credentials/configuration are deployment-specific and can be checked elsewhere, not a Mac SDK blocker.
 
-## Package and backend requirements
+## Fresh Mac-only work: isolated mechanism experiment
 
-Reuse the user's existing Developer ID/keychain and `scripts/package-desktop.sh` workflow. Do not provision/export credentials, introduce ad-hoc release signing, disable timestamping or weaken trust. The operator already reported successful signed/notarized arm64 Electron 43.2 packaging, framework-substitution differential and private-helper admission on retry at **609cee57**. That package is older, probe-only code: it does not validate current semantic/capture changes. Initial admission failure remains unexplained; lifecycle scalars now distinguish timeout/spawn/exit stages without raw helper output. No retries or timeout increases were added.
+Read [the experiment README](../apps/app-desktop/native/computer-control/tests/native-acceptance/README.md) first. **Hazardous: use a disposable isolated Mac login, close other apps, and expose no valuable work or credentials. Session input cannot be guaranteed to remain in the fixture after focus loss, suspension, death or stale callback return. A pending up may affect physical input. Never use the ordinary working desktop.**
 
-The production updater previously replaced the WIP 0.0.12 application with production 0.0.40. Use the newly built app directly with `USEBRIAN_DISABLE_AUTO_UPDATE=1`; never assume the old build directory or recovered ZIP is current. See `docs/native-computer-r1-package-check.md`. Keep rollout/acceptance claims honest; do not silently flip acceptance flags to make tests appear accepted. Existing explicit inspector opt-in cannot authorize control.
+This new target is excluded from production compilation/packaging. Its twelve finite cases are implemented; no operator coding is requested. First compile only:
 
-A real task also needs the feature-branch API/relay, normal authenticated account/workspace/assistant/conversation/task, native capability/tool policy, migrated DB and supported accounting. Existing routes cannot be assumed deployed to the cloud. Use an authorized non-production deployment; no production deployment/configuration change is authorized by this transfer. Setup requirements are in `docs/native-computer-r1-inspector.md` and `packages/api/src/computer-use/INTEGRATION.md`. Normal cloud credentials do not automatically establish an account in an independent local DB. Do not bypass auth or create another executor to avoid backend requirements.
+```sh
+cd apps/app-desktop/native/computer-control/tests/native-acceptance
+bash build.sh
+```
 
-## Verification already performed (not native acceptance)
+This does not launch, request permissions or explicitly sign anything. Review native bootstrap refusals and manual TCC/signing prerequisites in the README before emission. Use only the existing signing/TCC setup if required; after externally signing the test artifact, `node run.mjs --record-build` refreshes local identity, not trust or acceptance. Then run **one case at a time**, review its result, and obtain fresh per-case GUI consent:
+
+```sh
+node run.mjs --run null
+# Only after reviewing that result and prerequisites, separately:
+node run.mjs --run normal
+```
+
+The same command accepts exactly one of: `paused-before-final-check`, `last-check-to-post`, `after-down-stall`, `after-down-owner-death`, `worker-death-before-check`, `parent-death-before-check`, `worker-death-after-check`, `parent-death-after-check`, `physical-overlap`, `physical-before-check`. Do not loop or auto-retry. Physical cases require the README's manual cues; held-left uses **SAMPLE RECORDED**, not the end of the pause, as its release cue. Stop experiment / Command-Q fences and terminates owned processes, not pending OS events; release physical buttons manually. Uncertain process state requires ending the disposable login before further cases.
+
+`observed-as-specified` is narrow observation only; blocked/inconclusive/counterexample remain failures or missing evidence, not acceptance. Every result has `productionAcceptance: false`. The harness does not prove full signed Host/worker admission, monitor-return/lease protocol, global containment/release/drain or absence of races. No report automatically populates the empty production registry. Preserve native defects for engineering correction here; do not improvise an emitter or weaken guards on the Mac.
+
+## Signed app and backend workflow
+
+Once the authorized backend is ready, build the current app through the user's existing Developer ID/keychain workflow **for an actual inspector/workflow run**, not another package-only milestone. From the repository root on the operator's arm64 Mac:
+
+```sh
+bash scripts/package-desktop.sh --arm64
+test_dir="$(mktemp -d)"
+ditto -x -k "apps/app-desktop/release/usebrian.zip" "$test_dir"
+app="$test_dir/Use Brian.app"
+NATIVE_COMPUTER_INSPECTOR_ENABLED=true USEBRIAN_DISABLE_AUTO_UPDATE=1 \
+  "$app/Contents/MacOS/Use Brian"
+```
+
+No publish, version bump, credential export, ad-hoc release signing or timestamp bypass. The production updater previously replaced the WIP app; run the new extracted app directly and keep the terminal open. Authenticate normally against the intended backend, not an assumed cloud deployment. Follow [the inspector checks](native-computer-r1-inspector.md): first admission attempt, permission attribution, selected-window redaction/no effects, cleanup, Stop/takeover and scope loss. The inspector opt-in cannot run semantic tasks or capture. Do not set pilot/platform acceptance flags to manufacture a pass. Real semantic/provider/canvas and termination/physical checks remain gated acceptance work; unavailable gates must be recorded as blocked, not bypassed. An isolated mechanism pass is not authority to run production clicks.
+
+Record source/package revision, SDK/OS/architecture, bounded result and every failure/intervention without secrets or raw desktop content. R1–R4 remain open where signed workflow, real input or configured-provider evidence is absent. Deployment readiness and live credentials are separate from Mac execution; neither this document nor a successful checker deploys anything.
+
+## Historical evidence and constraints
+
+### Preserved earlier verification record (historical, not a new request)
 
 After the implementation-first pass: 603 native/build/signing Node tests, 1,111 desktop tests/54 files (three are local pending-CI checks), 38 web tests, 151 core-loop tests, 73 API/relay tests and desktop/web typechecks passed. The Foundation wire/click-policy runner passed in all three flag configurations, and the new guardian runner passed 10 portable ledger/tail cases. Mac-target Swift parsing passed but is not SDK typechecking. Earlier parent runs included API typechecking and 170 API runtime/service tests. Earlier current-native verification: 599 Node checks, 32 renderer/store tests, real Linux Foundation wire/dispatcher/approval/semantic/privacy/capture checks and generated envelope validation. Prototype ownership tests passed unoptimized and `-O`, including 45 revocation boundaries and exhaustive short traces. These are not Mac effects, input cleanup or live-provider acceptance. All evidence and earlier failures remain in `docs/native-computer-acceptance.md`.
 
-A credential-free Mac SDK GitHub workflow was prepared but **its push was rejected because the existing token lacks workflow scope**. No workflow ran. It is retained only in the Linux checkout/local branch `wip/native-mac-sdk-ci`; do not waste time expanding credentials to reproduce that now that work is moving to Mac. The feature commits above were pushed separately without it. No production workflow or signing credentials were changed.
+A credential-free Mac SDK GitHub workflow was prepared but **its push was rejected because the existing token lacks workflow scope**. No workflow ran. It is retained only in the Linux checkout/local branch `wip/native-mac-sdk-ci`; do not waste time expanding credentials to reproduce that as a substitute for the operator-reported SDK results. The feature commits above were pushed separately without it. No production workflow or signing credentials were changed.
 
-## Delivery constraints
 
-Work only in the feature scope; browser behavior stays independent. Windows/Linux, broad benchmarks, generalized attestation/telemetry and hosted-accounting expansion are deferred. No production deployment or release publication without authorization. WIP feature commits/pushes are authorized; no force push or hook bypass. KB work is separate (`brian-kb-native-computer` in the previous workspace). Do not mark the feature complete or available until the intended signed package and real workflow/provider configuration are verified.
+The [acceptance ledger](native-computer-acceptance.md) preserves earlier 603 native/build/signing checks, 1,111 desktop tests, 38 web tests, 151 core-loop tests, 73 API/relay tests, Foundation runs and earlier failures. Those overlapping revision-scoped results are not current native acceptance. The earlier rejected workflow push ran no Mac workflow; it is not a reason to expand credentials or repeat the operator's completed SDK checks. Earlier source/session/notice milestones (`1d13292f`, `eb83ce67`, `a7a60c00`, `23b57954`, `795870c5`) are historical, not the required current checkout.
+
+Browser behavior remains independent. Windows/Linux, generalized telemetry/attestation and hosted-accounting expansion remain deferred. No production deployment or release publication is authorized. KB edits remain separate and preserve existing work.
