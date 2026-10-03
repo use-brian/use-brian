@@ -137,7 +137,8 @@ describe('trusted main native computer setup', () => {
     vi.stubEnv('NATIVE_COMPUTER_INSPECTOR_ENABLED', 'true')
     integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth: async () => auth }); integration.install()
     await discover()
-    controller().caps.semanticActions = false
+    expect(controller().options.observationOnly).toBe(true)
+    expect(controller().caps.semanticActions).toBe(true) // UI gate must not rely on helper refusal.
     for (const [allowControl, allowCapture] of [[true, false], [false, true], [true, true]]) {
       expect(await integration.handle({ ...selection, allowControl, allowCapture })).toMatchObject({ ok: false })
     }

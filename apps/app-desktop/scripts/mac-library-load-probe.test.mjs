@@ -189,5 +189,6 @@ test('native source guards: own files and public SHA256 metadata, no kernel fabr
   const helper = readFileSync(new URL('../native/computer-control/Helper.swift', import.meta.url), 'utf8');
   assert(!helper.includes('LibraryConstraintLoadProbe'));
   assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
-  assert(helper.includes('case "beginApproval", "endApproval": result = false'));
+  assert(helper.includes('guard supportedGrant(payload), grant == nil'));
+  assert(helper.includes('guard supportedExecution(command) else { return result("denied") }'));
 });

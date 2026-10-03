@@ -435,17 +435,57 @@ func privateResponse(requestId: String, method: String, result: Any, timing: Sou
     return response
 }
 // Fresh-helper readiness is metadata-only. Only explicit local discovery creates
-// the backend; no argument/environment switch can enable action authority.
-let probeOnlyLimitation = "Experimental AX inspector: select discovery to initialize; control and capture disabled; signed Mac AX acceptance pending."
+// the backend; authority still requires an exact grant and per-action approval.
+let probeOnlyLimitation = "Select discovery to initialize AX inspection and consented semantic actions; capture and input disabled."
 protocol ObservationBackend: AnyObject {
     func capabilities() -> Object
     func listTargets() -> [Object]
     func start(_ payload: Object) -> Bool
+    func beginApproval(_ payload: Object) -> Bool
+    func endApproval(_ payload: Object) -> Bool
     func execute(_ payload: Object, timing: SourceRequestTiming?) -> Object
 }
 func observationGrant(_ payload: Object) -> Bool {
     guard validWirePayload("start", payload), let grant = payload["grant"] as? Object else { return false }
     return wireBool(grant["allowControl"]) == false && wireBool(grant["allowCapture"]) == false
+}
+// Capture is never implied by control. Reject rather than silently narrow grants.
+func supportedGrant(_ payload: Object) -> Bool {
+    guard validWirePayload("start", payload), let grant = payload["grant"] as? Object else { return false }
+    return wireBool(grant["allowCapture"]) == false
+}
+func semanticKind(_ kind: String) -> Bool { ["invoke", "setValue", "select", "scroll"].contains(kind) }
+func supportedExecution(_ command: Object) -> Bool {
+    guard let action = command["action"] as? Object, let kind = action["kind"] as? String else { return false }
+    return kind == "observe" || semanticKind(kind)
+}
+// Approval binds every command field (identity, target instances, epoch, ref,
+// observation, deadline and text), never a label or a subset of the action.
+func exactSemanticCommand(_ command: Object, _ approved: Object) -> Bool {
+    guard validWireCommand(command), validWireCommand(approved),
+          let action = command["action"] as? Object, let kind = action["kind"] as? String,
+          semanticKind(kind) else { return false }
+    return NSDictionary(dictionary: command).isEqual(to: approved)
+}
+// Pure policy used by live AX reads and portable tests. Native attributes are
+// queried only for public nodes under an explicitly control-authorized grant.
+func semanticNodeActions(control: Bool, appId: String, role: String, subrole: String?,
+                         enabled: Bool, names: [String], writableValue: Bool,
+                         writableSelection: Bool, vertical: Bool) -> [String] {
+    guard control, enabled, publicAXClassification(role, subrole) else { return [] }
+    if appId == "com.apple.TextEdit" {
+        return role == "AXTextArea" && writableValue ? ["setValue"] : []
+    }
+    guard appId == "com.usebrian.NativeComputerFixture" else { return [] }
+    var actions: [String] = []
+    // Window chrome is not a fixture form action.
+    if ["AXButton", "AXCheckBox", "AXPopUpButton", "AXMenuItem"].contains(role),
+       subrole == "", names.contains("AXPress") { actions.append("invoke") }
+    if ["AXTextField", "AXTextArea"].contains(role), writableValue { actions.append("setValue") }
+    if (["AXRow", "AXRadioButton"].contains(role) && writableSelection) ||
+        (role == "AXRadioButton" && names.contains("AXPress")) { actions.append("select") }
+    if role == "AXScrollBar", vertical, names.contains("AXIncrement") || names.contains("AXDecrement") { actions.append("scroll") }
+    return actions
 }
 final class ObservationDispatcher {
     private var backend: ObservationBackend?
@@ -465,11 +505,12 @@ final class ObservationDispatcher {
         case "listTargets":
             if backend == nil { backend = makeBackend() }
             result = backend!.listTargets()
-        case "start": result = observationGrant(payload) ? (backend?.start(payload) ?? false) : false
-        case "beginApproval", "endApproval": result = false
+        case "start": result = supportedGrant(payload) ? (backend?.start(payload) ?? false) : false
+        case "beginApproval": result = backend?.beginApproval(payload) ?? false
+        case "endApproval": result = backend?.endApproval(payload) ?? false
         case "execute":
             guard let command = payload["command"] as? Object, let commandId = command["commandId"] as? String else { return nil }
-            if let backend = backend, (command["action"] as? Object)?["kind"] as? String == "observe" {
+            if let backend = backend, supportedExecution(command) {
                 result = backend.execute(payload, timing: timing)
             } else {
                 result = ["commandId": commandId, "outcome": "not_executed", "code": "denied"]
@@ -495,6 +536,34 @@ func publicAXClassification(_ role: String?, _ subrole: String?) -> Bool {
     default: return false
     }
 }
+// Unsupported children are not equivalent to an empty declared child list.
+// Only reviewed public leaf roles, independently omitting AXChildren from a
+// successful attribute-name enumeration, may use the absent-leaf case.
+let publicAXLeafRoles: Set<String> = ["AXButton", "AXCheckBox", "AXRadioButton", "AXTextField", "AXTextArea", "AXStaticText"]
+func publicLeafWithoutChildren(_ role: String?, _ subrole: String?, _ attributeNames: [String]?) -> Bool {
+    guard let role = role, publicAXLeafRoles.contains(role), publicAXClassification(role, subrole),
+          let names = attributeNames, !names.contains("AXChildren") else { return false }
+    return true
+}
+enum ChildrenRead<Element> {
+    case declared([Element]), absentLeaf, failed, malformed
+    var elements: [Element]? {
+        switch self {
+        case .declared(let children): return children
+        case .absentLeaf: return []
+        case .failed, .malformed: return nil
+        }
+    }
+}
+func sameChildrenRead<Element>(_ previous: ChildrenRead<Element>, _ current: ChildrenRead<Element>,
+                               equal: (Element, Element) -> Bool) -> Bool {
+    switch (previous, current) {
+    case (.absentLeaf, .absentLeaf): return true
+    case (.declared(let before), .declared(let after)):
+        return before.count == after.count && zip(before, after).allSatisfy { equal($0.0, $0.1) }
+    default: return false // Even declared-empty -> absent-leaf is a scope change.
+    }
+}
 // END FOUNDATION WIRE VALIDATION
 func monotonic() -> Double { ProcessInfo.processInfo.systemUptime * 1000 }
 func id() -> String { UUID().uuidString }
@@ -504,6 +573,24 @@ func attr(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     return AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success ? result : nil
 }
 func elements(_ element: AXUIElement, _ name: String) -> [AXUIElement] { attr(element, name) as? [AXUIElement] ?? [] }
+func readChildren(_ element: AXUIElement) -> ChildrenRead<AXUIElement> {
+    var value: CFTypeRef?
+    switch AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) {
+    case .success:
+        guard let value = value, CFGetTypeID(value) == CFArrayGetTypeID(),
+              let children = value as? [AnyObject],
+              children.allSatisfy({ CFGetTypeID($0) == AXUIElementGetTypeID() }) else { return .malformed }
+        return .declared(children.map { $0 as! AXUIElement })
+    case .attributeUnsupported:
+        var attributes: CFArray?
+        guard AXUIElementCopyAttributeNames(element, &attributes) == .success else { return .failed }
+        guard let names = attributes as? [String] else { return .malformed }
+        guard publicLeafWithoutChildren(attr(element, kAXRoleAttribute) as? String,
+                                        privacySubrole(element), names) else { return .failed }
+        return .absentLeaf
+    default: return .failed // Includes noValue, timeout, invalid element and disabled API.
+    }
+}
 // Internal security comparisons always use the full AX string, never a prefix.
 func string(_ element: AXUIElement, _ name: String) -> String { attr(element, name) as? String ?? "" }
 func privacySubrole(_ element: AXUIElement) -> String? {
@@ -556,7 +643,7 @@ struct Window {
 struct Ref {
     let element: AXUIElement
     let node: Object
-    let children: [AXUIElement]
+    let children: ChildrenRead<AXUIElement>
 }
 struct Snapshot {
     let observation: Object
@@ -628,9 +715,9 @@ final class Broker: ObservationBackend {
     func capabilities() -> Object {
         let trusted = AXIsProcessTrusted()
         let ready = trusted && (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
-        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": false, "windowCapture": false, "input": false,
+        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready, "windowCapture": false, "input": false,
                 "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": "unknown",
-                "limitations": ["Experimental consented AX inspector only; signed Mac AX acceptance pending. Control, capture and focus restoration disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
+                "limitations": ["Consented TextEdit document and fixture semantic actions only. Capture, coordinate input and general focus/keys disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
     }
     func listTargets() -> [Object] {
         guard grant == nil, AXIsProcessTrusted() else { return [] }
@@ -732,7 +819,7 @@ final class Broker: ObservationBackend {
         return false
     }
     func start(_ payload: Object) -> Bool {
-        guard observationGrant(payload), grant == nil, let candidate = payload["grant"] as? Object,
+        guard supportedGrant(payload), grant == nil, let candidate = payload["grant"] as? Object,
               let leaseId = wireString(payload["leaseId"]),
               // Schema permits epoch zero; this pilot retains its active-grant >0 rule.
               let epoch = wireInteger(candidate["epoch"]), epoch > 0,
@@ -740,8 +827,15 @@ final class Broker: ObservationBackend {
               let targets = candidate["targets"] as? [Object], let tap = inputTap, CGEvent.tapIsEnabled(tap: tap), AXIsProcessTrusted(), targets.allSatisfy({ liveWindow($0) != nil }) else { return false }
         guard targets.count == 1, let window = liveWindow(targets[0]), monitorScope(window), liveWindow(window.target) != nil, AXIsProcessTrusted(), CGEvent.tapIsEnabled(tap: tap) else { return false }
         guard brian_private_channel_alive() == 1 else { _exit(70) }
-        grant = candidate; lease = leaseId; expiresMonotonic = monotonic() + expiry - now()
+        expiresMonotonic = monotonic() + expiry - now()
         guardLock.lock(); watchdogDeadline = expiresMonotonic; watchdogActive = true; guardLock.unlock()
+        // Inspector Start never activates. Only explicit control consent restores.
+        if wireBool(candidate["allowControl"]) == true {
+            guard restoreApprovedWindow(window) else { return false }
+        }
+        guard now() < expiry, liveWindow(window.target) != nil, trust.parentValid(),
+              brian_private_channel_alive() == 1, AXIsProcessTrusted(), CGEvent.tapIsEnabled(tap: tap) else { return false }
+        grant = candidate; lease = leaseId
         return true
     }
     func authorized(_ command: Object, _ leaseId: String) -> Bool {
@@ -773,6 +867,14 @@ final class Broker: ObservationBackend {
         let name = boundedText(sensitive ? "" : (title.isEmpty ? string(element, kAXDescriptionAttribute) : title), 4096)
         var complete = !sensitive && !exportedRole.truncated && !name.truncated
         var result: Object = ["ref": ref, "role": exportedRole.text, "name": name.text, "enabled": bool(element, kAXEnabledAttribute), "focused": bool(element, kAXFocusedAttribute), "selected": bool(element, kAXSelectedAttribute) || (!sensitive && role == kAXRadioButtonRole && bool(element, kAXValueAttribute)), "sensitive": sensitive, "actions": [String]()]
+        if !sensitive, wireBool(grant?["allowControl"]) == true {
+            var writable: DarwinBoolean = false
+            let writableValue = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &writable) == .success && writable.boolValue
+            let appId = (grant?["targets"] as? [Object])?.first?["appId"] as? String ?? ""
+            result["actions"] = semanticNodeActions(control: true, appId: appId, role: role, subrole: subrole,
+                enabled: bool(element, kAXEnabledAttribute), names: actionNames(element), writableValue: writableValue,
+                writableSelection: selectionAttribute(element), vertical: string(element, kAXOrientationAttribute) == kAXVerticalOrientationValue)
+        }
         if let parent = parent { result["parentRef"] = parent }
         if let rect = bounds(element) { result["bounds"] = rect }
         if !sensitive, let value = attr(element, kAXValueAttribute) as? String {
@@ -797,11 +899,6 @@ final class Broker: ObservationBackend {
             return role != kAXSheetRole
         }
     }
-    func scopedChildren(_ element: AXUIElement) -> [AXUIElement] {
-        // Canonical AX child membership includes sheet-role children. Actual
-        // AppKit modal coverage remains a native acceptance requirement.
-        return elements(element, kAXChildrenAttribute)
-    }
     func observe(_ command: Object, _ window: Window) -> Object? {
         guard brian_private_channel_alive() == 1 else { _exit(70) }
         guard liveWindow(window.target) != nil, let rect = bounds(window.element),
@@ -819,10 +916,10 @@ final class Broker: ObservationBackend {
             let key = id(); let read = node(element, key, parent); let value = read.value
             if !read.complete { complete = false }
             bytes += (try? JSONSerialization.data(withJSONObject: value).count) ?? 10000
-            let childRead = attr(element, kAXChildrenAttribute) as? [AXUIElement]
-            if childRead == nil { complete = false }
-            let children = childRead ?? []
-            nodes.append(value); refs[key] = Ref(element: element, node: value, children: children)
+            let childRead = readChildren(element)
+            if childRead.elements == nil { complete = false }
+            let children = childRead.elements ?? []
+            nodes.append(value); refs[key] = Ref(element: element, node: value, children: childRead)
             // Secure/unknown subtree never leaves the helper, even via a child's name.
             if value["sensitive"] as? Bool == true { complete = false; continue }
             if depth >= 16 { if !children.isEmpty { complete = false }; continue }
@@ -852,8 +949,8 @@ final class Broker: ObservationBackend {
         return snapshot
     }
     func sameChildren(_ ref: Ref) -> Bool {
-        let current = scopedChildren(ref.element)
-        return current.count == ref.children.count && zip(current, ref.children).allSatisfy { CFEqual($0.0, $0.1) }
+        let current = readChildren(ref.element)
+        return sameChildrenRead(ref.children, current, equal: { CFEqual($0, $1) })
     }
     func unchanged(_ snapshot: Snapshot, _ window: Window) -> Bool {
         guard snapshot.observation["completeness"] as? String == "complete" else { return false }
@@ -865,27 +962,36 @@ final class Broker: ObservationBackend {
                 reachable(ref.element, in: window.element) && sameChildren(ref)
         }
     }
-    func beginApproval(_ payload: Object) -> Bool { return false }
-    // Retained R2 implementation, deliberately unreachable from R1 entry points.
-    private func retainedBeginApproval(_ payload: Object) -> Bool {
+    // Approval must name a currently permitted ref, not just a well-formed command.
+    func permittedSemantic(_ action: Object, _ snapshot: Snapshot) -> Bool {
+        guard wireBool(grant?["allowControl"]) == true,
+              let kind = action["kind"] as? String, semanticKind(kind),
+              let key = action["ref"] as? String, let ref = snapshot.refs[key],
+              ref.node["sensitive"] as? Bool == false,
+              (ref.node["actions"] as? [String])?.contains(kind) == true else { return false }
+        if kind == "scroll" {
+            guard let delta = wireInteger(action["deltaY"], min: -600, max: 600), delta != 0,
+                  actionNames(ref.element).contains(delta > 0 ? kAXIncrementAction : kAXDecrementAction) else { return false }
+        }
+        return true
+    }
+    func beginApproval(_ payload: Object) -> Bool {
         guard validWirePayload("beginApproval", payload), approvalCommand == nil, let command = payload["command"] as? Object,
               let deadline = wireInteger(command["deadlineAt"]), validCommand(command), authorized(command, payload["leaseId"] as? String ?? ""),
               let action = command["action"] as? Object, let target = action["target"] as? Object,
-              let window = liveWindow(target), let snapshot = fresh(action, window), unchanged(snapshot, window) else { return false }
+              let window = liveWindow(target), let snapshot = fresh(action, window), permittedSemantic(action, snapshot), unchanged(snapshot, window) else { return false }
         approvedCommand = nil; approvalCommand = command
         guardLock.lock(); approvalOpen = true
         watchdogDeadline = min(expiresMonotonic, monotonic() + min(30_000, deadline - now()))
         guardLock.unlock()
         return true
     }
-    func endApproval(_ payload: Object) -> Bool { return false }
-    // Retained R2 implementation, deliberately unreachable from R1 entry points.
-    private func retainedEndApproval(_ payload: Object) -> Bool {
+    func endApproval(_ payload: Object) -> Bool {
         guardLock.lock(); approvalOpen = false; guardLock.unlock()
         defer { approvalCommand = nil }
         approvedCommand = nil
         guard validWirePayload("endApproval", payload), let approved = wireBool(payload["approved"]),
-              let command = payload["command"] as? Object, let pending = approvalCommand, same(command, pending),
+              let command = payload["command"] as? Object, let pending = approvalCommand, exactSemanticCommand(command, pending),
               authorized(command, payload["leaseId"] as? String ?? "") else { return false }
         if !approved {
             approvedCommand = nil
@@ -894,18 +1000,15 @@ final class Broker: ObservationBackend {
         }
         guard let action = command["action"] as? Object, let target = action["target"] as? Object,
               let window = liveWindow(target), let observationId = action["observationId"] as? String,
-              let snapshot = snapshots[observationId], snapshot.observation["completeness"] as? String == "complete",
+              let snapshot = snapshots[observationId], snapshot.observation["completeness"] as? String == "complete", permittedSemantic(action, snapshot),
               snapshot.refs.values.allSatisfy({ node($0.element, $0.node["ref"] as! String, $0.node["parentRef"] as? String).complete }),
               restoreApprovedWindow(window), let previous = snapshot.observation["bounds"] as? Object,
               let b = bounds(window.element), same(previous, b), snapshot.observation["displayLayoutVersion"] as? String == layout(),
               NSWorkspace.shared.frontmostApplication?.processIdentifier == pid_t(target["processId"] as! Int),
               let focused = attr(window.application, kAXFocusedWindowAttribute), CFEqual(focused, window.element),
               unchanged(snapshot, window) else { return false }
-        // After the locally approved focus restoration, never choose a replacement ref. The exact handles, values,
-        // geometry, semantics and (for clicks) PNG must survive the dialog unchanged.
-        if action["kind"] as? String == "click" {
-            guard let f = frame, safeCanvas(window, snapshot), let (png, _, _) = pixels(window), png.base64EncodedString() == f["data"] as? String else { return false }
-        }
+        // Exact handles/state must survive the local dialog. No capture fallback.
+        guard authorized(command, payload["leaseId"] as? String ?? "") else { return false }
         guard brian_private_channel_alive() == 1 else { _exit(70) }
         snapshots[observationId] = Snapshot(observation: snapshot.observation, refs: snapshot.refs, monotonic: monotonic())
         approvedCommand = command
@@ -920,8 +1023,9 @@ final class Broker: ObservationBackend {
             if let observation = observation { receipt["observation"] = observation }; return receipt
         }
         guard validWirePayload("execute", payload), let action = command["action"] as? Object, let kind = action["kind"] as? String else { return result("denied") }
-        // Absolute R1 barrier before even target/approval/capture revalidation.
-        guard kind == "observe" else { return result("denied") }
+        // Hard effect-class barrier, independent of grant or approval state.
+        guard supportedExecution(command) else { return result("denied") }
+        guard kind == "observe" || wireBool(grant?["allowControl"]) == true else { return result("denied") }
         guard approvalCommand == nil, validCommand(command), let deadline = wireInteger(command["deadlineAt"]), authorized(command, payload["leaseId"] as? String ?? ""), let target = action["target"] as? Object else { return result("denied") }
         // No surviving release owner across SIGKILL/_exit; approval or flags cannot enable input.
         if kind == "click" { return result("unsupported") }
@@ -947,12 +1051,10 @@ final class Broker: ObservationBackend {
             guard let observation = observe(command, window), authorized(command, payload["leaseId"] as? String ?? "") else { return finish(result("expired")) }
             return finish(result("ok", "executed", observation))
         }
-        if kind != "capture" {
-            guard let approved = approvedCommand, same(approved, command) else { return finish(result("approval_required")) }
-            approvedCommand = nil
-        }
+        guard let approved = approvedCommand, exactSemanticCommand(command, approved) else { return finish(result("approval_required")) }
+        approvedCommand = nil
         guard let completeSnapshot = fresh(action, window), unchanged(completeSnapshot, window) else { return finish(result("stale_observation")) }
-        if kind == "capture" { return finish(capture(command, action, window)) }
+        guard permittedSemantic(action, completeSnapshot) else { return finish(result("denied")) }
         // Unsupported action classes never fall back to unguarded input.
         if kind == "key" || kind == "focus" { return finish(result("unsupported")) }
         guard wireBool(grant?["allowControl"]) == true else { return finish(result("denied")) }

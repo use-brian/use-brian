@@ -41,11 +41,11 @@ if (process.argv.includes('--portable')) {
   const entry = helper.slice(helper.indexOf('guard let trust = ProcessTrust()'))
   assert(entry.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'))
   assert(entry.indexOf('guard trust.parentValid()') < entry.indexOf('dispatcher.response('))
-  assert(helper.includes('guard observationGrant(payload), grant == nil'))
-  assert(helper.includes('guard kind == "observe" else { return result("denied") }'))
-  assert(helper.includes('if childRead == nil { complete = false }'))
+  assert(helper.includes('guard supportedGrant(payload), grant == nil'))
+  assert(helper.includes('guard supportedExecution(command) else { return result("denied") }'))
+  assert(helper.includes('if childRead.elements == nil { complete = false }'))
   for (const marker of ['CFGetTypeID(number) == CFBooleanGetTypeID()', 'CFGetTypeID(number) == CFNumberGetTypeID()',
-    'string.utf16.count <= max', 'validWireRequest(request)', 'observationGrant(payload)',
+    'string.utf16.count <= max', 'validWireRequest(request)', 'supportedGrant(payload)',
     'validWirePayload("endApproval", payload)', 'let approved = wireBool(payload["approved"])',
     '(Date().timeIntervalSince1970 * 1000).rounded(.down)', '"capturedAt": now(), "monotonicMs": monotonic()']) assert(helper.includes(marker), marker)
   assert(!helper.includes('candidate["allowControl"] is Bool'))
@@ -71,10 +71,10 @@ if (process.argv.includes('--portable')) {
   assert(executeSource.indexOf('if kind == "click" { return result("unsupported") }') < executeSource.indexOf('if kind == "observe"'))
   assert(executeSource.includes('if kind == "click" { return result("unsupported") }'))
   assert(!/CGEvent\(mouseEventSource:|\.post\(tap:|func click\(/.test(helper), 'No coordinate emitter reachable even through raw private requests')
-  assert(helper.includes('return finish(capture(command, action, window))'))
+  assert(!helper.includes('return finish(capture(command, action, window))'))
   assert(helper.includes('AXUIElementPerformAction'))
   const fixture = readFileSync(new URL('./Fixture.swift', import.meta.url), 'utf8')
-  for (const marker of ['case "select":', 'case "scroll":', 'kAXIncrementAction', 'kAXDecrementAction', 'same(approved, command)', 'sameChildren(ref)', 'kind != "setValue"', 'watchdogDeadline', 'safeCanvas(window, snapshot)']) assert(helper.includes(marker), marker)
+  for (const marker of ['case "select":', 'case "scroll":', 'kAXIncrementAction', 'kAXDecrementAction', 'exactSemanticCommand(command, approved)', 'sameChildren(ref)', 'kind != "setValue"', 'watchdogDeadline', 'safeCanvas(window, snapshot)']) assert(helper.includes(marker), marker)
   for (const marker of ['Canvas clicks:', '.valueChanged', 'Mock send (local only)', 'Mock delete (local only)', 'NATIVE_SENTINEL', 'Duplicate action', 'window.beginSheet', 'NSPopUpButton']) assert(fixture.includes(marker), marker)
   for (const marker of ['value.unicodeScalars', 'scalar.value > 0xFFFF ? 2 : 1', 'publicAXRoles.contains(role) ? role : "AXUnknown"', '!publicAXClassification(role, subrole)', 'boundedText(value, 4096)', 'boundedText(sensitive', 'if !read.complete { complete = false }', 'current.complete && same(current.value, ref.node)', 'unchanged(completeSnapshot, window)']) assert(helper.includes(marker), marker)
   assert(!helper.includes('prefix(4096)')); assert(!helper.includes('role.prefix(100)'))
@@ -138,7 +138,7 @@ try {
     for (const bit of ['axRead', 'semanticActions', 'windowCapture', 'input']) assert.equal(caps[bit], false)
     assert.equal(caps.accessibilityPermission, 'unknown')
     assert.equal(caps.capturePermission, 'unknown')
-    assert.deepEqual(caps.limitations, ['Experimental AX inspector: select discovery to initialize; control and capture disabled; signed Mac AX acceptance pending.'])
+    assert.deepEqual(caps.limitations, ['Select discovery to initialize AX inspection and consented semantic actions; capture and input disabled.'])
     const target = { appId: 'com.usebrian.NativeComputerFixture', processId: 42, processInstanceId: 'not-looked-up', windowId: 'not-looked-up', windowInstanceId: 'not-looked-up' }
     const identity = Object.fromEntries(['deploymentId', 'userId', 'workspaceId', 'deviceId', 'sessionId', 'conversationId', 'taskId'].map(key => [key, randomUUID()]))
     const grant = { protocol: 'native-computer-v1', identity, grantId: randomUUID(), epoch: 1, expiresAt: Date.now() + 60000, targets: [target], allowControl: true, allowCapture: true, requester: 'Untrusted protocol assertion', goal: 'Must never authorize' }

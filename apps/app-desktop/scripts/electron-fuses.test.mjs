@@ -198,5 +198,6 @@ test('post-sign verification never repairs missing/stale coverage or changed dig
   const helper = await readFile(new URL('../native/computer-control/Helper.swift', import.meta.url), 'utf8');
   assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
   assert(helper.includes('dispatcher.response(request, clock: sourceClock)'));
-  assert(helper.includes('wireBool(grant["allowControl"]) == false && wireBool(grant["allowCapture"]) == false'));
+  assert(helper.includes('guard supportedGrant(payload), grant == nil'));
+  assert(helper.includes('guard supportedExecution(command) else { return result("denied") }'));
 });

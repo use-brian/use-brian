@@ -24,6 +24,8 @@ export interface NativeControllerOptions {
   /** Optional metadata-only observer, installed exclusively by trusted main. */
   observerFactory?: NativeBrokerObserverFactory
   enabled: boolean
+  /** Trusted main rollout ceiling: discovery/inspection only, regardless of helper support. */
+  observationOnly?: boolean
   /** Must only become true after independent shortcut/menu Stop AND takeover/lock hooks installed. */
   safetyControlsReady: () => boolean
   helperFactory: HelperFactory
@@ -80,7 +82,7 @@ export class NativeComputerController {
   private validateCapabilities(value: NativeCapabilities): NativeCapabilities {
     const caps = CapabilitiesSchema.parse(value)
     if (caps.platform !== (this.options.platform ?? process.platform)) throw new Error('Helper platform mismatch')
-    return caps
+    return this.options.observationOnly ? { ...caps, semanticActions: false, windowCapture: false, input: false } : caps
   }
   async capabilities(): Promise<NativeCapabilities> {
     if (!this.available() || this.abort.signal.aborted) return structuredClone(this.caps)
@@ -99,6 +101,8 @@ export class NativeComputerController {
   /** Caller is trusted local main UI. This method still requires a fresh local consent dialog. */
   async start(input: NativeGrant): Promise<NativeStatus> {
     const grant = frozen(GrantSchema.parse(input))
+    // Independent of advertised capabilities and the UI gate; never send forbidden authority to a helper.
+    if (this.options.observationOnly && (grant.allowControl || grant.allowCapture)) throw new Error('Observation-only capability ceiling')
     if (!this.available() || this.abort.signal.aborted || this.starting || this.grant) throw new Error('Local Resume required or device busy')
     if (grant.epoch <= this.epoch || grant.expiresAt <= Date.now() || grant.expiresAt > Date.now() + MAX_SESSION_MS) throw new Error('Invalid local grant lifetime/epoch')
     this.trace = NativeBrokerTrace.create(this.options.observerFactory, { sessionId: grant.identity.sessionId, epoch: grant.epoch })

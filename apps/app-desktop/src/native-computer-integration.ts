@@ -62,7 +62,7 @@ export class NativeComputerIntegration {
   private readonly controlEnabled = process.env.NATIVE_COMPUTER_ENABLED === 'true' && supportedNativePlatform(process.platform)
     && (!app.isPackaged || process.env[process.platform === 'darwin' ? 'NATIVE_COMPUTER_PILOT_ACCEPTED' : process.platform === 'win32' ? 'NATIVE_COMPUTER_WINDOWS_ACCEPTED' : 'NATIVE_COMPUTER_LINUX_ACCEPTED'] === 'true')
   // Explicit local R1 development opt-in, not an assertion of pilot acceptance.
-  // It grants only access to setup; native code separately refuses all effects.
+  // It grants only observation access; the controller independently caps helper authority.
   private readonly inspectorEnabled = process.platform === 'darwin' && app.isPackaged && process.env.NATIVE_COMPUTER_INSPECTOR_ENABLED === 'true'
   private readonly enabled = this.controlEnabled || this.inspectorEnabled
   private readonly helperTiming?: HelperTimingOptions
@@ -165,7 +165,7 @@ export class NativeComputerIntegration {
     return 'With your consent, the helper will attempt to restore only the selected window to the foreground at session start and after the approval dialog. It freshly rechecks the target and action; if focus restoration or validation fails, it fails closed.'
   }
   private makeController(): NativeComputerController {
-    const controller: NativeComputerController = new NativeComputerController({ enabled: this.enabled, observerFactory: this.options.observerFactory,
+    const controller: NativeComputerController = new NativeComputerController({ enabled: this.enabled, observationOnly: !this.controlEnabled, observerFactory: this.options.observerFactory,
       safetyControlsReady: () => this.ready && this.helperReady(),
       helperFactory: onDeath => new PrivatePipeHelper(this.helperLaunch(), onDeath, undefined, this.helperTiming), lease: new LocalDeviceLease(),
       approveGrant: (grant, signal) => this.consent('Allow Brian to use this computer?', [

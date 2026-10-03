@@ -84,12 +84,13 @@ describe('native helper signing in the existing Mac release hook', () => {
     }
   });
 
-  it('uses the custom signer while keeping native effects unavailable', () => {
+  it('uses the custom signer while constraining native control to the supported action surface', () => {
     const config = readFileSync(new URL('../../electron-builder.yml', import.meta.url), 'utf8');
     expect(config).toContain('sign: scripts/sign-mac-app.mjs');
     const helper = readFileSync(new URL('../../native/computer-control/Helper.swift', import.meta.url), 'utf8');
     expect(helper).toContain('ObservationDispatcher');
-    expect(helper).toContain('case "beginApproval", "endApproval": result = false');
-    expect(helper).toContain('wireBool(grant["allowControl"]) == false && wireBool(grant["allowCapture"]) == false');
+    expect(helper).toContain('guard supportedGrant(payload), grant == nil');
+    expect(helper).toContain('guard supportedExecution(command) else { return result("denied") }');
+    expect(helper).toContain('func semanticKind(_ kind: String) -> Bool { ["invoke", "setValue", "select", "scroll"].contains(kind) }');
   });
 });

@@ -1,12 +1,12 @@
 # Experimental Mac R1 inspector
 
-Implementation checkpoint, **not signed Mac acceptance or feature completion**. R2 model tasks, semantic actions, input and screenshot fallback remain disabled in the Mac helper. No production deployment/configuration change is authorized by this document.
+Inspector checkpoint, **not signed Mac acceptance or feature completion**. Current source also implements R2 semantic actions behind the separate control rollout gate; the inspector-only opt-in cannot enable them. Input and screenshot fallback remain disabled in the Mac helper. No production deployment/configuration change is authorized by this document.
 
 ## Boundary
 
 - Fresh helper readiness remains metadata-only, with no AX/Screen Recording queries or permission prompts. Bootstrap validation, signing policy and request timeout are unchanged. Failures now log only a fixed main-process stage and bounded timeout/spawn/exit scalars; no helper stderr, exception text, paths, credentials or window content. The operator's earlier first-attempt failure remains unexplained; there is no automatic retry.
 - Explicit discovery lazily constructs the AX backend. Capabilities are refreshed afterward. Accessibility permission and an enabled takeover tap are both required. Screen Recording is neither queried nor needed.
-- A locally approved grant must have `allowControl=false` and `allowCapture=false`. Only a single selected TextEdit/fixture window can be inspected. Start does not activate, raise or edit it. Approval commands and every non-observe command refuse in native code, independently of desktop flags. Snapshot actions are empty.
+- A locally approved grant must have `allowControl=false` and `allowCapture=false`. Only a single selected TextEdit/fixture window can be inspected. Start does not activate, raise or edit it. Native code refuses effects for a read-only grant, independently of renderer choices. The inspector-only main/controller capability ceiling also refuses control/capture grants even when the helper supports semantics. Inspector snapshot actions are empty.
 - Closed role/subrole redaction, bounded traversal, fresh process/window membership, sheet refusal, independent Stop, physical takeover and helper-death lease fencing remain. Scope notifications terminate the helper even during Start, before grant/watchdog activation; a short-lived sheet must not be forgotten. Unknown child arrays produce partial observations.
 - Existing authenticated session/exchange/relay READY and revocation remain required. The one-shot observation is displayed locally only after cleanup; there is no model request, local authorization bypass or separate service.
 

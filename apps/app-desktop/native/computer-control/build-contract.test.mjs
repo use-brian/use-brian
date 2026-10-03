@@ -68,6 +68,32 @@ test('scope notification terminates even before grant activation without locks o
   // flag may swallow a transient window/sheet between subscription and Start.
 });
 
+test('typed AX children reader admits only independently verified public leaves and pins membership', () => {
+  const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
+  const reader = helper.slice(helper.indexOf('func readChildren('), helper.indexOf('// Internal security comparisons'));
+  assert.match(reader, /switch AXUIElementCopyAttributeValue\(element, kAXChildrenAttribute as CFString, &value\)/);
+  assert.match(reader, /CFGetTypeID\(value\) == CFArrayGetTypeID\(\)/);
+  assert.match(reader, /children.allSatisfy\(\{ CFGetTypeID\(\$0\) == AXUIElementGetTypeID\(\) \}\)/);
+  assert.match(reader, /else \{ return .malformed \}/);
+  const unsupported = reader.slice(reader.indexOf('case .attributeUnsupported:'));
+  for (const guard of ['AXUIElementCopyAttributeNames(element, &attributes) == .success', 'let names = attributes as? [String]',
+    'publicLeafWithoutChildren(attr(element, kAXRoleAttribute) as? String,', 'privacySubrole(element), names)']) {
+    assert(unsupported.indexOf(guard) >= 0 && unsupported.indexOf(guard) < unsupported.indexOf('return .absentLeaf'), guard);
+  }
+  assert.match(unsupported, /default: return .failed/);
+  assert(!reader.includes('case .noValue'));
+  assert.equal((reader.match(/return .absentLeaf/g) ?? []).length, 1);
+  assert(helper.includes('let children: ChildrenRead<AXUIElement>'));
+  assert(helper.includes('if childRead.elements == nil { complete = false }'));
+  assert(helper.includes('Ref(element: element, node: value, children: childRead)'));
+  assert(helper.includes('let current = readChildren(ref.element)'));
+  assert(helper.includes('sameChildrenRead(ref.children, current, equal: { CFEqual($0, $1) })'));
+  assert(helper.includes('reachable(ref.element, in: window.element) && sameChildren(ref)'));
+  assert(!helper.includes('func scopedChildren('));
+  // Window/sheet fencing remains strict; the leaf exception never applies here.
+  assert(helper.includes('guard let children = attr(element, kAXChildrenAttribute) as? [AXUIElement], children.count <= 500 else { return false }'));
+});
+
 test('mapped reader has only an own-symbol source and no admission/parent/environment override', () => {
   const reader = readFileSync(new URL('./BootstrapApprovalReader.swift', import.meta.url), 'utf8');
   assert.match(reader, /brian_bootstrap_approval_copy\(buffer.baseAddress, buffer.count, &written\)/);
@@ -77,4 +103,42 @@ test('mapped reader has only an own-symbol source and no admission/parent/enviro
   const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
   assert.match(helper, /let dispatcher = ObservationDispatcher \{ Broker\(trust: trust\) \}/);
   assert.match(helper, /dispatcher.response\(request, clock: sourceClock\)/);
+});
+
+test('semantic approval and effect guards precede restoration and native dispatch', () => {
+  const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
+  const broker = helper.slice(helper.indexOf('final class Broker:'));
+  const section = (from, to) => broker.slice(broker.indexOf(from), broker.indexOf(to));
+  const start = section('    func start(', '    func authorized(');
+  assert(start.indexOf('monitorScope(window)') < start.indexOf('restoreApprovedWindow(window)'));
+  assert(start.indexOf('watchdogActive = true') < start.indexOf('restoreApprovedWindow(window)'));
+  assert.match(start, /if wireBool\(candidate\["allowControl"\]\) == true \{\s*guard restoreApprovedWindow/);
+  const begin = section('    func beginApproval(', '    func endApproval(');
+  for (const gate of ['validWirePayload("beginApproval", payload)', 'authorized(command,', 'fresh(action, window)', 'permittedSemantic(action, snapshot)', 'unchanged(snapshot, window)']) {
+    assert(begin.indexOf(gate) >= 0 && begin.indexOf(gate) < begin.indexOf('approvalCommand = command'), gate);
+  }
+  assert.match(begin, /min\(expiresMonotonic, monotonic\(\) \+ min\(30_000, deadline - now\(\)\)\)/);
+  const end = section('    func endApproval(', '    func execute(');
+  for (const gate of ['validWirePayload("endApproval", payload)', 'exactSemanticCommand(command, pending)', 'authorized(command,', 'if !approved', 'permittedSemantic(action, snapshot)']) {
+    assert(end.indexOf(gate) >= 0 && end.indexOf(gate) < end.indexOf('restoreApprovedWindow(window)'), gate);
+  }
+  assert.match(end, /defer \{ approvalCommand = nil \}/);
+  assert(end.indexOf('approvedCommand = nil') < end.indexOf('validWirePayload'));
+  assert(end.indexOf('unchanged(snapshot, window)') < end.indexOf('approvedCommand = command'));
+  assert(end.lastIndexOf('authorized(command,') > end.indexOf('restoreApprovedWindow(window)'));
+  const execute = section('    func execute(', '    func rect(');
+  const effect = execute.indexOf('        var error: AXError');
+  for (const gate of ['validWirePayload("execute", payload)', 'supportedExecution(command)', 'approvalCommand == nil', 'authorized(command,',
+    'journal[commandId] = result("helper_error", "execution_unknown")', 'exactSemanticCommand(command, approved)', 'approvedCommand = nil',
+    'permittedSemantic(action, completeSnapshot)', 'unchanged(snapshot, window)', 'fresh(action, window) != nil', 'current.complete']) {
+    assert(execute.indexOf(gate) >= 0 && execute.indexOf(gate) < effect, gate);
+  }
+  assert(!execute.includes('capture(command,'));
+  assert.match(execute, /snapshots.removeAll\(\)/);
+  assert.match(execute, /guard error == .success else \{ return finish\(result\("helper_error", "execution_unknown"\)\) \}/);
+  const authority = section('    func authorized(', '    func validCommand(');
+  for (const gate of ['trust.parentValid()', 'leaseId == lease', 'same(identity, owner)', 'command["grantId"]', 'command["epoch"]',
+    'now() < expiry', 'monotonic() < expiresMonotonic', 'monotonic() < commandDeadline', 'now() < deadline',
+    'same($0, target)', 'liveWindow(target) != nil', 'AXIsProcessTrusted()', 'brian_private_channel_alive() == 1']) assert(authority.includes(gate), gate);
+  // These are placement regressions, not native AX/Stop delivery evidence.
 });

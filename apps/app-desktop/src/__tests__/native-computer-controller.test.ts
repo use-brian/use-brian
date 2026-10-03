@@ -20,6 +20,31 @@ function setup(override: Partial<NativeHelper> = {}, approval: NativeControllerO
   return { controller, helper, lease, approveGrant }
 }
 describe('native main broker', () => {
+  it('independently enforces the observation ceiling before consent, lease or helper creation', async () => {
+    const advertised = { ...capabilities, windowCapture: true, input: true }
+    const { helper, lease, approveGrant } = setup({ capabilities: vi.fn(async () => advertised) })
+    const helperFactory = vi.fn(() => helper)
+    const controller = new NativeComputerController({ enabled: true, observationOnly: true, platform: 'darwin',
+      safetyControlsReady: () => true, helperFactory, lease, approveGrant, approveAction: async () => true })
+    try {
+      for (const [allowControl, allowCapture] of [[true, false], [false, true], [true, true]]) {
+        await expect(controller.start({ ...grant(), allowControl, allowCapture })).rejects.toThrow('Observation-only')
+      }
+      expect(helperFactory).not.toHaveBeenCalled()
+      expect(lease.acquire).not.toHaveBeenCalled()
+      expect(approveGrant).not.toHaveBeenCalled()
+      const masked = { axRead: true, semanticActions: false, windowCapture: false, input: false }
+      expect(await controller.capabilities()).toMatchObject(masked)
+      expect(controller.status().capabilities).toMatchObject(masked)
+      expect(advertised).toMatchObject({ semanticActions: true, windowCapture: true, input: true })
+      await controller.start({ ...grant(), allowControl: false })
+      expect(helper.start).toHaveBeenCalledWith(expect.objectContaining({ allowControl: false, allowCapture: false }), expect.any(String))
+      expect(controller.status().capabilities).toMatchObject(masked)
+      await controller.stop()
+      await expect(controller.resume(grant(3))).rejects.toThrow('Observation-only')
+      expect(helper.start).toHaveBeenCalledOnce()
+    } finally { await controller.dispose() }
+  })
   it.each(['darwin', 'win32', 'linux'] as const)('%s uses helper capabilities, separate read/control/capture and independent Stop', async platform => {
     const caps = { ...capabilities, platform, semanticActions: false, input: false, windowCapture: false }
     const { controller, helper } = setup({ capabilities: vi.fn(async () => caps) }, async () => true, platform)

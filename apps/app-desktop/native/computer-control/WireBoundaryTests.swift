@@ -34,6 +34,38 @@ for role in ["AXSheet", "AXUnknown", "SECRET_SENTINEL_ROLE"] {
 precondition(!publicAXClassification(nil, ""))
 precondition(publicAXClassification("AXTextField", "AXSearchField"))
 print("PASS closed AX role/subrole privacy policy; missing/unknown classification and sheets refuse. Foundation only, not native AX reads.")
+// Production leaf policy and typed membership comparisons; no native AX reads.
+var childrenChecks = 0
+for role in publicAXRoles.union(["AXSheet", "AXSecureTextField", "SECRET_ROLE"]) {
+    for subrole: String? in [nil, "", "AXStandardWindow", "AXSearchField", "AXSecureTextField", "AXUnreviewedSubrole"] {
+        for names: [String]? in [nil, [], ["AXRole"], ["AXChildren"], ["AXRole", "AXChildren"]] {
+            let expected = publicAXLeafRoles.contains(role) && publicAXClassification(role, subrole) &&
+                names != nil && !names!.contains("AXChildren")
+            precondition(publicLeafWithoutChildren(role, subrole, names) == expected)
+            childrenChecks += 1
+        }
+    }
+}
+// Independently pin the closed leaf set: policy changes must be reviewed.
+precondition(publicAXLeafRoles == Set(["AXButton", "AXCheckBox", "AXRadioButton", "AXTextField", "AXTextArea", "AXStaticText"]))
+precondition(!publicLeafWithoutChildren(nil, "", []))
+precondition(publicLeafWithoutChildren("AXTextArea", "", ["AXRole", "AXValue"]))
+precondition(!publicLeafWithoutChildren("AXWindow", "AXStandardWindow", []))
+precondition(!publicLeafWithoutChildren("AXGroup", "", []))
+precondition(!publicLeafWithoutChildren("AXPopUpButton", "", []))
+precondition(!publicLeafWithoutChildren("AXMenuItem", "", [])) // May own submenu.
+let childStates: [ChildrenRead<Int>] = [.declared([]), .declared([1]), .declared([1, 2]), .declared([2, 1]), .absentLeaf, .failed, .malformed]
+for (i, before) in childStates.enumerated() {
+    for (j, after) in childStates.enumerated() {
+        precondition(sameChildrenRead(before, after, equal: ==) == (i == j && i < 5))
+        childrenChecks += 1
+    }
+}
+precondition(ChildrenRead<Int>.failed.elements == nil)
+precondition(ChildrenRead<Int>.malformed.elements == nil)
+precondition(ChildrenRead<Int>.absentLeaf.elements == [])
+precondition(ChildrenRead<Int>.declared([1, 2]).elements == [1, 2])
+print("PASS \(childrenChecks + 11) typed child-read/leaf-policy checks; missing container children, failed/malformed reads and changed membership refuse. No native AX evidence.")
 var timingResponses: [Object] = []
 let vectors = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))) as! [Object]
 var checked = 0
@@ -198,20 +230,23 @@ let fakeMethodRequest = sourceRequest(.listTargets)
 saveResponse(fakeMethodRequest, SourceRequestTiming(request: apiRequest, clock: clock), false)
 // Production adapter with a recording backend; widened action routing traps.
 final class TrapBackend: ObservationBackend {
-    var reads = 0; var starts = 0; var discoveries = 0; var queries = 0
+    var reads = 0; var starts = 0; var discoveries = 0; var queries = 0; var approvals = 0; var effects = 0
     func capabilities() -> Object {
         queries += 1
         return ["protocol": proto, "platform": "darwin", "axRead": true,
-            "semanticActions": false, "windowCapture": false, "input": false,
+            "semanticActions": true, "windowCapture": false, "input": false,
             "accessibilityPermission": "granted", "capturePermission": "unknown", "limitations": []]
     }
     func listTargets() -> [Object] { discoveries += 1; return [] }
     func start(_ payload: Object) -> Bool {
-        precondition(observationGrant(payload)); starts += 1; return true
+        precondition(supportedGrant(payload)); starts += 1; return true
     }
+    func beginApproval(_ payload: Object) -> Bool { approvals += 1; return false }
+    func endApproval(_ payload: Object) -> Bool { approvals += 1; return false }
     func execute(_ payload: Object, timing: SourceRequestTiming?) -> Object {
         let command = payload["command"] as! Object
-        precondition((command["action"] as! Object)["kind"] as? String == "observe")
+        precondition(supportedExecution(command))
+        if (command["action"] as! Object)["kind"] as? String != "observe" { effects += 1 }
         reads += 1
         return ["commandId": command["commandId"]!, "outcome": "not_executed", "code": "denied"]
     }
@@ -232,13 +267,14 @@ func checkDispatch(_ request: Object) {
     case "capabilities":
         let caps = response["result"] as! Object
         precondition(wireBool(caps["axRead"]) == initialized)
-        for bit in ["semanticActions", "windowCapture", "input"] { precondition(wireBool(caps[bit]) == false) }
+        precondition(wireBool(caps["semanticActions"]) == initialized)
+        for bit in ["windowCapture", "input"] { precondition(wireBool(caps[bit]) == false) }
         precondition(caps["accessibilityPermission"] as? String == (initialized ? "granted" : "unknown"))
         precondition(caps["capturePermission"] as? String == "unknown")
 
         precondition(wireInteger(response["diagnosticsVersion"]) == 1)
     case "listTargets": precondition((response["result"] as! [Object]).isEmpty)
-    case "start": precondition(wireBool(response["result"]) == (initialized && observationGrant(request["payload"] as! Object)))
+    case "start": precondition(wireBool(response["result"]) == (initialized && supportedGrant(request["payload"] as! Object)))
     case "beginApproval", "endApproval": precondition(wireBool(response["result"]) == false)
     case "execute":
         let receipt = response["result"] as! Object
@@ -280,8 +316,8 @@ for vector in vectors {
         }
     }
 }
-// A caller may assert consent/control/capture and repeat the full conversation;
-// it never routes an authority-bearing grant or approval to the backend.
+// Routing is not authority. The native Broker independently revalidates grants,
+// exact approval and live state. Capture grants are rejected, never narrowed.
 for _ in 0..<2 {
     for method in [SourceMethod.capabilities, .start, .beginApproval, .endApproval, .execute] {
         var request = sourceRequest(method)
@@ -307,9 +343,78 @@ for control in [false, true] {
         checkDispatch(request)
     }
 }
-if !ready { precondition(constructions == 0 && backend.reads == 0 && backend.starts == 0 && backend.queries == 0) }
+if !ready { precondition(constructions == 0 && backend.reads == 0 && backend.starts == 0 && backend.queries == 0 && backend.approvals == 0 && backend.effects == 0) }
 }
-precondition(constructions == 1 && backend.reads > 0 && backend.starts > 0)
-print("PASS \(dispatchCount) lazy production dispatcher responses with observation-only traps; no native SDK execution.")
+precondition(constructions == 1 && backend.reads > 0 && backend.starts > 0 && backend.approvals > 0 && backend.effects > 0)
+print("PASS \(dispatchCount) lazy production dispatcher responses with semantic routing / disabled capture-input traps; no native SDK execution.")
+// Exact approval matching executes the production matcher, not a mock.
+let approvedAction: Object = ["kind": "setValue", "target": (baselineCommand["action"] as! Object)["target"]!,
+    "observationId": "observed", "ref": "exact-ref", "text": "approved text"]
+var approvedSemantic = baselineCommand; approvedSemantic["action"] = approvedAction
+precondition(exactSemanticCommand(approvedSemantic, approvedSemantic))
+var approvalChecks = 1
+for key in ["protocol", "grantId", "commandId", "epoch", "deadlineAt"] {
+    var changed = approvedSemantic
+    changed[key] = key == "epoch" || key == "deadlineAt" ? 2 : "different"
+    precondition(!exactSemanticCommand(changed, approvedSemantic)); approvalChecks += 1
+}
+for key in (baselineCommand["identity"] as! Object).keys {
+    var changed = approvedSemantic; var identity = changed["identity"] as! Object
+    identity[key] = "different"; changed["identity"] = identity
+    precondition(!exactSemanticCommand(changed, approvedSemantic)); approvalChecks += 1
+}
+for key in ["kind", "observationId", "ref", "text"] {
+    var changed = approvedSemantic; var action = approvedAction
+    action[key] = "different"; changed["action"] = action
+    precondition(!exactSemanticCommand(changed, approvedSemantic)); approvalChecks += 1
+}
+for key in (approvedAction["target"] as! Object).keys {
+    var changed = approvedSemantic; var action = approvedAction; var target = action["target"] as! Object
+    target[key] = key == "processId" ? 43 : "different"; action["target"] = target; changed["action"] = action
+    precondition(!exactSemanticCommand(changed, approvedSemantic)); approvalChecks += 1
+}
+precondition(!exactSemanticCommand(baselineCommand, baselineCommand)) // observe cannot be approved
+precondition(!exactSemanticCommand([:], [:]))
+print("PASS \(approvalChecks + 2) exact production approval-matcher checks; all command/identity/target/action fields bound.")
+// Execute the production effect-advertisement policy, including privacy and
+// authority negatives. No mock AX implementation can broaden these results.
+var policyChecks = 0
+func actions(_ app: String, _ role: String, control: Bool = true, subrole: String? = "",
+             enabled: Bool = true, names: [String] = ["AXPress", "AXIncrement", "AXDecrement"],
+             value: Bool = true, selection: Bool = true, vertical: Bool = true) -> [String] {
+    policyChecks += 1
+    return semanticNodeActions(control: control, appId: app, role: role, subrole: subrole,
+        enabled: enabled, names: names, writableValue: value, writableSelection: selection, vertical: vertical)
+}
+let fixtureApp = "com.usebrian.NativeComputerFixture"
+for app in [fixtureApp, "com.apple.TextEdit", "untrusted"] {
+    for role in publicAXRoles.union(["AXSecureTextField", "AXSheet", "SECRET_ROLE"]) {
+        precondition(actions(app, role, control: false).isEmpty)
+        precondition(actions(app, role, enabled: false).isEmpty)
+        for subrole: String? in [nil, "AXSecureTextField", "AXUnreviewedSubrole"] {
+            precondition(actions(app, role, subrole: subrole).isEmpty)
+        }
+        if app == "untrusted" { precondition(actions(app, role).isEmpty) }
+        if app == "com.apple.TextEdit" && role != "AXTextArea" { precondition(actions(app, role).isEmpty) }
+    }
+}
+precondition(actions("com.apple.TextEdit", "AXTextArea") == ["setValue"])
+precondition(actions("com.apple.TextEdit", "AXTextArea", value: false).isEmpty)
+for role in ["AXButton", "AXCheckBox", "AXPopUpButton", "AXMenuItem"] {
+    precondition(actions(fixtureApp, role) == ["invoke"])
+    precondition(actions(fixtureApp, role, names: []).isEmpty)
+}
+precondition(actions(fixtureApp, "AXButton", subrole: "AXCloseButton").isEmpty)
+precondition(actions(fixtureApp, "AXTextField") == ["setValue"])
+precondition(actions(fixtureApp, "AXTextField", value: false).isEmpty)
+precondition(actions(fixtureApp, "AXRadioButton", selection: false) == ["select"])
+precondition(actions(fixtureApp, "AXRadioButton", names: [], selection: false).isEmpty)
+precondition(actions(fixtureApp, "AXRow") == ["select"])
+precondition(actions(fixtureApp, "AXScrollBar") == ["scroll"])
+precondition(actions(fixtureApp, "AXScrollBar", vertical: false).isEmpty)
+precondition(actions(fixtureApp, "AXScrollBar", names: []).isEmpty)
+for kind in ["capture", "click", "key", "focus", "shell", "observe"] { precondition(!semanticKind(kind)) }
+for kind in ["invoke", "select", "setValue", "scroll"] { precondition(semanticKind(kind)) }
+print("PASS \(policyChecks) production semantic node-policy checks: exact cohort, grant, enabled, privacy, role and native support gates. No native effect delivery claimed.")
 try JSONSerialization.data(withJSONObject: timingResponses).write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
 print("PASS private timing default-off/negotiation, source intervals/nesting, status/privacy and bounded one-shot response tests. Foundation/Dispatch only; no native API dispatch or delivery evidence.")

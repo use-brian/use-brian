@@ -5,13 +5,14 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { HelperTimingEvent } from '@use-brian/computer-control/helper-timing.js'
+import type { NativeComputerController } from '../computer-control/controller.js'
 import type { NativeCommand, NativeGrant } from '@use-brian/computer-control/protocol.js'
-const mocks = vi.hoisted(() => ({ directory: '', packaged: false, spawn: vi.fn(), acquire: vi.fn(async () => {}), release: vi.fn(async () => {}), relay: vi.fn() }))
+const mocks = vi.hoisted(() => ({ directory: '', packaged: false, spawn: vi.fn(), acquire: vi.fn(async () => {}), release: vi.fn(async () => {}), relay: vi.fn(), ready: vi.fn(async () => {}), consent: vi.fn(async () => ({ response: 1 })) }))
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
 vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>(), statSync: () => ({ isFile: () => true }), accessSync: () => {} }))
 vi.mock('electron', () => ({
   app: { get isPackaged() { return mocks.packaged }, getPath: () => mocks.directory, on: vi.fn() }, globalShortcut: { register: () => true }, powerMonitor: { on: vi.fn() }, ipcMain: { on: vi.fn() },
-  dialog: { showMessageBox: async () => ({ response: 1 }) }, screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0 } }) }, shell: {}, systemPreferences: {},
+  dialog: { showMessageBox: mocks.consent }, screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0 } }) }, shell: {}, systemPreferences: {},
   BrowserWindow: class {
     webContents = { setWindowOpenHandler: vi.fn(), on: vi.fn(), send: vi.fn() }
     on = vi.fn(); loadFile = async () => {}; showInactive = vi.fn(); destroy = vi.fn(); isDestroyed = () => false
@@ -20,7 +21,7 @@ vi.mock('electron', () => ({
 // Keep the real controller and PrivatePipeHelper: only network/OS process/lease are fixtures.
 vi.mock('../computer-control/index.js', async original => ({ ...await original<typeof import('../computer-control/index.js')>(),
   LocalDeviceLease: class { acquire = mocks.acquire; release = mocks.release },
-  NativeRelayClient: class { constructor() { mocks.relay() }; connect = vi.fn(); disconnect = vi.fn(); waitUntilReady = async () => {} },
+  NativeRelayClient: class { constructor(controller: NativeComputerController) { mocks.relay(controller) }; connect = vi.fn(); disconnect = vi.fn(); waitUntilReady = mocks.ready },
 }))
 import { NativeComputerIntegration, type NativeIntegrationOptions } from '../native-computer-integration.js'
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -34,22 +35,29 @@ let auth: { userId: string; accessToken: string; apiUrl: string; accountKey: str
 let requests: Request[]
 let holdExecute: boolean
 let holdCapabilities: boolean
+let lazyCapabilities: boolean
+let authorized: boolean
 let resourcesPath: PropertyDescriptor | undefined
 let held: { request: Request; respond: () => void } | undefined
 let sessionNumber: number
 const paths: string[] = []
 function fakeChild() {
   let clock = 0
+  let discovered = false
   const child = Object.assign(new EventEmitter(), { pid: 4242, stdout: new PassThrough(), stderr: new PassThrough(),
     stdin: new Writable({ write(chunk: Buffer, _encoding, callback) {
       const request = JSON.parse(chunk.subarray(4).toString()) as Request; requests.push(request); callback()
       const respond = () => {
         const c = request.payload.command
-        const result = request.method === 'capabilities' ? { protocol: 'native-computer-v1', platform: process.platform, axRead: true, semanticActions: true, windowCapture: false, input: false, accessibilityPermission: 'granted', capturePermission: 'denied', limitations: [] }
-          : request.method === 'listTargets' ? [target] : request.method === 'start' ? true : { commandId: c!.commandId, outcome: 'executed', code: 'ok', observation: {
+        if (request.method === 'listTargets') discovered = true
+        const usable = !lazyCapabilities || discovered
+        const result = request.method === 'capabilities' ? { protocol: 'native-computer-v1', platform: process.platform, axRead: usable, semanticActions: usable, windowCapture: false, input: false, accessibilityPermission: usable ? 'granted' : 'unknown', capturePermission: 'denied', limitations: [] }
+          : request.method === 'listTargets' ? [target] : ['start', 'beginApproval', 'endApproval'].includes(request.method) ? true
+          : c!.action.kind !== 'observe' ? { commandId: c!.commandId, outcome: 'executed', code: 'ok' }
+          : { commandId: c!.commandId, outcome: 'executed', code: 'ok', observation: {
             identity: c!.identity, epoch: c!.epoch, id: 'private-snapshot', capturedAt: Date.now(), monotonicMs: 1, target, foreground: true,
             bounds: { x: 0, y: 0, width: 100, height: 100 }, displayLayoutVersion: 'private-layout', completeness: 'complete',
-            nodes: [{ ref: 'private-ref', role: 'textbox', name: 'private-AX-text', value: 'private-value', enabled: true, focused: false, selected: false, sensitive: false, actions: [] }],
+            nodes: [{ ref: 'private-ref', role: 'textbox', name: 'private-AX-text', value: 'private-value', bounds: { x: 0, y: 0, width: 100, height: 100 }, enabled: true, focused: false, selected: false, sensitive: false, actions: ['setValue'] }],
           } }
         clock += 100
         const diagnostics = { version: 1, instanceId: uuid(50), clockId: uuid(51), requestId: request.id, method: request.method,
@@ -71,7 +79,8 @@ function fakeChild() {
 beforeEach(() => {
   platform = Object.getOwnPropertyDescriptor(process, 'platform')!
   resourcesPath = Object.getOwnPropertyDescriptor(process, 'resourcesPath')
-  mocks.packaged = false; holdCapabilities = false
+  mocks.packaged = false; holdCapabilities = false; lazyCapabilities = false; authorized = true
+  mocks.ready.mockReset().mockResolvedValue(undefined); mocks.consent.mockReset().mockResolvedValue({ response: 1 })
   mocks.acquire.mockClear(); mocks.release.mockClear(); mocks.relay.mockClear()
   Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
   vi.stubEnv('NATIVE_COMPUTER_ENABLED', 'true')
@@ -81,6 +90,11 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
     paths.push(new URL(url).pathname)
     if (init.method === 'DELETE') return new Response(null, { status: 204 })
+    if (url.endsWith('/revalidate')) return Response.json({ authorized })
+    if (url.endsWith('/run')) return new Promise<Response>((_resolve, reject) => {
+      const abort = () => reject(new Error('aborted'))
+      init.signal!.addEventListener('abort', abort, { once: true }); if (init.signal!.aborted) abort()
+    })
     if (url.endsWith('/exchange')) return Response.json({ token: 'private-relay-token', relayUrl: 'wss://relay.example', expiresAt: Date.now() + 60000 })
     const body = JSON.parse(init.body as string)
     return Response.json({ identity: { deploymentId: 'private-deployment', userId: auth.userId, workspaceId: body.workspaceId, deviceId: body.deviceId, sessionId: uuid(++sessionNumber), conversationId: body.conversationId, taskId: body.taskId } })
@@ -102,6 +116,72 @@ async function discover() {
   expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: true })
 }
 describe('trusted main helper timing port with real pipe adapter', () => {
+  function packagedMac(accepted: boolean) {
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
+    Object.defineProperty(process, 'resourcesPath', { value: '/fixture/Use Brian.app/Contents/Resources', configurable: true })
+    mocks.packaged = true; lazyCapabilities = true
+    // Test fixtures only: not evidence of operational or signed-platform acceptance.
+    vi.stubEnv('NATIVE_COMPUTER_PILOT_ACCEPTED', String(accepted))
+    vi.stubEnv('NATIVE_COMPUTER_INSPECTOR_ENABLED', 'true')
+    install()
+  }
+
+  it.each([false, true])('refreshes lazy Mac capabilities after discovery with accepted control=%s', async accepted => {
+    packagedMac(accepted)
+    expect(await integration.handle({ type: 'status' })).toMatchObject({ status: { capabilities: { axRead: false, semanticActions: false, windowCapture: false, input: false } } })
+    expect(mocks.spawn).not.toHaveBeenCalled()
+    await integration.handle({ type: 'workspace-changed', workspaceId: selection.workspaceId })
+    expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: true, status: { state: 'ready', capabilities: { axRead: true, semanticActions: accepted, windowCapture: false, input: false } } })
+    expect(requests.map(r => r.method)).toEqual(['capabilities', 'listTargets', 'capabilities'])
+    expect(mocks.spawn).toHaveBeenCalledOnce()
+    if (!accepted) {
+      for (const [allowControl, allowCapture] of [[true, false], [false, true], [true, true]]) {
+        expect(await integration.handle({ ...selection, allowControl, allowCapture })).toMatchObject({ ok: false })
+      }
+      expect(fetch).not.toHaveBeenCalled()
+      expect(requests.some(r => r.method === 'start')).toBe(false)
+      expect(await integration.handle(selection)).toMatchObject({ ok: true, inspection: { id: 'private-snapshot' }, status: { capabilities: { axRead: true, semanticActions: false, windowCapture: false, input: false } } })
+      expect(mocks.consent).toHaveBeenCalledWith(expect.objectContaining({ detail: expect.stringContaining('will not activate, raise or edit') }))
+      expect(paths.some(p => p.endsWith('/run'))).toBe(false)
+    }
+  })
+
+  it('accepted Mac control waits for relay READY and retains exact action consent and API revalidation', async () => {
+    packagedMac(true); await discover()
+    let ready!: () => void
+    mocks.ready.mockImplementationOnce(() => new Promise<void>(resolve => { ready = resolve }))
+    const start = integration.handle({ ...selection, allowControl: true })
+    await vi.waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce())
+    expect(paths.some(p => p.endsWith('/exchange'))).toBe(true)
+    expect(paths.some(p => p.endsWith('/run'))).toBe(false)
+    ready()
+    expect(await start).toMatchObject({ ok: true, status: { state: 'active', capabilities: { semanticActions: true, windowCapture: false, input: false } } })
+    expect(paths.some(p => p.endsWith('/run'))).toBe(true)
+    const controller = mocks.relay.mock.calls[0][0] as NativeComputerController
+    const grant = requests.find(r => r.method === 'start')!.payload.grant!
+    const base = { protocol: grant.protocol, identity: grant.identity, epoch: grant.epoch, grantId: grant.grantId, deadlineAt: Date.now() + 30000 }
+    expect(await controller.execute({ ...base, commandId: 'observe', action: { kind: 'observe', target } })).toMatchObject({ code: 'ok' })
+    const action = { kind: 'setValue' as const, target, observationId: 'private-snapshot', ref: 'private-ref', text: 'exact replacement' }
+    const execute = (commandId: string) => controller.execute({ ...base, commandId, action })
+    const validations = () => paths.filter(p => p.endsWith('/revalidate')).length
+    mocks.consent.mockResolvedValueOnce({ response: 0 })
+    const beforeDenial = validations()
+    expect(await execute('denied')).toMatchObject({ code: 'approval_required' })
+    expect(validations()).toBe(beforeDenial)
+    expect(requests.some(r => r.method === 'execute' && r.payload.command?.commandId === 'denied')).toBe(false)
+    expect(await execute('approved')).toMatchObject({ code: 'ok', outcome: 'executed' })
+    // Authority is checked after consent and again immediately before dispatch.
+    expect(validations()).toBe(beforeDenial + 2)
+    expect(mocks.consent).toHaveBeenLastCalledWith(expect.objectContaining({ message: 'Approve this exact desktop action?', detail: expect.stringContaining(JSON.stringify(action)) }))
+    expect(requests.filter(r => r.payload.command?.commandId === 'approved').map(r => r.method)).toEqual(['beginApproval', 'endApproval', 'execute'])
+    // Effects invalidate the approval snapshot; obtain fresh context before another action.
+    expect(await controller.execute({ ...base, commandId: 'observe-again', action: { kind: 'observe', target } })).toMatchObject({ code: 'ok' })
+    const beforeRevocation = validations()
+    authorized = false
+    expect(await execute('revoked')).not.toMatchObject({ outcome: 'executed' })
+    expect(validations()).toBe(beforeRevocation + 1)
+    expect(requests.some(r => r.method === 'execute' && r.payload.command?.commandId === 'revoked')).toBe(false)
+  })
   // Packaged-darwin flags and executable are fixtures; these Linux-hosted tests
   // exercise the real private transport, not signature/native admission or AX.
   it.each(['success', 'stop-hung-metadata', 'stop-after-metadata'] as const)(
