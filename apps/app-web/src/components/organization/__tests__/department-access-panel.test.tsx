@@ -10,6 +10,7 @@ import { en } from '@/lib/i18n/dictionaries/en';
 import { ja } from '@/lib/i18n/dictionaries/ja';
 import { zh } from '@/lib/i18n/dictionaries/zh';
 import { zhCN } from '@/lib/i18n/dictionaries/zh-cn';
+import { WORKSPACE_IDENTITY_REFRESH_EVENT } from '@/lib/workspace-identity-events';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const W = 'workspace-fixture', D = 'department-fixture';
@@ -193,6 +194,28 @@ describe('[COMP:app-web/department-access] Organization > Departments: who reads
     await render(<HomeDepartmentControls />);
     expect(host.textContent).toContain(en.homeDepartment.title);
     expect(host.textContent).toContain(en.homeDepartment.none);
+  });
+
+  it('home department stays painted through the stream catch-up and purges on a real identity change', async () => {
+    // The workspace stream reconnects every ~5 minutes and its catch-up fires
+    // WORKSPACE_IDENTITY_REFRESH; purging on it blinked the section to a skeleton.
+    await render(<HomeDepartmentControls />);
+    expect(host.textContent).toContain(en.homeDepartment.title);
+    let finish!: (value: unknown) => void;
+    mocks.departments.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await act(async () => { window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT, { detail: { workspaceId: W, catchUp: true } })); });
+    await flush();
+    expect(mocks.departments).toHaveBeenCalledTimes(2);
+    expect(host.textContent).toContain(en.homeDepartment.title);
+    const fresh = { departments: [entry()], homes: [{ principal: { kind: 'user', id: 'owner-fixture' }, departmentId: null }] };
+    await act(async () => finish(fresh));
+    expect(host.textContent).toContain(en.homeDepartment.title);
+    // A server-sent identity change drops the previous answer before repainting.
+    mocks.departments.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await act(async () => { window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT, { detail: { workspaceId: W } })); });
+    expect(host.textContent).not.toContain(en.homeDepartment.title);
+    await act(async () => finish(fresh));
+    expect(host.textContent).toContain(en.homeDepartment.title);
   });
 
   it('carries complete copy in all four locales, with no em dash', () => {

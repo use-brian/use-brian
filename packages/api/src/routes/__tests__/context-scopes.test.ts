@@ -3,6 +3,11 @@ import { WorkspaceAccessError } from '../../workspace-access/policy.js'
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
+
+const { departmentsMock } = vi.hoisted(() => ({
+  departmentsMock: vi.fn(async () => new Map<string, string>()),
+}))
+vi.mock('../../db/department-store.js', () => ({ departmentClearancesForUserSystem: departmentsMock }))
 import type { ContextScopeStore } from '../../db/context-scope-store.js'
 import type { WorkspaceGroupStore } from '../../db/workspace-group-store.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
@@ -199,17 +204,64 @@ describe('[COMP:api/context-scope-routes] Teams and Projects REST contract', () 
     )
   })
 
-  it('enforces readiness before turning a company-wide connector into a scoped capability', async () => {
+  it('labels a connector with a department without the activation barrier (an audience, not a scope claim)', async () => {
     const { app, connectorInstanceStore } = makeApp('admin')
+    connectorInstanceStore.get.mockResolvedValue({
+      id: CONNECTOR_ID, workspaceId: WID, scope: 'workspace', compartments: [], projectIds: [],
+    })
+    connectorInstanceStore.update.mockResolvedValue({ id: CONNECTOR_ID })
     const response = await request(app)
       .put(`/api/workspaces/${WID}/connectors/${CONNECTOR_ID}/context`)
-      .send({ contextGroupId: GID, contextProjectId: null })
-    expect(response.status).toBe(409)
-    expect(response.body).toEqual({
-      error: 'context_activation_blocked',
-      failedChecks: ['connectors'],
+      .send({ contextGroupId: GID })
+    expect(response.status).toBe(204)
+    expect(connectorInstanceStore.update).toHaveBeenCalledWith('user-1', CONNECTOR_ID, {
+      compartments: [`team:${GID}`], projectIds: [],
     })
-    expect(connectorInstanceStore.update).not.toHaveBeenCalled()
+  })
+
+  it('lets the member who exposed a connector move it only into a department they hold', async () => {
+    const { app, connectorGrantStore } = makeApp('member')
+    connectorGrantStore.listForTargetSystem.mockResolvedValue([{
+      id: 'grant-1', connectorInstanceId: CONNECTOR_ID, grantedByUserId: 'user-1',
+      compartments: [], projectIds: [],
+      instance: { id: CONNECTOR_ID, scope: 'user', workspaceId: null, compartments: [], projectIds: [] },
+    }])
+    connectorGrantStore.updateContext.mockResolvedValue(true)
+    departmentsMock.mockResolvedValueOnce(new Map())
+    const refused = await request(app)
+      .put(`/api/workspaces/${WID}/connectors/${CONNECTOR_ID}/context`)
+      .send({ contextGroupId: GID })
+    expect(refused.status).toBe(403)
+    expect(refused.body).toEqual({ error: 'connector_department_not_held' })
+    departmentsMock.mockResolvedValueOnce(new Map([[GID, 'internal']]))
+    const allowed = await request(app)
+      .put(`/api/workspaces/${WID}/connectors/${CONNECTOR_ID}/context`)
+      .send({ contextGroupId: GID })
+    expect(allowed.status).toBe(204)
+    expect(connectorGrantStore.updateContext).toHaveBeenCalledWith(
+      'user-1', 'grant-1', [`team:${GID}`], [],
+    )
+  })
+
+  it('hides a teammate connector in another department and refuses edits outside the audience', async () => {
+    const { app, connectorGrantStore } = makeApp('member')
+    connectorGrantStore.listForTargetSystem.mockResolvedValue([{
+      id: 'grant-1', connectorInstanceId: CONNECTOR_ID, grantedByUserId: 'teammate',
+      compartments: [`team:${GID}`], projectIds: [],
+      instance: { id: CONNECTOR_ID, scope: 'user', workspaceId: null, compartments: [], projectIds: [] },
+    }])
+    const hidden = await request(app).get(`/api/workspaces/${WID}/connectors/${CONNECTOR_ID}/context`)
+    expect(hidden.status).toBe(404)
+    departmentsMock.mockResolvedValueOnce(new Map([[GID, 'internal']]))
+    const viewer = await request(app).get(`/api/workspaces/${WID}/connectors/${CONNECTOR_ID}/context`)
+    expect(viewer.status).toBe(200)
+    expect(viewer.body.canEdit).toBe(false)
+    departmentsMock.mockResolvedValueOnce(new Map([[GID, 'internal']]))
+    const edit = await request(app)
+      .put(`/api/workspaces/${WID}/connectors/${CONNECTOR_ID}/context`)
+      .send({ contextGroupId: null })
+    expect(edit.status).toBe(403)
+    expect(connectorGrantStore.updateContext).not.toHaveBeenCalled()
   })
 
   it('projects connector bindings as stable Team ids and never exposes compartment keys', async () => {
@@ -233,6 +285,7 @@ describe('[COMP:api/context-scope-routes] Teams and Projects REST contract', () 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({
       context: { contextGroupId: GID, contextProjectId: null },
+      canEdit: true,
     })
     expect(JSON.stringify(response.body)).not.toContain(`team:${GID}`)
   })

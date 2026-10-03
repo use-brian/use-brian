@@ -14,7 +14,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../../db/client.js', () => ({ query: vi.fn(), queryWithRLS: vi.fn() }))
 
 // `vi.hoisted` so the mock fn exists before `vi.mock` (which is hoisted) runs.
-const { membershipMock } = vi.hoisted(() => ({ membershipMock: vi.fn() }))
+const { membershipMock, departmentsMock } = vi.hoisted(() => ({
+  membershipMock: vi.fn(),
+  departmentsMock: vi.fn(async () => new Map<string, string>()),
+}))
+vi.mock('../../db/department-store.js', () => ({ departmentClearancesForUserSystem: departmentsMock }))
 vi.mock('../../db/workspace-store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../db/workspace-store.js')>()
   return { ...actual, getWorkspaceMembershipWithClearanceSystem: membershipMock }
@@ -54,7 +58,7 @@ function inst(over: Partial<ConnectorInstance> & { id: string }): ConnectorInsta
 function makeStores(opts: {
   own?: ConnectorInstance[]
   teamNative?: ConnectorInstance[]
-  granted?: Array<{ grantedByUserId: string; instance: ConnectorInstance }>
+  granted?: Array<{ grantedByUserId: string; instance: ConnectorInstance; compartments?: string[] }>
 }) {
   const connectorInstanceStore = {
     listByUser: vi.fn(async () => opts.own ?? []),
@@ -71,7 +75,29 @@ function run(stores: ReturnType<typeof makeStores>) {
 }
 
 describe('[COMP:connectors/usable-resolver] listUsableWorkspaceConnectors', () => {
-  beforeEach(() => membershipMock.mockReset())
+  beforeEach(() => {
+    membershipMock.mockReset()
+    departmentsMock.mockReset()
+    departmentsMock.mockResolvedValue(new Map())
+  })
+
+  it('lists a department connector only to members of that department, at a clearance that reads it', async () => {
+    membershipMock.mockResolvedValue({ role: 'member', clearance: 'confidential' })
+    const teammate = inst({ id: 'tm', userId: 'teammate', sensitivity: 'internal' })
+    const owned = inst({ id: 'ws', scope: 'workspace', userId: null, workspaceId: W, compartments: ['team:d-sales'] } as never)
+    const stores = () => makeStores({
+      teamNative: [owned],
+      granted: [
+        { grantedByUserId: 'teammate', instance: teammate, compartments: ['team:d-sales'] },
+        { grantedByUserId: 'teammate', instance: inst({ id: 'general', userId: 'teammate' }), compartments: [] },
+      ],
+    })
+    expect((await run(stores())).map((r) => r.instance.id)).toEqual(['general'])
+    departmentsMock.mockResolvedValue(new Map([['d-sales', 'public']]))
+    expect((await run(stores())).map((r) => r.instance.id)).toEqual(['general'])
+    departmentsMock.mockResolvedValue(new Map([['d-sales', 'internal']]))
+    expect((await run(stores())).map((r) => r.instance.id).sort()).toEqual(['general', 'tm', 'ws'])
+  })
 
   it('hides the member’s own personal connector when it is not exposed to this workspace', async () => {
     membershipMock.mockResolvedValue({ role: 'member', clearance: 'confidential' })

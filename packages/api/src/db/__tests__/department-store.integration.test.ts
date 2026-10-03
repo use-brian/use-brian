@@ -297,6 +297,44 @@ describeIf('[COMP:access/department-store] After the cutover: edges, home depart
     expect((await q('SELECT home_department_id h FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.w, f.maya])).rows[0].h).toBeNull()
   })
 
+  it('migration 661: a connector is born in its creator\'s home department; transfer carries the exposure\'s department', async () => {
+    const f = await flagged()
+    await store.setEdge(f.jun, f.platform.id, { kind: 'user', id: f.maya }, 'internal', null)
+    await store.setHome(f.maya, f.w, { kind: 'user', id: f.maya }, f.platform.id)
+    const personal = async () => (await q(`INSERT INTO connector_instance(scope,user_id,provider,label,created_by)
+      VALUES('user',$1,'github','GH',$1) RETURNING id`, [f.maya])).rows[0].id as string
+    // Exposure lands in Maya's home department.
+    const exposed = await personal()
+    expect((await q(`INSERT INTO connector_grant(connector_instance_id,target_type,target_id,granted_by_user_id)
+      VALUES($1,'workspace',$2,$3) RETURNING compartments`, [exposed, f.w, f.maya])).rows[0].compartments).toEqual([f.platform.key])
+    // A workspace-owned connector created here does too; a labelled one keeps its label.
+    expect((await q(`INSERT INTO connector_instance(scope,workspace_id,provider,label,created_by)
+      VALUES('workspace',$1,'github','Team GH',$2) RETURNING compartments`, [f.w, f.maya])).rows[0].compartments).toEqual([f.platform.key])
+    expect((await q(`INSERT INTO connector_instance(scope,workspace_id,provider,label,created_by,compartments)
+      VALUES('workspace',$1,'github','Fin GH',$2,$3) RETURNING compartments`, [f.w, f.maya, [f.finance.key]])).rows[0].compartments).toEqual([f.finance.key])
+    // A personal (unexposed) instance carries no label.
+    expect((await q('SELECT compartments FROM connector_instance WHERE id=$1', [exposed])).rows[0].compartments).toEqual([])
+    // Explicit General is kept.
+    const c = await pool.connect()
+    try {
+      await c.query('BEGIN')
+      await c.query("SELECT set_config('app.explicit_general','true',true)")
+      const general = (await c.query(`INSERT INTO connector_instance(scope,user_id,provider,label,created_by)
+        VALUES('user',$1,'github','GH2',$1) RETURNING id`, [f.maya])).rows[0].id
+      expect((await c.query(`INSERT INTO connector_grant(connector_instance_id,target_type,target_id,granted_by_user_id)
+        VALUES($1,'workspace',$2,$3) RETURNING compartments`, [general, f.w, f.maya])).rows[0].compartments).toEqual([])
+    } finally { await c.query('ROLLBACK'); c.release() }
+    // Transfer: the grant's department moves onto the instance as the grant is deleted.
+    await q(`UPDATE connector_grant SET compartments=$2 WHERE connector_instance_id=$1`, [exposed, [f.finance.key]])
+    const { createConnectorInstanceStore } = await import('../connector-instance-store.js')
+    const moved = await createConnectorInstanceStore(null).transferToWorkspace(f.maya, exposed, f.w)
+    expect(moved?.compartments).toEqual([f.finance.key])
+    expect((await q('SELECT count(*)::int n FROM connector_grant WHERE connector_instance_id=$1', [exposed])).rows[0].n).toBe(0)
+    // A never-exposed connector transfers into the actor's home.
+    const fresh = await personal()
+    expect((await createConnectorInstanceStore(null).transferToWorkspace(f.maya, fresh, f.w))?.compartments).toEqual([f.platform.key])
+  })
+
   it('directory: members see their departments; the workspace owner sees names and owners only; an admin sees nothing it is not in', async () => {
     const f = await flagged()
     const board = await team(f.w, f.priya, 'Board')

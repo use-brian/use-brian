@@ -607,7 +607,7 @@ describe('[COMP:api/delivery-authority] company-wide group approval', () => {
       .toMatchObject({ compartments: [], projectIds: [] })
   })
 
-  it('lets a company-wide group turn reach an unbounded connector; a General-only group cannot', async () => {
+  it('lets a company-wide group turn reach a department connector; a General-only group reaches only General ones', async () => {
     const turnOf = (c: AccessCeiling) => ({
       effectiveCompartments: c.compartments,
       effectiveProjectIds: c.projectIds,
@@ -635,6 +635,9 @@ describe('[COMP:api/delivery-authority] company-wide group approval', () => {
     )(speakerInput)
     expect(general.allowed).toBe(true)
     if (!general.allowed) return
-    expect(connectorExposureAllowed(turnOf(general.ceiling), unbounded)).toBe(false)
+    expect(connectorExposureAllowed(turnOf(general.ceiling), unbounded)).toBe(true)
+    const sales = { compartments: ['team:sales'], projectIds: [] }
+    expect(connectorExposureAllowed(turnOf(wide.ceiling), sales)).toBe(true)
+    expect(connectorExposureAllowed(turnOf(general.ceiling), sales)).toBe(false)
   })
 })

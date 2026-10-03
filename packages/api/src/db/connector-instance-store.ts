@@ -511,16 +511,29 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       // mirrors the ci_access USING clause (defense-in-depth — RLS is not the
       // filter, see listForUser); the WITH CHECK on the resulting workspace row
       // rejects a non-member target. `COALESCE($3::text, sensitivity)` keeps the
-      // existing tier when the caller passes none.
+      // existing tier when the caller passes none. The department audience
+      // rides along: the workspace exposure's labels move onto the instance
+      // before the grant is deleted (an explicit General grant stays General),
+      // and a never-exposed connector lands in the actor's home department.
       const result = await queryWithRLS<PublicRow>(
         actingUserId,
-        `WITH transferred AS (
+        `WITH exposure AS (
+           SELECT compartments, project_ids FROM connector_grant
+            WHERE connector_instance_id = $1 AND target_type = 'workspace' AND target_id = $2
+         ), transferred AS (
            UPDATE connector_instance
               SET scope = 'workspace',
                   user_id = NULL,
                   workspace_id = $2,
                   ingest_workspace_id = NULL,
-                  sensitivity = COALESCE($3::text, sensitivity)
+                  sensitivity = COALESCE($3::text, sensitivity),
+                  compartments = COALESCE(
+                    (SELECT compartments FROM exposure),
+                    (SELECT ARRAY['team:' || m.home_department_id::text] FROM workspace_members m
+                      JOIN workspaces w ON w.id = m.workspace_id AND w.department_read_v2
+                     WHERE m.workspace_id = $2 AND m.user_id = $4 AND m.home_department_id IS NOT NULL),
+                    '{}'::text[]),
+                  project_ids = COALESCE((SELECT project_ids FROM exposure), '{}'::uuid[])
             WHERE id = $1 AND scope = 'user' AND user_id = $4
             RETURNING ${PUBLIC_COLS}
          ), cleared_grants AS (

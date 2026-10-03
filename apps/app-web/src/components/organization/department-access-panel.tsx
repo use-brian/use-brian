@@ -21,10 +21,10 @@ import { listWorkspaceMembers } from "@/lib/api/mentions";
 import { useWorkspaceDirectory } from "@/lib/use-workspace-directory";
 import { listAssistants } from "@/lib/api/studio";
 import { fetchWorkspaceAccess, ORGANIZATION_CHANGED_EVENT } from "@/lib/api/workspace-access";
-import { invalidateSurfaceCache, seedSurfaceCache, useCachedResource, warmSurfaceCache } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, markSurfaceCacheStale, seedSurfaceCache, useCachedResource, warmSurfaceCache } from "@/lib/surface-cache";
 import { assistantsCacheKey, departmentDirectoryCacheKey, departmentEdgesCacheKey, departmentReadersCacheKey, workspaceAccessCacheKey } from "@/lib/surface-prefetch";
 import { ClearanceBar, ClearancePill, InfoNote, OrgAvatar, type Clearance } from "./org-visuals";
-import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
+import { isCatchUpRefresh, WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import {
   DEPARTMENTS_CHANGED_EVENT, DepartmentRequestError, addDepartmentOwner, breakGlassDepartment, fetchDepartmentEdges,
   fetchDepartments, removeDepartmentEdge, removeDepartmentOwner, setDepartmentEdge, setHomeDepartment,
@@ -71,7 +71,9 @@ export function warmDepartmentsSection(workspaceId: string, userId: string) {
 }
 
 /** Refresh on a department change; drop the viewer's department family on an
- * authority signal so a changed role never repaints the previous answer. */
+ * authority signal so a changed role never repaints the previous answer. The
+ * stream's reconnect catch-up (every ~5 minutes) is not one: it revalidates
+ * behind the paint, or the section blinks to a skeleton on that cadence. */
 function useDepartmentSignals(workspaceId: string, userId: string, refresh: () => Promise<unknown>) {
   const refreshRef = useRef(refresh); refreshRef.current = refresh;
   useEffect(() => {
@@ -79,7 +81,8 @@ function useDepartmentSignals(workspaceId: string, userId: string, refresh: () =
     const purge = (event: Event) => {
       const detail = (event as CustomEvent<{ workspaceId?: string }>).detail;
       if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
-      invalidateSurfaceCache(`departments:${workspaceId}:${userId}:`);
+      const family = `departments:${workspaceId}:${userId}:`;
+      if (isCatchUpRefresh(event)) markSurfaceCacheStale(family); else invalidateSurfaceCache(family);
     };
     window.addEventListener(DEPARTMENTS_CHANGED_EVENT, onChange);
     window.addEventListener(ORGANIZATION_CHANGED_EVENT, purge);

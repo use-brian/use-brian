@@ -153,6 +153,10 @@ export function createTransactionalConnectorSetup(options: { pool: Pool; encrypt
       const blob = encryptCredentials(staged.credentials, options.encryptionKey)
       // SQL backstop checks the immutable ready setup on this same transaction.
       await c.query("SELECT set_config('app.connector_setup_id',$1,true)", [s.id])
+      // The reviewed binding is the contract: an empty department list was
+      // reviewed as General, so the home-department stamp (migration 661)
+      // must not relabel it.
+      await c.query("SELECT set_config('app.explicit_general',$1,true)", [b.departments.length === 0 ? 'true' : 'false'])
       if (i.operation === 'create') {
         instanceId = (await c.query(`INSERT INTO connector_instance(scope,user_id,workspace_id,provider,label,credentials,credentials_type,
           config,sensitivity,connected,created_by,compartments,project_ids)

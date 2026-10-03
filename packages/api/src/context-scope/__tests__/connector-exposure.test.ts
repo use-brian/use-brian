@@ -2,41 +2,28 @@ import { describe, expect, it } from 'vitest'
 import { runWithAgentAccess, runWithAgentClearance } from '../../db/agent-access-context.js'
 import { connectorExposureAllowed } from '../connector-exposure.js'
 
-describe('[COMP:api/connector-context] connectorExposureAllowed', () => {
-  it('permits an unbounded exposure only for a universe turn', () => {
-    expect(connectorExposureAllowed(
-      { effectiveCompartments: null, effectiveProjectIds: null },
-      { compartments: [], projectIds: [] },
-    )).toBe(true)
-    expect(connectorExposureAllowed(
-      { effectiveCompartments: ['team:sales'], effectiveProjectIds: null },
-      { compartments: [], projectIds: [] },
-    )).toBe(false)
+const P = '11111111-1111-4111-8111-111111111111'
+const general = { compartments: [], projectIds: [] }
+
+describe('[COMP:api/connector-context] connectorExposureAllowed (audience)', () => {
+  it('lets every turn use a General connector', () => {
+    expect(connectorExposureAllowed({ effectiveCompartments: null, effectiveProjectIds: null }, general)).toBe(true)
+    expect(connectorExposureAllowed({ effectiveCompartments: ['team:sales'], effectiveProjectIds: null }, general)).toBe(true)
+    expect(connectorExposureAllowed({ effectiveCompartments: [], effectiveProjectIds: [] }, general)).toBe(true)
   })
 
-  it('withholds generic provider catalogs from finite turns even when bindings fit', () => {
-    const turn = {
-      effectiveCompartments: ['team:sales', 'team:strategy'],
-      effectiveProjectIds: ['11111111-1111-4111-8111-111111111111'],
-    }
-    const binding = {
-      compartments: ['team:sales'],
-      projectIds: ['11111111-1111-4111-8111-111111111111'],
-    }
-    expect(connectorExposureAllowed(turn, binding)).toBe(false)
-    expect(connectorExposureAllowed(turn, binding, 'fixed-operation')).toBe(true)
-    expect(connectorExposureAllowed(turn, {
-      compartments: ['team:accounting'],
-      projectIds: ['11111111-1111-4111-8111-111111111111'],
-    })).toBe(false)
-    expect(connectorExposureAllowed(turn, {
-      compartments: ['team:sales'],
-      projectIds: [],
-    })).toBe(false)
+  it('lets a department connector reach only turns inside that department', () => {
+    const turn = { effectiveCompartments: ['team:sales', 'team:strategy'], effectiveProjectIds: [P] }
+    expect(connectorExposureAllowed(turn, { compartments: ['team:sales'], projectIds: [P] })).toBe(true)
+    expect(connectorExposureAllowed(turn, { compartments: ['team:sales'], projectIds: [] })).toBe(true)
+    expect(connectorExposureAllowed(turn, { compartments: ['team:accounting'], projectIds: [] })).toBe(false)
+    expect(connectorExposureAllowed(turn, { compartments: [], projectIds: ['other'] })).toBe(false)
+    expect(connectorExposureAllowed({ effectiveCompartments: null, effectiveProjectIds: null },
+      { compartments: ['team:accounting'], projectIds: [] })).toBe(true)
   })
 
   it('keeps undefined scope compatible for non-execution/admin callers', () => {
-    expect(connectorExposureAllowed(undefined, { compartments: [], projectIds: [] })).toBe(true)
+    expect(connectorExposureAllowed(undefined, { compartments: ['team:x'], projectIds: [] })).toBe(true)
   })
 })
 
@@ -45,16 +32,12 @@ describe('[COMP:api/connector-context] independent connector mutation authority'
   const readGrant = { effectiveCompartments: ['team:product', 'team:marketing'],
     effectiveProjectIds: ['project'], access: { mutationCompartments: ['team:marketing'] } }
 
-  it('withholds an entire connector accessible only by a read grant', () => {
+  it('a temporary read grant is not membership in the connector audience', () => {
     expect(connectorExposureAllowed(readGrant, binding)).toBe(false)
     expect(connectorExposureAllowed({ ...readGrant,
-      access: { mutationCompartments: ['team:product'] } }, binding)).toBe(false)
-    expect(connectorExposureAllowed({ ...readGrant,
-      access: { mutationCompartments: ['team:product'] } }, binding, 'fixed-operation')).toBe(true)
+      access: { mutationCompartments: ['team:product'] } }, binding)).toBe(true)
     expect(connectorExposureAllowed({ ...readGrant,
       effectiveCompartments: [], access: { mutationCompartments: null } }, binding)).toBe(false)
-    expect(connectorExposureAllowed({ effectiveCompartments: null, effectiveProjectIds: null,
-      access: { mutationCompartments: [] } }, { compartments: [], projectIds: [] })).toBe(false)
   })
 
   it('retains the narrower active mutation grant even with a broader or omitted turn', async () => {
@@ -65,13 +48,8 @@ describe('[COMP:api/connector-context] independent connector mutation authority'
       expect(connectorExposureAllowed({ effectiveCompartments: null, effectiveProjectIds: null,
         access: { mutationCompartments: null } }, binding)).toBe(false)
       expect(connectorExposureAllowed(undefined,
-        { compartments: ['team:marketing'], projectIds: ['project'] })).toBe(false)
-      expect(connectorExposureAllowed(undefined,
-        { compartments: ['team:marketing'], projectIds: ['project'] }, 'fixed-operation')).toBe(true)
-      await runWithAgentAccess({ clearance: 'confidential', compartments: null,
-        mutationCompartments: null, projectIds: null }, async () => {
-        expect(connectorExposureAllowed(undefined, binding)).toBe(false)
-      })
+        { compartments: ['team:marketing'], projectIds: ['project'] })).toBe(true)
+      expect(connectorExposureAllowed(undefined, general)).toBe(true)
     })
   })
 
@@ -79,16 +57,16 @@ describe('[COMP:api/connector-context] independent connector mutation authority'
     runWithAgentClearance('internal', () => {
       expect(connectorExposureAllowed(undefined, binding)).toBe(false)
       expect(connectorExposureAllowed({ effectiveCompartments: null,
-        effectiveProjectIds: null }, { compartments: [], projectIds: [] })).toBe(false)
+        effectiveProjectIds: null }, general)).toBe(false)
     })
   })
 
-  it('retains project restrictions and legacy explicit universe authority', () => {
+  it('retains project restrictions and explicit universe authority', () => {
     runWithAgentAccess({ clearance: 'internal', compartments: null, projectIds: ['other'] }, () => {
       expect(connectorExposureAllowed(undefined, binding)).toBe(false)
     })
     runWithAgentAccess({ clearance: 'internal', compartments: null, projectIds: null }, () => {
-      expect(connectorExposureAllowed(undefined, { compartments: [], projectIds: [] })).toBe(true)
+      expect(connectorExposureAllowed(undefined, binding)).toBe(true)
     })
   })
 })

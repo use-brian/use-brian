@@ -222,17 +222,22 @@ export async function getReclassifiableContext(input: {
 export async function getConnectorContext(
   workspaceId: string,
   instanceId: string,
-): Promise<{ contextGroupId: string | null; contextProjectId: string | null }> {
-  const body = await json<{ context: { contextGroupId: string | null; contextProjectId: string | null } }>(
+): Promise<{ contextGroupId: string | null; contextProjectId: string | null; canEdit: boolean }> {
+  const body = await json<{
+    context: { contextGroupId: string | null; contextProjectId: string | null };
+    canEdit?: boolean;
+  }>(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${encodeURIComponent(instanceId)}/context`,
   );
-  return body.context;
+  return { ...body.context, canEdit: body.canEdit === true };
 }
 
 export async function updateConnectorContext(
   workspaceId: string,
   instanceId: string,
-  context: { contextGroupId: string | null; contextProjectId: string | null },
+  // Omit a field to keep it: the header badge sets only the department, the
+  // Settings binding only the Project.
+  context: { contextGroupId?: string | null; contextProjectId?: string | null },
 ): Promise<void> {
   await json(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${encodeURIComponent(instanceId)}/context`,

@@ -51,8 +51,8 @@ export async function lockNativeDeliveryMailbox(client:PoolClient,workspaceId:st
   const exposures=(await client.query<{connectorInstanceId:string;compartments:string[];projectIds:string[]}>(`SELECT connector_instance_id AS "connectorInstanceId",compartments,project_ids AS "projectIds"
     FROM connector_grant WHERE target_type='workspace' AND target_id=$1 ORDER BY connector_instance_id FOR SHARE`,[workspaceId])).rows
   const visible=instances.filter(row=>row.scope==='workspace' || (workspace.personal && row.userId===workspace.owner)
-    ? connectorExposureAllowed(turn,row,'fixed-operation')
-    : exposures.some(grant=>grant.connectorInstanceId===row.id && connectorExposureAllowed(turn,grant,'fixed-operation')))
+    ? connectorExposureAllowed(turn,row)
+    : exposures.some(grant=>grant.connectorInstanceId===row.id && connectorExposureAllowed(turn,grant)))
   const selected=visible.find(row=>row.id===instanceId)
   if(!selected) throw denied()
   const owned=visible.filter(row=>row.provider===selected.provider && row.scope==='workspace')
