@@ -1430,6 +1430,12 @@ export interface BootContext {
   filesResolver: FilesClientResolver | null
   /** App-default GCS/local client for legacy refs without a storageUri. */
   filesBlobClient: GcsFilesClient | null
+  /**
+   * Canonical chunked workspace-file uploads (start / PUT parts / complete).
+   * Edition-specific recording routes admit uploads through it so a recording
+   * is only ever derived from a stored file. Null when file storage is off.
+   */
+  chunkedFileUploads: ChunkedFileUploadService | null
   /** Open Pipeline B ingestor built over this boot's store graph. */
   brainEpisodeIngestor: BrainEpisodeIngestor | undefined
   /** Open recording queue operations for edition-specific routes. */
@@ -9302,6 +9308,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     filesApi,
     filesResolver,
     filesBlobClient,
+    chunkedFileUploads,
     brainEpisodeIngestor,
     recordingJobs: {
       enqueue: enqueueRecordingJob,
