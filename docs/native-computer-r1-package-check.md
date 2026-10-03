@@ -58,9 +58,25 @@ This is one concrete package regression check, not a general observer/attestatio
 
 ## Open the package and check its real helper
 
-1. Quit any already-running Use Brian instance. Open `apps/app-desktop/release/mac-arm64/Use Brian.app` from this build, not an installed older copy.
-2. Confirm the existing browser surface still opens.
-3. In **This computer**, click **Check Mac helper readiness** once. Expect the packaged-helper admission message while native control remains unavailable.
+1. Quit any already-running Use Brian instance. **Do not launch this WIP with Finder or plain `open`: automatic production updates can replace it on quit.** Use the existing per-launch `USEBRIAN_DISABLE_AUTO_UPDATE=1` QA option with the executable directly. This is not a native acceptance/pilot override and changes no signing or permission policy.
+2. If an earlier launch replaced the build-path app (the operator observed **0.0.12 → 0.0.40**), recover a separate copy from the original build ZIP, not from the updated `.app`. From the repository root:
+
+   ```sh
+   (
+     set -e
+     test_dir="$(mktemp -d "$HOME/UseBrian-native-check.XXXXXX")"
+     ditto -x -k "apps/app-desktop/release/usebrian.zip" "$test_dir"
+     app="$test_dir/Use Brian.app"
+     version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+     [ "$version" = "0.0.12" ] || { echo "STOP: expected test package 0.0.12, got $version"; exit 1; }
+     echo "Launching test package $version from $app"
+     USEBRIAN_DISABLE_AUTO_UPDATE=1 "$app/Contents/MacOS/Use Brian"
+   )
+   ```
+
+   The version assertion applies to this recorded 0.0.12 handoff. Keep the terminal open during the check; do not post its entire logs. No installed app, account data or existing build artifact is deleted or overwritten. For a freshly built, unmodified app, the same direct executable launch with that environment option suffices.
+3. Confirm **About Use Brian** matches the test version and the existing browser surface opens.
+4. In **This computer**, click **Check Mac helper readiness** once. Expect the packaged-helper admission message while native control remains unavailable.
 
 Readiness uses only the existing private helper `capabilities` request, even with rollout disabled. It does not call auth/API/relay/model services, discover targets, grant control or request permissions. It waits for helper death before releasing the device lease and presenting success. Stop/workspace changes discard late results. The page's ordinary account/navigation requests are not part of this helper check.
 

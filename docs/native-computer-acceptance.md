@@ -16,14 +16,14 @@ Latest supporting Linux verification: **999 desktop tests / 52 files**, **527 pa
 
 ### Operator-reported signed package success
 
-After the `609cee57` signing-environment correction, the operator supplied a completed arm64 packaging log for desktop **0.0.12 / Electron 43.2.0**. The exact on-device Git SHA remains to be confirmed; this is operator-reported evidence, not a locally reproduced Mac run.
+After the `609cee57` signing-environment correction, the operator supplied a completed arm64 packaging log for desktop **0.0.12 / Electron 43.2.0**. The operator subsequently confirmed checkout SHA **609cee57db3d380395ebe7c95384a98a537c55f1**; this is operator-reported evidence, not a locally reproduced Mac run.
 
 - **PASS:** `packaged-parent framework substitution check` — the check required an exact successful baseline canary and confirmed constrained refusal, with native control still disabled.
 - **PASS:** app notarization reported successful; arm64 DMG, ZIP and blockmaps built.
 - **PASS:** DMG signing, Apple notary status **Accepted**, stapling/validation and Gatekeeper **accepted / Notarized Developer ID**. The packaging command reached `Done` without publication.
-- **NOT YET REPORTED:** launch of this exact packaged app, existing browser surface, **Check Mac helper readiness**, absence of permission prompts, and control remaining unavailable in the UI.
+- **RUNTIME CHECK NOT PASSED:** an initial screenshot showed the native page unavailable and `Packaged helper admission could not be verified`. After quit/reopen, the native tab was absent. The operator then confirmed both build-path Info.plist and About version **0.0.40**, rather than test build **0.0.12**, while the running executable was still under `release/mac-arm64/Use Brian.app`. This is consistent with the configured automatic production update/install-on-quit replacing the WIP. It explains the missing tab, not necessarily the earlier admission failure. A clean, version-checked rerun from the original ZIP with the existing auto-update QA opt-out is required. Permission-prompt status remains unreported.
 
-Next: quit old app instances, open `apps/app-desktop/release/mac-arm64/Use Brian.app`, check the browser and run helper readiness once. This result does not complete the AX inspector, TCC/modal/privacy behavior, independent Stop, real model workflows, screenshot fallback, input cleanup or R1–R4 release acceptance. No operational barrier or acceptance flag changes follow from it.
+Next: follow the corrected [launch/recovery instructions](native-computer-r1-package-check.md#open-the-package-and-check-its-real-helper): quit existing instances, extract the original ZIP to a separate folder, confirm 0.0.12, launch its executable directly with `USEBRIAN_DISABLE_AUTO_UPDATE=1`, check the browser and run helper readiness once. This result does not complete the AX inspector, TCC/modal/privacy behavior, independent Stop, real model workflows, screenshot fallback, input cleanup or R1–R4 release acceptance. No operational barrier or acceptance flag changes follow from it.
 
 ### Earlier operator attempts and temporary-chain correction
 
