@@ -3,7 +3,7 @@ import { createKnowledgeTools, calculateCost, scopeGrantContains, type UsageStor
   type LLMProvider, type Tool, type Embedder, type SavedViewStore, type ScopeEvidence,
   type ToolContext } from '@use-brian/core'
 import { getPool } from '../db/client.js'
-import { findSessionById, addSessionMessage } from '../db/sessions.js'
+import { readSessionById, addSessionMessage } from '../db/sessions.js'
 import { findAssistantById } from '../db/users.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
@@ -63,7 +63,7 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
   async function resolve(userId: string, binding: Binding, signal: AbortSignal) {
     signal.throwIfAborted()
     const [session, assistant, role] = await Promise.all([
-      findSessionById(binding.chatSessionId), findAssistantById(binding.assistantId),
+      readSessionById(binding.chatSessionId), findAssistantById(binding.assistantId),
       deps.workspaceStore.getRole(userId, binding.workspaceId),
     ])
     if (!role || !session || !assistant || session.userId !== userId ||
@@ -207,6 +207,8 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
         if (!data.canonicalPublished) {
           // Serialize sequence allocation and freeze the destination binding during insertion.
           await tx.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE', [capture.chatSessionId])
+          // Revalidate under the lock using read-only lookups: a pooled recency
+          // touch would wait on our own transaction and prevent it from completing.
           const current = await resolve(capture.ownerId, capture, signal)
           await resolved.executionContext.security.authority.assertCurrent()
           const evidence = data.publicationEvidence as ScopeEvidence | undefined
@@ -241,7 +243,7 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
       // The dock may use a different assistant from the active main chat.
       // Resolve the immutable destination's assistant server-side, then perform
       // the usual owner/workspace/page checks before persisting the capture.
-      const session = await findSessionById(binding.chatSessionId)
+      const session = await readSessionById(binding.chatSessionId)
       if (!session || session.userId !== userId || !session.assistantId) throw deny()
       return service.create(userId, { ...binding, assistantId: session.assistantId })
     },
