@@ -3,7 +3,7 @@
  *
  * Boot injects the exact files client it already constructed
  * (`initLedgerRuntime`), so the ledger rides the same storage decision as
- * workspace files (GCS on hosted, local disk on self-host, per
+ * workspace files (GCS, Azure, S3, or local disk, per
  * `bootOpenApi`'s selection). Lanes that run without bootOpenApi (the
  * workers service) fall back to the same env-derived selection lazily.
  *
@@ -19,6 +19,8 @@
 import { createGcsFilesClient, type GcsFilesClient } from '../files/gcs-client.js'
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from '../files/local-files-client.js'
 import { azureBlobOptionsFromEnv, createAzureBlobFilesClient } from '../files/azure-blob-client.js'
+import { createS3FilesClient } from '../files/s3-client.js'
+import { s3OptionsFromEnv } from '../files/s3-env.js'
 import { createLedgerPayloadStore, type LedgerPayloadStore } from './payload-store.js'
 
 let injected: LedgerPayloadStore | null = null
@@ -31,20 +33,25 @@ export function initLedgerRuntime(files: GcsFilesClient): void {
 
 function resolveFromEnv(): LedgerPayloadStore {
   const bucket = process.env.GCS_FILES_BUCKET?.trim()
+  if ([bucket, process.env.AZURE_BLOB_CONTAINER?.trim(), process.env.S3_FILES_BUCKET?.trim()].filter(Boolean).length > 1) {
+    throw new Error('[files] GCS_FILES_BUCKET, AZURE_BLOB_CONTAINER, and S3_FILES_BUCKET are mutually exclusive — pick one app-default blob store')
+  }
+  const azure = azureBlobOptionsFromEnv(process.env)
+  const s3 = s3OptionsFromEnv(process.env)
   if (bucket) {
     return createLedgerPayloadStore(
       createGcsFilesClient({ bucket, projectId: process.env.GOOGLE_CLOUD_PROJECT }),
     )
   }
-  const azure = azureBlobOptionsFromEnv(process.env)
   if (azure) return createLedgerPayloadStore(createAzureBlobFilesClient(azure))
+  if (s3) return createLedgerPayloadStore(createS3FilesClient(s3))
   const configuredLocalDir = process.env.LOCAL_FILES_DIR?.trim()
   // Mirror bootOpenApi: on Cloud Run (K_SERVICE) without an explicit local
   // dir there is no usable disk — recording degrades honestly via throw.
   if (process.env.K_SERVICE && !configuredLocalDir) {
     return {
       put: async () => {
-        throw new Error('no ledger storage backend (GCS_FILES_BUCKET unset on Cloud Run)')
+        throw new Error('no ledger storage backend (no cloud default or LOCAL_FILES_DIR configured on Cloud Run)')
       },
       get: async () => null,
       erase: async () => 0,
