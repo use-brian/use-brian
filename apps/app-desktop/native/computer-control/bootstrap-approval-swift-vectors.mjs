@@ -28,7 +28,7 @@ const machoChanges = {
   sectionOffset: b => b.writeUInt32LE(16, 224), sectionAlignment: b => b.writeUInt32LE(3, 228),
   sectionReloc: b => b.writeUInt32LE(1, 236), sectionReserved: b => b.writeUInt32LE(1, 244),
   sectionUnknownType: b => b.writeUInt32LE(0x100000ff, 240), sectionZeroFill: b => b.writeUInt32LE(0x10000001, 240),
-  sectionUnknownFlags: b => b.writeUInt32LE(0x01000000, 240), sectionMissingNoDeadStrip: b => b.writeUInt32LE(0, 240),
+  sectionUnknownFlags: b => b.writeUInt32LE(0x01000000, 240), sectionUnexpectedAttribute: b => b.writeUInt32LE(0x20000000, 240),
   sectionsCount: b => b.writeUInt32LE(2, 168),
   noHeaderMap: b => b.writeBigUInt64LE(0n, 80),
   signatureBeforeHeader: b => b.writeUInt32LE(0, 336), signatureNotAtEnd: b => b.writeUInt32LE(128, 340),
@@ -128,6 +128,18 @@ export function bootstrapVectors() {
     b[4096 + 400] ^= 1; addBind(`fat-${wide}-unselected-page-mutation`, b, { offset: 20480 });
     const different = fat(filled({ cpu: 0x01000007 }, 1), filled(), wide);
     addBind(`fat-${wide}-different-valid-records`, different, { offset: 20480 });
+  }
+  const linked = cpu => { const b = filled({ cpu }); b.writeUInt32LE(0, 240); return rehash(b); };
+  for (const cpu of [0x0100000c, 0x01000007]) {
+    const architecture = cpu === 0x0100000c ? 'arm64' : 'x86_64';
+    const unsealed = filled({ cpu }); unsealed.writeUInt32LE(0, 240);
+    addBind(`linked-regular-unsealed-header-${architecture}`, unsealed, { architecture });
+    addBind(`linked-regular-${architecture}`, linked(cpu), { architecture, want: true });
+  }
+  for (const wide of [false, true]) {
+    const b = fat(linked(0x01000007), linked(0x0100000c), wide);
+    addBind(`linked-regular-fat-${wide}-intel`, b, { offset: 4096, architecture: 'x86_64', want: true });
+    addBind(`linked-regular-fat-${wide}-arm`, b, { offset: 20480, want: true });
   }
   const valid = filled(), oldHash = syntheticKernelHash(valid);
   const unsigned = thin({ signed: false }); encode(approval()).copy(unsigned, anchorOffset);

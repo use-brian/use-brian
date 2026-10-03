@@ -466,7 +466,9 @@ enum MachOLibraryConstraint {
                                       maxprot & 4 == 0,
                                       (segflags == 0x10 || (segflags == 0 && maxprot & 2 == 0 && initprot & 2 == 0)) else { throw Failure.rejected }
                             } else {
-                                guard flags == 0x10000000, length == BootstrapApproval.recordSize, alignment == 4,
+                                // The linker may consume the no-dead-strip retention attribute.
+                                // Only a regular section, with or without that attribute, is supported.
+                                guard (flags == 0 || flags == 0x10000000), length == BootstrapApproval.recordSize, alignment == 4,
                                       segflags == 0x10, initprot & 1 != 0, maxprot & 4 == 0 else { throw Failure.rejected }
                             }
                             try zero(part(section, 56, 8)); try zero(part(section, 68, 12))

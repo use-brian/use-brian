@@ -181,7 +181,9 @@ function slots(bytes) {
             sections.push({ offset, size: length });
           }
           if (section === SECTION) {
-            if (anchor !== undefined || segment !== '__DATA_CONST' || flags !== 0x10000000 || length !== bootstrapAnchorSize || align !== 4 || zeroFill ||
+            // The linker may consume S_ATTR_NO_DEAD_STRIP. Retention is a build
+            // directive, not runtime authentication; the final section is regular.
+            if (anchor !== undefined || segment !== '__DATA_CONST' || ![0, 0x10000000].includes(flags) || length !== bootstrapAnchorSize || align !== 4 || zeroFill ||
                 segflags !== 0x10 || !(initprot & 1) || (maxprot & 4) || b.readUInt32LE(a + 56) || b.readUInt32LE(a + 60) ||
                 b.readUInt32LE(a + 68) || b.readUInt32LE(a + 72) || b.readUInt32LE(a + 76)) fail();
             record(b.subarray(offset, offset + bootstrapAnchorSize), true); anchor = offset;

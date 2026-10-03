@@ -7,10 +7,10 @@ import { runMachOTests } from './macho-library-constraint.mjs';
 
 const vectors = bootstrapVectors();
 test('independent JS record/geometry/coverage oracle has deterministic scoped verdicts', () => {
-  assert.equal(vectors.length, 6290);
-  assert.equal(vectors.filter(v => v.expected.match).length, 136);
-  assert.equal(vectors.filter(v => v.mode === 'bind').length, 760);
-  assert.equal(vectors.filter(v => v.mode === 'bind' && v.expected.match).length, 27);
+  assert.equal(vectors.length, 6298);
+  assert.equal(vectors.filter(v => v.expected.match).length, 142);
+  assert.equal(vectors.filter(v => v.mode === 'bind').length, 768);
+  assert.equal(vectors.filter(v => v.mode === 'bind' && v.expected.match).length, 33);
   assert.deepEqual(bootstrapVectors(), vectors);
   assert.equal(vectors.filter(v => v.name.startsWith('record-truncated-')).length, 1376);
   assert.equal(vectors.filter(v => v.name.startsWith('record-byte-flip-')).length, 4128);
@@ -41,7 +41,7 @@ test('valid-but-different records, unsigned relocation, aliasing, full page and 
     'duplicate-or-alias-section-false', 'duplicate-or-alias-section-true',
     'empty-mapped', 'zero-mapped', 'empty-disk', 'repaired-pages-old-kernel',
     'unsigned-helper-valid-record', 'extra-marker-fat-padding-true', 'extra-marker-opaque-CMS', 'marker-digest-not-unique-artifact',
-    'geometry-missingReadonly', 'geometry-executeProtection', 'geometry-sectionMissingNoDeadStrip',
+    'geometry-missingReadonly', 'geometry-executeProtection', 'geometry-sectionUnexpectedAttribute',
     'geometry-noHeaderMap', 'geometry-extraMarker', 'fat-true-different-valid-records',
     'fat-false-unselected-page-mutation', 'optional-slot11-mutation', 'component-outside-special-table']) {
     const vector = vectors.find(v => v.name === name); assert(vector, name); assert(vector.expected.error, name);
@@ -59,7 +59,7 @@ test('no second plaintext marker constant or runtime fallback in production Swif
   // runner; this source guard does not pretend to establish linker behavior.
 });
 test('portable mode cannot silently claim real Swift or compiler-marker acceptance', () => {
-  assert.deepEqual(runBootstrapTests('--portable'), { vectors: 6290, matches: 136,
-    bindingVectors: 760, bindingMatches: 27, swiftExecutions: 0, compiledMarkerAbsent: false });
+  assert.deepEqual(runBootstrapTests('--portable'), { vectors: 6298, matches: 142,
+    bindingVectors: 768, bindingMatches: 33, swiftExecutions: 0, compiledMarkerAbsent: false });
   for (const mode of ['', '--fake', undefined]) assert.throws(() => runBootstrapTests(mode));
 });

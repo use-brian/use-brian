@@ -43,6 +43,24 @@ test('foreign failures cannot impersonate anchor diagnostics with a matching err
   } finally { Buffer.prototype.readUInt32BE = original; }
 });
 
+test('linked regular anchor may omit no-dead-strip, but still requires signed header coverage', () => {
+  const linked = cpu => { const b = thin({ cpu }); b.writeUInt32LE(0, 240); return rehash(b); };
+  for (const b of [linked(0x0100000c), linked(0x01000007),
+    fat(linked(0x01000007), linked(0x0100000c)), fat(linked(0x01000007), linked(0x0100000c), true)]) {
+    const before = Buffer.from(b);
+    assert.equal(preflight(b), undefined);
+    const stamped = stamp(b, approval());
+    assert.deepEqual(read(stamped).asarDigest, approval().asarDigest);
+    assert.deepEqual(b, before);
+  }
+  const b = thin(); b.writeUInt32LE(0, 240);
+  reject(() => preflight(b)); // Changing flags invalidates the signed header page.
+  const stamped = rehash(stamp(linked(0x0100000c), approval()));
+  assert.equal(verify(stamped, approval()).pageHashCoverage, true);
+  stamped[anchorOffset] ^= 1;
+  reject(() => verify(stamped, approval()));
+});
+
 test('canonical binary record, empty refuses, no circular main/team/path fields', () => {
   const pristine = empty(); assert.equal(pristine.length, bootstrapAnchorSize); assert.equal(pristine[34], 0);
   reject(() => decode(pristine));
@@ -167,7 +185,7 @@ const machoChanges = {
   sectionOffset: b => b.writeUInt32LE(16, 224), sectionAlignment: b => b.writeUInt32LE(3, 228),
   sectionReloc: b => b.writeUInt32LE(1, 236), sectionReserved: b => b.writeUInt32LE(1, 244),
   sectionUnknownType: b => b.writeUInt32LE(0x100000ff, 240), sectionZeroFill: b => b.writeUInt32LE(0x10000001, 240),
-  sectionUnknownFlags: b => b.writeUInt32LE(0x01000000, 240), sectionMissingNoDeadStrip: b => b.writeUInt32LE(0, 240),
+  sectionUnknownFlags: b => b.writeUInt32LE(0x01000000, 240), sectionUnexpectedAttribute: b => b.writeUInt32LE(0x20000000, 240),
   sectionsCount: b => b.writeUInt32LE(2, 168),
   noHeaderMap: b => b.writeBigUInt64LE(0n, 80),
   signatureBeforeHeader: b => b.writeUInt32LE(0, 336), signatureNotAtEnd: b => b.writeUInt32LE(128, 340),

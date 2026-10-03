@@ -24,7 +24,7 @@ export function bootstrapSourceGuards() {
     "from C's volatile OWN mapped getter", 'disk-derived CDHash', 'flags/entitlements']) assert(source.includes(text), text);
   for (const flag of ['productionAuthority', 'cmsAuthentication', 'staticSignerAuthentication', 'kernelProvenanceAuthentication',
     'mappedRecordProvenanceAuthentication', 'nativeEnforcement', 'loadedImageAuthentication']) assert(source.includes(`let ${flag} = false`));
-  for (const text of ['special <= 11', 'guard special == 11', 'segflags == 0x10', 'flags == 0x10000000',
+  for (const text of ['special <= 11', 'guard special == 11', 'segflags == 0x10', '(flags == 0 || flags == 0x10000000)',
     'alignment == 4', 'headerMappings == 1', 'try disjoint(vmSections)', 'try disjoint(sections + [sig])',
     'equal(region, mapped)', 'BootstrapApproval.matchesMarker', 'locations.remove(at)', 'length <= sig.offset - offset',
     'capturedHelper.count <= 128 * 1024 * 1024', 'sig.size <= 8 * 1024 * 1024']) assert(macho.includes(text), text);
