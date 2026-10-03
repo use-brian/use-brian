@@ -15,6 +15,9 @@ import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
   workspaceSearch: {
+    savedDrafts: "Saved unsent drafts",
+    restoreDraft: "Restore draft",
+    attachmentDraft: "Attachment draft",
     "title": "Search workspace",
     "shortcut": "Search (⌘/Ctrl+K)",
     "placeholder": "Search or ask in {workspace}",

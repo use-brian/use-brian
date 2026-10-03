@@ -89,8 +89,8 @@ describe("[COMP:app-web/chat-handoff] Home to Personal chat handoff", () => {
   });
 
   it("is single-consume and keeps the prompt out of the destination URL", () => {
-    stashChatHandoff(base);
-    expect(takeChatHandoff(base.workspaceId, base.ts)).toEqual(base);
+    const requestId = stashChatHandoff(base);
+    expect(takeChatHandoff(base.workspaceId, base.ts)).toEqual({ ...base, requestId });
     expect(takeChatHandoff(base.workspaceId, base.ts)).toBeNull();
     expect(personalChatHandoffPath(base.workspaceId, base.assistantId)).toBe(
       "/w/workspace-1/chat?v=personal&assistant=assistant-2",

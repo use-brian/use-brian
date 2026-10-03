@@ -13,6 +13,9 @@ import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
   workspaceSearch: {
+    savedDrafts: "已保存的未发送草稿",
+    restoreDraft: "恢复草稿",
+    attachmentDraft: "附件草稿",
     "title": "搜索工作空间",
     "shortcut": "搜索 (⌘/Ctrl+K)",
     "placeholder": "搜索 {workspace} 或提问",

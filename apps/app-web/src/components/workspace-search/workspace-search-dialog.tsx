@@ -89,8 +89,9 @@ export function WorkspaceSearchDialog({workspaceId,open,onClose}:{workspaceId:st
       if(!mounted.current)return
       const current=resolve(list);setRoster(list);setRecipient(current)
       if(current?.id!==recipient.id)return // Show the repaired recipient before another explicit submission.
-      stashChatHandoff({workspaceId,assistantId:current.id,text:query,ts:Date.now()})
-      router.push(personalChatHandoffPath(workspaceId,current.id));onClose();setQuery('')
+      const requestId=stashChatHandoff({workspaceId,assistantId:current.id,text:query,ts:Date.now()})
+      if (!requestId) return
+      router.push(personalChatHandoffPath(workspaceId,current.id,requestId));onClose();setQuery('')
     } catch {if(mounted.current){setRoster([]);setRecipient(null)}}
     finally {submission.current=false;if(mounted.current)setSending(false)}
   }

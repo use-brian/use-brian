@@ -27,7 +27,7 @@ function key(input:HTMLElement,name:string,extra:KeyboardEventInit={}){act(()=>{
 beforeEach(()=>{
   (globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT:boolean}).IS_REACT_ACT_ENVIRONMENT=true
   host=document.createElement('div');document.body.append(host);root=createRoot(host);vi.clearAllMocks()
-  mocks.path='/w/ws/p';mocks.roster.mockResolvedValue([{id:'assistant',name:'Fixture assistant'}]);mocks.search.mockResolvedValue(response());mocks.preview.mockResolvedValue({...strong,text:'Authorized detail'})
+  mocks.path='/w/ws/p';mocks.stash.mockReturnValue('request-id');mocks.roster.mockResolvedValue([{id:'assistant',name:'Fixture assistant'}]);mocks.search.mockResolvedValue(response());mocks.preview.mockResolvedValue({...strong,text:'Authorized detail'})
 })
 afterEach(()=>{act(()=>root.unmount());host.remove()})
 describe('[COMP:app-web/workspace-search] persistent modal behavior',()=>{

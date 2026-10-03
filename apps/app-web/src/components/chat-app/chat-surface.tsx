@@ -1,6 +1,8 @@
 "use client";
 
 
+import { useChatHandoff } from "@/lib/use-chat-handoff";
+import { readChatDrafts, writeChatDrafts, type RecoverableChatDraft } from "@/lib/chat-draft-recovery";
 import { LiveInteractionJobs, LiveInteractionQuestionControls } from "@/components/chrome/live-interaction-jobs";
 import { canonicalInteractionAdditions } from "@/lib/live-interaction/canonical";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
@@ -169,7 +171,7 @@ import { useT, useLocale, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { isPhoneViewport } from "@/lib/viewport";
 import { Skeleton } from "@/components/skeleton";
-import { type WorkspaceAssistantSummary } from "@/lib/api/views";
+import { listWorkspaceAssistants, type WorkspaceAssistantSummary } from "@/lib/api/views";
 import {
   patchSharedChatSessions,
   readCachedTranscript,
@@ -220,11 +222,7 @@ import {
   type ChatLocation,
   type ChatView,
 } from "@/lib/chat-last-location";
-import {
-  resolveChatHandoffAction,
-  takeChatHandoff,
-  type PendingChatHandoff,
-} from "@/lib/chat-handoff";
+import { personalChatHandoffPath } from "@/lib/chat-handoff";
 import { accelEnterLabel } from "@/lib/surface-shortcuts";
 import {
   fetchPendingSessionInput,
@@ -352,6 +350,7 @@ type RemoteConfirmation = {
 
 export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const t = useT().chatApp;
+  const searchCopy = useT().workspaceSearch;
   const locale = useLocale();
   // The dock's chat dictionary — tool narration, activity copy, copy/stop
   // labels. Reused verbatim so the two surfaces never phrase one thing twice.
@@ -433,14 +432,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  Reset whenever the pane returns to a fresh chat — the pick is per chat,
    *  not a sticky preference. */
   const [pickedAssistantId, setPickedAssistantId] = useState<string | null>(null);
+  const handoffAssistantRef = useRef<string | null>(null);
   const [contextTeams, setContextTeams] = useState<ContextTeam[]>([]);
   const [contextProjects, setContextProjects] = useState<ContextProject[]>([]);
   const [pickedContextGroupId, setPickedContextGroupId] = useState<string | null>(null);
   const [pickedContextProjectId, setPickedContextProjectId] = useState<string | null>(null);
-  const [pendingHandoff, setPendingHandoff] =
-    useState<PendingChatHandoff | null>(null);
-  const handoffWorkspaceRef = useRef<string | null>(null);
-  const resolvedHandoffRef = useRef<string | null>(null);
+
   const [switcherOpen, setSwitcherOpen] = useState(false);
   /** Personal rows across every assistant — resolves an open thread's binding
    *  (each row carries the `assistantId` it was fetched under). */
@@ -459,6 +456,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** The viewer's own user id — filters this client's OWN turn out of the
    *  room's bus mirror (it streams over this client's POST already). */
   const meId = getUserInfo()?.id ?? null;
+  const [recoveryDrafts,setRecoveryDrafts] = useState<RecoverableChatDraft[]>([]);
+  useEffect(() => { setRecoveryDrafts(meId ? readChatDrafts(workspaceId,meId) : []); },[workspaceId,meId]);
+  const updateRecoveryDrafts = (drafts:RecoverableChatDraft[]) => {
+    setRecoveryDrafts(drafts);
+    if(meId) writeChatDrafts(workspaceId,meId,drafts);
+  };
   /** The composer's Ask affordance (D1/T3): arms address intent for the next
    *  send in a room without typing a mention. Reset after each send. */
   const [askArmed, setAskArmed] = useState(false);
@@ -1316,7 +1319,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setTranscriptCold(false);
       // Back on a fresh pane: the assistant pick is per chat, so it resets
       // to the primary default rather than sticking as a preference.
-      setPickedAssistantId(null);
+      setPickedAssistantId(handoffAssistantRef.current);
       return;
     }
     // Paint what the cache holds for THIS session synchronously (its own
@@ -3189,62 +3192,52 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     };
   }, [send]);
 
-  // Home's compact composer opens this route with an explicit fresh Personal
-  // location and leaves the private prompt in a one-shot per-tab handoff.
-  // Strict Mode re-runs effects, so remember which workspace was consumed.
-  useEffect(() => {
-    if (!workspaceId || handoffWorkspaceRef.current === workspaceId) return;
-    handoffWorkspaceRef.current = workspaceId;
-    setPendingHandoff(takeChatHandoff(workspaceId, Date.now()));
-  }, [workspaceId]);
-
-  // Wait until BOTH roster validation and the `?assistant=` picker have
-  // resolved. A stale/removed assistant keeps the exact prompt as an editable
-  // draft; it must never auto-send to the primary fallback.
-  useEffect(() => {
-    const action = resolveChatHandoffAction({
-      handoff: pendingHandoff,
-      assistantsLoaded,
-      assistantIds: assistants.map((row) => row.id),
-      activeAssistantId: activeAssistant?.id ?? null,
-      activeSessionId,
-      view,
-    });
-    if (!pendingHandoff || action === "wait") return;
-    const handoffKey =
-      `${pendingHandoff.workspaceId}:` +
-      `${pendingHandoff.assistantId}:${pendingHandoff.ts}`;
-    if (resolvedHandoffRef.current === handoffKey) return;
-    resolvedHandoffRef.current = handoffKey;
-    if (action === "drop") {
-      setPendingHandoff(null);
-      return;
-    }
-    const { text, researchMode: handoffResearch, fileIds, attachedRecordingIds } =
-      pendingHandoff;
-    setPendingHandoff(null);
-    if (action === "prefill") {
-      setInput((current) => (current.trim() ? current : text));
-      return;
-    }
-    // Reflect the launcher's research pick in this composer so a follow-up
-    // keeps it, and pass it as an override so THIS turn uses it already.
-    if (handoffResearch) setResearchMode(true);
-    void send({
-      text,
-      ...(fileIds ? { fileIds } : {}),
-      ...(attachedRecordingIds ? { attachedRecordingIds } : {}),
-      ...(handoffResearch ? { researchMode: true } : {}),
-    });
-  }, [
-    activeAssistant?.id,
-    activeSessionId,
-    assistants,
-    assistantsLoaded,
-    pendingHandoff,
-    send,
-    view,
-  ]);
+  const captureComposerDraft = ():RecoverableChatDraft|null => {
+    if (!input.trim() && !att.hasReady && pendingRecordings.length===0) return null;
+    return {id:crypto.randomUUID(),text:input,sessionId:activeSessionId,assistantId:activeAssistant?.id??null,
+      view,attachments:att.attachments.filter(chip=>chip.status==='done'),recordings:pendingRecordings,researchMode};
+  };
+  useChatHandoff({
+    workspaceId,assistantsLoaded,blocked:att.uploading||recordingUpload.busy,
+    activeSessionId,activeAssistantId:activeAssistant?.id??null,view,
+    prepare(handoff) {
+      const draft=captureComposerDraft();if(draft)updateRecoveryDrafts([...recoveryDrafts,draft]);
+      handoffAssistantRef.current=handoff.assistantId;
+      resetPane();setPendingRecordings([]);setReplyTo(null);pendingReplyRef.current=null;setSelectionQuote(null);
+      setPickedContextGroupId(null);setPickedContextProjectId(null);setResearchMode(false);setAskArmed(false);
+      setPickedAssistantId(handoff.assistantId);seededRef.current=null;setRestoring(null);
+      router.replace(personalChatHandoffPath(workspaceId,handoff.assistantId,handoff.requestId),{scroll:false});
+    },
+    async validateAssistant(id) {
+      return (await listWorkspaceAssistants(workspaceId)).some(assistant=>assistant.id===id) && assistants.some(assistant=>assistant.id===id);
+    },
+    async send(handoff) {
+      handoffAssistantRef.current=null;
+      return send({text:handoff.text,fileIds:handoff.fileIds??[],attachedRecordingIds:handoff.attachedRecordingIds??[],researchMode:handoff.researchMode??false});
+    },
+    preserveUnsent(handoff) {
+      if(!meId)return;
+      const drafts=readChatDrafts(workspaceId,meId),id=handoff.requestId??crypto.randomUUID();
+      if(!drafts.some(draft=>draft.id===id))writeChatDrafts(workspaceId,meId,[...drafts,{id,text:handoff.text,sessionId:null,
+        assistantId:handoff.assistantId,view:'personal',attachments:[],recordings:[],researchMode:!!handoff.researchMode}]);
+    },
+    prefill(handoff) {
+      if (input.trim()) {
+        updateRecoveryDrafts([...recoveryDrafts,{id:handoff.requestId??crypto.randomUUID(),text:handoff.text,sessionId:null,
+          assistantId:handoff.assistantId,view:'personal',attachments:[],recordings:[],researchMode:!!handoff.researchMode}]);
+      } else setInput(handoff.text);
+      setError(searchCopy.assistantUnavailable);
+    },
+  });
+  const restoreComposerDraft = (draft:RecoverableChatDraft) => {
+    if(att.uploading||recordingUpload.busy)return;
+    const current=captureComposerDraft();
+    updateRecoveryDrafts([...recoveryDrafts.filter(row=>row.id!==draft.id),...(current?[current]:[])]);
+    handoffAssistantRef.current=draft.assistantId;
+    resetPane();setPendingRecordings(draft.recordings);att.restore(draft.attachments);setInput(draft.text);
+    setResearchMode(draft.researchMode);setReplyTo(null);pendingReplyRef.current=null;setSelectionQuote(null);
+    setPickedAssistantId(draft.assistantId);selectSession(draft.sessionId,draft.view);
+  };
 
   const retryUserMessage = useCallback(
     (messageId: string) => {
@@ -3717,7 +3710,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           "focus-within:border-ring [&_:focus-visible]:shadow-none",
         )}
       >
-        <ChatComposer
+        {recoveryDrafts.length>0 && <details className="border-b p-2 text-sm">
+        <summary className="min-h-11 cursor-pointer py-3">{searchCopy.savedDrafts}</summary>
+        {recoveryDrafts.map(draft=><button key={draft.id} type="button" disabled={att.uploading||recordingUpload.busy}
+          onClick={()=>restoreComposerDraft(draft)} className="flex min-h-11 w-full items-center gap-2 rounded px-2 text-left hover:bg-muted">
+          <span className="shrink-0">{searchCopy.restoreDraft}</span><span className="truncate">{draft.text||searchCopy.attachmentDraft}</span>
+        </button>)}
+      </details>}
+      <ChatComposer
           value={editingText}
           onChange={setEditingText}
           onKeyDown={(event) => {
@@ -3969,6 +3969,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         commands={slashCommands}
         className="bottom-full left-2 mb-1"
       />
+      {recoveryDrafts.length>0 && <details className="border-b p-2 text-sm">
+        <summary className="min-h-11 cursor-pointer py-3">{searchCopy.savedDrafts}</summary>
+        {recoveryDrafts.map(draft=><button key={draft.id} type="button" disabled={att.uploading||recordingUpload.busy}
+          onClick={()=>restoreComposerDraft(draft)} className="flex min-h-11 w-full items-center gap-2 rounded px-2 text-left hover:bg-muted">
+          <span className="shrink-0">{searchCopy.restoreDraft}</span><span className="truncate">{draft.text||searchCopy.attachmentDraft}</span>
+        </button>)}
+      </details>}
       <ChatComposer
         value={input}
         onChange={setInput}

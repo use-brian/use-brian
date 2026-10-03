@@ -2,6 +2,9 @@ import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
   workspaceSearch: {
+    savedDrafts: "保存された未送信の下書き",
+    restoreDraft: "下書きを復元",
+    attachmentDraft: "添付ファイルの下書き",
     "title": "ワークスペースを検索",
     "shortcut": "検索 (⌘/Ctrl+K)",
     "placeholder": "{workspace} を検索、または質問",

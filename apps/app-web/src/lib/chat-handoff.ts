@@ -16,7 +16,10 @@
  * [COMP:app-web/chat-handoff]
  */
 
+export const CHAT_HANDOFF_EVENT = "sidan:chat-handoff";
+
 export type PendingChatHandoff = {
+  requestId?: string;
   workspaceId: string;
   assistantId: string;
   /** May be empty when the turn carries attachments. */
@@ -80,6 +83,7 @@ export function parsePendingChatHandoff(
     return null;
   }
   return {
+    ...(typeof value.requestId === "string" && value.requestId ? { requestId: value.requestId } : {}),
     workspaceId: value.workspaceId,
     assistantId: value.assistantId,
     text,
@@ -100,9 +104,9 @@ export function isPendingChatHandoffFresh(
   return age >= 0 && age < CHAT_HANDOFF_TTL_MS;
 }
 
-export function stashChatHandoff(handoff: PendingChatHandoff): void {
-  const normalized = parsePendingChatHandoff(JSON.stringify(handoff));
-  if (!normalized) return;
+export function stashChatHandoff(handoff: PendingChatHandoff): string | null {
+  const normalized = parsePendingChatHandoff(JSON.stringify({ ...handoff, requestId: handoff.requestId ?? crypto.randomUUID() }));
+  if (!normalized) return null;
   inMemory.set(normalized.workspaceId, normalized);
   try {
     store()?.setItem(
@@ -112,6 +116,10 @@ export function stashChatHandoff(handoff: PendingChatHandoff): void {
   } catch {
     // The in-memory copy still covers same-SPA navigation.
   }
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(CHAT_HANDOFF_EVENT, {
+    detail: { workspaceId: normalized.workspaceId, requestId: normalized.requestId },
+  }));
+  return normalized.requestId!;
 }
 
 /** Read and remove this workspace's payload. Every outcome is single-consume. */
@@ -145,8 +153,10 @@ export function takeChatHandoff(
 export function personalChatHandoffPath(
   workspaceId: string,
   assistantId: string,
+  requestId?: string,
 ): string {
   const params = new URLSearchParams({ v: "personal", assistant: assistantId });
+  if (requestId) params.set("handoff", requestId);
   return `/w/${encodeURIComponent(workspaceId)}/chat?${params.toString()}`;
 }
 
