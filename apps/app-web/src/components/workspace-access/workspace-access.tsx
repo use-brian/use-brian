@@ -6,10 +6,10 @@ import type { DepartmentAccessCommand, DepartmentAccessTeam, WorkspaceAccessOver
 import { useProtectedProjection } from '@/lib/use-protected-projection';
 import { useWorkspaceContext } from '@/lib/workspace-context';
 import { useT } from '@/lib/i18n/client';
-import { useCachedResource, invalidateSurfaceCache } from '@/lib/surface-cache';
+import { useCachedResource, invalidateSurfaceCache, markSurfaceCacheStale } from '@/lib/surface-cache';
 import { workspaceAccessCacheKey, workspaceAccessHistoryCacheKey } from '@/lib/surface-prefetch';
 import { fetchWorkspaceAccess, fetchWorkspaceAccessHistory, ORGANIZATION_CHANGED_EVENT } from '@/lib/api/workspace-access';
-import { WORKSPACE_IDENTITY_REFRESH_EVENT } from '@/lib/workspace-identity-events';
+import { WORKSPACE_IDENTITY_REFRESH_EVENT, isCatchUpRefresh } from '@/lib/workspace-identity-events';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { SearchableSelect } from '@/components/ui/searchable-select';
@@ -51,6 +51,8 @@ function WorkspaceAccessPanel({selection,embedded}:{selection?:AccessSelection;e
     const purge=(event:Event)=>{
       const detail=(event as CustomEvent<{workspaceId?:string}>).detail;
       if(detail?.workspaceId&&detail.workspaceId!==workspaceId)return;
+      // Reconnect catch-up: revalidate behind the paint, keep open editors.
+      if(isCatchUpRefresh(event)){markSurfaceCacheStale(`workspace-access:${workspaceId}:`);return;}
       change.cancelReview();setRequestTeam(null);setEditTeam(null);setEditPerson(null);setInspection(null);invalidateSurfaceCache(`workspace-access:${workspaceId}:`);
     };
     window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);

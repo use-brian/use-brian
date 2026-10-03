@@ -88,6 +88,8 @@ describe('[COMP:app-web/workspace-access] principal migration progress',()=>{
  it('labels the canonical default department field in saved review effects',()=>{
    const html=renderToStaticMarkup(<I18nProvider locale="en" dict={en}><CommandReviewEffects review={{id:'r',payloadHash:'h',policyRevision:'1',expiresAt:'2099-01-01',validForMs:30000,command:{type:'workspace.default_department.set',teamId:'team'},changes:[{field:'default_department_id',before:[],after:[{kind:'text',value:'Research'}]}]}}/></I18nProvider>);
    expect(html).toContain(en.workspaceAccess.reviewDefaultDepartment);expect(html).toContain('Research');
+   // A first assignment lists the new value, never a "Before: None" row.
+   expect(html).not.toContain(en.workspaceAccess.reviewBefore);
  });
  it('retries a lost apply receipt with the same hash without preparing another proposal',async()=>{
    mocks.apply.mockRejectedValueOnce(new Error('network'));await render();await click(t.inspect);await click(t.review);await click(en.workspaceAccess.retryChange);

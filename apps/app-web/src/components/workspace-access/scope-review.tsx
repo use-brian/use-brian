@@ -5,11 +5,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ScopeReview, ScopeReviewAction, ScopeReviewCommand, ScopeReviewInventory, ScopeReviewKind } from '@use-brian/shared';
 import { useWorkspaceContext } from '@/lib/workspace-context';
 import { useT } from '@/lib/i18n/client';
-import { useCachedResource, invalidateSurfaceCache } from '@/lib/surface-cache';
+import { useCachedResource, invalidateSurfaceCache, markSurfaceCacheStale } from '@/lib/surface-cache';
 import { scopeReviewCacheKey, workspaceAccessModeCacheKey } from '@/lib/surface-prefetch';
 import { useProtectedProjection } from '@/lib/use-protected-projection';
 import { fetchScopeReview, fetchWorkspaceAccessMode, saveScopeReview, ORGANIZATION_CHANGED_EVENT } from '@/lib/api/workspace-access';
-import { WORKSPACE_IDENTITY_REFRESH_EVENT } from '@/lib/workspace-identity-events';
+import { WORKSPACE_IDENTITY_REFRESH_EVENT, isCatchUpRefresh } from '@/lib/workspace-identity-events';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { SearchableSelect } from '@/components/ui/searchable-select';
@@ -51,7 +51,7 @@ function ScopeReviewWorkspace({teams,close}:{teams:Array<{id:string;name:string}
   },[expiresAt,cancelConfirmation]);
   const activation=useDepartmentChange(workspaceId,async()=>{invalidateSurfaceCache(`scope-review:${workspaceId}:`);await resource.refresh();},`${me.id}:strict-activation`);
   useEffect(()=>{
-    const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;if(event.type===WORKSPACE_IDENTITY_REFRESH_EVENT)operation.current?.controller.abort();else cancelConfirmation();setSelected([]);invalidateSurfaceCache(`scope-review:${workspaceId}:`);invalidateSurfaceCache(modeKey);};
+    const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;if(isCatchUpRefresh(event)){markSurfaceCacheStale(`scope-review:${workspaceId}:`);markSurfaceCacheStale(modeKey);return;}if(event.type===WORKSPACE_IDENTITY_REFRESH_EVENT)operation.current?.controller.abort();else cancelConfirmation();setSelected([]);invalidateSurfaceCache(`scope-review:${workspaceId}:`);invalidateSurfaceCache(modeKey);};
     const visible=()=>{if(document.visibilityState==='visible')cancelConfirmation();};
     window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);
     window.addEventListener('focus',cancelConfirmation);document.addEventListener('visibilitychange',visible);

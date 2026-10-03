@@ -4,11 +4,11 @@ import {useEffect,useRef,useState} from 'react';
 import type {DepartmentCommandReview,DepartmentAccessCommand,WorkspaceDepartmentRegistry} from '@use-brian/shared';
 import {useT} from '@/lib/i18n/client';
 import {useWorkspaceContext} from '@/lib/workspace-context';
-import {useCachedResource,invalidateSurfaceCache} from '@/lib/surface-cache';
+import {useCachedResource,invalidateSurfaceCache,markSurfaceCacheStale} from '@/lib/surface-cache';
 import {useProtectedProjection,projectionRemainingMs} from '@/lib/use-protected-projection';
 import {workspaceAccessModeCacheKey,workspaceAccessMigrationCacheKey,workspaceDepartmentRegistryCacheKey} from '@/lib/surface-prefetch';
 import {fetchWorkspaceDepartmentRegistry,fetchWorkspaceAccessMode,fetchMigrationPlans,fetchMigrationPlan,prepareMigrationItem,applyMigrationItem,setMigrationPlanState,ORGANIZATION_CHANGED_EVENT,isResourceMigrationItem,type MigrationItem,type PrincipalMigrationItem,type ResourceMigrationItem,type MigrationItemReviewResult,type MigrationItemApplyResult,type MigrationProjection} from '@/lib/api/workspace-access';
-import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
+import {WORKSPACE_IDENTITY_REFRESH_EVENT,isCatchUpRefresh} from '@/lib/workspace-identity-events';
 import {Button} from '@/components/ui/button';
 import {RefreshCw} from 'lucide-react';
 import {HowItWorks} from '@/components/organization/org-visuals';
@@ -78,7 +78,7 @@ function MigrationPanel(){
   const {workspaceId,me}=useWorkspaceContext(),t=useT().accessMigration;
   const [plan,setPlan]=useState<string|null>(null),[after,setAfter]=useState('');
   useEffect(()=>{
-    const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;invalidateSurfaceCache(`workspace-access:${workspaceId}:`);};
+    const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;if(isCatchUpRefresh(event))markSurfaceCacheStale(`workspace-access:${workspaceId}:`);else invalidateSurfaceCache(`workspace-access:${workspaceId}:`);};
     window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);
     return()=>{window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};
   },[workspaceId]);

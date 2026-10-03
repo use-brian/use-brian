@@ -6,7 +6,7 @@ import {useT} from '@/lib/i18n/client';
 import {useCreationContext,useWorkspaceAccessMode,ModeAwareCreationContext} from '@/components/context/mode-aware-context';
 import {getShopifyReconnect,reconnectIntent,type ReconnectProjection,getSetup,reviewSetup,mutateSetup,stageShopify,type SetupIntent,type SetupReview} from '@/lib/api/connector-setups';
 import {connectorSetupCacheKey,connectorReconnectCacheKey} from '@/lib/surface-prefetch';
-import {useCachedResource,invalidateSurfaceCache} from '@/lib/surface-cache';
+import {useCachedResource,invalidateSurfaceCache,markSurfaceCacheStale} from '@/lib/surface-cache';
 import {useProtectedProjection,projectionRemainingMs,type ProtectedProjection} from '@/lib/use-protected-projection';
 import {Button} from '@/components/ui/button';
 import {SearchableSelect} from '@/components/ui/searchable-select';
@@ -15,7 +15,7 @@ import {SurfaceSkeletonFor} from '@/components/chrome/surface-skeleton';
 import {normalizeShopifyShopDomain} from '@/lib/shopify-domain';
 import {parseShopifySetupState,setupCookie} from '@/lib/shopify-setup-state';
 import {ORGANIZATION_CHANGED_EVENT} from '@/lib/api/workspace-access';
-import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
+import {WORKSPACE_IDENTITY_REFRESH_EVENT,isCatchUpRefresh} from '@/lib/workspace-identity-events';
 import {OFFICIAL_OAUTH_SCOPES} from '@use-brian/shared/builtin-connectors';
 const field='min-h-8 max-sm:min-h-11 w-full rounded border border-border bg-background px-3 text-[16px] md:text-sm';
 function remember(id:string){const url=new URL(window.location.href);url.searchParams.delete('connected');url.searchParams.delete('instance');url.searchParams.set('shopifySetup',id);window.history.replaceState(null,'',url);}
@@ -41,7 +41,7 @@ function ShopifyReconnect({instanceId}:{instanceId:string}){
  const key=connectorReconnectCacheKey(workspaceId,me.id,instanceId),resource=useCachedResource(key,()=>getShopifyReconnect(workspaceId,me.id,instanceId));
  const [reviewNeeded,setReviewNeeded]=useState(false);
  const data=useProtectedProjection(key,resource.error?undefined:resource.data,()=>setReviewNeeded(true));
- useEffect(()=>{const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;setReviewNeeded(true);invalidateSurfaceCache(key);};window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);return()=>{window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};},[key,workspaceId]);
+ useEffect(()=>{const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;if(isCatchUpRefresh(event)){markSurfaceCacheStale(key);return;}setReviewNeeded(true);invalidateSurfaceCache(key);};window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);return()=>{window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};},[key,workspaceId]);
  return <><p>{t.reconnect}</p>{!data&&!resource.error&&!reviewNeeded?<SurfaceSkeletonFor surface="studio" chrome={false}/>:null}{!data||reviewNeeded?<Button className="max-sm:min-h-11" onClick={async()=>{try{await resource.refresh();setReviewNeeded(false);}catch{setReviewNeeded(true);}}}>{a.reload}</Button>:null}{resource.error?<p role="alert">{t.error}</p>:null}{data&&!data.eligibility.eligible?<p role="status">{t[data.eligibility.reason??'scope_unavailable']}</p>:null}<ShopifySetupForm reconnect={data&&!reviewNeeded&&data.eligibility.eligible?data:undefined} reconnecting onReconnectFailure={()=>{setReviewNeeded(true);invalidateSurfaceCache(key);}}/></>;
 }
 function ShopifySetupForm({reconnect,reconnecting=false,onReconnectFailure}:{reconnect?:ProtectedProjection<ReconnectProjection>;reconnecting?:boolean;onReconnectFailure?:()=>void}={}){
@@ -90,7 +90,7 @@ function SetupProgress({id}:{id:string}){
  const controller=useRef<AbortController|null>(null),pending=useRef<string|null>(null),live=useRef(true);
  const [busy,setBusy]=useState(false),[error,setError]=useState(''),[retry,setRetry]=useState(false);
  const data=useProtectedProjection(key,resource.data,()=>controller.current?.abort(),resource.refresh);
- useEffect(()=>{live.current=true;const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;controller.current?.abort();invalidateSurfaceCache(key);};window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);return()=>{live.current=false;controller.current?.abort();window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};},[key,workspaceId]);
+ useEffect(()=>{live.current=true;const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;if(isCatchUpRefresh(event)){markSurfaceCacheStale(key);return;}controller.current?.abort();invalidateSurfaceCache(key);};window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);return()=>{live.current=false;controller.current?.abort();window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};},[key,workspaceId]);
  async function apply(){
   if(busy||!data)return;setBusy(true);setError('');const abort=new AbortController();controller.current=abort;let timer:ReturnType<typeof setTimeout>|undefined;let reviewed:ProtectedProjection<SetupReview>|undefined;let consentAttempted=false;
   try{

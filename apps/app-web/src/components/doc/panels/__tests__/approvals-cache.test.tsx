@@ -14,6 +14,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
+import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { PendingApprovalRow } from "@/lib/api/approvals";
@@ -185,6 +186,25 @@ describe("[COMP:app-web/approvals] approvals queue paints from the surface cache
     });
     expect(host!.textContent).toContain("Bea Example");
     expect(host!.textContent).not.toContain("Ada Example");
+  });
+  it("keeps the batch selection and a half-typed reason through the stream catch-up, and clears them on a real identity change", async () => {
+    await loadSurfaceCache(approvalsCacheKey("w1"), async () => [{ ...row("a1", "Ada Example"), kind: "tool_invocation" }]);
+    await loadSurfaceCache(approvalSkillDetailsCacheKey("w1"), async () => ({}));
+    api.listApprovals.mockReturnValue(pending());
+    api.listSkillApprovalDetails.mockReturnValue(pending());
+    await mount();
+    const selectAll = host!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => { selectAll.click(); await settle(); });
+    const reason = () => host!.querySelector<HTMLInputElement>(`input[placeholder="${en.approvalsPage.batch.reasonPlaceholder}"]`);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(reason()!, "Checked with finance");
+      reason()!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // The stream reconnects every ~5 minutes; its catch-up changes nothing the viewer chose.
+    await act(async () => { window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT, { detail: { workspaceId: "w1", catchUp: true } })); await settle(); });
+    expect(reason()?.value).toBe("Checked with finance");
+    await act(async () => { window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT, { detail: { workspaceId: "w1" } })); await settle(); });
+    expect(reason()).toBeNull();
   });
   it("renders an explicit departmental review and links to a fresh access review without batch selection",async()=>{
     const card:PendingApprovalRow={...row('department-review','Unused'),kind:'department_access',approvalPayload:{targetTeamName:'Research',beneficiaryName:'Riley',beneficiaryKind:'team',reason:'Review requirements',startsAt:'2030-01-01T00:00:00Z',expiresAt:'2030-01-31T00:00:00Z'}};

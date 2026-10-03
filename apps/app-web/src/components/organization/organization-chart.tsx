@@ -8,10 +8,10 @@ import type { OrganizationChart, OrganizationCommand, OrganizationPlacement, Org
 import { useProtectedProjection } from '@/lib/use-protected-projection';
 import { useWorkspaceContext } from '@/lib/workspace-context';
 import { useT } from '@/lib/i18n/client';
-import { useCachedResource, invalidateSurfaceCache } from '@/lib/surface-cache';
+import { useCachedResource, invalidateSurfaceCache, markSurfaceCacheStale } from '@/lib/surface-cache';
 import { organizationCacheKey } from '@/lib/surface-prefetch';
 import { fetchOrganizationChart, ORGANIZATION_CHANGED_EVENT } from '@/lib/api/workspace-access';
-import { WORKSPACE_IDENTITY_REFRESH_EVENT } from '@/lib/workspace-identity-events';
+import { WORKSPACE_IDENTITY_REFRESH_EVENT,isCatchUpRefresh } from '@/lib/workspace-identity-events';
 import { ASSISTANT_REFRESH_EVENT } from '@/lib/assistant-events';
 import { Button } from '@/components/ui/button';
 import { SearchableSelect } from '@/components/ui/searchable-select';
@@ -49,6 +49,10 @@ function OrganizationWorkspace() {
     const refresh=(event:Event)=>{
       const detail=(event as CustomEvent<{workspaceId?:string}>).detail;
       if(detail?.workspaceId && detail.workspaceId!==workspaceId) return;
+      // The stream's reconnect catch-up is speculative: revalidate behind the
+      // paint and keep the open editor (a changed chart still clears it via
+      // useProtectedProjection's identity check).
+      if(isCatchUpRefresh(event)){markSurfaceCacheStale(`organization:${workspaceId}:`);return;}
       change.cancelReview();setEditor(null);
       invalidateSurfaceCache(`organization:${workspaceId}:`);
     };
