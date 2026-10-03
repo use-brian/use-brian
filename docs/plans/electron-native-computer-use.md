@@ -13,10 +13,10 @@ Ship an opt-in, attended **This computer** feature in the macOS Electron app:
 1. The user selects a supported local window and gives explicit local consent for a task.
 2. Brian reads accessibility information and uses semantic actions where possible.
 3. The existing task loop uses Jev for eligible structured decisions and the configured LLM for planning/generation/fallback. Models do not grant authority.
-4. If AX cannot ground a step, and capture is authorized, send a screenshot of the selected window to the configured image-capable LLM. Validate its structured next action through the same executor.
+4. If textual AX information cannot ground a step, investigate using an authorized selected-window screenshot with the configured image-capable LLM to identify a target, then resolve that proposal to a supported, window-bound AX action through the existing executor. This replacement is not implemented or accepted yet. A visual proposal must never fall back to the retired global mouse emitter.
 5. The user sees activity and can immediately Stop or take over. Uncertain effects are never automatically replayed.
 
-Initial supported scope is the existing TextEdit document workflow and the native fixture's form, selection, menu and canvas workflows. The fixture is acceptance tooling, not a claim of arbitrary-app support. Keep other applications/action classes unavailable until deliberately added and tested. Start acceptance on the operator's Mac; advertise only verified OS/architecture combinations. Windows/Linux work is deferred.
+The immediate delivery target is the existing TextEdit document workflow and native fixture form, selection and menu workflows. The original canvas screenshot-to-action requirement remains **open and unsupported**, not silently completed or removed: an arbitrary canvas with no usable AX action is not covered by screenshot-guided AX. Do not retrofit a test-only click backdoor into the fixture and count it as general native control. If a safe canvas mechanism cannot be established, request an explicit scope decision before calling a narrower AX release complete. The fixture is acceptance tooling, not a claim of arbitrary-app support. Keep other applications/action classes unavailable until deliberately added and tested. Start acceptance on the operator's Mac; advertise only verified OS/architecture combinations. Windows/Linux work is deferred.
 
 An operational AX inspector and AX task are useful intermediate milestones, **not completion of the screenshot-LLM fallback or the whole release**.
 
@@ -30,13 +30,17 @@ existing task loop
   → usable semantic target? use AX
   → otherwise, approved selected-window screenshot
   → existing configured image-capable LLM
-  → schema-validated action proposal
-  → existing local safety/approval/execution path
+  → schema-validated visual target proposal
+  → trusted native resolution to a supported AX element/action in that window
+  → exact local approval and fresh native revalidation
+  → existing semantic executor (never global mouse injection)
   → fresh observation; continue or pause
 ```
 
 - Reuse the existing provider/model resolver, multimodal adapter, metering, cancellation and task budgets. No second planner or executor.
-- Return only supported structured actions. The LLM may propose a point in the supplied image; it cannot execute code or invent permission/grant fields.
+- Return only supported structured proposals. A model point is a hint for native target resolution, never authority to inject a click. The LLM cannot execute code, invent permission/grant fields or declare its target safe.
+- Require a uniquely resolved, permitted AX action on a public element belonging to the approved window. Revalidate element identity/membership, frame/geometry, scope and action after approval. Missing, ambiguous, sensitive, unsupported or changed targets pause; no raw-click fallback.
+- AX targeting avoids a synthetic mouse down/up pair, but is not automatically deadline-atomic or free of dispatch races. Document and review its actual cancellation/expiry boundary before declaring it safe. A request timeout is not proof that a queued action was cancelled.
 - Preserve frame identity, selected-window bounds and the pixel-to-window transform. Reject out-of-bounds, stale, ambiguous or wrong-window proposals; do not guess or silently repair coordinates.
 - Use AX again when it becomes useful. Verify progress with fresh evidence, using AX where available or another authorized screenshot when needed.
 - No screenshot on the AX-complete happy path. No full-desktop streaming. Secure or unclassifiable sensitive content must cause pause/refusal rather than upload.
@@ -64,32 +68,74 @@ Scope reduction is not permission to disable safeguards:
 - **Consent and scope:** local session consent, exact app/window identity, native-only authorization, fresh epoch on Resume, and action-specific approval where required. Never automate Brian's consent UI, OS security prompts or credential surfaces.
 - **Stop:** independent local shortcut/tray/control UI, immediate dispatch revocation, no dependence on network/model/accounting/observers. Lock/sleep, permission loss, disconnect and helper failure revoke authority.
 - **Freshness and effects:** revalidate after approval/focus changes; changed windows/modals pause for fresh local authorization. Unknown effects/outcomes stop or ask the user, never retry an uncertain action.
-- **Input ownership:** the minimal one-click guardian candidate is implemented, not accepted. Before enabling it, verify owned press/release cleanup across takeover, overlap, partial delivery and helper/parent failure. Do not release physical user input or relinquish the lease while worker/input ownership is uncertain. General keyboard injection, drag and gesture support are not release requirements.
+- **Input ownership:** the failed one-click mechanism is retired, not awaiting profile approval. Do not restore down-post/returned-up emission, insert another check/timer as an atomicity claim, or extend deadlines to pass its experiment. Existing uncertain ownership remains fenced; never synthesize a cleanup up or release a lease on process death alone. Screenshot-guided AX must use a semantic action rather than synthesize a mouse pair. Any future raw-input mechanism needs a separate defensible design and native evidence. General keyboard injection, drag and gesture support are not release requirements.
 - **Privacy:** redact secure AX data before transmission; scoped, consented images only; no raw AX/text/images/credentials in routine logs.
 - **One loop, honest capabilities:** no alternate executor, silent permission expansion or false success. Unsupported combinations fail closed. Keep existing execution/Stop/watchdog budgets; do not increase them to hide failures.
 
-The current helper supports consented inspector/semantic/capture paths, not the historical probe-only boundary. Production `input=false` remains enforced by the empty accepted-platform registry. The isolated mechanism experiment cannot promote it. This documentation change enables nothing.
+The current helper supports consented inspector/semantic/capture paths, not the historical probe-only boundary. Production `input=false` and coordinate refusal are unconditional; even adding a metadata profile cannot enable the retired mechanism. The isolated harness permits only `null`; historical emitting cases are offline evidence. This documentation change enables nothing.
 
-## 5. Ordered delivery milestones
+## 5. Remaining tasks, in execution order
 
-Work in this order. Each milestone must produce a useful integrated result, not another standalone research probe.
+**Engineering owns implementation and integration.** The Mac operator supplies native execution/physical evidence, not unfinished code. The next meaningful Mac session should exercise a task inside Use Brian, not resume the retired standalone input experiments. Verification may expose further engineering defects; do not claim that only verification remains while a replacement is unwritten.
 
-The implementation column records the required source scope, now present for verification; it is not a Mac coding checklist. Native evidence can still expose defects requiring engineering correction.
+### A. Preserve the safety fix — completed source, ongoing invariant
 
-| Milestone | Required source scope | Evidence to close it |
-| --- | --- | --- |
-| **R1 — Packaged Mac inspector** | Close the supported-package admission gap; connect the existing helper/broker/discovery/consent path; finish permission readiness and selected-window AX inspection. Reuse the user's signing workflow. | On the packaged Mac app: select TextEdit/fixture, consent, see a bounded redacted snapshot, Stop, and refuse wrong-parent/channel/scope, denied permissions and lost identity. |
-| **R2 — Working AX task** | Run the existing API/relay/task loop against real macOS semantic actions. Complete TextEdit editing and fixture form/selection tasks with configured LLM planning, fresh completion checks and existing usage accounting. | Real UI outcomes, no unintended images, cancellation/takeover, stale refs, duplicate commands, lost receipts and modal/new-window refusal. No helper-only or fake-provider result counts as an end-to-end task. |
-| **R3 — Jev routing and screenshot fallback** | Exercise existing Jev decisions/fallback; keep exact approved-profile requirements. Integrate screenshot input to the configured image-capable LLM and minimal safe click execution in the same loop. | Approved Jev route and configured-LLM fallback behave correctly; the real canvas fixture completes via an actual screenshot/LLM call. Capture denial, no-image model, stale frame, bad coordinates and Stop refuse safely. |
-| **R4 — Release candidate** | Finish UI errors/onboarding, supported-target descriptions and rollback; package through the existing Electron release process; run the compact acceptance matrix below; update user/KB docs. | Recorded real-Mac results for the actual package/provider configuration, no open safety failure, reviewed default-off/opt-in rollout and regression results. Then cohesive commits, push and PR. |
+- [x] Remove both production and experimental down-post/returned-up emitters; refuse coordinate dispatch independently of profiles.
+- [x] Reject emitting harness cases at JS, Swift and C boundaries; retain historical classifier data and the operator's counterexample.
+- [x] Refuse clicks before consuming AX availability or transferring monitoring; preserve existing uncertainty fences and consent/privacy controls.
+- [x] Verify retirement with portable tests and source review. Source pushed through `8f62ec43`; no functional coordinate replacement is claimed.
 
-**Fresh next work is verification, not implementation transfer.** The operator already passed production source SDK preflight and corrected guardian 16 XCTest + public-header C syscall-fake tests at `2fe2e0d2`; do not repeat unchanged checks or request packaging-only tests. Source now pins images to the configured task route (global vision setting is approval only), decomposes before capture, monotonically reduces post-effect capabilities and publishes relay status before receipts. A real controller/relay/API/concrete-runtime regression verifies synthetic click/readback completion and unchanged-counter refusal; fake OS/provider/DB results do not close R3.
+Do not launch pre-retirement experiment binaries. Rebuilding replaces a local artifact; pulling source alone does not. Existing native compile/null/pair observations remain revision-scoped evidence, not acceptance of the retired design.
 
-Use [the handoff](../native-computer-mac-handoff.md) for exact fresh commands. First separate deployment-specific work: authenticated SELECT-only readiness with no-touch auth and protected token-file/stdin CLI, existing context IDs, supported accounting/migrations and existing non-production API/relay/provider configuration. [Backend setup](../native-computer-backend-setup.md) can run off-Mac; no deployment or credentials are provisioned or claimed. Readiness is not inference or acceptance, and default budgets cannot fund one conservative image attempt.
+### B. Establish the actual application/backend path — next engineering work (R1/R2)
 
-The subsequent source-owned platform selector matches exact OS version/build/native architecture/mechanism revision and rejects malformed, duplicate or translated profiles. Its immutable registry remains empty; four portable matcher tests bring the current Mac runner to 20 non-emitting cases. One fresh SDK check covers this new source, not repeated unchanged evidence.
+- [ ] Audit the packaged **This computer** flow from normal login and workspace/assistant/conversation/task selection through native consent, session exchange, relay READY, `/run`, model invocation, result display and teardown. Fix remaining blockers in that path without introducing a second executor or verification authorization bypass.
+- [ ] Confirm an existing authorized non-production API/relay destination and normal account/context. Run the implemented [readiness checker](../native-computer-backend-setup.md) against the matching revision: migrations 620/621, auth/scope/tool policy, supported accounting, route configuration and reachable relay. Record actual results, not assumed readiness. This can run off-Mac; unavailable environment inputs require user coordination, not delegation of coding or secret disclosure in chat.
+- [ ] Verify the actual configured provider's native-strict text request, provenance/usage and settlement using the existing authorized environment. No provider substitution, fabricated login/grant, unapproved deployment or automatic budget increase. Readiness alone does not exercise inference.
+- [ ] Ensure the app exposes only supported AX actions with coordinate input off; missing permissions/configuration and unsupported goals must give bounded, actionable errors. Preserve independent Stop, pending-cleanup UI and account/workspace isolation.
+- [ ] Extend focused integration regressions for TextEdit-style assignment and fixture invoke/select/scroll, exact approval, fresh whole-goal completion, denial and uncertain receipt handling. Keep browser behavior unchanged.
 
-Mac-only work: compile the new isolated `tests/native-acceptance` target, then inspect individual null/tap/death/physical-overlap cases with fresh GUI consent in a **disposable isolated login**, never the working desktop. Input can escape the fixture; a clean result is narrow observation with `productionAcceptance: false`, not ownership/drain proof or registry promotion. Separately build the current signed app through the existing workflow for meaningful inspector/backend execution and remaining R1–R4 checks. Keep unavailable production gates blocked; do not bypass them to obtain a result. Engineering owns any source correction here; the operator is not asked to finish code/tooling on Mac.
+**Exit:** source and portable integration checks are ready for a real signed-app AX task, with explicit deployment prerequisites and no known setup/code gap handed to the operator.
+
+### C. Design and implement screenshot-guided AX — feasibility gate, then code (R3)
+
+- [ ] Determine whether an image proposal can be resolved to a unique public AX element with a supported semantic action in the approved window. Inspect actual interfaces and define the evidence needed; do not assume a point hit-test, a role/name match or AX membership alone establishes authority.
+- [ ] Resolve the capture/action intersection explicitly: current capture is restricted to the public safe canvas, which may expose no suitable AX action. If no eligible surface supports both, record the blocker and propose a separately reviewed, narrowly scoped capture/action extension—not automatic broader capture or a fixture-only execution backdoor.
+- [ ] Specify native target binding, frame/geometry lifetime, exact approval and post-approval revalidation. Document dispatch/expiry/cancellation limits and any remaining check-to-OS-call race. If the required safety contract cannot be met, stop at this design gate rather than disguising it with another check or weaker deadline.
+- [ ] Define an honest capability/action contract for visual semantic targeting, separate from raw `input`. Update helper/protocol, controller, API/core and UI consistently; do not set `input:true` merely to pass the old screenshot-click gate. Keep inspector grants read-only and capture separately consented.
+- [ ] Reuse approved capture, the configured image-capable model, immutable goal decomposition, frame binding, native resolution and the existing semantic executor. No new planner, OCR service, global mouse path or test-only fixture backdoor.
+- [ ] Add regressions for absent/ambiguous AX targets, unsupported actions, privacy, stale frames/refs, movement/scale/occlusion, window/app replacement, permission/consent denial, Stop, provider errors and uncertain outcomes. Preserve one-attempt/accounting behavior and independent completion checks.
+- [ ] Review existing image approval and conservative reservation bounds with the authorized deployment owner. Defaults cannot fund one conservative image attempt; do not raise budgets or approve uploads automatically to make a test run.
+
+**Exit:** an implementable, reviewed window-bound semantic path and its integration tests exist. If no supported AX action exists, the result is an explicit unsupported/pause, not a synthesized click. This does not establish arbitrary canvas support.
+
+### D. Deliver the first real task inside Use Brian — Mac evidence (R1/R2)
+
+Complete feasible implementation/tooling in B/C before requesting this Mac session. If C is infeasible, record that engineering blocker explicitly; do not hand unresolved implementation to the operator. The first actual task remains AX-only, followed by visual verification only when ready.
+
+- [ ] Build the current package with the existing signing/notarization workflow for an actual workflow run. Reuse existing prerequisites; no packaging-only milestone or repetition of unchanged probes. Prevent production auto-update from replacing the WIP app during verification.
+- [ ] Verify current-package helper admission, permission attribution, selected-window discovery and redacted inspector result; preserve and investigate any recurrence of the earlier first-attempt admission failure.
+- [ ] Through the app and real configured model, complete an approved TextEdit document task and fixture form/selection/menu tasks. Confirm the actual UI result with fresh whole-goal evidence and usage records—not an `executed` receipt alone. The AX-complete path must upload no screenshot.
+- [ ] Exercise independent Stop during model wait/approval/dispatch, physical takeover, wrong/stale targets, modal/new-window changes, duplicate commands, lost receipts and cleanup uncertainty. Keep gated paths unavailable unless their normal authorization requirements are satisfied; never manufacture acceptance by toggling flags.
+- [ ] Fix failures in engineering, then rerun only affected workflows. Record package/OS/provider identity, outcomes and interventions.
+
+**Exit:** reproducible attended AX tasks work inside Use Brian with real native/provider evidence. This closes neither screenshot fallback nor the original canvas requirement.
+
+### E. Verify visual semantics and resolve original canvas scope (R3)
+
+- [ ] Inside the signed app, demonstrate a genuinely image-needed task on a currently privacy-approved capture surface with a real supported AX action, using the actual configured image-capable model. Do not broaden capture eligibility just to find a passing example.
+- [ ] Confirm image-to-target binding, exact local approval, native semantic action, fresh completion and actual usage settlement; exercise negative cases from C on the Mac. No raw mouse pair should be created.
+- [ ] Exercise Jev only with its existing exact approved operation/profile and probability policy; otherwise use the configured LLM or abstain and disclose the unavailable lane.
+- [ ] Keep the original no-AX canvas case explicitly unsupported until a different defensible mechanism exists. Either implement and verify such a mechanism, or obtain the user's explicit approval to narrow the release to AX-backed workflows. Screenshot-guided AX alone must not be presented as completing the original canvas requirement.
+
+**Exit:** verified visual-semantic capability with accurately stated limits, plus an explicit disposition of the still-open canvas requirement.
+
+### F. Product and release acceptance (R4)
+
+- [ ] Finish onboarding and supported-target/action descriptions; clearly distinguish Accessibility control, capture permission and unsupported coordinate input. Provide actionable refusal/Stop/cleanup feedback without leaking prior task content.
+- [ ] Run the compact matrix below against the actual package/provider configuration; verify rollback/default-off behavior and existing browser functionality.
+- [ ] Update the evidence ledger, runtime/handoff instructions and KB to the implemented support boundary. Preserve counterexamples and unresolved limitations.
+- [ ] Only after the agreed release scope and safety gates pass, prepare the release PR/rollout for review. A narrower release requires the scope decision in E; tests or disabled code do not substitute for it.
 
 ## 6. Compact release acceptance
 
@@ -97,7 +143,7 @@ Use the existing fixture and TextEdit, the operator's Mac and the actual configu
 
 | Area | Minimum evidence |
 | --- | --- |
-| User flows | Permissioned inspector; TextEdit document task; fixture form/selection; one modal/new-window pause and reauthorization; canvas screenshot-to-LLM task. Repeat workflows and report every failure/intervention rather than cherry-pick a pass. |
+| User flows | Permissioned inspector; TextEdit document task; fixture form/selection/menu; one modal/new-window pause and reauthorization; a genuinely image-needed screenshot-to-AX task. The original no-AX canvas task remains a separate unmet requirement until implemented/verified or explicitly removed by the user. Repeat workflows and report every failure/intervention rather than cherry-pick a pass. |
 | Authority | Wrong parent/private channel, wrong account/task/window, stale epoch, duplicate command, revoked grant and approval-target changes are denied. Browser authority never authorizes native control. |
 | Stop and ownership | Stop during observation, model wait, approval and action dispatch; physical takeover; helper/parent termination; blocked AX; permission loss, lock/sleep and relay loss. Confirm safe input cleanup/fencing and no uncertain replay. |
 | Privacy and capture | Secure fields/sentinel secrets excluded; AX path sends no images; selected-window-only capture; movement, resize, display scale and occlusion invalidate stale proposals. |
@@ -124,6 +170,6 @@ These are deferred scope, not silently marked complete. Historical test failures
 
 The release is complete when R1–R4 are demonstrated on the intended package, the in-scope checklist has no outstanding required failures, and user-facing support/limits are accurate. Compile-only preflights, test counts and source modules are supporting evidence—not completion percentages or operational acceptance.
 
-Commit/push/open the PR only after that verification, as already authorized. Keep native rollout opt-in and browser behavior unchanged. Do not ship or advertise deferred capabilities.
+Previously authorized feature-branch WIP commits/pushes may preserve implementation and fixes before acceptance; they are not release approval. Open the release PR and seek rollout approval only after verification of the agreed scope. Keep native rollout opt-in and browser behavior unchanged. Do not ship or advertise unsupported or deferred capabilities.
 
 Tracking: `feature/electron-native-computer-use` in `/workspace/use-brian-native-computer`; related KB work remains in `/workspace/brian-kb-native-computer`. Implementation evidence belongs in the [acceptance ledger](../native-computer-acceptance.md), runtime behavior in the [runtime guide](../native-computer-use.md). The [evaluation document](../native-computer-evaluation.md) describes optional deferred tooling, not an additional release programme.
