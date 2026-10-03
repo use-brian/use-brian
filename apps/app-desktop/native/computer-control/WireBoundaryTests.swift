@@ -230,12 +230,13 @@ let fakeMethodRequest = sourceRequest(.listTargets)
 saveResponse(fakeMethodRequest, SourceRequestTiming(request: apiRequest, clock: clock), false)
 // Production adapter with a recording backend; widened action routing traps.
 final class TrapBackend: ObservationBackend {
-    var reads = 0; var starts = 0; var discoveries = 0; var queries = 0; var approvals = 0; var effects = 0
+    var reads = 0; var starts = 0; var discoveries = 0; var queries = 0; var approvals = 0; var effects = 0; var captures = 0
+    var captureReady = false
     func capabilities() -> Object {
         queries += 1
         return ["protocol": proto, "platform": "darwin", "axRead": true,
-            "semanticActions": true, "windowCapture": false, "input": false,
-            "accessibilityPermission": "granted", "capturePermission": "unknown", "limitations": []]
+            "semanticActions": true, "windowCapture": captureReady, "input": false,
+            "accessibilityPermission": "granted", "capturePermission": captureReady ? "granted" : "denied", "limitations": []]
     }
     func listTargets() -> [Object] { discoveries += 1; return [] }
     func start(_ payload: Object) -> Bool {
@@ -247,6 +248,7 @@ final class TrapBackend: ObservationBackend {
         let command = payload["command"] as! Object
         precondition(supportedExecution(command))
         if (command["action"] as! Object)["kind"] as? String != "observe" { effects += 1 }
+        if (command["action"] as! Object)["kind"] as? String == "capture" { captures += 1 }
         reads += 1
         return ["commandId": command["commandId"]!, "outcome": "not_executed", "code": "denied"]
     }
@@ -257,6 +259,7 @@ let dispatcher = ObservationDispatcher { constructions += 1; return backend }
 var initialized = false
 var dispatchCount = 0
 func checkDispatch(_ request: Object) {
+    let beforeStarts = backend.starts; let beforeCaptures = backend.captures
     guard let response = dispatcher.response(request, clock: clock) else {
         precondition(!validWireRequest(request), "Valid direct request must get a bounded refusal/probe")
         return
@@ -268,13 +271,18 @@ func checkDispatch(_ request: Object) {
         let caps = response["result"] as! Object
         precondition(wireBool(caps["axRead"]) == initialized)
         precondition(wireBool(caps["semanticActions"]) == initialized)
-        for bit in ["windowCapture", "input"] { precondition(wireBool(caps[bit]) == false) }
+        precondition(wireBool(caps["input"]) == false)
+        precondition(wireBool(caps["windowCapture"]) == (initialized && backend.captureReady))
         precondition(caps["accessibilityPermission"] as? String == (initialized ? "granted" : "unknown"))
-        precondition(caps["capturePermission"] as? String == "unknown")
+        precondition(caps["capturePermission"] as? String == (initialized ? (backend.captureReady ? "granted" : "denied") : "unknown"))
 
         precondition(wireInteger(response["diagnosticsVersion"]) == 1)
     case "listTargets": precondition((response["result"] as! [Object]).isEmpty)
-    case "start": precondition(wireBool(response["result"]) == (initialized && supportedGrant(request["payload"] as! Object)))
+    case "start":
+        let grant = (request["payload"] as! Object)["grant"] as! Object
+        let allowed = initialized && (wireBool(grant["allowCapture"]) == false || wireBool(grant["allowControl"]) == true)
+        precondition(wireBool(response["result"]) == allowed)
+        precondition(backend.starts == beforeStarts + (allowed ? 1 : 0))
     case "beginApproval", "endApproval": precondition(wireBool(response["result"]) == false)
     case "execute":
         let receipt = response["result"] as! Object
@@ -282,6 +290,8 @@ func checkDispatch(_ request: Object) {
         precondition(Set(receipt.keys) == Set(["commandId", "code", "outcome"]))
         precondition(receipt["commandId"] as? String == command["commandId"] as? String)
         precondition(receipt["code"] as? String == "denied" && receipt["outcome"] as? String == "not_executed")
+        let capture = (command["action"] as! Object)["kind"] as? String == "capture"
+        precondition(backend.captures == beforeCaptures + (initialized && capture ? 1 : 0))
     default: fatalError("Unknown method admitted")
     }
     let timed = wireBool(request["diagnostics"]) == true
@@ -317,7 +327,7 @@ for vector in vectors {
     }
 }
 // Routing is not authority. The native Broker independently revalidates grants,
-// exact approval and live state. Capture grants are rejected, never narrowed.
+// exact approval and live state. Only control+capture grants may carry capture.
 for _ in 0..<2 {
     for method in [SourceMethod.capabilities, .start, .beginApproval, .endApproval, .execute] {
         var request = sourceRequest(method)
@@ -340,13 +350,37 @@ for control in [false, true] {
         var grant = payload["grant"] as! Object
         grant["allowControl"] = control; grant["allowCapture"] = capture
         payload["grant"] = grant; request["payload"] = payload
+        precondition(supportedGrant(payload) == (!capture || control))
+        precondition(captureAuthority(grant) == (control && capture))
         checkDispatch(request)
     }
 }
 if !ready { precondition(constructions == 0 && backend.reads == 0 && backend.starts == 0 && backend.queries == 0 && backend.approvals == 0 && backend.effects == 0) }
 }
-precondition(constructions == 1 && backend.reads > 0 && backend.starts > 0 && backend.approvals > 0 && backend.effects > 0)
-print("PASS \(dispatchCount) lazy production dispatcher responses with semantic routing / disabled capture-input traps; no native SDK execution.")
+precondition(constructions == 1 && backend.reads > 0 && backend.starts > 0 && backend.approvals > 0 && backend.effects > 0 && backend.captures > 0)
+for ready in [true, false] {
+    backend.captureReady = ready
+    checkDispatch(sourceRequest(.capabilities))
+}
+print("PASS \(dispatchCount) lazy production dispatcher responses with semantic/capture routing and disabled input traps; no native SDK execution.")
+var captureChecks = 0
+for control: Any in [false, true, 0, 1, "true", NSNull()] {
+    for capture: Any in [false, true, 0, 1, "true", NSNull()] {
+        var grant = baselineGrant; grant["allowControl"] = control; grant["allowCapture"] = capture
+        let expected = wireBool(control) == true && wireBool(capture) == true
+        precondition(captureAuthority(grant) == expected); captureChecks += 1
+    }
+}
+var captureGrant = baselineGrant; captureGrant["allowCapture"] = true
+for key in captureGrant.keys {
+    var malformed = captureGrant; malformed.removeValue(forKey: key)
+    precondition(!captureAuthority(malformed)); captureChecks += 1
+}
+precondition(!captureAuthority(nil)); captureChecks += 1
+var captureCommand = baselineCommand
+captureCommand["action"] = ["kind": "capture", "target": (baselineCommand["action"] as! Object)["target"]!, "observationId": "obs"]
+precondition(supportedExecution(captureCommand) && !exactSemanticCommand(captureCommand, captureCommand)); captureChecks += 1
+print("PASS \(captureChecks) capture-authority checks: strict dual consent, malformed/missing grants and no semantic-approval bypass.")
 // Exact approval matching executes the production matcher, not a mock.
 let approvedAction: Object = ["kind": "setValue", "target": (baselineCommand["action"] as! Object)["target"]!,
     "observationId": "observed", "ref": "exact-ref", "text": "approved text"]

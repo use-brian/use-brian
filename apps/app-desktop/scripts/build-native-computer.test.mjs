@@ -88,7 +88,7 @@ test('macOS inspector source keeps failed privacy reads and changed window/modal
   assert.ok(observe.indexOf('liveWindow(window.target) != nil') < observe.indexOf('let read = node('))
   assert.ok(observe.lastIndexOf('liveWindow(window.target) != nil') > observe.indexOf('let read = node('))
   assert.ok(observe.lastIndexOf('liveWindow(window.target) != nil') < observe.indexOf('snapshots[observationId] ='))
-  assert.ok(swift.includes('"axRead": ready, "semanticActions": ready, "windowCapture": false, "input": false'))
+  assert.ok(swift.includes('"axRead": ready, "semanticActions": ready, "windowCapture": ready && captureReady, "input": false'))
   assert.ok(swift.includes('inputTap.map { CGEvent.tapIsEnabled(tap: $0) }'))
 })
 
@@ -139,7 +139,7 @@ test('macOS authority source rejects metadata spoofing, unsigned/ad-hoc and wron
   assert.ok(swift.includes('guard trust.parentValid() else { _exit(77) }'))
   const broker = swift.slice(swift.indexOf('final class Broker: ObservationBackend'))
   const body = (name, next) => {
-    const begin = broker.indexOf(`    func ${name}(`), end = broker.indexOf(`    func ${next}(`, begin)
+    const begin = broker.indexOf(`func ${name}(`), end = broker.indexOf(`func ${next}(`, begin)
     assert.ok(begin >= 0 && end > begin, `${name} -> ${next}`)
     return broker.slice(begin, end)
   }
@@ -151,7 +151,12 @@ test('macOS authority source rejects metadata spoofing, unsigned/ad-hoc and wron
   assert.ok(body('authorized', 'validCommand').includes('liveWindow(target) != nil'))
   for (const [name, next] of [['beginApproval', 'endApproval'], ['endApproval', 'execute']]) assert.ok(body(name, next).includes('let window = liveWindow(target)'))
   assert.ok(body('safeCanvas', 'visibleWindowID').includes('liveWindow(window.target) != nil'))
-  assert.equal((body('pixels', 'capture').match(/liveWindow\(window.target\) != nil/g) ?? []).length, 3, 'Before SCK selection, capture and release')
+  const pixels = body('pixels', 'captureStillValid')
+  assert.ok(pixels.indexOf('safeCanvas(window, snapshot)') < pixels.indexOf('SCShareableContent.getExcludingDesktopWindows'))
+  assert.ok(pixels.indexOf('captureStillValid(command, action, window, snapshot)') < pixels.indexOf('SCScreenshotManager.captureImage'))
+  assert.ok(pixels.lastIndexOf('captureStillValid(command, action, window, snapshot)') > pixels.indexOf('done.wait()'))
+  assert.equal((pixels.match(/visibleWindowID\(window\) == number/g) ?? []).length, 2)
+  assert.ok(body('captureStillValid', 'capture').includes('captureAuthority(grant) && authorized(command, lease)'))
   const dispatch = body('execute', 'rect')
   assert.ok(dispatch.lastIndexOf('authorized(command, payload["leaseId"] as? String ?? "")', dispatch.indexOf('switch kind')) > dispatch.indexOf('unchanged(snapshot, window)'))
 })

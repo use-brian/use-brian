@@ -436,7 +436,7 @@ func privateResponse(requestId: String, method: String, result: Any, timing: Sou
 }
 // Fresh-helper readiness is metadata-only. Only explicit local discovery creates
 // the backend; authority still requires an exact grant and per-action approval.
-let probeOnlyLimitation = "Select discovery to initialize AX inspection and consented semantic actions; capture and input disabled."
+let probeOnlyLimitation = "Select discovery to initialize AX and safe-fixture-canvas capture readiness; input disabled."
 protocol ObservationBackend: AnyObject {
     func capabilities() -> Object
     func listTargets() -> [Object]
@@ -449,15 +449,19 @@ func observationGrant(_ payload: Object) -> Bool {
     guard validWirePayload("start", payload), let grant = payload["grant"] as? Object else { return false }
     return wireBool(grant["allowControl"]) == false && wireBool(grant["allowCapture"]) == false
 }
-// Capture is never implied by control. Reject rather than silently narrow grants.
+// Capture requires both explicit permissions; a read-only grant cannot carry it.
+func captureAuthority(_ grant: Object?) -> Bool {
+    guard let grant = grant, validWireGrant(grant) else { return false }
+    return wireBool(grant["allowControl"]) == true && wireBool(grant["allowCapture"]) == true
+}
 func supportedGrant(_ payload: Object) -> Bool {
     guard validWirePayload("start", payload), let grant = payload["grant"] as? Object else { return false }
-    return wireBool(grant["allowCapture"]) == false
+    return wireBool(grant["allowCapture"]) == false || captureAuthority(grant)
 }
 func semanticKind(_ kind: String) -> Bool { ["invoke", "setValue", "select", "scroll"].contains(kind) }
 func supportedExecution(_ command: Object) -> Bool {
     guard let action = command["action"] as? Object, let kind = action["kind"] as? String else { return false }
-    return kind == "observe" || semanticKind(kind)
+    return kind == "observe" || kind == "capture" || semanticKind(kind)
 }
 // Approval binds every command field (identity, target instances, epoch, ref,
 // observation, deadline and text), never a label or a subset of the action.
@@ -715,9 +719,11 @@ final class Broker: ObservationBackend {
     func capabilities() -> Object {
         let trusted = AXIsProcessTrusted()
         let ready = trusted && (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
-        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready, "windowCapture": false, "input": false,
-                "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": "unknown",
-                "limitations": ["Consented TextEdit document and fixture semantic actions only. Capture, coordinate input and general focus/keys disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
+        // Broker exists only after explicit discovery. Never prompt for permission.
+        let captureReady = CGPreflightScreenCaptureAccess()
+        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready, "windowCapture": ready && captureReady, "input": false,
+                "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": captureReady ? "granted" : "denied",
+                "limitations": ["Consented TextEdit document and fixture semantic actions only. Capture requires control+capture consent and the public, unoccluded safe fixture canvas; no TextEdit or general-window screenshots. Coordinate input and general focus/keys disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
     }
     func listTargets() -> [Object] {
         guard grant == nil, AXIsProcessTrusted() else { return [] }
@@ -1026,6 +1032,7 @@ final class Broker: ObservationBackend {
         // Hard effect-class barrier, independent of grant or approval state.
         guard supportedExecution(command) else { return result("denied") }
         guard kind == "observe" || wireBool(grant?["allowControl"]) == true else { return result("denied") }
+        guard kind != "capture" || captureAuthority(grant) else { return result("denied") }
         guard approvalCommand == nil, validCommand(command), let deadline = wireInteger(command["deadlineAt"]), authorized(command, payload["leaseId"] as? String ?? ""), let target = action["target"] as? Object else { return result("denied") }
         // No surviving release owner across SIGKILL/_exit; approval or flags cannot enable input.
         if kind == "click" { return result("unsupported") }
@@ -1051,6 +1058,9 @@ final class Broker: ObservationBackend {
             guard let observation = observe(command, window), authorized(command, payload["leaseId"] as? String ?? "") else { return finish(result("expired")) }
             return finish(result("ok", "executed", observation))
         }
+        // Capture is authorized by the exact session grant, never by an action
+        // approval or desktop ceiling. capture() repeats authority and scope gates.
+        if kind == "capture" { return finish(capture(command, action, window)) }
         guard let approved = approvedCommand, exactSemanticCommand(command, approved) else { return finish(result("approval_required")) }
         approvedCommand = nil
         guard let completeSnapshot = fresh(action, window), unchanged(completeSnapshot, window) else { return finish(result("stale_observation")) }
@@ -1144,9 +1154,12 @@ final class Broker: ObservationBackend {
         }
         return nil
     }
-    func pixels(_ window: Window) -> (Data, Int, Int)? {
+    private func pixels(_ command: Object, _ action: Object, _ window: Window, _ snapshot: Snapshot) -> (Data, Int, Int)? {
         guard brian_private_channel_alive() == 1 else { _exit(70) }
-        guard liveWindow(window.target) != nil, CGPreflightScreenCaptureAccess(), let number = visibleWindowID(window) else { return nil }
+        guard captureAuthority(grant), authorized(command, lease), fresh(action, window) != nil,
+              safeCanvas(window, snapshot), CGPreflightScreenCaptureAccess(),
+              let expectedBounds = snapshot.observation["bounds"] as? Object,
+              let number = visibleWindowID(window) else { return nil }
         let done = DispatchSemaphore(value: 0)
         var output: (Data, Int, Int)?
         SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: true) { content, error in
@@ -1157,12 +1170,15 @@ final class Broker: ObservationBackend {
             // 1 pixel per input point, bounded; no mixed-DPI scaling assumption.
             configuration.width = Int(selected.frame.width.rounded())
             configuration.height = Int(selected.frame.height.rounded())
-            guard self.liveWindow(window.target) != nil, configuration.width > 0, configuration.height > 0, configuration.width <= 1024, configuration.height <= 1024 else { done.signal(); return }
+            guard selected.frame == self.rect(expectedBounds), self.captureStillValid(command, action, window, snapshot),
+                  self.visibleWindowID(window) == number,
+                  configuration.width > 0, configuration.height > 0, configuration.width <= 1024, configuration.height <= 1024 else { done.signal(); return }
             configuration.showsCursor = false
             configuration.ignoreShadowsSingleWindow = true
             guard brian_private_channel_alive() == 1 else { done.signal(); return }
             SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, error in
                 if error == nil, let image = image,
+                   image.width == configuration.width, image.height == configuration.height,
                    let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]), png.count <= 2_000_000 {
                     output = (png, image.width, image.height)
                 }
@@ -1171,16 +1187,22 @@ final class Broker: ObservationBackend {
         }
         // Watchdog/parent kills this process on deadline even if SCK hangs.
         done.wait()
-        guard liveWindow(window.target) != nil, visibleWindowID(window) == number else { return nil }
+        guard captureStillValid(command, action, window, snapshot), visibleWindowID(window) == number else { return nil }
         guard brian_private_channel_alive() == 1 else { _exit(70) }
         return output
     }
-    func capture(_ command: Object, _ action: Object, _ window: Window) -> Object {
+    private func captureStillValid(_ command: Object, _ action: Object, _ window: Window, _ snapshot: Snapshot) -> Bool {
+        return captureAuthority(grant) && authorized(command, lease) && fresh(action, window) != nil &&
+            safeCanvas(window, snapshot) && CGPreflightScreenCaptureAccess() && brian_private_channel_alive() == 1
+    }
+    private func capture(_ command: Object, _ action: Object, _ window: Window) -> Object {
         func denied(_ code: String) -> Object { ["commandId": command["commandId"]!, "outcome": "not_executed", "code": code] }
-        guard wireBool(grant?["allowCapture"]) == true, CGPreflightScreenCaptureAccess() else { return denied("denied") }
+        frame = nil; frameObservation = "" // Failed attempts never leave a reusable frame.
+        guard captureAuthority(grant), authorized(command, lease), CGPreflightScreenCaptureAccess() else { return denied("denied") }
         guard monotonic() - lastCapture >= 1000, let snapshot = fresh(action, window), safeCanvas(window, snapshot) else { return denied("stale_observation") }
         lastCapture = monotonic()
-        guard let (png, width, height) = pixels(window), fresh(action, window) != nil, safeCanvas(window, snapshot), authorized(command, lease) else { return denied("stale_observation") }
+        guard let (png, width, height) = pixels(command, action, window, snapshot),
+              captureStillValid(command, action, window, snapshot) else { return denied("stale_observation") }
         let value: Object = ["id": id(), "mimeType": "image/png", "data": png.base64EncodedString(), "width": width, "height": height,
                              "bounds": snapshot.observation["bounds"]!, "displayLayoutVersion": snapshot.observation["displayLayoutVersion"]!]
         frame = value; frameObservation = action["observationId"] as! String

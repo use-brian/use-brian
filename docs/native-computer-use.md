@@ -4,7 +4,7 @@
 
 ## Current Mac implementation boundary
 
-Signed-package admission passed on the operator's earlier revision; first-attempt readiness reliability remains unresolved. Current source has permissionless fresh-helper readiness, lazy discovery, a consented read-only inspector and the existing approved semantic TextEdit/fixture task path. Control still requires the separate accepted rollout gate. The inspector-only opt-in applies an independent controller capability/grant ceiling and cannot enable effects. Capture, coordinates, keyboard injection and generic focus remain unavailable. No current-source signed AX/model task result is claimed. See the [acceptance ledger](native-computer-acceptance.md) for outstanding R1–R4 requirements.
+Signed-package admission passed on the operator's earlier revision; first-attempt readiness reliability remains unresolved. Current source has permissionless fresh-helper readiness, lazy discovery, a consented read-only inspector and the existing approved semantic TextEdit/fixture task path. Control still requires the separate accepted rollout gate. The inspector-only opt-in applies an independent controller capability/grant ceiling and cannot enable effects. Coordinates, keyboard injection and generic focus remain unavailable. Safe-fixture-canvas capture requires a separate explicit control-and-capture grant; the screenshot-click task fallback remains unavailable until safe input ownership is implemented and verified. No current-source signed AX/model task result is claimed. See the [acceptance ledger](native-computer-acceptance.md) for outstanding R1–R4 requirements.
 
 ## Historical prerequisites and evidence
 

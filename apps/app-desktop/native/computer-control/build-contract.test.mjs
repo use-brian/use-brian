@@ -105,6 +105,54 @@ test('mapped reader has only an own-symbol source and no admission/parent/enviro
   assert.match(helper, /dispatcher.response\(request, clock: sourceClock\)/);
 });
 
+test('capture is dual-consented, target-only and revalidated before SCK and frame export', () => {
+  const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
+  const broker = helper.slice(helper.indexOf('final class Broker:'));
+  const section = (from, to) => broker.slice(broker.indexOf(from), broker.indexOf(to));
+  const execute = section('    func execute(', '    func rect(');
+  for (const gate of ['validWirePayload("execute", payload)', 'supportedExecution(command)', 'wireBool(grant?["allowControl"]) == true',
+    'kind != "capture" || captureAuthority(grant)', 'approvalCommand == nil', 'authorized(command,',
+    'watchdogDeadline = min(expiresMonotonic, commandDeadline)', 'liveWindow(target)']) {
+    assert(execute.indexOf(gate) >= 0 && execute.indexOf(gate) < execute.indexOf('capture(command,'), gate);
+  }
+  const canvas = section('    func safeCanvas(', '    func visibleWindowID(');
+  for (const gate of ['liveWindow(window.target)', 'window.target["appId"] as? String == cohort', 'kAXTitleAttribute) == canvasTitle',
+    'brian-safe-canvas-v1', 'hasNoSheetChildren(window.element)', '"completeness"] as? String == "complete"',
+    '"sensitive"] as? Bool == false', '"role"] as? String != kAXSheetRole', '.isEmpty', 'unchanged(snapshot, window)']) assert(canvas.includes(gate), gate);
+  const visible = section('    func visibleWindowID(', '    private func pixels(');
+  for (const gate of ['CGDisplayBounds($0).contains(r)', 'CGDisplayRotation($0) == 0', '.count == 1', '.optionOnScreenOnly',
+    'window.target["processId"]', 'area == r', '== canvasTitle', 'area.intersects(r)', '> 0 { return nil }']) assert(visible.includes(gate), gate);
+  const pixels = section('    private func pixels(', '    private func captureStillValid(');
+  for (const gate of ['captureAuthority(grant)', 'authorized(command, lease)', 'fresh(action, window) != nil', 'safeCanvas(window, snapshot)',
+    'CGPreflightScreenCaptureAccess()', 'visibleWindowID(window)']) {
+    assert(pixels.indexOf(gate) >= 0 && pixels.indexOf(gate) < pixels.indexOf('SCShareableContent.getExcludingDesktopWindows'), gate);
+  }
+  assert.match(pixels, /SCShareableContent.getExcludingDesktopWindows\(true, onScreenWindowsOnly: true\)/);
+  assert.match(pixels, /SCContentFilter\(desktopIndependentWindow: selected\)/);
+  for (const gate of ['$0.windowID == number', 'selected.owningApplication?.processID == pid_t(window.target["processId"] as! Int)',
+    'selected.frame == self.rect(expectedBounds)', 'self.captureStillValid(command, action, window, snapshot)', 'self.visibleWindowID(window) == number',
+    'configuration.width <= 1024', 'configuration.height <= 1024', 'configuration.showsCursor = false', 'configuration.ignoreShadowsSingleWindow = true']) {
+    assert(pixels.indexOf(gate) >= 0 && pixels.indexOf(gate) < pixels.indexOf('SCScreenshotManager.captureImage'), gate);
+  }
+  assert.match(pixels, /guard brian_private_channel_alive\(\) == 1 else \{ done.signal\(\); return \}\s*SCScreenshotManager.captureImage/);
+  assert(pixels.includes('image.width == configuration.width, image.height == configuration.height'));
+  assert(pixels.includes('png.count <= 2_000_000'));
+  assert(pixels.indexOf('guard captureStillValid(command, action, window, snapshot), visibleWindowID(window) == number') > pixels.indexOf('done.wait()'));
+  const valid = section('    private func captureStillValid(', '    private func capture(');
+  for (const gate of ['captureAuthority(grant)', 'authorized(command, lease)', 'fresh(action, window) != nil', 'safeCanvas(window, snapshot)',
+    'CGPreflightScreenCaptureAccess()', 'brian_private_channel_alive() == 1']) assert(valid.includes(gate), gate);
+  const capture = section('    private func capture(', '    func reachable(');
+  for (const gate of ['frame = nil; frameObservation = ""', 'captureAuthority(grant)', 'authorized(command, lease)', 'CGPreflightScreenCaptureAccess()',
+    'monotonic() - lastCapture >= 1000', 'fresh(action, window)', 'safeCanvas(window, snapshot)']) {
+    assert(capture.indexOf(gate) >= 0 && capture.indexOf(gate) < capture.indexOf('pixels(command,'), gate);
+  }
+  assert(capture.indexOf('captureStillValid(command, action, window, snapshot)') > capture.indexOf('pixels(command,'));
+  assert(capture.indexOf('captureStillValid(command, action, window, snapshot)') < capture.indexOf('png.base64EncodedString()'));
+  assert.equal((helper.match(/SCScreenshotManager.captureImage/g) ?? []).length, 1);
+  assert(!/CGRequestScreenCaptureAccess|CGEvent\(mouseEventSource:|\.post\(tap:|SCContentFilter\(display:/.test(helper));
+  assert(!pixels.includes('beginAPI')); // Root capture_request only; no fabricated AX span.
+});
+
 test('semantic approval and effect guards precede restoration and native dispatch', () => {
   const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
   const broker = helper.slice(helper.indexOf('final class Broker:'));
@@ -133,7 +181,8 @@ test('semantic approval and effect guards precede restoration and native dispatc
     'permittedSemantic(action, completeSnapshot)', 'unchanged(snapshot, window)', 'fresh(action, window) != nil', 'current.complete']) {
     assert(execute.indexOf(gate) >= 0 && execute.indexOf(gate) < effect, gate);
   }
-  assert(!execute.includes('capture(command,'));
+  assert(execute.includes('if kind == "capture" { return finish(capture(command, action, window)) }'));
+  assert(execute.indexOf('captureAuthority(grant)') < execute.indexOf('capture(command,'));
   assert.match(execute, /snapshots.removeAll\(\)/);
   assert.match(execute, /guard error == .success else \{ return finish\(result\("helper_error", "execution_unknown"\)\) \}/);
   const authority = section('    func authorized(', '    func validCommand(');

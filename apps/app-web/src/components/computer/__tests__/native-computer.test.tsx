@@ -207,7 +207,30 @@ it.each([true, false])("[COMP:app-web/native-computer] observation-only caps (ax
   } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
 });
 
-it.each(["control", "capture"] as const)("[COMP:app-web/native-computer] rejects stale %s requests and visibly clears unsupported preferences", async lost => {
+it("[COMP:app-web/native-computer] capture without input keeps semantic control available but never requests screenshot fallback", async () => {
+  setup.populated = true;
+  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: { ...fullCapabilities, input: false } };
+  const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
+  const control = vi.fn<ComputerControl>().mockImplementation(async () => ({ ok: true, status, targets: [target] }));
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); document.body.append(el); const root = createRoot(el);
+  try {
+    await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
+    await fillInspectorForm(el);
+    const boxes = () => Array.from(el.querySelectorAll<HTMLElement>('[role="checkbox"]'));
+    expect(boxes()[0].getAttribute("aria-disabled")).not.toBe("true");
+    await act(async () => boxes()[0].click());
+    expect(boxes()[1].getAttribute("aria-disabled")).toBe("true");
+    await act(async () => boxes()[1].click());
+    expect(boxes().map(b => b.getAttribute("aria-checked"))).toEqual(["true", "false"]);
+    await act(async () => Array.from(el.querySelectorAll("button")).find(b => b.textContent === en.nativeComputer.start)!.click());
+    expect(control).toHaveBeenCalledWith(expect.objectContaining({ type: "start", assistantId: "a", conversationId: "c", taskId: "t", allowControl: true, allowCapture: false }));
+    expect(control.mock.calls.some(([m]) => (m.type === "start" || m.type === "resume") && m.allowCapture)).toBe(false);
+  } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
+});
+
+it.each(["control", "capture", "input"] as const)("[COMP:app-web/native-computer] rejects stale %s requests and visibly clears unsupported preferences", async lost => {
   setup.populated = true;
   let status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: fullCapabilities };
   const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
@@ -222,7 +245,7 @@ it.each(["control", "capture"] as const)("[COMP:app-web/native-computer] rejects
     await act(async () => boxes()[0].click());
     await act(async () => boxes()[1].click());
     expect(boxes().map(b => b.getAttribute("aria-checked"))).toEqual(["true", "true"]);
-    status = { ...status, epoch: 2, capabilities: { ...fullCapabilities, semanticActions: lost !== "control", windowCapture: false, input: false } };
+    status = { ...status, epoch: 2, capabilities: { ...fullCapabilities, semanticActions: lost !== "control", windowCapture: lost !== "capture", input: lost !== "input" } };
     // Simulate the live store changing before React has rendered the new caps.
     const snapshot = vi.spyOn(nativeComputer, "snapshot").mockReturnValue({ ok: true, status });
     try {

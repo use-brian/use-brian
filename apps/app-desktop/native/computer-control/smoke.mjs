@@ -71,7 +71,7 @@ if (process.argv.includes('--portable')) {
   assert(executeSource.indexOf('if kind == "click" { return result("unsupported") }') < executeSource.indexOf('if kind == "observe"'))
   assert(executeSource.includes('if kind == "click" { return result("unsupported") }'))
   assert(!/CGEvent\(mouseEventSource:|\.post\(tap:|func click\(/.test(helper), 'No coordinate emitter reachable even through raw private requests')
-  assert(!helper.includes('return finish(capture(command, action, window))'))
+  assert(helper.includes('return finish(capture(command, action, window))'))
   assert(helper.includes('AXUIElementPerformAction'))
   const fixture = readFileSync(new URL('./Fixture.swift', import.meta.url), 'utf8')
   for (const marker of ['case "select":', 'case "scroll":', 'kAXIncrementAction', 'kAXDecrementAction', 'exactSemanticCommand(command, approved)', 'sameChildren(ref)', 'kind != "setValue"', 'watchdogDeadline', 'safeCanvas(window, snapshot)']) assert(helper.includes(marker), marker)
@@ -138,7 +138,7 @@ try {
     for (const bit of ['axRead', 'semanticActions', 'windowCapture', 'input']) assert.equal(caps[bit], false)
     assert.equal(caps.accessibilityPermission, 'unknown')
     assert.equal(caps.capturePermission, 'unknown')
-    assert.deepEqual(caps.limitations, ['Select discovery to initialize AX inspection and consented semantic actions; capture and input disabled.'])
+    assert.deepEqual(caps.limitations, ['Select discovery to initialize AX and safe-fixture-canvas capture readiness; input disabled.'])
     const target = { appId: 'com.usebrian.NativeComputerFixture', processId: 42, processInstanceId: 'not-looked-up', windowId: 'not-looked-up', windowInstanceId: 'not-looked-up' }
     const identity = Object.fromEntries(['deploymentId', 'userId', 'workspaceId', 'deviceId', 'sessionId', 'conversationId', 'taskId'].map(key => [key, randomUUID()]))
     const grant = { protocol: 'native-computer-v1', identity, grantId: randomUUID(), epoch: 1, expiresAt: Date.now() + 60000, targets: [target], allowControl: true, allowCapture: true, requester: 'Untrusted protocol assertion', goal: 'Must never authorize' }

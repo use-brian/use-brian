@@ -42,7 +42,7 @@ for (const method of ['execute']) {
   const authority = body.indexOf(method === 'start' ? 'AXIsProcessTrusted()' : 'authorized(');
   assert(authority > validation, `${method}: strict wire validation must precede authority/effects`);
 }
-for (const marker of ['wireBool(grant?["allowControl"]) == true', 'wireBool(grant?["allowCapture"]) == true',
+for (const marker of ['wireBool(grant?["allowControl"]) == true', 'wireBool(grant["allowCapture"]) == true',
   'let approved = wireBool(payload["approved"])', 'guard validCommand(command), wireString(leaseId) != nil',
   'brian_private_channel_alive() == 1', '"input": false', 'if kind == "click" { return result("unsupported") }']) assert(helper.includes(marker), marker);
 assert(!helper.includes('payload["approved"] as? Bool'));
@@ -62,6 +62,9 @@ assert(!/payload|target|ref|name|goal|frame|error|result|environment/.test(dtoSo
 const brokerOffset = helper.indexOf('final class Broker: ObservationBackend');
 const capsSource = helper.slice(helper.indexOf('    func capabilities(', brokerOffset), helper.indexOf('    func listTargets(', brokerOffset));
 assert(!capsSource.includes('diagnostics'), 'Never modify public capabilities result');
+assert(capsSource.includes('CGPreflightScreenCaptureAccess()'));
+assert(capsSource.includes('"windowCapture": ready && captureReady'));
+assert(!helper.includes('CGRequestScreenCaptureAccess'), 'No permission prompt in any path');
 const mainSource = helper.slice(helper.indexOf('guard let trust = ProcessTrust()'));
 assert(mainSource.includes('let sourceClock = SourceClock()'));
 assert(mainSource.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
@@ -78,7 +81,7 @@ assert(!/CGPreflight|AXUIElementPerformAction/.test(start));
 assert(start.includes('if wireBool(candidate["allowControl"]) == true {\n            guard restoreApprovedWindow(window)'));
 assert(start.indexOf('monitorScope(window)') < start.indexOf('restoreApprovedWindow(window)'));
 assert(start.indexOf('watchdogActive = true') < start.indexOf('restoreApprovedWindow(window)'));
-const init = helper.slice(helper.indexOf('    init(trust:'), helper.indexOf('    func listTargets() -> [Object] {'));
+const init = helper.slice(helper.indexOf('    init(trust:'), helper.indexOf('    func capabilities(', brokerOffset));
 assert(init.indexOf('if AXIsProcessTrusted() {') < init.indexOf('inputTap = CGEvent.tapCreate'));
 assert(!init.includes('CGPreflightScreenCaptureAccess'));
 assert(helper.includes('if childRead.elements == nil { complete = false }'));

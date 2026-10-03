@@ -42,7 +42,7 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   const conversations = (chat.personal ?? []).filter(row => row.assistantId === assistantId);
   const active = phase === "active" || phase === "awaiting_action_approval" || phase === "awaiting_local_consent";
   const canControl = state.status?.capabilities.semanticActions === true;
-  const canCapture = canControl && state.status?.capabilities.windowCapture === true;
+  const canCapture = canControl && state.status?.capabilities.windowCapture === true && state.status?.capabilities.input === true;
   // Forget unsupported preferences, but surface the change rather than silently
   // treating a previously requested control run as an inspector run.
   useEffect(() => {
@@ -75,7 +75,7 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
     // Recheck the live store as well: capabilities can change between render
     // and click. Reject the requested run; never coerce it into inspector mode.
     const capabilities = nativeComputer.snapshot().status?.capabilities;
-    if (allowControl && capabilities?.semanticActions !== true || allowCapture && (!allowControl || capabilities?.windowCapture !== true)) {
+    if (allowControl && capabilities?.semanticActions !== true || allowCapture && (!allowControl || capabilities?.windowCapture !== true || capabilities?.input !== true)) {
       setFailed(true);
       return;
     }
