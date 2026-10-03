@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LiveInteractionDeps } from '../live-interaction-service.js'
 
 const mocks = vi.hoisted(() => ({
-  service: vi.fn(), create: vi.fn(), session: vi.fn(), assistant: vi.fn(), resolve: vi.fn(),
+  service: vi.fn(), create: vi.fn(), session: vi.fn(), touchSession: vi.fn(), assistant: vi.fn(), resolve: vi.fn(),
   query: vi.fn(), txQuery: vi.fn(), add: vi.fn(), sources: vi.fn(), answer: vi.fn(),
   ledger: vi.fn(), release: vi.fn(), rule: vi.fn(),
 }))
@@ -10,7 +10,7 @@ vi.mock('../live-interaction-service.js', () => ({
   InteractionError: class extends Error { constructor(public status: number, message: string) { super(message) } },
   createLiveInteractionService: mocks.service,
 }))
-vi.mock('../../db/sessions.js', () => ({ findSessionById: mocks.session, addSessionMessage: mocks.add }))
+vi.mock('../../db/sessions.js', () => ({ readSessionById: mocks.session, findSessionById: mocks.touchSession, addSessionMessage: mocks.add }))
 vi.mock('../../db/users.js', () => ({ findAssistantById: mocks.assistant }))
 vi.mock('../../context-scope/execution-context.js', () => ({ resolveExecutionContextSystem: mocks.resolve }))
 vi.mock('../../db/derived-scope-store.js', () => ({ readCurrentScopeSources: mocks.sources }))
@@ -74,6 +74,8 @@ describe('[COMP:recordings/live-interaction] runtime', () => {
     const runtime = createLiveInteractionRuntime(deps)
     await runtime.create('owner', { ...capture, assistantId: 'dock-assistant' })
     expect(mocks.create).toHaveBeenCalledWith('owner', capture)
+    expect(mocks.session).toHaveBeenCalledWith('chat')
+    expect(mocks.touchSession).not.toHaveBeenCalled()
     mocks.create.mockClear()
     await expect(runtime.create('stranger', capture)).rejects.toThrow('access denied')
     expect(mocks.create).not.toHaveBeenCalled()
@@ -142,6 +144,43 @@ describe('[COMP:recordings/live-interaction] runtime', () => {
     const rebind = mocks.txQuery.mock.calls.filter(call => call[0].startsWith('UPDATE turn_events'))
     expect(rebind).toHaveLength(1)
     expect(rebind[0]![1]).toEqual(['actual-assistant', 'reserved', 'chat', 'workspace'])
+  })
+  it('revalidates with a read-only session lookup after locking and keeps writes on the transaction', async () => {
+    const resolved = await mocks.resolve()
+    const authority = resolved.executionContext.security.authority.assertCurrent
+    await publish()
+    const lockIndex = mocks.txQuery.mock.calls.findIndex(([sql]) => sql === 'SELECT id FROM sessions WHERE id=$1 FOR UPDATE')
+    expect(lockIndex).toBeGreaterThanOrEqual(0)
+    const lockOrder = mocks.txQuery.mock.invocationCallOrder[lockIndex]!
+    expect(mocks.session.mock.calls).toEqual([['chat'], ['chat']])
+    expect(mocks.session.mock.invocationCallOrder[0]).toBeLessThan(lockOrder)
+    expect(mocks.session.mock.invocationCallOrder[1]).toBeGreaterThan(lockOrder)
+    expect(mocks.touchSession).not.toHaveBeenCalled()
+    expect(authority).toHaveBeenCalledTimes(2)
+    for (const order of authority.mock.invocationCallOrder) {
+      expect(order).toBeGreaterThan(lockOrder)
+      expect(order).toBeLessThan(mocks.add.mock.invocationCallOrder[0]!)
+    }
+    const tx = mocks.sources.mock.calls[0]![0]
+    expect(tx.query).toBe(mocks.txQuery)
+    expect(mocks.sources).toHaveBeenCalledWith(tx, 'workspace', [])
+    expect(mocks.add).toHaveBeenCalledTimes(2)
+    for (const call of mocks.add.mock.calls) expect(call[1]).toBe(tx)
+    expect(mocks.query).not.toHaveBeenCalled()
+    expect(mocks.txQuery).toHaveBeenCalledWith('COMMIT')
+    expect(mocks.release).toHaveBeenCalledTimes(1)
+  })
+  it('rejects destination permission loss discovered by the lookup under the session lock', async () => {
+    const session = await mocks.session()
+    mocks.session.mockClear()
+    mocks.session.mockResolvedValueOnce(session).mockResolvedValueOnce({ ...session, visibility: 'workspace' })
+    await expect(publish()).rejects.toThrow('access denied')
+    expect(mocks.txQuery).toHaveBeenCalledWith('SELECT id FROM sessions WHERE id=$1 FOR UPDATE', ['chat'])
+    expect(mocks.session).toHaveBeenCalledTimes(2)
+    expect(mocks.touchSession).not.toHaveBeenCalled()
+    expect(mocks.add).not.toHaveBeenCalled()
+    expect(mocks.txQuery).toHaveBeenCalledWith('ROLLBACK')
+    expect(mocks.txQuery).not.toHaveBeenCalledWith('COMMIT')
   })
   it('fences stale workers and refuses changed or held evidence', async () => {
     fenced = false

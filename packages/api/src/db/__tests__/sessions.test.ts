@@ -10,6 +10,7 @@ vi.mock('../client.js', () => ({
 import {
   findOrCreateSession,
   findSessionById,
+  readSessionById,
   updateSessionStatus,
   updateSessionTitle,
   renameSession,
@@ -138,6 +139,24 @@ describe('[COMP:api/sessions-route] findOrCreateSession', () => {
       appId: 'sidantrip',
     })
     expect(mockQuery.mock.calls[0][1]![4]).toBe('sidantrip')
+  })
+})
+
+describe('[COMP:api/sessions-route] readSessionById', () => {
+  it('returns the full session snapshot without writes or row locks', async () => {
+    const session = { id: 's_1', userId: 'u_1', assistantId: 'a_1', visibility: 'owner', mode: null }
+    mockQuery.mockResolvedValueOnce({ rows: [session], rowCount: 1 } as never)
+    expect(await readSessionById('s_1')).toEqual(session)
+    expect(mockQuery).toHaveBeenCalledOnce()
+    const [sql, params] = mockQuery.mock.calls[0]
+    expect(sql).toMatch(/^SELECT/)
+    expect(sql).not.toMatch(/UPDATE|INSERT|FOR UPDATE|FOR SHARE/)
+    expect(params).toEqual(['s_1'])
+  })
+  it('returns null without touching a missing session', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(await readSessionById('missing')).toBeNull()
+    expect(mockQuery).toHaveBeenCalledOnce()
   })
 })
 
