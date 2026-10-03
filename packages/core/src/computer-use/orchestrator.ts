@@ -210,9 +210,21 @@ export class NativeComputerOrchestrator {
             .filter(c => sameTarget(c.action.target, observation.target) && 'observationId' in c.action
               && c.action.observationId === observation.id && policy.allows(c.action, observation))
         }
+        const decompose = async () => {
+          if (decomposed || !this.deps.llm.decompose) return
+          if (calls < 1) throw new Error('Budget exhausted')
+          calls--; await reserve('text', 1)
+          await measured('decomposition', step, correlation => this.deps.llm.decompose!({ goal: options.goal, observation: { ...observation, frame: undefined }, candidates, signal, deadlineAt, trace: correlation }))
+          decomposed = true
+        }
         // A complete tree can still omit a custom-drawn target. Safe capture is
         // decided independently by the app policy and local helper, never by AX completeness alone.
         const groundVisually = async () => {
+          // Freeze the AX goal contract before starting the frame freshness clock.
+          // Decomposition may be slow; neither its old refs nor an old image can
+          // authorize capture. Re-observe even when planning already froze goals.
+          await decompose()
+          observation = { ...await observe(step), frame: undefined }
           const status = await check()
           if (!grant.allowCapture || !status.capabilities.input || !status.capabilities.windowCapture || status.capabilities.capturePermission !== 'granted'
             || !this.deps.llm.vision?.nativeGrounding || !policy.allowsCapture(observation)) throw new Error('No safe grounding')
@@ -290,12 +302,7 @@ export class NativeComputerOrchestrator {
         }
         const candidate = candidates.find(c => c.id === selection)
         if (!candidate) return result('paused', 'Planner abstained')
-        if (!decomposed && this.deps.llm.decompose) {
-          if (calls < 1) return result('paused', 'Budget exhausted')
-          calls--; await reserve('text', 1)
-          await measured('decomposition', step, correlation => this.deps.llm.decompose!({ goal: options.goal, observation: { ...observation, frame: undefined }, candidates, signal, deadlineAt, trace: correlation }))
-          decomposed = true
-        }
+        await decompose()
         let action = ActionSchema.parse(candidate.action)
         let status = await check()
         // Inference may outlive a ref. Refresh without replaying or silently choosing

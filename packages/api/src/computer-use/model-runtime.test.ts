@@ -413,7 +413,7 @@ describe('native model runtime', () => {
     expect(JSON.stringify(f.meter.mock.calls)).not.toContain('image-sentinel')
   })
   it('runs vision-to-AX recovery end to end without treating a click receipt as completion', async () => {
-    const f = fixture([{ steps: [] }, { x: 50, y: 20 }, { objectives: [objective('Hello')] }, { status: 'continue', observationId: 'o3', evidence: [] }, { steps: [{ kind: 'setValue', ref: 'r3', text: 'Hello' }], objectives: [objective('Hello')] }, verified('o4', 'r4', 'Hello')])
+    const f = fixture([{ steps: [] }, { objectives: [objective('Hello')] }, { x: 50, y: 20 }, { status: 'continue', observationId: 'o4', evidence: [] }, { steps: [{ kind: 'setValue', ref: 'r4', text: 'Hello' }], objectives: [objective('Hello')] }, verified('o5', 'r5', 'Hello')])
     f.target.appId = 'com.usebrian.NativeComputerFixture'
     f.options.budget.tokens = 10000000; f.options.budget.costUsd = 1000
     let clicked = false
@@ -444,10 +444,10 @@ describe('native model runtime', () => {
     const after = platform === 'darwin' ? 'Canvas clicks: 1' : 'Canvas clicks: 1; selected: true'
     const name = platform === 'darwin' ? 'Safe custom canvas' : after
     const f = fixture([
-      { steps: [] }, { x: 100, y: 65 },
-      { objectives: [{ role, name, property, equals: after }] },
+      { steps: [] }, { objectives: [{ role, name, property, equals: after }] },
+      { x: 100, y: 65 },
       // Deliberately claims counter 1 even in the contradictory counter-0 cases.
-      { status: 'complete', observationId: 'o3', evidence: [{ ref: 'r3', property, equals: after }] },
+      { status: 'complete', observationId: 'o4', evidence: [{ ref: 'r4', property, equals: after }] },
     ])
     f.target.appId = 'com.usebrian.NativeComputerFixture'
     f.grant.goal = 'Click the canvas once'
@@ -483,11 +483,11 @@ describe('native model runtime', () => {
     const runtime = (await f.runtime())!
     const result = await new NativeComputerOrchestrator({ ...runtime, provider: f.native }).run({ authority: { grant: f.grant, target: f.target, assertCurrent: async () => {} }, goal: f.grant.goal, signal: f.context.abortSignal, deadlineAt: Date.now() + 60000 })
     expect(result).toMatchObject({ outcome: advances ? 'completed' : 'paused', actions: 1 })
-    expect(order).toEqual(['capture', 'decompose', 'click'])
+    expect(order).toEqual(['decompose', 'capture', 'click'])
     expect(f.requests).toHaveLength(4)
     expect(f.meter).toHaveBeenCalledTimes(12)
     expect(f.requests.filter(r => JSON.stringify(r).includes('private-canvas-pixels'))).toHaveLength(1)
-    expect(JSON.stringify(f.requests[2])).not.toContain('private-canvas-pixels')
+    expect(JSON.stringify(f.requests[1])).not.toContain('private-canvas-pixels')
   })
   it('retains the requested selector and reports only native evidence as actual completion identity', async () => {
     const f = fixture([]), requestedModel = 'requested-alias', model = 'resolved-model-v2'

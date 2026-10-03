@@ -20,6 +20,85 @@ function setup(override: Partial<NativeHelper> = {}, approval: NativeControllerO
   return { controller, helper, lease, approveGrant }
 }
 describe('native main broker', () => {
+  it('publishes a successful click downgrade, keeps AX/capture readback and rejects queued effects without approval', async () => {
+    const full = { ...capabilities, windowCapture: true, input: true, capturePermission: 'granted' as const }
+    let current = full
+    const bounds = { x: 0, y: 0, width: 100, height: 100 }
+    const observation = { identity, epoch: 1, id: 'obs', capturedAt: Date.now(), monotonicMs: 1,
+      target, foreground: true, bounds, displayLayoutVersion: 'layout', completeness: 'complete' as const,
+      nodes: [{ ref: 'ref', role: 'button', name: 'Clicked', enabled: true, focused: false, selected: false, sensitive: false, actions: [] }] }
+    const frame = { id: 'frame', mimeType: 'image/png' as const, data: 'fixture', width: 100, height: 100, bounds, displayLayoutVersion: 'layout' }
+    const approval = vi.fn(async () => true)
+    const { controller, helper } = setup({ capabilities: vi.fn(async () => current), execute: vi.fn(async (c: NativeCommand): Promise<NativeReceipt> => {
+      if (c.action.kind === 'click') current = { ...full, semanticActions: false, input: false }
+      return { commandId: c.commandId, outcome: 'executed', code: 'ok',
+        ...(c.action.kind === 'observe' ? { observation } : c.action.kind === 'capture' ? { observation: { ...observation, frame } } : {}) }
+    }) }, approval)
+    try {
+      await controller.start({ ...grant(), allowCapture: true })
+      const click: NativeCommand = { ...command('click'), action: { kind: 'click', target, observationId: 'obs', frameId: 'frame', x: 10, y: 20 } }
+      const first = controller.execute(click)
+      const queued = controller.execute(command('queued'))
+      expect(await first).toMatchObject({ outcome: 'executed', code: 'ok' })
+      expect(controller.status()).toMatchObject({ state: 'active', identity, epoch: 1,
+        capabilities: { axRead: true, windowCapture: true, semanticActions: false, input: false } })
+      expect(await queued).toMatchObject({ outcome: 'not_executed', code: 'unsupported' })
+      for (const kind of ['observe', 'capture'] as const) {
+        expect(await controller.execute({ ...command(kind), action: kind === 'capture' ? { kind, target, observationId: 'obs' } : { kind, target } })).toMatchObject({ outcome: 'executed', code: 'ok', observation: kind === 'capture' ? { ...observation, frame } : observation })
+      }
+      // Even an apparently restored native report cannot elevate this grant.
+      current = full
+      expect(await controller.capabilities()).toMatchObject({ semanticActions: false, input: false })
+      expect(await controller.execute({ ...click, commandId: 'second' })).toMatchObject({ code: 'unsupported', outcome: 'not_executed' })
+      expect(approval).toHaveBeenCalledOnce()
+      expect(helper.beginApproval).toHaveBeenCalledOnce()
+      expect(helper.execute).toHaveBeenCalledTimes(3)
+    } finally { await controller.dispose() }
+  })
+  it('treats a failed post-effect capability refresh as uncertainty, stops and never retries', async () => {
+    const refresh = vi.fn().mockResolvedValueOnce(capabilities).mockRejectedValue(new Error('refresh failed'))
+    const { controller, helper } = setup({ capabilities: refresh })
+    try {
+      await controller.start(grant())
+      const c = command()
+      expect(await controller.execute(c)).toMatchObject({ outcome: 'execution_unknown', code: 'transport_error' })
+      expect(controller.status().state).toBe('stopped')
+      expect(await controller.execute(c)).toMatchObject({ outcome: 'execution_unknown' })
+      expect(helper.execute).toHaveBeenCalledOnce()
+      expect(helper.kill).toHaveBeenCalledOnce()
+    } finally { await controller.dispose() }
+  })
+  it.each(['stop', 'identityChanged'] as const)('ignores late post-effect refresh after %s and resume', async revoke => {
+    const late = deferred<NativeCapabilities>()
+    const refresh = vi.fn().mockResolvedValueOnce(capabilities).mockImplementationOnce(() => late.promise).mockResolvedValue(capabilities)
+    const { controller, helper } = setup({ capabilities: refresh })
+    try {
+      await controller.start(grant())
+      const pending = controller.execute(command())
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2))
+      await controller[revoke]()
+      expect(await pending).toMatchObject({ outcome: 'execution_unknown' })
+      await controller.resume(grant(3))
+      late.resolve({ ...capabilities, axRead: false, semanticActions: false })
+      await Promise.resolve(); await Promise.resolve()
+      expect(controller.status()).toMatchObject({ state: 'active', epoch: 3, capabilities: { axRead: true, semanticActions: true } })
+      expect(helper.execute).toHaveBeenCalledOnce()
+    } finally { await controller.dispose() }
+  })
+  it('does not let a late public capability refresh overwrite a resumed grant', async () => {
+    const late = deferred<NativeCapabilities>()
+    const refresh = vi.fn().mockResolvedValueOnce(capabilities).mockImplementationOnce(() => late.promise).mockResolvedValue(capabilities)
+    const { controller } = setup({ capabilities: refresh })
+    try {
+      await controller.start(grant())
+      const pending = controller.capabilities()
+      await controller.identityChanged()
+      await controller.resume(grant(3))
+      late.resolve({ ...capabilities, semanticActions: false })
+      await pending
+      expect(controller.status()).toMatchObject({ state: 'active', epoch: 3, capabilities: { semanticActions: true } })
+    } finally { await controller.dispose() }
+  })
   it('independently enforces the observation ceiling before consent, lease or helper creation', async () => {
     const advertised = { ...capabilities, windowCapture: true, input: true }
     const { helper, lease, approveGrant } = setup({ capabilities: vi.fn(async () => advertised) })
@@ -40,6 +119,7 @@ describe('native main broker', () => {
       await controller.start({ ...grant(), allowControl: false })
       expect(helper.start).toHaveBeenCalledWith(expect.objectContaining({ allowControl: false, allowCapture: false }), expect.any(String))
       expect(controller.status().capabilities).toMatchObject(masked)
+      expect(await controller.capabilities()).toMatchObject(masked)
       await controller.stop()
       await expect(controller.resume(grant(3))).rejects.toThrow('Observation-only')
       expect(helper.start).toHaveBeenCalledOnce()

@@ -84,13 +84,31 @@ export class NativeComputerController {
     if (caps.platform !== (this.options.platform ?? process.platform)) throw new Error('Helper platform mismatch')
     return this.options.observationOnly ? { ...caps, semanticActions: false, windowCapture: false, input: false } : caps
   }
+  /** Helper reports may remove authority, never restore it within a grant. */
+  private reduceCapabilities(next: NativeCapabilities): NativeCapabilities {
+    const previous = this.caps
+    return { ...next,
+      axRead: previous.axRead && next.axRead && next.accessibilityPermission === 'granted',
+      semanticActions: previous.semanticActions && next.semanticActions && next.accessibilityPermission === 'granted',
+      windowCapture: previous.windowCapture && next.windowCapture && next.capturePermission === 'granted',
+      input: previous.input && next.input && next.accessibilityPermission === 'granted',
+      accessibilityPermission: previous.accessibilityPermission === 'granted' ? next.accessibilityPermission : previous.accessibilityPermission,
+      capturePermission: previous.capturePermission === 'granted' ? next.capturePermission : previous.capturePermission,
+    }
+  }
   async capabilities(): Promise<NativeCapabilities> {
-    if (!this.available() || this.abort.signal.aborted) return structuredClone(this.caps)
+    const signal = this.abort.signal
+    const grant = this.grant
+    const starting = this.starting
+    if (!this.available() || signal.aborted) return structuredClone(this.caps)
     try {
-      this.caps = this.validateCapabilities(await this.getHelper().capabilities())
-      if (!this.grant && !this.abort.signal.aborted) this.state = this.caps.axRead && this.caps.accessibilityPermission === 'granted' ? 'ready' : 'permission_required'
+      const caps = this.validateCapabilities(await this.getHelper().capabilities())
+      // A late discovery/old-account response must not overwrite a new session.
+      if (signal.aborted || signal !== this.abort.signal || grant !== this.grant || starting !== this.starting) return structuredClone(this.caps)
+      this.caps = grant ? this.reduceCapabilities(caps) : caps
+      if (!grant) this.state = this.caps.axRead && this.caps.accessibilityPermission === 'granted' ? 'ready' : 'permission_required'
       this.changed()
-    } catch { await this.stop() }
+    } catch { if (signal === this.abort.signal && !signal.aborted) await this.stop() }
     return structuredClone(this.caps)
   }
   async listTargets(): Promise<DiscoveredTarget[]> {
@@ -121,7 +139,9 @@ export class NativeComputerController {
       if (!await this.traceWait(trace, 'approval_wait', 'grant', () => this.until(this.options.approveGrant(grant, signal), signal, grant.expiresAt), signal)) throw new Error('Local consent denied')
       if (signal.aborted || !this.available()) throw new Error('Stopped')
       const helper = this.getHelper()
-      this.caps = this.validateCapabilities(await this.helperWait(trace, 'capabilities', () => helper.capabilities(), signal))
+      const caps = this.validateCapabilities(await this.helperWait(trace, 'capabilities', () => helper.capabilities(), signal))
+      if (signal.aborted || signal !== this.abort.signal) throw new Error('Stopped')
+      this.caps = caps
       if (signal.aborted || !this.caps.axRead || this.caps.accessibilityPermission !== 'granted' || (grant.allowControl && !this.caps.semanticActions) || (grant.allowCapture && !this.caps.windowCapture)) throw new Error('Permissions/capabilities missing')
       await this.helperWait(trace, 'start', () => helper.start(grant, this.leaseId!), signal)
       if (signal.aborted || grant.expiresAt <= Date.now()) throw new Error('Stopped/expired')
@@ -262,6 +282,16 @@ export class NativeComputerController {
         const frame = observation.frame
         if (command.action.kind !== 'capture' || !this.grant?.allowCapture || frame.displayLayoutVersion !== observation.displayLayoutVersion ||
           (['x', 'y', 'width', 'height'] as const).some(key => frame.bounds[key] !== observation.bounds[key])) throw new Error('Unscoped frame')
+      }
+      if (result.outcome === 'executed' && command.action.kind !== 'observe' && command.action.kind !== 'capture') {
+        const grant = this.grant
+        const caps = this.validateCapabilities(await this.helperWait(trace, 'capabilities', () => this.helper!.capabilities(), signal, command.deadlineAt, command))
+        if (signal.aborted || signal !== this.abort.signal || this.grant !== grant || this.permitted(command)) throw new Error('Capability refresh revoked')
+        this.caps = this.reduceCapabilities(caps)
+        this.changed()
+        // Do not re-test the completed action against its own downgrade. Readback
+        // stays authorized, but a synchronous status callback may still Stop.
+        if (signal.aborted || signal !== this.abort.signal || this.grant !== grant) throw new Error('Capability publication revoked')
       }
       // Retain no values, action lists or image bytes. No extra read may regenerate refs.
       if (!signal.aborted) this.approvalObservation = observation ? frozen({

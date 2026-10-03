@@ -113,7 +113,7 @@ describe('existing native loop trace seam', () => {
     f.llm.plan = async input => { f.record(input); return [] }
     f.llm.vision = { nativeGrounding: true, propose: async input => { f.record(input); return { kind: 'click', target: input.observation.target, observationId: input.observation.id, frameId: input.observation.frame!.id, x: 10, y: 10 } } }
     expect((await new NativeComputerOrchestrator({ ...f, trace }).run(f.options)).outcome).toBe('completed')
-    expect(trace.snapshot().events.filter(e => e.kind === 'span-start').map(e => e.phase)).toEqual(['observation-rpc', 'generation', 'capture-rpc', 'vision-grounding', 'decomposition', 'effect-rpc', 'observation-rpc', 'verification'])
+    expect(trace.snapshot().events.filter(e => e.kind === 'span-start').map(e => e.phase)).toEqual(['observation-rpc', 'generation', 'decomposition', 'observation-rpc', 'capture-rpc', 'vision-grounding', 'effect-rpc', 'observation-rpc', 'verification'])
     expect(JSON.stringify(trace.snapshot())).not.toContain('private-')
     expect(f.llm.select).not.toHaveBeenCalled()
   })

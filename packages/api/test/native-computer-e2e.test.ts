@@ -5,7 +5,7 @@ import { createServer, type Server, type IncomingMessage } from 'node:http'
 import { createRequire } from 'node:module'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Duplex } from 'node:stream'
-import type { NativeLlmAdapter } from '@use-brian/core'
+import type { LLMProvider, ProviderRequest, NativeLlmAdapter } from '@use-brian/core'
 import type { NativeControllerOptions } from '../../../apps/app-desktop/src/computer-control/controller.js'
 import type { Mock } from 'vitest'
 import type { QueryResultRow } from 'pg'
@@ -23,6 +23,7 @@ import { NativeComputerService } from '../src/computer-use/service.js'
 import { composeNativeComputerTool } from '../src/computer-use/composition.js'
 import { createRelayNativeComputerProvider } from '../src/computer-use/provider.js'
 import { query } from '../src/db/client.js'
+import { createNativeComputerModelRuntimeFactory } from '../src/computer-use/model-runtime.js'
 
 vi.mock('../src/db/client.js', () => ({ query: vi.fn() }))
 
@@ -133,9 +134,10 @@ let approveGrant: Mock<NativeControllerOptions['approveGrant']>
 let verify: Mock<NonNullable<NativeLlmAdapter['verify']>>
 let relayUrl: string
 let sockets: Set<InstanceType<typeof WebSocket>>
+let wireMessages: Array<{ type: string; status?: ReturnType<NativeComputerController['status']>; receipt?: NativeReceipt }>
 
 beforeEach(async () => {
-  revokedAuthority = undefined; executionChecks = 0; row = undefined; audits = []; calls = []; observations = []; effects = 0; mode = 'normal'; sockets = new Set()
+  wireMessages = []; revokedAuthority = undefined; executionChecks = 0; row = undefined; audits = []; calls = []; observations = []; effects = 0; mode = 'normal'; sockets = new Set()
   vi.mocked(query).mockImplementation(async <T extends QueryResultRow>(sql: string, params?: unknown[]) => {
     const result = memoryQuery(sql, params)
     // As with pg, the caller chooses the row type for its SQL projection.
@@ -161,7 +163,7 @@ beforeEach(async () => {
   })
   wss.on('connection', socket => {
     sockets.add(socket)
-    socket.on('message', raw => relay.handle(socket, raw.toString()))
+    socket.on('message', raw => { wireMessages.push(JSON.parse(raw.toString())); relay.handle(socket, raw.toString()) })
     socket.on('close', () => { sockets.delete(socket); relay.disconnect(socket) })
     socket.on('error', () => relay.disconnect(socket))
   })
@@ -222,10 +224,10 @@ afterEach(async () => {
   vi.restoreAllMocks()
 }, 10_000)
 
-async function pair() {
+async function pair(overrides: Partial<Pick<NativeGrant, 'targets' | 'allowCapture' | 'goal'>> = {}) {
   const verifier = 'x'.repeat(43)
   const created = await request(app).post('/sessions').send({ ...Object.fromEntries(Object.entries(scope).filter(([k]) => k !== 'userId')), deviceId: 'fake-device', challenge: createHash('sha256').update(verifier).digest('base64url') }).expect(201)
-  grant = { protocol: 'native-computer-v1', identity: created.body.identity, grantId: uuid(), epoch: 1, expiresAt: Date.now() + 60_000, targets: [target], allowControl: true, allowCapture: false, requester: 'Fixture user', goal: 'Save the fixture' }
+  grant = { protocol: 'native-computer-v1', identity: created.body.identity, grantId: uuid(), epoch: 1, expiresAt: Date.now() + 60_000, targets: [target], allowControl: true, allowCapture: false, requester: 'Fixture user', goal: 'Save the fixture', ...overrides }
   await controller.start(grant)
   expect(approveGrant).toHaveBeenCalledOnce()
   const path = `/sessions/${grant.identity.sessionId}`
@@ -243,6 +245,100 @@ async function pair() {
 function command(): NativeCommand { return { protocol: 'native-computer-v1', identity: grant.identity, grantId: grant.grantId, epoch: grant.epoch, commandId: uuid(), deadlineAt: Date.now() + 2000, action: { kind: 'observe', target } } }
 
 describe('P1 native fake-OS end-to-end over loopback HTTP + WebSocket', () => {
+  it.each([true, false])('concrete runtime click/readback with effect capabilities downgraded (counter advances: %s)', async advances => {
+    const canvasTarget = { ...target, appId: 'com.usebrian.NativeComputerFixture' }
+    const full = { ...caps, input: true, windowCapture: true, capturePermission: 'granted' as const }
+    helper.capabilities = async () => effects ? { ...full, semanticActions: false, input: false } : full
+    helper.listTargets = async () => [canvasTarget]
+    helper.execute = async c => {
+      calls.push(c)
+      if (c.action.kind === 'click') {
+        effects++
+        return { commandId: c.commandId, outcome: 'executed', code: 'ok' }
+      }
+      expect(['observe', 'capture']).toContain(c.action.kind)
+      if (effects) {
+        expect(controller.status().capabilities).toMatchObject({ axRead: true, semanticActions: false, input: false })
+        expect(relay.status(row!.id).status?.capabilities).toMatchObject({ axRead: true, semanticActions: false, input: false })
+      }
+      await new Promise(resolve => setTimeout(resolve, 2))
+      const seq = observations.length + 1
+      const o: NativeObservation = { id: `canvas-${seq}`, identity: c.identity, epoch: c.epoch,
+        target: canvasTarget, capturedAt: Date.now(), monotonicMs: seq, foreground: true,
+        bounds, displayLayoutVersion: 'fake-layout', completeness: 'complete',
+        nodes: [{ ref: `counter-${seq}`, role: 'AXGroup', name: 'Safe custom canvas',
+          value: `Canvas clicks: ${effects && advances ? 1 : 0}`, enabled: true, focused: false,
+          selected: false, sensitive: false, actions: [] }],
+        ...(c.action.kind === 'capture' ? { frame: { id: `frame-${seq}`, mimeType: 'image/png' as const,
+          data: 'synthetic-canvas-pixels', width: 200, height: 100, bounds, displayLayoutVersion: 'fake-layout' } } : {}),
+      }
+      observations.push(o)
+      return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: o }
+    }
+    approveAction.mockImplementation(async c => {
+      expect(c.action).toMatchObject({ kind: 'click', target: canvasTarget, x: 100, y: 65 })
+      expect(effects).toBe(0)
+      return true
+    })
+    const requests: ProviderRequest[] = []
+    const provider: LLMProvider = { name: 'synthetic', models: ['synthetic-canvas'], createSession: vi.fn(),
+      stream: async function* (r) {
+        expect(r).toMatchObject({ nativeStrict: true, allowProviderFallback: false, model: 'synthetic-canvas', responseFormat: 'json' })
+        expect(r.httpRetryWindow!.deadline).toBeLessThanOrEqual(Date.now())
+        const index = requests.push(r) - 1
+        expect(index).toBeLessThan(4) // Unexpected replan/selection is a regression, not another canned answer.
+        const content = r.messages[0]!.content as Array<{ type: string; text?: string }>
+        const context = JSON.parse(content[0]!.text!)
+        const replies = [
+          { steps: [] },
+          { objectives: [{ role: 'AXGroup', name: 'Safe custom canvas', property: 'value', equals: 'Canvas clicks: 1' }] },
+          { x: 100, y: 65 },
+          // Deliberately overclaims success for the unchanged-counter case.
+          { status: 'complete', observationId: context.observationId,
+            evidence: [{ ref: context.nodes[0].ref, property: 'value', equals: 'Canvas clicks: 1' }] },
+        ]
+        expect(content.some(part => part.type === 'image')).toBe(index === 2)
+        if (index === 3) {
+          expect(effects).toBe(1)
+          expect(context.observationId).toBe(observations.at(-1)!.id)
+          expect(context.nodes[0].value).toBe(`Canvas clicks: ${advances ? 1 : 0}`)
+        }
+        yield { type: 'text_delta', text: JSON.stringify(replies[index]) }
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 },
+          nativeMetadata: { actualModel: 'synthetic-canvas', usage: { inputTokens: 10, outputTokens: 5 } } }
+      },
+    }
+    const meter = vi.fn(async () => {}) // Synthetic accounting only; no billing/production claim.
+    const runtime = createNativeComputerModelRuntimeFactory({ localApprovalRequired: true,
+      resolve: async () => ({ provider, model: 'synthetic-canvas', plan: 'enterprise', budgetStatus: 'ok',
+        grounder: { provider, model: 'synthetic-canvas', nativeGrounding: true } }),
+      budget: { tokens: 10000000, costUsd: 1000, attemptTokens: 100000, attemptCostUsd: 1 }, meter,
+    })
+    app = express(); app.use(express.json())
+    app.use((req, _res, next) => { req.userId = scope.userId; req.authSessionId = authSessionId; next() })
+    app.use(nativeComputerRoutes(service, composeNativeComputerTool(service, runtime)))
+    const path = await pair({ targets: [canvasTarget], allowCapture: true, goal: 'Click the canvas once' })
+    const result = await request(app).post(`${path}/run`).send({}).expect(200)
+    expect(result.body.data).toMatchObject({ outcome: advances ? 'completed' : 'paused', actions: 1 })
+    expect(calls.map(c => c.action.kind)).toEqual(['observe', 'observe', 'capture', 'click', 'observe'])
+    expect(observations.at(-1)!.id).not.toBe(observations[0].id)
+    expect(observations.at(-1)!.capturedAt).toBeGreaterThan(observations[0].capturedAt)
+    const click = calls.find(c => c.action.kind === 'click')!
+    const receiptIndex = wireMessages.findIndex(m => m.type === 'receipt' && m.receipt?.commandId === click.commandId)
+    expect(receiptIndex).toBeGreaterThan(0)
+    expect(wireMessages[receiptIndex]).toMatchObject({ receipt: { outcome: 'executed', code: 'ok' } })
+    expect(wireMessages[receiptIndex - 1]).toMatchObject({ type: 'status', status: { state: 'active',
+      capabilities: { axRead: true, semanticActions: false, input: false } } })
+    expect(audits.filter(a => a.length === 5)).toEqual(calls.map(c => [grant.identity.sessionId, c.commandId, c.action.kind, 'executed', 'ok']))
+    expect(requests).toHaveLength(4); expect(meter).toHaveBeenCalledTimes(12)
+    expect(provider.createSession).not.toHaveBeenCalled()
+    expect(effects).toBe(1); expect(approveAction).toHaveBeenCalledOnce()
+    expect(helper.beginApproval).toHaveBeenCalledOnce(); expect(helper.endApproval).toHaveBeenCalledOnce()
+    const dispatches = calls.length
+    expect((await request(app).post(`${path}/run`).send({}).expect(200)).body).toMatchObject({ duplicate: true, runState: 'finished' })
+    expect(calls).toHaveLength(dispatches); expect(effects).toBe(1); expect(approveAction).toHaveBeenCalledOnce()
+  }, 10_000)
+
   it('grants/exchanges/runs one AX effect with local approval, fresh verification and persisted authenticated receipts', async () => {
     const path = await pair()
     const result = await request(app).post(`${path}/run`).send({}).expect(200)

@@ -56,7 +56,7 @@ describe('native orchestration', () => {
     } : execute(c, signal))
     expect(await new NativeComputerOrchestrator(f).run(f.options)).toMatchObject({ outcome: 'completed', actions: 1 })
     expect(vi.mocked(f.provider.execute).mock.calls.map(([c]) => c.action.kind)).toEqual(['capture', 'click'])
-    expect(f.provider.observe).toHaveBeenCalledTimes(2)
+    expect(f.provider.observe).toHaveBeenCalledTimes(3)
     expect(f.llm.plan).toHaveBeenCalledTimes(1)
   })
   it.each([false, true])('requires input before CV capture and inference (revoked after capture: %s)', async revokeAfterCapture => {
@@ -120,9 +120,58 @@ describe('native orchestration', () => {
     })
     expect(await new NativeComputerOrchestrator(f).run({ ...f.options, signal: controller.signal })).toMatchObject({ outcome: failure === 'cancel' ? 'cancelled' : 'paused', actions: 0 })
     release(); await new Promise(r => setTimeout(r, 0))
-    expect(order).toEqual(['capture', 'vision', 'decompose'])
-    expect(f.provider.execute).toHaveBeenCalledTimes(1)
+    expect(order).toEqual(['decompose'])
+    expect(f.provider.execute).not.toHaveBeenCalled()
     expect(f.llm.select).not.toHaveBeenCalled()
+  })
+  it.each([0, 6000])('decomposes before fresh capture without extending frame age (grounding delay: %s ms)', async groundingMs => {
+    vi.useFakeTimers()
+    try {
+      const f = fixture(), order: string[] = []
+      let seq = 0, clicked = false
+      f.provider.observe = vi.fn(async () => {
+        order.push('observe')
+        return { ...f.observation(), id: `o${++seq}`, monotonicMs: seq, nodes: [] }
+      })
+      f.policy.isComplete = () => clicked
+      f.llm.decompose = async input => {
+        order.push('decompose')
+        expect(input.observation.id).toBe('o1')
+        expect(input.observation.frame).toBeUndefined()
+        await new Promise(resolve => setTimeout(resolve, 6000))
+      }
+      f.llm.vision = { nativeGrounding: true, propose: async input => {
+        order.push('vision')
+        expect(input.observation.id).toBe('o2')
+        expect(Date.now() - input.observation.capturedAt).toBe(0)
+        if (groundingMs) await new Promise(resolve => setTimeout(resolve, groundingMs))
+        return { kind: 'click', target: input.observation.target, observationId: input.observation.id, frameId: 'fresh-frame', x: 20, y: 20 }
+      } }
+      f.llm.verify = async input => {
+        order.push('verify')
+        expect(input.observation.id).toBe('o3')
+        return { result: 'complete', providerId: 'llm', model: { catalogId: 'test', wireId: 'test' } }
+      }
+      f.provider.execute = vi.fn<NativeComputerProvider['execute']>(async command => {
+        order.push(command.action.kind)
+        if (command.action.kind === 'capture') {
+          expect(command.action.observationId).toBe('o2')
+          return { commandId: command.commandId, outcome: 'executed', code: 'ok', observation: {
+            ...f.observation(), id: 'o2', monotonicMs: 2, nodes: [],
+            frame: { id: 'fresh-frame', mimeType: 'image/png', data: '', width: 100, height: 100, bounds: f.observation().bounds, displayLayoutVersion: 'l' },
+          } }
+        }
+        expect(command.action).toMatchObject({ kind: 'click', observationId: 'o2', frameId: 'fresh-frame' })
+        clicked = true
+        f.status.capabilities.input = false
+        f.status.capabilities.semanticActions = false
+        return { commandId: command.commandId, outcome: 'executed', code: 'ok' }
+      })
+      const run = new NativeComputerOrchestrator(f).run(f.options)
+      await vi.advanceTimersByTimeAsync(6001 + groundingMs)
+      expect(await run).toMatchObject({ outcome: groundingMs ? 'paused' : 'completed', actions: groundingMs ? 0 : 1 })
+      expect(order).toEqual(['observe', 'decompose', 'observe', 'capture', 'vision', ...(groundingMs ? [] : ['click', 'observe', 'verify'])])
+    } finally { vi.useRealTimers() }
   })
   it('refreshes unchanged AX state after inference without reusing stale refs', async () => {
     const f = fixture(); let sequence = 0
