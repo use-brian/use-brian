@@ -95,6 +95,12 @@ export function classify(report) {
         return result('counterexample', 'input-observed-after-liveness-loss');
       return unknown('post-death-delivery-unknown');
     }
+    // Deadline expiry is independently observed even when the tap remains
+    // enabled. Only classify a NEW down inserted after that sample, not an up
+    // returning from a pair whose down was already in flight before suspension.
+    if (before(3, 86, 96) && before(3, 96, 16) &&
+        rows(1, 42).some(r => BigInt(r.ticks) > tick(3, 96)))
+      return result('counterexample', 'new-down-observed-after-deadline');
     // Sleeping alone does not establish timeout; query actual enabled state.
     if (!one(3, 93)) return unknown('tap-disable-not-observed-at-resume');
     if ((has(1, 42) && tick(1, 42) > tick(3, 86)) || (has(1, 43) && tick(1, 43) > tick(3, 86)))

@@ -86,6 +86,27 @@ test('closed finite case list matches Swift exactly; no arbitrary target/PID/poi
   assert.throws(() => command(['--run', 'normal'], 'linux'));
 });
 
+test('operator enabled-tap trace proves new down after sampled deadline expiry, not disabled-proxy behavior', async () => {
+  // Operator-supplied observation from binary 0ce85768…335f40, not synthetic OS execution.
+  const r = JSON.parse(await file('fixtures/operator-last-check-to-post-25G83.json'));
+  assert.deepEqual(classify(r), { verdict: 'counterexample', reason: 'new-down-observed-after-deadline', productionAcceptance: false });
+  for (const code of [96, 16, 42]) {
+    const missing = structuredClone(r); remove(missing, code === 42 ? 1 : 3, code);
+    assert.notEqual(classify(missing).reason, 'new-down-observed-after-deadline');
+  }
+  const earlierDown = structuredClone(r);
+  earlierDown.records.find(x => x.source === 3 && x.code === 16).ticks = '572180211990000';
+  normalize(earlierDown);
+  assert.notEqual(classify(earlierDown).reason, 'new-down-observed-after-deadline');
+  const earlierObserved = structuredClone(r);
+  earlierObserved.records.find(x => x.source === 1 && x.code === 42).ticks = '572180211990000';
+  normalize(earlierObserved);
+  assert.notEqual(classify(earlierObserved).reason, 'new-down-observed-after-deadline');
+  const afterDown = report('after-down-stall');
+  afterDown.records.push({ source: 3, code: 96, ticks: '4041500000' }); normalize(afterDown);
+  assert.notEqual(classify(afterDown).reason, 'new-down-observed-after-deadline');
+});
+
 test('valid null and normal remain observations, never production acceptance', () => {
   for (const name of ['null', 'normal']) {
     assert.equal(verdict(report(name)), 'observed-as-specified');

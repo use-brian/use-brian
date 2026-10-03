@@ -266,6 +266,21 @@ phases or ambiguous process termination cannot produce a positive verdict.
 - `counterexample` (exit 4): concrete unexpected ordering/duplicate/input after
   the observed disabled or liveness-loss boundary.
 
+**Observed deadline counterexample (operator, arm64 25G83):** the preserved
+`fixtures/operator-last-check-to-post-25G83.json` observation came from binary
+`0ce85768103d6144c98318a99e97eb7e50d2a1f1dc5ff99d9ec14ab476335f40`.
+After suspension past the final check, the owner sampled deadline expiry, then
+inserted a new down; the independent observer and fixture received the pair.
+The tap still reported enabled. The old classifier called this inconclusive
+because disablement was missing; it now independently reports
+`counterexample / new-down-observed-after-deadline`. This does not establish
+behavior of a disabled proxy or the full production Host. Regression mutations
+require expiry-before-insertion and downstream down evidence; an up from an
+already-in-flight pair is not mislabeled as a new-down deadline violation.
+Further attended input cases are paused pending engineering review. Do not
+rerun native effects to reclassify existing evidence or lengthen the deadline
+to hide this result; a last check alone is not atomic with posting.
+
 A delayed disabled notification alone does not establish that the tap was already
 disabled when resumed: the stale-proxy counterexample requires the actual resumed
 `tapIsEnabled` sample to be false. No downstream event in eight seconds is **not**
