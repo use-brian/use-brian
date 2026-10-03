@@ -93,6 +93,45 @@ describe('[COMP:recordings/live-interaction] runtime', () => {
     vi.mocked(deps.savedViewStore.getById).mockResolvedValue(null)
     expect(await callbacks.authorize('owner', capture)).toBe(false)
   })
+  it.each([
+    { workspaceGroupId: null, compartmentKey: null, compartments: [] },
+    { workspaceGroupId: 'group', compartmentKey: 'page-team', compartments: ['page-team'] },
+  ])('allows readable teamspaces and retains their actual group labels: %j', async row => {
+    vi.mocked(deps.savedViewStore.getById).mockResolvedValue({ workspaceId: 'workspace',
+      clearance: 'internal', teamspaceId: 'teamspace', projectId: 'project' } as never)
+    mocks.query.mockImplementation(async (sql: string) => ({
+      // An INNER JOIN drops a real, readable teamspace with no group.
+      rows: sql.includes('FROM teamspaces') && (row.workspaceGroupId !== null || sql.includes('LEFT JOIN')) ? [row] : [],
+      rowCount: 1,
+    }))
+    expect(await callbacks.authorize('owner', capture)).toBe(true)
+    expect(mocks.query).toHaveBeenCalledWith(expect.stringContaining('t.workspace_id=$2'), ['teamspace', 'workspace'])
+    expect(mocks.query).toHaveBeenCalledWith(expect.stringContaining('g.workspace_id=t.workspace_id'), ['teamspace', 'workspace'])
+    await callbacks.answer({ capture, job, signal: new AbortController().signal, onText: vi.fn() })
+    const context = mocks.answer.mock.calls[0]![0].createContext(new AbortController().signal)
+    expect(context.scopeAccumulator.evidence).toMatchObject({ compartments: row.compartments,
+      sensitivity: 'internal', projectIds: ['project'] })
+    await publish()
+    expect(mocks.add.mock.calls[1]![0].scope.compartments).toEqual(expect.arrayContaining(row.compartments))
+    vi.mocked(deps.savedViewStore.getById).mockResolvedValue(null)
+    expect(await callbacks.authorize('owner', capture)).toBe(false)
+    await expect(publish()).rejects.toThrow('access denied')
+  })
+  it.each([
+    { rows: [] },
+    { rows: [{ workspaceGroupId: 'missing-or-cross-workspace-group', compartmentKey: null }] },
+  ])('rejects missing teamspaces or unresolved linked groups: %j', async ({ rows }) => {
+    vi.mocked(deps.savedViewStore.getById).mockResolvedValue({ workspaceId: 'workspace',
+      clearance: 'internal', teamspaceId: 'teamspace' } as never)
+    mocks.query.mockResolvedValue({ rows, rowCount: rows.length })
+    expect(await callbacks.authorize('owner', capture)).toBe(false)
+    await expect(publish()).rejects.toThrow('access denied')
+    expect(mocks.add).not.toHaveBeenCalled()
+  })
+  it('rejects a readable page belonging to another workspace', async () => {
+    vi.mocked(deps.savedViewStore.getById).mockResolvedValue({ workspaceId: 'other-workspace' } as never)
+    expect(await callbacks.authorize('owner', capture)).toBe(false)
+  })
   it('publishes once and transactionally replaces reserved IDs with canonical IDs', async () => {
     await publish(); await publish()
     expect(mocks.add).toHaveBeenCalledTimes(2)
