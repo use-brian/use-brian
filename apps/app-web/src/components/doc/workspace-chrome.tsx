@@ -99,6 +99,7 @@ import {
   type TeamspaceSettingsTab,
 } from "./teamspace-settings-modal";
 import { FloatingChat } from "@/components/chrome/floating-chat";
+import { FloatingRecorderHost } from "@/components/chrome/dock-recorder";
 import { MobileChatDrawer } from "./mobile-chat-drawer";
 
 /**
@@ -849,6 +850,10 @@ export function WorkspaceChrome({
             />
           </div>
         )}
+        {/* The record button outlives the dock: a surface that hides the dock
+            (Chat app, Feed, Skill creator) still gets the same floating
+            button bottom-right. Brian Nearby owns capture in its own window. */}
+        {dockSuppressed && !brianNearby ? <FloatingRecorderHost /> : null}
       </div>
       {/* Workspace status row. Contained in the LEFT SIDEBAR, not a full-width
           bar: this overlay is pinned to the bottom-left corner at the sidebar's

@@ -151,6 +151,7 @@ import {
   registerDockRecorderChatTarget,
   useGlobalDockRecorder,
 } from "@/lib/recorder/dock-recorder-bridge";
+import { useFloatingRecorderClearance } from "@/lib/recorder/floating-recorder-slot";
 import {
   appendReasoning,
   appendStep,
@@ -3769,6 +3770,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     chat.state.messages.length === 0 &&
     !chat.state.isStreaming &&
     !remoteActive;
+  // The docked composer bar can reach the bottom-right corner where the
+  // floating record button rests (WorkspaceChrome's FloatingRecorderHost);
+  // registering it lifts the button above Send instead of covering it.
+  const composerBarRef = useRef<HTMLDivElement>(null);
+  useFloatingRecorderClearance(composerBarRef, !heroMode);
 
   /** Interlocutor control, rendered INSIDE the composer box (bottom-left):
    *  a NEW personal chat picks its assistant here and the session sticks to
@@ -3933,14 +3939,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const composerBox = (
     <>
       {/* Live-recording chrome — the recovery banner, first-use/error notice,
-          and active recorder strip stack ABOVE the composer box, exactly as
-          they ride above the dock's composer. One node rendered in both the
-          hero and the bottom bar, so a running capture survives the swap. */}
+          and active recorder strip stack ABOVE the composer box below `lg`
+          (at `lg`+ they ride the floating cluster bottom-right). One node
+          rendered in both the hero and the bottom bar, so a running capture
+          survives the swap. */}
       {dockRecorder ? (
         <>
-          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5" />
-          <DockRecorderNotice rec={dockRecorder} className="mb-1.5" />
-          <DockRecorderStrip rec={dockRecorder} className="mb-1.5" />
+          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5 lg:hidden" />
+          <DockRecorderNotice rec={dockRecorder} className="mb-1.5 lg:hidden" />
+          <DockRecorderStrip rec={dockRecorder} className="mb-1.5 lg:hidden" />
         </>
       ) : null}
     <div
@@ -4180,13 +4187,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             >
               <Paperclip className="size-[17px]" aria-hidden />
             </button>
-            {/* The record affordance, beside the paperclip exactly as in the
-                dock's expanded composer. Hides itself while a capture is
-                latched (the strip above the box owns the pill then). */}
+            {/* The record affordance below `lg`, beside the paperclip exactly
+                as in the dock's expanded composer. At `lg`+ the floating
+                button bottom-right (FloatingRecorderHost) is the one record
+                control, as on every other surface. Hides itself while a
+                capture is latched (the strip above the box owns the pill). */}
             {dockRecorder ? (
               <DockRecorderButton
                 rec={dockRecorder}
                 disabled={!!pendingQuestion || recordingUpload.busy}
+                className="lg:hidden"
               />
             ) : null}
             {interlocutorControl}
@@ -4405,7 +4415,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // The pill is anchored to a viewport rect, so scrolling would strand
           // it over the wrong text. Dismiss rather than chase.
           onScroll={selectionQuote ? () => setSelectionQuote(null) : undefined}
-          className="min-h-0 flex-1 overflow-y-auto px-4 py-6"
+          // Bottom pad grows by the floating recorder's reserve while it is
+          // lifted above the composer, so the newest message scrolls clear.
+          className="min-h-0 flex-1 overflow-y-auto px-4 pt-6 pb-[calc(1.5rem+var(--floating-recorder-reserve,0px))]"
         >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {/* In-chat pursuit: the always-visible strip while any session
@@ -5002,7 +5014,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
         {/* Composer bar — the same composite box the hero centers, docked. */}
         <div className="shrink-0 px-4 pb-4 pt-1">
-          <div className="mx-auto w-full max-w-3xl">{composerBox}</div>
+          <div ref={composerBarRef} className="mx-auto w-full max-w-3xl">{composerBox}</div>
         </div>
       </section>
       {openDocument ? (

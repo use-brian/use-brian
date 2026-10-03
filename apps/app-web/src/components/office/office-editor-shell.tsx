@@ -41,6 +41,7 @@ import { cn } from "@/lib/utils";
 import { TemplateRoutingInspector, type TemplateRoutingInspectorState } from "./template-routing-inspector";
 import { chatDockSuppression } from "@/lib/chat-dock-suppress";
 import { DockRecorderFallback } from "@/components/chrome/dock-recorder";
+import { claimFloatingRecorder } from "@/lib/recorder/floating-recorder-slot";
 import { OfficeHistoryControls } from "./office-history-controls";
 import { OfficeHistory } from "./history/office-history";
 import { OfficeSharing } from "./sharing/office-sharing";
@@ -209,6 +210,9 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   useEffect(() => {if (!offlineDiscussion) setQueuedCommentThreads(EMPTY_COMMENTS);}, [offlineDiscussion]);
   const currentUser = getUserInfo();
   useEffect(() => chatDockSuppression.suppress(), []);
+  // Office mounts its own floating recorder (offset for the document
+  // toolbar, hidden while presenting); the chrome-level host stands down.
+  useEffect(() => claimFloatingRecorder(), []);
   usePublishPresenceIdentity(collab.provider, currentUser);
   usePublishPresenceActivity(collab.provider);
   const presence = usePresence(collab.provider);
