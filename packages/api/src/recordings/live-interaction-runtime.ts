@@ -78,11 +78,19 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
     })
     const page = await runWithAgentAccess(scopedAccess(resolved.turnScope), () => deps.savedViewStore.getById(userId, binding.pageId))
     if (!page || page.workspaceId !== binding.workspaceId) throw deny()
-    const compartments = page.teamspaceId ? (await getPool().query<{ compartmentKey: string }>(
-      `SELECT g.compartment_key AS "compartmentKey" FROM teamspaces t
-       JOIN workspace_groups g ON g.id=t.workspace_group_id WHERE t.id=$1 AND t.workspace_id=$2`,
-      [page.teamspaceId, binding.workspaceId])).rows.map(row => row.compartmentKey) : []
-    if (page.teamspaceId && !compartments.length) throw deny()
+    const compartments: string[] = []
+    if (page.teamspaceId) {
+      const teamspace = (await getPool().query<{ workspaceGroupId: string | null; compartmentKey: string | null }>(
+        `SELECT t.workspace_group_id AS "workspaceGroupId", g.compartment_key AS "compartmentKey" FROM teamspaces t
+         LEFT JOIN workspace_groups g ON g.id=t.workspace_group_id AND g.workspace_id=t.workspace_id
+         WHERE t.id=$1 AND t.workspace_id=$2`,
+        [page.teamspaceId, binding.workspaceId])).rows[0]
+      // The scoped page read above remains the access gate. A teamspace may
+      // legitimately have no linked group; that adds no compartment label.
+      // Missing teamspaces or unresolved linked groups still fail closed.
+      if (!teamspace || (teamspace.workspaceGroupId !== null && !teamspace.compartmentKey)) throw deny()
+      if (teamspace.compartmentKey) compartments.push(teamspace.compartmentKey)
+    }
     const pageEvidence: ScopeEvidence = { sensitivity: page.clearance, compartments,
       projectIds: page.projectId ? [page.projectId] : [] }
     return { ...resolved, session, assistant, pageEvidence }
