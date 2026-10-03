@@ -5904,6 +5904,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (usesOpenStandaloneRoutes(profile) && filesResolver && filesBlobClient) {
     app.use('/api/recordings', requireAuth(env.JWT_SECRET), openRecordingsRoutes({
       filesResolver,
+      chunkedFileUploads,
       getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
       enqueueJob: enqueueRecordingJob,
       hasProcessed: hasCompletedRecordingJob,
@@ -5921,6 +5922,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       usageStore,
       // Window-audio persistence + the assembled-windows finalize fallback.
       filesResolver,
+      filesApi,
       liveInteraction: liveInteraction ?? undefined,
     }))
   }

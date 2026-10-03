@@ -53,11 +53,16 @@ vi.mock("@/lib/i18n/client", () => ({
       tooLong: "Too long.",
       cannotReadDuration: "Cannot read duration.",
       failed: "Upload failed.",
+      uploadFailed: "Storage upload failed.",
+      uploadPrepareFailed: "Admission failed.",
+      uploadCompleteFailed: "Completion failed.",
+      serverSetupRequired: "Configure server ffmpeg; keep the local recording.",
       uploadInProgress: "Another recording is still being prepared.",
     },
   }),
 }));
 
+import { RecordingApiError } from "@/lib/api/recordings";
 import { useRecordingUpload } from "../use-recording-upload";
 
 type HookValue = ReturnType<typeof useRecordingUpload>;
@@ -91,6 +96,26 @@ afterEach(() => {
 });
 
 describe("[COMP:web/recording-upload] operation ownership", () => {
+  it("preserves the fallback server prerequisite error and returns failure for local retention", async () => {
+    api.startRecordingUpload.mockRejectedValueOnce(Object.assign(new RecordingApiError("admission", 500), { code: "recording_upload_prepare_failed" }));
+    api.finalizeLiveRecording.mockRejectedValueOnce(Object.assign(new RecordingApiError("ffmpeg unavailable", 503), { code: "recording_media_tools_unavailable" }));
+    await act(async () => {
+      expect(await capture.run(new File(["audio"], "recording.webm"), { liveSessionId: "live" })).toEqual({
+        outcome: "failed", message: "Configure server ffmpeg; keep the local recording.",
+      });
+    });
+    expect(capture.status).toBe("error");
+    expect(capture.result).toBeNull();
+    expect(api.estimateRecording).not.toHaveBeenCalled();
+  });
+
+  it.each(["recording_upload_prepare_failed", "recording_upload_complete_failed"])("uses stage-aware attachment copy for %s", async (code) => {
+    api.startRecordingUpload.mockRejectedValueOnce(Object.assign(new RecordingApiError("API failed", 500), { code }));
+    await act(async () => { expect(await latest!.stage(new File(["audio"], "recording.webm"))).toBeNull(); });
+    expect(latest!.message).toBe(code.includes("prepare") ? "Admission failed." : "Completion failed.");
+    expect(api.estimateRecording).not.toHaveBeenCalled();
+  });
+
   it("uploads the full file without waiting for live transcription", async () => {
     api.startRecordingUpload.mockResolvedValueOnce({ recordingId: "full-recording" });
     const pendingWindows = new Promise<void>(() => {});

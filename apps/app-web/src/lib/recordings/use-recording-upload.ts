@@ -105,6 +105,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
       setResult(null);
       setMessage("");
       setUploadProgress(0);
+      let failureStage: "upload" | "estimate" = "upload";
       try {
         setStatus("uploading");
         const { recordingId } = await startRecordingUpload({
@@ -118,6 +119,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         });
         setUploadProgress(1);
         setStatus("estimating");
+        failureStage = "estimate";
         const estimate = await estimateRecording(recordingId);
         const staged = {
           recordingId,
@@ -130,14 +132,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         return staged;
       } catch (e) {
         setStatus("error");
-        const code = e instanceof RecordingApiError ? e.code : undefined;
-        setMessage(
-          code === "too_long"
-            ? t.recordings.tooLong
-            : code === "could_not_read_duration"
-              ? t.recordings.cannotReadDuration
-              : t.recordings.failed,
-        );
+        setMessage(recordingFailureMessage(e, failureStage, t));
         return null;
       } finally {
         operationActiveRef.current = false;
@@ -209,7 +204,10 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
             assistantId,
             sessionId: opts.liveSessionId,
             ...(opts.existingPageId ? { pageId: opts.existingPageId } : {}),
-          }).catch(() => null);
+          }).catch((error: unknown) => {
+            if (error instanceof RecordingApiError && error.code === "recording_media_tools_unavailable") throw error;
+            return null;
+          });
           if (!fallback) throw uploadError;
           recordingId = fallback.recordingId;
           assembled = true;

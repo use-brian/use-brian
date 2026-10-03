@@ -67,6 +67,24 @@ describe('recording canonical intake parent admission (not publication)', () => 
 const speech = [{ segmentIndex: 0, startMs: 0, endMs: 1000, speaker: null, speakerIds: [], text: 'Canonical transcript', utteranceRefs: [] }]
 const text = [{ segmentIndex: 0, charStart: 0, charEnd: 4, headingPath: [], content: 'text' }]
 describe('atomic recording and segment publication', () => {
+  it.each(['meeting', 'memo'])('completes a canonical upload through the route, preserving %s and retry identity', async kind => {
+    const f = await fixture()
+    const app = createTestApp('/', openRecordingsRoutes({
+      filesResolver: {} as never, getRole: async () => 'owner',
+      enqueueJob: async () => ({ enqueued: false, jobId: null }), hasProcessed: async () => false,
+      chunkedFileUploads: { complete: async (ctx: { workspaceId: string; userId: string }) => {
+        expect(ctx).toEqual({ workspaceId: f.workspaceId, userId: f.userId })
+        return f.file
+      } } as never,
+    }), { userId: f.userId })
+    const body = { workspaceId: f.workspaceId, assistantId: randomUUID(), uploadId: randomUUID(), kind }
+    const first = await request(app).post('/complete-upload').send(body)
+    expect(first.status).toBe(200)
+    const retry = await request(app).post('/complete-upload').send(body)
+    expect(retry.body).toEqual(first.body)
+    const rows = (await pool.query('SELECT id,kind,user_id,assistant_id FROM recordings WHERE workspace_id=$1', [f.workspaceId])).rows
+    expect(rows).toEqual([{ id: first.body.recordingId, kind, user_id: f.userId, assistant_id: null }])
+  })
   it('adopts through production resolver, transcribes through production processor, records exact lineage, and retries without duplicates', async () => {
     const f = await fixture()
     const first = await resolveRecordingForFile(f.file, f.userId)
