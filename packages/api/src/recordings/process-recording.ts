@@ -4,6 +4,7 @@ import type { FilesApi, RecordingTranscriber } from '@use-brian/core'
 import { captureRecordingSegmentProvenance, type RecordingSegmentProvenance } from '../db/recording-intake-admission.js'
 import { getEpisodeByIdSystem } from '../db/episodes-store.js'
 import { getRecordingSystem, updateRecording } from '../db/recordings-store.js'
+import { getWorkspacePrimaryAssistant } from '../db/users.js'
 import {
   insertTranscriptSegments,
   linkTranscriptSegmentsFile,
@@ -40,6 +41,8 @@ export async function processOpenRecording(
     fallbackStorage: GcsFilesClient
     transcriber?: RecordingTranscriber
     brainIngestor?: BrainEpisodeIngestor
+    /** Pipeline B owner for a workspace-shared recording; defaults to the workspace primary. */
+    resolvePrimaryAssistantId?: (actingUserId: string, workspaceId: string) => Promise<string | null>
     getEpisode?: typeof getEpisodeByIdSystem
     getRecording?: typeof getRecordingSystem
     probe?: typeof probeRecordingDuration
@@ -167,10 +170,16 @@ export async function processOpenRecording(
   }
 
   const text = interleaveTranscriptText(transcription.utterances, visualMoments)
+  // A workspace-shared recording (no assistant partition) binds Pipeline B to the
+  // workspace primary, like every other workspace-level ingest. '' is not an
+  // assistant: the child episode would fail its uuid insert.
+  const brainAssistantId = episode.assistantId
+    ?? await (deps.resolvePrimaryAssistantId ?? (async (actor, workspace) => (await getWorkspacePrimaryAssistant(actor, workspace))?.id ?? null))(job.actingUserId, episode.workspaceId)
+  if (!brainAssistantId) throw new Error('recording_brain_assistant_unavailable')
   await deps.brainIngestor({
     workspaceId: episode.workspaceId,
     userId: job.actingUserId,
-    assistantId: episode.assistantId ?? '',
+    assistantId: brainAssistantId,
     content: text,
     occurredAt: new Date(),
     sourceLabel: 'recording',
