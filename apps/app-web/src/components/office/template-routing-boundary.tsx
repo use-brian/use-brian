@@ -70,7 +70,7 @@ export function TemplateRoutingBoundary({ templateId, initialRouting, onStateCha
   }
 
   if (!read.data) return read.error
-    ? <div className="space-y-3 p-3" data-template-routing="failed"><p role="alert" className="text-sm text-destructive">{t.routingLoadFailed}</p><button type="button" className="min-h-11 rounded border px-3 text-sm" onClick={() => void read.refresh()}>{t.routingRetry}</button></div>
+    ? <div className="space-y-3 p-3" data-template-routing="failed"><p role="alert" className="text-sm text-destructive">{t.routingLoadFailed}</p><button type="button" className="min-h-8 max-sm:min-h-11 rounded border px-3 text-sm" onClick={() => void read.refresh()}>{t.routingRetry}</button></div>
     : <div data-template-routing="loading" aria-busy="true" aria-label={t.routingLoading} className="space-y-3 p-3"><Skeleton className="h-8 w-2/3"/><Skeleton className="h-24 w-full"/><Skeleton className="h-48 w-full"/></div>;
   return children(read.data, save, `${key}:${signature}`, savedSignature === signature);
 }

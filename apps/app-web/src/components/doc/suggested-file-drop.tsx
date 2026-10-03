@@ -282,7 +282,7 @@ export function SuggestedFileDrop({
           disabled={offline}
           className={cn(
             "mt-5 flex w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-muted/20 px-4 text-sm transition-colors hover:border-primary/50 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
-            items.length > 0 ? "min-h-11 py-3" : "min-h-40 py-6",
+            items.length > 0 ? "max-sm:min-h-11 py-3" : "min-h-40 py-6",
           )}
         >
           {items.length === 0 && <FileUp className="size-6 text-muted-foreground" aria-hidden />}

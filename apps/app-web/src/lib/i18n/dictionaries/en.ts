@@ -3020,26 +3020,26 @@ export const en = {
     emptyDraftDesc:
       "Ask the assistant in chat to fill this page, or add blocks below.",
     // Default-viewer landing (centre pane when no page is open): a chatter
-    // that hands a prompt to the chat to mint a new draft, plus
+    // that hands a prompt to a fresh conversation in the Chat app, plus
     // recently-opened pages as quick-link cards.
     // [COMP:app-web/empty-page-landing]
     landing: {
       title: "What do you want to see?",
       subtitle:
-        "Describe a view, a page, or a question and Use Brian drafts it for you.",
+        "Ask a question or describe a page. Use Brian answers in Chat and links any page it creates.",
       placeholder: "e.g. A board of open deals by stage",
-      send: "Create",
-      // Escape hatch from the "describe it and Use Brian drafts it" chatter: open
+      send: "Send",
+      // Escape hatch from the chatter: open
       // an empty page and write it yourself, no AI prompt. Sits under the
       // composer as a quiet text button.
       startBlank: "Start with a blank page",
       startFromTemplate: "Start from a template",
-      // Draft-assistant picker in the composer footer: which workspace
-      // assistant drafts the page. `assistantLabel` is the trigger's
+      // Assistant picker in the composer footer: which workspace assistant
+      // answers in Chat. `assistantLabel` is the trigger's
       // aria-label/tooltip; `assistantTitle` heads the popover list.
-      assistantLabel: "Choose the assistant that drafts this page",
-      assistantTitle: "Drafts with",
-      // Starter prompts — one tap mints a draft for that prompt. Keep each
+      assistantLabel: "Choose the assistant to chat with",
+      assistantTitle: "Chat with",
+      // Starter prompts: one tap opens Chat with that prompt. Keep each
       // short enough to read as a chip and to stand alone as a request.
       suggestions: [
         "My tasks due this week",
@@ -3047,14 +3047,6 @@ export const en = {
         "Summarize my pipeline",
       ],
       recentsTitle: "Jump back in",
-      // Page-body "drafting" indicator shown while the assistant builds the
-      // page after a landing prompt (so the WIP is visible without opening
-      // the chat). [COMP:app-web/page-build-indicator]
-      building: "Use Brian is drafting this page…",
-      buildingHint: "Building it live — no need to open the chat.",
-      buildingThinking: "Thinking…",
-      // Section label for the live reasoning stream (model's internal thinking).
-      buildingReasoning: "Reasoning",
     },
     // "Suggested for you" home surface — the assistant-curated dock that leads
     // the Home content pane. [COMP:app-web/home-suggested]
@@ -3524,12 +3516,6 @@ export const en = {
     deleteConfirmAction: "Delete",
     cancel: "Cancel",
     createDraftFailed: "Could not create draft: {message}",
-    // A landing build turn that died before it streamed anything. The dock
-    // stays collapsed on an autoSend build, so without these the page just
-    // stopped saying "drafting" and the user was told nothing (2026-09-01).
-    buildFailed: "Could not build this page: {message}",
-    buildNeverStarted:
-      "Could not build this page. The request did not start - try sending it again.",
     saveFailed: "Could not save: {message}",
     unsaveFailed: "Could not move to drafts: {message}",
     moveContextConfirmTitle: "Move page to a different context?",
@@ -6428,8 +6414,34 @@ export const en = {
         },
       },
       graphHint:
-        "Highlighted entries were retrieved for this turn. A grouped bubble shows how many it holds.",
+        "Lit entries were retrieved for this turn and replay in retrieval order. A grouped bubble shows how many it holds.",
       openInChat: "Open in chat",
+      prompt: {
+        open: "Full prompt",
+        view: "View full prompt",
+        title: "Full prompt",
+        hint: "exactly what this model call sent and received",
+        system: "System prompt",
+        messageN: "Message {index}",
+        response: "Response",
+        roles: {
+          system: "System",
+          user: "User",
+          assistant: "Assistant",
+          response: "Response",
+          other: "Message",
+        },
+        copyAll: "Copy all",
+        copied: "Copied",
+        close: "Close",
+        round: "Round {turn}",
+        tokensIn: "{count} tokens in",
+        chars: "{count} chars",
+        loading: "Loading {loaded} of {total}…",
+        loadingOne: "Loading…",
+        erased: "This content was erased.",
+        unavailable: "Content unavailable.",
+      },
     },
     skills: {
       heading: "Skills",
@@ -8574,6 +8586,14 @@ export const en = {
       copy: "Copy document",
       copied: "Document copied",
       close: "Close document viewer",
+    },
+    // Card under a Chat reply for each Page the assistant created or edited
+    // that turn. [COMP:app-web/chat-page-links]
+    pageLink: {
+      open: "Open page",
+      openAria: "Open page {title}",
+      untitled: "Untitled page",
+      unavailable: "Page unavailable",
     },
     pins: {
       rowAria: "Pinned context",
@@ -12215,6 +12235,9 @@ export const en = {
         retry: "Retry",
         title: "In-app browser",
         description: "Connect the browser built into Use Brian. No extension is needed.",
+        externalTitle: "Pair existing Chrome or Edge",
+        externalDescription:
+          "Install the extension in the browser profile whose sign-ins you want to use. Completing the pairing replaces this profile's current in-app browser connection. Starting the in-app browser again switches it back.",
         connect: "Connect in-app browser",
         connected: "In-app browser connected",
         disconnected: "In-app browser not connected",

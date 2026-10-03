@@ -94,7 +94,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'googleCalendarQueryFreeBusy', description: 'Find common availability across calendars or attendees', classification: 'read', defaultPolicy: 'allow' },
     { name: 'googleCalendarCreateEvent', description: 'Create a new calendar event', classification: 'write', defaultPolicy: 'ask' },
     { name: 'googleCalendarUpdateEvent', description: 'Update an existing calendar event or RSVP', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleCalendarDeleteEvent', description: 'Delete a calendar event', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'googleCalendarDeleteEvent', description: 'Delete a calendar event', classification: 'destructive', defaultPolicy: 'ask' },
   ],
   gmail: [
     // Read tools are phase-gated (require the restricted `gmail.readonly`
@@ -141,7 +141,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'googleSlidesCreateSlide', description: 'Create a slide with a layout and fill placeholders atomically', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
     { name: 'googleSlidesUpdateSlideContent', description: 'Replace text in a slide placeholder or shape', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
     { name: 'googleSlidesInsertImage', description: 'Insert an image on a slide from Drive or a URL', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
-    { name: 'googleSlidesDeleteSlide', description: 'Delete a slide from a presentation', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
+    { name: 'googleSlidesDeleteSlide', description: 'Delete a slide from a presentation', classification: 'destructive', defaultPolicy: 'ask', group: 'slides' },
     { name: 'googleSlidesReorderSlides', description: 'Move slides to a new position', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
     { name: 'googleSlidesDuplicateSlide', description: 'Duplicate a slide with its content', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
     { name: 'googleSlidesBatchUpdate', description: 'Submit raw Slides API batchUpdate requests (escape hatch)', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
@@ -396,6 +396,27 @@ export function connectorToolGrouping(connectorId: string): {
     if (!order.includes(tool.group)) order.push(tool.group)
   }
   return { order, byTool }
+}
+
+/**
+ * The write grant an (assistant, connector) pair holds before anyone has set
+ * one in Studio: every `write` tool, never a `destructive` one. Absence of an
+ * `assistant_connector_grants` row means exactly this set; any row, including
+ * one with an empty `allowed_actions`, is an explicit choice that replaces it.
+ * The grant only makes a tool available; each call still resolves Allow / Ask /
+ * Block, and every registry write tool defaults to Ask, so an unattended run
+ * parks the call for approval instead of executing it.
+ *
+ * Accepts a provider id or an instance governance id (`<provider>:<uuid>`).
+ * See docs/architecture/integrations/connector-actions.md -> "Per-assistant
+ * capability grants".
+ */
+export function defaultGrantedConnectorActions(connectorId: string): string[] {
+  const separator = connectorId.indexOf(':')
+  const provider = separator > 0 ? connectorId.slice(0, separator) : connectorId
+  return (OFFICIAL_CONNECTOR_TOOLS[provider] ?? [])
+    .filter((tool) => tool.classification === 'write')
+    .map((tool) => tool.name)
 }
 
 /**

@@ -223,7 +223,7 @@ function StudioAssistants() {
                   <BackButton
                     label={t.studioPage.assistants.backToList}
                     onClick={() => setDetailOpen(false)}
-                    className="min-h-11"
+                    className="min-h-8 max-sm:min-h-11"
                   />
                 </div>
                 <AssistantDetail
@@ -328,7 +328,7 @@ function CreateAssistantModal({
                 onClick={() => setProfileId(null)}
                 aria-pressed={profileId === null}
                 title={t.studioPage.assistants.profileBlankTitle}
-                className={`min-w-0 min-h-11 text-left border rounded-lg px-2.5 py-2 transition-colors ${
+                className={`min-w-0 max-sm:min-h-11 text-left border rounded-lg px-2.5 py-2 transition-colors ${
                   profileId === null ? "border-primary bg-primary/5" : "border-border hover:bg-muted/50"
                 }`}
               >
@@ -345,7 +345,7 @@ function CreateAssistantModal({
                     onClick={() => setProfileId(p.id)}
                     aria-pressed={profileId === p.id}
                     title={card.title}
-                    className={`min-w-0 min-h-11 text-left border rounded-lg px-2.5 py-2 transition-colors ${
+                    className={`min-w-0 max-sm:min-h-11 text-left border rounded-lg px-2.5 py-2 transition-colors ${
                       profileId === p.id ? "border-primary bg-primary/5" : "border-border hover:bg-muted/50"
                     }`}
                   >

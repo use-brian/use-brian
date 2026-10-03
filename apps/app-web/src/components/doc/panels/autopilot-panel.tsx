@@ -221,7 +221,7 @@ export function AutopilotPanel() {
               <BackButton
                 label={t.goalsPage.backToList}
                 onClick={() => setDetailOpen(false)}
-                className="min-h-11"
+                className="min-h-8 max-sm:min-h-11"
               />
             </div>
             <GoalDetailPane
@@ -596,7 +596,7 @@ function GoalDetailPane({
             </h2>
             <p className="text-sm text-red-600 dark:text-red-400">{goal.blockerReason === "goal_source_scope_unavailable" ? labels.sourceAccessChanged : goal.blockerReason}</p>
             {goal.blockerReason === "goal_source_scope_unavailable" && (
-              <button type="button" className="min-h-11 self-start rounded-md border border-border px-3 text-sm font-medium"
+              <button type="button" className="min-h-8 max-sm:min-h-11 self-start rounded-md border border-border px-3 text-sm font-medium"
                 onClick={() => openWorkspaceSettings("ws-access")}>{labels.reviewDepartmentAccess}</button>
             )}
           </section>

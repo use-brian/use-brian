@@ -104,7 +104,7 @@ export function CreateThemeDialog({
             {t.settings.general.customThemeDialogDesc}
           </Dialog.Description>
           {iconUrl ? (
-            <label htmlFor={iconOptionId} className="mt-4 flex min-h-11 cursor-pointer items-center gap-3 text-sm">
+            <label htmlFor={iconOptionId} className="mt-4 flex min-h-8 max-sm:min-h-11 cursor-pointer items-center gap-3 text-sm">
               <Checkbox id={iconOptionId} checked={useIcon} disabled={generating}
                 onCheckedChange={(checked) => { setFromIcon(checked); setError(null); }} />
               {t.settings.general.customThemeFromIcon}

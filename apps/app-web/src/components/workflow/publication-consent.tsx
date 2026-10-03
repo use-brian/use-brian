@@ -125,12 +125,12 @@ export function WorkflowPublicationConsent({ workflow, dirty }: { workflow: Work
             <p>{c.expiresAt}: {consent.expiresAt}</p>
           </>}
           {(data?.canManage || consent) && <div className="flex flex-wrap gap-2">
-            {eligible && data?.canManage && <Button className="min-h-11" disabled={blocked || busy || dirty} onClick={() => void change(stepId, fixed!.channelId, fixed!.channelIntegrationId ?? "", false)}>{consent ? c.reapprove : c.approve}</Button>}
-            {consent && <Button className="min-h-11" variant="outline" disabled={unavailable || busy} onClick={() => void change(stepId, consent.channelId, consent.channelIntegrationId, true)}>{c.revoke}</Button>}
+            {eligible && data?.canManage && <Button className="max-sm:min-h-11" disabled={blocked || busy || dirty} onClick={() => void change(stepId, fixed!.channelId, fixed!.channelIntegrationId ?? "", false)}>{consent ? c.reapprove : c.approve}</Button>}
+            {consent && <Button className="max-sm:min-h-11" variant="outline" disabled={unavailable || busy} onClick={() => void change(stepId, consent.channelId, consent.channelIntegrationId, true)}>{c.revoke}</Button>}
           </div>}
         </div>;
       })}
-      <Button className="min-h-11" variant="outline" disabled={busy || resource.revalidating} onClick={() => { setFailed(false); void resource.refresh(); }}>{c.refresh}</Button>
+      <Button className="max-sm:min-h-11" variant="outline" disabled={busy || resource.revalidating} onClick={() => { setFailed(false); void resource.refresh(); }}>{c.refresh}</Button>
     </section>
   );
 }

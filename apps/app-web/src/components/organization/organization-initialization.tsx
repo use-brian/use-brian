@@ -28,22 +28,22 @@ export function OrganizationInitialization({chart,close,change}:{chart:Organizat
   }
   if(!chart.canManage||!chart.initialization)return null;
   return <aside aria-label={t.initialize} className="min-w-0 rounded-xl border border-border bg-card p-4 lg:sticky lg:top-4">
-    <div className="mb-3 flex items-center justify-between gap-2"><h2 tabIndex={-1} ref={heading} className="break-words font-semibold">{t.initialize}</h2><Button variant="ghost" className="min-h-11" onClick={close}>{t.close}</Button></div>
+    <div className="mb-3 flex items-center justify-between gap-2"><h2 tabIndex={-1} ref={heading} className="break-words font-semibold">{t.initialize}</h2><Button variant="ghost" className="max-sm:min-h-11" onClick={close}>{t.close}</Button></div>
     <p className="mb-4 text-sm text-muted-foreground">{t.initializeHint}</p>
     <form onSubmit={submit} className="space-y-4">
       <fieldset disabled={busy} className="space-y-2"><legend className="text-sm font-medium">{t.initializeSubject}</legend>
         <div className="max-h-60 space-y-1 overflow-y-auto">{candidates.map(c=>{
           const person=chart.subjects.find(s=>s.kind===c.kind&&s.id===c.subjectId);if(!person)return null;
           const key=`${c.kind}:${c.subjectId}`;
-          return <Button key={key} type="button" variant={selection===key?'secondary':'outline'} aria-pressed={selection===key} className="min-h-11 h-auto w-full justify-start whitespace-normal text-left" onClick={()=>{setSelection(key);setTeamId('');}}><span className="min-w-0 break-words">{person.name||(c.kind==='assistant'?t.unnamedAssistant:t.unnamedPerson)} ({c.kind==='assistant'?t.assistant:t.person})</span></Button>;
+          return <Button key={key} type="button" variant={selection===key?'secondary':'outline'} aria-pressed={selection===key} className="max-sm:min-h-11 h-auto w-full justify-start whitespace-normal text-left" onClick={()=>{setSelection(key);setTeamId('');}}><span className="min-w-0 break-words">{person.name||(c.kind==='assistant'?t.unnamedAssistant:t.unnamedPerson)} ({c.kind==='assistant'?t.assistant:t.person})</span></Button>;
         })}</div>
       </fieldset>
       {candidate?<fieldset disabled={busy} className="space-y-2"><legend className="text-sm font-medium">{t.initializeDepartment}</legend>
-        {chart.teams.filter(team=>candidate.teamIds.includes(team.id)).map(team=><Button key={team.id} type="button" variant={teamId===team.id?'secondary':'outline'} aria-pressed={teamId===team.id} className="min-h-11 h-auto w-full justify-start whitespace-normal text-left" onClick={()=>setTeamId(team.id)}><span className="min-w-0 break-words">{team.name}</span></Button>)}
+        {chart.teams.filter(team=>candidate.teamIds.includes(team.id)).map(team=><Button key={team.id} type="button" variant={teamId===team.id?'secondary':'outline'} aria-pressed={teamId===team.id} className="max-sm:min-h-11 h-auto w-full justify-start whitespace-normal text-left" onClick={()=>setTeamId(team.id)}><span className="min-w-0 break-words">{team.name}</span></Button>)}
       </fieldset>:null}
       {team?<p className="rounded-lg bg-muted p-3 text-sm">{effect}</p>:null}
       <p className="text-xs text-muted-foreground">{t.permissionHint}</p>
-      <Button type="submit" className="min-h-11 w-full" disabled={busy||!team}>{busy?t.saving:t.save}</Button>
+      <Button type="submit" className="max-sm:min-h-11 w-full" disabled={busy||!team}>{busy?t.saving:t.save}</Button>
     </form>
   </aside>;
 }

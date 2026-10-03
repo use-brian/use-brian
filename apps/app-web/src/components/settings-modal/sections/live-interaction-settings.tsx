@@ -38,11 +38,11 @@ export function LiveInteractionSettings() {
     {ready && !available && <p role="status" className="text-sm">{t.unavailable}</p>}
     <label className="block space-y-1 text-sm">{t.rule}<textarea className="w-full rounded-md border bg-background p-2 text-base" rows={3} maxLength={4000} value={rule} disabled={!ready || busy} onChange={(event) => { setRule(event.target.value); setSaved(false); setResult(null); }} /></label>
     <div className="flex flex-wrap gap-2">
-      <Button className="min-h-11" disabled={!ready || busy || !rule.trim()} onClick={() => void run(false)}>{t.save}</Button>
-      <Button className="min-h-11" variant="outline" disabled={busy} onClick={() => { setRule(DEFAULT_INTERACTION_RULE); setSaved(false); }}>{t.defaultRule}</Button>
+      <Button className="max-sm:min-h-11" disabled={!ready || busy || !rule.trim()} onClick={() => void run(false)}>{t.save}</Button>
+      <Button className="max-sm:min-h-11" variant="outline" disabled={busy} onClick={() => { setRule(DEFAULT_INTERACTION_RULE); setSaved(false); }}>{t.defaultRule}</Button>
     </div>
     <label className="block space-y-1 text-sm">{t.sample}<textarea className="w-full rounded-md border bg-background p-2 text-base" rows={2} value={text} onChange={(event) => { setText(event.target.value); setResult(null); }} /></label>
-    <Button className="min-h-11" variant="outline" disabled={!available || busy || !text.trim() || !rule.trim()} onClick={() => void run(true)}>{t.preview}</Button>
+    <Button className="max-sm:min-h-11" variant="outline" disabled={!available || busy || !text.trim() || !rule.trim()} onClick={() => void run(true)}>{t.preview}</Button>
     {result !== null && <p role="status" className="text-sm whitespace-pre-wrap">{result}</p>}
     {saved && <p role="status" className="text-sm">{t.saved}</p>}
     {error && <p role="alert" className="text-sm text-destructive">{t.error}</p>}

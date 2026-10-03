@@ -20,7 +20,7 @@ import { type BrainRow } from '@/lib/api/brain';
 import { feedOwner } from '@/lib/offline/feed-cache';
 import { useDocMedia } from '@/lib/use-doc-media';
 import { fetchDocFileBlob } from '@/components/doc/doc-file-url';
-const inputClass = 'min-h-11 w-full rounded-md border bg-background p-2 text-base';
+const inputClass = 'min-h-8 max-sm:min-h-11 w-full rounded-md border bg-background p-2 text-base';
 export type FeedGenerationControls = { workspaceId: string; assistantId: string; sessionId: string; revision: number; offline: boolean; pending: boolean; readOnly: boolean; article: boolean; snapshot?: FeedCollaborationSnapshot | null; onCommand: (commands: FeedCommand[]) => Promise<boolean>; onRefresh: () => void };
 type FeedImageNode = Extract<FeedNode, { type: 'image' }>;
 function imagePreviewStorageKey(controls: FeedGenerationControls, slotId: string): string | null {
@@ -174,7 +174,7 @@ export function GenerationPlaceholder(props: { slot: FeedPlaceholderAttrs; segme
     </section> : null;
   return <Dialog.Root open={open} onOpenChange={setOpen}>
     <section data-feed-slot={props.slot.id} className="my-3 flex min-w-0 flex-wrap items-center gap-x-2 rounded-lg bg-muted/40 px-3 py-1" onPointerDown={props.onSelect} onFocusCapture={props.onSelect}>
-      {pendingImage ? <div className="relative order-first min-h-11 w-full pt-2">
+      {pendingImage ? <div className="relative order-first min-h-8 max-sm:min-h-11 w-full pt-2">
         <Dialog.Trigger aria-label={t.openDetails} className="w-full" data-feed-pending-image><FeedGenerationImage workspaceId={c.workspaceId} fileId={pendingImage.attrs.fileId} alt={pendingImage.attrs.alt ?? ''} className="max-h-48 w-full rounded-lg object-contain" /></Dialog.Trigger>
         {imageCandidates.length > 1 ? <>
           <Button variant="secondary" size="icon" className="absolute left-2 top-1/2 size-11 -translate-y-1/2 rounded-full shadow-sm" aria-label={t.previousImage} disabled={selectedImageIndex === 0} onClick={() => selectImageIndex(selectedImageIndex - 1)}><ChevronLeft className="size-5" aria-hidden /></Button>
@@ -187,42 +187,42 @@ export function GenerationPlaceholder(props: { slot: FeedPlaceholderAttrs; segme
       </div> : null}
       <span className="flex shrink-0 items-center gap-2 text-sm font-medium text-muted-foreground"><Icon className="size-4" aria-hidden />{label}</span>
       <input aria-label={t.brief} title={props.slot.brief || t.briefHint} placeholder={t.briefHint} value={props.slot.brief} disabled={c.readOnly}
-        className="order-last min-h-11 w-full min-w-0 border-0 bg-transparent text-base shadow-none outline-none focus-visible:shadow-none md:order-none md:w-auto md:flex-1"
+        className="order-last min-h-8 max-sm:min-h-11 w-full min-w-0 border-0 bg-transparent text-base shadow-none outline-none focus-visible:shadow-none md:order-none md:w-auto md:flex-1"
         onChange={event => update({ brief: event.target.value })}
         onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); props.onContinue?.(); } }} />
       {active || waiting ? <span role="status" className="ml-auto text-xs text-muted-foreground">{active ? tr.running : t.reviewReady}</span> : null}
-      <Dialog.Trigger aria-label={t.openDetails} title={t.openDetails} render={<Button variant="ghost" size="icon" className="ml-auto size-11 shrink-0 md:ml-0" />}><MoreHorizontal className="size-4" aria-hidden /></Dialog.Trigger>
+      <Dialog.Trigger aria-label={t.openDetails} title={t.openDetails} render={<Button variant="ghost" size="icon" className="ml-auto max-sm:size-11 shrink-0 md:ml-0" />}><MoreHorizontal className="size-4" aria-hidden /></Dialog.Trigger>
     </section>
     <Dialog.Portal>
       <Dialog.Backdrop data-feed-generation-backdrop onClick={() => setOpen(false)} className="fixed inset-0 z-[100] bg-background/80 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
       <Dialog.Popup className="fixed left-1/2 top-1/2 z-[101] max-h-[85dvh] w-[calc(100vw-2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border bg-background p-5 shadow-xl">
-        <div className="mb-2 flex items-center justify-between gap-3"><Dialog.Title className="text-base font-semibold">{label}</Dialog.Title><Dialog.Close aria-label={t.closeDetails} render={<Button variant="ghost" size="icon" className="size-11 shrink-0" />}><X className="size-4" aria-hidden /></Dialog.Close></div>
+        <div className="mb-2 flex items-center justify-between gap-3"><Dialog.Title className="text-base font-semibold">{label}</Dialog.Title><Dialog.Close aria-label={t.closeDetails} render={<Button variant="ghost" size="icon" className="max-sm:size-11 shrink-0" />}><X className="size-4" aria-hidden /></Dialog.Close></div>
         {imageCandidates.length ? <FeedImageCandidateCarousel controls={c} runs={runs} candidates={imageCandidates} slot={props.slot} index={selectedImageIndex} onIndexChange={selectImageIndex} iteration={iteration} onIterationChange={value => { queuedIteration.current = null; clearEstimate(); setIteration(value); }} onPrepareIteration={regenerateImage} busy={generationBlocked || active} /> : null}
         {imageCandidates.length ? <>{confirmation}{busy ? <p role="status" className="text-sm">{t.loading}</p> : null}{error ? <p role="alert" className="text-sm">{error}</p> : null}</> : null}
         <details key={imageCandidates.length ? "refinement" : "initial"} open={imageCandidates.length ? undefined : true}>
-        {imageCandidates.length ? <summary className="min-h-11 cursor-pointer py-3 text-sm">{t.imageDetails}</summary> : null}
+        {imageCandidates.length ? <summary className="max-sm:min-h-11 cursor-pointer py-3 text-sm">{t.imageDetails}</summary> : null}
         <Dialog.Description className="mb-5 text-sm text-muted-foreground">{props.slot.kind === 'image' ? t.imageInstructions : t.draftFirst}</Dialog.Description>
         <div className="space-y-3" onFocusCapture={props.onSelect}>
     <label className="block space-y-1 text-sm"><span>{t.brief}</span><textarea aria-label={t.brief} className={inputClass} value={props.slot.brief} disabled={c.readOnly} rows={3} onChange={e => update({ brief: e.target.value })} /></label>
-    {props.slot.kind === 'text' ? <><details className="space-y-3"><summary className="min-h-11 cursor-pointer py-3 text-sm">{t.advanced}</summary>
+    {props.slot.kind === 'text' ? <><details className="space-y-3"><summary className="max-sm:min-h-11 cursor-pointer py-3 text-sm">{t.advanced}</summary>
         <label className="block text-sm">{t.intent}<input className={inputClass} value={props.slot.intent ?? ''} disabled={c.readOnly} onChange={e => update({ intent: e.target.value })} /></label>
         <label className="block text-sm">{t.length}<input type="number" min={1} max={100000} className={inputClass} value={props.slot.length ?? ''} disabled={c.readOnly} onChange={e => { const value = Number(e.target.value); if (!e.target.value || (Number.isInteger(value) && value >= 1 && value <= 100000)) update({ length: e.target.value ? value : undefined }); }} /></label>
         {referenceControls}
       </details>
-      <details><summary className="min-h-11 cursor-pointer py-3 text-sm">{t.manualText}</summary><textarea className={inputClass} aria-label={t.manualText} value={manual} onChange={e => setManual(e.target.value)} disabled={c.readOnly} /><Button variant="default" size="sm" className="min-h-11 md:min-h-8 whitespace-normal" disabled={c.readOnly || !manual.trim()} onClick={() => { const nodes = importFeedMarkdown(manual); nodes[0]!.attrs.id = props.slot.id; replace(nodes); }}>{t.fillText}</Button></details>
+      <details><summary className="max-sm:min-h-11 cursor-pointer py-3 text-sm">{t.manualText}</summary><textarea className={inputClass} aria-label={t.manualText} value={manual} onChange={e => setManual(e.target.value)} disabled={c.readOnly} /><Button variant="default" size="sm" className="min-h-11 md:min-h-8 whitespace-normal" disabled={c.readOnly || !manual.trim()} onClick={() => { const nodes = importFeedMarkdown(manual); nodes[0]!.attrs.id = props.slot.id; replace(nodes); }}>{t.fillText}</Button></details>
     </> : <>
       <div className="grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1"><label className="block text-sm">{t.imageSize}</label><SearchableSelect className="min-h-11 text-base" popupClassName="z-[110] [&_[role=option]]:min-h-11 [&_input]:text-base" aria-label={t.imageSize} value={props.slot.aspectRatio ?? '1:1'} disabled={c.readOnly} items={['1:1', '16:9', '9:16', '4:3', '3:4'].map(value => ({ value, label: value }))} onValueChange={value => update({ aspectRatio: value as FeedPlaceholderAttrs['aspectRatio'] })} /></div>
-        <div className="space-y-1"><label className="block text-sm">{t.imageProvider}</label>{imageProviders.length > 1 ? <SearchableSelect aria-label={t.imageProvider} className="min-h-11 text-base" popupClassName="z-[110] [&_[role=option]]:min-h-11" value={imageProvider}
-          disabled={c.readOnly || active || busy} items={imageProviders} onValueChange={value => { setImageProvider(value as 'gemini' | 'openai-codex'); clearEstimate(); setError(null); }} /> : <div aria-label={t.imageProvider} className="flex min-h-11 items-center rounded-md border bg-muted/40 px-3 text-sm">{imageProviders[0]!.label}</div>}</div>
+        <div className="space-y-1"><label className="block text-sm">{t.imageSize}</label><SearchableSelect className="max-sm:min-h-11 text-base" popupClassName="z-[110] [&_[role=option]]:min-h-11 [&_input]:text-base" aria-label={t.imageSize} value={props.slot.aspectRatio ?? '1:1'} disabled={c.readOnly} items={['1:1', '16:9', '9:16', '4:3', '3:4'].map(value => ({ value, label: value }))} onValueChange={value => update({ aspectRatio: value as FeedPlaceholderAttrs['aspectRatio'] })} /></div>
+        <div className="space-y-1"><label className="block text-sm">{t.imageProvider}</label>{imageProviders.length > 1 ? <SearchableSelect aria-label={t.imageProvider} className="max-sm:min-h-11 text-base" popupClassName="z-[110] [&_[role=option]]:min-h-11" value={imageProvider}
+          disabled={c.readOnly || active || busy} items={imageProviders} onValueChange={value => { setImageProvider(value as 'gemini' | 'openai-codex'); clearEstimate(); setError(null); }} /> : <div aria-label={t.imageProvider} className="flex min-h-8 max-sm:min-h-11 items-center rounded-md border bg-muted/40 px-3 text-sm">{imageProviders[0]!.label}</div>}</div>
       </div>
       {imageProvider === 'openai-codex' ? <p className="text-xs text-muted-foreground">{t.codexConnection}</p> : null}
-      <details className="space-y-3"><summary className="min-h-11 cursor-pointer py-3 text-sm">{t.imageDetails}</summary>
+      <details className="space-y-3"><summary className="max-sm:min-h-11 cursor-pointer py-3 text-sm">{t.imageDetails}</summary>
         <label className="block text-sm">{t.style}<input className={inputClass} value={props.slot.style ?? ''} disabled={c.readOnly} onChange={e => update({ style: e.target.value })} /></label>
         <label className="block text-sm">{t.altIntent}<input className={inputClass} value={props.slot.altIntent ?? ''} disabled={c.readOnly} onChange={e => update({ altIntent: e.target.value })} /></label>
       </details>
       {referenceControls}
-      <details className="space-y-3"><summary className="min-h-11 cursor-pointer py-3 text-sm">{t.useExistingImage}</summary>
+      <details className="space-y-3"><summary className="max-sm:min-h-11 cursor-pointer py-3 text-sm">{t.useExistingImage}</summary>
         <p className="text-xs text-muted-foreground">{t.useExistingImageHint}</p>
         <div className="flex flex-wrap gap-2"><input aria-label={t.uploadImage} hidden ref={imageUploadInput} type="file" accept={ACCEPTED_MEDIA_MIME.join(',')} onChange={e => { const file = e.target.files?.[0]; if (file) void uploadImage(file); e.currentTarget.value = ''; }} />
           <Button variant="outline" size="sm" className="min-h-11 md:min-h-8 whitespace-normal" disabled={fileBlocked} onClick={() => imageUploadInput.current?.click()}>{t.uploadImage}</Button>
@@ -303,7 +303,7 @@ export function FeedGenerationResults({ controls: c, runs, candidates, slot, onR
       const uncertain = run.status === 'unknown_outcome' || run.error === 'cancelled_after_dispatch' ? tr.unknownExplanation : null;
       const detail = [originalBrief, uncertain, run.error].filter(Boolean).join(' · ');
       const timestamp = new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(run.createdAt));
-      return <div key={run.id} data-feed-generation-run className="flex min-h-11 min-w-0 items-center gap-2 overflow-hidden py-1 text-xs" title={detail || undefined}>
+      return <div key={run.id} data-feed-generation-run className="flex min-h-8 max-sm:min-h-11 min-w-0 items-center gap-2 overflow-hidden py-1 text-xs" title={detail || undefined}>
         <span className="shrink-0 font-medium">{tr[run.status]}</span>
         <time className="shrink-0 text-muted-foreground" dateTime={run.createdAt}>{timestamp}</time>
         <span className="min-w-0 flex-1 truncate text-muted-foreground" title={run.model}>{run.model}</span>
@@ -332,7 +332,7 @@ export function FeedDetachedGenerationResults({ controls: c }: { controls: FeedG
   const slots = new Set(c.snapshot?.copy?.content.composition ? walkFeed(c.snapshot.copy.content.composition).filter(item => item.node.type === 'generationPlaceholder').map(item => item.node.attrs.id) : []);
   const runs = c.snapshot?.runs?.filter(run => run.generation && !slots.has(run.generation.slotId)) ?? [];
   if (!runs.length) return null;
-  return <details className="rounded-lg border p-3"><summary className="min-h-11 cursor-pointer py-3 text-sm">{t.retainedResults}</summary>
+  return <details className="rounded-lg border p-3"><summary className="max-sm:min-h-11 cursor-pointer py-3 text-sm">{t.retainedResults}</summary>
     {error ? <p role="alert" className="text-sm">{error}</p> : null}
     <FeedGenerationResults controls={c} runs={runs} candidates={c.snapshot?.suggestions.filter(s => runs.some(run => run.id === s.sourceRunId)) ?? []} onRunAction={async (id, action) => {
       setError(null);
@@ -345,5 +345,5 @@ export function FeedDetachedGenerationResults({ controls: c }: { controls: FeedG
 export function FeedGenerationImage({ workspaceId, fileId, alt, className }: { workspaceId: string; fileId: string; alt: string; className?: string }) {
   const t = useT().feedGeneration;
   const {url,error} = useDocMedia(workspaceId, fileId);
-  return url ? <img src={url} alt={alt} className={className ?? 'max-h-96 max-w-full rounded-lg object-contain'} /> : <p role="status" className="min-h-11 text-sm">{error ? t.imageUnavailable : t.loading}{alt ? `: ${alt}` : ''}</p>;
+  return url ? <img src={url} alt={alt} className={className ?? 'max-h-96 max-w-full rounded-lg object-contain'} /> : <p role="status" className="min-h-8 max-sm:min-h-11 text-sm">{error ? t.imageUnavailable : t.loading}{alt ? `: ${alt}` : ''}</p>;
 }

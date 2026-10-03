@@ -94,7 +94,7 @@ export function AssistantContextSettings({
         <div>
           <h4 className="text-sm font-medium">{t.assistantDepartmentsTitle}</h4>
           <p className="mt-1 text-xs text-muted-foreground">{t.assistantDepartmentsNote}</p>
-          <Link href={organizationHref(workspaceId, "departments")} className="inline-flex min-h-11 items-center text-sm underline">{t.openDepartments}</Link>
+          <Link href={organizationHref(workspaceId, "departments")} className="inline-flex min-h-8 max-sm:min-h-11 items-center text-sm underline">{t.openDepartments}</Link>
         </div>
         <AssistantHomeDepartment assistantId={assistantId} />
       </section>

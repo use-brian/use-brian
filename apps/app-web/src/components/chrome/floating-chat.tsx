@@ -3577,7 +3577,7 @@ export function FloatingChat({
                 {recorder.interactionStatus === "unavailable" ? interactionT.personalOnly : recorder.interactionStatus === "gap" ? interactionT.error : interactionT.listening}
               </p>
               {recorder.interactionCaptureId && <LiveInteractionQuestionControls key={recorder.interactionCaptureId} captureId={recorder.interactionCaptureId} />}
-              <button type="button" className="min-h-11 text-sm underline" onClick={() => recorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
+              <button type="button" className="min-h-8 max-sm:min-h-11 text-sm underline" onClick={() => recorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
             </div>
           )}
           <LiveInteractionJobs

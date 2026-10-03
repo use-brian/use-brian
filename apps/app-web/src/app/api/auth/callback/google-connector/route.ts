@@ -1,3 +1,4 @@
+import { withConnectWorkspace } from "@/lib/connector-auto-expose";
 import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
@@ -100,7 +101,7 @@ export async function GET(request: Request) {
 
     try {
       const redirectUri = `${appOrigin}/api/auth/callback/google-connector`;
-      const exchangeRes = await fetch(`${INTERNAL_API_URL}/api/connectors/gdrive/oauth-callback`, {
+      const exchangeRes = await fetch(withConnectWorkspace(`${INTERNAL_API_URL}/api/connectors/gdrive/oauth-callback`, workspaceId), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -213,7 +214,7 @@ export async function GET(request: Request) {
     // onto their own account. `createNew` ("Add another") mints a FRESH
     // instance (the connected email doubles as its nickname). The two are
     // mutually exclusive; reconnect wins.
-    const storeRes = await fetch(`${INTERNAL_API_URL}/api/connectors/${connector}/store-credentials`, {
+    const storeRes = await fetch(withConnectWorkspace(`${INTERNAL_API_URL}/api/connectors/${connector}/store-credentials`, workspaceId), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

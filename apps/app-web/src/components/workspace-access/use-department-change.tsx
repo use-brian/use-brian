@@ -22,6 +22,6 @@ export function DepartmentChangeFeedback({ change }: { change: {error:string;bus
   const t = useT().workspaceAccess;
   return <>
     {change.error ? <p role="alert" className="text-sm text-destructive">{change.error}</p> : null}
-    {change.retryAvailable ? <Button type="button" variant="outline" className="min-h-11" disabled={change.busy} onClick={() => void change.retry()}>{t.retryChange}</Button> : null}
+    {change.retryAvailable ? <Button type="button" variant="outline" className="max-sm:min-h-11" disabled={change.busy} onClick={() => void change.retry()}>{t.retryChange}</Button> : null}
   </>;
 }

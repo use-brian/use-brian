@@ -53,7 +53,7 @@ describe("[COMP:app-web/desktop-accounts] account provenance and switching", () 
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "Work cloud");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await clickText(en.workspaceSwitcher.accountIcon);
+    await act(async () => host.querySelector<HTMLButtonElement>(`[aria-label="${en.workspaceSwitcher.accountIcon}"]`)!.click());
     await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(update).toHaveBeenCalledWith("cloud:one", { displayName: "Work cloud", icon: "🏡" });
     expect(host.textContent).toContain("Work cloud");

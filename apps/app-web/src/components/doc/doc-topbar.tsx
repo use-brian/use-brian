@@ -292,7 +292,7 @@ function PhoneTabStrip({
                 data-doc-tabs-menu
                 aria-label={menuAria}
                 title={menuAria}
-                className="inline-flex h-11 shrink-0 items-center gap-1 self-center rounded-md px-2 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent"
+                className="inline-flex h-11 shrink-0 items-center gap-1 self-center rounded-md px-2 md:h-7 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent"
               >
                 <span className="whitespace-nowrap">{menuLabel}</span>
                 <ChevronDown className="size-4" aria-hidden />
@@ -303,7 +303,7 @@ function PhoneTabStrip({
             {menu.map((tab) => (
               <DropdownMenuItem
                 key={tab.key}
-                className="min-h-11 gap-2"
+                className="min-h-8 max-sm:min-h-11 gap-2"
                 onClick={() => onSwitchTab(tab.key)}
               >
                 <span className="grid size-4 shrink-0 place-items-center text-[14px] leading-none">

@@ -87,7 +87,7 @@ function DesktopBrowserButton({ workspaceId }: { workspaceId: string }) {
   };
   return <Tooltip label={label}>
     <button type="button" onClick={onClick} disabled={phase === "connecting"} aria-label={label}
-      className="relative flex size-11 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-sidebar-accent disabled:opacity-60">
+      className="relative flex size-11 shrink-0 md:size-7 items-center justify-center rounded-md transition-colors hover:bg-sidebar-accent disabled:opacity-60">
       <Globe className={cn("size-4", phase === "connected" ? "text-primary" : "text-sidebar-foreground/55")} aria-hidden />
       {phase === "connected" || phase === "paused" || phase === "failed" ? <span aria-hidden className={cn(
         "absolute right-1 top-1 size-1.5 rounded-full ring-2 ring-sidebar",

@@ -147,3 +147,30 @@ export function resolveAutoExpose(input: AutoExposeInput): AutoExposeDecision {
 
   return { expose: true, connectorInstanceId };
 }
+
+const WORKSPACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Tag a connector API call with the workspace it was made from, so the API
+ * shares the connection with that workspace in the same request (server-side
+ * auto-expose, `packages/api/src/connectors/auto-expose.ts`). A query param,
+ * not a header, so no CORS allowlist change is needed and an older API simply
+ * ignores it. `authFetch` applies this to every connector POST made inside
+ * `/w/<id>/`; the OAuth callbacks apply it with the id their `state` carried.
+ */
+export function withConnectWorkspace(url: string, workspaceId: string | null | undefined): string {
+  if (!workspaceId || !WORKSPACE_ID_RE.test(workspaceId)) return url;
+  if (/[?&]workspaceId=/.test(url)) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`;
+}
+
+/** The active workspace from an app path (`/w/<uuid>/...`), or null. */
+export function workspaceIdFromPath(pathname: string): string | null {
+  const match = /^\/w\/([0-9a-f-]{36})(?:\/|$)/i.exec(pathname);
+  return match && WORKSPACE_ID_RE.test(match[1]) ? match[1] : null;
+}
+
+/** Whether a request is a connector POST that should carry the workspace. */
+export function isConnectorPost(url: string, method: string | undefined): boolean {
+  return (method ?? "GET").toUpperCase() === "POST" && /\/api\/connectors(?:\/|\?|$)/.test(url);
+}

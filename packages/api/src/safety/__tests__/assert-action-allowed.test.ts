@@ -18,10 +18,15 @@ import {
   filterToolsByActionGrants,
   gateToolsOnActionGrants,
 } from '../assert-action-allowed.js'
-import type { AssistantConnectorGrantsStore } from '../../db/assistant-connector-grants-store.js'
+import {
+  defaultAssistantConnectorGrant,
+  type AssistantConnectorGrantsStore,
+} from '../../db/assistant-connector-grants-store.js'
 
+// `null` stands in for a grant that names nothing (the real store never
+// returns null; an untouched pair resolves to the registry default).
 function buildStore(
-  getResult: Awaited<ReturnType<AssistantConnectorGrantsStore['getForAssistantSystem']>>,
+  getResult: Awaited<ReturnType<AssistantConnectorGrantsStore['getForAssistantSystem']>> | null,
 ): AssistantConnectorGrantsStore {
   return {
     getForAssistantSystem: vi.fn().mockResolvedValue(getResult),
@@ -32,7 +37,7 @@ function buildStore(
 }
 
 describe('[COMP:safety/assert-action-allowed] grant gate', () => {
-  it('denies when no grant row exists (secure default)', async () => {
+  it('denies when the effective grant names nothing', async () => {
     const store = buildStore(null)
     const res = await assertActionAllowed(store, 'a-1', 'gmail', 'gmailSendMessage')
     expect(res.ok).toBe(false)
@@ -86,7 +91,7 @@ function fakeTool(name: string): { tool: Tool; execute: ReturnType<typeof vi.fn>
 
 describe('[COMP:safety/assert-action-allowed] gateToolsOnActionGrants', () => {
   it('gates every registry write/destructive tool of the connector, and only those', async () => {
-    const store = buildStore(null) // no grant row → all writes denied
+    const store = buildStore(null) // a store answering nothing → all writes denied
     const { tool: read } = fakeTool('githubListIssues')
     const { tool: write1 } = fakeTool('githubCreateIssue')
     const { tool: write2 } = fakeTool('githubWriteFile')
@@ -98,15 +103,15 @@ describe('[COMP:safety/assert-action-allowed] gateToolsOnActionGrants', () => {
     await expect(gated[0].execute({} as never, {} as never)).resolves.toEqual({ data: 'githubListIssues-ran' })
     await expect(gated[3].execute({} as never, {} as never)).resolves.toEqual({ data: 'someUnregisteredTool-ran' })
     // Both registry write tools are denied before their execute runs.
-    await expect(gated[1].execute({} as never, {} as never)).rejects.toThrow(/no grant for github/)
-    await expect(gated[2].execute({} as never, {} as never)).rejects.toThrow(/no grant for github/)
+    await expect(gated[1].execute({} as never, {} as never)).rejects.toThrow(/cannot perform .* on github/)
+    await expect(gated[2].execute({} as never, {} as never)).rejects.toThrow(/cannot perform .* on github/)
   })
 
   it('does not run the underlying execute when the action is denied', async () => {
     const store = buildStore(null)
     const { tool, execute } = fakeTool('notionCreatePage')
     const [gated] = gateToolsOnActionGrants([tool], 'notion', store, 'a-1')
-    await expect(gated.execute({} as never, {} as never)).rejects.toThrow(/action|grant/i)
+    await expect(gated.execute({} as never, {} as never)).rejects.toThrow(/cannot perform/)
     expect(execute).not.toHaveBeenCalled()
   })
 
@@ -139,6 +144,21 @@ describe('[COMP:safety/assert-action-allowed] gateToolsOnActionGrants', () => {
     const gated = gateToolsOnActionGrants([tool], 'fathom', store, 'a-1')
     expect(gated[0]).toBe(tool)
     expect(store.getForAssistantSystem).not.toHaveBeenCalled()
+  })
+
+  it('an untouched pair holds the default: create runs, delete stays gated', async () => {
+    const store = buildStore(defaultAssistantConnectorGrant('a-1', 'gcal'))
+    const { tool: create, execute: createRun } = fakeTool('googleCalendarCreateEvent')
+    const { tool: remove, execute: removeRun } = fakeTool('googleCalendarDeleteEvent')
+    const gated = gateToolsOnActionGrants([create, remove], 'gcal', store, 'a-1')
+
+    const visible = await filterToolsByActionGrants(new Map(gated.map((tool) => [tool.name, tool])))
+    expect([...visible.keys()]).toEqual(['googleCalendarCreateEvent'])
+
+    await expect(gated[0].execute({} as never, {} as never)).resolves.toEqual({ data: 'googleCalendarCreateEvent-ran' })
+    await expect(gated[1].execute({} as never, {} as never)).rejects.toThrow(/cannot perform/)
+    expect(createRun).toHaveBeenCalled()
+    expect(removeRun).not.toHaveBeenCalled()
   })
 
   it('removes ungranted writes before injection while retaining reads', async () => {
@@ -184,7 +204,7 @@ describe('[COMP:safety/assert-action-allowed] gateToolsOnActionGrants', () => {
     }
     const store = buildStore(null)
     vi.mocked(store.getForAssistantSystem).mockImplementation(async (_assistantId, connectorId) =>
-      connectorId === 'gcal' ? providerGrant : null,
+      connectorId === 'gcal' ? providerGrant : { ...providerGrant, connectorId, allowedActions: [] },
     )
     const { tool } = fakeTool('googleCalendarCreateEvent')
     const [gated] = gateToolsOnActionGrants(
@@ -216,13 +236,13 @@ describe('[COMP:safety/assert-action-allowed] gateToolsOnActionGrants', () => {
     const store = buildStore(grant)
     vi.mocked(store.getForAssistantSystem)
       .mockResolvedValueOnce(grant)
-      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null as never)
     const { tool, execute } = fakeTool('gmailSendMessage')
     const [gated] = gateToolsOnActionGrants([tool], 'gmail', store, 'a-1')
     const visible = await filterToolsByActionGrants(new Map([[tool.name, gated]]))
 
     expect(visible.has(tool.name)).toBe(true)
-    await expect(gated.execute({} as never, {} as never)).rejects.toThrow(/no grant for gmail/)
+    await expect(gated.execute({} as never, {} as never)).rejects.toThrow(/cannot perform .* on gmail/)
     expect(execute).not.toHaveBeenCalled()
   })
 })

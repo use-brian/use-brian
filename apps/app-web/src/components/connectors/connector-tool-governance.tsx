@@ -39,6 +39,7 @@ import { useEffect, useState, useCallback } from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import {
   OFFICIAL_CONNECTOR_TOOLS,
+  defaultGrantedConnectorActions,
 } from "@use-brian/shared/builtin-connectors";
 import { useT } from "@/lib/i18n/client";
 import {
@@ -119,7 +120,9 @@ export function ConnectorToolGovernance({
       .then((data: { grants?: Grant[] } | null) => {
         const grant = data?.grants?.find((g) => g.connectorId === governanceId)
           ?? data?.grants?.find((g) => g.connectorId === connectorId);
-        setAllowed(new Set(grant?.allowedActions ?? []));
+        // No row = the registry default the runtime applies (every write,
+        // no destructive). The first toggle PATCHes an explicit row.
+        setAllowed(new Set(grant ? grant.allowedActions : defaultGrantedConnectorActions(connectorId)));
       })
       .catch(() => setAllowed(new Set()))
       .finally(() => setGrantsLoading(false));

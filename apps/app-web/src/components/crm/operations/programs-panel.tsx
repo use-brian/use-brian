@@ -69,7 +69,7 @@ export function CrmProgramsPanel({
     <div className="flex h-full min-h-0 flex-1 max-md:flex-col" data-crm-programs-panel>
       <aside className="w-72 shrink-0 overflow-y-auto border-r border-border/60 max-md:w-full max-md:max-h-56 max-md:border-b max-md:border-r-0">
         <div className="border-b border-border/60 px-3 py-3 text-sm font-semibold">{t.programs}</div>
-        <Link href={`/w/${workspaceId}/association`} className="flex min-h-11 items-center px-3 text-sm text-primary">{association.name}</Link>
+        <Link href={`/w/${workspaceId}/association`} className="flex min-h-8 max-sm:min-h-11 items-center px-3 text-sm text-primary">{association.name}</Link>
         <div className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"><KeyRound className="mr-1 inline size-3" />{t.entitlementPlans}</div>
         {plans.map((plan) => <button type="button" key={plan.id} className={`block w-full border-b border-border/40 px-3 py-2 text-left text-xs ${selectedPlanId === plan.id ? "bg-accent" : "hover:bg-accent/50"}`} onClick={() => { onSelectEvent(null); onSelectPlan(plan.id); }}><div className="font-medium">{plan.name}</div><div className="font-mono text-[10px] text-muted-foreground">{plan.planKey}</div></button>)}
         <div className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"><CalendarDays className="mr-1 inline size-3" />{t.events}</div>

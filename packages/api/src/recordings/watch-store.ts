@@ -14,6 +14,8 @@ export type Grant = {
 export type Capture = {
   id: string; grant_id: string; client_id: string; metadata: { capturedAt: string; title: string; source: string }
   page_id: string; recording_id: string; state: 'open' | 'sealed' | 'finalized' | 'expired'
+  /** Frozen at creation: null = workspace-shared (primary destination), else the destination assistant's partition. */
+  scope_assistant_id: string | null
   page_prepared: boolean; page_prepare_started: boolean
   finalization: { expectedWindows: number; allowIncomplete: boolean; source: 'windows' | 'full' } | null
   expires_at: Date
@@ -52,15 +54,17 @@ export const watchStore = {
   async provision(input: { ownerId: string; deviceId: string; workspaceId: string; assistantId: string; label: string; provisioningKey: string }) {
     return transaction(async db => {
       await db.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [input.ownerId])
+      // One grant per destination assistant: selecting another assistant adds a grant and
+      // never revokes the one earlier captures are queued on.
       const existing = (await db.query<Grant & { access_hash: string }>(`SELECT * FROM recording_device_grants
-        WHERE owner_id=$1 AND device_id=$2 AND workspace_id=$3 AND revoked_at IS NULL FOR UPDATE`,
-      [input.ownerId, input.deviceId, input.workspaceId])).rows[0]
+        WHERE owner_id=$1 AND device_id=$2 AND workspace_id=$3 AND assistant_id=$4 AND revoked_at IS NULL FOR UPDATE`,
+      [input.ownerId, input.deviceId, input.workspaceId, input.assistantId])).rows[0]
       const id = existing?.id ?? randomUUID()
       // Reproducible only with the server secret; no stored plaintext/encrypted token cache.
       const derive = (kind: string) => createHmac('sha256', input.provisioningKey).update(JSON.stringify(['watch-provision-v1', id, kind])).digest('base64url')
       const tokens = { accessToken: `wra_${derive('access')}`, renewalToken: `wrr_${derive('renewal')}`, expiresIn: 900, audience: 'watch-recording-v1' }
       if (existing) {
-        if (existing.assistant_id !== input.assistantId || existing.label !== input.label) throw new WatchError(409, 'provisioning_conflict')
+        if (existing.label !== input.label) throw new WatchError(409, 'provisioning_conflict')
         if (new Date(existing.expires_at).getTime() <= Date.now()) throw new WatchError(409, 'grant_expired_use_relay')
         if (existing.access_hash !== sha256(tokens.accessToken)) throw new WatchError(409, 'grant_already_rotated_use_relay')
         return { grantId: id, ...tokens, expiresIn: Math.max(0, Math.floor((new Date(existing.access_expires_at).getTime() - Date.now()) / 1000)) }
@@ -148,7 +152,13 @@ export const watchStore = {
       }
       const count = await db.query(`SELECT count(*)::int AS n FROM watch_captures c JOIN recording_device_grants g ON g.id=c.grant_id WHERE g.owner_id=$1 AND c.state IN ('open','sealed') AND c.expires_at>now()`, [grant.owner_id])
       if (count.rows[0].n >= LIMITS.active) throw new WatchError(429, 'active_capture_limit')
-      return (await db.query<Capture>('INSERT INTO watch_captures(id,grant_id,client_id,metadata,page_id,recording_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING *', [randomUUID(), grant.id, clientId, metadata, randomUUID(), randomUUID()])).rows[0]
+      // A primary destination keeps today's workspace-shared media; any other assistant
+      // partitions it. Frozen here so retries never re-decide the scope.
+      const created = (await db.query<Capture>(`INSERT INTO watch_captures(id,grant_id,client_id,metadata,page_id,recording_id,scope_assistant_id)
+        SELECT $1,$2,$3,$4,$5,$6,CASE WHEN a.kind='primary' THEN NULL ELSE a.id END FROM assistants a WHERE a.id=$7 RETURNING *`,
+      [randomUUID(), grant.id, clientId, metadata, randomUUID(), randomUUID(), grant.assistant_id])).rows[0]
+      if (!created) throw new WatchError(403, 'destination_unavailable')
+      return created
     })
   },
   async get(grant: Grant, clientId: string): Promise<Capture> {

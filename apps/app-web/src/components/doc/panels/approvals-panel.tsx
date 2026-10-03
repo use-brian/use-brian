@@ -1657,6 +1657,6 @@ function DepartmentAccessBody({row}:{row:PendingApprovalRow}) {
     <p>{t.starts}: {payload.startsAt?new Date(payload.startsAt).toLocaleString():''}</p>
     <p>{t.expires}: {payload.expiresAt?new Date(payload.expiresAt).toLocaleString():t.ongoing}</p>
     <p>{t.readOnly}</p>{payload.beneficiaryKind==='team'?<p>{t.futureMembers}</p>:null}
-    <Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-access')}>{t.title}</Button>
+    <Button variant="outline" className="max-sm:min-h-11" onClick={()=>openWorkspaceSettings('ws-access')}>{t.title}</Button>
   </div>;
 }

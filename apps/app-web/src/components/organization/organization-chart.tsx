@@ -26,7 +26,7 @@ import { EmptyState, HowItWorks, OrgAvatar, StatStrip, StatTile, toneFor, toneSo
 import { format } from '@/lib/i18n/format';
 
 type Editor = {kind:'unit';unit?:OrganizationUnit} | {kind:'subject';subject:OrganizationSubject;placement?:OrganizationPlacement};
-const inputClass = 'min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
+const inputClass = 'min-h-8 max-sm:min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
 
 export function OrganizationChartView() {
   const {workspaceId,me} = useWorkspaceContext();
@@ -171,7 +171,7 @@ function OrganizationEditor({chart,editor,close,change}:{chart:OrganizationChart
   const busy=change.busy;
   const heading=useRef<HTMLHeadingElement>(null);
   useEffect(()=>{heading.current?.focus();heading.current?.scrollIntoView?.({block:'nearest'});},[]);
-  const pick=(label:string,value:string,onValueChange:(value:string)=>void,items:Array<{value:string;label:string}>)=><label className="grid gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} className="min-h-11" value={value} onValueChange={onValueChange} items={items} searchPlaceholder={t.search} emptyMessage={t.noResults} disabled={busy||!chart.canManage}/></label>;
+  const pick=(label:string,value:string,onValueChange:(value:string)=>void,items:Array<{value:string;label:string}>)=><label className="grid gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} className="max-sm:min-h-11" value={value} onValueChange={onValueChange} items={items} searchPlaceholder={t.search} emptyMessage={t.noResults} disabled={busy||!chart.canManage}/></label>;
   const units=chart.units.filter(u=>u.id!==unit?.id).map(u=>({value:u.id,label:u.name}));
   async function execute(command:OrganizationCommand,archive=false) {
     if(!chart.canManage||busy)return;
@@ -183,8 +183,8 @@ function OrganizationEditor({chart,editor,close,change}:{chart:OrganizationChart
     else void execute({type:'org.placement.save',...(placement?{id:placement.id,expectedVersion:placement.version}:{}),unitId,userId:subject!.kind==='member'?subject!.id:null,assistantId:subject!.kind==='assistant'?subject!.id:null,isPrimary:primary,reportsToUserId:primary&&subject!.kind==='member'&&human!=='none'?human:null,accountableUserId:primary&&subject!.kind==='assistant'&&human!=='none'?human:null});
   }
   return <aside aria-label={t.details} className="min-w-0 rounded-xl border border-border bg-card p-4 lg:sticky lg:top-4">
-    <div className="mb-3 flex items-center justify-between gap-2"><h2 ref={heading} tabIndex={-1} className="break-words font-semibold">{subject?.name||(editor.kind==='unit'?(unit?t.editUnit:t.addUnit):t.details)}</h2><Button variant="ghost" className="min-h-11" onClick={close}>{t.close}</Button></div>
-    {subject?<div className="mb-4 flex flex-wrap gap-2">{subject.kind==='assistant'?<Link className="flex min-h-11 items-center text-sm text-primary underline" href={`/w/${chart.workspaceId}/studio/assistants?assistant=${subject.id}`}>{t.openAssistant}</Link>:<Link className="flex min-h-11 items-center text-sm text-primary underline" href={organizationHref(chart.workspaceId,'people',subject.id)}>{t.openMember}</Link>}</div>:null}
+    <div className="mb-3 flex items-center justify-between gap-2"><h2 ref={heading} tabIndex={-1} className="break-words font-semibold">{subject?.name||(editor.kind==='unit'?(unit?t.editUnit:t.addUnit):t.details)}</h2><Button variant="ghost" className="max-sm:min-h-11" onClick={close}>{t.close}</Button></div>
+    {subject?<div className="mb-4 flex flex-wrap gap-2">{subject.kind==='assistant'?<Link className="flex min-h-8 max-sm:min-h-11 items-center text-sm text-primary underline" href={`/w/${chart.workspaceId}/studio/assistants?assistant=${subject.id}`}>{t.openAssistant}</Link>:<Link className="flex min-h-8 max-sm:min-h-11 items-center text-sm text-primary underline" href={organizationHref(chart.workspaceId,'people',subject.id)}>{t.openMember}</Link>}</div>:null}
     <form onSubmit={submit} className="space-y-4">
       {editor.kind==='unit'?<>
         <label className="grid gap-1 text-sm">{t.unitName}<input required maxLength={120} value={name} onChange={e=>setName(e.target.value)} className={inputClass} disabled={busy||!chart.canManage}/></label>
@@ -194,18 +194,18 @@ function OrganizationEditor({chart,editor,close,change}:{chart:OrganizationChart
         <p className="text-xs text-muted-foreground">{t.directoryHint}</p>
       </>:<>
         {pick(t.unit,unitId,setUnitId,units)}
-        <label className="flex min-h-11 items-center gap-2 text-sm"><Checkbox checked={primary} onCheckedChange={value=>setPrimary(Boolean(value))} disabled={busy||!chart.canManage}/>{t.primary}</label>
+        <label className="flex min-h-8 max-sm:min-h-11 items-center gap-2 text-sm"><Checkbox checked={primary} onCheckedChange={value=>setPrimary(Boolean(value))} disabled={busy||!chart.canManage}/>{t.primary}</label>
         {primary?pick(subject!.kind==='assistant'?t.accountable:t.reportsTo,human,setHuman,[{value:'none',label:t.none},...chart.subjects.filter(s=>s.kind==='member'&&s.id!==subject!.id).map(s=>({value:s.id,label:s.name||t.unnamedPerson}))]):null}
-        {chart.canManage&&placement?<Button type="button" variant="outline" className="min-h-11" disabled={busy} onClick={()=>void execute({type:'org.placement.remove',id:placement.id,expectedVersion:placement.version})}>{t.unplace}</Button>:null}
-        {chart.canManage&&placement?<Button type="button" variant="ghost" className="min-h-11" disabled={busy||!unitId} onClick={()=>void execute({type:'org.placement.save',unitId,userId:subject!.kind==='member'?subject!.id:null,assistantId:subject!.kind==='assistant'?subject!.id:null,isPrimary:false,reportsToUserId:null,accountableUserId:null})}>{t.addSecondary}</Button>:null}
+        {chart.canManage&&placement?<Button type="button" variant="outline" className="max-sm:min-h-11" disabled={busy} onClick={()=>void execute({type:'org.placement.remove',id:placement.id,expectedVersion:placement.version})}>{t.unplace}</Button>:null}
+        {chart.canManage&&placement?<Button type="button" variant="ghost" className="max-sm:min-h-11" disabled={busy||!unitId} onClick={()=>void execute({type:'org.placement.save',unitId,userId:subject!.kind==='member'?subject!.id:null,assistantId:subject!.kind==='assistant'?subject!.id:null,isPrimary:false,reportsToUserId:null,accountableUserId:null})}>{t.addSecondary}</Button>:null}
       </>}
       <p className="text-xs text-muted-foreground">{t.permissionHint}</p>
-      {chart.canManage?<Button type="submit" className="min-h-11 w-full" disabled={busy||(editor.kind==='unit'?!name.trim():!unitId)}>{busy?t.saving:t.save}</Button>:null}
+      {chart.canManage?<Button type="submit" className="max-sm:min-h-11 w-full" disabled={busy||(editor.kind==='unit'?!name.trim():!unitId)}>{busy?t.saving:t.save}</Button>:null}
     </form>
     {unit&&chart.canManage?<div className="mt-5 space-y-3 border-t border-border pt-4">
       {pick(t.archiveDestination,destination,setDestination,[{value:'none',label:t.unassigned},...units])}
       <p className="text-xs text-muted-foreground">{t.archiveHint}</p>
-      <Button variant="outline" className="min-h-11 w-full" disabled={busy} onClick={()=>void execute({type:'org.unit.archive',id:unit.id,expectedVersion:unit.version,destinationId:destination==='none'?null:destination},true)}>{t.archiveUnit}</Button>
+      <Button variant="outline" className="max-sm:min-h-11 w-full" disabled={busy} onClick={()=>void execute({type:'org.unit.archive',id:unit.id,expectedVersion:unit.version,destinationId:destination==='none'?null:destination},true)}>{t.archiveUnit}</Button>
     </div>:null}
   </aside>;
 }

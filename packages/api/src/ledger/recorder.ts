@@ -86,6 +86,8 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
     /** Cumulative request-message refs (deltas appended in stateful mode). */
     private messageRefs: string[] = []
     private systemRef: string | null = null
+    /** Whether any `request` has landed yet (see `request`). */
+    private requested = false
     private startMessages: Message[]
 
     get traceId(): string {
@@ -158,8 +160,13 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
       const { messages, full } = info
       enqueue(async () => {
         const refs = await this.putMessages(messages)
-        if (full) this.messageRefs = refs
+        // A stateful session starts EMPTY, so its first "delta" is the whole
+        // history - the same messages `startTrace` already recorded. The
+        // first request therefore replaces the start messages in both modes;
+        // appending would record the history twice (and replay it twice).
+        if (full || !this.requested) this.messageRefs = refs
         else this.messageRefs = [...this.messageRefs, ...refs]
+        this.requested = true
       })
     }
 

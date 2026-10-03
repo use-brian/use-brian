@@ -54,7 +54,7 @@ export function OrganizationTopbar({ workspaceId, section, slotRef }: {
         <DropdownMenuContent align="start">
           {sections.map(item => {
             const Icon = ORGANIZATION_SECTION_ICON[item];
-            return <DropdownMenuItem key={item} className={cn('min-h-11', item === section && 'font-medium')} onClick={() => router.push(organizationHref(workspaceId, item))}>
+            return <DropdownMenuItem key={item} className={cn('min-h-8 max-sm:min-h-11', item === section && 'font-medium')} onClick={() => router.push(organizationHref(workspaceId, item))}>
               <Icon className="size-3.5" aria-hidden /><span className="min-w-32 flex-1">{copy[item].label}</span>
             </DropdownMenuItem>;
           })}

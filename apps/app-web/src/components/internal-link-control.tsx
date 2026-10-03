@@ -145,10 +145,10 @@ export function InternalLinkControl({
                   autoCapitalize="none"
                   autoCorrect="off"
                   spellCheck={false}
-                  className="h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] outline-none focus:border-ring focus:ring-2 focus:ring-ring/30 sm:text-sm"
+                  className="h-11 md:h-9 w-full rounded-lg border border-border bg-background px-3 text-[16px] outline-none focus:border-ring focus:ring-2 focus:ring-ring/30 sm:text-sm"
                 />
               </label>
-              <Button className="min-h-11" disabled={!changed || status === "checking" || status === "invalid" || status === "taken" || status === "saving"} onClick={() => void save()}>
+              <Button className="max-sm:min-h-11" disabled={!changed || status === "checking" || status === "invalid" || status === "taken" || status === "saving"} onClick={() => void save()}>
                 {status === "saving" ? t.aliasSaving : t.aliasSave}
               </Button>
             </div>
@@ -160,7 +160,7 @@ export function InternalLinkControl({
           {status === "error" ? <p role="alert" className="text-xs text-destructive">{t.aliasError}</p> : null}
           {canManage ? <p className="text-xs text-muted-foreground">{t.aliasHistoryHint}</p> : null}
           {showCopy ? (
-            <Button variant="outline" className="min-h-11" onClick={() => void copy()}>
+            <Button variant="outline" className="max-sm:min-h-11" onClick={() => void copy()}>
               {copied ? <Check aria-hidden className="size-4" /> : <Copy aria-hidden className="size-4" />}
               {copied ? t.aliasCopied : t.aliasCopy}
             </Button>

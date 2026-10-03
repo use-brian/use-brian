@@ -31,6 +31,32 @@ describe("[COMP:app-web/chat-handoff] Home to Personal chat handoff", () => {
     ).toEqual({ ...base, text: "Ask Brian" });
   });
 
+  it("carries the Pages landing's research flag and attachments", () => {
+    expect(
+      parsePendingChatHandoff(
+        JSON.stringify({
+          ...base,
+          researchMode: true,
+          fileIds: ["file-1", 7, ""],
+          attachedRecordingIds: ["rec-1"],
+        }),
+      ),
+    ).toEqual({
+      ...base,
+      researchMode: true,
+      fileIds: ["file-1"],
+      attachedRecordingIds: ["rec-1"],
+    });
+  });
+
+  it("accepts an attachment-only payload with no prompt text", () => {
+    expect(
+      parsePendingChatHandoff(
+        JSON.stringify({ ...base, text: "  ", fileIds: ["file-1"] }),
+      ),
+    ).toEqual({ ...base, text: "", fileIds: ["file-1"] });
+  });
+
   it("rejects malformed or empty payloads", () => {
     expect(parsePendingChatHandoff(null)).toBeNull();
     expect(parsePendingChatHandoff("not json")).toBeNull();

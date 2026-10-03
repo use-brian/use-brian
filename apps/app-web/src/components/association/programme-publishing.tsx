@@ -57,18 +57,18 @@ export function ProgrammePublishingPanel({ workspaceId }: { workspaceId: string 
         <div className="flex flex-wrap gap-3" role="status">{Object.keys(read.data.observations).length === 0 && read.data.publishedRevision > 0 ? <p className="text-sm">{t.content.statusNotRead}</p> : null}{Object.keys(read.data.observations).map(s => <p key={s} className="text-sm">{format(read.data!.observations[s]?.revision === read.data!.publishedRevision ? t.content.observed : t.content.pending, { site: websiteSiteLabel(s, names) })}</p>)}</div>
         {!doc && <InlineNotice tone="neutral">{c.empty}</InlineNotice>}
         <div className="flex flex-wrap gap-2">
-          {!editing && <Button className="min-h-11" onClick={() => startEditing(0)}>{doc ? c.edit : c.create}</Button>}
-          {editing && <><Button className="min-h-11" disabled={action.pending || Object.values(feeInput).some(value => value !== "" && !money.test(value))} onClick={() => void save()}>{c.draft}</Button><Button className="min-h-11" variant="outline" onClick={async () => { if (await confirmDialog({ title: t.ux.cancelEdit, description: t.ux.cancelHelp, confirmLabel: t.cancel, cancelLabel: t.ux.keepEditing })) { setEditing(null); setFeeInput({}); } }}>{t.cancel}</Button></>}
-          {!editing && doc && <Button className="min-h-11" variant="outline" onClick={() => setPreview(!preview)}>{c.preview}</Button>}
-          {preview && !editing && <Button className="min-h-11" disabled={!!read.error || action.pending || !!read.data.issues.length || read.data.version === read.data.publishedRevision} onClick={() => void publish()}>{c.publish}</Button>}
+          {!editing && <Button className="max-sm:min-h-11" onClick={() => startEditing(0)}>{doc ? c.edit : c.create}</Button>}
+          {editing && <><Button className="max-sm:min-h-11" disabled={action.pending || Object.values(feeInput).some(value => value !== "" && !money.test(value))} onClick={() => void save()}>{c.draft}</Button><Button className="max-sm:min-h-11" variant="outline" onClick={async () => { if (await confirmDialog({ title: t.ux.cancelEdit, description: t.ux.cancelHelp, confirmLabel: t.cancel, cancelLabel: t.ux.keepEditing })) { setEditing(null); setFeeInput({}); } }}>{t.cancel}</Button></>}
+          {!editing && doc && <Button className="max-sm:min-h-11" variant="outline" onClick={() => setPreview(!preview)}>{c.preview}</Button>}
+          {preview && !editing && <Button className="max-sm:min-h-11" disabled={!!read.error || action.pending || !!read.data.issues.length || read.data.version === read.data.publishedRevision} onClick={() => void publish()}>{c.publish}</Button>}
         </div>
         {action.feedback}{read.data.issues.length > 0 && <ul role="alert" className="list-inside list-disc text-sm text-destructive">{read.data.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
         {doc && <div className="grid gap-3 md:grid-cols-3"><Choice label={c.locale} value={locale} values={locales} labels={{ en: "English", "zh-Hant": "繁體中文", "zh-Hans": "简体中文" }} onChange={v => setLocale(v as MembershipLocale)}/>{sites.length > 1 ? <Choice label={c.site} value={site} values={sites} labels={Object.fromEntries(sites.map(key => [key, websiteSiteLabel(key, names)]))} onChange={v => setSite(v)}/> : null}</div>}
-        {!editing && !preview && doc && <div className="grid gap-3 md:grid-cols-2">{doc.programmes.map((p, i) => <article key={p.slug} className="space-y-2 rounded-xl border p-4"><h3 className="font-semibold">{(p.i18n[locale] ?? p.i18n.en).name}</h3><p className="text-sm text-muted-foreground">{statusLabel(p.status)} · {p.audiences.map(a => c[a]).join(" · ")}{p.fee ? ` · HKD ${p.fee.amountMinor / 100}` : ""}</p><Button className="min-h-11" variant="outline" onClick={() => startEditing(i)}>{c.edit}</Button></article>)}</div>}
+        {!editing && !preview && doc && <div className="grid gap-3 md:grid-cols-2">{doc.programmes.map((p, i) => <article key={p.slug} className="space-y-2 rounded-xl border p-4"><h3 className="font-semibold">{(p.i18n[locale] ?? p.i18n.en).name}</h3><p className="text-sm text-muted-foreground">{statusLabel(p.status)} · {p.audiences.map(a => c[a]).join(" · ")}{p.fee ? ` · HKD ${p.fee.amountMinor / 100}` : ""}</p><Button className="max-sm:min-h-11" variant="outline" onClick={() => startEditing(i)}>{c.edit}</Button></article>)}</div>}
         {preview && doc && <div className="grid min-w-0 gap-4 lg:grid-cols-2">{([c.before, c.after] as const).map((title, index) => <div className="min-w-0 rounded-xl border p-4" key={title}><h3 className="font-semibold">{title}</h3><ProgrammePreview document={index === 0 ? read.data!.published : doc} locale={locale} site={site}/></div>)}</div>}
         {editing && doc && <fieldset disabled={action.pending} className="min-w-0 space-y-6">
-          <div className="flex flex-wrap gap-2">{doc.programmes.map((p, i) => <Button className="min-h-11 max-w-full" key={i} variant={i === selected ? "default" : "outline"} onClick={() => setSelected(i)}>{(p.i18n[locale] ?? p.i18n.en).name || p.slug || c.newProgramme}</Button>)}
-            <Button className="min-h-11" variant="outline" onClick={() => { setSelected(doc.programmes.length); patch(d => d.programmes.push({ slug: `programme-${d.programmes.length + 1}`, audiences: ["students"], order: d.programmes.length, sites: sites.slice(0, 1), status: "live", fee: null, gallery: null, cover: null, href: null, i18n: { en: emptyCopy() } })); }}>{c.newProgramme}</Button>
+          <div className="flex flex-wrap gap-2">{doc.programmes.map((p, i) => <Button className="max-sm:min-h-11 max-w-full" key={i} variant={i === selected ? "default" : "outline"} onClick={() => setSelected(i)}>{(p.i18n[locale] ?? p.i18n.en).name || p.slug || c.newProgramme}</Button>)}
+            <Button className="max-sm:min-h-11" variant="outline" onClick={() => { setSelected(doc.programmes.length); patch(d => d.programmes.push({ slug: `programme-${d.programmes.length + 1}`, audiences: ["students"], order: d.programmes.length, sites: sites.slice(0, 1), status: "live", fee: null, gallery: null, cover: null, href: null, i18n: { en: emptyCopy() } })); }}>{c.newProgramme}</Button>
           </div>
           {programme && <section className="grid min-w-0 gap-4 rounded-xl border p-4 md:grid-cols-2">
             <Field label={c.slug} value={programme.slug} disabled={publishedSlugs.has(programme.slug)} help={publishedSlugs.has(programme.slug) ? c.slugLocked : undefined} onChange={v => setProgramme("slug", v)}/>
@@ -86,8 +86,8 @@ export function ProgrammePublishingPanel({ workspaceId }: { workspaceId: string 
             {!programme.coverMediaId && <Field label={c.cover} value={programme.cover ?? ""} onChange={v => setProgramme("cover", v || null)}/>}
             {programme.coverMediaId && copy && <Field label={c.coverAlt} value={copy.coverAlt ?? ""} help={locale === "en" ? c.coverAltHelp : undefined} onChange={v => patchCopy(value => { value.coverAlt = v; })}/>}
             <Field label={c.href} value={programme.href ?? ""} onChange={v => setProgramme("href", v || null)}/>
-            {!copy && <div className="space-y-2 md:col-span-2"><InlineNotice tone="neutral">{c.noTranslation}</InlineNotice><Button variant="outline" className="min-h-11" onClick={() => patch(d => { d.programmes[selected].i18n[locale] = { ...structuredClone(d.programmes[selected].i18n.en) }; })}>{c.addTranslation}</Button></div>}
-            {copy && locale !== "en" && <Button variant="outline" className="min-h-11 md:col-span-2" onClick={() => patch(d => { delete d.programmes[selected].i18n[locale]; })}>{c.removeTranslation}</Button>}
+            {!copy && <div className="space-y-2 md:col-span-2"><InlineNotice tone="neutral">{c.noTranslation}</InlineNotice><Button variant="outline" className="max-sm:min-h-11" onClick={() => patch(d => { d.programmes[selected].i18n[locale] = { ...structuredClone(d.programmes[selected].i18n.en) }; })}>{c.addTranslation}</Button></div>}
+            {copy && locale !== "en" && <Button variant="outline" className="max-sm:min-h-11 md:col-span-2" onClick={() => patch(d => { delete d.programmes[selected].i18n[locale]; })}>{c.removeTranslation}</Button>}
             {copy && <>
               {(["name", "tagline", "kicker", "summary", "feeUnit"] as const).map(key => <Field key={key} label={c[key]} value={copy[key]} multiline={key === "summary"} onChange={v => patchCopy(value => { value[key] = v; })}/>)}
               <Field label={c.feeNotes} multiline value={copy.feeNotes.join("\n")} onChange={v => patchCopy(value => { value.feeNotes = v ? lines(v) : []; })}/>
@@ -97,27 +97,27 @@ export function ProgrammePublishingPanel({ workspaceId }: { workspaceId: string 
               <Rows title={c.contacts} rows={copy.contacts.map(row => ({ label: row.label, name: row.name ?? "", email: row.email }))} fields={[["label", c.contactLabel], ["name", c.contactName], ["email", c.contactEmail]]} add={c.add} remove={c.remove} blankRow={() => ({ label: "", name: "", email: "" })} onChange={rows => patchCopy(value => { value.contacts = rows.map(row => ({ label: row.label, email: row.email, ...(row.name ? { name: row.name } : {}) })); })}/>
               <Rows title={c.links} rows={copy.links} fields={[["label", c.linkLabel], ["href", c.linkUrl]]} add={c.add} remove={c.remove} blankRow={() => ({ label: "", href: "/" })} onChange={rows => patchCopy(value => { value.links = rows; })}/>
               <div className="space-y-3 md:col-span-2"><h4>{c.cta}</h4>
-                {!copy.cta ? <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.cta = { heading: "", text: "", href: "/contact", label: "" }; })}>{c.add}: {c.cta}</Button> : <div className="grid gap-2 md:grid-cols-2">
+                {!copy.cta ? <Button variant="outline" className="max-sm:min-h-11" onClick={() => patchCopy(value => { value.cta = { heading: "", text: "", href: "/contact", label: "" }; })}>{c.add}: {c.cta}</Button> : <div className="grid gap-2 md:grid-cols-2">
                   {(["heading", "text", "href", "label"] as const).map(key => <Field key={key} label={c[key === "heading" ? "ctaHeading" : key === "text" ? "ctaText" : key === "href" ? "linkUrl" : "ctaLabel"]} value={copy.cta![key]} onChange={v => patchCopy(value => { value.cta![key] = v; })}/>)}
                   <Field label={`${c.ctaSecondary}: ${c.linkLabel}`} value={copy.cta.secondary?.label ?? ""} onChange={v => patchCopy(value => { value.cta!.secondary = v || value.cta!.secondary?.href ? { label: v, href: value.cta!.secondary?.href ?? "/" } : undefined; })}/>
                   <Field label={`${c.ctaSecondary}: ${c.linkUrl}`} value={copy.cta.secondary?.href ?? ""} onChange={v => patchCopy(value => { value.cta!.secondary = v || value.cta!.secondary?.label ? { label: value.cta!.secondary?.label ?? "", href: v } : undefined; })}/>
-                  <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.cta = null; })}>{c.remove}: {c.cta}</Button></div>}
+                  <Button variant="outline" className="max-sm:min-h-11" onClick={() => patchCopy(value => { value.cta = null; })}>{c.remove}: {c.cta}</Button></div>}
               </div>
               <div className="space-y-3 md:col-span-2"><h4>{c.steps}</h4>
-                {!copy.steps ? <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.steps = { title: "", items: [] }; })}>{c.add}: {c.steps}</Button> : <div className="space-y-2">
+                {!copy.steps ? <Button variant="outline" className="max-sm:min-h-11" onClick={() => patchCopy(value => { value.steps = { title: "", items: [] }; })}>{c.add}: {c.steps}</Button> : <div className="space-y-2">
                   <Field label={c.stepsTitle} value={copy.steps.title} onChange={v => patchCopy(value => { value.steps!.title = v; })}/>
                   <Rows title="" rows={copy.steps.items} fields={[["title", c.stepTitle], ["text", c.stepText]]} add={c.add} remove={c.remove} blankRow={() => ({ title: "", text: "" })} onChange={rows => patchCopy(value => { value.steps!.items = rows; })}/>
-                  <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.steps = null; })}>{c.remove}: {c.steps}</Button></div>}
+                  <Button variant="outline" className="max-sm:min-h-11" onClick={() => patchCopy(value => { value.steps = null; })}>{c.remove}: {c.steps}</Button></div>}
               </div>
               <div className="space-y-3 md:col-span-2"><h4>{c.sections}</h4>
                 {copy.sections.map((section, i) => <div className="space-y-3 border-t border-border pt-3" key={i}>
                   <SectionFields section={section} labels={c} onChange={fn => patchCopy(value => fn(value.sections[i]))}/>
                   <div className="space-y-2 pl-3"><h5 className="text-sm font-medium">{c.subsections}</h5>
-                    {section.subsections.map((sub, j) => <div className="space-y-2 border-l-2 border-border pl-3" key={j}><SectionFields section={sub} labels={c} onChange={fn => patchCopy(value => fn(value.sections[i].subsections[j]))}/><Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.sections[i].subsections.splice(j, 1); })}>{c.remove}</Button></div>)}
-                    <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.sections[i].subsections.push(emptySub(value.sections[i].subsections.length + 1)); })}>{c.add}: {c.subsections}</Button></div>
-                  <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.sections.splice(i, 1); })}>{c.remove}: {c.sections}</Button>
+                    {section.subsections.map((sub, j) => <div className="space-y-2 border-l-2 border-border pl-3" key={j}><SectionFields section={sub} labels={c} onChange={fn => patchCopy(value => fn(value.sections[i].subsections[j]))}/><Button variant="outline" className="max-sm:min-h-11" onClick={() => patchCopy(value => { value.sections[i].subsections.splice(j, 1); })}>{c.remove}</Button></div>)}
+                    <Button variant="outline" className="max-sm:min-h-11" onClick={() => patchCopy(value => { value.sections[i].subsections.push(emptySub(value.sections[i].subsections.length + 1)); })}>{c.add}: {c.subsections}</Button></div>
+                  <Button variant="outline" className="max-sm:min-h-11" onClick={() => patchCopy(value => { value.sections.splice(i, 1); })}>{c.remove}: {c.sections}</Button>
                 </div>)}
-                <Button variant="outline" className="min-h-11" onClick={() => patchCopy(value => { value.sections.push(emptySection(value.sections.length + 1)); })}>{c.add}: {c.sections}</Button>
+                <Button variant="outline" className="max-sm:min-h-11" onClick={() => patchCopy(value => { value.sections.push(emptySection(value.sections.length + 1)); })}>{c.add}: {c.sections}</Button>
               </div>
             </>}
           </section>}
@@ -143,8 +143,8 @@ function SectionFields({ section, labels: c, onChange }: { section: ProgrammeSub
 
 function Rows<Row extends Record<string, string>>({ title, rows, fields, add, remove, blankRow, onChange }: { title: string; rows: Row[]; fields: [keyof Row & string, string][]; add: string; remove: string; blankRow: () => Row; onChange: (rows: Row[]) => void }) {
   return <div className="space-y-3 md:col-span-2">{title && <h4>{title}</h4>}
-    {rows.map((row, i) => <div className="grid gap-2 md:grid-cols-4" key={i}>{fields.map(([key, label]) => <Field key={key} label={label} value={row[key]} onChange={v => { const next = rows.map(r => ({ ...r })); next[i][key] = v as Row[typeof key]; onChange(next); }}/>)}<Button variant="outline" className="min-h-11" onClick={() => onChange(rows.filter((_, j) => j !== i))}>{remove}</Button></div>)}
-    <Button variant="outline" className="min-h-11" onClick={() => onChange([...rows, blankRow()])}>{add}{title ? `: ${title}` : ""}</Button>
+    {rows.map((row, i) => <div className="grid gap-2 md:grid-cols-4" key={i}>{fields.map(([key, label]) => <Field key={key} label={label} value={row[key]} onChange={v => { const next = rows.map(r => ({ ...r })); next[i][key] = v as Row[typeof key]; onChange(next); }}/>)}<Button variant="outline" className="max-sm:min-h-11" onClick={() => onChange(rows.filter((_, j) => j !== i))}>{remove}</Button></div>)}
+    <Button variant="outline" className="max-sm:min-h-11" onClick={() => onChange([...rows, blankRow()])}>{add}{title ? `: ${title}` : ""}</Button>
   </div>;
 }
 

@@ -75,9 +75,9 @@ export function LiveInteractionJobs({ workspaceId, sessionId, messageIds, onCano
       <p role="status" className="text-xs text-muted-foreground">{t[job.status]}</p>
       {(!job.assistantMessageId || !messageIds.has(job.assistantMessageId)) && <p className="text-sm whitespace-pre-wrap break-words">{job.answer}</p>}
       {job.error && <p role="alert" className="text-sm text-destructive">{t.error}</p>}
-      {(job.status === "queued" || job.status === "running") && <Button className="min-h-11" variant="outline" onClick={() => void act(job, "cancel")}>{t.cancel}</Button>}
-      {(job.status === "failed" || job.status === "cancelled") && <Button className="min-h-11" variant="outline" onClick={() => void act(job, "retry")}>{t.retry}</Button>}
-      <Button className="min-h-11" variant="outline" disabled={editing} onClick={() => void edit(job)}>{t.editQuestion}</Button>
+      {(job.status === "queued" || job.status === "running") && <Button className="max-sm:min-h-11" variant="outline" onClick={() => void act(job, "cancel")}>{t.cancel}</Button>}
+      {(job.status === "failed" || job.status === "cancelled") && <Button className="max-sm:min-h-11" variant="outline" onClick={() => void act(job, "retry")}>{t.retry}</Button>}
+      <Button className="max-sm:min-h-11" variant="outline" disabled={editing} onClick={() => void edit(job)}>{t.editQuestion}</Button>
     </article>)}
   </div>;
 }
@@ -98,8 +98,8 @@ export function LiveInteractionQuestionControls({ captureId }: { captureId: stri
     finally { setBusy(false); }
   };
   return <div className="flex flex-wrap gap-2">
-    <Button className="min-h-11" variant="outline" disabled={busy} onClick={() => void act("submit")}>{t.askNow}</Button>
-    <Button className="min-h-11" variant="outline" disabled={busy} onClick={() => void act("cancel")}>{t.cancelPending}</Button>
+    <Button className="max-sm:min-h-11" variant="outline" disabled={busy} onClick={() => void act("submit")}>{t.askNow}</Button>
+    <Button className="max-sm:min-h-11" variant="outline" disabled={busy} onClick={() => void act("cancel")}>{t.cancelPending}</Button>
     {failed && <p role="alert" className="text-sm text-destructive">{t.error}</p>}
   </div>;
 }

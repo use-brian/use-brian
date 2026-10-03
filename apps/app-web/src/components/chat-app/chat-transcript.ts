@@ -25,6 +25,8 @@ export type ChatSurfaceMessage = Message & {
   senderAssistantId?: string | null;
   userAttachments?: MessageAttachmentRef[];
   documents?: TranscriptDocumentAttachment[];
+  /** Pages the assistant created or edited this turn (lib/chat-page-links). */
+  pageLinks?: string[];
 };
 
 /** Per-row presentation metadata for the group-chat transcript timeline. */
@@ -227,6 +229,11 @@ function mergeAssistantRows(
     earlier.documents,
     later.documents,
     (entry) => entry.id,
+  );
+  merged.pageLinks = mergeUnique(
+    earlier.pageLinks,
+    later.pageLinks,
+    (entry) => entry,
   );
 
   return merged;

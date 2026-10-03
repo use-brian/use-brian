@@ -22,7 +22,8 @@
  *  - The tab strip + per-tab browse history (`doc-tabs.ts`) and the two
  *    URL↔tabs reconciliation effects that make `/p/<pageId>` switching a soft
  *    swap (no remount, no list flash — see `p/layout.tsx`).
- *  - The draft landing / build flow, the floating + mobile chat docks.
+ *  - The draft landing (its composer hands off to the Chat app), the
+ *    floating + mobile chat docks.
  *
  * Selecting a sidebar row writes the canonical `/p/<pageId>` URL (the chrome
  * does the `router.push`); the URL→tabs effect below adopts it into the active
@@ -124,17 +125,9 @@ import { ApprovalsPanel } from "./panels/approvals-panel";
 import { AutopilotPanel } from "./panels/autopilot-panel";
 import { TriagePanel } from "./panels/triage-panel";
 import { RecordingsPanel } from "./panels/recordings-panel";
-import { requestChatSeed, type ChatSeed } from "@/lib/chat-seed";
 import { docChatRelay } from "@/lib/doc-chat-relay";
-import { isAuthRedirectInFlight } from "@/lib/auth-fetch";
-import {
-  clearPendingBuild,
-  stashPendingBuild,
-  takePendingBuild,
-} from "@/lib/pending-build";
-import { PageBuildIndicator } from "./page-build-indicator";
+import { personalChatHandoffPath, stashChatHandoff } from "@/lib/chat-handoff";
 import { PageLoadErrorState } from "./error-states";
-import { subscribeBuildActivity, buildIndicatorTransition } from "@/lib/build-activity";
 import { offlineWrite } from "@/lib/offline/offline-writes";
 import {
   publishCollabConnected,
@@ -436,11 +429,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     return () => window.removeEventListener("doc:title-updated", handler);
   }, [applyAutoTitle]);
 
-  // Chat-seed bridge moved up to `WorkspaceChrome` with the dock — the doc
-  // landing's chatter still fires the same `doc:chat-seed` event
-  // (`requestChatSeed`, below); the chrome subscribes and routes it. The dock
-  // lives above this shell now, so the routing must too.
-
   // Page-collab guard relay. The "another member is running on this page"
   // warning needs the page's Yjs provider (`assistantRun`), which only exists
   // here. The dock reads it from the module-level relay (it can't be passed
@@ -456,19 +444,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     return () => docChatRelay.setOthersRun(null);
   }, [docOthersRun]);
 
-  // ── Page-body build indicator ─────────────────────────────────────────
-  // A landing prompt pre-creates a draft and runs the build with the corner
-  // chat collapsed; the page body fills via Yjs. To make that work visible
-  // *on the page*, the editor renders `<PageBuildIndicator>` (under the page
-  // comment composer) whenever `buildingPageId` is the active page — the
-  // indicator pulls the live detail (tool timeline + streaming text) off the
-  // build-activity bus itself, so the shell only owns *visibility*, not the
-  // per-token content. We subscribe here purely to clear `buildingPageId`
-  // when the turn finishes: wait until we've actually seen it stream (so the
-  // pre-stream tick doesn't clear early), then drop the banner when it stops.
-  const [buildingPageId, setBuildingPageId] = useState<string | null>(null);
-  const buildingPageIdRef = useRef<string | null>(null);
-  buildingPageIdRef.current = buildingPageId;
   // Whether the active page has an inline comment anchor (reported by the
   // editor). When it does — and the page is the constrained reading column on a
   // wide viewport — the content shifts left to reserve a right gutter so the
@@ -596,12 +571,12 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     pageHasComments && pageView && !pageView.fullWidth
       ? commentGutterWidth(viewportWidth)
       : 0;
-  // A brand-new, untouched draft (placeholder title) that isn't mid-build shows
+  // A brand-new, untouched draft (placeholder title) shows
   // the same "What do you want to see?" prompt as a blank tab — an empty draft
   // and an empty tab are the same "haven't decided what this page is" state,
-  // except the draft already has an id, so a submit builds *into* it (no comment
-  // band, no bare editor). Once a build starts (`buildingPageId`) or the page
-  // auto/user-titles, the editor takes over so the construction streams onto it.
+  // except the draft already has an id. A submit hands the prompt to Chat (see
+  // `handleLandingSubmit`); once the page gains a block or a real title (Chat
+  // can edit it, or the user types), the editor takes over.
   //
   // Emptiness: while the doc is still syncing a placeholder draft is *presumed
   // empty* (a freshly-created one is — this is what kills the open-flicker where
@@ -612,98 +587,17 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   //
   // The `newDraftId` latch covers the earlier window still: right after "+ New
   // draft", `pageView` is null (its `getView` is in flight), so the placeholder
-  // gate can't fire yet — the latch forces the landing until the draft syncs. A
-  // running build always wins (the editor must show the stream).
+  // gate can't fire yet — the latch forces the landing until the draft syncs.
   // "Start with a blank page" wins over every landing trigger: once the user
   // opts to write the page by hand, the editor must hold even though the draft
   // is still an empty placeholder (which would otherwise re-assert the prompt).
   const startedBlank = urlViewId !== null && blankDraftIds.has(urlViewId);
   const isDraftLanding =
     !startedBlank &&
-    buildingPageId !== urlViewId &&
     ((newDraftId !== null && newDraftId === urlViewId) ||
       (!!pageView &&
         pageView.nameOrigin === "placeholder" &&
         (!collab.synced || docEmpty)));
-  const buildStartedRef = useRef(false);
-  useEffect(
-    () =>
-      subscribeBuildActivity((a) => {
-        if (!buildingPageIdRef.current) return;
-        // A build that FAILS before it streams never flips `isStreaming`, so
-        // "stopped after streaming" cannot end it — the banner used to hang
-        // until a silent 60s timeout wiped it and the user was told nothing at
-        // all (2026-09-01: a refused turn on the doc dock). Report it on the
-        // page, the only surface showing, since an autoSend build keeps the
-        // corner chat collapsed. The three-way decision is the pure
-        // `buildIndicatorTransition` so it can be tested without this tree.
-        switch (buildIndicatorTransition(a, buildStartedRef.current)) {
-          case "fail":
-            buildStartedRef.current = false;
-            setBuildingPageId(null);
-            setTopError(format(t.buildFailed, { message: a.error ?? "" }));
-            return;
-          case "start":
-            buildStartedRef.current = true;
-            return;
-          case "end":
-            buildStartedRef.current = false;
-            setBuildingPageId(null);
-            return;
-          case "wait":
-            return;
-        }
-      }),
-    [t],
-  );
-
-  // Latest `handleBuildPage`, for the resume effect to call without taking it
-  // as a dep (its identity changes every render). Assigned during render just
-  // after the function is defined.
-  const buildPageRef = useRef<
-    | ((
-        text: string,
-        opts: {
-          model: ChatSeed["model"];
-          researchMode: boolean;
-          fileIds?: string[];
-          attachedRecordingIds?: string[];
-          assistantId?: string;
-        },
-        targetViewId?: string,
-        fromResume?: boolean,
-      ) => void)
-    | null
-  >(null);
-  // One-shot guard so the resume can't re-fire on later renders of this mount.
-  const buildResumedRef = useRef(false);
-
-  // Resume a build interrupted by the auth-refresh redirect. `handleBuildPage`
-  // stashes its intent before the (possibly redirecting) `createDraft`; on the
-  // full-page return we replay it exactly once. `take` is single-consume and
-  // the replay passes `fromResume` (no re-stash), so a still-broken session
-  // can't loop; a short TTL stops a stale prompt resurrecting on a later visit.
-  // See docs/architecture/platform/auth.md → "A sub-app refresh discards
-  // in-flight work".
-  useEffect(() => {
-    if (buildResumedRef.current) return;
-    buildResumedRef.current = true;
-    const pending = takePendingBuild(workspaceId, Date.now());
-    if (!pending) return;
-    buildPageRef.current?.(
-      pending.text,
-      {
-        model: pending.model,
-        researchMode: pending.researchMode,
-        fileIds: pending.fileIds,
-        attachedRecordingIds: pending.attachedRecordingIds,
-        assistantId: pending.assistantId,
-      },
-      pending.targetViewId,
-      true,
-    );
-  }, [workspaceId]);
-
   // (Both sidebar lists are fetched by the hoisted provider, above this shell;
   // they survive `/p/<pageId>` soft swaps because the provider lives in the
   // workspace layout, keyed on the stable route `workspaceId`.)
@@ -1013,114 +907,47 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     setBlankDraftIds((prev) => new Set(prev).add(viewId));
   }
 
-  // Default-viewer landing → "build me a page". Unlike the floating dock
-  // (which streams the reply in the corner), this pre-creates the draft and
-  // navigates to it *immediately*, then hands the prompt to the chat anchored
-  // to that page (`docViewId`). The model edits the open page via
-  // `patchPage`, so the construction streams onto the **page body** itself
-  // (live Yjs), with the corner chat left collapsed — the page is the show.
-  // Pre-creating is also why this doesn't depend on a server "page created"
-  // navigation signal: doc's `renderPage` emits none (only `renderView`
-  // does, and that tool is stripped for doc assistants).
-  async function handleBuildPage(
+  // Landing composer ("What do you want to see?") → a fresh Personal
+  // conversation in the Chat app. The landing used to build into a page with
+  // the corner chat collapsed, which left a conversational reply ("hi", a
+  // clarifying question) hidden behind an empty page. Chat is where a reply is
+  // always visible; when the user asks for a page, Chat creates it and links
+  // it in the transcript. The prompt rides the one-shot `chat-handoff` (never
+  // the URL), the same seam as Home's composer. The model tier needs no field:
+  // every chat surface shares one persisted tier key.
+  function handleLandingSubmit(
     text: string,
     opts: {
-      model: ChatSeed["model"];
       researchMode: boolean;
-      fileIds?: string[];
-      attachedRecordingIds?: string[];
-      /** The landing's draft-assistant pick — rides the seed so the dock
-       *  switches its interlocutor for the build turn. */
+      fileIds: string[];
+      attachedRecordingIds: string[];
+      /** The landing's assistant pick; absent → the workspace primary. */
       assistantId?: string;
     },
-    targetViewId?: string,
-    fromResume = false,
   ) {
+    const targetAssistantId = opts.assistantId ?? assistantId;
+    if (!targetAssistantId) return;
     const trimmed = text.trim();
-    if (!trimmed) return;
-    setTopError(null);
-    // Stash the intent so it survives the mandatory auth-refresh full-page
-    // redirect: `createDraft` below is an `authFetch` POST, and in production a
-    // 401 bounces the whole browser to usebrian.ai and back, reloading this page
-    // and dropping `trimmed` (React state). The resume effect replays it on
-    // return. A replay (`fromResume`) never re-stashes, so a still-broken
-    // session can't loop. See docs/architecture/platform/auth.md → "A sub-app
-    // refresh discards in-flight work".
-    if (!fromResume) {
-      stashPendingBuild({
-        workspaceId,
-        text: trimmed,
-        model: opts.model,
-        researchMode: opts.researchMode,
-        fileIds: opts.fileIds,
-        attachedRecordingIds: opts.attachedRecordingIds,
-        targetViewId,
-        assistantId: opts.assistantId,
-        ts: Date.now(),
-      });
+    if (
+      !trimmed &&
+      opts.fileIds.length === 0 &&
+      opts.attachedRecordingIds.length === 0
+    ) {
+      return;
     }
-    try {
-      // Blank tab → mint a fresh draft and navigate into it. Empty draft (the
-      // draft landing, where the page is already open) → build into THAT page —
-      // it's the same "describe what you want" surface, it just already has an id.
-      let pageId = targetViewId;
-      if (!pageId) {
-        const created = await createDraft({ workspaceId });
-        reloadSidebar();
-        recordPrune(created.id, created.autoPruneAt);
-        navigateToView(created.id);
-        pageId = created.id;
-      }
-      // Surface the build on the page body (indicator) until the turn finishes;
-      // setting `buildingPageId` also swaps the draft landing for the live
-      // editor (see `isDraftLanding`) so the construction streams onto the body.
-      buildStartedRef.current = false;
-      setBuildingPageId(pageId);
-      requestChatSeed({
-        prefill: trimmed,
-        autoSend: true,
-        docViewId: pageId,
-        model: opts.model,
-        researchMode: opts.researchMode,
-        ...(opts.assistantId ? { assistantId: opts.assistantId } : {}),
-        ...(opts.fileIds && opts.fileIds.length > 0
-          ? { fileIds: opts.fileIds }
-          : {}),
-        ...(opts.attachedRecordingIds && opts.attachedRecordingIds.length > 0
-          ? { attachedRecordingIds: opts.attachedRecordingIds }
-          : {}),
-      });
-      // The turn is seeded — intent fulfilled, drop the stash.
-      clearPendingBuild();
-      // Backstop: if the turn never streams (e.g. a rapid second submit hit
-      // the chat while a prior turn was in flight), the stream-end effect
-      // never fires — drop the banner so it can't wedge. No-ops once the
-      // build has actually started (the effect owns clearing from there).
-      window.setTimeout(() => {
-        if (buildStartedRef.current) return;
-        // Say why. Clearing the banner in silence is what made a refused build
-        // indistinguishable from "the model is still thinking" — the user is
-        // left with an empty page and no account of it. Read the ref rather
-        // than reporting from inside the state updater, which must stay pure.
-        if (buildingPageIdRef.current !== pageId) return;
-        setBuildingPageId(null);
-        setTopError(t.buildNeverStarted);
-      }, 60_000);
-    } catch (err) {
-      // Keep the stash ONLY when the throw is the auth redirect unloading the
-      // page (so the build replays on return). Any other failure is terminal
-      // here — clear it so a later reload can't silently re-fire the build.
-      if (!isAuthRedirectInFlight()) clearPendingBuild();
-      const message = err instanceof Error ? err.message : String(err);
-      setTopError(format(t.createDraftFailed, { message }));
-    }
+    stashChatHandoff({
+      workspaceId,
+      assistantId: targetAssistantId,
+      text: trimmed,
+      ...(opts.researchMode ? { researchMode: true } : {}),
+      ...(opts.fileIds.length > 0 ? { fileIds: opts.fileIds } : {}),
+      ...(opts.attachedRecordingIds.length > 0
+        ? { attachedRecordingIds: opts.attachedRecordingIds }
+        : {}),
+      ts: Date.now(),
+    });
+    router.push(personalChatHandoffPath(workspaceId, targetAssistantId));
   }
-
-  // Keep the resume effect (below) pointed at the current `handleBuildPage`
-  // closure without taking it as an effect dep — its identity changes every
-  // render. Assigning a ref during render is the sanctioned "latest callback"
-  // pattern (idempotent, reads no external mutable state).
-  buildPageRef.current = handleBuildPage;
 
   // Sidebar page mutations (add-child / rename / rename-value / duplicate /
   // reparent / save / unsave / delete / set-icon) live in the hoisted provider
@@ -1361,7 +1188,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
               assistantId={assistantId}
               cards={landingCards}
               onOpenCard={navigateToView}
-              onSubmitPrompt={(text, opts) => handleBuildPage(text, opts)}
+              onSubmitPrompt={handleLandingSubmit}
               onStartBlank={() => void handleStartBlankNew()}
               onStartFromTemplate={() => setLandingGalleryOpen(true)}
               studioSetupIncomplete={studioSetupIncomplete}
@@ -1438,18 +1265,16 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             {isDraftLanding ? (
               // Empty, untouched draft → the blank-tab "What do you want to
               // see?" prompt instead of a title + comment band + bare editor.
-              // A submit builds into THIS draft (`urlViewId`); the moment the
-              // build starts, `isDraftLanding` flips false and the editor below
-              // mounts so the construction streams onto the page body.
+              // A submit opens the Chat app with the prompt
+              // (`handleLandingSubmit`); the draft stays an empty placeholder
+              // and auto-prunes like any untouched draft.
               <div className="flex-1 min-h-0 overflow-y-auto">
                 <EmptyPageLanding
                   workspaceId={workspaceId}
                   assistantId={assistantId}
                   cards={landingCards}
                   onOpenCard={navigateToView}
-                  onSubmitPrompt={(text, opts) =>
-                    handleBuildPage(text, opts, urlViewId)
-                  }
+                  onSubmitPrompt={handleLandingSubmit}
                   onStartBlank={() => handleStartBlankDraft(urlViewId)}
                   onStartFromTemplate={() => setLandingGalleryOpen(true)}
                 />
@@ -1610,9 +1435,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                       applyAutoTitle(urlViewId, title, icon)
                     }
                     assistantId={assistantId}
-                    buildSlot={
-                      buildingPageId === urlViewId ? <PageBuildIndicator /> : null
-                    }
                     onCommentsPresenceChange={setPageHasComments}
                     onNewTemplate={() => void handleNewTemplate()}
                     seedTemplate={seedTemplate}

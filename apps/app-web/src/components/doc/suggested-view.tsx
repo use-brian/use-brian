@@ -339,7 +339,7 @@ export function SuggestedView({
         type="submit"
         disabled={!q.trim() || !selectedAssistantId}
         aria-label={tChat.send}
-        className="order-2 ml-auto inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
+        className="order-2 ml-auto inline-flex size-11 shrink-0 md:size-7 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
       >
         <ArrowUp className="size-4" aria-hidden />
       </button>
@@ -362,7 +362,7 @@ export function SuggestedView({
                 <button key={starter} type="button" onClick={() => {
                   setQ(starter);
                   promptRef.current?.focus();
-                }} className="min-h-11 rounded-full border border-border bg-card px-3.5 py-2 text-xs text-muted-foreground transition-colors hover:border-primary/30 hover:bg-muted/50 hover:text-foreground">
+                }} className="max-sm:min-h-11 rounded-full border border-border bg-card px-3.5 py-2 text-xs text-muted-foreground transition-colors hover:border-primary/30 hover:bg-muted/50 hover:text-foreground">
                   {starter}
                 </button>
               ))}

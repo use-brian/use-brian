@@ -293,6 +293,15 @@ import {
   ChatDocumentCard,
   ChatDocumentViewer,
 } from "@/components/chat-app/chat-document-viewer";
+import { ChatPageLinkCard } from "@/components/chat-app/chat-page-link-card";
+import {
+  PAGE_WRITING_TOOLS,
+  addPageLinks,
+  collectPageWrites,
+  pageIdsFromToolResult,
+  pageLinksForRow,
+} from "@/lib/chat-page-links";
+import { docPagePath } from "@/lib/doc-page-url";
 import {
   coalesceAssistantRunMessages,
   computeTranscriptRowMeta,
@@ -724,6 +733,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // to discard, captured at `tool_start` against the tool it preceded.
   const turnNotesRef = useRef<ActivityNote[]>([]);
   const turnDocumentsRef = useRef<DocumentAttachment[]>([]);
+  // Pages the turn created or edited (live `page_created` + page-writing
+  // tool results) — linked under the reply. See lib/chat-page-links.ts.
+  const turnPageLinksRef = useRef<string[]>([]);
   const turnCitationsRef = useRef<CitationSource[]>([]);
   const turnFileAttachmentsRef = useRef<ChatFileAttachment[]>([]);
   const turnWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
@@ -749,6 +761,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     turnToolsRef.current = [];
     turnNotesRef.current = [];
     turnDocumentsRef.current = [];
+    turnPageLinksRef.current = [];
     turnCitationsRef.current = [];
     turnFileAttachmentsRef.current = [];
     turnWorkerDescriptionsRef.current = new Map();
@@ -778,6 +791,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     (assistantId: string | null): SurfaceMessage | null => {
       const finalText = turnTextRef.current.trim();
       const finalDocuments = turnDocumentsRef.current;
+      const finalPageLinks = turnPageLinksRef.current;
       const finalCitations = turnCitationsRef.current;
       const finalFileAttachments = turnFileAttachmentsRef.current;
       // Close any step the server never resolved, so the receipt shows a
@@ -789,6 +803,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         !finalText &&
         tools.length === 0 &&
         finalDocuments.length === 0 &&
+        finalPageLinks.length === 0 &&
         finalFileAttachments.length === 0
       ) {
         return null;
@@ -811,6 +826,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ...(activityNotes ? { activityNotes } : {}),
         ...(activityReasoning ? { activityReasoning } : {}),
         ...(finalDocuments.length > 0 ? { documents: finalDocuments } : {}),
+        ...(finalPageLinks.length > 0 ? { pageLinks: finalPageLinks } : {}),
         ...(activityDurationMs != null ? { activityDurationMs } : {}),
         ...(finalCitations.length > 0 ? { citations: finalCitations } : {}),
         ...(finalFileAttachments.length > 0
@@ -1160,6 +1176,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // Each call's outcome lives on the tool_result carrier row the transcript
     // never renders — index them once so a failed call restores as `retried`.
     const outcomes = collectToolResults(rows);
+    const pageWrites = collectPageWrites(rows);
     const persistedRows: SurfaceMessage[] = rows
       .filter((r) => r.role === "user" || r.role === "assistant")
       .map((r) => {
@@ -1171,6 +1188,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             : { toolsUsed: [], activityNotes: [] };
         const documents =
           r.role === "assistant" ? extractPresentedDocuments(r.content) : [];
+        const pageLinks =
+          r.role === "assistant" ? pageLinksForRow(r.content, pageWrites) : [];
         return {
           id: r.id,
           role: r.role as "user" | "assistant",
@@ -1179,6 +1198,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           ...(toolsUsed.length > 0 ? { toolsUsed } : {}),
           ...(activityNotes.length > 0 ? { activityNotes } : {}),
           ...(documents.length > 0 ? { documents } : {}),
+          ...(pageLinks.length > 0 ? { pageLinks } : {}),
           ...(r.attachments && r.attachments.length > 0
             ? { fileAttachments: r.attachments }
             : {}),
@@ -1201,7 +1221,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           (m.toolsUsed?.length ?? 0) > 0 ||
           (m.userAttachments?.length ?? 0) > 0 ||
           (m.fileAttachments?.length ?? 0) > 0 ||
-          (m.documents?.length ?? 0) > 0,
+          (m.documents?.length ?? 0) > 0 ||
+          (m.pageLinks?.length ?? 0) > 0,
       );
     return coalesce ? coalesceAssistantRunMessages(persistedRows) : persistedRows;
   }, [tChat.toolNarration]);
@@ -2205,6 +2226,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const send = useCallback(async (override?: {
     text?: string;
     fileIds?: string[];
+    /** Recording ids for this turn instead of the composer tray (a handoff). */
+    attachedRecordingIds?: string[];
+    /** Research mode for this turn, ahead of the toggle's state settling. */
+    researchMode?: boolean;
     truncateFromMessageId?: string;
     forceAddress?: boolean;
     /** An EDIT, not a replay: read the mentions out of the new text. A retry
@@ -2219,9 +2244,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const trimmed = (override?.text ?? input).trim();
     const usesComposerTray = override?.fileIds === undefined;
     const turnFileIds = override?.fileIds ?? att.fileIds();
-    const turnRecordingIds = usesComposerTray
-      ? pendingRecordings.map((recording) => recording.recordingId)
-      : [];
+    const turnRecordingIds =
+      override?.attachedRecordingIds ??
+      (usesComposerTray
+        ? pendingRecordings.map((recording) => recording.recordingId)
+        : []);
+    const turnResearchMode = override?.researchMode ?? researchMode;
     // Snapshot the interlocutor at send time — the turn belongs to it even
     // if the resolution inputs shift while the reply streams.
     const interlocutor = activeAssistant;
@@ -2290,7 +2318,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       reply?.role === "assistant" ||
       turnFileIds.length > 0 ||
       turnRecordingIds.length > 0 ||
-      researchMode ||
+      turnResearchMode ||
       override?.forceAddress === true;
     setAskArmed(false);
     mentions.reset();
@@ -2458,7 +2486,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         appOrigin: APP_ORIGIN,
         // The picked tier rides every turn; the server clamps to plan.
         model,
-        ...(researchMode ? { mode: "research" as const } : {}),
+        ...(turnResearchMode ? { mode: "research" as const } : {}),
         // The first persisted row owns the attachments. Later assistants see
         // them through room history; re-sending file ids would transcribe /
         // distil the same upload again.
@@ -2748,6 +2776,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               startedAtMs != null
                 ? Math.max(0, Math.round(performance.now() - startedAtMs))
                 : undefined;
+            const finishedTool = turnToolsRef.current.find((tool) => tool.id === id);
+            if (finishedTool && PAGE_WRITING_TOOLS.has(finishedTool.name) && output) {
+              turnPageLinksRef.current = addPageLinks(
+                turnPageLinksRef.current,
+                pageIdsFromToolResult(output, isError),
+              );
+            }
             turnToolsRef.current = turnToolsRef.current.map((tool) =>
               tool.id === id
                 ? {
@@ -2760,6 +2795,22 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 : tool,
             );
             setToolTimeline(turnToolsRef.current);
+            break;
+          }
+          case "page_created": {
+            // The assistant created a new Page. Link it under the reply and
+            // tell the hoisted sidebar provider to reload so the Page shows
+            // in the Pages tree without a refresh. No navigation: Chat stays
+            // the surface; the card is how the user opens it.
+            const newPageId =
+              typeof payload.pageId === "string" ? payload.pageId : "";
+            if (!newPageId) break;
+            turnPageLinksRef.current = addPageLinks(turnPageLinksRef.current, [newPageId]);
+            window.dispatchEvent(
+              new CustomEvent("doc:draft-created", {
+                detail: { viewId: newPageId, action: "created" },
+              }),
+            );
             break;
           }
           case "document_payload": {
@@ -3169,13 +3220,22 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setPendingHandoff(null);
       return;
     }
-    const text = pendingHandoff.text;
+    const { text, researchMode: handoffResearch, fileIds, attachedRecordingIds } =
+      pendingHandoff;
     setPendingHandoff(null);
     if (action === "prefill") {
       setInput((current) => (current.trim() ? current : text));
       return;
     }
-    void send({ text });
+    // Reflect the launcher's research pick in this composer so a follow-up
+    // keeps it, and pass it as an override so THIS turn uses it already.
+    if (handoffResearch) setResearchMode(true);
+    void send({
+      text,
+      ...(fileIds ? { fileIds } : {}),
+      ...(attachedRecordingIds ? { attachedRecordingIds } : {}),
+      ...(handoffResearch ? { researchMode: true } : {}),
+    });
   }, [
     activeAssistant?.id,
     activeSessionId,
@@ -4370,7 +4430,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   {dockRecorder.interactionStatus === "gap" ? interactionT.error : interactionT.listening}
                 </p>
                 {dockRecorder.interactionCaptureId && <LiveInteractionQuestionControls key={dockRecorder.interactionCaptureId} captureId={dockRecorder.interactionCaptureId} />}
-                <button type="button" className="min-h-11 text-sm underline" onClick={() => dockRecorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
+                <button type="button" className="min-h-8 max-sm:min-h-11 text-sm underline" onClick={() => dockRecorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
               </div>
             )}
             {!isRoomView && view === "personal" && <LiveInteractionJobs
@@ -4603,6 +4663,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         key={document.id}
                         document={document}
                         onOpen={setOpenDocument}
+                      />
+                    ))}
+                    {m.pageLinks?.map((pageId) => (
+                      <ChatPageLinkCard
+                        key={pageId}
+                        pageId={pageId}
+                        onOpen={(id) => router.push(docPagePath(workspaceId, id))}
                       />
                     ))}
                     {m.text

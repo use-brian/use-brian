@@ -140,6 +140,7 @@ import { readMailboxIdleStatus } from '../mailbox/idle-watcher.js'
 import { countEmailArchiveMessages } from '../db/email-archive-store.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { CHAT_ARCHIVE_SEARCH_TOOL } from '../chat-archive/tool-catalog.js'
+import { autoExposeOnConnectMiddleware } from '../connectors/auto-expose.js'
 import {
   ConnectorLifecycleError,
   createConnectorLifecycleService,
@@ -406,6 +407,11 @@ function instanceRow(
 export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   const { connectorStore, connectorInstanceStore, mcpSettingsStore } = opts
   const router = Router()
+  // First, so every connect route below (and the mounted custom-connector
+  // routes) shares a new connection with the workspace it came from.
+  router.use(autoExposeOnConnectMiddleware(opts.connectorGrantStore
+    ? { grantStore: opts.connectorGrantStore, instanceStore: connectorInstanceStore }
+    : null))
   if (opts.setupService) {
     router.use('/setups', connectorSetupRoutes(opts.setupService))
     router.use(shopifySetupRoutes(opts.setupService, opts.shopifySetupRedirectUri))

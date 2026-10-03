@@ -19,7 +19,7 @@ type Card = { key: string; title: string; help: string; icon: LucideIcon; href: 
 function PageCard({ card, names }: { card: Card; names: Record<string, string> }) {
   const c = useT().associationPage.content;
   return <Link href={card.href} data-website-card={card.key}
-    className="flex min-h-11 flex-col gap-3 rounded-2xl border border-border bg-background p-5 transition-colors hover:border-primary/40 hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring">
+    className="flex min-h-8 max-sm:min-h-11 flex-col gap-3 rounded-2xl border border-border bg-background p-5 transition-colors hover:border-primary/40 hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring">
     <div className="flex items-start justify-between gap-3">
       <span className="flex items-center gap-2 font-semibold"><card.icon aria-hidden className="size-4 shrink-0 text-muted-foreground" />{card.title}</span>
       {card.state ? <PublicationStatus state={card.state} names={names} /> : null}

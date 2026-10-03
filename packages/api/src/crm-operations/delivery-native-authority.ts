@@ -1,6 +1,7 @@
 /** Transactional native sender identity and mailbox grants. [COMP:crm/delivery-policy] */
 import type { PoolClient } from 'pg'
 import { CrmOperationsError, type CrmOperationsActor, type CrmNativeDeliveryAuthority } from '@use-brian/core'
+import { defaultGrantedConnectorActions } from '@use-brian/shared'
 import { connectorExposureAllowed } from '../context-scope/connector-exposure.js'
 import { connectorInstanceGovernanceId } from '../db/connector-instance-store.js'
 
@@ -74,7 +75,9 @@ export async function lockNativeDeliveryMailbox(client:PoolClient,workspaceId:st
   const sendAction={gmail:'gmailSendMessage',imap:'imapSendMessage',agentmail:'agentmailSendMessage'}[selected.provider]
   if(!sendAction) throw denied()
   const grant=await client.query<{actions:string[]}>(`SELECT allowed_actions AS actions FROM assistant_connector_grants WHERE assistant_id=$1 AND connector_id=$2 FOR SHARE`,[native.ceiling.assistantId,governance])
-  if(!grant.rows[0]?.actions.includes(sendAction)) throw denied()
+  // No row = the registry default grant (every write, sends included).
+  const actions=grant.rows[0]?.actions??defaultGrantedConnectorActions(selected.provider)
+  if(!actions.includes(sendAction)) throw denied()
   const policy=selected.scope==='workspace'
     ? await client.query(`SELECT policy FROM workspace_tool_policy WHERE workspace_id=$1 AND server_name IN($2,$3) AND tool_name=$4 FOR SHARE`,[workspaceId,selected.provider,exact,sendAction])
     : await client.query(`SELECT policy FROM mcp_tool_settings WHERE user_id=$1 AND assistant_id=$2 AND server_name IN($3,$4) AND tool_name=$5 FOR SHARE`,[selected.userId,native.ceiling.assistantId,selected.provider,exact,sendAction])

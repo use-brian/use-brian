@@ -31,7 +31,7 @@
  *   input, data or visual-state change wakes it (`wake()`). The always-on
  *   decorations that forced continuous frames (per-node twinkle, breathing
  *   halos, drifting aurora, ambient photons, the hover pulse ring) are gone
- *   or moved: the atmosphere (aurora / dot grid / vignette) is CSS behind a
+ *   or moved: the atmosphere (dot grid / vignette) is CSS behind a
  *   transparent canvas (`.graph-backdrop`), so at rest the canvas costs
  *   nothing and looks the same.
  * - Node sizing: flat log curve clamped to [2.5, 7] graph units
@@ -192,6 +192,13 @@ type Props = {
   highlightNames?: ReadonlySet<string> | null;
   /** Re-scope the highlight projection around ONE id (the panel's Reveal). */
   highlightRevealId?: string | null;
+  /**
+   * Retrieved entries the caller resolved itself (clearance-scoped). Any the
+   * current projection does not already draw join it as standalone nodes, so
+   * a turn whose retrieval is all unlinked memories (which the graph route
+   * never draws) still lights its entries instead of matching nothing.
+   */
+  auditEntries?: readonly BrainGraphNode[];
   /** Active recorded access, within the stable full-turn highlight projection. */
   accessIds?: readonly string[];
   accessNames?: readonly string[];
@@ -342,6 +349,8 @@ const TIER_NEIGHBOR_FOCUS = 0.5;
 const TIER_REST_FOCUS = 0.12;
 const TIER_NEIGHBOR_HIGHLIGHT = 0.45;
 const TIER_REST_HIGHLIGHT = 0.1;
+// Audit replay: the turn's other matches step back while one access pulses.
+const TIER_HIGHLIGHT_WAITING = 0.55;
 
 /** How many incident edges get a type label while a node is hovered. */
 const HOVER_EDGE_LABEL_CAP = 12;
@@ -425,6 +434,7 @@ export function BrainGraphView({
   highlightIds,
   highlightNames,
   highlightRevealId,
+  auditEntries,
   accessIds,
   accessNames,
   accessPulseKey,
@@ -581,7 +591,14 @@ export function BrainGraphView({
   );
 
   const activeProjection = scopedGraph ?? sourceGraph;
-  const graph = activeProjection;
+  const graph = useMemo(() => {
+    if (!auditEntries || auditEntries.length === 0) return activeProjection;
+    const present = new Set(activeProjection.nodes.map((node) => node.id));
+    const extra = auditEntries.filter((node) => !present.has(node.id));
+    return extra.length === 0
+      ? activeProjection
+      : { ...activeProjection, nodes: [...activeProjection.nodes, ...extra] };
+  }, [activeProjection, auditEntries]);
   const groupLabel = t.brainPage.graphView.density.groupLabel;
   const groupCountLabel = t.brainPage.graphView.density.groupCount;
 
@@ -1131,6 +1148,14 @@ export function BrainGraphView({
     !isBrainGraphGroupNode(node) && (accessIds?.includes(node.id) ||
       accessNames?.includes(node.name.trim().toLowerCase())),
   ), [graphData, accessIds, accessNames]);
+  // The entries the current access lit, when a replay is running and at
+  // least one of them is drawn - otherwise no match steps back.
+  const accessFocusIds = useMemo(
+    () => accessPulseKey && accessNodes.length > 0
+      ? new Set(accessNodes.map((node) => node.id))
+      : null,
+    [accessPulseKey, accessNodes],
+  );
   const accessPulseStartRef = useRef<number | null>(null);
   useEffect(() => {
     onAccessReady?.(!scopeLoading && !loading && Boolean(ForceGraph2D));
@@ -1151,6 +1176,7 @@ export function BrainGraphView({
     hoverId,
     focusMatchIds,
     highlightMatchIds,
+    accessFocusIds,
     legendMatchIds,
     activeFilterKinds,
     colors,
@@ -1526,9 +1552,6 @@ export function BrainGraphView({
     >
       {/* Atmosphere — CSS, not canvas (see the header note). */}
       <div className="graph-backdrop" aria-hidden>
-        <div className="graph-backdrop__aurora graph-backdrop__aurora--a" />
-        <div className="graph-backdrop__aurora graph-backdrop__aurora--b" />
-        <div className="graph-backdrop__aurora graph-backdrop__aurora--c" />
         <div ref={gridRef} className="graph-backdrop__grid" />
         <div className="graph-backdrop__vignette" />
       </div>
@@ -1627,7 +1650,7 @@ export function BrainGraphView({
           className={cn(chipCls, "absolute bottom-2 left-2 z-10 w-[200px] px-1.5 py-1.5")}
           onPointerLeave={() => setLegendSpotlight(null)}
         >
-          {compactAudit ? <summary className="min-h-11 cursor-pointer content-center px-1 text-xs font-medium">
+          {compactAudit ? <summary className="min-h-8 max-sm:min-h-11 cursor-pointer content-center px-1 text-xs font-medium">
             {t.brainPage.graphView.groupsLegend.heading}
           </summary> : <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide opacity-70">
             {t.brainPage.graphView.groupsLegend.heading}
@@ -1861,9 +1884,14 @@ export function BrainGraphView({
             if (hoverId !== null) {
               target = isHovered || isHoverNeighbor ? 1 : TIER_REST_HOVER;
             } else if (highlightMatchIds) {
+              // In the Audit pane only the turn's own entries stay lit: a
+              // neighbour of a retrieved entry was not retrieved. While one
+              // access replays, the other matches step back so the order reads.
               target = isHighlight
-                ? 1
-                : isHighlightNeighbor
+                ? accessFocusIds && !accessFocusIds.has(n.id)
+                  ? TIER_HIGHLIGHT_WAITING
+                  : 1
+                : isHighlightNeighbor && !auditMode
                   ? TIER_NEIGHBOR_HIGHLIGHT
                   : TIER_REST_HIGHLIGHT;
             } else if (focusMatchIds) {

@@ -38,7 +38,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import { useRouter } from "next/navigation";
 import { useEditor, EditorContent } from "@tiptap/react";
@@ -153,12 +152,6 @@ export type CollabPageEditorProps = {
    *  are read-only (no new threads, no AI replies). */
   assistantId?: string;
   /**
-   * Optional node rendered between the page comment composer and the content
-   * (top of the body). Used by the shell to drop the `<PageBuildIndicator>`
-   * where the AI's blocks stream in, while a landing build runs.
-   */
-  buildSlot?: ReactNode;
-  /**
    * Reports whether this page currently has at least one inline (in-doc)
    * comment anchor. The shell uses it to reserve a right gutter — shifting the
    * page content left so the comment rail has somewhere to dock (Notion-style).
@@ -198,7 +191,6 @@ export function CollabPageEditor({
   nameOrigin,
   onAutoTitled,
   assistantId,
-  buildSlot,
   onCommentsPresenceChange,
   onNewTemplate,
   seedTemplate,
@@ -211,10 +203,7 @@ export function CollabPageEditor({
   const { doc, provider, synced, status } = collab;
   if (!doc || !provider) {
     return (
-      <>
-        {buildSlot}
-        <EditorSkeleton />
-      </>
+      <EditorSkeleton />
     );
   }
   return (
@@ -227,7 +216,7 @@ export function CollabPageEditor({
     <DrawingToolbarProvider>
     {collab.recoveryRequired && <div role="alert" className="rounded border border-border p-3 text-sm">
       <p>{drawingCopy.drawingRecovery}</p>
-      <button type="button" className="min-h-11 rounded px-3 py-2 text-primary hover:bg-muted" onClick={async () => {
+      <button type="button" className="max-sm:min-h-11 rounded px-3 py-2 text-primary hover:bg-muted" onClick={async () => {
         if (await confirmDialog({ title: drawingCopy.drawingRecoveryAction, description: drawingCopy.drawingRecovery,
           confirmLabel: drawingCopy.drawingRecoveryAction, cancelLabel: drawingCopy.cancel, variant: 'destructive' })) {
           try { setRecoveryFailed(false); await collab.discardLocalChanges?.(); }
@@ -238,7 +227,7 @@ export function CollabPageEditor({
     </div>}
     {collab.reloadRequired && !collab.recoveryRequired && <div role="alert" className="rounded border border-border p-3 text-sm">
       <p>{drawingCopy.drawingReload}</p>
-      <button type="button" className="min-h-11 rounded px-3 py-2 text-primary hover:bg-muted" onClick={() => window.location.reload()}>{drawingCopy.drawingReloadAction}</button>
+      <button type="button" className="max-sm:min-h-11 rounded px-3 py-2 text-primary hover:bg-muted" onClick={() => window.location.reload()}>{drawingCopy.drawingReloadAction}</button>
     </div>}
     <CollabEditorInner
       doc={doc}
@@ -251,7 +240,6 @@ export function CollabPageEditor({
       nameOrigin={nameOrigin}
       onAutoTitled={onAutoTitled}
       assistantId={assistantId}
-      buildSlot={buildSlot}
       onCommentsPresenceChange={onCommentsPresenceChange}
       onNewTemplate={onNewTemplate}
       seedTemplate={seedTemplate}
@@ -275,7 +263,6 @@ function CollabEditorInner({
   nameOrigin,
   onAutoTitled,
   assistantId,
-  buildSlot,
   onCommentsPresenceChange,
   onNewTemplate,
   seedTemplate,
@@ -292,7 +279,6 @@ function CollabEditorInner({
   nameOrigin?: string;
   onAutoTitled?: (title: string, icon: string | null) => void;
   assistantId?: string;
-  buildSlot?: ReactNode;
   onCommentsPresenceChange?: (present: boolean) => void;
   onNewTemplate?: () => void;
   seedTemplate?: { kind: "builtin" | "custom"; id: string } | null;
@@ -1301,9 +1287,6 @@ function CollabEditorInner({
           pageId={viewId ?? ""}
         />
       ) : null}
-      {/* Drafting indicator (when a landing build is running this page) sits
-          at the top of the content body, right where the blocks stream in. */}
-      {buildSlot}
       <EditorContent editor={editor} />
       {viewId ? (
         <CommentRail

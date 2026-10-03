@@ -282,11 +282,11 @@ export function PageLoadErrorState({
         </p>
 
         <div className="mt-6 flex flex-col justify-center gap-2 sm:flex-row">
-          <Button type="button" size="lg" className="min-h-11 sm:min-w-32" onClick={onRetry}>
+          <Button type="button" size="lg" className="max-sm:min-h-11 sm:min-w-32" onClick={onRetry}>
             <RefreshCw aria-hidden />
             {t.pageLoadRetry}
           </Button>
-          <Button type="button" size="lg" variant="outline" className="min-h-11 sm:min-w-40" onClick={() => void copyDiagnostics()}>
+          <Button type="button" size="lg" variant="outline" className="max-sm:min-h-11 sm:min-w-40" onClick={() => void copyDiagnostics()}>
             {copyState === "copied" ? <Check aria-hidden /> : <Copy aria-hidden />}
             {copyState === "copied" ? t.diagnosticsCopied : t.copyDiagnostics}
           </Button>
@@ -298,7 +298,7 @@ export function PageLoadErrorState({
         ) : null}
 
         <details className="group mt-6 border-t border-border/70 pt-2 text-left">
-          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-2 text-sm font-medium text-muted-foreground outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+          <summary className="flex min-h-8 max-sm:min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-2 text-sm font-medium text-muted-foreground outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
             {t.technicalDetails}
             <ChevronDown aria-hidden className="size-4 transition-transform group-open:rotate-180" />
           </summary>

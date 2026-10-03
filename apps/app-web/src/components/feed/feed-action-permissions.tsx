@@ -59,7 +59,7 @@ export function FeedActionPermissions() {
     </div>
     {assistant ? <>
       <Select value={assistant.id} onValueChange={value => value && setSelected(value)}>
-        <SelectTrigger className="min-h-11 w-full" aria-label={t.feedPage.connection.assistantLabel}>
+        <SelectTrigger className="max-sm:min-h-11 w-full" aria-label={t.feedPage.connection.assistantLabel}>
           <SelectValue>{assistant.name}</SelectValue>
         </SelectTrigger>
         <SelectContent>{assistants.map(item => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
@@ -88,7 +88,7 @@ function AssistantPermissions({ assistantId }: { assistantId: string }) {
   const connectors = resource.data.connectors.filter(connector => connector.connected && connector.enabled);
   return <div className="space-y-3">
     {connectors.length ? connectors.map(connector => <details key={connector.id} className="rounded-xl border border-border p-3">
-      <summary className="min-h-11 cursor-pointer content-center text-sm font-medium">{connector.name}</summary>
+      <summary className="min-h-8 max-sm:min-h-11 cursor-pointer content-center text-sm font-medium">{connector.name}</summary>
       <ConnectorPermissions assistantId={assistantId} connector={connector} />
     </details>) : <p className="text-sm text-muted-foreground">{t.feedPage.actionPermissions.empty}</p>}
   </div>;
@@ -146,7 +146,7 @@ export function FeedActionPermissionsButton() {
       <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 max-h-[90dvh] w-[calc(100vw-2rem)] max-w-3xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border bg-background p-4 shadow-xl md:p-6">
         <div className="mb-4 flex items-center justify-between gap-3">
           <Dialog.Title className="font-semibold">{t.feedPage.actionPermissions.title}</Dialog.Title>
-          <Dialog.Close render={<Button variant="ghost" size="icon" className="size-11" aria-label={t.feedPage.inspiration.closeAria} />}><X className="size-4" /></Dialog.Close>
+          <Dialog.Close render={<Button variant="ghost" size="icon" className="max-sm:size-11" aria-label={t.feedPage.inspiration.closeAria} />}><X className="size-4" /></Dialog.Close>
         </div>
         <FeedActionPermissions />
       </Dialog.Popup>

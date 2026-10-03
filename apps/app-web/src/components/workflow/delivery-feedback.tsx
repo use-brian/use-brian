@@ -12,7 +12,7 @@ function ChannelsLink({ workspaceId }: { workspaceId?: string }) {
   const t = useT();
   if (!id) return null;
   return (
-    <Link className="inline-flex min-h-11 items-center text-primary underline" href={`/w/${encodeURIComponent(id)}/studio/channels`}>
+    <Link className="inline-flex min-h-8 max-sm:min-h-11 items-center text-primary underline" href={`/w/${encodeURIComponent(id)}/studio/channels`}>
       {t.workflowPage.builder.deliveryFeedback.settings}
     </Link>
   );

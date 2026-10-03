@@ -60,7 +60,7 @@ export function WebsiteMediaPanel({ workspaceId }: { workspaceId: string }) {
     <PageHeader level={2} title={c.title} description={c.help}/>
     {manage && <div className="flex flex-wrap items-center gap-3">
       <input ref={input} id="website-media-upload" type="file" multiple accept={WEBSITE_MEDIA_ACCEPT} className="sr-only" onChange={event => void upload(event.target.files)}/>
-      <Button className="min-h-11" disabled={action.pending} onClick={() => input.current?.click()}>{c.upload}</Button>
+      <Button className="max-sm:min-h-11" disabled={action.pending} onClick={() => input.current?.click()}>{c.upload}</Button>
       <p className="text-xs text-muted-foreground">{c.limits}</p>
     </div>}
     {action.feedback}

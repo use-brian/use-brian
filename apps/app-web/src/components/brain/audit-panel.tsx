@@ -39,6 +39,7 @@ import {
   ChevronRight,
   Cpu,
   Database,
+  FileText,
   MessageSquareText,
   Pause,
   Play,
@@ -59,6 +60,7 @@ import { fetchTurnPayload, fetchTurnTrace } from "@/lib/api/turn-trace";
 import {
   getKnowledgeEntry,
   type BrainGraph,
+  type BrainGraphNode,
   type BrainRow,
 } from "@/lib/api/brain";
 import { fetchBrainRow } from "@/lib/api/brain-inbox";
@@ -80,10 +82,12 @@ import {
   withToolInputs,
   type AuditStepView,
   type AuditTurn,
+  type GraphAccessStep,
   type RetrievedRow,
   type TraceSummary,
 } from "@/lib/turn-audit";
 import { BrainGraphView } from "@/components/brain/graph-view";
+import { AuditPromptDialog, type AuditPromptTarget } from "@/components/brain/audit-prompt-dialog";
 import { Skeleton } from "@/components/skeleton";
 import { BRAIN_REFRESH_EVENT } from "@/lib/brain-events";
 
@@ -103,7 +107,13 @@ type Props = {
   onSelectSkillNode?: (skillRowId: string) => void;
 };
 
-type ResolvedRow = { name: string; kind: BrainRow["kind"]; row: BrainRow } | null;
+type ResolvedRow = {
+  name: string;
+  kind: BrainRow["kind"];
+  row: BrainRow;
+  /** The graph node this entry draws as when the projection lacks it. */
+  node: BrainGraphNode;
+} | null;
 
 type PayloadState =
   | { status: "loading" }
@@ -265,7 +275,8 @@ export function AuditPanel({
 
   const accesses = useMemo(() => summary ? graphAccessSteps(summary) : [], [summary]);
   const accessKey = JSON.stringify([sessionId, turnId, accesses]);
-  const [playback, setPlayback] = useState({ key: "", index: 0, playing: false, run: 0 });
+  // `cycle` counts loop passes so a one-access turn still re-pulses.
+  const [playback, setPlayback] = useState({ key: "", index: 0, playing: false, run: 0, cycle: 0 });
   const [reducedMotion, setReducedMotion] = useState(false);
   const [documentVisible, setDocumentVisible] = useState(true);
   const [graphReady, setGraphReady] = useState(false);
@@ -283,19 +294,22 @@ export function AuditPanel({
     };
   }, []);
   useEffect(() => {
-    setPlayback({ key: accessKey, index: 0, playing: !reducedMotion && accesses.length > 0, run: 0 });
+    setPlayback({ key: accessKey, index: 0, playing: !reducedMotion && accesses.length > 0, run: 0, cycle: 0 });
   }, [accessKey, reducedMotion, accesses.length]);
   const playing = playback.key === accessKey && playback.playing && !reducedMotion;
   const activeAccess = playback.key === accessKey ? accesses[playback.index] : undefined;
   useEffect(() => {
     if (!playing || !documentVisible || !graphReady) return;
+    // Loops: after the last access the replay holds one extra beat, then
+    // starts over from the first, until paused or the turn changes.
+    const last = playback.index + 1 >= accesses.length;
     const timer = window.setTimeout(() => setPlayback((current) =>
       current.index + 1 < accesses.length
         ? { ...current, index: current.index + 1 }
-        : { ...current, playing: false },
-    ), AUDIT_ACCESS_STEP_MS);
+        : { ...current, index: 0, cycle: current.cycle + 1 },
+    ), last ? AUDIT_ACCESS_STEP_MS * 2 : AUDIT_ACCESS_STEP_MS);
     return () => window.clearTimeout(timer);
-  }, [playing, playback.index, playback.run, accessKey, accesses.length, documentVisible, graphReady]);
+  }, [playing, playback.index, playback.run, playback.cycle, accessKey, accesses.length, documentVisible, graphReady]);
 
   // Which highlighted ids the graph could actually place (reported by the
   // canvas after each projection) — drives the On graph / Not on graph
@@ -342,6 +356,24 @@ export function AuditPanel({
     };
   }, [summary, workspaceId, viewpointAssistantId, cacheScope]);
 
+  // Every resolved retrieved entry, as the node the graph draws when its
+  // projection lacks it (unlinked memories are never in the graph route's
+  // projection). The graph skips the ones it already has.
+  const auditEntries = useMemo(() => {
+    if (!summary) return undefined;
+    const nodes: BrainGraphNode[] = [];
+    for (const row of summary.retrievedRows.slice(0, 40)) {
+      const res = resolved.get(`${row.primitive}:${row.rowId}`);
+      if (res) nodes.push(res.node);
+    }
+    return nodes.length > 0 ? nodes : undefined;
+  }, [summary, resolved]);
+
+  const [promptTarget, setPromptTarget] = useState<AuditPromptTarget | null>(null);
+  useEffect(() => {
+    setPromptTarget(null);
+  }, [turnId]);
+
   // ── Payload expansion (tool input / result) ───────────────────────────
   const [payloads, setPayloads] = useState<Record<string, PayloadState>>({});
   const loadPayload = useCallback(
@@ -368,7 +400,7 @@ export function AuditPanel({
        and only fills a flex parent - in a block it measured its own empty
        height and painted a 200px strip. */
     <section className="relative order-1 flex h-[280px] max-h-[42%] min-h-[200px] min-w-0 shrink-0 flex-col lg:order-2 lg:h-auto lg:max-h-none lg:flex-1 lg:min-h-0" aria-label={copy.brainAccess}>
-      <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-border px-3 py-1">
+      <div className="flex min-h-8 max-sm:min-h-11 shrink-0 items-center gap-2 border-b border-border px-3 py-1">
         <Database className="size-4 shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0 flex-1 text-xs">
           <p className="font-medium">{copy.brainAccess}</p>
@@ -380,15 +412,15 @@ export function AuditPanel({
         </div>
         {accesses.length > 0 && <>
           {reducedMotion ? (
-            <button type="button" aria-label={copy.nextAccess} className="flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-muted" onClick={() => setPlayback((current) => ({ ...current, index: (current.index + 1) % accesses.length }))}>
+            <button type="button" aria-label={copy.nextAccess} className="flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-muted md:size-8" onClick={() => setPlayback((current) => ({ ...current, index: (current.index + 1) % accesses.length }))}>
               <ChevronRight className="size-4" aria-hidden />
             </button>
           ) : (
-            <button type="button" aria-label={playing ? copy.pauseReplay : copy.playReplay} className="flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-muted" onClick={() => setPlayback((current) => ({ ...current, playing: !current.playing }))}>
+            <button type="button" aria-label={playing ? copy.pauseReplay : copy.playReplay} className="flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-muted md:size-8" onClick={() => setPlayback((current) => ({ ...current, playing: !current.playing }))}>
               {playing ? <Pause className="size-4" aria-hidden /> : <Play className="size-4" aria-hidden />}
             </button>
           )}
-          <button type="button" aria-label={copy.replay} className="flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-muted" onClick={() => setPlayback((current) => ({ key: accessKey, index: 0, playing: !reducedMotion, run: current.run + 1 }))}>
+          <button type="button" aria-label={copy.replay} className="flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-muted md:size-8" onClick={() => setPlayback((current) => ({ key: accessKey, index: 0, playing: !reducedMotion, run: current.run + 1, cycle: 0 }))}>
             <RotateCcw className="size-4" aria-hidden />
           </button>
         </>}
@@ -402,9 +434,10 @@ export function AuditPanel({
         highlightIds={highlightIds}
         highlightNames={highlightNames}
         highlightRevealId={revealId}
+        auditEntries={auditEntries}
         accessIds={activeAccess?.ids}
         accessNames={activeAccess?.names}
-        accessPulseKey={playing ? `${accessKey}:${playback.index}:${playback.run}` : null}
+        accessPulseKey={playing ? `${accessKey}:${playback.index}:${playback.run}:${playback.cycle}` : null}
         onAccessReady={setGraphReady}
         auditMode
         onHighlightResolved={handleHighlightResolved}
@@ -442,8 +475,8 @@ export function AuditPanel({
         <div className="shrink-0 border-b border-border px-3 py-2">
           <div className="flex items-center gap-2 rounded-md border border-input px-2 focus-within:border-ring [&_:focus-visible]:shadow-none">
             <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-            <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={copy.searchTurns} aria-label={copy.searchTurns} className="h-11 min-w-0 flex-1 bg-transparent text-base outline-none md:text-sm [&::-webkit-search-cancel-button]:appearance-none" />
-            {search && <button type="button" onClick={() => setSearch("")} aria-label={copy.clearSearch} className="flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-muted"><X className="size-4" aria-hidden /></button>}
+            <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={copy.searchTurns} aria-label={copy.searchTurns} className="h-11 min-w-0 flex-1 bg-transparent md:h-8 text-base outline-none md:text-sm [&::-webkit-search-cancel-button]:appearance-none" />
+            {search && <button type="button" onClick={() => setSearch("")} aria-label={copy.clearSearch} className="flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-muted md:size-8"><X className="size-4" aria-hidden /></button>}
           </div>
           <p className="mt-1 text-[11px] text-muted-foreground" role="status">{search.trim() ? format(copy.matchingTurns, { count: visibleTurns.length, total: turns?.length ?? 0 }) : copy.newestFirst}</p>
         </div>
@@ -469,7 +502,7 @@ export function AuditPanel({
                         onSelectTurn(turn.id);
                         if (selected) setPlayback((current) => ({
                           ...current, index: 0, playing: !reducedMotion && accesses.length > 0,
-                          run: current.run + 1,
+                          run: current.run + 1, cycle: 0,
                         }));
                       }}
                       aria-pressed={selected}
@@ -525,6 +558,8 @@ export function AuditPanel({
                         onOpenRow={onOpenRow}
                         payloads={payloads}
                         loadPayload={loadPayload}
+                        activeAccess={activeAccess ?? null}
+                        onViewPrompt={setPromptTarget}
                       />
                     )}
                   </li>
@@ -535,6 +570,11 @@ export function AuditPanel({
         </div>
       </aside>
       {graphPane}
+      <AuditPromptDialog
+        sessionId={sessionId}
+        target={promptTarget}
+        onClose={() => setPromptTarget(null)}
+      />
     </div>
   );
 }
@@ -551,6 +591,8 @@ function TurnTrace({
   onOpenRow,
   payloads,
   loadPayload,
+  activeAccess,
+  onViewPrompt,
 }: {
   turn: AuditTurn;
   summary: TraceSummary | null | undefined;
@@ -562,6 +604,8 @@ function TurnTrace({
   onOpenRow: (row: BrainRow) => void;
   payloads: Record<string, PayloadState>;
   loadPayload: (hash: string) => void;
+  activeAccess: GraphAccessStep | null;
+  onViewPrompt: (target: AuditPromptTarget) => void;
 }) {
   const t = useT();
   const copy = t.brainPage.audit;
@@ -583,6 +627,11 @@ function TurnTrace({
   }
 
   const retrievedCount = summary.retrievedRows.length;
+  // The header's Full prompt opens the turn's LAST model call: requests are
+  // cumulative, so it holds everything earlier rounds sent too.
+  const lastCall = [...summary.steps].reverse().find(
+    (step) => step.kind === "provider_call" && step.prompt,
+  );
   return (
     <div className="flex flex-col gap-2.5 px-4 pb-4">
       {/* Header chips - the turn's shape at a glance. */}
@@ -627,6 +676,16 @@ function TurnTrace({
             {format(copy.summary.cost, { cost: summary.costUsd.toFixed(4) })}
           </span>
         )}
+        {lastCall?.prompt && (
+          <button
+            type="button"
+            onClick={() => onViewPrompt(promptTargetOf(lastCall))}
+            className={cn(glassChip, "min-h-11 text-foreground hover:bg-muted md:min-h-0")}
+          >
+            <FileText className="size-3" aria-hidden />
+            {copy.prompt.open}
+          </button>
+        )}
       </div>
 
       <h4 className="pt-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -644,6 +703,8 @@ function TurnTrace({
             onOpenRow={onOpenRow}
             payloads={payloads}
             loadPayload={loadPayload}
+            activeAccess={activeAccess}
+            onViewPrompt={onViewPrompt}
           />
         ))}
       </ol>
@@ -665,6 +726,8 @@ function StepRow({
   onOpenRow,
   payloads,
   loadPayload,
+  activeAccess,
+  onViewPrompt,
 }: {
   step: AuditStepView;
   resolved: Map<string, ResolvedRow>;
@@ -674,10 +737,14 @@ function StepRow({
   onOpenRow: (row: BrainRow) => void;
   payloads: Record<string, PayloadState>;
   loadPayload: (hash: string) => void;
+  activeAccess: GraphAccessStep | null;
+  onViewPrompt: (target: AuditPromptTarget) => void;
 }) {
   const t = useT();
   const copy = t.brainPage.audit;
   const [open, setOpen] = useState(step.kind === "retrieval");
+  // The replay is on this step right now (the graph is pulsing its entries).
+  const replaying = activeAccess?.stepKey === step.key;
   const [showInput, setShowInput] = useState(false);
   const [showResult, setShowResult] = useState(false);
 
@@ -768,9 +835,10 @@ function StepRow({
           "absolute -left-[17px] top-2 size-2 rounded-full border border-background",
           step.kind === "tool_call" && step.isError
             ? "bg-red-500"
-            : step.kind === "retrieval"
+            : step.kind === "retrieval" || replaying
               ? "bg-[var(--graph-highlight)]"
               : "bg-muted-foreground/50",
+          replaying && "ring-2 ring-[var(--graph-highlight)]/40 motion-safe:animate-pulse",
         )}
       />
       <button
@@ -779,8 +847,9 @@ function StepRow({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={expandable ? open : undefined}
         className={cn(
-          "flex w-full items-start gap-2 rounded-md px-1.5 py-1 text-left",
+          "flex w-full items-start gap-2 rounded-md px-1.5 py-1 text-left transition-colors",
           expandable ? "hover:bg-muted/40" : "cursor-default",
+          replaying && step.kind === "tool_call" && "bg-[var(--graph-highlight)]/10",
         )}
       >
         <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
@@ -806,7 +875,19 @@ function StepRow({
           revealId={revealId}
           onReveal={onReveal}
           onOpenRow={onOpenRow}
+          activeRowId={replaying ? activeAccess?.rowId ?? null : null}
         />
+      )}
+
+      {step.kind === "provider_call" && step.prompt && (
+        <button
+          type="button"
+          onClick={() => onViewPrompt(promptTargetOf(step))}
+          className="mx-1.5 mb-1 inline-flex min-h-11 items-center gap-1 text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline md:min-h-0"
+        >
+          <FileText className="size-3" aria-hidden />
+          {copy.prompt.view}
+        </button>
       )}
 
       {open && step.kind === "response_text" && step.text && (
@@ -896,6 +977,7 @@ function RetrievedRows({
   revealId,
   onReveal,
   onOpenRow,
+  activeRowId,
 }: {
   rows: RetrievedRow[];
   resolved: Map<string, ResolvedRow>;
@@ -903,6 +985,7 @@ function RetrievedRows({
   revealId: string | null;
   onReveal: (id: string | null) => void;
   onOpenRow: (row: BrainRow) => void;
+  activeRowId: string | null;
 }) {
   const t = useT();
   const copy = t.brainPage.audit.retrieved;
@@ -915,17 +998,23 @@ function RetrievedRows({
         const key = `${row.primitive}:${row.rowId}`;
         const res = resolved.get(key);
         const onGraph = graphVisible.visibleIds.has(row.rowId);
+        const active = activeRowId === row.rowId;
         const kindLabel = copy.kinds[retrievedPrimitiveLabel(row.primitive)];
         return (
           <li
             key={key}
-            className="flex items-center gap-2 rounded-md px-1.5 py-1 text-[12px] hover:bg-muted/40"
+            aria-current={active ? "step" : undefined}
+            className={cn(
+              "flex items-center gap-2 rounded-md px-1.5 py-1 text-[12px] transition-colors duration-300",
+              active ? "bg-[var(--graph-highlight)]/12" : "hover:bg-muted/40",
+            )}
           >
             <span
               aria-hidden
               className={cn(
                 "inline-block size-1.5 shrink-0 rounded-full",
-                onGraph ? "bg-[var(--graph-highlight)]" : "bg-muted-foreground/30",
+                onGraph || active ? "bg-[var(--graph-highlight)]" : "bg-muted-foreground/30",
+                active && "ring-2 ring-[var(--graph-highlight)]/40 motion-safe:animate-pulse",
               )}
             />
             <button
@@ -1002,6 +1091,15 @@ function TurnsSkeleton() {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
+function promptTargetOf(step: AuditStepView): AuditPromptTarget {
+  return {
+    prompt: step.prompt!,
+    model: step.model,
+    turn: step.turn,
+    inputTokens: step.inputTokens,
+  };
+}
+
 function sourceLabel(
   source: string | null | undefined,
   labels: { index_inject: string; memory_recall_events: string; nudge: string; tool_call: string; other: string },
@@ -1044,11 +1142,12 @@ async function resolveRow(
     if (label === "memory") {
       const detail = await fetchBrainRow(workspaceId, "memory", row.rowId, cacheScope);
       if (!detail) return null;
-      const name = String(detail.body.summary ?? detail.body.detail ?? "").trim();
+      const name = String(detail.body.summary ?? detail.body.detail ?? "").trim() || row.rowId;
       return {
-        name: name || row.rowId,
+        name,
         kind: "memories",
-        row: { id: row.rowId, kind: "memories", name: name || row.rowId },
+        row: { id: row.rowId, kind: "memories", name },
+        node: graphNode(row.rowId, "memory", name, detail.body.sensitivity),
       };
     }
     if (label === "entity") {
@@ -1065,7 +1164,12 @@ async function resolveRow(
           ? kind
           : "other";
       const name = String(detail.body.display_name ?? detail.body.name ?? row.rowId);
-      return { name, kind: mapped, row: { id: row.rowId, kind: mapped, name } };
+      return {
+        name,
+        kind: mapped,
+        row: { id: row.rowId, kind: mapped, name },
+        node: graphNode(row.rowId, mapped, name, detail.body.sensitivity),
+      };
     }
     if (label === "knowledge") {
       const entry = await getKnowledgeEntry(row.rowId, workspaceId, viewpointAssistantId, cacheScope);
@@ -1074,10 +1178,30 @@ async function resolveRow(
         name: entry.title,
         kind: "knowledge",
         row: { id: entry.id, kind: "knowledge", name: entry.title },
+        node: graphNode(entry.id, "knowledge", entry.title, entry.sensitivity),
       };
     }
     return null;
   } catch {
     return null;
   }
+}
+
+const SENSITIVITIES: readonly string[] = ["public", "internal", "confidential", "restricted"];
+
+function graphNode(
+  id: string,
+  kind: BrainGraphNode["kind"],
+  name: string,
+  sensitivity: unknown,
+): BrainGraphNode {
+  return {
+    id,
+    kind,
+    name,
+    sensitivity: (typeof sensitivity === "string" && SENSITIVITIES.includes(sensitivity)
+      ? sensitivity
+      : "internal") as BrainGraphNode["sensitivity"],
+    degree: 0,
+  };
 }

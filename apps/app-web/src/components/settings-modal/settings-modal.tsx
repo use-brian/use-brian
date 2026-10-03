@@ -236,7 +236,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
               open={pickerOpen}
               onOpenChange={setPickerOpen}
             >
-              <SelectTrigger aria-label={t.chrome.settingsModal.title} className="w-full min-h-11">
+              <SelectTrigger aria-label={t.chrome.settingsModal.title} className="w-full max-sm:min-h-11">
                 <SelectValue>{labels[activeSection]}</SelectValue>
               </SelectTrigger>
               <SelectContent
@@ -250,7 +250,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
                       {group.label}
                     </div>
                     {group.sections.map((s) => (
-                      <SelectItem key={s} value={s} className="min-h-11">
+                      <SelectItem key={s} value={s} className="min-h-8 max-sm:min-h-11">
                         {labels[s]}
                       </SelectItem>
                     ))}
