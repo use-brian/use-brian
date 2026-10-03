@@ -11706,6 +11706,9 @@ export const zh: Dictionary = {
     confirmAlreadyProcessed:
       "这段录音已经处理过一次。再跑一次会重新转录音频，之前抽取的记忆可能会重复。",
     linkError: "无法加载录音。",
+    uploadPrepareFailed: "伺服器無法準備或接受此錄音上傳。尚未開始處理。請保留此裝置上的錄音並重試。",
+    uploadCompleteFailed: "伺服器無法完成此錄音上傳。尚未開始處理。請保留此裝置上的錄音並重試。",
+    serverSetupRequired: "伺服器需要設定 ffmpeg 和 ffprobe 才能處理此錄音。請聯絡管理員，並保留本機錄音以便重試。",
     uploadFailed:
       "音频无法上传到存储,尚未开始处理。请检查网络连接。录音已保存在此设备上,可从录音器再次保存。",
     estimateFailed:

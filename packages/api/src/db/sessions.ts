@@ -636,7 +636,9 @@ async function createTransientBrainSession(params: {
 /**
  * Find a session by its primary key ID.
  */
-export async function findSessionById(id: string): Promise<Session | null> {
+/** Full session snapshot without a recency write. Safe for authority checks
+ * while another connection holds the session row lock. */
+export async function readSessionById(id: string): Promise<Session | null> {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             channel_type as "channelType", channel_id as "channelId",
@@ -654,7 +656,12 @@ export async function findSessionById(id: string): Promise<Session | null> {
      FROM sessions WHERE id = $1`,
     [id],
   )
-  if (result.rows.length === 0) return null
+  return result.rows[0] ?? null
+}
+
+export async function findSessionById(id: string): Promise<Session | null> {
+  const session = await readSessionById(id)
+  if (!session) return null
   // Touch last_active_at.
   //
   // NOTE: this is a *read* that writes the recency column, and that is
@@ -666,7 +673,7 @@ export async function findSessionById(id: string): Promise<Session | null> {
   // running turn writes (`turn_heartbeat_at`, migration 424). Never move the
   // sweep predicate back onto `last_active_at`.
   await query(`UPDATE sessions SET last_active_at = now() WHERE id = $1`, [id])
-  return result.rows[0]
+  return session
 }
 
 /** Read-only session identity/binding snapshot for per-boundary authority renewal. */

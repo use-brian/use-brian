@@ -498,6 +498,8 @@ import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js
 import { initLedgerRuntime } from './ledger/runtime.js'
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
 import { azureBlobOptionsFromEnv, createAzureBlobFilesClient } from './files/azure-blob-client.js'
+import { createS3FilesClient } from './files/s3-client.js'
+import { s3OptionsFromEnv } from './files/s3-env.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
 import { createMeetingTagsTool } from './recordings/meeting-tags-tool.js'
@@ -929,11 +931,17 @@ export interface OpenApiEnv {
   BRIAN_MESSAGE_STORE_ALLOW_REMOTE?: string
   BRIAN_MESSAGE_STORE_HMAC_SECRET?: string
   LLM_PROVIDER_KEY_ENCRYPTION_KEY?: string
-  // Blob storage. GCS wins when set; AZURE_BLOB_CONTAINER selects an Azure Blob
-  // container (self-hosted on Azure); LOCAL_FILES_DIR enables durable
-  // self-hosted local storage; otherwise non-Cloud-Run dev falls back to /tmp.
-  // GCS and Azure together is a misconfiguration and fails boot.
+  // Blob storage. Select at most one GCS, Azure, or S3 deployment default.
+  // Otherwise LOCAL_FILES_DIR enables durable self-hosted local storage;
+  // non-Cloud-Run dev falls back to /tmp. Cloud defaults override local disk.
   GCS_FILES_BUCKET?: string
+  S3_FILES_BUCKET?: string
+  S3_REGION?: string
+  S3_ENDPOINT?: string
+  S3_FORCE_PATH_STYLE?: string
+  S3_ACCESS_KEY_ID?: string
+  S3_SECRET_ACCESS_KEY?: string
+  S3_SESSION_TOKEN?: string
   AZURE_BLOB_CONTAINER?: string
   /** Shared-key auth for Azure Blob: a connection string, or account + key. */
   AZURE_STORAGE_CONNECTION_STRING?: string
@@ -4399,13 +4407,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ── Workspace filesystem ──
   const configuredLocalFilesDir = env.LOCAL_FILES_DIR?.trim()
   const localFilesDir = resolveLocalFilesBaseDir(configuredLocalFilesDir)
-  // Azure Blob is the self-hosted bucket option (throws on a half-configured
-  // deployment so boot fails closed rather than landing on the temp dir).
-  const azureBlobOptions = azureBlobOptionsFromEnv(env)
-  if (azureBlobOptions && env.GCS_FILES_BUCKET) {
-    throw new Error('[files] GCS_FILES_BUCKET and AZURE_BLOB_CONTAINER are both set — pick one app-default blob store')
+  const gcsBucket = env.GCS_FILES_BUCKET?.trim()
+  if ([gcsBucket, env.AZURE_BLOB_CONTAINER?.trim(), env.S3_FILES_BUCKET?.trim()].filter(Boolean).length > 1) {
+    throw new Error('[files] GCS_FILES_BUCKET, AZURE_BLOB_CONTAINER, and S3_FILES_BUCKET are mutually exclusive — pick one app-default blob store')
   }
-  const cloudBlobConfigured = Boolean(env.GCS_FILES_BUCKET) || azureBlobOptions !== null
+  // Fail closed on incomplete cloud configuration instead of falling back to disk.
+  const azureBlobOptions = azureBlobOptionsFromEnv(env)
+  const s3Options = s3OptionsFromEnv(env)
+  const cloudBlobConfigured = Boolean(gcsBucket) || azureBlobOptions !== null || s3Options !== null
   const localFilesClient = !cloudBlobConfigured && !(process.env.K_SERVICE && !configuredLocalFilesDir)
     ? createLocalFilesClient({
         baseDir: localFilesDir,
@@ -4413,16 +4422,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         signingSecret: env.JWT_SECRET,
       })
     : null
-  const filesBlobClient = env.GCS_FILES_BUCKET
-    ? createGcsFilesClient({ bucket: env.GCS_FILES_BUCKET, projectId: process.env.GOOGLE_CLOUD_PROJECT })
+  const filesBlobClient = gcsBucket
+    ? createGcsFilesClient({ bucket: gcsBucket, projectId: process.env.GOOGLE_CLOUD_PROJECT })
     : azureBlobOptions
       ? createAzureBlobFilesClient(azureBlobOptions)
-      : localFilesClient
+      : s3Options
+        ? createS3FilesClient(s3Options)
+        : localFilesClient
   if (azureBlobOptions) {
     console.log(`[files] using Azure Blob container ${azureBlobOptions.container} for workspace files.`)
-  } else if (filesBlobClient && !env.GCS_FILES_BUCKET) {
+  } else if (s3Options) {
+    console.log(`[files] using S3 bucket ${s3Options.bucket} for workspace files.`)
+  } else if (localFilesClient) {
     const mode = configuredLocalFilesDir ? 'configured self-hosted storage' : 'ephemeral dev fallback'
-    console.warn(`[files] GCS_FILES_BUCKET unset — using local-disk file storage at ${localFilesDir} (${mode}).`)
+    console.warn(`[files] no cloud default configured — using local-disk file storage at ${localFilesDir} (${mode}).`)
   }
   // Turn ledger rides the same storage decision as workspace files —
   // injected here so lanes never re-derive the driver from env.
@@ -4443,15 +4456,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     | null = null
   let fileIngestor: unknown = null
   if (filesBlobClient) {
-    // Bring-your-own GCS storage: a workspace with an active `gcs` connector
-    // binding writes its file bytes to its OWN bucket under its OWN key; every
-    // other workspace falls through to the app default bucket (byte-identical
-    // to before). The binding lookup reads the encrypted connector_instance
-    // credential. See docs/plans/byo-google-storage.md.
+    // Workspace GCS/S3/local bindings override the deployment default.
+    // The binding lookup reads encrypted connector_instance credentials;
+    // unbound workspaces use the singleton default below.
     const defaultFilesResolver = createSingletonFilesClientResolver(
       filesBlobClient,
-      env.GCS_FILES_BUCKET ?? azureBlobOptions?.container ?? localFilesDir,
-      env.GCS_FILES_BUCKET ? undefined : azureBlobOptions ? 'az' : 'file',
+      gcsBucket || azureBlobOptions?.container || s3Options?.bucket || localFilesDir,
+      gcsBucket ? 'gs' : azureBlobOptions ? 'az' : s3Options ? 's3' : 'file',
     )
     const lookupStorageBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
       // A binding resolves only while we hold the key. Disconnect wipes the key
@@ -5917,6 +5928,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (usesOpenStandaloneRoutes(profile) && filesResolver && filesBlobClient) {
     app.use('/api/recordings', requireAuth(env.JWT_SECRET), openRecordingsRoutes({
       filesResolver,
+      chunkedFileUploads,
       getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
       enqueueJob: enqueueRecordingJob,
       hasProcessed: hasCompletedRecordingJob,
@@ -5934,6 +5946,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       usageStore,
       // Window-audio persistence + the assembled-windows finalize fallback.
       filesResolver,
+      filesApi,
       liveInteraction: liveInteraction ?? undefined,
     }))
   }
@@ -8855,7 +8868,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const googleRecordingTranscribers: RecordingTranscriber[] = []
   const dashscopeRecordingTranscribers: RecordingTranscriber[] = []
   const recordingTranscriptionModel = env.RECORDING_TRANSCRIPTION_MODEL ?? env.VOICE_TRANSCRIPTION_MODEL
-  if (vertexTx && env.GCS_FILES_BUCKET && filesBlobClient) {
+  if (vertexTx && gcsBucket && filesBlobClient) {
     googleRecordingTranscribers.push(geminiTranscriber({
       transport: vertexTx,
       ...(recordingTranscriptionModel ? { model: recordingTranscriptionModel } : {}),
@@ -8866,7 +8879,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           mime,
         })
         return {
-          fileUri: `gs://${env.GCS_FILES_BUCKET}/${key}`,
+          fileUri: `gs://${gcsBucket}/${key}`,
           cleanup: () => filesBlobClient.deleteBlob(key),
         }
       },

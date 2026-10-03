@@ -133,6 +133,45 @@ describe("[COMP:app-web/dock-recorder] recorder stickiness coverage", () => {
     }
   });
 
+  it("keeps the floating chat launcher reachable during capture and finishing", () => {
+    const dock = read("components/chrome/floating-chat.tsx");
+    const launcher = dock.slice(dock.indexOf("{/* Launcher — floating mode only."), dock.indexOf("function coercePayload"));
+    // The old latched/finishing guard removed the entire row, including the
+    // only way to open chat. Only side-panel mode may omit this launcher.
+    expect(launcher).toMatch(/\{!isSidePanel && \(\s*<div/);
+    expect(launcher).not.toContain("recorder.phase");
+    expect(launcher).toContain("onClick={() => setExpanded(true)}");
+    expect(launcher).toContain("tabIndex={expanded ? -1 : 0}");
+    expect(launcher).not.toMatch(/router\.|navigate\(|setSession\(/);
+    expect(launcher).toContain("<DockRecorderButton");
+  });
+
+  it("shares one recorder across the launcher and expanded chat without blocking typing", () => {
+    const dock = read("components/chrome/floating-chat.tsx");
+    expect(dock.match(/const recorder = useDockRecorder\(/g)).toHaveLength(1);
+    expect(dock).toContain('<DockRecorderStrip rec={recorder} className="mb-1.5" />');
+    expect(dock).toContain("<DockRecorderStrip rec={recorder} />");
+    const composer = dock.slice(dock.indexOf("<ChatComposer"), dock.indexOf("{/* Live-recording chrome (collapsed mode)"));
+    expect(composer).toContain("disabled={!!pendingQuestion || offline}");
+    expect(composer).not.toMatch(/disabled=\{[^}]*recorder\./);
+    expect(dock).not.toContain("captureUpload.busy");
+  });
+
+  it("keeps interaction answers in their originating session without replacing typed streaming messages", () => {
+    const dock = read("components/chrome/floating-chat.tsx");
+    const answers = dock.slice(dock.indexOf("<LiveInteractionJobs"), dock.indexOf("{showEmpty ?"));
+    expect(answers).toContain("sessionId={session.state.sessionId}");
+    expect(answers).toContain("if (sessionIdRef.current !== sid) return;");
+    expect(answers).toContain("canonicalInteractionAdditions(session.state.messages,");
+    expect(answers).toContain('session.dispatch({ type: "message/append", message })');
+    expect(answers).not.toMatch(/router\.|navigate\(|setSession\(|setMessages\(/);
+    const binding = dock.slice(dock.indexOf("ensureInteractionSession:"), dock.indexOf("getSessionId: () =>", dock.indexOf("ensureInteractionSession:")));
+    expect(binding).toContain("const existing = sessionIdRef.current;");
+    expect(binding).toContain("if (existing) return existing;");
+    expect(binding).toContain('if (threadEpochRef.current !== epoch) throw new Error("Chat changed");');
+    expect(binding).toContain("if (sessionIdRef.current) return sessionIdRef.current;");
+  });
+
   it("the Chat route hide pairs with the Chat surface composer rehost", () => {
     // WorkspaceChrome hides the dock on the full-page Chat surface without
     // a suppression hold - the pairing is with ChatSurface itself.

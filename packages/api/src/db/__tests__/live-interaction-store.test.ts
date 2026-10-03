@@ -260,6 +260,50 @@ describe("[COMP:recordings/live-interaction] durable interaction store", () => {
     expect(await store.listJobs(other, workspace, chat)).toEqual([]);
     expect(await store.listJobs(owner, randomUUID(), chat)).toEqual([]);
   });
+  it("accepts repeated 30s microphone windows across silence and gaps, deduplicating only upload retries", async () => {
+    await db.exec("DELETE FROM live_interaction_captures");
+    const c = await store.create(makeCapture());
+    const publish = vi.fn(async () => {});
+    const answer = vi.fn(async () => "answer");
+    const service = createLiveInteractionService({ store, authorize: async () => true, answer, publish });
+    const windows = [
+      { startMs: 30000, text: "Speaker 1: Hey Brian，咱們，咱們來拍個照吧。\nBrian: 你要拿手機拍嗎？" },
+      // No Brian wake in this representative incomplete recognition: correctly ignored.
+      { startMs: 60000, text: "Hey 喺度...今日幾多號..." },
+      { startMs: 120000, text: "Hey Brian, 今日幾多號?", discontinuity: true },
+      { startMs: 180000, text: "Brian\nHey Brian\n快啲答我，今日幾多號？", discontinuity: true },
+      { startMs: 240000, text: "Hey Brian, 今日幾多號?" },
+    ];
+    for (const [n, window] of windows.entries()) {
+      const u = { ...window, id: `session:${n}:microphone`, source: "microphone" as const,
+        previousId: n ? `session:${n - 1}:microphone` : undefined, endMs: window.startMs + 30000 };
+      await service.ingest(owner, c.id, u);
+      await service.tickDetector();
+      await service.ingest(owner, c.id, u);
+      await service.tickDetector();
+      expect((await store.capture(c.id))?.state).toBe("listening");
+    }
+    // Playback containing the exact same wake/question still cannot trigger.
+    await service.ingest(owner, c.id, { id: "playback", source: "system",
+      text: windows[2]!.text, startMs: 270000, endMs: 300000 });
+    await service.tickDetector();
+    const jobs = await store.listJobs(owner, workspace, chat);
+    expect(jobs).toHaveLength(4);
+    expect(jobs.some(j => j.question === "咱們，咱們來拍個照吧。")).toBe(true);
+    expect((await store.listUtterances(c.id))[0]?.text).toBe(windows[0]!.text);
+    expect(jobs.filter(j => j.question === "今日幾多號?")).toHaveLength(2);
+    expect(jobs.some(j => j.question === "快啲答我，今日幾多號？")).toBe(true);
+    expect(new Set(jobs.map(j => j.id)).size).toBe(4);
+    expect(new Set(jobs.map(j => j.assistantMessageId)).size).toBe(4);
+    try {
+      await service.tickAnswers();
+      await expect.poll(() => publish.mock.calls.length).toBe(3);
+      await service.tickAnswers();
+      await expect.poll(() => publish.mock.calls.length).toBe(4);
+      expect(answer).toHaveBeenCalledTimes(4);
+      expect((await store.listJobs(owner, workspace, chat)).every(j => j.status === "completed")).toBe(true);
+    } finally { await service.stop(); }
+  });
   it("recovers missing predecessor as a discontinuity rather than combining unrelated speech", async () => {
     await db.exec("DELETE FROM live_interaction_captures");
     const c = await store.create(makeCapture());
@@ -291,6 +335,27 @@ describe("[COMP:recordings/live-interaction] durable interaction store", () => {
     const gap = await store.claimInbox();
     expect(gap?.pending).toBeNull();
     await store.finishInbox(gap!, null);
+  });
+  it("expires only pending speech after silence and resumes fresh wakes after a missing window", async () => {
+    await db.exec("DELETE FROM live_interaction_captures");
+    const c = await store.create(makeCapture());
+    const service = createLiveInteractionService({ store, authorize: async () => true,
+      answer: async () => "", publish: async () => {} });
+    await service.ingest(owner, c.id, { id: "wake", source: "microphone",
+      text: "Hey Brian", startMs: 0, endMs: 30000 });
+    await service.tickDetector();
+    await service.ingest(owner, c.id, { id: "after-silence", previousId: "wake", source: "microphone",
+      text: "今日幾多號?", startMs: 60000, endMs: 90000 });
+    await service.tickDetector();
+    expect(await store.listJobs(owner, workspace, chat)).toHaveLength(0);
+    await service.ingest(owner, c.id, { id: "after-gap", previousId: "missing-window", source: "microphone",
+      text: "Hey Brian, 今日幾多號?", startMs: 120000, endMs: 150000 });
+    await service.tickDetector();
+    expect(await store.listJobs(owner, workspace, chat)).toHaveLength(0);
+    await db.exec("UPDATE live_interaction_utterances SET created_at=now()-interval '10 seconds'; UPDATE live_interaction_captures SET detector_retry=now()");
+    await service.tickDetector();
+    expect(await store.listJobs(owner, workspace, chat)).toMatchObject([{ question: "今日幾多號?" }]);
+    expect((await store.capture(c.id))?.state).toBe("listening");
   });
   it("enforces workspace capacity across captures and runs answers independently of detection", async () => {
     await db.exec("DELETE FROM live_interaction_captures");

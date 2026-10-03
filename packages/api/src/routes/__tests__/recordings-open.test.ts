@@ -236,25 +236,64 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
     expect(response.body.mime).toBe('video/mp4')
   })
 
-  it('creates a recording and returns the active storage backend upload URL', async () => {
-    const { app, deps, storage } = makeApp()
+  it('starts a chunked upload without creating an Episode or recording', async () => {
+    const start = vi.fn().mockResolvedValue({ uploadId: 'up-1', fileId: 'file-1', chunkSizeBytes: 3, parts: [{ index: 0, offset: 0, sizeBytes: 3, url: 'https://upload' }], expiresAt: 'tomorrow' })
+    const { app, deps } = makeApp({ chunkedFileUploads: { start } })
     const response = await request(app).post('/api/recordings/upload-url').send({
-      workspaceId: 'ws-1',
-      assistantId: 'assistant-1',
-      fileName: 'clip.mp4',
-      mime: 'video/mp4',
+      workspaceId: 'ws-1', assistantId: 'untrusted', fileName: 'clip.mp4', mime: 'video/mp4', sizeBytes: 3, kind: 'meeting',
     })
-
     expect(response.status).toBe(200)
-    expect(response.body.recordingId).toBe('rec-1')
-    expect(response.body.uploadUrl).toMatch(/^http:\/\/localhost:4000\/api\/local-files/)
-    expect(storage.signedWriteUrl).toHaveBeenCalledWith(expect.stringMatching(/^ws-1\/recordings\//), {
-      contentType: 'video/mp4',
-      ttlSec: 3600,
+    expect(response.body.uploadId).toBe('up-1')
+    expect(response.body.recordingId).toBeUndefined()
+    expect(start).toHaveBeenCalledWith({ workspaceId: 'ws-1', userId: 'user-1' }, { fileName: 'clip.mp4', mime: 'video/mp4', sizeBytes: 3 })
+    expect(deps.createEpisode).not.toHaveBeenCalled()
+    expect(deps.createRecording).not.toHaveBeenCalled()
+  })
+
+  it('runs canonical adoption with captured evidence and retries atomic kind creation', async () => {
+    const parent = { workspaceId: 'ws-1', resourceKind: 'workspace_file', resourceId: 'file-1', version: '1', mime: 'video/mp4', assistantId: null }
+    const complete = vi.fn().mockResolvedValue({ id: 'file-1', workspaceId: 'ws-1', mime: 'video/mp4', sourceEpisodeId: 'forged' })
+    const captureParent = vi.fn().mockResolvedValue(parent)
+    const createRecording = vi.fn(async (_input, provenance) => {
+      expect(provenance).toEqual({ actorUserId: 'user-1', parent })
+      return { id: 'canonical-recording', status: 'awaiting_upload' }
     })
-    expect(deps.createRecording).toHaveBeenCalledWith(expect.objectContaining({
-      storageUri: expect.stringMatching(/^file:\/\/\/data\/files\/ws-1\/recordings\//),
-    }))
+    const updateRecording = vi.fn()
+    const { app } = makeApp({ chunkedFileUploads: { complete }, captureParent, createRecording, updateRecording })
+    const body = { workspaceId: 'ws-1', assistantId: 'untrusted', uploadId: 'up-1', kind: 'meeting', parent: { resourceId: 'forged' } }
+    createRecording.mockRejectedValueOnce(new Error('lost connection'))
+    expect((await request(app).post('/api/recordings/complete-upload').send(body)).status).toBe(503)
+    for (let i = 0; i < 2; i++) {
+      const response = await request(app).post('/api/recordings/complete-upload').send(body)
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({ recordingId: 'canonical-recording' })
+    }
+    expect(complete).toHaveBeenCalledWith({ workspaceId: 'ws-1', userId: 'user-1' }, 'up-1')
+    expect(captureParent).toHaveBeenCalledWith({ actorUserId: 'user-1' }, 'ws-1', 'file-1')
+    expect(createRecording).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'meeting' }), { actorUserId: 'user-1', parent })
+    expect(updateRecording).not.toHaveBeenCalled()
+  })
+
+  it('reports a conflicting kind as 409 without patching the existing recording', async () => {
+    const { app, deps } = makeApp({
+      chunkedFileUploads: { complete: vi.fn().mockResolvedValue({ id: 'file-1', workspaceId: 'ws-1', mime: 'audio/wav' }) },
+      captureParent: vi.fn().mockResolvedValue({ mime: 'audio/wav', assistantId: null }),
+      createRecording: vi.fn().mockRejectedValue(new Error('recording_kind_conflict')),
+    })
+    const response = await request(app).post('/api/recordings/complete-upload')
+      .send({ workspaceId: 'ws-1', assistantId: 'a', uploadId: 'up-1', kind: 'meeting' })
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({ error: 'recording_kind_conflict' })
+    expect(deps.updateRecording).not.toHaveBeenCalled()
+    expect(deps.enqueueJob).not.toHaveBeenCalled()
+  })
+
+  it('does not adopt when the chunked service rejects ownership', async () => {
+    const { ChunkedUploadError } = await import('../../files/chunked-upload.js')
+    const { app, deps } = makeApp({ chunkedFileUploads: { complete: vi.fn().mockRejectedValue(new ChunkedUploadError('not_found', 'Upload not found')) } })
+    const response = await request(app).post('/api/recordings/complete-upload').send({ workspaceId: 'ws-1', assistantId: 'a', uploadId: 'foreign' })
+    expect(response.status).toBe(404)
+    expect(deps.createRecording).not.toHaveBeenCalled()
   })
 
   it('estimates without a hosted credit surcharge', async () => {
@@ -271,17 +310,17 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
     expect(deps.updateRecording).toHaveBeenCalledWith('rec-1', { durationMs: 65_000 })
   })
 
-  it('returns the actionable ffprobe prerequisite error', async () => {
+  it.each(['estimate', 'process'])('returns a server-prerequisite error when %s cannot find ffprobe', async endpoint => {
     const { app } = makeApp({
       probe: vi.fn(async () => {
         throw new Error('ffprobe prerequisite failed: spawn ffprobe ENOENT')
       }),
     })
-    const response = await request(app).post('/api/recordings/rec-1/estimate')
+    const response = await request(app).post(`/api/recordings/rec-1/${endpoint}`)
 
-    expect(response.status).toBe(422)
+    expect(response.status).toBe(503)
     expect(response.body).toEqual({
-      error: 'could_not_read_duration',
+      error: 'recording_media_tools_unavailable',
       detail: 'ffprobe prerequisite failed: spawn ffprobe ENOENT',
     })
   })

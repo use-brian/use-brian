@@ -99,7 +99,14 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
     forUri: vi.fn(),
   }
   const createEpisode = vi.fn(async () => ({ id: '00000000-0000-0000-0000-00000000e901' }))
-  const createRecording = vi.fn(async () => ({}))
+  const parent = { workspaceId: WORKSPACE_ID, resourceKind: 'workspace_file', resourceId: 'canonical-file', version: '1', mime: 'audio/mp4', assistantId: null }
+  const captureParent = vi.fn().mockResolvedValue(parent)
+  const createRecording = vi.fn(async (_input, provenance) => {
+    expect(provenance).toEqual({ actorUserId: USER_ID, parent })
+    return { id: '00000000-0000-0000-0000-00000000e901', status: 'awaiting_upload' }
+  })
+  const updateRecording = vi.fn().mockResolvedValue({ kind: 'meeting' })
+  const filesApi = { writeBytes: vi.fn().mockResolvedValue({ ok: true, value: { id: 'canonical-file', workspaceId: WORKSPACE_ID, mime: 'audio/mp4' } }) }
   const getRecording = vi.fn(async (_userId: string, id: string) =>
     id === 'rec-1' ? { id, workspaceId: WORKSPACE_ID } : null,
   )
@@ -130,7 +137,9 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
     liveWindows,
     liveInteraction: { getCapture: vi.fn(), ingest: vi.fn(async () => {}) },
     getRecording,
-    createEpisode,
+    filesApi,
+    captureParent,
+    updateRecording,
     createRecording,
     concatWindows,
   }
@@ -505,11 +514,28 @@ describe('[COMP:recordings/live-page-route]', () => {
       coverageMs: 60_000,
     })
     expect(h.concatWindows).toHaveBeenCalledOnce()
-    expect(h.createEpisode).toHaveBeenCalledOnce()
-    expect(h.createRecording).toHaveBeenCalledWith(expect.objectContaining({ kind: 'meeting' }))
+    expect(h.createEpisode).not.toHaveBeenCalled()
+    expect(h.deps.filesApi.writeBytes).toHaveBeenCalledWith({ workspaceId: WORKSPACE_ID, userId: USER_ID }, expect.objectContaining({ mime: 'audio/mp4' }))
+    expect(h.deps.createRecording).toHaveBeenCalledWith(expect.objectContaining({ kind: 'meeting' }), expect.objectContaining({ actorUserId: USER_ID }))
+    expect(h.deps.updateRecording).not.toHaveBeenCalled()
     expect(h.update).toHaveBeenCalledWith(USER_ID, page.pageId, {
       linkedRecordingId: '00000000-0000-0000-0000-00000000e901',
     })
+  })
+
+  it.each(['tools', 'publication', 'adoption'])('preserves source audio after %s failure', async failure => {
+    const h = harness()
+    const page = await startLive(h)
+    await chunkRequest(h, page, 'chunk-1', 0)
+    if (failure === 'tools') h.concatWindows.mockRejectedValueOnce(new Error('ffmpeg prerequisite failed: spawn ffmpeg ENOENT'))
+    if (failure === 'publication') h.deps.filesApi.writeBytes.mockResolvedValueOnce({ ok: false, error: { kind: 'quota_exceeded' } } as never)
+    if (failure === 'adoption') h.deps.captureParent.mockRejectedValueOnce(new Error('recording_intake_source_changed'))
+    const response = await request(h.app).post('/api/recordings/live/finalize').send({ workspaceId: WORKSPACE_ID, assistantId: 'a', sessionId: page.sessionId })
+    expect(response.status).toBe(503)
+    expect(response.body.error).toBe(failure === 'tools' ? 'recording_media_tools_unavailable' : 'recording_upload_preparation_failed')
+    expect(h.gcs.deleteBlob).not.toHaveBeenCalled()
+    expect(h.liveWindows.clearAudio).not.toHaveBeenCalled()
+    expect(h.blobs.size).toBe(1)
   })
 
   it('409s a finalize with no stored windows', async () => {
