@@ -1,13 +1,10 @@
 /** OSS recording upload and queue routes. [COMP:recordings/open-routes] */
 
-import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import {
-  createEpisode,
   getEpisodeByIdSystem,
 } from '../db/episodes-store.js'
 import {
-  createRecording,
   getRecording,
   listRecordings,
   LIST_RECORDINGS_LIMIT_MAX,
@@ -18,14 +15,16 @@ import { readRecordingRange } from '../db/retrieval-store.js'
 import { listTasksBySourceEpisode } from '../db/tasks.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import type { FilesClientResolver } from '../files/files-api.js'
-import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
+import type { ChunkedFileUploadService } from '../files/chunked-upload.js'
+import { adoptRecordingUpload, sendRecordingUploadError, type UploadAdoptionDeps } from '../recordings/upload-adoption.js'
 import { probeRecordingDuration } from '../recordings/ffmpeg.js'
 import { InvalidRecordingBlueprintError } from '../recordings/resolve-blueprint.js'
 
 const MAX_RECORDING_DURATION_MS = 180 * 60 * 1000
 export const TRANSCRIPT_PAGE = 200
 
-type RouteDeps = {
+type RouteDeps = UploadAdoptionDeps & {
+  chunkedFileUploads?: ChunkedFileUploadService | null
   filesResolver: FilesClientResolver
   getRole: (userId: string, workspaceId: string) => Promise<string | null>
   enqueueJob: (input: {
@@ -38,8 +37,6 @@ type RouteDeps = {
   hasProcessed: (recordingId: string) => Promise<boolean>
   resolvePageWorkspace?: (userId: string, pageId: string) => Promise<string | null>
   probe?: typeof probeRecordingDuration
-  createEpisode?: typeof createEpisode
-  createRecording?: typeof createRecording
   getRecording?: typeof getRecording
   listRecordings?: typeof listRecordings
   resolveViewpoint?: typeof resolveWorkspaceViewpoint
@@ -138,14 +135,15 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
   router.post('/upload-url', async (req, res) => {
     const userId = userIdOf(req)
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
-    const { workspaceId, assistantId, fileName, mime, kind } = (req.body ?? {}) as {
+    const { workspaceId, assistantId, fileName, mime, kind, sizeBytes } = (req.body ?? {}) as {
       workspaceId?: string
       assistantId?: string
       fileName?: string
       mime?: string
       kind?: string
+      sizeBytes?: number
     }
-    if (!workspaceId || !assistantId || !mime) {
+    if (![workspaceId, assistantId, mime].every(value => typeof value === 'string' && value.length > 0) || !workspaceId || !assistantId || !mime) {
       return void res.status(400).json({ error: 'workspaceId, assistantId, and mime are required' })
     }
     if (!mime.startsWith('audio/') && !mime.startsWith('video/')) {
@@ -158,38 +156,33 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
       return void res.status(403).json({ error: 'Not a member of this workspace' })
     }
 
-    const fileId = randomUUID()
-    const key = buildStorageKey(workspaceId, `recordings/${fileId}`)
-    const resolved = await deps.filesResolver.forWorkspace(workspaceId)
-    const storageUri = buildStorageUri(resolved.bucket, workspaceId, `recordings/${fileId}`, resolved.uriScheme)
-    const episode = await (deps.createEpisode ?? createEpisode)(userId, {
-      sourceKind: 'recording',
-      sourceRef: { fileId, gcsKey: key, storageUri, fileName: fileName ?? null, mime, status: 'awaiting_upload' },
-      occurredAt: new Date(),
-      workspaceId,
-      userId: null,
-      assistantId,
-      createdByUserId: userId,
-      sensitivity: 'internal',
-    })
-    await (deps.createRecording ?? createRecording)({
-      id: episode.id,
-      workspaceId,
-      mime,
-      gcsKey: key,
-      storageUri,
-      fileName: fileName ?? null,
-      title: fileName ?? null,
-      ...(kind ? { kind } : {}),
-      userId: null,
-      assistantId,
-      sensitivity: 'internal',
-      createdByUserId: userId,
-    })
-    const uploadUrl = await resolved.gcs.signedWriteUrl(key, { contentType: mime, ttlSec: 3600 })
-    // Azure Blob needs `x-ms-blob-type` on the PUT; GCS/S3/local send none.
-    const uploadHeaders = resolved.gcs.signedWriteHeaders
-    res.json({ recordingId: episode.id, uploadUrl, key, ...(uploadHeaders ? { uploadHeaders } : {}) })
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes! <= 0 || (fileName !== undefined && (typeof fileName !== 'string' || !fileName.trim()))) {
+      return void res.status(400).json({ error: 'invalid_upload', detail: 'sizeBytes must be a positive integer and fileName must be non-empty' })
+    }
+    if (!deps.chunkedFileUploads) return void res.status(503).json({ error: 'file_storage_unavailable' })
+    try {
+      res.json(await deps.chunkedFileUploads.start({ workspaceId, userId }, {
+        fileName: fileName ?? `recording-${crypto.randomUUID()}`, mime, sizeBytes: sizeBytes!,
+      }))
+    } catch (error) { sendRecordingUploadError(res, error) }
+  })
+
+  router.post('/complete-upload', async (req, res) => {
+    const userId = userIdOf(req)
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const { workspaceId, assistantId, uploadId, kind } = req.body ?? {}
+    if (![workspaceId, assistantId, uploadId].every(value => typeof value === 'string' && value.length > 0)
+      || (kind !== undefined && kind !== 'memo' && kind !== 'meeting')) {
+      return void res.status(400).json({ error: 'invalid_upload' })
+    }
+    if (!(await deps.getRole(userId, workspaceId))) return void res.status(403).json({ error: 'Not a member of this workspace' })
+    if (!deps.chunkedFileUploads) return void res.status(503).json({ error: 'file_storage_unavailable' })
+    try {
+      // assistantId is a compatibility field, not file scope or attribution.
+      const file = await deps.chunkedFileUploads.complete({ workspaceId, userId }, uploadId)
+      const recordingId = await adoptRecordingUpload(file, userId, workspaceId, kind, deps)
+      res.json({ recordingId })
+    } catch (error) { sendRecordingUploadError(res, error) }
   })
 
   router.get('/:recordingId/transcript', async (req, res) => {
@@ -315,8 +308,9 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
     } catch (err) {
       const detail = probeFailureDetail(err)
       console.error(`[recordings] estimate failed for ${episode.id}: ${detail}`)
-      res.status(422).json({
-        error: 'could_not_read_duration',
+      const missingTool = /(?:ffmpeg|ffprobe).*ENOENT/i.test(detail)
+      res.status(missingTool ? 503 : 422).json({
+        error: missingTool ? 'recording_media_tools_unavailable' : 'could_not_read_duration',
         detail,
       })
     }
@@ -364,7 +358,8 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
     } catch (err) {
       const detail = probeFailureDetail(err)
       console.error(`[recordings] process preflight failed for ${episode.id}: ${detail}`)
-      return void res.status(422).json({ error: 'could_not_read_duration', detail })
+      const missingTool = /(?:ffmpeg|ffprobe).*ENOENT/i.test(detail)
+      return void res.status(missingTool ? 503 : 422).json({ error: missingTool ? 'recording_media_tools_unavailable' : 'could_not_read_duration', detail })
     }
     if (durationMs > MAX_RECORDING_DURATION_MS) return void res.status(413).json({ error: 'too_long' })
 
