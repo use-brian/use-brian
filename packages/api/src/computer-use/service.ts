@@ -3,7 +3,9 @@ import { z } from 'zod'
 import { NativeModelIdSchema, type Tool, type ToolContext } from '@use-brian/core'
 import { randomUUID, createHash } from 'node:crypto'
 import { CommandSchema, GrantSchema, StatusSchema, NATIVE_PROTOCOL, sameIdentity, type NativeCommand, type NativeGrant, ReceiptSchema, MAX_MESSAGE_BYTES, sameTarget } from '@use-brian/computer-control/protocol.js'
-import { query } from '../db/client.js'
+import { query, queryWithRLS } from '../db/client.js'
+import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
+import { buildAccessPredicate } from '../db/access-predicate.js'
 import { signNativeToken } from '../auth/native-computer-token.js'
 export type NativeScope = { userId: string; workspaceId: string; assistantId: string; conversationId: string; taskId: string }
 // Explicit allowlist: never persist provider URLs, exceptions, AX, goals or frames.
@@ -157,6 +159,23 @@ export class NativeComputerService {
     try { while (true) { const {done,value} = await reader.read(); if (done) break; bytes += value.byteLength; if (bytes > MAX_MESSAGE_BYTES) throw new Error('Native response too large'); chunks.push(value) } }
     finally { await reader.cancel() }
     return JSON.parse(Buffer.concat(chunks).toString()) as unknown
+  }
+  /** Picker metadata only. Predicates mirror authorized below; dispatch still revalidates. */
+  async contextTasks(s: Omit<NativeScope, 'taskId'>): Promise<{ id: string; title: string }[]> {
+    // Same member read ceiling and universal task predicate as /brain/tasks,
+    // intersected with native ownership. Never disclose titles via the system pool.
+    const ctx = await resolveWorkspaceViewpoint(s.userId, s.workspaceId, s.assistantId)
+    if (!ctx) return []
+    const access = buildAccessPredicate(ctx, { alias: 't', startIdx: 5 })
+    const r = await queryWithRLS<{ id: string; title: string }>(s.userId, `SELECT DISTINCT t.id, left(t.title, 256) AS title
+      FROM sessions s JOIN assistants a ON a.id=s.assistant_id
+      JOIN workspace_members m ON m.workspace_id=$2 AND m.user_id=$1
+      JOIN assistant_capabilities c ON c.assistant_id=a.id AND c.capability='native_computer' AND c.revoked_at IS NULL
+      JOIN tasks t ON t.workspace_id=$2 AND t.user_id=$1 AND t.assistant_id=a.id AND t.valid_to IS NULL AND t.retracted_at IS NULL AND NOT t.scope_held
+      WHERE s.id=$4 AND s.user_id=$1 AND a.id=$3 AND a.workspace_id=$2
+      AND ${access.sql}
+      ORDER BY t.id LIMIT 500`, [s.userId,s.workspaceId,s.assistantId,s.conversationId,...access.params])
+    return r.rows.map(({ id, title }) => ({ id, title }))
   }
   async authorized(s: NativeScope): Promise<boolean> {
     if (!s.userId || !s.workspaceId || !s.assistantId || !s.conversationId || !s.taskId) return false

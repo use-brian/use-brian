@@ -63,12 +63,14 @@ export class NativeComputer {
     try {
       const result = await this.bridge()?.(message) ?? EMPTY;
       if (generation !== this.generation) return EMPTY;
+      // A reply begun before observed cleanup cannot restore old status/targets,
+      // even if a newer poll has already confirmed that cleanup finished.
+      if (auxiliary && cleanupRevision !== this.cleanupRevision) return EMPTY;
       if (result.cleanupPending) {
         ++this.cleanupRevision;
         this.publish({ ok: result.ok, cleanupPending: true });
         return result;
       }
-      if (auxiliary && this.value.cleanupPending && cleanupRevision !== this.cleanupRevision) return result;
       if (!this.value.cleanupPending && (duringStart || auxiliary && this.starting === generation)) return result;
       if (readiness) {
         this.publish({ ...this.value, readiness: result.ok ? result.readiness : undefined, readinessFailed: !result.ok || !result.readiness?.helperAdmitted, readinessPending: false });
@@ -85,7 +87,7 @@ export class NativeComputer {
       this.publish({ ...result, readiness: previous.readiness, readinessFailed: previous.readinessFailed, readinessPending: previous.readinessPending, ...(polling && sameSession && previous.inspection ? { inspection: previous.inspection } : {}) });
       return result;
     } catch {
-      if (generation === this.generation && !duringStart && !(auxiliary && this.starting === generation)) this.publish(readiness ? { ...this.value, readiness: undefined, readinessFailed: true, readinessPending: false } : this.value.cleanupPending ? { ok: false, cleanupPending: true } : EMPTY);
+      if (generation === this.generation && !(auxiliary && cleanupRevision !== this.cleanupRevision) && !duringStart && !(auxiliary && this.starting === generation)) this.publish(readiness ? { ...this.value, readiness: undefined, readinessFailed: true, readinessPending: false } : this.value.cleanupPending ? { ok: false, cleanupPending: true } : EMPTY);
       return EMPTY;
     } finally { if (beginsStart && this.starting === generation) this.starting = undefined; }
   }

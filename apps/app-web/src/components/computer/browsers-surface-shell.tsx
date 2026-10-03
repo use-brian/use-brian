@@ -34,9 +34,9 @@ import { ConnectBrowserButton } from "./connect-browser-button";
 
 type BrowsersView = "live" | "profiles" | "native";
 
-/** Static `/profiles` wins over `[sessionId]`; every other computer route is live. */
+/** Static native/profiles routes win over `[sessionId]`, including trailing slashes. */
 function browserViewFromPathname(pathname: string | null | undefined): BrowsersView {
-  if (pathname?.endsWith("/computer/native")) return "native";
+  if (pathname && /\/computer\/native\/?$/.test(pathname)) return "native";
   return pathname && /\/computer\/profiles(?:\/|$)/.test(pathname) ? "profiles" : "live";
 }
 

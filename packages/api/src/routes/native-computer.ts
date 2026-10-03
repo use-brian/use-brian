@@ -7,14 +7,15 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { ExecutionCheckSchema, type NativeComputerService } from '../computer-use/service.js'
 const Create = z.object({ workspaceId:z.string().uuid(),assistantId:z.string().uuid(),conversationId:z.string().uuid(),taskId:z.string().uuid(),deviceId:z.string().min(1).max(256),challenge:z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict()
+const Context = Create.pick({ workspaceId: true, assistantId: true, conversationId: true })
 const Exchange = z.object({ verifier:z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/),grant:z.unknown() }).strict()
 /** Mount on /api/native-computer INSTEAD OF an outer requireAuth. The Express
- * router accepts case-insensitive paths/trailing slash; only its readiness POST
- * gets no-touch auth. Headers/body/query cannot select this authentication mode. */
+ * router accepts case-insensitive paths/trailing slash; its readiness POST and context-tasks GET
+ * get no-touch auth. Headers/body/query cannot select this authentication mode. */
 export function nativeComputerAuth(jwtSecret: string, sessions?: Pick<AuthSessionStore, 'validateAccess'>): RequestHandler {
   const normal = requireAuth(jwtSecret, sessions)
   const readOnly = requireAuthWithoutTouch(jwtSecret, sessions)
-  return (req, res, next) => (req.method === 'POST' && /^\/readiness\/?$/i.test(req.path)
+  return (req, res, next) => ((req.method === 'POST' && /^\/readiness\/?$/i.test(req.path) || req.method === 'GET' && /^\/context-tasks\/?$/i.test(req.path))
     ? readOnly : normal)(req, res, next)
 }
 
@@ -38,6 +39,13 @@ export function nativeComputerRoutes(service: NativeComputerService | null, tool
     finally { clearTimeout(timer) }
   })
   router.use((_req,res,next)=>{ res.setHeader('Cache-Control','no-store'); if(!service){res.sendStatus(404);return} next() })
+  router.get('/context-tasks', async (req,res) => {
+    if (!req.userId || !req.authSessionId) { res.sendStatus(403); return }
+    const parsed = Context.safeParse(req.query)
+    if (!parsed.success) { res.sendStatus(400); return }
+    try { res.json({ tasks: await service!.contextTasks({ ...parsed.data, userId: req.userId }) }) }
+    catch { res.status(503).json({ error: 'Native context unavailable' }) }
+  })
   router.post('/sessions',async(req,res)=>{
     if (!req.authSessionId) { res.sendStatus(403); return }
     const parsed=Create.safeParse(req.body); if(!parsed.success){res.sendStatus(400);return}

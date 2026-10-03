@@ -35,6 +35,7 @@ vi.mock("next/link", () => ({
 
 vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({
+    nativeComputer: { title: "This computer" },
     computer: {
       sessions: {
         liveView: "Live browser",
@@ -79,6 +80,17 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/browsers-surface] browser top-bar view", () => {
+  it.each(["/w/ws-1/computer/native", "/w/ws-1/computer/native/"])(
+    "marks %s as This computer without selecting a browser tab",
+    async route => {
+      await mount(route);
+      const active = container?.querySelectorAll('a[aria-current="page"]');
+      expect(active).toHaveLength(1);
+      expect(active?.[0].getAttribute("href")).toBe("/w/ws-1/computer/native");
+      expect(active?.[0].textContent).toBe("This computer");
+    },
+  );
+
   it.each(["/w/ws-1/computer", "/w/ws-1/computer/session-1"])(
     "marks %s as Live browser",
     async (route) => {

@@ -48,7 +48,7 @@ it('readiness validates scope, binds auth, and reports unwired runtime without c
  expect((await request(app(null)).post('/readiness').send(context)).body.blockers).toContain('native_disabled')
 })
 it('readiness denies missing session auth before consulting service',async()=>{
- const readiness=vi.fn();const a=express();a.use(express.json());a.use(nativeComputerRoutes({readiness} as unknown as NativeComputerService))
+ const readiness=vi.fn();const a=express();a.use(express.json());a.use(nativeComputerRoutes({readiness,contextTasks:vi.fn().mockResolvedValue([])} as unknown as NativeComputerService))
  expect((await request(a).post('/readiness').send({})).status).toBe(403)
  expect(readiness).not.toHaveBeenCalled()
 })
@@ -66,13 +66,13 @@ it('bounds a stalled readiness response and suppresses late/raw errors',async()=
  } finally { vi.useRealTimers() }
 })
 
-it('readiness authentication never touches aged sessions; ordinary native routes still do',async()=>{
+it('read-only native authentication never touches aged sessions; ordinary native routes still do',async()=>{
  const id='00000000-0000-4000-8000-000000000000',secret='synthetic-auth-test'
  const token=createTokens(id,secret,{id,authVersion:2}).accessToken
  const dbQuery=vi.fn(async(_sql:string,_params?:unknown[])=>({rows:[{authVersion:2,sessionId:id,sessionVersion:2,lastSeenAt:new Date(Date.now()-6*60_000)}]}))
  const sessions=createAuthSessionStore({query:dbQuery} as never)
  const readiness=vi.fn().mockResolvedValue([]),a=express();a.use(express.json())
- a.use('/api/native-computer',nativeComputerAuth(secret,sessions),nativeComputerRoutes({readiness} as unknown as NativeComputerService))
+ a.use('/api/native-computer',nativeComputerAuth(secret,sessions),nativeComputerRoutes({readiness,contextTasks:vi.fn().mockResolvedValue([])} as unknown as NativeComputerService))
  const context={workspaceId:id,assistantId:id,conversationId:id,taskId:id,deviceId:'device'}
  for(const path of ['/readiness','/READINESS/','/readiness?touchLastSeen=true']) {
   dbQuery.mockClear()
@@ -80,6 +80,15 @@ it('readiness authentication never touches aged sessions; ordinary native routes
   expect(dbQuery).toHaveBeenCalledOnce()
   expect(dbQuery.mock.calls[0]?.[0].trim()).toMatch(/^SELECT /)
  }
+ for(const path of ['/context-tasks','/CONTEXT-TASKS/']) {
+  dbQuery.mockClear()
+  const result=await request(a).get('/api/native-computer'+path).query({workspaceId:id,assistantId:id,conversationId:id}).set('Authorization',`Bearer ${token}`)
+  expect(result.status).toBe(200)
+  expect(result.body).toEqual({tasks:[]})
+  expect(dbQuery).toHaveBeenCalledOnce()
+  expect(dbQuery.mock.calls[0]?.[0].trim()).toMatch(/^SELECT /)
+ }
+ expect((await request(a).get('/api/native-computer/context-tasks')).status).toBe(401)
  dbQuery.mockClear()
  expect((await request(a).post('/api/native-computer/sessions?readOnly=true').set('Authorization',`Bearer ${token}`).set('X-Read-Only','true').send({})).status).toBe(400)
  expect(dbQuery).toHaveBeenCalledTimes(2)

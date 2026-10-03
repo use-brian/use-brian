@@ -5,9 +5,9 @@ import { useT } from "@/lib/i18n/client";
 import { desktopBridge } from "@/lib/desktop-auth-source";
 import { nativeComputer, type DiscoveredTarget, isNativeTarget, nativeTargetKey } from "@/lib/native-computer";
 import { useChatSessionsData } from "@/lib/chat-surface-data";
-import { fetchWorkspaceTasks } from "@/lib/api/tasks";
+import { fetchNativeContextTasks } from "@/lib/api/native-computer";
 import { useCachedResource } from "@/lib/surface-cache";
-import { surfaceDataKey } from "@/lib/surface-prefetch";
+import { nativeContextTasksCacheKey } from "@/lib/surface-prefetch";
 import { ListSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -21,14 +21,23 @@ function Picker({ label, value, options, onChange, disabled }: { label: string; 
     </Select></div>;
 }
 export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
-  const t = useT().nativeComputer;
+  const copy = useT();
+  const t = copy.nativeComputer;
   const supported = !!desktopBridge()?.computerControl;
   const state = useSyncExternalStore(nativeComputer.subscribe, nativeComputer.snapshot, nativeComputer.serverSnapshot);
   const chat = useChatSessionsData(supported ? workspaceId : null);
-  const tasks = useCachedResource(supported ? surfaceDataKey("tasks", workspaceId) : null, () => fetchWorkspaceTasks(workspaceId));
   const [assistantId, setAssistant] = useState("");
   const [conversationId, setConversation] = useState("");
-  const [taskId, setTask] = useState("");
+  const contextKey = supported && !state.cleanupPending && assistantId && conversationId
+    ? nativeContextTasksCacheKey(workspaceId, assistantId, conversationId) : null;
+  const tasks = useCachedResource(contextKey, () => fetchNativeContextTasks(workspaceId, assistantId, conversationId));
+  const [taskSelection, setTaskSelection] = useState<{ key: string | null; id: string } | null>(null);
+  const taskId = taskSelection?.key === contextKey ? taskSelection?.id ?? "" : "";
+  const setTask = (id: string) => setTaskSelection(id ? { key: contextKey, id } : null);
+
+  useEffect(() => { setTaskSelection(null); }, [contextKey]);
+  const eligibleTasks = contextKey && !tasks.error ? tasks.data ?? [] : [];
+
   const [goal, setGoal] = useState("");
   const [targets, setTargets] = useState<DiscoveredTarget[]>([]);
   const [targetKey, setTarget] = useState("");
@@ -63,7 +72,9 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
     let live = true;
     const refresh = async () => {
       try {
-        const result = await desktopBridge()?.computerControl?.({ type: "targets" });
+        // Share Stop/workspace/cleanup fencing with all other native requests.
+        // A direct bridge call can return old window identities after revocation.
+        const result = await nativeComputer.send({ type: "targets" });
         if (live) setTargets(result?.ok ? (result.targets ?? []).filter(isNativeTarget) : []);
       } catch { if (live) setTargets([]); }
     };
@@ -74,7 +85,7 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   }, [workspaceId, active, busy, state.inspection]);
   const resumable = phase === "paused_for_user" || phase === "stopped";
   const ready = phase === "ready" || phase === "ended" || resumable;
-  const valid = !state.inspection && ready && !!target && !!goal.trim() && chat.assistants.some(a => a.id === assistantId) && conversations.some(c => c.id === conversationId) && !!tasks.data?.some(row => row.id === taskId);
+  const valid = !state.inspection && ready && !!target && !!goal.trim() && chat.assistants.some(a => a.id === assistantId) && conversations.some(c => c.id === conversationId) && eligibleTasks.some(row => row.id === taskId);
   async function openPermissions(permission: "accessibility" | "screen-recording") {
     if (busy || active) return;
     setBusy(true); setFailed(false);
@@ -122,14 +133,17 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
         </tr>)}</tbody>
       </table></div>
     </section> : null}
+    {contextKey && tasks.error ? <div role="alert" className="text-sm text-muted-foreground">
+      {copy.tasksPage.loadFailed}{" "}<Button variant="outline" className="min-h-11" disabled={tasks.revalidating} onClick={() => void tasks.refresh()}>{copy.tasksPage.retry}</Button>
+    </div> : null}
     {failed ? <p role="alert" className="text-destructive">{t.error}</p> : null}
-    {supported && (!chat.assistantsLoaded || !tasks.data && !tasks.error) ? <ListSurfaceSkeleton /> : null}
+    {supported && (!chat.assistantsLoaded || contextKey && !tasks.data && !tasks.error) ? <ListSurfaceSkeleton /> : null}
     {supported && !state.cleanupPending ? <>
       <p className="text-sm">{t.contextHelp} <Link className="underline" href={`/w/${workspaceId}/tasks`}>{t.tasks}</Link>{" · "}<Link className="underline" href={`/w/${workspaceId}/chat`}>{t.chat}</Link></p>
       <div className="grid gap-4 md:grid-cols-2">
-        <Picker label={t.assistant} value={assistantId} disabled={busy || active} options={chat.assistants.map(a => ({ id: a.id, name: a.name }))} onChange={id => { setAssistant(id); setConversation(""); }} />
-        <Picker label={t.conversation} value={conversationId} disabled={busy || active} options={conversations.map(c => ({ id: c.id, name: c.title || t.untitled }))} onChange={setConversation} />
-        <Picker label={t.task} value={taskId} disabled={busy || active} options={(tasks.data ?? []).map(row => ({ id: row.id, name: row.title }))} onChange={setTask} />
+        <Picker label={t.assistant} value={assistantId} disabled={busy || active} options={chat.assistants.map(a => ({ id: a.id, name: a.name }))} onChange={id => { setAssistant(id); setConversation(""); setTask(""); }} />
+        <Picker label={t.conversation} value={conversationId} disabled={busy || active} options={conversations.map(c => ({ id: c.id, name: c.title || t.untitled }))} onChange={id => { setConversation(id); setTask(""); }} />
+        <Picker label={t.task} value={taskId} disabled={busy || active} options={eligibleTasks.map(row => ({ id: row.id, name: row.title }))} onChange={setTask} />
         <Picker label={t.target} value={targetKey} disabled={busy || active} options={targets.map(item => ({ id: nativeTargetKey(item), name: `${item.displayName ? `${item.displayName} · ` : ""}${item.appId} · ${item.windowId}` }))} onChange={setTarget} />
       </div>
       {!targets.length ? <p className="text-sm">{t.noTargets}</p> : null}

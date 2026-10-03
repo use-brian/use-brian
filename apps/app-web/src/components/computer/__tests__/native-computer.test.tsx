@@ -9,7 +9,7 @@ import { nativeComputer, type NativeStatus, type ComputerControl } from "@/lib/n
 vi.mock("@/lib/i18n/client", () => ({ useT: () => en }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => <a {...props}>{children}</a> }));
 const setup = vi.hoisted(() => ({ populated: false }));
-vi.mock("@/lib/chat-surface-data", () => ({ useChatSessionsData: () => ({ assistantsLoaded: true, assistants: setup.populated ? [{ id: "a", name: "Assistant" }] : [], personal: setup.populated ? [{ id: "c", assistantId: "a", title: "Conversation" }] : [] }) }));
+vi.mock("@/lib/chat-surface-data", () => ({ useChatSessionsData: () => ({ assistantsLoaded: true, assistants: setup.populated ? [{ id: "a", name: "Assistant" }, { id: "a2", name: "Other assistant" }] : [], personal: setup.populated ? [{ id: "c", assistantId: "a", title: "Conversation" }, { id: "c2", assistantId: "a2", title: "Other conversation" }] : [] }) }));
 vi.mock("@/lib/surface-cache", () => ({ useCachedResource: () => ({ data: setup.populated ? [{ id: "t", title: "Task" }] : [] }) }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 afterEach(() => { setup.populated = false; delete window.usebrianDesktop; });
@@ -317,4 +317,58 @@ it("shows fixed focus-free cleanup copy and disables setup but not repeated Stop
     expect(el.querySelector('[role="dialog"]')).toBeNull();
     expect(focus).not.toHaveBeenCalled();
   } finally { focus.mockRestore(); await act(async () => root.unmount()); }
+});
+
+it("[COMP:app-web/native-computer] discovery publishes permission state and discards windows returned after Stop", async () => {
+  let finish!: (value: Awaited<ReturnType<ComputerControl>>) => void;
+  const permission = { protocol: "native-computer-v1", state: "permission_required", epoch: 0, capabilities: { ...fullCapabilities, semanticActions: false, input: false } } as NativeStatus;
+  const control = vi.fn<ComputerControl>().mockImplementation(async m => m.type === "targets"
+    ? { ok: true, status: permission, targets: [] }
+    : { ok: true, cleanupPending: false });
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); document.body.append(el); const root = createRoot(el);
+  try {
+    await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
+    // Discovery must update the shared status without waiting for a coordinator poll.
+    expect(el.textContent).toContain(en.nativeComputer.permissionHelp);
+    control.mockImplementation(m => m.type === "targets" ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ ok: true, cleanupPending: false }));
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => Array.from(el.querySelectorAll("button")).find(b => b.textContent === en.nativeComputer.stop)!.click());
+    await act(async () => finish({ ok: true, status: { ...permission, state: "ready" }, targets: [{ appId: "old-app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Old window" }] }));
+    expect(el.textContent).toContain(en.nativeComputer.noTargets);
+    expect(nativeComputer.snapshot().status).toBeUndefined();
+    await act(async () => (el.querySelector(`[aria-label="${en.nativeComputer.target}"]`) as HTMLElement).click());
+    expect(document.body.textContent).not.toContain("Old window");
+  } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
+});
+
+it("[COMP:app-web/native-computer] changing assistant requires choosing the task again even after selecting a new conversation", async () => {
+  setup.populated = true;
+  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: { ...fullCapabilities, input: false } };
+  const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
+  const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: true, status, targets: [target] });
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); document.body.append(el); const root = createRoot(el);
+  const choose = async (label: string, name: string) => {
+    await act(async () => (el.querySelector(`[aria-label="${label}"]`) as HTMLElement).click());
+    await act(async () => Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(option => option.textContent === name)!.click());
+  };
+  const start = () => Array.from(el.querySelectorAll("button")).find(button => button.textContent === en.nativeComputer.start)!;
+  try {
+    await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
+    await fillInspectorForm(el);
+    expect(start().disabled).toBe(false);
+    await choose(en.nativeComputer.assistant, "Other assistant");
+    expect(start().disabled).toBe(true);
+    await choose(en.nativeComputer.conversation, "Other conversation");
+    expect(start().disabled).toBe(true); // A new conversation cannot carry the old task selection.
+    await act(async () => start().click());
+    expect(control.mock.calls.some(([m]) => m.type === "start" || m.type === "resume")).toBe(false);
+    await choose(en.nativeComputer.task, "Task");
+    expect(start().disabled).toBe(false);
+    await act(async () => start().click());
+    expect(control).toHaveBeenCalledWith(expect.objectContaining({ type: "start", assistantId: "a2", conversationId: "c2", taskId: "t" }));
+  } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
 });

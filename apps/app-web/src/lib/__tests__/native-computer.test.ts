@@ -208,3 +208,22 @@ it("an older status response cannot clear newly observed cleanup", async () => {
   await owner.check();
   expect(owner.snapshot().cleanupPending).toBe(false);
 });
+
+it.each(["status", "targets"] as const)("[COMP:app-web/native-computer] stale %s cannot return prior scope after cleanup has finished", async type => {
+  for (const reject of [false, true]) {
+    let finish!: (result: DesktopComputerControlResult) => void;
+    let fail!: (error: Error) => void;
+    const control = vi.fn<ComputerControl>().mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+    const owner = new NativeComputer(() => control);
+    const stale = owner.send({ type });
+    control.mockResolvedValueOnce({ ok: true, cleanupPending: true });
+    await owner.check();
+    control.mockResolvedValueOnce({ ok: true, cleanupPending: false });
+    await owner.check();
+    const clean = owner.snapshot();
+    if (reject) fail(new Error("old request failed"));
+    else finish({ ok: true, cleanupPending: false, targets: [input.target] });
+    expect(await stale).toEqual({ ok: false });
+    expect(owner.snapshot()).toBe(clean);
+  }
+});

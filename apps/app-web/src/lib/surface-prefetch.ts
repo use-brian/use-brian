@@ -76,6 +76,11 @@ function viewerSuffix(): string {
   return id ? `:${id}` : "";
 }
 
+/** Shares task event invalidation, but never the broad workspace task DTO. */
+export function nativeContextTasksCacheKey(workspaceId: string, assistantId: string, conversationId: string): string {
+  return `tasks:${workspaceId}:native-context${viewerSuffix()}:${assistantId}:${conversationId}`;
+}
+
 /** Organization directory is permission-sensitive and additionally keys the explicit shell viewer. */
 export function workspaceAccessCacheKey(workspaceId: string, userId: string): string {
   return `workspace-access:${workspaceId}:${userId}`;

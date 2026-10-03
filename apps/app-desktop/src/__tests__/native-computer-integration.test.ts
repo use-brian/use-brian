@@ -200,6 +200,19 @@ describe('trusted main native computer setup', () => {
     return getAuth
   }
 
+  it('packaged Mac tasks remain unavailable with rollout enabled but pilot acceptance absent', async () => {
+    await packagedReadiness()
+    vi.stubEnv('NATIVE_COMPUTER_ENABLED', 'true')
+    vi.stubEnv('NATIVE_COMPUTER_INSPECTOR_ENABLED', 'false')
+    const getAuth = vi.fn(async () => auth)
+    integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth }); integration.install()
+    await discover()
+    expect(await integration.handle(selection)).toMatchObject({ ok: false, error: 'Native control unavailable' })
+    expect(getAuth).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
+  })
+
   it('packaged inspector opt-in authorizes only a one-shot read, not control/capture or pilot acceptance', async () => {
     await packagedReadiness()
     vi.stubEnv('NATIVE_COMPUTER_INSPECTOR_ENABLED', 'true')
