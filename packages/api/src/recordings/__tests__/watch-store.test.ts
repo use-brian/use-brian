@@ -9,7 +9,7 @@ vi.mock('../../db/client.js', () => ({
   getPool: () => ({ connect: async () => ({ query: (sql: string, params?: unknown[]) => db.query(sql, params), release() {} }) }),
 }))
 import { watchStore, sha256 } from '../watch-store.js'
-const ownerId = randomUUID(), workspaceId = randomUUID(), assistantId = randomUUID(), deviceId = randomUUID()
+const ownerId = randomUUID(), workspaceId = randomUUID(), assistantId = randomUUID(), standardId = randomUUID(), deviceId = randomUUID()
 async function grant() {
   const tokens = await watchStore.provision({ ownerId, workspaceId, assistantId, deviceId: randomUUID(), provisioningKey: 'test-server-key', label: 'Watch' })
   return { tokens, g: await watchStore.authenticate(tokens.accessToken) }
@@ -19,12 +19,15 @@ const audio = Buffer.from('audio')
 const input = (sequence: number) => ({ sequence, offsetMs: sequence * 1000, durationMs: 1000, checksum: sha256(audio), audio })
 
 beforeAll(async () => {
-  await db.exec('CREATE TABLE users(id uuid PRIMARY KEY); CREATE TABLE workspaces(id uuid PRIMARY KEY); CREATE TABLE assistants(id uuid PRIMARY KEY); CREATE TABLE episodes(id uuid PRIMARY KEY,workspace_id uuid,assistant_id uuid,created_by_user_id uuid,source_kind text,occurred_at timestamptz);')
-  await db.exec('CREATE TABLE workspace_files(id uuid PRIMARY KEY,workspace_id uuid,created_by_user_id uuid,path text); CREATE TABLE saved_views(id uuid PRIMARY KEY,workspace_id uuid,created_by uuid,linked_recording_id uuid);')
+  await db.exec(`CREATE TABLE users(id uuid PRIMARY KEY); CREATE TABLE workspaces(id uuid PRIMARY KEY); CREATE TABLE assistants(id uuid PRIMARY KEY,kind text NOT NULL DEFAULT 'primary'); CREATE TABLE episodes(id uuid PRIMARY KEY,workspace_id uuid,assistant_id uuid,created_by_user_id uuid,source_kind text,occurred_at timestamptz);`)
+  await db.exec('CREATE TABLE workspace_files(id uuid PRIMARY KEY,workspace_id uuid,assistant_id uuid,created_by_user_id uuid,created_by_assistant_id uuid,path text); CREATE TABLE saved_views(id uuid PRIMARY KEY,workspace_id uuid,created_by uuid,linked_recording_id uuid);')
   await db.query('INSERT INTO users VALUES($1)', [ownerId])
   await db.query('INSERT INTO workspaces VALUES($1)', [workspaceId])
   await db.query('INSERT INTO assistants VALUES($1)', [assistantId])
-  await db.exec(readFileSync(new URL('../../../migrations/653_watch_recording.sql', import.meta.url), 'utf8'))
+  await db.query("INSERT INTO assistants VALUES($1,'standard')", [standardId])
+  for (const name of ['653_watch_recording.sql', '657_watch_assistant_destinations.sql']) {
+    await db.exec(readFileSync(new URL(`../../../migrations/${name}`, import.meta.url), 'utf8'))
+  }
 }, 60000)
 afterAll(async () => { await db.close() })
 
@@ -38,6 +41,11 @@ describe('watch persisted security and receipts (real SQL)', () => {
     expect(second.renewalToken).toBe(first.renewalToken)
     expect((await db.query('SELECT id FROM recording_device_grants WHERE device_id=$1', [deviceId])).rows).toHaveLength(1)
     await expect(watchStore.provision({ ...input, label: 'Changed' })).rejects.toMatchObject({ message: 'provisioning_conflict' })
+    // Another assistant in the same workspace is a separate destination grant, not a conflict.
+    const other = await watchStore.provision({ ...input, assistantId: standardId })
+    expect(other.grantId).not.toBe(first.grantId)
+    expect((await watchStore.provision({ ...input, assistantId: standardId })).grantId).toBe(other.grantId)
+    await watchStore.revoke(ownerId, other.grantId)
     await watchStore.renew(first.renewalToken, async () => {})
     await expect(watchStore.provision(input)).rejects.toMatchObject({ message: 'grant_already_rotated_use_relay' })
     await watchStore.revoke(ownerId, first.grantId)
@@ -151,6 +159,30 @@ describe('watch persisted security and receipts (real SQL)', () => {
     await expect(watchStore.receiveFull(g, c.id, audio, client)).rejects.toMatchObject({ status: 410 })
     await watchStore.cleanup()
     expect(await watchStore.upload(c.id)).toBeNull()
+  })
+  it('freezes a non-primary destination partition per capture and enforces it at the SQL boundary', async () => {
+    const primary = await grant()
+    expect((await watchStore.create(primary.g, randomUUID(), meta)).scope_assistant_id).toBeNull()
+    const tokens = await watchStore.provision({ ownerId, workspaceId, assistantId: standardId, deviceId: randomUUID(), provisioningKey: 'test-server-key', label: 'Watch' })
+    const g = await watchStore.authenticate(tokens.accessToken), c = await watchStore.create(g, randomUUID(), meta)
+    expect(c.scope_assistant_id).toBe(standardId)
+    await watchStore.receive(g, c, input(0))
+    await watchStore.seal(g, c.client_id, { expectedWindows: 1, allowIncomplete: false, source: 'windows' })
+    const file = (assistant: string | null, author: string | null) => db.query('INSERT INTO workspace_files(id,workspace_id,assistant_id,created_by_user_id,created_by_assistant_id,path) VALUES($1,$2,$3,$4,$5,$6)',
+      [randomUUID(), workspaceId, assistant, ownerId, author, `/recordings/watch/${c.id}.m4a`])
+    // Device audio lands only in the frozen partition and stays human-authored.
+    await expect(file(null, null)).rejects.toThrow('watch_capture_publication_closed')
+    await expect(file(standardId, standardId)).rejects.toThrow('watch_capture_publication_closed')
+    await file(standardId, null)
+    const episode = async (assistant: string | null) => {
+      await db.exec('BEGIN')
+      await db.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.media_intake_parent','{}',true)", [ownerId])
+      try { return await db.query<{occurred_at: Date}>(`INSERT INTO episodes(id,workspace_id,assistant_id,created_by_user_id,source_kind,occurred_at) VALUES($1,$2,$3,$4,'recording',now()) RETURNING occurred_at`, [c.recording_id, workspaceId, assistant, ownerId]) }
+      finally { await db.exec('ROLLBACK') }
+    }
+    await expect(episode(null)).rejects.toThrow('watch_recording_provenance_mismatch')
+    expect(new Date((await episode(standardId)).rows[0].occurred_at).toISOString()).toBe('2026-01-01T00:00:00.000Z')
+    await db.query("UPDATE watch_captures SET expires_at=now()-interval '1 day' WHERE grant_id IN ($1,$2)", [g.id, primary.g.id])
   })
   it('rejects SQL publication after expiry and cannot create a previously prepared page', async () => {
     const { g } = await grant(), c = await watchStore.create(g, randomUUID(), meta)

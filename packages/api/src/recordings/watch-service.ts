@@ -11,9 +11,12 @@ import { parseTranscriptLines } from '../routes/recording-live.js'
 import { watchStore, WatchError, withCaptureLock, missingTimeRanges, type Grant, type Capture, type Window } from './watch-store.js'
 
 export async function authorizeWatchDestination(g: Pick<Grant, 'owner_id' | 'workspace_id' | 'assistant_id'> & { id?: string; authMode?: 'relay' }) {
-  // v1 deliberately supports only the workspace primary assistant, never arbitrary destinations.
+  // Any assistant the owner can use in this workspace: a current member who is not
+  // blocked from it. A non-primary destination must be cleared to read the internal
+  // audio the watch writes, or it could never see its own recording.
   const result = await query(`SELECT 1 FROM workspace_members m JOIN assistants a ON a.workspace_id=m.workspace_id
-    WHERE m.user_id=$1 AND m.workspace_id=$2 AND a.id=$3 AND a.kind='primary'
+    WHERE m.user_id=$1 AND m.workspace_id=$2 AND a.id=$3
+      AND (a.kind='primary' OR a.clearance IN ('internal','confidential'))
       AND NOT ($1=ANY(a.blocked_user_ids))`, [g.owner_id, g.workspace_id, g.assistant_id])
   if (!result.rows.length) throw new WatchError(403, 'destination_unavailable')
   if (g.id) {
@@ -143,7 +146,9 @@ export function createWatchService(deps: {
       const rows = await watchStore.windows(c.id, c.finalization?.source !== 'full')
       // Original device audio is human-authored, not assistant-generated. Let the
       // canonical root-file adapter admit its scope; the recording inherits it.
-      const ctx = { workspaceId: g.workspace_id, userId: g.owner_id }
+      // A non-primary destination partitions it to the capture's frozen assistant.
+      const scope = c.scope_assistant_id ?? null
+      const ctx = { workspaceId: g.workspace_id, userId: g.owner_id, ...(scope ? { scopeAssistantId: scope } : {}) }
       const path = `/recordings/watch/${c.id}.m4a`
       let file = await deps.files.stat(ctx, path)
       if (!file.ok) {
@@ -157,10 +162,13 @@ export function createWatchService(deps: {
         file = await deps.files.writeBytes(ctx, { path, bytes: assembled.buffer, mime: assembled.mime, title: c.metadata.title, sensitivity: 'internal' })
       }
       if (!file.ok) throw new WatchError(file.error.kind === 'quota_exceeded' ? 413 : 409, 'media_publication_failed')
-      if (file.value.createdByUserId !== g.owner_id || file.value.assistantId !== null || file.value.createdByAssistantId != null || file.value.mime !== 'audio/mp4') throw new WatchError(409, 'media_identity_conflict')
+      if (file.value.createdByUserId !== g.owner_id || file.value.assistantId !== scope || file.value.createdByAssistantId != null || file.value.mime !== 'audio/mp4') throw new WatchError(409, 'media_identity_conflict')
       await watchStore.assertLive(c.id, db)
-      const authority = { actorUserId: g.owner_id }
+      // The human intake read must see the partition it publishes, and nothing wider.
+      const authority = { actorUserId: g.owner_id, ...(scope ? { access: { workspaceId: g.workspace_id, userId: g.owner_id,
+        assistantId: '', assistantKind: 'primary' as const, visibilityAssistantIds: [scope] } } : {}) }
       const parent = await captureRecordingIntakeParent(authority, g.workspace_id, file.value.id)
+      if (parent.assistantId !== scope) throw new WatchError(409, 'media_identity_conflict')
       await watchStore.assertLive(c.id, db)
       const recording = await createRecording({ id: c.recording_id, workspaceId: g.workspace_id, mime: parent.mime,
         gcsKey: '', assistantId: parent.assistantId, createdByUserId: g.owner_id }, { ...authority, parent })
