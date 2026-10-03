@@ -165,7 +165,7 @@ export const DEPARTMENT_ISOLATION_CASES: ReadonlyArray<{
   ]},
   {id:'A14',assertions:[
     selector('organization','src/workspace-access/__tests__/org-chart.integration.test.ts','A14 projects visible descendants'),
-    selector('ui','src/components/organization/__tests__/organization-chart.test.tsx','keyboard-operable outline'),
+    selector('ui','src/components/organization/__tests__/organization-chart.test.tsx','keyboard-operable chart'),
     selector('ui','src/components/organization/__tests__/organization-chart.test.tsx','searches only projected data'),
   ]},
   {id:'A15',assertions:[

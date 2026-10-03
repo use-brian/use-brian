@@ -23,6 +23,7 @@
 
 import { getPool } from '../db/client.js'
 import { chunkFileText, insertFileSegments } from '../db/file-segments-store.js'
+import { captureRecordingIntakeParent } from '../db/recording-intake-admission.js'
 
 export type IndexFileArtifactResult = {
   /** Rows actually inserted this call (0 on an idempotent re-run). */
@@ -94,6 +95,12 @@ export async function indexFileArtifact(input: {
   // the stamp, so its retry completes the partial set instead.
   const alreadyIndexed = p.metadata?.indexing?.status === 'ready'
 
+  // Segment publication is admitted against the canonical parent as the
+  // acting user reads it NOW (migration 643 rejects any file_segments insert
+  // without it). The store re-admits this snapshot in the write transaction,
+  // so a parent that changed while we chunked fails as source_changed.
+  const authority = { actorUserId: input.actingUserId }
+  const parentSnapshot = await captureRecordingIntakeParent(authority, input.workspaceId, input.fileId)
   const { segments, truncatedAtChar } = chunkFileText(input.text)
   const segmentsInserted = await insertFileSegments({
     replace: alreadyIndexed,
@@ -106,7 +113,7 @@ export async function indexFileArtifact(input: {
     tags: p.tags,
     source: p.source,
     segments,
-  })
+  }, { ...authority, parent: parentSnapshot })
 
   const truncated = truncatedAtChar !== null
   await setFileIndexing(input.fileId, {

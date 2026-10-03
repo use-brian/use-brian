@@ -10,6 +10,8 @@ import {workspaceAccessModeCacheKey,workspaceAccessMigrationCacheKey,workspaceDe
 import {fetchWorkspaceDepartmentRegistry,fetchWorkspaceAccessMode,fetchMigrationPlans,fetchMigrationPlan,prepareMigrationItem,applyMigrationItem,setMigrationPlanState,ORGANIZATION_CHANGED_EVENT,isResourceMigrationItem,type MigrationItem,type PrincipalMigrationItem,type ResourceMigrationItem,type MigrationItemReviewResult,type MigrationItemApplyResult,type MigrationProjection} from '@/lib/api/workspace-access';
 import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
 import {Button} from '@/components/ui/button';
+import {RefreshCw} from 'lucide-react';
+import {HowItWorks} from '@/components/organization/org-visuals';
 import {confirmDialog} from '@/components/ui/confirm-dialog';
 import {SurfaceSkeletonFor} from '@/components/chrome/surface-skeleton';
 import {ScopeReviewEvidence} from './scope-review';
@@ -80,11 +82,10 @@ function MigrationPanel(){
     window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);
     return()=>{window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};
   },[workspaceId]);
-  return <section className="min-w-0 space-y-4 rounded-xl border border-border p-4"><h2 className="font-semibold">{t.title}</h2>
+  return <section className="min-w-0 space-y-3 rounded-xl border border-border bg-card p-4"><h2 className="font-semibold">{t.title}</h2>
     <ModeSummary/>
-    <p className="text-sm">{t.limitation}</p>
-    <p className="text-sm font-medium">{t.warning}</p>
-    {plan?<><Button variant="outline" className="min-h-11" onClick={()=>setPlan(null)}>{t.back}</Button><PlanDetail key={plan} planId={plan}/></>:<PlanList key={after} after={after} setAfter={setAfter} inspect={setPlan}/>}
+    <HowItWorks summary={t.aboutPlans}><p>{t.limitation}</p><p className="font-medium text-foreground">{t.warning}</p></HowItWorks>
+    {plan?<><Button variant="outline" size="sm" className="max-sm:min-h-11" onClick={()=>setPlan(null)}>{t.back}</Button><PlanDetail key={plan} planId={plan}/></>:<PlanList key={after} after={after} setAfter={setAfter} inspect={setPlan}/>}
   </section>;
 }
 function LoadState({error,refresh}:{error:unknown;refresh:()=>Promise<unknown>}){
@@ -95,14 +96,15 @@ function ModeSummary(){
   const {workspaceId,me}=useWorkspaceContext(),t=useT().accessMigration;
   const key=workspaceAccessModeCacheKey(workspaceId,me.id),resource=useCachedResource(key,()=>fetchWorkspaceAccessMode(workspaceId));
   const mode=useProtectedProjection(key,resource.data,()=>{},resource.refresh);
-  return mode?<dl className="grid gap-2 text-sm"><div><dt>{t.current}</dt><dd>{t[mode.mode]}</dd></div><div><dt>{t.setup}</dt><dd>{t[mode.setupState]}</dd></div><div><dt>{t.defaultDepartment}</dt><dd className="break-words">{mode.defaultDepartmentName??t.missing}</dd></div></dl>:<LoadState error={resource.error} refresh={resource.refresh}/>;
+  return mode?<dl className="grid gap-2 text-sm sm:grid-cols-3">{([[t.current,t[mode.mode]],[t.setup,t[mode.setupState]],[t.defaultDepartment,mode.defaultDepartmentName??t.missing]] as const).map(([label,value])=>
+    <div key={label} className="min-w-0 rounded-lg bg-muted/50 px-3 py-2"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="break-words font-medium">{value}</dd></div>)}</dl>:<LoadState error={resource.error} refresh={resource.refresh}/>;
 }
 function PlanList({after,setAfter,inspect}:{after:string;setAfter:(value:string)=>void;inspect:(id:string)=>void}){
   const {workspaceId,me}=useWorkspaceContext(),t=useT().accessMigration,a=useT().workspaceAccess;
   const key=workspaceAccessMigrationCacheKey(workspaceId,me.id,'list',after),resource=useCachedResource(key,()=>fetchMigrationPlans(workspaceId,after));
   const data=useProtectedProjection(key,resource.data,()=>{},resource.refresh);
-  return <div className="space-y-3"><h3 className="font-medium">{t.plans}</h3><Button variant="outline" className="min-h-11" onClick={()=>void resource.refresh()}>{a.reload}</Button>
-    {!data?<LoadState error={resource.error} refresh={resource.refresh}/>:<>{!data.plans.length?<p>{t.empty}</p>:data.plans.map(plan=><article className="space-y-2 border-t border-border pt-3 text-sm" key={plan.id}>
+  return <div className="space-y-2"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">{t.plans}</h3><Button variant="ghost" size="sm" className="max-sm:min-h-11" onClick={()=>void resource.refresh()}><RefreshCw aria-hidden className="size-3.5"/>{a.reload}</Button></div>
+    {!data?<LoadState error={resource.error} refresh={resource.refresh}/>:<>{!data.plans.length?<p className="text-sm text-muted-foreground">{t.empty}</p>:data.plans.map(plan=><article className="space-y-2 border-t border-border pt-3 text-sm" key={plan.id}>
       <p className="break-all">{plan.id}</p><p>{statusLabel(plan.status,t)} · {t.target}: {t[plan.target_mode]}</p>
       <p>{t.appliedCount}: {plan.summary_counts.applied??0} / {plan.summary_counts.total??0}</p>
       <Button className="min-h-11" variant="outline" onClick={()=>inspect(plan.id)}>{t.inspect}</Button>

@@ -3279,3 +3279,25 @@ button.doc-comment-card:hover {
 @media (prefers-reduced-motion: reduce) {
   [data-document-toolbar-surface], [data-document-find-replace], [data-document-outline], [data-document-word-count] { animation: none !important; transition: none !important; }
 }
+
+/* Organization → Structure graph. Units are `.org-node` list items whose
+   sub-units sit in `.org-children`; person rows inside a card are untouched.
+   Phones get an indented outline; from md up, connector lines join each card
+   to its children. Spec: organization-chart.md → "Visual presentation". */
+.org-tree, .org-children { list-style: none; margin: 0; padding: 0; }
+.org-tree { display: grid; gap: 0.75rem; }
+.org-children { display: grid; gap: 0.75rem; margin: 0.75rem 0 0 0.75rem; padding-left: 0.75rem; border-left: 1px solid color-mix(in srgb, var(--foreground) 22%, transparent); }
+@media (min-width: 768px) {
+  .org-tree { display: flex; align-items: flex-start; justify-content: center; gap: 1.5rem; }
+  .org-children { position: relative; display: flex; align-items: flex-start; justify-content: center; gap: 0; margin: 0; padding: 1.25rem 0 0; border: 0; }
+  .org-children::before { content: ""; position: absolute; top: 0; left: 50%; height: 1.25rem; border-left: 1px solid color-mix(in srgb, var(--foreground) 22%, transparent); }
+  .org-node { position: relative; display: flex; flex-direction: column; align-items: center; }
+  .org-children > .org-node { padding: 1.25rem 0.5rem 0; }
+  .org-children > .org-node::before, .org-children > .org-node::after { content: ""; position: absolute; top: 0; right: 50%; width: 50%; height: 1.25rem; border-top: 1px solid color-mix(in srgb, var(--foreground) 22%, transparent); }
+  .org-children > .org-node::after { right: auto; left: 50%; border-left: 1px solid color-mix(in srgb, var(--foreground) 22%, transparent); }
+  .org-children > .org-node:only-child { padding-top: 0; }
+  .org-children > .org-node:only-child::before, .org-children > .org-node:only-child::after { display: none; }
+  .org-children > .org-node:first-child::before, .org-children > .org-node:last-child::after { border: 0 none; }
+  .org-children > .org-node:last-child::before { border-right: 1px solid color-mix(in srgb, var(--foreground) 22%, transparent); border-top-right-radius: 6px; }
+  .org-children > .org-node:first-child::after { border-top-left-radius: 6px; }
+}

@@ -6,8 +6,8 @@
  * `manageDepartments` tool (D25). Spec: docs/architecture/features/workspace-access.md
  * -> "Department management and home departments (v2, migration 651)".
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarClock, Check, Crown, MoreHorizontal, ShieldAlert, Trash2, UserPlus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { CalendarClock, Check, Crown, MoreHorizontal, ShieldAlert, Trash2, UserPlus, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
@@ -20,8 +20,9 @@ import { useWorkspaceContext } from "@/lib/workspace-context";
 import { listWorkspaceMembers } from "@/lib/api/mentions";
 import { listAssistants } from "@/lib/api/studio";
 import { fetchWorkspaceAccess, ORGANIZATION_CHANGED_EVENT } from "@/lib/api/workspace-access";
-import { invalidateSurfaceCache, useCachedResource, warmSurfaceCache } from "@/lib/surface-cache";
-import { assistantsCacheKey, departmentDirectoryCacheKey, departmentEdgesCacheKey, workspaceAccessCacheKey } from "@/lib/surface-prefetch";
+import { invalidateSurfaceCache, seedSurfaceCache, useCachedResource, warmSurfaceCache } from "@/lib/surface-cache";
+import { assistantsCacheKey, departmentDirectoryCacheKey, departmentEdgesCacheKey, departmentReadersCacheKey, workspaceAccessCacheKey } from "@/lib/surface-prefetch";
+import { ClearanceBar, ClearancePill, InfoNote, OrgAvatar, type Clearance } from "./org-visuals";
 import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import {
   DEPARTMENTS_CHANGED_EVENT, DepartmentRequestError, addDepartmentOwner, breakGlassDepartment, fetchDepartmentEdges,
@@ -103,6 +104,35 @@ function useDirectory(workspaceId: string) {
   return { data, reload };
 }
 
+/**
+ * Reader edges for every listed department at once, for the department cards.
+ * Lives in the department cache family, so the same signals refresh and purge
+ * it, and seeds each department's own slot so opening a card paints at once.
+ * A department the viewer cannot read maps to no entry.
+ */
+export function useDepartmentReaders(departmentIds: string[]) {
+  const { workspaceId, me } = useWorkspaceContext();
+  const signature = [...departmentIds].sort().join(",");
+  const ids = useMemo(() => (signature ? signature.split(",") : []), [signature]);
+  const key = ids.length ? departmentReadersCacheKey(workspaceId, me.id, ids) : null;
+  const resource = useCachedResource(key, async () => {
+    const rows = await Promise.all(ids.map(id => loadEdges(workspaceId, id).then(edges => [id, edges] as const, () => null)));
+    const edges = new Map<string, DepartmentEdge[]>();
+    for (const row of rows) {
+      if (!row) continue;
+      edges.set(row[0], row[1]);
+      seedSurfaceCache(departmentEdgesCacheKey(workspaceId, me.id, row[0]), row[1]);
+    }
+    return edges;
+  });
+  useDepartmentSignals(workspaceId, me.id, resource.refresh);
+  const { data } = useDirectory(workspaceId);
+  return { edges: resource.data ?? null, directory: data?.departments ?? null };
+}
+
+export const clearanceCounts = (edges: DepartmentEdge[]): Record<Clearance, number> =>
+  edges.reduce((counts, edge) => ({ ...counts, [edge.clearance]: counts[edge.clearance] + 1 }), { public: 0, internal: 0, confidential: 0 } as Record<Clearance, number>);
+
 function useErrorCopy() {
   const t = useT().departmentAccess;
   return (error: unknown) => {
@@ -126,7 +156,7 @@ const dateValue = (iso: string | null): string => {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 };
 const today = () => dateValue(new Date().toISOString());
-const dateInputClass = "min-h-11 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm";
+const dateInputClass = "h-8 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring max-sm:h-11 md:text-sm";
 
 export function DepartmentAccessPanel({ departmentId }: { departmentId: string }) {
   const { workspaceId, me } = useWorkspaceContext();
@@ -179,10 +209,11 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
     const lastOwner = isOwner && owners.size <= 1;
     const editing = editingExpiry?.key === rowKey ? editingExpiry : null;
     return (
-      <li key={rowKey} className="space-y-3 rounded-lg border border-border/70 px-3 py-2">
-        <div className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-2">
+      <li key={rowKey} className="space-y-3 px-1 py-1.5">
+        <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-2 max-sm:min-h-11">
+          <OrgAvatar name={name} kind={edge.principal.kind === "user" ? "member" : "assistant"} seed={edge.principal.id} size={26} />
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2 text-sm">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
               <span className="truncate font-medium">{name}</span>
               {edge.principal.kind === "user" && edge.principal.id === me.id ? <span className="text-xs text-muted-foreground">{t.you}</span> : null}
               {isOwner ? <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs"><Crown className="size-3" aria-hidden />{t.owner}</span> : null}
@@ -194,30 +225,30 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
           </div>
           {canManage && !fixed ? (
             <Select value={edge.clearance} onValueChange={(value) => { if (value && value !== edge.clearance) void run(() => setDepartmentEdge(workspaceId, departmentId, { principal: edge.principal, clearance: value as DepartmentClearance, expiresAt: edge.expiresAt, expectedRevision: revision })); }}>
-              <SelectTrigger aria-label={format(t.clearanceLabel, { name })} className="min-h-11 w-40" disabled={busy}>
+              <SelectTrigger aria-label={format(t.clearanceLabel, { name })} className="w-40 max-sm:min-h-11" disabled={busy}>
                 <SelectValue>{clearanceLabel(edge.clearance)}</SelectValue>
               </SelectTrigger>
               <SelectContent>{CLEARANCES.map(c => <SelectItem key={c} value={c}>{clearanceLabel(c)}</SelectItem>)}</SelectContent>
             </Select>
-          ) : <span className="text-sm text-muted-foreground">{clearanceLabel(edge.clearance)}</span>}
+          ) : <ClearancePill clearance={edge.clearance} label={clearanceLabel(edge.clearance)} />}
           {canManage && !isPrimary && !viaGrant ? (
             <DropdownMenu>
               <DropdownMenuTrigger aria-label={format(t.actionsLabel, { name })} disabled={busy}
-                className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50">
+                className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50 max-sm:size-11">
                 <MoreHorizontal className="size-4" aria-hidden />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                {!isOwner ? <DropdownMenuItem className="min-h-11" onClick={() => setEditingExpiry({ key: rowKey, value: dateValue(edge.expiresAt) })}>
+                {!isOwner ? <DropdownMenuItem className="max-sm:min-h-11" onClick={() => setEditingExpiry({ key: rowKey, value: dateValue(edge.expiresAt) })}>
                   <CalendarClock className="size-4" aria-hidden />{edge.expiresAt ? t.changeEndDate : t.setEndDate}
                 </DropdownMenuItem> : null}
-                {edge.principal.kind === "user" ? <DropdownMenuItem className="min-h-11" disabled={lastOwner} onClick={() => void run(() => isOwner
+                {edge.principal.kind === "user" ? <DropdownMenuItem className="max-sm:min-h-11" disabled={lastOwner} onClick={() => void run(() => isOwner
                   ? removeDepartmentOwner(workspaceId, departmentId, edge.principal.id, revision)
                   : addDepartmentOwner(workspaceId, departmentId, edge.principal.id, revision))}>
                   <Crown className="size-4" aria-hidden />{isOwner ? t.removeOwner : t.makeOwner}
                 </DropdownMenuItem> : null}
                 {!isOwner ? <>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" className="min-h-11" onClick={() => void (async () => {
+                  <DropdownMenuItem variant="destructive" className="max-sm:min-h-11" onClick={() => void (async () => {
                     const ok = await confirmDialog({ title: t.removeTitle, description: format(t.removeDescription, { name }), confirmLabel: t.remove, variant: "destructive" });
                     if (ok) await run(() => removeDepartmentEdge(workspaceId, departmentId, { principal: edge.principal, expectedRevision: revision }));
                   })()}><Trash2 className="size-4" aria-hidden />{t.remove}</DropdownMenuItem>
@@ -233,13 +264,13 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
               <input type="date" min={today()} value={editing.value} disabled={busy} className={dateInputClass}
                 onChange={(event) => setEditingExpiry({ key: rowKey, value: event.target.value })} />
             </label>
-            <Button size="sm" className="min-h-11" disabled={busy || !editing.value} onClick={() => void (async () => {
+            <Button disabled={busy || !editing.value} onClick={() => void (async () => {
               if (await run(() => setDepartmentEdge(workspaceId, departmentId, { principal: edge.principal, clearance: edge.clearance, expiresAt: endOfDay(editing.value), expectedRevision: revision }))) setEditingExpiry(null);
             })()}><Check className="size-4" aria-hidden />{t.saveEndDate}</Button>
-            {edge.expiresAt ? <Button variant="outline" size="sm" className="min-h-11" disabled={busy} onClick={() => void (async () => {
+            {edge.expiresAt ? <Button variant="outline" disabled={busy} onClick={() => void (async () => {
               if (await run(() => setDepartmentEdge(workspaceId, departmentId, { principal: edge.principal, clearance: edge.clearance, expiresAt: null, expectedRevision: revision }))) setEditingExpiry(null);
             })()}>{t.clearEndDate}</Button> : null}
-            <Button variant="ghost" size="sm" className="min-h-11" disabled={busy} onClick={() => setEditingExpiry(null)}>{t.cancel}</Button>
+            <Button variant="ghost" disabled={busy} onClick={() => setEditingExpiry(null)}>{t.cancel}</Button>
           </div>
         ) : null}
       </li>
@@ -249,20 +280,23 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
   const assistants = edges.filter(e => e.principal.kind === "assistant");
   const group = (title: string, rows: DepartmentEdge[], empty: string) => (
     <div>
-      <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{title}</h4>
-      {rows.length ? <ul className="space-y-2">{rows.map(row)}</ul> : <p className="text-sm text-muted-foreground">{empty}</p>}
+      <h4 className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{title}<span className="rounded-full bg-muted px-1.5 text-[11px] font-medium tabular-nums normal-case">{rows.length}</span></h4>
+      {rows.length ? <ul className="divide-y divide-border border-y border-border">{rows.map(row)}</ul> : <p className="py-3 text-sm text-muted-foreground">{empty}</p>}
     </div>
   );
 
   return (
     <div className="space-y-4">
-      <div>
-        <h3 className="font-semibold">{t.title}</h3>
-        <p className="mt-1 text-sm text-muted-foreground">{canManage ? t.summary : wsOwnerOutside ? t.notMember : t.readOnly}</p>
+      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(14rem,20rem)] md:items-start">
+        <div className="min-w-0 space-y-1">
+          <h3 className="font-semibold">{t.title}</h3>
+          <InfoNote>{canManage ? t.summary : wsOwnerOutside ? t.notMember : t.readOnly}</InfoNote>
+        </div>
+        {!wsOwnerOutside && edges.length ? <ClearanceBar counts={clearanceCounts(edges)} labels={{ public: t.clearancePublic, internal: t.clearanceInternal, confidential: t.clearanceConfidential }} /> : null}
       </div>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {wsOwnerOutside ? (
-        <Button variant="outline" size="sm" className="min-h-11" disabled={busy} onClick={() => void (async () => {
+        <Button variant="outline" size="sm" disabled={busy} onClick={() => void (async () => {
           const ok = await confirmDialog({ title: t.breakGlassTitle, description: t.breakGlassDescription, confirmLabel: t.breakGlass, variant: "destructive" });
           if (!ok) return;
           const reason = (await promptDialog({ title: t.breakGlassReason }))?.trim();
@@ -280,14 +314,14 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_10rem_auto_auto] lg:items-end">
             <label className="grid gap-1 text-xs text-muted-foreground">
               {t.addWho}
-              <SearchableSelect aria-label={t.addWho} value={adding} onValueChange={setAdding} disabled={busy} className="min-h-11"
+              <SearchableSelect aria-label={t.addWho} value={adding} onValueChange={setAdding} disabled={busy} className="h-8 max-sm:min-h-11"
                 placeholder={t.addPlaceholder} searchPlaceholder={t.addSearch} emptyMessage={t.addNoMatches}
                 items={candidates.map(p => ({ value: key(p), label: label(p), hint: p.kind === "user" ? t.person : t.assistant }))} />
             </label>
             <label className="grid gap-1 text-xs text-muted-foreground">
               {t.addClearance}
               <Select value={addClearance} onValueChange={(value) => { if (value) setAddClearance(value as DepartmentClearance); }}>
-                <SelectTrigger aria-label={t.addClearance} className="min-h-11 w-full" disabled={busy}><SelectValue>{clearanceLabel(addClearance)}</SelectValue></SelectTrigger>
+                <SelectTrigger aria-label={t.addClearance} className="w-full max-sm:min-h-11" disabled={busy}><SelectValue>{clearanceLabel(addClearance)}</SelectValue></SelectTrigger>
                 <SelectContent>{CLEARANCES.map(c => <SelectItem key={c} value={c}>{clearanceLabel(c)}</SelectItem>)}</SelectContent>
               </Select>
             </label>
@@ -295,7 +329,7 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
               {t.addEndDate}
               <input type="date" min={today()} value={addUntil} disabled={busy} className={dateInputClass} onChange={(event) => setAddUntil(event.target.value)} />
             </label>
-            <Button size="sm" className="min-h-11" disabled={busy || !adding} onClick={() => {
+            <Button disabled={busy || !adding} onClick={() => {
               const [kind, id] = adding.split(":") as [DepartmentPrincipal["kind"], string];
               void (async () => {
                 if (await run(() => setDepartmentEdge(workspaceId, departmentId, { principal: { kind, id }, clearance: addClearance, expiresAt: endOfDay(addUntil), expectedRevision: revision }))) {
@@ -327,16 +361,16 @@ function useHomePicker() {
       reload();
     }
   };
-  const picker = (home: DepartmentHome, label: string) => {
+  const picker = (home: DepartmentHome, label: string, avatar?: ReactNode) => {
     if (!data) return null;
     const memberOf = data.departments.filter(d => d.myClearance !== null && d.status === "active");
     const current = home.departmentId ?? none;
     const currentName = data.departments.find(d => d.departmentId === home.departmentId)?.name ?? t.none;
     return (
-      <div key={key(home.principal)} className="flex flex-wrap items-center justify-between gap-3">
-        <span className="text-sm">{label}</span>
+      <div key={key(home.principal)} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <span className="flex min-w-0 items-center gap-2 text-sm">{avatar}<span className="truncate">{label}</span></span>
         <Select value={current} onValueChange={(value) => { if (value && value !== current) void save(home.principal, value); }}>
-          <SelectTrigger aria-label={label} className="min-h-11 w-56"><SelectValue>{currentName}</SelectValue></SelectTrigger>
+          <SelectTrigger aria-label={label} className="w-48 max-sm:min-h-11"><SelectValue>{currentName}</SelectValue></SelectTrigger>
           <SelectContent>
             <SelectItem value={none}>{t.none}</SelectItem>
             {memberOf.map(d => <SelectItem key={d.departmentId} value={d.departmentId}>{d.name}</SelectItem>)}
@@ -359,14 +393,23 @@ export function HomeDepartmentControls() {
   const assistants = data.homes.filter(h => h.principal.kind === "assistant");
   return (
     <section className="space-y-3 rounded-xl border border-border bg-background p-4 md:p-5">
-      <div>
-        <h3 className="font-medium">{t.title}</h3>
-        <p className="text-sm text-muted-foreground">{t.summary}</p>
+      <div className="space-y-1">
+        <h3 className="font-semibold">{t.title}</h3>
+        <InfoNote>{t.summary}</InfoNote>
       </div>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      {mine ? picker(mine, t.mine) : null}
-      {assistants.length > 0 ? <p className="pt-2 text-xs font-medium uppercase text-muted-foreground">{t.assistants}</p> : null}
-      {assistants.map(home => picker(home, names.get(key(home.principal)) ?? dictionary.departmentAccess.assistant))}
+      {mine ? picker(mine, t.mine, <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground"><UserRound className="size-3.5" /></span>) : null}
+      {assistants.length > 0 ? (
+        <div className="space-y-2 border-t border-border/70 pt-3">
+          <p className="text-xs font-medium uppercase text-muted-foreground">{t.assistants}</p>
+          <div className="grid gap-x-8 gap-y-2 lg:grid-cols-2">
+            {assistants.map(home => {
+              const name = names.get(key(home.principal)) ?? dictionary.departmentAccess.assistant;
+              return picker(home, name, <OrgAvatar name={name} kind="assistant" seed={home.principal.id} size={24} />);
+            })}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

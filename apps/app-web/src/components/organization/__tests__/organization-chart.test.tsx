@@ -62,9 +62,10 @@ describe('[COMP:app-web/organization-chart] directory and configuration UX',()=>
     await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace-fixture'}})));
     expect(host.textContent).not.toContain(en.organization.initialize);
   });
-  it('shows a keyboard-operable outline, nests an assistant under its accountable person and exposes Unassigned',async()=>{
+  it('shows a keyboard-operable chart, nests an assistant under its accountable person and exposes Unassigned',async()=>{
     await render();
-    expect(host.querySelector('details[open] summary')?.textContent).toBe('Research');
+    expect(host.querySelector('ul.org-tree > li.org-node article h3')?.textContent).toBe('Research');
+    expect(host.querySelector(`button[aria-label="${en.organization.editUnitNamed.replace('{unit}','Research')}"]`)).not.toBeNull();
     expect(button('Riley').parentElement?.querySelector('ul')?.textContent).toContain('Research assistant');
     expect(host.textContent).toContain(en.organization.unassigned);
     expect(host.textContent).toContain(en.organization.adminHint);
@@ -74,6 +75,18 @@ describe('[COMP:app-web/organization-chart] directory and configuration UX',()=>
     expect(host.querySelector('aside a')?.getAttribute('href')).toBe('/w/workspace-fixture/studio/assistants?assistant=assistant-fixture');
     // Section navigation lives in the sidebar and top bar, never inside Structure.
     expect(host.querySelector('a[href*="section=departments"]')).toBeNull();
+  });
+  it('summarizes placement in stat tiles and collapses a unit\'s sub-units from its card',async()=>{
+    const chart=fixture();chart.units.push({id:'unit-2',parentId:'unit-1',name:'Labs',position:0,teamId:null,teamName:null,directoryVisibility:'workspace',version:'1'});
+    mocks.fetch.mockResolvedValue(chart);await render();
+    const tiles=[...host.querySelectorAll(`dl[aria-label="${en.organization.overview}"] > div`)].map(tile=>tile.textContent);
+    expect(tiles).toEqual([`${en.organization.statUnits}2`,`${en.organization.statPeoplePlaced}1${en.organization.statOfTotal.replace('{total}','2')}`,`${en.organization.statAssistantsPlaced}1${en.organization.statOfTotal.replace('{total}','1')}`,`${en.organization.unassigned}1`]);
+    expect(host.querySelector('ul.org-children article h3')?.textContent).toBe('Labs');
+    await click(en.organization.hideSubunits);
+    expect(host.querySelector('ul.org-children')).toBeNull();
+    expect(host.querySelector('[aria-expanded="false"]')?.textContent).toContain(en.organization.showSubunits.replace('{count}','1'));
+    await click(en.organization.showSubunits.replace('{count}','1'));
+    expect(host.querySelector('ul.org-children article h3')?.textContent).toBe('Labs');
   });
   it('nests a human direct report and their assistant under the manager within a unit',async()=>{
     const chart=fixture();chart.placements.push({id:'report-placement',unitId:'unit-1',userId:'unassigned-fixture',assistantId:null,isPrimary:true,reportsToUserId:'member-fixture',accountableUserId:null,version:'1'});

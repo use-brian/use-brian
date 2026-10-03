@@ -20,6 +20,15 @@ export type DeliveryAudienceInput = {
   userId: string
   channelType: string
   channelId: string
+  /**
+   * The session key when it differs from the chat: a thread-scoped channel
+   * session (`<chat>:thread:<root>`, Feishu / Slack reply-in-thread). The
+   * recipient's personal session lives under THIS id, so the individual-DM
+   * lookup must use it; looking under the bare chat finds no session (or an
+   * older one owned by someone else) and judges the member as anonymous.
+   * Bindings stay keyed by `channelId`.
+   */
+  sessionChannelId?: string
   channelIntegrationId?: string
   sessionId?: string
   recipientType?: 'individual' | 'group'
@@ -157,17 +166,25 @@ function externalAudienceType(channelType: string, channelId: string): 'individu
   return null
 }
 
-function bindingCeiling(
+export function bindingCeiling(
   workspaceId: string,
   binding: DeliveryAudienceBinding,
 ): AccessCeiling {
+  // Company-wide is an explicit universe (null), never the empty arrays:
+  // `[]` means General only, which withholds every unbounded connector.
+  // A stored entry that somehow carries both fails narrow to its lists; only
+  // a group-wide entry (no recipient) may be company-wide.
+  const companyWide = binding.companyWide === true
+    && binding.compartments.length === 0
+    && binding.projectIds.length === 0
+    && !binding.recipientUserId
   return {
     workspaceId,
     userId: binding.recipientUserId ?? '',
     clearance: binding.clearance,
-    compartments: [...binding.compartments],
-    mutationCompartments: [...binding.compartments],
-    projectIds: [...binding.projectIds],
+    compartments: companyWide ? null : [...binding.compartments],
+    mutationCompartments: companyWide ? null : [...binding.compartments],
+    projectIds: companyWide ? null : [...binding.projectIds],
     visibilityAssistantIds: null,
   }
 }
@@ -273,7 +290,7 @@ async function resolveEnvelope(
       assistantId: input.assistantId,
       userId: input.userId,
       channelType: input.channelType,
-      channelId: input.channelId,
+      channelId: input.sessionChannelId ?? input.channelId,
     })
     if (personalSession && !isSharedAudienceSession(personalSession)) {
       const member = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps, input.recipientMode)

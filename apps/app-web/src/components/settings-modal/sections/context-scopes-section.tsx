@@ -3,9 +3,12 @@
 
 import type { DepartmentAccessCommand } from "@use-brian/shared";
 /** Workspace Team/Project registry and readiness UI. [COMP:app-web/context-scope] */
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { isPhoneViewport } from "@/lib/viewport";
 import Link from "next/link";
-import { Archive, Check, Plus, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Archive, Building2, Check, Crown, Lock, Network, Plus, ShieldAlert, ShieldCheck, SlidersHorizontal, UsersRound } from "lucide-react";
+import { AvatarStack, Chip, ClearanceBar, ClearancePill, InfoNote, ORG_TONES, SegmentedTabs, departmentTone, tabPanelProps, toneFill, toneSolid, type OrgTone } from "@/components/organization/org-visuals";
+import { clearanceCounts, useDepartmentReaders } from "@/components/organization/department-access-panel";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DepartmentChangeFeedback, useDepartmentChange } from "@/components/workspace-access/use-department-change";
@@ -34,7 +37,8 @@ function stableKey(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 39);
 }
 
-export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings?:(teamId:string)=>ReactNode}={}) {
+/** `panel` names the department panel being filled; a caller without panels may ignore it. */
+export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings?:(teamId:string,panel?:'readers'|'policy')=>ReactNode}={}) {
   const { workspaceId, me } = useWorkspaceContext();
   const dictionary = useT(), t = dictionary.contextScope, accessCopy = dictionary.workspaceAccess;
   const [name, setName] = useState("");
@@ -52,6 +56,11 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
   const teams=data?.teams??[];
   const selected=teams.find(team=>team.id===selectedId)??null;
   const canManage=data?.canAdminister===true;
+  const [panel,setPanel]=useState<'readers'|'policy'|'details'>('readers');
+  const detailRef=useRef<HTMLElement>(null);
+  // On a phone the detail sits below every card; bring the chosen one into view.
+  const choose=(id:string)=>{setSelectedId(id);if(isPhoneViewport())requestAnimationFrame(()=>detailRef.current?.scrollIntoView({block:'start',behavior:'smooth'}));};
+  const {edges:readerEdges,directory}=useDepartmentReaders(teams.map(team=>team.id));
   const save=(command:DepartmentAccessCommand,description:string)=>data?change.save(command,description,data.policyRevision):Promise.resolve(null);
   useEffect(()=>{
     const purge=(event:Event)=>{
@@ -106,66 +115,111 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
     catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
-  if(!data)return resource.error?<div className="space-y-3"><p role="alert">{t.loadFailed}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{accessCopy.reload}</Button></div>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
-  const createDepartment=canManage?<section className="space-y-3 rounded-xl border border-border bg-muted/20 p-4">
-    <h3 className="font-medium">{t.createTeamTitle}</h3>
-    <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t.teamNamePlaceholder}
-      aria-label={t.teamNameLabel} className="min-h-11 w-full min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] outline-none focus-visible:border-ring md:text-sm" />
-    <Button className="min-h-11 w-full" onClick={() => void create()} disabled={change.busy || !name.trim()}><Plus className="size-4" />{t.createTeam}</Button>
-  </section>:null;
+  if(!data)return resource.error?<div className="space-y-3"><p role="alert">{t.loadFailed}</p><Button className="max-sm:min-h-11" onClick={()=>void resource.refresh()}>{accessCopy.reload}</Button></div>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
+  const d=dictionary.departmentAccess,colors=dictionary.docPage.blockActions;
+  const clearanceLabels={public:d.clearancePublic,internal:d.clearanceInternal,confidential:d.clearanceConfidential};
+  const nameOf=(principal:{kind:'user'|'assistant';id:string})=>(principal.kind==='user'?data.people:data.assistants).find(row=>row.id===principal.id)?.name||(principal.kind==='user'?d.person:d.assistant);
+  const fieldClass="h-9 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring max-sm:h-11 md:text-sm";
+  const toneNames:Record<OrgTone,string>={blue:colors.colorBlue,green:colors.colorGreen,purple:colors.colorPurple,orange:colors.colorOrange,pink:colors.colorPink,brown:colors.colorBrown,yellow:colors.colorYellow,red:colors.colorRed,gray:colors.colorGray};
+  const departmentCard=(team:(typeof teams)[number])=>{
+    const tone=departmentTone(team.color,team.id);
+    const entry=directory?.find(row=>row.departmentId===team.id);
+    const readers=readerEdges?.get(team.id);
+    // People lead the stack; assistants follow.
+    const stack=(readers??[]).map(edge=>({id:edge.principal.id,kind:edge.principal.kind==='user'?'member' as const:'assistant' as const,name:nameOf(edge.principal)})).sort((a,b)=>a.kind===b.kind?0:a.kind==='member'?-1:1);
+    const linked=team.orgUnits.filter(unit=>unit.name.trim().toLocaleLowerCase()!==team.name.trim().toLocaleLowerCase()).map(unit=>unit.name).join(', ');
+    const count=format(t.readerCount,{count:stack.length});
+    return <li key={team.id} className="min-w-0"><button type="button" aria-pressed={team.id===selectedId} onClick={()=>choose(team.id)}
+      className="flex h-full w-full min-w-0 flex-col gap-3 rounded-xl border border-border bg-card p-3.5 text-left transition-colors hover:border-foreground/25 focus-visible:outline focus-visible:outline-ring aria-pressed:border-foreground/50 aria-pressed:bg-muted/40 aria-pressed:shadow-sm">
+      <span className="flex w-full min-w-0 items-start gap-2.5">
+        <span aria-hidden style={toneFill(tone)} className="grid size-8 shrink-0 place-items-center rounded-lg"><Building2 className="size-4"/></span>
+        <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold">{team.name}</span>
+          <span className="block truncate text-xs text-muted-foreground">{team.description||linked||'\u00a0'}</span></span>
+        {entry?.isOwner?<Chip icon={Crown}>{d.owner}</Chip>:entry?.myClearance?<ClearancePill clearance={entry.myClearance} label={clearanceLabels[entry.myClearance]}/>:entry?<Chip icon={Lock}>{t.notAMember}</Chip>:null}
+      </span>
+      {readers?<span className="block w-full space-y-2">
+        <span className="flex items-center justify-between gap-2">{stack.length?<AvatarStack items={stack} label={count} size={22}/>:<span className="text-xs text-muted-foreground">{t.noReaders}</span>}
+          {stack.length?<span aria-hidden className="text-xs tabular-nums text-muted-foreground">{count}</span>:null}</span>
+        <ClearanceBar counts={clearanceCounts(readers)} labels={clearanceLabels} legend={false}/>
+      </span>:<span aria-hidden className={`block h-[38px] w-full rounded-md ${readerEdges?'':'animate-pulse bg-muted/50'}`}/>}
+    </button></li>;
+  };
+  const createDepartment=canManage?<li className="min-w-0"><section className="flex h-full flex-col justify-center gap-2 rounded-xl border border-dashed border-border p-3.5">
+    <h3 className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground"><Plus aria-hidden className="size-4"/>{t.createTeamTitle}</h3>
+    <div className="flex min-w-0 gap-2">
+      <input value={name} onChange={(event) => setName(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();void create();}}} placeholder={t.teamNamePlaceholder}
+        aria-label={t.teamNameLabel} className={`${fieldClass} w-full flex-1`} />
+      <Button className="max-sm:min-h-11" onClick={() => void create()} disabled={change.busy || !name.trim()}>{t.createTeam}</Button>
+    </div>
+  </section></li>:null;
+  const selectedTone=selected?departmentTone(selected.color,selected.id):'gray';
+  const prefix=`department-${selected?.id??'none'}`;
+  const readers=selected?readerEdges?.get(selected.id):undefined;
+  const swatch=(value:string,label:string,tone:OrgTone|null)=><button key={value||'none'} type="button" role="radio" aria-checked={editColor.trim().toLowerCase()===value} aria-label={label} title={label} disabled={change.busy}
+    onClick={()=>setEditColor(value)} style={tone?toneSolid(tone):undefined}
+    className={`grid size-6 place-items-center rounded-full border border-border ring-offset-2 ring-offset-background aria-checked:ring-2 aria-checked:ring-foreground/60 max-sm:size-11 ${tone?'':'bg-background text-muted-foreground'}`}>{tone?null:<span aria-hidden className="block h-px w-3.5 rotate-45 bg-current"/>}</button>;
+  const details=<div className="space-y-5">
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_16rem]">
+      <div className="min-w-0 space-y-3">
+        <h4 className="text-sm font-semibold">{t.departmentDetailsTitle}</h4>
+        {canManage ? <div className="grid gap-3 sm:grid-cols-2">
+          <label className="grid gap-1 text-xs text-muted-foreground">{t.teamNameLabel}
+            <input value={editName} onChange={(event) => setEditName(event.target.value)} className={fieldClass} /></label>
+          <label className="grid gap-1 text-xs text-muted-foreground">{t.teamDescriptionLabel}
+            <input value={editDescription} onChange={(event) => setEditDescription(event.target.value)} className={fieldClass} /></label>
+          <div className="grid gap-1.5 text-xs text-muted-foreground sm:col-span-2"><span id={`${prefix}-color`}>{t.teamColorLabel}</span>
+            <div role="radiogroup" aria-labelledby={`${prefix}-color`} className="flex flex-wrap items-center gap-2">
+              {swatch('',colors.colorDefault,null)}
+              {ORG_TONES.map(tone=>swatch(tone,toneNames[tone],tone))}
+              {editColor.trim()&&!(ORG_TONES as readonly string[]).includes(editColor.trim().toLowerCase())?<span className="rounded-full bg-muted px-2 py-0.5 text-foreground">{editColor}</span>:null}
+            </div></div>
+          <Button size="sm" variant="outline" className="self-start justify-self-start max-sm:min-h-11" onClick={() => void saveTeamDetails()} disabled={change.busy || !editName.trim()}>
+            <Check className="size-4" />{t.saveTeamDetails}
+          </Button>
+        </div> : selected?.description ? <p className="text-sm text-muted-foreground">{selected.description}</p> : null}
+      </div>
+      <aside className="min-w-0 space-y-3 text-sm lg:border-l lg:border-border/70 lg:pl-5">
+        <h4 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{accessCopy.relatedOrgUnits}</h4>
+        {selected?.orgUnits.length?<ul className="flex flex-wrap gap-1.5">{selected.orgUnits.map(unit=><li key={unit.id}><Link className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-0.5 text-xs hover:bg-muted max-sm:min-h-11" href={organizationHref(workspaceId)}><Network aria-hidden className="size-3"/>{unit.name}</Link></li>)}</ul>:<p className="text-xs text-muted-foreground">{accessCopy.noVisibleOrgUnits}</p>}
+        <InfoNote>{format(accessCopy.requestPolicyHint,{defaultDays:data.requestPolicy.defaultDays,maxDays:data.requestPolicy.maxDays})}</InfoNote>
+      </aside>
+    </div>
+    {canManage && selected?.status === "active" ? <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-destructive/5 px-3 py-2.5">
+      <div className="min-w-0"><h4 className="text-sm font-medium">{t.departmentLifecycleTitle}</h4><p className="text-xs text-muted-foreground">{t.archiveTeamDescription}</p></div>
+      <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive max-sm:min-h-11" disabled={change.busy} onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button>
+    </section> : null}
+  </div>;
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div>
         <h2 className="text-lg font-semibold">{t.teamsTitle}</h2>
         <p className="mt-1 text-sm text-muted-foreground">{t.teamsDescription}</p>
       </div>
       <DepartmentChangeFeedback change={change}/>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      {teams.length === 0 ? <div className="grid gap-4 lg:max-w-sm">{createDepartment}<p className="text-sm text-muted-foreground">{t.noTeams}</p></div> : (
-        <div className="grid items-start gap-6 lg:grid-cols-[minmax(15rem,19rem)_minmax(0,1fr)]">
-          <aside className="space-y-4 lg:sticky lg:top-4">
-            <section className="space-y-3 rounded-xl border border-border bg-background p-4">
-              <h3 className="font-medium">{t.departmentPickerLabel}</h3>
-              <SearchableSelect aria-label={t.departmentPickerLabel} value={selectedId} disabled={change.busy} onValueChange={setSelectedId}
-                items={teams.map((team) => ({ value: team.id, label: team.name }))}
-                searchPlaceholder={t.searchTeams} emptyMessage={t.noTeams} />
-            </section>
-            {createDepartment}
-          </aside>
-          {selected ? <div className="min-w-0 space-y-4">
-            <section className="space-y-4 rounded-xl border border-border bg-background p-4 md:p-5">
-              <div><h3 className="font-semibold">{t.departmentDetailsTitle}</h3><p className="mt-1 text-sm text-muted-foreground">{selected.name}</p></div>
-              {canManage ? <div className="grid gap-3 sm:grid-cols-2">
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {t.teamNameLabel}
-                    <input value={editName} onChange={(event) => setEditName(event.target.value)}
-                      className="min-h-11 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {t.teamColorLabel}
-                    <input value={editColor} onChange={(event) => setEditColor(event.target.value)} placeholder={t.teamColorPlaceholder}
-                      className="min-h-11 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground sm:col-span-2">
-                    {t.teamDescriptionLabel}
-                    <input value={editDescription} onChange={(event) => setEditDescription(event.target.value)}
-                      className="min-h-11 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
-                  </label>
-                  <Button size="sm" variant="outline" className="min-h-11 self-start" onClick={() => void saveTeamDetails()} disabled={change.busy || !editName.trim()}>
-                    <Check className="size-4" />{t.saveTeamDetails}
-                  </Button>
-                </div> : selected.description ? <p className="text-sm text-muted-foreground">{selected.description}</p> : null}
-              <div className="space-y-2 border-t border-border/70 pt-4 text-sm">
-                <h4 className="font-medium">{accessCopy.relatedOrgUnits}</h4>
-                {selected.orgUnits.length?<ul>{selected.orgUnits.map(unit=><li key={unit.id}><Link className="flex min-h-11 items-center underline" href={organizationHref(workspaceId)}>{unit.name}</Link></li>)}</ul>:<p className="text-muted-foreground">{accessCopy.noVisibleOrgUnits}</p>}
-                <p className="text-xs text-muted-foreground">{format(accessCopy.requestPolicyHint,{defaultDays:data.requestPolicy.defaultDays,maxDays:data.requestPolicy.maxDays})}</p>
-              </div>
-            </section>
-            {renderAccessSettings?<section className="rounded-xl border border-border bg-background p-4 md:p-5">{renderAccessSettings(selected.id)}</section>:null}
-            {canManage && selected.status === "active" ? <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-muted/20 p-4"><h3 className="font-medium">{t.departmentLifecycleTitle}</h3><Button variant="ghost" size="sm" className="min-h-11 text-destructive hover:text-destructive" disabled={change.busy} onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button></section> : null}
-          </div> : null}
+      <ul aria-label={t.departmentPickerLabel} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{teams.map(departmentCard)}{createDepartment}</ul>
+      {teams.length === 0 ? <p className="text-sm text-muted-foreground">{t.noTeams}</p> : null}
+      {selected ? <section ref={detailRef} aria-label={selected.name} className="min-w-0 scroll-mt-4 rounded-xl border border-border bg-background">
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 md:px-5">
+          <div className="flex min-w-0 items-center gap-3">
+            <span aria-hidden style={toneFill(selectedTone)} className="grid size-9 shrink-0 place-items-center rounded-lg"><Building2 className="size-4"/></span>
+            <div className="min-w-0"><h3 className="truncate text-base font-semibold">{selected.name}</h3>
+              {selected.description?<p className="truncate text-sm text-muted-foreground">{selected.description}</p>:null}</div>
+          </div>
+          {renderAccessSettings?<SegmentedTabs value={panel} onChange={setPanel} label={t.panelsLabel} idPrefix={prefix} items={[
+            {value:'readers',label:t.readersTab,icon:UsersRound,count:readers?.length},
+            {value:'policy',label:t.policyTab,icon:ShieldCheck},
+            {value:'details',label:t.detailsTab,icon:SlidersHorizontal},
+          ]}/>:null}
+        </header>
+        <div className="p-4 md:p-5">
+          {renderAccessSettings?<>
+            <div {...tabPanelProps(prefix,'readers')} hidden={panel!=='readers'}>{renderAccessSettings(selected.id,'readers')}</div>
+            <div {...tabPanelProps(prefix,'policy')} hidden={panel!=='policy'}>{renderAccessSettings(selected.id,'policy')}</div>
+            <div {...tabPanelProps(prefix,'details')} hidden={panel!=='details'}>{details}</div>
+          </>:details}
         </div>
-      )}
+      </section> : null}
     </div>
   );
 }
