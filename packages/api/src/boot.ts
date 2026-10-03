@@ -652,6 +652,10 @@ import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbPageDomainStore } from './db/page-domain-store.js'
 import { createDbInternalLinkAliasStore } from './db/internal-link-alias-store.js'
 import { createInternalLinkService } from './internal-link-service.js'
+import { workspaceSearchRoutes } from './routes/workspace-search.js'
+import { createWorkspaceSearchService } from './workspace-search/service.js'
+import { createSearchAdapters } from './workspace-search/adapters.js'
+import { createOfficeSearchProjector } from './workspace-search/office-projection.js'
 import { internalLinkRoutes } from './routes/internal-links.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbBlueprintRecordStore } from './db/blueprint-records-store.js'
@@ -6700,6 +6704,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : undefined,
   }))
   app.use('/api', requireAuth(env.JWT_SECRET), internalLinkRoutes(internalLinkService))
+  app.use('/api', requireAuth(env.JWT_SECRET), workspaceSearchRoutes({
+    isMember: isWorkspaceMember,
+    search: createWorkspaceSearchService(createSearchAdapters(), { key: Buffer.from(env.JWT_SECRET) }),
+  }))
 
   // Standalone Generate from Brain is open in both editions. Hosted injects
   // quote/gate/charge billing policy; OSS confirms the long-lived run but is
@@ -6785,6 +6793,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (snapshot.artifactId !== artifactId) throw new Error('Office version snapshot artifact mismatch')
     return { snapshot, source }
   }
+  const officeSearchProjector = createOfficeSearchProjector(async (userId, artifactId, versionId) =>
+    (await readOfficeVersionSnapshot(userId, artifactId, versionId))?.snapshot ?? null)
+  if (runWorkers) officeSearchProjector.start()
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeArtifactRoutes({
     service: officeService,
     generationAvailable: officeGenerationAvailable,
@@ -9709,6 +9720,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   async function shutdown(): Promise<void> {
+    await officeSearchProjector.stop()
     await stopWatchCleanup?.() // Watch boot lifecycle: stop and drain retention work.
     console.log('Shutting down — flushing analytics...')
     consolidationWorker.stop()
