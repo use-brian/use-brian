@@ -2,18 +2,24 @@
 
 ## Decision and scope
 
-**Blocked under the current contract at `abdcc89f75241a753cf17dcbe0498740d1bb4e41`. Do not implement or enable visual execution on the strength of this investigation.**
+**Visual execution remains blocked by the capture/action policy inspected at `abdcc89f75241a753cf17dcbe0498740d1bb4e41`. Do not enable it on the strength of this investigation. The user subsequently accepted the in-flight Stop boundary below.**
 
-There are two independent blockers:
+The source-policy blocker and separate dispatch boundary are:
 
 1. **The native capture/semantic-action intersection is empty by policy.** Capture requires a complete public safe-canvas snapshot with no supported actions on any node. Semantic execution requires a supported action on a node in that snapshot. The fixture canvas itself implements mouse handling, not a usable semantic action.
-2. **Public AX dispatch does not establish expiry-atomic or revocation-atomic execution.** The existing executor checks authority and then calls AX. Suspension or revocation can intervene; AX has no command deadline/revocation token in these calls. Timeout, helper death and channel closure cannot establish cancellation of a request already delivered to the target. Another pre-call check does not close the gap.
+2. **Public AX dispatch does not establish expiry-atomic or revocation-atomic execution.** The existing executor checks authority and then calls AX. Suspension or revocation can intervene; AX has no command deadline/revocation token in these calls. Timeout, helper death and channel closure cannot establish cancellation of a request already delivered to the target; the user now accepts that in-flight limitation. Another pre-call check still does not prove absence of newly dispatched post-revocation calls.
 
 The existing protocol/loop also implements screenshot-to-`click`, not screenshot-to-AX. That is additional implementation work, not a reason to set `input:true`.
 
 This is a source/interface feasibility finding, not an observed native AX counterexample or a universal impossibility proof about every macOS interface. It does not retire or alter the existing AX-only implementation, approve its release safety, resolve the original no-AX canvas requirement, or claim R3 completion. The initial investigation changed only this document. Subsequent semantic-only hardening is recorded below; it does not change the feasibility decision or enable visual execution.
 
 Read alongside the [active plan](plans/electron-native-computer-use.md), [runtime guide](native-computer-use.md), [acceptance ledger](native-computer-acceptance.md) and [retirement contract](../apps/app-desktop/native/computer-control/ClickGuardian-CONTRACT.md). Their historical probe-only/emitting-harness passages are not current authorization. The plan's Task C feasibility gate and its zero newly dispatched post-revocation effects requirement remain controlling constraints; the runtime guide separately acknowledges that entered OS operations cannot be retracted. Neither statement supplies an atomic dispatch primitive.
+
+## Accepted in-flight Stop boundary
+
+The user accepted this specific explanation: once Brian sends an action to macOS, macOS might still finish it after Stop. Therefore cancellation of already-sent AX work is **not an engineering blocker**. Stop continues to revoke further dispatch; late completion cannot resume planning, publish a new observation or automatically retry an uncertain action. Existing lease/death fences remain. This approval does not waive a new call after revocation, increase deadlines, restore the retired mouse emitter, broaden capture, or remove the no-AX canvas requirement.
+
+The focused Foundation lifecycle harness now includes **48** in-flight cases across invoke, selection, both scroll directions and assignment: native-call entry occurs first, then channel closure or command/grant expiry before return. Success remains `executed`; failed native outcomes remain `execution_unknown`; neither is relabelled certified cancellation. No follow-up reads/effects or automatic replay occur under revoked session authority. These are extracted production methods with fake native dependencies, not native OS evidence or proof of check-to-call atomicity.
 
 ## Subsequent semantic-only hardening
 
@@ -104,7 +110,7 @@ Implement consistently in Swift validation/resolution, shared schemas, desktop a
 
 ### C. Dispatch is a separate blocking design decision
 
-A/B do **not** solve the dispatch contract. Before implementation, require evidence of a supported mechanism that couples the requested action with deadline/revocation enforcement at the actual dispatch/effect boundary, including queued requests and process suspension. No such mechanism was found in the inspected AX interfaces.
+A/B do **not** solve future-dispatch safety. The accepted boundary above permits an already-sent request to finish; no cancellation/drain proof for that work is required. Stop must still prevent further dispatch, and process suspension between the last check and a new OS call remains a separate review/acceptance concern. The inspected AX interfaces do not supply an atomic check-and-send primitive. Do not treat the in-flight approval as authorization for that distinct race.
 
 A cooperating target-side transactional protocol could be investigated separately, but would require a defined shared revocation/commit boundary and target-side enforcement—not another target-side pre-call check. It would not be ordinary AX support for TextEdit/arbitrary apps, and a fixture-only protocol must not be passed off as the requested general mechanism. That architectural work is outside this narrow proposal.
 

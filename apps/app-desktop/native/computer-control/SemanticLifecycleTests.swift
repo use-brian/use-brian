@@ -33,8 +33,16 @@ enum AXError { case success, cannotComplete }
 var axResult = AXError.success
 var axEffects = 0
 var axOperations: [String] = []
-func AXUIElementPerformAction(_ element: Int, _ action: String) -> AXError { axEffects += 1; axOperations.append("action:" + action); return axResult }
-func AXUIElementSetAttributeValue(_ element: Int, _ attribute: String, _ value: Any?) -> AXError { axEffects += 1; axOperations.append("set:" + attribute); return axResult }
+// Entry/effect is recorded BEFORE the blocking-call hook. A failure can follow
+// delivery; this hook must never model revocation as cancellation of that effect.
+var onAXCall: (() -> Void)?
+func recordedAXCall(_ operation: String) -> AXError {
+    axEffects += 1; axOperations.append(operation)
+    onAXCall?()
+    return axResult
+}
+func AXUIElementPerformAction(_ element: Int, _ action: String) -> AXError { recordedAXCall("action:" + action) }
+func AXUIElementSetAttributeValue(_ element: Int, _ attribute: String, _ value: Any?) -> AXError { recordedAXCall("set:" + attribute) }
 func json(_ value: Object) -> Object { try! JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: value)) as! Object }
 let testIdentity: Object = json(["deploymentId": "d", "userId": "u", "workspaceId": "w", "deviceId": "device", "sessionId": "s", "conversationId": "c", "taskId": "t"])
 let testTarget: Object = json(["appId": "com.usebrian.NativeComputerFixture", "processId": 42, "processInstanceId": "p", "windowId": "w", "windowInstanceId": "wi"])
@@ -44,6 +52,7 @@ func makeCommand(_ id: String, _ kind: String = "invoke", deadline: Double = 100
     if kind != "observe" { action["observationId"] = "o" }
     if semanticKind(kind) { action["ref"] = "r" }
     if kind == "scroll" { action["deltaY"] = deltaY }
+    if kind == "setValue" { action["text"] = "Synthetic replacement" }
     return json(["protocol": proto, "identity": testIdentity, "grantId": "g", "epoch": 1,
             "commandId": id, "deadlineAt": deadline, "action": action])
 }
@@ -141,7 +150,7 @@ var lifecycleChecks = 0
 func verify(_ condition: @autoclosure () -> Bool, _ message: String = "") {
     lifecycleChecks += 1; precondition(condition(), "lifecycle check \(lifecycleChecks): \(message)")
 }
-func resetClocks() { testWall = 1000; testMono = 100; channelAlive = true; axResult = .success; axEffects = 0; axOperations = [] }
+func resetClocks() { testWall = 1000; testMono = 100; channelAlive = true; axResult = .success; axEffects = 0; axOperations = []; onAXCall = nil }
 // 1. Validation remains bounded while blocking, but conclusive stale refusal
 // releases only the active timer. An independent command can run afterward.
 resetClocks()
@@ -325,4 +334,85 @@ do {
     verify(b.execute(payload(command))["outcome"] as? String == "not_executed")
     verify(axEffects == 0 && b.observations == 0)
 }
-print("PASS \(lifecycleChecks) extracted Broker lifecycle checks (4 original sequences, \(branchSequences) select/scroll branch sequences, 2 approval-clock sequences); fake native dependencies, no native/atomicity evidence")
+// 8. Already-dispatched AX may finish after revocation. This deliberately models
+// return from the OS call, not actual macOS cancellation or watchdog termination.
+// Command expiry revokes that command, not an otherwise live session; only channel
+// closure/grant expiry must refuse unrelated, otherwise-valid observation IDs.
+let inFlightBranches = branchCases + [
+    (name: "invoke", kind: "invoke", role: "AXButton", writable: true, delta: 1, operation: "action:" + kAXPressAction),
+    (name: "set-value", kind: "setValue", role: kAXTextAreaRole, writable: true, delta: 1, operation: "set:" + kAXValueAttribute),
+]
+var inFlightSequences = 0
+for branch in inFlightBranches {
+    for revocation in ["channel", "command-monotonic", "command-wall", "grant-monotonic"] {
+        for nativeResult in [AXError.success, AXError.cannotComplete] {
+            resetClocks()
+            let b = LifecycleBroker(kind: branch.kind, role: branch.role)
+            b.selectionWritable = branch.writable
+            // Initial wall/monotonic = 1000/100. Command = 1100/200;
+            // Grant expires first only in the grant case (1050/150), so its
+            // monotonic failure is independent of both command clocks.
+            let grantDeadline = revocation == "grant-monotonic" ? 150.0 : 300.0
+            b.grant?["expiresAt"] = revocation == "grant-monotonic" ? 1050 : 1200
+            b.expiresMonotonic = grantDeadline; b.watchdogDeadline = grantDeadline
+            let command = makeCommand("in-flight", branch.kind, deadline: 1100, deltaY: branch.delta)
+            let label = branch.name + "-" + revocation + "-\(nativeResult)"
+            verify(b.beginApproval(payload(command)), label)
+            verify(b.endApproval(payload(command, approved: true)), label)
+            verify(b.commandDeadline == 200 && b.watchdogDeadline == min(200, grantDeadline), label)
+            axResult = nativeResult
+            var entries = 0
+            onAXCall = {
+                entries += 1
+                verify(entries == 1 && axEffects == 1 && axOperations == [branch.operation], label)
+                verify(testWall == 1000 && testMono == 100 && channelAlive, label)
+                verify(b.approvedCommand == nil && b.approvalCommand == nil, label)
+                verify(b.commandDeadline == 200 && b.watchdogDeadline == min(200, grantDeadline), label)
+                verify(b.journal["in-flight"]?["outcome"] as? String == "execution_unknown", label)
+                verify(b.seen["in-flight"] == b.fingerprint(command), label)
+                switch revocation {
+                case "channel": channelAlive = false
+                case "command-monotonic": testMono = 200; testWall = 900 // rollback cannot renew
+                case "command-wall": testWall = 1100 // monotonic remains 100
+                default: testMono = 150; testWall = 900
+                }
+            }
+            let receipt = b.execute(payload(command))
+            let failed = nativeResult == .cannotComplete
+            verify(receipt["outcome"] as? String == (failed ? "execution_unknown" : "executed"), label)
+            verify(receipt["code"] as? String == (failed ? "helper_error" : "ok"), label)
+            verify(receipt["observation"] == nil && b.observations == 0 && b.captures == 0, label)
+            verify(b.semanticSafety.uncertain == failed && b.snapshots.isEmpty, label)
+            verify(entries == 1 && axEffects == 1 && axOperations == [branch.operation], label)
+            verify(b.approvedCommand == nil && b.commandDeadline.isInfinite && b.watchdogDeadline == grantDeadline, label)
+            verify(b.semanticSafety.deadline(id: "in-flight", fingerprint: b.fingerprint(command)) == 200, label)
+            verify(same(b.journal["in-flight"]!, receipt), label)
+            let authority = b.authorityCalls
+            let queries = b.selectionQueries + b.actionQueries
+            for _ in 0..<2 {
+                let replay = b.execute(payload(command))
+                if channelAlive { verify(same(replay, receipt), label) }
+                else {
+                    verify(replay["outcome"] as? String == "not_executed" && replay["code"] as? String == "denied", label)
+                    // A denied transport replay is NOT evidence the sent action was cancelled.
+                    verify(same(b.journal["in-flight"]!, receipt), label)
+                }
+            }
+            if channelAlive { verify(b.authorityCalls == authority, label) }
+            verify(!b.beginApproval(payload(command)), label)
+            let next = makeCommand("new-action", branch.kind, deltaY: branch.delta)
+            verify(b.execute(payload(next))["outcome"] as? String == "not_executed", label)
+            if revocation == "channel" || revocation == "grant-monotonic" || failed {
+                verify(!b.beginApproval(payload(next)), label)
+                verify(b.execute(payload(makeCommand("new-observation", "observe")))["code"] as? String == "denied", label)
+            }
+            verify(b.semanticSafety.uncertain == failed, label)
+            verify(b.observations == 0 && b.captures == 0 && entries == 1 && axEffects == 1, label)
+            verify(b.selectionQueries + b.actionQueries == queries && axOperations == [branch.operation], label)
+            verify(b.semanticSafety.deadline(id: "in-flight", fingerprint: b.fingerprint(command)) == 200, label)
+            inFlightSequences += 1
+        }
+    }
+}
+resetClocks() // Do not retain a hook capturing a completed test's Broker.
+print("PASS \(lifecycleChecks) extracted Broker lifecycle checks (4 original sequences, \(branchSequences) select/scroll branch sequences, 2 approval-clock sequences, \(inFlightSequences) in-flight AX revocation sequences); fake native dependencies, no native/atomicity evidence")
