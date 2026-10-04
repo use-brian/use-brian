@@ -22,6 +22,7 @@ export const GrantSchema = z.object({
 export const CapabilitiesSchema = z.object({
   protocol: z.literal(NATIVE_PROTOCOL), platform: z.enum(['darwin', 'win32', 'linux', 'unsupported']),
   axRead: z.boolean(), semanticActions: z.boolean(), windowCapture: z.boolean(), input: z.boolean(),
+  visualInvokeVersion: z.literal(1).optional(),
   accessibilityPermission: z.enum(['granted', 'denied', 'unknown']),
   capturePermission: z.enum(['granted', 'denied', 'unknown']),
   limitations: z.array(z.string().max(300)).max(20),
@@ -42,6 +43,7 @@ export const ObservationSchema = z.object({
   target: TargetSchema, foreground: z.boolean(), bounds: BoundsSchema, displayLayoutVersion: id,
   completeness: z.enum(['complete', 'partial', 'unavailable']),
   nodes: z.array(AxNodeSchema).max(500), frame: FrameSchema.optional(),
+  captureCohort: z.literal('public-shapes-v1').optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.nodes.some(node => node.sensitive && (node.value !== undefined || node.name !== '' || node.actions.length > 0))) {
     ctx.addIssue({ code: 'custom', message: 'Secure nodes must be redacted before transmission' })
@@ -56,8 +58,16 @@ export const ActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('select'), target: TargetSchema, observationId: id, ref: id }).strict(),
   z.object({ kind: z.literal('scroll'), target: TargetSchema, observationId: id, ref: id, deltaY: z.number().int().min(-600).max(600) }).strict(),
   z.object({ kind: z.literal('click'), target: TargetSchema, observationId: id, frameId: id, x: z.number().finite().nonnegative(), y: z.number().finite().nonnegative() }).strict(),
+  z.object({ kind: z.literal('visualInvoke'), target: TargetSchema, observationId: id, frameId: id, x: z.number().finite().nonnegative(), y: z.number().finite().nonnegative() }).strict(),
   z.object({ kind: z.literal('key'), target: TargetSchema, observationId: id, key: z.enum(['Tab', 'Shift+Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape', 'Enter']) }).strict(),
 ])
+// Private helper approval response. The model proposes a point; only native
+// resolution may supply this exact invoke target for the local approval dialog.
+export const VisualApprovalSchema = z.object({
+  bindingId: id, commandId: id, frameId: id,
+  action: z.object({ kind: z.literal('invoke'), target: TargetSchema, observationId: id, ref: id }).strict(),
+}).strict()
+export type NativeVisualApproval = z.infer<typeof VisualApprovalSchema>
 export const CommandSchema = z.object({
   protocol: z.literal(NATIVE_PROTOCOL), identity: IdentitySchema, grantId: id, epoch,
   commandId: id, deadlineAt: timestamp, action: ActionSchema,

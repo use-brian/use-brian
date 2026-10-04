@@ -213,6 +213,59 @@ describe('trusted main native computer setup', () => {
     expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
   })
 
+  async function verificationSetup(enabled = true) {
+    await packagedReadiness()
+    vi.stubEnv('NATIVE_COMPUTER_ENABLED', String(enabled))
+    integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth: async () => auth }); integration.install()
+    await integration.handle({ type: 'workspace-changed', workspaceId: selection.workspaceId })
+  }
+  it('verification is default-off without normal opt-in and never sets pilot acceptance', async () => {
+    await verificationSetup(false)
+    expect(await integration.handle({ type: 'acknowledge-verification' })).toMatchObject({ ok: false })
+    expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
+  })
+  it('declined verification cannot enable discovery or control', async () => {
+    await verificationSetup()
+    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({ response: 0, checkboxChecked: false })
+    expect(await integration.handle({ type: 'acknowledge-verification' })).toMatchObject({ ok: false })
+    expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: false })
+    expect(await integration.handle(selection)).toMatchObject({ ok: false })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+  it.each(['stop', 'workspace', 'logout', 'account'] as const)('rejects verification consent made stale by %s', async change => {
+    await verificationSetup()
+    const approval = deferred<Electron.MessageBoxReturnValue>()
+    vi.mocked(dialog.showMessageBox).mockReturnValueOnce(approval.promise)
+    const result = integration.handle({ type: 'acknowledge-verification' })
+    await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalled())
+    if (change === 'stop') await integration.stop()
+    if (change === 'workspace') await integration.handle({ type: 'workspace-changed', workspaceId: uuid(90) })
+    if (change === 'logout') auth = null
+    if (change === 'account') auth = { ...auth!, accountKey: 'other' }
+    approval.resolve({ response: 1, checkboxChecked: false })
+    expect(await result).toMatchObject({ ok: false })
+    expect(controller().options.observationOnly).toBe(true)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+  it('valid attended verification uses normal task/session authorization and is revoked on Stop', async () => {
+    await verificationSetup()
+    expect(await integration.handle({ type: 'acknowledge-verification' })).toMatchObject({ ok: true, verificationConsented: true })
+    expect(controller().options.observationOnly).toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled() // acknowledgment is not a grant or task
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ defaultId: 0, detail: expect.stringContaining('macOS may finish an action already sent') }))
+    await integration.handle({ type: 'targets' })
+    expect(await integration.handle(selection)).toMatchObject({ ok: true })
+    expect(requests.some(row => row.path.endsWith('/sessions'))).toBe(true)
+    expect(requests.some(row => row.path.endsWith('/exchange'))).toBe(true)
+    expect(requests.some(row => row.path.endsWith('/run'))).toBe(true)
+    expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
+    await integration.stop()
+    expect(await integration.handle({ type: 'status' })).toMatchObject({ verificationConsented: false })
+    expect(await integration.handle(selection)).toMatchObject({ ok: false })
+  })
+
   it('packaged inspector opt-in authorizes only a one-shot read, not control/capture or pilot acceptance', async () => {
     await packagedReadiness()
     vi.stubEnv('NATIVE_COMPUTER_INSPECTOR_ENABLED', 'true')
@@ -416,7 +469,8 @@ describe('trusted main native computer setup', () => {
     const flags = { darwin: 'NATIVE_COMPUTER_PILOT_ACCEPTED', win32: 'NATIVE_COMPUTER_WINDOWS_ACCEPTED', linux: 'NATIVE_COMPUTER_LINUX_ACCEPTED' }
     for (const flag of Object.values(flags)) vi.stubEnv(flag, flag === flags[platform] ? 'false' : 'true')
     integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth: async () => auth }); integration.install()
-    expect(mocks.controllers).toHaveLength(0)
+    expect(mocks.controllers).toHaveLength(platform === 'darwin' ? 1 : 0)
+    if (platform === 'darwin') expect(controller().options.observationOnly).toBe(true)
     vi.stubEnv(flags[platform], 'true')
     integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth: async () => auth }); integration.install()
     const options = controller().options as NativeControllerOptions
@@ -481,8 +535,8 @@ describe('trusted main native computer setup', () => {
     expect(controller().start.mock.calls[0][0]).toMatchObject({ allowControl, allowCapture })
     const detail = vi.mocked(dialog.showMessageBox).mock.calls.at(-1)![0].detail!
     if (allowControl && allowCapture) {
-      expect(detail).toContain('Screenshot support: selected-window safe fixture canvas capture only.')
-      expect(detail).toContain('Coordinate clicks and screenshot-to-action fallback are unavailable.')
+      expect(detail).toContain('Screenshot support: selected reviewed fixture windows only.')
+      expect(detail).toContain('No raw coordinate input or no-AX canvas actions.')
     } else {
       expect(detail).toContain('No screenshot capture.')
       expect(detail).not.toContain('Screenshot support:')

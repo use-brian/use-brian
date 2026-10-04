@@ -1,6 +1,6 @@
 // electron-builder's mac.sign hook: keep its identity, temporary keychain,
-// traversal and signing implementation. Only the native helper's entitlement
-// profile differs from Electron. This does not enable helper admission.
+// traversal and signing implementation. The helper and pinned fixture use the
+// closed native entitlement profile, not Electron's. This does not enable admission.
 import { signAsync } from '@electron/osx-sign';
 import { withNativeHelperSigningPolicy, nativeHelperRelativePath } from './mac-native-signing-policy.mjs';
 import { captureUnstampedHelper, sealNativeBootstrap } from './mac-release-bootstrap.mjs';
@@ -19,16 +19,19 @@ export default async function signMacApp(options, packager) {
   const unstampedHelper = captureUnstampedHelper(options.app);
   const helper = `${options.app}/${nativeHelperRelativePath}`;
   const original = selected.optionsForFile;
-  let helperVisited = false;
+  const fixture = `${options.app}/Contents/Resources/computer-control/NativeComputerFixture.app/Contents/MacOS/NativeComputerFixture`;
+  let helperVisited = false, fixtureVisited = false;
   selected.optionsForFile = path => {
     const result = original(path);
     if (path === helper) helperVisited = true;
+    if (path === fixture) fixtureVisited = true;
     return result;
   };
   // Explicit binaries are used by electron-builder for extensionless helpers.
-  selected.binaries = [...new Set([...(options.binaries ?? []), helper])];
+  selected.binaries = [...new Set([...(options.binaries ?? []), helper, fixture])];
   await signAsync(selected);
   if (!helperVisited) throw new Error('Native helper was skipped by the Mac signer');
+  if (!fixtureVisited) throw new Error('Visual fixture was skipped by the Mac signer');
   const approval = await sealNativeBootstrap(selected, unstampedHelper);
   if (process.env.BRIAN_NATIVE_PACKAGE_CHECK === '1') {
     // Explicit operator package check only. Reuse the selected keychain before

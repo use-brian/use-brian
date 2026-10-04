@@ -15,6 +15,7 @@ const selection = { workspaceId: z.string().uuid(), assistantId: z.string().uuid
 export const NativeUiRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('status') }).strict(), z.object({ type: z.literal('targets') }).strict(),
   z.object({ type: z.literal('check-readiness') }).strict(),
+  z.object({ type: z.literal('acknowledge-verification') }).strict(),
   z.object({ type: z.literal('permissions'), permission: z.enum(['accessibility', 'screen-recording']).optional() }).strict(), z.object({ type: z.literal('stop') }).strict(), z.object({ type: z.literal('disconnect') }).strict(),
   z.object({ type: z.literal('workspace-changed'), workspaceId: z.string().uuid() }).strict(),
   z.object({ type: z.literal('start'), ...selection }).strict(), z.object({ type: z.literal('resume'), ...selection }).strict(),
@@ -98,7 +99,14 @@ export class NativeComputerIntegration {
   // Explicit local R1 development opt-in, not an assertion of pilot acceptance.
   // It grants only observation access; the controller independently caps helper authority.
   private readonly inspectorEnabled = process.platform === 'darwin' && app.isPackaged && process.env.NATIVE_COMPUTER_INSPECTOR_ENABLED === 'true'
-  private readonly enabled = this.controlEnabled || this.inspectorEnabled
+  // Eligibility is not admission. A fresh attended local acknowledgment is required.
+  private readonly verificationAvailable = process.platform === 'darwin' && app.isPackaged && process.env.NATIVE_COMPUTER_ENABLED === 'true'
+  private verificationConsent?: { generation: number; workspaceId: string; authIdentity: string }
+  private verificationAllowed(): boolean {
+    const consent = this.verificationConsent
+    return !!consent && consent.generation === this.generation && consent.workspaceId === this.workspaceId && consent.authIdentity === this.authIdentity
+  }
+  private readonly enabled = this.controlEnabled || this.inspectorEnabled || this.verificationAvailable
   private readonly helperTiming?: HelperTimingOptions
   constructor(private readonly options: NativeIntegrationOptions) {
     // Snapshot the callback once. PrivatePipeHelper captures original per-request
@@ -199,14 +207,14 @@ export class NativeComputerIntegration {
     return 'With your consent, the helper will attempt to restore only the selected window to the foreground at session start and after the approval dialog. It freshly rechecks the target and action; if focus restoration or validation fails, it fails closed.'
   }
   private makeController(): NativeComputerController {
-    const controller: NativeComputerController = new NativeComputerController({ enabled: this.enabled, observationOnly: !this.controlEnabled, observerFactory: this.options.observerFactory,
+    const controller: NativeComputerController = new NativeComputerController({ enabled: this.enabled, observationOnly: !this.controlEnabled && !this.verificationAllowed(), observerFactory: this.options.observerFactory,
       safetyControlsReady: () => this.ready && this.helperReady(),
       helperFactory: onDeath => new PrivatePipeHelper(this.helperLaunch(), onDeath, undefined, this.helperTiming), lease: new LocalDeviceLease(),
       approveGrant: (grant, signal) => this.consent('Allow Brian to use this computer?', [
         `Requester: ${JSON.stringify(grant.requester)}`, `Workspace: ${JSON.stringify(grant.identity.workspaceId)}`, `Deployment: ${JSON.stringify(grant.identity.deploymentId)}`,
         `Task: ${JSON.stringify(grant.goal)}`, `Selected windows (data): ${JSON.stringify(grant.targets.map(target => ({ displayName: this.selection.find(item => sameTarget(item, target))?.displayName, appId: target.appId, windowId: target.windowId })))}`,
         grant.allowControl ? 'Initial semantic scope: TextEdit and supported fixtures only. Every action requires your local approval; unavailable capabilities are not substituted.' : 'Observation only. No input.',
-        grant.allowCapture ? 'Screenshot support: selected-window safe fixture canvas capture only. Coordinate clicks and screenshot-to-action fallback are unavailable.' : 'No screenshot capture.',
+        grant.allowCapture ? 'Screenshot support: selected reviewed fixture windows only. Screenshot-guided actions require a uniquely resolved Accessibility invoke and exact local approval. No raw coordinate input or no-AX canvas actions.' : 'No screenshot capture.',
         grant.allowControl || process.platform !== 'darwin' ? this.foregroundNotice() : 'Read-only inspection: Brian will not activate, raise or edit the selected window.',
         grant.allowControl
           ? 'Accessibility text is sent to your configured model provider. Local execution is not local inference.' + (grant.allowCapture ? ' Images may be sent to that provider only after separate image-upload approval and model-policy checks; capture consent alone is not sufficient.' : '')
@@ -248,6 +256,7 @@ export class NativeComputerIntegration {
       },
       onStatus: status => { if (this.controller === controller) {
         if (['stopped', 'paused_for_user', 'ended'].includes(status.state) && !this.terminalControllers.has(controller)) {
+          this.verificationConsent = undefined
           this.terminalControllers.add(controller)
           this.trackCleanup(() => controller.stop())
         }
@@ -331,6 +340,7 @@ export class NativeComputerIntegration {
     }
   }
   async stop(): Promise<void> {
+    this.verificationConsent = undefined
     ++this.generation; this.requests.abort(); this.requests = new AbortController()
     this.selection = []
     this.completedInspection = undefined
@@ -392,8 +402,10 @@ export class NativeComputerIntegration {
     if (this.teardown.size) return { ok: input.type === 'status' }
     if (input.type === 'check-readiness') return this.checkReadiness()
     if (!this.enabled || !this.ready) return { ok: false, error: 'Native control unavailable' }
+    if (!this.controlEnabled && !this.inspectorEnabled && !this.verificationAllowed() &&
+      ['targets', 'start', 'resume'].includes(input.type)) return { ok: false, error: 'Native control unavailable' }
     if ((input.type === 'start' || input.type === 'resume') &&
-      ((!this.controlEnabled && (input.allowControl || input.allowCapture)) || (!input.allowControl && input.allowCapture))) {
+      ((!this.controlEnabled && !this.verificationAllowed() && (input.allowControl || input.allowCapture)) || (!input.allowControl && input.allowCapture))) {
       return { ok: false, error: 'This inspector supports observation only, without control or screenshots.' }
     }
     // An auth read begun in an old generation cannot restore its scope after Stop.
@@ -413,12 +425,33 @@ export class NativeComputerIntegration {
       return { ok: false, error: 'Native identity changed' }
     }
     this.authIdentity = authIdentity
-    if (input.type === 'status') return { ok: true, status: this.authenticatedStatus(auth), deviceId: this.deviceId }
+    if (input.type === 'status') return { ok: true, status: this.authenticatedStatus(auth), deviceId: this.deviceId, verificationAvailable: this.verificationAvailable, verificationConsented: this.verificationAllowed() }
     if (this.teardown.size || this.busy) return { ok: false, error: 'Native setup busy' }
     this.busy = true
     const generation = this.generation
     let completionGeneration = generation
     try {
+      if (input.type === 'acknowledge-verification') {
+        if (!this.verificationAvailable || !this.workspaceId || !this.helperReady() ||
+          ['active', 'awaiting_action_approval', 'awaiting_local_consent'].includes(this.controller?.status().state ?? '')) return { ok: false }
+        this.verificationConsent = undefined
+        this.selection = []
+        const workspaceId = this.workspaceId
+        const signal = this.requests.signal
+        const allowed = await this.consent('Allow attended packaged Mac verification?',
+          'This is verification before pilot acceptance, not production rollout or a safety certification. Stay present and review every action. Stop revokes further work best-effort, including handoff; macOS may finish an action already sent. Accessibility-backed actions only; no-AX canvases are deferred. Normal task authorization, signed-helper admission, target consent and separate capture consent still apply. This acknowledgment is temporary and is cleared by Stop, workspace/account changes or session end.', signal)
+        const fresh = allowed ? await this.readAuth(AbortSignal.any([signal, AbortSignal.timeout(5000)])) : null
+        if (!allowed || signal.aborted || generation !== this.generation || workspaceId !== this.workspaceId || !fresh || this.authKey(fresh) !== authIdentity) return { ok: false }
+        // Replace discovery under the new ceiling only after confirmed teardown.
+        if (this.controller) await this.trackCleanup(() => this.controller!.dispose())
+        if (signal.aborted || generation !== this.generation || workspaceId !== this.workspaceId) return { ok: false }
+        const finalAuth = await this.readAuth(AbortSignal.any([signal, AbortSignal.timeout(5000)]))
+        if (signal.aborted || generation !== this.generation || !finalAuth || this.authKey(finalAuth) !== authIdentity) return { ok: false }
+        this.selection = []
+        this.verificationConsent = { generation, workspaceId, authIdentity }
+        this.makeController()
+        return { ok: true, verificationConsented: true }
+      }
       if (input.type === 'permissions') {
         if (['active', 'awaiting_action_approval', 'awaiting_local_consent'].includes(this.controller?.status().state ?? '')) {
           return { ok: false, error: 'Stop the current native session before changing permissions.' }

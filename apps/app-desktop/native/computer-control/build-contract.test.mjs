@@ -123,9 +123,9 @@ test('capture is dual-consented, target-only and revalidated before SCK and fram
     '"sensitive"] as? Bool == false', '"role"] as? String != kAXSheetRole', '.isEmpty', 'unchanged(snapshot, window)']) assert(canvas.includes(gate), gate);
   const visible = section('    func visibleWindowID(', '    private func pixels(');
   for (const gate of ['CGDisplayBounds($0).contains(r)', 'CGDisplayRotation($0) == 0', '.count == 1', '.optionOnScreenOnly',
-    'window.target["processId"]', 'area == r', '== canvasTitle', 'area.intersects(r)', '> 0 { return nil }']) assert(visible.includes(gate), gate);
+    'window.target["processId"]', 'area == r', '== captureWindowTitle(window)', 'area.intersects(r)', '> 0 { return nil }']) assert(visible.includes(gate), gate);
   const pixels = section('    private func pixels(', '    private func captureStillValid(');
-  for (const gate of ['captureAuthority(grant)', 'authorized(command, lease)', 'fresh(action, window) != nil', 'safeCanvas(window, snapshot)',
+  for (const gate of ['captureAuthority(grant)', 'authorized(command, lease)', 'fresh(action, window) != nil', 'captureCohort(window, snapshot)',
     'CGPreflightScreenCaptureAccess()', 'visibleWindowID(window)']) {
     assert(pixels.indexOf(gate) >= 0 && pixels.indexOf(gate) < pixels.indexOf('SCShareableContent.getExcludingDesktopWindows'), gate);
   }
@@ -141,11 +141,11 @@ test('capture is dual-consented, target-only and revalidated before SCK and fram
   assert(pixels.includes('png.count <= 2_000_000'));
   assert(pixels.indexOf('guard captureStillValid(command, action, window, snapshot), visibleWindowID(window) == number') > pixels.indexOf('done.wait()'));
   const valid = section('    private func captureStillValid(', '    private func capture(');
-  for (const gate of ['captureAuthority(grant)', 'authorized(command, lease)', 'fresh(action, window) != nil', 'safeCanvas(window, snapshot)',
+  for (const gate of ['captureAuthority(grant)', 'authorized(command, lease)', 'fresh(action, window) != nil', 'captureCohort(window, snapshot)',
     'CGPreflightScreenCaptureAccess()', 'brian_private_channel_alive() == 1']) assert(valid.includes(gate), gate);
   const capture = section('    private func capture(', '    func reachable(');
   for (const gate of ['frame = nil; frameObservation = ""', 'captureAuthority(grant)', 'authorized(command, lease)', 'CGPreflightScreenCaptureAccess()',
-    'monotonic() - lastCapture >= 1000', 'fresh(action, window)', 'safeCanvas(window, snapshot)']) {
+    'monotonic() - lastCapture >= 1000', 'fresh(action, window)', 'captureCohort(window, snapshot)']) {
     assert(capture.indexOf(gate) >= 0 && capture.indexOf(gate) < capture.indexOf('pixels(command,'), gate);
   }
   assert(capture.indexOf('captureStillValid(command, action, window, snapshot)') > capture.indexOf('pixels(command,'));
@@ -237,7 +237,7 @@ test('click preparation uses native cache, unchanged PNG and anchored ages witho
   assert(helper.includes('guardianWorkerHandoff(requestID: requestID, descriptor: prepared.descriptor'));
   assert(execute.includes('guard supportedExecution(command) else { return result("denied") }'));
   assert(execute.includes('if kind == "click" { return result("unsupported") }'));
-  assert(helper.includes('return kind == "observe" || kind == "capture" || semanticKind(kind)'));
+  assert(helper.includes('return kind == "observe" || kind == "capture" || kind == "visualInvoke" || semanticKind(kind)'));
   assert(helper.includes('if let backend = backend, supportedExecution(command)'));
   assert.equal((helper.match(/"input": false/g) ?? []).length, 3); // Includes inert timeout-configuration failure.
   assert(!helper.includes('"input": inputReady'));

@@ -78,7 +78,7 @@ if (process.argv.includes('--portable')) {
   for (const marker of ['Canvas clicks:', '.valueChanged', 'Mock send (local only)', 'Mock delete (local only)', 'NATIVE_SENTINEL', 'Duplicate action', 'window.beginSheet', 'NSPopUpButton']) assert(fixture.includes(marker), marker)
   for (const marker of ['value.unicodeScalars', 'scalar.value > 0xFFFF ? 2 : 1', 'publicAXRoles.contains(role) ? role : "AXUnknown"', '!publicAXClassification(role, subrole)', 'boundedText(value, 4096)', 'boundedText(sensitive', 'if !read.complete { complete = false }', 'current.complete && same(current.value, ref.node)', 'unchanged(completeSnapshot, window)']) assert(helper.includes(marker), marker)
   assert(!helper.includes('prefix(4096)')); assert(!helper.includes('role.prefix(100)'))
-  assert.equal((helper.match(/snapshot.observation\["completeness"\] as\? String == "complete"/g) ?? []).length, 4)
+  assert.equal((helper.match(/snapshot.observation\["completeness"\] as\? String == "complete"/g) ?? []).length, 5) // Existing four guards plus the closed visual cohort.
   // Wire-limit vectors are JS UTF-16 checks, NOT execution of the Swift limiter.
   const boundary = '😀'.repeat(2048)
   assert.equal(boundary.length, 4096); assert.equal([...boundary].length, 2048)

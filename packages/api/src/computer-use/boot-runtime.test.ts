@@ -124,10 +124,13 @@ describe('native boot composition', () => {
     const availability = new MutableProviderAvailability(['gemini', row.provider])
     f.options.configuredProviders = availability
     f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
-    f.grant.allowCapture = true
+    f.grant.allowCapture = true; f.grant.allowControl = true
+    f.grant.goal = f.input.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    f.input.observation.captureCohort = 'public-shapes-v1'
     f.input.observation.frame = { id: 'frame', width: 100, height: 100, mimeType: 'image/png', data: 'private', bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
     const runtime = (await f.runtime())!
     availability.setStaticProvider(row.provider, false)
+    if (lane === 'text') delete f.input.observation.captureCohort
     await expect(lane === 'text' ? runtime.llm.plan!(f.input) : runtime.llm.vision!.propose(f.input)).rejects.toThrow()
     expect(f.requests).toHaveLength(0)
     expect(f.recordUsage).not.toHaveBeenCalled()
@@ -212,8 +215,10 @@ describe('native boot composition', () => {
   it.each([false, true])('audits failed vision with optional usage=%s and user-key costs', async knownUsage => {
     const f = fixture()
     f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
-    f.grant.allowCapture = true
-    f.input.observation.frame = { width: 1, height: 1, mimeType: 'image/png', data: 'private image' } as never
+    f.grant.allowCapture = true; f.grant.allowControl = true
+    f.grant.goal = f.input.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    f.input.observation.captureCohort = 'public-shapes-v1'
+    f.input.observation.frame = { id: 'frame', width: 1, height: 1, mimeType: 'image/png', data: 'private image', bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
     managedRoute(f, 'gpt-5.2', f.provider, 'user')
     f.provider.stream = async function* (request) {
       yield { type: 'message_start', model: request.model }
@@ -289,7 +294,9 @@ describe('native boot composition', () => {
   ] as const)('real OpenAI-compatible native grounder: %s', async (_label, actualModel, usage, usable, billable) => {
     const f = fixture(), requestedModel = 'claude-haiku-4-5', wireModel = 'claude-haiku-4-5-20251001'
     f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
-    f.grant.allowCapture = true
+    f.grant.allowCapture = true; f.grant.allowControl = true
+    f.grant.goal = f.input.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    f.input.observation.captureCohort = 'public-shapes-v1'
     f.input.observation.frame = { id: 'frame', width: 640, height: 480, mimeType: 'image/png', data: 'fixture-pixels',
       bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
     const fetchFn = vi.fn<typeof fetch>(async () => new Response(
@@ -303,7 +310,7 @@ describe('native boot composition', () => {
     managedRoute(f, requestedModel, provider)
     const runtime = (await f.runtime())!, useOutput = vi.fn()
     const result = runtime.llm.vision!.propose(f.input).then(value => { useOutput(value); return value })
-    if (usable) await expect(result).resolves.toMatchObject({ kind: 'click', x: 10, y: 20 })
+    if (usable) await expect(result).resolves.toMatchObject({ kind: 'visualInvoke', x: 10, y: 20 })
     else await expect(result).rejects.toThrow()
     expect(useOutput).toHaveBeenCalledTimes(usable ? 1 : 0)
     expect(fetchFn).toHaveBeenCalledTimes(1)
@@ -326,7 +333,9 @@ describe('native boot composition', () => {
     f.provider.models = [model]
     f.options.resolveGrounder = createNativeConfiguredGrounderApproval(true, model)
     f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
-    f.grant.allowCapture = true
+    f.grant.allowCapture = true; f.grant.allowControl = true
+    f.grant.goal = f.input.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    f.input.observation.captureCohort = 'public-shapes-v1'
     f.input.observation.frame = { id: 'frame', width: 100, height: 100, data: 'private-pixels', mimeType: 'image/png', bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
     f.provider.stream = async function* (request) {
       f.requests.push(request)
@@ -345,7 +354,9 @@ describe('native boot composition', () => {
     managedRoute(f, model)
     f.options.resolveGrounder = createNativeConfiguredGrounderApproval(true, model)
     f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
-    f.grant.allowCapture = true
+    f.grant.allowCapture = true; f.grant.allowControl = true
+    f.grant.goal = f.input.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    f.input.observation.captureCohort = 'public-shapes-v1'
     f.input.observation.frame = { id: 'frame', width: 100, height: 100, data: 'private-pixels', mimeType: 'image/png', bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
     f.provider.stream = async function* (request) {
       f.requests.push(request)
@@ -354,8 +365,10 @@ describe('native boot composition', () => {
       yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 4 }, nativeMetadata: { actualModel: model === 'claude-haiku-4-5' ? 'claude-haiku-4-5-20251001' : model, usage: { inputTokens: 10, outputTokens: 4 } } }
     }
     const runtime = (await f.runtime())!
+    delete f.input.observation.captureCohort
     await runtime.llm.plan!(f.input)
-    expect(await runtime.llm.vision!.propose(f.input)).toMatchObject({ kind: 'click', x: 10, y: 20 })
+    f.input.observation.captureCohort = 'public-shapes-v1'
+    expect(await runtime.llm.vision!.propose(f.input)).toMatchObject({ kind: 'visualInvoke', x: 10, y: 20 })
     expect(f.requests).toHaveLength(2)
     for (const request of f.requests) expect(request).toMatchObject({ model, nativeStrict: true, allowProviderFallback: false })
     expect(JSON.stringify(f.requests[0])).not.toContain('private-pixels')
@@ -386,7 +399,9 @@ describe('native boot composition', () => {
     const f = fixture()
     managedRoute(f, 'gpt-5.2')
     f.grant.targets[0]!.appId = 'com.usebrian.NativeComputerFixture'
-    f.grant.allowCapture = true
+    f.grant.allowCapture = true; f.grant.allowControl = true
+    f.grant.goal = f.input.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    f.input.observation.captureCohort = 'public-shapes-v1'
     f.input.observation.frame = { id: 'frame', width: 100, height: 100, data: 'private-pixels', mimeType: 'image/png', bounds: f.input.observation.bounds, displayLayoutVersion: 'layout' }
     const runtime = (await f.runtime())!
     const changeModel = () => { managedRoute(f, 'claude-haiku-4-5') }

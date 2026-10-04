@@ -227,3 +227,72 @@ it.each(["status", "targets"] as const)("[COMP:app-web/native-computer] stale %s
     expect(owner.snapshot()).toBe(clean);
   }
 });
+
+it("[COMP:app-web/native-computer] acknowledgment is explicit, unsupported fails closed, and native decline never confirms", async () => {
+  const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: true });
+  const owner = new NativeComputer(() => control);
+  await owner.enter("w"); await owner.check();
+  await owner.send({ type: "acknowledge-verification" });
+  expect(control).not.toHaveBeenCalledWith({ type: "acknowledge-verification" });
+  control.mockResolvedValueOnce({ ok: true, verificationAvailable: true, verificationConsented: false });
+  await owner.check();
+  expect(control).not.toHaveBeenCalledWith({ type: "acknowledge-verification" });
+  control.mockResolvedValueOnce({ ok: false });
+  await owner.send({ type: "acknowledge-verification" });
+  expect(owner.snapshot().verificationConsented).toBe(false);
+  control.mockResolvedValueOnce({ ok: true }); // Success alone is not native approval.
+  await owner.send({ type: "acknowledge-verification" });
+  expect(owner.snapshot().verificationConsented).toBe(false);
+  control.mockResolvedValueOnce({ ok: true, verificationConsented: true });
+  await owner.send({ type: "acknowledge-verification" });
+  expect(owner.snapshot().verificationConsented).toBe(true);
+  await owner.send({ type: "targets" });
+  expect(owner.snapshot().verificationConsented).toBe(true);
+  await owner.check(); // A status without optional support must not retain old approval.
+  expect(owner.snapshot().verificationConsented).toBeUndefined();
+});
+
+it.each(["stop", "workspace-changed", "disconnect"] as const)("[COMP:app-web/native-computer] %s fences native approval and stale status immediately", async type => {
+  let approve!: (result: DesktopComputerControlResult) => void;
+  let poll!: (result: DesktopComputerControlResult) => void;
+  const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: true, verificationAvailable: true, verificationConsented: true });
+  const owner = new NativeComputer(() => control);
+  await owner.enter("w"); await owner.check();
+  control.mockImplementation(m => m.type === "acknowledge-verification" ? new Promise(resolve => { approve = resolve; }) : m.type === "status" ? new Promise(resolve => { poll = resolve; }) : Promise.resolve({ ok: true }));
+  const pending = owner.send({ type: "acknowledge-verification" });
+  const stale = owner.check();
+  const revision = owner.setupRevision;
+  const reset = owner.send(type === "workspace-changed" ? { type, workspaceId: "other" } : { type });
+  expect(owner.snapshot().verificationConsented).toBeUndefined();
+  expect(owner.setupRevision).toBeGreaterThan(revision);
+  await reset;
+  approve({ ok: true, verificationConsented: true });
+  poll({ ok: true, verificationAvailable: true, verificationConsented: true });
+  expect(await pending).toEqual({ ok: false });
+  expect(await stale).toEqual({ ok: false });
+  expect(owner.snapshot().verificationConsented).toBeUndefined();
+});
+
+it("[COMP:app-web/native-computer] cleanup fences a late native approval even after cleanup finishes", async () => {
+  let finish!: (result: DesktopComputerControlResult) => void;
+  const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: true, verificationAvailable: true });
+  const owner = new NativeComputer(() => control);
+  await owner.enter("w"); await owner.check();
+  control.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const pending = owner.send({ type: "acknowledge-verification" });
+  control.mockResolvedValueOnce({ ok: true, cleanupPending: true }); await owner.check();
+  control.mockResolvedValueOnce({ ok: true, cleanupPending: false }); await owner.check();
+  finish({ ok: true, verificationConsented: true });
+  expect(await pending).toEqual({ ok: false });
+  expect(owner.snapshot().verificationConsented).toBeUndefined();
+});
+
+it("[COMP:app-web/native-computer] visual capability is optional and requires both permissions, not raw input", async () => {
+  const { supportsNativeVisual } = await import("../native-computer");
+  const caps = { semanticActions: true, windowCapture: true, input: false, visualInvokeVersion: 1, accessibilityPermission: "granted", capturePermission: "granted" } as NonNullable<DesktopComputerControlResult["status"]>["capabilities"];
+  expect(supportsNativeVisual(caps)).toBe(true);
+  expect(supportsNativeVisual(undefined)).toBe(false);
+  for (const unsupported of [{ visualInvokeVersion: undefined }, { accessibilityPermission: "denied" as const }, { capturePermission: "unknown" as const }, { semanticActions: false }, { windowCapture: false }]) {
+    expect(supportsNativeVisual({ ...caps, ...unsupported })).toBe(false);
+  }
+});

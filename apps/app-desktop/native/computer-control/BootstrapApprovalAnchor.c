@@ -86,3 +86,31 @@ brian_bootstrap_anchor_result brian_bootstrap_approval_copy(
     *written = BRIAN_BOOTSTRAP_APPROVAL_SIZE;
     return result; /* DATA, NEVER authority */
 }
+
+/* Separate pre-sign-only record, never a bootstrap library pin.
+ * VISUAL_DEFINITION_BEGIN: injected test translation units only. */
+__attribute__((used, aligned(16), section("__DATA_CONST,__br_visual,regular,no_dead_strip")))
+static const volatile uint8_t brian_visual_fixture_pin[80] = {
+    0x42, 0x52, 0x49, 0x41, 0x4e, 0x5f, 0x56, 0x49, 0x53, 0x55, 0x41, 0x4c, 0x5f, 0x46, 0x49, 0x58, 0x54, 0x55, 0x52, 0x45, 0x5f, 0x50, 0x49, 0x4e, 0x5f, 0x56, 0x31, 0x8c, 0xa1, 0xd3, 0xf9, 0xb7,
+    [33] = 1, [35] = 20, [39] = 80
+};
+/* VISUAL_DEFINITION_END */
+static const volatile uint8_t visual_marker_xor[32] = {
+    0xe7, 0xf7, 0xec, 0xe4, 0xeb, 0xfa, 0xf3, 0xec, 0xf6, 0xf0, 0xe4, 0xe9, 0xfa, 0xe3, 0xec, 0xfd, 0xf1, 0xf0, 0xf7, 0xe0, 0xfa, 0xf5, 0xec, 0xeb, 0xfa, 0xf3, 0x94, 0x29, 0x04, 0x76, 0x5c, 0x12
+};
+int brian_visual_fixture_hashes_copy(uint8_t *output, size_t capacity) {
+    if (!output || capacity != 40) return 0;
+    memset(output, 0, 40);
+    uint8_t b[80];
+    for (size_t i = 0; i < sizeof(b); ++i) b[i] = brian_visual_fixture_pin[i];
+    for (size_t i = 0; i < 32; ++i)
+        if (b[i] != (uint8_t)(visual_marker_xor[i] ^ 0xa5u)) return 0;
+    const unsigned count = b[34];
+    if (b[32] || b[33] != 1 || count < 1 || count > 2 || b[35] != 20 ||
+        be32(b + 36) != 80 || !zero(b + 40 + count * 20, 40 - count * 20)) return 0;
+    for (unsigned i = 0; i < count; ++i)
+        if (zero(b + 40 + i * 20, 20) ||
+            (i && memcmp(b + 40, b + 60, 20) >= 0)) return 0;
+    memcpy(output, b + 40, count * 20);
+    return (int)count;
+}

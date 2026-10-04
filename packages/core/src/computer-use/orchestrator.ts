@@ -23,6 +23,7 @@ class NativeLogicalInterruption extends Error {}
 
 const denyPolicy: NativeSafetyPolicy = { allows: () => false, allowsCapture: () => false, isComplete: () => false }
 export function buildNativeCandidates(observation: NativeObservation, policy: NativeSafetyPolicy): NativeCandidate[] {
+  if (observation.captureCohort === 'public-shapes-v1') return []
   const actions: NativeAction[] = []
   for (const node of observation.nodes) {
     if (!node.enabled || node.sensitive || !node.actions.some(kind => kind === 'invoke' || kind === 'select' || kind === 'scroll')
@@ -47,6 +48,9 @@ export function buildNativeCandidates(observation: NativeObservation, policy: Na
 export class NativeComputerOrchestrator {
   private busy = false
   private unknown = false
+  private visualOnly = false
+  // Spent before capture (including failure/abstention); never reset by run().
+  private visualAttempted = false
   constructor(private readonly deps: {
     provider?: NativeComputerProvider
     policy?: NativeSafetyPolicy
@@ -58,6 +62,8 @@ export class NativeComputerOrchestrator {
   }) {}
 
   async run(options: NativeTaskOptions): Promise<NativeTaskResult> {
+    // Pin caller goal/target and budgets across awaits; native still revalidates authority.
+    options = { ...options, authority: { ...options.authority, target: { ...options.authority.target } } }
     let actions = 0, traceStep = 0
     let trace: NativeRunTrace | undefined
     const result = (outcome: NativeTaskResult['outcome'], reason: string): NativeTaskResult => {
@@ -65,6 +71,7 @@ export class NativeComputerOrchestrator {
       return { outcome, reason, actions }
     }
     if (this.unknown) return result('execution_unknown', 'Manual reconciliation required; no replay')
+    if (this.visualAttempted) return result('paused', 'Visual attempt consumed; a separately consented run is required')
     if (this.busy) return result('paused', 'Session already running')
     this.busy = true
     trace = this.deps.trace
@@ -127,6 +134,9 @@ export class NativeComputerOrchestrator {
         const o = ObservationSchema.parse(raw)
         if (!sameIdentity(o.identity, grant.identity) || o.epoch !== grant.epoch || !sameTarget(o.target, options.authority.target)
           || o.capturedAt > Date.now() || Date.now() - o.capturedAt > MAX_OBSERVATION_AGE_MS || !o.foreground) throw new Error('Stale or wrong native observation')
+        if (o.captureCohort === 'public-shapes-v1') this.visualOnly = true
+        if (this.visualOnly && (o.captureCohort !== 'public-shapes-v1' || o.completeness !== 'complete' || o.target.appId !== 'com.usebrian.NativeComputerFixture'
+          || options.goal !== 'Activate the outlined triangle; finish when Result is Triangle.' || grant.goal !== options.goal)) throw new Error('Visual scope changed or denied')
         return o
       }
       const observe = async (step: number) => {
@@ -150,6 +160,7 @@ export class NativeComputerOrchestrator {
         && o.capturedAt >= before.capturedAt
         && (o.capturedAt > before.capturedAt || o.monotonicMs > before.monotonicMs)
       let decomposed = false
+      let visualCaptureStarted: number | undefined
       // Every replan consumes model admission; every dispatch consumes maxActions.
       // Permit the final observation even when discarded proposals used iterations.
       for (let step = 0; ; step++) {
@@ -162,6 +173,12 @@ export class NativeComputerOrchestrator {
           await check()
           if (!newerThan(observation, recoveryFrom)) return result('paused', 'No fresh recovery observation')
           recoveryFrom = undefined
+        }
+        if (this.visualAttempted && needsVerification) {
+          await check()
+          const results = observation.nodes.filter(n => n.role === 'AXStaticText' && n.name === 'Result' && !n.sensitive)
+          return lastEffect && newerThan(observation, lastEffect) && results.length === 1 && results[0]!.value === 'Triangle'
+            && policy.isComplete(observation) ? result('completed', 'Verified frozen visual postcondition') : result('paused', 'Visual attempt ended without fresh goal evidence')
         }
         if (needsVerification && this.deps.llm.verify) {
           if (!lastEffect || !newerThan(observation, lastEffect)) return result('paused', 'No fresh post-action evidence')
@@ -194,7 +211,7 @@ export class NativeComputerOrchestrator {
           if (assessment === 'complete') return policy.isComplete(observation) ? result('completed', 'Verified goal postconditions') : result('paused', 'Completion evidence contradicted or incomplete')
           if (assessment !== 'continue') return result('paused', 'Progress verifier abstained')
           needsVerification = false
-        } else if (!this.deps.llm.verify && policy.isComplete(observation)) return result('completed', 'Verified postcondition')
+        } else if (!this.visualOnly && !this.deps.llm.verify && policy.isComplete(observation)) return result('completed', 'Verified postcondition')
         const fingerprint = JSON.stringify(observation.nodes.map(n => [n.role, n.name, n.value, n.selected, n.enabled]))
         if (fingerprint === previous || seen.has(fingerprint)) noProgress++
         if (noProgress >= limit(options.maxNoProgress, 2, 4)) return result('paused', 'No verified progress')
@@ -204,7 +221,7 @@ export class NativeComputerOrchestrator {
         let generatedCandidates = false
         // Keep bounded AX choices on the Jev fast path. Invoke generation only
         // when semantic candidates cannot express the requested operation.
-        if (!candidates.length && this.deps.llm.plan) {
+        if (!this.visualOnly && !candidates.length && this.deps.llm.plan) {
           calls--
           await reserve('text', 1)
           const planned = await measured('generation', step, correlation => this.deps.llm.plan!({ goal: options.goal, observation, candidates, signal, deadlineAt, trace: correlation }))
@@ -212,7 +229,7 @@ export class NativeComputerOrchestrator {
           if (planned.length > 24) return result('paused', 'Too many proposals')
           candidates = planned.map((candidate, i) => ({ id: `p${i}`, action: ActionSchema.parse(candidate.action) }))
             .filter(c => sameTarget(c.action.target, observation.target) && 'observationId' in c.action
-              && c.action.observationId === observation.id && policy.allows(c.action, observation))
+              && c.action.observationId === observation.id && c.action.kind !== 'visualInvoke' && c.action.kind !== 'click' && policy.allows(c.action, observation))
         }
         const decompose = async () => {
           if (decomposed || !this.deps.llm.decompose) return
@@ -227,25 +244,34 @@ export class NativeComputerOrchestrator {
           // Freeze the AX goal contract before starting the frame freshness clock.
           // Decomposition may be slow; neither its old refs nor an old image can
           // authorize capture. Re-observe even when planning already froze goals.
+          if (!this.visualOnly || this.visualAttempted) throw new Error('No visual cohort or attempt available')
+          this.visualAttempted = true
+          const results = observation.nodes.filter(n => n.role === 'AXStaticText' && n.name === 'Result' && !n.sensitive)
+          if (results.length !== 1) throw new Error('Missing frozen Result objective')
           await decompose()
           observation = { ...await observe(step), frame: undefined }
           const status = await check()
-          if (!grant.allowCapture || !status.capabilities.input || !status.capabilities.windowCapture || status.capabilities.capturePermission !== 'granted'
+          if (!grant.allowControl || !grant.allowCapture || status.capabilities.visualInvokeVersion !== 1 || !status.capabilities.semanticActions || !status.capabilities.windowCapture || status.capabilities.capturePermission !== 'granted'
             || !this.deps.llm.vision?.nativeGrounding || !policy.allowsCapture(observation)) throw new Error('No safe grounding')
           options.onProgress?.({ phase: 'vision', step })
+          visualCaptureStarted = performance.now()
           const capture = command({ kind: 'capture', target: observation.target, observationId: observation.id })
           const receipt = ReceiptSchema.parse(await measured('capture-rpc', step, () => provider.execute(capture, signal), capture))
-          if (receipt.commandId !== capture.commandId || receipt.outcome !== 'executed' || !receipt.observation) throw new Error('Capture unavailable')
+          if (receipt.commandId !== capture.commandId || receipt.outcome !== 'executed' || receipt.code !== 'ok' || !receipt.observation) throw new Error('Capture unavailable')
           observation = validate(receipt.observation)
-          if (!observation.frame || !policy.allowsCapture(observation)) throw new Error('Capture denied')
+          if (!observation.frame || observation.frame.width > 1024 || observation.frame.height > 1024
+            || Buffer.byteLength(observation.frame.data, 'base64') > 2_000_000
+            || observation.frame.displayLayoutVersion !== observation.displayLayoutVersion
+            || JSON.stringify(observation.frame.bounds) !== JSON.stringify(observation.bounds) || !policy.allowsCapture(observation)) throw new Error('Capture denied')
           if (calls < 1) throw new Error('Budget exhausted')
-          if (!(await check()).capabilities.input) throw new Error('Visual input unavailable')
+          const current = await check()
+          if (current.capabilities.visualInvokeVersion !== 1 || !current.capabilities.semanticActions || !current.capabilities.windowCapture || current.capabilities.capturePermission !== 'granted') throw new Error('Visual invoke unavailable')
           calls--
           await reserve('vision', 1)
           const proposal = await measured('vision-grounding', step, correlation => this.deps.llm.vision!.propose({ goal: options.goal, observation, candidates: [], signal, deadlineAt, trace: correlation }))
           if (!proposal) throw new Error('Vision abstained')
           const action = ActionSchema.parse(proposal)
-          if (action.kind !== 'click' || action.frameId !== observation.frame.id || observation.frame.displayLayoutVersion !== observation.displayLayoutVersion) throw new Error('Invalid visual grounding')
+          if (action.kind !== 'visualInvoke' || !sameTarget(action.target, observation.target) || action.observationId !== observation.id || action.frameId !== observation.frame.id || observation.frame.displayLayoutVersion !== observation.displayLayoutVersion) throw new Error('Invalid visual grounding')
           framePoint(observation.frame, action.x, action.y)
           candidates = [{ id: 'vision', action }]
         }
@@ -300,7 +326,7 @@ export class NativeComputerOrchestrator {
           const planned = await measured('generation', step, correlation => this.deps.llm.plan!({ goal: options.goal, observation, candidates, signal, deadlineAt, trace: correlation }))
           generatedCandidates = true
           if (planned.length > 24) return result('paused', 'Too many proposals')
-          candidates = planned.map((c, i) => ({ id: `p${i}`, action: ActionSchema.parse(c.action) })).filter(c => sameTarget(c.action.target, observation.target) && 'observationId' in c.action && c.action.observationId === observation.id && policy.allows(c.action, observation))
+          candidates = planned.map((c, i) => ({ id: `p${i}`, action: ActionSchema.parse(c.action) })).filter(c => sameTarget(c.action.target, observation.target) && 'observationId' in c.action && c.action.observationId === observation.id && c.action.kind !== 'visualInvoke' && c.action.kind !== 'click' && policy.allows(c.action, observation))
           if (!candidates.length) await groundVisually()
           selection = await choose()
         }
@@ -311,7 +337,7 @@ export class NativeComputerOrchestrator {
         let status = await check()
         // Inference may outlive a ref. Refresh without replaying or silently choosing
         // another target; all visible semantic state and geometry must still match.
-        if (Date.now() - observation.capturedAt > 1500 && action.kind !== 'click') {
+        if (Date.now() - observation.capturedAt > 1500 && action.kind !== 'visualInvoke') {
           const fresh = await observe(step)
           const state = (o: NativeObservation) => JSON.stringify(o.nodes.map(({ ref: _ref, parentRef, ...node }) => ({ ...node, parentIndex: parentRef ? o.nodes.findIndex(n => n.ref === parentRef) : null })))
           // A refresh is not authority to act after Stop/physical takeover.
@@ -332,7 +358,11 @@ export class NativeComputerOrchestrator {
         }
         validate(observation)
         if (!grant.allowControl || !sameTarget(action.target, observation.target) || !('observationId' in action) || action.observationId !== observation.id
-          || !policy.allows(action, observation) || (action.kind === 'click' ? !status.capabilities.input : !status.capabilities.semanticActions)) return result('paused', 'Action policy denied')
+          || action.kind === 'click' || (this.visualOnly && action.kind !== 'visualInvoke')
+          || (action.kind === 'visualInvoke' && (!this.visualAttempted || candidate.id !== 'vision' || !grant.allowCapture
+            || visualCaptureStarted === undefined || performance.now() - visualCaptureStarted >= MAX_OBSERVATION_AGE_MS
+            || status.capabilities.visualInvokeVersion !== 1 || !status.capabilities.windowCapture || status.capabilities.capturePermission !== 'granted'))
+          || !policy.allows(action, observation) || !status.capabilities.semanticActions) return result('paused', 'Action policy denied')
         const dispatch = command(action)
         options.onProgress?.({ phase: 'executing', step })
         // From dispatch until validated receipt, every failure is ambiguous. Never fallback/retry.

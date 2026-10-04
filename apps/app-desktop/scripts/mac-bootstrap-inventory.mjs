@@ -621,3 +621,20 @@ async function approveBootstrapInventory({ captured, held }) {
       libraryCDHashes: Object.freeze(captured.candidateCDHashes.map(hash => Buffer.from(hash, 'hex'))) });
   } catch { approvalUnavailable(); }
 }
+
+/** Exact executable slice data for the adjacent visual fixture only. CMS/signer
+ * authentication remains the release caller's codesign --all-architectures check. */
+export function extractVisualFixtureCodeData(bytes, expectedArchitectures, info, resources) {
+  return guard(() => {
+    const b = copy(bytes, 32, inventoryLimits.fileBytes), expected = architectures(expectedArchitectures);
+    const all = slices(b);
+    if (all.length !== expected.length || expected.some(a => !all.some(s => s.architecture === a))) fail();
+    const external = new Map([[1, sha(copy(info, 0, inventoryLimits.fileBytes)).toString('hex')],
+      [3, sha(copy(resources, 0, inventoryLimits.fileBytes)).toString('hex')]]);
+    return all.map(s => {
+      const part = b.subarray(s.offset, s.offset + s.size), parsed = commands(part, s);
+      if (parsed.type !== 2) fail();
+      return { architecture: s.architecture, ...directory(part, parsed.signature, slot => external.get(slot), () => {}) };
+    });
+  });
+}

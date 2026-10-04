@@ -32,7 +32,7 @@ const inferencePhase = { plan: 'generation', decompose: 'decomposition', 'next-a
 const correlationSchema = z.object({ runId: z.string().uuid(), spanId: z.string().uuid(), clockId: z.string().uuid() }).strict()
 
 const phaseSchema = z.enum(['run', 'observation-rpc', 'capture-rpc', 'effect-rpc', 'generation', 'selection', 'decomposition', 'verification', 'vision-grounding'])
-const actionSchema = z.enum(['observe', 'capture', 'invoke', 'select', 'setValue', 'scroll', 'key', 'click', 'focus'])
+const actionSchema = z.enum(['observe', 'capture', 'invoke', 'select', 'setValue', 'scroll', 'key', 'click', 'visualInvoke', 'focus'])
 const poisonSchema = z.enum(['overflow', 'invalid_clock', 'invalid_metadata', 'observer_failed', 'observer_backpressure'])
 const terminalSchema = z.enum(['completed', 'paused', 'cancelled', 'execution_unknown', 'unavailable'])
 const timestampSchema = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable()

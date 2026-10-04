@@ -288,7 +288,7 @@ test('portable injected C translation unit agrees with JS canonical validation (
     assert.notEqual(refused.status, 0); assert.match(refused.stderr, /requires Darwin/);
     // Test-only replacement is in a NEW temporary TU; production bytes unchanged.
     const injected = source.replace(/#if !defined\(__APPLE__\) \|\| !defined\(__MACH__\)\n#error[^\n]*\n#endif/, '')
-      .replace(/__attribute__\(\(used, aligned\(16\), section\("__DATA_CONST,__br_bootstrap,regular,no_dead_strip"\)\)\)/, '')
+      .replace(/__attribute__\(\(used, aligned\(16\), section\("__DATA_CONST,__br_(?:bootstrap|visual),regular,no_dead_strip"\)\)\)/g, '')
       .replace('static const volatile uint8_t brian_bootstrap_anchor', 'static volatile uint8_t brian_bootstrap_anchor');
     const harness = `\n#include <stdio.h>\nint main(void) {
       uint8_t input[1376], out[1376]; size_t written = 9;

@@ -171,6 +171,21 @@ func signedProcess(_ identity: ProcessIdentity, _ requirementText: String, boots
     // Apple platform binaries need not carry a third-party team identifier.
     return info[kSecCodeInfoTeamIdentifier as String] as? String ?? ""
 }
+// BEGIN FOUNDATION VISUAL PINS
+// Copy only the signed helper's embedded anchor, never target-supplied pins.
+// C validates the record; independently bound count and hash material here.
+func visualFixtureExpectedCDHashes() -> [Data] {
+    var bytes = [UInt8](repeating: 0, count: 40)
+    let count = bytes.withUnsafeMutableBufferPointer {
+        brian_visual_fixture_hashes_copy($0.baseAddress, $0.count)
+    }
+    guard count == 1 || count == 2 else { return [] }
+    let hashes = (0..<Int(count)).map { Data(bytes[($0 * 20)..<(($0 + 1) * 20)]) }
+    guard hashes.allSatisfy({ $0.contains(where: { $0 != 0 }) }), Set(hashes).count == hashes.count,
+          bytes.dropFirst(Int(count) * 20).allSatisfy({ $0 == 0 }) else { return [] }
+    return hashes
+}
+// END FOUNDATION VISUAL PINS
 final class ProcessTrust {
     let helper: ProcessIdentity
     let parent: ProcessIdentity
@@ -212,6 +227,21 @@ final class ProcessTrust {
             ProcessIdentity.read(getpid()) == helper && ProcessIdentity.read(parent.pid) == parent &&
             signedProcess(helper, teamRequirement()) == team &&
             signedProcess(parent, teamRequirement("ai.usebrian.desktop"), bootstrap: true) == team
+    }
+    func visualFixturePinReady() -> Bool {
+        let pins = visualFixtureExpectedCDHashes()
+        return !pins.isEmpty && pins.count <= 2 && pins.allSatisfy { $0.count == 20 }
+    }
+    func visualFixtureValid(_ identity: ProcessIdentity) -> Bool {
+        guard visualFixturePinReady(), parentValid(), identity.executable == fixtureExecutable,
+              ProcessIdentity.read(identity.pid) == identity else { return false }
+        let hashes = visualFixtureExpectedCDHashes().map { pin in
+            "cdhash H\"" + pin.map { String(format: "%02x", $0) }.joined() + "\""
+        }.joined(separator: " or ")
+        // The requirement is checked against the running guest AND static seal,
+        // with process birth rechecked by signedProcess. Same-team substitutions
+        // do not satisfy the exact reviewed renderer hash requirement.
+        return signedProcess(identity, teamRequirement(cohort) + " and (" + hashes + ")") == team
     }
     func target(_ pid: pid_t) -> (ProcessIdentity, String)? {
         guard parentValid(), let identity = ProcessIdentity.read(pid), pid != getpid() else { return nil }
@@ -279,6 +309,7 @@ func validWireCommand(_ command: Object) -> Bool {
         "focus": ["kind", "target", "observationId"], "invoke": ["kind", "target", "observationId", "ref"],
         "setValue": ["kind", "target", "observationId", "ref", "text"],
         "select": ["kind", "target", "observationId", "ref"], "scroll": ["kind", "target", "observationId", "ref", "deltaY"],
+        "visualInvoke": ["kind", "target", "observationId", "frameId", "x", "y"],
         "click": ["kind", "target", "observationId", "frameId", "x", "y"], "key": ["kind", "target", "observationId", "key"]
     ]
     guard keys[kind] == Set(action.keys) else { return false }
@@ -289,7 +320,7 @@ func validWireCommand(_ command: Object) -> Bool {
         guard let text = wireString(action["text"], max: 4096, nonempty: false), !text.contains("\u{0000}") else { return false }
     case "scroll":
         guard wireInteger(action["deltaY"], min: -600, max: 600) != nil else { return false }
-    case "click":
+    case "click", "visualInvoke":
         guard wireString(action["frameId"]) != nil, let x = wireNumber(action["x"]), let y = wireNumber(action["y"]), x >= 0, y >= 0 else { return false }
     case "key":
         guard let key = action["key"] as? String, ["Tab", "Shift+Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Escape", "Enter"].contains(key) else { return false }
@@ -304,7 +335,9 @@ func validWirePayload(_ method: String, _ payload: Object) -> Bool {
         return Set(payload.keys) == Set(["grant", "leaseId"]) && wireString(payload["leaseId"]) != nil &&
             (payload["grant"] as? Object).map(validWireGrant) == true
     case "beginApproval", "execute", "endApproval":
-        let keys = method == "endApproval" ? ["command", "leaseId", "approved"] : ["command", "leaseId"]
+        let visual = ((payload["command"] as? Object)?["action"] as? Object)?["kind"] as? String == "visualInvoke"
+        let keys = method == "endApproval" ? ["command", "leaseId", "approved"] + (visual ? ["bindingId"] : []) : ["command", "leaseId"]
+        if method == "endApproval" && visual && wireString(payload["bindingId"]) == nil { return false }
         return Set(payload.keys) == Set(keys) && wireString(payload["leaseId"]) != nil &&
             (method != "endApproval" || wireBool(payload["approved"]) != nil) &&
             (payload["command"] as? Object).map(validWireCommand) == true
@@ -437,16 +470,31 @@ func privateResponse(requestId: String, method: String, result: Any, timing: Sou
 // Fresh-helper readiness is metadata-only. Only explicit local discovery creates
 // the backend; authority still requires an exact grant and per-action approval.
 let probeOnlyLimitation = "Select discovery to initialize AX and safe-fixture-canvas capture readiness; input disabled."
+// A visual backend cannot return legacy true or an arbitrary dictionary.
+struct VisualApproval {
+    let bindingId: String
+    let commandId: String
+    let frameId: String
+    let target: Object
+    let observationId: String
+    let ref: String
+    var wire: Object {
+        ["bindingId": bindingId, "commandId": commandId, "frameId": frameId,
+         "action": ["kind": "invoke", "target": target, "observationId": observationId, "ref": ref]]
+    }
+}
 protocol ObservationBackend: AnyObject {
     func capabilities() -> Object
     func listTargets() -> [Object]
     func start(_ payload: Object) -> Bool
     func beginApproval(_ payload: Object) -> Bool
+    func beginVisualApproval(_ payload: Object) -> VisualApproval?
     func endApproval(_ payload: Object) -> Bool
     func execute(_ payload: Object, timing: SourceRequestTiming?) -> Object
     func handoffClick(_ payload: Object, requestID: String) -> Object?
 }
 extension ObservationBackend {
+    func beginVisualApproval(_ payload: Object) -> VisualApproval? { nil }
     // Non-native/metadata backends have no private descriptor producer.
     func handoffClick(_ payload: Object, requestID: String) -> Object? { nil }
 }
@@ -466,14 +514,14 @@ func supportedGrant(_ payload: Object) -> Bool {
 func semanticKind(_ kind: String) -> Bool { ["invoke", "setValue", "select", "scroll"].contains(kind) }
 func supportedExecution(_ command: Object) -> Bool {
     guard let action = command["action"] as? Object, let kind = action["kind"] as? String else { return false }
-    return kind == "observe" || kind == "capture" || semanticKind(kind)
+    return kind == "observe" || kind == "capture" || kind == "visualInvoke" || semanticKind(kind)
 }
 // Approval binds every command field (identity, target instances, epoch, ref,
 // observation, deadline and text), never a label or a subset of the action.
 func exactSemanticCommand(_ command: Object, _ approved: Object) -> Bool {
     guard validWireCommand(command), validWireCommand(approved),
           let action = command["action"] as? Object, let kind = action["kind"] as? String,
-          semanticKind(kind) else { return false }
+          (semanticKind(kind) || kind == "visualInvoke") else { return false }
     return NSDictionary(dictionary: command).isEqual(to: approved)
 }
 // Explicit local pixel approval is not semantic/ref approval. Whole-object
@@ -523,7 +571,10 @@ final class ObservationDispatcher {
             if backend == nil { backend = makeBackend() }
             result = backend!.listTargets()
         case "start": result = supportedGrant(payload) ? (backend?.start(payload) ?? false) : false
-        case "beginApproval": result = backend?.beginApproval(payload) ?? false
+        case "beginApproval":
+            if ((payload["command"] as? Object)?["action"] as? Object)?["kind"] as? String == "visualInvoke" {
+                result = backend?.beginVisualApproval(payload)?.wire as Any? ?? false
+            } else { result = backend?.beginApproval(payload) ?? false }
         case "endApproval": result = backend?.endApproval(payload) ?? false
         case "execute":
             guard let command = payload["command"] as? Object, let commandId = command["commandId"] as? String else { return nil }
@@ -621,6 +672,91 @@ struct SemanticSafety {
 }
 // END FOUNDATION SEMANTIC SAFETY
 // END FOUNDATION WIRE VALIDATION
+// BEGIN FOUNDATION VISUAL POLICY
+// Closed visual policy; extracted verbatim on Foundation-only hosts.
+enum VisualPolicy {
+    static let title = "Brian Public Shapes v1"
+    static let identifier = "brian-public-shapes-v1"
+    static let goal = "Activate the outlined triangle; finish when Result is Triangle."
+    enum AttributeRead { case value(Any), absent, failed }
+    static func contentAttributes(_ node: Object, read: (String) -> AttributeRead) -> Bool {
+        // Optional alternate content must be empty or agree with required
+        // exported content. Missing required content still fails cohort().
+        for name in ["AXTitle", "AXDescription", "AXHelp", "AXValue", "AXMinimized", "AXModal"] {
+            switch read(name) {
+            case .absent: continue
+            case .failed: return false
+            case .value(let value):
+                if ["AXMinimized", "AXModal"].contains(name) {
+                    guard value as? Bool == false else { return false }
+                } else {
+                    guard let text = value as? String else { return false }
+                    let expected = name == "AXValue" ? (node["value"] as? String ?? "") :
+                        (name == "AXHelp" ? "" : node["name"] as? String ?? "")
+                    guard text.isEmpty || text == expected else { return false }
+                }
+            }
+        }
+        return true
+    }
+    static func point(x: Double, y: Double, width: Double, height: Double, bounds: Object) -> (Double, Double)? {
+        guard let bx = wireNumber(bounds["x"]), let by = wireNumber(bounds["y"]),
+              let bw = wireNumber(bounds["width"]), let bh = wireNumber(bounds["height"]),
+              [x, y, width, height, bx, by, bw, bh].allSatisfy({ $0.isFinite }),
+              width > 0, height > 0, width <= 1024, height <= 1024, bw > 0, bh > 0,
+              x >= 0, y >= 0, x < width, y < height else { return nil }
+        let px = bx + x * bw / width, py = by + y * bh / height
+        return px.isFinite && py.isFinite ? (px, py) : nil
+    }
+    static func contains(_ b: Object, _ point: (Double, Double)) -> Bool {
+        guard let x = wireNumber(b["x"]), let y = wireNumber(b["y"]),
+              let w = wireNumber(b["width"]), let h = wireNumber(b["height"]), w > 0, h > 0 else { return false }
+        return point.0 > x && point.1 > y && point.0 < x + w && point.1 < y + h
+    }
+    static func alive(capture: Double, observation: Double, current: Double) -> Bool {
+        return [capture, observation, current].allSatisfy { $0.isFinite } &&
+            current >= capture && current >= observation && current - capture < 5_000 && current - observation < 5_000
+    }
+    static func cohort(_ nodes: [Object], bounds: Object) -> Bool {
+        guard nodes.count == 6, let x = wireNumber(bounds["x"]), let y = wireNumber(bounds["y"]),
+              wireNumber(bounds["width"]) == 480, wireNumber(bounds["height"]) == 240 else { return false }
+        let ids = [identifier, "public-shapes-content-v1", "slot-1", "slot-2", "slot-3", "public-shapes-result-v1"]
+        let roles = ["AXWindow", "AXGroup", "AXButton", "AXButton", "AXButton", "AXStaticText"]
+        let names = [title, "Public shapes", "Option 1", "Option 2", "Option 3", "Result"]
+        let boxes: [[Double]] = [[0,0,480,240], [0,0,480,240], [30,60,120,100], [180,60,120,100], [330,60,120,100], [30,190,420,24]]
+        for i in nodes.indices {
+            let n = nodes[i]
+            guard n["identifier"] as? String == ids[i], n["role"] as? String == roles[i],
+                  n["subrole"] as? String == (i == 0 ? "AXStandardWindow" : ""), n["name"] as? String == names[i],
+                  n["sensitive"] as? Bool == false, let b = n["bounds"] as? Object,
+                  wireNumber(b["x"]) == x + boxes[i][0], wireNumber(b["y"]) == y + boxes[i][1],
+                  wireNumber(b["width"]) == boxes[i][2], wireNumber(b["height"]) == boxes[i][3],
+                  n["parent"] as? Int == (i == 0 ? -1 : (i == 1 ? 0 : 1)),
+                  let actions = n["actions"] as? [String], actions == (i >= 2 && i <= 4 ? ["invoke"] : []) else { return false }
+            if i >= 2 && i <= 4 && n["enabled"] as? Bool != true { return false }
+            if i == 5 {
+                guard ["None", "Triangle", "Circle", "Square"].contains(n["value"] as? String ?? "") else { return false }
+            } else if !(n["value"] as? String ?? "").isEmpty { return false }
+        }
+        return true
+    }
+}
+struct VisualAttempt {
+    private(set) var captureCommand: Data?
+    private(set) var command: Data?
+    private(set) var terminal = false
+    mutating func reserveCapture(_ fingerprint: Data) -> Bool {
+        guard !terminal, captureCommand == nil else { return false }
+        captureCommand = fingerprint; return true
+    }
+    mutating func bind(_ fingerprint: Data) -> Bool {
+        guard !terminal, captureCommand != nil, command == nil else { return false }
+        command = fingerprint; return true
+    }
+    mutating func terminate() { terminal = true }
+}
+// END FOUNDATION VISUAL POLICY
+
 func monotonic() -> Double { ProcessInfo.processInfo.systemUptime * 1000 }
 func id() -> String { UUID().uuidString }
 func same(_ a: Object, _ b: Object) -> Bool { NSDictionary(dictionary: a).isEqual(to: b) }
@@ -708,6 +844,20 @@ struct Snapshot {
     let monotonic: Double
     var inputMonotonic: Double? = nil // Local dialog input checkpoint, never observation age.
 }
+private struct VisualBinding {
+    let id: String
+    let command: Object
+    let lease: String
+    let action: Object
+    let frame: Object
+    let captureMonotonic: Double
+    let observationMonotonic: Double
+    let element: AXUIElement
+    let window: AXUIElement
+    let identity: ProcessIdentity
+    let point: (Double, Double)
+    var approved = false
+}
 final class Broker: ObservationBackend {
     // Explicit dependency: top-level guard bindings are not class members.
     // Created only by explicit discovery after signed-parent admission.
@@ -721,6 +871,9 @@ final class Broker: ObservationBackend {
     var frame: Object?
     var frameObservation = ""
     private var frameMonotonic: Double?
+    private var visualAttempt = VisualAttempt() // Helper lifetime, never reset by observe/start/Resume.
+    private var visualBinding: VisualBinding?
+    private var visualExecuting = false
     private var localCommandDeadline: Double?
     private var localDeadlines: [String: Double] = [:] // Session lifetime; never renew a command ID.
     // Private owner preparation is available; this is NOT platform/input acceptance.
@@ -759,6 +912,7 @@ final class Broker: ObservationBackend {
         guardLock.lock(); let active = watchdogActive; guardLock.unlock()
         let monitor = messagingReady && active && window.epochFence.clean() &&
             (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
+        guard visualEvidenceAlive() else { return false }
         return semanticSafety.permitsEffect(monotonic: monotonic(), wall: now(),
             commandDeadline: deadline, grantDeadline: expiresMonotonic,
             wallDeadline: wallDeadline, wallExpiry: wallExpiry,
@@ -820,9 +974,13 @@ final class Broker: ObservationBackend {
         let ready = messagingReady && trusted && (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
         // Broker exists only after explicit discovery. Never prompt for permission.
         let captureReady = CGPreflightScreenCaptureAccess()
-        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready && !clickSpent && !semanticSafety.uncertain, "windowCapture": ready && captureReady, "input": false,
+        var result: Object = ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready && !clickSpent && !semanticSafety.uncertain, "windowCapture": ready && captureReady, "input": false,
                 "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": captureReady ? "granted" : "denied",
                 "limitations": ["Consented TextEdit/fixture AX actions. Capture requires control+capture consent and a public, unoccluded fixture canvas. Coordinate mechanism retired after a deadline counterexample; input/keys/focus disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
+        if ready && captureReady && !semanticSafety.uncertain && !clickSpent && trust.visualFixturePinReady() {
+            result["visualInvokeVersion"] = 1
+        }
+        return result
     }
     func listTargets() -> [Object] { discoverTargets(only: nil) }
     private func discoverTargets(only pid: pid_t?, standingFence: ProcessEpochFence? = nil) -> [Object] {
@@ -1068,14 +1226,17 @@ final class Broker: ObservationBackend {
             if queue.count > 1000 { complete = false; break }
         }
         if bytes > 400_000 || monotonic() - started > 300 { complete = false }
-        let observation: Object = ["identity": identity, "epoch": command["epoch"]!, "id": observationId, "capturedAt": now(), "monotonicMs": monotonic(), "target": window.target,
+        var observation: Object = ["identity": identity, "epoch": command["epoch"]!, "id": observationId, "capturedAt": now(), "monotonicMs": monotonic(), "target": window.target,
                                    "foreground": NSWorkspace.shared.frontmostApplication?.processIdentifier == pid_t(window.target["processId"] as! Int), "bounds": rect, "displayLayoutVersion": layout(), "completeness": complete ? "complete" : "partial", "nodes": nodes]
+        invalidateVisualEvidence()
         frame = nil; frameObservation = ""; frameMonotonic = nil
         snapshots.removeAll() // One latest observation; no cross-window cached authority.
         guard brian_private_channel_alive() == 1 else { if let invalidate = guardianInvalidation { invalidate(); return nil }; _exit(70) }
         // Recheck after traversal, before any local text can leave the helper.
         // Changed window/sheet scope is a refusal, not a partial approved result.
         guard liveWindow(window.target) != nil, let finalBounds = bounds(window.element), same(rect, finalBounds) else { return nil }
+        let candidate = Snapshot(observation: observation, refs: refs, monotonic: started)
+        if publicShapes(window, candidate) { observation["captureCohort"] = "public-shapes-v1" }
         snapshots[observationId] = Snapshot(observation: observation, refs: refs, monotonic: started)
         return observation
     }
@@ -1104,6 +1265,9 @@ final class Broker: ObservationBackend {
     }
     // Approval must name a currently permitted ref, not just a well-formed command.
     func permittedSemantic(_ action: Object, _ snapshot: Snapshot) -> Bool {
+        if let target = snapshot.observation["target"] as? Object, let window = liveWindow(target), visualReserved(window) {
+            guard visualExecuting, let binding = visualBinding, same(action, binding.action) else { return false }
+        }
         guard wireBool(grant?["allowControl"]) == true,
               let kind = action["kind"] as? String, semanticKind(kind),
               let key = action["ref"] as? String, let ref = snapshot.refs[key],
@@ -1259,6 +1423,199 @@ final class Broker: ObservationBackend {
         readbackMonitorInstalled = true
         return true
     }
+    private func visualReserved(_ window: Window) -> Bool {
+        return string(window.element, kAXTitleAttribute) == VisualPolicy.title ||
+            string(window.element, kAXIdentifierAttribute) == VisualPolicy.identifier
+    }
+    private func captureWindowTitle(_ window: Window) -> String {
+        visualReserved(window) ? VisualPolicy.title : canvasTitle
+    }
+    private func captureWindowIdentifier(_ window: Window) -> String {
+        visualReserved(window) ? VisualPolicy.identifier : "brian-safe-canvas-v1"
+    }
+    private func captureCohort(_ window: Window, _ snapshot: Snapshot) -> Bool {
+        visualReserved(window) ? publicShapes(window, snapshot) : safeCanvas(window, snapshot)
+    }
+    // Pixel privacy comes from the exact pinned closed renderer, not an OS
+    // metadata allowlist. Required roles/content/children/geometry are checked
+    // by publicShapes/cohort/unchanged. Localized descriptions and optional OS
+    // relations are not rendered content and must not authorize or deny it.
+    private func publicShapeAttributes(_ element: AXUIElement, _ node: Object) -> Bool {
+        VisualPolicy.contentAttributes(node) { name in
+            var value: CFTypeRef?
+            switch AXUIElementCopyAttributeValue(element, name as CFString, &value) {
+            case .success:
+                guard let value = value else { return .failed }
+                return .value(value)
+            case .noValue, .attributeUnsupported: return .absent
+            default: return .failed
+            }
+        }
+    }
+    private func publicShapes(_ window: Window, _ snapshot: Snapshot) -> Bool {
+        guard captureAuthority(grant), grant?["goal"] as? String == VisualPolicy.goal,
+              window.target["appId"] as? String == cohort, trust.visualFixtureValid(window.identity),
+              liveWindow(window.target) != nil, string(window.element, kAXTitleAttribute) == VisualPolicy.title,
+              string(window.element, kAXIdentifierAttribute) == VisualPolicy.identifier,
+              snapshot.observation["completeness"] as? String == "complete", snapshot.refs.count == 6,
+              let bounds = snapshot.observation["bounds"] as? Object,
+              let exported = snapshot.observation["nodes"] as? [Object], exported.count == 6,
+              window.applicationWindows.count == 1, hasNoSheetChildren(window.element) else { return false }
+        var nodes: [Object] = []
+        for n in exported {
+            guard let key = n["ref"] as? String, let ref = snapshot.refs[key],
+                  ref.node["sensitive"] as? Bool == false, publicShapeAttributes(ref.element, n),
+                  let subrole = privacySubrole(ref.element), let children = ref.children.elements else { return false }
+            let index = nodes.count
+            let expectedChildren = index == 0 ? [1] : (index == 1 ? [2, 3, 4, 5] : [])
+            guard children.count == expectedChildren.count else { return false }
+            for (child, expected) in zip(children, expectedChildren) {
+                guard let childKey = exported[expected]["ref"] as? String, let known = snapshot.refs[childKey],
+                      CFEqual(child, known.element) else { return false }
+            }
+            var value = n
+            value["identifier"] = string(ref.element, kAXIdentifierAttribute); value["subrole"] = subrole
+            if let parent = n["parentRef"] as? String {
+                guard let parentIndex = exported.firstIndex(where: { $0["ref"] as? String == parent }),
+                      let parentRef = snapshot.refs[parent], let nativeParent = attr(ref.element, kAXParentAttribute),
+                      CFEqual(nativeParent, parentRef.element) else { return false }
+                value["parent"] = parentIndex
+            } else { value["parent"] = -1 }
+            let nativeActions = actionNames(ref.element)
+            guard nativeActions == (index == 0 ? [kAXRaiseAction] : (index >= 2 && index <= 4 ? [kAXPressAction] : [])) else { return false }
+            nodes.append(value)
+        }
+        return VisualPolicy.cohort(nodes, bounds: bounds) && unchanged(snapshot, window)
+    }
+    private func reserveVisualCapture(_ command: Object) -> Bool {
+        visualAttempt.reserveCapture(fingerprint(command))
+    }
+    private func terminateVisual() { visualAttempt.terminate(); visualBinding = nil }
+    private func invalidateVisualEvidence() {
+        if visualAttempt.captureCommand != nil { terminateVisual() }
+    }
+    private func isVisualApproval(_ payload: Object) -> Bool {
+        return visualBinding != nil || ((payload["command"] as? Object)?["action"] as? Object)?["kind"] as? String == "visualInvoke"
+    }
+    private func visualEvidenceAlive() -> Bool {
+        guard let binding = visualBinding else { return !visualExecuting }
+        return VisualPolicy.alive(capture: binding.captureMonotonic, observation: binding.observationMonotonic, current: monotonic())
+    }
+    private func visualValid(_ binding: VisualBinding, _ command: Object, _ window: Window) -> Bool {
+        guard same(binding.command, command), binding.lease == lease, window.identity == binding.identity,
+              CFEqual(window.element, binding.window), let action = command["action"] as? Object,
+              let currentFrame = frame, same(currentFrame, binding.frame),
+              currentFrame["id"] as? String == action["frameId"] as? String,
+              frameObservation == action["observationId"] as? String,
+              frameMonotonic == binding.captureMonotonic,
+              let snapshot = fresh(action, window), snapshot.monotonic == binding.observationMonotonic,
+              VisualPolicy.alive(capture: binding.captureMonotonic, observation: binding.observationMonotonic, current: monotonic()),
+              captureAuthority(grant), CGPreflightScreenCaptureAccess(), publicShapes(window, snapshot),
+              let number = visibleWindowID(window), uniqueCanvasWindow(window, number),
+              let key = binding.action["ref"] as? String, let ref = snapshot.refs[key], CFEqual(ref.element, binding.element),
+              ref.node["role"] as? String == "AXButton", ref.node["enabled"] as? Bool == true,
+              let box = ref.node["bounds"] as? Object, VisualPolicy.contains(box, binding.point),
+              actionNames(ref.element) == [kAXPressAction], reachable(ref.element, in: window.element),
+              authorized(command, binding.lease) else { return false }
+        // Native validation above may block; never return a renewed/stale binding.
+        return VisualPolicy.alive(capture: binding.captureMonotonic, observation: binding.observationMonotonic, current: monotonic())
+    }
+    func beginVisualApproval(_ payload: Object) -> VisualApproval? {
+        guard validWirePayload("beginApproval", payload), let command = payload["command"] as? Object,
+              let action = command["action"] as? Object, action["kind"] as? String == "visualInvoke",
+              approvalCommand == nil, approvedCommand == nil, visualBinding == nil,
+              let deadline = wireInteger(command["deadlineAt"]), let commandID = wireString(command["commandId"]),
+              let retained = semanticSafety.admit(id: commandID, fingerprint: fingerprint(command), wallDeadline: deadline,
+                  wall: now(), monotonic: monotonic()), visualAttempt.bind(fingerprint(command)) else { return nil }
+        commandDeadline = retained
+        guardLock.lock(); watchdogDeadline = min(expiresMonotonic, retained); guardLock.unlock()
+        var accepted = false
+        defer {
+            if !accepted {
+                terminateVisual(); commandDeadline = .infinity
+                guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
+            }
+        }
+        guard messagingReady, !semanticSafety.uncertain, !clickSpent,
+              authorized(command, payload["leaseId"] as? String ?? ""),
+              let target = action["target"] as? Object, let window = liveWindow(target), let snapshot = fresh(action, window),
+              publicShapes(window, snapshot), let frame = frame, let captureTime = frameMonotonic,
+              frameObservation == action["observationId"] as? String, frame["id"] as? String == action["frameId"] as? String,
+              let width = wireNumber(frame["width"]), let height = wireNumber(frame["height"]), let b = frame["bounds"] as? Object,
+              let x = wireNumber(action["x"]), let y = wireNumber(action["y"]),
+              let point = VisualPolicy.point(x: x, y: y, width: width, height: height, bounds: b),
+              VisualPolicy.alive(capture: captureTime, observation: snapshot.monotonic, current: monotonic()),
+              let number = visibleWindowID(window), uniqueCanvasWindow(window, number) else { return nil }
+        let candidates = snapshot.refs.filter { _, ref in
+            ref.node["role"] as? String == "AXButton" && ref.node["enabled"] as? Bool == true &&
+                (ref.node["actions"] as? [String]) == ["invoke"] &&
+                (ref.node["bounds"] as? Object).map { VisualPolicy.contains($0, point) } == true
+        }
+        guard candidates.count == 1, let (key, ref) = candidates.first else { return nil }
+        guard let hitBounds = ref.node["bounds"] as? Object,
+              VisualPolicy.contains(hitBounds, (Double(Float(point.0)), Double(Float(point.1)))) else { return nil }
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(window.application, Float(point.0), Float(point.1), &hit) == .success,
+              let hit = hit, CFEqual(hit, ref.element),
+              snapshot.refs.values.filter({ CFEqual($0.element, hit) }).count == 1 else { return nil }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(hit, &pid) == .success, pid == window.identity.pid else { return nil }
+        let resolved: Object = ["kind": "invoke", "target": target, "observationId": action["observationId"]!, "ref": key]
+        let binding = VisualBinding(id: id(), command: command, lease: lease, action: resolved, frame: frame,
+            captureMonotonic: captureTime, observationMonotonic: snapshot.monotonic, element: hit,
+            window: window.element, identity: window.identity, point: point)
+        guard visualValid(binding, command, window), let expiry = wireInteger(grant?["expiresAt"]),
+              effectAllowed(window, deadline: retained, wallDeadline: deadline, wallExpiry: expiry) else { return nil }
+        visualBinding = binding; approvalCommand = command
+        guardLock.lock(); approvalOpen = true; guardLock.unlock()
+        accepted = true
+        return VisualApproval(bindingId: binding.id, commandId: commandID, frameId: action["frameId"] as! String,
+            target: target, observationId: action["observationId"] as! String, ref: key)
+    }
+    private func endVisualApproval(_ payload: Object) -> Bool {
+        guardLock.lock(); approvalOpen = false; guardLock.unlock()
+        var accepted = false
+        defer {
+            approvalCommand = nil
+            if !accepted {
+                approvedCommand = nil; terminateVisual(); commandDeadline = .infinity
+                guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
+            }
+        }
+        guard validWirePayload("endApproval", payload), let command = payload["command"] as? Object,
+              let pending = approvalCommand, same(command, pending), var binding = visualBinding,
+              binding.id == payload["bindingId"] as? String, same(command, binding.command),
+              payload["leaseId"] as? String == binding.lease, let approved = wireBool(payload["approved"]),
+              authorized(command, binding.lease) else { return false }
+        if !approved { return true } // Denial spends the run; never renew evidence/deadline.
+        guard let action = command["action"] as? Object, let target = action["target"] as? Object,
+              let window = liveWindow(target), let observation = action["observationId"] as? String,
+              var snapshot = snapshots[observation],
+              VisualPolicy.alive(capture: binding.captureMonotonic, observation: binding.observationMonotonic, current: monotonic()),
+              let retained = semanticSafety.deadline(id: command["commandId"] as! String, fingerprint: fingerprint(command)),
+              let wallDeadline = wireInteger(command["deadlineAt"]), let expiry = wireInteger(grant?["expiresAt"]),
+              restoreApprovedWindow(window, deadline: retained, wallDeadline: wallDeadline, wallExpiry: expiry) else { return false }
+        snapshot.inputMonotonic = monotonic() // Dialog input only, NOT snapshot/capture age.
+        snapshots[observation] = snapshot
+        guard visualValid(binding, command, window),
+              effectAllowed(window, deadline: retained, wallDeadline: wallDeadline, wallExpiry: expiry) else { return false }
+        binding.approved = true; visualBinding = binding; approvedCommand = pending
+        commandDeadline = retained; accepted = true
+        return true
+    }
+    private func consumeVisual(_ command: Object, _ payload: Object, _ window: Window) -> Object? {
+        let binding = visualBinding
+        visualAttempt.terminate() // At most one attempted dispatch, including refusal.
+        guard let binding = binding, binding.approved, payload["leaseId"] as? String == binding.lease,
+              visualAttempt.command == fingerprint(command), visualValid(binding, command, window) else {
+            visualBinding = nil; approvedCommand = nil; return nil
+        }
+        visualExecuting = true
+        return binding.action
+    }
+    private func endVisualExecution() {
+        if visualExecuting { visualBinding = nil; visualExecuting = false }
+    }
     private func localApprovalKind(_ command: Object) -> Bool {
         guard let action = command["action"] as? Object, let kind = action["kind"] as? String else { return false }
         return kind == "capture" || kind == "click"
@@ -1281,7 +1638,7 @@ final class Broker: ObservationBackend {
         guard authorized(command, payload["leaseId"] as? String ?? ""), captureAuthority(grant),
               CGPreflightScreenCaptureAccess(), let tap = inputTap, CGEvent.tapIsEnabled(tap: tap),
               let action = command["action"] as? Object, let target = action["target"] as? Object,
-              let window = liveWindow(target), let snapshot = fresh(action, window), safeCanvas(window, snapshot) else { return false }
+              let window = liveWindow(target), let snapshot = fresh(action, window), captureCohort(window, snapshot) else { return false }
         if action["kind"] as? String == "click" {
             guard let grant = grant, let native = clickSnapshot(command, payload["leaseId"] as? String ?? ""),
                   ClickIntent.validate(command: command, approved: command, grant: grant, snapshot: native,
@@ -1311,7 +1668,7 @@ final class Broker: ObservationBackend {
         guard let action = command["action"] as? Object, let target = action["target"] as? Object,
               let observationID = action["observationId"] as? String, let snapshot = snapshots[observationID],
               monotonic() - snapshot.monotonic < 5_000,
-              let window = liveWindow(target), safeCanvas(window, snapshot),
+              let window = liveWindow(target), captureCohort(window, snapshot),
               let deadline = localCommandDeadline, let wallDeadline = wireInteger(command["deadlineAt"]),
               let expiry = wireInteger(grant?["expiresAt"]),
               restoreApprovedWindow(window, deadline: deadline, wallDeadline: wallDeadline, wallExpiry: expiry) else { return false }
@@ -1319,7 +1676,7 @@ final class Broker: ObservationBackend {
         // old observations or frames young. The independent takeover tap stays live.
         var restored = snapshot; restored.inputMonotonic = monotonic()
         snapshots[observationID] = restored
-        guard fresh(action, window) != nil, safeCanvas(window, restored),
+        guard fresh(action, window) != nil, captureCohort(window, restored),
               authorized(command, payload["leaseId"] as? String ?? ""), CGPreflightScreenCaptureAccess(),
               let tap = inputTap, CGEvent.tapIsEnabled(tap: tap) else { return false }
         approvedCommand = pending
@@ -1364,6 +1721,7 @@ final class Broker: ObservationBackend {
         return true
     }
     func endApproval(_ payload: Object) -> Bool {
+        if isVisualApproval(payload) { return endVisualApproval(payload) }
         if let pending = approvalCommand, localApprovalKind(pending) { return endLocalApproval(payload) }
         guardLock.lock(); approvalOpen = false; guardLock.unlock()
         defer { approvalCommand = nil }
@@ -1405,13 +1763,15 @@ final class Broker: ObservationBackend {
             var receipt: Object = ["commandId": commandId, "outcome": outcome, "code": code]
             if let observation = observation { receipt["observation"] = observation }; return receipt
         }
-        guard validWirePayload("execute", payload), let action = command["action"] as? Object, let kind = action["kind"] as? String else { return result("denied") }
+        guard validWirePayload("execute", payload), var action = command["action"] as? Object, var kind = action["kind"] as? String else { return result("denied") }
+        defer { endVisualExecution() }
         let digest = fingerprint(command)
         // Metadata-only exact replay needs no live AX/deadline authority. Bind the
         // entire command AND private lease; never return pixels or re-enter AX.
-        if let old = journal[commandId], SemanticSafety.cachedReceiptMatches(fingerprint: digest,
-           recorded: seen[commandId], lease: wireString(payload["leaseId"]), expectedLease: lease,
-           channelAlive: brian_private_channel_alive() == 1) {
+        if let old = journal[commandId] {
+            guard SemanticSafety.cachedReceiptMatches(fingerprint: digest,
+                recorded: seen[commandId], lease: wireString(payload["leaseId"]), expectedLease: lease,
+                channelAlive: brian_private_channel_alive() == 1) else { return result("denied") }
             return old
         }
         guard !semanticSafety.uncertain else { return result("denied") }
@@ -1426,7 +1786,7 @@ final class Broker: ObservationBackend {
         guard approvalCommand == nil, validCommand(command), let deadline = wireInteger(command["deadlineAt"]), authorized(command, payload["leaseId"] as? String ?? ""), let target = action["target"] as? Object else { return result("denied") }
         // No coordinate emitter exists in this AX executor; clicks use the private handoff.
         if kind == "click" { return result("unsupported") }
-        if semanticKind(kind) {
+        if semanticKind(kind) || kind == "visualInvoke" {
             guard let retained = semanticSafety.deadline(id: commandId, fingerprint: digest) else { return result("approval_required") }
             commandDeadline = retained
         } else if let approved = approvedCommand, exactLocalCommand(command, approved), let anchored = localCommandDeadline {
@@ -1442,7 +1802,7 @@ final class Broker: ObservationBackend {
         defer {
             // Early refusal (e.g. a full journal) must not disarm an approval
             // still awaiting dispatch. Only a consumed approval releases its timer.
-            if !semanticKind(kind) || approvedCommand == nil {
+            if (!semanticKind(kind) && kind != "visualInvoke") || approvedCommand == nil {
                 commandDeadline = Double.infinity
                 guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
             }
@@ -1457,6 +1817,10 @@ final class Broker: ObservationBackend {
             journal[commandId] = metadata; return receipt
         }
         guard let window = liveWindow(target) else { return finish(result("wrong_target")) }
+        if kind == "visualInvoke" {
+            guard let resolved = consumeVisual(command, payload, window) else { return finish(result("denied")) }
+            action = resolved; kind = "invoke"
+        }
         if kind == "observe" {
             guard let observation = observe(command, window), authorized(command, payload["leaseId"] as? String ?? "") else { return finish(result("expired")) }
             if readbackOnly {
@@ -1565,7 +1929,7 @@ final class Broker: ObservationBackend {
             guard let dictionary = entry[kCGWindowBounds as String] as? Object,
                   let area = CGRect(dictionaryRepresentation: dictionary as CFDictionary) else { return nil }
             if entry[kCGWindowOwnerPID as String] as? Int == window.target["processId"] as? Int,
-               area == r, entry[kCGWindowName as String] as? String == canvasTitle,
+               area == r, entry[kCGWindowName as String] as? String == captureWindowTitle(window),
                let number = entry[kCGWindowNumber as String] as? UInt32 { return number }
             if area.intersects(r), (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0 { return nil }
         }
@@ -1575,14 +1939,14 @@ final class Broker: ObservationBackend {
         guard let expected = bounds(window.element), let peers = attr(window.application, kAXWindowsAttribute) as? [AXUIElement],
               peers.count <= 32,
               peers.filter({ element in
-                  string(element, kAXTitleAttribute) == canvasTitle &&
-                  string(element, kAXIdentifierAttribute) == "brian-safe-canvas-v1" &&
+                  string(element, kAXTitleAttribute) == captureWindowTitle(window) &&
+                  string(element, kAXIdentifierAttribute) == captureWindowIdentifier(window) &&
                   bounds(element).map { same($0, expected) } == true
               }).count == 1,
               let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [Object] else { return false }
         let matches = entries.filter { entry in
             guard entry[kCGWindowOwnerPID as String] as? Int == Int(window.identity.pid),
-                  entry[kCGWindowName as String] as? String == canvasTitle,
+                  entry[kCGWindowName as String] as? String == captureWindowTitle(window),
                   let b = entry[kCGWindowBounds as String] as? Object,
                   let r = CGRect(dictionaryRepresentation: b as CFDictionary) else { return false }
             return r == rect(expected)
@@ -1660,7 +2024,7 @@ final class Broker: ObservationBackend {
     private func pixels(_ command: Object, _ action: Object, _ window: Window, _ snapshot: Snapshot) -> (Data, Int, Int)? {
         guard brian_private_channel_alive() == 1 else { if let invalidate = guardianInvalidation { invalidate(); return nil }; _exit(70) }
         guard captureAuthority(grant), authorized(command, lease), fresh(action, window) != nil,
-              safeCanvas(window, snapshot), CGPreflightScreenCaptureAccess(),
+              captureCohort(window, snapshot), CGPreflightScreenCaptureAccess(),
               let expectedBounds = snapshot.observation["bounds"] as? Object,
               let number = visibleWindowID(window) else { return nil }
         let done = DispatchSemaphore(value: 0)
@@ -1674,7 +2038,7 @@ final class Broker: ObservationBackend {
             configuration.width = Int(selected.frame.width.rounded())
             configuration.height = Int(selected.frame.height.rounded())
             guard selected.frame == self.rect(expectedBounds), self.captureStillValid(command, action, window, snapshot),
-                  self.visibleWindowID(window) == number,
+                  self.visibleWindowID(window) == number, self.uniqueCanvasWindow(window, number),
                   configuration.width > 0, configuration.height > 0, configuration.width <= 1024, configuration.height <= 1024 else { done.signal(); return }
             configuration.showsCursor = false
             configuration.ignoreShadowsSingleWindow = true
@@ -1690,28 +2054,35 @@ final class Broker: ObservationBackend {
         }
         // Watchdog/parent kills this process on deadline even if SCK hangs.
         done.wait()
-        guard captureStillValid(command, action, window, snapshot), visibleWindowID(window) == number else { return nil }
+        guard captureStillValid(command, action, window, snapshot), visibleWindowID(window) == number, uniqueCanvasWindow(window, number) else { return nil }
         guard brian_private_channel_alive() == 1 else { if let invalidate = guardianInvalidation { invalidate(); return nil }; _exit(70) }
         return output
     }
     private func captureStillValid(_ command: Object, _ action: Object, _ window: Window, _ snapshot: Snapshot) -> Bool {
         return captureAuthority(grant) && authorized(command, lease) && fresh(action, window) != nil &&
-            safeCanvas(window, snapshot) && CGPreflightScreenCaptureAccess() && brian_private_channel_alive() == 1
+            captureCohort(window, snapshot) && CGPreflightScreenCaptureAccess() && brian_private_channel_alive() == 1
     }
     private func capture(_ command: Object, _ action: Object, _ window: Window) -> Object {
         func denied(_ code: String) -> Object { ["commandId": command["commandId"]!, "outcome": "not_executed", "code": code] }
+        let visual = visualReserved(window)
+        let visualAdmitted = !visual || reserveVisualCapture(command)
+        var captured = false
+        defer { if visual && !captured { terminateVisual() } }
+        visualBinding = nil
         frame = nil; frameObservation = ""; frameMonotonic = nil // Failed attempts never leave a reusable frame.
-        guard captureAuthority(grant), authorized(command, lease), CGPreflightScreenCaptureAccess() else { return denied("denied") }
-        guard monotonic() - lastCapture >= 1000, let snapshot = fresh(action, window), safeCanvas(window, snapshot) else { return denied("stale_observation") }
+        guard visualAdmitted, captureAuthority(grant), authorized(command, lease), CGPreflightScreenCaptureAccess() else { return denied("denied") }
+        guard monotonic() - lastCapture >= 1000, let snapshot = fresh(action, window), captureCohort(window, snapshot) else { return denied("stale_observation") }
         lastCapture = monotonic()
         let captureStarted = monotonic() // Conservative capture age, before asynchronous SCK.
         guard let (png, width, height) = pixels(command, action, window, snapshot),
-              captureStillValid(command, action, window, snapshot) else { return denied("stale_observation") }
+              captureStillValid(command, action, window, snapshot), monotonic() - captureStarted < 5_000 else { return denied("stale_observation") }
         let value: Object = ["id": id(), "mimeType": "image/png", "data": png.base64EncodedString(), "width": width, "height": height,
                              "bounds": snapshot.observation["bounds"]!, "displayLayoutVersion": snapshot.observation["displayLayoutVersion"]!]
         frame = value; frameObservation = action["observationId"] as! String
         frameMonotonic = captureStarted
+        captured = true
         var observation = snapshot.observation; observation["frame"] = value
+        if visual { observation["captureCohort"] = "public-shapes-v1" }
         snapshots[frameObservation] = Snapshot(observation: observation, refs: snapshot.refs, monotonic: snapshot.monotonic, inputMonotonic: snapshot.inputMonotonic)
         return ["commandId": command["commandId"]!, "outcome": "executed", "code": "ok", "observation": observation]
     }

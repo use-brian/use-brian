@@ -9,7 +9,7 @@ const plist = createRequire(import.meta.url)('plist') as { parse(xml: string): u
 // mocked. The real parsers have their existing byte-level suites. No Mac or
 // certificate acceptance is implied by these tests.
 describe('R1 release bootstrap signing composition', () => {
-  let root: string, app: string, helper: string;
+  let root: string, app: string, helper: string, fixture: string;
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const arch = Object.getOwnPropertyDescriptor(process, 'arch')!;
   const identity = 'A'.repeat(40);
@@ -22,9 +22,16 @@ describe('R1 release bootstrap signing composition', () => {
   const captureReleaseLibraryInventoryData = vi.fn();
   const requireVerifiedCapturedInventory = vi.fn();
   const requireApprovedBootstrapInventory = vi.fn();
-  const stampBootstrapApproval = vi.fn();
+  const stampNativeApprovalRecords = vi.fn();
   const validateUnstampedBootstrapAnchor = vi.fn();
   const verifyBootstrapApprovalCoverage = vi.fn();
+  const validateUnstampedVisualFixturePin = vi.fn();
+  const nativeApprovalArchitectures = vi.fn();
+  const verifyVisualFixturePinCoverage = vi.fn();
+  const extractVisualFixtureCodeData = vi.fn();
+  const fixtureRecords = [{ architecture: 'arm64', cdHash: '05'.repeat(20) },
+    { architecture: 'x86_64', cdHash: '04'.repeat(20) }];
+  const fixtureHashes = [Buffer.alloc(20, 4), Buffer.alloc(20, 5)];
   const extractPackagedParentLibraryConstraints = vi.fn();
   const compareObservedLibraryConstraintPolicy = vi.fn();
 
@@ -38,6 +45,16 @@ describe('R1 release bootstrap signing composition', () => {
     for (const file of [helper, join(app, 'Contents/MacOS/Use Brian')]) {
       mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, Buffer.alloc(64, 7));
     }
+    fixture = join(app, 'Contents/Resources/computer-control/NativeComputerFixture.app');
+    for (const [relative, data] of [
+      ['Contents/MacOS/NativeComputerFixture', Buffer.alloc(64, 8)],
+      ['Contents/Info.plist', '<plist><dict><key>CFBundleIdentifier</key><string>com.usebrian.NativeComputerFixture</string><key>CFBundleExecutable</key><string>NativeComputerFixture</string></dict></plist>'],
+      ['Contents/_CodeSignature/CodeResources', Buffer.alloc(64, 6)],
+    ] as const) {
+      const path = join(fixture, relative); mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, data);
+    }
+    nativeApprovalArchitectures.mockReturnValue(['arm64', 'x86_64']);
+    extractVisualFixtureCodeData.mockReturnValue(fixtureRecords);
     signCalls = []; constraintPath = undefined;
     execFileSync.mockImplementation((tool, args) => {
       expect(tool).toBe('/usr/bin/codesign'); signCalls.push(args);
@@ -58,12 +75,13 @@ describe('R1 release bootstrap signing composition', () => {
     captureReleaseLibraryInventoryData.mockReturnValue({ captured: true });
     requireVerifiedCapturedInventory.mockResolvedValue({ privateReceipt: true });
     requireApprovedBootstrapInventory.mockResolvedValue(expected);
-    stampBootstrapApproval.mockReturnValue(Buffer.alloc(64, 9));
+    stampNativeApprovalRecords.mockReturnValue(Buffer.alloc(64, 9));
     extractPackagedParentLibraryConstraints.mockReturnValue([{ rawBlob: Buffer.from('constraint') }]);
     vi.doMock('node:child_process', () => ({ execFileSync, spawnSync }));
     vi.doMock('../../scripts/mac-bootstrap-inventory.mjs', () => ({ captureReleaseLibraryInventoryData,
-      requireVerifiedCapturedInventory, requireApprovedBootstrapInventory }));
-    vi.doMock('../../scripts/mac-bootstrap-anchor.mjs', () => ({ stampBootstrapApproval, verifyBootstrapApprovalCoverage, validateUnstampedBootstrapAnchor }));
+      requireVerifiedCapturedInventory, requireApprovedBootstrapInventory, extractVisualFixtureCodeData }));
+    vi.doMock('../../scripts/mac-bootstrap-anchor.mjs', () => ({ stampNativeApprovalRecords, verifyBootstrapApprovalCoverage, validateUnstampedBootstrapAnchor,
+      validateUnstampedVisualFixturePin, nativeApprovalArchitectures, verifyVisualFixturePinCoverage }));
     vi.doMock('../../scripts/mac-library-constraints.mjs', () => ({ extractPackagedParentLibraryConstraints }));
     vi.doMock('../../scripts/mac-library-constraint-policy.mjs', () => ({ compareObservedLibraryConstraintPolicy }));
   });
@@ -87,7 +105,7 @@ describe('R1 release bootstrap signing composition', () => {
     expect(execFileSync).not.toHaveBeenCalled();
     expect(spawnSync).not.toHaveBeenCalled();
     expect(captureReleaseLibraryInventoryData).not.toHaveBeenCalled();
-    expect(stampBootstrapApproval).not.toHaveBeenCalled();
+    expect(stampNativeApprovalRecords).not.toHaveBeenCalled();
     expect(readFileSync(helper)).toEqual(Buffer.alloc(64, 7));
   });
 
@@ -97,7 +115,9 @@ describe('R1 release bootstrap signing composition', () => {
     await api.sealNativeBootstrap(options(), original);
     expect(original).toEqual(Buffer.alloc(64, 7));
     expect(validateUnstampedBootstrapAnchor).toHaveBeenCalledWith(original);
-    expect(stampBootstrapApproval).toHaveBeenCalledWith(original, expected);
+    expect(stampNativeApprovalRecords).toHaveBeenCalledWith(original, expected, fixtureHashes);
+    expect(validateUnstampedVisualFixturePin).toHaveBeenCalledWith(original);
+    expect(nativeApprovalArchitectures).toHaveBeenCalledWith(original);
     expect(requireVerifiedCapturedInventory).toHaveBeenCalledWith({ captured: true }, { teamIdentifier: team });
     expect(captureReleaseLibraryInventoryData).toHaveBeenCalledWith(app, { architectures: ['arm64'] });
     const signs = signCalls.filter(args => args.includes('--sign'));
@@ -108,6 +128,21 @@ describe('R1 release bootstrap signing composition', () => {
       expect(args[args.indexOf('--keychain') + 1]).toBe('/private/builder.keychain');
       expect(args).not.toContain('--deep');
     }
+    const fixtureChecks = signCalls.filter(args => args.at(-1) === fixture);
+    expect(fixtureChecks).toHaveLength(2);
+    for (const args of fixtureChecks) {
+      expect(args).toEqual(['--verify', '--strict', '--all-architectures', '-R',
+        expect.stringContaining(`certificate leaf = H"${identity}" and identifier "com.usebrian.NativeComputerFixture"`), fixture]);
+    }
+    expect(signCalls.indexOf(fixtureChecks[0])).toBeLessThan(signCalls.indexOf(signs[0]));
+    expect(signCalls.indexOf(signs[1])).toBeLessThan(signCalls.indexOf(fixtureChecks[1]));
+    expect(extractVisualFixtureCodeData).toHaveBeenCalledTimes(2);
+    expect(extractVisualFixtureCodeData).toHaveBeenCalledWith(Buffer.alloc(64, 8), ['arm64', 'x86_64'],
+      readFileSync(join(fixture, 'Contents/Info.plist')), Buffer.alloc(64, 6));
+    expect(extractVisualFixtureCodeData.mock.invocationCallOrder[0]).toBeLessThan(stampNativeApprovalRecords.mock.invocationCallOrder[0]);
+    expect(stampNativeApprovalRecords.mock.invocationCallOrder[0]).toBeLessThan(
+      execFileSync.mock.invocationCallOrder[signCalls.indexOf(signs[0])]);
+    expect(verifyVisualFixturePinCoverage).toHaveBeenCalledWith(Buffer.alloc(64, 9), fixtureHashes);
     expect(signs[1]).toContain('--enforce-constraint-validity');
     expect(signCalls[0].join(' ')).toContain(`certificate leaf = H"${identity}"`);
     expect(requireApprovedBootstrapInventory).toHaveBeenCalledTimes(2);
@@ -130,9 +165,10 @@ describe('R1 release bootstrap signing composition', () => {
   it('does not mutate/sign when independent inventory approval fails', async () => {
     const api = await load(); requireApprovedBootstrapInventory.mockRejectedValue(new Error('unapproved library'));
     await expect(api.sealNativeBootstrap(options(), api.captureUnstampedHelper(app))).rejects.toThrow('unapproved library');
-    expect(stampBootstrapApproval).not.toHaveBeenCalled();
+    expect(stampNativeApprovalRecords).not.toHaveBeenCalled();
     expect(signCalls.some(args => args.includes('--sign'))).toBe(false);
     expect(readFileSync(helper)).toEqual(Buffer.alloc(64, 7));
+    expect(extractVisualFixtureCodeData).not.toHaveBeenCalled();
   });
 
   it('rejects changed final pins and cleans the constraint file after errors', async () => {
@@ -142,11 +178,48 @@ describe('R1 release bootstrap signing composition', () => {
     expect(existsSync(constraintPath!)).toBe(false);
   });
 
+  it.each([{ records: [] }, { records: [fixtureRecords[0], fixtureRecords[0]] }])('rejects empty or duplicate fixture pins %# before signing', async ({ records }) => {
+    const api = await load(); extractVisualFixtureCodeData.mockReturnValue(records);
+    await expect(api.sealNativeBootstrap(options(), api.captureUnstampedHelper(app))).rejects.toThrow('refused');
+    expect(stampNativeApprovalRecords).not.toHaveBeenCalled();
+    expect(signCalls.some(args => args.includes('--sign'))).toBe(false);
+    expect(readFileSync(helper)).toEqual(Buffer.alloc(64, 7));
+  });
+
+  it('refuses an invalid empty visual pin before the ordinary signing pass', async () => {
+    const api = await load();
+    validateUnstampedVisualFixturePin.mockImplementation(() => { throw new Error('invalid empty visual pin'); });
+    expect(() => api.captureUnstampedHelper(app)).toThrow('invalid empty visual pin');
+    expect(execFileSync).not.toHaveBeenCalled();
+    expect(readFileSync(helper)).toEqual(Buffer.alloc(64, 7));
+  });
+
+  it('rejects a changed final fixture identity and cleans temporary constraints', async () => {
+    const api = await load();
+    extractVisualFixtureCodeData.mockReturnValueOnce(fixtureRecords).mockReturnValueOnce([
+      { ...fixtureRecords[0], cdHash: '06'.repeat(20) }, fixtureRecords[1],
+    ]);
+    await expect(api.sealNativeBootstrap(options(), api.captureUnstampedHelper(app))).rejects.toThrow('refused');
+    expect(verifyVisualFixturePinCoverage).toHaveBeenCalledWith(Buffer.alloc(64, 9), fixtureHashes);
+    expect(requireApprovedBootstrapInventory).toHaveBeenCalledTimes(1);
+    expect(existsSync(constraintPath!)).toBe(false);
+  });
+
+  it.each(['', 'zz'.repeat(20), '01'.repeat(19), '00'.repeat(20), '01'.repeat(20) + 'zz'])(
+    'rejects invalid fixture CDHash %s before mutation/signing', async cdHash => {
+      const api = await load(); extractVisualFixtureCodeData.mockReturnValue([{ architecture: 'arm64', cdHash }]);
+      await expect(api.sealNativeBootstrap(options(), api.captureUnstampedHelper(app))).rejects.toThrow('refused');
+      expect(stampNativeApprovalRecords).not.toHaveBeenCalled();
+      expect(signCalls.some(args => args.includes('--sign'))).toBe(false);
+      expect(readFileSync(helper)).toEqual(Buffer.alloc(64, 7));
+    });
+
   it('after-sign verification is read-only and refuses malformed parent constraints', async () => {
     const api = await load();
     await api.verifyPackagedNativeBootstrap(app, team);
     expect(signCalls.some(args => args.includes('--sign'))).toBe(false);
-    expect(stampBootstrapApproval).not.toHaveBeenCalled();
+    expect(stampNativeApprovalRecords).not.toHaveBeenCalled();
+    expect(verifyVisualFixturePinCoverage).toHaveBeenCalledWith(Buffer.alloc(64, 7), fixtureHashes);
     compareObservedLibraryConstraintPolicy.mockImplementation(() => { throw new Error('wrong constraint'); });
     await expect(api.verifyPackagedNativeBootstrap(app, team)).rejects.toThrow('wrong constraint');
   });

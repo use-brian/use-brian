@@ -13,6 +13,11 @@ import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
   nativeComputer: {
+    verificationAcknowledge: "申请有人监督的 Mac 验证",
+    verificationHelp: "此为临时验证，不代表试行验收或正式上线认证。请全程在场。必须由 Mac 原生对话框批准。停止、切换工作区或账号及结束会话会撤销批准；已发出的操作仍可能完成。仍需任务与目标同意。",
+    verificationConfirmed: "此上下文的 Mac 验证已获批准。控制与截图仍须分别启用。",
+    visualScope: "视觉截图仅支持 public-shapes-v1 测试程序：从截图识别支持的 AX invoke 操作。不支持原始坐标点击或无 AX 画布。需要独立截图同意及屏幕录制权限。",
+
     createTask: "创建任务",
     createTaskHelp: "使用所选对话，为你与此助手创建私人任务。这不会启动电脑访问。",
     createTaskFailed: "无法创建或重新加载任务。请确认访问权限并刷新列表后重试。",
@@ -42,7 +47,7 @@ export const zhCN: Dictionary = {
     "permissionHelp": "请在系统设置中允许辅助功能。屏幕截图为可选功能，需要单独授权。",
     "permissions": "打开 Mac 辅助功能设置",
     screenRecordingSettings: "打开 Mac 屏幕录制设置",
-    supportedScope: "启用后：TextEdit 文档检查与非机密文本设置，以及支持的测试程序表单、选择、滚动和菜单操作。坐标点击和截图引导的任务目前不可用。辅助功能控制与屏幕录制是不同的权限。只读检查器不会运行模型或截图。",
+    supportedScope: "启用后：TextEdit 检查及非机密文本设置，以及支持的测试程序表单、选择、滚动及菜单操作。只读检查器不执行模型或截图。",
     "stop": "停止",
     "error": "无法完成请求。请检查设置、辅助功能权限、助手访问权限及任务所有者。若任务已开始，请先检查应用程序状态再重新开始，不要重复结果不明的操作。",
     "contextHelp": "选择您拥有的任务，以及您与同一助手的对话。助手需要明确的“这台电脑”访问权限，浏览器访问权限并不足够。列表为空时请先创建。",
@@ -57,7 +62,7 @@ export const zhCN: Dictionary = {
     "goal": "目标",
     "observe": "默认仅观察。控制及屏幕截图需要分别授权。",
     "control": "允许控制选中的应用",
-    "capture": "允许截取选中窗口的画面",
+    "capture": "允许支持的公开图形测试程序截图（可选）",
     "consent": "开始和继续都需要在原生对话框中重新批准。停止会立即撤销本机权限。切换工作区会断开连接。",
     "resume": "重新批准并继续",
     "start": "本机批准后开始",

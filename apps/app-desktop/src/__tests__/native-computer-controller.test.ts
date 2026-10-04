@@ -100,7 +100,7 @@ describe('native main broker', () => {
     } finally { await controller.dispose() }
   })
   it('independently enforces the observation ceiling before consent, lease or helper creation', async () => {
-    const advertised = { ...capabilities, windowCapture: true, input: true }
+    const advertised = { ...capabilities, windowCapture: true, input: true, visualInvokeVersion: 1 as const }
     const { helper, lease, approveGrant } = setup({ capabilities: vi.fn(async () => advertised) })
     const helperFactory = vi.fn(() => helper)
     const controller = new NativeComputerController({ enabled: true, observationOnly: true, platform: 'darwin',
@@ -115,6 +115,7 @@ describe('native main broker', () => {
       const masked = { axRead: true, semanticActions: false, windowCapture: false, input: false }
       expect(await controller.capabilities()).toMatchObject(masked)
       expect(controller.status().capabilities).toMatchObject(masked)
+      expect(controller.status().capabilities).not.toHaveProperty('visualInvokeVersion')
       expect(advertised).toMatchObject({ semanticActions: true, windowCapture: true, input: true })
       await controller.start({ ...grant(), allowControl: false })
       expect(helper.start).toHaveBeenCalledWith(expect.objectContaining({ allowControl: false, allowCapture: false }), expect.any(String))
@@ -551,4 +552,95 @@ it('declining approval makes no authority requests', async () => {
   expect((await controller.execute(command())).code).toBe('approval_required')
   expect(verify).not.toHaveBeenCalled(); expect(helper.execute).not.toHaveBeenCalled()
   await controller.dispose()
+})
+
+describe('visual invoke binding', () => {
+  const caps: NativeCapabilities = { ...capabilities, windowCapture: true, capturePermission: 'granted', visualInvokeVersion: 1 }
+  const visual = (): NativeCommand => ({ ...command(), action: { kind: 'visualInvoke', target, observationId: 'observation', frameId: 'frame', x: 10, y: 20 } })
+  const binding = () => ({ bindingId: 'binding', commandId: 'command', frameId: 'frame', action: { kind: 'invoke' as const, target: { ...target }, observationId: 'observation', ref: 'resolved-ref' } })
+  it('shows frozen resolved invoke, echoes binding and dispatches only original visual command without raw input', async () => {
+    const native = binding()
+    const approval = vi.fn(async (display: Readonly<NativeCommand>) => {
+      expect(display.action).toEqual(native.action)
+      expect(Object.isFrozen(display.action)).toBe(true)
+      expect(Object.isFrozen(display.action.target)).toBe(true)
+      native.action.ref = 'mutated'
+      expect('ref' in display.action && display.action.ref).toBe('resolved-ref')
+      return true
+    })
+    const { controller, helper } = setup({ capabilities: async () => caps, beginApproval: async () => native }, approval)
+    try {
+      await controller.start({ ...grant(), allowCapture: true })
+      const c = visual()
+      expect(await controller.execute(c)).toMatchObject({ outcome: 'executed' })
+      expect(helper.endApproval).toHaveBeenCalledWith(c, expect.any(String), true, 'binding')
+      expect(helper.execute).toHaveBeenCalledWith(c, expect.any(String))
+      expect(await controller.execute(c)).toEqual({ commandId: c.commandId, outcome: 'executed', code: 'ok' })
+      expect(helper.execute).toHaveBeenCalledOnce()
+    } finally { await controller.dispose() }
+  })
+  it.each(['boolean', 'command', 'frame', 'observation', 'target', 'extra'] as const)('refuses forged binding: %s', async fault => {
+    const forged: any = binding()
+    if (fault === 'command') forged.commandId = 'other'
+    if (fault === 'frame') forged.frameId = 'other'
+    if (fault === 'observation') forged.action.observationId = 'other'
+    if (fault === 'target') forged.action.target.windowInstanceId = 'other'
+    if (fault === 'extra') forged.approved = true
+    const approval = vi.fn(async () => true)
+    const { controller, helper } = setup({ capabilities: async () => caps, beginApproval: async () => fault === 'boolean' ? true : forged }, approval)
+    try {
+      await controller.start({ ...grant(), allowCapture: true })
+      expect(await controller.execute(visual())).toMatchObject({ outcome: 'not_executed' })
+      expect(approval).not.toHaveBeenCalled()
+      expect(helper.execute).not.toHaveBeenCalled()
+    } finally { await controller.dispose() }
+  })
+  it.each(['binding', 'dialog', 'end'] as const)('Stop fences late %s and retains lease until death', async phase => {
+    const pending = deferred<any>(); const death = deferred<void>()
+    const approval = vi.fn(() => phase === 'dialog' ? pending.promise : Promise.resolve(true))
+    const { controller, helper, lease } = setup({ capabilities: async () => caps,
+      beginApproval: vi.fn(() => phase === 'binding' ? pending.promise : Promise.resolve(binding())),
+      endApproval: vi.fn(() => phase === 'end' ? pending.promise : Promise.resolve(true)), kill: () => death.promise }, approval)
+    await controller.start({ ...grant(), allowCapture: true })
+    const result = controller.execute(visual())
+    await vi.waitFor(() => expect(phase === 'binding' ? helper.beginApproval : phase === 'dialog' ? approval : helper.endApproval).toHaveBeenCalled())
+    const stopped = controller.stop()
+    expect(lease.release).not.toHaveBeenCalled()
+    pending.resolve(phase === 'binding' ? binding() : true)
+    expect(await result).toMatchObject({ outcome: 'not_executed' })
+    expect(helper.execute).not.toHaveBeenCalled()
+    death.resolve(); await stopped
+    expect(lease.release).toHaveBeenCalled()
+  })
+  it.each(['declined', 'end-error', 'unknown'] as const)('does not replay on %s', async fault => {
+    const { controller, helper } = setup({ capabilities: async () => caps, beginApproval: async () => binding(),
+      endApproval: vi.fn(async () => { if (fault === 'end-error') throw new Error('lost'); return true }),
+      execute: vi.fn(async () => { throw new Error('lost effect receipt') }) }, async () => fault !== 'declined')
+    try {
+      await controller.start({ ...grant(), allowCapture: true })
+      const c = visual()
+      const result = await controller.execute(c)
+      expect(result.outcome).toBe(fault === 'unknown' ? 'execution_unknown' : 'not_executed')
+      expect(await controller.execute(c)).toEqual(result)
+      expect(helper.execute).toHaveBeenCalledTimes(fault === 'unknown' ? 1 : 0)
+    } finally { await controller.dispose() }
+  })
+  it('requires both consents/capabilities, and cannot restore reduced visual support', async () => {
+    let current: NativeCapabilities = caps
+    const { controller, helper } = setup({ capabilities: async () => current })
+    try {
+      await controller.start({ ...grant(), allowCapture: true })
+      current = { ...caps, visualInvokeVersion: undefined }
+      expect((await controller.capabilities()).visualInvokeVersion).toBeUndefined()
+      current = caps
+      expect((await controller.capabilities()).visualInvokeVersion).toBeUndefined()
+      expect(await controller.execute(visual())).toMatchObject({ code: 'unsupported' })
+      expect(helper.beginApproval).not.toHaveBeenCalled()
+    } finally { await controller.dispose() }
+    const noCapture = setup({ capabilities: async () => caps })
+    try {
+      await noCapture.controller.start(grant())
+      expect(await noCapture.controller.execute(visual())).toMatchObject({ code: 'unsupported' })
+    } finally { await noCapture.controller.dispose() }
+  })
 })

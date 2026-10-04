@@ -216,7 +216,7 @@ test('semantic policy is wired into approval, focus, effect dispatch and exact u
   assert.ok(execute.indexOf('guard !semanticSafety.uncertain') < execute.indexOf('authorized('))
   assert.ok(execute.includes('if let approved = approvedCommand, !same(command, approved) { return result("denied") }'))
   assert.ok(execute.includes('semanticSafety.deadline(id: commandId, fingerprint: digest)'))
-  assert.ok(execute.includes('if !semanticKind(kind) || approvedCommand == nil {'))
+  assert.ok(execute.includes('if (!semanticKind(kind) && kind != "visualInvoke") || approvedCommand == nil {'))
   const localAttempt = execute.slice(execute.indexOf('} else if let approved = approvedCommand, exactLocalCommand('), execute.indexOf('guardLock.lock(); watchdogDeadline'))
   assert.ok(localAttempt.includes('commandDeadline = anchored'))
   assert.ok(localAttempt.includes('if kind == "capture" { approvedCommand = nil; localCommandDeadline = nil }'))

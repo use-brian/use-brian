@@ -20,6 +20,30 @@ function fixture() {
   const options = { authority: { grant, target, assertCurrent: vi.fn(async () => {}) }, goal: 'select fixture', signal: new AbortController().signal, deadlineAt: Date.now() + 60_000 }
   return { provider, llm, policy, options, observation, status }
 }
+function visualFixture() {
+  const f = fixture()
+  f.options.authority.target.appId = 'com.usebrian.NativeComputerFixture'
+  f.options.goal = f.options.authority.grant.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+  f.status.capabilities.visualInvokeVersion = 1
+  f.status.capabilities.input = false
+  const old = f.observation
+  let seq = 0, value = 'None'
+  f.observation = () => ({ ...old(), captureCohort: 'public-shapes-v1', id: `o${++seq}`, monotonicMs: seq,
+    nodes: [{ ...old().nodes[0]!, role: 'AXStaticText', name: 'Result', value, actions: [] }] })
+  f.provider.observe = vi.fn(async () => f.observation())
+  f.policy.isComplete = o => o.nodes.some(n => n.value === 'Triangle')
+  f.provider.execute = vi.fn<NativeComputerProvider['execute']>(async c => {
+    if (c.action.kind === 'capture') {
+      const o = f.observation()
+      return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: { ...o,
+        frame: { id: 'frame', mimeType: 'image/png', data: '', width: 100, height: 100, bounds: o.bounds, displayLayoutVersion: 'l' } } }
+    }
+    value = 'Triangle'
+    return { commandId: c.commandId, outcome: 'executed', code: 'ok' }
+  })
+  f.llm.vision = { nativeGrounding: true, propose: vi.fn<NonNullable<NativeLlmAdapter['vision']>['propose']>(async i => ({ kind: 'visualInvoke', target: i.observation.target, observationId: i.observation.id, frameId: i.observation.frame!.id, x: 10, y: 10 })) }
+  return f
+}
 describe('native orchestration', () => {
   it('offers both semantic scroll directions without truncation or policy bypass', () => {
     const f = fixture(), o = f.observation()
@@ -80,33 +104,102 @@ describe('native orchestration', () => {
     expect((await new NativeComputerOrchestrator(f).run(f.options)).outcome).toBe('completed')
     expect(order).toEqual(['select', 'decompose', 'execute'])
   })
-  it('uses per-step CV after AX and generation abstain, then returns to AX', async () => {
-    const f = fixture()
-    vi.mocked(f.llm.select).mockResolvedValue({ result: 'abstain', providerId: 'llm', model: { catalogId: 'test', wireId: 'test' } })
+  it('invokes semantically once, checks fresh Result before budget pause, and never reopens the run', async () => {
+    const f = visualFixture(), loop = new NativeComputerOrchestrator(f)
     f.llm.plan = vi.fn(async () => [])
-    f.llm.vision = { nativeGrounding: true, propose: async i => ({ kind: 'click', target: i.observation.target, observationId: i.observation.id, frameId: 'frame', x: 10, y: 10 }) }
-    const execute = f.provider.execute
-    f.provider.execute = vi.fn<NativeComputerProvider['execute']>(async (c, signal) => c.action.kind === 'capture' ? {
-      commandId: c.commandId, outcome: 'executed', code: 'ok', observation: { ...f.observation(), frame: { id: 'frame', mimeType: 'image/png', data: '', width: 100, height: 100, bounds: f.observation().bounds, displayLayoutVersion: 'l' } },
-    } : execute(c, signal))
-    expect(await new NativeComputerOrchestrator(f).run(f.options)).toMatchObject({ outcome: 'completed', actions: 1 })
-    expect(vi.mocked(f.provider.execute).mock.calls.map(([c]) => c.action.kind)).toEqual(['capture', 'click'])
-    expect(f.provider.observe).toHaveBeenCalledTimes(3)
-    expect(f.llm.plan).toHaveBeenCalledTimes(1)
+    expect(buildNativeCandidates(f.observation(), f.policy)).toEqual([])
+    expect(await loop.run({ ...f.options, maxActions: 1 })).toMatchObject({ outcome: 'completed', actions: 1 })
+    expect(vi.mocked(f.provider.execute).mock.calls.map(([c]) => c.action.kind)).toEqual(['capture', 'visualInvoke'])
+    expect(await loop.run({ ...f.options, maxActions: 20 })).toMatchObject({ outcome: 'paused', actions: 0 })
+    expect(f.llm.plan).not.toHaveBeenCalled()
+    expect(f.llm.select).not.toHaveBeenCalled()
   })
-  it.each([false, true])('requires input before CV capture and inference (revoked after capture: %s)', async revokeAfterCapture => {
-    const f = fixture()
-    f.provider.observe = vi.fn(async () => ({ ...f.observation(), nodes: [] }))
-    f.status.capabilities.platform = 'linux'
-    f.status.capabilities.input = revokeAfterCapture
-    f.llm.vision = { nativeGrounding: true, propose: vi.fn(async () => null) }
-    f.provider.execute = vi.fn<NativeComputerProvider['execute']>(async c => {
-      f.status.capabilities.input = false
-      return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: { ...f.observation(), frame: { id: 'frame', mimeType: 'image/png', data: 'private', width: 100, height: 100, bounds: f.observation().bounds, displayLayoutVersion: 'l' } } }
+  it.each(['missing-version', 'no-control', 'no-capture', 'permission', 'marker', 'layout', 'bounds', 'capture-denied', 'vision-null', 'budget', 'stale-result', 'wrong-frame', 'wrong-observation', 'wrong-target', 'edge', 'raw-click', 'extra', 'unknown', 'lost', 'wrong-result', 'stop-model', 'stop-dispatch', 'stop-success'])(
+    'fails closed without a second trial: %s', async failure => {
+      const f = visualFixture(), controller = new AbortController()
+      if (failure === 'missing-version') delete f.status.capabilities.visualInvokeVersion
+      if (failure === 'no-control') f.options.authority.grant.allowControl = false
+      if (failure === 'no-capture') f.options.authority.grant.allowCapture = false
+      if (failure === 'permission') f.status.capabilities.capturePermission = 'denied'
+      const originalObserve = f.provider.observe
+      let firstResult: NativeObservation | undefined
+      f.provider.observe = vi.fn(async (c, signal) => {
+        const o = await originalObserve(c, signal)
+        if (failure === 'stale-result' && firstResult) return firstResult
+        return o
+      })
+      const execute = f.provider.execute
+      f.provider.execute = vi.fn<NativeComputerProvider['execute']>(async (c, signal) => {
+        if (c.action.kind === 'visualInvoke') {
+          if (failure === 'lost') throw new Error('lost')
+          if (failure === 'unknown') return { commandId: c.commandId, outcome: 'execution_unknown', code: 'helper_error' }
+          if (failure === 'stop-dispatch') { controller.abort(); return new Promise<never>(() => {}) }
+          if (failure === 'stop-success') controller.abort()
+          if (failure === 'wrong-result') return { commandId: c.commandId, outcome: 'executed', code: 'ok' }
+        }
+        const receipt = await execute(c, signal)
+        if (receipt.observation) {
+          firstResult = receipt.observation
+          if (failure === 'marker') delete receipt.observation.captureCohort
+          if (failure === 'layout') receipt.observation.frame!.displayLayoutVersion = 'changed'
+          if (failure === 'bounds') receipt.observation.frame!.bounds = { ...receipt.observation.bounds, x: 1 }
+          if (failure === 'capture-denied') return { commandId: c.commandId, outcome: 'not_executed', code: 'denied' }
+        }
+        return receipt
+      })
+      const propose = f.llm.vision!.propose
+      f.llm.vision!.propose = vi.fn(async input => {
+        if (failure === 'vision-null') return null
+        if (failure === 'stop-model') { controller.abort(); return new Promise<never>(() => {}) }
+        const a = await propose(input)
+        return { ...a, ...(failure === 'wrong-frame' ? { frameId: 'old' } : {}),
+          ...(failure === 'wrong-observation' ? { observationId: 'old' } : {}),
+          ...(failure === 'wrong-target' ? { target: { ...input.observation.target, windowId: 'other' } } : {}),
+          ...(failure === 'edge' ? { x: 100 } : {}), ...(failure === 'raw-click' ? { kind: 'click' } : {}),
+          ...(failure === 'extra' ? { ref: 'forged' } : {}) } as never
+      })
+      const loop = new NativeComputerOrchestrator({ ...f, inferenceBudget: { reserve: async () => failure !== 'budget' } })
+      const result = await loop.run({ ...f.options, signal: controller.signal, maxActions: 20 })
+      expect(result.outcome).not.toBe('completed')
+      if (!['unknown', 'lost', 'wrong-result', 'stale-result', 'stop-dispatch', 'stop-success'].includes(failure)) expect(result.actions).toBe(0)
+      if (failure === 'stop-model') expect(result.outcome).toBe('cancelled')
+      if (['lost', 'unknown', 'stop-dispatch'].includes(failure)) expect(result.outcome).toBe('execution_unknown')
+      expect(vi.mocked(f.provider.execute).mock.calls.filter(([c]) => c.action.kind === 'visualInvoke').length).toBeLessThanOrEqual(1)
+      const count = vi.mocked(f.provider.execute).mock.calls.length
+      await loop.run(f.options)
+      expect(f.provider.execute).toHaveBeenCalledTimes(count)
     })
-    expect(await new NativeComputerOrchestrator(f).run(f.options)).toMatchObject({ outcome: 'paused', actions: 0 })
-    expect(f.provider.execute).toHaveBeenCalledTimes(revokeAfterCapture ? 1 : 0)
-    expect(f.llm.vision.propose).not.toHaveBeenCalled()
+  it('cannot discard a rejected visual cohort on a later run to restore ordinary effects', async () => {
+    const f = visualFixture(), loop = new NativeComputerOrchestrator(f)
+    expect(await loop.run({ ...f.options, goal: 'Different goal' })).toMatchObject({ outcome: 'paused', actions: 0 })
+    f.provider.observe = vi.fn(async () => {
+      const o = f.observation()
+      delete o.captureCohort
+      o.nodes[0]!.actions = ['invoke']
+      return o
+    })
+    expect(await loop.run(f.options)).toMatchObject({ outcome: 'paused', actions: 0 })
+    expect(f.provider.execute).not.toHaveBeenCalled()
+    expect(f.llm.select).not.toHaveBeenCalled()
+    expect(f.llm.vision!.propose).not.toHaveBeenCalled()
+  })
+  it('ignores a late visual proposal after Stop and cannot reopen the consumed attempt', async () => {
+    const f = visualFixture(), controller = new AbortController()
+    let release!: () => void, entered!: () => void
+    const waiting = new Promise<void>(resolve => { entered = resolve })
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    const propose = f.llm.vision!.propose
+    f.llm.vision!.propose = vi.fn(async input => { entered(); await blocked; return propose(input) })
+    const loop = new NativeComputerOrchestrator(f)
+    const running = loop.run({ ...f.options, signal: controller.signal })
+    await waiting
+    controller.abort()
+    expect(await running).toMatchObject({ outcome: 'cancelled', actions: 0 })
+    release()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(await loop.run(f.options)).toMatchObject({ outcome: 'paused', actions: 0 })
+    expect(vi.mocked(f.provider.execute).mock.calls.map(([c]) => c.action.kind)).toEqual(['capture'])
+    expect(f.llm.vision!.propose).toHaveBeenCalledOnce()
   })
   it.each([1, 2])('selects only ambiguous generated proposals (%s proposals)', async count => {
     const f = fixture(), order: string[] = []
@@ -121,7 +214,7 @@ describe('native orchestration', () => {
     f.llm.select = vi.fn(async () => { order.push('select'); return { result: 'p0', providerId: 'llm', model: { catalogId: 'test', wireId: 'test' } } })
     f.llm.decompose = async () => { order.push('decompose') }
     const execute = f.provider.execute
-    f.provider.execute = vi.fn(async (c, signal) => { order.push('execute'); return execute(c, signal) })
+    f.provider.execute = vi.fn<NativeComputerProvider['execute']>(async (c, signal) => { order.push('execute'); return execute(c, signal) })
     const budget = { reserve: vi.fn(async () => true) }
     expect(await new NativeComputerOrchestrator({ ...f, inferenceBudget: budget }).run({ ...f.options, maxModelCalls: count === 1 ? 2 : 3 })).toMatchObject({ outcome: 'completed', actions: 1 })
     expect(order).toEqual(count === 1 ? ['plan', 'decompose', 'execute'] : ['plan', 'select', 'decompose', 'execute'])
@@ -137,10 +230,10 @@ describe('native orchestration', () => {
     expect(f.provider.execute).not.toHaveBeenCalled()
     expect(f.llm.select).not.toHaveBeenCalled()
   })
-  it.each(['failure', 'cancel'] as const)('never dispatches a click after decomposition %s', async failure => {
-    const f = fixture(), controller = new AbortController(), order: string[] = []
-    f.provider.observe = vi.fn(async () => ({ ...f.observation(), nodes: [] }))
-    f.llm.vision = { nativeGrounding: true, propose: async input => { order.push('vision'); return { kind: 'click', target: input.observation.target, observationId: input.observation.id, frameId: 'frame', x: 20, y: 20 } } }
+  it.each(['failure', 'cancel'] as const)('never dispatches a visual invoke after decomposition %s', async failure => {
+    const f = visualFixture(), controller = new AbortController(), order: string[] = []
+    f.provider.observe = vi.fn(async () => f.observation())
+    f.llm.vision = { nativeGrounding: true, propose: async input => { order.push('vision'); return { kind: 'visualInvoke', target: input.observation.target, observationId: input.observation.id, frameId: 'frame', x: 20, y: 20 } } }
     let release: () => void = () => {}
     f.llm.decompose = vi.fn(async input => {
       order.push('decompose')
@@ -159,14 +252,14 @@ describe('native orchestration', () => {
     expect(f.provider.execute).not.toHaveBeenCalled()
     expect(f.llm.select).not.toHaveBeenCalled()
   })
-  it.each([0, 6000])('decomposes before fresh capture without extending frame age (grounding delay: %s ms)', async groundingMs => {
+  it.each([0, 2000, 6000])('decomposes before fresh capture without extending frame age (grounding delay: %s ms)', async groundingMs => {
     vi.useFakeTimers()
     try {
-      const f = fixture(), order: string[] = []
+      const f = visualFixture(), order: string[] = []
       let seq = 0, clicked = false
       f.provider.observe = vi.fn(async () => {
         order.push('observe')
-        return { ...f.observation(), id: `o${++seq}`, monotonicMs: seq, nodes: [] }
+        return { ...f.observation(), id: `o${++seq}`, monotonicMs: seq, nodes: f.observation().nodes.map(n => ({ ...n, value: clicked ? 'Triangle' : 'None' })) }
       })
       f.policy.isComplete = () => clicked
       f.llm.decompose = async input => {
@@ -180,7 +273,7 @@ describe('native orchestration', () => {
         expect(input.observation.id).toBe('o2')
         expect(Date.now() - input.observation.capturedAt).toBe(0)
         if (groundingMs) await new Promise(resolve => setTimeout(resolve, groundingMs))
-        return { kind: 'click', target: input.observation.target, observationId: input.observation.id, frameId: 'fresh-frame', x: 20, y: 20 }
+        return { kind: 'visualInvoke', target: input.observation.target, observationId: input.observation.id, frameId: 'fresh-frame', x: 20, y: 20 }
       } }
       f.llm.verify = async input => {
         order.push('verify')
@@ -192,11 +285,11 @@ describe('native orchestration', () => {
         if (command.action.kind === 'capture') {
           expect(command.action.observationId).toBe('o2')
           return { commandId: command.commandId, outcome: 'executed', code: 'ok', observation: {
-            ...f.observation(), id: 'o2', monotonicMs: 2, nodes: [],
+            ...f.observation(), id: 'o2', monotonicMs: 2,
             frame: { id: 'fresh-frame', mimeType: 'image/png', data: '', width: 100, height: 100, bounds: f.observation().bounds, displayLayoutVersion: 'l' },
           } }
         }
-        expect(command.action).toMatchObject({ kind: 'click', observationId: 'o2', frameId: 'fresh-frame' })
+        expect(command.action).toMatchObject({ kind: 'visualInvoke', observationId: 'o2', frameId: 'fresh-frame' })
         clicked = true
         f.status.capabilities.input = false
         f.status.capabilities.semanticActions = false
@@ -204,8 +297,8 @@ describe('native orchestration', () => {
       })
       const run = new NativeComputerOrchestrator(f).run(f.options)
       await vi.advanceTimersByTimeAsync(6001 + groundingMs)
-      expect(await run).toMatchObject({ outcome: groundingMs ? 'paused' : 'completed', actions: groundingMs ? 0 : 1 })
-      expect(order).toEqual(['observe', 'decompose', 'observe', 'capture', 'vision', ...(groundingMs ? [] : ['click', 'observe', 'verify'])])
+      expect(await run).toMatchObject({ outcome: groundingMs >= 5000 ? 'paused' : 'completed', actions: groundingMs >= 5000 ? 0 : 1 })
+      expect(order).toEqual(['observe', 'decompose', 'observe', 'capture', 'vision', ...(groundingMs >= 5000 ? [] : ['visualInvoke', 'observe'])])
     } finally { vi.useRealTimers() }
   })
   it('refreshes unchanged AX state after inference without reusing stale refs', async () => {
@@ -257,16 +350,16 @@ describe('native orchestration', () => {
     expect((await new NativeComputerOrchestrator(f).run(f.options)).actions).toBe(0)
     expect(f.provider.execute).not.toHaveBeenCalled()
   })
-  it.each(['partial', 'complete'] as const)('vision with %s AX when no target is grounded and capture is explicitly allowed', async completeness => {
+  it.each(['partial', 'complete'] as const)('refuses unadmitted %s AX canvases even when capture is allowed', async completeness => {
     const f = fixture(); let done = false
     f.provider.observe = vi.fn<NativeComputerProvider['observe']>(async () => ({ ...f.observation(), completeness, nodes: done ? [{ ...f.observation().nodes[0]!, selected: true }] : [] }))
     f.provider.execute = vi.fn<NativeComputerProvider['execute']>(async c => {
       if (c.action.kind === 'capture') return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: { ...f.observation(), completeness: 'partial', nodes: [], frame: { id: 'frame', mimeType: 'image/png', data: '', width: 100, height: 100, bounds: f.observation().bounds, displayLayoutVersion: 'l' } } }
       done = true; return { commandId: c.commandId, outcome: 'executed', code: 'ok' }
     })
-    f.llm.vision = { nativeGrounding: true, propose: vi.fn<NonNullable<NativeLlmAdapter['vision']>['propose']>(async () => ({ kind: 'click', target: f.options.authority.target, observationId: 'o', frameId: 'frame', x: 20, y: 20 })) }
-    expect((await new NativeComputerOrchestrator(f).run(f.options)).outcome).toBe('completed')
-    expect(f.llm.select).not.toHaveBeenCalled(); expect(f.llm.vision!.propose).toHaveBeenCalledTimes(1)
+    f.llm.vision = { nativeGrounding: true, propose: vi.fn<NonNullable<NativeLlmAdapter['vision']>['propose']>(async () => ({ kind: 'visualInvoke', target: f.options.authority.target, observationId: 'o', frameId: 'frame', x: 20, y: 20 })) }
+    expect((await new NativeComputerOrchestrator(f).run(f.options)).outcome).toBe('paused')
+    expect(f.llm.select).not.toHaveBeenCalled(); expect(f.llm.vision!.propose).not.toHaveBeenCalled(); expect(f.provider.execute).not.toHaveBeenCalled()
   })
   it('no vision adapter means no capture', async () => {
     const f = fixture(); f.provider.observe = vi.fn<NativeComputerProvider['observe']>(async () => ({ ...f.observation(), nodes: [], completeness: 'unavailable' }))

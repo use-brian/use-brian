@@ -362,14 +362,14 @@ describe('P1 native fake-OS end-to-end over loopback HTTP + WebSocket', () => {
     expect({ calls: calls.length, requests: requests.length, accounting: meter.mock.calls.length }).toEqual(before)
   }, 10000)
 
-  it.each([true, false])('concrete runtime click/readback with effect capabilities downgraded (counter advances: %s)', async advances => {
+  it.each(['Triangle', 'Circle', 'None'])('concrete runtime visual invoke/readback with effect capabilities downgraded (Result: %s)', async finalValue => {
     const canvasTarget = { ...target, appId: 'com.usebrian.NativeComputerFixture' }
-    const full = { ...caps, input: true, windowCapture: true, capturePermission: 'granted' as const }
+    const full = { ...caps, input: false, visualInvokeVersion: 1 as const, windowCapture: true, capturePermission: 'granted' as const }
     helper.capabilities = async () => effects ? { ...full, semanticActions: false, input: false } : full
     helper.listTargets = async () => [canvasTarget]
     helper.execute = async c => {
       calls.push(c)
-      if (c.action.kind === 'click') {
+      if (c.action.kind === 'visualInvoke') {
         effects++
         return { commandId: c.commandId, outcome: 'executed', code: 'ok' }
       }
@@ -382,9 +382,9 @@ describe('P1 native fake-OS end-to-end over loopback HTTP + WebSocket', () => {
       const seq = observations.length + 1
       const o: NativeObservation = { id: `canvas-${seq}`, identity: c.identity, epoch: c.epoch,
         target: canvasTarget, capturedAt: Date.now(), monotonicMs: seq, foreground: true,
-        bounds, displayLayoutVersion: 'fake-layout', completeness: 'complete',
-        nodes: [{ ref: `counter-${seq}`, role: 'AXGroup', name: 'Safe custom canvas',
-          value: `Canvas clicks: ${effects && advances ? 1 : 0}`, enabled: true, focused: false,
+        bounds, displayLayoutVersion: 'fake-layout', completeness: 'complete', captureCohort: 'public-shapes-v1',
+        nodes: [{ ref: `result-${seq}`, role: 'AXStaticText', name: 'Result',
+          value: effects ? finalValue : 'None', enabled: true, focused: false,
           selected: false, sensitive: false, actions: [] }],
         ...(c.action.kind === 'capture' ? { frame: { id: `frame-${seq}`, mimeType: 'image/png' as const,
           data: 'synthetic-canvas-pixels', width: 200, height: 100, bounds, displayLayoutVersion: 'fake-layout' } } : {}),
@@ -392,8 +392,16 @@ describe('P1 native fake-OS end-to-end over loopback HTTP + WebSocket', () => {
       observations.push(o)
       return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: o }
     }
+    helper.beginApproval = vi.fn(async c => {
+      const captured = observations.at(-1)!
+      expect(c.action).toEqual({ kind: 'visualInvoke', target: canvasTarget,
+        observationId: captured.id, frameId: captured.frame!.id, x: 100, y: 65 })
+      return { bindingId: 'native-binding', commandId: c.commandId, frameId: captured.frame!.id,
+        action: { kind: 'invoke' as const, target: canvasTarget, observationId: captured.id, ref: 'native-resolved-option' } }
+    })
     approveAction.mockImplementation(async c => {
-      expect(c.action).toMatchObject({ kind: 'click', target: canvasTarget, x: 100, y: 65 })
+      expect(c.action).toEqual({ kind: 'invoke', target: canvasTarget,
+        observationId: observations.at(-1)!.id, ref: 'native-resolved-option' })
       expect(effects).toBe(0)
       return true
     })
@@ -402,25 +410,14 @@ describe('P1 native fake-OS end-to-end over loopback HTTP + WebSocket', () => {
       stream: async function* (r) {
         expect(r).toMatchObject({ nativeStrict: true, allowProviderFallback: false, model: 'synthetic-canvas', responseFormat: 'json' })
         expect(r.httpRetryWindow!.deadline).toBeLessThanOrEqual(Date.now())
-        const index = requests.push(r) - 1
-        expect(index).toBeLessThan(4) // Unexpected replan/selection is a regression, not another canned answer.
+        requests.push(r)
+        expect(requests).toHaveLength(1) // One visual attempt; no planning/verification model or retry.
         const content = r.messages[0]!.content as Array<{ type: string; text?: string }>
         const context = JSON.parse(content[0]!.text!)
-        const replies = [
-          { steps: [] },
-          { objectives: [{ role: 'AXGroup', name: 'Safe custom canvas', property: 'value', equals: 'Canvas clicks: 1' }] },
-          { x: 100, y: 65 },
-          // Deliberately overclaims success for the unchanged-counter case.
-          { status: 'complete', observationId: context.observationId,
-            evidence: [{ ref: context.nodes[0].ref, property: 'value', equals: 'Canvas clicks: 1' }] },
-        ]
-        expect(content.some(part => part.type === 'image')).toBe(index === 2)
-        if (index === 3) {
-          expect(effects).toBe(1)
-          expect(context.observationId).toBe(observations.at(-1)!.id)
-          expect(context.nodes[0].value).toBe(`Canvas clicks: ${advances ? 1 : 0}`)
-        }
-        yield { type: 'text_delta', text: JSON.stringify(replies[index]) }
+        expect(context.objectives).toEqual([{ role: 'AXStaticText', name: 'Result', property: 'value', equals: 'Triangle' }])
+        expect(content.some(part => part.type === 'image')).toBe(true)
+        expect(JSON.stringify(r)).toContain('synthetic-canvas-pixels')
+        yield { type: 'text_delta', text: JSON.stringify({ x: 100, y: 65 }) }
         yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 },
           nativeMetadata: { actualModel: 'synthetic-canvas', usage: { inputTokens: 10, outputTokens: 5 } } }
       },
@@ -434,26 +431,86 @@ describe('P1 native fake-OS end-to-end over loopback HTTP + WebSocket', () => {
     app = express(); app.use(express.json())
     app.use((req, _res, next) => { req.userId = scope.userId; req.authSessionId = authSessionId; next() })
     app.use(nativeComputerRoutes(service, composeNativeComputerTool(service, runtime)))
-    const path = await pair({ targets: [canvasTarget], allowCapture: true, goal: 'Click the canvas once' })
+    const path = await pair({ targets: [canvasTarget], allowCapture: true, goal: 'Activate the outlined triangle; finish when Result is Triangle.' })
     const result = await request(app).post(`${path}/run`).send({}).expect(200)
-    expect(result.body.data).toMatchObject({ outcome: advances ? 'completed' : 'paused', actions: 1 })
-    expect(calls.map(c => c.action.kind)).toEqual(['observe', 'observe', 'capture', 'click', 'observe'])
+    expect(result.body.data).toMatchObject({ outcome: finalValue === 'Triangle' ? 'completed' : 'paused', actions: 1 })
+    expect(calls.map(c => c.action.kind)).toEqual(['observe', 'observe', 'capture', 'visualInvoke', 'observe'])
     expect(observations.at(-1)!.id).not.toBe(observations[0].id)
     expect(observations.at(-1)!.capturedAt).toBeGreaterThan(observations[0].capturedAt)
-    const click = calls.find(c => c.action.kind === 'click')!
-    const receiptIndex = wireMessages.findIndex(m => m.type === 'receipt' && m.receipt?.commandId === click.commandId)
+    const visual = calls.find(c => c.action.kind === 'visualInvoke')!
+    const receiptIndex = wireMessages.findIndex(m => m.type === 'receipt' && m.receipt?.commandId === visual.commandId)
     expect(receiptIndex).toBeGreaterThan(0)
     expect(wireMessages[receiptIndex]).toMatchObject({ receipt: { outcome: 'executed', code: 'ok' } })
     expect(wireMessages[receiptIndex - 1]).toMatchObject({ type: 'status', status: { state: 'active',
       capabilities: { axRead: true, semanticActions: false, input: false } } })
     expect(audits.filter(a => a.length === 5)).toEqual(calls.map(c => [grant.identity.sessionId, c.commandId, c.action.kind, 'executed', 'ok']))
-    expect(requests).toHaveLength(4); expect(meter).toHaveBeenCalledTimes(12)
+    expect(requests).toHaveLength(1); expect(meter).toHaveBeenCalledTimes(3)
+    expect(meter).toHaveBeenLastCalledWith(expect.objectContaining({ lane: 'vision', invocationState: 'settled', outcome: 'ok',
+      usage: { inputTokens: 10, outputTokens: 5 } }))
+    expect(JSON.stringify(meter.mock.calls)).not.toContain('synthetic-canvas-pixels')
+    expect(observations.at(-1)!.nodes).toMatchObject([{ name: 'Result', value: finalValue, actions: [] }])
+    expect(helper.endApproval).toHaveBeenCalledWith(visual, expect.any(String), true, 'native-binding')
     expect(provider.createSession).not.toHaveBeenCalled()
     expect(effects).toBe(1); expect(approveAction).toHaveBeenCalledOnce()
     expect(helper.beginApproval).toHaveBeenCalledOnce(); expect(helper.endApproval).toHaveBeenCalledOnce()
-    const dispatches = calls.length
+    const before = { dispatches: calls.length, requests: requests.length, accounting: meter.mock.calls.length }
     expect((await request(app).post(`${path}/run`).send({}).expect(200)).body).toMatchObject({ duplicate: true, runState: 'finished' })
-    expect(calls).toHaveLength(dispatches); expect(effects).toBe(1); expect(approveAction).toHaveBeenCalledOnce()
+    expect({ dispatches: calls.length, requests: requests.length, accounting: meter.mock.calls.length }).toEqual(before); expect(effects).toBe(1); expect(approveAction).toHaveBeenCalledOnce()
+  }, 10_000)
+
+  it('refuses retired safeCanvas raw click over transport and in the concrete runtime', async () => {
+    const canvasTarget = { ...target, appId: 'com.usebrian.NativeComputerFixture' }
+    helper.capabilities = async () => ({ ...caps, windowCapture: true, capturePermission: 'granted' })
+    helper.listTargets = async () => [canvasTarget]
+    helper.execute = async c => {
+      calls.push(c)
+      expect(c.action.kind).toBe('observe')
+      const o: NativeObservation = { id: uuid(), identity: c.identity, epoch: c.epoch,
+        target: canvasTarget, capturedAt: Date.now(), monotonicMs: observations.length + 1,
+        foreground: true, bounds, displayLayoutVersion: 'fake-layout', completeness: 'complete',
+        nodes: [{ ref: 'safeCanvas', role: 'AXGroup', name: 'Safe custom canvas', value: 'Canvas clicks: 0',
+          enabled: true, focused: false, selected: false, sensitive: false, actions: [] }] }
+      observations.push(o)
+      return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: o }
+    }
+    const requests: ProviderRequest[] = []
+    const provider: LLMProvider = { name: 'synthetic', models: ['retired-canvas'], createSession: vi.fn(),
+      stream: async function* (r) {
+        requests.push(r)
+        expect(requests).toHaveLength(1)
+        // A legacy model's raw-click plan must not revive the retired canvas path.
+        yield { type: 'text_delta', text: JSON.stringify({ steps: [{ kind: 'click', x: 100, y: 65 }] }) }
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 },
+          nativeMetadata: { actualModel: 'retired-canvas', usage: { inputTokens: 10, outputTokens: 5 } } }
+      } }
+    const meter = vi.fn(async () => {})
+    const runtime = createNativeComputerModelRuntimeFactory({ localApprovalRequired: true, meter,
+      resolve: async () => ({ provider, model: 'retired-canvas', plan: 'enterprise', budgetStatus: 'ok',
+        grounder: { provider, model: 'retired-canvas', nativeGrounding: true } }),
+      budget: { tokens: 10000000, costUsd: 1000, attemptTokens: 100000, attemptCostUsd: 1 } })
+    app = express(); app.use(express.json())
+    app.use((req, _res, next) => { req.userId = scope.userId; req.authSessionId = authSessionId; next() })
+    app.use(nativeComputerRoutes(service, composeNativeComputerTool(service, runtime)))
+    const path = await pair({ targets: [canvasTarget], allowCapture: true, goal: 'Click the canvas once' })
+    const raw: NativeCommand = { ...command(), action: { kind: 'click', target: canvasTarget,
+      observationId: 'retired-observation', frameId: 'retired-frame', x: 100, y: 65 } }
+    const transport = createRelayNativeComputerProvider(service, scope, row!.id)
+    expect(await transport.execute(raw, new AbortController().signal)).toMatchObject({
+      commandId: raw.commandId, outcome: 'not_executed', code: 'unsupported',
+    })
+    expect(calls).toHaveLength(0)
+    expect((await request(app).post(`${path}/run`).send({}).expect(200)).body.data).toMatchObject({ outcome: 'paused', actions: 0 })
+    expect(calls.map(c => c.action.kind)).toEqual(['observe'])
+    expect(requests).toHaveLength(1)
+    expect(meter).toHaveBeenCalledTimes(3)
+    expect(provider.createSession).not.toHaveBeenCalled()
+    expect(approveAction).not.toHaveBeenCalled()
+    expect(helper.beginApproval).not.toHaveBeenCalled()
+    expect(helper.endApproval).not.toHaveBeenCalled()
+    expect(effects).toBe(0)
+    const before = { calls: calls.length, requests: requests.length, accounting: meter.mock.calls.length }
+    expect((await request(app).post(`${path}/run`).send({}).expect(200)).body).toMatchObject({ duplicate: true, runState: 'finished' })
+    expect({ calls: calls.length, requests: requests.length, accounting: meter.mock.calls.length }).toEqual(before)
   }, 10_000)
 
   it('grants/exchanges/runs one AX effect with local approval, fresh verification and persisted authenticated receipts', async () => {

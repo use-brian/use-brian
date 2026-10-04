@@ -156,7 +156,7 @@ const actions = [
   ...['invoke', 'select'].map(kind => ({ kind, target, observationId: 'obs', ref: 'ref' })),
   { kind: 'setValue', target, observationId: 'obs', ref: 'ref', text: 'text' },
   { kind: 'scroll', target, observationId: 'obs', ref: 'ref', deltaY: 600 },
-  { kind: 'click', target, observationId: 'obs', frameId: 'frame', x: 0, y: 1 },
+  ...['click', 'visualInvoke'].map(kind => ({ kind, target, observationId: 'obs', frameId: 'frame', x: 0, y: 1 })),
   { kind: 'key', target, observationId: 'obs', key: 'Enter' },
 ];
 for (const action of actions) {
@@ -168,7 +168,7 @@ for (const action of actions) {
     add('command', 'native text assignment forbids NUL', edit(base, 'action.text', 'a\0b'), false);
   }
   if (action.kind === 'scroll') for (const value of [...numeric, -601, -600, -1, 0, 600, 601]) add('command', `deltaY strict ${value}`, edit(base, 'action.deltaY', value));
-  if (action.kind === 'click') for (const key of ['x', 'y']) for (const value of numeric) add('command', `click ${key} strict ${value}`, edit(base, `action.${key}`, value));
+  if (['click', 'visualInvoke'].includes(action.kind)) for (const key of ['x', 'y']) for (const value of numeric) add('command', `click ${key} strict ${value}`, edit(base, `action.${key}`, value));
   if (action.kind === 'key') for (const key of ['Tab', 'Shift+Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape', 'Enter', '', 'Delete', true, 1, null]) add('command', `key enum ${key}`, edit(base, 'action.key', key));
 }
 function request(name, value, expected) { vectors.push({ kind: 'request', name, value, expected }); }
@@ -196,6 +196,19 @@ for (const [method, payload] of [['start', { grant, leaseId: 'lease' }], ['execu
 }
 for (const approved of [undefined, null, false, true, 0, 1, 'false', 'true', [], {}]) request(`strict approved ${JSON.stringify(approved)}`,
   edit(envelope('endApproval', { command, leaseId: 'lease', approved: true }), 'payload.approved', approved), typeof approved === 'boolean');
+const visualCommand = { ...command, action: actions.find(a => a.kind === 'visualInvoke') };
+for (const approved of [undefined, null, false, true, 0, 1, 'true', [], {}]) {
+  for (const bindingId of [undefined, null, '', false, 1, {}, [], 'binding', 'a'.repeat(256), 'a'.repeat(257)]) {
+    request('visual approval strict binding and boolean', envelope('endApproval', {
+      command: visualCommand, leaseId: 'lease', approved, bindingId,
+    }), typeof approved === 'boolean' && typeof bindingId === 'string' && bindingId.length > 0 && bindingId.length <= 256);
+  }
+}
+for (const method of ['beginApproval', 'execute']) {
+  request(`${method} visual valid`, envelope(method, { command: visualCommand, leaseId: 'lease' }), true);
+  request(`${method} rejects client-resolved binding`, envelope(method, { command: visualCommand, leaseId: 'lease', bindingId: 'forged' }), false);
+}
+request('semantic approval rejects visual binding', envelope('endApproval', { command, leaseId: 'lease', approved: true, bindingId: 'forged' }), false);
 request('invalid command cannot use cancellation path', envelope('endApproval', { command: {}, leaseId: 'lease', approved: false }), false);
 request('invalid raw unsupported click boolean', envelope('execute', { command: { ...command, action: { ...actions.find(a => a.kind === 'click'), x: true } }, leaseId: 'lease' }), false);
 request('invalid numeric grant boolean', envelope('start', { grant: { ...grant, allowControl: 1 }, leaseId: 'lease' }), false);

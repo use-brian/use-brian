@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 /** Metadata only: never command authority, content, credentials, or content hashes. */
 export const NativeTraceBindingSchema = z.object({ sessionId: z.string().uuid(), epoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }).strict()
-export const NativeTraceCommandSchema = z.object({ commandId: z.string().uuid(), actionKind: z.enum(['observe', 'capture', 'focus', 'invoke', 'setValue', 'select', 'scroll', 'click', 'key']) }).strict()
+export const NativeTraceCommandSchema = z.object({ commandId: z.string().uuid(), actionKind: z.enum(['observe', 'capture', 'focus', 'invoke', 'setValue', 'select', 'scroll', 'click', 'visualInvoke', 'key']) }).strict()
 export const NativeTraceMetadataSchema = z.object({
   event: z.enum(['command_admission', 'approval_wait', 'authority_check', 'helper_rpc_wait', 'helper_rpc_settlement', 'stop_requested', 'local_gate_revoked', 'helper_lifetime_barrier', 'trace_incomplete']),
   outcome: z.enum(['started', 'admitted', 'denied', 'replayed', 'resolved', 'failed', 'cancelled', 'late_resolved', 'late_failed', 'revoked', 'incomplete']),

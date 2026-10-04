@@ -2,6 +2,11 @@ import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
   nativeComputer: {
+    verificationAcknowledge: "申請有人監督的 Mac 驗證",
+    verificationHelp: "此為臨時驗證，不代表試行驗收或正式上線認證。請全程在場。必須由 Mac 原生對話框批准。停止、切換工作區或帳號及結束工作階段會撤銷批准；已送出的操作仍可能完成。仍需任務與目標同意。",
+    verificationConfirmed: "此情境的 Mac 驗證已獲批准。控制與截圖仍須分別啟用。",
+    visualScope: "視覺截圖僅支援 public-shapes-v1 測試程式：從截圖識別支援的 AX invoke 操作。不支援原始座標點擊或無 AX 畫布。需要獨立截圖同意及螢幕錄製權限。",
+
     createTask: "建立任務",
     createTaskHelp: "使用所選對話，為你與此助理建立私人任務。這不會啟動電腦存取。",
     createTaskFailed: "無法建立或重新載入任務。請確認存取權限並重新整理清單後再試。",
@@ -31,7 +36,7 @@ export const zh: Dictionary = {
     "permissionHelp": "請在系統設定中允許輔助使用。螢幕擷取為選用功能，需要另外授權。",
     "permissions": "開啟 Mac 輔助使用設定",
     screenRecordingSettings: "開啟 Mac 螢幕錄製設定",
-    supportedScope: "啟用後：TextEdit 文件檢查與非機密文字設定，以及支援的測試程式表單、選取、捲動和選單操作。座標點擊和截圖引導的任務目前不可用。輔助使用控制與螢幕錄製是不同的權限。唯讀檢查器不會執行模型或截圖。",
+    supportedScope: "啟用後：TextEdit 檢查及非機密文字設定，以及支援的測試程式表單、選取、捲動及選單操作。唯讀檢查器不執行模型或截圖。",
     "stop": "停止",
     "error": "無法完成請求。請檢查設定、輔助使用權限、助理存取權及任務擁有者。若任務已開始，請先檢查應用程式狀態再重新開始，不要重複結果不明的操作。",
     "contextHelp": "選擇您擁有的任務，以及您與同一助理的對話。助理需要明確的「這台電腦」存取權，瀏覽器存取權並不足夠。清單空白時請先建立。",
@@ -46,7 +51,7 @@ export const zh: Dictionary = {
     "goal": "目標",
     "observe": "預設僅觀察。控制及螢幕擷取需要分別授權。",
     "control": "允許控制選取的應用程式",
-    "capture": "允許擷取選取視窗的畫面",
+    "capture": "允許支援的公開圖形測試程式截圖（選用）",
     "consent": "開始和繼續都需要在原生對話框中重新核准。停止會立即撤銷本機權限。切換工作區會中斷連線。",
     "resume": "重新核准並繼續",
     "start": "本機核准後開始",

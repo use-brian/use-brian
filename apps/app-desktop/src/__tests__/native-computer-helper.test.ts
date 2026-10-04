@@ -771,3 +771,51 @@ describe('one-click grant followed by independent readback', () => {
     expect(f.worker.sideReplies.some(value => (value as { kind: string }).kind === 'delivered')).toBe(false)
   })
 })
+
+describe('private visual approval wire', () => {
+  function visual() {
+    const command = descriptorFor().command
+    return { ...command, action: { ...command.action, kind: 'visualInvoke' as const } } as Parameters<PrivatePipeHelper['execute']>[0]
+  }
+  function binding() {
+    const c = visual()
+    return { bindingId: 'binding', commandId: c.commandId, frameId: 'f', action: { kind: 'invoke', target: c.action.target, observationId: 'o', ref: 'resolved' } }
+  }
+  it('freezes the native binding, requires exact echo and burns approved dispatch', async () => {
+    const pipe = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    try {
+      const c = visual()
+      const begun = helper.beginApproval(c, 'lease'); pipe.respond(binding())
+      const result = await begun
+      expect(Object.isFrozen(result)).toBe(true)
+      const ended = helper.endApproval(c, 'lease', true, 'binding')
+      expect(pipe.lastRequest().payload).toMatchObject({ command: c, bindingId: 'binding' })
+      pipe.respond(true); expect(await ended).toBe(true)
+      const execution = helper.execute(c, 'lease'); pipe.respond({ commandId: c.commandId, outcome: 'executed', code: 'ok' })
+      expect(await execution).toMatchObject({ outcome: 'executed' })
+      await expect(helper.execute(c, 'lease')).rejects.toThrow('not approved')
+    } finally { await helper.kill() }
+  })
+  it.each(['boolean', 'frame', 'target', 'legacy-object'] as const)('rejects incompatible approval %s', async fault => {
+    const pipe = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    try {
+      const c = visual(); const value = binding()
+      if (fault === 'frame') value.frameId = 'other'
+      if (fault === 'target') value.action.target.windowInstanceId = 'other'
+      if (fault === 'legacy-object') c.action = { kind: 'invoke', target: c.action.target, observationId: 'o', ref: 'r' }
+      const begun = helper.beginApproval(c, 'lease'); pipe.respond(fault === 'boolean' ? true : value)
+      await expect(begun).rejects.toThrow()
+      await expect(helper.endApproval(visual(), 'lease', true, 'binding')).rejects.toThrow()
+    } finally { await helper.kill() }
+  })
+  it.each(['binding', 'lease', 'command', 'stop'] as const)('rejects changed approval or Stop: %s', async fault => {
+    const pipe = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    try {
+      const c = visual(); const begun = helper.beginApproval(c, 'lease'); pipe.respond(binding()); await begun
+      if (fault === 'stop') await helper.kill()
+      if (fault === 'command') c.deadlineAt++
+      await expect(helper.endApproval(c, fault === 'lease' ? 'other' : 'lease', true, fault === 'binding' ? 'other' : 'binding')).rejects.toThrow()
+      await expect(helper.execute(c, 'lease')).rejects.toThrow()
+    } finally { await helper.kill() }
+  })
+})

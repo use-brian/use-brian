@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { NativeBrokerTraceEventSchema, NativeTraceMetadataSchema } from '../broker-trace.js'
+import { NativeBrokerTraceEventSchema, NativeTraceMetadataSchema } from '../broker-trace.ts'
 const uuid = '12345678-1234-4234-8234-123456789012'
 const event = { source: 'desktop_broker', sourceId: uuid, clockId: uuid, sessionId: uuid, epoch: 1, sequence: 1, elapsedMs: 0.25, incomplete: false,
   event: 'helper_rpc_wait', outcome: 'resolved', operation: 'execute', durationMs: 0.125, command: { commandId: uuid, actionKind: 'observe' } }
@@ -9,6 +9,13 @@ describe('canonical broker source envelope', () => {
       expect(NativeBrokerTraceEventSchema.parse({ ...event, event: name, outcome })).toEqual({ ...event, event: name, outcome })
     }
     expect(NativeBrokerTraceEventSchema.safeParse({ ...event, command: undefined, operation: undefined, durationMs: undefined }).success).toBe(true)
+  })
+  it('allows visual invocation metadata without capturing its point or binding', () => {
+    const command = { commandId: uuid, actionKind: 'visualInvoke' }
+    expect(NativeBrokerTraceEventSchema.parse({ ...event, command }).command).toEqual(command)
+    for (const key of ['x', 'y', 'frameId', 'bindingId', 'ref', 'target']) {
+      expect(NativeBrokerTraceEventSchema.safeParse({ ...event, command: { ...command, [key]: 'private' } }).success).toBe(false)
+    }
   })
   it('requires the full source, scope, sequence and clock envelope', () => {
     for (const key of ['source', 'sourceId', 'clockId', 'sessionId', 'epoch', 'sequence', 'elapsedMs', 'incomplete', 'event', 'outcome']) {

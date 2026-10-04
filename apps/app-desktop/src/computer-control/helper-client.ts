@@ -1,3 +1,4 @@
+import { freezeBinding } from './visual-approval.js'
 import { ClickGuardianClient, type GuardianHandoff, type NativeClickScope } from './click-guardian-client.js'
 import { isDeepStrictEqual } from 'node:util'
 import type { Duplex } from 'node:stream'
@@ -5,14 +6,14 @@ import { HelperTimingEventSchema, HelperTimingSchema, type HelperMethod, type He
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { posix, win32 } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { CapabilitiesSchema, ReceiptSchema, DiscoveredTargetSchema, MAX_MESSAGE_BYTES, type NativeCapabilities, type NativeCommand, type NativeGrant, type NativeReceipt, type DiscoveredTarget } from './contracts.js'
+import { CapabilitiesSchema, ReceiptSchema, DiscoveredTargetSchema, MAX_MESSAGE_BYTES, type NativeVisualApproval, type NativeCapabilities, type NativeCommand, type NativeGrant, type NativeReceipt, type DiscoveredTarget } from './contracts.js'
 
 export interface NativeHelper {
   capabilities(): Promise<NativeCapabilities>
   listTargets(): Promise<DiscoveredTarget[]>
   start(grant: NativeGrant, leaseId: string): Promise<void>
-  beginApproval(command: NativeCommand, leaseId: string): Promise<boolean>
-  endApproval(command: NativeCommand, leaseId: string, approved: boolean): Promise<boolean>
+  beginApproval(command: NativeCommand, leaseId: string): Promise<boolean | NativeVisualApproval>
+  endApproval(command: NativeCommand, leaseId: string, approved: boolean, bindingId?: string): Promise<boolean>
   execute(command: NativeCommand, leaseId: string): Promise<NativeReceipt>
   /** Attempts SIGKILL immediately, never queues behind AX. Resolves only after
    * confirmed worker exit/spawn failure AND owner safety, never a failed kill
@@ -78,6 +79,7 @@ export class PrivatePipeHelper implements NativeHelper {
   private killed?: Promise<void>
   private grantSnapshot?: { grant: NativeGrant; leaseId: string }
   private approvedSnapshot?: { command: NativeCommand; leaseId: string }
+  private visualApproval?: { command: NativeCommand; leaseId: string; binding: NativeVisualApproval }
   private clickSpent = false
   private readbackOnly = false
   private executeSnapshot?: { id: string; command: NativeCommand; leaseId: string }
@@ -145,6 +147,7 @@ export class PrivatePipeHelper implements NativeHelper {
   private fail(reason?: 'takeover'): void {
     if (this.dead) return
     this.dead = true
+    this.visualApproval = undefined
     this.guardian?.revoke()
     this.approvedSnapshot = undefined
     this.executeSnapshot = undefined
@@ -294,18 +297,41 @@ export class PrivatePipeHelper implements NativeHelper {
     if (await this.request('start', snapshot) !== true) throw new Error('Helper refused grant')
     if (!this.dead) this.grantSnapshot = snapshot
   }
-  async beginApproval(command: NativeCommand, leaseId: string): Promise<boolean> {
+  async beginApproval(command: NativeCommand, leaseId: string): Promise<boolean | NativeVisualApproval> {
     this.approvedSnapshot = undefined
-    return await this.request('beginApproval', { command, leaseId }) === true
+    this.visualApproval = undefined
+    const snapshot = structuredClone(command)
+    const result = await this.request('beginApproval', { command: snapshot, leaseId })
+    if (this.dead) throw new Error('Approval revoked')
+    if (snapshot.action.kind !== 'visualInvoke') {
+      if (typeof result !== 'boolean') throw new Error('Invalid legacy approval')
+      return result
+    }
+    if (result === false) return false
+    const binding = freezeBinding(result, snapshot)
+    this.visualApproval = { command: snapshot, leaseId, binding }
+    return binding
   }
-  async endApproval(command: NativeCommand, leaseId: string, approved: boolean): Promise<boolean> {
+  async endApproval(command: NativeCommand, leaseId: string, approved: boolean, bindingId?: string): Promise<boolean> {
     this.approvedSnapshot = undefined
-    const snapshot = JSON.parse(JSON.stringify({ command, leaseId })) as { command: NativeCommand; leaseId: string }
-    const accepted = await this.request('endApproval', { ...snapshot, approved }) === true
-    if (accepted && approved && !this.dead) this.approvedSnapshot = snapshot
-    return accepted
+    const visual = this.visualApproval
+    this.visualApproval = undefined
+    const snapshot = structuredClone({ command, leaseId })
+    if (command.action.kind === 'visualInvoke') {
+      if (!visual || visual.leaseId !== leaseId || visual.binding.bindingId !== bindingId ||
+        !isDeepStrictEqual(visual.command, snapshot.command)) throw new Error('Visual approval mismatch')
+    } else if (bindingId !== undefined) throw new Error('Unexpected binding')
+    const result = await this.request('endApproval', { ...snapshot, approved, ...(bindingId === undefined ? {} : { bindingId }) })
+    if (typeof result !== 'boolean') throw new Error('Invalid approval result')
+    if (result && approved && !this.dead) this.approvedSnapshot = snapshot
+    return result && !this.dead
   }
   async execute(command: NativeCommand, leaseId: string): Promise<NativeReceipt> {
+    if (command.action.kind === 'visualInvoke') {
+      const approved = this.approvedSnapshot
+      this.approvedSnapshot = undefined
+      if (!approved || approved.leaseId !== leaseId || !isDeepStrictEqual(approved.command, command)) throw new Error('Visual dispatch not approved')
+    }
     return ReceiptSchema.parse(await this.request('execute', { command, leaseId }))
   }
   kill(): Promise<void> {

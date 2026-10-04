@@ -120,7 +120,8 @@ function name(b, offset) {
 const fixed = new Map([[2, 24], [0xb, 80], [0x1b, 24], [0x24, 16], [0x26, 16], [0x29, 16], [0x2a, 16],
   [0x80000028, 24], [0x22, 48], [0x80000022, 48], [0x80000033, 16], [0x80000034, 16]]);
 const strings = new Map([[0xc, 24], [0xd, 24], [0x80000018, 24], [0x8000001f, 24], [0x80000023, 24], [0xe, 12], [0x8000001c, 12]]);
-function slots(bytes) {
+function slots(bytes, profile = bootstrapProfile) {
+  const { size: recordSize, marker, section: recordSection, validate: validateRecord } = profile;
   const slices = [], magic = bytes.readUInt32BE(0);
   if (magic === 0xcafebabe || magic === 0xcafebabf) {
     const count = bytes.readUInt32BE(4), stride = magic === 0xcafebabe ? 20 : 32, end = 8 + count * stride;
@@ -180,13 +181,13 @@ function slots(bytes) {
             if (offset < fileoff || (length && offset < end) || offset !== fileoff + address - vmaddr || offset % (2 ** align)) fail();
             sections.push({ offset, size: length });
           }
-          if (section === SECTION) {
+          if (section === recordSection) {
             // The linker may consume S_ATTR_NO_DEAD_STRIP. Retention is a build
             // directive, not runtime authentication; the final section is regular.
-            if (anchor !== undefined || segment !== '__DATA_CONST' || ![0, 0x10000000].includes(flags) || length !== bootstrapAnchorSize || align !== 4 || zeroFill ||
+            if (anchor !== undefined || segment !== '__DATA_CONST' || ![0, 0x10000000].includes(flags) || length !== recordSize || align !== 4 || zeroFill ||
                 segflags !== 0x10 || !(initprot & 1) || (maxprot & 4) || b.readUInt32LE(a + 56) || b.readUInt32LE(a + 60) ||
                 b.readUInt32LE(a + 68) || b.readUInt32LE(a + 72) || b.readUInt32LE(a + 76)) fail();
-            record(b.subarray(offset, offset + bootstrapAnchorSize), true); anchor = offset;
+            validateRecord(b.subarray(offset, offset + recordSize), true); anchor = offset;
           }
         }
       } else if (cmd === 0x1d) {
@@ -212,13 +213,13 @@ function slots(bytes) {
     s.anchor = s.offset + anchor; s.signature = signature;
   }
   const positions = []; let at = -1;
-  while ((at = bytes.indexOf(MARKER, at + 1)) !== -1) { positions.push(at); if (positions.length > slices.length) fail(); }
+  while ((at = bytes.indexOf(marker, at + 1)) !== -1) { positions.push(at); if (positions.length > slices.length) fail(); }
   if (positions.length !== slices.length || slices.some(s => !positions.includes(s.anchor))) fail();
   return slices;
 }
 const magicBySlot = new Map([[0, 0xfade0c02], [2, 0xfade0c01], [5, 0xfade7171], [7, 0xfade7172],
   [8, 0xfade8181], [9, 0xfade8181], [10, 0xfade8181], [11, 0xfade8181], [0x10000, 0xfade0b01]]);
-function coverage(bytes, slice, linkerOnly = false) {
+function coverage(bytes, slice, linkerOnly = false, recordSize = bootstrapAnchorSize) {
   if (!slice.signature) fail();
   const b = bytes.subarray(slice.offset, slice.offset + slice.size), sig = slice.signature, sb = b.subarray(sig.offset, sig.offset + sig.size);
   if (sb.readUInt32BE(0) !== 0xfade0cc0) fail();
@@ -270,7 +271,7 @@ function coverage(bytes, slice, linkerOnly = false) {
   // Slots 1/3 seal external Info.plist/resources, not interpreted here. CMS
   // wrapper contents are also opaque: a valid header/page table does NOT prove
   // a signature, certificate, team, Apple issuance or even CMS well-formedness.
-  range(slice.anchor - slice.offset, bootstrapAnchorSize, limit);
+  range(slice.anchor - slice.offset, recordSize, limit);
   for (let p = 0; p < pages; p++) {
     if (!hash(b.subarray(p * pageSize, Math.min((p + 1) * pageSize, limit))).equals(cd.subarray(hashes + p * 32, hashes + (p + 1) * 32))) fail();
   }
@@ -318,4 +319,65 @@ export function verifyBootstrapApprovalCoverage(bytes, approval) {
     return Object.freeze({ kind: 'static-bootstrap-anchor-coverage', slices: locations.length,
       pageHashCoverage: true, signatureAuthentication: false, productionAuthority: false });
   });
+}
+
+// Two fixed project records share the bounded Mach-O/seal parser, not trust.
+const bootstrapProfile = { size: bootstrapAnchorSize, marker: MARKER, section: SECTION, validate: record };
+const visualMarker = Buffer.concat([Buffer.from('BRIAN_VISUAL_FIXTURE_PIN_V1'), Buffer.from('8ca1d3f9b7', 'hex')]);
+export function emptyVisualFixtureRecord() {
+  const b = Buffer.alloc(80); visualMarker.copy(b); b[33] = 1; b[35] = 20; b[39] = 80; return b;
+}
+export function decodeVisualFixtureRecord(bytes, allowEmpty = false) {
+  const b = copy(bytes, 80), base = emptyVisualFixtureRecord(), count = b[34];
+  if (!b.subarray(0, 34).equals(base.subarray(0, 34)) || !b.subarray(35, 40).equals(base.subarray(35, 40)) || count > 2) fail();
+  if (!count && !allowEmpty) fail();
+  const hashes = [];
+  for (let i = 0; i < count; i++) {
+    const h = Buffer.from(b.subarray(40 + i * 20, 60 + i * 20));
+    if (zero(h) || (i && Buffer.compare(hashes[i - 1], h) >= 0)) fail();
+    hashes.push(h);
+  }
+  requireZero(b.subarray(40 + count * 20)); return hashes;
+}
+export function encodeVisualFixtureRecord(hashes) {
+  if (!Array.isArray(hashes) || hashes.length < 1 || hashes.length > 2) fail();
+  const b = emptyVisualFixtureRecord(); b[34] = hashes.length;
+  hashes.forEach((h, i) => copy(h, 20).copy(b, 40 + i * 20)); decodeVisualFixtureRecord(b); return b;
+}
+const visualProfile = { size: 80, marker: visualMarker, section: '__br_visual', validate: decodeVisualFixtureRecord };
+function emptyVisualSlots(b) {
+  const locations = slots(b, visualProfile);
+  for (const s of locations) {
+    if (!b.subarray(s.anchor, s.anchor + 80).equals(emptyVisualFixtureRecord())) fail();
+    if (s.signature) coverage(b, s, true, 80);
+  }
+  return locations;
+}
+export function validateUnstampedVisualFixturePin(bytes) {
+  return guard(() => { emptyVisualSlots(copy(bytes, 32, MAX_BYTES)); });
+}
+// Validate both original records and linker seals BEFORE either edit makes the
+// linker-only page hashes stale. Never patch an ordinary signed helper.
+export function stampNativeApprovalRecords(bytes, approval, fixtureHashes) {
+  return guard(() => {
+    const b = copy(bytes, 32, MAX_BYTES), locations = emptyVisualSlots(b);
+    const visual = encodeVisualFixtureRecord(fixtureHashes);
+    const stamped = stampBootstrapApproval(b, approval);
+    for (const s of locations) visual.copy(stamped, s.anchor);
+    return stamped;
+  });
+}
+export function verifyVisualFixturePinCoverage(bytes, fixtureHashes) {
+  return guard(() => {
+    const b = copy(bytes, 32, MAX_BYTES), expected = encodeVisualFixtureRecord(fixtureHashes);
+    const locations = slots(b, visualProfile);
+    for (const s of locations) {
+      if (!b.subarray(s.anchor, s.anchor + 80).equals(expected)) fail();
+      coverage(b, s, false, 80);
+    }
+    return { slices: locations.length, pageHashCoverage: true, signatureAuthentication: false };
+  });
+}
+export function nativeApprovalArchitectures(bytes) {
+  return guard(() => slots(copy(bytes, 32, MAX_BYTES)).map(s => s.cpu === 0x0100000c ? 'arm64' : 'x86_64').sort());
 }

@@ -136,6 +136,14 @@ final class LifecycleBroker {
         captures += 1; captureDeadline = commandDeadline; captureHadPendingApproval = approvedCommand != nil
         return ["commandId": command["commandId"]!, "outcome": "executed", "code": "ok"]
     }
+    // Native-only visual dependencies. Legacy lifecycle extraction remains
+    // verbatim; this harness cannot fabricate a visual binding or AX hit.
+    func captureCohort(_ window: Window, _ snapshot: Snapshot) -> Bool { safeCanvas(window, snapshot) }
+    func isVisualApproval(_ payload: Object) -> Bool { false }
+    func endVisualApproval(_ payload: Object) -> Bool { false }
+    func consumeVisual(_ command: Object, _ payload: Object, _ window: Window) -> Object? { nil }
+    func endVisualExecution() {}
+    func visualEvidenceAlive() -> Bool { true } // No visual binding is admitted in this legacy harness.
     // PRODUCTION BROKER METHODS
 }
 // Unreachable click dependency required to typecheck the verbatim local approval

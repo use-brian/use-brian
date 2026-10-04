@@ -96,24 +96,30 @@ describe('existing native loop trace seam', () => {
     if (trace) expect(trace.snapshot().events.filter(e => e.phase === 'effect-rpc').map(e => e.kind)).toEqual(['span-start', 'span-settled'])
     expect(f.provider.execute).toHaveBeenCalledTimes(1)
   })
-  it('covers generation/capture/vision and passes correlation only to trusted model input', async () => {
+  it('covers semantic visual capture/dispatch without model verification or leaking correlation', async () => {
     const f = fixture(), trace = new NativeRunTrace()
     let clicked = false
+    f.options.authority.target.appId = 'com.usebrian.NativeComputerFixture'
+    f.options.goal = f.options.authority.grant.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    const status = await f.provider.status(f.controller.signal)
+    status.capabilities.visualInvokeVersion = 1; status.capabilities.input = false
+    const old = f.observation
+    f.observation = () => { const o = old(); return { ...o, captureCohort: 'public-shapes-v1', nodes: [{ ...o.nodes[0]!, role: 'AXStaticText', name: 'Result', value: clicked ? 'Triangle' : 'None', selected: clicked, actions: [] }] } }
     const execute = f.provider.execute
-    f.provider.observe = vi.fn(async command => { f.commands.push(command); const o = f.observation(); return clicked ? o : { ...o, nodes: [] } })
+    f.provider.observe = vi.fn(async command => { f.commands.push(command); const o = f.observation(); return o })
     f.provider.execute = vi.fn<NativeComputerProvider['execute']>(async (command, signal) => {
       if (command.action.kind === 'capture') {
         f.commands.push(command)
         const o = f.observation()
-        return { commandId: command.commandId, outcome: 'executed', code: 'ok', observation: { ...o, nodes: [], frame: { id: 'private-frame', mimeType: 'image/png', data: 'private-pixels', width: 100, height: 100, bounds: o.bounds, displayLayoutVersion: o.displayLayoutVersion } } }
+        return { commandId: command.commandId, outcome: 'executed', code: 'ok', observation: { ...o, frame: { id: 'private-frame', mimeType: 'image/png', data: 'private-pixels', width: 100, height: 100, bounds: o.bounds, displayLayoutVersion: o.displayLayoutVersion } } }
       }
       clicked = true
       return execute(command, signal)
     })
     f.llm.plan = async input => { f.record(input); return [] }
-    f.llm.vision = { nativeGrounding: true, propose: async input => { f.record(input); return { kind: 'click', target: input.observation.target, observationId: input.observation.id, frameId: input.observation.frame!.id, x: 10, y: 10 } } }
+    f.llm.vision = { nativeGrounding: true, propose: async input => { f.record(input); return { kind: 'visualInvoke', target: input.observation.target, observationId: input.observation.id, frameId: input.observation.frame!.id, x: 10, y: 10 } } }
     expect((await new NativeComputerOrchestrator({ ...f, trace }).run(f.options)).outcome).toBe('completed')
-    expect(trace.snapshot().events.filter(e => e.kind === 'span-start').map(e => e.phase)).toEqual(['observation-rpc', 'generation', 'decomposition', 'observation-rpc', 'capture-rpc', 'vision-grounding', 'effect-rpc', 'observation-rpc', 'verification'])
+    expect(trace.snapshot().events.filter(e => e.kind === 'span-start').map(e => e.phase)).toEqual(['observation-rpc', 'decomposition', 'observation-rpc', 'capture-rpc', 'vision-grounding', 'effect-rpc', 'observation-rpc'])
     expect(JSON.stringify(trace.snapshot())).not.toContain('private-')
     expect(f.llm.select).not.toHaveBeenCalled()
   })

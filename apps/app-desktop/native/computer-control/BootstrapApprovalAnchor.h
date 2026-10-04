@@ -47,4 +47,10 @@ typedef enum {
  */
 brian_bootstrap_anchor_result brian_bootstrap_approval_copy(
     uint8_t *output, size_t capacity, size_t *written);
+/* Separate 80-byte visual record: marker[32], BE version=1, count=0..2,
+ * width=20, BE size=80, sorted unique nonzero hashes[40]; unused bytes zero.
+ * Own mapped data, NOT authentication. Exactly 40 disjoint writable bytes
+ * required. Empty/malformed clears output and returns 0; invalid capacity or
+ * NULL returns 0 without dereferencing. Authenticate helper before trusting. */
+int brian_visual_fixture_hashes_copy(uint8_t *output, size_t capacity);
 #endif

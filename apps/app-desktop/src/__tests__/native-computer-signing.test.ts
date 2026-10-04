@@ -5,25 +5,30 @@ import { describe, expect, it, vi } from 'vitest';
 
 // Tool calls are mocked. These checks establish hook composition, not Mac signing.
 describe('native helper signing in the existing Mac release hook', () => {
-  it('reuses builder identity/keychain and traversal with a closed helper profile', async () => {
+  it('reuses builder identity/keychain and traversal with closed helper and fixture profiles', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'native-signing-')));
     const app = join(root, 'Use Brian.app');
     const helper = join(app, 'Contents/Resources/computer-control/brian-native-computer-helper');
+    const fixture = join(app, 'Contents/Resources/computer-control/NativeComputerFixture.app/Contents/MacOS/NativeComputerFixture');
     mkdirSync(join(helper, '..'), { recursive: true });
     writeFileSync(helper, 'fixture, not executable');
+    mkdirSync(join(fixture, '..'), { recursive: true });
+    writeFileSync(fixture, 'fixture, not executable');
     const inherited = { entitlements: 'build/entitlements.mac.plist', hardenedRuntime: true,
       additionalArguments: ['--options', 'runtime,library'], timestamp: 'https://timestamp.apple.com/ts01' };
     const signAsync = vi.fn(async (options) => {
       expect(options.identity).toBe('BUILDER-SELECTED-IDENTITY');
       expect(options.keychain).toBe('/private/builder.keychain');
-      expect(options.binaries).toEqual([helper]);
+      expect(options.binaries).toEqual([helper, fixture]);
       expect(options.optionsForFile(app)).toBe(inherited);
-      const policy = options.optionsForFile(helper);
-      expect(policy.hardenedRuntime).toBe(true);
-      expect(policy.additionalArguments).toEqual([]);
-      expect(policy.signatureFlags).toEqual([]);
-      expect(policy.timestamp).toBe(inherited.timestamp);
-      expect(readFileSync(policy.entitlements, 'utf8')).toContain('<dict/>');
+      for (const target of [helper, fixture, join(fixture, '../../..')]) {
+        const policy = options.optionsForFile(target);
+        expect(policy.hardenedRuntime).toBe(true);
+        expect(policy.additionalArguments).toEqual([]);
+        expect(policy.signatureFlags).toEqual([]);
+        expect(policy.timestamp).toBe(inherited.timestamp);
+        expect(readFileSync(policy.entitlements, 'utf8')).toContain('<dict/>');
+      }
     });
     const originalHelper = Buffer.alloc(64);
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -37,7 +42,7 @@ describe('native helper signing in the existing Mac release hook', () => {
     try {
       const { default: sign } = await import(new URL('../../scripts/sign-mac-app.mjs', import.meta.url).href);
       const options = { app, platform: 'darwin', identity: 'BUILDER-SELECTED-IDENTITY',
-        keychain: '/private/builder.keychain', binaries: [helper], optionsForFile: () => inherited };
+        keychain: '/private/builder.keychain', binaries: [helper, fixture, helper], optionsForFile: () => inherited };
       await sign(options);
       expect(signAsync).toHaveBeenCalledOnce();
       expect(captureUnstampedHelper).toHaveBeenCalledWith(app);
@@ -55,6 +60,9 @@ describe('native helper signing in the existing Mac release hook', () => {
       vi.stubEnv('BRIAN_NATIVE_PACKAGE_CHECK', '0');
       sealNativeBootstrap.mockClear();
       expect(options.optionsForFile()).toBe(inherited);
+      signAsync.mockImplementation(async selected => { selected.optionsForFile(helper); });
+      await expect(sign(options)).rejects.toThrow('Visual fixture was skipped');
+      expect(sealNativeBootstrap).not.toHaveBeenCalled();
       signAsync.mockImplementation(async () => {});
       await expect(sign(options)).rejects.toThrow('skipped');
       signAsync.mockRejectedValue(new Error('codesign failed'));

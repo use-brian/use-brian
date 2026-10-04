@@ -1,3 +1,4 @@
+import { freezeBinding } from './visual-approval.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { CapabilitiesSchema, CommandSchema, GrantSchema, ReceiptSchema, DiscoveredTargetSchema, NATIVE_PROTOCOL, MAX_SESSION_MS, sameIdentity, sameTarget, type NativeObservation, type NativeCapabilities, type NativeCommand, type NativeGrant, type NativeReceipt, type NativeStatus, type DiscoveredTarget } from './contracts.js'
@@ -82,12 +83,16 @@ export class NativeComputerController {
   private validateCapabilities(value: NativeCapabilities): NativeCapabilities {
     const caps = CapabilitiesSchema.parse(value)
     if (caps.platform !== (this.options.platform ?? process.platform)) throw new Error('Helper platform mismatch')
-    return this.options.observationOnly ? { ...caps, semanticActions: false, windowCapture: false, input: false } : caps
+    if (!this.options.observationOnly) return caps
+    const { visualInvokeVersion: _visual, ...readOnly } = caps
+    return { ...readOnly, semanticActions: false, windowCapture: false, input: false }
   }
   /** Helper reports may remove authority, never restore it within a grant. */
   private reduceCapabilities(next: NativeCapabilities): NativeCapabilities {
     const previous = this.caps
-    return { ...next,
+    const { visualInvokeVersion: _visual, ...base } = next
+    return { ...base,
+      ...(previous.visualInvokeVersion === 1 && next.visualInvokeVersion === 1 && previous.semanticActions && next.semanticActions && previous.windowCapture && next.windowCapture && next.accessibilityPermission === 'granted' && next.capturePermission === 'granted' ? { visualInvokeVersion: 1 as const } : {}),
       axRead: previous.axRead && next.axRead && next.accessibilityPermission === 'granted',
       semanticActions: previous.semanticActions && next.semanticActions && next.accessibilityPermission === 'granted',
       windowCapture: previous.windowCapture && next.windowCapture && next.capturePermission === 'granted',
@@ -201,6 +206,7 @@ export class NativeComputerController {
     if (!grant.targets.some(target => sameTarget(target, command.action.target))) return 'wrong_target'
     if (command.action.kind === 'capture') return grant.allowCapture && this.caps.windowCapture ? undefined : 'unsupported'
     if (command.action.kind !== 'observe' && !grant.allowControl) return 'denied'
+    if (command.action.kind === 'visualInvoke' && (!grant.allowCapture || !this.caps.windowCapture || this.caps.capturePermission !== 'granted' || this.caps.accessibilityPermission !== 'granted' || this.caps.visualInvokeVersion !== 1)) return 'unsupported'
     if (command.action.kind === 'click' && !grant.allowCapture) return 'denied'
     if ((command.action.kind === 'click' || command.action.kind === 'key') && !this.caps.input) return 'unsupported'
     if (command.action.kind === 'observe' && !this.caps.axRead) return 'unsupported'
@@ -249,16 +255,20 @@ export class NativeComputerController {
       if (signal.aborted || denial) return receipt(command.commandId, denial ?? 'stopped')
       if (command.action.kind !== 'observe' && command.action.kind !== 'capture') {
         // No label/model supplied effect classification is authoritative. Even fixture actions ask.
-        if (!await this.helperWait(trace, 'begin_approval', () => this.helper!.beginApproval(command, this.leaseId!), signal, command.deadlineAt, command)) return receipt(command.commandId, 'stale_observation')
+        const begun = await this.helperWait(trace, 'begin_approval', () => this.helper!.beginApproval(command, this.leaseId!), signal, command.deadlineAt, command)
+        if (begun === false) return receipt(command.commandId, 'stale_observation')
+        const binding = command.action.kind === 'visualInvoke' ? freezeBinding(begun, command) : undefined
+        if (!binding && begun !== true) throw new Error('Invalid legacy approval')
+        const displayCommand = binding ? frozen({ ...command, action: binding.action }) : command
         if (signal.aborted || (denial = this.permitted(command))) return receipt(command.commandId, denial ?? 'stopped')
         this.state = 'awaiting_action_approval'; this.changed()
         if (signal.aborted || (denial = this.permitted(command))) return receipt(command.commandId, denial ?? 'stopped')
-        const approved = await this.traceWait(trace, 'approval_wait', 'action', () => this.until(this.options.approveAction(command, signal, this.approvalContext(command)), signal, Math.min(command.deadlineAt, this.grant!.expiresAt)), signal, command)
+        const approved = await this.traceWait(trace, 'approval_wait', 'action', () => this.until(this.options.approveAction(displayCommand, signal, this.approvalContext(displayCommand)), signal, Math.min(command.deadlineAt, this.grant!.expiresAt)), signal, command)
         denial = this.permitted(command)
         if (signal.aborted || denial) return receipt(command.commandId, denial ?? 'stopped')
         if (approved) await this.revalidateExecution(command, signal, trace)
         if (signal.aborted || (denial = this.permitted(command))) return receipt(command.commandId, denial ?? 'stopped')
-        const unchanged = await this.helperWait(trace, 'end_approval', () => this.helper!.endApproval(command, this.leaseId!, approved), signal, command.deadlineAt, command)
+        const unchanged = await this.helperWait(trace, 'end_approval', () => this.helper!.endApproval(command, this.leaseId!, approved, ...(binding ? [binding.bindingId] : [])), signal, command.deadlineAt, command)
         if (signal.aborted || (denial = this.permitted(command))) return receipt(command.commandId, denial ?? 'stopped')
         this.state = 'active'; this.changed()
         if (!unchanged) { void this.stop(); return receipt(command.commandId, 'stale_observation') }
@@ -270,7 +280,7 @@ export class NativeComputerController {
       // Reads/capture use this single check; the fixed local inspector stays local.
       if (this.grant?.allowControl) await this.revalidateExecution(command, signal, trace)
       if (signal.aborted || (denial = this.permitted(command))) return receipt(command.commandId, denial ?? 'stopped')
-      this.activity({ appId: command.action.target.appId, perception: command.action.kind === 'capture' || command.action.kind === 'click' ? 'vision' : 'ax' })
+      this.activity({ appId: command.action.target.appId, perception: command.action.kind === 'capture' || command.action.kind === 'click' || command.action.kind === 'visualInvoke' ? 'vision' : 'ax' })
       // A trusted UI callback may itself revoke the session.
       if (signal.aborted || (denial = this.permitted(command))) return receipt(command.commandId, denial ?? 'stopped')
       sent = true
@@ -314,7 +324,9 @@ export class NativeComputerController {
     const allowed = await this.traceWait(trace, 'authority_check', 'remote', () => this.until(this.options.revalidateExecution!(command, signal), signal, command.deadlineAt), signal, command)
     if (signal.aborted || signal !== this.abort.signal || this.permitted(command) || !allowed) throw new Error('Remote authority revoked')
   }
-  private traceCommand(command: NativeCommand): NativeTraceCommand {
+  private traceCommand(command: NativeCommand): NativeTraceCommand | undefined {
+    // Older broker trace schemas cannot represent visualInvoke; never mislabel it as raw input.
+    if (command.action.kind === 'visualInvoke') return undefined
     return { commandId: command.commandId, actionKind: command.action.kind }
   }
   private commandTrace(command: NativeCommand): NativeBrokerTrace | undefined {

@@ -15,6 +15,11 @@ import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
   nativeComputer: {
+    verificationAcknowledge: "Request attended Mac verification",
+    verificationHelp: "Verification is temporary, not pilot acceptance or production certification. Stay present. A native Mac dialog must approve this request. Stop, workspace/account changes and session end revoke approval; an action already sent may finish. Task and target consent still apply.",
+    verificationConfirmed: "Native Mac verification approved for this context. Control and capture remain separate opt-ins.",
+    visualScope: "Visual capture supports only the public-shapes-v1 fixture: a screenshot identifies a supported AX invoke action. No raw coordinate clicks or no-AX canvases. Separate capture consent and Screen Recording permission are required.",
+
     createTask: "Create task",
     createTaskHelp: "Create a private task for you and this assistant using the selected conversation. This does not start computer access.",
     createTaskFailed: "Could not create or reload the task. Check task access and refresh the list before trying again.",
@@ -44,7 +49,7 @@ export const en = {
     "permissionHelp": "Allow Accessibility in system settings. Screen capture is optional and needs a separate permission.",
     "permissions": "Open Mac Accessibility settings",
     screenRecordingSettings: "Open Mac Screen Recording settings",
-    supportedScope: "When enabled: TextEdit document inspection and non-secret text assignment; supported fixture form, selection, scroll and menu actions. Coordinate clicks and screenshot-guided tasks are unavailable. Accessibility control and Screen Recording are separate permissions. The read-only inspector never runs a model or captures screenshots.",
+    supportedScope: "When enabled: TextEdit inspection and non-secret text assignment; supported fixture forms, selection, scrolling and menus. The read-only inspector never runs a model or captures screenshots.",
     "stop": "Stop",
     "error": "Could not complete the request. Check setup, Accessibility permission, assistant access and task ownership. If a task started, inspect the application before starting again; uncertain actions must not be repeated.",
     "contextHelp": "Choose a task you own and your own conversation with the same assistant. The assistant needs explicit This computer access; browser access is not enough. Create the context first if the lists are empty.",
@@ -59,7 +64,7 @@ export const en = {
     "goal": "Goal",
     "observe": "Observe only by default. Control and screen capture are separate permissions.",
     "control": "Allow control of the selected app",
-    "capture": "Allow screen capture of the selected window",
+    "capture": "Allow supported public-shape fixture capture (optional)",
     "consent": "Start and Resume require fresh approval in a native dialog. Stop revokes local authority immediately. Workspace changes disconnect the session.",
     "resume": "Resume with new approval",
     "start": "Start with local approval",

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
 import { desktopBridge } from "@/lib/desktop-auth-source";
-import { nativeComputer, type DiscoveredTarget, isNativeTarget, nativeTargetKey } from "@/lib/native-computer";
+import { nativeComputer, type DiscoveredTarget, isNativeTarget, nativeTargetKey, supportsNativeVisual } from "@/lib/native-computer";
 import { useChatSessionsData } from "@/lib/chat-surface-data";
 import { createNativeContextTask, fetchNativeContextTasks } from "@/lib/api/native-computer";
 import { invalidateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -87,12 +87,22 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   const conversations = (chat.personal ?? []).filter(row => row.assistantId === assistantId);
   const active = phase === "active" || phase === "awaiting_action_approval" || phase === "awaiting_local_consent";
   const canControl = state.status?.capabilities.semanticActions === true;
-  const canCapture = canControl && state.status?.capabilities.windowCapture === true && state.status?.capabilities.input === true;
+  const canCapture = supportsNativeVisual(state.status?.capabilities);
   // Cleanup crosses account/workspace boundaries; keep no previous task form behind it.
   useEffect(() => {
     setAssistant(""); setConversation(""); setTask(""); setGoal(""); setTargets([]); setTarget("");
     setControl(false); setCapture(false);
   }, [workspaceId, state.cleanupPending]);
+  const setupRevision = nativeComputer.setupRevision;
+  useEffect(() => { setControl(false); setCapture(false); }, [assistantId, conversationId, taskId, targetKey, setupRevision, state.verificationConsented]);
+  // Main can revoke between polls without changing capabilities or verification.
+  // Depend on the phase, not a terminal boolean: terminal-to-terminal transitions
+  // reset too, while repeated polls and leaving a terminal phase keep fresh choices.
+  useEffect(() => {
+    if (["stopped", "paused_for_user", "ended", "unavailable", "permission_required"].includes(phase)) {
+      setControl(false); setCapture(false);
+    }
+  }, [phase]);
   // Forget unsupported preferences, but surface the change rather than silently
   // treating a previously requested control run as an inspector run.
   useEffect(() => {
@@ -128,12 +138,20 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
     try { setFailed(!(await nativeComputer.send({ type: "permissions", permission })).ok); }
     finally { setBusy(false); }
   }
+  async function acknowledgeVerification() {
+    if (busy || active || !nativeComputer.snapshot().verificationAvailable) return;
+    setBusy(true); setFailed(false); setControl(false); setCapture(false); setTargets([]); setTarget("");
+    try {
+      const result = await nativeComputer.send({ type: "acknowledge-verification" });
+      setFailed(!result.ok || result.verificationConsented !== true);
+    } finally { setBusy(false); }
+  }
   async function start() {
     if (!valid || !target || busy) return;
     // Recheck the live store as well: capabilities can change between render
     // and click. Reject the requested run; never coerce it into inspector mode.
     const capabilities = nativeComputer.snapshot().status?.capabilities;
-    if (allowControl && capabilities?.semanticActions !== true || allowCapture && (!allowControl || capabilities?.windowCapture !== true || capabilities?.input !== true)) {
+    if (allowControl && capabilities?.semanticActions !== true || allowCapture && (!allowControl || !supportsNativeVisual(capabilities))) {
       setFailed(true);
       return;
     }
@@ -152,6 +170,11 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
       <Button className="min-h-11" variant="outline" disabled={busy || active} onClick={() => void openPermissions("accessibility")}>{t.permissions}</Button>
       <Button className="min-h-11" variant="outline" disabled={busy || active} onClick={() => void openPermissions("screen-recording")}>{t.screenRecordingSettings}</Button>
       <Button className="min-h-11" variant="destructive" onClick={async () => { setFailed(!(await nativeComputer.stop()).ok); }}>{t.stop}</Button>
+    </div> : null}
+    {supported && state.verificationAvailable ? <div className="space-y-2">
+      <p className="text-sm text-muted-foreground">{t.verificationHelp}</p>
+      <Button className="min-h-11 whitespace-normal" variant="outline" disabled={busy || active || state.verificationConsented === true} onClick={() => void acknowledgeVerification()}>{t.verificationAcknowledge}</Button>
+      {state.verificationConsented === true ? <p role="status">{t.verificationConfirmed}</p> : null}
     </div> : null}
     {supported && state.readiness?.helperAdmitted ? <p role="status">{t.readinessPassed}</p> : null}
     {supported && state.readinessFailed ? <p role="alert" className="text-destructive">{t.readinessFailed}</p> : null}
@@ -193,6 +216,7 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
       <p className="text-sm">{allowControl ? t.observe : t.inspectorHelp}</p>
       <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowControl} onCheckedChange={value => { setControl(value); if (!value) setCapture(false); }} disabled={busy || active || !canControl} />{t.control}</label>
       <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowCapture} onCheckedChange={setCapture} disabled={busy || active || !allowControl || !canCapture} />{t.capture}</label>
+      <p className="text-sm text-muted-foreground">{t.visualScope}</p>
       <p className="text-sm text-muted-foreground">{t.consent}</p>
       <Button className="min-h-11" disabled={!valid || busy || active} onClick={() => void start()}>{resumable ? t.resume : t.start}</Button>
       </> : null}

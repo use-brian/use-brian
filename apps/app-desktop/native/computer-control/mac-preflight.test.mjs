@@ -45,7 +45,7 @@ test('Mac compiler regression guards retain explicit trust and public AX sheet t
   assert.match(sheets, /children\.count <= 500 else \{ return false \}/)
   assert.match(sheets, /attr\(child, kAXRoleAttribute\) as\? String, !role\.isEmpty else \{ return false \}/)
   assert.match(sheets, /return role != kAXSheetRole/)
-  assert.equal((broker.match(/hasNoSheetChildren\(/g) ?? []).length, 4)
+  assert.equal((broker.match(/hasNoSheetChildren\(/g) ?? []).length, 5)
   assert(broker.includes('completeSnapshot.refs.values.contains(where: { $0.node["role"] as? String == kAXSheetRole })'))
   assert(broker.includes('$0.node["role"] as? String != kAXSheetRole'))
   assert(helper.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'), 'Only explicit discovery initializes the backend')

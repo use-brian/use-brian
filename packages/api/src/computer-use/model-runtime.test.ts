@@ -119,7 +119,11 @@ describe('native model runtime', () => {
     input.trace = spans[1]!.correlation; await runtime.llm.plan!(input)
     input.trace = spans[2]!.correlation; await runtime.llm.select(input)
     input.trace = spans[3]!.correlation; await runtime.llm.verify!(input)
-    input.trace = spans[4]!.correlation; await runtime.llm.vision!.propose(input)
+    input.trace = spans[4]!.correlation
+    f.grant.goal = input.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    input.observation.captureCohort = 'public-shapes-v1'
+    input.observation.frame = { id: 'frame', width: 1, height: 1, mimeType: 'image/png', data: 'private-frame', bounds: input.observation.bounds, displayLayoutVersion: 'l' }
+    await (await f.runtime())!.llm.vision!.propose(input)
     expect(f.meter).toHaveBeenCalledTimes(15)
     for (const [index, operation] of ['decompose', 'plan', 'next-action', 'verify-progress', 'ground'].entries()) {
       expect(f.meter).toHaveBeenNthCalledWith(3 * index + 3, expect.objectContaining({ operation, stage: 'direct',
@@ -412,93 +416,66 @@ describe('native model runtime', () => {
     await expect(runtime.llm.plan!(f.input())).rejects.toThrow('cancelled')
     expect(f.meter).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed' }))
   })
-  it('grounds frame-relative vision points but never sends frames to text', async () => {
-    const f = fixture([{ steps: [] }, { x: 50, y: 20 }])
+  it.each(['Triangle', 'Circle', 'None'])('actual image adapter and loop freeze Result, never trial another button: %s', async finalValue => {
+    const f = fixture([{ x: 50.5, y: 20.5 }])
     f.target.appId = 'com.usebrian.NativeComputerFixture'
-    const runtime = (await f.runtime())!, input = f.input()
-    input.observation.frame = { id: 'f', data: 'image-sentinel', mimeType: 'image/png', width: 200, height: 100, bounds: input.observation.bounds, displayLayoutVersion: 'l' }
-    await runtime.llm.plan!(input)
-    expect(JSON.stringify(f.requests[0])).not.toContain('image-sentinel')
-    expect(await runtime.llm.vision!.propose(input)).toMatchObject({ kind: 'click', frameId: 'f', x: 50, y: 20 })
-    expect(JSON.stringify(f.requests[1])).toContain('image-sentinel')
-    expect(JSON.stringify(f.meter.mock.calls)).not.toContain('image-sentinel')
-  })
-  it('runs vision-to-AX recovery end to end without treating a click receipt as completion', async () => {
-    const f = fixture([{ steps: [] }, { objectives: [objective('Hello')] }, { x: 50, y: 20 }, { status: 'continue', observationId: 'o4', evidence: [] }, { steps: [{ kind: 'setValue', ref: 'r4', text: 'Hello' }], objectives: [objective('Hello')] }, verified('o5', 'r5', 'Hello')])
-    f.target.appId = 'com.usebrian.NativeComputerFixture'
-    f.options.budget.tokens = 10000000; f.options.budget.costUsd = 1000
-    let clicked = false
-    const execute = f.native.execute
-    f.native.observe = async () => {
-      const o = f.observation()
-      return clicked ? o : { ...o, nodes: [], completeness: 'partial' }
-    }
-    f.native.execute = vi.fn<NativeComputerProvider['execute']>(async (c, signal) => {
-      if (c.action.kind === 'capture') {
-        const o = f.observation()
-        return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: { ...o, completeness: 'partial', nodes: [], frame: { id: 'frame', mimeType: 'image/png', data: 'pixels', width: 200, height: 100, bounds: o.bounds, displayLayoutVersion: 'l' } } }
-      }
-      if (c.action.kind === 'click') clicked = true
-      return execute(c, signal)
-    })
-    const runtime = (await f.runtime())!
-    const result = await new NativeComputerOrchestrator({ ...runtime, provider: f.native }).run({ authority: { grant: f.grant, target: f.target, assertCurrent: async () => {} }, goal: f.grant.goal, signal: f.context.abortSignal, deadlineAt: Date.now() + 60000 })
-    expect(result).toMatchObject({ outcome: 'completed', actions: 2 })
-    expect(f.meter).toHaveBeenCalledTimes(18)
-    expect(f.requests.filter(r => JSON.stringify(r).includes('pixels'))).toHaveLength(1)
-  })
-  it.each([
-    ['darwin', true], ['darwin', false], ['win32', true], ['win32', false],
-  ] as const)('verifies canvas click from fresh read-only %s AX output (counter advanced: %s)', async (platform, advances) => {
-    const role = platform === 'darwin' ? 'AXGroup' : 'ControlType.Text'
-    const property = platform === 'darwin' ? 'value' : 'name'
-    const after = platform === 'darwin' ? 'Canvas clicks: 1' : 'Canvas clicks: 1; selected: true'
-    const name = platform === 'darwin' ? 'Safe custom canvas' : after
-    const f = fixture([
-      { steps: [] }, { objectives: [{ role, name, property, equals: after }] },
-      { x: 100, y: 65 },
-      // Deliberately claims counter 1 even in the contradictory counter-0 cases.
-      { status: 'complete', observationId: 'o4', evidence: [{ ref: 'r4', property, equals: after }] },
-    ])
-    f.target.appId = 'com.usebrian.NativeComputerFixture'
-    f.grant.goal = 'Click the canvas once'
+    f.grant.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
     f.options.budget.tokens = 10000000; f.options.budget.costUsd = 1000
     const status = await f.native.status(f.context.abortSignal)
-    status.capabilities.platform = platform
-    let clicked = false
+    status.capabilities.visualInvokeVersion = 1; status.capabilities.input = false
+    let value = 'None'
     const observe = (): NativeObservation => {
-      const o = f.observation(), count = clicked && advances ? 1 : 0
-      const text = platform === 'darwin' ? `Canvas clicks: ${count}` : `Canvas clicks: ${count}; selected: ${count === 1}`
-      return { ...o, nodes: [{ ...o.nodes[0]!, role, name: platform === 'darwin' ? name : text, value: platform === 'darwin' ? text : undefined, actions: [] }] }
+      const o = f.observation()
+      return { ...o, captureCohort: 'public-shapes-v1', nodes: [
+        { ...o.nodes[0]!, role: 'AXStaticText', name: 'Result', value, actions: [] },
+        { ...o.nodes[0]!, ref: 'slot', role: 'AXButton', name: 'Option 1', value: undefined, actions: ['invoke'] },
+      ] }
     }
     f.native.observe = async () => observe()
-    const order: string[] = []
     f.native.execute = vi.fn<NativeComputerProvider['execute']>(async c => {
-      order.push(c.action.kind)
       if (c.action.kind === 'capture') {
         const o = observe()
-        return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: { ...o, frame: { id: 'frame', mimeType: 'image/png', data: 'private-canvas-pixels', width: 200, height: 100, bounds: o.bounds, displayLayoutVersion: 'l' } } }
+        return { commandId: c.commandId, outcome: 'executed', code: 'ok', observation: { ...o,
+          frame: { id: 'frame', mimeType: 'image/png', data: 'pixels', width: 200, height: 100, bounds: o.bounds, displayLayoutVersion: 'l' } } }
       }
-      if (c.action.kind === 'click') clicked = true
+      expect(c.action).toMatchObject({ kind: 'visualInvoke', frameId: 'frame', x: 50.5, y: 20.5 })
+      value = finalValue
       await new Promise(r => setTimeout(r, 2))
       return { commandId: c.commandId, outcome: 'executed', code: 'ok' }
     })
-    const stream = f.provider.stream.bind(f.provider)
-    f.provider.stream = async function* (request) {
-      if (request.systemPrompt?.includes('Decompose the ENTIRE')) {
-        order.push('decompose')
-        expect(JSON.stringify(request)).not.toContain('private-canvas-pixels')
-      }
-      yield* stream(request)
-    }
-    const runtime = (await f.runtime())!
-    const result = await new NativeComputerOrchestrator({ ...runtime, provider: f.native }).run({ authority: { grant: f.grant, target: f.target, assertCurrent: async () => {} }, goal: f.grant.goal, signal: f.context.abortSignal, deadlineAt: Date.now() + 60000 })
-    expect(result).toMatchObject({ outcome: advances ? 'completed' : 'paused', actions: 1 })
-    expect(order).toEqual(['decompose', 'capture', 'click'])
-    expect(f.requests).toHaveLength(4)
-    expect(f.meter).toHaveBeenCalledTimes(12)
-    expect(f.requests.filter(r => JSON.stringify(r).includes('private-canvas-pixels'))).toHaveLength(1)
-    expect(JSON.stringify(f.requests[1])).not.toContain('private-canvas-pixels')
+    const runtime = (await f.runtime())!, loop = new NativeComputerOrchestrator({ ...runtime, provider: f.native })
+    const opts = { authority: { grant: f.grant, target: f.target, assertCurrent: async () => {} }, goal: f.grant.goal, signal: f.context.abortSignal, deadlineAt: Date.now() + 60000, maxActions: 20 }
+    expect(await loop.run(opts)).toMatchObject({ outcome: finalValue === 'Triangle' ? 'completed' : 'paused', actions: 1 })
+    expect(await loop.run(opts)).toMatchObject({ outcome: 'paused', actions: 0 })
+    expect(f.native.execute).toHaveBeenCalledTimes(2)
+    expect(f.requests).toHaveLength(1)
+    expect(f.requests[0]).toMatchObject({ nativeStrict: true, allowProviderFallback: false, model: 'test' })
+    expect(requestContext(f.requests[0]!).objectives).toEqual([{ role: 'AXStaticText', name: 'Result', property: 'value', equals: 'Triangle' }])
+    expect(f.meter).toHaveBeenCalledTimes(3)
+    expect(JSON.stringify(f.meter.mock.calls)).not.toContain('pixels')
+  })
+  it.each([null, { x: -1, y: 0 }, { x: 200, y: 0 }, { x: 0, y: 100 }, { x: 1, y: 1, ref: 'slot' }, { x: '1', y: 1 }])('strict actual grounder proposal %j', async proposal => {
+    const f = fixture([proposal])
+    f.target.appId = 'com.usebrian.NativeComputerFixture'
+    f.grant.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    const runtime = (await f.runtime())!, input = f.input()
+    input.observation.captureCohort = 'public-shapes-v1'
+    input.observation.frame = { id: 'f', data: 'pixels', mimeType: 'image/png', width: 200, height: 100, bounds: input.observation.bounds, displayLayoutVersion: 'l' }
+    if (proposal === null) expect(await runtime.llm.vision!.propose(input)).toBeNull()
+    else await expect(runtime.llm.vision!.propose(input)).rejects.toThrow()
+    expect(f.meter).toHaveBeenCalledTimes(3)
+  })
+  it('latches visual scope against ordinary/generated effects and marker disappearance', async () => {
+    const f = fixture([])
+    f.target.appId = 'com.usebrian.NativeComputerFixture'
+    f.grant.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    const runtime = (await f.runtime())!, input = f.input()
+    input.observation.captureCohort = 'public-shapes-v1'
+    expect(await runtime.llm.plan!(input)).toEqual([])
+    expect(runtime.policy!.allows({ kind: 'invoke', target: f.target, observationId: input.observation.id, ref: input.observation.nodes[0]!.ref }, input.observation)).toBe(false)
+    delete input.observation.captureCohort
+    await expect(runtime.llm.plan!(input)).rejects.toThrow()
+    expect(f.requests).toHaveLength(0)
   })
   it('retains the requested selector and reports only native evidence as actual completion identity', async () => {
     const f = fixture([]), requestedModel = 'requested-alias', model = 'resolved-model-v2'
@@ -576,11 +553,11 @@ describe('native model runtime', () => {
     expect(f.meter).toHaveBeenCalledWith(expect.objectContaining({ model: 'exact-route', outcome: 'ok' }))
   })
   it('rejects out-of-frame coordinates and oversized generated text', async () => {
-    const f = fixture([{ x: 200, y: 0 }, { steps: [{ kind: 'setValue', ref: 'r1', text: 'x'.repeat(2049) }] }])
+    const f = fixture([{ steps: [{ kind: 'setValue', ref: 'r1', text: 'x'.repeat(2049) }] }])
     f.target.appId = 'com.usebrian.NativeComputerFixture'
     const runtime = (await f.runtime())!, input = f.input()
     input.observation.frame = { id: 'f', data: '', mimeType: 'image/png', width: 200, height: 100, bounds: input.observation.bounds, displayLayoutVersion: 'l' }
-    await expect(runtime.llm.vision!.propose(input)).rejects.toThrow()
+    expect(await runtime.llm.vision!.propose(input)).toBeNull()
     await expect(runtime.llm.plan!(input)).rejects.toThrow()
   })
   it('meters provider failures without leaking raw errors', async () => {

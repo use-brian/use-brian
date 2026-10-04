@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ActionSchema, BoundsSchema, CapabilitiesSchema, ClientMessageSchema, CommandSchema, FrameSchema, GrantSchema, IdentitySchema, NATIVE_PROTOCOL, ObservationSchema, ReceiptSchema, ServerMessageSchema, StatusSchema, TargetSchema, MAX_MESSAGE_BYTES, framePoint, parseMessage, sameIdentity, sameTarget } from '../protocol.js'
+import { VisualApprovalSchema, ActionSchema, BoundsSchema, CapabilitiesSchema, ClientMessageSchema, CommandSchema, FrameSchema, GrantSchema, IdentitySchema, NATIVE_PROTOCOL, ObservationSchema, ReceiptSchema, ServerMessageSchema, StatusSchema, TargetSchema, MAX_MESSAGE_BYTES, framePoint, parseMessage, sameIdentity, sameTarget } from '../protocol.js'
 
 const identity = { deploymentId: 'd', userId: 'u', workspaceId: 'w', deviceId: 'dev', sessionId: 's', conversationId: 'c', taskId: 't' }
 const target = { appId: 'editor', processId: 1, processInstanceId: 'pi', windowId: 'w', windowInstanceId: 'wi' }
@@ -27,6 +27,30 @@ describe('native shared protocol', () => {
   it.each([GrantSchema, CommandSchema, CapabilitiesSchema, StatusSchema])('rejects missing and unsupported protocol versions', schema => {
     const value = schema === GrantSchema ? grant : schema === CommandSchema ? command : schema === CapabilitiesSchema ? capabilities : status
     for (const protocol of [undefined, 'native-computer-v2', 'browser-v1']) expect(schema.safeParse({ ...value, protocol }).success).toBe(false)
+  })
+  it('keeps visual support explicit, optional and separate from raw input', () => {
+    expect(CapabilitiesSchema.parse(capabilities).visualInvokeVersion).toBeUndefined()
+    expect(CapabilitiesSchema.parse({ ...capabilities, input: false, visualInvokeVersion: 1 }).input).toBe(false)
+    for (const visualInvokeVersion of [0, 2, true, '1', null]) {
+      expect(CapabilitiesSchema.safeParse({ ...capabilities, visualInvokeVersion }).success).toBe(false)
+    }
+    expect(ObservationSchema.parse({ ...observation, captureCohort: 'public-shapes-v1' }).captureCohort).toBe('public-shapes-v1')
+    for (const captureCohort of ['public', 'safe-canvas', true, null]) {
+      expect(ObservationSchema.safeParse({ ...observation, captureCohort }).success).toBe(false)
+    }
+  })
+  it('validates visual proposals separately from native resolved approval', () => {
+    const action = { kind: 'visualInvoke', target, observationId: 'o', frameId: 'f', x: 10.5, y: 20.5 }
+    expect(ActionSchema.parse(action)).toEqual(action)
+    expect(CommandSchema.parse({ ...command, action }).action).toEqual(action)
+    for (const patch of [{ x: -1 }, { x: NaN }, { y: Infinity }, { frameId: '' }, { ref: 'forged' }, { bindingId: 'forged' }, { safe: true }]) {
+      expect(ActionSchema.safeParse({ ...action, ...patch }).success).toBe(false)
+    }
+    const approval = { bindingId: 'b', commandId: 'cmd', frameId: 'f', action: { kind: 'invoke', target, observationId: 'o', ref: 'native-ref' } }
+    expect(VisualApprovalSchema.parse(approval)).toEqual(approval)
+    for (const value of [true, false, { ...approval, bindingId: '' }, { ...approval, approved: true }, { ...approval, action }, { ...approval, action: { ...approval.action, x: 1 } }]) {
+      expect(VisualApprovalSchema.safeParse(value).success).toBe(false)
+    }
   })
   it('rejects unknown wire messages and nested extra fields', () => {
     expect(ClientMessageSchema.safeParse({ type: 'hello', protocol: 'native-computer-v2', token: 'x' }).success).toBe(false)

@@ -7,6 +7,10 @@ import plist from "plist";
 
 export const nativeHelperRelativePath =
   "Contents/Resources/computer-control/brian-native-computer-helper";
+export const nativeFixtureRelativePath =
+  "Contents/Resources/computer-control/NativeComputerFixture.app";
+export const nativeFixtureExecutableRelativePath =
+  `${nativeFixtureRelativePath}/Contents/MacOS/NativeComputerFixture`;
 export const nativeHelperEntitlements = fileURLToPath(
   new URL("../build/entitlements.native-computer.plist", import.meta.url),
 );
@@ -60,17 +64,26 @@ function perFile(value) {
 
 // Run both before notarization and during final afterSign verification. Missing
 // output is not proof of entitlement absence; require the signed empty profile.
-export function verifyNativeHelperEntitlements(helper) {
-  const result = spawnSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', helper],
+function verifyEmptyNativeEntitlements(target, name) {
+  const result = spawnSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', target],
     { encoding: 'utf8', timeout: 120000, maxBuffer: 64 * 1024 });
   let policy;
   try {
     if (result.status !== 0 || typeof result.stdout !== 'string' || !result.stdout.trim()) throw new Error();
     policy = plist.parse(result.stdout);
-  } catch { throw new Error('Could not verify native helper entitlements'); }
+  } catch { throw new Error(`Could not verify ${name.toLowerCase()} entitlements`); }
   if (!policy || Object.getPrototypeOf(policy) !== Object.prototype || Object.keys(policy).length !== 0) {
-    throw new Error('Native helper requires the empty entitlement profile');
+    throw new Error(`${name} requires the empty entitlement profile`);
   }
+}
+
+export function verifyNativeHelperEntitlements(helper) {
+  verifyEmptyNativeEntitlements(helper, "Native helper");
+}
+
+export function verifyNativeFixtureEntitlements(bundle) {
+  verifyEmptyNativeEntitlements(bundle, "Native fixture");
+  verifyEmptyNativeEntitlements(`${bundle}/Contents/MacOS/NativeComputerFixture`, "Native fixture executable");
 }
 
 /**
@@ -79,10 +92,10 @@ export function verifyNativeHelperEntitlements(helper) {
  * No signing, credentials, platform commands, or authority/barrier changes.
  *
  * Paths must exist in the finished, quiescent package. Read-only realpath checks
- * reject helper aliases/symlinks rather than silently signing them as Electron.
+ * reject native aliases/symlinks rather than silently signing them as Electron.
  * This is not a race-proof filesystem sandbox or proof of a signed package.
  * The caller still owns traversal/ignore selection and final signature checks;
- * it must actually submit the helper for signing, not ignore/skip it.
+ * it must actually submit the helper and fixture for signing, not ignore/skip it.
  */
 export function withNativeHelperSigningPolicy(signOptions, appPath) {
   record(signOptions, signKeys);
@@ -94,28 +107,39 @@ export function withNativeHelperSigningPolicy(signOptions, appPath) {
   }
   const original = signOptions.optionsForFile;
   if (original !== undefined && typeof original !== "function") fail("unsupported optionsForFile");
-  const helper = `${appPath}/${nativeHelperRelativePath}`;
   const realApp = fs.realpathSync(appPath);
-  const realHelper = fs.realpathSync(helper);
-  if (realHelper !== `${realApp}/${nativeHelperRelativePath}` ||
-      !fs.lstatSync(helper).isFile()) fail("helper path alias or non-file");
+  const protectedPaths = [
+    [nativeHelperRelativePath, false],
+    [nativeFixtureRelativePath, true],
+    [nativeFixtureExecutableRelativePath, false],
+  ].map(([relative, directory]) => {
+    const lexical = `${appPath}/${relative}`;
+    const resolved = fs.realpathSync(lexical);
+    const stat = fs.lstatSync(lexical);
+    if (resolved !== `${realApp}/${relative}` ||
+        !(directory ? stat.isDirectory() : stat.isFile())) {
+      fail("native path alias or non-file/directory");
+    }
+    return { lexical, resolved };
+  });
 
   return {
     ...signOptions,
     optionsForFile(filePath) {
       canonicalPath(filePath);
-      // Case-insensitive volumes and symlinks must not turn a different lexical
-      // path into the helper, nor turn the exact helper path into another file.
-      const isHelper = filePath === helper;
+      // Reject aliases for either fixture signing target as well as the helper.
+      const isNative = protectedPaths.some(({ lexical }) => filePath === lexical);
       const resolved = fs.realpathSync(filePath);
-      if ((isHelper && resolved !== realHelper) ||
-          (!isHelper && (resolved === realHelper ||
-            filePath.toLowerCase() === helper.toLowerCase()))) fail("helper path confusion");
+      for (const target of protectedPaths) {
+        if ((filePath === target.lexical && resolved !== target.resolved) ||
+            (filePath !== target.lexical && (resolved === target.resolved ||
+              filePath.toLowerCase() === target.lexical.toLowerCase()))) fail("native path confusion");
+      }
       const options = original === undefined ? undefined : original.call(signOptions, filePath);
       perFile(options); // In particular, never accept a Promise from an async callback.
-      if (!isHelper) return options; // Preserve identity and every supported option.
+      if (!isNative) return options; // Preserve identity and every supported option.
       // Do not spread Electron's per-file options. Explicitly clear raw arguments
-      // and signature flags; neither may override the closed helper policy.
+      // and signature flags; neither may override the closed native policy.
       return {
         entitlements: nativeHelperEntitlements,
         hardenedRuntime: true,

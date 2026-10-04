@@ -168,7 +168,7 @@ it("[COMP:app-web/native-computer] explicit readiness remains available when con
 
 const fullCapabilities: NativeStatus["capabilities"] = {
   protocol: "native-computer-v1", platform: "darwin", axRead: true,
-  semanticActions: true, windowCapture: true, input: true,
+  semanticActions: true, windowCapture: true, input: false, visualInvokeVersion: 1,
   accessibilityPermission: "granted", capturePermission: "granted", limitations: [],
 };
 async function fillInspectorForm(el: HTMLElement) {
@@ -209,9 +209,9 @@ it.each([true, false])("[COMP:app-web/native-computer] observation-only caps (ax
   } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
 });
 
-it.each(["input", "windowCapture"] as const)("[COMP:app-web/native-computer] missing %s keeps semantic control available but never requests screenshot fallback", async missing => {
+it.each(["visualInvokeVersion", "windowCapture"] as const)("[COMP:app-web/native-computer] missing %s keeps semantic control available but never requests screenshot fallback", async missing => {
   setup.populated = true;
-  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: { ...fullCapabilities, [missing]: false } };
+  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: { ...fullCapabilities, [missing]: missing === "visualInvokeVersion" ? undefined : false } };
   const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
   const control = vi.fn<ComputerControl>().mockImplementation(async () => ({ ok: true, status, targets: [target] }));
   window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
@@ -232,7 +232,7 @@ it.each(["input", "windowCapture"] as const)("[COMP:app-web/native-computer] mis
   } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
 });
 
-it.each(["control", "capture", "input"] as const)("[COMP:app-web/native-computer] rejects stale %s requests and visibly clears unsupported preferences", async lost => {
+it.each(["control", "capture", "visual"] as const)("[COMP:app-web/native-computer] rejects stale %s requests and visibly clears unsupported preferences", async lost => {
   setup.populated = true;
   let status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: fullCapabilities };
   const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
@@ -247,7 +247,7 @@ it.each(["control", "capture", "input"] as const)("[COMP:app-web/native-computer
     await act(async () => boxes()[0].click());
     await act(async () => boxes()[1].click());
     expect(boxes().map(b => b.getAttribute("aria-checked"))).toEqual(["true", "true"]);
-    status = { ...status, epoch: 2, capabilities: { ...fullCapabilities, semanticActions: lost !== "control", windowCapture: lost !== "capture", input: lost !== "input" } };
+    status = { ...status, epoch: 2, capabilities: { ...fullCapabilities, semanticActions: lost !== "control", windowCapture: lost !== "capture", visualInvokeVersion: lost === "visual" ? undefined : 1 } };
     // Simulate the live store changing before React has rendered the new caps.
     const snapshot = vi.spyOn(nativeComputer, "snapshot").mockReturnValue({ ok: true, status });
     try {
@@ -370,5 +370,112 @@ it("[COMP:app-web/native-computer] changing assistant requires choosing the task
     expect(start().disabled).toBe(false);
     await act(async () => start().click());
     expect(control).toHaveBeenCalledWith(expect.objectContaining({ type: "start", assistantId: "a2", conversationId: "c2", taskId: "t" }));
+  } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
+});
+
+it("[COMP:app-web/native-computer] verification requires explicit native approval, never promotes inspector, and Stop clears confirmation", async () => {
+  let finish!: (value: Awaited<ReturnType<ComputerControl>>) => void;
+  let consented = false;
+  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: fullCapabilities };
+  const control = vi.fn<ComputerControl>().mockImplementation(m => m.type === "acknowledge-verification"
+    ? new Promise(resolve => { finish = resolve; })
+    : Promise.resolve({ ok: true, status, ...(m.type === "status" ? { verificationAvailable: true, verificationConsented: consented } : {}) }));
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); const root = createRoot(el);
+  const button = (label: string) => Array.from(el.querySelectorAll("button")).find(b => b.textContent === label);
+  try {
+    await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
+    expect(button(en.nativeComputer.verificationAcknowledge)).toBeUndefined();
+    await act(async () => { await nativeComputer.check(); });
+    expect(button(en.nativeComputer.verificationAcknowledge)?.disabled).toBe(false);
+    expect(control).not.toHaveBeenCalledWith({ type: "acknowledge-verification" });
+    await act(async () => button(en.nativeComputer.verificationAcknowledge)!.click());
+    expect(button(en.nativeComputer.verificationAcknowledge)?.disabled).toBe(true);
+    expect(button(en.nativeComputer.stop)?.disabled).toBe(false);
+    expect(el.textContent).not.toContain(en.nativeComputer.verificationConfirmed);
+    await act(async () => finish({ ok: false }));
+    expect(el.textContent).not.toContain(en.nativeComputer.verificationConfirmed);
+    expect(el.textContent).toContain(en.nativeComputer.error);
+    await act(async () => button(en.nativeComputer.verificationAcknowledge)!.click());
+    consented = true;
+    await act(async () => finish({ ok: true, verificationConsented: true }));
+    expect(el.textContent).toContain(en.nativeComputer.verificationConfirmed);
+    expect(Array.from(el.querySelectorAll('[role="checkbox"]')).map(b => b.getAttribute("aria-checked"))).toEqual(["false", "false"]);
+    consented = false;
+    await act(async () => button(en.nativeComputer.stop)!.click());
+    expect(el.textContent).not.toContain(en.nativeComputer.verificationConfirmed);
+    expect(control.mock.calls.some(([m]) => m.type === "start" || m.type === "resume")).toBe(false);
+  } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); }
+});
+
+it.each([false, true])("[COMP:app-web/native-computer] visual AX with input=false requires explicit capture consent (%s), reset by Stop", async capture => {
+  setup.populated = true;
+  const status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: fullCapabilities };
+  const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
+  const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: true, status, targets: [target] });
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); document.body.append(el); const root = createRoot(el);
+  const boxes = () => Array.from(el.querySelectorAll<HTMLElement>('[role="checkbox"]'));
+  try {
+    await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
+    await fillInspectorForm(el);
+    expect(boxes()[1].getAttribute("aria-disabled")).toBe("true");
+    await act(async () => boxes()[0].click());
+    expect(boxes()[1].getAttribute("aria-disabled")).not.toBe("true");
+    expect(boxes()[1].getAttribute("aria-checked")).toBe("false");
+    if (capture) await act(async () => boxes()[1].click());
+    await act(async () => Array.from(el.querySelectorAll("button")).find(b => b.textContent === en.nativeComputer.start)!.click());
+    expect(control).toHaveBeenCalledWith(expect.objectContaining({ type: "start", allowControl: true, allowCapture: capture }));
+    // Coordinator Stop also resets form consent, even if status stays ready.
+    await act(async () => { await nativeComputer.stop(); });
+    expect(boxes().map(b => b.getAttribute("aria-checked"))).toEqual(["false", "false"]);
+  } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
+});
+
+it.each(["stopped", "paused_for_user", "ended", "unavailable", "permission_required"] as const)("[COMP:app-web/native-computer] main poll entering %s resets opt-ins once with unchanged capabilities and verification", async terminal => {
+  setup.populated = true;
+  let status: NativeStatus = { protocol: "native-computer-v1", state: "ready", epoch: 1, capabilities: fullCapabilities };
+  const target = { appId: "app", processId: 1, processInstanceId: "p", windowId: "win", windowInstanceId: "wi", displayName: "Document" };
+  const control = vi.fn<ComputerControl>().mockImplementation(async () => ({ ok: true, status, targets: [target], verificationConsented: true, cleanupPending: false }));
+  window.usebrianDesktop = { signIn: vi.fn(), computerControl: control };
+  await nativeComputer.enter("w");
+  const el = document.createElement("div"); document.body.append(el); const root = createRoot(el);
+  const boxes = () => Array.from(el.querySelectorAll<HTMLElement>('[role="checkbox"]'));
+  const checked = () => boxes().map(b => b.getAttribute("aria-checked"));
+  const optIn = async () => {
+    await act(async () => boxes()[0].click());
+    await act(async () => boxes()[1].click());
+    expect(checked()).toEqual(["true", "true"]);
+  };
+  const poll = async (phase: NativeStatus["state"]) => {
+    status = { ...status, state: phase };
+    await act(async () => { await nativeComputer.check(); });
+  };
+  try {
+    await act(async () => root.render(<NativeComputerPage workspaceId="w" />));
+    await fillInspectorForm(el);
+    await optIn();
+    const revision = nativeComputer.setupRevision;
+    await poll("active");
+    expect(checked()).toEqual(["true", "true"]);
+    await poll(terminal);
+    expect(checked()).toEqual(["false", "false"]);
+    expect(nativeComputer.setupRevision).toBe(revision);
+    expect(nativeComputer.snapshot()).toMatchObject({ verificationConsented: true, cleanupPending: false, status: { capabilities: fullCapabilities } });
+    await optIn();
+    await poll(terminal);
+    await poll(terminal);
+    expect(checked()).toEqual(["true", "true"]);
+    // A different terminal phase is a new reset, not just a boolean edge.
+    await poll(terminal === "stopped" ? "paused_for_user" : "stopped");
+    expect(checked()).toEqual(["false", "false"]);
+    await optIn();
+    await poll("ready");
+    expect(checked()).toEqual(["true", "true"]);
+    await poll(terminal);
+    expect(checked()).toEqual(["false", "false"]);
+    expect(control.mock.calls.some(([m]) => ["stop", "disconnect", "start", "resume"].includes(m.type))).toBe(false);
   } finally { await act(async () => { root.unmount(); await nativeComputer.leave(); }); el.remove(); }
 });

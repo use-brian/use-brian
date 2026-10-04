@@ -28,6 +28,77 @@ final class SafeCanvas: NSView {
     }
 }
 final class CanvasWindow: NSWindow { override var canBecomeKey: Bool { true } }
+// Closed public renderer. The permutation is private window-lifetime state;
+// accessibility exposes only neutral slot names, never a shape/map/seed.
+private enum PublicShape: CaseIterable { case triangle, circle, square
+    var result: String { switch self { case .triangle: return "Triangle"; case .circle: return "Circle"; case .square: return "Square" } }
+}
+private final class PublicShapeButton: NSButton {
+    let shape: PublicShape
+    init(slot: Int, shape: PublicShape) {
+        self.shape = shape
+        super.init(frame: NSRect(x: 30 + slot * 150, y: 60, width: 120, height: 100))
+        title = "Option \(slot + 1)"; setButtonType(.momentaryPushIn)
+        isBordered = false; focusRingType = .none
+        setAccessibilityIdentifier("slot-\(slot + 1)"); setAccessibilityLabel(title)
+    }
+    required init?(coder: NSCoder) { fatalError("unsupported") }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.setFill(); bounds.fill(); NSColor.black.setStroke()
+        let r = NSRect(x: 36, y: 36, width: 48, height: 48)
+        let path: NSBezierPath
+        switch shape {
+        case .circle: path = NSBezierPath(ovalIn: r)
+        case .square: path = NSBezierPath(rect: r)
+        case .triangle:
+            path = NSBezierPath(); path.move(to: NSPoint(x: 60, y: 84))
+            path.line(to: NSPoint(x: 36, y: 36)); path.line(to: NSPoint(x: 84, y: 36)); path.close()
+        }
+        path.lineWidth = 2; path.stroke()
+        (title as NSString).draw(at: NSPoint(x: 32, y: 10), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.black])
+    }
+}
+private final class PublicShapesContent: NSView {
+    override var isFlipped: Bool { true }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setAccessibilityElement(true); setAccessibilityRole(.group)
+        setAccessibilityIdentifier("public-shapes-content-v1"); setAccessibilityLabel("Public shapes")
+    }
+    required init?(coder: NSCoder) { fatalError("unsupported") }
+    override func draw(_ dirtyRect: NSRect) { NSColor.white.setFill(); bounds.fill() }
+}
+private final class PublicShapesDelegate: NSObject, NSApplicationDelegate {
+    private var window: NSWindow!
+    private let result = NSTextField(labelWithString: "Result: None")
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // No caller-controlled content or layout, including evaluation arguments.
+        guard Array(ProcessInfo.processInfo.arguments.dropFirst()) == ["--variant", "visual-invoke-v1"] else { NSApp.terminate(nil); return }
+        window = CanvasWindow(contentRect: NSRect(x: 100, y: 300, width: 480, height: 240),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.title = "Brian Public Shapes v1"; window.setAccessibilityIdentifier("brian-public-shapes-v1")
+        window.isOpaque = true; window.backgroundColor = .white; window.hasShadow = false
+        let content = PublicShapesContent(frame: NSRect(x: 0, y: 0, width: 480, height: 240))
+        window.contentView = content
+        for (slot, shape) in PublicShape.allCases.shuffled().enumerated() {
+            let button = PublicShapeButton(slot: slot, shape: shape)
+            button.target = self; button.action = #selector(activate(_:)); content.addSubview(button)
+        }
+        result.frame = NSRect(x: 30, y: 190, width: 420, height: 24)
+        result.font = .systemFont(ofSize: 12); result.textColor = .black
+        result.setAccessibilityIdentifier("public-shapes-result-v1")
+        result.setAccessibilityLabel("Result"); result.setAccessibilityValue("None")
+        content.addSubview(result)
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    @objc private func activate(_ sender: PublicShapeButton) {
+        result.stringValue = "Result: " + sender.shape.result
+        result.setAccessibilityValue(sender.shape.result)
+        NSAccessibility.post(element: result, notification: .valueChanged)
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
 final class FixtureDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var canvas: NSWindow!
@@ -299,7 +370,9 @@ final class EvaluationCanvas: NSView {
     }
 }
 let app = NSApplication.shared
-let delegate: NSApplicationDelegate = ProcessInfo.processInfo.arguments.dropFirst().contains(where: { $0.hasPrefix("--eval-") }) ? EvaluationDelegate() : FixtureDelegate()
+let args = Array(ProcessInfo.processInfo.arguments.dropFirst())
+let delegate: NSApplicationDelegate = args.contains("visual-invoke-v1") ? PublicShapesDelegate() :
+    (args.contains(where: { $0.hasPrefix("--eval-") }) ? EvaluationDelegate() : FixtureDelegate())
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

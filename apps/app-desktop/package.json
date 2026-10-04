@@ -24,7 +24,7 @@
     "package": "pnpm run build:renderer && pnpm run build && pnpm run build:native-computer && pnpm run build:siri && electron-builder --mac",
     "package:win": "pnpm run build:renderer && pnpm run build && pnpm run build:native-computer:win && electron-builder --win --x64 --publish never",
     "package:linux": "pnpm run build:renderer && pnpm run build && pnpm run build:native-computer:linux && electron-builder --linux AppImage --publish never",
-    "test:mac-bootstrap": "node --test scripts/electron-fuses.test.mjs scripts/build-native-computer.test.mjs scripts/mac-asar-integrity.test.mjs scripts/mac-bootstrap-anchor.test.mjs scripts/mac-bootstrap-inventory.test.mjs scripts/mac-bootstrap-inventory-verifier.test.mjs scripts/mac-library-constraints.test.mjs scripts/mac-library-constraint-policy.test.mjs scripts/mac-native-signing-policy.test.mjs scripts/mac-packaged-admission-check.test.mjs"
+    "test:mac-bootstrap": "node --test scripts/electron-fuses.test.mjs scripts/build-native-computer.test.mjs scripts/mac-asar-integrity.test.mjs scripts/mac-bootstrap-anchor.test.mjs scripts/mac-visual-fixture-pin.test.mjs scripts/mac-bootstrap-inventory.test.mjs scripts/mac-bootstrap-inventory-verifier.test.mjs scripts/mac-library-constraints.test.mjs scripts/mac-library-constraint-policy.test.mjs scripts/mac-native-signing-policy.test.mjs scripts/mac-release-bootstrap.test.mjs scripts/mac-packaged-admission-check.test.mjs"
   },
   "devDependencies": {
     "@electron/asar": "3.4.1",
