@@ -1,4 +1,18 @@
-# Screenshot-guided AX: Task C feasibility gate
+# Screenshot-guided AX — implemented design and historical feasibility
+
+## CURRENT disposition
+
+**Source-ready; signed Mac/native/provider verification pending.** The user approved accessibility-backed workflows including screenshot-guided AX, explicitly deferred the original no-AX canvas, accepted ordinary **best-effort Stop including action handoff**, and approved temporary explicitly consented packaged verification before pilot acceptance. No atomic AX send/cancel guarantee is required or claimed. Existing authority checks, deadlines, watchdogs and independent Stop remain; late results cannot resume work and uncertain actions cannot replay.
+
+The former empty capture/action intersection is resolved **only for the reviewed public-shapes cohort**, not by broadening arbitrary capture. `Fixture.swift --variant visual-invoke-v1` supplies neutral ordinary AX buttons and an AX result; screenshot grounding uses the exact goal **Activate the outlined triangle; finish when Result is Triangle.** The normal signing workflow pins the signed fixture's CDHashes into the helper before signing it and sealing the outer app. Native resolution, typed private exact approval, original five-second frame/observation lifetime and one capture/invoke attempt are implemented. `input=false`; no raw emitter is restored.
+
+Main/web `acknowledge-verification` supplies temporary explicit verification consent on enabled packaged Mac without asserting `PILOT_ACCEPTED`; normal authorization and capture/action grants still apply. The configured model/image policy and budgets remain unchanged; refusals are recorded, not bypassed.
+
+See the [implemented contract](native-computer-visual-invoke-contract.md), [current plan](plans/electron-native-computer-use.md) and [evidence ledger](native-computer-acceptance.md). The **only active final Mac checklist** is [the operator handoff](native-computer-mac-handoff.md). No operator coding or new provider/backend work is requested.
+
+## Historical feasibility record — `abdcc89f75241a753cf17dcbe0498740d1bb4e41`
+
+**Everything below is revision-pinned historical analysis, not current blockers or instructions.** Its capture-intersection conclusion describes the old safe-canvas-only policy. Its sent-only Stop approval and requirement for atomic dispatch were superseded by the explicit best-effort handoff decision above; the narrower public cohort and no-AX deferral were subsequently approved and implemented. Preserve the public API limitations and earlier findings without treating them as unwritten features or a second acceptance checklist.
 
 ## Decision and scope
 

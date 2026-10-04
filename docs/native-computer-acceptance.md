@@ -1,6 +1,41 @@
 # Native computer acceptance evidence
 
-**Active delivery scope: the [macOS release plan](plans/electron-native-computer-use.md), revised at the user's direction.** Windows/Linux, broad comparative benchmarks, a separate vision-only baseline and generalized observer/attestation infrastructure are deferred, not release gates. Vision fallback means sending an approved selected-window screenshot to the existing configured image-capable LLM, not building a CV subsystem. Concrete admission, consent, Stop, input ownership, privacy, fresh modal authorization and real workflow/provider checks remain required. The user has an existing working Electron signing certificate/workflow; certificate provisioning is not a blocker or workstream. The records below preserve historical results and broader requirements, not a second active release checklist. The user will run Mac tests personally. The user subsequently authorized a work-in-progress feature-branch commit/push so the Mac checkout can fetch fixes directly. This is not release completion; a release PR remains conditional on verified release scope. Release/acceptance gates remain off. Current source and gating status are recorded below; older probe-only records are historical.
+## CURRENT — implemented approved visual AX; native acceptance pending
+
+**Source-ready, not release-complete.** User decisions approve accessibility-backed workflows including screenshot-guided AX, defer the original no-AX canvas, accept normal best-effort Stop **including action handoff**, and allow separately consented packaged-Mac verification before pilot acceptance. The old `abdcc89f` feasibility/admission blockers below are historical and superseded for this approved cohort/Stop contract, not erased evidence. No release flags enabled; no pilot acceptance claimed.
+
+Implemented: `--variant visual-invoke-v1`, exact goal **Activate the outlined triangle; finish when Result is Triangle.**, signed-helper-pinned reviewed public renderer, optional version/cohort fields, typed private native-resolved exact AX approval, original five-second evidence ages, one capture/invoke attempt, unchanged configured image policy/budget, no emitter/uncertain replay, and main/web `acknowledge-verification` with normal grants and terminal/context reset. See [contract](native-computer-visual-invoke-contract.md). The **single active final Mac checklist** is [the operator handoff](native-computer-mac-handoff.md); all older checklists here are historical ledger entries.
+
+### Current source verification (parent runs; overlapping selections, do not sum)
+
+Implementation commit: `3a2bf7e4`.
+
+| Scope | Actual evidence |
+| --- | --- |
+| Native/build Node | 671 passed |
+| Desktop | 1,166 passed / 54 files, including three pre-existing untracked CI tests |
+| Core | 179 passed / 5 files |
+| API native units | 284 passed / 12 files |
+| API HTTP/WebSocket E2E and routes | 25 passed / 2 files, including real concrete-runtime visual invocation over synthetic loopback transport |
+| Shared protocol | 39 passed / 4 files |
+| Foundation wire / lazy dispatcher | 1,285 wire vectors / 2,706 dispatcher responses |
+| Timing schema | 2,757 Foundation-generated private envelopes, 946 timed; no native delivery evidence |
+| Semantic policy / extracted Broker lifecycle | 550 / 1,628 passed with fake native dependencies |
+| Visual | 262 production-policy and extracted actual begin/end/consume/execute checks passed; fake native dependencies |
+| Swift | arm64 Mac-target syntax parse passed; no Mac SDK typecheck |
+| Relevant typechecks | All seven passed: shared computer-control, core, API, desktop, web, web desktop-renderer and relay |
+| Reviews | Findings addressed across native, packaging, core and UI; terminal opt-in reset has five regressions, and final packaging review closed fixture entitlement inheritance |
+| Web computer/control surfaces | 131 passed / 11 files |
+| Relay | 50 passed / 4 files |
+| Builds | Shared protocol, core, API, desktop main/assets, relay and desktop renderer passed; renderer retains large-chunk/mixed-import warnings |
+
+Logs: `/tmp/native-visual-final/`. `foundation.log` retains an initial visual harness failure (`approved production execute`, SIGILL); it is **not an all-green aggregate**. The subsequent `visual.log` reports 262 passing checks including actual extracted execute/replay/Stop-after-entry, plus 550 semantic and 1,628 lifecycle checks. Preserve both attempts rather than erase the failure or count successive 149/229/262 visual subtotals as independent suites. Initial transport regressions still expected retired click execution; they now exercise supported visual invocation with success/wrong-result and capability-downgrade readback assertions preserved, plus an explicit retired-canvas refusal. The final 25-case run passed. Standalone E2E typechecking passed with repository-matching compiler options and a 6 GiB process heap; the diagnostics helper's default heap exhausted, and a preliminary non-project DOM/NodeNext configuration produced an unrelated fetch type mismatch. The seven normal project typechecks passed. Final packaging review closed fixture entitlement inheritance on both executable and bundle; updated signing-hook assertions and preserved helper error wording passed the full desktop rerun. Final source review also added content-free visual action broker-trace metadata coverage.
+
+No current-source signed package, Mac SDK/native effect, TCC, live-provider or pilot acceptance was performed here. Earlier successful package admission is revision-scoped; earlier first-attempt failures and the retired mouse deadline counterexample remain unresolved historical evidence. Verification consent is not acceptance. Engineering owns any actual defect found; the operator runs the normal signed workflow, not code fixes or hypothetical missing mechanisms. Provider/image policy refusal is an honest outcome, not permission to reconfigure/bypass policy or raise budgets.
+
+## Historical ledger — preserve failures and revision boundaries
+
+All entries below retain their original evidence scope. “Current”, open checkboxes and blockers within these older entries describe that checkpoint, not the current plan. In particular the no-AX canvas is now explicitly deferred, the reviewed public cohort is implemented, and Stop is best-effort through handoff. No historical result is promoted to current native acceptance.
 
 ## Live sandbox follow-up — modified stack running, no external deployment required
 

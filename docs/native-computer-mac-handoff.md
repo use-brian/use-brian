@@ -1,72 +1,77 @@
-# Mac computer use — final consolidated verification checklist
+# Mac computer use — single final operator verification checklist
 
-This replaces the pre-retirement experiment handoff. Historical observations, including the post-deadline mouse counterexample, remain in the [acceptance ledger](native-computer-acceptance.md). **Do not launch old emitting binaries, run emitting experiment cases, enable acceptance flags, raise budgets, or clear unknown-effect fences.** Current production `input:false` is unconditional.
+**CURRENT: approved accessibility-backed source is ready for signed-package verification, not release-complete.** This is the only active final Mac checklist. Older checklists/feasibility blockers are revision-pinned history. User approval includes screenshot-guided AX, defers the original no-AX canvas, accepts normal best-effort Stop **including action handoff**, and permits separate explicit verification consent before pilot acceptance.
 
-## Resolve these prerequisites once, before scheduling task verification
+The operator performs the normal package workflow and observes results; no code fixes, provider/backend setup, ad-hoc signing, acceptance-flag changes or budget increases are requested. Use the existing authorized normal model/image policy. If policy refuses, record it without bypass: that case is not positive live acceptance. Engineering owns actual defects. Preserve all failures in one consolidated report.
 
-1. **Use the modified sandbox backend:** engineering has started it with isolated PostgreSQL, normal local-owner auth and genuine context/task creation; an external deployment is not required. [Backend setup](native-computer-backend-setup.md) records API 44000, web 43003, relay 48094 and doc-sync 48080, all loopback. Backend-only readiness reports `model_unavailable` and `device_not_checked`; the remaining configuration step is a legitimately supplied supported model through normal provider settings, not a new backend deployment. No live native inference was performed. Use protected port forwarding for later Mac access and full readiness with that Mac's actual device ID. Never put credentials in chat.
-2. **Control admission policy:** packaged Mac control requires `NATIVE_COMPUTER_PILOT_ACCEPTED=true` in `native-computer-integration.ts`; the instruction prohibits enabling acceptance flags. Inspector mode independently caps control/capture and never runs `/run`; development Electron cannot satisfy signed-parent admission. **The task rows below are blocked under current policy.** A separately reviewed policy decision and any resulting engineering change must precede them. Do not ask the operator to toggle the flag, patch the app, or manufacture prior acceptance.
-3. **Safety and scope:** [visual AX feasibility](native-computer-visual-ax-design.md) found an empty capture/action intersection and no expiry/revocation-atomic AX primitive. The latter also affects existing AX dispatch review. The user now accepts that an action already sent to macOS may finish after Stop. Cancellation of that work is not a prerequisite; preventing further dispatch remains required, including review of the separate check-to-call race. The original no-AX canvas requirement remains open. Visual execution is not implemented or ready for a Mac test. Image approval/budget review is deferred until a defensible path exists; defaults remain unchanged.
+## 1. Build and open the actual signed package
 
-These are provider-configuration/policy/engineering blockers, not operator coding tasks. Do not spend another signing session expecting it to resolve them. Readiness can run off-Mac once authorized inputs exist; its pass proves configuration only, not inference or settlement.
-
-## Ordered final Mac checklist
-
-### 1. Fetch the reviewed feature revision and build the actual package
-
-After prerequisites permit the intended verification, preserve local changes and fetch the feature branch normally; do not reset/clean. Record `git rev-parse HEAD`, dirty status, OS/build/architecture and package version. Use the existing signing/notarization workflow (no publish, version bump or alternative signing pipeline):
+- [ ] Fetch the reviewed feature revision normally, preserving local changes; record source revision/dirty state, package version, OS/build and architecture. Do not reset/clean. Build using the established signing/notarization workflow, with no publish or version bump:
 
 ```sh
 bash scripts/package-desktop.sh --arm64
 check_dir="$(mktemp -d)"
 ditto -x -k "apps/app-desktop/release/usebrian.zip" "$check_dir"
 app="$check_dir/Use Brian.app"
-NATIVE_COMPUTER_INSPECTOR_ENABLED=true USEBRIAN_DISABLE_AUTO_UPDATE=1 \
-  "$app/Contents/MacOS/Use Brian"
+USEBRIAN_DISABLE_AUTO_UPDATE=1 NATIVE_COMPUTER_ENABLED=true \
+  NATIVE_COMPUTER_INSPECTOR_ENABLED=true "$app/Contents/MacOS/Use Brian"
 ```
 
-This launch is explicitly **inspector-only**; it cannot run the effect tasks below. Keep automatic updates disabled for any subsequently reviewed control launch as well. The updater previously replaced the WIP package. Use the current adjacent packaged fixture, never an old isolated input harness. The build covers changed source; there is no request to repeat unchanged standalone experiments.
+These are the existing feature and read-only inspector opt-ins; neither asserts acceptance. **Do not set `NATIVE_COMPUTER_PILOT_ACCEPTED` or other acceptance flags**. The normal build signs the fixture, stamps its CDHashes into the helper, signs the helper and seals the outer app. Use only the adjacent packaged fixture; do not copy/resign it, patch pins or launch old emitting experiments. Keep auto-update disabled so it cannot replace the WIP package.
 
-### 2. Normal login → This computer → scoped inspection
+- [ ] Confirm first-attempt helper readiness in **This computer**. Preserve any first-attempt failure before an explicit retry; earlier admission failures are not erased by a later pass. Record bounded readiness/lifecycle metadata, not raw helper stderr or desktop content. A build/signing failure returns to engineering, not an operator workaround.
 
-Authenticate normally against the intended backend. Select an owned workspace, assistant with native capability and your personal conversation. Select an eligible current task or use the explicit Create task action, which requires no model call and grants no computer authority. Open a disposable unsaved TextEdit document containing only `Native verification draft`. In **This computer**, check first-attempt helper admission, then explicitly open Accessibility settings if needed; verify permission attribution to the actual signed package. Refresh windows and select exactly that document.
+## 2. Normal context, inspection and separate verification consent
 
-Expected: bounded, redacted one-shot inspection after local consent; no text change, model request, screenshot or capture permission prompt. Snapshot appears only after helper/lease/API teardown. Capture/control remain unavailable in inspector mode. Preserve the very first admission failure if it recurs; no automatic retries or deadline changes. Record only fixed readiness stage/lifecycle fields, not raw helper stderr or desktop content.
+- [ ] Authenticate normally; select the owned workspace, native-capable assistant, personal conversation and eligible task (or explicit Create task). This setup grants no computer authority. Open a disposable unsaved TextEdit document containing `Native verification draft`.
+- [ ] Use explicit Accessibility settings consent if needed and verify attribution to this signed package. Refresh targets and select exactly the disposable document. With control/capture off, inspect after local consent: bounded redacted snapshot only after teardown, no activation/edit, model request, screenshot or Screen Recording prompt. Test the adjacent fixture's `--variant secure` separately: no secure value or label in exported observation.
+- [ ] Before verification acknowledgment, effect/capture control must remain unavailable without pilot acceptance. Use the **packaged verification acknowledgment button** in This computer; approve the main-process dialog. This sends `acknowledge-verification`, not a pilot flag. Normal task authorization, signed-helper admission and per-target/action grants remain required. Refresh the target list after acknowledgment to obtain current control/visual capabilities, then select the window and opt in to the required permissions.
+- [ ] Deny acknowledgment once; verify no authority. On separate attempts, confirm Stop, session terminal state, workspace/account changes clear main/UI acknowledgment and require new explicit acknowledgment. Stale windows/results must not reappear. Pending cleanup remains visibly fenced until confirmed; never clear a lease manually.
 
-Check Stop via local UI, tray and **Cmd+Shift+Escape**; switch workspace/sign out while discovery is pending. Expected: old windows/snapshot never reappear, cleanup stays visibly fenced until confirmed, and no prior-account content leaks. Test the secure fixture separately with `--variant secure`; neither sentinel value nor secure label may appear in exported observation. This is inspection evidence only.
+## 3. Real configured-model AX workflows (capture off)
 
-### 3. Gate checkpoint — do not bypass
-
-With current flags unchanged, control is unavailable: record **blocked**, not failed task execution or successful R2 acceptance. Continue steps 4–6 only after the explicit policy/safety decision is resolved in engineering and a reviewed control launch is supplied. No control-enabling command is hidden in this handoff.
-
-### 4. Actual configured-model AX tasks inside Use Brian
-
-Use only disposable local documents/fixture state, with fresh consent per task. Launch the adjacent fixture when needed:
+For each task, use fresh normal consent and disposable state. Re-acknowledge verification after terminal/context reset. Launch the adjacent fixture when needed:
 
 ```sh
-"$app/Contents/Resources/computer-control/NativeComputerFixture.app/Contents/MacOS/NativeComputerFixture" --variant baseline
+fixture="$app/Contents/Resources/computer-control/NativeComputerFixture.app/Contents/MacOS/NativeComputerFixture"
+"$fixture" --variant baseline
 ```
 
-This is the fixed adjacent fixture path required by helper admission; do not copy/resign it elsewhere. Select its **Brian Native Safety Fixture** form window, not the canvas. Keep capture off. In the normal task/context UI, use these goals one at a time:
+Select **Brian Native Safety Fixture**, not its canvas.
 
-| Task | Required result, beyond an executed receipt |
-| --- | --- |
-| TextEdit: “Replace the document text with Hello team.” | Exact local setValue approval, exact final document text, fresh whole-goal completion in Brian. No save, menus, typing injection or screenshot. |
-| Fixture: “Set Fixture text to Local verification draft and select Review draft.” | Exact text and radio selection simultaneously present in fresh readback; two independent objectives, not just the last one. |
-| Fixture: “Use Fixture workflow menu to choose Mark reviewed.” | Only supported semantic actions; final status `Menu: Mark reviewed`. If popup membership/modal/freshness cannot be established, bounded pause is required and this workflow remains unaccepted. |
-| Fixture: “Scroll the local review list down,” then a separate fresh “Scroll the local review list to the top.” | Direction correct and fresh observable scrollbar/result evidence. If no reliable postcondition is available, pause rather than claim success. |
-| Fixture: “Open Review form.” after manually preparing non-secret text and Review draft before consent | Opening the sheet revokes/pauses scope. No automatic Confirm action. A sheet that cannot be separately authorized remains unsupported; dismiss manually after Stop. |
+- [ ] TextEdit goal: **Replace the document text with Hello team.** Confirm exact setValue approval, actual document text and fresh whole-goal completion; no save, keyboard injection or screenshot.
+- [ ] Fixture goal: **Set Fixture text to Local verification draft and select Review draft.** Confirm both objectives simultaneously in fresh readback, not just the final action.
+- [ ] Fixture goal: **Use Fixture workflow menu to choose Mark reviewed.** Confirm supported semantic actions and `Menu: Mark reviewed`. If menu membership/freshness cannot be established, bounded pause is correct and the workflow remains unaccepted.
+- [ ] After manually preparing non-secret fixture text and Review draft before consent, goal **Open Review form.** A sheet revokes/pauses the original scope; no automatic Confirm or silent new-window authorization. Dismiss manually after Stop if separately authorizing the sheet is unsupported.
+- [ ] Confirm zero screenshots on AX-complete workflows and truthful actual-model/usage/settlement evidence. A receipt alone is not completion; missing provider evidence or policy refusal is not a pass. Do not change provider routing or budgets to force success.
 
-For each, confirm the real UI and the task result. Record exact requested/resolved provider identity privately as appropriate, invocation IDs, reported usage and durable settlement status using existing authorized metadata diagnostics. No raw prompts/AX/images/tokens in routine evidence. Readiness or a mocked provider test is not this check. A completed receipt is not whole-goal completion; unknown usage/settlement must prevent further effects. The AX happy path sends **zero images**. Jev requires exact approved next-action state **4** / progress state **3** profiles; otherwise disclose configured-LLM-only routing or abstention, never promote old profiles.
+## 4. Positive screenshot → ordinary AX press
 
-### 5. Negative tasks and independent Stop
+Close the old fixture before launching the new variant (one public window only):
 
-Use separate fresh tasks, never replay an uncertain one. Deny an exact action approval; Stop during model wait and approval; exercise tray/shortcut Stop and physical takeover while a disposable task is active. Before approval, move/replace the selected window or open a sheet. Disconnect the relay during a disposable task only in the authorized test environment. Expected: no widening to another window, no stale action approval, no automatic replay/reconnection, fixed bounded errors, pending cleanup/unknown state stays fenced.
+```sh
+"$fixture" --variant visual-invoke-v1
+```
 
-An AX call entered before Stop may finish afterward under the user-approved boundary; late completion alone is not a failure or proof of cancellation. Distinguish it from a newly dispatched post-revocation call, which still blocks acceptance and returns to engineering. If available evidence cannot distinguish them, record the case as inconclusive rather than claiming cancellation or safe dispatch. Do not inject faults by editing production code or clearing leases. Duplicate/lost-receipt synthetic regressions are already implemented; any additional native fault instrumentation remains engineering-owned. Record unavailable cases honestly rather than calling portable tests native evidence.
+- [ ] Select **Brian Public Shapes v1** and use the exact goal **Activate the outlined triangle; finish when Result is Triangle.** Approve normal control **and separately capture**, with existing Screen Recording permission attributed to the signed package. Neither consent nor acknowledgment silently grants OS permission.
+- [ ] Under the existing authorized image policy, confirm one selected-window capture reaches the configured image-capable model, not full-desktop capture or a different provider. The triangle's slot varies; AX exposes neutral options, not a hidden shape map. Exact approval must name the **native-resolved ordinary invoke target**, not merely the model pixel. Confirm the visible result and fresh AX readback are Triangle.
+- [ ] Record capture/invoke attempt count (at most one each per run), actual model/usage/settlement and final outcome. No raw emitter or second visual attempt follows failure/uncertainty. A wrong shape is failed grounding, not success or permission to retry within the run.
+- [ ] On a separate fresh task, delay the exact visual approval beyond five seconds from the original frame/observation. It must refuse/pause with no effect; the approval dialog cannot renew evidence age. If ordinary model/approval latency exceeds that bound, record refusal rather than extend deadlines or repeatedly recapture to obtain a pass.
 
-### 6. Unsupported visual task, regression and evidence
+## 5. Consent, geometry, scope and independent Stop negatives
 
-Ask to click the blue rectangle in **Brian Safe Canvas**: expect unavailable/pause, no image upload through the task fallback and no click. This is a negative check, **not** R3 completion. Screenshot-guided AX requires a separately reviewed capture cohort and dispatch design; do not broaden capture or add a fixture click backdoor.
+Use separate fresh tasks and normal UI/physical changes only; never replay an uncertain run or edit production code to inject faults. Mark cases unavailable/inconclusive if timing or UI cannot expose them; portable regressions are not native evidence.
 
-Confirm browser computer control remains independent and native default-off/Stop behavior unchanged. Record every attempt, failure/intervention, package/source/OS/architecture, bounded status/outcome, screenshot count, settlement state and actual UI outcome. Do not claim latency targets without sample counts and hardware. Keep unresolved work fenced. Send one consolidated metadata-only report; engineering fixes affected defects before another consolidated verification round. No release completion or rollout is authorized by this checklist.
+- [ ] Deny capture consent, use control-only or inspector grants, or decline Screen Recording access: no capture/upload and no automatic OS prompt. General TextEdit/form/secure content remains uncapturable. Deny exact action approval: no effect/retry.
+- [ ] Move/replace the selected window, change display geometry/scale, occlude it, or introduce a sheet before approval. Stale/wrong-window/changed geometry must refuse, never silently retarget. For the fixed borderless fixture, use available OS movement/display controls; do not add a resize API or modify its layout. Never ask the model to manufacture a stale frame or forged binding; synthetic coverage handles unexposable cases.
+- [ ] Exercise Stop from local UI, tray and **Cmd+Shift+Escape** during model wait, capture, approval and action handoff where observable; exercise physical takeover and permission loss/lock/sleep or relay loss in the authorized disposable environment. Stop must not depend on network/model completion. No follow-up planning/action, automatic reconnect/replay or unfenced new owner after uncertainty.
+
+**Best-effort warning:** Stop includes the non-atomic last-check-to-handoff interval. An action can still reach or finish in macOS despite Stop; neither cancellation nor atomic prevention is promised. Record observed ordering and uncertainty, not a false guarantee. This accepted boundary is not permission for the planner to keep issuing new work after revocation. No uncertain effect is automatically replayed; cleanup remains fenced until actual teardown.
+
+- [ ] Launch the original baseline fixture and ask to click the blue rectangle in **Brian Safe Canvas**. Expect unsupported/pause and no click or task-fallback image upload. This is the explicitly deferred no-AX negative, not the positive visual fixture and not an outstanding requirement to implement canvas control.
+
+## 6. Consolidated evidence and regression
+
+- [ ] Confirm browser control remains independent and default-off/native Stop behavior is unchanged. Record every attempt, denial, refusal, failure and intervention; package/source/OS/architecture; bounded statuses/outcomes; capture counts; actual UI result; provider/settlement metadata. No routine raw screenshots, AX content, credentials or tokens in reports.
+- [ ] Distinguish actual signed package/native effects/live-provider evidence from portable tests, syntax parsing and earlier revision results. Retain unknown outcomes and first-attempt failures. Do not claim latency targets without sample counts and hardware or infer target-side drain from an RPC receipt.
+- [ ] Send one consolidated metadata-only report. Engineering fixes actual defects and identifies affected reruns. Verification consent and this checklist do not authorize rollout, mark the pilot accepted or establish release completion. See the [evidence ledger](native-computer-acceptance.md).
