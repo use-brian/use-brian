@@ -92,6 +92,8 @@ A client lock, serial queue, approval digest, shorter timeout or additional chec
 
 ## Narrow extension proposal — requires separate review, not approved
 
+The [bounded visual-invoke contract](native-computer-visual-invoke-contract.md) specifies the proposed renderer, wire schema, native binding and integration sequence. Initial independent review identified ordinary-action bypass, repeated-attempt and exact renderer-trust gaps. The draft now specifies the first two protections and records the remaining renderer-trust condition explicitly; this is not implementation or unconditional design approval.
+
 ### A. Capture/action cohort, only if dispatch safety is resolved
 
 The smallest useful privacy proposal is **one separately identified, bounded, immutable-public-content fixture window with real standard AX controls and only local reversible state**, initially one `invoke` class. Keep the existing no-AX safe canvas unchanged as the negative case. Review the entire rendered surface, including chrome/overlays and every supported state; no editable user text, secrets, arbitrary images, menus/sheets or external effects. Require existing signed adjacent-fixture identity plus a new exact cohort identity/schema, complete expected public structure, per-control action allowlist, unique window binding and the existing SCK geometry/occlusion limits. Merely recognizing a title or finding no secure AX node is insufficient.
