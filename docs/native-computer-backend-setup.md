@@ -1,6 +1,41 @@
 # Native computer: non-production backend readiness
 
-This is a read-only setup check, not Mac acceptance or a deployment command. Use an existing authorized **non-production** API/relay, normal authenticated account and configured provider. Do not provision credentials, mint test JWTs, use dev-login, fabricate grants, change production, or enable acceptance flags for this check.
+Readiness is a read-only setup check, not Mac acceptance or a deployment command. Use the **modified API/relay from this feature branch** in an authorized non-production environment, including an isolated local stack. The user explicitly authorized spawning that stack in the sandbox; an existing external deployment is not required. Normal local-owner onboarding and generation of this new local installation's secrets are legitimate setup, not fabricated credentials. Never mint test JWTs, use dev-login, fabricate native grants, change production or enable acceptance flags to obtain a passing report.
+
+## Verified local sandbox setup
+
+The modified stack was actually started with a fresh PostgreSQL **18.6** database and pgvector/pg_trgm, applying the normal OSS migrations through 621. A separate non-owner `NOSUPERUSER NOBYPASSRLS` application role supplies `DATABASE_URL_APP`; `PG_SINGLE_CONNECTION` is unset. Use real PostgreSQL for this verification: the embedded single-connection path currently shares the system pool and does not establish user-role RLS enforcement.
+
+Running sandbox endpoints (loopback only, not public deployment URLs):
+
+| Component | Address |
+| --- | --- |
+| Web | `http://127.0.0.1:43003` |
+| Modified API | `http://127.0.0.1:44000` |
+| Modified browser/native relay | `http://127.0.0.1:48094` |
+| Doc-sync | `ws://127.0.0.1:48080` |
+| Isolated PostgreSQL | `127.0.0.1:55439`, database `native_sandbox` |
+
+The private local state directory is recorded in `/tmp/native-stack-path`; it contains owner-only environment/session files, logs and process IDs. Do not print or commit those files. Data is not automatically deleted. These processes are session-lifetime resources, not hosted infrastructure; verify listeners before reuse. API starts with its existing `--no-workers` option to avoid unrelated background automation; the native HTTP task runtime remains mounted. Channel bridges were not started because they are unrelated to this loop and need their own credentials.
+
+The normal `/auth/local-session` flow created the local owner and workspace. Normal assistant, conversation and capability routes provisioned context, and the new explicit **Create task** action successfully created and selected a genuine owned task in a real Chromium browser. No direct identity/task row insertion, forged JWT or native grant was used. An ordinary personal chat creates a personal conversation; `/api/sessions/workspace` creates a shared room and is **not** a substitute for the personal-conversation picker.
+
+Use the existing package entrypoints, not a separate native execution harness. For isolated launches, supply protected environment values before running:
+
+```sh
+# Migrate ONLY after verifying the newly created isolated database destination.
+# MIGRATION_DIRS must be empty for the OSS schema.
+MIGRATION_DIRS= pnpm --filter @use-brian/api migrate
+# Build dependencies and entrypoints using the commands below.
+API_HOST=127.0.0.1 PORT=44000 node apps/api/dist/index.js --no-workers
+HOST=127.0.0.1 PORT=48094 pnpm --filter @use-brian/browser-relay start
+HOST=127.0.0.1 PORT=48080 pnpm --filter @use-brian/doc-sync exec tsx src/index.ts
+pnpm --filter app-web exec next dev --hostname 127.0.0.1 --port 43003
+```
+
+Set `USEBRIAN_EDITION=oss`, `USEBRIAN_SINGLE_PROCESS=1`, the two database URLs, local JWT/relay/doc-sync/encryption secrets, `NATIVE_COMPUTER_ENABLED=true`, deployment ID and consistent API/APP/relay/doc-sync URLs. Web uses `API_INTERNAL_URL`, `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_USEBRIAN_EDITION=oss`. Configure no provider credentials unless legitimately supplied. API's `API_HOST` and doc-sync's `HOST` are optional explicit bind addresses; absent values preserve existing behavior. Do not expose OSS local-owner onboarding on an unauthenticated public interface. A Mac can later use protected port forwarding; sandbox localhost is not Mac localhost.
+
+**Actual backend-only report:** `ready:false`, blockers `model_unavailable`, `device_not_checked`. Schema/auth/scope/policy/conversation/accounting-capability/relay checks passed. No model credential or custom endpoint is configured in this fresh installation. Provider setup—not another backend deployment—is the remaining inference prerequisite. No provider was substituted, inference performed, native session/grant created or accounting receipt fabricated.
 
 ## Existing setup
 
@@ -25,7 +60,7 @@ The normal database must already have migrations `620_native_computer_sessions.s
 
 ## Run the checker
 
-Use context IDs from the deployment's normal owned workspace/assistant/conversation/current task; do not invent rows or reuse IDs from another deployment. The intended desktop's existing native `status` response includes `deviceId`. The same UUID is stored in `native-computer-device-id` under that app's Electron `userData` directory; read it without modifying it if needed. Do not generate a substitute device ID: that would miss the actual device's unknown/busy fence.
+Use context IDs from the deployment's normal owned workspace/assistant/conversation/current task; do not invent rows or reuse IDs from another deployment. The normal This computer **Create task** action now creates the required owned assistant-bound task after assistant/personal-conversation selection, including from the web setup page. The intended desktop's existing native `status` response includes `deviceId`. The same UUID is stored in `native-computer-device-id` under that app's Electron `userData` directory; read it without modifying it if needed. Do not generate a substitute device ID: that would miss the actual device's unknown/busy fence.
 
 Use a currently valid access token from the deployment's ordinary authenticated session. Supply it through an existing owner-only regular file (mode 0600 or stricter, no symlinks), or noninteractive stdin. Do not place tokens in command arguments, shell history or reports. The checker never prints token contents, URLs, raw errors or response bodies.
 
@@ -38,9 +73,11 @@ pnpm native:readiness --non-production \
   --device-id "$DEVICE_ID"
 ```
 
+For off-Mac backend checks, replace `--device-id "$DEVICE_ID"` with **`--backend-only`**. This explicitly omits device identity, still checks all feasible backend predicates, and always returns `ready:false` / exit 1 with `device_not_checked`. It cannot certify the intended Mac's busy/unknown fence. The modes are mutually exclusive; never generate a substitute device ID. Other blockers such as `model_unavailable` remain visible.
+
 `--token-file -` reads stdin instead, with an 8 KiB cap and five-second input timeout. Use your existing credential manager to supply stdin; do not echo a literal token. `--api` is the API origin, not an `/api` path. HTTPS is mandatory except HTTP localhost/127.0.0.1/[::1]. Credentials, query strings, fragments and redirects are rejected. `--non-production` is the operator's explicit destination acknowledgement, **not automatic proof of deployment classification**.
 
-The CLI sends exactly one authenticated `POST /api/native-computer/readiness`, containing only the five context fields above. POST keeps identifiers out of query-string access logs; this endpoint performs no data writes. The API uses authenticated user/session identity, not client user IDs. It checks migration/schema availability, auth-session liveness, existing membership/capability/task predicates, existing tool-policy blocks, device busy/unknown fences, the same-user/conversation lease across all devices/deployments, and relay readiness. It never expires sessions, constructs grants, clears unknown state, performs accounting admission/reservation/reconciliation, calls a model or dispatches commands.
+The CLI sends exactly one authenticated `POST /api/native-computer/readiness`, containing the five context fields above, or the four scope fields plus `backendOnly:true`. POST keeps identifiers out of query-string access logs; this endpoint performs no data writes. The API uses authenticated user/session identity, not client user IDs. It checks migration/schema availability, auth-session liveness, existing membership/capability/task predicates, existing tool-policy blocks, device busy/unknown fences, the same-user/conversation lease across all devices/deployments, and relay readiness. It never expires sessions, constructs grants, clears unknown state, performs accounting admission/reservation/reconciliation, calls a model or dispatches commands.
 
 The API response deadline is eight seconds; relay fetch is five seconds and capped at 1 KiB. The CLI request is capped at ten seconds and its response at 8 KiB. A response deadline does not cancel an already-running SELECT: the normal database statement timeout still applies. Readiness is a point-in-time preflight, not an authorization lease or an atomic multi-query snapshot; normal dispatch revalidation remains authoritative.
 
@@ -52,6 +89,7 @@ Output is a bounded protocol/ready/blockers/warnings JSON object. Exit 0 means t
 | `schema_unavailable` | Inspect the selected test database/migration state separately. No automatic migration. |
 | `auth_session_denied`, `scope_denied` | Use normal login and owned workspace/assistant/conversation/current task with active native capability. |
 | `policy_denied` | Review existing native tool policy through normal administration. Checker never changes it. |
+| `device_not_checked` | Expected in backend-only mode. Obtain the actual desktop ID for full readiness later; no device check was skipped silently. |
 | `device_busy` | Device or conversation already leased. The conversation check matches the partial unique index (`user_id`, `conversation_id`, `revoked_at IS NULL`), including expired but not-yet-revoked rows. Readiness does not run expiry cleanup. Stop/reconcile through the existing deliberate workflow. Never clear unknown effects or replay automatically. |
 | `relay_unavailable`, `relay_disabled` | Check revision, native enablement, HTTPS routing and existing shared secret. |
 | `accounting_unavailable` | Use a supported registered native accounting backend; generic usage-store presence is insufficient. |
@@ -74,7 +112,9 @@ Warnings always distinguish unverified JWT compatibility, live model behavior an
 
 `GET /api/native-computer/context-tasks` accepts only UUID `workspaceId`, `assistantId`, `conversationId` query fields under normal session-backed authentication. It returns at most 500 `id/title` rows (titles capped at 256 characters), with `Cache-Control: no-store`. It intersects the native owned conversation/assistant/task, membership, native capability and current-task predicates with the established workspace viewpoint/task-read access predicate and user-scoped RLS. Clearance or compartment reduction must not disclose previously accessible task titles. This is discovery metadata, never a grant; create/run/dispatch still revalidate independently. The ordinary server routing/logging policy applies to context IDs in the URL; credentials and task content are never query fields.
 
-The app loads this list only after assistant/conversation selection, keys it by viewer and context, clears selection on context changes, ignores late replies from other contexts, and offers explicit retry on load failure. An empty list is not permission to invent a task ID: use a normally owned current task for the selected assistant with appropriate read access. No setup credential or task is fabricated by this route.
+`POST /api/native-computer/context-tasks` uses normal touching/session-backed auth and strict `{ workspaceId, assistantId, conversationId, title }`. It validates the exact owned conversation/native capability and established task mutation/read scope, then uses the ordinary task store to create an internal user-owned, assistant-bound task. It grants no computer authority. Trusted store construction suppresses creation triage, workflow dispatch and waiting-goal resumption for this explicit setup action while retaining normal cache notifications; ordinary task creation automation is unchanged. No untrusted task field can select this suppression.
+
+The app loads this list only after assistant/conversation selection, keys it by viewer and context, clears selection on context changes, ignores late replies from other contexts, and offers explicit retry on load failure. An empty list is not permission to invent a task ID: use a normally owned current task for the selected assistant with appropriate read access. The explicit Create task UI re-reads through the permission-filtered list before selecting the new task, invalidating any pending pre-create read first. Context changes fence stale prompts/results. No setup credential or task is fabricated by the read route.
 
 ## Existing vision approval and budget controls
 
