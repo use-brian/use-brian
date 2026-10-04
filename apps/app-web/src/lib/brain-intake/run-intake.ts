@@ -135,9 +135,13 @@ async function watchJob(id: string, jobId: string, ctx: RunContext): Promise<voi
       return;
     }
     if (state.status === "failed") {
+      // `state.error` is the worker's raw exception text (e.g. an internal
+      // admission code), written for operators. Keep it in the console and
+      // give the row a sentence.
+      if (state.error) console.warn("[brain-intake] ingest job failed:", jobId, state.error);
       ctx.store.update(id, {
         status: "error",
-        error: state.error ?? ctx.t.docPage.suggested.ingestFailed,
+        error: ctx.t.docPage.suggested.ingestAnalysisFailed,
       });
       return;
     }
