@@ -44,7 +44,7 @@ vi.mock('../route-helpers.js', () => ({
 vi.mock('../../db/users.js', () => ({
   findOrCreateUser: vi.fn(),
   getDefaultAssistant: vi.fn(),
-  getUserAssistant: vi.fn(),
+  getUserAssistant: vi.fn(async () => ({ id: 'a-1', workspaceId: 'ws-1' })),
   getUserProfilesByIds: vi.fn(async () => new Map([['u-2', { name: 'Bob', avatarUrl: null }]])),
   getWorkspacePrimaryAssistant: vi.fn(),
 }))
@@ -84,6 +84,7 @@ vi.mock('../../resolve-session-pins.js', async (importOriginal) => {
 })
 
 import { sessionRoutes } from '../sessions.js'
+import { getUserAssistant } from '../../db/users.js'
 import { findSessionById } from '../../db/sessions.js'
 import { addSessionPin, removeSessionPin } from '../../db/session-pins-store.js'
 import type { SessionEvent } from '../../session-event-port.js'
@@ -135,6 +136,15 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/room-pins] pin CRUD is post-gated and attributed (T14)', () => {
+  it('refuses pinning when the member can no longer access the room assistant', async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    vi.mocked(getUserAssistant).mockResolvedValueOnce(null)
+    const res = await request(makeApp()).post('/api/sessions/s-room/pins')
+      .send({ kind: 'instruction', text: 'hello' })
+    expect(res.status).toBe(403)
+    expect(mockAddPin).not.toHaveBeenCalled()
+  })
+
   it('a member pins into a shared chat, attributed, and the bus signals', async () => {
     const published: SessionEvent[] = []
     mockFindSession.mockResolvedValue(roomSession())
