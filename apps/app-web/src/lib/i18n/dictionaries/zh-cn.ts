@@ -3159,6 +3159,7 @@ export const zhCN: Dictionary = {
       ingestAddedToBrain: "已加入大脑",
       ingestAdded: "项已加入大脑",
       ingestFailed: "失败",
+      ingestAnalysisFailed: "已上传，但 Brian 无法将它读入你的大脑。请再添加一次。",
       ingestTooLarge: "文件太大，无法加入大脑：{size}。每个文件上限为 {limit}。",
       ingestUnreachable: "上传无法连接到服务器。请检查网络连接后再试一次。",
       ingestTooManyFiles: "一次最多 {max} 个文件。请在下一批加入这个文件。",
