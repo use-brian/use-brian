@@ -1,6 +1,6 @@
 "use client";
 
-/** Workspace-wide mini apps below primary navigation. Selecting a project
+/** Home mini apps below primary navigation. Selecting a project
  * does not scope these routes. [COMP:app-web/operator-app-bar] */
 
 import Link from "next/link";
@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
+  operatorAppFromSurface,
   customHomeAppId,
   homeAppBasePath,
   homeAppPath,
@@ -76,9 +77,9 @@ export function OperatorAppBar({
   // base paths, then resolve cached locations after mount.
   const [locationsReady, setLocationsReady] = useState(false);
   useEffect(() => setLocationsReady(true), []);
-  // Context views own their sidebar; app links here would imply project scope.
+  // Home contains the built-in operator surfaces and custom apps.
   const surface = surfaceFromPathname(pathname);
-  if (surface === "projects" || surface === "organization") return null;
+  if (!operatorAppFromSurface(surface) && surface !== "apps") return null;
   const labels: Record<OperatorAppKey, string> = {
     page: t.page,
     office: t.office,

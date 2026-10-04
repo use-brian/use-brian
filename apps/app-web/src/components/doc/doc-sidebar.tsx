@@ -609,6 +609,10 @@ export function DocSidebar(props: Props) {
         </button>
       </div>
 
+      <div data-doc-chrome className="shrink-0 px-2">
+        <HomeDock workspaceId={workspaceId} />
+      </div>
+
       {/* Workspace context stays fully labelled above main navigation. */}
       <div data-doc-chrome data-workspace-context-nav className="mx-2 mb-1 flex shrink-0 flex-wrap items-center gap-1 border-b border-sidebar-border pb-2 pt-1">
         <Tooltip label={copy.contextScope.projectsTitle}>
@@ -726,8 +730,7 @@ export function DocSidebar(props: Props) {
 
       </nav>
 
-      {/* Mini apps hide on Projects and Organization, leaving the view's own
-          navigation below the main row. Other surfaces retain workspace apps. */}
+      {/* Home owns the mini-app switcher; other surfaces keep their local navigation. */}
       <OperatorAppBar
         workspaceId={workspaceId}
         active={activeOperatorApp}
@@ -736,12 +739,6 @@ export function DocSidebar(props: Props) {
       />
 
       <div className="doc-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-4">
-        {/* The shared quiet Suggested-for-you row always leads the scrollable
-            body, including Office and Live, before the local navigation. */}
-        {activeOperatorApp !== null || sidebarSurface === "live" ? (
-          <HomeDock workspaceId={workspaceId} />
-        ) : null}
-
         {/* Surface-aware body. Suggested borrows `/p` for its content pane but
             resolves this body from the sticky Home app, so first load keeps the
             selected app's navigation visible. Page shows the page tree; Office
