@@ -160,22 +160,23 @@ test('semantic approval and effect guards precede restoration and native dispatc
   const broker = helper.slice(helper.indexOf('final class Broker:'));
   const section = (from, to) => broker.slice(broker.indexOf(from), broker.indexOf(to));
   const start = section('    func start(', '    func authorized(');
-  assert(start.indexOf('monitorScope(window)') < start.indexOf('restoreApprovedWindow(window)'));
-  assert(start.indexOf('watchdogActive = true') < start.indexOf('restoreApprovedWindow(window)'));
+  assert(start.indexOf('monitorScope(window)') < start.indexOf('restoreApprovedWindow(window,'));
+  assert(start.indexOf('watchdogActive = true') < start.indexOf('restoreApprovedWindow(window,'));
   assert.match(start, /if wireBool\(candidate\["allowControl"\]\) == true \{\s*guard restoreApprovedWindow/);
   const begin = section('    func beginApproval(', '    func endApproval(');
   for (const gate of ['validWirePayload("beginApproval", payload)', 'authorized(command,', 'fresh(action, window)', 'permittedSemantic(action, snapshot)', 'unchanged(snapshot, window)']) {
     assert(begin.indexOf(gate) >= 0 && begin.indexOf(gate) < begin.indexOf('approvalCommand = command'), gate);
   }
-  assert.match(begin, /min\(expiresMonotonic, monotonic\(\) \+ min\(30_000, deadline - now\(\)\)\)/);
+  assert(begin.includes('semanticSafety.admit(id: commandID, fingerprint: fingerprint(command)'));
+  assert(begin.includes('watchdogDeadline = min(expiresMonotonic, retained)'));
   const end = section('    func endApproval(', '    func execute(');
   for (const gate of ['validWirePayload("endApproval", payload)', 'exactSemanticCommand(command, pending)', 'authorized(command,', 'if !approved', 'permittedSemantic(action, snapshot)']) {
-    assert(end.indexOf(gate) >= 0 && end.indexOf(gate) < end.indexOf('restoreApprovedWindow(window)'), gate);
+    assert(end.indexOf(gate) >= 0 && end.indexOf(gate) < end.indexOf('restoreApprovedWindow(window,'), gate);
   }
   assert.match(end, /defer \{ approvalCommand = nil \}/);
   assert(end.indexOf('approvedCommand = nil') < end.indexOf('validWirePayload'));
   assert(end.indexOf('unchanged(snapshot, window)') < end.indexOf('approvedCommand = command'));
-  assert(end.lastIndexOf('authorized(command,') > end.indexOf('restoreApprovedWindow(window)'));
+  assert(end.lastIndexOf('authorized(command,') > end.indexOf('restoreApprovedWindow(window,'));
   const execute = section('    func execute(', '    func rect(');
   const effect = execute.indexOf('        var error: AXError');
   for (const gate of ['validWirePayload("execute", payload)', 'supportedExecution(command)', 'approvalCommand == nil', 'authorized(command,',
@@ -186,7 +187,7 @@ test('semantic approval and effect guards precede restoration and native dispatc
   assert(execute.includes('if kind == "capture" { return finish(capture(command, action, window)) }'));
   assert(execute.indexOf('captureAuthority(grant)') < execute.indexOf('capture(command,'));
   assert.match(execute, /snapshots.removeAll\(\)/);
-  assert.match(execute, /guard error == .success else \{ return finish\(result\("helper_error", "execution_unknown"\)\) \}/);
+  assert.match(execute, /guard error == .success else \{\s*semanticSafety.markUncertain\(\)[^\n]*\n\s*return finish\(result\("helper_error", "execution_unknown"\)\)/);
   const authority = section('    func authorized(', '    func validCommand(');
   for (const gate of ['trust.parentValid()', 'leaseId == lease', 'same(identity, owner)', 'command["grantId"]', 'command["epoch"]',
     'now() < expiry', 'monotonic() < expiresMonotonic', 'monotonic() < commandDeadline', 'now() < deadline',
@@ -238,7 +239,7 @@ test('click preparation uses native cache, unchanged PNG and anchored ages witho
   assert(execute.includes('if kind == "click" { return result("unsupported") }'));
   assert(helper.includes('return kind == "observe" || kind == "capture" || semanticKind(kind)'));
   assert(helper.includes('if let backend = backend, supportedExecution(command)'));
-  assert.equal((helper.match(/"input": false/g) ?? []).length, 2);
+  assert.equal((helper.match(/"input": false/g) ?? []).length, 3); // Includes inert timeout-configuration failure.
   assert(!helper.includes('"input": inputReady'));
   assert(!/CGEvent\(mouseEventSource:|\.post\(tap:|CGEventPost/.test(helper));
   const intent = readFileSync(new URL('./ClickIntent.swift', import.meta.url), 'utf8');

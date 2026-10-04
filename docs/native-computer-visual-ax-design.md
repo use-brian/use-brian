@@ -11,9 +11,17 @@ There are two independent blockers:
 
 The existing protocol/loop also implements screenshot-to-`click`, not screenshot-to-AX. That is additional implementation work, not a reason to set `input:true`.
 
-This is a source/interface feasibility finding, not an observed native AX counterexample or a universal impossibility proof about every macOS interface. It does not retire or alter the existing AX-only implementation, approve its release safety, resolve the original no-AX canvas requirement, or claim R3 completion. Only this new document is changed. No emitter, capture policy, gate, deadline, permission, deployment or fixture was changed.
+This is a source/interface feasibility finding, not an observed native AX counterexample or a universal impossibility proof about every macOS interface. It does not retire or alter the existing AX-only implementation, approve its release safety, resolve the original no-AX canvas requirement, or claim R3 completion. The initial investigation changed only this document. Subsequent semantic-only hardening is recorded below; it does not change the feasibility decision or enable visual execution.
 
 Read alongside the [active plan](plans/electron-native-computer-use.md), [runtime guide](native-computer-use.md), [acceptance ledger](native-computer-acceptance.md) and [retirement contract](../apps/app-desktop/native/computer-control/ClickGuardian-CONTRACT.md). Their historical probe-only/emitting-harness passages are not current authorization. The plan's Task C feasibility gate and its zero newly dispatched post-revocation effects requirement remain controlling constraints; the runtime guide separately acknowledges that entered OS operations cannot be retracted. Neither statement supplies an atomic dispatch primitive.
+
+## Subsequent semantic-only hardening
+
+`Helper.swift` now retains fingerprint-bound monotonic command deadlines across denied/repeated approvals, preserves the watchdog while approved dispatch is pending, checks both clocks/channel/monitor after blocking action validation and inside queued activation, and latches terminal uncertainty on failed AX mutations. Exact cached metadata remains retrievable without native reads, redispatch or clock renewal. Refused admission releases only its active timer; matching local capture approval is consumed on its attempt without changing capture eligibility.
+
+The existing **0.2-second** timeout is now configured on the system-wide AX object, establishing the process default rather than an application-object-only override. Configuration failure leaves the lazy backend unavailable. Apple's primary documentation confirms the [process-wide timeout semantics](https://developer.apple.com/tutorials/data/documentation/applicationservices/1459345-axuielementsetmessagingtimeout.json) and warns that a [timed-out action need not have failed](https://developer.apple.com/tutorials/data/documentation/applicationservices/1462091-axuielementperformaction.json). Neither establishes target-side cancellation.
+
+Focused verification passed: **550** extracted production-policy checks, **296** extracted Broker lifecycle checks with fake native dependencies, **653** native/build Node tests, **296** desktop control/integration tests, and the Foundation wire/dispatcher suite. Mac-target Swift syntax parsing and whitespace checks passed. No Mac SDK build or native AX execution was performed. These regressions fix concrete implementation defects, **not** the remaining check-to-call suspension race, queued OS effects, empty capture/action intersection or original no-AX canvas requirement. No backend/provider setup is a prerequisite for these engineering checks.
 
 ## Concrete source evidence
 
@@ -54,7 +62,7 @@ A future visual resolver should consume only a bounded proposal tied to the exac
 
 ## Dispatch, expiry and cancellation: exact boundary
 
-### What the code actually does
+### Inspected baseline (`abdcc89f`; hardening above supersedes changed details)
 
 1. `scopedAuthority` checks exact identity/grant/epoch/lease/target, live process/window, wall expiry/deadline, monotonic expiry/command deadline, AX trust and private-channel liveness (`Helper.swift:911–919`). It does not atomically couple these predicates to the target application's mutation.
 2. Semantic approval compares the entire command (`472–478`), checks supported ref/whole state, restores the selected window, and revalidates handles, geometry/layout and state (`1259–1300`). **Semantic `endApproval` resets the snapshot monotonic timestamp** after unchanged-state checks (`1298`). This is not evidence that earlier pixels became fresh. The local capture path instead retains its original frame/command age (`1195–1256`). A visual extension must not inherit the semantic timestamp refresh as frame renewal.
@@ -67,7 +75,7 @@ A future visual resolver should consume only a bounded proposal tied to the exac
 
 `AXUIElementPerformAction(element,action)` and `AXUIElementSetAttributeValue(element,attribute,value)` have no command ID, absolute deadline, expected-state predicate, cancellation handle or revocation generation argument. The header explicitly warns that `kAXErrorCannotComplete` from `PerformAction` can occur during modal processing when the application has not returned within the messaging timeout: **it does not necessarily mean the action failed**. Its generic retry/increase-timeout suggestions are not acceptable under this project's no-replay/unchanged-budget contract.
 
-`AXUIElementSetMessagingTimeout` configures messaging timeout, not deadline-enforced execution. Its object-specific setting does not even apply to other equal AX objects. The helper sets 0.2 seconds on the application AX object during discovery (`Helper.swift:784`); this must not be described as a guaranteed 200 ms timeout on every descendant or as target-side cancellation.
+`AXUIElementSetMessagingTimeout` configures messaging timeout, not deadline-enforced execution. Its object-specific setting does not even apply to other equal AX objects. The inspected baseline set 0.2 seconds on the application AX object during discovery (`Helper.swift:784`), not a descendant-wide setting. The hardening above corrects this to the process default; it still does not guarantee a 200 ms effect deadline or target-side cancellation.
 
 Two distinct residual races matter:
 
@@ -104,7 +112,7 @@ Alternatively the user may explicitly choose a narrower release scope and separa
 
 ## Verification and next evidence
 
-Performed here:
+Performed by the initial feasibility investigation (before the hardening above):
 
 - Read the active plan, runtime guide and full acceptance ledger; traced native capture, fixture, semantic approval/dispatch, protocol/core vision gate and helper termination source at the stated revision.
 - Read public AX header/documentation evidence; no live desktop access, capture, AX operation, provider call or permission request.

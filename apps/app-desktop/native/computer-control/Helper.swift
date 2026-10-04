@@ -584,6 +584,42 @@ func sameChildrenRead<Element>(_ previous: ChildrenRead<Element>, _ current: Chi
     default: return false // Even declared-empty -> absent-leaf is a scope change.
     }
 }
+// BEGIN FOUNDATION SEMANTIC SAFETY
+// Serialized Broker-lane state. Tests extract this exact production policy.
+// These are admission/revalidation fences, NOT an atomic AX dispatch primitive.
+struct SemanticSafety {
+    private struct Binding { let fingerprint: Data; let deadline: Double }
+    private var bindings: [String: Binding] = [:]
+    private(set) var uncertain = false
+    mutating func admit(id: String, fingerprint: Data, wallDeadline: Double,
+                        wall: Double, monotonic: Double) -> Double? {
+        guard !uncertain else { return nil }
+        if let old = bindings[id] {
+            return old.fingerprint == fingerprint ? old.deadline : nil
+        }
+        guard bindings.count < 512 else { return nil }
+        let deadline = monotonic + min(30_000, wallDeadline - wall)
+        bindings[id] = Binding(fingerprint: fingerprint, deadline: deadline)
+        return deadline // Retained even if later approval validation/consent fails.
+    }
+    func deadline(id: String, fingerprint: Data) -> Double? {
+        guard let old = bindings[id], old.fingerprint == fingerprint else { return nil }
+        return old.deadline
+    }
+    static func cachedReceiptMatches(fingerprint: Data, recorded: Data?, lease: String?, expectedLease: String,
+                                     channelAlive: Bool) -> Bool {
+        return channelAlive && !expectedLease.isEmpty && lease == expectedLease && recorded == fingerprint
+    }
+    mutating func markUncertain() { uncertain = true }
+    func permitsEffect(monotonic: Double, wall: Double, commandDeadline: Double,
+                       grantDeadline: Double, wallDeadline: Double, wallExpiry: Double,
+                       channelAlive: Bool, monitorLive: Bool) -> Bool {
+        return !uncertain && channelAlive && monitorLive &&
+            monotonic < commandDeadline && monotonic < grantDeadline &&
+            wall < wallDeadline && wall < wallExpiry
+    }
+}
+// END FOUNDATION SEMANTIC SAFETY
 // END FOUNDATION WIRE VALIDATION
 func monotonic() -> Double { ProcessInfo.processInfo.systemUptime * 1000 }
 func id() -> String { UUID().uuidString }
@@ -710,6 +746,24 @@ final class Broker: ObservationBackend {
     var inputTap: CFMachPort?
     // Local lifetime fencing only; no observer transport, content or telemetry.
     private var scopeObserver: AXObserver?
+    private var semanticSafety = SemanticSafety()
+    private var messagingReady = false
+    private func fingerprint(_ command: Object) -> Data {
+        let bytes = (try? JSONSerialization.data(withJSONObject: command, options: [.sortedKeys])) ?? Data()
+        return Data(SHA256.hash(data: bytes))
+    }
+    // Fast only: no AX reads, signatures or window traversal here. Existing
+    // notification/takeover revocation still exits independently. Suspension
+    // after this check and already queued target effects remain unresolved AX races.
+    private func effectAllowed(_ window: Window, deadline: Double, wallDeadline: Double, wallExpiry: Double) -> Bool {
+        guardLock.lock(); let active = watchdogActive; guardLock.unlock()
+        let monitor = messagingReady && active && window.epochFence.clean() &&
+            (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
+        return semanticSafety.permitsEffect(monotonic: monotonic(), wall: now(),
+            commandDeadline: deadline, grantDeadline: expiresMonotonic,
+            wallDeadline: wallDeadline, wallExpiry: wallExpiry,
+            channelAlive: brian_private_channel_alive() == 1, monitorLive: monitor)
+    }
     func input(_ type: CGEventType, _ event: CGEvent) {
         guardLock.lock(); let active = watchdogActive; let approving = approvalOpen; guardLock.unlock()
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput { _exit(72) }
@@ -724,6 +778,11 @@ final class Broker: ObservationBackend {
     init(trust: ProcessTrust, guardianInvalidation: (() -> Void)? = nil) {
         self.trust = trust
         self.guardianInvalidation = guardianInvalidation
+        // System-wide AX object's timeout sets the process default for descendant
+        // handles too; an application-object override does not. This config call
+        // neither reads AX content nor prompts. Failure leaves this backend inert.
+        messagingReady = AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.2) == .success
+        guard messagingReady else { return }
         // Guardian uses the same native readers, not the worker's exiting tap,
         // watchdog or notification callbacks. It owns revocable prepared scope.
         if guardianInvalidation != nil { return }
@@ -752,17 +811,22 @@ final class Broker: ObservationBackend {
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { _ in _exit(71) }
     }
     func capabilities() -> Object {
+        guard messagingReady else {
+            return ["protocol": proto, "platform": "darwin", "axRead": false, "semanticActions": false,
+                    "windowCapture": false, "input": false, "accessibilityPermission": "unknown",
+                    "capturePermission": "unknown", "limitations": ["AX messaging timeout configuration failed; backend unavailable."]]
+        }
         let trusted = AXIsProcessTrusted()
-        let ready = trusted && (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
+        let ready = messagingReady && trusted && (inputTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
         // Broker exists only after explicit discovery. Never prompt for permission.
         let captureReady = CGPreflightScreenCaptureAccess()
-        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready && !clickSpent, "windowCapture": ready && captureReady, "input": false,
+        return ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready && !clickSpent && !semanticSafety.uncertain, "windowCapture": ready && captureReady, "input": false,
                 "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": captureReady ? "granted" : "denied",
                 "limitations": ["Consented TextEdit/fixture AX actions. Capture requires control+capture consent and a public, unoccluded fixture canvas. Coordinate mechanism retired after a deadline counterexample; input/keys/focus disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
     }
     func listTargets() -> [Object] { discoverTargets(only: nil) }
     private func discoverTargets(only pid: pid_t?, standingFence: ProcessEpochFence? = nil) -> [Object] {
-        guard grant == nil, AXIsProcessTrusted() else { return [] }
+        guard messagingReady, grant == nil, AXIsProcessTrusted() else { return [] }
         let applications: [NSRunningApplication]
         if let pid = pid {
             guard let app = NSRunningApplication(processIdentifier: pid) else { return [] }
@@ -781,7 +845,6 @@ final class Broker: ObservationBackend {
             let processInstance = processes[processKey] ?? id()
             processes[processKey] = processInstance
             let ax = AXUIElementCreateApplication(app.processIdentifier)
-            AXUIElementSetMessagingTimeout(ax, 0.2)
             guard let applicationWindows = attr(ax, kAXWindowsAttribute) as? [AXUIElement],
                   applicationWindows.count <= 32 else { continue }
             for window in applicationWindows {
@@ -858,22 +921,29 @@ final class Broker: ObservationBackend {
     }
     // Foreground restoration is part of explicit local session/action consent,
     // never an independently model-callable focus escape hatch. Recheck identity.
-    func restoreApprovedWindow(_ window: Window) -> Bool {
+    func restoreApprovedWindow(_ window: Window, deadline: Double, wallDeadline: Double, wallExpiry: Double) -> Bool {
         guard let live = liveWindow(window.target), CFEqual(live.element, window.element),
               let app = NSRunningApplication(processIdentifier: pid_t(window.target["processId"] as! Int)) else { return false }
-        let activated = DispatchQueue.main.sync { brian_private_channel_alive() == 1 && app.activate(options: []) }
-        guard activated, liveWindow(window.target) != nil, brian_private_channel_alive() == 1, AXUIElementPerformAction(window.element, kAXRaiseAction as CFString) == .success else { return false }
+        guard effectAllowed(window, deadline: deadline, wallDeadline: wallDeadline, wallExpiry: wallExpiry) else { return false }
+        let activated = DispatchQueue.main.sync {
+            effectAllowed(window, deadline: deadline, wallDeadline: wallDeadline, wallExpiry: wallExpiry) && app.activate(options: [])
+        }
+        guard activated, liveWindow(window.target) != nil,
+              effectAllowed(window, deadline: deadline, wallDeadline: wallDeadline, wallExpiry: wallExpiry) else { return false }
+        let raised = AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
+        guard raised == .success else { semanticSafety.markUncertain(); return false }
         let end = monotonic() + 750
         repeat {
             if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
                let focused = attr(window.application, kAXFocusedWindowAttribute), CFEqual(focused, window.element) {
-                return liveWindow(window.target) != nil && brian_private_channel_alive() == 1
+                return liveWindow(window.target) != nil && effectAllowed(window, deadline: deadline, wallDeadline: wallDeadline, wallExpiry: wallExpiry)
             }
             usleep(10_000)
         } while monotonic() < end
         return false
     }
     func start(_ payload: Object) -> Bool {
+        guard messagingReady, !semanticSafety.uncertain else { return false }
         guard supportedGrant(payload), grant == nil, let candidate = payload["grant"] as? Object,
               let leaseId = wireString(payload["leaseId"]),
               // Schema permits epoch zero; this pilot retains its active-grant >0 rule.
@@ -886,7 +956,7 @@ final class Broker: ObservationBackend {
         guardLock.lock(); watchdogDeadline = expiresMonotonic; watchdogActive = true; guardLock.unlock()
         // Inspector Start never activates. Only explicit control consent restores.
         if wireBool(candidate["allowControl"]) == true {
-            guard restoreApprovedWindow(window) else { return false }
+            guard restoreApprovedWindow(window, deadline: expiresMonotonic, wallDeadline: expiry, wallExpiry: expiry) else { return false }
         }
         guard now() < expiry, liveWindow(window.target) != nil, trust.parentValid(),
               brian_private_channel_alive() == 1, AXIsProcessTrusted(), CGEvent.tapIsEnabled(tap: tap) else { return false }
@@ -908,6 +978,7 @@ final class Broker: ObservationBackend {
     }
     // Internal scope validation during a handoff is NOT reopening dispatch.
     private func scopedAuthority(_ command: Object, _ leaseId: String) -> Bool {
+        guard messagingReady else { return false }
         guard validCommand(command), wireString(leaseId) != nil, trust.parentValid(), let grant = grant, leaseId == lease, command["protocol"] as? String == proto,
               let identity = command["identity"] as? Object, let owner = grant["identity"] as? Object, same(identity, owner),
               command["grantId"] as? String == grant["grantId"] as? String, wireInteger(command["epoch"]) == wireInteger(grant["epoch"]),
@@ -1240,7 +1311,10 @@ final class Broker: ObservationBackend {
         guard let action = command["action"] as? Object, let target = action["target"] as? Object,
               let observationID = action["observationId"] as? String, let snapshot = snapshots[observationID],
               monotonic() - snapshot.monotonic < 5_000,
-              let window = liveWindow(target), safeCanvas(window, snapshot), restoreApprovedWindow(window) else { return false }
+              let window = liveWindow(target), safeCanvas(window, snapshot),
+              let deadline = localCommandDeadline, let wallDeadline = wireInteger(command["deadlineAt"]),
+              let expiry = wireInteger(grant?["expiresAt"]),
+              restoreApprovedWindow(window, deadline: deadline, wallDeadline: wallDeadline, wallExpiry: expiry) else { return false }
         // Permit only the completed trusted local dialog's input, without making
         // old observations or frames young. The independent takeover tap stays live.
         var restored = snapshot; restored.inputMonotonic = monotonic()
@@ -1257,15 +1331,35 @@ final class Broker: ObservationBackend {
         return true
     }
     func beginApproval(_ payload: Object) -> Bool {
-        guard !clickSpent else { return false } // readback capture uses session consent, not effect approval
+        guard messagingReady, !semanticSafety.uncertain, !clickSpent else { return false } // readback capture uses session consent, not effect approval
         if let command = payload["command"] as? Object, localApprovalKind(command) { return beginLocalApproval(payload) }
-        guard validWirePayload("beginApproval", payload), approvalCommand == nil, let command = payload["command"] as? Object,
-              let deadline = wireInteger(command["deadlineAt"]), validCommand(command), authorized(command, payload["leaseId"] as? String ?? ""),
-              let action = command["action"] as? Object, let target = action["target"] as? Object,
-              let window = liveWindow(target), let snapshot = fresh(action, window), permittedSemantic(action, snapshot), unchanged(snapshot, window) else { return false }
+        guard validWirePayload("beginApproval", payload), let command = payload["command"] as? Object,
+              let action = command["action"] as? Object, let kind = action["kind"] as? String, semanticKind(kind),
+              let deadline = wireInteger(command["deadlineAt"]), let commandID = wireString(command["commandId"]),
+              let retained = semanticSafety.admit(id: commandID, fingerprint: fingerprint(command),
+                  wallDeadline: deadline, wall: now(), monotonic: monotonic()) else { return false }
+        guard approvalCommand == nil, approvedCommand == nil else { return false }
+        // Arm the original bound BEFORE validation can block in AX/Security.
+        // A refused/repeated attempt retains its binding; it cannot buy more time.
+        commandDeadline = retained
+        guardLock.lock(); watchdogDeadline = min(expiresMonotonic, retained); guardLock.unlock()
+        defer {
+            // Validation performed no effects. A conclusive refusal releases the
+            // active timer, not the immutable per-ID deadline retained above.
+            if approvalCommand == nil && approvedCommand == nil {
+                commandDeadline = .infinity
+                guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
+            }
+        }
+        guard authorized(command, payload["leaseId"] as? String ?? ""),
+              let target = action["target"] as? Object, let window = liveWindow(target),
+              let snapshot = fresh(action, window), permittedSemantic(action, snapshot), unchanged(snapshot, window),
+              let expiry = wireInteger(grant?["expiresAt"]),
+              effectAllowed(window, deadline: retained, wallDeadline: deadline, wallExpiry: expiry) else { return false }
+        commandDeadline = retained
         approvedCommand = nil; approvalCommand = command
         guardLock.lock(); approvalOpen = true
-        watchdogDeadline = min(expiresMonotonic, monotonic() + min(30_000, deadline - now()))
+        watchdogDeadline = min(expiresMonotonic, retained)
         guardLock.unlock()
         return true
     }
@@ -1279,6 +1373,7 @@ final class Broker: ObservationBackend {
               authorized(command, payload["leaseId"] as? String ?? "") else { return false }
         if !approved {
             approvedCommand = nil
+            commandDeadline = .infinity
             guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
             return true
         }
@@ -1286,17 +1381,21 @@ final class Broker: ObservationBackend {
               let window = liveWindow(target), let observationId = action["observationId"] as? String,
               let snapshot = snapshots[observationId], snapshot.observation["completeness"] as? String == "complete", permittedSemantic(action, snapshot),
               snapshot.refs.values.allSatisfy({ node($0.element, $0.node["ref"] as! String, $0.node["parentRef"] as? String).complete }),
-              restoreApprovedWindow(window), let previous = snapshot.observation["bounds"] as? Object,
+              let commandID = wireString(command["commandId"]),
+              let retained = semanticSafety.deadline(id: commandID, fingerprint: fingerprint(command)),
+              let wallDeadline = wireInteger(command["deadlineAt"]), let expiry = wireInteger(grant?["expiresAt"]),
+              restoreApprovedWindow(window, deadline: retained, wallDeadline: wallDeadline, wallExpiry: expiry), let previous = snapshot.observation["bounds"] as? Object,
               let b = bounds(window.element), same(previous, b), snapshot.observation["displayLayoutVersion"] as? String == layout(),
               NSWorkspace.shared.frontmostApplication?.processIdentifier == pid_t(target["processId"] as! Int),
               let focused = attr(window.application, kAXFocusedWindowAttribute), CFEqual(focused, window.element),
               unchanged(snapshot, window) else { return false }
         // Exact handles/state must survive the local dialog. No capture fallback.
         guard authorized(command, payload["leaseId"] as? String ?? "") else { return false }
-        guard brian_private_channel_alive() == 1 else { _exit(70) }
+        guard effectAllowed(window, deadline: retained, wallDeadline: wallDeadline, wallExpiry: expiry) else { return false }
         snapshots[observationId] = Snapshot(observation: snapshot.observation, refs: snapshot.refs, monotonic: monotonic())
         approvedCommand = command
-        guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
+        commandDeadline = retained
+        guardLock.lock(); watchdogDeadline = min(expiresMonotonic, retained); guardLock.unlock()
         return true
     }
     func execute(_ payload: Object, timing: SourceRequestTiming? = nil) -> Object {
@@ -1307,6 +1406,17 @@ final class Broker: ObservationBackend {
             if let observation = observation { receipt["observation"] = observation }; return receipt
         }
         guard validWirePayload("execute", payload), let action = command["action"] as? Object, let kind = action["kind"] as? String else { return result("denied") }
+        let digest = fingerprint(command)
+        // Metadata-only exact replay needs no live AX/deadline authority. Bind the
+        // entire command AND private lease; never return pixels or re-enter AX.
+        if let old = journal[commandId], SemanticSafety.cachedReceiptMatches(fingerprint: digest,
+           recorded: seen[commandId], lease: wireString(payload["leaseId"]), expectedLease: lease,
+           channelAlive: brian_private_channel_alive() == 1) {
+            return old
+        }
+        guard !semanticSafety.uncertain else { return result("denied") }
+        // An unrelated read/attempt must not disarm an approved command's watchdog.
+        if let approved = approvedCommand, !same(command, approved) { return result("denied") }
         if clickSpent && (!readbackOnly || !["observe", "capture"].contains(kind)) { return result("denied") }
         // Clicks use the private dispatcher handoff, never this AX executor.
         // Hard effect-class barrier, independent of grant or approval state.
@@ -1316,21 +1426,30 @@ final class Broker: ObservationBackend {
         guard approvalCommand == nil, validCommand(command), let deadline = wireInteger(command["deadlineAt"]), authorized(command, payload["leaseId"] as? String ?? ""), let target = action["target"] as? Object else { return result("denied") }
         // No coordinate emitter exists in this AX executor; clicks use the private handoff.
         if kind == "click" { return result("unsupported") }
-        if let approved = approvedCommand, exactLocalCommand(command, approved), let anchored = localCommandDeadline {
+        if semanticKind(kind) {
+            guard let retained = semanticSafety.deadline(id: commandId, fingerprint: digest) else { return result("approval_required") }
+            commandDeadline = retained
+        } else if let approved = approvedCommand, exactLocalCommand(command, approved), let anchored = localCommandDeadline {
             commandDeadline = anchored
+            // Capture still requires the existing session/canvas authority. Burn
+            // matching local approval on this attempt, retaining its bound through
+            // capture; otherwise the pending-command fence would block readback.
+            if kind == "capture" { approvedCommand = nil; localCommandDeadline = nil }
         } else {
             commandDeadline = monotonic() + deadline - now()
         }
         guardLock.lock(); watchdogDeadline = min(expiresMonotonic, commandDeadline); guardLock.unlock()
         defer {
-            commandDeadline = Double.infinity
-            guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
+            // Early refusal (e.g. a full journal) must not disarm an approval
+            // still awaiting dispatch. Only a consumed approval releases its timer.
+            if !semanticKind(kind) || approvedCommand == nil {
+                commandDeadline = Double.infinity
+                guardLock.lock(); watchdogDeadline = expiresMonotonic; guardLock.unlock()
+            }
         }
-        let serialized = (try? JSONSerialization.data(withJSONObject: command, options: [.sortedKeys])) ?? Data()
-        let fingerprint = Data(SHA256.hash(data: serialized))
-        if let old = journal[commandId] { return seen[commandId] == fingerprint ? old : result("denied") }
+        if let old = journal[commandId] { return seen[commandId] == digest ? old : result("denied") }
         guard journal.count < 512 else { return result("denied") }
-        seen[commandId] = fingerprint
+        seen[commandId] = digest
         // Mark BEFORE dispatch. No repeat, even after a partially failed AX call.
         journal[commandId] = result("helper_error", "execution_unknown")
         func finish(_ receipt: Object) -> Object {
@@ -1372,22 +1491,23 @@ final class Broker: ObservationBackend {
               unchanged(snapshot, window),
               fresh(action, window) != nil,
               authorized(command, payload["leaseId"] as? String ?? "") else { return finish(result("stale_observation")) }
+        guard let expiry = wireInteger(grant?["expiresAt"]) else { return finish(result("denied")) }
         var error: AXError
         switch kind {
         case "invoke":
-            guard brian_private_channel_alive() == 1 else { _exit(70) }
+            guard effectAllowed(window, deadline: commandDeadline, wallDeadline: deadline, wallExpiry: expiry) else { return finish(result("expired")) }
             timing?.beginAPI(.api_invoke)
             error = AXUIElementPerformAction(ref.element, kAXPressAction as CFString)
             timing?.endAPI(returned: error == .success)
         case "select":
             if selectionAttribute(ref.element) {
-                guard brian_private_channel_alive() == 1 else { _exit(70) }
+                guard effectAllowed(window, deadline: commandDeadline, wallDeadline: deadline, wallExpiry: expiry) else { return finish(result("expired")) }
                 timing?.beginAPI(.api_select)
                 error = AXUIElementSetAttributeValue(ref.element, kAXSelectedAttribute as CFString, kCFBooleanTrue)
                 timing?.endAPI(returned: error == .success)
             } else if current.value["role"] as? String == kAXRadioButtonRole, actionNames(ref.element).contains(kAXPressAction) {
                 // Radio selection is idempotent, unlike a checkbox toggle.
-                guard brian_private_channel_alive() == 1 else { _exit(70) }
+                guard effectAllowed(window, deadline: commandDeadline, wallDeadline: deadline, wallExpiry: expiry) else { return finish(result("expired")) }
                 timing?.beginAPI(.api_select)
                 error = AXUIElementPerformAction(ref.element, kAXPressAction as CFString)
                 timing?.endAPI(returned: error == .success)
@@ -1397,13 +1517,13 @@ final class Broker: ObservationBackend {
             guard let delta = wireInteger(action["deltaY"], min: -600, max: 600), delta != 0 else { return finish(result("denied")) }
             let operation = delta > 0 ? kAXIncrementAction : kAXDecrementAction
             guard actionNames(ref.element).contains(operation) else { return finish(result("unsupported")) }
-            guard brian_private_channel_alive() == 1 else { _exit(70) }
+            guard effectAllowed(window, deadline: commandDeadline, wallDeadline: deadline, wallExpiry: expiry) else { return finish(result("expired")) }
             timing?.beginAPI(.api_scroll)
             error = AXUIElementPerformAction(ref.element, operation as CFString)
             timing?.endAPI(returned: error == .success)
         case "setValue":
             guard let text = action["text"] as? String, text.utf16.count <= 4096, !text.contains("\u{0000}") else { return finish(result("denied")) }
-            guard brian_private_channel_alive() == 1 else { _exit(70) }
+            guard effectAllowed(window, deadline: commandDeadline, wallDeadline: deadline, wallExpiry: expiry) else { return finish(result("expired")) }
             timing?.beginAPI(.api_set_value)
             error = AXUIElementSetAttributeValue(ref.element, kAXValueAttribute as CFString, text as CFString)
             timing?.endAPI(returned: error == .success)
@@ -1411,7 +1531,10 @@ final class Broker: ObservationBackend {
         }
         snapshots.removeAll()
         // AX timeout/error may be after delivery; never report "not executed" or retry.
-        guard error == .success else { return finish(result("helper_error", "execution_unknown")) }
+        guard error == .success else {
+            semanticSafety.markUncertain() // No new ID/observation/approval can reopen effects.
+            return finish(result("helper_error", "execution_unknown"))
+        }
         let post = authorized(command, payload["leaseId"] as? String ?? "") ? observe(command, window) : nil
         return finish(result("ok", "executed", post))
     }
