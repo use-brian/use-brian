@@ -423,8 +423,9 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
            FROM association_events e
           WHERE e.workspace_id=$1 AND ($2::text IS NULL OR e.status=$2) AND ($3::uuid[] IS NULL OR e.id=ANY($3::uuid[]))
             AND ($4::text IS NULL OR ($4='upcoming' AND e.ends_at >= now()) OR ($4='past' AND e.ends_at < now()))
-            AND ($5::uuid IS NULL OR e.id=$5::uuid) AND ($6::text IS NULL OR e.slug=$6)`,
-        [workspaceId, filters.status ?? null, select(workspaceId, 'crm.catalog.read', 'eventIds'), filters.when ?? null, filters.id ?? null, filters.slug ?? null],
+            AND ($5::uuid IS NULL OR e.id=$5::uuid) AND ($6::text IS NULL OR e.slug=$6)
+            AND ($7::text IS NULL OR ($7='visible' AND e.status <> 'draft') OR ($7='drafts' AND e.status = 'draft'))`,
+        [workspaceId, filters.status ?? null, select(workspaceId, 'crm.catalog.read', 'eventIds'), filters.when ?? null, filters.id ?? null, filters.slug ?? null, filters.website ?? null],
       )
     },
 

@@ -93,7 +93,7 @@ export type AssociationSponsorshipInvitation={id:string;allocationId:string;nomi
   redeemedAt:string|null;revocationReason:string|null;revokedAt:string|null;redemptionToken?:string|null;createdAt:string;updatedAt:string};
 type Rows = {retentionRuns:Record<string,unknown>&{id:string;status:string;createdAt:string};credentials:import("./crm-administration").CrmManagedCredential;plans:AssociationPlan;memberships:AssociationMembership;rescues:AssociationMembershipRescue;allocations:AssociationSponsorshipAllocation;invitations:AssociationSponsorshipInvitation;events:AssociationEvent;tickets:AssociationTicket;promotions:AssociationPromotion;registrations:AssociationRegistration;waitlist:AssociationWaitlistRow;receipts:AssociationProviderReceipt;audit:import("./crm").CrmOperationsAuditEntry;deliveries:import("./crm").CrmEventDeliveryEntry};
 export type AssociationResource = keyof Rows;
-export type AssociationListQuery = {cursor?:string;eventId?:string;planId?:string;contactId?:string;sponsorContactId?:string;allocationId?:string;nomineeContactId?:string;status?:string;includeClosed?:boolean;activeOnly?:boolean;when?:"upcoming"|"past";id?:string;slug?:string};
+export type AssociationListQuery = {cursor?:string;eventId?:string;planId?:string;contactId?:string;sponsorContactId?:string;allocationId?:string;nomineeContactId?:string;status?:string;includeClosed?:boolean;activeOnly?:boolean;when?:"upcoming"|"past";website?:"visible"|"drafts";id?:string;slug?:string};
 export async function listAssociationPage<K extends keyof Rows>(workspaceId:string,resource:K,query:AssociationListQuery={}):Promise<{items:Rows[K][];nextCursor:string|null}> {
   const base=`/api/crm/${encodeURIComponent(workspaceId)}`;
   const event=encodeURIComponent(query.eventId ?? "");

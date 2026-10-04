@@ -71,6 +71,17 @@ describe('[COMP:api/crm-intake-route] CRM intake credential authentication', () 
 })
 
 describe('[COMP:crm/operations-store] CRM operations read model', () => {
+  it('filters website event visibility in SQL before bounded pagination', async () => {
+    query.mockResolvedValue({ rows: [] })
+    const reads = createDbCrmIntakeReadStore()
+    await reads.listEvents(WORKSPACE_ID, { website: 'visible', limit: 17 })
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining("$7='visible' AND e.status <> 'draft'"),
+      [WORKSPACE_ID, null, null, null, null, null, 'visible', null, null, null, null, null, null, null, 18])
+    await reads.listEvents(WORKSPACE_ID, { website: 'drafts', limit: 17 })
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining("$7='drafts' AND e.status = 'draft'"),
+      [WORKSPACE_ID, null, null, null, null, null, 'drafts', null, null, null, null, null, null, null, 18])
+  })
+
   beforeEach(() => vi.clearAllMocks())
 
   it('workspace-qualifies bounded submission queue reads', async () => {
