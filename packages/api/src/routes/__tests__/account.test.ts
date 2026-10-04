@@ -18,6 +18,10 @@ vi.mock('../../db/client.js', () => {
     __mockClient: mockClient,
   }
 })
+vi.mock('../../db/account-teardown.js', async (orig) => ({
+  ...(await orig<typeof import('../../db/account-teardown.js')>()),
+  deleteAccountFootprint: vi.fn(),
+}))
 vi.mock('../../db/users.js', () => ({
   findUserById: vi.fn(),
   updateUserTimezone: vi.fn(),
@@ -26,10 +30,12 @@ vi.mock('../../db/users.js', () => ({
 import { accountRoutes } from '../account.js'
 import { query, queryWithRLS, getPool } from '../../db/client.js'
 import { findUserById, updateUserTimezone } from '../../db/users.js'
+import { AccountTeardownBlockedError, deleteAccountFootprint } from '../../db/account-teardown.js'
 
 const mockQuery = vi.mocked(query)
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
 const mockFindUserById = vi.mocked(findUserById)
+const mockTeardown = vi.mocked(deleteAccountFootprint)
 const mockUpdateUserTimezone = vi.mocked(updateUserTimezone)
 
 // Access the mock client from the pool
@@ -54,6 +60,7 @@ describe('[COMP:api/account-route] Account routes', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+    mockTeardown.mockResolvedValue({ mode: 'deleted', workspacesDeleted: 1, assistantsDeleted: 0 })
   })
 
   // ── Revocable device sessions ───────────────────────────────
@@ -551,7 +558,10 @@ describe('[COMP:api/account-route] Account routes', () => {
     mockFindUserById.mockResolvedValueOnce({ id: 'u_1', stripeCustomerId: null } as never)
     const pool = mockPool()
     const mockClient = (await pool.connect()) as unknown as { query: ReturnType<typeof vi.fn> }
-    mockClient.query.mockResolvedValue({ rows: [], rowCount: 0 })
+    mockClient.query.mockImplementation(async (sql: string) =>
+      String(sql).includes('FOR UPDATE')
+        ? { rows: [{ deleted_at: null }], rowCount: 1 }
+        : { rows: [], rowCount: 0 })
 
     const res = await request(app).delete('/api/account')
     expect(res.status).toBe(204)
@@ -574,9 +584,51 @@ describe('[COMP:api/account-route] Account routes', () => {
     // The pool.connect().query calls
     const pool = mockPool()
     const mockClient = (await pool.connect()) as unknown as { query: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> }
-    mockClient.query.mockResolvedValue({ rows: [], rowCount: 0 })
+    mockClient.query.mockImplementation(async (sql: string) =>
+      String(sql).includes('FOR UPDATE')
+        ? { rows: [{ deleted_at: null }], rowCount: 1 }
+        : { rows: [], rowCount: 0 })
 
     const res = await request(app).delete('/api/account')
     expect(res.status).toBe(204)
+
+    // The teardown runs inside the route's transaction, after the guards.
+    expect(mockTeardown).toHaveBeenCalledWith(mockClient, 'u_1', undefined)
+    const sql = mockClient.query.mock.calls.map((c) => String(c[0]))
+    expect(sql.indexOf('BEGIN')).toBeLessThan(sql.indexOf('COMMIT'))
+  })
+
+  it('answers 204 without a teardown when a concurrent delete already tombstoned the account', async () => {
+    const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
+    mockFindUserById.mockResolvedValueOnce({ id: 'u_1', stripeCustomerId: null } as never)
+    const pool = mockPool()
+    const mockClient = (await pool.connect()) as unknown as { query: ReturnType<typeof vi.fn> }
+    mockClient.query.mockImplementation(async (sql: string) =>
+      String(sql).includes('FOR UPDATE')
+        ? { rows: [{ deleted_at: new Date() }], rowCount: 1 }
+        : { rows: [], rowCount: 0 })
+
+    const res = await request(app).delete('/api/account')
+    expect(res.status).toBe(204)
+    expect(mockTeardown).not.toHaveBeenCalled()
+  })
+
+  it('reports a blocked teardown as a 500 with a code, after rolling back', async () => {
+    const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
+    mockFindUserById.mockResolvedValueOnce({ id: 'u_1', stripeCustomerId: null } as never)
+    const pool = mockPool()
+    const mockClient = (await pool.connect()) as unknown as { query: ReturnType<typeof vi.fn> }
+    mockClient.query.mockImplementation(async (sql: string) =>
+      String(sql).includes('FOR UPDATE')
+        ? { rows: [{ deleted_at: null }], rowCount: 1 }
+        : { rows: [], rowCount: 0 })
+    mockTeardown.mockRejectedValueOnce(
+      new AccountTeardownBlockedError([{ step: 'users', error: 'violates foreign key constraint' }]),
+    )
+
+    const res = await request(app).delete('/api/account')
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ error: 'Failed to delete account', code: 'account_data_blocked' })
+    expect(mockClient.query.mock.calls.map((c) => String(c[0]))).toContain('ROLLBACK')
   })
 })

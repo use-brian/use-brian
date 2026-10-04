@@ -19,6 +19,11 @@ vi.mock("@/lib/api/channels", async (importOriginal) => ({
 }));
 vi.mock("@/lib/api/context-scopes", () => ({ listContextProjects: vi.fn() }));
 vi.mock("@/lib/api/workflow", () => ({ listChannelDestinations: vi.fn(), listWorkspaceMemberOptions: vi.fn() }));
+vi.mock("@/lib/api/departments", () => ({ fetchDepartments: vi.fn(async () => ({ homes: [], departments: [
+  { departmentId: "dept-finance", name: "Finance", status: "active", revision: 1, myClearance: "internal", isOwner: false, ownerIds: [] },
+  { departmentId: "dept-ops", name: "Ops", status: "active", revision: 1, myClearance: "confidential", isOwner: true, ownerIds: [] },
+  { departmentId: "dept-board", name: "Board", status: "active", revision: 1, myClearance: null, isOwner: false, ownerIds: [] },
+] })) }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const copy = en.studioPage.channels.deliveryAudience;
@@ -26,7 +31,7 @@ const project = "12345678-1234-1234-1234-123456789abc";
 const recipient = "abcdefab-1234-1234-1234-123456789abc";
 const first: DeliveryAudienceBinding = {
   channelId: "-100111", audienceType: "group", clearance: "internal",
-  compartments: ["finance"], projectIds: [project], recipientUserId: null,
+  compartments: ["team:dept-finance"], projectIds: [project], recipientUserId: null,
   expiresAt: "2099-01-01T00:00:00.000Z", version: 1,
   approvedByUserId: recipient, approvedAt: "2026-01-01T00:00:00.000Z",
 };
@@ -125,12 +130,17 @@ describe("[COMP:app-web/channel-delivery-audiences] Delivery audience", () => {
   it("edits only the chosen binding, normalizes lists and expiry, and selects sensitivity", async () => {
     await render(); await click(copy.edit);
     expect(field("channelId").value).toBe(first.channelId);
-    await fill("compartments", " ops, finance, ops, ");
+    expect(host.textContent).toContain("Finance");
+    await pick(copy.chooseDepartment, "Ops");
+    // Only departments the approver is in are offered.
+    await act(async () => host.querySelector<HTMLButtonElement>(`button[aria-label="${copy.chooseDepartment}"]`)!.click());
+    expect([...document.querySelectorAll('[role="option"]')].map((node) => node.textContent)).not.toContain("Board");
+    await act(async () => host.querySelector<HTMLButtonElement>(`button[aria-label="${copy.chooseDepartment}"]`)!.click());
     await fill("projects", `${project}, ${project}`);
     await fill("expires", "2099-01-01T02:00:00+02:00");
     await select(1, en.studioPage.channels.clearance.confidential);
     await click(copy.save);
-    expectWrite([{ ...input(first), clearance: "confidential", compartments: ["ops", "finance"] }, input(second)]);
+    expectWrite([{ ...input(first), clearance: "confidential", compartments: ["team:dept-finance", "team:dept-ops"] }, input(second)]);
   });
   it("removes only the targeted binding with removal-specific confirmation", async () => {
     await render(); await click(copy.remove, host.querySelectorAll("li")[1]);
@@ -160,9 +170,9 @@ describe("[COMP:app-web/channel-delivery-audiences] Delivery audience", () => {
   });
   it("retains a failed save draft and allows a successful retry", async () => {
     vi.mocked(updateChannelConfig).mockRejectedValueOnce(new Error("offline"));
-    await render(); await add(); await fill("compartments", "ops"); await click(copy.save);
+    await render(); await add(); await pick(copy.chooseDepartment, "Ops"); await click(copy.save);
     expect(host.querySelector('[role="alert"]')?.textContent).toBe(copy.saveError);
-    expect(field("channelId").value).toBe("-100333"); expect(field("compartments").value).toBe("ops");
+    expect(field("channelId").value).toBe("-100333"); expect(host.querySelector(`button[aria-label="Remove Ops"]`)).not.toBeNull();
     expect(onUpdated).not.toHaveBeenCalled(); expect(button(copy.save).disabled).toBe(false);
     await click(copy.save);
     expect(updateChannelConfig).toHaveBeenCalledTimes(2);
@@ -219,10 +229,10 @@ describe("[COMP:app-web/channel-delivery-audiences] Delivery audience", () => {
     expect(confirmDialog).not.toHaveBeenCalled(); expect(updateChannelConfig).not.toHaveBeenCalled();
   });
   it("blocks a stale edit when refreshed props replace the binding list", async () => {
-    await render(); await click(copy.edit); await fill("compartments", "draft");
+    await render(); await click(copy.edit); await fill("projects", "draft");
     await render(channel([second]));
     expect(host.querySelector('[role="alert"]')?.textContent).toBe(copy.changed);
-    expect(field("compartments").disabled).toBe(true); expect(button(copy.save).disabled).toBe(true);
+    expect(field("projects").disabled).toBe(true); expect(button(copy.save).disabled).toBe(true);
     await click(copy.save);
     expect(confirmDialog).not.toHaveBeenCalled(); expect(updateChannelConfig).not.toHaveBeenCalled();
     await click(copy.cancel); await click(copy.edit); expect(field("channelId").value).toBe(second.channelId);
@@ -328,4 +338,37 @@ it("blocks editing after integration identity changes with identical bindings", 
   expect(button(copy.save).disabled).toBe(true);
   expect(host.querySelector('[role="alert"]')?.textContent).toBe(copy.changed);
   expect(updateChannelConfig).not.toHaveBeenCalled();
+});
+it("shows departments by name, removes one from an approval, and drops labels v2 no longer honours", async () => {
+  const legacy: DeliveryAudienceBinding = { ...first, compartments: ["finance-legacy", "team:dept-finance"] };
+  await render(channel([legacy]));
+  expect(host.textContent).toContain("Finance");
+  expect(host.textContent).not.toContain("finance-legacy");
+  await click(copy.edit);
+  await act(async () => host.querySelector<HTMLButtonElement>(`button[aria-label="Remove Finance"]`)!.click());
+  expect(host.textContent).toContain(copy.generalOnly);
+  await click(copy.save);
+  expectWrite([{ ...input(legacy), compartments: [] }]);
+});
+
+describe("[COMP:app-web/channel-delivery-audiences] Whole company approval", () => {
+  it("approves a group for the whole company, dropping its department and project caps", async () => {
+    await render(); await click(copy.edit);
+    expect(host.textContent).toContain(copy.wholeCompanyHint);
+    await act(async () => host.querySelector<HTMLElement>('[role="switch"]')!.click());
+    // The department and project pickers no longer apply.
+    expect(host.querySelector(`button[aria-label="${copy.chooseDepartment}"]`)).toBeNull();
+    expect(host.querySelector('input[id$="-projects"]')).toBeNull();
+    await click(copy.save);
+    expectWrite([{ ...input(first), compartments: [], projectIds: [], companyWide: true }, input(second)]);
+  });
+  it("shows a company-wide approval and keeps it when another approval is edited", async () => {
+    const wide: DeliveryAudienceBinding = { ...first, compartments: [], projectIds: [], companyWide: true };
+    await render(channel([wide, second]));
+    expect(host.textContent).toContain(copy.wholeCompany);
+    await act(async () => [...host.querySelectorAll("button")].filter((node) => node.textContent?.trim() === copy.edit)[1].click());
+    expect(host.querySelector('[role="switch"]')).toBeNull();
+    await click(copy.save);
+    expectWrite([input(wide), input(second)]);
+  });
 });

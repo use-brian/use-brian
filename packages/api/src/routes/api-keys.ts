@@ -1,3 +1,4 @@
+import { withExternalKeyActor } from '../db/external-key-admission.js'
 /**
  * Edition-neutral per-assistant API key management.
  * [COMP:api/integrations-api-keys]
@@ -50,7 +51,7 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
       })
     }
     try {
-      const created = await store.create({
+      const created = await withExternalKeyActor(req.userId!, req.authSessionId, () => store.create({
         assistantId: req.params.assistantId,
         name: parsed.data.name,
         actingUserId: userId,
@@ -58,7 +59,7 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
         audience: parsed.data.audience,
         anonymousContext: parsed.data.anonymousContext,
         toolPolicy,
-      })
+      }))
       res.json({
         id: created.id,
         name: created.name,
@@ -76,6 +77,9 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
       if ((err as Error).message.includes('Not authorized')) {
         res.status(403).json({ error: 'Not authorized to modify this assistant' })
         return
+      }
+      if ((err as Error).message.startsWith('external_key_')) {
+        res.status(409).json({ error: 'external_key_admission_required' }); return
       }
       console.error('[api-keys] create failed:', err)
       res.status(500).json({ error: 'Failed to create API key' })

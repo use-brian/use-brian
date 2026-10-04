@@ -1,3 +1,4 @@
+import { admitTaskCreate } from '../workspace-access/task-create-admission.js'
 import { bindScopeSource, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type { AccessContext, EntityLinksStore, Sensitivity, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor, TaskStore } from '@use-brian/core'
 import type pg from 'pg'
@@ -180,12 +181,24 @@ export async function findRecentDuplicateTask(
   userId: string,
   coords: Parameters<typeof createTask>[1],
 ): Promise<TaskRecord | null> {
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client,userId)
+    coords = await admitTaskCreate(client,userId,coords,taskAccess(userId,coords.workspaceId,coords.access))
+    const result = await findTaskDuplicateInTransaction(userId,coords,client)
+    await client.query('COMMIT')
+    return result
+  } finally { await rollbackAndRelease(client) }
+}
+
+async function findTaskDuplicateInTransaction(userId: string, coords: Parameters<typeof createTask>[1], client: pg.PoolClient): Promise<TaskRecord | null> {
   const access=checkTaskCreate(userId,coords)
-  await checkTaskProject(userId,coords)
+  await checkTaskProject(userId,coords,client)
   // Relationship writes are not represented by the row, so never swallow them.
   if (coords.title === PLACEHOLDER_TASK_TITLE||coords.dependsOn?.length||coords.linkedEntityIds?.length) return null
   const ap=buildAccessPredicate(access,{startIdx:20,operation:'mutation'})
-  const result = await queryWithRLS<TaskRow>(userId,
+  const result = await client.query<TaskRow>(
     `SELECT ${FULL_SELECT} FROM tasks
       WHERE workspace_id=$1 AND title=$2 AND status=$3 AND parent_id IS NOT DISTINCT FROM $4
         AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
@@ -226,6 +239,7 @@ export async function createTask(
   userId: string,
   params: {
     workspaceId: string
+    expectedPolicyRevision?: string
     title: string
     status?: TaskRecordStatus
     assigneeId?: string | null
@@ -285,6 +299,7 @@ export async function createTask(
   },
   entityLinks?: EntityLinksStore,
   transactionClient?: pg.PoolClient,
+  options?: { deduplicate?: boolean; onInserted?: (task: TaskRecord) => void },
 ): Promise<TaskRecord> {
   // WU-4.5 — authorship NOT NULL enforcement at the store layer. The
   // `userId` argument is both the RLS actor and the row author; without
@@ -293,43 +308,61 @@ export async function createTask(
   // Other universal columns (sensitivity, source, valid_from) take
   // their schema defaults from migration 128.
   assertAuthorshipPresent('createTask', userId)
-  checkTaskCreate(userId,params)
-  await checkTaskProject(userId,params,transactionClient)
-  const sql =
-    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, project_ids, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms, sensitivity, user_id, assistant_id)
-     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
-     WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$10)
-       AND (effective_member_team_compartments($10,$1) IS NULL
-         OR $11::text[] <@ effective_member_team_compartments($10,$1))
-     RETURNING ${FULL_SELECT}`
-  const values = [
-      params.workspaceId,
-      params.title,
-      params.status ?? 'todo',
-      params.assigneeId ?? null,
-      params.due ?? null,
-      params.tags ?? [],
-      params.parentId ?? null,
-      JSON.stringify(params.externalRef ?? {}),
-      JSON.stringify(params.attributes ?? {}),
-      userId,
-      params.compartments ?? [],
-      params.projectIds ?? [],
-      params.source ?? 'user',
-      params.sourceSessionId ?? null,
-      params.sourceEpisodeId ?? null,
-      params.createdByAssistantId ?? null,
-      params.sourceStartMs ?? null,
-      params.sensitivity??'internal',params.visibility?.userId??null,params.visibility?.assistantId??null,
-    ]
-  const result = transactionClient
-    ? await transactionClient.query<TaskRow>(sql, values)
-    : await queryWithRLS<TaskRow>(userId, sql, values)
-  if (!result.rows[0]) throw Object.assign(new Error('The task operation is outside the current access scope.'), { code: 'scope_operation_denied' })
-  const task = toRecord(result.rows[0])
+  const client = transactionClient ?? await getAppPool().connect()
+  let task: TaskRecord
+  try {
+    if (!transactionClient) {
+      await client.query('BEGIN')
+      await applyRLSGucs(client,userId)
+    }
+    params = await admitTaskCreate(client,userId,params,taskAccess(userId,params.workspaceId,params.access))
+    checkTaskCreate(userId,params)
+    await checkTaskProject(userId,params,client)
+    if (options?.deduplicate) {
+      const duplicate = await findTaskDuplicateInTransaction(userId,params,client)
+      if (duplicate) {
+        if (!transactionClient) await client.query('COMMIT')
+        return duplicate
+      }
+    }
+    const sql =
+      `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, project_ids, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms, sensitivity, user_id, assistant_id)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+       WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$10)
+         AND (effective_member_team_compartments($10,$1) IS NULL
+           OR $11::text[] <@ effective_member_team_compartments($10,$1))
+       RETURNING ${FULL_SELECT}`
+    const values = [
+        params.workspaceId,
+        params.title,
+        params.status ?? 'todo',
+        params.assigneeId ?? null,
+        params.due ?? null,
+        params.tags ?? [],
+        params.parentId ?? null,
+        JSON.stringify(params.externalRef ?? {}),
+        JSON.stringify(params.attributes ?? {}),
+        userId,
+        params.compartments ?? [],
+        params.projectIds ?? [],
+        params.source ?? 'user',
+        params.sourceSessionId ?? null,
+        params.sourceEpisodeId ?? null,
+        params.createdByAssistantId ?? null,
+        params.sourceStartMs ?? null,
+        params.sensitivity??'internal',params.visibility?.userId??null,params.visibility?.assistantId??null,
+      ]
+    const result = await client.query<TaskRow>(sql, values)
+    if (!result.rows[0]) throw Object.assign(new Error('The task operation is outside the current access scope.'), { code: 'scope_operation_denied' })
+    task = toRecord(result.rows[0])
+    if (!transactionClient) await client.query('COMMIT')
+  } finally {
+    if (!transactionClient) await rollbackAndRelease(client)
+  }
+  if (!transactionClient) options?.onInserted?.(task)
 
   // Workflow task-event emit — fire-and-forget after the committed insert
-  // (single-statement autocommit above). The late-bound fanout is a no-op
+  // (writer transaction above). The late-bound fanout is a no-op
   // until bootOpenApi binds the dispatcher. [COMP:api/task-event-fanout]
   if (!transactionClient) publishTaskLifecycle({
     workspaceId: task.workspaceId,
@@ -636,6 +669,7 @@ export async function updateTask(
         return current.rows[0]?toRecord(current.rows[0]):null
       }
 
+      await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[liveRes.rows[0].workspaceId])
       const oldRes = await client.query<OldTaskRow>(
         `SELECT workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
                 sensitivity, compartments, project_ids,
@@ -659,15 +693,21 @@ export async function updateTask(
       const newParentId = fields.parentId !== undefined ? fields.parentId : old.parent_id
       const newExternalRef = fields.externalRef !== undefined ? fields.externalRef : (old.external_ref ?? {})
       const newAttributes = fields.attributes !== undefined ? fields.attributes : (old.attributes ?? {})
-      const nextCompartments = unionScopeRequirements(old.compartments, opts?.scope?.compartments)
-      const nextProjectIds = unionScopeRequirements(old.project_ids, opts?.scope?.projectIds)
-      const nextSensitivity=maxSensitivity(old.sensitivity,opts?.scope?.sensitivity??'public')
+      let nextCompartments = unionScopeRequirements(old.compartments, opts?.scope?.compartments)
+      let nextProjectIds = unionScopeRequirements(old.project_ids, opts?.scope?.projectIds)
+      let nextSensitivity=maxSensitivity(old.sensitivity,opts?.scope?.sensitivity??'public')
       const mergeVisibility=(current:string|null,inherited:string|null|undefined)=>{
         if(current&&inherited&&current!==inherited)throw Object.assign(new Error('Task visibility cannot combine these sources.'),{code:'scope_visibility_incompatible'})
         return current??inherited??null
       }
-      const nextUserId=mergeVisibility(old.user_id,opts?.scope?.visibility?.userId)
-      const nextAssistantId=mergeVisibility(old.assistant_id,opts?.scope?.visibility?.assistantId)
+      let nextUserId=mergeVisibility(old.user_id,opts?.scope?.visibility?.userId)
+      let nextAssistantId=mergeVisibility(old.assistant_id,opts?.scope?.visibility?.assistantId)
+      const admitted = await admitTaskCreate(client,userId,{
+        workspaceId:old.workspace_id,parentId:newParentId,sensitivity:nextSensitivity,
+        compartments:nextCompartments,projectIds:nextProjectIds,visibility:{userId:nextUserId,assistantId:nextAssistantId},
+      },access,{sensitivity:old.sensitivity,compartments:old.compartments??[],projectIds:old.project_ids??[],userId:old.user_id,assistantId:old.assistant_id})
+      nextSensitivity=admitted.sensitivity;nextCompartments=admitted.compartments;nextProjectIds=admitted.projectIds
+      nextUserId=admitted.visibility.userId;nextAssistantId=admitted.visibility.assistantId
       assertExecutionResourceScope({workspaceId:old.workspace_id,userId:nextUserId,assistantId:nextAssistantId,
         sensitivity:nextSensitivity,compartments:nextCompartments,projectIds:nextProjectIds},'mutation',access)
 

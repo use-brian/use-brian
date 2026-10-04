@@ -28,7 +28,7 @@ async function teams(client:PoolClient,p:Principal):Promise<Team[]>{
   const result=await client.query<Team>(`SELECT g.id,g.name,g.compartment_key AS "compartmentKey",g.directory_visibility AS "directoryVisibility",g.requestable,g.read_all AS "readAll",g.status,
     ARRAY(SELECT compartment_key FROM workspace_group_compartment_grants WHERE group_id=g.id) AS bundle,
     ARRAY(SELECT gm.user_id FROM workspace_group_members gm JOIN workspace_members wm ON wm.user_id=gm.user_id AND wm.workspace_id=g.workspace_id WHERE gm.group_id=g.id) AS "memberIds",
-    ARRAY(SELECT assistant_id FROM workspace_group_assistants WHERE group_id=g.id) AS "assistantIds",
+    ARRAY(SELECT assistant_id FROM workspace_group_assistants WHERE group_id=g.id AND public.assistant_placement_visible($2,assistant_id)) AS "assistantIds",
     ARRAY(SELECT user_id FROM workspace_team_managers WHERE team_id=g.id AND workspace_id=g.workspace_id AND revoked_at IS NULL) AS "managerIds",
     coalesce((SELECT jsonb_agg(jsonb_build_object('userId',user_id,'capabilities',capabilities)) FROM workspace_team_managers WHERE team_id=g.id AND workspace_id=g.workspace_id AND revoked_at IS NULL),'[]'::jsonb) AS managers,
     coalesce((SELECT capabilities FROM workspace_team_managers WHERE team_id=g.id AND workspace_id=g.workspace_id AND user_id=$2 AND revoked_at IS NULL),ARRAY[]::text[]) AS capabilities,
@@ -64,7 +64,12 @@ async function historyIds(client:PoolClient,p:Principal,all:Team[],kind:'request
   const ids=rows.slice(0,50).map(row=>row.id);
   return {ids,nextCursor:rows.length>50?ids[ids.length-1]:null};
 }
-async function overview(client:PoolClient,p:Principal,history?:WorkspaceAccessHistoryQuery & {kind:'requests'|'grants';requestId?:string}):Promise<WorkspaceAccessOverview>{
+/** The overview minus request/grant history and departmental readiness. The
+ * readiness audit introspects the catalog and counts every scoped row family
+ * in the workspace, so read-only inspection surfaces that never return it
+ * (registry, explanation, audit) must not pay for it on every refresh. */
+export type WorkspaceAccessDirectory=Omit<WorkspaceAccessOverview,'readiness'|'requests'|'grants'|'nextRequestCursor'|'nextGrantCursor'|'appliedCommand'|'commandReceipt'>
+async function directory(client:PoolClient,p:Principal):Promise<{all:Team[];visible:Team[];view:WorkspaceAccessDirectory}>{
   const all=await teams(client,p)
   const reach=(await client.query<{reach:string[]|null}>('SELECT effective_member_read_compartments($1,$2) AS reach',[p.userId,p.workspaceId])).rows[0].reach
   const visible=all.filter(t=>t.status==='active'&&(isAccessAdmin(p.role)||t.directoryVisibility==='workspace'||t.managerIds.includes(p.userId)||reach===null||reach.includes(t.compartmentKey)))
@@ -76,6 +81,12 @@ async function overview(client:PoolClient,p:Principal,history?:WorkspaceAccessHi
     FROM workspace_members WHERE workspace_id=$1 AND ($2::boolean OR user_id=$3)`,[p.workspaceId,isAccessAdmin(p.role),p.userId])
   const teamIds=(reach:string[]|null)=>reach===null?null:visible.filter(team=>reach.includes(team.compartmentKey)).map(team=>team.id)
   for(const person of people){const setting=settings.rows.find(row=>row.id===person.id);if(setting)person.access={clearance:setting.clearance,effectiveClearance:isAccessAdmin(person.role)?'confidential':setting.clearance,teamScopeMode:setting.teamScopeMode,readTeamIds:teamIds(setting.readReach),membershipTeamIds:teamIds(setting.membershipReach),hasUnlistedReadScope:setting.readReach?.some(key=>!visible.some(team=>team.compartmentKey===key))??false,hasUnlistedMembershipScope:setting.membershipReach?.some(key=>!visible.some(team=>team.compartmentKey===key))??false}}
+  const policy=(await client.query<{revision:string;mode:WorkspaceAccessOverview['classificationMode']}>('SELECT revision::text,classification_mode AS mode FROM workspace_access_policies WHERE workspace_id=$1',[p.workspaceId])).rows[0]
+  return{all,visible,view:{validForMs:await projectionLifetime(client,p.workspaceId,p.userId),workspaceId:p.workspaceId,policyRevision:policy?.revision??'1',classificationMode:policy?.mode??'legacy',canAdminister:isAccessAdmin(p.role),people,teams:visible.map(t=>({id:t.id,name:t.name,directoryVisibility:t.directoryVisibility,requestable:t.requestable,canManageMembers:canManageMembers(p,t),canApprove:isAccessAdmin(p.role)||t.capabilities.includes('approve_read_requests'),expandedPackage:t.expanded||t.readAll||t.bundle.some(key=>key!==t.compartmentKey),memberIds:t.memberIds.filter(id=>people.some(m=>m.id===id)),assistantIds:isAccessAdmin(p.role)||t.managerIds.includes(p.userId)?t.assistantIds:[],managerIds:t.managerIds.filter(id=>people.some(m=>m.id===id)),managers:isAccessAdmin(p.role)?t.managers:[]}))}}
+}
+async function overview(client:PoolClient,p:Principal,history?:WorkspaceAccessHistoryQuery & {kind:'requests'|'grants';requestId?:string}):Promise<WorkspaceAccessOverview>{
+  const {all,visible,view}=await directory(client,p)
+  const people=view.people
   const requestPage=history?.requestId?{ids:(await client.query<{id:string}>('SELECT id FROM workspace_access_requests WHERE workspace_id=$1 AND id=$2 AND can_view_department_request(id,$3)',[p.workspaceId,history.requestId,p.userId])).rows.map(row=>row.id),nextCursor:null}:history?.kind==='grants'?{ids:[],nextCursor:null}:await historyIds(client,p,all,'requests',history?.after);
   const grantPage=history?.kind==='requests'?{ids:[],nextCursor:null}:await historyIds(client,p,all,'grants',history?.after);
   const memberName=(id:string)=>people.find(m=>m.id===id)?.name??null
@@ -97,8 +108,7 @@ async function overview(client:PoolClient,p:Principal,history?:WorkspaceAccessHi
     if(!isAccessAdmin(p.role)&&!beneficiary&&!team.capabilities.includes('approve_read_requests'))continue
     grants.push({...grant,status:grant.revokedAt?'revoked':grant.expiresAt&&grant.expiresAt<=p.now?'expired':grant.startsAt>p.now?'scheduled':'active',targetTeamName:team.name,beneficiaryName:grant.beneficiaryKind==='member'?memberName(grant.beneficiaryId):visible.find(t=>t.id===grant.beneficiaryId)?.name??null,startsAt:grant.startsAt.toISOString(),expiresAt:grant.expiresAt?.toISOString()??null,revokedAt:grant.revokedAt?.toISOString()??null,canRevoke:!grant.revokedAt&&(isAccessAdmin(p.role)||team.capabilities.includes('approve_read_requests')||(grant.beneficiaryKind==='member'&&beneficiary))})
   }
-  const policy=(await client.query<{revision:string;mode:WorkspaceAccessOverview['classificationMode']}>('SELECT revision::text,classification_mode AS mode FROM workspace_access_policies WHERE workspace_id=$1',[p.workspaceId])).rows[0]
-  return{nextRequestCursor:requestPage.nextCursor,nextGrantCursor:grantPage.nextCursor,readiness:await getDepartmentalReadinessSystem(p.workspaceId,client.query.bind(client)),validForMs:await projectionLifetime(client,p.workspaceId,p.userId),workspaceId:p.workspaceId,policyRevision:policy?.revision??'1',classificationMode:policy?.mode??'legacy',canAdminister:isAccessAdmin(p.role),people,teams:visible.map(t=>({id:t.id,name:t.name,directoryVisibility:t.directoryVisibility,requestable:t.requestable,canManageMembers:canManageMembers(p,t),canApprove:isAccessAdmin(p.role)||t.capabilities.includes('approve_read_requests'),expandedPackage:t.expanded||t.readAll||t.bundle.some(key=>key!==t.compartmentKey),memberIds:t.memberIds.filter(id=>people.some(m=>m.id===id)),assistantIds:isAccessAdmin(p.role)||t.managerIds.includes(p.userId)?t.assistantIds:[],managerIds:t.managerIds.filter(id=>people.some(m=>m.id===id)),managers:isAccessAdmin(p.role)?t.managers:[]})),requests,grants}
+  return{...view,nextRequestCursor:requestPage.nextCursor,nextGrantCursor:grantPage.nextCursor,readiness:await getDepartmentalReadinessSystem(p.workspaceId,client.query.bind(client)),requests,grants}
 }
 
 export async function getWorkspaceAccess(workspaceId:string,userId:string):Promise<WorkspaceAccessOverview>{
@@ -161,6 +171,7 @@ async function attachApproval(client:PoolClient,p:Principal,r:RequestRow,all:Tea
 
 /** Canonical before/after audit, never a model-written account of the change. */
 async function auditState(client:PoolClient,workspaceId:string,command:DepartmentAccessCommand,createdId?:string):Promise<unknown> {
+  if(command.type==='workspace.default_department.set')return (await client.query('SELECT access_mode,default_department_id FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0]??null
   if(command.type==='workspace.classification.set')return (await client.query('SELECT workspace_id,classification_mode,revision::text,reviewed_inventory_revision::text FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0]??null
   if(command.type==='assistant.clearance.set')return (await client.query('SELECT id,clearance FROM assistants WHERE workspace_id=$1 AND id=$2',[workspaceId,command.assistantId])).rows[0]??null
   if(command.type==='member.access.set')return (await client.query('SELECT user_id,role,clearance,team_scope_mode FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,command.userId])).rows[0]??null
@@ -190,11 +201,27 @@ async function auditState(client:PoolClient,workspaceId:string,command:Departmen
 }
 
 /** Trusted transaction entry. Transport callers must use the saved-review protocol. */
-export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand):Promise<WorkspaceAccessOverview>{
+type AppliedCommand=NonNullable<WorkspaceAccessOverview['appliedCommand']>
+/** `projection:'directory'` is for a SIMULATED command (saved-review preview):
+ * the caller reads only the audit event, so the result skips the departmental
+ * readiness audit, which locks and reads every scoped row in the workspace. */
+export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand):Promise<WorkspaceAccessOverview>
+export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand,projection:'directory'):Promise<WorkspaceAccessDirectory&{appliedCommand?:AppliedCommand}>
+export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand,projection:'overview'|'directory'='overview'):Promise<WorkspaceAccessOverview|(WorkspaceAccessDirectory&{appliedCommand?:AppliedCommand})>{
     const p=await principal(client,workspaceId,userId,true),all=await teams(client,p)
+    if ('assistantId' in command && command.assistantId && !(await client.query(
+      'SELECT 1 WHERE public.assistant_placement_visible($1,$2)', [userId,command.assistantId])).rows.length) throw new WorkspaceAccessError('not_found',404)
     const before=await auditState(client,workspaceId,command)
     let subjectId:string
-    if(command.type==='workspace.classification.set') {
+    if(command.type==='workspace.default_department.set') {
+      admin(p)
+      const target=all.find(team=>team.id===command.teamId)
+      if(!target||target.status!=='active'||target.readAll||target.bundle.some(key=>key!==target.compartmentKey))throw new WorkspaceAccessError('access_mode_default_invalid',409)
+      const policy=(await client.query<{mode:string;defaultId:string|null}>('SELECT access_mode AS mode,default_department_id AS "defaultId" FROM workspace_access_policies WHERE workspace_id=$1 FOR UPDATE',[workspaceId])).rows[0]
+      if(policy.mode==='simple'&&policy.defaultId!==command.teamId)throw new WorkspaceAccessError('access_mode_migration_required',409)
+      await client.query('UPDATE workspace_access_policies SET default_department_id=$2 WHERE workspace_id=$1',[workspaceId,command.teamId])
+      subjectId=workspaceId
+    }else if(command.type==='workspace.classification.set') {
       admin(p)
       if(command.expectedPolicyRevision!==p.revision)throw new WorkspaceAccessError('access_policy_conflict',409)
       const policy=(await client.query<{classificationMode:string;inventoryRevision:string|null}>(`SELECT classification_mode AS "classificationMode",reviewed_inventory_revision::text AS "inventoryRevision"
@@ -254,6 +281,13 @@ export async function executeDepartmentAccessInTransaction(client:PoolClient,wor
         } else if(command.type==='department.archive') {
           await store.archiveTeam(userId,team.id)
         } else if(command.type==='department.read_bundle.set') {
+          // Retired by the v2 cutover (D23, D26): in a v2 workspace Team-to-Team
+          // read packages and "read every Team" create no access, so the command
+          // is refused rather than saved as an inert setting. Per-person access
+          // is an edge set through manageDepartments / Organization -> Departments.
+          // A workspace rolled back to the legacy read keeps the command.
+          const v2=(await client.query<{v2:boolean}>(`SELECT coalesce((to_jsonb(w)->>'department_read_v2')::boolean,false) AS v2 FROM workspaces w WHERE id=$1`,[workspaceId])).rows[0]?.v2===true
+          if(v2)throw new WorkspaceAccessError('department_read_bundle_retired',410)
           const selected=command.groupIds.map(id=>all.find(row=>row.id===id&&row.status==='active'))
           if(team.status!=='active'||selected.some(row=>!row))throw new WorkspaceAccessError('not_found',404)
           await store.setTeamReadBundle(userId,team.id,{readAll:command.readAll,compartmentKeys:selected.map(row=>row!.compartmentKey)})
@@ -332,13 +366,18 @@ export async function executeDepartmentAccessInTransaction(client:PoolClient,wor
         await client.query('UPDATE pending_approvals SET status=$2,responded_at=now(),responded_by=$3,reject_reason=$4 WHERE id=$1',[r.approvalId,command.decision,userId,command.decision==='rejected'?command.reason??null:null])
       }
     }
-    const result=await overview(client,p)
+    const result=projection==='directory'?(await directory(client,p)).view:await overview(client,p)
     const event=await client.query<{id:string}>(`INSERT INTO workspace_access_events(workspace_id,actor_user_id,kind,subject_id,policy_revision,changes) VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING id`,[workspaceId,userId,command.type,subjectId,result.policyRevision,JSON.stringify({command,before,after:await auditState(client,workspaceId,command,subjectId)})])
     return {...result,appliedCommand:{type:command.type,subjectId,auditEventId:event.rows[0].id}}
 }
 
 export async function getWorkspaceAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,lock=false):Promise<WorkspaceAccessOverview>{
   return overview(client,await principal(client,workspaceId,userId,lock))
+}
+
+/** Read-only inspection: same visibility and lifetime, no history or readiness audit. */
+export async function getWorkspaceAccessDirectoryInTransaction(client:PoolClient,workspaceId:string,userId:string,lock=false):Promise<WorkspaceAccessDirectory>{
+  return (await directory(client,await principal(client,workspaceId,userId,lock))).view
 }
 
 /** Trusted canonical entry for the common approval protocol; ordinary HTTP writers require saved reviews. */

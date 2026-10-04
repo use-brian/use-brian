@@ -15,6 +15,7 @@ import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport } from '../../a2a/types.js'
 import type { JobStore, ScheduledJob } from '../../scheduling/types.js'
 import type { DeliverToChannel } from '../executor.js'
+import { pinToolAuthoringAuthority } from '../../security/index.js'
 import { loadBuiltinSkills } from '../../skills/loader.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
@@ -281,6 +282,7 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
 }
 
 function makeAllTools(opts?: {
+  resolvePrimary?: (workspaceId: string) => Promise<string | null>
   isKnownTool?: (name: string) => boolean
   resolveKnownWorkflowTools?: (args: {
     userId: string
@@ -344,7 +346,7 @@ function makeAllTools(opts?: {
     resolveKnownWorkflowTools: opts?.resolveKnownWorkflowTools,
     // Scheduling substrate (scheduling-authoring-unification).
     jobStore,
-    resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+    resolvePrimary: opts?.resolvePrimary ?? (async () => PRIMARY_ASSISTANT_ID),
     deliverToChannel: opts?.deliverToChannel,
     resolveViewWorkspace: opts?.resolveViewWorkspace ?? (async () => WORKSPACE_ID),
     validateDeliveryTarget: opts?.validateDeliveryTarget,
@@ -824,10 +826,12 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
   })
 
   it('[COMP:api/client-principal-runtime] resolves safe API-key metadata into a receipt-backed reviewed reply', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async () => [])
+    const resolvePrimary = vi.fn(async () => PRIMARY_ASSISTANT_ID)
     const keyId = '00000000-0000-4000-8000-000000000020'
     const listAuthorableClientApiKeys = vi.fn(async () => [{
       id: keyId,
-      assistantId: PRIMARY_ASSISTANT_ID,
+      assistantId: AUTHORING_ASSISTANT_ID,
       name: 'Studio public clients',
       scope: 'chat' as const,
       audience: 'external' as const,
@@ -840,11 +844,14 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     const { tools, stores } = makeAllTools({
       allowLegacyDirectWrites: false,
       listAuthorableClientApiKeys,
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+      resolvePrimary,
     })
     const proposed = await tools.proposeWorkflow.execute({
       name: 'Review client replies',
       clientBoundary: {
-        assistantId: PRIMARY_ASSISTANT_ID,
+        assistantId: AUTHORING_ASSISTANT_ID,
         resolve: { kind: 'verified_email_pairing' },
       },
       definition: {
@@ -853,7 +860,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
           {
             id: 'draft',
             type: 'assistant_call',
-            target: { assistantId: PRIMARY_ASSISTANT_ID },
+            target: { assistantId: AUTHORING_ASSISTANT_ID },
             prompt: 'Draft a reply to {{input.event.text}}.',
             storeOutputAs: 'draft',
             nextStepId: 'review',
@@ -884,7 +891,13 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     }, makeContext())
 
     expect(proposed.isError).toBeFalsy()
-    expect(listAuthorableClientApiKeys).toHaveBeenCalledWith(USER_ID, PRIMARY_ASSISTANT_ID)
+    expect(resolvePrimary).not.toHaveBeenCalled()
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: AUTHORING_ASSISTANT_ID,
+      authoringAuthority: pinToolAuthoringAuthority(makeContext()),
+      toolNames: ['imapSendMessage'],
+    }))
+    expect(listAuthorableClientApiKeys).toHaveBeenCalledWith(USER_ID, AUTHORING_ASSISTANT_ID)
     expect((proposed.data as { selectedClientBoundary: unknown }).selectedClientBoundary).toMatchObject({
       id: keyId,
       name: 'Studio public clients',
@@ -900,7 +913,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(stores.workflows.get(workflowId)?.definition.principal).toEqual({
       kind: 'api_external_client',
       apiKeyId: keyId,
-      assistantId: PRIMARY_ASSISTANT_ID,
+      assistantId: AUTHORING_ASSISTANT_ID,
       resolve: { kind: 'verified_email_pairing' },
     })
   })
@@ -1444,7 +1457,32 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       workspaceId: WORKSPACE_ID,
       assistantId: PRIMARY_ASSISTANT_ID,
       toolNames: ['list_events'],
+      authoringAuthority: pinToolAuthoringAuthority(makeContext()),
+      contextGroupId: null,
+      contextProjectId: null,
     })
+  })
+
+  it.each([false, true])('uses the create/edit binding for exact lookup (edit=%s)', async (editing) => {
+    const resolveKnownWorkflowTools = vi.fn(async () => [])
+    const { tools } = makeAllTools({ isKnownTool: () => false, resolveKnownWorkflowTools })
+    const definition = { startStepId: 'events', steps: [
+      { id: 'events', type: 'tool_call', toolName: 'list_events', arguments: {} },
+    ] }
+    let workflowId: string | undefined
+    if (editing) {
+      const created = await tools.createWorkflow.execute({ name: 'Existing', definition }, makeContext())
+      workflowId = (created.data as { id: string }).id
+      expect(workflowId).toBeTruthy()
+    }
+    const context = makeContext({ activeGroupId: AUTHORING_ASSISTANT_ID, activeProjectId: PROJECT_ID })
+    const result = await tools.proposeWorkflow.execute({ name: 'Scoped', workflowId, definition }, context)
+    expect(result.isError).toBeFalsy()
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledWith(expect.objectContaining({
+      authoringAuthority: pinToolAuthoringAuthority(context),
+      contextGroupId: editing ? null : AUTHORING_ASSISTANT_ID,
+      contextProjectId: editing ? null : PROJECT_ID,
+    }))
   })
 
   it('batches deterministic tool lookups and does not mix assistant_call scope', async () => {
@@ -1484,8 +1522,11 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     }))
   })
 
-  it('keeps the unknown warning when exact runtime lookup fails or disagrees with preflight', async () => {
-    const resolveKnownWorkflowTools = vi.fn(async () => [])
+  it.each([false, true])('keeps execution-scope warnings when exact lookup fails or disagrees with preflight (throws=%s)', async (throws) => {
+    const resolveKnownWorkflowTools = vi.fn(async () => {
+      if (throws) throw new Error('Execution scope unavailable')
+      return []
+    })
     const { tools } = makeAllTools({
       isKnownTool: () => false,
       resolveKnownWorkflowTools,
@@ -1502,6 +1543,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(r.isError).toBeFalsy()
     const warnings = (r.data as Record<string, unknown>).warnings as string[]
     expect(warnings.some((w) => w.includes('missing_action') && w.includes('tool_not_found'))).toBe(true)
+    expect(warnings.some((w) => w.includes('execution scope'))).toBe(true)
   })
 
   it('does not build the runtime tool registry during createWorkflow', async () => {
@@ -3243,5 +3285,187 @@ describe('[COMP:workflow/tools] session-captured delivery retargets the terminal
     expect(errors).toContain(AUTHORING_ASSISTANT_ID)
     // The old copy told the user to do the one thing they had already done.
     expect(errors).not.toContain('Author from inside the Telegram chat')
+  })
+})
+
+/**
+ * "Deliver to this chat" on a non-schedule trigger. The `trigger.delivery`
+ * sugar only exists for schedules, and nothing exposes the raw chat id to the
+ * model, so a Telegram-group request for a webhook alert workflow guessed
+ * through five rejected proposals (no id, the channel-row UUID, the
+ * integration UUID, the word "current") and gave up. `channelId: "current"`
+ * is the reserved reference to the authoring chat, resolved before validation.
+ */
+describe('[COMP:workflow/tools] channelId "current" resolves to the authoring chat', () => {
+  const GROUP_CHAT = '-5550000001'
+  const CHANNEL_ROW_UUID = '8a000000-0000-4000-8000-0000000000aa'
+  const webhookDef = (deliver: Record<string, unknown>, failureDelivery?: Record<string, unknown>) => ({
+    startStepId: 'step_alert',
+    steps: [{
+      id: 'step_alert',
+      type: 'assistant_call',
+      target: { assistantId: 'primary' },
+      prompt: 'Write a short alert from {{input.alertname}}.',
+      deliver,
+    }],
+    ...(failureDelivery ? { failureDelivery } : {}),
+  })
+  const telegramGroup = (overrides: Partial<ToolContext> = {}) =>
+    makeContext({ channelType: 'telegram', channelId: GROUP_CHAT, ...overrides })
+  const proposedDef = (r: { data: unknown }) =>
+    (r.data as { definition: WorkflowDefinition }).definition
+
+  it('substitutes the session chat on a webhook workflow, step and failureDelivery, and probes that chat', async () => {
+    const validateDeliveryTarget = vi.fn(async (_args: { channelId: string }) => ({ ok: true }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'Alerts',
+        trigger: { kind: 'webhook' },
+        definition: webhookDef(
+          { channelType: 'telegram', channelId: 'current' },
+          { channelType: 'telegram', channelId: 'current' },
+        ),
+      },
+      telegramGroup(),
+    )
+    expect(r.isError).toBeFalsy()
+    const def = proposedDef(r)
+    const step = def.steps[0] as { target: { assistantId: string }; deliver: unknown }
+    expect(step.deliver).toEqual({ channelType: 'telegram', channelId: GROUP_CHAT })
+    expect(def.failureDelivery).toEqual({ channelType: 'telegram', channelId: GROUP_CHAT })
+    // The session assistant IS the primary: the durable sentinel is kept.
+    expect(step.target.assistantId).toBe('primary')
+    for (const call of validateDeliveryTarget.mock.calls) {
+      expect(call[0].channelId).toBe(GROUP_CHAT)
+    }
+    expect(validateDeliveryTarget).toHaveBeenCalledTimes(2)
+  })
+
+  it('retargets a step left on primary to the session assistant, and persists the resolved id', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools, stores } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.createWorkflow.execute(
+      {
+        name: 'Alerts',
+        trigger: { kind: 'webhook' },
+        definition: webhookDef({ channelType: 'telegram', channelId: 'current' }),
+      },
+      telegramGroup({ assistantId: AUTHORING_ASSISTANT_ID }),
+    )
+    expect(r.isError, JSON.stringify(r.data)).toBeFalsy()
+    const saved = stores.workflows.get((r.data as { id: string }).id)!.definition.steps[0] as {
+      target: { assistantId: string }
+      deliver: unknown
+    }
+    expect(saved.deliver).toEqual({ channelType: 'telegram', channelId: GROUP_CHAT })
+    expect(saved.target.assistantId).toBe(AUTHORING_ASSISTANT_ID)
+    expect(validateDeliveryTarget).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: AUTHORING_ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: GROUP_CHAT,
+    }))
+  })
+
+  it('rejects "current" with a channelType that is not this session\'s, without probing', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', trigger: { kind: 'webhook' }, definition: webhookDef({ channelType: 'slack', channelId: 'current' }) },
+      telegramGroup(),
+    )
+    expect(r.isError).toBe(true)
+    const errors = (r.data as { errors: string[] }).errors.join('\n')
+    expect(errors).toContain('this session is a telegram chat')
+    expect(validateDeliveryTarget).not.toHaveBeenCalled()
+  })
+
+  it('rejects "current" from a session that is not a messaging chat', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', definition: webhookDef({ channelType: 'telegram', channelId: 'current' }) },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    expect((r.data as { errors: string[] }).errors.join('\n')).toContain('is not a messaging chat')
+  })
+
+  it('names "current" when a messaging deliver has no channelId, instead of the opaque union error', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'X',
+        definition: webhookDef({ channelType: 'telegram' }, { channelType: 'telegram' }),
+      },
+      telegramGroup(),
+    )
+    expect(r.isError).toBe(true)
+    const errors = (r.data as { errors: string[] }).errors
+    expect(errors).toHaveLength(2)
+    expect(errors.join('\n')).toContain('set channelId to "current"')
+    expect(errors.join('\n')).not.toContain('Invalid input')
+  })
+
+  it('rejects an internal Use Brian UUID as a Telegram chat id before any probe', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: false, reason: 'Telegram: chat not found' }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', definition: webhookDef({ channelType: 'telegram', channelId: CHANNEL_ROW_UUID }) },
+      telegramGroup(),
+    )
+    expect(r.isError).toBe(true)
+    const errors = (r.data as { errors: string[] }).errors.join('\n')
+    expect(errors).toContain('internal Use Brian id')
+    expect(errors).toContain('"current"')
+    expect(validateDeliveryTarget).not.toHaveBeenCalled()
+  })
+
+  it('names the primary assistant, not a step target, when a failure notification cannot reach this chat', async () => {
+    const validateDeliveryTarget = vi.fn(async (args: { assistantId: string }) =>
+      args.assistantId === PRIMARY_ASSISTANT_ID
+        ? { ok: false, reason: `Telegram: chat not found (${GROUP_CHAT})` }
+        : { ok: true },
+    )
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'X',
+        definition: webhookDef(
+          { channelType: 'telegram', channelId: 'current' },
+          { channelType: 'telegram', channelId: 'current' },
+        ),
+      },
+      telegramGroup({ assistantId: AUTHORING_ASSISTANT_ID }),
+    )
+    expect(r.isError).toBe(true)
+    const errors = (r.data as { errors: string[] }).errors
+    // The step was retargeted and reaches the chat; only the failure line fails.
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('failure notifications are always sent by the workspace\'s primary assistant')
+    expect(errors[0]).not.toContain('target.assistantId')
+  })
+
+  it('stops telling a user inside a Telegram chat to author from inside the Telegram chat', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: false, reason: 'Telegram: chat not found (12345)' }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', definition: webhookDef({ channelType: 'telegram', channelId: '12345' }) },
+      telegramGroup(),
+    )
+    expect(r.isError).toBe(true)
+    const errors = (r.data as { errors: string[] }).errors.join('\n')
+    expect(errors).toContain('set channelId to "current"')
+    expect(errors).not.toContain('Author from inside the Telegram chat')
+  })
+
+  it('never lets an unresolved "current" through the schema (REST / MCP have no authoring chat)', async () => {
+    const { WorkflowDefinitionSchema } = await import('../schemas.js')
+    const parsed = WorkflowDefinitionSchema.safeParse(webhookDef(
+      { channelType: 'telegram', channelId: 'current' },
+      { channelType: 'telegram', channelId: 'current' },
+    ))
+    expect(parsed.success).toBe(false)
+    const messages = parsed.success ? [] : parsed.error.issues.map((i) => i.message)
+    expect(messages.filter((m) => m.includes('no authoring chat'))).toHaveLength(2)
   })
 })

@@ -261,7 +261,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
               </Select>
             </label>
             {identityPolicy === "external_subject" && <label className="text-xs sm:col-span-2"><span className="mb-1 block text-muted-foreground">{t.identityProvider}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-[16px] md:text-xs" value={identityProvider} onChange={(event) => setIdentityProvider(event.target.value)} /></label>}
-            {needsVerification && <div className="space-y-2 rounded-md border border-border p-2 sm:col-span-2">
+            {needsVerification && <div className="space-y-2 border-l-2 border-border pl-3 sm:col-span-2">
               <p className="text-xs text-muted-foreground">{t.verificationHelp}</p>
               <label className="block text-xs"><span>{t.verificationKeyId}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-[16px] md:text-xs" value={verificationKeyId} onChange={(event) => setVerificationKeyId(event.target.value)} /></label>
               <label className="block text-xs"><span>{t.verificationPublicKey}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 font-mono text-[16px] md:text-xs" value={verificationPublicKey} onChange={(event) => setVerificationPublicKey(event.target.value)} /></label>
@@ -274,8 +274,8 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
           <p className="text-[11px] text-muted-foreground">{t.consentMappingsHelp}</p>
           <Button className="mt-2" size="sm" disabled={busy || !definitionLabel.trim() || !definitionKey.trim() || (needsVerification && (!verificationAcknowledged || !verificationKeyId.trim() || !verificationPublicKey.trim() || !verificationMaxAge))} onClick={() => void createDefinition()}><Plus aria-hidden />{editingDefinition ? t.saveDefinitionVersion : t.createDefinition}</Button>
           {editingDefinition && <Button className="ml-2 mt-2" size="sm" variant="ghost" disabled={busy} onClick={() => selectDefinition(null)}>{t.cancel}</Button>}
-          <div className="mt-3 space-y-2">
-            {definitions.map((definition) => <div key={definition.id} className="rounded-lg bg-muted/30 px-3 py-2 text-xs"><div className="font-medium">{definition.label}</div><div className="font-mono text-[10px] text-muted-foreground">{definition.definitionKey} · v{definition.currentVersion}</div>{!unverifiedPolicy(definition.identityPolicy) && (!definition.identityVerification || !definition.verificationAcknowledgedByUserId) && <p className="mt-1 text-amber-600">{t.verificationUnconfigured}</p>}<Button size="xs" variant="outline" disabled={busy} onClick={() => selectDefinition(definition)}>{t.editDefinition}</Button></div>)}
+          <div className="mt-3 divide-y divide-border">
+            {definitions.map((definition) => <div key={definition.id} className="py-2 text-xs"><div className="font-medium">{definition.label}</div><div className="font-mono text-[10px] text-muted-foreground">{definition.definitionKey} · v{definition.currentVersion}</div>{!unverifiedPolicy(definition.identityPolicy) && (!definition.identityVerification || !definition.verificationAcknowledgedByUserId) && <p className="mt-1 text-amber-600">{t.verificationUnconfigured}</p>}<Button size="xs" variant="outline" disabled={busy} onClick={() => selectDefinition(definition)}>{t.editDefinition}</Button></div>)}
             {definitions.length === 0 && <div className="text-xs text-muted-foreground">{t.noDefinitions}</div>}
           </div>
         </div>
@@ -283,7 +283,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
         <div className="rounded-xl border border-border p-3">
           <h4 className="text-xs font-semibold">{t.credentials}</h4>
           <p className="mt-1 text-[11px] text-muted-foreground">{t.credentialsHelp}</p>
-          {oneTimeKey && <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3"><div className="text-xs font-medium">{t.copyNow}</div><div className="mt-2 break-all rounded bg-background p-2 font-mono text-[11px]">{oneTimeKey}</div><Button className="mt-2" size="xs" variant="outline" onClick={() => void navigator.clipboard.writeText(oneTimeKey).then(() => setCopied(true))}>{copied ? <Check aria-hidden /> : <Copy aria-hidden />}{copied ? t.copied : t.copy}</Button></div>}
+          {oneTimeKey && <div className="mt-3 rounded-lg bg-amber-500/10 p-3"><div className="text-xs font-medium">{t.copyNow}</div><div className="mt-2 break-all rounded bg-background p-2 font-mono text-[11px]">{oneTimeKey}</div><Button className="mt-2" size="xs" variant="outline" onClick={() => void navigator.clipboard.writeText(oneTimeKey).then(() => setCopied(true))}>{copied ? <Check aria-hidden /> : <Copy aria-hidden />}{copied ? t.copied : t.copy}</Button></div>}
           <div className="mt-3 grid gap-2">
             <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.credentialLabel}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-[16px] md:text-xs" value={credentialLabel} onChange={(event) => setCredentialLabel(event.target.value)} /></label>
             <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.boundDefinition}</span>
@@ -294,8 +294,8 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
             </label>
           </div>
           <Button className="mt-2" size="sm" disabled={busy || !credentialLabel.trim() || !credentialDefinitionId} onClick={() => void createCredential()}><Plus aria-hidden />{t.createCredential}</Button>
-          <div className="mt-3 space-y-2">
-            {credentials.map((credential) => <div key={credential.id} className="flex items-center justify-between gap-3 rounded-lg bg-muted/30 px-3 py-2 text-xs"><div><div className="font-medium">{credential.label}</div><div className="break-all font-mono text-[10px] text-muted-foreground">{credential.prefix} · {credential.revokedAt ? t.revoked : t.active}</div></div><Button size="xs" variant="outline" disabled={busy} onClick={() => void rotate(credential)}>{t.rotateCredential}</Button>{!credential.revokedAt && <Button size="icon-xs" variant="ghost" className="max-md:size-9" aria-label={t.revoke} disabled={busy} onClick={() => void revoke(credential)}><RotateCcw aria-hidden /></Button>}</div>)}
+          <div className="mt-3 divide-y divide-border">
+            {credentials.map((credential) => <div key={credential.id} className="flex items-center justify-between gap-3 py-2 text-xs"><div><div className="font-medium">{credential.label}</div><div className="break-all font-mono text-[10px] text-muted-foreground">{credential.prefix} · {credential.revokedAt ? t.revoked : t.active}</div></div><Button size="xs" variant="outline" disabled={busy} onClick={() => void rotate(credential)}>{t.rotateCredential}</Button>{!credential.revokedAt && <Button size="icon-xs" variant="ghost" className="max-md:size-9" aria-label={t.revoke} disabled={busy} onClick={() => void revoke(credential)}><RotateCcw aria-hidden /></Button>}</div>)}
             {credentials.length === 0 && <div className="text-xs text-muted-foreground">{t.noCredentials}</div>}
           </div>
         </div>
@@ -323,8 +323,8 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
         </div>
         <Button className="mt-2" size="sm" disabled={busy || !purposeLabel.trim() || !purposeKey.trim() || !wording.trim() || purposeChannels.length === 0} onClick={() => void createPurpose()}><Plus aria-hidden />{editingPurpose ? t.saveWordingVersion : t.createPurpose}</Button>
         {editingPurpose && <Button className="mt-2 ml-2" size="sm" variant="outline" disabled={busy} onClick={() => selectPurpose(null)}>{t.cancel}</Button>}
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {purposes.map((purpose) => <div key={purpose.id} className="rounded-lg bg-muted/30 px-3 py-2 text-xs"><div className="flex items-center justify-between gap-2"><span className="font-medium">{purpose.label}</span><Button size="xs" variant="outline" disabled={busy} onClick={() => selectPurpose(purpose)}>{t.editWording}</Button></div><div className="font-mono text-[10px] text-muted-foreground">{purpose.purposeKey} · {purpose.wordingVersion} · {purpose.archivedAt ? t.archived : purpose.applicableChannels.map((channel) => t.channelLabels[channel]).join(", ")}</div></div>)}
+        <div className="mt-3 divide-y divide-border">
+          {purposes.map((purpose) => <div key={purpose.id} className="py-2 text-xs"><div className="flex items-center justify-between gap-2"><span className="font-medium">{purpose.label}</span><Button size="xs" variant="outline" disabled={busy} onClick={() => selectPurpose(purpose)}>{t.editWording}</Button></div><div className="font-mono text-[10px] text-muted-foreground">{purpose.purposeKey} · {purpose.wordingVersion} · {purpose.archivedAt ? t.archived : purpose.applicableChannels.map((channel) => t.channelLabels[channel]).join(", ")}</div></div>)}
           {purposes.length === 0 && <div className="text-xs text-muted-foreground">{t.noPurposes}</div>}
         </div>
       </div>

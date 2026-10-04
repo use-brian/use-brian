@@ -10,13 +10,22 @@ import {
 } from '../db/users.js'
 import { isAllowedMime } from './files.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
+import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 import type { LinkCodeStore } from '../db/link-codes.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import { authSessionStore, type AuthSessionStore } from '../db/auth-session-store.js'
+import { AccountTeardownBlockedError, deleteAccountFootprint, type AccountTeardownResult, type AccountTeardownRule } from '../db/account-teardown.js'
 
 type AccountRouteOptions = {
+  /**
+   * Teardown rules for tables an edition adds to the open schema (the hosted
+   * overlay). See db/account-teardown.ts.
+   */
+  teardownRules?: Readonly<Record<string, AccountTeardownRule>>
   linkedAccountStore?: LinkedAccountStore
   /**
    * Shared link-code store for the Settings → Account → Connected accounts
@@ -206,6 +215,75 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
     } catch (err) {
       console.error('[account] list linked accounts failed:', err)
       res.status(500).json({ error: 'Failed to list linked accounts' })
+    }
+  })
+
+  // ── GET /api/account/channel-identities ───────────────────────
+  //
+  // Who the caller is on each chat channel beyond explicit links: providers
+  // whose sender was matched to this account by email (channel_user_cache),
+  // and - for owners/admins of `workspaceId` only - each of that workspace's
+  // channels' email-matching status (the newest channel_email_lookup_* row,
+  // written on change by the channel route). Read by Settings -> Account ->
+  // Connected accounts and the Studio channel footer.
+  // Spec: docs/plans/channel-identity-binding.md §3, §4.
+
+  router.get('/channel-identities', async (req, res) => {
+    const userId = req.userId
+    if (!userId) {
+      res.status(401).json({ error: 'Missing or invalid Authorization header' })
+      return
+    }
+    const rawWorkspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : null
+    const workspaceId = rawWorkspaceId && UUID_PATTERN.test(rawWorkspaceId) ? rawWorkspaceId : null
+    try {
+      const matches = await query<{ provider: string; providerId: string; displayName: string | null }>(
+        `SELECT DISTINCT ON (provider) provider, provider_user_id AS "providerId", display_name AS "displayName"
+           FROM channel_user_cache
+          WHERE user_id = $1 AND email IS NOT NULL
+          ORDER BY provider, cached_at DESC`,
+        [userId],
+      )
+      let emailMatching: Array<{
+        channelId: string
+        status: 'on' | 'off'
+        reason: string | null
+        missingScopes: string[]
+        providerCode: string | null
+        at: string
+      }> = []
+      const role = workspaceId ? await getWorkspaceRoleSystem(userId, workspaceId) : null
+      const emailMatchingVisible = Boolean(workspaceId) && (role === 'owner' || role === 'admin')
+      if (emailMatchingVisible) {
+        const rows = await query<{ channelId: string; eventName: string; metadata: Record<string, unknown> | null; at: Date }>(
+          `SELECT DISTINCT ON (ae.metadata->>'integration_id')
+                  ae.metadata->>'integration_id' AS "channelId", ae.event_name AS "eventName",
+                  ae.metadata, ae.created_at AS at
+             FROM analytics_events ae
+             JOIN channels c ON c.id::text = ae.metadata->>'integration_id'
+            WHERE ae.event_name IN ('channel_email_lookup_ok', 'channel_email_lookup_unavailable')
+              AND c.workspace_id = $1
+              AND ae.created_at > now() - interval '30 days'
+            ORDER BY ae.metadata->>'integration_id', ae.created_at DESC`,
+          [workspaceId],
+        )
+        emailMatching = rows.rows.map((row) => {
+          const meta = row.metadata ?? {}
+          const scopes = typeof meta.missing_scopes === 'string' ? meta.missing_scopes : ''
+          return {
+            channelId: row.channelId,
+            status: row.eventName === 'channel_email_lookup_ok' ? 'on' : 'off',
+            reason: typeof meta.reason === 'string' ? meta.reason : null,
+            missingScopes: scopes ? scopes.split(',').filter(Boolean) : [],
+            providerCode: typeof meta.provider_code === 'string' ? meta.provider_code : null,
+            at: new Date(row.at).toISOString(),
+          }
+        })
+      }
+      res.json({ emailMatches: matches.rows, emailMatching, emailMatchingVisible })
+    } catch (err) {
+      console.error('[account] channel identities failed:', err)
+      res.status(500).json({ error: 'Failed to load channel identities' })
     }
   })
 
@@ -606,9 +684,22 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
       // Single pooled client wrapping BEGIN/COMMIT. Every statement rolls
       // back together on failure — nothing half-deleted.
       const client = await getPool().connect()
-      let ownedAssistantsDeleted = 0
+      let removed: AccountTeardownResult = { mode: 'deleted', workspacesDeleted: 0, assistantsDeleted: 0 }
       try {
         await client.query('BEGIN')
+
+        // Lock the user row before anything references it: a concurrent
+        // second delete waits here, then finds the account gone or already
+        // tombstoned and answers 204 (the analytics FK below would otherwise
+        // contend with the teardown's lock, or fail on a deleted row).
+        const locked = await client.query<{ deleted_at: Date | null }>(
+          `SELECT deleted_at FROM users WHERE id = $1 FOR UPDATE`, [userId],
+        )
+        if (locked.rows.length === 0 || locked.rows[0]!.deleted_at) {
+          await client.query('COMMIT')
+          res.status(204).end()
+          return
+        }
 
         // Final analytics event goes FIRST — the user row still exists
         // so the FK is valid. It'll be cascade-deleted along with the user
@@ -627,24 +718,7 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
           ],
         )
 
-        // Delete solo-owned assistants (owner + zero other members).
-        // Cascades through all assistant-scoped children via migration 007.
-        const solo = await client.query(
-          `DELETE FROM assistants
-           WHERE owner_user_id = $1
-             AND NOT EXISTS (
-               SELECT 1 FROM assistant_members
-               WHERE assistant_id = assistants.id
-                 AND user_id <> $1
-             )`,
-          [userId],
-        )
-        ownedAssistantsDeleted = solo.rowCount ?? 0
-
-        // Finally, the user itself. Everything else (memberships in OTHER
-        // team assistants, personal usage_tracking, memories in other
-        // assistants, etc.) cascades via migration 007.
-        await client.query(`DELETE FROM users WHERE id = $1`, [userId])
+        removed = await deleteAccountFootprint(client, userId, options.teardownRules)
 
         await client.query('COMMIT')
       } catch (err) {
@@ -661,11 +735,21 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
         )
       }
       console.log(
-        `[account-delete] Deleted user ${userId}, ${ownedAssistantsDeleted} assistants cascaded`,
+        `[account-delete] ${removed.mode} user ${userId}: ${removed.workspacesDeleted} solo workspaces, ${removed.assistantsDeleted} other solo assistants`,
       )
 
       res.status(204).end()
     } catch (err) {
+      if (err instanceof AccountTeardownBlockedError) {
+        // A reference the teardown rule could not resolve. Not something
+        // the user can fix: log which tables refused (names only) so the
+        // rule can be extended, and keep the client on its error branch.
+        console.error(
+          `[account-delete] blocked for user ${userId}: ${err.blockers.map((b) => `${b.step}: ${b.error}`).join(' | ')}`,
+        )
+        res.status(500).json({ error: 'Failed to delete account', code: err.code })
+        return
+      }
       console.error('Delete account error:', err)
       res.status(500).json({ error: 'Failed to delete account' })
     }

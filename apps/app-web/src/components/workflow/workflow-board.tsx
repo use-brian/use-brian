@@ -749,7 +749,7 @@ export function WorkflowBoard({
             aria-pressed={layoutEditing}
             title={t.workflowPage.board.editLayoutHint}
             className={cn(
-              "inline-flex h-11 items-center gap-1.5 rounded-full border px-3 text-xs font-medium",
+              "inline-flex h-11 md:h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium",
               layoutEditing
                 ? "border-primary bg-primary/10 text-primary"
                 : "border-border bg-card text-muted-foreground",

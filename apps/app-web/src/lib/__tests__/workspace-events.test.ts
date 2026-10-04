@@ -159,6 +159,12 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
   });
 
   it("catch-up covers every domain event exactly once", () => {
+    // Catch-up is speculative ("something MAY have changed"), and the stream
+    // reconnects every ~5 minutes: every detail is tagged so authority
+    // listeners revalidate behind their paint instead of blanking to a
+    // skeleton. A server-sent change never carries the tag.
+    expect(allDomainDispatches("ws-1").every((d) => d.detail.catchUp === true)).toBe(true);
+    expect(routeWorkspaceChange(payload("workspace_config")).every((d) => d.detail.catchUp === undefined)).toBe(true);
     const events = allDomainDispatches("ws-1").map((d) => d.event);
     expect(new Set(events).size).toBe(events.length);
     expect(events).toContain(BRAIN_REFRESH_EVENT);
@@ -239,6 +245,17 @@ describe("[COMP:app-web/workspace-events] createRefreshFolder", () => {
     fireTimers(); // window expires with nothing pending
     folder.fold(dispatch("a", 2));
     expect(emitted).toHaveLength(2);
+  });
+
+  it("a later catch-up never downgrades a pending real change", () => {
+    // Authority listeners purge on a real change and only revalidate on a
+    // catch-up, so the trailing emit must keep the real one.
+    const { folder, emitted, fireTimers } = harness();
+    folder.fold({ event: "a", detail: { seq: 1, catchUp: true } });
+    folder.fold({ event: "a", detail: { seq: 2 } });
+    folder.fold({ event: "a", detail: { seq: 3, catchUp: true } });
+    fireTimers();
+    expect(emitted.map((d) => d.detail)).toEqual([{ seq: 1, catchUp: true }, { seq: 2 }]);
   });
 
   it("dispose clears pending windows without emitting", () => {

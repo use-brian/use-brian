@@ -62,6 +62,7 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
     // The list, the editable detail (mark-stale only, never invalidate) and
     // the run drill-down all move on the one workflow event.
     expect(staleMarksFor(WORKFLOW_REFRESH_EVENT, "w1")).toEqual([
+      "project:w1:",
       "workflow:w1",
       "workflow-detail:w1:",
       "workflow-run:w1:",
@@ -79,6 +80,7 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
     expect(staleMarksFor(LIVE_REFRESH_EVENT, "w1")).toEqual([
       "live:w1",
       "chat-sessions:w1",
+      "project:w1:",
       "chat-shared:w1",
       "feed-collaboration:w1",
     ]);
@@ -193,6 +195,27 @@ describe("[COMP:app-web/surface-cache-invalidation] marks stale without dropping
   });
 });
 
+describe("[COMP:app-web/surface-cache-invalidation] catch-up never purges authority surfaces", () => {
+  beforeEach(() => {
+    resetSurfaceCache();
+  });
+
+  it("a catch-up identity refresh keeps access data painted; a real one purges", async () => {
+    // The stream's reconnect catch-up fires every ~5 minutes. Purging on it
+    // blanked Organization -> Departments to a skeleton on that cadence.
+    await loadSurfaceCache("workspace-access:w1:u1:registry", async () => ({ teams: ["t1"] }));
+    await loadSurfaceCache("workspace-member-directory:w1:u1", async () => ["m1"]);
+    applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT, { workspaceId: "w1", catchUp: true }, "w1");
+    expect(readSurfaceCache("workspace-access:w1:u1:registry").data).toEqual({ teams: ["t1"] });
+    expect(isSurfaceCacheStale("workspace-access:w1:u1:registry")).toBe(true);
+    expect(readSurfaceCache("workspace-member-directory:w1:u1").data).toEqual(["m1"]);
+    // A server-sent workspace_config (every access command emits one) still purges.
+    applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT, { workspaceId: "w1" }, "w1");
+    expect(readSurfaceCache("workspace-access:w1:u1:registry").data).toBeUndefined();
+    expect(readSurfaceCache("workspace-member-directory:w1:u1").data).toBeUndefined();
+  });
+});
+
 /**
  * The `goal` primitive (Phase 3 step 3): the goals board, the Triage panel and
  * every goal detail used to rely on a local `refetchTick` only the acting tab
@@ -283,4 +306,28 @@ it('[COMP:app-web/surface-cache-invalidation] purges only the changed workspace 
   applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,{workspaceId:'w1'},'w1');
   expect(readSurfaceCache('page-directory:w1:viewer').data).toBeUndefined();
   expect(readSurfaceCache('page-directory:w2:viewer').data).toBe('other');
+});
+
+describe('[COMP:app-web/shopify-setup] unmounted reconnect projections',()=>{
+ it.each(['brian:organization-changed',WORKSPACE_IDENTITY_REFRESH_EVENT])('purges every viewer on %s without touching another workspace',async event=>{
+  resetSurfaceCache();
+  const keys=['workspace-access:w1:u1:connector-reconnect:i1','workspace-access:w1:u2:connector-reconnect:i1','workspace-access:w2:u1:connector-reconnect:i1'];
+  for(const key of keys)await loadSurfaceCache(key,async()=>({binding:'saved-private-scope'}));
+  applySpineEventToSurfaceCache(event,{workspaceId:'w1'},'w1');
+  expect(readSurfaceCache(keys[0])?.data).toBeUndefined();expect(readSurfaceCache(keys[1])?.data).toBeUndefined();expect(readSurfaceCache(keys[2])?.data).toEqual({binding:'saved-private-scope'});
+ });
+});
+
+
+it('[COMP:app-web/surface-cache-invalidation] clears project counts on access changes while catch-up preserves the painted view', async () => {
+  const key = 'project:w1:u1:p1';
+  await loadSurfaceCache(key, async () => ({ tasks: 2 }));
+  await loadSurfaceCache('projects:w1:u1', async () => ['p1']);
+  await loadSurfaceCache('project:w2:u1:p1', async () => ({ tasks: 3 }));
+  applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT, { workspaceId: 'w1', catchUp: true }, 'w1');
+  expect(readSurfaceCache(key).data).toEqual({ tasks: 2 });
+  applySpineEventToSurfaceCache('brian:organization-changed', { workspaceId: 'w1' }, 'w1');
+  expect(readSurfaceCache(key).data).toBeUndefined();
+  expect(readSurfaceCache('projects:w1:u1').data).toBeUndefined();
+  expect(readSurfaceCache('project:w2:u1:p1').data).toEqual({ tasks: 3 });
 });

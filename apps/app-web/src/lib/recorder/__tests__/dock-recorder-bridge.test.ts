@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DockRecorderApi } from "../use-dock-recorder";
 import {
   getDockRecorderController,
+  ensureDockRecorderInteractionSession,
+  InteractionSessionUnavailable,
   getDockRecorderSessionId,
   publishDockRecorderController,
   registerDockRecorderChatTarget,
@@ -62,4 +64,19 @@ describe("[COMP:app-web/dock-recorder] replacement-chat bridge", () => {
     expect(first).toHaveBeenCalledWith("old");
     releaseFirst();
   });
+});
+
+it("creates a fresh session on the visible main surface, never the hidden floating thread", async () => {
+  const fallback = vi.fn(async () => "hidden");
+  const ensure = vi.fn(async () => "main-personal");
+  registerDockRecorderChatTarget({ getSessionId: () => undefined, sendVoiceClip: async () => true, ensureInteractionSession: ensure });
+  expect(getDockRecorderSessionId(() => "hidden")).toBeUndefined();
+  await expect(ensureDockRecorderInteractionSession(fallback)).resolves.toBe("main-personal");
+  expect(ensure).toHaveBeenCalledOnce(); expect(fallback).not.toHaveBeenCalled();
+});
+it("rejects unsupported feed/shared targets before requesting backend interaction", async () => {
+  const fallback = vi.fn(async () => "hidden");
+  registerDockRecorderChatTarget({ getSessionId: () => "room", sendVoiceClip: async () => true });
+  await expect(ensureDockRecorderInteractionSession(fallback)).rejects.toBeInstanceOf(InteractionSessionUnavailable);
+  expect(fallback).not.toHaveBeenCalled();
 });

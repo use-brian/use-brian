@@ -222,20 +222,37 @@ export async function getReclassifiableContext(input: {
 export async function getConnectorContext(
   workspaceId: string,
   instanceId: string,
-): Promise<{ contextGroupId: string | null; contextProjectId: string | null }> {
-  const body = await json<{ context: { contextGroupId: string | null; contextProjectId: string | null } }>(
+): Promise<{ contextGroupId: string | null; contextProjectId: string | null; canEdit: boolean }> {
+  const body = await json<{
+    context: { contextGroupId: string | null; contextProjectId: string | null };
+    canEdit?: boolean;
+  }>(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${encodeURIComponent(instanceId)}/context`,
   );
-  return body.context;
+  return { ...body.context, canEdit: body.canEdit === true };
 }
 
 export async function updateConnectorContext(
   workspaceId: string,
   instanceId: string,
-  context: { contextGroupId: string | null; contextProjectId: string | null },
+  // Omit a field to keep it: the header badge sets only the department, the
+  // Settings binding only the Project.
+  context: { contextGroupId?: string | null; contextProjectId?: string | null },
 ): Promise<void> {
   await json(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${encodeURIComponent(instanceId)}/context`,
     { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(context) },
   );
+}
+
+
+export type ProjectContentView = "work" | "knowledge" | "recent";
+export type ProjectContentPage = {
+  items: Array<{ key: string; id: string; title: string; snippet: string; kind: string;
+    target: import("@use-brian/shared").WorkspaceSearchTarget; status: string | null; updatedAt: string | null }>;
+  nextOffset: number | null;
+};
+export function getProjectContent(workspaceId: string, projectId: string, view: ProjectContentView, q: string, offset: number) {
+  const query = new URLSearchParams({view,q,offset:String(offset)});
+  return json<ProjectContentPage>(`/api/workspaces/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}/content?${query}`);
 }

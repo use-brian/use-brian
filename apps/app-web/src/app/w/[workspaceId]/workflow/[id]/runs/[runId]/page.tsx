@@ -206,7 +206,7 @@ export default function WorkflowRunDetailPage({
             ) ? (
               <>
                 <p>{t.workflowPage.builder.runDetail.sourceAccessChanged}</p>
-                <button type="button" className="mt-2 min-h-11 rounded-md border border-current px-3 text-sm font-medium"
+                <button type="button" className="mt-2 min-h-8 max-sm:min-h-11 rounded-md border border-current px-3 text-sm font-medium"
                   onClick={() => openWorkspaceSettings("ws-access")}>
                   {t.workflowPage.builder.runDetail.reviewDepartmentAccess}
                 </button>
@@ -592,10 +592,10 @@ function JsonBlock({
   return (
     <pre
       className={cn(
-        "px-3 py-2 bg-background border rounded-md text-[11px] font-mono whitespace-pre-wrap break-all max-h-80 overflow-auto",
+        "px-3 py-2 rounded-md text-[11px] font-mono whitespace-pre-wrap break-all max-h-80 overflow-auto",
         tone === "error"
-          ? "border-red-500/30 text-red-700 dark:text-red-400"
-          : "border-border",
+          ? "bg-red-500/5 text-red-700 dark:text-red-400"
+          : "bg-muted/50",
       )}
     >
       {pretty}

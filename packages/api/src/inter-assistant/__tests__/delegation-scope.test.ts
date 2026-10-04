@@ -41,6 +41,6 @@ describe('[COMP:api/delivery-authority] delegated output audience', () => {
     await expect(authorize({
       ...base,
       scopeEvidence: { sensitivity: 'internal', compartments: ['legal'], projectIds: [] },
-    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified' })
+    })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', detail: 'evidence_exceeds_audience', diagnostic: 'teams' })
   })
 })

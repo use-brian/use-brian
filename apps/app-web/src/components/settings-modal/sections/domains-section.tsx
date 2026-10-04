@@ -81,7 +81,7 @@ function DnsRows({ instructions }: { instructions: DnsInstruction[] }) {
   const t = useT().docPage.share;
   if (instructions.length === 0) return null;
   return (
-    <div className="rounded-md border border-border bg-muted/40 p-2 text-xs">
+    <div className="rounded-md bg-muted/40 p-2 text-xs">
       <p className="mb-1 text-muted-foreground">{t.site.dnsHint}</p>
       <div className="space-y-1 font-mono">
         {instructions.map((ins, i) => (
@@ -651,7 +651,7 @@ function EmailDnsRows({ records }: { records: EmailDomainSummary["records"] }) {
   const t = useT().chrome.settingsModal.domains;
   if (records.length === 0) return null;
   return (
-    <div className="rounded-md border border-border bg-muted/40 p-2 text-xs">
+    <div className="rounded-md bg-muted/40 p-2 text-xs">
       <p className="mb-2 text-muted-foreground">{t.emailDnsHint}</p>
       <div className="space-y-2 font-mono">
         {records.map((record, index) => (

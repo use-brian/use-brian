@@ -176,11 +176,17 @@ function resolvedCaptureScope(target:ProgrammaticCaptureTarget,rule:Programmatic
   resolved:boolean;origin:'legacy'|'explicit'|'reviewed'|'held';compartments:string[];projectIds:string[]
 }{
   const origin=rule.scopeBindingOrigin??'legacy'
+  if(target.intakeBinding)return {resolved:origin!=='held',origin,compartments:target.intakeBinding.compartments,projectIds:target.intakeBinding.projectIds}
+  // A hold survives policy changes; changing mode is never a release action.
+  if(origin==='held')return {resolved:false,origin,
+    compartments:rule.compartments,projectIds:rule.projectIds}
+  const trusted=(value:string|undefined)=>value==='explicit'||value==='reviewed'
+  // Explicit empty labels are a saved binding too, not a request to consult
+  // today's assistant defaults. Preserve legacy inheritance only for inherit.
+  if(rule.scopeBindingMode==='explicit')return {resolved:target.classificationMode!=='strict'||trusted(origin),origin,
+    compartments:rule.compartments,projectIds:rule.projectIds}
   if(target.classificationMode!=='strict')return {resolved:true,origin,
     compartments:effectiveCompartments(target,rule),projectIds:effectiveProjects(target,rule)}
-  const trusted=(value:string|undefined)=>value==='explicit'||value==='reviewed'
-  if(rule.scopeBindingMode==='explicit')return {resolved:trusted(origin),origin,
-    compartments:rule.compartments,projectIds:rule.projectIds}
   return {resolved:trusted(origin)&&trusted(target.assistantDefaultBindingOrigin),origin,
     compartments:target.assistantDefaultCompartments,
     projectIds:target.assistantDefaultProjectId?[target.assistantDefaultProjectId]:[]}
@@ -217,13 +223,14 @@ export function createProgrammaticCaptureRouter(deps: {
       assistantId: auth.captureAssistantId ?? null,
       overrideProfileId: auth.captureProfileId ?? null,
     })
-    if (!target) {
+    if (!target || (target.accessSetupState==='ready' && !target.intakeBinding)) {
       throw new ProgrammaticCaptureError(
         'capture_profile_not_configured',
         'Routed capture is not configured for this connection. Assign a capture profile to its selected assistant or set a connection override.',
       )
     }
 
+    if(target.intakeBinding && target.rules.some(rule=>rule.routingMode==='realtime')) throw new ProgrammaticCaptureError('capture_target_unavailable','Capture target unavailable.')
     const occurredAt = input.occurredAt ?? deps.now?.() ?? new Date()
     const metadata = input.metadata ?? {}
     const event: IngestEvent = {
@@ -422,7 +429,7 @@ function isQueuedEvent(value: unknown): value is QueuedProgrammaticCaptureEvent 
     && typeof event.role === 'string'
 }
 
-function renderBatchWindow(events: QueuedProgrammaticCaptureEvent[]): string {
+export function renderBatchWindow(events: QueuedProgrammaticCaptureEvent[]): string {
   return events.map((event) => {
     const subject = event.subjectId ? ` subject=${event.subjectId}` : ''
     const session = event.sessionId ? ` session=${event.sessionId}` : ''
@@ -437,6 +444,8 @@ function renderBatchWindow(events: QueuedProgrammaticCaptureEvent[]): string {
 export function createProgrammaticBatchProcessor(deps: {
   store: ProgrammaticCaptureStore
   ingest: BrainEpisodeIngestor
+  /** Ready configured profiles must never fall back to human-authored ingest. */
+  configuredIngest?: BrainEpisodeIngestor
 }) {
   return async function processProgrammaticBatch(batch: PendingBatch): Promise<void> {
     if (batch.source !== 'programmatic') {
@@ -454,7 +463,7 @@ export function createProgrammaticBatchProcessor(deps: {
       batch.assistantId,
       batch.ruleId,
     )
-    if (!target) {
+    if (!target || (target.accessSetupState==='ready' && !target.intakeBinding)) {
       throw new ProgrammaticCaptureError(
         'capture_target_unavailable',
         `Programmatic batch ${batch.id} target is unavailable.`,
@@ -477,7 +486,9 @@ export function createProgrammaticBatchProcessor(deps: {
     const batchSensitivity = batch.episodeSensitivity ?? target.assistantClearance
     const sensitivity = minSensitivity(target.assistantClearance, batchSensitivity)
     const occurredAt = new Date(events[0]!.occurredAt)
-    await deps.ingest({
+    const ingest=target.intakeBinding ? deps.configuredIngest : deps.ingest
+    if(!ingest)throw new ProgrammaticCaptureError('capture_target_unavailable','Configured capture publication unavailable.')
+    await ingest({
       workspaceId: batch.workspaceId,
       userId: target.ownerUserId,
       assistantId: target.assistantId,

@@ -94,6 +94,14 @@ export type BrainAuth = {
   captureProfileId?: string | null
 }
 
+// Proof belongs to this exact successful authentication, not serializable auth
+// metadata. Copying/spreading/parsing BrainAuth cannot manufacture the proof.
+const authenticatedCredentials = new WeakMap<BrainAuth, () => Promise<boolean>>()
+
+export function getAuthenticatedBrainCredentialCurrent(auth: BrainAuth): (() => Promise<boolean>) | undefined {
+  return authenticatedCredentials.get(auth)
+}
+
 export type BrainAuthOptions = {
   brainKeyStore: BrainKeyStore
   /**
@@ -138,15 +146,18 @@ export async function authenticateBrainRequest(
   // ── Path 1: legacy API key (sk_brain_*) ─────────────────────────
   const apiKeyParts = parseBrainAuthToken(token)
   if (apiKeyParts) {
-    const row = await opts.brainKeyStore.getByIdSystem(apiKeyParts.keyId)
-    if (!row) return null
+    const stored = await opts.brainKeyStore.getByIdSystem(apiKeyParts.keyId)
+    if (!stored) return null
+    // Keep the very hash scrypt verifies, even if the store row changes while
+    // verification awaits. Never adopt a hash fetched during context resolution.
+    const row = { ...stored }
     if (row.status !== 'active') return null
     const ok = await verifySecret(apiKeyParts.secret, row.keyHash)
     if (!ok) return null
     opts.brainKeyStore.touchLastUsedAt(row.id).catch((err) => {
       console.error('[brain-mcp] touchLastUsedAt failed:', err)
     })
-    return {
+    const auth: BrainAuth = {
       keyId: row.id,
       workspaceId: row.workspaceId,
       scope: row.scope,
@@ -157,6 +168,14 @@ export async function authenticateBrainRequest(
       captureAssistantId: row.captureAssistantId ?? null,
       captureProfileId: row.captureProfileId ?? null,
     }
+    authenticatedCredentials.set(auth, async () => {
+      const current = await opts.brainKeyStore.getByIdSystem(row.id)
+      return current !== null && current.status === 'active'
+        && current.id === row.id && current.workspaceId === row.workspaceId
+        && current.keyHash === row.keyHash && current.scope === row.scope
+        && current.maxClearance === row.maxClearance
+    })
+    return auth
   }
 
   // ── Path 2: OAuth access token (oat_*) ──────────────────────────

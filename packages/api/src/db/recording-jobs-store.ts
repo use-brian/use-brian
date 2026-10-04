@@ -15,6 +15,7 @@
  * [COMP:recordings/recording-jobs-store]
  */
 
+import type { PoolClient } from 'pg'
 import { query } from './client.js'
 import { createDbPageTemplateStore } from './page-templates-store.js'
 import { resolveRecordingBlueprint } from '../recordings/resolve-blueprint.js'
@@ -59,6 +60,8 @@ const RETURNING = `
  * Enqueue a recording for async processing. Idempotent: the partial unique index
  * on `recording_id WHERE status IN ('pending','processing')` makes a second
  * enqueue while one is in-flight a no-op (`enqueued: false`).
+ * Optional transaction joins a caller-owned atomic status transition; this
+ * function does not begin/commit it. Existing callers retain autocommit behavior.
  */
 export async function enqueueRecordingJob(input: {
   recordingId: string
@@ -67,7 +70,7 @@ export async function enqueueRecordingJob(input: {
   blueprintSlug?: string | null
   /** Destination page for the brief (migration 353). Omit → workspace root. */
   parentPageId?: string | null
-}): Promise<{ enqueued: boolean; jobId: string | null }> {
+}, transaction?: PoolClient): Promise<{ enqueued: boolean; jobId: string | null }> {
   // Every caller (chat, channels, HTTP) shares this boundary. Reject a bad
   // blueprint before the expensive worker transcribes, not afterwards in SQL.
   const selection = input.blueprintSlug?.trim()
@@ -78,19 +81,20 @@ export async function enqueueRecordingJob(input: {
         selection,
       })).id
     : null
-  const { rows } = await query<{ id: string }>(
-    `INSERT INTO recording_jobs (recording_id, workspace_id, acting_user_id, blueprint_slug, parent_page_id)
+  const sql = `INSERT INTO recording_jobs (recording_id, workspace_id, acting_user_id, blueprint_slug, parent_page_id)
      VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT DO NOTHING
-     RETURNING id`,
-    [
-      input.recordingId,
-      input.workspaceId,
-      input.actingUserId,
-      blueprintId,
-      input.parentPageId ?? null,
-    ],
-  )
+     RETURNING id`
+  const values = [
+    input.recordingId,
+    input.workspaceId,
+    input.actingUserId,
+    blueprintId,
+    input.parentPageId ?? null,
+  ]
+  const { rows } = transaction
+    ? await transaction.query<{ id: string }>(sql, values)
+    : await query<{ id: string }>(sql, values)
   return rows[0] ? { enqueued: true, jobId: rows[0].id } : { enqueued: false, jobId: null }
 }
 

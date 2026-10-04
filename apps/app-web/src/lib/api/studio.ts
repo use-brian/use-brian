@@ -26,6 +26,8 @@ export type StudioAssistantSummary = {
   name: string;
   workspaceId: string | null;
   channels: string[];
+  placementDepartmentId?: string | null;
+  placementDepartmentName?: string | null;
   clearance?: string | null;
   iconSeed?: number | null;
 };
@@ -80,6 +82,8 @@ function normalizeAssistant(
   return {
     id: a.id,
     name: a.name,
+    placementDepartmentId: a.placementDepartmentId ?? null,
+    placementDepartmentName: a.placementDepartmentName ?? null,
     workspaceId: a.workspaceId ?? null,
     channels: Array.isArray(a.channels) ? a.channels : [],
     clearance: a.clearance ?? null,
@@ -96,6 +100,7 @@ export async function createAssistant(
   workspaceId: string,
   name: string,
   charter?: { mission?: string; audience?: string; success?: string; instructions?: string },
+  placementDepartmentId?: string | null,
 ): Promise<StudioAssistantSummary> {
   const hasCharter = charter && Object.values(charter).some((v) => v && v.trim());
   const res = await authFetch(
@@ -103,7 +108,7 @@ export async function createAssistant(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(hasCharter ? { name, charter } : { name }),
+      body: JSON.stringify({ name, ...(hasCharter ? { charter } : {}), ...(placementDepartmentId ? { placementDepartmentId } : {}) }),
     },
   );
   if (!res.ok) {

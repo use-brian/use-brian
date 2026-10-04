@@ -93,7 +93,7 @@ export function RecordingPlayerBar({
         onClick={() => void copyTimestamp()}
         disabled={isLoading || durationMs <= 0 || copyStatus === "copying"}
         title={t.recordings.copyTimestampHint}
-        className="inline-flex h-9 shrink-0 items-center rounded border border-border px-2 text-xs hover:bg-muted disabled:opacity-50 sm:h-6"
+        className="inline-flex h-9 shrink-0 items-center rounded px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50 sm:h-6"
       >
         {t.recordings.copyTimestamp}
       </button>

@@ -71,7 +71,7 @@ export function MediaChoice({ label, value, onChange, context, images }: { label
 function ImageInput({ label, value, onChange, context, optional }: { label: string; value: unknown; onChange: (next: unknown) => void; context: EditorContext; optional?: boolean }) {
   const { c, label: text } = useLabels();
   if (!isObject(value)) return optional
-    ? <Button type="button" variant="outline" className="min-h-11 w-fit" disabled={context.disabled} onClick={() => onChange({ alt: { en: "" } })}>{c.addImage}: {label}</Button>
+    ? <Button type="button" variant="outline" className="max-sm:min-h-11 w-fit" disabled={context.disabled} onClick={() => onChange({ alt: { en: "" } })}>{c.addImage}: {label}</Button>
     : null;
   const choose = (id: string | undefined) => {
     const next: Value = { ...value };
@@ -84,7 +84,7 @@ function ImageInput({ label, value, onChange, context, optional }: { label: stri
     {typeof value.src === "string" && !value.mediaId ? <p className="text-xs text-muted-foreground">{c.siteFile}: <code>{value.src}</code></p> : null}
     <MediaChoice label={c.library} value={typeof value.mediaId === "string" ? value.mediaId : undefined} onChange={choose} context={context} images/>
     <LocalizedInput label={text("alt")} value={value.alt} context={context} onChange={alt => onChange({ ...value, alt: alt ?? { en: "" } })}/>
-    {optional && <Button type="button" variant="ghost" className="min-h-11 w-fit text-destructive" disabled={context.disabled} onClick={() => onChange(undefined)}>{c.removeImage}</Button>}
+    {optional && <Button type="button" variant="ghost" className="max-sm:min-h-11 w-fit text-destructive" disabled={context.disabled} onClick={() => onChange(undefined)}>{c.removeImage}</Button>}
   </fieldset>;
 }
 
@@ -98,7 +98,7 @@ function ListInput({ field, value, onChange, context }: { field: Extract<Field, 
     <h4 className="text-sm font-semibold">{label(field.label)} <span className="font-normal text-muted-foreground">({items.length})</span></h4>
     <ul className="space-y-2">{items.map((item, index) => <li key={index}>
       <details className="rounded-lg border">
-        <summary className="flex min-h-11 cursor-pointer items-center gap-2 px-3 text-sm"><span className="min-w-0 flex-1 truncate">{field.itemTitle(item) || `#${index + 1}`}</span></summary>
+        <summary className="flex min-h-8 max-sm:min-h-11 cursor-pointer items-center gap-2 px-3 text-sm"><span className="min-w-0 flex-1 truncate">{field.itemTitle(item) || `#${index + 1}`}</span></summary>
         <div className="space-y-3 border-t p-3">
           <FieldsEditor fields={field.item} value={item} context={context} onChange={next => onChange(items.map((old, i) => i === index ? next : old))}/>
           <div className="flex flex-wrap gap-2">
@@ -109,7 +109,7 @@ function ListInput({ field, value, onChange, context }: { field: Extract<Field, 
         </div>
       </details>
     </li>)}</ul>
-    <Button type="button" variant="outline" className="min-h-11 w-fit" disabled={context.disabled} onClick={() => { const next = field.blank(); onChange([...items, Array.isArray(next.sites) && next.sites.length === 0 ? { ...next, sites: context.sites.slice(0, 1) } : next]); }}>{c.add}: {label(field.label)}</Button>
+    <Button type="button" variant="outline" className="max-sm:min-h-11 w-fit" disabled={context.disabled} onClick={() => { const next = field.blank(); onChange([...items, Array.isArray(next.sites) && next.sites.length === 0 ? { ...next, sites: context.sites.slice(0, 1) } : next]); }}>{c.add}: {label(field.label)}</Button>
   </section>;
 }
 
@@ -155,7 +155,7 @@ function FieldInput({ field, value, onChange, context }: { field: Field; value: 
           <LocalizedInput label={`${name} ${index + 1}`} value={item} multiline context={context} onChange={next => onChange(items.map((old, i) => i === index ? next ?? { en: "" } : old))}/></div>
           <Button type="button" size="sm" variant="ghost" className="mt-6 min-h-11 text-destructive md:min-h-8" aria-label={c.remove} disabled={context.disabled} onClick={() => onChange(items.filter((_, i) => i !== index))}><Trash2 aria-hidden className="size-4"/></Button>
         </div>)}
-        <Button type="button" variant="outline" className="min-h-11 w-fit" disabled={context.disabled} onClick={() => onChange([...items, { en: "" }])}>{c.add}: {name}</Button>
+        <Button type="button" variant="outline" className="max-sm:min-h-11 w-fit" disabled={context.disabled} onClick={() => onChange([...items, { en: "" }])}>{c.add}: {name}</Button>
       </section>;
     }
     case "list":

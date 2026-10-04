@@ -1,0 +1,28 @@
+-- Drop the trigram GIN on email_archive_segments.segment_text (migration 359).
+--
+-- No query can plan onto it. The hybrid lexical arm (segment-lexical.ts) ORs
+-- `es.segment_text ILIKE $n` with `m.subject` / `m.from_addr` on the joined
+-- email_archive_messages row, and an OR that spans two relations cannot be
+-- served by an index on one column of one of them. The literal listing
+-- (email-archive-store.ts) probes segments per message through a correlated
+-- EXISTS on message_id, which the (message_id, segment_index) key serves.
+-- pg_stat_user_indexes on production showed 0 scans of this index between the
+-- 2026-07-18 stats reset and 2026-09-30, against 812k on that unique key.
+--
+-- What it cost: 3,066 MB (the table's heap is 977 MB) through a 128 MB
+-- shared_buffers. Every single-row segment INSERT flushed the GIN pending list
+-- into it from disk - 60 to 120 s per row in IO/DataFileRead, ~1,400 blocks/s,
+-- 205M blocks (~1.6 TB) read from it since July - and the 2026-07-29
+-- index-vacuum starvation recorded on migration 381 was the same index.
+--
+-- CONCURRENTLY, outside a transaction: a plain DROP INDEX takes an ACCESS
+-- EXCLUSIVE lock on the table and would queue behind whichever segment INSERT
+-- is mid-flush (up to the 120 s background timeout), blocking every archive
+-- read for the wait. The migrator sends each statement on its own, so no
+-- BEGIN/COMMIT here (the 619 precedent).
+--
+-- Read behaviour is unchanged by construction. If an indexed lexical arm is
+-- wanted later, the predicate has to become per-relation first (a UNION of a
+-- segment arm and a message arm); see brain/embeddings.md -> "The lexical arm".
+
+DROP INDEX CONCURRENTLY IF EXISTS idx_email_archive_segments_trgm;

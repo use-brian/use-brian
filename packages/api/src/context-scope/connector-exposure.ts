@@ -1,11 +1,12 @@
 /**
- * Live connector exposure gate. A connector is data outside Brian's row-level
- * predicates, so a finite Team/Project turn may only receive an exposure that
- * is itself finite and wholly inside that turn's grant.
+ * Live connector exposure gate. A connector's Team (department) and Project
+ * labels name its AUDIENCE: who may see it and receive its tools. They are
+ * not a claim that the provider's data is confined to that department.
  *
- * Empty connector arrays mean unbounded/company-wide, never Workspace
- * General. They are therefore usable only when the turn grant is universe on
- * that axis. This is intentionally stricter than model-side filtering.
+ * Empty arrays mean General: every principal in the workspace may use it.
+ * A labelled connector is usable only by a turn whose mutation reach (the
+ * department membership floor, never a temporary read grant) contains every
+ * label. A clearance-only agent wrapper is not connector authority at all.
  *
  * [COMP:api/connector-context]
  */
@@ -25,46 +26,38 @@ export type ConnectorTurnGrant = {
   access?: { mutationCompartments?: ScopeGrant }
 }
 
-export type ConnectorOperationBoundary = 'provider-catalog' | 'fixed-operation'
-
-function axisExposureAllowed(
+function axisAudienceAllowed(
   turnGrant: ScopeGrant,
-  exposure: readonly string[],
+  audience: readonly string[],
 ): boolean {
-  if (turnGrant === null) return true
-  if (exposure.length === 0) return false
-  return scopeGrantContains(turnGrant, exposure)
+  if (turnGrant === null || audience.length === 0) return true
+  return scopeGrantContains(turnGrant, audience)
 }
 
 export function connectorExposureAllowed(
   turn: ConnectorTurnGrant | null | undefined,
   binding: ConnectorContextBinding,
-  boundary: ConnectorOperationBoundary = 'provider-catalog',
 ): boolean {
   const ambient = currentAgentAccess()
   // Only non-agent administrative callers may omit a trusted execution scope.
   if (!turn && !ambient) return true
+  // A clearance-only agent wrapper is not authority to access live connectors.
+  if (ambient && ambient.compartments === undefined) return false
   const read = intersectScopeGrants(
     turn?.effectiveCompartments ?? null,
-    // A clearance-only agent wrapper is not authority to access live connectors.
-    ambient ? ambient.compartments === undefined ? [] : ambient.compartments : null,
+    ambient ? ambient.compartments ?? null : null,
   )
   const mutation = intersectScopeGrants(
     read,
     turn?.access?.mutationCompartments === undefined
       ? turn?.effectiveCompartments ?? null : turn.access.mutationCompartments,
     ambient ? ambient.mutationCompartments === undefined
-      ? ambient.compartments === undefined ? [] : ambient.compartments : ambient.mutationCompartments : null,
+      ? ambient.compartments ?? null : ambient.mutationCompartments : null,
   )
   const projects = intersectScopeGrants(
     turn?.effectiveProjectIds ?? null,
     ambient ? ambient.projectIds === undefined ? [] : ambient.projectIds : null,
   )
-  if (!axisExposureAllowed(mutation, binding.compartments)
-      || !axisExposureAllowed(projects, binding.projectIds)) return false
-  // Team/Project bindings prove Brian-side reach, not a provider-native root.
-  // Generic provider catalogs therefore require company-wide authority. The
-  // fixed-operation exception is selected by audited code, never tool metadata.
-  return boundary === 'fixed-operation'
-    || (read === null && mutation === null && projects === null)
+  return axisAudienceAllowed(mutation, binding.compartments)
+    && axisAudienceAllowed(projects, binding.projectIds)
 }

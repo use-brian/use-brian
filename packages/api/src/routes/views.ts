@@ -27,6 +27,7 @@
 import { Router,type Request,type Response,type NextFunction } from 'express'
 import { departmentRouteReview, executeReviewedDepartmentRoute } from '../workspace-access/reviewed-route.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { copySavedViewPage } from '../db/saved-views-store.js'
 import multer from 'multer'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
@@ -664,7 +665,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       name: parsed.data.name,
       description: parsed.data.description ?? null,
       binding: parsed.data.binding,
-    })
+    }, ...(req.authSessionId ? [{ provenance: { kind: 'human-authored' as const, actorId: userId } }] : []))
     res.status(201).json({
       ...viewMetadata(created),
       binding: created.binding,
@@ -1798,6 +1799,26 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   })
 
   // POST /workspaces/:wid/views/draft  — create an empty draft
+  // Canonical page copy: never accept a client-rendered body as source proof.
+  router.post('/workspaces/:workspaceId/views/:sourcePageId/copy', async (req, res) => {
+    if (!req.userId || !req.authSessionId) return unauthorized(res)
+    const parsed = z.object({
+      sourceVersion: z.number().int().nonnegative(),
+      teamspaceId: z.string().uuid().nullable().optional(),
+      projectId: z.string().uuid().nullable().optional(),
+    }).strict().safeParse(req.body)
+    if (!parsed.success || !z.string().uuid().safeParse(req.params.workspaceId).success
+      || !z.string().uuid().safeParse(req.params.sourcePageId).success) return badRequest(res, 'Valid source identity/version and placement required; page bodies are not accepted')
+    try {
+      const created = await copySavedViewPage({ userId: req.userId, workspaceId: req.params.workspaceId,
+        sourcePageId: req.params.sourcePageId, ...parsed.data })
+      res.status(201).json(viewMetadata(created))
+    } catch (error) {
+      if (error instanceof WorkspaceAccessError) { res.status(error.status).json({ error: error.code }); return }
+      throw error
+    }
+  })
+
   router.post('/workspaces/:workspaceId/views/draft', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
@@ -1901,7 +1922,10 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
         // (debounced typing) or navigates away, via /views/:id/commit-created.
         // Migration 283 / docs workflow.md → "Deferred created (interactive drafts)".
         deferCreatedEvent: true,
-      })
+      // Only a validated human session creating an empty page is proven here.
+      // Seed/template/copy bodies remain unsupported, even with a valid parent.
+      }, ...(req.authSessionId && body.blocks === undefined && body.binding === undefined
+        ? [{ provenance: { kind: 'human-authored' as const, actorId: userId } }] : []))
       res.status(201).json(viewMetadata(created))
     } catch (error) {
       if ((error as { code?: string }).code === 'PAGE_ID_CONFLICT') {

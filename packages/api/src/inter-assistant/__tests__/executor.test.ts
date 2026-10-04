@@ -289,6 +289,35 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(mockQueryLoop).not.toHaveBeenCalled()
   })
 
+  it.each(['approved', 'revoked', 'interactive'])(
+    'checks explicit publication only for the identified workflow step: %s', async state => {
+      mockFindAssistant.mockImplementation(async id => ({ ...calleeAssistant, id, workspaceId: 'workspace-1',
+        kind: 'primary', compartments: [], defaultCompartments: [] }) as never)
+      const authorizeWorkflowPublication = vi.fn(async () => state === 'approved'
+        ? { allowed: true as const, approvalId: 'consent-1' } : { allowed: false as const })
+      const run = createCalleeExecutor({ provider: {} as never, tools: new Map(), memoryStore: memoryStore() as never,
+        capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+        authorizeDeliveryAudience: async () => ({ allowed: false, reason: 'delivery_audience_unverified' }),
+        authorizeWorkflowPublication,
+      })
+      if (state === 'approved') yieldsText('Prepared broadcast')
+      const operation = run({ ...baseParams, callerChannelType: state === 'interactive' ? 'web' : 'workflow',
+        workflowRunId: 'run-1', workflowStepId: 'remind',
+        deliverTarget: { channelType: 'telegram', channelId: '-100123', channelIntegrationId: 'integration-1' },
+      })
+      if (state === 'approved') {
+        await expect(operation).resolves.toBe('Prepared broadcast')
+        expect(mockQueryLoop).toHaveBeenCalled()
+      } else {
+        await expect(operation).rejects.toMatchObject({ reason: 'delivery_audience_unverified' })
+        expect(mockQueryLoop).not.toHaveBeenCalled()
+      }
+      if (state === 'interactive') expect(authorizeWorkflowPublication).not.toHaveBeenCalled()
+      else expect(authorizeWorkflowPublication).toHaveBeenCalledWith(expect.objectContaining({
+        publication: { runId: 'run-1', stepId: 'remind' }, channelId: '-100123', channelIntegrationId: 'integration-1',
+      }))
+    })
+
   it('carries validated caller sources into the receiver write accumulator and returned evidence',async()=>{
     const primary={...calleeAssistant,workspaceId:'workspace-1',kind:'primary',clearance:'internal',compartments:['product']}
     mockFindAssistant.mockImplementation(async id=>({...primary,id}) as never)
@@ -1274,6 +1303,37 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       mcpSettingsStore: {} as never,
     })
   }
+
+  it('preserves discovery diagnostics for unknown pins without attributing every pin to scope', async () => {
+    const diagnostic = 'Connector discovery is limited by the current execution scope. Some connectors belong to a department or Project this turn cannot reach; searching again cannot bypass this restriction.'
+    mockInjectMcp.mockResolvedValueOnce({
+      enrichConfirmation: async (_toolName, input) => input,
+      unavailable: [diagnostic],
+      searchableSources: [],
+    })
+
+    await expect(injectingExecutor(new Map())({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['gcalListEvents', 'misspelledTool'],
+    })).rejects.toMatchObject({
+      reason: 'tools_unavailable',
+      message: `None of the step's pinned tools are available to the callee. gcalListEvents, misspelledTool: not available to this assistant (check tool names and exposure); Discovery diagnostics: ${diagnostic}.`,
+    })
+    expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
+
+  it('fails unknown pins without inventing discovery diagnostics when injection reports none', async () => {
+    await expect(injectingExecutor(new Map())({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['misspelledTool'],
+    })).rejects.toMatchObject({
+      reason: 'tools_unavailable',
+      message: "None of the step's pinned tools are available to the callee. misspelledTool: not available to this assistant (check tool names and exposure).",
+    })
+    expect(mockQueryLoop).not.toHaveBeenCalled()
+  })
 
   it('keeps built-ins direct when the caller pins an allow-list', async () => {
     yieldsText()

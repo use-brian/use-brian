@@ -148,6 +148,7 @@ export function createChatLinkStore(): ChatLinkStore {
          LEFT JOIN workspaces w ON w.id = a.workspace_id
          WHERE l.token = $1
            AND l.status = 'active'
+           AND a.placement_department_id IS NULL
            AND (w.id IS NULL OR w.external_sharing_enabled = true)`,
         [token],
       )

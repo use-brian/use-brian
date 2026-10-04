@@ -39,7 +39,7 @@ export function GenericToolPreview({
 }) {
   if (preview.fields.length === 0) return null;
   return (
-    <dl className="w-full max-w-2xl mt-1 rounded-md border border-border bg-background px-3 py-2 space-y-2">
+    <dl className="w-full max-w-2xl mt-1 space-y-2">
       {preview.fields.map((field, index) => (
         // Label above value below `sm` (C 24): a fixed 112px label column left
         // ~50px for the value at 360px, so every field wrapped word by word.
@@ -79,7 +79,7 @@ export function ToolInputToggle({
         {open ? t.approvalsPage.hideToolInput : t.approvalsPage.viewToolInput}
       </button>
       {open && (
-        <pre className="w-full text-[11px] font-mono bg-muted/50 border border-border rounded px-2 py-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all max-w-2xl">
+        <pre className="w-full text-[11px] font-mono bg-muted/50 rounded px-2 py-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all max-w-2xl">
           {JSON.stringify(args, null, 2)}
         </pre>
       )}

@@ -56,6 +56,9 @@
  */
 
 import { Router } from 'express'
+import { connectorSetupRoutes } from '../connectors/setup-routes.js'
+import { shopifySetupRoutes } from '../connectors/shopify-setup-routes.js'
+import type { TransactionalConnectorSetup } from '../connectors/transactional-setup.js'
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
 import type { FilesApi, McpSettingsStore } from '@use-brian/core'
@@ -137,6 +140,7 @@ import { readMailboxIdleStatus } from '../mailbox/idle-watcher.js'
 import { countEmailArchiveMessages } from '../db/email-archive-store.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { CHAT_ARCHIVE_SEARCH_TOOL } from '../chat-archive/tool-catalog.js'
+import { autoExposeOnConnectMiddleware } from '../connectors/auto-expose.js'
 import {
   ConnectorLifecycleError,
   createConnectorLifecycleService,
@@ -186,6 +190,10 @@ type ConnectorRowOut = {
 }
 
 type ConnectorRouteOptions = {
+  /** Canonical reviewed setup; boot must supply the transaction-backed service. */
+  setupService?: TransactionalConnectorSetup
+  /** Server-configured public app callback; never taken from request headers. */
+  shopifySetupRedirectUri?: string
   connectorStore: ConnectorStore
   connectorInstanceStore: ConnectorInstanceStore
   /**
@@ -399,6 +407,15 @@ function instanceRow(
 export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   const { connectorStore, connectorInstanceStore, mcpSettingsStore } = opts
   const router = Router()
+  // First, so every connect route below (and the mounted custom-connector
+  // routes) shares a new connection with the workspace it came from.
+  router.use(autoExposeOnConnectMiddleware(opts.connectorGrantStore
+    ? { grantStore: opts.connectorGrantStore, instanceStore: connectorInstanceStore }
+    : null))
+  if (opts.setupService) {
+    router.use('/setups', connectorSetupRoutes(opts.setupService))
+    router.use(shopifySetupRoutes(opts.setupService, opts.shopifySetupRedirectUri))
+  }
   const lifecycle = createConnectorLifecycleService({
     instanceStore: connectorInstanceStore,
     legacyStore: connectorStore,

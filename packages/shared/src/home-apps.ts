@@ -69,9 +69,11 @@ export type HomeAppEntry = HomeAppKey | `${typeof CUSTOM_HOME_APP_PREFIX}${strin
 /**
  * Config default for a workspace that has never been configured (`[]`).
  * Migration 385 grandfathered the original six apps; Office migration 3941
- * appends its reserved key. New rows resolve to the minimal three-app set.
+ * appends its reserved key. New rows resolve to the minimal three-app set,
+ * Chat first: workspace entry opens the first entry (`defaultHomePath`), so
+ * this order is also what a new account lands on.
  */
-export const DEFAULT_HOME_APPS: readonly HomeAppEntry[] = ['page', 'office', 'chat']
+export const DEFAULT_HOME_APPS: readonly HomeAppEntry[] = ['chat', 'page', 'browsers']
 
 /** Upper bound on the strip. Custom apps count against it (T12). */
 export const HOME_APPS_MAX = 7

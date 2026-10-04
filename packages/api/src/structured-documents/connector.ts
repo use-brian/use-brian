@@ -64,14 +64,14 @@ export function createStructuredOcrConnectorResolver(options: StructuredOcrConne
     ])
     const rows = new Map<string, { instance: ConnectorInstance; policyUserId: string; serverName: string; store: McpSettingsStore }>()
     for (const instance of owned) {
-      if (instance.scope !== 'workspace' || instance.workspaceId !== ctx.workspaceId || !connectorExposureAllowed(turn, instance, 'fixed-operation')) continue
+      if (instance.scope !== 'workspace' || instance.workspaceId !== ctx.workspaceId || !connectorExposureAllowed(turn, instance)) continue
       rows.set(instance.id, { instance, policyUserId: ctx.userId, serverName: instance.provider, store: workspacePolicyAsSettingsStore(workspacePolicies, ctx.workspaceId) })
     }
     for (const grant of exposed) {
       const instance = grant.instance
       if (grant.targetType !== 'workspace' || grant.targetId !== ctx.workspaceId || grant.connectorInstanceId !== instance.id ||
           instance.scope !== 'user' || instance.userId !== grant.grantedByUserId || !grant.grantedByUserId ||
-          !connectorExposureAllowed(turn, grant, 'fixed-operation')) continue
+          !connectorExposureAllowed(turn, grant)) continue
       rows.set(instance.id, { instance, policyUserId: grant.grantedByUserId, serverName: instance.label, store: settings })
     }
     const eligible = [...rows.values()].filter(({ instance: i }) => i.custom && i.connected && i.healthStatus !== 'auth_failed' && i.credentialsType === 'bearer' && !!i.url)

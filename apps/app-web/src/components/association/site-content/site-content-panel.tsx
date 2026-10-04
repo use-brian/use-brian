@@ -84,10 +84,10 @@ export function SiteContentPanel({ workspaceId, collection, back }: { workspaceI
         {published ? <InlineNotice tone="success">{c.publishDone}</InlineNotice> : null}
         {!doc && <InlineNotice tone="neutral">{c.empty}</InlineNotice>}
         <div className="flex flex-wrap gap-2">
-          {!editing && <Button className="min-h-11" variant={unpublished ? "outline" : "default"} onClick={() => { setEditing({ version: read.data!.version, document: structuredClone(doc ?? blankDocument(collection, readers)), dirty: false }); setPreview(false); setPublished(false); }}>{doc ? c.edit : c.create}</Button>}
-          {editing && <><Button className="min-h-11" disabled={action.pending || !editing.dirty} onClick={() => void save()}>{c.save}</Button><Button className="min-h-11" variant="outline" onClick={() => void cancel()}>{t.cancel}</Button></>}
-          {!editing && doc && !preview && <Button className="min-h-11" variant="outline" onClick={() => setPreview(true)}>{c.preview}</Button>}
-          {!editing && unpublished && issues.length === 0 && <Button className="min-h-11" disabled={action.pending} onClick={() => void publish()}>{c.publish}</Button>}
+          {!editing && <Button className="max-sm:min-h-11" variant={unpublished ? "outline" : "default"} onClick={() => { setEditing({ version: read.data!.version, document: structuredClone(doc ?? blankDocument(collection, readers)), dirty: false }); setPreview(false); setPublished(false); }}>{doc ? c.edit : c.create}</Button>}
+          {editing && <><Button className="max-sm:min-h-11" disabled={action.pending || !editing.dirty} onClick={() => void save()}>{c.save}</Button><Button className="max-sm:min-h-11" variant="outline" onClick={() => void cancel()}>{t.cancel}</Button></>}
+          {!editing && doc && !preview && <Button className="max-sm:min-h-11" variant="outline" onClick={() => setPreview(true)}>{c.preview}</Button>}
+          {!editing && unpublished && issues.length === 0 && <Button className="max-sm:min-h-11" disabled={action.pending} onClick={() => void publish()}>{c.publish}</Button>}
         </div>
         {action.feedback}
         {issues.length > 0 && <InlineNotice tone="danger" title={c.issuesTitle}><ul className="list-inside list-disc">{issues.map((issue, i) => <li key={`${issue.code}:${i}`}>{issueText(issue)}</li>)}</ul></InlineNotice>}

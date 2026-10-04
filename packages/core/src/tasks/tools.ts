@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
 import { intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
-import { deriveResourceScope } from '../security/derived-scope.js'
+import { deriveContextFloor, DerivedScopeError } from '../security/derived-scope.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
 import {
@@ -133,6 +133,8 @@ const tagShape = z.array(z.string().min(1).max(64)).max(20)
  * Same 10 000-char ceiling the brain-inbox `/adjust` boundary enforces.
  */
 const descriptionShape = z.string().max(10_000)
+
+const taskProjectConflict = 'This edit would give a task multiple Projects, but tasks support only one. Nothing was changed for this task. Do not retry the same edit or switch tools; use a context limited to the task’s Project for content changes.'
 
 /**
  * Supersession-aware guidance: every task edit mints a NEW id (bi-temporal
@@ -278,12 +280,29 @@ export function createTaskTools(
       context.mutationCompartments===undefined?context.compartments??null:context.mutationCompartments)
   }
 
-  function inheritedVisibility(context:ToolContext){
+  // Which user a task write must stay private to (decision D3, 2026-09-30).
+  //  - The assistant axis is never inherited: a primary that read several
+  //    assistants' rows can still write.
+  //  - The acting user's own conversation (`session_message` rows) never
+  //    privatizes a task: their words are theirs to share, and counting them
+  //    made every chat-created task private to its author.
+  //  - Any other private row (a personal memory, a private task or file)
+  //    keeps the task private to that user when CONTENT flows in; a
+  //    status-only change (close, reopen, reassign, due) carries none, so a
+  //    team task closed from chat stays a team task.
+  //  - Nobody writes another person's private rows into a task.
+  const CONTENT_FIELDS = ['title', 'tags', 'attributes', 'externalRef'] as const
+  function inheritedVisibility(context:ToolContext, fields?:Partial<Record<(typeof CONTENT_FIELDS)[number],unknown>>){
     const sources=context.scopeAccumulator?.evidence.sources
     if(!sources?.length)return undefined
-    const floor=deriveResourceScope({producer:'task-write',sources})
-    if(floor.workspaceId!==context.workspaceId)throw new Error('scope_operation_denied')
-    return {userId:floor.userId,assistantId:floor.assistantId}
+    deriveContextFloor({producer:'task-write',sources})
+    if(sources.some(source=>source.workspaceId!==context.workspaceId))throw new Error('scope_operation_denied')
+    if(sources.some(source=>source.userId!==null&&source.userId!==context.userId)){
+      throw new DerivedScopeError('scope_visibility_incompatible')
+    }
+    const content=!fields||CONTENT_FIELDS.some(key=>fields[key]!==undefined)
+    const privateContent=sources.some(source=>source.userId!==null&&source.resourceKind!=='session_message')
+    return content&&privateContent?{userId:context.userId,assistantId:null}:undefined
   }
 
   function resolveVisibleTask(context: ToolContext, id: string): Promise<TaskRecord | null> {
@@ -634,7 +653,8 @@ export function createTaskTools(
     try {
       // Assistant-mediated write (incl. interactive chat) — the workflow
       // task-event self-loop guard keys on this (fromBots gate).
-      const writeScope = resolveWriteScope({
+      const lifecycleOnly = Object.keys(fields).every((key) => ['status', 'assigneeId', 'due'].includes(key))
+      const writeScope = lifecycleOnly ? undefined : resolveWriteScope({
         baseCompartments: context.assistantDefaultCompartments,
         baseProjectIds: context.assistantDefaultProjectIds,
         evidence: context.scopeAccumulator ?? {
@@ -648,14 +668,17 @@ export function createTaskTools(
         writtenBy: 'system',
         access: accessFor(context),
         scope: {
-          sensitivity: writeScope.sensitivity,
-          visibility: inheritedVisibility(context),
-          compartments: writeScope.compartments,
-          projectIds: writeScope.projectIds,
+          sensitivity: writeScope?.sensitivity,
+          visibility: inheritedVisibility(context, fields),
+          compartments: writeScope?.compartments ?? [],
+          projectIds: writeScope?.projectIds ?? [],
         },
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('tasks_one_project_check')) {
+        return { data: taskProjectConflict, isError: true }
+      }
       if (msg.includes('task_reference_conflict')) {
         return {data:'The task or its related records cannot be changed in this context. Nothing was saved. Refresh the task and review your access before trying a new edit.',isError:true}
       }
@@ -958,58 +981,58 @@ export function createTaskTools(
     return lines
   }
 
-  /** Loop the per-row supersession update over resolved rows. */
+  /** Each structured lifecycle edit retains its target's canonical scope. */
   async function applyBulk(
     context: Parameters<Tool['execute']>[1],
     rows: TaskListRow[],
     fieldsFor: (row: TaskListRow) => Parameters<TaskStore['update']>[2],
-  ): Promise<{ updated: number; failed: number }> {
-    let updated = 0
-    let failed = 0
+  ): Promise<{ updated: TaskListRow[]; failures: Array<{ row: TaskListRow; reason: string }> }> {
+    const updated: TaskListRow[] = []
+    const failures: Array<{ row: TaskListRow; reason: string }> = []
     for (const row of rows) {
       try {
-        const writeScope = resolveWriteScope({
-          baseCompartments: context.assistantDefaultCompartments,
-          baseProjectIds: context.assistantDefaultProjectIds,
-          evidence: context.scopeAccumulator ?? {
-            sensitivity: context.sensitivity?.max,
-            compartments: context.compartmentAccumulator?.compartments,
-          },
-          compartmentGrant: writeGrant(context),
-          projectGrant: context.projectIds,
-        })
-        const result = await store.update(context.userId, row.id, fieldsFor(row), {
+        const rowFields = fieldsFor(row)
+        const result = await store.update(context.userId, row.id, rowFields, {
           writtenBy: 'system',
           access: accessFor(context),
-          scope: {
-            sensitivity: writeScope.sensitivity,
-            visibility: inheritedVisibility(context),
-            compartments: writeScope.compartments,
-            projectIds: writeScope.projectIds,
-          },
+          // Bulk priority changes only the enum on this row's own attributes.
+          // It does not import free-form content from the turn's other reads.
+          scope: { compartments: [], projectIds: [], visibility: inheritedVisibility(context, {}) },
         })
         if (result) {
-          updated++
-          opts?.onEvent?.(
-            { type: 'task_updated', taskId: result.id, fields: Object.keys(fieldsFor(row)) },
-            eventCtx(context),
-          )
-        } else failed++
-      } catch {
-        failed++
+          updated.push(row)
+          try {
+            opts?.onEvent?.(
+              { type: 'task_updated', taskId: result.id, fields: Object.keys(rowFields) },
+              eventCtx(context),
+            )
+          } catch (err) {
+            // The write already committed; telemetry cannot turn it into a
+            // failed row and encourage the caller to apply it again.
+            console.warn('[tasks] task_updated event failed after committed bulk edit', err)
+          }
+        } else {
+          failures.push({ row, reason: 'Task is unavailable or outside the current mutation scope. Refresh the task and review access.' })
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        failures.push({ row, reason: message.includes('tasks_one_project_check') ? taskProjectConflict : message.slice(0, 400) })
       }
     }
-    return { updated, failed }
+    return { updated, failures }
   }
 
-  function bulkSummary(verb: string, rows: TaskListRow[], updated: number, failed: number): string {
-    const lines = rows
-      .slice(0, 15)
-      .map((r) => `- ${r.title}`)
-      .join('\n')
-    const more = rows.length > 15 ? `\n…and ${rows.length - 15} more` : ''
-    const failNote = failed > 0 ? ` (${failed} failed — every edit mints a new id; re-run listTasks to re-resolve)` : ''
-    return `${verb} ${updated} task(s)${failNote}:\n${lines}${more}`
+  function bulkSummary(verb: string, result: Awaited<ReturnType<typeof applyBulk>>): { data: string; isError?: true } {
+    const { updated, failures } = result
+    const lines = [`${verb} ${updated.length} task(s).`]
+    lines.push(...updated.slice(0, 15).map((row) => `- ${row.title}`))
+    if (updated.length > 15) lines.push(`...and ${updated.length - 15} more updated tasks.`)
+    if (failures.length > 0) {
+      lines.push(`Failed ${failures.length} task(s):`)
+      lines.push(...failures.map(({ row, reason }) => `- [${row.id}] ${row.title}: ${reason}`))
+      lines.push('Do not repeat the whole batch or switch tools to retry it. Verify current task state, address the reported cause, and retry only unresolved tasks when appropriate.')
+    }
+    return { data: lines.join('\n'), ...(failures.length > 0 ? { isError: true as const } : {}) }
   }
 
   const bulkUpdateTasks = buildTool({
@@ -1018,7 +1041,7 @@ export function createTaskTools(
     requiresConfirmation: true,
     description:
       'Update MANY tasks in one confirmed call: everything matching `filter` gets `set` applied (status / assignee / due / priority). The backlog-cleanup verb — e.g. filter `{status: "todo", unassigned: true, updated_before: <30 days ago>}` with set `{status: "archived"}` clears the stale unassigned backlog. ' +
-      `Caps at ${BULK_CAP} tasks per call; requires at least one filter field (an empty filter is rejected). For archiving, \`archiveTasks\` is the shorthand. Every update supersedes its row (new task ids).`,
+      `Caps at ${BULK_CAP} tasks per call; requires at least one filter field (an empty filter is rejected). Omitting status includes completed tasks (but not archived tasks). Preserve the user's target filters when recovering from an error; never broaden the selection to make a retry work. For archiving, \`archiveTasks\` is the shorthand. Every update supersedes its row (new task ids).`,
     inputSchema: bulkUpdateSchema,
     async describeConfirmation(input, context) {
       if (!context.workspaceId) return null
@@ -1038,7 +1061,7 @@ export function createTaskTools(
       }
       const rows = await resolveBulkRows(context, input.filter)
       if (rows.length === 0) return { data: 'No tasks match that filter — nothing to update.' }
-      const { updated, failed } = await applyBulk(context, rows, (row) => {
+      const result = await applyBulk(context, rows, (row) => {
         const fields: Parameters<TaskStore['update']>[2] = {}
         if (input.set.status !== undefined) fields.status = input.set.status
         if (input.set.assignee_id !== undefined) fields.assigneeId = input.set.assignee_id
@@ -1051,7 +1074,7 @@ export function createTaskTools(
         }
         return fields
       })
-      return { data: bulkSummary('Updated', rows, updated, failed) }
+      return bulkSummary('Updated', result)
     },
   })
 
@@ -1061,7 +1084,7 @@ export function createTaskTools(
     requiresConfirmation: true,
     description:
       'Archive MANY tasks in one confirmed call — the soft-delete sweep (`status: "archived"`; archived tasks leave every default list but stay recoverable). Shorthand for `bulkUpdateTasks` with `set: {status: "archived"}`. ' +
-      `Same filter shape and ${BULK_CAP}-task cap; requires at least one filter field.`,
+      `Same filter shape and ${BULK_CAP}-task cap; requires at least one filter field. Omitting status includes completed tasks. For active tasks, pass the requested active statuses or explicit resolved ids. Preserve those filters on recovery; never broaden the selection to make a retry work.`,
     inputSchema: archiveTasksSchema,
     async describeConfirmation(input, context) {
       if (!context.workspaceId) return null
@@ -1082,8 +1105,8 @@ export function createTaskTools(
       }
       const rows = await resolveBulkRows(context, input.filter)
       if (rows.length === 0) return { data: 'No tasks match that filter — nothing to archive.' }
-      const { updated, failed } = await applyBulk(context, rows, () => ({ status: 'archived' }))
-      return { data: bulkSummary('Archived', rows, updated, failed) }
+      const result = await applyBulk(context, rows, () => ({ status: 'archived' }))
+      return bulkSummary('Archived', result)
     },
   })
 

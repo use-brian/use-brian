@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ACTION_CURSOR_BEFORE_CAPTURE, buildActionCursorArmExpression } from '../action-cursor.js'
+import { ACTION_CURSOR_BEFORE_CAPTURE, buildActionCursorArmExpression, buildActionCursorMoveExpression } from '../action-cursor.js'
 import { formFieldOperation, type FormField } from '../fill-form.js'
 
 const key = Symbol.for('use-brian.action-cursor.v1')
@@ -34,6 +34,35 @@ describe('action cursor presentation', () => {
     vi.advanceTimersByTime(4000)
     expect(cursor.host.isConnected).toBe(false)
     expect(state()).toBeUndefined()
+  })
+
+  it('scales travel with distance without an initial fly-in or duplicate-event restart', () => {
+    evaluate(buildActionCursorArmExpression('pointer'))
+    const cursor = state()
+    cursor.show(100, 100, false)
+    expect(cursor.host.style.getPropertyValue('--travel-time')).toBe('0ms')
+    cursor.show(110, 100, false)
+    const short = parseFloat(cursor.host.style.getPropertyValue('--travel-time'))
+    cursor.show(800, 600, false)
+    const long = parseFloat(cursor.host.style.getPropertyValue('--travel-time'))
+    expect(long).toBeGreaterThan(short)
+    expect(long).toBeLessThanOrEqual(420)
+    cursor.show(800, 600, false)
+    expect(parseFloat(cursor.host.style.getPropertyValue('--travel-time'))).toBe(long)
+  })
+
+  it('waits for travel before returning, with a bounded background-tab fallback', async () => {
+    vi.useFakeTimers()
+    evaluate(buildActionCursorArmExpression('pointer'))
+    state().host.getAnimations = () => [{ transitionProperty: 'transform', finished: new Promise(() => {}) }]
+    let arrived = false
+    const travel = evaluate(buildActionCursorMoveExpression(120, 80)).then(() => { arrived = true })
+    await vi.advanceTimersByTimeAsync(499)
+    expect(arrived).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await travel
+    expect(arrived).toBe(true)
+    expect(state().ring.classList.contains('on')).toBe(false)
   })
 
   it('removes unused arming DOM too', () => {

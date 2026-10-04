@@ -89,8 +89,171 @@ type PanelProps = { profileId: string; profileName: string; onConnectionChange?:
 export function ConnectBrowserPanel(props: PanelProps) {
   const params = useParams<{ workspaceId?: string }>();
   return desktopBridge()?.browserControl
-    ? <DesktopBrowserState workspaceId={params?.workspaceId ?? ""} {...props} />
+    ? <DesktopConnectBrowserPanel workspaceId={params?.workspaceId ?? ""} {...props} />
     : <ExtensionBrowserPanel {...props} />;
+}
+
+function ManualPairingControls({
+  pairing,
+  busy,
+  error,
+  onGenerate,
+  onRefresh,
+}: {
+  pairing: BrowserExtensionPairing | null;
+  busy: boolean;
+  error: string | null;
+  onGenerate: () => void;
+  onRefresh: () => void;
+}) {
+  const c = useT().computer.connectBrowser;
+  return (
+    <div className="mt-3">
+      <div className="flex flex-wrap gap-2">
+        <a
+          href={BROWSER_EXTENSION_INSTALL_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
+        >
+          <Download className="size-3.5" aria-hidden />
+          {c.step1Cta}
+        </a>
+        {!pairing ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onGenerate}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
+          >
+            <Link2 className="size-3.5" aria-hidden />
+            {busy ? c.generating : c.generate}
+          </button>
+        ) : null}
+      </div>
+      {pairing ? (
+        <div className="mt-3 space-y-2">
+          <CopyField
+            label={c.relayLabel}
+            value={pairing.relayUrl}
+            copyLabel={c.copy}
+            copiedLabel={c.copied}
+          />
+          <CopyField
+            label={c.tokenLabel}
+            value={pairing.pairingToken}
+            copyLabel={c.copy}
+            copiedLabel={c.copied}
+          />
+          <p className="text-[11px] text-muted-foreground">{c.tokenExpiry}</p>
+          <button
+            type="button"
+            onClick={onRefresh}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
+          >
+            <RefreshCw className="size-3.5" aria-hidden />
+            {c.refresh}
+          </button>
+        </div>
+      ) : null}
+      {error ? <p className="mt-1 text-[11px] text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+function DesktopConnectBrowserPanel({
+  workspaceId,
+  profileId,
+  profileName,
+  onConnectionChange,
+}: PanelProps & { workspaceId: string }) {
+  const c = useT().computer.connectBrowser;
+  const [gated, setGated] = useState(false);
+  const [status, setStatus] = useState<BrowserExtensionStatus | null>(null);
+  const [pairing, setPairing] = useState<BrowserExtensionPairing | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const capabilities = deploymentCapabilities();
+    if (!capabilities.billing || !workspaceId) {
+      setGated(false);
+      return;
+    }
+    let cancelled = false;
+    void getWorkspacePlan(workspaceId).then((plan) => {
+      if (!cancelled) setGated(planGateApplies(capabilities, plan));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  const refreshStatus = useCallback(async () => {
+    const next = await getBrowserExtensionStatus(workspaceId, profileId);
+    setStatus(next);
+    onConnectionChange?.(profileId, next.connected);
+  }, [onConnectionChange, profileId, workspaceId]);
+
+  useEffect(() => {
+    void refreshStatus();
+    const id = setInterval(() => void refreshStatus(), STATUS_POLL_MS);
+    return () => clearInterval(id);
+  }, [refreshStatus]);
+
+  const onGenerate = useCallback(async () => {
+    if (busy || !workspaceId) return;
+    setBusy(true);
+    setError(null);
+    const next = await pairBrowserExtension(workspaceId, profileId);
+    setBusy(false);
+    if (!next) {
+      setError(c.generateFailed);
+      return;
+    }
+    setPairing(next);
+  }, [busy, c.generateFailed, profileId, workspaceId]);
+
+  return (
+    <>
+      <DesktopBrowserState workspaceId={workspaceId} profileId={profileId} />
+      <div className="mt-3 rounded-lg border border-border bg-muted/15 p-3">
+        <h3 className="flex items-center gap-2 text-sm font-medium">
+          <Cable className="size-4 text-muted-foreground" aria-hidden />
+          {c.desktop.externalTitle}
+          <span className="sr-only">{profileName}</span>
+        </h3>
+        <p className="mt-2 text-xs text-muted-foreground">{c.desktop.externalDescription}</p>
+        {status?.staleBuild ? (
+          <p className="mt-2 rounded-md bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+            {c.staleBuildWarning}
+          </p>
+        ) : null}
+        {status && !status.configured ? (
+          <p className="mt-3 text-xs text-muted-foreground">{c.notConfigured}</p>
+        ) : gated ? (
+          <>
+            <p className="mt-2 text-xs text-muted-foreground">{c.gatedBody}</p>
+            <button
+              type="button"
+              onClick={() => openWorkspaceSettings("ws-plan")}
+              className="mt-2 h-8 rounded-md bg-action px-3 text-xs font-medium text-action-foreground"
+            >
+              {c.gatedCta}
+            </button>
+          </>
+        ) : (
+          <ManualPairingControls
+            pairing={pairing}
+            busy={busy}
+            error={error}
+            onGenerate={() => void onGenerate()}
+            onRefresh={() => void refreshStatus()}
+          />
+        )}
+      </div>
+    </>
+  );
 }
 
 function ExtensionBrowserPanel({
@@ -286,56 +449,13 @@ function ExtensionBrowserPanel({
           {error ? <p className="mt-1 text-[11px] text-destructive">{error}</p> : null}
         </div>
       ) : (
-        <div className="mt-3">
-          <div className="flex flex-wrap gap-2">
-            <a
-              href={BROWSER_EXTENSION_INSTALL_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
-            >
-              <Download className="size-3.5" aria-hidden />
-              {c.step1Cta}
-            </a>
-            {!pairing ? (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void onGenerate()}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
-              >
-                <Link2 className="size-3.5" aria-hidden />
-                {busy ? c.generating : c.generate}
-              </button>
-            ) : null}
-          </div>
-            {pairing ? (
-              <div className="mt-3 space-y-2">
-                <CopyField
-                  label={c.relayLabel}
-                  value={pairing.relayUrl}
-                  copyLabel={c.copy}
-                  copiedLabel={c.copied}
-                />
-                <CopyField
-                  label={c.tokenLabel}
-                  value={pairing.pairingToken}
-                  copyLabel={c.copy}
-                  copiedLabel={c.copied}
-                />
-                <p className="text-[11px] text-muted-foreground">{c.tokenExpiry}</p>
-                <button
-                  type="button"
-                  onClick={() => void refreshStatus()}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
-                >
-                  <RefreshCw className="size-3.5" aria-hidden />
-                  {c.refresh}
-                </button>
-              </div>
-            ) : null}
-            {error ? <p className="mt-1 text-[11px] text-destructive">{error}</p> : null}
-        </div>
+        <ManualPairingControls
+          pairing={pairing}
+          busy={busy}
+          error={error}
+          onGenerate={() => void onGenerate()}
+          onRefresh={() => void refreshStatus()}
+        />
       )}
     </div>
   );

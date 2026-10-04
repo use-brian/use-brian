@@ -47,6 +47,7 @@ import {
 } from "@/lib/api/recordings";
 import { setPageLinkedRecording } from "@/lib/api/views";
 import { confirmAndProcessRecording } from "@/lib/recordings/confirm-and-process";
+import { recordingFailureMessage } from "@/lib/recordings/failure-copy";
 
 export type RecordingUploadStatus =
   | "idle"
@@ -104,6 +105,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
       setResult(null);
       setMessage("");
       setUploadProgress(0);
+      let failureStage: "upload" | "estimate" = "upload";
       try {
         setStatus("uploading");
         const { recordingId } = await startRecordingUpload({
@@ -117,6 +119,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         });
         setUploadProgress(1);
         setStatus("estimating");
+        failureStage = "estimate";
         const estimate = await estimateRecording(recordingId);
         const staged = {
           recordingId,
@@ -129,14 +132,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         return staged;
       } catch (e) {
         setStatus("error");
-        const code = e instanceof RecordingApiError ? e.code : undefined;
-        setMessage(
-          code === "too_long"
-            ? t.recordings.tooLong
-            : code === "could_not_read_duration"
-              ? t.recordings.cannotReadDuration
-              : t.recordings.failed,
-        );
+        setMessage(recordingFailureMessage(e, failureStage, t));
         return null;
       } finally {
         operationActiveRef.current = false;
@@ -157,7 +153,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      */
     async (
       file: File,
-      opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string },
+      opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string; liveWindowsDone?: Promise<void> },
     ): Promise<RecordingRunOutcome> => {
       if (operationActiveRef.current) {
         return { outcome: "failed", message: t.recordings.uploadInProgress };
@@ -200,12 +196,18 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           // than losing the meeting — the spool still keeps the lossless copy
           // for a later retry.
           if (!opts?.liveSessionId) throw uploadError;
+          // Only assembly depends on provisional uploads. Never hold the full
+          // recording upload behind slow live transcription or rolling notes.
+          await opts.liveWindowsDone;
           const fallback = await finalizeLiveRecording({
             workspaceId,
             assistantId,
             sessionId: opts.liveSessionId,
             ...(opts.existingPageId ? { pageId: opts.existingPageId } : {}),
-          }).catch(() => null);
+          }).catch((error: unknown) => {
+            if (error instanceof RecordingApiError && error.code === "recording_media_tools_unavailable") throw error;
+            return null;
+          });
           if (!fallback) throw uploadError;
           recordingId = fallback.recordingId;
           assembled = true;
@@ -258,21 +260,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         return { outcome: "queued", recording: res, message };
       } catch (e) {
         setStatus("error");
-        const code = e instanceof RecordingApiError ? e.code : undefined;
-        const detail =
-          e instanceof RecordingApiError && e.message && e.status !== 0 ? e.message : null;
-        const message =
-          code === "too_long"
-            ? t.recordings.tooLong
-            : code === "could_not_read_duration"
-              ? t.recordings.cannotReadDuration
-              : stage === "upload"
-                ? t.recordings.uploadFailed
-                : stage === "estimate"
-                  ? t.recordings.estimateFailed
-                  : detail
-                    ? `${t.recordings.processFailed} (${detail})`
-                    : t.recordings.processFailed;
+        const message = recordingFailureMessage(e, stage, t);
         setMessage(message);
         return { outcome: "failed", message };
       } finally {

@@ -101,6 +101,7 @@ export function LiveTranscriptPane({
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<LiveTranscriptWindowDetail>).detail;
       if (!detail || detail.pageId !== pageId) return;
+      setLoaded(true);
       setWindows((prev) =>
         mergeLiveWindows(prev, [
           {
@@ -127,7 +128,7 @@ export function LiveTranscriptPane({
   if (loaded && windows.length === 0) return null;
 
   return (
-    <section className="mb-6 rounded-lg border border-border bg-muted/20 p-3">
+    <section className="mb-6">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -151,14 +152,14 @@ export function LiveTranscriptPane({
           onScroll={(event) => {
             pinnedToEndRef.current = isPinnedToEnd(event.currentTarget);
           }}
-          className="mt-2 max-h-80 overflow-y-auto rounded-md border border-border bg-background px-3 py-2"
+          className="mt-2 max-h-80 overflow-y-auto rounded-md bg-muted/30 px-3 py-2"
         >
           {!loaded ? (
             <p className="text-sm text-muted-foreground">{t.recordings.liveTranscriptLoading}</p>
           ) : (
             <ol className="space-y-1">
               {windows.map((w) => (
-                <li key={w.chunkId}>
+                <li key={w.chunkId} id={w.chunkId}>
                   {w.missedBefore > 0 ? (
                     <p className="px-2 py-0.5 text-xs italic text-muted-foreground">
                       {t.recordings.liveTranscriptGap.replace(

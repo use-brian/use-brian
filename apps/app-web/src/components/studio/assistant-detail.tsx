@@ -346,7 +346,7 @@ export function AssistantDetail({
                     <SelectTrigger
                       size="sm"
                       aria-label={t.assistant.clearanceSelector.ariaLabel}
-                      className="min-h-11 w-auto gap-1 border-transparent bg-transparent px-2 py-0 text-[16px] hover:bg-muted/50 md:text-sm"
+                      className="max-sm:min-h-11 w-auto gap-1 border-transparent bg-transparent px-2 py-0 text-[16px] hover:bg-muted/50 md:text-sm"
                     >
                       <SelectValue>
                         <SensitivityBadge tier={assistant.clearance} size="xs" />
@@ -2135,7 +2135,7 @@ export function DecisionPlaybookRuleCard({
     : null;
 
   return (
-    <div className="border border-border rounded-lg px-3 py-2.5 space-y-1.5">
+    <div className="py-2.5 space-y-1.5">
       <div className="flex items-start justify-between gap-3">
         <div className="text-[14px] text-foreground">
           {rule.rule}
@@ -2686,6 +2686,7 @@ function SettingsTab({
                   <div className="text-[12px] font-medium text-muted-foreground">
                     {t.assistant.settings.playbookSuggested}
                   </div>
+                  <div className="divide-y divide-border">
                   {playbook.filter((r) => r.status === "suggested").map((r) => (
                     <DecisionPlaybookRuleCard
                       key={r.id}
@@ -2695,6 +2696,7 @@ function SettingsTab({
                       onDecision={(decision) => void decideRule(r.id, decision)}
                     />
                   ))}
+                  </div>
                 </div>
               )}
               {playbook.some((r) => r.status === "active") && (
@@ -2702,6 +2704,7 @@ function SettingsTab({
                   <div className="text-[12px] font-medium text-muted-foreground">
                     {t.assistant.settings.playbookActive}
                   </div>
+                  <div className="divide-y divide-border">
                   {playbook.filter((r) => r.status === "active").map((r) => (
                     <DecisionPlaybookRuleCard
                       key={r.id}
@@ -2711,6 +2714,7 @@ function SettingsTab({
                       onDecision={(decision) => void decideRule(r.id, decision)}
                     />
                   ))}
+                  </div>
                 </div>
               )}
               {playbook.some((r) => r.status === "retired") && (
@@ -2718,6 +2722,7 @@ function SettingsTab({
                   <div className="text-[12px] font-medium text-muted-foreground">
                     {t.assistant.settings.playbookRetired}
                   </div>
+                  <div className="divide-y divide-border">
                   {playbook.filter((r) => r.status === "retired").map((r) => (
                     <DecisionPlaybookRuleCard
                       key={r.id}
@@ -2727,6 +2732,7 @@ function SettingsTab({
                       onDecision={() => {}}
                     />
                   ))}
+                  </div>
                 </div>
               )}
             </>

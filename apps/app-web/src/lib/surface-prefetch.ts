@@ -52,6 +52,7 @@ import { fetchLiveRoster } from "@/lib/api/live";
  * Studio icon warms the connectors list that section reads on mount.
  */
 export type WarmableSurface =
+  | "projects"
   | "tasks"
   | "crm"
   | "association"
@@ -81,8 +82,8 @@ export function workspaceAccessCacheKey(workspaceId: string, userId: string): st
   return `workspace-access:${workspaceId}:${userId}`;
 }
 
-export function scopeReviewCacheKey(workspaceId:string,userId:string,kind:string,after:string,reviewId:string,reviewAfter:string=''):string {
-  return `scope-review:${workspaceId}:${userId}:${kind}:${after}:${reviewId}:${reviewAfter}`;
+export function scopeReviewCacheKey(workspaceId:string,userId:string,kind:string,after:string,reviewId:string,reviewAfter:string='',includeClassified=false):string {
+  return `scope-review:${workspaceId}:${userId}:${kind}:${after}:${reviewId}:${reviewAfter}${includeClassified?':classified':''}`;
 }
 
 export function organizationCacheKey(workspaceId: string, userId: string): string {
@@ -109,6 +110,8 @@ export function surfaceDataKey(
 ): string | null {
   if (!workspaceId) return null;
   switch (surface) {
+    case "projects":
+      return `projects:${workspaceId}${viewerSuffix()}`;
     case "tasks":
       return `tasks:${workspaceId}${viewerSuffix()}`;
     case "crm":
@@ -388,6 +391,10 @@ export function chatTranscriptCacheKey(sessionId: string): string {
  *
  * Both viewer-suffixed: a workflow row and its runs are RLS-scoped reads.
  */
+export function workflowPublicationConsentCacheKey(workspaceId: string, workflowId: string): string {
+  return `workflow-publication-consent:${workspaceId}${viewerSuffix()}:${workflowId}`;
+}
+
 export function workflowDetailCacheKey(workspaceId: string, workflowId: string): string {
   return `workflow-detail:${workspaceId}${viewerSuffix()}:${workflowId}`;
 }
@@ -812,6 +819,11 @@ export function warmTargetFor(
   workspaceId: string,
 ): WarmTarget {
   switch (surface) {
+    case "projects":
+      return {
+        key: surfaceDataKey("projects", workspaceId) as string,
+        fetch: () => import("@/lib/api/context-scopes").then(m => m.listContextProjects(workspaceId, true)),
+      };
     case "tasks":
       return {
         key: surfaceDataKey("tasks", workspaceId) as string,
@@ -889,6 +901,7 @@ export function warmTargetFor(
 }
 
 const WARMABLE: ReadonlySet<string> = new Set<WarmableSurface>([
+  "projects",
   "tasks",
   "crm",
   "association",
@@ -966,6 +979,21 @@ export function workspaceAccessInspectionCacheKey(workspaceId:string,userId:stri
 /** Meeting tags share workspace/page cache identity across the doc panel. */
 export const meetingTagsCacheKey = (workspaceId: string, pageId: string): string => `meeting-tags:${workspaceId}:${pageId}`;
 
+/** Department directory + homes (v2), viewer-scoped like every access read. */
+export function departmentDirectoryCacheKey(workspaceId:string,userId:string):string {
+  return `departments:${workspaceId}:${userId}:directory`;
+}
+
+/** One department's reader edges; shares the department family prefix. */
+export function departmentEdgesCacheKey(workspaceId:string,userId:string,departmentId:string):string {
+  return `departments:${workspaceId}:${userId}:edges:${departmentId}`;
+}
+
+/** Every listed department's reader edges, for the department cards; same family prefix. */
+export function departmentReadersCacheKey(workspaceId:string,userId:string,departmentIds:string[]):string {
+  return `departments:${workspaceId}:${userId}:readers:${departmentIds.join(',')}`;
+}
+
 /** Registry snapshots share the access invalidation namespace and viewer scope. */
 export function workspaceDepartmentRegistryCacheKey(workspaceId:string,userId:string):string {
   return `${workspaceAccessCacheKey(workspaceId,userId)}:registry`;
@@ -1017,4 +1045,23 @@ export function pageDirectoryCacheKey(workspaceId: string, viewerId: string): st
 /** Settings telemetry is isolated by workspace and signed-in viewer. */
 export function tokenUsageCacheKey(workspaceId: string): string {
   return `token-usage:models:${workspaceId}${viewerSuffix()}`;
+}
+
+/** Shares the access authority invalidation family, scoped to the shell viewer. */
+export function workspaceAccessModeCacheKey(workspaceId:string,userId:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:mode`;
+}
+
+export function workspaceAccessMigrationCacheKey(workspaceId:string,userId:string,kind:'list'|'plan',cursor=''):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:migration:${kind}:${cursor}`;
+}
+
+export function workspaceCreationContextCacheKey(workspaceId:string,userId:string):string {return `${workspaceAccessCacheKey(workspaceId,userId)}:creation-context`;}
+
+export function connectorSetupCacheKey(workspaceId:string,userId:string,setupId:string):string{return `${workspaceAccessCacheKey(workspaceId,userId)}:connector-setup:${setupId}`;}
+
+export function connectorReconnectCacheKey(workspaceId:string,userId:string,instanceId:string):string{return `${workspaceAccessCacheKey(workspaceId,userId)}:connector-reconnect:${instanceId}`;}
+
+export function projectContentCacheKey(workspaceId: string, projectId: string, view: string, query: string, offset: number): string {
+  return `${projectDetailCacheKey(workspaceId, projectId)}:content:${JSON.stringify([view, query, offset])}`;
 }

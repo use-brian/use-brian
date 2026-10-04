@@ -45,6 +45,10 @@ type SdkChannel = {
     type: 'image' | 'file',
   ): Promise<{ buffer: Buffer; contentType?: string }>
   rawClient: {
+    im: { v1: { message: { update(input: {
+      path: { message_id: string }
+      data: { msg_type: 'post'; content: string }
+    }): Promise<{ code?: number; msg?: string; log_id?: string }> } } }
     request(input: { url: string; method: 'GET' }): Promise<unknown>
   }
 }
@@ -246,6 +250,23 @@ export function createFeishuApi(
         '/open-apis/im/v1/messages/:message_id',
         () => channel.editMessage(messageId, text),
       )
+    },
+    editPost(messageId, markdown) {
+      return callFeishuSdk('edit_post', '/open-apis/im/v1/messages/:message_id', async () => {
+        const result = await channel.rawClient.im.v1.message.update({
+          path: { message_id: messageId },
+          data: {
+            msg_type: 'post',
+            content: JSON.stringify({
+              zh_cn: { title: '', content: [[{ tag: 'md', text: markdown }]] },
+            }),
+          },
+        })
+        if (result.code != null && result.code !== 0) {
+          throw new FeishuApiError({ response: { data: result } },
+            'edit_post', '/open-apis/im/v1/messages/:message_id')
+        }
+      })
     },
     updateCard(messageId, card) {
       return callFeishuSdk(

@@ -14,10 +14,13 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('../client.js', () => ({ query: vi.fn(), queryWithRLS: vi.fn() }))
+vi.mock('../client.js', () => ({ query: vi.fn(), queryWithRLS: vi.fn(), getPool: vi.fn() }))
+vi.mock('../../workspace-access/operational-admission.js', () => ({
+  admitOperationalAuthoring: vi.fn(async (_client, input) => input),
+}))
 vi.mock('../../brain-stream/notify.js', () => ({ notifyWorkspaceChange: vi.fn() }))
 
-import { query } from '../client.js'
+import { query, getPool } from '../client.js'
 import { notifyWorkspaceChange } from '../../brain-stream/notify.js'
 import {
   abandonGoalsForHostTaskSystem,
@@ -73,6 +76,10 @@ const ROW = {
 }
 
 beforeEach(() => {
+  vi.mocked(getPool).mockReturnValue({ connect: async () => ({
+    query: (sql: string, values?: unknown[]) => sql.includes('INSERT INTO goals') ? query(sql, values) : Promise.resolve({ rows: [] }),
+    release: vi.fn(),
+  }) } as never)
   mockQuery.mockReset()
   mockNotify.mockReset()
 })

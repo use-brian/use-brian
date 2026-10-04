@@ -45,6 +45,8 @@ type TeamsActivity = {
 // not here — so those config keys are intentionally absent (the route passes
 // the wider `ChannelIntegrationConfig`, whose extra keys are ignored).
 export type MsTeamsAdapterConfig = {
+  /** Event normalization only: retain messages emptied by stripping mentions. */
+  preserveMentionOnly?: boolean
   replyInThread?: boolean
   ackReaction?: string
   requireMention?: boolean
@@ -149,7 +151,9 @@ export function createMsTeamsAdapter(options: MsTeamsAdapterOptions): ChannelAda
 
       const text = stripMentions(activity.text ?? '')
       const hasText = !!text.trim()
-      if (!hasText && files.length === 0) return null
+      const mentionOnly = config.preserveMentionOnly && !!activity.text?.trim()
+        && (activity.entities ?? []).some(e => e?.type === 'mention' && !!e.mentioned?.id)
+      if (!hasText && files.length === 0 && !mentionOnly) return null
 
       // In group surfaces, gate on the mention requirement (DMs always answer).
       if (isGroupChat && requireMention && !mentioned) return null

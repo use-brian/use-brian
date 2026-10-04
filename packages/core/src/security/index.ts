@@ -47,12 +47,14 @@ export type {
   ScopeGrant,
   TurnScope,
 } from './context-scope.js'
-export { deriveContextFloor, deriveResourceScope, DerivedScopeError, resourceScopeKey, sourcesShareVisibility } from './derived-scope.js'
+export { deriveContextFloor, deriveResourceScope, deriveWriteScope, DerivedScopeError, resourceScopeKey, sourcesShareVisibility } from './derived-scope.js'
 export type { ResourceScope, ScopeSource, DerivedWriteEvidence } from './derived-scope.js'
 export { bindScopeSource, boundScopeSource } from './source-evidence.js'
 
 export { pinAccessCeiling, pinAuthoringAuthority, parseAuthoringAuthority, intersectAccessCeilings, accessCeilingContains } from './access-ceiling.js'
 export type { AccessCeiling, AuthoringAuthority } from './access-ceiling.js'
+export { intersectDepartmentReadGrants, departmentReadGrantJson } from './department-read.js'
+export type { DepartmentReadGrant } from './department-read.js'
 export { pinToolAuthoringAuthority } from './tool-authority.js'
 export { createExecutionContext, executionToolContext } from './execution-context.js'
 export type {

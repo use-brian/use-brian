@@ -1,13 +1,17 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { ChannelConfigUpdateError, updateChannelConfig, type Channel, type DeliveryAudienceBindingInput } from "@/lib/api/channels";
 
 import { SearchableSelect, type SearchableSelectItem } from "@/components/ui/searchable-select";
 import { listContextProjects } from "@/lib/api/context-scopes";
+import { fetchDepartments } from "@/lib/api/departments";
+import { format } from "@/lib/i18n/format";
 import { listChannelDestinations, listWorkspaceMemberOptions } from "@/lib/api/workflow";
 
 type Draft = {
@@ -18,15 +22,18 @@ type Draft = {
   channelId: string;
   audienceType: "group" | "individual";
   clearance: "public" | "internal" | "confidential";
-  compartments: string;
+  /** Department keys (`team:<id>`): the only labels the v2 read honours. */
+  compartments: string[];
+  /** Group only: replaces the department and project lists with no cap. */
+  companyWide: boolean;
   projects: string;
   recipient: string;
   expires: string;
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const list = (value: string) => [...new Set(value.split(",").map((v) => v.trim()).filter(Boolean))];
-const buttonClass = "min-h-11 rounded-md border border-border px-3 text-sm disabled:opacity-50";
-const inputClass = "min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 text-base md:text-sm";
+const buttonClass = "min-h-8 max-sm:min-h-11 rounded-md border border-border px-3 text-sm disabled:opacity-50";
+const inputClass = "min-h-8 max-sm:min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 text-base md:text-sm";
 
 /** Strip server-owned metadata: the config endpoint validates entries strictly. */
 function toInput(binding: DeliveryAudienceBindingInput): DeliveryAudienceBindingInput {
@@ -35,6 +42,7 @@ function toInput(binding: DeliveryAudienceBindingInput): DeliveryAudienceBinding
     clearance: binding.clearance, compartments: binding.compartments,
     projectIds: binding.projectIds, recipientUserId: binding.recipientUserId ?? null,
     expiresAt: binding.expiresAt ?? null,
+    ...(binding.companyWide ? { companyWide: true } : {}),
   };
 }
 
@@ -58,6 +66,19 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
   const identity = JSON.stringify([workspaceId, channel.id, channel.integrationId, channel.channelType]);
   const session = useRef(0);
   const [options, setOptions] = useState<{ destinations: SearchableSelectItem[]; projects: SearchableSelectItem[]; members: SearchableSelectItem[]; failed: boolean }>({ destinations: [], projects: [], members: [], failed: false });
+  // Departments the viewer is in, keyed the way a binding stores them.
+  const [departments, setDepartments] = useState<SearchableSelectItem[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchDepartments(workspaceId).then((result) => {
+      if (cancelled) return;
+      setDepartments((Array.isArray(result?.departments) ? result.departments : [])
+        .filter((department) => department.myClearance !== null && department.status === "active")
+        .map((department) => ({ value: `team:${department.departmentId}`, label: department.name })));
+    }).catch(() => { if (!cancelled) setDepartments([]); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+  const departmentName = (departmentKey: string) => departments.find((item) => item.value === departmentKey)?.label ?? copy.unknownDepartment;
   const editorSession = draft?.session;
   const editorIdentity = draft?.identity;
   useEffect(() => {
@@ -99,7 +120,10 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
     const binding = index === null ? null : bindings[index];
     setDraft({ identity, session: ++session.current, index, baseline: fingerprint, channelId: binding?.channelId ?? "",
       audienceType: binding?.audienceType ?? "group", clearance: binding?.clearance ?? "public",
-      compartments: binding?.compartments.join(", ") ?? "", projects: binding?.projectIds.join(", ") ?? "",
+      // Only department keys are honoured since the v2 cutover; any other
+      // label on an older approval is dropped when it is next saved.
+      compartments: (binding?.compartments ?? []).filter((value) => value.startsWith("team:")), projects: binding?.projectIds.join(", ") ?? "",
+      companyWide: binding?.companyWide === true && binding.audienceType === "group",
       recipient: binding?.recipientUserId ?? "", expires: binding?.expiresAt ?? "" });
     setError(null);
     setInvalidFields([]);
@@ -148,8 +172,9 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
   function save() {
     if (!draft) return;
     const channelId = draft.channelId.trim();
-    const compartments = list(draft.compartments);
-    const projectIds = list(draft.projects);
+    const companyWide = draft.companyWide && draft.audienceType === "group";
+    const compartments = companyWide ? [] : [...new Set(draft.compartments)];
+    const projectIds = companyWide ? [] : list(draft.projects);
     const recipientUserId = draft.audienceType === "individual" ? draft.recipient.trim() || null : null;
     const expires = draft.expires.trim();
     const expiry = expires ? Date.parse(expires) : null;
@@ -171,7 +196,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
     if (!channelId || channelId.length > 256
       || bindings.some((binding, index) => index !== draft.index && binding.channelId === channelId)
       || (draft.index === null && bindings.length >= 500)
-      || compartments.length > 100 || compartments.some((key) => key.length > 128)
+      || compartments.length > 100 || compartments.some((key) => key.length > 128 || !key.startsWith("team:"))
       || projectIds.length > 100 || projectIds.some((value) => !uuid.test(value))
       || (recipientUserId !== null && !uuid.test(recipientUserId))
       || (expires && (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(expires)
@@ -183,7 +208,8 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
     }
     const binding: DeliveryAudienceBindingInput = { channelId, audienceType: draft.audienceType,
       clearance: draft.clearance, compartments, projectIds, recipientUserId,
-      expiresAt: expiry === null ? null : new Date(expiry).toISOString() };
+      expiresAt: expiry === null ? null : new Date(expiry).toISOString(),
+      ...(companyWide ? { companyWide: true } : {}) };
     const next = bindings.map(toInput);
     if (draft.index === null) next.push(binding);
     else next[draft.index] = binding;
@@ -191,7 +217,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
   }
 
   const stale = draft !== null && (draft.baseline !== fingerprint || draft.identity !== identity);
-  function field(key: "channelId" | "compartments" | "projects" | "recipient" | "expires", label: string, hint: string) {
+  function field(key: "channelId" | "projects" | "recipient" | "expires", label: string, hint: string) {
     return <div className="space-y-1">
       <label htmlFor={`${id}-${key}`} className="text-sm font-medium">{label}</label>
       <input id={`${id}-${key}`} aria-describedby={`${id}-${key}-hint`} className={inputClass}
@@ -214,12 +240,12 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
       {!canManage && <p className="text-sm text-muted-foreground">{copy.adminOnly}</p>}
     </div>
     {bindings.length === 0 && <p className="text-sm text-muted-foreground">{copy.empty}</p>}
-    <ul className="space-y-3">
-      {bindings.map((binding, index) => <li key={`${binding.channelId}-${index}`} className="space-y-2 rounded-md border border-border p-3">
+    <ul className="divide-y divide-border">
+      {bindings.map((binding, index) => <li key={`${binding.channelId}-${index}`} className="space-y-2 py-3 first:pt-0 last:pb-0">
         <p className="break-all font-mono text-sm">{binding.channelId}</p>
         <p className="text-sm">{binding.audienceType === "group" ? copy.group : copy.individual} · {t.studioPage.channels.clearance[binding.clearance]}</p>
         <dl className="space-y-1 break-words text-xs text-muted-foreground">
-          {binding.compartments.length > 0 && <div><dt>{copy.compartments}</dt><dd>{binding.compartments.join(", ")}</dd></div>}
+          <div><dt>{copy.compartments}</dt><dd>{binding.companyWide ? copy.wholeCompany : binding.compartments.some((value) => value.startsWith("team:")) ? binding.compartments.filter((value) => value.startsWith("team:")).map(departmentName).join(", ") : copy.generalOnly}</dd></div>
           {binding.projectIds.length > 0 && <div><dt>{copy.projects}</dt><dd>{binding.projectIds.join(", ")}</dd></div>}
           {binding.recipientUserId && <div><dt>{copy.recipient}</dt><dd>{binding.recipientUserId}</dd></div>}
           <div><dt>{copy.expires}</dt><dd>{binding.expiresAt ?? copy.noExpiry}{binding.expiresAt && Date.parse(binding.expiresAt) <= Date.now() ? ` (${copy.expired})` : ""}</dd></div>
@@ -241,16 +267,16 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
         const audienceType = channel.channelType === "telegram" ? (bare.startsWith("-") ? "group" : "individual")
           : channel.channelType === "slack" ? (value.startsWith("D") ? "individual" : "group")
           : channel.channelType === "whatsapp" ? (value.endsWith("@g.us") ? "group" : "individual") : draft.audienceType;
-        setDraft({ ...draft, channelId: value, audienceType, recipient: audienceType === "group" ? "" : draft.recipient });
+        setDraft({ ...draft, channelId: value, audienceType, recipient: audienceType === "group" ? "" : draft.recipient, companyWide: audienceType === "group" && draft.companyWide });
       })}
       {field("channelId", copy.destination, copy.destinationHint)}
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1">
           <label id={`${id}-type`} className="text-sm font-medium">{copy.audienceType}</label>
           <Select value={draft.audienceType} disabled={busy || stale} onValueChange={(value) => {
-            if (value === "group" || value === "individual") setDraft({ ...draft, audienceType: value, recipient: value === "group" ? "" : draft.recipient });
+            if (value === "group" || value === "individual") setDraft({ ...draft, audienceType: value, recipient: value === "group" ? "" : draft.recipient, companyWide: value === "group" && draft.companyWide });
           }}>
-            <SelectTrigger aria-labelledby={`${id}-type`} className="min-h-11 w-full"><SelectValue>{draft.audienceType === "group" ? copy.group : copy.individual}</SelectValue></SelectTrigger>
+            <SelectTrigger aria-labelledby={`${id}-type`} className="max-sm:min-h-11 w-full"><SelectValue>{draft.audienceType === "group" ? copy.group : copy.individual}</SelectValue></SelectTrigger>
             <SelectContent><SelectItem value="group">{copy.group}</SelectItem><SelectItem value="individual">{copy.individual}</SelectItem></SelectContent>
           </Select>
         </div>
@@ -259,16 +285,46 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
           <Select value={draft.clearance} disabled={busy || stale} onValueChange={(value) => {
             if (value === "public" || value === "internal" || value === "confidential") setDraft({ ...draft, clearance: value });
           }}>
-            <SelectTrigger aria-labelledby={`${id}-clearance`} className="min-h-11 w-full"><SelectValue>{t.studioPage.channels.clearance[draft.clearance]}</SelectValue></SelectTrigger>
+            <SelectTrigger aria-labelledby={`${id}-clearance`} className="max-sm:min-h-11 w-full"><SelectValue>{t.studioPage.channels.clearance[draft.clearance]}</SelectValue></SelectTrigger>
             <SelectContent>{(["public", "internal", "confidential"] as const).map((value) => <SelectItem key={value} value={value}>{t.studioPage.channels.clearance[value]}</SelectItem>)}</SelectContent>
           </Select>
         </div>
       </div>
-      {field("compartments", copy.compartments, copy.compartmentsHint)}
+      {draft.audienceType === "group" && <div className="flex items-start gap-3">
+        <Switch id={`${id}-company-wide`} aria-describedby={`${id}-company-wide-hint`} checked={draft.companyWide}
+          disabled={busy || stale} className="mt-0.5"
+          onCheckedChange={(checked) => setDraft({ ...draft, companyWide: checked })} />
+        <div className="space-y-1">
+          <label htmlFor={`${id}-company-wide`} className="text-sm font-medium">{copy.wholeCompany}</label>
+          <p id={`${id}-company-wide-hint`} className="text-xs text-muted-foreground">{copy.wholeCompanyHint}</p>
+        </div>
+      </div>}
+      {!(draft.companyWide && draft.audienceType === "group") && <>
+      <div className="space-y-2">
+        <p id={`${id}-departments`} className="text-sm font-medium">{copy.compartments}</p>
+        {draft.compartments.length > 0 ? <ul aria-labelledby={`${id}-departments`} className="flex flex-wrap gap-2">
+          {draft.compartments.map((departmentKey) => {
+            const name = departmentName(departmentKey);
+            return <li key={departmentKey} className="inline-flex min-h-8 max-sm:min-h-11 items-center gap-1 rounded-full border border-border bg-muted/40 pl-3 pr-1 text-sm">
+              {name}
+              <button type="button" aria-label={format(copy.removeDepartment, { name })} disabled={busy || stale}
+                className="inline-flex size-9 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                onClick={() => setDraft({ ...draft, compartments: draft.compartments.filter((value) => value !== departmentKey) })}>
+                <X className="size-3.5" aria-hidden />
+              </button>
+            </li>;
+          })}
+        </ul> : <p className="text-sm text-muted-foreground">{copy.generalOnly}</p>}
+        {picker(copy.chooseDepartment, "", departments.filter((item) => !draft.compartments.includes(item.value)), (value) => {
+          if (value) setDraft({ ...draft, compartments: [...new Set([...draft.compartments, value])] });
+        })}
+        <p className="text-xs text-muted-foreground">{copy.compartmentsHint}</p>
+      </div>
       {picker(copy.chooseProject, "", options.projects, (value) => {
         if (value) setDraft({ ...draft, projects: [...new Set([...list(draft.projects), value])].join(", ") });
       })}
       {field("projects", copy.projects, copy.projectsHint)}
+      </>}
       {draft.audienceType === "individual" && picker(copy.chooseMember, draft.recipient, options.members, (value) => {
         if (value) setDraft({ ...draft, recipient: value });
       })}

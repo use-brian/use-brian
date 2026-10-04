@@ -145,9 +145,9 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     expect(homeAppFromPathname("brain", "/w/w1/brain")).toBeNull();
   });
 
-  it("defaults to the config default (Page + Chat) when nothing is cached", () => {
+  it("defaults to the config default (Chat first) when nothing is cached", () => {
     expect(readOperatorApp("w1")).toBe(DEFAULT_OPERATOR_APP);
-    expect(homePath("w1")).toBe("/w/w1/p");
+    expect(homePath("w1")).toBe("/w/w1/chat");
   });
 
   it("persists the selection per workspace (the sticky Home contract)", () => {

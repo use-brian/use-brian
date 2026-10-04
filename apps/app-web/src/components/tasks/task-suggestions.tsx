@@ -348,7 +348,7 @@ export function TaskSuggestionsView({
                       )}
 
                       {expanded && (
-                        <div className="mt-2 flex flex-col gap-2 rounded-xl border border-border/60 bg-muted/30 p-3 text-xs leading-relaxed">
+                        <div className="mt-2 flex flex-col gap-2 border-l-2 border-border pl-3 text-xs leading-relaxed">
                           {candidate.quality?.evidenceQuote && (
                             <p className="text-muted-foreground">
                               <span className="font-medium text-foreground">
@@ -462,7 +462,7 @@ export function TaskSuggestionsView({
                   </div>
 
                   {dismissing?.id === candidate.id && (
-                    <div className="mt-4 rounded-xl border border-border bg-muted/30 p-4">
+                    <div className="mt-4 border-t border-border pt-4">
                       <p className="text-sm font-medium text-foreground">
                         {t.dismissTitle}
                       </p>

@@ -28,6 +28,17 @@ describe("[COMP:app-desktop/awake-brian] preference", () => {
     expect(parseAwakeBrianPreference("[]")).toBe(false);
   });
 
+  it("preserves the macOS foreground process type for every all-Spaces overlay", () => {
+    const main = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
+    const calls = [...main.matchAll(/\.setVisibleOnAllWorkspaces\(true,\s*\{([^}]+)\}\)/g)];
+    // Companion, attached chat, and recorder must all avoid app-wide transforms.
+    expect(calls).toHaveLength(3);
+    for (const [, options] of calls) {
+      expect(options).toMatch(/visibleOnFullScreen:\s*true/);
+      expect(options).toMatch(/skipTransformProcessType:\s*true/);
+    }
+  });
+
   it("renders the canonical logo asset instead of reconstructing the mark", () => {
     const html = readFileSync(new URL("../brian-pet.html", import.meta.url), "utf8");
     expect(html).toContain('src="./brian-logo.png"');

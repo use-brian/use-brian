@@ -5,13 +5,13 @@
  * [COMP:api/context-scope-routes]
  */
 
-import { getDepartmentalReadinessSystem } from '../workspace-access/readiness.js'
+import { departmentalReadiness, getDepartmentalReadinessSystem } from '../workspace-access/readiness.js'
 import { departmentRouteReview, executeReviewedDepartmentRoute } from '../workspace-access/reviewed-route.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import { scopeGrantContains, type ScopeGrant } from '@use-brian/core'
-import { buildAccessPredicate } from '../db/access-predicate.js'
+import { projectAggregates, projectContent } from '../db/project-aggregates.js'
 import {
   createDbContextScopeStore,
   type ContextScopeStore,
@@ -28,8 +28,8 @@ import {
   type WorkspaceGroupStore,
 } from '../db/workspace-group-store.js'
 import { query, queryWithRLS } from '../db/client.js'
+import { departmentClearancesForUserSystem } from '../db/department-store.js'
 import {
-  getWorkspaceMembershipWithClearanceSystem,
   type WorkspaceStore,
 } from '../db/workspace-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
@@ -110,9 +110,11 @@ const reclassifyQuery = z.object({
   rowId: z.string().min(1).max(200),
 })
 
+// Either field may be omitted to keep its current value: the header badge
+// sets only the department, the Settings binding only the Project.
 const connectorContextBody = z.object({
-  contextGroupId: UUID.nullable(),
-  contextProjectId: UUID.nullable(),
+  contextGroupId: UUID.nullable().optional(),
+  contextProjectId: UUID.nullable().optional(),
 }).strict()
 
 type WorkspaceRole = 'owner' | 'admin' | 'member'
@@ -189,81 +191,6 @@ async function loadAssistant(
     [workspaceId, assistantId ?? null],
   )
   return result.rows[0] ?? null
-}
-
-async function projectAggregates(
-  userId: string,
-  workspaceId: string,
-  projectId: string,
-): Promise<Record<string, number>> {
-  const [membership, grant] = await Promise.all([
-    getWorkspaceMembershipWithClearanceSystem(userId, workspaceId),
-    query<{ compartments: ScopeGrant }>(
-      'SELECT effective_member_team_compartments($1, $2) AS compartments',
-      [userId, workspaceId],
-    ),
-  ])
-  if (!membership) return {}
-  const principal = {
-    role: membership.role,
-    clearance: membership.role === 'owner' || membership.role === 'admin'
-      ? 'confidential' as const
-      : membership.clearance,
-    compartments: grant.rows[0]?.compartments ?? [],
-  }
-  const access = {
-    workspaceId,
-    userId,
-    assistantId: '',
-    assistantKind: 'primary' as const,
-    clearance: principal.clearance,
-    compartments: principal.compartments,
-    projectIds: [projectId],
-  }
-  const tables = {
-    memories: 'memories',
-    tasks: 'tasks',
-    files: 'workspace_files',
-    entities: 'entities',
-    knowledge: 'knowledge_entries',
-    recordings: 'recordings',
-    office: 'office_artifacts',
-    episodes: 'episodes',
-  } as const
-  const counts: Record<string, number> = {}
-  for (const [label, table] of Object.entries(tables)) {
-    const predicate = buildAccessPredicate(access, { alias: 'r' })
-    const result = await query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM ${table} r WHERE ${predicate.sql}`,
-      predicate.params,
-    )
-    counts[label] = Number(result.rows[0]?.count ?? '0')
-  }
-  const pages = await queryWithRLS<{ count: string }>(
-    userId,
-    `SELECT count(*)::text AS count
-       FROM saved_views
-      WHERE workspace_id = $1 AND project_id = $2`,
-    [workspaceId, projectId],
-  )
-  counts.pages = Number(pages.rows[0]?.count ?? '0')
-  const operational = await query<{ workflows: string; goals: string }>(
-    `SELECT
-       (SELECT count(*)::text
-          FROM workflows w
-          LEFT JOIN workspace_groups g ON g.id = w.context_group_id
-         WHERE w.workspace_id = $1 AND w.context_project_id = $2
-           AND (w.context_group_id IS NULL OR $3::text[] IS NULL OR g.compartment_key = ANY($3::text[]))) AS workflows,
-       (SELECT count(*)::text
-          FROM goals o
-          LEFT JOIN workspace_groups g ON g.id = o.context_group_id
-         WHERE o.workspace_id = $1 AND o.context_project_id = $2
-           AND (o.context_group_id IS NULL OR $3::text[] IS NULL OR g.compartment_key = ANY($3::text[]))) AS goals`,
-    [workspaceId, projectId, principal.compartments],
-  )
-  counts.workflows = Number(operational.rows[0]?.workflows ?? '0')
-  counts.goals = Number(operational.rows[0]?.goals ?? '0')
-  return counts
 }
 
 export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
@@ -451,6 +378,21 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     res.json({ project: { ...project, aggregates } })
   })
 
+  router.get('/workspaces/:workspaceId/projects/:projectId/content', async (req, res) => {
+    const access = await gate(req, res)
+    if (!access) return
+    const parsed = z.object({
+      view: z.enum(['work','knowledge','recent']).default('work'),
+      q: z.string().max(200).default(''),
+      offset: z.coerce.number().int().min(0).max(100000).default(0),
+    }).safeParse(req.query)
+    if (!parsed.success) return invalid(res, parsed)
+    const project = await contextStore.getProjectDetail(access.userId, access.workspaceId, req.params.projectId)
+    if (!project) return void res.status(404).json({ error: 'not_found' })
+    res.json(await projectContent(access.userId, access.workspaceId, project.id,
+      parsed.data.view, parsed.data.q.trim(), parsed.data.offset))
+  })
+
   router.patch('/workspaces/:workspaceId/projects/:projectId', async (req, res) => {
     const access = await gate(req, res, true)
     if (!access) return
@@ -545,42 +487,78 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     return null
   }
 
+  type ConnectorExposure = NonNullable<Awaited<ReturnType<typeof connectorExposure>>>
+
+  /**
+   * A connector's department is its audience (mcp.md -> "Connector departments
+   * are an audience"). Who may change it: a workspace owner/admin; the member
+   * who exposed it; any member in the audience of a workspace-owned connector
+   * (it is team-managed). Anyone else in its audience may only read it.
+   */
+  async function connectorAuthority(
+    access: { userId: string; workspaceId: string; role: WorkspaceRole },
+    exposure: ConnectorExposure,
+    departments: Map<string, unknown>,
+  ): Promise<'edit' | 'view' | null> {
+    if (access.role === 'owner' || access.role === 'admin') return 'edit'
+    if (exposure.kind === 'grant' && exposure.grant.grantedByUserId === access.userId) return 'edit'
+    const inAudience = exposure.compartments
+      .every((label) => !label.startsWith('team:') || departments.has(label.slice(5)))
+    if (!inAudience) return null
+    return exposure.kind === 'instance' ? 'edit' : 'view'
+  }
+
   router.get('/workspaces/:workspaceId/connectors/:instanceId/context', async (req, res) => {
-    const access = await gate(req, res, true)
+    const access = await gate(req, res)
     if (!access) return
     const exposure = await connectorExposure(access.userId, access.workspaceId, req.params.instanceId)
     if (!exposure) return void res.status(404).json({ error: 'not_found' })
+    const departments = await departmentClearancesForUserSystem(access.userId, access.workspaceId)
+    const authority = await connectorAuthority(access, exposure, departments)
+    if (!authority) return void res.status(404).json({ error: 'not_found' })
     const teams = await contextStore.listTeams(access.userId, access.workspaceId)
     const team = teams.find((row) => exposure.compartments.includes(row.compartmentKey))
+    const labelled = exposure.compartments.find((label) => label.startsWith('team:'))
     res.json({
       context: {
-        contextGroupId: team?.id ?? null,
+        contextGroupId: team?.id ?? (labelled ? labelled.slice(5) : null),
         contextProjectId: exposure.projectIds[0] ?? null,
       },
+      canEdit: authority === 'edit',
     })
   })
 
   router.put('/workspaces/:workspaceId/connectors/:instanceId/context', async (req, res) => {
-    const access = await gate(req, res, true)
+    const access = await gate(req, res)
     if (!access) return
     const parsed = connectorContextBody.safeParse(req.body)
     if (!parsed.success) return invalid(res, parsed)
     const exposure = await connectorExposure(access.userId, access.workspaceId, req.params.instanceId)
     if (!exposure) return void res.status(404).json({ error: 'not_found' })
+    const departments = await departmentClearancesForUserSystem(access.userId, access.workspaceId)
+    const authority = await connectorAuthority(access, exposure, departments)
+    if (!authority) return void res.status(404).json({ error: 'not_found' })
+    if (authority !== 'edit') return void res.status(403).json({ error: 'connector_context_forbidden' })
+    const currentTeamLabel = exposure.compartments.find((label) => label.startsWith('team:'))
+    const groupId = parsed.data.contextGroupId === undefined
+      ? currentTeamLabel ? currentTeamLabel.slice(5) : null
+      : parsed.data.contextGroupId
+    const projectId = parsed.data.contextProjectId === undefined
+      ? exposure.projectIds[0] ?? null
+      : parsed.data.contextProjectId
     const [team, project] = await Promise.all([
-      parsed.data.contextGroupId
-        ? contextStore.getTeamSystem(access.workspaceId, parsed.data.contextGroupId)
-        : null,
-      parsed.data.contextProjectId
-        ? contextStore.getProjectSystem(access.workspaceId, parsed.data.contextProjectId)
-        : null,
+      groupId ? contextStore.getTeamSystem(access.workspaceId, groupId) : null,
+      projectId ? contextStore.getProjectSystem(access.workspaceId, projectId) : null,
     ])
-    if ((parsed.data.contextGroupId && (!team || team.status !== 'active'))
-      || (parsed.data.contextProjectId && (!project || project.status !== 'active'))) {
+    if ((groupId && (!team || team.status !== 'active'))
+      || (projectId && (!project || project.status !== 'active'))) {
       return void res.status(404).json({ error: 'context_not_available' })
     }
-    if (team || project) {
-      await assertContextActivationReady(access.workspaceId, getReadiness)
+    // A non-admin may only place a connector in a department they belong to,
+    // so they can never move it out of their own sight.
+    if (parsed.data.contextGroupId && access.role !== 'owner' && access.role !== 'admin'
+        && !departments.has(parsed.data.contextGroupId)) {
+      return void res.status(403).json({ error: 'connector_department_not_held' })
     }
     const compartments = team ? [team.compartmentKey] : []
     const projectIds = project ? [project.id] : []
@@ -716,7 +694,11 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   router.get('/workspaces/:workspaceId/context/readiness', async (req, res) => {
     const access = await gate(req, res, true)
     if (!access) return
-    const [context,departmental]=await Promise.all([getReadiness(access.workspaceId),(options.getDepartmentalReadiness??getDepartmentalReadinessSystem)(access.workspaceId)])
+    // One evidence pass: the departmental verdict is a pure function of the
+    // context evidence, so deriving it avoids a second schema probe and a
+    // second inventory read on the same request.
+    const context=await getReadiness(access.workspaceId)
+    const departmental=options.getDepartmentalReadiness?await options.getDepartmentalReadiness(access.workspaceId):departmentalReadiness(context)
     res.json({...context,readyForActivation:context.readyForActivation&&departmental.ready,
       checks:[...context.checks.filter(check=>check.id!=='delegation'),{id:'delegation',ready:departmental.ready,blocking:true,detail:'Departmental access readiness',missing:departmental.missingCapabilities}],departmental})
   })

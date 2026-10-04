@@ -23,6 +23,7 @@ export function createOfficeLifecycleWorker(deps: { sweep(): Promise<number>; in
 }
 
 type ExpiredPdfSession = {
+  intakeState?: string
   id: string
   workspaceId: string
   ownerUserId: string
@@ -51,7 +52,7 @@ export async function purgeExpiredPdfSessions(client: PoolClient, limit = 25): P
     try {
       const session = (await client.query<ExpiredPdfSession>(`
         SELECT id,workspace_id AS "workspaceId",owner_user_id AS "ownerUserId",
-               expires_at AS "expiresAt",legal_hold AS "legalHold"
+               expires_at AS "expiresAt",legal_hold AS "legalHold",pdf_intake_state AS "intakeState"
           FROM office_artifacts
          WHERE mode='session' AND family='pdf' AND lifecycle_state='active'
            AND expires_at<=now()
@@ -75,7 +76,7 @@ export async function purgeExpiredPdfSessions(client: PoolClient, limit = 25): P
          ORDER BY a.created_at,a.file_id
          FOR UPDATE OF f
       `, [session.id])).rows
-      if (assets.length < 2 || !assets.some((asset) => asset.role === 'source') || !assets.some((asset) => asset.role === 'snapshot')) {
+      if (session.intakeState !== 'pending' && session.intakeState !== 'abandoned' && (assets.length < 2 || !assets.some((asset) => asset.role === 'source') || !assets.some((asset) => asset.role === 'snapshot'))) {
         throw new Error('pdf_purge_incomplete_asset_set')
       }
       for (const asset of assets) {
@@ -102,14 +103,14 @@ export async function purgeExpiredPdfSessions(client: PoolClient, limit = 25): P
       for (const reference of references.rows) {
         const predicate = reference.columns.map((column, position) =>
           `c.${quoteIdentifier(column)}=f.${quoteIdentifier(reference.target[position]!)}`).join(' AND ')
-        const owned = reference.schema === 'public' && ['office_pdf_session_assets', 'office_artifact_versions', 'office_release_records'].includes(reference.table)
-          ? `AND NOT (c.artifact_id=$3)` : ''
+        const owned = reference.schema === 'public' && ['office_pdf_session_assets', 'office_artifact_versions', 'office_release_records', 'workspace_file_session_bindings'].includes(reference.table)
+          ? `AND c.artifact_id IS DISTINCT FROM $3` : ''
         const count = Number((await client.query(`
           SELECT count(*)::int count
             FROM ${quoteIdentifier(reference.schema)}.${quoteIdentifier(reference.table)} c
             JOIN workspace_files f ON ${predicate}
            WHERE f.workspace_id=$1 AND f.id=ANY($2::uuid[]) ${owned}
-        `, [session.workspaceId, fileIds, session.id])).rows[0]?.count ?? 0)
+        `, [session.workspaceId, fileIds, ...(owned ? [session.id] : [])])).rows[0]?.count ?? 0)
         if (count > 0) throw new Error('pdf_purge_foreign_file_reference')
       }
       const duplicateObject = Number((await client.query(`
@@ -130,8 +131,8 @@ export async function purgeExpiredPdfSessions(client: PoolClient, limit = 25): P
       await client.query(`
         INSERT INTO office_audit_events
           (workspace_id,artifact_id,actor_user_id,event_type,metadata)
-        VALUES ($1,$2,NULL,'office_pdf_session_purged',
-          jsonb_build_object('formerArtifactId',$2::text,'expiredAt',$3::timestamptz,
+        VALUES ($1,$2::uuid,NULL,'office_pdf_session_purged',
+          jsonb_build_object('formerArtifactId',($2::uuid)::text,'expiredAt',$3::timestamptz,
             'purgedAt',clock_timestamp(),'assetCount',$4::int,
             'sourceHashes',$5::text[],'outputHashes',$6::text[]))
       `, [session.workspaceId, session.id, session.expiresAt, assets.length,

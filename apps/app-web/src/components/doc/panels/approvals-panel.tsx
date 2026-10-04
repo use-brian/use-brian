@@ -56,7 +56,7 @@ import {
   buildConfirmationPreview,
   getToolDisplayName,
 } from "@use-brian/shared";
-import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
+import { WORKSPACE_IDENTITY_REFRESH_EVENT, isCatchUpRefresh } from "@/lib/workspace-identity-events";
 import { openWorkspaceSettings } from "@/lib/workspace-settings-events";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -166,6 +166,9 @@ export function ApprovalsPanel() {
     const reset=(event:Event)=>{
       const detail=(event as CustomEvent<{workspaceId?:string}>).detail;
       if(detail?.workspaceId&&detail.workspaceId!==activeId)return;
+      // The reconnect catch-up changes nothing the viewer chose; a half-typed
+      // batch reason must survive it.
+      if(isCatchUpRefresh(event))return;
       setSelected(new Set());setFilter(NO_FILTER);setBatchReason("");setBatchError(null);setAssistantNames({});
     };
     window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,reset);
@@ -927,7 +930,7 @@ function ApprovalCard({
               <ToolCallBody row={row} preview={toolPreview} />
             )}
             {reviewedEmail && (
-              <div className="mt-2 flex max-w-2xl flex-col gap-2 rounded-md border border-border bg-muted/20 p-3">
+              <div className="mt-3 flex max-w-2xl flex-col gap-2 border-t border-border pt-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs font-medium">
                     {format(t.approvalsPage.emailRevision.revision, {
@@ -1170,7 +1173,7 @@ function EmailSenderBody({ row }: { row: PendingApprovalRow }) {
   const t = useT();
   const p = row.approvalPayload;
   return (
-    <div className="mt-1 flex max-w-2xl flex-col gap-1.5 rounded-md border border-border bg-muted/20 p-3">
+    <div className="mt-1 flex max-w-2xl flex-col gap-1.5">
       <p className="text-xs text-muted-foreground">
         {t.approvalsPage.emailSender.effect}
       </p>
@@ -1316,7 +1319,7 @@ function SkillCreationBody({ row }: { row: PendingApprovalRow }) {
           : t.approvalsPage.skill.viewContent}
       </button>
       {open && (
-        <pre className="w-full text-[11px] font-mono bg-muted/50 border border-border rounded px-2 py-1.5 max-h-72 overflow-auto whitespace-pre-wrap break-words max-w-2xl">
+        <pre className="w-full text-[11px] font-mono bg-muted/50 rounded px-2 py-1.5 max-h-72 overflow-auto whitespace-pre-wrap break-words max-w-2xl">
           {umbrella.content ?? ""}
         </pre>
       )}
@@ -1449,7 +1452,7 @@ function SkillUpdateBody({
         <DiffView rows={diffRows} />
       ) : open && hasBodyProposal ? (
         // No target snapshot to diff against — show the raw proposal.
-        <pre className="w-full text-[11px] font-mono bg-muted/50 border border-border rounded px-2 py-1.5 max-h-72 overflow-auto whitespace-pre-wrap break-words max-w-2xl">
+        <pre className="w-full text-[11px] font-mono bg-muted/50 rounded px-2 py-1.5 max-h-72 overflow-auto whitespace-pre-wrap break-words max-w-2xl">
           {proposed ?? patch?.diff ?? ""}
         </pre>
       ) : null}
@@ -1462,7 +1465,7 @@ function SkillUpdateBody({
 function DiffView({ rows }: { rows: DiffRow[] }) {
   const t = useT();
   return (
-    <div className="w-full text-[11px] font-mono bg-muted/30 border border-border rounded max-h-72 overflow-auto max-w-2xl">
+    <div className="w-full text-[11px] font-mono bg-muted/30 rounded max-h-72 overflow-auto max-w-2xl">
       {rows.map((r, i) =>
         r.type === "gap" ? (
           <div
@@ -1522,7 +1525,7 @@ function AttachOffer({
     return prompt.length > 0 ? `${id} · ${prompt.slice(0, 48)}` : id;
   };
   return (
-    <div className="mt-1 flex flex-col items-start gap-1.5 border border-border rounded px-2.5 py-2 bg-muted/30">
+    <div className="mt-1 flex flex-col items-start gap-1.5">
       <label className="flex items-center gap-2 text-xs">
         <input
           type="checkbox"
@@ -1657,6 +1660,6 @@ function DepartmentAccessBody({row}:{row:PendingApprovalRow}) {
     <p>{t.starts}: {payload.startsAt?new Date(payload.startsAt).toLocaleString():''}</p>
     <p>{t.expires}: {payload.expiresAt?new Date(payload.expiresAt).toLocaleString():t.ongoing}</p>
     <p>{t.readOnly}</p>{payload.beneficiaryKind==='team'?<p>{t.futureMembers}</p>:null}
-    <Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-access')}>{t.title}</Button>
+    <Button variant="outline" className="max-sm:min-h-11" onClick={()=>openWorkspaceSettings('ws-access')}>{t.title}</Button>
   </div>;
 }

@@ -300,6 +300,82 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
     expect((await getSoulContext({...access,compartments:['product']})).content).toBe('Product preference summary')
   })
 
+  it.each([
+    ['soul', 'legacy'], ['domain', 'legacy'], ['soul', 'ready'], ['domain', 'ready'],
+  ] as const)('replaces a %s summary repeatedly in %s mode without predecessor lineage', async (kind, setupState) => {
+    const f = await fixture(), input = await f.create({ compartments: ['finance'] })
+    await pool.query(`UPDATE workspace_access_policies SET setup_state=$2,access_mode='departments' WHERE workspace_id=$1`,[f.workspaceId,setupState])
+    const write = (content: string) => writeScopedSummary({
+      assistantId: f.assistantId,userId: f.userId,kind,slotKey: 'shared',content,
+      derivation: { producer: `consolidation:${kind}`,sources: [asSource(input)] },
+    })
+    const currentId = async () => (await pool.query(
+      'SELECT memory_id FROM memory_summary_slots WHERE workspace_id=$1 AND kind=$2',[f.workspaceId,kind],
+    )).rows[0].memory_id as string
+    let previous: string | undefined
+    let dependent: Memory | undefined
+    for (const content of ['First summary', 'Second summary', 'Third summary']) {
+      await write(content)
+      const id = await currentId(), current = await getMemoryByIdSystem(id)
+      expect(current).toMatchObject({ detail: content,scopeHeld: false,validTo: null })
+      expect((await pool.query(`SELECT s.source_id FROM scope_derivation_sources s
+        JOIN scope_derivations d ON d.id=s.derivation_id WHERE d.resource_id=$1`,[id])).rows)
+        .toEqual([{ source_id: input.id }])
+      if (previous) {
+        expect(id).not.toBe(previous)
+        const old = (await pool.query('SELECT valid_to,superseded_by FROM memories WHERE id=$1',[previous])).rows[0]
+        expect(old.valid_to).not.toBeNull()
+        expect(old.superseded_by).toBe(id)
+        expect(await getMemoryByIdSystem(dependent!.id)).toBeNull()
+      }
+      previous = id
+      dependent = await f.derive([current!])
+    }
+    expect((await pool.query(`SELECT count(*)::int n FROM memories
+      WHERE workspace_id=$1 AND tags @> ARRAY[$2]::text[] AND valid_to IS NULL`,[f.workspaceId,`consolidation:${kind}`])).rows[0].n).toBe(1)
+    // Fresh summaries still inherit the actual input's invalidation.
+    await pool.query('UPDATE memories SET summary=$2 WHERE id=$1',[input.id,'Changed source'])
+    expect(await getMemoryByIdSystem(previous!)).toBeNull()
+  })
+
+  it('recovers a summary slot whose old update path already created predecessor lineage', async () => {
+    const f = await fixture(), input = await f.create()
+    const derivation = { producer: 'consolidation:soul',sources: [asSource(input)] }
+    const write = (content: string) => writeScopedSummary({
+      assistantId: f.assistantId,userId: f.userId,kind: 'soul',slotKey: 'shared',content,derivation,
+    })
+    await write('Original summary')
+    const first = (await pool.query('SELECT memory_id FROM memory_summary_slots WHERE workspace_id=$1',[f.workspaceId])).rows[0].memory_id
+    // Reproduce the previously deployed writer's first successful update.
+    const second = await updateMemory(first,{ summary: 'Old-path update',detail: 'Old-path update',derivation })
+    expect(second).not.toBeNull()
+    await pool.query('UPDATE memory_summary_slots SET memory_id=$2 WHERE workspace_id=$1',[f.workspaceId,second!.id])
+    expect((await pool.query(`SELECT resource_id FROM scope_descendant_memories($1,'memory',$2)`,[f.workspaceId,second!.id])).rows)
+      .toContainEqual({ resource_id: second!.id })
+    await write('Recovered summary')
+    await write('Next healthy summary')
+    const ctx = { workspaceId: f.workspaceId,userId: f.userId,assistantId: f.assistantId,assistantKind: 'standard' as const,clearance: 'confidential' as const,compartments: null }
+    expect((await getSoulContext(ctx)).content).toBe('Next healthy summary')
+  })
+
+  it.each(['previous output', 'dependent'] as const)('rolls back summary replacement citing the %s', async sourceKind => {
+    const f = await fixture(), input = await f.create()
+    const write = (sources: ScopeSource[], content: string) => writeScopedSummary({
+      assistantId: f.assistantId,userId: f.userId,kind: 'soul',slotKey: 'shared',content,
+      derivation: { producer: 'consolidation:soul',sources },
+    })
+    await write([asSource(input)],'Original summary')
+    const id = (await pool.query('SELECT memory_id FROM memory_summary_slots WHERE workspace_id=$1',[f.workspaceId])).rows[0].memory_id
+    const summary = await getMemoryByIdSystem(id), dependent = await f.derive([summary!])
+    const source = sourceKind === 'previous output' ? summary! : dependent
+    await expect(write([asSource(source)],'Invalid circular synthesis')).rejects.toThrow('scope_source_changed')
+    expect((await pool.query('SELECT memory_id FROM memory_summary_slots WHERE workspace_id=$1',[f.workspaceId])).rows[0].memory_id).toBe(id)
+    expect(await getMemoryByIdSystem(id)).toMatchObject({ detail: 'Original summary',validTo: null,scopeHeld: false })
+    expect(await getMemoryByIdSystem(dependent.id)).toMatchObject({ scopeHeld: false })
+    expect((await pool.query(`SELECT count(*)::int n FROM memories WHERE workspace_id=$1
+      AND tags @> ARRAY['consolidation:soul']::text[]`,[f.workspaceId])).rows[0].n).toBe(1)
+  })
+
   it('A08 a scoped summary slot cannot resurrect held content and can rebuild from current evidence', async () => {
     const f = await fixture(), input = await f.create({ compartments: ['finance'] })
     const write = (memory: Memory,content: string) => writeScopedSummary({

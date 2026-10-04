@@ -12,7 +12,7 @@ vi.mock("@/lib/surface-prefetch", () => ({ associationPageCacheKey: (w: string, 
 vi.mock("@/lib/api/crm", () => ({ fetchCrmLookup: api.lookup }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: api.confirm }));
 import { AssociationApiError, type AssociationOrder } from "@/lib/api/association";
-import { AssociationModuleControls } from "../module-controls";
+import { AssociationModuleControls, AssociationModuleNote } from "../module-controls";
 import { AssociationOrdersPanel } from "../orders-panel";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -21,8 +21,9 @@ import { markSurfaceCacheStale, resetSurfaceCache } from "@/lib/surface-cache";
 const t = en.associationPage;
 let host: HTMLDivElement, root: Root;
 const moduleRow = (state = "disabled", version = 1) => ({ workspaceId: "w1", state, version });
-async function render(readOnly = false) {
-  await act(async () => root.render(<I18nProvider locale="en" dict={en}><AssociationModuleControls workspaceId="w1" readOnly={readOnly} /></I18nProvider>));
+async function render(note = false) {
+  const view = note ? <AssociationModuleNote workspaceId="w1" /> : <AssociationModuleControls workspaceId="w1" />;
+  await act(async () => root.render(<I18nProvider locale="en" dict={en}>{view}</I18nProvider>));
 }
 async function click(label: string) {
   await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent === label)!.click(); });
@@ -54,8 +55,9 @@ describe("[COMP:app-web/association] Independent module controls", () => {
     await act(async () => { resetSurfaceCache(); });
     api.get.mockResolvedValue({ module: moduleRow(), canManage: true });
     await render(true);
-    expect(host.textContent).toContain(t.savedPermissions);
-    expect([...host.querySelectorAll("button")].some(button => button.textContent === t.enable)).toBe(false);
+    expect(host.textContent).toContain(`${t.moduleStateLabel}: ${t.states.disabled}. ${t.savedPermissions}`);
+    expect(host.textContent).not.toContain(t.moduleTitle);
+    expect(host.querySelectorAll("button, a").length).toBe(0);
     expect(api.change).not.toHaveBeenCalled();
   });
   it("keeps a cancelled confirmation side-effect free", async () => {

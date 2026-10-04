@@ -1,6 +1,8 @@
 "use client";
 
 
+import { canonicalInteractionAdditions } from "@/lib/live-interaction/canonical";
+import { LiveInteractionJobs, LiveInteractionQuestionControls } from "./live-interaction-jobs";
 import { availableAppWidth, subscribeAppViewport } from "@/lib/app-viewport";
 
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
@@ -107,6 +109,7 @@ import {
   readActiveAssistantId,
   writeActiveAssistantId,
 } from "@/lib/active-assistant";
+import { nextReplyVoiceHint } from "@/lib/next-reply-voice";
 import {
   derivePageIcon,
   getAssistantIdentity,
@@ -253,6 +256,7 @@ import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
 import { useLiveRecordingPage } from "@/lib/recordings/use-live-recording-page";
 import {
   getDockRecorderSessionId,
+  ensureDockRecorderInteractionSession,
   publishDockRecorderController,
   sendDockRecorderVoiceClip,
 } from "@/lib/recorder/dock-recorder-bridge";
@@ -3001,6 +3005,7 @@ export function FloatingChat({
   // the recording ingestion flow (the full cost + blueprint +
   // destination confirm), stamped kind='meeting' — a recorder-originated
   // long capture is a meeting, and kind routes the transcriber ladder.
+  const interactionT = useT().liveInteraction;
   const liveRecording = useLiveRecordingPage(workspaceId, activeAssistantId);
   // Capture saves have their own serial lane. Never gate chat/attachments on
   // this uploader's busy state: the recorder reports its background progress.
@@ -3015,6 +3020,23 @@ export function FloatingChat({
       uploadProgress: captureUpload.uploadProgress,
       message: captureUpload.message,
     },
+    ensureInteractionSession: () => ensureDockRecorderInteractionSession(async () => {
+      const existing = sessionIdRef.current;
+      if (existing) return existing;
+      const epoch = threadEpochRef.current;
+      const response = await authFetch(`${API_URL}/api/sessions/personal`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId, assistantId: activeAssistantId, channelId: crypto.randomUUID() }),
+      });
+      if (!response.ok) throw new Error("Could not create interaction chat");
+      const { session: created } = await response.json();
+      // A concurrent typed send or navigation wins. Never replace its binding.
+      if (threadEpochRef.current !== epoch) throw new Error("Chat changed");
+      if (sessionIdRef.current) return sessionIdRef.current;
+      sessionIdRef.current = created.id;
+      session.setSession(created.id);
+      return created.id;
+    }),
     getSessionId: () =>
       getDockRecorderSessionId(() => sessionIdRef.current ?? undefined),
     sendVoiceClip: (fileId: string) =>
@@ -3025,11 +3047,12 @@ export function FloatingChat({
     prepareLivePage: liveRecording.prepare,
     prepareCaptureSource: (initialSource) => pickCaptureSource(initialSource, tRecorder),
     streamLiveWindow: liveRecording.streamWindow,
-    onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string }) => {
+    onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string; liveWindowsDone?: Promise<void> }) => {
       const outcome = await captureUpload.run(file, {
         kind: "meeting",
         ...(live ? { existingPageId: live.pageId } : {}),
         ...(live?.sessionId ? { liveSessionId: live.sessionId } : {}),
+        ...(live?.liveWindowsDone ? { liveWindowsDone: live.liveWindowsDone } : {}),
       });
       // The recorder's own notice reports this outcome (queued / kept /
       // step-aware failure) on BOTH render sites, collapsed included — the
@@ -3298,6 +3321,13 @@ export function FloatingChat({
   );
 
   const messages = session.state.messages as MessageWithViews[];
+  // Doc-dock per-turn re-address: a mid-thread switch keeps the transcript,
+  // so name who the NEXT reply comes from (doc.md → "Next-reply hint").
+  // Hidden while streaming: queued input rides the running turn's voice.
+  const nextReplyVoiceId =
+    isDocOrigin && !isStreaming
+      ? nextReplyVoiceHint(messages, selectedAssistantId)
+      : null;
   const showEmpty = messages.length === 0 && !isStreaming;
   // A browser tool anywhere in this session's activity (live timeline or a
   // restored receipt) arms the live-browser chip's task probe.
@@ -3542,6 +3572,28 @@ export function FloatingChat({
           ref={scrollRef}
           className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5"
         >
+          {recorder.interactionChatSessionId && recorder.interactionChatSessionId === session.state.sessionId && recorder.interactionStatus !== "idle" && (
+            <div className="space-y-2 rounded-lg bg-muted/40 p-3">
+              <p role={recorder.interactionStatus === "gap" ? "alert" : "status"} className="text-sm">
+                {recorder.interactionStatus === "unavailable" ? interactionT.personalOnly : recorder.interactionStatus === "gap" ? interactionT.error : interactionT.listening}
+              </p>
+              {recorder.interactionCaptureId && <LiveInteractionQuestionControls key={recorder.interactionCaptureId} captureId={recorder.interactionCaptureId} />}
+              <button type="button" className="min-h-8 max-sm:min-h-11 text-sm underline" onClick={() => recorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
+            </div>
+          )}
+          <LiveInteractionJobs
+            workspaceId={workspaceId}
+            sessionId={session.state.sessionId}
+            messageIds={new Set(messages.map((message) => message.id))}
+            onCanonical={(sid, rows, ids) => {
+              if (sessionIdRef.current !== sid) return;
+              // Refresh ONLY canonical voice-job rows. Never reload or replace
+              // the typed turn, optimistic user message, or streaming buffer.
+              for (const message of canonicalInteractionAdditions(session.state.messages, mapSessionRows(rows, t.toolNarration, false), ids)) {
+                session.dispatch({ type: "message/append", message });
+              }
+            }}
+          />
           {showEmpty ? (
             <div className="flex h-full items-center justify-center px-6">
               <div className="text-center space-y-1.5">
@@ -3720,7 +3772,7 @@ export function FloatingChat({
           ) : null}
 
           {error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {error}
             </div>
           ) : null}
@@ -3748,7 +3800,7 @@ export function FloatingChat({
           {/* Soft double-text guard — warns when another member already has the
               assistant working on this page (presence over Yjs awareness). */}
           {othersRun ? (
-            <div className="mb-2 flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground">
+            <div className="mb-2 flex items-center gap-2 rounded-md bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground">
               <span
                 aria-hidden
                 className="claw-blink size-1.5 shrink-0 rounded-full bg-primary"
@@ -3757,6 +3809,22 @@ export function FloatingChat({
                 {othersRun.actor?.name
                   ? format(tRun.guard, { name: othersRun.actor.name })
                   : tRun.guardAnon}
+              </span>
+            </div>
+          ) : null}
+          {nextReplyVoiceId && activeAssistant ? (
+            <div
+              className="mb-2 flex items-center gap-1.5 text-[11px] text-muted-foreground"
+              aria-live="polite"
+            >
+              <AssistantAvatar
+                id={activeAssistant.id}
+                name={activeAssistant.name}
+                iconSeed={activeAssistant.iconSeed ?? undefined}
+                size="xs"
+              />
+              <span className="min-w-0 truncate">
+                {format(t.nextReplyFrom, { name: activeAssistant.name })}
               </span>
             </div>
           ) : null}
@@ -3993,8 +4061,8 @@ export function FloatingChat({
 
       {/* Live-recording chrome (collapsed mode) — the recovery banner, the
           first-use/error notice, and the active recorder strip stack ABOVE
-          the launcher row; while a capture runs the strip IS the pill (the
-          launcher hides below). See docs/architecture/media/live-capture.md. */}
+          the launcher row. Keep chat reachable while capturing and saving;
+          opening it reuses the same recorder and originating chat session. */}
       {!isSidePanel && !expanded ? (
         <>
           <DockRecorderRecovery rec={recorder} />
@@ -4006,15 +4074,12 @@ export function FloatingChat({
           small avatar (its creature icon) beside a short text nudge; fades +
           scales out when the panel expands. While a turn runs it tints to
           primary and the nudge mirrors the live tool / stream label. Falls back
-          to a chat glyph until the identity resolves. Hidden while a LATCHED
-          recording's strip owns the pill (the record button itself stays
-          mounted through arming/holding — it anchors the live press gesture);
-          the record-dot button rides beside it otherwise. */}
-      {!isSidePanel &&
-        !(
-          (recorder.phase.kind === "latched" || recorder.phase.kind === "finishing") &&
-          !expanded
-        ) && (
+          to a chat glyph until the identity resolves. Recording never hides
+          the chat launcher: users can open the originating conversation to
+          type or read answers without stopping capture or navigating away.
+          The record button stays mounted through arming/holding so its live
+          press gesture keeps its anchor. */}
+      {!isSidePanel && (
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -4133,6 +4198,7 @@ function coercePayload(data: unknown): Record<string, unknown> {
 function mapSessionRows(
   rows: Awaited<ReturnType<typeof fetchSessionMessages>>,
   narration: NarrationDict,
+  coalesce = true,
 ): MessageWithViews[] {
   // Each call's outcome lives on the tool_result carrier row the transcript
   // never renders — index them once so a failed call restores as `retried`.
@@ -4182,7 +4248,7 @@ function mapSessionRows(
     );
   // One assistant row per query-loop round in storage; one reply per run on
   // screen (the Chat app's fold, so a multi-step run keeps one receipt).
-  return coalesceAssistantRunMessages(mapped);
+  return coalesce ? coalesceAssistantRunMessages(mapped) : mapped;
 }
 
 /**

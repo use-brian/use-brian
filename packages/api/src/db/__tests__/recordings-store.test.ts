@@ -5,6 +5,13 @@ vi.mock('../client.js', () => ({
   queryWithRLS: vi.fn(),
 }))
 
+const intake = vi.hoisted(() => ({ query: vi.fn(), admit: vi.fn() }))
+vi.mock('../recording-intake-admission.js', () => ({
+  recordingIntakeTransaction: vi.fn(async (_authority, work) => work({ query: intake.query })),
+  admitRecordingIntakeParent: intake.admit,
+}))
+vi.mock('../../workspace-access/admission-policy-read.js', () => ({ readAdmissionPolicy: vi.fn(async () => null) }))
+
 import {
   createRecording,
   getRecording,
@@ -58,22 +65,25 @@ beforeEach(() => {
 })
 
 describe('[COMP:recordings/recordings-store] create', () => {
-  it('writes on the owner pool and is idempotent on the anchor id', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [ROW] } as never)
-    await createRecording({
-      id: 'rec-1',
-      workspaceId: 'ws-1',
-      mime: 'audio/mp4',
-      gcsKey: 'ws-1/recordings/f1',
-      assistantId: 'a-1',
-      createdByUserId: 'u-1',
-    })
-    const [sql, values] = mockQuery.mock.calls[0]!
-    // Idempotent: a retried upload-url for the same Episode must not 23505.
-    expect(sql).toMatch(/ON CONFLICT \(id\) DO UPDATE/)
-    expect(values![0]).toBe('rec-1')
-    // The route did the membership check; the worker has no user context.
-    expect(mockRls).not.toHaveBeenCalled()
+  it('rejects missing per-call provenance without an owner-pool escape', async () => {
+    await expect(createRecording({ id: 'rec-1', workspaceId: 'ws-1', mime: 'audio/mp4', gcsKey: 'key', assistantId: 'a-1', createdByUserId: 'u-1' })).rejects.toThrow('recording_intake_provenance_required')
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it.each(['memo', 'meeting', undefined] as const)('publishes kind %s in the admitted transaction', async kind => {
+    const parent = { workspaceId: 'ws-1', resourceKind: 'workspace_file' as const, resourceId: 'f-1', version: '1',
+      userId: null, assistantId: 'a-1', sensitivity: 'internal' as const, compartments: [], projectIds: [],
+      mime: 'audio/mp4', storageUri: 'gs://bucket/key', name: 'clip.mp4', sizeBytes: 10 }
+    const provenance = { actorUserId: 'u-1', parent }
+    intake.admit.mockResolvedValue(parent)
+    intake.query.mockResolvedValue({ rows: [{ ...ROW, kind: kind ?? 'memo' }] })
+    const recording = await createRecording({ id: 'rec-1', workspaceId: 'ws-1', mime: parent.mime,
+      gcsKey: '', assistantId: 'a-1', createdByUserId: 'u-1', kind }, provenance)
+    expect(intake.admit).toHaveBeenCalledWith(expect.anything(), provenance, 'ws-1', parent)
+    expect(intake.query).toHaveBeenCalledWith(expect.stringContaining('publish_file_recording($1::jsonb,$2::uuid,$3::text)'),
+      [JSON.stringify(parent), 'rec-1', kind ?? null])
+    expect(recording.kind).toBe(kind ?? 'memo')
+    expect(mockQuery).not.toHaveBeenCalled()
   })
 
   it('BIGINT columns come back from pg as strings and are normalized to numbers', async () => {

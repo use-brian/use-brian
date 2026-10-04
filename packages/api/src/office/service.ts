@@ -8,6 +8,7 @@ import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { isDurableOfficeArtifact, type OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { ResolvedOfficeAccess } from './access.js'
+import { createHumanOfficeGeneration, type OfficeHumanGenerationOptions, type OfficeGenerationRequest } from '../db/office-generation-admission.js'
 
 export type OfficeServiceDeps = {
   generationAvailable(family?: 'document' | 'presentation' | 'spreadsheet'): boolean
@@ -112,8 +113,18 @@ function targetOutline(snapshot: OfficeArtifactSnapshot, offset = 0): Pick<Offic
   return { ...(snapshot.family === 'pdf' ? { sourceHash: snapshot.source.sha256 } : {}), targets, targetsTruncated: nextTargetOffset !== undefined, nextTargetOffset }
 }
 
-export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
+export type OfficeService = OfficeToolPort & {
+  createAuthenticated?(input: OfficeGenerationRequest, proof: OfficeHumanGenerationOptions): Promise<{artifactId:string;jobId:string} | null>
+}
+
+export function createOfficeService(deps: OfficeServiceDeps): OfficeService {
   return {
+    async createAuthenticated(input, proof) {
+      if (!deps.generationAvailable(input.family)) throw new OfficeGenerationUnavailableError()
+      const created = await createHumanOfficeGeneration(input, proof)
+      if (created) deps.wakeGeneration?.(input.userId)
+      return created
+    },
     async create(params) {
       if (!deps.generationAvailable(params.family)) throw new OfficeGenerationUnavailableError()
       const artifact = await deps.createShell({ userId: params.userId, workspaceId: params.workspaceId, family: params.family, title: titleFromOutcome(params.outcome, params.family), templateVersionId: params.templateId ?? null, capabilityVersion: 1, sensitivity: params.sensitivity, requiredCompartments: params.compartments, projectIds: params.projectIds })

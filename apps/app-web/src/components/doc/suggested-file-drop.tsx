@@ -2,14 +2,19 @@
 
 /**
  * Shared "Add files to your brain" intake for Home, Brain, and the workspace
- * fallback dialog. Drag files onto it (or pick them), then "Add to brain" runs
- * deterministic ingest.
- * Ordinary files use Pipeline B; audio/video uses the recording pipeline so
- * the required cost + blueprint confirmation happens before transcription; a
- * single LinkedIn ZIP uses the dedicated lossless queue. Per-file status
- * renders inline.
+ * fallback dialog. Drag files onto it (or pick them), then "Add to brain"
+ * hands the batch to the workspace intake queue and the review empties: the
+ * modal is for choosing, never for waiting. Progress lives in the bottom-bar
+ * intake tray (`[COMP:app-web/brain-intake-tray]`), so the user keeps
+ * navigating while a large recording uploads.
+ * Ordinary files use Pipeline B; audio/video uses the recording pipeline and
+ * stops at Ready to review, where the required cost + blueprint confirmation
+ * opens on click; a single LinkedIn ZIP uses the dedicated lossless queue.
+ * Only drop-time validation failures (size cap, batch cap, ZIP mixed with
+ * other files) stay here as error chips: they are decided before anything is
+ * sent.
  *
- * Reuses `useFileDrop` for drag state; the ingest SDK is `lib/api/ingest.ts`.
+ * Reuses `useFileDrop` for drag state; the queue is `lib/brain-intake/`.
  * It lives under the Home build bar and in the workspace intake dialog.
  *
  * Spec: docs/architecture/features/files.md -> "Direct ingest".
@@ -17,64 +22,43 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, Check, FileUp, Loader2, X } from "lucide-react";
+import { AlertCircle, FileUp, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { cn } from "@/lib/utils";
 import { useFileDrop } from "@/lib/use-file-drop";
 import {
-  MAX_INGEST_FILE_BYTES,
+  LARGE_FILE_CONFIRM_BYTES,
+  MAX_STORED_FILE_BYTES,
   formatFileSize,
-  getIngestJobStatus,
-  ingestFiles,
-  ingestLinkedInArchive,
   partitionByIngestSize,
-  totalAdded,
-  type IngestFileResult,
 } from "@/lib/api/ingest";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { isRecordingFile } from "@/lib/api/recordings";
-import {
-  useRecordingUpload,
-  type RecordingUploadStatus,
-} from "@/lib/recordings/use-recording-upload";
+import { enqueueIntake, type IntakeKind } from "@/lib/brain-intake/intake-queue";
 
 /** Match the server's per-request cap (MAX_INGEST_FILES in routes/files.ts). */
 const MAX_FILES = 5;
 
 /**
- * `analyzing` = the bytes are filed and the brain ingest is on the worker queue.
- * The upload request returns as soon as the file is stored (it must: knowledge
- * extraction on a large document runs for minutes, far past the CDN's
- * origin-response timeout), so the completion signal is a poll, not the reply.
+ * `pending` = staged, nothing sent. `error` = refused at drop or at Add, before
+ * any request (size cap, batch cap, ZIP mixed with other files, no assistant
+ * for media). Everything in flight lives in the intake queue, not here.
  */
-type ItemStatus = "pending" | "ingesting" | "analyzing" | "done" | "error";
-
-const POLL_INTERVAL_MS = 3_000;
-/** Give up watching (not the job — the job is durable) after this long. */
-const POLL_TIMEOUT_MS = 15 * 60_000;
-
-/**
- * What one upload result means for the chip. Exported because this is the
- * decision the 2026-08-05 incident got wrong in the other direction: a file
- * that had been fully ingested was labelled "Failed". The rule is that only the
- * server saying so makes a chip red.
- */
-export function statusForIngestResult(result: IngestFileResult | undefined): ItemStatus {
-  if (!result || !result.ok) return "error";
-  // Stored, but the brain ingest is still on the queue — not done yet, and
-  // emphatically not failed.
-  if (result.status === "queued" && result.jobId) return "analyzing";
-  return "done";
-}
+type ItemStatus = "pending" | "error";
 
 type StagedItem = {
   localId: string;
   file: File;
   status: ItemStatus;
-  result?: IngestFileResult;
-  recordingId?: string;
   error?: string;
 };
+
+function intakeKindFor(file: File): IntakeKind {
+  if (isRecordingFile(file)) return "media";
+  if (file.name.toLowerCase().endsWith(".zip")) return "linkedin";
+  return "file";
+}
 
 export type IngestFileBatch = {
   id: number;
@@ -87,38 +71,22 @@ export function SuggestedFileDrop({
   incomingBatch,
   offline = false,
   appearance = "card",
-  onBusyChange,
+  onQueued,
 }: {
   workspaceId: string;
   assistantId?: string | null;
   incomingBatch?: IngestFileBatch | null;
   offline?: boolean;
   appearance?: "card" | "dialog";
-  onBusyChange?: (busy: boolean) => void;
+  /** The batch left for the intake queue; a hosting dialog closes on this. */
+  onQueued?: () => void;
 }) {
   const copy = useT();
   const t = copy.docPage.suggested;
+  const pins = copy.chatApp.pins;
   const [items, setItems] = useState<StagedItem[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [activeMediaId, setActiveMediaId] = useState<string | null>(null);
   const incomingBatchId = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const recording = useRecordingUpload(workspaceId, assistantId ?? "");
-  const {
-    run: runRecording,
-    dismiss: dismissRecording,
-    status: recordingStatus,
-    uploadProgress: recordingProgress,
-  } = recording;
-  // Polls outlive no unmount: this block is torn down when its Home/Brain
-  // surface changes.
-  const unmounted = useRef(false);
-  useEffect(() => {
-    unmounted.current = false;
-    return () => {
-      unmounted.current = true;
-    };
-  }, []);
 
   const addFiles = useCallback(
     (fileList: FileList | File[]) => {
@@ -128,15 +96,18 @@ export function SuggestedFileDrop({
       // is dropped by the edge before any handler runs, so the request would
       // reject with a bare `TypeError: Failed to fetch` that names neither the
       // size nor the limit. Telling the user here also costs them nothing.
-      // Explicit Brain intake treats every audio/video file as a recording,
-      // including a short voice memo. Media goes direct to signed storage and
-      // therefore must not inherit the ordinary multipart 30 MiB ceiling.
+      // The ceiling is the durable chunked lane's 1 GiB: the intake queue
+      // routes anything past the 30 MiB multipart ceiling through signed
+      // 8 MiB parts and the stored-file ingest route, so a 60 MB deck is not
+      // refused here any more. Explicit Brain intake treats every audio/video
+      // file as a recording, including a short voice memo; media goes direct
+      // to signed storage and has no ordinary-file ceiling at all.
       const media = incoming.filter(isRecordingFile);
       const ordinary = incoming.filter((file) => !isRecordingFile(file));
-      const { accepted, tooLarge } = partitionByIngestSize(ordinary);
+      const { accepted, tooLarge } = partitionByIngestSize(ordinary, MAX_STORED_FILE_BYTES);
       const acceptedSet = new Set([...media, ...accepted]);
       const acceptedInOrder = incoming.filter((file) => acceptedSet.has(file));
-      const limit = formatFileSize(MAX_INGEST_FILE_BYTES);
+      const limit = formatFileSize(MAX_STORED_FILE_BYTES);
       setItems((prev) => {
         // Keep only unresolved (pending) items plus the new batch, capped.
         const pending = prev.filter((i) => i.status === "pending");
@@ -179,11 +150,7 @@ export function SuggestedFileDrop({
     addFiles(incomingBatch.files);
   }, [addFiles, incomingBatch]);
 
-  useEffect(() => {
-    onBusyChange?.(busy);
-  }, [busy, onBusyChange]);
-
-  const drop = useFileDrop(addFiles, { disabled: busy || offline });
+  const drop = useFileDrop(addFiles, { disabled: offline });
 
   const onPick = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) addFiles(e.target.files);
@@ -197,162 +164,77 @@ export function SuggestedFileDrop({
     setItems((prev) => prev.filter((i) => i.status === "pending"));
 
   const pendingCount = items.filter((i) => i.status === "pending").length;
-  const hasResolved = items.some((i) => i.status === "done" || i.status === "error");
+  const hasResolved = items.some((i) => i.status === "error");
 
   /**
-   * Watch one queued job to a terminal state. An unreadable poll is NOT a
-   * failure — the row is durable in `file_ingest_jobs` — so a null response
-   * keeps the chip on "analyzing" and tries again. Only the server saying
-   * `failed` turns the chip red.
+   * Validate, hand off, empty. The queue owns every request from here on; the
+   * only failures this surface can still report are the ones decided before
+   * anything is sent.
    */
-  const watchJob = useCallback(async (localId: string, jobId: string) => {
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-    while (!unmounted.current && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-      if (unmounted.current) return;
-      const state = await getIngestJobStatus(jobId);
-      if (!state) continue;
-      if (state.status === "done") {
-        setItems((prev) =>
-          prev.map((i) => (i.localId === localId ? { ...i, status: "done" } : i)),
-        );
-        return;
-      }
-      if (state.status === "failed") {
-        setItems((prev) =>
-          prev.map((i) =>
-            i.localId === localId ? { ...i, status: "error", error: state.error } : i,
-          ),
-        );
-        return;
-      }
-    }
-  }, []);
-
   const addToBrain = useCallback(async () => {
     const pending = items.filter((i) => i.status === "pending");
-    if (pending.length === 0 || busy || offline) return;
-    setBusy(true);
-    const pendingIds = new Set(pending.map((p) => p.localId));
-    setItems((prev) =>
-      prev.map((i) => (pendingIds.has(i.localId) ? { ...i, status: "ingesting" } : i)),
-    );
-    try {
-      const zipItems = pending.filter((item) => item.file.name.toLowerCase().endsWith(".zip"));
-      if (zipItems.length > 0 && pending.length !== 1) {
-        throw new Error(t.linkedinArchiveAlone);
-      }
-      const ordinary = pending.filter((item) => !isRecordingFile(item.file));
-      const media = pending.filter((item) => isRecordingFile(item.file));
-      const results = zipItems.length === 1
-        ? [await ingestLinkedInArchive(workspaceId, zipItems[0].file)]
-        : ordinary.length > 0
-          ? await ingestFiles(workspaceId, ordinary.map((p) => p.file))
-          : [];
-      // `results` is positional over `ordinary`; pair them out here rather than
-      // inside the updater, which React may run twice.
-      const queued = ordinary.flatMap((p, idx) => {
-        const r = results[idx];
-        return r?.ok && r.status === "queued" && r.jobId
-          ? [{ localId: p.localId, jobId: r.jobId }]
-          : [];
-      });
-      setItems((prev) => {
-        let idx = 0;
-        return prev.map((i) => {
-          if (!pendingIds.has(i.localId) || isRecordingFile(i.file)) return i;
-          const r = results[idx++];
-          const status = statusForIngestResult(r);
-          if (status === "error") {
-            return { ...i, status, error: r?.error ?? t.ingestFailed };
-          }
-          return { ...i, status, result: r };
-        });
-      });
-      for (const job of queued) void watchJob(job.localId, job.jobId);
-
-      // Recording uploads are sequential. Each file owns a separate cost +
-      // blueprint decision, so overlapping confirms would make the selection
-      // ambiguous.
-      for (const [mediaIndex, item] of media.entries()) {
-        if (!assistantId) {
-          setItems((prev) =>
-            prev.map((i) =>
-              i.localId === item.localId
-                ? { ...i, status: "error", error: t.ingestMediaNeedsAssistant }
-                : i,
-            ),
-          );
-          continue;
-        }
-        setActiveMediaId(item.localId);
-        const outcome = await runRecording(item.file);
-        if (outcome.outcome === "cancelled") {
-          // A cancel spends nothing and leaves the file ready to retry. Stop
-          // here rather than immediately opening the next recording dialog.
-          const notStarted = new Set(
-            media.slice(mediaIndex).map((remaining) => remaining.localId),
-          );
-          setItems((prev) =>
-            prev.map((i) =>
-              notStarted.has(i.localId) ? { ...i, status: "pending" } : i,
-            ),
-          );
-          break;
-        }
-        if (outcome.outcome === "failed") {
-          setItems((prev) =>
-            prev.map((i) =>
-              i.localId === item.localId
-                ? { ...i, status: "error", error: outcome.message }
-                : i,
-            ),
-          );
-          continue;
-        }
-        setItems((prev) =>
-          prev.map((i) =>
-            i.localId === item.localId
-              ? {
-                  ...i,
-                  status: "done",
-                  recordingId: outcome.recording.recordingId,
-                }
-              : i,
-          ),
-        );
-      }
-    } catch (err) {
-      // `fetch` rejects with a bare `TypeError` for anything that never reached
-      // a handler: offline, DNS, CORS, or a body the edge refused. Its message
-      // ("Failed to fetch", or "Load failed" on Safari) is not something to
-      // show a user, so name the class of failure instead.
-      const message =
-        err instanceof TypeError ? t.ingestUnreachable : (err as Error).message;
+    if (pending.length === 0 || offline) return;
+    const zipItems = pending.filter((item) => intakeKindFor(item.file) === "linkedin");
+    if (zipItems.length > 0 && pending.length !== 1) {
+      const zipIds = new Set(zipItems.map((z) => z.localId));
       setItems((prev) =>
         prev.map((i) =>
-          pendingIds.has(i.localId) && i.status === "ingesting"
-            ? { ...i, status: "error", error: message }
-            : i,
+          zipIds.has(i.localId) ? { ...i, status: "error", error: t.linkedinArchiveAlone } : i,
         ),
       );
-    } finally {
-      setActiveMediaId(null);
-      dismissRecording();
-      setBusy(false);
+      return;
     }
+    const needsAssistant = !assistantId
+      ? pending.filter((item) => intakeKindFor(item.file) === "media")
+      : [];
+    const refused = new Set(needsAssistant.map((m) => m.localId));
+    // A file above 100 MiB is a long transfer: the cheap `File.size` probe
+    // confirms it before anything is sent (the Work Bench's own sentence). A
+    // declined file stays staged; nothing about it is refused.
+    const declined = new Set<string>();
+    for (const item of pending) {
+      if (refused.has(item.localId) || item.file.size <= LARGE_FILE_CONFIRM_BYTES) continue;
+      const ok = await confirmDialog({
+        title: pins.largeFileTitle,
+        description: format(pins.largeFileDescription, {
+          fileName: item.file.name,
+          size: formatFileSize(item.file.size),
+        }),
+        confirmLabel: pins.largeFileConfirm,
+        cancelLabel: pins.largeFileCancel,
+      });
+      if (!ok) declined.add(item.localId);
+    }
+    const accepted = pending.filter(
+      (item) => !refused.has(item.localId) && !declined.has(item.localId),
+    );
+    setItems((prev) =>
+      prev
+        .filter((i) => !accepted.some((a) => a.localId === i.localId))
+        .map((i) =>
+          refused.has(i.localId)
+            ? { ...i, status: "error", error: t.ingestMediaNeedsAssistant }
+            : i,
+        ),
+    );
+    if (accepted.length === 0) return;
+    enqueueIntake({
+      workspaceId,
+      assistantId: assistantId ?? null,
+      files: accepted.map((a) => a.file),
+      kind: intakeKindFor,
+      t: copy,
+    });
+    if (refused.size === 0 && declined.size === 0) onQueued?.();
   }, [
     items,
-    busy,
     offline,
     workspaceId,
     assistantId,
-    runRecording,
-    dismissRecording,
-    watchJob,
-    t.ingestFailed,
+    copy,
+    pins,
+    onQueued,
     t.ingestMediaNeedsAssistant,
-    t.ingestUnreachable,
     t.linkedinArchiveAlone,
   ]);
 
@@ -376,7 +258,7 @@ export function SuggestedFileDrop({
         {appearance === "card" && <button
           type="button"
           onClick={() => inputRef.current?.click()}
-          disabled={busy || offline}
+          disabled={offline}
           className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-background px-2.5 py-1.5 text-[12.5px] font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-60 md:min-h-0"
         >
           {t.ingestCta}
@@ -385,7 +267,7 @@ export function SuggestedFileDrop({
           ref={inputRef}
           type="file"
           multiple
-          disabled={busy || offline}
+          disabled={offline}
           onChange={onPick}
           className="hidden"
           aria-hidden
@@ -397,10 +279,10 @@ export function SuggestedFileDrop({
           type="button"
           aria-label={t.ingestCta}
           onClick={() => inputRef.current?.click()}
-          disabled={busy || offline}
+          disabled={offline}
           className={cn(
             "mt-5 flex w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-muted/20 px-4 text-sm transition-colors hover:border-primary/50 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
-            items.length > 0 ? "min-h-11 py-3" : "min-h-40 py-6",
+            items.length > 0 ? "max-sm:min-h-11 py-3" : "min-h-40 py-6",
           )}
         >
           {items.length === 0 && <FileUp className="size-6 text-muted-foreground" aria-hidden />}
@@ -412,18 +294,18 @@ export function SuggestedFileDrop({
       {offline && (
         <p
           role="status"
-          className="mt-3 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-700/60 dark:bg-amber-950 dark:text-amber-100"
+          className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100"
         >
           {t.ingestOffline}
         </p>
       )}
 
       {items.length > 0 && (
-        <ul className="mt-3 flex flex-col gap-1.5">
+        <ul className="mt-3 flex flex-col divide-y divide-border/70">
           {items.map((i) => (
             <li
               key={i.localId}
-              className="flex items-center gap-2.5 rounded-lg border border-border/70 bg-background px-2.5 py-1.5"
+              className="flex items-center gap-2.5 py-1.5"
             >
               <StatusIcon status={i.status} />
               <div className="min-w-0 flex-1">
@@ -431,13 +313,11 @@ export function SuggestedFileDrop({
                   {i.file.name}
                 </div>
                 <div className="break-words text-[11.5px] text-muted-foreground" role="status">
-                  <StatusLabel
-                    item={i}
-                    t={t}
-                    recordings={copy.recordings}
-                    recordingStatus={activeMediaId === i.localId ? recordingStatus : undefined}
-                    recordingProgress={recordingProgress}
-                  />
+                  {i.status === "error" ? (
+                    <span className="text-rose-600 dark:text-rose-400">{i.error ?? t.ingestFailed}</span>
+                  ) : (
+                    t.ingestReady
+                  )}
                 </div>
               </div>
               {i.status === "pending" && (
@@ -457,7 +337,7 @@ export function SuggestedFileDrop({
 
       {(pendingCount > 0 || hasResolved) && (
         <div className="mt-3 flex items-center justify-end gap-2">
-          {hasResolved && !busy && (
+          {hasResolved && (
             <button
               type="button"
               onClick={clearResolved}
@@ -468,12 +348,11 @@ export function SuggestedFileDrop({
           )}
           <button
             type="button"
-            onClick={addToBrain}
-            disabled={pendingCount === 0 || busy || offline}
+            onClick={() => void addToBrain()}
+            disabled={pendingCount === 0 || offline}
             className="inline-flex min-h-11 items-center gap-1.5 rounded-lg bg-action px-3 py-1.5 text-[12.5px] font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground md:min-h-0"
           >
-            {busy && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
-            {busy ? t.ingestAdding : t.ingestAdd}
+            {t.ingestAdd}
           </button>
         </div>
       )}
@@ -488,69 +367,7 @@ export function SuggestedFileDrop({
 }
 
 function StatusIcon({ status }: { status: ItemStatus }) {
-  if (status === "ingesting" || status === "analyzing")
-    return <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" aria-hidden />;
-  if (status === "done")
-    return <Check className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />;
   if (status === "error")
     return <AlertCircle className="size-4 shrink-0 text-rose-600 dark:text-rose-400" aria-hidden />;
   return <FileUp className="size-4 shrink-0 text-muted-foreground/60" aria-hidden />;
-}
-
-function StatusLabel({
-  item,
-  t,
-  recordings,
-  recordingStatus,
-  recordingProgress,
-}: {
-  item: StagedItem;
-  t: ReturnType<typeof useT>["docPage"]["suggested"];
-  recordings: ReturnType<typeof useT>["recordings"];
-  recordingStatus?: RecordingUploadStatus;
-  recordingProgress: number;
-}) {
-  if (item.status === "pending") return <>{t.ingestReady}</>;
-  if (item.status === "ingesting") {
-    if (recordingStatus === "uploading") {
-      return (
-        <>
-          {recordings.uploadingProgress.replace(
-            "{percent}",
-            String(Math.round(recordingProgress * 100)),
-          )}
-        </>
-      );
-    }
-    if (recordingStatus === "estimating") return <>{recordings.estimating}</>;
-    if (recordingStatus === "processing") return <>{recordings.processing}</>;
-    return <>{t.ingestAdding}</>;
-  }
-  if (item.status === "analyzing") return <>{t.ingestAnalyzing}</>;
-  if (item.status === "error") return <span className="text-rose-600 dark:text-rose-400">{item.error ?? t.ingestFailed}</span>;
-  if (item.recordingId) {
-    return (
-      <span className="text-emerald-600 dark:text-emerald-400">
-        {recordings.detailStatusQueued}
-      </span>
-    );
-  }
-  if (item.result?.linkedinImport) {
-    const imported = item.result.linkedinImport;
-    return imported.status === "completed" ? (
-      <span className="text-emerald-600 dark:text-emerald-400">{`${imported.rows} ${t.linkedinRowsImported}`}</span>
-    ) : (
-      <span className="text-emerald-600 dark:text-emerald-400">{t.linkedinImportQueued}</span>
-    );
-  }
-  const n = totalAdded(item.result?.counts);
-  if (n > 0) {
-    return <span className="text-emerald-600 dark:text-emerald-400">{`${n} ${t.ingestAdded}`}</span>;
-  }
-  // A queued ingest carries no counts in its reply — the extraction happened on
-  // the worker, long after the upload answered.
-  if (item.result?.status === "queued") {
-    return <span className="text-emerald-600 dark:text-emerald-400">{t.ingestAddedToBrain}</span>;
-  }
-  return <span className="text-emerald-600 dark:text-emerald-400">{t.ingestStored}</span>;
 }

@@ -232,13 +232,20 @@ function missingTriggers(
   return names.filter((name) => !evidence.has(name))
 }
 
+export type ContextReadinessOptions = {
+  /** Count Workspace General rows. Informational only; the departmental
+   * verdict never reads them, so its callers skip the eleven table counts. */
+  legacyInventory?: boolean
+}
+
 export async function getContextReadinessSystem(
   workspaceId: string,
   queryFn: ReadinessQuery = query,
+  options: ContextReadinessOptions = {},
 ): Promise<ContextReadiness> {
   const [{ missingColumns, triggerNames, functionNames }, legacyGeneral] = await Promise.all([
     schemaEvidence(queryFn),
-    legacyInventory(workspaceId, queryFn),
+    options.legacyInventory === false ? Promise.resolve({}) : legacyInventory(workspaceId, queryFn),
   ])
   const sessionMissing = missingTriggers(
     triggerNames,
@@ -254,12 +261,18 @@ export async function getContextReadinessSystem(
     REQUIRED_TRIGGERS.write_inheritance,
   )
   const functionMissing=(id:keyof typeof REQUIRED_FUNCTIONS)=>missingTriggers(functionNames,REQUIRED_FUNCTIONS[id])
-  const coverage=missingColumns.length===0
-    ? await getScopeReviewCoverage({query:queryFn},workspaceId)
-    : {registryRevision:String(SCOPE_REVIEW_REGISTRY_REVISION),unresolved:'1',families:[]}
   const reviewedInventoryRevision=missingColumns.length===0
     ? (await queryFn<{revision:string|null}>('SELECT reviewed_inventory_revision::text AS revision FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0]?.revision??null
     : null
+  // scope_review passes only with zero unresolved rows AND an inventory
+  // acknowledged at the current registry revision. The coverage walk calls
+  // read_scope_review_source() once per scoped row under a row lock (tens of
+  // thousands of rows, 5-15s on a working brain), so it runs only when the
+  // acknowledgement holds and its count can still change the verdict.
+  const inventoryAcknowledged=reviewedInventoryRevision===String(SCOPE_REVIEW_REGISTRY_REVISION)
+  const coverage=missingColumns.length===0&&inventoryAcknowledged
+    ? await getScopeReviewCoverage({query:queryFn},workspaceId)
+    : {registryRevision:String(SCOPE_REVIEW_REGISTRY_REVISION),unresolved:'1',families:[]}
 
   const checks: ContextReadinessCheck[] = [
     check(
@@ -369,7 +382,8 @@ export async function getContextReadinessSystem(
         &&coverage.unresolved==='0'&&reviewedInventoryRevision===coverage.registryRevision
         ? 'Every frozen source, impact, binding, and active-job family has been reviewed or held.'
         : 'The complete scope inventory still has unresolved or unacknowledged rows.',
-      [...functionMissing('scope_review'),...coverage.families.filter(family=>family.unresolved!=='0').map(family=>family.family)],
+      [...functionMissing('scope_review'),...coverage.families.filter(family=>family.unresolved!=='0').map(family=>family.family),
+        ...(inventoryAcknowledged?[]:['reviewed_inventory_revision'])],
     ),
   ]
 

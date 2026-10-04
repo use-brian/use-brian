@@ -112,14 +112,16 @@ export type ResolvePrimaryAssistant = (workspaceId: string) => Promise<string | 
  * tools, scoped to a workspace + acting assistant. Constructed once at the
  * start of every workflow run; held immutable for that run's duration.
  */
+type WorkflowToolRegistry = Map<string, Tool> & { discoveryWarnings?: readonly string[] }
+
 export type BuildToolRegistry = (params: {
   workspaceId: string
   /** The acting assistant — typically the workspace's primary. */
   assistantId: string
   userId: string | null
-  /** Trusted execution scope. Undefined only for authoring-time tool lookup. */
+  /** Trusted execution scope, including authoring previews when available. */
   turnScope?: TurnScope
-}) => Promise<Map<string, Tool>>
+}) => Promise<WorkflowToolRegistry>
 
 /**
  * Optional audit hook. Fire-and-forget at the call site (the executor never
@@ -149,6 +151,8 @@ export type DeliveryOutcome =
        * step's `deliver.thread.fromStep` can reply under this message.
        */
       messageId?: string
+      /** Explicit generated-output publication consent used for this send. */
+      publicationApprovalId?: string
       /**
        * Thread-reply resolution for a `deliver.thread` step: `applied` — the
        * parent message id resolved and the push was a thread reply;
@@ -178,8 +182,17 @@ export type DeliveryOutcome =
         | 'access_denied'
         | 'customer_service_window_expired'
         | 'delivery_audience_unverified'
+      /** Coarse audience diagnosis only; never source names or policy identifiers. */
+      detail?: DeliveryAudienceDenialDetail
     }
   | { status: 'failed'; channelType: string; error: string }
+
+/** Safe, coarse audience diagnoses shared by the authorizer and delivery outcomes. */
+export type DeliveryAudienceDenialDetail =
+  /** No approval covers this conversation and the output was not public. */
+  | 'unbound'
+  /** An approval exists but the output needs more than it grants (e.g. personal context). */
+  | 'evidence_exceeds_audience'
 
 /**
  * Push an `assistant_call` step's text output to a user channel. Injected
@@ -200,6 +213,8 @@ export type DeliverToChannel = (params: {
   text: string
   /** Trusted run/turn high-water evidence checked against the current audience. */
   scopeEvidence?: import('../security/context-scope.js').ScopeEvidence
+  /** Only the engine's generated-output step sets this; never tool or question delivery. */
+  publication?: { runId: string; stepId: string }
   question?: import('../tools/base/ask-question.js').AssistantQuestion
   questionResponse?: { toolName: string; arguments: Record<string, unknown>; answerField: string }
   /**
@@ -812,7 +827,7 @@ export async function advanceWorkflowRun(
     scopeAccumulator.note(persistedScopeEvidence as import('../security/context-scope.js').ScopeEvidence)
   }
 
-  let toolRegistry: Map<string, Tool>
+  let toolRegistry: WorkflowToolRegistry
   try {
     toolRegistry = await deps.buildToolRegistry({
       workspaceId: run.workspaceId,
@@ -1378,7 +1393,7 @@ type DispatchContext = {
   primaryAssistantId: string
   /** Assistant whose grants/connector instances back deterministic tool_call. */
   toolAssistantId: string
-  toolRegistry: Map<string, Tool>
+  toolRegistry: WorkflowToolRegistry
   consultTransport: ConsultTransport
   externalClientPrincipal?: ResolvedExternalClientWorkflowPrincipal
   runtimeScope?: {
@@ -1779,6 +1794,7 @@ async function dispatchAssistantCall(
     // consult stamp source_id=<runId>, which is what the next run's
     // `{{lastRun.output.<key>}}` reads.
     workflowRunId: ctx.run.id,
+    workflowStepId: step.id,
     decisionContext: {
       operationId: `${ctx.run.id}:${step.id}`,
       externalPrincipal: ctx.externalClientPrincipal !== undefined,
@@ -1894,6 +1910,8 @@ async function dispatchAssistantCall(
                   : undefined),
               text: deliveredText,
               scopeEvidence: ctx.scopeAccumulator.evidence,
+              publication: !question && !ctx.externalClientPrincipal
+                ? { runId: ctx.run.id, stepId: step.id } : undefined,
               question,
               questionResponse: question && step.questionResponse ? {
                 ...step.questionResponse,
@@ -1929,7 +1947,7 @@ async function dispatchAssistantCall(
         // Audit + log only the non-`delivered` outcomes so a recurring
         // reminder that delivers fine every fire doesn't spam the audit log,
         // while a silent no-op / failure becomes a first-class signal.
-        if (delivery.status !== 'delivered') {
+        if (delivery.status !== 'delivered' || delivery.publicationApprovalId) {
           console.warn(`[workflow] step "${step.id}" delivery ${delivery.status}:`, delivery)
           fireAndForgetAudit(ctx.deps, {
             type: 'workflow.step_delivered',
@@ -1989,7 +2007,9 @@ async function dispatchToolCall(
     return {
       kind: 'failed',
       error: {
-        message: `tool_call references unknown / disallowed tool "${step.toolName}".`,
+        message: [`tool_call references unknown / disallowed tool "${step.toolName}".`,
+          ...(ctx.toolRegistry.discoveryWarnings ?? []).map((warning) => `Discovery: ${warning}`),
+        ].join(' '),
         reason: 'tool_not_found',
       },
     }

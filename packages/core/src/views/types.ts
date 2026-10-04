@@ -594,6 +594,14 @@ export type PageWriteActor = 'user' | 'system'
 
 // ── Store interface ───────────────────────────────────────────────────
 
+/** Internal-only evidence supplied by an authenticated, source-free human
+ * authoring adapter. Never deserialize from request/tool JSON, infer from the
+ * row creator, or attach to imports, copies, generated bodies or source pages.
+ * A parent proves placement, not content provenance. */
+export type SavedViewCreationOptions = {
+  provenance: { kind: 'human-authored'; actorId: string }
+}
+
 export type SavedViewStore = {
   create(params: {
     userId: string
@@ -603,7 +611,7 @@ export type SavedViewStore = {
     binding: BindingConfig
     /** See {@link PageWriteActor}. Defaults to `'user'`. */
     writtenBy?: PageWriteActor
-  }): Promise<SavedView>
+  }, options?: SavedViewCreationOptions): Promise<SavedView>
 
   /**
    * Returns the full record. RLS hides cross-workspace rows — the caller
@@ -657,7 +665,7 @@ export type SavedViewStore = {
    * Create a draft. Seeded with `page` (often a single data block from
    * the chat tool, or `emptyPage` from the route layer).
    */
-  createDraft(params: CreateDraftInput): Promise<SavedView>
+  createDraft(params: CreateDraftInput, options?: SavedViewCreationOptions): Promise<SavedView>
 
   /**
    * Fire the deferred `created` page-event for an interactively-created draft

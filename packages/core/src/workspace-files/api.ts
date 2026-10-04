@@ -7,6 +7,7 @@
  * with a fake FilesApi without pulling pg or @google-cloud/storage.
  */
 
+import type { DerivedWriteEvidence } from '../security/derived-scope.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type {
   FileSensitivity,
@@ -16,9 +17,19 @@ import type {
 } from './types.js'
 
 export type FilesContext = {
+  /** Per-call trusted source snapshots from the executing tool accumulator. Never a transport field. */
+  derivation?: DerivedWriteEvidence
   workspaceId: string
   userId: string
   assistantId?: string | null
+  /**
+   * A human caller writing into one assistant's partition (watch audio recorded
+   * for a chosen assistant). Reads see workspace-shared rows plus that
+   * assistant's; writes stamp the row's assistant scope while authorship stays
+   * human. Internal only, never a transport or model field. Ignored when
+   * `assistantId` is set.
+   */
+  scopeAssistantId?: string | null
   /**
    * Calling assistant's kind. Drives whether the universal access
    * predicate drops the assistant_id partition (primary widens to

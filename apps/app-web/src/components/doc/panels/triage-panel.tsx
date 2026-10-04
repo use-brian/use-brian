@@ -135,7 +135,7 @@ export function TriagePanel() {
               <BackButton
                 label={t.triagePage.backToList}
                 onClick={() => setDetailOpen(false)}
-                className="min-h-11"
+                className="min-h-8 max-sm:min-h-11"
               />
             </div>
             <TriageDetailPane

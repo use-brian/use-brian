@@ -86,6 +86,7 @@ import {
 } from '../fathom/client.js'
 import {
   createShopifyTokenManager,
+  isManagedShopifyTokens,
   unpackShopifyTokens, packShopifyTokens,
   getShop as getShopifyShop,
   listProducts as listShopifyProducts,
@@ -155,8 +156,10 @@ import {
   matchKnowledgeCaptureRules,
   type KnowledgeCaptureRuleStore,
 } from '../knowledge/capture-rules.js'
+import { CONNECTOR_SCOPE_RESTRICTION } from './discovery-diagnostics.js'
 import {
   connectorExposureAllowed,
+  type ConnectorContextBinding,
   type ConnectorTurnGrant,
 } from '../context-scope/connector-exposure.js'
 
@@ -578,6 +581,22 @@ export async function injectMcpTools(params: {
   } = params
 
   const unavailable: string[] = []
+  // Discovery visits the same bindings in multiple lanes. Report once per
+  // injection, without exposing connector identity, scope values, or counts.
+  let scopeRejectionReported = false
+  const exposureAllowed = (binding: ConnectorContextBinding): boolean => {
+    const allowed = connectorExposureAllowed(contextScope, binding)
+    if (!allowed && !scopeRejectionReported) {
+      scopeRejectionReported = true
+      unavailable.push(CONNECTOR_SCOPE_RESTRICTION)
+      console.info('[mcp-inject] connector discovery scope restriction', {
+        assistantId,
+        workspaceId: assistantTeamId ?? null,
+        reason: 'connector_exposure_outside_execution_scope',
+      })
+    }
+    return allowed
+  }
   let searchableSources: string[] = []
   let knowledgeCapturePrompt: string | undefined
 
@@ -678,7 +697,7 @@ export async function injectMcpTools(params: {
   if (assistantTeamId && connectorInstanceStore) {
     try {
       const teamInstances = (await connectorInstanceStore.listByWorkspaceSystem(assistantTeamId))
-        .filter((instance) => connectorExposureAllowed(contextScope, instance))
+        .filter((instance) => exposureAllowed(instance))
       for (const inst of teamInstances) {
         if (!inst.custom || !inst.connected || !inst.url) continue
         connectedCustom.push({
@@ -948,9 +967,9 @@ export async function injectMcpTools(params: {
           : Promise.resolve([]),
       ])
       const teamNative = allTeamNative.filter((instance) =>
-        connectorExposureAllowed(contextScope, instance))
+        exposureAllowed(instance))
       const grants = allGrants.filter((grant) =>
-        connectorExposureAllowed(contextScope, grant))
+        exposureAllowed(grant))
       const seen = new Set(cliInstances.map((inst) => inst.id))
       for (const inst of teamNative) {
         if (inst.provider !== 'cli' || !inst.connected || seen.has(inst.id)) continue
@@ -1093,7 +1112,7 @@ export async function injectMcpTools(params: {
   await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
-  await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
+  await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile, connectorInstanceStore)
   await injectWordPressTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('wordpress'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
   await injectSearchConsoleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('gsc'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   // No extras argument: `msgraph` is `single_instance` in OFFICIAL_CONNECTORS
@@ -1138,7 +1157,7 @@ export async function injectMcpTools(params: {
   if (assistantTeamId && connectorGrantStore) {
     try {
       const grants = (await connectorGrantStore.listForTargetSystem('workspace', assistantTeamId))
-        .filter((grant) => connectorExposureAllowed(contextScope, grant))
+        .filter((grant) => exposureAllowed(grant))
         .sort((a, b) => (a.instance.createdAt?.getTime() ?? 0) - (b.instance.createdAt?.getTime() ?? 0)
           || String(a.instance.id).localeCompare(String(b.instance.id)))
       const overlaidByGrant = new Set<string>()
@@ -1297,7 +1316,7 @@ export async function injectMcpTools(params: {
             extraInstances, resolveGrantedInstanceCreds, persistGrantedInstanceCreds,
             { report: reportHealth, instanceId: g.instance.id },
             assistantConnectorGrantsStore,
-            filesApi,
+            filesApi, undefined, connectorInstanceStore,
           )
         } else if (p === 'wordpress') {
           await injectWordPressTools(
@@ -1377,7 +1396,7 @@ export async function injectMcpTools(params: {
   if (assistantTeamId && connectorInstanceStore) {
     try {
       const teamNative = (await connectorInstanceStore.listByWorkspaceSystem(assistantTeamId))
-        .filter((instance) => connectorExposureAllowed(contextScope, instance))
+        .filter((instance) => exposureAllowed(instance))
         .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0)
           || String(a.id).localeCompare(String(b.id)))
       const overlaidByTeam = new Set<string>()
@@ -1589,7 +1608,7 @@ export async function injectMcpTools(params: {
             extraInstances, resolveTeamInstanceCreds, persistTeamInstanceCreds,
             { report: reportHealth, instanceId: inst.id },
             assistantConnectorGrantsStore,
-            filesApi,
+            filesApi, undefined, connectorInstanceStore,
           )
         } else if (p === 'wordpress') {
           await injectWordPressTools(
@@ -3875,6 +3894,7 @@ async function injectShopifyTools(
   filesApi?: FilesApi,
   /** Upload-cache reader, so a just-attached photo can be promoted on the fly. */
   readCachedFile?: (id: string, ctx: AccessContext) => Promise<CachedFile | null>,
+  rotationStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore,
 ): Promise<void> {
   const shopify = connectors.find((c) => c.connectorId === 'shopify' && c.connected)
   const shopifyEnabled = shopify && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'shopify'))
@@ -3903,13 +3923,27 @@ async function injectShopifyTools(
     })
   }
 
-  // App credentials (SHOPIFY_CLIENT_ID/SECRET) are only needed to refresh an
-  // expiring OAuth token — resolved lazily inside the manager so pasted
-  // static tokens work with zero app registration.
+  // A real store owns ALL refresh decisions. Never hand its result to the
+  // legacy manager: verification/publication may have consumed the leeway.
   function makeTokenManager(
     load: () => Promise<string | null>,
     persist: (encoded: string) => Promise<void>,
+    instanceId?: string | null,
   ) {
+    if (rotationStore?.refreshShopifyCredentialsSystem) {
+      return {
+        async getAuth() {
+          if (!instanceId) throw new Error('connector_rotation_instance_required')
+          const credentials = await rotationStore.refreshShopifyCredentialsSystem!(instanceId)
+          const tokens = credentials?.type === 'oauth' ? unpackShopifyTokens(credentials.client_secret) : null
+          if (!tokens) throw new Error('connector_rotation_reconnect_required')
+          if (isManagedShopifyTokens(tokens) && !(Date.parse(tokens.expiresAt!) - Date.now() > 60000)) {
+            throw new Error('connector_rotation_reconnect_required')
+          }
+          return { accessToken: tokens.accessToken, shopDomain: tokens.shopDomain }
+        },
+      }
+    }
     return createShopifyTokenManager({
       getAppConfig: () => getConnectorConfig('shopify'),
       store: {
@@ -4025,7 +4059,7 @@ async function injectShopifyTools(
   const primaryInstanceId = healthProbe?.instanceId ?? (shopify as { id?: string }).id ?? null
   try {
     if (shopifyEnabled) {
-      const built = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded))
+      const built = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded, primaryInstanceId))
       const shopifyTools = healthProbe && primaryInstanceId
         ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
         : built
@@ -4047,7 +4081,7 @@ async function injectShopifyTools(
         buildToolsForInstance: (inst, governanceId) => {
           const variant = buildTools(makeTokenManager(
             () => resolveInstanceCreds(inst.id),
-            (encoded) => persistInstanceCreds(inst.id, 'shopify_oauth', encoded),
+            (encoded) => persistInstanceCreds(inst.id, 'shopify_oauth', encoded), inst.id,
           ), governanceId)
           return healthProbe ? wrapToolsWithHealthProbe(variant, inst.id, healthProbe.report) : variant
         },

@@ -5,9 +5,23 @@ const db = vi.hoisted(() => ({
   queryWithRLS: vi.fn(),
 }))
 
+// Configuration writes run in an admitted transaction (captureWrite). Its
+// control and admission statements answer as a legacy workspace; every other
+// statement is recorded on queryWithRLS so the SQL-shape assertions see it.
+const txClient = vi.hoisted(() => ({
+  query: async (sql: string, params?: unknown[]) => {
+    if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql) || sql.includes('FOR UPDATE') || sql.includes('set_config(')) return { rows: [] }
+    if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: null }] }
+    if (sql.includes('FROM workspace_access_policies')) return { rows: [] }
+    return db.queryWithRLS('tx', sql, params)
+  },
+  release: () => {},
+}))
 vi.mock('../client.js', () => ({
   query: db.query,
   queryWithRLS: db.queryWithRLS,
+  getAppPool: () => ({ connect: async () => txClient }),
+  applyRLSGucs: async () => {},
 }))
 
 import { createProgrammaticCaptureStore } from '../programmatic-capture-store.js'

@@ -1,6 +1,10 @@
 /**
- * One-shot handoff from the Home briefing composer into a fresh Personal
- * conversation in the Chat operator app.
+ * One-shot handoff from a launcher composer into a fresh Personal
+ * conversation in the Chat operator app. Two launchers use it: the Home
+ * briefing composer and the Pages landing ("What do you want to see?"),
+ * which answers in Chat rather than building into a page. The landing also
+ * carries its research toggle and staged attachments; the model tier needs
+ * no field because every chat surface shares one persisted tier key.
  *
  * The prompt must not ride in the URL: it can be long, private, and should not
  * remain in browser history. sessionStorage keeps the payload inside this tab
@@ -12,12 +16,29 @@
  * [COMP:app-web/chat-handoff]
  */
 
+export const CHAT_HANDOFF_EVENT = "sidan:chat-handoff";
+
 export type PendingChatHandoff = {
+  requestId?: string;
+  contextProjectId?: string;
+  draftOnly?: boolean;
   workspaceId: string;
   assistantId: string;
+  /** May be empty when the turn carries attachments. */
   text: string;
+  /** Run the first turn in research mode (the landing's toggle). */
+  researchMode?: boolean;
+  /** Ready attachment ids staged on the launcher, in chip order. */
+  fileIds?: string[];
+  /** Recording ids staged without processing on the launcher. */
+  attachedRecordingIds?: string[];
   ts: number;
 };
+
+function stringIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((id): id is string => typeof id === "string" && !!id);
+}
 
 export const CHAT_HANDOFF_TTL_MS = 3 * 60 * 1000;
 
@@ -53,15 +74,26 @@ export function parsePendingChatHandoff(
     typeof value.assistantId !== "string" ||
     !value.assistantId ||
     typeof value.text !== "string" ||
-    !value.text.trim() ||
     typeof value.ts !== "number"
   ) {
     return null;
   }
+  const fileIds = stringIds(value.fileIds);
+  const attachedRecordingIds = stringIds(value.attachedRecordingIds);
+  const text = value.text.trim();
+  if (!text && fileIds.length === 0 && attachedRecordingIds.length === 0) {
+    return null;
+  }
   return {
+    ...(typeof value.requestId === "string" && value.requestId ? { requestId: value.requestId } : {}),
+    ...(typeof value.contextProjectId === "string" && value.contextProjectId ? {contextProjectId: value.contextProjectId} : {}),
+    ...(value.draftOnly === true ? {draftOnly: true} : {}),
     workspaceId: value.workspaceId,
     assistantId: value.assistantId,
-    text: value.text.trim(),
+    text,
+    ...(value.researchMode === true ? { researchMode: true } : {}),
+    ...(fileIds.length > 0 ? { fileIds } : {}),
+    ...(attachedRecordingIds.length > 0 ? { attachedRecordingIds } : {}),
     ts: value.ts,
   };
 }
@@ -76,9 +108,9 @@ export function isPendingChatHandoffFresh(
   return age >= 0 && age < CHAT_HANDOFF_TTL_MS;
 }
 
-export function stashChatHandoff(handoff: PendingChatHandoff): void {
-  const normalized = parsePendingChatHandoff(JSON.stringify(handoff));
-  if (!normalized) return;
+export function stashChatHandoff(handoff: PendingChatHandoff): string | null {
+  const normalized = parsePendingChatHandoff(JSON.stringify({ ...handoff, requestId: handoff.requestId ?? crypto.randomUUID() }));
+  if (!normalized) return null;
   inMemory.set(normalized.workspaceId, normalized);
   try {
     store()?.setItem(
@@ -88,6 +120,10 @@ export function stashChatHandoff(handoff: PendingChatHandoff): void {
   } catch {
     // The in-memory copy still covers same-SPA navigation.
   }
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(CHAT_HANDOFF_EVENT, {
+    detail: { workspaceId: normalized.workspaceId, requestId: normalized.requestId },
+  }));
+  return normalized.requestId!;
 }
 
 /** Read and remove this workspace's payload. Every outcome is single-consume. */
@@ -121,8 +157,10 @@ export function takeChatHandoff(
 export function personalChatHandoffPath(
   workspaceId: string,
   assistantId: string,
+  requestId?: string,
 ): string {
   const params = new URLSearchParams({ v: "personal", assistant: assistantId });
+  if (requestId) params.set("handoff", requestId);
   return `/w/${encodeURIComponent(workspaceId)}/chat?${params.toString()}`;
 }
 

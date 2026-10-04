@@ -59,6 +59,7 @@ const knowledgeStore = {
   setSourceDisabled: vi.fn(),
   getSource: vi.fn(),
   createSource: vi.fn(),
+  captureSourceSync: vi.fn(async () => undefined),
   updateSourceWriteAccess: vi.fn(),
   updateSourceDefaultSensitivity: vi.fn(),
   countEntriesBySource: vi.fn(async () => []),
@@ -348,7 +349,7 @@ describe('[COMP:api/kb-write-capability] POST /sources — create-time write pro
   }
 
   /** URL-routed GitHub stub for the pre-connect validation + the probe. */
-  function stubGithub(opts: { probeStatus?: number; push?: boolean }) {
+  function stubGithub(opts: { probeStatus?: number; push?: boolean; outsideOnly?: boolean }) {
     const b64 = Buffer.from('---\ntitle: X\ndescription: d\n---\nBody').toString('base64')
     return vi.fn(async (input: string | URL) => {
       const url = String(input)
@@ -357,9 +358,9 @@ describe('[COMP:api/kb-write-capability] POST /sources — create-time write pro
       }
       if (url.includes('/git/trees/')) {
         return new Response(JSON.stringify({ tree: [
-          { path: 'docs/index.md', type: 'blob' },
-          { path: 'docs/products/vault.md', type: 'blob' },
-          { path: 'docs/products/fees.md', type: 'blob' },
+          { path: `${opts.outsideOnly ? 'docs-private' : 'docs'}/index.md`, type: 'blob' },
+          { path: `${opts.outsideOnly ? 'docs-private' : 'docs'}/products/vault.md`, type: 'blob' },
+          { path: `${opts.outsideOnly ? 'docs-private' : 'docs'}/products/fees.md`, type: 'blob' },
         ] }), { status: 200 })
       }
       if (url.includes('/contents/')) {
@@ -399,10 +400,23 @@ describe('[COMP:api/kb-write-capability] POST /sources — create-time write pro
       expect(res.status).toBe(201)
       expect(knowledgeStore.createSource).toHaveBeenCalled()
       // The just-created source is writable immediately, not after the first tick.
-      expect(knowledgeStore.updateSourceWriteAccess).toHaveBeenCalledWith('src-new', true)
+      expect(knowledgeStore.updateSourceWriteAccess).toHaveBeenCalledWith('src-new', true, undefined)
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+
+  it.each([false, true])('normalizes directory roots without admitting adjacent prefixes (outside=%s)', async outsideOnly => {
+    wireHappyPath()
+    vi.stubGlobal('fetch', stubGithub({ outsideOnly }))
+    try {
+      const res = await request(appWs('u-1'))
+        .post('/api/workspaces/ws-1/knowledge/sources')
+        .send({ repo: 'acme/kb', rootPath: './docs//', connectorInstanceId: 'own-gh' })
+      expect(res.status).toBe(outsideOnly ? 400 : 201)
+      if (outsideOnly) expect(knowledgeStore.createSource).not.toHaveBeenCalled()
+      else expect(knowledgeStore.createSource).toHaveBeenCalledWith(expect.objectContaining({ rootPath: 'docs' }), expect.anything())
+    } finally { vi.unstubAllGlobals() }
   })
 
   it('still creates the source when the probe fails (best-effort; the tick re-probes)', async () => {
@@ -456,7 +470,7 @@ describe('[COMP:api/knowledge-route] local filesystem sources', () => {
       expect(res.status).toBe(201)
       expect(knowledgeStore.createSource).toHaveBeenCalledWith(expect.objectContaining({
         workspaceId: 'ws-1', sourceType: 'local', repo: dir, branch: 'local', rootPath: '',
-      }))
+      }), { actorUserId: 'u1' })
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

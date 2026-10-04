@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowDown, ArrowUp, Pencil, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Pencil, SmilePlus, Trash2 } from "lucide-react";
 import { desktopBridge, type DesktopAccount } from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -118,7 +118,7 @@ export function DesktopAccounts(props: {
                 aria-current={account.active ? "true" : undefined}
                 aria-label={`${account.displayName || account.email || account.name} (${label}, ${account.appUrl})`}
                 onClick={() => void select(account)}
-                className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-muted"
+                className="flex min-h-8 max-sm:min-h-11 min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-muted"
               >
                 {account.icon ? <span aria-hidden className="flex size-6 shrink-0 items-center justify-center text-xl">{account.icon}</span> : <UserAvatar
                   size={24}
@@ -140,17 +140,17 @@ export function DesktopAccounts(props: {
                 <div className="flex shrink-0 items-center justify-end px-1">
                   <button type="button" disabled={pending !== null} aria-label={format(t.editAccount, { name: account.displayName || account.email || account.name || label })}
                     onClick={() => { setEditing(account.key); setDisplayName(account.displayName ?? ""); setIcon(account.icon ?? ""); setError(null); }}
-                    className="flex size-11 items-center justify-center rounded text-muted-foreground hover:bg-muted disabled:opacity-50">
+                    className="flex size-11 items-center justify-center rounded text-muted-foreground hover:bg-muted disabled:opacity-50 sm:size-7">
                     <Pencil aria-hidden className="size-3.5" />
                   </button>
                   <button type="button" disabled={pending !== null || index === 0} aria-label={format(t.moveAccountUp, { name: account.displayName || account.email || account.name || label })}
                     onClick={() => void customize(account, "up")}
-                    className="flex size-11 items-center justify-center rounded text-muted-foreground hover:bg-muted disabled:opacity-50">
+                    className="flex size-11 items-center justify-center rounded text-muted-foreground hover:bg-muted disabled:opacity-50 sm:size-7">
                     <ArrowUp aria-hidden className="size-3.5" />
                   </button>
                   <button type="button" disabled={pending !== null || index === accounts.length - 1} aria-label={format(t.moveAccountDown, { name: account.displayName || account.email || account.name || label })}
                     onClick={() => void customize(account, "down")}
-                    className="flex size-11 items-center justify-center rounded text-muted-foreground hover:bg-muted disabled:opacity-50">
+                    className="flex size-11 items-center justify-center rounded text-muted-foreground hover:bg-muted disabled:opacity-50 sm:size-7">
                     <ArrowDown aria-hidden className="size-3.5" />
                   </button>
                 </div>
@@ -172,25 +172,24 @@ export function DesktopAccounts(props: {
               ) : null}
             </div>
             {customizing && editing === account.key && (
-              <form onSubmit={(event) => { event.preventDefault(); void customize(account); }} className="space-y-2 rounded border border-border p-2">
-                <p className="text-xs text-muted-foreground">{t.customizeHint}</p>
-                <label className="block text-xs">
-                  {t.accountDisplayName}
-                  <input autoFocus value={displayName} maxLength={80} disabled={pending !== null}
-                    placeholder={account.email || account.name || label} onChange={(event) => setDisplayName(event.target.value)}
-                    className="mt-1 min-h-11 w-full rounded border border-border bg-background px-2 text-base" />
-                </label>
-                <div className="flex items-center gap-2">
+              <form onSubmit={(event) => { event.preventDefault(); void customize(account); }} className="mx-1 mb-1 space-y-2 rounded-lg border border-border bg-background p-2">
+                <label htmlFor={`account-name-${account.key}`} className="block text-xs font-medium text-muted-foreground">{t.accountDisplayName}</label>
+                <div className="flex items-center gap-1.5">
                   <EmojiPicker onPick={(value) => setIcon(value ?? "")} trigger={
-                    <button type="button" disabled={pending !== null} className="flex min-h-11 items-center gap-2 rounded border border-border px-3 text-sm">
-                      {icon && <span aria-hidden>{icon}</span>}{t.accountIcon}
-                    </button>
+                    <Button type="button" variant="outline" size="icon" disabled={pending !== null}
+                      aria-label={t.accountIcon} title={t.accountIcon} className="max-sm:size-11">
+                      {icon ? <span aria-hidden className="text-base leading-none">{icon}</span> : <SmilePlus aria-hidden className="text-muted-foreground" />}
+                    </Button>
                   } />
-                  {icon && <button type="button" disabled={pending !== null} onClick={() => setIcon("")} className="min-h-11 rounded px-2 text-sm hover:bg-muted">{t.resetAccountIcon}</button>}
+                  <input id={`account-name-${account.key}`} autoFocus value={displayName} maxLength={80} disabled={pending !== null}
+                    placeholder={account.email || account.name || label} onChange={(event) => setDisplayName(event.target.value)}
+                    className="h-8 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-[16px] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 max-sm:min-h-11 md:text-xs" />
                 </div>
-                <div className="flex justify-end gap-2">
-                  <button type="button" disabled={pending !== null} onClick={() => setEditing(null)} className="min-h-11 rounded px-3 text-sm hover:bg-muted">{t.addAccountDialog.cancel}</button>
-                  <Button type="submit" disabled={pending !== null} className="min-h-11">{t.saveAccount}</Button>
+                <p className="text-[11px] leading-snug text-muted-foreground">{t.customizeHint}</p>
+                <div className="flex items-center justify-end gap-1">
+                  {icon && <Button type="button" variant="ghost" size="sm" disabled={pending !== null} onClick={() => setIcon("")} className="mr-auto text-muted-foreground">{t.resetAccountIcon}</Button>}
+                  <Button type="button" variant="ghost" size="sm" disabled={pending !== null} onClick={() => setEditing(null)}>{t.addAccountDialog.cancel}</Button>
+                  <Button type="submit" size="sm" disabled={pending !== null}>{t.saveAccount}</Button>
                 </div>
               </form>
             )}
@@ -199,14 +198,14 @@ export function DesktopAccounts(props: {
       })}
       {!props.allowedKeys && !accounts.some((account) => account.deployment === "cloud") && canSwitch && (
         <button type="button" role="menuitem" disabled={pending !== null} onClick={() => void select()}
-          className="min-h-11 rounded px-2 py-1.5 text-left text-sm hover:bg-muted">
+          className="min-h-8 max-sm:min-h-11 rounded px-2 py-1.5 text-left text-sm hover:bg-muted">
           {t.openCloudAccount}
         </button>
       )}
       {canCustomize && accounts.length > 0 && (
         <button type="button" disabled={pending !== null} aria-pressed={customizing}
           onClick={() => { setCustomizing(!customizing); setEditing(null); setError(null); }}
-          className="min-h-11 rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted">
+          className="min-h-8 max-sm:min-h-11 rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted">
           {customizing ? t.customizeDone : t.customizeAccounts}
         </button>
       )}

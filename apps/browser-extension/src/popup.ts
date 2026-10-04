@@ -118,6 +118,12 @@ async function refreshProtected(): Promise<void> {
   el('protected-session-recovery').hidden = s?.needsSessionRecovery !== true
   el('protected-recover-server').hidden = !!s?.locked
   el('protected-server-help').hidden = !!s?.locked
+  // The panel is collapsed by default; anything that needs the user opens it.
+  // Only ever opens: a user who expanded it to configure stays expanded.
+  const attention = !!s?.pending || !!s?.locked || s?.needsRenewal === true || s?.needsSessionRecovery === true || !!protectedError
+  const panel = el<HTMLDetailsElement>('protected-fill')
+  panel.classList.toggle('attention', attention)
+  if (attention) panel.open = true
 }
 for (const [id, allowed] of [['protected-approve',true],['protected-deny',false]] as const) {
   el(id).addEventListener('click', () => { void chrome.runtime.sendMessage({type:'protected-approval', allowed}).then(refreshProtected) })

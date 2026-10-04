@@ -6,6 +6,7 @@ import { runOfficeGenerationPipeline, type OfficeGenerationEvent, type OfficeGen
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 
 export type OfficeGenerationWorkerStore = {
+  get?(userId: string, jobId: string): Promise<OfficeGenerationJobRow | null>
   claim(params: { userId: string; leaseToken: string; leaseMs: number }): Promise<OfficeGenerationJobRow | null>
   checkpoint(params: { userId: string; jobId: string; leaseToken: string; stage: string; expectedVersion: number; checkpoint: unknown; status?: OfficeGenerationJobRow['status'] }): Promise<boolean>
   appendEvent(params: { userId: string; jobId: string; workspaceId: string; code: string; values: Record<string, string | number | boolean>; actorType: 'user' | 'assistant' | 'system'; actorUserId?: string; actorAssistantId?: string; safeNarration?: string }): Promise<unknown>
@@ -21,6 +22,7 @@ export type OfficeGenerationWorkerDeps = {
     emit(event: OfficeGenerationEvent): Promise<void>
     drainSteering(stage: string): Promise<string[]>
   }): Omit<OfficeGenerationPipelineDeps, 'checkpoint' | 'emit' | 'drainSteering'>
+  executePromptOnly?(job: OfficeGenerationJobRow, leaseToken: string): Promise<void>
   leaseMs?: number
 }
 
@@ -52,6 +54,27 @@ export function createOfficeGenerationWorker(deps: OfficeGenerationWorkerDeps) {
       const leaseToken = randomUUID()
       const job = await deps.store.claim({ userId: deps.workerUserId, leaseToken, leaseMs: deps.leaseMs ?? 10 * 60_000 })
       if (!job) return 'idle'
+      const binding = (job.authorityProjection as {creationBinding?: {protocol?: string}} | null)?.creationBinding
+      if (binding?.protocol === 'office_prompt_only_v1') {
+        if (!deps.executePromptOnly) {
+          await deps.store.finish({userId:deps.workerUserId,jobId:job.id,leaseToken,
+            status:'needs_input',stage:'needs_input',errorCode:'office_prompt_only_execution_adapter_required'})
+          return 'needs_input'
+        }
+        try {
+          // The adapter completes the job in the same transaction as its output.
+          await deps.executePromptOnly(job,leaseToken)
+          return 'completed'
+        } catch {
+          // A lost commit acknowledgement is not a failed generation. Confirm
+          // through the app-role ledger; never overwrite a completed publication.
+          const current = await deps.store.get?.(deps.workerUserId,job.id).catch(()=>null)
+          if (current?.status === 'completed') return 'completed'
+          await deps.store.finish({userId:deps.workerUserId,jobId:job.id,leaseToken,
+            status:'failed',stage:'failed',errorCode:'office_prompt_only_generation_failed'}).catch(()=>false)
+          return 'failed'
+        }
+      }
       let checkpointVersion = job.checkpointVersion
       const controls = {
         async checkpoint(value: Parameters<OfficeGenerationPipelineDeps['checkpoint']>[0]) {

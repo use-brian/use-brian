@@ -12,10 +12,20 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../client.js', () => ({
-  query: vi.fn(),
-  queryWithRLS: vi.fn(),
+vi.mock('../../workspace-access/entity-link-create-admission.js', () => ({
+  admitEntityLinkCreate: vi.fn(async (_client, _actor, params) => ({ params, ready: false })),
 }))
+vi.mock('../client.js', () => {
+  const queryWithRLS = vi.fn()
+  return {
+    query: vi.fn(), queryWithRLS, applyRLSGucs: vi.fn(),
+    getAppPool: () => ({ connect: async () => ({
+      query: (sql: string, values: unknown[]) => ['BEGIN','COMMIT','ROLLBACK'].includes(sql)
+        ? Promise.resolve({ rows: [] }) : queryWithRLS(USER, sql, values),
+      release: vi.fn(),
+    }) }),
+  }
+})
 
 import { createDbEntityLinksStore } from '../entity-links-store.js'
 import { queryWithRLS } from '../client.js'

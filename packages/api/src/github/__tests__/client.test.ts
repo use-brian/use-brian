@@ -120,6 +120,11 @@ describe('[COMP:api/github-client] response shaping', () => {
     expect(Array.isArray(await getFileContents('pat', 'o', 'r', ''))).toBe(true)
   })
 
+  it('rejects a truncated tree rather than returning a partial inventory', async () => {
+    mockFetch.mockResolvedValueOnce(ok({ truncated: true, tree: [{ path: 'visible.md', sha: 'blob', type: 'blob' }] }))
+    await expect(getRepoTree('pat', 'o', 'r', 'head')).rejects.toThrow('tree is truncated')
+  })
+
   it('getRepoTree keeps only blob entries', async () => {
     mockFetch.mockResolvedValueOnce(
       ok({ tree: [

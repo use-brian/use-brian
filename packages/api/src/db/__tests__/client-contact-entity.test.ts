@@ -21,8 +21,10 @@ const captured: Array<{ sql: string; params: unknown[] }> = []
 let selectEntityIdRows: Array<{ entityId: string | null }> = []
 let selectEntityRows: unknown[] = []
 
-vi.mock('../client.js', () => ({
-  query: vi.fn(async (sql: string, params: unknown[] = []) => {
+vi.mock('../../workspace-access/entity-create-admission.js', () => ({ beginEntityAdmission: vi.fn(async () => false), admitEntityCreate: vi.fn(async (_client, params) => params) }))
+
+vi.mock('../client.js', () => {
+  const query = vi.fn(async (sql: string, params: unknown[] = []) => {
     captured.push({ sql, params })
     const flat = sql.replace(/\s+/g, ' ')
     if (flat.includes('SELECT entity_id')) return { rows: selectEntityIdRows, rowCount: selectEntityIdRows.length }
@@ -44,11 +46,15 @@ vi.mock('../client.js', () => ({
       }
     }
     return { rows: [], rowCount: 0 }
-  }),
+  })
+  return { query,
+  getPool: () => ({ connect: async () => ({ query, release: vi.fn() }) }),
   queryWithRLS: vi.fn(async () => ({ rows: [], rowCount: 0 })),
-  getAppPool: vi.fn(() => { throw new Error('getAppPool must not be reached') }),
+  getAppPool: () => ({ connect: async () => ({ query, release: vi.fn() }) }),
+  applyRLSGucs: vi.fn(),
   rollbackAndRelease: vi.fn(),
-}))
+  }
+})
 
 const store = await import('../entities-store.js')
 
@@ -154,9 +160,10 @@ describe('[COMP:brain/client-contact-entity] client contact entity', () => {
     })
     const insert = find('INSERT INTO entities')!
     const sql = insert.sql.replace(/\s+/g, ' ')
-    // `$4` in the user_id slot: SET, not NULL. This is the shape a client
-    // contact must NOT have.
-    expect(sql).toContain('$3, $4, NULL')
-    expect(JSON.parse(insert.params[1] as string)).toEqual({ self: true })
+    // Canonical create keeps the teammate's personal boundary.
+    expect(sql).toContain('$7, $8, $9')
+    expect(insert.params[7]).toBe('member-1')
+    expect(insert.params[8]).toBeNull()
+    expect(JSON.parse(insert.params[4] as string)).toEqual({ self: true })
   })
 })

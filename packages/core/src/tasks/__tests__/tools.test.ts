@@ -1,9 +1,12 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { buildCitationIndex } from '@use-brian/shared'
 import { createTaskTools, type TaskToolEvent } from '../tools.js'
 import { formatToolError } from '../../engine/tool-executor.js'
 import type { TaskRecord, TaskStore } from '../types.js'
 import type { TaskAdmissionPort, TaskRuleRecord } from '../admission.js'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import type { ToolContext } from '../../tools/types.js'
+import type { ScopeSource } from '../../security/derived-scope.js'
 
 // The real store persists provenance (source*, mig 316/334) but does NOT
 // project it back on reads — `TaskRecord` is deliberately a compact,
@@ -1037,5 +1040,174 @@ describe('[COMP:tasks/tools-bulk] bulkUpdateTasks / archiveTasks', () => {
     const hit = await archiveTasks.execute({ filter: { status: 'done' } }, ctx)
     expect(String(hit.data)).toContain('Archived 1 task(s)')
     expect(store.rows[0].status).toBe('archived')
+  })
+})
+
+describe('[COMP:tasks/tools] write visibility after a primary read (decision D3)', () => {
+  const read = (id: string, userId: string | null, assistantId: string | null): ScopeSource => ({
+    workspaceId: 'workspace_1', userId, assistantId, sensitivity: 'internal', compartments: [], projectIds: [],
+    resourceKind: 'memory', resourceId: id, version: '1',
+  })
+  // The user's own chat message plus two standard assistants' private memories.
+  const primaryRead = () => new ContextScopeAccumulator({ sources: [
+    read('message', 'user_1', null), read('memory-a', 'user_1', 'standard-a'), read('memory-b', 'user_1', 'standard-b'),
+  ] })
+
+  it('closes a shared task without making it private', async () => {
+    const store = makeFakeStore()
+    const scopes: unknown[] = []
+    const update = store.update.bind(store)
+    store.update = async (userId, id, fields, opts) => { scopes.push(opts?.scope); return update(userId, id, fields, opts) }
+    const { saveTask, closeTask } = createTaskTools(store)
+    await saveTask.execute({ title: 'Ship' }, ctx)
+    const result = await closeTask.execute({ id: store.rows[0].id }, { ...ctx, scopeAccumulator: primaryRead() })
+    expect(result.isError).toBeFalsy()
+    expect(scopes.at(-1)).toMatchObject({ visibility: undefined })
+  })
+
+  it('keeps a task shared when only the author\'s own conversation fed it', async () => {
+    const store = makeFakeStore()
+    const creates: unknown[] = []
+    const create = store.create.bind(store)
+    store.create = async (params) => { creates.push(params.visibility); return create(params) }
+    const { saveTask } = createTaskTools(store)
+    const chat = new ContextScopeAccumulator({ sources: [{ ...read('message', 'user_1', null), resourceKind: 'session_message' }] })
+    await saveTask.execute({ title: 'Ship the release' }, { ...ctx, scopeAccumulator: chat })
+    expect(creates.at(-1)).toBeUndefined()
+  })
+
+  it('keeps content drawn from a private row private to that user, never to one assistant', async () => {
+    const store = makeFakeStore()
+    const creates: unknown[] = []
+    const create = store.create.bind(store)
+    store.create = async (params) => { creates.push(params.visibility); return create(params) }
+    const { saveTask } = createTaskTools(store)
+    await saveTask.execute({ title: 'From my notes' }, { ...ctx, scopeAccumulator: primaryRead() })
+    expect(creates.at(-1)).toEqual({ userId: 'user_1', assistantId: null })
+  })
+
+  it('refuses to write another person\'s private rows into a task', async () => {
+    const store = makeFakeStore()
+    const { saveTask } = createTaskTools(store)
+    const foreign = new ContextScopeAccumulator({ sources: [read('theirs', 'user_2', null)] })
+    // The executor turns the throw into a failed tool call, not a failed turn.
+    await expect(saveTask.execute({ title: 'Leak' }, { ...ctx, scopeAccumulator: foreign }))
+      .rejects.toThrow('scope_visibility_incompatible')
+    expect(store.rows).toHaveLength(0)
+  })
+})
+
+describe('[COMP:tasks/tools] lifecycle scope and bulk failure reporting', () => {
+  const projectA = '11111111-1111-4111-8111-111111111111'
+  const projectB = '22222222-2222-4222-8222-222222222222'
+  const mixedContext: ToolContext = {
+    ...ctx,
+    assistantDefaultProjectIds: [projectB],
+    scopeAccumulator: new ContextScopeAccumulator({
+      sensitivity: 'confidential', compartments: ['other-team'], projectIds: [projectA, projectB],
+    }),
+  }
+
+  async function scopedStore() {
+    const store = makeFakeStore()
+    const tools = createTaskTools(store)
+    await tools.saveTask.execute({ title: 'First project task' }, ctx)
+    await tools.saveTask.execute({ title: 'Second project task' }, ctx)
+    store.rows[0].projectIds = [projectA]
+    store.rows[1].projectIds = [projectB]
+    for (const row of store.rows) {
+      row.sensitivity = 'internal'
+      row.compartments = ['original-team']
+    }
+    const update = store.update.bind(store)
+    const calls: Array<Parameters<TaskStore['update']>[3]> = []
+    store.update = async (userId, id, fields, options) => {
+      calls.push(options)
+      const row = store.rows.find((entry) => entry.id === id)!
+      const projects = [...new Set([...(row.projectIds ?? []), ...(options?.scope?.projectIds ?? [])])]
+      if (projects.length > 1) throw new Error('tasks_one_project_check')
+      row.projectIds = projects
+      row.compartments = [...new Set([...(row.compartments ?? []), ...(options?.scope?.compartments ?? [])])]
+      if (options?.scope?.sensitivity) row.sensitivity = options.scope.sensitivity
+      return update(userId, id, fields, options)
+    }
+    return { store, tools, calls }
+  }
+
+  it('closes, reopens and reassigns without importing unrelated Project or Team labels', async () => {
+    const { store, tools, calls } = await scopedStore()
+    const id = store.rows[0].id
+    expect((await tools.closeTask.execute({ id }, mixedContext)).isError).toBeFalsy()
+    expect((await tools.reopenTask.execute({ id }, mixedContext)).isError).toBeFalsy()
+    expect((await tools.updateTask.execute({ id, assignee_id: null, due: '2026-10-20' }, mixedContext)).isError).toBeFalsy()
+    expect(store.rows[0]).toMatchObject({ projectIds: [projectA], compartments: ['original-team'], sensitivity: 'internal' })
+    expect(calls).toHaveLength(3)
+    expect(calls.every((call) => call?.access?.userId === ctx.userId)).toBe(true)
+  })
+
+  it('archives and changes bulk priority across Projects while retaining each target scope', async () => {
+    const { store, tools } = await scopedStore()
+    const priority = await tools.bulkUpdateTasks.execute({ filter: { status: 'todo' }, set: { priority: 'urgent' } }, mixedContext)
+    expect(priority.isError).toBeFalsy()
+    expect(store.rows.map((row) => row.attributes.priority)).toEqual(['urgent', 'urgent'])
+    const archive = await tools.archiveTasks.execute({ filter: { status: 'todo' } }, mixedContext)
+    expect(archive.isError).toBeFalsy()
+    expect(store.rows.map((row) => row.status)).toEqual(['archived', 'archived'])
+    expect(store.rows.map((row) => row.projectIds)).toEqual([[projectA], [projectB]])
+    expect(store.rows.every((row) => row.sensitivity === 'internal')).toBe(true)
+  })
+
+  it('still refuses a content edit that would combine Projects', async () => {
+    const { store, tools } = await scopedStore()
+    const result = await tools.updateTask.execute({ id: store.rows[0].id, title: 'New content' }, mixedContext)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('multiple Projects')
+    expect(store.rows[0].title).toBe('First project task')
+  })
+
+  it('reports partial commits separately from failures and retains the cause', async () => {
+    const { store, tools } = await scopedStore()
+    const update = store.update.bind(store)
+    const failedId = store.rows[1].id
+    store.update = async (userId, id, fields, opts) => {
+      if (id === failedId) throw new Error('scope_operation_denied')
+      return update(userId, id, fields, opts)
+    }
+    const result = await tools.archiveTasks.execute({ filter: { status: 'todo' } }, mixedContext)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('Archived 1 task(s).')
+    const [success, failure] = String(result.data).split('Failed 1 task(s):')
+    expect(success).not.toContain('Second project task')
+    expect(failure).toContain(failedId)
+    expect(failure).toContain('scope_operation_denied')
+    expect(failure).toContain('Do not repeat the whole batch')
+    expect(store.rows.map((row) => row.status)).toEqual(['archived', 'todo'])
+  })
+
+  it('marks an all-unavailable bulk update as an error instead of claiming success', async () => {
+    const { tools, store } = await scopedStore()
+    store.update = async () => null
+    const result = await tools.bulkUpdateTasks.execute({ filter: { status: 'todo' }, set: { status: 'done' } }, mixedContext)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('Updated 0 task(s).')
+    expect(String(result.data)).toContain('Failed 2 task(s):')
+    expect(String(result.data)).toContain('mutation scope')
+    expect(String(result.data)).not.toContain('every edit mints a new id')
+  })
+
+  it('does not label a committed update as failed when its event callback throws', async () => {
+    const { store } = await scopedStore()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const tools = createTaskTools(store, { onEvent: () => { throw new Error('telemetry unavailable') } })
+      const result = await tools.archiveTasks.execute({ filter: { status: 'todo' } }, mixedContext)
+      expect(result.isError).toBeFalsy()
+      expect(String(result.data)).toContain('Archived 2 task(s).')
+      expect(String(result.data)).not.toContain('Failed')
+      expect(store.rows.every((row) => row.status === 'archived')).toBe(true)
+      expect(warning).toHaveBeenCalledTimes(2)
+    } finally {
+      warning.mockRestore()
+    }
   })
 })

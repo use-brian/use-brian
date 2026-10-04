@@ -23,6 +23,9 @@
  */
 
 import { Router } from 'express'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { mountWorkflowPublicationRoutes } from './workflow-publication.js'
+import type { PublicationConsentStore } from '../workflow/publication-consent.js'
 import { randomBytes } from 'node:crypto'
 import {
   advanceWorkflowRun,
@@ -51,6 +54,7 @@ import {
 } from '../context-scope/context-readiness.js'
 
 export type WorkflowsRouteOptions = {
+  publicationConsentStore?: PublicationConsentStore
   workflowStore: WorkflowStore
   runStore: WorkflowRunStore
   workspaceStore: WorkspaceStore
@@ -152,7 +156,7 @@ export type WorkflowsRouteOptions = {
     workspaceId: string
     contextGroupId: string | null
     contextProjectId: string | null
-  }) => Promise<AuthoringAuthority>
+  }, captureInTransaction?: () => Promise<AuthoringAuthority>) => Promise<AuthoringAuthority>
 }
 
 export type WorkflowAuditDelta =
@@ -167,6 +171,7 @@ const maxTurnsSchema = z.number().int().min(1).max(60)
 
 const createBodySchema = z.object({
   workspaceId: z.string().uuid(),
+  expectedPolicyRevision: z.string().regex(/^[1-9][0-9]*$/).max(32).optional(),
   name: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
   definition: z.unknown(),
@@ -179,6 +184,9 @@ const createBodySchema = z.object({
 })
 
 const updateBodySchema = z.object({
+  reviewId: z.string().uuid().optional(),
+  payloadHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  expectedPolicyRevision: z.string().regex(/^[1-9][0-9]*$/).max(32).optional(),
   name: z.string().min(1).max(120).optional(),
   description: z.string().max(2000).nullable().optional(),
   definition: z.unknown().optional(),
@@ -517,6 +525,7 @@ function serializeSummary(w: import('@use-brian/core').WorkflowRecord) {
 
 export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
   const router = Router()
+  mountWorkflowPublicationRoutes(router, opts)
 
   // Reconcile the firing `scheduled_jobs` row from a workflow's trigger — the
   // web-builder counterpart of the `scheduleWorkflow` chat tool, via the SAME
@@ -676,31 +685,52 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     // generate cryptographically random values.
     const cred = trigger.kind === 'webhook' ? mintWebhookCredentials() : null
 
-    const record = await opts.workflowStore.create({
-      userId,
-      workspaceId: parsed.data.workspaceId,
-      name: parsed.data.name,
-      description: parsed.data.description ?? null,
-      definition: definitionParsed.data,
-      trigger,
-      webhookSlug: cred?.slug ?? null,
-      webhookSecret: cred?.secret ?? null,
-      modelAlias: parsed.data.modelAlias,
-      maxTurns: parsed.data.maxTurns ?? null,
-      researchMode: parsed.data.researchMode,
-      contextGroupId: parsed.data.contextGroupId ?? null,
-      contextProjectId: parsed.data.contextProjectId ?? null,
-      authoringAuthority: await opts.resolveAuthoringAuthority({
+    let record: WorkflowRecord
+    let schedulePublished = false
+    try {
+      record = await opts.workflowStore.create({
         userId,
         workspaceId: parsed.data.workspaceId,
-        contextGroupId: parsed.data.contextGroupId ?? null,
-        contextProjectId: parsed.data.contextProjectId ?? null,
-      }),
-    })
+        name: parsed.data.name,
+        description: parsed.data.description ?? null,
+        definition: definitionParsed.data,
+        trigger,
+        webhookSlug: cred?.slug ?? null,
+        webhookSecret: cred?.secret ?? null,
+        modelAlias: parsed.data.modelAlias,
+        maxTurns: parsed.data.maxTurns ?? null,
+        researchMode: parsed.data.researchMode,
+        contextGroupId: parsed.data.contextGroupId,
+        contextProjectId: parsed.data.contextProjectId,
+      }, { onSchedulePublished: () => { schedulePublished = true }, authoring: {
+        kind: 'authenticated-workflow-rest',
+        userId,
+        authSessionId: req.authSessionId ?? '',
+        expectedPolicyRevision: parsed.data.expectedPolicyRevision,
+        captureLegacyAuthority: captureInTransaction => opts.resolveAuthoringAuthority({
+          userId,
+          workspaceId: parsed.data.workspaceId,
+          contextGroupId: parsed.data.contextGroupId ?? null,
+          contextProjectId: parsed.data.contextProjectId ?? null,
+        }, captureInTransaction),
+      } })
+    } catch (error) {
+      if (error instanceof WorkspaceAccessError) {
+        const message = error.code === 'workflow_schedule_authoring_not_ready'
+          ? 'Scheduled authoring is not available in this access mode yet. Create a manual workflow instead.'
+          : error.code === 'workflow_source_authoring_not_ready'
+            ? 'Source-bound authoring needs a verified source adapter. Create a manual workflow instead.' : undefined
+        return void res.status(error.status).json({ error: error.code, code: error.code, ...(message ? { message } : {}) })
+      }
+      if ((error as { reason?: string }).reason === 'workflow_authority_unavailable') {
+        return void res.status(409).json({ error: 'workflow_authority_unavailable', code: 'workflow_authority_unavailable' })
+      }
+      throw error
+    }
 
     // Create the backing firing job for a schedule trigger (closes the gap
     // where a builder-scheduled workflow displayed "Scheduled" but never fired).
-    if (record.trigger.kind === 'schedule') {
+    if (record.trigger.kind === 'schedule' && !schedulePublished) {
       await reconcileScheduleTrigger(record, userId)
     }
 
@@ -720,9 +750,10 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
   })
 
   // ── PATCH /workflows/:id ───────────────────────────────────────────────
-  router.patch('/workflows/:id', async (req, res) => {
+  const updateWorkflow: import('express').RequestHandler = async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
+    if (typeof req.params.id !== 'string') return notFound(res, 'Workflow not found')
 
     const parsed = updateBodySchema.safeParse(req.body)
     if (!parsed.success) {
@@ -839,7 +870,9 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       || parsed.data.modelAlias !== undefined || parsed.data.maxTurns !== undefined
       || parsed.data.researchMode !== undefined || parsed.data.contextGroupId !== undefined
       || parsed.data.contextProjectId !== undefined
-    if (executionAffectingEdit) {
+    const scheduleEdit = existing.trigger.kind === 'schedule' || fields.trigger?.kind === 'schedule' || !!parsed.data.reviewId
+    const preparing = req.method === 'POST'
+    if (executionAffectingEdit && !scheduleEdit && !preparing) {
       fields.authoringAuthority = await opts.resolveAuthoringAuthority({
         userId,
         workspaceId: existing.workspaceId,
@@ -850,13 +883,28 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       })
     }
 
-    const updated = await opts.workflowStore.update(userId, req.params.id, fields)
+    let updated: WorkflowRecord | null
+    try {
+      const proof = { kind: 'authenticated-workflow-rest' as const,userId,authSessionId: req.authSessionId ?? '',
+        reviewId: parsed.data.reviewId,payloadHash: parsed.data.payloadHash,expectedPolicyRevision: parsed.data.expectedPolicyRevision }
+      if (preparing) {
+        if (!opts.workflowStore.prepareScheduleEdit) throw new WorkspaceAccessError('workflow_schedule_review_unavailable',409)
+        const review = await opts.workflowStore.prepareScheduleEdit(userId,req.params.id,fields,proof)
+        if (!review) return notFound(res,'Workflow not found')
+        return void res.json(review)
+      }
+      updated = await opts.workflowStore.update(userId, req.params.id, fields, proof)
+    } catch (error) {
+      if (error instanceof WorkspaceAccessError) return void res.status(error.status).json({ error: error.code,code: error.code })
+      if ((error as { reason?: string }).reason === 'workflow_authority_unavailable') return void res.status(409).json({ code: 'workflow_authority_unavailable' })
+      throw error
+    }
     if (!updated) return notFound(res, 'Workflow not found')
 
     // A trigger change reconciles the firing `scheduled_jobs` row: a schedule
     // trigger creates/updates the job; any other kind clears it. This is what
     // makes "Scheduled" in the builder actually fire (and "Manual" stop firing).
-    if (parsed.data.trigger !== undefined) {
+    if (parsed.data.trigger !== undefined && !parsed.data.reviewId) {
       await reconcileScheduleTrigger(updated, userId)
     }
 
@@ -873,7 +921,9 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       ...serializeWorkflow(updated),
       ...(updateWarnings.length > 0 ? { warnings: updateWarnings } : {}),
     })
-  })
+  }
+  router.post('/workflows/:id/schedule-review', updateWorkflow)
+  router.patch('/workflows/:id', updateWorkflow)
 
   // ── DELETE /workflows?workspaceId= — bulk delete ───────────────────────
   //
@@ -1094,6 +1144,18 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     })
   })
 
+  router.use((error: unknown, _req: import('express').Request, res: import('express').Response, next: import('express').NextFunction) => {
+    if (error instanceof WorkspaceAccessError) {
+      res.status(error.status).json({ error: error.code, code: error.code })
+      return
+    }
+    if ((error as Error)?.message === 'workflow_schedule_reapproval_required') {
+      res.status(409).json({ error: 'workflow_schedule_reapproval_required', code: 'workflow_schedule_reapproval_required',
+        message: 'This schedule is bound to saved consent. Create a separately approved workflow instead of editing or re-enabling it.' })
+      return
+    }
+    next(error)
+  })
   return router
 }
 

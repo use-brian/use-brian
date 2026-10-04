@@ -61,6 +61,9 @@ vi.mock("@/contexts/workspace-context", () => ({
   useWorkspaces: () => ({ workspaces: [], activeId: "w1", active: null, setActive: vi.fn() }),
 }));
 
+// Publication authority has its own component tests; keep this cache test offline.
+vi.mock("@/components/workflow/publication-consent", () => ({ WorkflowPublicationConsent: () => null }));
+
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: vi.fn() }));
 vi.mock("@/components/context/context-scope-picker", () => ({
   ContextScopePicker: () => <div data-testid="context-scope" />,

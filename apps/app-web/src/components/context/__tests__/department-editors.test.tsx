@@ -16,6 +16,9 @@ const mocks=vi.hoisted(()=>({registry:vi.fn(),fetch:vi.fn(),prepare:vi.fn(),save
 vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>mocks.viewer}));
 vi.mock('@/lib/api/workspace-access',()=>({fetchWorkspaceAccess:mocks.fetch,fetchWorkspaceDepartmentRegistry:mocks.registry,prepareWorkspaceAccessCommand:mocks.prepare,saveWorkspaceAccessCommand:mocks.save,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:mocks.confirm}));
+vi.mock('@/components/organization/department-access-panel',()=>({AssistantHomeDepartment:({assistantId}:{assistantId:string})=><p>home-picker:{assistantId}</p>,
+  useDepartmentReaders:()=>({edges:new Map([['team',[{departmentId:'team',principal:{kind:'user',id:'person'},clearance:'internal',expiresAt:null,origin:'store'}]]]),directory:[{departmentId:'team',name:'Research',status:'active',revision:1,myClearance:'confidential',isOwner:true,ownerIds:['person']}]}),
+  clearanceCounts:(edges:Array<{clearance:'public'|'internal'|'confidential'}>)=>edges.reduce((c,e)=>({...c,[e.clearance]:c[e.clearance]+1}),{public:0,internal:0,confidential:0})}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:vi.fn(async(url:string)=>({ok:true,json:async()=>url.includes('/assistants?')?{assistants:[{id:'assistant',name:'Research assistant'}]}:{members:[{userId:'person',userName:'Riley'}]}}))}));
 const team={id:'team',name:'Research',key:'research',description:null,color:null,status:'active',readAll:false,readGrantGroupIds:[],memberCount:0,members:[],assistantIds:[]};
 vi.mock('@/lib/api/context-scopes',()=>({
@@ -44,9 +47,23 @@ function expectApplied(){expect(mocks.save).toHaveBeenCalledWith('workspace',{ty
 function Harness(){const change=useDepartmentChange('workspace');return <><button onClick={()=>void change.save({type:'department.archive',teamId:'team'},'Research')}>Change</button><button onClick={()=>void change.save({type:'department.archive',teamId:'other'},'Other')}>Other</button><DepartmentChangeFeedback change={change}/></>;}
 
 describe('[COMP:app-web/context-scope] reviewed Team and assistant editors',()=>{
-  it('separates department identity, membership, read scope and lifecycle into named panels',async()=>{
-    await render(<TeamsContextSection/>);
-    for(const heading of [t.departmentPickerLabel,t.createTeamTitle,t.departmentDetailsTitle,t.membershipTitle,t.readAccessTitle,t.departmentLifecycleTitle])expect(host.textContent).toContain(heading);
+  it('separates department identity and lifecycle, and leaves who reads it to the department panel',async()=>{
+    await render(<TeamsContextSection renderAccessSettings={(id,panel)=><p>{panel}:{id}</p>}/>);
+    for(const heading of [t.createTeamTitle,t.departmentDetailsTitle,t.departmentLifecycleTitle])expect(host.textContent).toContain(heading);
+    // The department cards are the picker: one pressed card per selection, with its reader summary.
+    const cards=host.querySelector(`ul[aria-label="${t.departmentPickerLabel}"]`)!;
+    expect(cards.querySelector('button[aria-pressed="true"]')?.textContent).toContain('Research');
+    expect(cards.textContent).toContain(t.readerCount.replace('{count}','1'));
+    // Readers is the default panel; Policy and Details stay mounted but hidden, so drafts survive a switch.
+    const panel=(name:string)=>host.querySelector<HTMLElement>(`[role="tabpanel"][id$="-panel-${name}"]`)!;
+    expect(panel('readers').hidden).toBe(false);expect(panel('readers').textContent).toBe('readers:team');
+    expect(panel('policy').hidden).toBe(true);expect(panel('policy').textContent).toBe('policy:team');
+    expect(panel('details').hidden).toBe(true);
+    await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(tab=>tab.textContent?.includes(t.detailsTab))!.click());
+    expect(panel('details').hidden).toBe(false);expect(panel('readers').hidden).toBe(true);
+    // Membership checkboxes and Team-to-Team read packages are retired (D26): one roster.
+    for(const retired of [t.membershipTitle,t.readAccessTitle,t.readAllTeams,t.saveAccess])expect(host.textContent).not.toContain(retired);
+    expect(host.querySelector('[role="checkbox"]')).toBeNull();
   });
   it('uses current registry capabilities and shows only the authorized related units',async()=>{
     mocks.registry.mockImplementation(async()=>({...registry(),canAdminister:false}));await render(<TeamsContextSection/>);
@@ -76,26 +93,21 @@ describe('[COMP:app-web/context-scope] reviewed Team and assistant editors',()=>
   });
   it('prepares creation and cancellation never changes a Team',async()=>{
     mocks.confirm.mockResolvedValue(false);await render(<TeamsContextSection/>);
-    await input(host.querySelector<HTMLInputElement>(`input[placeholder="${t.teamNamePlaceholder}"]`)!,'Design');await click(t.createTeam);
+    await click(t.createTeamTitle);await input(host.querySelector<HTMLInputElement>(`input[placeholder="${t.teamNameExample}"]`)!,'Design');await click(t.createTeam);
+    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({title:'Create the Design department?',description:t.createTeamReviewDescription,confirmLabel:t.createTeam}));
     expect(mocks.prepare).toHaveBeenCalledWith('workspace',{type:'department.create',name:'Design',key:'design'},'15',expect.any(String));
     expect(mocks.save).not.toHaveBeenCalled();expect(host.textContent).toContain('Research');
   });
-  it('reviews membership without silently changing legacy mode',async()=>{
-    await render(<TeamsContextSection/>);await checkbox('Riley');
-    expect(mocks.prepare).toHaveBeenCalledWith('workspace',{type:'department.member.set',teamId:'team',userId:'person',enabled:true,activateAssigned:false},'15',expect.any(String));
-    expect(mocks.confirm.mock.calls[0][0].description).toContain('Riley');expectApplied();
-  });
-  it('reviews assistant assignment through the same canonical endpoint',async()=>{
-    await render(<TeamsContextSection/>);await checkbox('Research assistant');
-    expect(mocks.prepare.mock.calls[0][1]).toEqual({type:'department.assistant.set',teamId:'team',assistantId:'assistant',enabled:true});expectApplied();
-  });
-  it('shows read package changes before committing and archives with one confirmation',async()=>{
-    await render(<TeamsContextSection/>);await checkbox(t.readAllTeams);expect(mocks.prepare).not.toHaveBeenCalled();
-    await click(t.saveAccess);expect(mocks.prepare.mock.calls[0][1]).toEqual({type:'department.read_bundle.set',teamId:'team',readAll:true,groupIds:[]});expectApplied();
-    mocks.confirm.mockClear();await click(t.archiveTeam);expect(mocks.confirm).toHaveBeenCalledTimes(1);expect(mocks.prepare.mock.calls[1][1]).toEqual({type:'department.archive',teamId:'team'});
+  it('archives with one confirmation',async()=>{
+    await render(<TeamsContextSection/>);
+    await click(t.archiveTeam);expect(mocks.confirm).toHaveBeenCalledTimes(1);expect(mocks.prepare.mock.calls[0][1]).toEqual({type:'department.archive',teamId:'team'});expectApplied();
   });
   it('saves full assistant audience and defaults only after review',async()=>{
-    await render(<AssistantContextSettings workspaceId="workspace" assistantId="assistant" canManage/>);await click(t.saveContext);
+    await render(<AssistantContextSettings workspaceId="workspace" assistantId="assistant" canManage/>);
+    // Departments are set in Organization > Departments; the home picker replaces the default Team.
+    expect(host.textContent).toContain(t.assistantDepartmentsNote);expect(host.textContent).toContain('home-picker:assistant');
+    expect(host.textContent).not.toContain(t.teamAccessMode);
+    await click(t.saveContext);
     expect(mocks.prepare.mock.calls[0][1]).toEqual({type:'assistant.audience.set',assistantId:'assistant',teamMode:'all',teamIds:[],defaultGroupId:null,projectMode:'all',projectIds:[],defaultProjectId:null});expectApplied();expect(host.textContent).toContain(t.saved);
   });
   it('exposes retry in the assistant editor and refreshes after the same receipt succeeds',async()=>{
@@ -112,6 +124,15 @@ describe('[COMP:app-web/workspace-access] shared command confirmation lifetime',
     const signal=mocks.confirm.mock.calls[0][0].signal as AbortSignal;
     await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace'}})));expect(signal.aborted).toBe(true);
     await act(async()=>finish(true));expect(mocks.save).not.toHaveBeenCalled();
+  });
+  it('keeps an open confirmation through the stream catch-up',async()=>{
+    // The stream reconnects every ~5 minutes; its catch-up is not an authority
+    // change, so it must not close the dialog the viewer is reading.
+    let finish:(value:boolean)=>void=()=>{};mocks.confirm.mockImplementation(()=>new Promise<boolean>(resolve=>{finish=resolve}));
+    await render(<Harness/>);await click('Change');
+    const signal=mocks.confirm.mock.calls[0][0].signal as AbortSignal;
+    await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace',catchUp:true}})));expect(signal.aborted).toBe(false);
+    await act(async()=>finish(true));expect(mocks.save).toHaveBeenCalledTimes(1);
   });
   it('blocks another intent while a confirmed result is uncertain, then retries the saved receipt',async()=>{
     mocks.save.mockRejectedValueOnce(new TypeError('lost response'));await render(<Harness/>);await click('Change');await click('Other');
@@ -132,8 +153,8 @@ describe('[COMP:app-web/workspace-access] shared command confirmation lifetime',
     mocks.config.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}));
     await click(t.saveContext);
     await render(<AssistantContextSettings workspaceId="workspace" assistantId="other-assistant" canManage/>);
-    await act(async()=>finish({teamMode:'assigned',teamIds:['team'],defaultGroupId:'team',projectMode:'all',projectIds:[],defaultProjectId:null}));
-    expect(host.querySelector(`[aria-label="${t.teamAccessMode}"]`)?.textContent).toContain(t.allTeams);
+    await act(async()=>finish({teamMode:'assigned',teamIds:['team'],defaultGroupId:'team',projectMode:'assigned',projectIds:[],defaultProjectId:null}));
+    expect(host.querySelector(`[aria-label="${t.projectAccessMode}"]`)?.textContent).toContain(t.allProjects);
     expect(host.textContent).not.toContain(t.saved);
   });
   it('cancels an assistant review when switching to another assistant',async()=>{

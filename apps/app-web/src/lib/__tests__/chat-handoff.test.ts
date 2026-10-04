@@ -25,10 +25,44 @@ describe("[COMP:app-web/chat-handoff] Home to Personal chat handoff", () => {
     takeChatHandoff(base.workspaceId, base.ts);
   });
 
+  it("preserves a project-scoped editable draft through storage", () => {
+    const payload={...base,contextProjectId:"project-1",draftOnly:true};
+    const requestId=stashChatHandoff(payload);
+    expect(takeChatHandoff(base.workspaceId,base.ts)).toEqual({...payload,requestId});
+    expect(parsePendingChatHandoff(JSON.stringify({...payload,contextProjectId:42,draftOnly:"true"})))
+      .toEqual(base);
+  });
+
   it("parses a valid payload and trims its prompt", () => {
     expect(
       parsePendingChatHandoff(JSON.stringify({ ...base, text: "  Ask Brian  " })),
     ).toEqual({ ...base, text: "Ask Brian" });
+  });
+
+  it("carries the Pages landing's research flag and attachments", () => {
+    expect(
+      parsePendingChatHandoff(
+        JSON.stringify({
+          ...base,
+          researchMode: true,
+          fileIds: ["file-1", 7, ""],
+          attachedRecordingIds: ["rec-1"],
+        }),
+      ),
+    ).toEqual({
+      ...base,
+      researchMode: true,
+      fileIds: ["file-1"],
+      attachedRecordingIds: ["rec-1"],
+    });
+  });
+
+  it("accepts an attachment-only payload with no prompt text", () => {
+    expect(
+      parsePendingChatHandoff(
+        JSON.stringify({ ...base, text: "  ", fileIds: ["file-1"] }),
+      ),
+    ).toEqual({ ...base, text: "", fileIds: ["file-1"] });
   });
 
   it("rejects malformed or empty payloads", () => {
@@ -63,8 +97,8 @@ describe("[COMP:app-web/chat-handoff] Home to Personal chat handoff", () => {
   });
 
   it("is single-consume and keeps the prompt out of the destination URL", () => {
-    stashChatHandoff(base);
-    expect(takeChatHandoff(base.workspaceId, base.ts)).toEqual(base);
+    const requestId = stashChatHandoff(base);
+    expect(takeChatHandoff(base.workspaceId, base.ts)).toEqual({ ...base, requestId });
     expect(takeChatHandoff(base.workspaceId, base.ts)).toBeNull();
     expect(personalChatHandoffPath(base.workspaceId, base.assistantId)).toBe(
       "/w/workspace-1/chat?v=personal&assistant=assistant-2",

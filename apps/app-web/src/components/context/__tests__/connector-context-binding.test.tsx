@@ -15,7 +15,9 @@ const api = vi.hoisted(() => ({
 
 vi.mock("@/lib/api/context-scopes", () => api);
 vi.mock("../context-scope-picker", () => ({
-  ContextScopePicker: () => <div data-testid="context-picker" />,
+  ContextScopePicker: (props: { hideTeam?: boolean }) => (
+    <div data-testid="context-picker" data-hide-team={String(props.hideTeam === true)} />
+  ),
 }));
 
 import { ConnectorContextBinding } from "../connector-context-binding";
@@ -56,14 +58,20 @@ afterEach(async () => {
 });
 
 describe("[COMP:app-web/context-scope] connector context binding", () => {
-  it("discloses the provider-root limit for a scoped connector", async () => {
+  it("saves only the Project, leaving the department to the header badge", async () => {
+    api.listContextProjects.mockResolvedValue([{ id: "project-roadmap", name: "Roadmap", status: "active" }]);
     api.getConnectorContext.mockResolvedValue({
       contextGroupId: "team-product",
       contextProjectId: "project-roadmap",
+      canEdit: true,
     });
     await renderBinding();
-
-    expect(host.textContent).toContain(en.contextScope.connectorProviderRootUnavailable);
+    const save = [...host.querySelectorAll("button")].find((b) => b.textContent === en.contextScope.saveContext);
+    await act(async () => { save!.click(); });
+    expect(api.updateConnectorContext).toHaveBeenCalledWith(expect.any(String), expect.any(String), {
+      contextProjectId: "project-roadmap",
+    });
+    expect(host.querySelector("[data-testid=context-picker]")?.getAttribute("data-hide-team")).toBe("true");
   });
 
   it("renders localized load copy instead of a raw API error code", async () => {

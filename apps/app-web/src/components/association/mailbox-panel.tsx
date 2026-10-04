@@ -29,12 +29,12 @@ export function AssociationMailboxPolicyForm({workspaceId,instanceId,policy,disa
         {selected.filter(key=>!purposes.data?.some(row=>row.purposeKey===key)).map(key=><AssociationToggle key={key} label={key} checked disabled={unavailable} onChange={()=>setSelected(values=>values.filter(value=>value!==key))}/>)}
       </div></AssociationListState>
       <h4 className="text-sm font-medium">{t.admin.templates}</h4>
-      {templates.map(row=><div key={row.id} className="space-y-2 rounded-lg border border-border p-3"><AssociationField label={t.admin.templateKey} required maxLength={63} value={row.key} onChange={key=>setTemplates(values=>values.map(item=>item.id===row.id?{...item,key}:item))}/>
-        <Select value={row.purpose} disabled={unavailable} onValueChange={value=>{if(value)setTemplates(values=>values.map(item=>item.id===row.id?{...item,purpose:value}:item));}}><SelectTrigger aria-label={t.manage.purpose} className="min-h-11 w-full"><SelectValue placeholder={t.manage.choose}/></SelectTrigger><SelectContent>{selected.map(key=><SelectItem key={key} value={key}>{purposes.data?.find(p=>p.purposeKey===key)?.label ?? key}</SelectItem>)}</SelectContent></Select>
-        <Button type="button" className="min-h-11" variant="ghost" onClick={()=>setTemplates(values=>values.filter(item=>item.id!==row.id))}>{t.admin.removeTemplate}</Button>
+      {templates.map(row=><div key={row.id} className="space-y-2 border-t border-border pt-3"><AssociationField label={t.admin.templateKey} required maxLength={63} value={row.key} onChange={key=>setTemplates(values=>values.map(item=>item.id===row.id?{...item,key}:item))}/>
+        <Select value={row.purpose} disabled={unavailable} onValueChange={value=>{if(value)setTemplates(values=>values.map(item=>item.id===row.id?{...item,purpose:value}:item));}}><SelectTrigger aria-label={t.manage.purpose} className="max-sm:min-h-11 w-full"><SelectValue placeholder={t.manage.choose}/></SelectTrigger><SelectContent>{selected.map(key=><SelectItem key={key} value={key}>{purposes.data?.find(p=>p.purposeKey===key)?.label ?? key}</SelectItem>)}</SelectContent></Select>
+        <Button type="button" className="max-sm:min-h-11" variant="ghost" onClick={()=>setTemplates(values=>values.filter(item=>item.id!==row.id))}>{t.admin.removeTemplate}</Button>
       </div>)}
-      <Button type="button" className="min-h-11" variant="outline" disabled={templates.length>=200} onClick={()=>setTemplates(values=>[...values,{id:crypto.randomUUID(),key:"",purpose:""}])}>{t.admin.addTemplate}</Button>
-    </fieldset>{action.feedback}<Button type="submit" className="min-h-11" disabled={unavailable}>{t.manage.save}</Button>
+      <Button type="button" className="max-sm:min-h-11" variant="outline" disabled={templates.length>=200} onClick={()=>setTemplates(values=>[...values,{id:crypto.randomUUID(),key:"",purpose:""}])}>{t.admin.addTemplate}</Button>
+    </fieldset>{action.feedback}<Button type="submit" className="max-sm:min-h-11" disabled={unavailable}>{t.manage.save}</Button>
   </form>;
 }
 export function AssociationMailboxGrantControl({workspaceId,instanceId,credential,disabled}:{workspaceId:string;instanceId:string;credential:CrmManagedCredential;disabled:boolean}) {
@@ -52,18 +52,18 @@ function MailboxDetails({workspaceId,instanceId,disabled}:{workspaceId:string;in
   const [editor,setEditor]=useState<{policy:CrmManagedMailboxPolicy|null}|null>(null),[credential,setCredential]=useState<CrmManagedCredential|null>(null);
   return <div className="space-y-4"><p className="break-all text-sm">{t.admin.mailboxId}: {instanceId}</p>
     <AssociationListState {...policy}><div className="space-y-1 text-sm"><p>{t.admin.readVersion}: {policy.data?.policy?.version ?? 0}</p><p>{policy.data?.policy?.providerKey ?? t.admin.unconfigured}</p><p>{policy.data?.policy?.purposeKeys.join(", ")}</p></div>
-      <Button type="button" className="min-h-11" variant="outline" disabled={disabled||!!policy.error||!policy.data} onClick={()=>setEditor({policy:policy.data!.policy})}>{t.manage.edit}</Button>
+      <Button type="button" className="max-sm:min-h-11" variant="outline" disabled={disabled||!!policy.error||!policy.data} onClick={()=>setEditor({policy:policy.data!.policy})}>{t.manage.edit}</Button>
     </AssociationListState>
     {editor?<AssociationMailboxPolicyForm key={`${instanceId}:${editor.policy?.version ?? 0}`} workspaceId={workspaceId} instanceId={instanceId} policy={editor.policy} disabled={disabled||!!policy.error} onSaved={()=>{setEditor(null);void policy.refresh();}}/>:null}
-    <h3 className="font-semibold">{t.admin.mailboxGrant}</h3><AssociationListState {...credentials}><div className="max-h-56 overflow-y-auto divide-y divide-border">{credentials.data?.items.map(row=><Button type="button" className="min-h-11 w-full justify-start" key={row.id} variant="ghost" disabled={disabled||!!credentials.error} onClick={()=>setCredential(row)}>{row.label} · {row.prefix}</Button>)}</div>{credentials.data?.items.length===0?<p>{t.manage.empty}</p>:null}</AssociationListState>
+    <h3 className="font-semibold">{t.admin.mailboxGrant}</h3><AssociationListState {...credentials}><div className="max-h-56 overflow-y-auto divide-y divide-border">{credentials.data?.items.map(row=><Button type="button" className="max-sm:min-h-11 w-full justify-start" key={row.id} variant="ghost" disabled={disabled||!!credentials.error} onClick={()=>setCredential(row)}>{row.label} · {row.prefix}</Button>)}</div>{credentials.data?.items.length===0?<p>{t.manage.empty}</p>:null}</AssociationListState>
     {credential?<AssociationMailboxGrantControl key={`${instanceId}:${credential.id}`} workspaceId={workspaceId} instanceId={instanceId} credential={credentials.data?.items.find(row=>row.id===credential.id) ?? credential} disabled={disabled||!!credentials.error}/>:null}
   </div>;
 }
 export function AssociationMailboxPanel({workspaceId,disabled}:{workspaceId:string;disabled:boolean}) {
   const t=useT().associationPage,mailboxes=useCachedResource(associationPageCacheKey(workspaceId,"mailboxes"),()=>listCrmMailboxes(workspaceId));
   const [draft,setDraft]=useState(""),[instanceId,setInstanceId]=useState("");
-  return <section className="space-y-3"><h3 className="font-semibold">{t.admin.mailboxes}</h3><AssociationListState {...mailboxes}><div className="divide-y divide-border">{mailboxes.data?.map(row=><Button type="button" key={row.id} className="min-h-11 w-full justify-start" variant="ghost" disabled={disabled||!!mailboxes.error} onClick={()=>{setInstanceId(row.id);setDraft(row.id);}}>{row.label} · {row.provider}</Button>)}</div></AssociationListState>
-    <form className="flex flex-wrap items-end gap-2" onSubmit={e=>{e.preventDefault();if(!disabled)setInstanceId(draft.trim());}}><AssociationField label={t.admin.mailboxId} value={draft} onChange={setDraft} required pattern="[a-fA-F0-9-]{36}" maxLength={36}/><Button type="submit" className="min-h-11" variant="outline" disabled={disabled}>{t.admin.loadMailbox}</Button></form>
+  return <section className="space-y-3"><h3 className="font-semibold">{t.admin.mailboxes}</h3><AssociationListState {...mailboxes}><div className="divide-y divide-border">{mailboxes.data?.map(row=><Button type="button" key={row.id} className="max-sm:min-h-11 w-full justify-start" variant="ghost" disabled={disabled||!!mailboxes.error} onClick={()=>{setInstanceId(row.id);setDraft(row.id);}}>{row.label} · {row.provider}</Button>)}</div></AssociationListState>
+    <form className="flex flex-wrap items-end gap-2" onSubmit={e=>{e.preventDefault();if(!disabled)setInstanceId(draft.trim());}}><AssociationField label={t.admin.mailboxId} value={draft} onChange={setDraft} required pattern="[a-fA-F0-9-]{36}" maxLength={36}/><Button type="submit" className="max-sm:min-h-11" variant="outline" disabled={disabled}>{t.admin.loadMailbox}</Button></form>
     {instanceId?<MailboxDetails key={instanceId} workspaceId={workspaceId} instanceId={instanceId} disabled={disabled}/>:null}
   </section>;
 }

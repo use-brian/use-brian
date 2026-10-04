@@ -77,6 +77,10 @@ export type ScheduledJobState = {
 }
 
 export type ScheduledJob = {
+  /** Server queue lease identity; absent on legacy/unpinned jobs. */
+  scheduleClaimId?: string | null
+  /** Discovery only: must claim immediately before invoking the executor. */
+  requiresScheduleClaim?: boolean
   id: string
   assistantId: string
   userId: string
@@ -190,16 +194,26 @@ export type JobStore = {
   listEnabledByView(userId: string, viewId: string): Promise<ScheduledJob[]>
 
   getDueJobs(): Promise<ScheduledJob[]>
+  /** Pinned schedule discovery is not a lease. Null means skip, not failure. */
+  claimDueJob?(id: string): Promise<ScheduledJob | null>
+  /** Atomically merge nag state + deadline only for a live, unconsumed claim. */
+  advanceScheduleClaimNag?(id: string, claimId: string, activeNag: NonNullable<ScheduledJobState['activeNag']>, nextRunAt: Date): Promise<boolean>
+  /** Atomic, claim-fenced outcome + failure streak bookkeeping. */
+  finishScheduleClaim?(id: string, claimId: string, outcome: {
+    success: boolean; nextRunAt: Date; maxConsecutiveFailures: number
+  }): Promise<{ applied: boolean; disabled: boolean; failures: number }>
 
   markCompleted(id: string, nextRunAt: Date): Promise<void>
   markFailed(id: string, nextRunAt: Date): Promise<void>
 
   /**
-   * Replace the job's `state_json`. The executor uses this to set
-   * `activeNag` at fire time; the chat-route post-user-turn hook uses it
-   * to clear `activeNag` on resolution. Pass an empty object `{}` (not
-   * `null`) to clear all keys.
+   * Atomically remove ONLY the observed activeNag and restore normal timing.
+   * Compare the complete cycle identity, preserve all other runtime state,
+   * and return false for stale/deleted/disabled rows. No split-write fallback.
    */
+  resolveActiveNag?(id: string, userId: string, observedNag: NonNullable<ScheduledJobState['activeNag']>, nextRunAt: Date): Promise<boolean>
+
+  /** Replace runtime state. Nag resolution must use resolveActiveNag instead. */
   setState(id: string, state: ScheduledJobState): Promise<void>
 
   /**

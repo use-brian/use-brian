@@ -28,7 +28,6 @@ import {
   type CreateWorkflowInput,
   type WorkflowDefinition,
 } from "@/lib/api/workflow";
-import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import { requestWorkflowRefresh } from "@/lib/workflow-events";
 import {
   Select,
@@ -38,6 +37,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { isPhoneViewport } from "@/lib/viewport";
+import {ModeAwareCreationContext,useCreationContext} from '@/components/context/mode-aware-context';
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -48,28 +48,17 @@ export function CreateWorkflowModal({ onClose }: Props) {
   const t = useT();
   const router = useRouter();
   const { activeId } = useWorkspaces();
+  const destination=useCreationContext("new-shared");
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [assistantId, setAssistantId] = useState<string>("primary");
   const [prompt, setPrompt] = useState("");
-  const [assistants, setAssistants] = useState<StudioAssistantSummary[]>([]);
+  const assistants=destination.choices?.assistants??[];
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!activeId) return;
-    let cancelled = false;
-    void (async () => {
-      const list = await listAssistants(activeId);
-      if (!cancelled) {
-        setAssistants(list.filter((a) => a.workspaceId === activeId));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId]);
+  useEffect(()=>{if(destination.reviewNeeded)setAssistantId("primary");},[destination.reviewNeeded,activeId]);
 
   // Escape-to-close + body scroll lock — mirrors SettingsModal.
   useEffect(() => {
@@ -96,7 +85,8 @@ export function CreateWorkflowModal({ onClose }: Props) {
       setError(t.workflowPage.builder.promptRequired);
       return;
     }
-    if (!activeId) return;
+    const admitted=destination.snapshot();
+    if (!activeId||!admitted) return;
 
     const definition: WorkflowDefinition = {
       startStepId: "step_1",
@@ -117,13 +107,16 @@ export function CreateWorkflowModal({ onClose }: Props) {
       description: description.trim() || undefined,
       definition,
       trigger: { kind: "manual" },
+      ...(destination.legacy&&!destination.hasSelection?{expectedPolicyRevision:admitted.expectedPolicyRevision}:admitted),
     };
 
     setSubmitting(true);
-    const result = await createWorkflow(input);
+    const result = await createWorkflow(input).catch(()=>({ok:false as const,error:t.modeContext.stale}));
     setSubmitting(false);
+    if(!destination.isCurrent())return;
     if (!result.ok) {
-      setError(result.error || t.workflowPage.builder.createError);
+      destination.fail();
+      setError(t.modeContext.stale);
       return;
     }
     requestWorkflowRefresh(activeId);
@@ -214,11 +207,11 @@ export function CreateWorkflowModal({ onClose }: Props) {
               />
             </div>
 
-            <div className="border border-border rounded-md bg-card overflow-hidden">
-              <div className="px-4 py-2 border-b border-border text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            <div className="border-t border-border pt-4">
+              <div className="pb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 {t.workflowPage.builder.firstStepHeading}
               </div>
-              <div className="p-4 flex flex-col gap-3">
+              <div className="flex flex-col gap-3">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-medium text-muted-foreground">
                     {t.workflowPage.builder.assistantPickerLabel}
@@ -264,6 +257,8 @@ export function CreateWorkflowModal({ onClose }: Props) {
               </div>
             </div>
 
+            <ModeAwareCreationContext context={destination}/>
+
             {error && (
               <div className="text-sm text-red-600 dark:text-red-400">{error}</div>
             )}
@@ -279,7 +274,7 @@ export function CreateWorkflowModal({ onClose }: Props) {
               </button>
               <button
                 type="submit"
-                disabled={submitting}
+                disabled={submitting||!destination.ready}
                 className={cn(
                   "inline-flex h-11 sm:h-9 items-center px-4 rounded-md text-sm font-medium",
                   "bg-action text-action-foreground hover:opacity-90 disabled:opacity-50",

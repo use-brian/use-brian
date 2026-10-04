@@ -1,3 +1,5 @@
+import {capturePdfIntakeSource,reservePdfIntake,finalizePdfIntake,checkPdfIntakeRequest,pdfIntakeError} from './office-pdf-intake.js'
+import {queryWithRLS} from './client.js'
 /** Owner-only PDF session persistence. [COMP:api/office-pdf-sessions] */
 import type { PdfSnapshot } from '@use-brian/office-model'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
@@ -27,6 +29,7 @@ export type PdfSessionAssetRow = {
 }
 
 export type CreatePdfSessionRecord = {
+  intakeReserved?: boolean
   userId: string
   artifactId: string
   versionId: string
@@ -61,6 +64,12 @@ const SELECT_SESSION = `
 
 export function createOfficePdfSessionStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
+    captureSource: capturePdfIntakeSource,
+    reserveIntake: reservePdfIntake,
+    checkIntakeRequest: checkPdfIntakeRequest,
+    async abortIntake(actor:string,id:string) {
+      return (await queryWithRLS(actor,'SELECT abandon_pdf_intake($1) AS abandoned',[id])).rows[0]?.abandoned===true
+    },
     async get(userId: string, artifactId: string): Promise<PdfSessionRow | null> {
       const result = await db<PdfSessionRow>(userId, `${SELECT_SESSION} AND a.id=$1`, [artifactId])
       return result.rows[0] ?? null
@@ -74,6 +83,8 @@ export function createOfficePdfSessionStore(db: OfficeDbQuery = defaultOfficeDbQ
     },
 
     async create(params: CreatePdfSessionRecord): Promise<PdfSessionRow | null> {
+      if (params.intakeReserved) return finalizePdfIntake(params,SELECT_SESSION)
+      if (db===defaultOfficeDbQuery) pdfIntakeError('pdf_intake_reservation_required')
       const assetIds = [params.sourceFileId, params.snapshotFileId, ...(params.signatureFileId ? [params.signatureFileId] : [])]
       const assetRoles = ['source', 'snapshot', ...(params.signatureFileId ? ['signature'] : [])]
       const assetHashes = [params.sourceSha256, params.snapshotHash, ...(params.signatureSha256 ? [params.signatureSha256] : [])]

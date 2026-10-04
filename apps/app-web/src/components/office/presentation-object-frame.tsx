@@ -513,7 +513,7 @@ export function PresentationGeometryToolbar({
 }) {
   const t = useT().office;
   const fields = [["xPt", t.x], ["yPt", t.y], ["widthPt", t.width], ["heightPt", t.height], ["rotationDeg", t.rotation]] as const;
-  return <div data-properties-toolbar="true" role="toolbar" aria-label={t.properties} className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1.5 border-b bg-background px-3 py-1.5 max-md:shrink-0 max-md:flex-nowrap max-md:border-b-0">
+  return <div data-properties-toolbar="true" role="toolbar" aria-label={t.properties} className="flex min-h-8 max-sm:min-h-11 flex-wrap items-center gap-x-3 gap-y-1.5 border-b bg-background px-3 py-1.5 max-md:shrink-0 max-md:flex-nowrap max-md:border-b-0">
     <strong className="shrink-0 text-xs font-semibold">{t.properties}</strong>
     {fields.map(([key, label]) => <label key={key} className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">{label}<input type="number" disabled={disabled} value={object.geometry[key]} onChange={(event) => onProperty(["geometry", key], Number(event.target.value))} className="h-10 w-[4.5rem] rounded border bg-background px-2 text-[16px] text-foreground disabled:opacity-50 md:h-7 md:text-xs" /></label>)}
     <button type="button" disabled={disabled} onClick={onDelete} className="ml-auto shrink-0 rounded px-2 py-1 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-40">{t.deleteObject}</button>

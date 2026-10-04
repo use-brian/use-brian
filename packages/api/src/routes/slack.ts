@@ -1,3 +1,5 @@
+import { claimChannelEvent } from '../db/channel-event-dedup.js'
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
@@ -46,7 +48,7 @@ import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, fetchSlackProfile, ensureAssistantMember, channelLinkBindsHere, type ChannelUserStore } from '../db/channel-user-store.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
-import { mergeShadowUser } from '../db/linked-accounts.js'
+import { completeLinkClaim } from './link-claim.js'
 import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
 import {
   parseFileContent,
@@ -164,7 +166,7 @@ type SlackRouteOptions = {
   filesApi?: import('@use-brian/core').FilesApi
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
-  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   /** Transient upload cache (`file_cache`). When present, inbound images are
    *  cached so the turn carries a promotable `<attached_file id="…">` tag
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
@@ -463,16 +465,16 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     const drainBackgroundProducers = (): void => {
       if (backgroundProducersDrained) return
       backgroundProducersDrained = true
-      if (options.workflowEventDispatcher) {
-        void dispatchSlackWorkflowEvent(
-          options.workflowEventDispatcher,
-          req.body,
-          integration.id,
-          channelId,
-        ).catch((err) =>
-          console.error('[slack] workflow event dispatch failed:', err),
-        )
-      }
+      void dispatchSlackWorkflowEvent(
+        options.workflowEventDispatcher,
+        req.body,
+        integration.id,
+        channelId,
+        integration.botUserId ?? undefined,
+        (integration.config ?? {}) as SlackAdapterConfig,
+      ).catch((err) =>
+        console.error('[slack] workflow event dispatch failed:', err),
+      )
       if (options.slackWebhookIngestor) {
         void dispatchSlackIngest(
           options.slackWebhookIngestor,
@@ -668,14 +670,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     }
 
     // Access control — silently ignore messages from unauthorized users
-    const accessMode = slackConfig.userAccessMode ?? 'allow_all'
-    if (accessMode === 'allowlist') {
-      const allowed = slackConfig.allowedUserIds ?? []
-      if (allowed.length > 0 && !allowed.includes(incoming.userId)) return
-    } else if (accessMode === 'blocklist') {
-      const blocked = slackConfig.blockedUserIds ?? []
-      if (blocked.includes(incoming.userId)) return
-    }
+    if (!slackUserAllowed(slackConfig, incoming.userId)) return
 
     // Addressing gate. An exact, unexpired realtime thread target may admit an
     // otherwise unmentioned channel reply. This is deliberately after access
@@ -738,16 +733,16 @@ export function slackRoutes(options: SlackRouteOptions): Router {
               providerId: incoming.userId,
               providerMetadata: { channelId: incoming.channelId },
             })
-            mergeShadowUser(code.userId, incoming.userId, 'slack', {
-              reason: 'link-code',
+            const claim = await completeLinkClaim({
+              provider: 'slack',
+              realUserId: code.userId,
+              providerId: incoming.userId,
               evidence: { codeId: code.id, channelId: incoming.channelId },
-            }).catch((err) => {
-              console.error('[slack] link-code merge failed:', err)
+              receivingAssistant: { id: assistant.id, name: assistant.name ?? null },
+              analytics: options.analytics,
             })
-            const linkedAssistant = await findAssistantById(code.assistantId)
-            const assistantName = linkedAssistant?.name ?? 'your assistant'
             await adapter.sendMessage(incoming.channelId, {
-              text: `Linked to "${assistantName}". Your past conversations here are now connected to your account.`,
+              text: claim.text,
             }, threadTs ? { threadTs } : undefined).catch((err) => {
               console.error('[slack] link confirmation send failed:', err)
             })
@@ -858,8 +853,19 @@ type ParsedSlackEvent = {
   actorId: string | null
   channelId: string | null
   mentions: string[]
+  files: IncomingMessage['files']
   isBot: boolean
   payload: Record<string, unknown>
+}
+
+/** Keep chat and deferred workflow producers on the same sender policy. */
+function slackUserAllowed(config: SlackAdapterConfig, userId: string): boolean {
+  if (config.userAccessMode === 'allowlist') {
+    const allowed = config.allowedUserIds ?? []
+    return allowed.length === 0 || allowed.includes(userId)
+  }
+  if (config.userAccessMode === 'blocklist') return !(config.blockedUserIds ?? []).includes(userId)
+  return true
 }
 
 /** `<@U123>` mention ids in Slack message text. */
@@ -883,7 +889,9 @@ function parseSlackEventForDispatch(body: unknown): ParsedSlackEvent | null {
   if (!ev || typeof ev !== 'object') return null
   const e = ev as Record<string, unknown>
   if (e.type !== 'message' && e.type !== 'app_mention') return null
-  if (typeof e.subtype === 'string' && e.subtype !== 'bot_message') return null
+  // file_share is a new user message, even when it has no text. Other
+  // subtypes describe lifecycle changes, edits/deletes, or system notices.
+  if (typeof e.subtype === 'string' && e.subtype !== 'bot_message' && e.subtype !== 'file_share') return null
 
   const text = typeof e.text === 'string' ? e.text : null
   const isBot = typeof e.bot_id === 'string' || e.subtype === 'bot_message'
@@ -903,6 +911,16 @@ function parseSlackEventForDispatch(body: unknown): ParsedSlackEvent | null {
     actorId,
     channelId,
     mentions: parseSlackMentions(text),
+    files: Array.isArray(e.files) ? e.files.flatMap(file => {
+      if (!file || typeof file !== 'object') return []
+      const f = file as Record<string, unknown>
+      return [{
+        url: '', // Workflows need metadata, not Slack's private download URLs.
+        name: typeof f.name === 'string' ? f.name : 'attachment',
+        mimeType: typeof f.mimetype === 'string' ? f.mimetype : 'application/octet-stream',
+        ...(typeof f.size === 'number' ? { sizeBytes: f.size } : {}),
+      }]
+    }) : [],
     isBot,
     payload: {
       text: text ?? '',
@@ -922,25 +940,46 @@ function parseSlackEventForDispatch(body: unknown): ParsedSlackEvent | null {
  * row id a workflow's `event` source names.
  */
 async function dispatchSlackWorkflowEvent(
-  dispatcher: WorkflowEventDispatcher,
+  dispatcher: WorkflowEventDispatcher | undefined,
   body: unknown,
   channelIntegrationId: string,
   channelsRowId: string,
+  botUserId?: string,
+  config: SlackAdapterConfig = {},
 ): Promise<void> {
   const parsed = parseSlackEventForDispatch(body)
   if (!parsed) return
   const channel = await getChannelForWebhook(channelsRowId)
-  if (!channel) return
-  await dispatcher.dispatch({
+  if (!channel || channel.status !== 'active') return
+  if (!parsed.actorId || !parsed.channelId || !slackUserAllowed(config, parsed.actorId)) return
+  if (botUserId && parsed.actorId === botUserId) return
+  // Slack sends message + app_mention for the same post (with different event_id).
+  // Claim only the workflow producer: chat and ingest have independent gates.
+  // A mention-only subscription still claims and dispatches normally.
+  const ts = parsed.payload.ts
+  if (typeof ts === 'string' && parsed.channelId && !await claimChannelEvent(
+    channelsRowId, `workflow:slack:${parsed.channelId}:${ts}`,
+  )) return
+  await dispatchIncomingMessageEvent({
     workspaceId: channel.workspaceId,
-    source: { type: 'channel', channelIntegrationId, channel: 'slack' },
-    text: parsed.text,
-    actorId: parsed.actorId,
-    channelId: parsed.channelId,
-    mentions: parsed.mentions,
+    integrationId: channelIntegrationId,
+    incoming: {
+      channelType: 'slack',
+      userId: parsed.actorId ?? '',
+      channelId: parsed.channelId ?? '',
+      messageId: typeof parsed.payload.ts === 'string' ? parsed.payload.ts : undefined,
+      threadId: typeof parsed.payload.thread_ts === 'string' ? parsed.payload.thread_ts : undefined,
+      replyToMessageId: typeof parsed.payload.thread_ts === 'string' ? parsed.payload.thread_ts : undefined,
+      text: parsed.text ?? '',
+      mentions: parsed.mentions,
+      files: parsed.files,
+      isGroupChat: !parsed.channelId?.startsWith('D'),
+      timestamp: Number(parsed.payload.ts ?? NaN),
+      raw: body,
+    },
     isBot: parsed.isBot,
     payload: parsed.payload,
-  })
+  }, dispatcher)
 }
 
 /**
@@ -1183,7 +1222,7 @@ type ProcessMessageParams = {
   filesApi?: import('@use-brian/core').FilesApi
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
-  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   /** Transient upload cache (`file_cache`). When present, inbound images are
    *  cached so the turn carries a promotable `<attached_file id="…">` tag
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images

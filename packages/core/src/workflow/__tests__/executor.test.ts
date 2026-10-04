@@ -1183,7 +1183,10 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(outcome.kind).toBe('completed')
   })
 
-  it('records a non-delivered outcome on the step run and audits it (observability)', async () => {
+  it.each([
+    { reason: 'no_integration' as const },
+    { reason: 'delivery_audience_unverified' as const, detail: 'evidence_exceeds_audience' as const },
+  ])('records and audits a non-delivered outcome including detail: %j', async (denial) => {
     const stores = makeFakeStores()
     const audits: WorkflowAuditEvent[] = []
     const deps: ExecutorDeps = {
@@ -1195,11 +1198,10 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       emitAudit: async (e) => {
         audits.push(e)
       },
-      // A channel with no connected integration → skipped, not delivered.
       deliverToChannel: async ({ channelType }) => ({
         status: 'skipped' as const,
         channelType,
-        reason: 'no_integration' as const,
+        ...denial,
       }),
     }
     const definition: WorkflowDefinition = {
@@ -1222,16 +1224,17 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(
       (stepRun?.output as { __delivery?: { status: string; reason?: string } } | undefined)
         ?.__delivery,
-    ).toMatchObject({ status: 'skipped', reason: 'no_integration' })
+    ).toMatchObject({ status: 'skipped', ...denial })
     // A non-delivered push is audited so the silent no-op becomes a signal.
     expect(audits.find((a) => a.type === 'workflow.step_delivered')).toMatchObject({
       type: 'workflow.step_delivered',
       stepId: 's1',
-      delivery: { status: 'skipped', reason: 'no_integration' },
+      delivery: { status: 'skipped', ...denial },
     })
   })
 
-  it('records a delivered outcome on the step run but does not audit it (no per-fire noise)', async () => {
+  it.each([undefined, 'explicit-publication-approval'])(
+    'records delivered output and audits only explicit publication receipt %s', async (publicationApprovalId) => {
     const stores = makeFakeStores()
     const audits: WorkflowAuditEvent[] = []
     const deps: ExecutorDeps = {
@@ -1243,11 +1246,11 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       emitAudit: async (e) => {
         audits.push(e)
       },
-      deliverToChannel: async ({ channelType, channelId }) => ({
-        status: 'delivered' as const,
-        channelType,
-        channelId,
-      }),
+      deliverToChannel: async ({ channelType, channelId, publication }) => {
+        expect(publication).toEqual({ runId: expect.any(String), stepId: 's1' })
+        return { status: 'delivered' as const, channelType, channelId,
+          ...(publicationApprovalId ? { publicationApprovalId } : {}) }
+      },
     }
     const definition: WorkflowDefinition = {
       startStepId: 's1',
@@ -1262,12 +1265,16 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       ],
     }
     const { run } = await seedWorkflowAndRun(deps, definition)
+    const consult = vi.spyOn(deps.consultTransport, 'send')
     await advanceWorkflowRun(deps, run.id)
+    expect(consult).toHaveBeenCalledWith(expect.objectContaining({ workflowStepId: 's1', workflowRunId: run.id }))
     const stepRun = stores.stepRuns.find((s) => s.runId === run.id && s.stepId === 's1')
     expect(
       (stepRun?.output as { __delivery?: { status: string } } | undefined)?.__delivery?.status,
     ).toBe('delivered')
-    expect(audits.find((a) => a.type === 'workflow.step_delivered')).toBeUndefined()
+    const receipt = audits.find((a) => a.type === 'workflow.step_delivered')
+    if (publicationApprovalId) expect(receipt).toMatchObject({ delivery: { status: 'delivered', publicationApprovalId } })
+    else expect(receipt).toBeUndefined()
   })
 
   it.each([
@@ -1734,14 +1741,14 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(updated?.status).toBe('failed')
   })
 
-  it('fails when a tool_call references an unknown tool', async () => {
+  it.each([{ discoveryWarnings: [] }, { discoveryWarnings: ['Connector discovery is limited by the current execution scope.'] }])('reports discovery warnings for an unknown tool: %j', async ({ discoveryWarnings }) => {
     const stores = makeFakeStores()
     const deps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       consultTransport: makeConsultTransport(),
       resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
-      buildToolRegistry: async () => new Map(),
+      buildToolRegistry: async () => Object.assign(new Map(), { discoveryWarnings }),
     }
     const { run } = await seedWorkflowAndRun(deps, {
       startStepId: 's',
@@ -1751,6 +1758,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(outcome.kind).toBe('failed')
     if (outcome.kind === 'failed') {
       expect(outcome.error.reason).toBe('tool_not_found')
+      for (const warning of discoveryWarnings) expect(outcome.error.message).toContain(warning)
     }
   })
 

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { intersectScopeGrants,minSensitivity } from '@use-brian/core'
+import { intersectDepartmentReadGrants,intersectScopeGrants,minSensitivity,type DepartmentReadGrant } from '@use-brian/core'
 
 /**
  * Trusted execution ceiling propagated through awaits and nested tools.
@@ -17,12 +17,16 @@ type AgentAccessContext = {
   workspaceId?: string
   userId?: string
   visibilityAssistantIds?: string[] | null
+  /** Sticky: a nested execution can narrow to a shared audience, never widen back. */
+  sharedAudience?: boolean
   clearance: AgentClearance
   /** undefined = legacy clearance-only wrap; linked Teams fail closed. */
   compartments?: string[] | null
   mutationCompartments?: string[] | null
   /** Project is not an ACL, but page/container reads must retain its boundary. */
   projectIds?: string[] | null
+  /** Permission model v2 read authority for a workspace whose v2 flag is on. */
+  departmentRead?: DepartmentReadGrant
 }
 
 const agentAccessStorage = new AsyncLocalStorage<AgentAccessContext>()
@@ -41,10 +45,12 @@ export function runWithAgentAccess<T>(
     workspaceId?: string
     userId?: string
     visibilityAssistantIds?: string[] | null
+    sharedAudience?: boolean
     clearance: string | null | undefined
     compartments: string[] | null | undefined
     mutationCompartments?: string[] | null
     projectIds?: string[] | null | undefined
+    departmentRead?: DepartmentReadGrant
   },
   fn: () => T,
 ): T {
@@ -64,6 +70,10 @@ export function runWithAgentAccess<T>(
       intersect(parent?.compartments,access.compartments)),
     projectIds:intersect(parent?.projectIds,access.projectIds),
     visibilityAssistantIds:intersect(parent?.visibilityAssistantIds,access.visibilityAssistantIds),
+    ...(parent?.sharedAudience||access.sharedAudience?{sharedAudience:true}:{}),
+    // Nested executions only narrow the v2 grant; one never replaces another.
+    ...(parent?.departmentRead&&access.departmentRead?{departmentRead:intersectDepartmentReadGrants(parent.departmentRead,access.departmentRead)}
+      :parent?.departmentRead??access.departmentRead?{departmentRead:(parent?.departmentRead??access.departmentRead)!}:{}),
   },fn)
 }
 

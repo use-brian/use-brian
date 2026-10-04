@@ -105,7 +105,9 @@ import {
   type CurrentConnectorAuth,
 } from "@/lib/connector-auth-form";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {ShopifySetupGate,ShopifySetupResume} from "@/components/connectors/shopify-reviewed-setup";
 import { ConnectorContextBinding } from "@/components/context/connector-context-binding";
+import { ConnectorDepartmentBadge } from "@/components/connectors/connector-department-badge";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 const GOOGLE_CLIENT_ID = publicRuntimeConfig().googleClientId;
@@ -1847,6 +1849,7 @@ function ConnectorsList() {
     // merchant's own custom app has to grant). Delete this early return and a
     // Shopify connect falls through to the GOOGLE authorize URL.
     if (id === "shopify") {
+      setJustConnected(null); // A pending reviewed setup must never inherit an auto-exposure arm.
       setShowShopifyForm(rid);
       revealConnectForm(rid);
       setShopifyConnectOpts(opts ?? null);
@@ -3765,6 +3768,7 @@ function ConnectorsList() {
 
   return (
     <div className="space-y-5">
+      <ShopifySetupResume/>
       <StudioTopbarActions>
         <AddConnectorMenu
           label={tc.addConnector}
@@ -3962,7 +3966,7 @@ function ConnectorsList() {
             <BackButton
               label={tc.backToList}
               onClick={() => setDetailOpen(false)}
-              className="min-h-11"
+              className="min-h-8 max-sm:min-h-11"
             />
           </div>
           {!sel ? (
@@ -4014,6 +4018,7 @@ function ConnectorsList() {
                             inside the Edit form, so an admin can tell at a
                             glance why a member reports "I can't see this". */}
                         <SensitivityBadge tier={sensitivity} size="xs" />
+                        <ConnectorDepartmentBadge workspaceId={workspaceId} instanceId={iid} />
                       </div>
                       <p className="text-[12px] text-muted-foreground">
                         {tc.workspaceSharedTeamNative}
@@ -4283,9 +4288,14 @@ function ConnectorsList() {
                       <ConnectorIcon connectorId={sel.id} iconUrl={sel.icon_url} />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <h2 className="truncate text-[15px] font-semibold tracking-tight">
-                        {sel.label ?? sel.name}
-                      </h2>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <h2 className="truncate text-[15px] font-semibold tracking-tight">
+                          {sel.label ?? sel.name}
+                        </h2>
+                        {sel.connectorInstanceId && (
+                          <ConnectorDepartmentBadge workspaceId={workspaceId} instanceId={sel.connectorInstanceId} />
+                        )}
+                      </div>
                       <p className="text-[12px] text-muted-foreground">
                         {sel.sharedBy
                           ? tc.workspaceSharedByMember.replace("{name}", sel.sharedBy)
@@ -4309,6 +4319,11 @@ function ConnectorsList() {
             // Built-in primitive — always-on pill, no connect/disconnect/
             // remove/share affordances, tool list always visible.
             const builtin = isBuiltinPrimitive(sel);
+            // Personal connection in a workspace: connected, owned by me, not
+            // exposed (no connector_grant). Transferred rows never reach this
+            // panel (they render through the workspace-owned branch above).
+            const personalOnly =
+              !builtin && sel.connected && !!instanceId && !!active && !exposedGrants[instanceId];
             // The header title is the instance nickname (defaults to the
             // provider name); when nicknamed, the provider name drops to a
             // muted badge so the account's identity stays readable.
@@ -4408,6 +4423,16 @@ function ConnectorsList() {
                         <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
                           {transport}
                         </span>
+                      )}
+                      {/* Department = audience; only meaningful once the
+                          connector is exposed to this workspace. Keyed by the
+                          grant so a re-expose reloads it. */}
+                      {!builtin && instanceId && exposedGrants[instanceId] && (
+                        <ConnectorDepartmentBadge
+                          key={exposedGrants[instanceId]}
+                          workspaceId={workspaceId}
+                          instanceId={instanceId}
+                        />
                       )}
                     </div>
                     {subtitle ? (
@@ -4911,7 +4936,7 @@ function ConnectorsList() {
                   </div>
                 )}
                 {showShopifyForm === rid && (
-                  <div className="space-y-2">
+                  <ShopifySetupGate instanceId={shopifyConnectOpts?.instanceId??sel.connectorInstanceId??undefined} reconnect={!shopifyConnectOpts?.addAnother&&Boolean(shopifyConnectOpts?.instanceId??sel.connectorInstanceId)} legacy={<div className="space-y-2">
                     <p className="text-xs text-muted-foreground">{tc.shopify.formHelp}</p>
                     <input
                       type="text"
@@ -5027,7 +5052,7 @@ function ConnectorsList() {
                         </button>
                       </div>
                     )}
-                  </div>
+                  </div>}/>
                 )}
 
                 {/* GCS bring-your-own storage form — SA key + bucket, validated
@@ -5489,7 +5514,16 @@ function ConnectorsList() {
                     built-ins). Built-in primitives always show their tools —
                     the per-tool allow/ask/block governance is the point of
                     the page for them. */}
-                {(sel.connected || builtin) && !STORAGE_CONNECTOR_IDS.has(sel.id) && (
+                {/* A personal connection (neither exposed nor transferred) is
+                    not related to this workspace: no Tools / Settings tabs,
+                    only a placeholder pointing at the Expose / Transfer card. */}
+                {personalOnly && !STORAGE_CONNECTOR_IDS.has(sel.id) && (
+                  <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-[13px] text-muted-foreground">
+                    {tc.personalConnectorPlaceholder}
+                  </div>
+                )}
+
+                {(sel.connected || builtin) && !personalOnly && !STORAGE_CONNECTOR_IDS.has(sel.id) && (
                   <>
                     <div className="flex gap-0 border-b border-border">
                       <button

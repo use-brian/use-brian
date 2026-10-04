@@ -1,3 +1,4 @@
+import { withPagePlacement } from './page-placement-admission.js'
 /**
  * Saved views store, backed by PostgreSQL (migration 120 + 184).
  *
@@ -237,6 +238,32 @@ export function reparentWouldCycle(
   return false
 }
 
+/** Canonical copy: the request supplies an identity/version, never content or
+ * an envelope. This bounded path preserves the exact source Teamspace/Project
+ * (including creator-private); relocation/read-only derivation is not admitted. */
+export async function copySavedViewPage(params: {
+  userId: string; workspaceId: string; sourcePageId: string; sourceVersion: number
+  teamspaceId?: string | null; projectId?: string | null
+}): Promise<SavedView> {
+  return withPagePlacement(params.workspaceId, params.userId, {
+    teamspaceId: params.teamspaceId, projectId: params.projectId,
+  }, async (client, placement, source) => {
+    if (!source) throw new Error('Canonical copy source was not locked')
+    const result = await client.query<FullRow>(`INSERT INTO saved_views
+      (workspace_id,created_by,name,name_origin,description,icon,entity,view_type,binding,page,state,
+       teamspace_id,project_id,clearance,nest_parent_id,position)
+      -- Only the admitted plain snapshot is copied. Do not propagate legacy
+      -- live bindings, description/icon source references, or source pointers.
+      SELECT workspace_id,$2,$3,'user',NULL,NULL,'tasks','table',
+        '{"entity":"tasks","viewType":"table"}'::jsonb,$4::jsonb,'saved',
+        $5,$6,$7,NULL,(SELECT COALESCE(MAX(position)+1,0) FROM saved_views WHERE workspace_id=$8 AND nest_parent_id IS NULL)
+      FROM saved_views WHERE id=$1 AND workspace_id=$8
+      RETURNING ${FULL_SELECT}`, [source.id, params.userId, source.name, JSON.stringify(source.page),
+      placement.teamspaceId, placement.projectId ?? null, placement.clearance ?? 'internal', params.workspaceId])
+    return rowToFull(result.rows[0])
+  }, undefined, { pageId: params.sourcePageId, version: params.sourceVersion })
+}
+
 // ── Factory ───────────────────────────────────────────────────────────
 
 /** Construction deps for the saved-views store. */
@@ -265,7 +292,7 @@ export function createDbSavedViewStore(
     }
   }
   return {
-    async create({ userId, workspaceId, name, description, binding, writtenBy }) {
+    async create({ userId, workspaceId, name, description, binding, writtenBy }, options) {
       // Manual /views/new — defaults to 'saved' (the user explicitly
       // created the view through the form). No auto-prune timestamp.
       // Page is seeded as a one-block data page so the new readers can
@@ -279,16 +306,15 @@ export function createDbSavedViewStore(
           },
         ],
       }
-      const result = await queryWithRLS<FullRow>(
-        userId,
+      const result = await withPagePlacement(workspaceId, userId, {}, (client, placement) => client.query<FullRow>(
         // `name_origin = 'user'` — the /views/new form always carries a
         // user-chosen name, so it's never auto-title-eligible.
         // `teamspace_id` defaults to the workspace's General teamspace
         // (migration 313) so a programmatic root create stays team-visible.
         `INSERT INTO saved_views
-           (workspace_id, created_by, name, name_origin, description, entity, view_type, binding, page, state, auto_prune_at, teamspace_id)
+           (workspace_id, created_by, name, name_origin, description, entity, view_type, binding, page, state, auto_prune_at, teamspace_id, clearance)
          VALUES ($1, $2, $3, 'user', $4, $5, $6, $7, $8, 'saved', NULL,
-           (SELECT t.id FROM teamspaces t WHERE t.workspace_id = $1 AND t.is_default = true))
+           CASE WHEN $9::boolean THEN $10::uuid ELSE (SELECT t.id FROM teamspaces t WHERE t.workspace_id = $1 AND t.is_default = true) END, $11)
          RETURNING ${FULL_SELECT}`,
         [
           workspaceId,
@@ -299,8 +325,9 @@ export function createDbSavedViewStore(
           binding.viewType,
           JSON.stringify(binding),
           JSON.stringify(page),
+          placement.teamspaceId !== undefined, placement.teamspaceId ?? null, placement.clearance ?? 'internal',
         ],
-      )
+      ), options)
       const view = rowToFull(result.rows[0])
       emitLifecycle({
         workspaceId: view.workspaceId,
@@ -507,7 +534,7 @@ export function createDbSavedViewStore(
       return result.rows.length > 0
     },
 
-    async createDraft({ id, userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent, teamspaceId, projectId, state }) {
+    async createDraft({ id, userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent, teamspaceId, projectId, state }, options) {
       // Born-saved rows are durable artifacts (a paid synthesis brief), not
       // speculative renders: no prune date at all, so neither the daily prune
       // worker nor a later `unsave` can strand them on an expired timestamp.
@@ -523,8 +550,9 @@ export function createDbSavedViewStore(
       // Born auto-title-eligible unless the caller already supplied a real
       // title (renderPage/createSubPage pass 'user'). Migration 218.
       const origin: NameOrigin = nameOrigin ?? 'placeholder'
-      const result = await queryWithRLS<FullRow>(
-        userId,
+      let replay = false
+      const result = await withPagePlacement(workspaceId, userId, { teamspaceId, projectId, nestParentId }, async (client, placement) => {
+        const inserted = await client.query<FullRow>(
         // `position` appends to the end of the destination sibling set so
         // new pages get a distinct, contiguous slot instead of all sharing
         // 0 (which broke reparent's gap-open reindexing). The sibling set is
@@ -555,7 +583,7 @@ export function createDbSavedViewStore(
         // a private page, never an insert into a teamspace the caller can't
         // see (the policy WITH CHECK backstops that anyway).
         `INSERT INTO saved_views
-           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending, teamspace_id, project_id${id ? ', id' : ''})
+           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending, teamspace_id, project_id, clearance${id ? ', id' : ''})
          VALUES ($1, $2, $3, $4, NULL, $10, $5, $6, $7, $8, $17, $9,
            (SELECT COALESCE(MAX(position) + 1, 0) FROM saved_views
               WHERE nest_parent_id IS NOT DISTINCT FROM $9 AND workspace_id = $1),
@@ -569,7 +597,7 @@ export function createDbSavedViewStore(
              WHEN $18::boolean THEN $19::uuid
              WHEN $9::uuid IS NOT NULL THEN (SELECT p.project_id FROM saved_views p WHERE p.id = $9)
              ELSE NULL
-           END${id ? ', $20::uuid' : ''})
+           END, $20${id ? ', $21::uuid' : ''})
          ${id ? 'ON CONFLICT (id) DO NOTHING' : ''}
          RETURNING ${FULL_SELECT}`,
         [
@@ -587,32 +615,34 @@ export function createDbSavedViewStore(
           autoPruneAt,
           anchorKey ?? null,
           deferCreatedEvent === true,
-          teamspaceId !== undefined,
-          teamspaceId ?? null,
+          placement.teamspaceId !== undefined,
+          placement.teamspaceId ?? null,
           bornState,
-          projectId !== undefined,
-          projectId ?? null,
+          placement.projectId !== undefined,
+          placement.projectId ?? null,
+          placement.clearance ?? 'internal',
           ...(id ? [id] : []),
         ],
-      )
-      if (id && result.rows.length === 0) {
-        // A lost response or concurrent retry must not create another page or
-        // overwrite a page whose content has already been edited. RLS plus
-        // creator/workspace checks keep a guessed ID from exposing a row.
-        const existing = await queryWithRLS<FullRow>(userId,
+        )
+        if (!id || inserted.rows.length) return inserted
+        // Replays are authenticated on the same live transaction; a read-only
+        // grant or ownership in a different workspace is not mutation authority.
+        const existing = await client.query<FullRow>(
           `SELECT ${FULL_SELECT} FROM saved_views
-           WHERE id = $1 AND workspace_id = $2 AND created_by = $3`,
+           WHERE id = $1 AND workspace_id = $2 AND created_by = $3
+             AND saved_view_root_operation_scope_allows(id,true)`,
           [id, workspaceId, userId])
         if (!existing.rows[0]) {
           throw Object.assign(new Error('Page ID is already in use'), { code: 'PAGE_ID_CONFLICT' })
         }
-        return rowToFull(existing.rows[0])
-      }
+        replay = true
+        return existing
+      }, options)
       const view = rowToFull(result.rows[0])
       // Deferred (interactive) drafts hold their `created` event until the
       // client commits it (debounced typing / navigate-away) via
       // `commitCreatedEvent`; every other create fires it now.
-      if (!deferCreatedEvent) {
+      if (!deferCreatedEvent && !replay) {
         emitLifecycle({
           workspaceId: view.workspaceId,
           pageId: view.id,

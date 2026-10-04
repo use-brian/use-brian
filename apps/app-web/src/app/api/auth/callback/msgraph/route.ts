@@ -1,3 +1,4 @@
+import { withConnectWorkspace } from "@/lib/connector-auto-expose";
 import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
@@ -69,7 +70,7 @@ export async function GET(request: Request) {
     // as anything about the code.
     const redirectUri = `${new URL(request.url).origin}/api/auth/callback/msgraph`;
 
-    const exchangeRes = await fetch(`${INTERNAL_API_URL}/api/connectors/msgraph/oauth-callback`, {
+    const exchangeRes = await fetch(withConnectWorkspace(`${INTERNAL_API_URL}/api/connectors/msgraph/oauth-callback`, workspaceId), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

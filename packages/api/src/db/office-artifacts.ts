@@ -1,5 +1,7 @@
 /** Office artifact/version/source/grant/audit persistence. [COMP:api/office-store] */
-import { queryWithRLS } from './client.js'
+import { queryWithRLS, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
+import type { PoolClient } from 'pg'
+import { admitOfficeShell, officeCreationPolicy, officeProvenanceRequired, type OfficeCreateOptions } from '../workspace-access/office-create-admission.js'
 import type { QueryResultRow } from 'pg'
 import {officeProjectionQuery} from './office-read-projection.js'
 
@@ -45,6 +47,25 @@ export function isDurableOfficeArtifact(row: OfficeArtifactRow): row is DurableO
 }
 
 export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
+  // The injected query is the existing low-level test seam. Production creation
+  // always uses one app-role client; never call the pooling db callback while
+  // holding that client, or join an Office read-only projection transaction.
+  async function creation<T>(userId: string, write: (query: OfficeDbQuery, client?: PoolClient) => Promise<T>): Promise<T> {
+    if (db !== defaultOfficeDbQuery) return write(db)
+    if (officeProjectionQuery(userId)) throw new Error('office_creation_in_read_projection')
+    const client = await getAppPool().connect()
+    try {
+      await client.query('BEGIN')
+      await applyRLSGucs(client, userId)
+      const query: OfficeDbQuery = async <R>(actor: string, sql: string, params: unknown[]) => {
+        if (actor !== userId) throw new Error('office_creation_actor_mismatch')
+        return { rows: (await client.query(sql, params)).rows as R[] }
+      }
+      const result = await write(query, client)
+      await client.query('COMMIT')
+      return result
+    } finally { await rollbackAndRelease(client) }
+  }
   return {
     async list(userId: string, workspaceId: string, lifecycleState: 'active' | 'archived' | 'trash' | 'retained'): Promise<OfficeArtifactRow[]> {
       const result = await db<OfficeArtifactRow>(userId, `
@@ -78,26 +99,37 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       visibilityUserIds?: string[]
       requiredCompartments?: string[]
       projectIds?: string[]
-    }): Promise<OfficeArtifactRow> {
-      const result = await db<OfficeArtifactRow>(params.userId, `
-        INSERT INTO office_artifacts
-          (workspace_id, family, mode, title, creator_user_id, owner_user_id,
-           template_version_id, capability_version, sensitivity,
-           visibility_user_ids, compartments, project_ids)
-        VALUES ($1,$2,$11,$3,$4,$4,$5,$6,$7,$8::uuid[],$9::text[],$10::uuid[])
-        RETURNING id, workspace_id AS "workspaceId", family, mode, title,
-                  creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
-                  template_version_id AS "templateVersionId",
-                  head_version_id AS "headVersionId", head_version::int AS "headVersion",
-                  capability_version AS "capabilityVersion", sensitivity,
-                  compartments, project_ids AS "projectIds",
-                  default_workspace_role AS "defaultWorkspaceRole",
-                  lifecycle_state AS "lifecycleState", expires_at AS "expiresAt",
-                  updated_at AS "updatedAt"
-      `, [params.workspaceId, params.family, params.title, params.userId, params.templateVersionId, params.capabilityVersion, params.sensitivity, params.visibilityUserIds ?? [], params.requiredCompartments ?? [], params.projectIds ?? [], params.mode ?? 'artifact'])
-      const row = result.rows[0]
-      if (!row) throw new Error('Office artifact shell insert returned no row')
-      return row
+    }, options?: OfficeCreateOptions): Promise<OfficeArtifactRow> {
+      return creation(params.userId, async (query, client) => {
+        if (client) params = await admitOfficeShell(client, params, options)
+        const result = await query<OfficeArtifactRow & { visibilityUserIds: string[] }>(params.userId, `
+          INSERT INTO office_artifacts
+            (workspace_id, family, mode, title, creator_user_id, owner_user_id,
+             template_version_id, capability_version, sensitivity,
+             visibility_user_ids, compartments, project_ids)
+          VALUES ($1,$2,$11,$3,$4,$4,$5,$6,$7,$8::uuid[],$9::text[],$10::uuid[])
+          RETURNING id, workspace_id AS "workspaceId", family, mode, title,
+                    creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
+                    template_version_id AS "templateVersionId",
+                    head_version_id AS "headVersionId", head_version::int AS "headVersion",
+                    capability_version AS "capabilityVersion", sensitivity,
+                    compartments, project_ids AS "projectIds", visibility_user_ids AS "visibilityUserIds",
+                    default_workspace_role AS "defaultWorkspaceRole",
+                    lifecycle_state AS "lifecycleState", expires_at AS "expiresAt",
+                    updated_at AS "updatedAt"
+        `, [params.workspaceId, params.family, params.title, params.userId, params.templateVersionId, params.capabilityVersion, params.sensitivity, params.visibilityUserIds ?? [], params.requiredCompartments ?? [], params.projectIds ?? [], params.mode ?? 'artifact'])
+        const persisted = result.rows[0]
+        if (!persisted) throw new Error('Office artifact shell insert returned no row')
+        const { visibilityUserIds, ...row } = persisted
+        if (client) {
+          const same = (a: string[], b: string[]) => JSON.stringify([...new Set(a)].sort()) === JSON.stringify([...new Set(b)].sort())
+          if (row.workspaceId !== params.workspaceId || row.sensitivity !== params.sensitivity
+            || !same(row.compartments, params.requiredCompartments ?? [])
+            || !same(row.projectIds, params.projectIds ?? [])
+            || !same(visibilityUserIds, params.visibilityUserIds ?? [])) throw new Error('office_admission_persistence_mismatch')
+        }
+        return row
+      })
     },
 
     async deleteEmptyShell(userId: string, artifactId: string): Promise<boolean> {
@@ -136,43 +168,52 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       sourceArtifactId: string
       sourceVersionId: string
     }): Promise<{ id: string; version: number } | null> {
-      const result=await db<{id:string;version:number}>(params.userId,`
-        WITH artifact AS (
-          INSERT INTO office_artifacts
-            (id,workspace_id,family,mode,title,creator_user_id,owner_user_id,
-             template_version_id,head_version_id,head_version,capability_version,
-             sensitivity,compartments,project_ids)
-          VALUES ($1,$3,$4,'artifact',$5,$6,$6,$7,$2,1,$8,$9,$10::text[],$11::uuid[])
-          RETURNING id,workspace_id
-        ), version AS (
-          INSERT INTO office_artifact_versions
-            (id,artifact_id,workspace_id,version,parent_version_id,snapshot_file_id,
-             snapshot_hash,operation_clock,schema_version,capability_version,
-             author_type,author_user_id,origin,summary,named,checkpoint_kind)
-          SELECT $2,id,workspace_id,1,NULL,$12,$13,$14,$15,$16,'user',$6,'manual',$21,TRUE,'named'
-            FROM artifact
-          RETURNING id,artifact_id,workspace_id,version
-        ), live AS (
-          INSERT INTO office_collab_documents
-            (artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version,seq)
-          SELECT artifact_id,workspace_id,$17,$18,$13,version,1 FROM version
-          RETURNING artifact_id
-        ), source AS (
-          INSERT INTO office_artifact_sources
-            (artifact_id,artifact_version_id,workspace_id,source_kind,source_id,source_version,sensitivity)
-          SELECT artifact_id,id,workspace_id,'artifact',$19,$20,$9 FROM version
-          RETURNING artifact_id
-        )
-        SELECT v.id,v.version::int AS version FROM version v
-          JOIN live l ON l.artifact_id=v.artifact_id
-          JOIN source s ON s.artifact_id=v.artifact_id
-      `,[params.artifactId,params.versionId,params.workspaceId,params.family,params.title,params.userId,
-        params.templateVersionId,params.capabilityVersion,params.sensitivity,
-        params.compartments,params.projectIds,params.snapshotFileId,params.snapshotHash,
-        Buffer.from(params.operationClock),params.schemaVersion,params.snapshotCapabilityVersion,
-        Buffer.from(params.liveUpdate),Buffer.from(params.liveStateVector),params.sourceArtifactId,
-        params.sourceVersionId,`Copied from version ${params.sourceVersionId}`])
-      return result.rows[0]??null
+      return creation(params.userId, async (query, client) => {
+        if (client) {
+          const policy = await officeCreationPolicy(client, params.workspaceId)
+          // The current copy CTE trusts caller labels and does not validate/lock
+          // transitive source, snapshot-file and visibility evidence. Preserve it
+          // for legacy only. Never default this derived artifact in ready mode.
+          if (policy?.setupState === 'ready') officeProvenanceRequired()
+        }
+        const result=await query<{id:string;version:number}>(params.userId,`
+          WITH artifact AS (
+            INSERT INTO office_artifacts
+              (id,workspace_id,family,mode,title,creator_user_id,owner_user_id,
+               template_version_id,head_version_id,head_version,capability_version,
+               sensitivity,compartments,project_ids)
+            VALUES ($1,$3,$4,'artifact',$5,$6,$6,$7,$2,1,$8,$9,$10::text[],$11::uuid[])
+            RETURNING id,workspace_id
+          ), version AS (
+            INSERT INTO office_artifact_versions
+              (id,artifact_id,workspace_id,version,parent_version_id,snapshot_file_id,
+               snapshot_hash,operation_clock,schema_version,capability_version,
+               author_type,author_user_id,origin,summary,named,checkpoint_kind)
+            SELECT $2,id,workspace_id,1,NULL,$12,$13,$14,$15,$16,'user',$6,'manual',$21,TRUE,'named'
+              FROM artifact
+            RETURNING id,artifact_id,workspace_id,version
+          ), live AS (
+            INSERT INTO office_collab_documents
+              (artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version,seq)
+            SELECT artifact_id,workspace_id,$17,$18,$13,version,1 FROM version
+            RETURNING artifact_id
+          ), source AS (
+            INSERT INTO office_artifact_sources
+              (artifact_id,artifact_version_id,workspace_id,source_kind,source_id,source_version,sensitivity)
+            SELECT artifact_id,id,workspace_id,'artifact',$19,$20,$9 FROM version
+            RETURNING artifact_id
+          )
+          SELECT v.id,v.version::int AS version FROM version v
+            JOIN live l ON l.artifact_id=v.artifact_id
+            JOIN source s ON s.artifact_id=v.artifact_id
+        `,[params.artifactId,params.versionId,params.workspaceId,params.family,params.title,params.userId,
+          params.templateVersionId,params.capabilityVersion,params.sensitivity,
+          params.compartments,params.projectIds,params.snapshotFileId,params.snapshotHash,
+          Buffer.from(params.operationClock),params.schemaVersion,params.snapshotCapabilityVersion,
+          Buffer.from(params.liveUpdate),Buffer.from(params.liveStateVector),params.sourceArtifactId,
+          params.sourceVersionId,`Copied from version ${params.sourceVersionId}`])
+        return result.rows[0]??null
+      })
     },
 
     async get(userId: string, artifactId: string): Promise<OfficeArtifactRow | null> {

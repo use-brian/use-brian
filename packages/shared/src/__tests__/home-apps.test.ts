@@ -41,10 +41,10 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
   })
 
   it('defaults a never-configured workspace to Page + Office + Chat', () => {
-    expect(DEFAULT_HOME_APPS).toEqual(['page', 'office', 'chat'])
-    expect(normalizeHomeApps([])).toEqual(['page', 'office', 'chat'])
-    expect(normalizeHomeApps(null)).toEqual(['page', 'office', 'chat'])
-    expect(normalizeHomeApps('page,chat')).toEqual(['page', 'office', 'chat'])
+    expect(DEFAULT_HOME_APPS).toEqual(['chat', 'page', 'browsers'])
+    expect(normalizeHomeApps([])).toEqual(['chat', 'page', 'browsers'])
+    expect(normalizeHomeApps(null)).toEqual(['chat', 'page', 'browsers'])
+    expect(normalizeHomeApps('page,chat')).toEqual(['chat', 'page', 'browsers'])
   })
 
   it('recognises built-in vs custom entries', () => {
@@ -61,7 +61,7 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
   it('filters unknown keys on read instead of failing (additive contract)', () => {
     expect(normalizeHomeApps(['page', 'holodeck', 'chat'])).toEqual(['page', 'chat'])
     // Everything dropped still yields a usable strip, never an empty one.
-    expect(normalizeHomeApps(['holodeck'])).toEqual(['page', 'office', 'chat'])
+    expect(normalizeHomeApps(['holodeck'])).toEqual(['chat', 'page', 'browsers'])
     // Live was briefly a Home app before promotion to the primary icon row.
     // Retired stored keys ride the same loose-read compatibility path.
     expect(normalizeHomeApps(['page', 'live', 'chat'])).toEqual(['page', 'chat'])

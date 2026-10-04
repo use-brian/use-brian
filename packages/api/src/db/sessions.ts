@@ -1,12 +1,16 @@
 import type pg from 'pg'
 import {
   bindScopeSource,
+  deriveResourceScope,
+  DerivedScopeError,
+  maxSensitivity,
   type DerivedWriteEvidence,
   type ResourceScope,
   type ScopeSource,
 } from '@use-brian/core'
-import { getPool, query } from './client.js'
-import { recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
+import { getPool, getAppPool, applyRLSGucs, query } from './client.js'
+import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
+import { admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 /**
@@ -206,6 +210,19 @@ export function isSharedChatSession(s: SessionShape): boolean {
 }
 
 /**
+ * Is this session's AUDIENCE shared rather than one owner? The single
+ * definition for audience-scoped decisions: how a person's input is stamped,
+ * which ceiling delivery checks, and what automatic context a turn may load.
+ * Wider than `isSharedChatSession` (web rooms): doc comment threads and Feed
+ * threads are `visibility='workspace'`, and live drafts are `mode='draft'`.
+ * Two definitions refused every doc-thread and draft turn: input stamped
+ * personal, delivery judged against a room.
+ */
+export function isSharedAudienceSession(s: Pick<SessionShape, 'visibility' | 'mode'>): boolean {
+  return s.visibility === 'workspace' || s.mode === 'draft'
+}
+
+/**
  * A session several humans share, so the model needs speaker labels to tell
  * "the user" apart: shared chats, feed drafts, and doc comment threads.
  */
@@ -279,8 +296,11 @@ export async function createWorkspaceChatSession(params: {
   effectiveClearance: string | null
   contextGroupId?: string | null
   contextProjectId?: string | null
+  expectedPolicyRevision?: string
+  /** Set only by the authenticated web route, never from request JSON. */
+  authenticatedHuman?: true
 }): Promise<Session> {
-  return findOrCreateSession({
+  return findOrCreateSessionInternal({
     assistantId: params.assistantId,
     userId: params.starterUserId,
     channelType: 'web',
@@ -291,20 +311,21 @@ export async function createWorkspaceChatSession(params: {
     visibility: 'workspace',
     workspaceId: params.workspaceId,
     effectiveClearance: params.effectiveClearance,
+    expectedPolicyRevision: params.expectedPolicyRevision,
     ...(params.contextGroupId !== undefined
       ? { contextGroupId: params.contextGroupId }
       : {}),
     ...(params.contextProjectId !== undefined
       ? { contextProjectId: params.contextProjectId }
       : {}),
-  })
+  }, params.authenticatedHuman === true)
 }
 
 /**
  * Find or create a session for the given tuple.
  * Updates lastActiveAt on access.
  */
-export async function findOrCreateSession(params: {
+type CreateSessionParams = {
   assistantId: string
   userId: string
   channelType: string
@@ -343,7 +364,45 @@ export async function findOrCreateSession(params: {
   contextGroupId?: string | null
   contextProjectId?: string | null
   contextCompartments?: string[]
-}): Promise<Session> {
+  expectedPolicyRevision?: string
+}
+
+export async function findOrCreateSession(params: CreateSessionParams): Promise<Session> {
+  return findOrCreateSessionInternal(params, false)
+}
+
+/** Per-call authenticated personal transport; no request-supplied visibility. */
+export async function createPersonalWebSession(params: Omit<CreateSessionParams, 'visibility' | 'effectiveClearance' | 'contextCompartments'>,
+  principal: PersonalWebSessionPrincipal): Promise<Session> {
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, principal.actorUserId)
+    const admitted = await admitPersonalWebSession(client, params, principal)
+    const session = await insertSession({ ...admitted, visibility: 'owner' }, (sql, values) => client.query(sql, values), true)
+    await client.query('COMMIT')
+    return session
+  } catch (error) { await client.query('ROLLBACK'); throw error }
+  finally { client.release() }
+}
+
+async function findOrCreateSessionInternal(params: CreateSessionParams, authenticatedHuman: boolean): Promise<Session> {
+  if (params.visibility !== 'workspace') return insertSession(params, query, params.channelType === 'web' && params.appOrigin === 'chat')
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, params.userId)
+    const admitted = await admitSessionCreate(client, params, authenticatedHuman)
+    const session = await insertSession(admitted, (sql, values) => client.query(sql, values), true)
+    await client.query('COMMIT')
+    return session
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally { client.release() }
+}
+
+async function insertSession(params: CreateSessionParams, execute: typeof query, resumeFirst = false): Promise<Session> {
   const appId = params.appId ?? 'Use Brian'
   const appOrigin = params.appOrigin ?? null
   const visibility = params.visibility ?? 'owner'
@@ -355,7 +414,31 @@ export async function findOrCreateSession(params: {
   const contextProjectId = params.contextProjectId ?? null
   const contextCompartments = params.contextCompartments ?? null
 
-  const result = await query<Session>(
+  // BEFORE INSERT runs even for ON CONFLICT. Never exempt a proposed row
+  // merely because its identity matches history: resume the locked row instead.
+  if (resumeFirst) {
+    const resumed = await execute<Session>(
+      `UPDATE sessions SET last_active_at=now()
+       WHERE assistant_id=$1 AND user_id=$2 AND channel_type=$3 AND channel_id=$4 AND app_id=$5
+       RETURNING id, assistant_id as "assistantId", user_id as "userId",
+               channel_type as "channelType", channel_id as "channelId",
+               app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+               compaction_count as "compactionCount",
+               compact_boundary_sequence as "compactBoundarySequence", title,
+               downgrade_notice_sent as "downgradeNoticeSent",
+               downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
+               mode, visibility, effective_clearance as "effectiveClearance",
+               context_group_id as "contextGroupId",
+               context_project_id as "contextProjectId",
+               context_compartments as "contextCompartments",
+               context_locked_at as "contextLockedAt",
+               created_at as "createdAt", last_active_at as "lastActiveAt"`,
+      [params.assistantId, params.userId, params.channelType, params.channelId, appId],
+    )
+    if (resumed.rows[0]) return resumed.rows[0]
+  }
+
+  const result = await execute<Session>(
     `INSERT INTO sessions (
        assistant_id, user_id, channel_type, channel_id, app_id, app_origin,
        visibility, workspace_id, effective_clearance, context_group_id,
@@ -553,7 +636,9 @@ async function createTransientBrainSession(params: {
 /**
  * Find a session by its primary key ID.
  */
-export async function findSessionById(id: string): Promise<Session | null> {
+/** Full session snapshot without a recency write. Safe for authority checks
+ * while another connection holds the session row lock. */
+export async function readSessionById(id: string): Promise<Session | null> {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             channel_type as "channelType", channel_id as "channelId",
@@ -571,7 +656,12 @@ export async function findSessionById(id: string): Promise<Session | null> {
      FROM sessions WHERE id = $1`,
     [id],
   )
-  if (result.rows.length === 0) return null
+  return result.rows[0] ?? null
+}
+
+export async function findSessionById(id: string): Promise<Session | null> {
+  const session = await readSessionById(id)
+  if (!session) return null
   // Touch last_active_at.
   //
   // NOTE: this is a *read* that writes the recency column, and that is
@@ -583,7 +673,7 @@ export async function findSessionById(id: string): Promise<Session | null> {
   // running turn writes (`turn_heartbeat_at`, migration 424). Never move the
   // sweep predicate back onto `last_active_at`.
   await query(`UPDATE sessions SET last_active_at = now() WHERE id = $1`, [id])
-  return result.rows[0]
+  return session
 }
 
 /** Read-only session identity/binding snapshot for per-boundary authority renewal. */
@@ -744,6 +834,21 @@ export async function touchTurnLease(
   const row = result.rows[0]
   if (!row) return { held: false, cancelRequested: false }
   return { held: true, cancelRequested: row.cancel_requested_at !== null }
+}
+
+/**
+ * Did a DIFFERENT turn claim this session after `token`'s turn? True only when
+ * another, non-null lease token is now current. A plain stop releases the
+ * lease to NULL (`releaseTurnLease(..., null)`), which is not a successor: the
+ * stopped turn still owns what it streamed. Stop-then-retry is.
+ */
+export async function isTurnLeaseSuperseded(sessionId: string, token: string): Promise<boolean> {
+  const result = await query<{ token: string | null }>(
+    `SELECT turn_lease_token AS token FROM sessions WHERE id = $1`,
+    [sessionId],
+  )
+  const current = result.rows[0]?.token ?? null
+  return current !== null && current !== token
 }
 
 /**
@@ -1022,11 +1127,24 @@ export async function countSessionTurns(sessionId: string): Promise<number> {
  */
 export async function getSessionMessages(
   sessionId: string,
-  opts?: { limit?: number; afterSequence?: number; fromSequence?: number | null },
+  opts?: {
+    limit?: number
+    afterSequence?: number
+    fromSequence?: number | null
+    /**
+     * Withhold rows whose scope is held for review. This read runs on the
+     * owner pool, which bypasses the RLS policy that withholds them
+     * everywhere else, so every caller that turns history into MODEL context
+     * must pass it: a held row carries no bound source, so its labels would
+     * never reach the turn's writes or delivery check.
+     */
+    excludeHeld?: boolean
+  },
 ): Promise<SessionMessage[]> {
   const conditions = ['session_id = $1']
   const values: unknown[] = [sessionId]
   let paramIdx = 2
+  if (opts?.excludeHeld) conditions.push('scope_held IS NOT TRUE')
 
   if (opts?.afterSequence !== undefined) {
     conditions.push(`sequence_num > $${paramIdx}`)
@@ -1391,9 +1509,33 @@ export async function addSessionMessage(params: {
                attachments`
 
   const write = async (db: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> => {
-    const scope = params.derivation
-      ? await validateDerivedMemoryInputs(db, params.derivation)
-      : params.scope
+    let derivation = params.derivation
+    let scope = params.scope
+    if (derivation) {
+      // A transcript row records what was SAID, not a derived fact. A source
+      // the turn itself edited or removed (list then close a task, forget a
+      // memory) must not block saving a reply the user already received
+      // (decision D1): lineage keeps only still-current sources, while the row
+      // carries the labels of every source it was derived from, raised to the
+      // current labels of any that changed. Held sources and changed causal
+      // inputs still refuse.
+      const certified = deriveResourceScope(derivation)
+      const states = await readCurrentScopeSources(db, certified.workspaceId, derivation.sources)
+      if (states.some((state) => state.state === 'held' || state.state === 'unverifiable' || state.state === 'stale_input')) {
+        throw new DerivedScopeError('scope_source_changed')
+      }
+      const labels = { ...certified }
+      for (const state of states) {
+        if (state.state !== 'changed') continue
+        labels.sensitivity = maxSensitivity(labels.sensitivity, state.current.sensitivity)
+        labels.compartments = [...new Set([...labels.compartments, ...state.current.compartments])].sort()
+        labels.projectIds = [...new Set([...labels.projectIds, ...state.current.projectIds])].sort()
+      }
+      scope = labels
+      const current = states.filter((state) => state.state === 'current').map((state) => state.source)
+      derivation = current.length ? { ...derivation, sources: current } : undefined
+      if (derivation) await validateDerivedMemoryInputs(db, derivation)
+    }
     const values = [
       params.sessionId,
       params.role,
@@ -1423,8 +1565,8 @@ export async function addSessionMessage(params: {
       resourceId: stored.id,
       version: '1',
     }
-    if (params.derivation) {
-      await recordDerivedResource(db, params.derivation, source)
+    if (derivation) {
+      await recordDerivedResource(db, derivation, source)
     }
     return bindScopeSource(stored, source)
   }
@@ -1836,7 +1978,7 @@ export async function listSessionsForWorkspaceSystem(
   opts: { limit: number; channelType?: string },
 ): Promise<WorkspaceSessionSummary[]> {
   const limit = Math.max(1, Math.min(opts.limit, 50))
-  const conditions = ['a.workspace_id = $1']
+  const conditions = ['a.workspace_id = $1', 'a.placement_department_id IS NULL']
   const values: unknown[] = [workspaceId]
   let paramIdx = 2
 

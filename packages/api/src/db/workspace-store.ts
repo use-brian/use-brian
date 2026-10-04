@@ -22,6 +22,7 @@
  */
 
 import type { PoolClient } from 'pg'
+import { transferAssistant } from './assistant-transfer-admission.js'
 import { seedBuiltinPrimitiveCapabilities } from './capability-seed.js'
 import {
   minSensitivity,
@@ -339,8 +340,8 @@ export type WorkspaceStore = {
    * compose with `canMemberDraftRole` to decide draft-route admission.
    */
   getMembership(userId: string, workspaceId: string): Promise<{ role: 'owner' | 'admin' | 'member'; canDraft: boolean } | null>
-  adoptAssistant(userId: string, workspaceId: string, assistantId: string): Promise<boolean>
-  removeAssistant(userId: string, workspaceId: string, assistantId: string): Promise<boolean>
+  adoptAssistant(userId: string, workspaceId: string, assistantId: string, departmentId?: string, expectedPolicyRevision?: string): Promise<boolean>
+  removeAssistant(userId: string, workspaceId: string, assistantId: string, departmentId?: string, expectedPolicyRevision?: string): Promise<boolean>
   /** System-level lookup (no RLS) for worker context. */
   getByIdSystem(workspaceId: string): Promise<Workspace | null>
   /** Count free-plan workspaces owned by a user (the auto-created Personal
@@ -707,7 +708,7 @@ export async function resolveOperationCeilingsSystem(
   assistantCompartments: string[] | null,
   requireMembership = false,
   authorityQuery: typeof query = query,
-): Promise<{ clearance: Sensitivity; compartments: string[] | null; mutationCompartments: string[] | null }> {
+): Promise<{ clearance: Sensitivity; compartments: string[] | null; mutationCompartments: string[] | null; departmentReadV2?: boolean; departmentQuery?: typeof query }> {
   if (!workspaceId) return {
     clearance: assistantClearance, compartments: assistantCompartments,
     mutationCompartments: assistantCompartments,
@@ -716,16 +717,22 @@ export async function resolveOperationCeilingsSystem(
   // One statement sees read grants and ordinary membership at the same snapshot.
   const member = (await authorityQuery<{
     role: 'owner' | 'admin' | 'member'; clearance: Sensitivity;
-    readCompartments: string[] | null; mutationCompartments: string[] | null;
+    readCompartments: string[] | null; mutationCompartments: string[] | null; departmentReadV2?: string | null;
   }>(`SELECT role,clearance,
       effective_member_read_compartments(user_id,workspace_id) AS "readCompartments",
-      effective_member_team_compartments(user_id,workspace_id) AS "mutationCompartments"
+      effective_member_team_compartments(user_id,workspace_id) AS "mutationCompartments",
+      (SELECT to_jsonb(w)->>'department_read_v2' FROM workspaces w WHERE w.id=$1) AS "departmentReadV2"
     FROM workspace_members WHERE workspace_id=$1 AND user_id=$2`,[workspaceId,userId])).rows[0]
   if (!member && requireMembership) throw new Error('authority_unavailable')
   return {
     clearance: effectiveReadClearance(member?.role ?? null,member?.clearance ?? null,assistantClearance),
     compartments: effectiveReadCompartments(member?.role ?? null,member ? member.readCompartments : [],assistantCompartments),
     mutationCompartments: effectiveReadCompartments(member?.role ?? null,member ? member.mutationCompartments : [],assistantCompartments),
+    // Permission model v2 flag (migration 649), read through to_jsonb so an
+    // older schema reads "off". The resolver switches paths on it.
+    // The v2 snapshot must read on the same connection (a caller's transaction
+    // or single-connection pool), so the query used here travels with the flag.
+    ...(member?.departmentReadV2 === 'true' ? { departmentReadV2: true, departmentQuery: authorityQuery } : {}),
   }
 }
 
@@ -1411,7 +1418,8 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
 
         // §17 — primary assistants default-on for Tasks (Q1) and CRM
         // (Q2) primitive grants, plus the built-in workspace primitives
-        // (files / office / computer). Matches findOrCreateUser's defaults so
+        // (files / office / computer), plus 'configure' (Agent configuration,
+        // default-on for every primary). Matches findOrCreateUser's defaults so
         // a workspace primary behaves identically to the Personal one — keep
         // the two lists in step.
         await client.query(
@@ -1421,7 +1429,8 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
                   ($1, 'crm',      $2, '§17 default-on at primary creation'),
                   ($1, 'goals',    $2, 'goals default-on at primary creation'),
                   ($1, 'views',    $2, 'doc-skill parity — default-on at primary creation'),
-                  ($1, 'files',    $2, 'built-in primitive — default-on at primary creation')`,
+                  ($1, 'files',    $2, 'built-in primitive — default-on at primary creation'),
+                  ($1, 'configure', $2, 'agent configuration - default-on at primary creation')`,
           [assistantResult.rows[0].id, userId],
         )
         await seedBuiltinPrimitiveCapabilities(
@@ -1633,63 +1642,76 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
     },
 
     async addMember(_userId, workspaceId, memberUserId, role = 'member') {
-      // Clearance tracks the role default (sensitivity.md → "User clearance
-      // (Q18)"): admin is an operator → 'confidential', member → 'internal'.
-      // Until Q18 explicit per-member grants ship, role is the sole clearance
-      // source; the write-side channel/page gates read this raw column.
-      const clearance = role === 'admin' ? 'confidential' : 'internal'
-      const result = await query<WorkspaceMember>(
-        `INSERT INTO workspace_members (workspace_id, user_id, role, clearance) VALUES ($1, $2, $3, $4)
-         RETURNING id, workspace_id AS "workspaceId", user_id AS "userId", role, joined_at AS "joinedAt"`,
-        [workspaceId, memberUserId, role, clearance],
-      )
-      const member = result.rows[0]
-
-      // Add the new member to all workspace assistants
-      await query(
-        `INSERT INTO assistant_members (assistant_id, user_id, role)
-         SELECT a.id, $1, 'member'
-         FROM assistants a WHERE a.workspace_id = $2
-         ON CONFLICT (assistant_id, user_id) DO NOTHING`,
-        [memberUserId, workspaceId],
-      )
-
-      // Auto-join the workspace's default (General) teamspace — the hard
-      // page-access boundary would otherwise leave a fresh member with an
-      // empty doc sidebar (migration 313). Non-fatal: a missing join heals
-      // on the next teamspace list.
+      const client = await getPool().connect()
       try {
-        await joinDefaultTeamspacesSystem(workspaceId, memberUserId)
-      } catch (err) {
-        console.error('[workspace-store] default-teamspace join on member add failed:', err)
-      }
+        await client.query('BEGIN')
+        // Workspace first: serialize admission with access-policy changes.
+        await client.query('SELECT id FROM workspaces WHERE id = $1 FOR UPDATE', [workspaceId])
+        // Clearance tracks the role default (sensitivity.md → "User clearance
+        // (Q18)"): admin is an operator → 'confidential', member → 'internal'.
+        // Until Q18 explicit per-member grants ship, role is the sole clearance
+        // source; the write-side channel/page gates read this raw column.
+        const clearance = role === 'admin' ? 'confidential' : 'internal'
+        const result = await client.query<WorkspaceMember>(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, clearance) VALUES ($1, $2, $3, $4)
+           RETURNING id, workspace_id AS "workspaceId", user_id AS "userId", role, joined_at AS "joinedAt"`,
+          [workspaceId, memberUserId, role, clearance],
+        )
+        const member = result.rows[0]
 
-      return member
+        // Join shared assistants and the member’s own personal assistants only.
+        await client.query(
+          `INSERT INTO assistant_members (assistant_id, user_id, role)
+           SELECT a.id, $1, 'member'
+           FROM assistants a WHERE a.workspace_id = $2
+             AND (a.owner_user_id IS NULL OR a.kind IN ('primary', 'app') OR a.owner_user_id = $1)
+           ON CONFLICT (assistant_id, user_id) DO NOTHING`,
+          [memberUserId, workspaceId],
+        )
+
+        await joinDefaultTeamspacesSystem(workspaceId, memberUserId, client)
+        await client.query('COMMIT')
+        return member
+      } catch (err) {
+        await client.query('ROLLBACK')
+        throw err
+      } finally {
+        client.release()
+      }
     },
 
     async ensureMemberSystem(workspaceId, memberUserId) {
-      const result = await query<WorkspaceMember>(
-        `INSERT INTO workspace_members (workspace_id, user_id, role, clearance)
-         VALUES ($1, $2, 'member', 'internal')
-         ON CONFLICT (workspace_id, user_id) DO UPDATE SET user_id = EXCLUDED.user_id
-         RETURNING id, workspace_id AS "workspaceId", user_id AS "userId", role,
-                   can_draft AS "canDraft", clearance, joined_at AS "joinedAt"`,
-        [workspaceId, memberUserId],
-      )
-      const member = result.rows[0]
-      await query(
-        `INSERT INTO assistant_members (assistant_id, user_id, role)
-         SELECT a.id, $1, 'member'
-         FROM assistants a WHERE a.workspace_id = $2
-         ON CONFLICT (assistant_id, user_id) DO NOTHING`,
-        [memberUserId, workspaceId],
-      )
+      const client = await getPool().connect()
       try {
-        await joinDefaultTeamspacesSystem(workspaceId, memberUserId)
+        await client.query('BEGIN')
+        // Workspace first: serialize admission with access-policy changes.
+        await client.query('SELECT id FROM workspaces WHERE id = $1 FOR UPDATE', [workspaceId])
+        const result = await client.query<WorkspaceMember>(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, clearance)
+           VALUES ($1, $2, 'member', 'internal')
+           ON CONFLICT (workspace_id, user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+           RETURNING id, workspace_id AS "workspaceId", user_id AS "userId", role,
+                     can_draft AS "canDraft", clearance, joined_at AS "joinedAt"`,
+          [workspaceId, memberUserId],
+        )
+        const member = result.rows[0]
+        await client.query(
+          `INSERT INTO assistant_members (assistant_id, user_id, role)
+           SELECT a.id, $1, 'member'
+           FROM assistants a WHERE a.workspace_id = $2
+             AND (a.owner_user_id IS NULL OR a.kind IN ('primary', 'app') OR a.owner_user_id = $1)
+           ON CONFLICT (assistant_id, user_id) DO NOTHING`,
+          [memberUserId, workspaceId],
+        )
+        await joinDefaultTeamspacesSystem(workspaceId, memberUserId, client)
+        await client.query('COMMIT')
+        return member
       } catch (err) {
-        console.error('[workspace-store] default-teamspace join on JIT enrollment failed:', err)
+        await client.query('ROLLBACK')
+        throw err
+      } finally {
+        client.release()
       }
-      return member
     },
 
     async removeMember(_userId, workspaceId, memberUserId) {
@@ -1878,103 +1900,12 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
       return { role: row.role, canDraft: row.canDraft }
     },
 
-    async adoptAssistant(userId, workspaceId, assistantId) {
-      // Transfer-of-ownership: caller's Personal workspace → target
-      // workspace. Requirements:
-      //   - Caller owns the assistant (assistant_members.role='owner').
-      //   - Assistant currently lives in caller's Personal workspace
-      //     (post-§9 every assistant has a workspace_id).
-      const ownerCheck = await queryWithRLS<{ role: string }>(
-        userId,
-        `SELECT role FROM assistant_members WHERE assistant_id = $1 AND user_id = $2`,
-        [assistantId, userId],
-      )
-      if (!ownerCheck.rows[0] || ownerCheck.rows[0].role !== 'owner') return false
-
-      const client = await getPool().connect()
-      try {
-        await client.query('BEGIN')
-
-        const updated = await client.query(
-          `UPDATE assistants a
-             SET workspace_id = $1,
-                 owner_user_id = NULL
-           FROM workspaces w
-           WHERE a.id = $2
-             AND a.workspace_id = w.id
-             AND w.owner_user_id = $3
-             AND w.is_personal = true`,
-          [workspaceId, assistantId, userId],
-        )
-        if ((updated.rowCount ?? 0) === 0) {
-          await client.query('ROLLBACK')
-          return false
-        }
-
-        await client.query(
-          `DELETE FROM assistant_members WHERE assistant_id = $1`,
-          [assistantId],
-        )
-
-        await client.query('COMMIT')
-        return true
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => {})
-        throw err
-      } finally {
-        client.release()
-      }
+    async adoptAssistant(userId, workspaceId, assistantId, departmentId, expectedPolicyRevision) {
+      return transferAssistant(userId, workspaceId, assistantId, 'adopt', departmentId, expectedPolicyRevision)
     },
 
-    async removeAssistant(userId, workspaceId, assistantId) {
-      // Transfer-of-ownership: workspace → workspace owner's Personal.
-      const newOwnerRow = await query<{ ownerUserId: string; personalWorkspaceId: string | null }>(
-        `SELECT w.owner_user_id AS "ownerUserId",
-                pw.id            AS "personalWorkspaceId"
-         FROM workspaces w
-         LEFT JOIN workspaces pw ON pw.owner_user_id = w.owner_user_id AND pw.is_personal = true
-         WHERE w.id = $1`,
-        [workspaceId],
-      )
-      const newOwnerUserId = newOwnerRow.rows[0]?.ownerUserId
-      const newWorkspaceId = newOwnerRow.rows[0]?.personalWorkspaceId
-      if (!newOwnerUserId || !newWorkspaceId) return false
-
-      const client = await getPool().connect()
-      try {
-        await client.query('BEGIN')
-
-        const updated = await client.query(
-          `UPDATE assistants
-             SET workspace_id = $1,
-                 owner_user_id = $2
-           WHERE id = $3 AND workspace_id = $4`,
-          [newWorkspaceId, newOwnerUserId, assistantId, workspaceId],
-        )
-        if ((updated.rowCount ?? 0) === 0) {
-          await client.query('ROLLBACK')
-          return false
-        }
-
-        await client.query(
-          `DELETE FROM assistant_members WHERE assistant_id = $1`,
-          [assistantId],
-        )
-        await client.query(
-          `INSERT INTO assistant_members (assistant_id, user_id, role)
-           VALUES ($1, $2, 'owner')
-           ON CONFLICT (assistant_id, user_id) DO UPDATE SET role = 'owner'`,
-          [assistantId, newOwnerUserId],
-        )
-
-        await client.query('COMMIT')
-        return true
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => {})
-        throw err
-      } finally {
-        client.release()
-      }
+    async removeAssistant(userId, workspaceId, assistantId, departmentId, expectedPolicyRevision) {
+      return transferAssistant(userId, workspaceId, assistantId, 'remove', departmentId, expectedPolicyRevision)
     },
 
     async getByIdSystem(workspaceId) {

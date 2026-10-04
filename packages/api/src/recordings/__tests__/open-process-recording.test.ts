@@ -26,6 +26,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
             storageUri: 's3://bucket/ws-1/channel-media/id',
           },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/channel-media/id', parent: { storageUri: 's3://bucket/ws-1/channel-media/id' } }) as never),
         getRecording: vi.fn(async () => null),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
@@ -36,6 +37,36 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
     expect(forUri).toHaveBeenCalledWith('ws-1', 's3://bucket/ws-1/channel-media/id')
     expect(brainIngestor).toHaveBeenCalledWith(expect.objectContaining({ parentEpisodeId: 'rec-1' }))
     expect(result).toEqual({ truncated: false, segmentsInserted: 1, durationMs: 1000 })
+  })
+
+  it('binds a workspace-shared recording to the workspace primary for Pipeline B, never an empty id', async () => {
+    const storage = { signedReadUrl: vi.fn(async () => 'https://signed.example/media') }
+    const brainIngestor = vi.fn(async () => ({}) as never)
+    const run = (primary: string | null) => processOpenRecording(
+      { recordingId: 'rec-shared', actingUserId: 'owner-1' },
+      {
+        filesResolver: { forUri: vi.fn(async () => storage) as never, forWorkspace: vi.fn() },
+        fallbackStorage: storage as never,
+        transcriber: { name: 'test', transcribe: vi.fn(async () => ({ utterances: [{ startMs: 0, endMs: 1000, speaker: null, text: 'shared' }], usages: [], windows: 1, truncated: false, degenerateWindows: 0 })) },
+        brainIngestor,
+        resolvePrimaryAssistantId: vi.fn(async (actor: string, workspace: string) => {
+          expect([actor, workspace]).toEqual(['owner-1', 'ws-1'])
+          return primary
+        }),
+        getEpisode: vi.fn(async () => ({ id: 'rec-shared', workspaceId: 'ws-1', userId: null, assistantId: null, sensitivity: 'internal',
+          sourceRef: { gcsKey: 'ws-1/media', storageUri: 's3://bucket/ws-1/media' } }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/media', parent: { storageUri: 's3://bucket/ws-1/media' } }) as never),
+        getRecording: vi.fn(async () => null),
+        probe: vi.fn(async () => 1000),
+        extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
+        insertSegments: vi.fn(async () => 1),
+      },
+    )
+    await run('primary-1')
+    expect(brainIngestor).toHaveBeenCalledWith(expect.objectContaining({ assistantId: 'primary-1', parentEpisodeId: 'rec-shared' }))
+    brainIngestor.mockClear()
+    await expect(run(null)).rejects.toThrow('recording_brain_assistant_unavailable')
+    expect(brainIngestor).not.toHaveBeenCalled()
   })
 
   it('fails clearly when no transcriber is configured', async () => {
@@ -70,6 +101,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
             storageUri: 'file:///data/files/ws-1/recordings/video-id',
           },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/video-id', parent: { storageUri: 'file:///data/files/ws-1/recordings/video-id' } }) as never),
         getRecording: vi.fn(async () => null),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('m4a-bytes'), mime: 'audio/mp4' })),
@@ -129,6 +161,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
           id: 'rec-1', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
           sensitivity: 'confidential', sourceRef: { gcsKey: 'ws-1/recordings/id' },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/id', parent: { storageUri: '' } }) as never),
         getRecording: vi.fn(async () => ({ title: 'Sales call', fileName: 'call.m4a' }) as never),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
@@ -147,7 +180,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
       recordingId: 'rec-1',
       sensitivity: 'confidential',
       title: 'Sales call',
-    }))
+    }), expect.objectContaining({ recordingStorageKey: 'ws-1/recordings/id' }))
     expect(linkTranscriptFile).toHaveBeenCalledWith('rec-1', 'transcript-1')
     expect(synthesize).toHaveBeenCalledWith(expect.objectContaining({
       blueprintSlug: 'sales-call',
@@ -180,6 +213,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
           id: 'rec-1', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
           sensitivity: 'internal', sourceRef: { gcsKey: 'ws-1/recordings/id' },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/id', parent: { storageUri: '' } }) as never),
         getRecording: vi.fn(async () => null),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
@@ -220,6 +254,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
           id: 'rec-v', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
           sensitivity: 'internal', sourceRef: { gcsKey: 'ws-1/recordings/v' },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/v', parent: { storageUri: '' } }) as never),
         getRecording: vi.fn(async () => ({ mime: 'video/webm', title: 'demo', kind: 'meeting' }) as never),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
@@ -255,6 +290,7 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
           id: 'rec-v2', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
           sensitivity: 'internal', sourceRef: { gcsKey: 'ws-1/recordings/v2', mime: 'video/mp4' },
         }) as never),
+        captureProvenance: vi.fn(async () => ({ recordingStorageKey: 'ws-1/recordings/v2', parent: { storageUri: '' } }) as never),
         getRecording: vi.fn(async () => null),
         probe: vi.fn(async () => 1000),
         extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),

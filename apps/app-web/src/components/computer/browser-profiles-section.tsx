@@ -626,7 +626,7 @@ export function BrowserProfilesSection({
                   ) : null}
 
                   {profileSurfaces(profile).captureFromBrowser ? (
-                    <div className="mt-3 rounded-md border border-border bg-muted/20 p-3">
+                    <div className="mt-4 border-t border-border pt-3">
                       <p className="text-[11px] font-medium text-foreground">
                         {t.computer.profiles.captureLabel}
                       </p>
@@ -726,7 +726,7 @@ export function BrowserProfilesSection({
                       host-owned broker store. It never enters chat or a
                       model-facing browser tool. Cloud profiles only. */}
                   {profileSurfaces(profile).signIn ? (
-                    <div className="mt-3 rounded-md border border-border bg-muted/20 p-3">
+                    <div className="mt-4 border-t border-border pt-3">
                       <p className="text-[11px] font-medium text-foreground">
                         {t.computer.profiles.credentialLabel}
                       </p>
@@ -800,11 +800,11 @@ export function BrowserProfilesSection({
                       ) : null}
 
                       {profile.credentials.length > 0 ? (
-                        <ul className="mt-3 divide-y divide-border rounded-md border border-border bg-background">
+                        <ul className="mt-2 divide-y divide-border">
                           {profile.credentials.map((credential) => (
                             <li
                               key={credential.id}
-                              className="flex items-center justify-between gap-3 px-2.5 py-2"
+                              className="flex items-center justify-between gap-3 py-2"
                             >
                               <div className="min-w-0">
                                 <div className="flex items-center gap-2">
@@ -1021,11 +1021,11 @@ export function BrowserProfilesSection({
                       <p className="text-[11px] font-medium text-muted-foreground">
                         {t.computer.profiles.grantsLabel}
                       </p>
-                      <ul className="mt-1 divide-y divide-border rounded-md border border-border">
+                      <ul className="mt-1 divide-y divide-border">
                         {profile.grants.map((grant) => (
                           <li
                             key={grant.id}
-                            className="flex items-center justify-between gap-3 px-2.5 py-2"
+                            className="flex items-center justify-between gap-3 py-2"
                           >
                             <div className="min-w-0">
                               <span className="truncate text-xs font-medium">{grant.skillName}</span>
@@ -1064,11 +1064,11 @@ export function BrowserProfilesSection({
                         {t.computer.profiles.sessionsEmpty}
                       </p>
                     ) : (
-                      <ul className="mt-1 divide-y divide-border rounded-md border border-border">
+                      <ul className="mt-1 divide-y divide-border">
                         {profile.sessions.map((session) => (
                           <li
                             key={session.site}
-                            className="flex items-center justify-between gap-3 px-2.5 py-2"
+                            className="flex items-center justify-between gap-3 py-2"
                           >
                             <div className="min-w-0">
                               <div className="flex items-center gap-2">

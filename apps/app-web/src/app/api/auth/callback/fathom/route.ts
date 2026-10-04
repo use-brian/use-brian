@@ -1,3 +1,4 @@
+import { withConnectWorkspace } from "@/lib/connector-auto-expose";
 import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
@@ -126,7 +127,7 @@ export async function GET(request: Request) {
     }
 
     const storeRes = await fetch(
-      `${INTERNAL_API_URL}/api/connectors/fathom/store-credentials`,
+      withConnectWorkspace(`${INTERNAL_API_URL}/api/connectors/fathom/store-credentials`, workspaceId),
       {
         method: "POST",
         headers: {

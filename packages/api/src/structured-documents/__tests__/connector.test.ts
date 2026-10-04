@@ -86,7 +86,7 @@ describe('[COMP:api/structured-documents] structured OCR connector resolver', ()
     const { binding } = await f.resolver.resolve(limited, 'file', 'instance')
     expect(f.personalPolicy).toHaveBeenCalledWith({ assistantId: APP_LEVEL_ASSISTANT_ID, userId: 'owner', serverName: f.instance.label, toolName: 'ocr_capabilities' })
     expect(f.personalPolicy).toHaveBeenCalledWith({ assistantId: 'assistant', userId: 'owner', serverName: f.instance.label, toolName: 'ocr_start' })
-    f.state.grants[0].compartments = [] // Unbounded exposure is NOT a finite grant.
+    f.state.grants[0].compartments = ['legal'] // A department this turn cannot reach.
     await expect(f.resolver.resolve(limited, 'file', 'instance', binding)).rejects.toMatchObject({ code: 'connector_unavailable' })
     f.state.grants = []
     expect(await f.resolver.list(ctx)).toEqual([])

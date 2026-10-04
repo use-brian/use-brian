@@ -459,7 +459,7 @@ function ImportDialog({ workspaceId, config, canCreateField, open, initialKind, 
                 ))}
               </div>
               {createColumn !== null && (
-                <div className="mt-3 space-y-3 rounded-lg border border-border bg-muted/20 p-3">
+                <div className="mt-3 space-y-3 border-l-2 border-border pl-3">
                   <div className="text-xs font-medium">{t.createFieldFromColumn}</div>
                   <div className="grid gap-2 sm:grid-cols-2">
                     <Input label={t.fieldLabel} value={newFieldLabel} onChange={setNewFieldLabel} />
@@ -734,7 +734,7 @@ function DuplicateReview({ workspaceId, open, onOpenChange, onMerged }: Paramete
           const eligible = groupPairs.filter((pair) => canSelectCrmMergePair(pair, selectedPairs, separations));
           const chosen = eligible.filter((pair) => selected.has(pair.key));
           return <section key={`${group.kind}:${group.reason}:${group.value}`} className="rounded-xl border border-border p-3">
-            <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs font-medium">
+            <label className="flex min-h-8 max-sm:min-h-11 cursor-pointer items-center gap-2 text-xs font-medium">
               <Checkbox aria-label={t.selectDuplicateGroup.replace("{name}", group.value)} checked={eligible.length > 0 && chosen.length === eligible.length} indeterminate={chosen.length > 0 && chosen.length < eligible.length} disabled={disabled || eligible.length === 0} onCheckedChange={(include) => choose(eligible, include)} />
               <span className="min-w-0 break-words">{t.duplicateReasons[group.reason]} · {group.value}</span>
             </label>
@@ -742,7 +742,7 @@ function DuplicateReview({ workspaceId, open, onOpenChange, onMerged }: Paramete
               const pair = groupPairs.find((candidate) => candidate.duplicate.id === record.id);
               const conflict = pair ? !canSelectCrmMergePair(pair, selectedPairs, separations) : false;
               return <div key={record.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2 text-xs">
-                <label className="flex min-h-11 min-w-32 flex-1 cursor-pointer items-center gap-2">
+                <label className="flex min-h-8 max-sm:min-h-11 min-w-32 flex-1 cursor-pointer items-center gap-2">
                   {index > 0 && pair && <Checkbox aria-label={t.includeDuplicate.replace("{name}", record.name).replace("{survivor}", pair.survivor.name)} checked={selected.has(pair.key)} disabled={disabled || conflict} onCheckedChange={(include) => choose([pair], include)} />}
                   <span className="break-words">{record.name}</span>
                 </label>
@@ -756,7 +756,7 @@ function DuplicateReview({ workspaceId, open, onOpenChange, onMerged }: Paramete
           </section>;
         })}
         {loaded && !loading && !error && groups.length === 0 && <div className="text-sm text-muted-foreground">{t.noDuplicates}</div>}
-        {separations.length > 0 && <details className="rounded-xl border border-border p-3"><summary className="min-h-11 cursor-pointer text-xs font-medium">{t.keptSeparateSection.replace("{count}", String(separations.length))}</summary><div className="mt-2 space-y-2">{separations.map((separation) => <div key={separation.id} className="flex flex-wrap items-center justify-between gap-2 text-xs"><span>{separation.leftName} · {separation.rightName}</span><Button size="xs" variant="ghost" className="max-sm:min-h-11" disabled={disabled} onClick={() => void reviewAgain(separation.id)}>{t.reviewAgain}</Button></div>)}</div></details>}
+        {separations.length > 0 && <details className="rounded-xl border border-border p-3"><summary className="min-h-8 max-sm:min-h-11 cursor-pointer text-xs font-medium">{t.keptSeparateSection.replace("{count}", String(separations.length))}</summary><div className="mt-2 space-y-2">{separations.map((separation) => <div key={separation.id} className="flex flex-wrap items-center justify-between gap-2 text-xs"><span>{separation.leftName} · {separation.rightName}</span><Button size="xs" variant="ghost" className="max-sm:min-h-11" disabled={disabled} onClick={() => void reviewAgain(separation.id)}>{t.reviewAgain}</Button></div>)}</div></details>}
       </div>
     </Shell>
   );

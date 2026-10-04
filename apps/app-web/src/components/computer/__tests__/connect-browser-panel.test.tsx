@@ -81,15 +81,17 @@ describe("[COMP:app-web/connect-browser] My Browser connect surface", () => {
 
 describe("[COMP:app-web/connect-browser] Desktop connect surface", () => {
   afterEach(() => vi.unstubAllGlobals());
-  it("shows automatic lifecycle state, never extension installation or manual tokens", () => {
+  it("keeps automatic lifecycle state and exposes manual extension pairing", () => {
     vi.stubGlobal("window", { usebrianDesktop: { browserControl: vi.fn() } });
     const html = render();
     expect(html).toContain(c.desktop.title);
     expect(html).toContain(c.desktop.automatic);
+    expect(html).toContain(c.desktop.externalTitle);
+    expect(html).toContain("Install the extension in the browser profile");
     expect(html).not.toContain(c.desktop.connect);
     expect(html).not.toContain(c.desktop.resume);
-    expect(html).not.toContain("chromewebstore.google.com");
-    expect(html).not.toContain(c.step1Cta);
-    expect(html).not.toContain(c.generate);
+    expect(html).toContain("chromewebstore.google.com");
+    expect(html).toContain(c.step1Cta);
+    expect(html).toContain(c.generate);
   });
 });

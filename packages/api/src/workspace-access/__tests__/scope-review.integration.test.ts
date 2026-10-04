@@ -128,7 +128,7 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
       writing=createMemory({workspaceId:f.workspaceId,userId:f.owner,assistantId:f.assistantId,createdByUserId:f.owner,summary:'Concurrent derived fixture',sensitivity:'confidential',derivation:{producer:'review-fixture',sources:[source]}}).then(()=>({unexpectedSuccess:true}),error=>error)
       let blocked=false
       for(let i=0;i<100&&!blocked;i++){
-        blocked=(await pool.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT read_scope_source(%'")).rows.length>0
+        blocked=(await pool.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND (query LIKE '%read_scope_source(%' OR query LIKE '%FROM workspaces%FOR UPDATE%')")).rows.length>0
         if(!blocked)await new Promise(resolve=>setTimeout(resolve,10))
       }
       expect(blocked).toBe(true)

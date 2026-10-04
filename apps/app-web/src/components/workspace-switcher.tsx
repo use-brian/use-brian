@@ -674,7 +674,7 @@ export function WorkspaceSwitcher() {
             {!desktopBridge()?.runLocal && desktopBridge()?.chooseDeployment && (
               <button type="button" role="menuitem"
                 onClick={() => { setOpen(false); requestSidebarClose(); desktopBridge()?.chooseDeployment?.(); }}
-                className="min-h-11 rounded px-2 py-1.5 text-left text-sm hover:bg-muted">
+                className="min-h-8 max-sm:min-h-11 rounded px-2 py-1.5 text-left text-sm hover:bg-muted">
                 {t.useOwnDeployment}
               </button>
             )}

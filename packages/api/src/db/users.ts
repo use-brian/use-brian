@@ -249,6 +249,12 @@ export async function findOrCreateUser(params: {
     // grant exists. Owner toggles via the assistant settings page.
     // See docs/plans/company-brain.md §17.
     //
+    // 'configure' (Agent configuration) is default-on for every primary so a
+    // first conversation can set the workspace up, including the in-chat
+    // Connect button for official OAuth connectors. Owners/admins can switch
+    // it off on the assistant's settings. See
+    // docs/architecture/integrations/agent-capability-surface.md.
+    //
     // 'files' / 'office' / 'computer' are the built-in workspace primitives.
     // Default-ON — switching one off is a
     // deliberate act, so a fresh assistant behaves exactly as before this
@@ -261,7 +267,8 @@ export async function findOrCreateUser(params: {
               ($1, 'crm',      $2, '§17 default-on at primary creation'),
               ($1, 'goals',    $2, 'goals default-on at primary creation'),
               ($1, 'views',    $2, 'doc-skill parity — default-on at primary creation'),
-              ($1, 'files',    $2, 'built-in primitive — default-on at primary creation')`,
+              ($1, 'files',    $2, 'built-in primitive — default-on at primary creation'),
+              ($1, 'configure', $2, 'agent configuration - default-on at primary creation')`,
       [assistant.rows[0].id, user.id],
     )
     // office / computer — seeded for EVERY assistant kind, not just primaries
@@ -680,6 +687,7 @@ export async function getDefaultAssistant(userId: string): Promise<UserAssistant
      FROM assistants a
      JOIN assistant_members am ON am.assistant_id = a.id
      WHERE am.user_id = $1 AND am.role = 'owner'
+       AND public.assistant_placement_visible($1,a.id)
      ORDER BY a.created_at ASC LIMIT 1`,
     [userId],
   )
@@ -797,6 +805,7 @@ export async function resolveAssistantAccess(
               am.user_id IS NOT NULL
               OR (a.workspace_id IS NOT NULL AND wm.user_id IS NOT NULL)
             )
+        AND public.assistant_placement_visible($1, a.id)
       LIMIT 1`,
     [userId, assistantId],
   )
@@ -822,6 +831,8 @@ export async function getUserAssistant(userId: string, assistantId: string): Pro
 export type AccessibleAssistant = {
   id: string
   name: string
+  placementDepartmentId: string | null
+  placementDepartmentName: string | null
   /**
    * The caller's *effective* role on this assistant: the highest-privilege
    * of their direct (`assistant_members`) and workspace (`workspace_members`)
@@ -876,6 +887,8 @@ export async function listAccessibleAssistants(
   const wsFilter = workspaceId ? ' AND a.workspace_id = $2' : ''
   const result = await query<AccessibleAssistant>(
     `SELECT a.id, a.name,
+            a.placement_department_id AS "placementDepartmentId",
+            (SELECT name FROM workspace_groups WHERE id=a.placement_department_id) AS "placementDepartmentName",
             CASE
               WHEN am.role = 'owner' OR wm.role = 'owner' THEN 'owner'
               WHEN am.role = 'admin' OR wm.role = 'admin' THEN 'admin'
@@ -900,6 +913,7 @@ export async function listAccessibleAssistants(
               am.user_id IS NOT NULL
               OR (a.workspace_id IS NOT NULL AND wm.user_id IS NOT NULL)
             )${wsFilter}
+        AND public.assistant_placement_visible($1, a.id)
       ORDER BY a.created_at ASC`,
     workspaceId ? [userId, workspaceId] : [userId],
   )

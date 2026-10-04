@@ -24,5 +24,7 @@ export default defineConfig({
     // real-DB flows; give them headroom over the 5s default.
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    // Supertest must dial the address it bound; see vitest.setup.ts.
+    setupFiles: ['./vitest.setup.ts'],
   },
 })

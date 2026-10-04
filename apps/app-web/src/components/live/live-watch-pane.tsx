@@ -497,7 +497,7 @@ export function LiveWatchPane({
 
         <div
           data-live-interventions
-          className="flex flex-col gap-2.5 rounded-xl border border-border/70 bg-muted/25 p-3"
+          className="flex flex-col gap-2.5 border-t border-border/70 pt-3"
         >
           <span className="text-[11px] font-semibold text-foreground">
             {tl.intervene}

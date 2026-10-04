@@ -16,6 +16,8 @@ import {
   filterAuditTurns,
   graphAccessSteps,
   formatPayloadPreview,
+  formatPromptMessage,
+  formatPromptResponse,
   formatTokens,
   graphHighlightIds,
   graphHighlightNames,
@@ -23,6 +25,7 @@ import {
   isBrainRowTool,
   mergeTurnTraces,
   parseAuditDeepLink,
+  providerPromptRefs,
   retrievedPrimitiveLabel,
   summarizeTrace,
   usageTokens,
@@ -82,6 +85,22 @@ describe("[COMP:app-web/turn-audit] browsing and access replay", () => {
     expect(graphAccessSteps(summary).map((step) => [step.kind, step.ids, step.names]))
       .toEqual([["retrieval", [M1], []], ["tool_call", [M1], []], ["tool_call", [], ["launch plan"]]]);
     expect(graphAccessSteps({ steps: [] })).toEqual([]);
+  });
+  it("replays a retrieval one entry at a time in returned order, once per entry", () => {
+    const summary = summarizeTrace({ fidelity: "full", preEpoch: false, sessionId: "fixture", steps: [
+      { ordinal: 0, kind: "retrieval", at: null, payloadRefs: [], metadata: { source: "index_inject", returnedRows: [
+        { primitive: "memory", rowId: M1 },
+        { primitive: "entity", rowId: E1 },
+        { primitive: "memory", rowId: M1 },
+      ] } },
+    ] });
+    expect(summary.steps[0]!.rows!.map((row) => row.rowId)).toEqual([M1, E1]);
+    const accesses = graphAccessSteps(summary);
+    expect(accesses.map((step) => [step.stepKey, step.rowId, step.ids])).toEqual([
+      ["0:retrieval", M1, [M1]],
+      ["0:retrieval", E1, [E1]],
+    ]);
+    expect(new Set(accesses.map((step) => step.key)).size).toBe(2);
   });
 });
 
@@ -489,5 +508,52 @@ describe("[COMP:app-web/turn-audit] deep link", () => {
       turnId: "m9",
     });
     expect(auditTurnUrl("https://app.example", "ws", "s1")).toBe("https://app.example/w/ws/brain?audit=s1");
+  });
+});
+
+describe("[COMP:app-web/turn-audit] raw prompt", () => {
+  it("splits provider_call refs into system, messages and response by messageCount", () => {
+    expect(providerPromptRefs(["sys", "m1", "m2", "resp"], 2)).toEqual({
+      systemRef: "sys", messageRefs: ["m1", "m2"], responseRef: "resp",
+    });
+    // No system prompt recorded: every ref but the response is a message.
+    expect(providerPromptRefs(["m1", "m2", "resp"], 2)).toEqual({
+      systemRef: null, messageRefs: ["m1", "m2"], responseRef: "resp",
+    });
+    // Without the count a system ref cannot be told from a message.
+    expect(providerPromptRefs(["a", "b", "resp"], undefined)).toEqual({
+      systemRef: null, messageRefs: ["a", "b"], responseRef: "resp",
+    });
+    expect(providerPromptRefs([], 0)).toBeUndefined();
+  });
+
+  it("attaches prompt refs to full-fidelity model calls", () => {
+    const summary = summarizeTrace({ fidelity: "full", preEpoch: false, sessionId: "fixture", steps: [
+      { ordinal: 0, kind: "provider_call", at: null, payloadRefs: ["sys", "m1", "resp"],
+        metadata: { model: "m", turn: 0, messageCount: 1 } },
+    ] });
+    expect(summary.steps[0]!.prompt).toEqual({ systemRef: "sys", messageRefs: ["m1"], responseRef: "resp" });
+  });
+
+  it("renders recorded messages readably and never drops an unparseable payload", () => {
+    expect(formatPromptMessage(JSON.stringify({ role: "user", content: "hello" })))
+      .toEqual({ role: "user", text: "hello" });
+    const blocks = formatPromptMessage(JSON.stringify({ role: "assistant", content: [
+      { type: "text", text: "Looking it up" },
+      { type: "tool_use", id: "t1", name: "getEntity", input: { id_or_name: "Acme" } },
+    ] }));
+    expect(blocks.role).toBe("assistant");
+    expect(blocks.text).toContain("Looking it up");
+    expect(blocks.text).toContain("[tool call: getEntity]");
+    expect(blocks.text).toContain('"id_or_name": "Acme"');
+    const result = formatPromptMessage(JSON.stringify({ role: "user", content: [
+      { type: "tool_result", toolUseId: "t1", content: "not found", isError: true },
+      { type: "image", source: {} },
+    ] }));
+    expect(result.text).toBe("[tool result, error]\nnot found\n\n[image]");
+    expect(formatPromptMessage("not json")).toEqual({ role: "other", text: "not json" });
+    expect(formatPromptResponse(JSON.stringify([{ type: "text", text: "Done" }])))
+      .toEqual({ role: "assistant", text: "Done" });
+    expect(formatPromptResponse("{bad")).toEqual({ role: "assistant", text: "{bad" });
   });
 });

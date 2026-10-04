@@ -118,7 +118,7 @@ export default function CloudLinkApprovalPage() {
 
         {data && status !== "approved" ? (
           <>
-            <div className="mt-6 grid gap-3 rounded-xl border border-border/70 bg-muted/30 p-4 text-sm">
+            <div className="mt-6 grid gap-3 border-y border-border/70 py-4 text-sm">
               <Detail label={t.approvalCode} value={data.request.code} mono />
               <Detail label={t.approvalOrigin} value={data.request.localOrigin} />
               <Detail label={t.approvalLocalWorkspace} value={data.request.localWorkspaceName} />
@@ -161,13 +161,13 @@ export default function CloudLinkApprovalPage() {
                   })}
                 </div>
               ) : (
-                <p className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
+                <p className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
                   {t.approvalNoPaidWorkspace}
                 </p>
               )}
             </div>
 
-            <div className="mt-6 rounded-lg border border-border/60 p-3 text-xs leading-relaxed text-muted-foreground">
+            <div className="mt-6 text-xs leading-relaxed text-muted-foreground">
               <p>{t.disclosureSent}</p>
               <p className="mt-1">{t.disclosureLocal}</p>
             </div>

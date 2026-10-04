@@ -31,6 +31,7 @@ import { accessCeilingContains, pinToolAuthoringAuthority, type AuthoringAuthori
 import { NO_TOOL_TIMEOUT } from '../engine/tool-executor.js'
 import { CrmDomainEventTypeSchema } from '../crm/operations-types.js'
 import {
+  CURRENT_CHAT_CHANNEL_ID,
   WorkflowDefinitionSchema,
   WorkflowTriggerSchema,
   STEP_TYPE_VALUES,
@@ -184,6 +185,9 @@ export type WorkflowToolDeps = {
     workspaceId: string
     assistantId: string
     toolNames: string[]
+    authoringAuthority: AuthoringAuthority
+    contextGroupId: string | null
+    contextProjectId: string | null
   }) => Promise<string[]>
   /**
    * Scheduling substrate — lets the authoring tools attach a schedule trigger
@@ -735,7 +739,7 @@ function warningsFor(
       && !opts.runtimeKnownToolNames?.has(step.toolName)
     ) {
       warnings.push(
-        `Step "${step.id}" calls tool "${step.toolName}", which is not a built-in tool. The run fails with \`tool_not_found\` unless it is a connector action whose connector is connected in this workspace. Built-in brain search is \`searchBrain\`; web search / fetch is \`mcp_search\`. Double-check the tool name.`,
+        `Step "${step.id}" calls tool "${step.toolName}", which is not a built-in tool. The run fails with \`tool_not_found\` unless it is available in the workflow execution scope. Check the connector connection and execution permissions. Built-in brain search is \`searchBrain\`; web search / fetch is \`mcp_search\`. Double-check the tool name.`,
       )
     }
     if (step.type === 'wait' && !opts.phaseBActive) {
@@ -813,8 +817,10 @@ async function runtimeKnownToolNames(
   def: WorkflowDefinition,
   context: ToolContext,
   deps: Pick<WorkflowToolDeps, 'isKnownTool' | 'resolveKnownWorkflowTools' | 'resolvePrimary'>,
+  authoringAuthority: AuthoringAuthority,
+  binding: { contextGroupId: string | null; contextProjectId: string | null },
 ): Promise<Set<string>> {
-  if (!context.workspaceId || !deps.resolveKnownWorkflowTools || !deps.resolvePrimary) {
+  if (!context.workspaceId || !deps.resolveKnownWorkflowTools) {
     return new Set()
   }
   const toolNames = [...new Set(def.steps.flatMap((step) => (
@@ -826,13 +832,15 @@ async function runtimeKnownToolNames(
   if (toolNames.length === 0) return new Set()
 
   try {
-    const assistantId = await deps.resolvePrimary(context.workspaceId)
+    const assistantId = def.principal?.assistantId ?? await deps.resolvePrimary?.(context.workspaceId)
     if (!assistantId) return new Set()
     return new Set(await deps.resolveKnownWorkflowTools({
       userId: context.userId,
       workspaceId: context.workspaceId,
       assistantId,
       toolNames,
+      authoringAuthority,
+      ...binding,
     }))
   } catch (err) {
     console.warn('[workflow/tools] runtime tool-name lookup threw:', err)
@@ -1046,6 +1054,8 @@ const CONNECTOR_DATA_KEYWORD =
   /\b(github|gmail|notion|fathom|(google\s*)?(calendar|drive|docs|sheets|slides)|gcal|gdrive)\b/i
 const FETCH_VERB = /\b(summari[sz]|fetch|pull|retriev|gather|list|report on|review|digest|recap|scan)\b/i
 
+const FAILURE_NOTIFICATION_LOCATION = 'Workflow failure notification'
+
 /** The terminal (last-by-order, or sole) `assistant_call` step id — where a
  *  schedule trigger's `delivery` sugar gets stamped. `null` when none. */
 function terminalAssistantCallId(def: WorkflowDefinition): string | null {
@@ -1141,7 +1151,7 @@ async function dependencyIssues(
       && def.failureDelivery.channelType !== 'custom'
     ) {
       targets.push({
-        location: 'Workflow failure notification',
+        location: FAILURE_NOTIFICATION_LOCATION,
         assistantTarget: 'primary',
         channelType: def.failureDelivery.channelType,
         channelId: def.failureDelivery.channelId,
@@ -1210,15 +1220,28 @@ async function dependencyIssues(
           // already done (2026-09-01).
           const authoredHere =
             t.channelType === context.channelType && t.channelId === context.channelId
+          // A failure notification has no `target.assistantId` to fix: the
+          // executor always sends it as the workspace primary
+          // (`attemptFailureDelivery`), so name that instead of the step copy.
+          const isFailureNotification = t.location === FAILURE_NOTIFICATION_LOCATION
+          // Inside a chat of this type, "current" is the fix for a wrong id;
+          // "author from inside the chat" would name what the user already did.
+          const inSameTypeChat = context.channelType === t.channelType
           const guidance = authoredHere && assistantId !== context.assistantId
-            ? ` This IS the chat the workflow is being authored from, so the destination is correct. The problem is the step: it executes as a different assistant, and a ${t.channelType} chat can only be reached by the bot bound to the assistant that serves it. Set this step's \`target.assistantId\` to "${context.assistantId}" (the assistant hosting this chat), or point \`deliver\` at a chat the step's own assistant is connected to.`
+            ? isFailureNotification
+              ? ` This IS the chat the workflow is being authored from, but failure notifications are always sent by the workspace's primary assistant (${assistantId}), and a ${t.channelType} chat can only be reached by the bot bound to the assistant that serves it. Point \`failureDelivery\` at a chat the primary assistant serves, or remove \`failureDelivery\`.`
+              : ` This IS the chat the workflow is being authored from, so the destination is correct. The problem is the step: it executes as a different assistant, and a ${t.channelType} chat can only be reached by the bot bound to the assistant that serves it. Set this step's \`target.assistantId\` to "${context.assistantId}" (the assistant hosting this chat), or point \`deliver\` at a chat the step's own assistant is connected to.`
             : t.channelType === 'slack'
               ? ' Call `listSlackChannels` to get a real channel id and set it on the terminal step\'s `deliver` as `{ "channelType": "slack", "channelId": "<id>" }` (the internal id from `listChannels` is not a Slack channel id). Or author the workflow from inside the Slack channel you want the result posted to.'
               : t.channelType === 'telegram'
                 ? /chat not found/i.test(res.reason ?? '')
-                  ? ' Author from inside the Telegram chat you want the result delivered to so the correct destination is captured.'
+                  ? inSameTypeChat
+                    ? ` To deliver to the chat this workflow is being authored from, set channelId to "${CURRENT_CHAT_CHANNEL_ID}". For a different chat, use that chat's numeric Telegram id.`
+                    : ` Author from inside the Telegram chat you want the result delivered to and set channelId to "${CURRENT_CHAT_CHANNEL_ID}".`
                   : ''
-                : ' Author from inside the chat you want the result delivered to so the correct channel is captured.'
+                : inSameTypeChat
+                  ? ` To deliver to the chat this workflow is being authored from, set channelId to "${CURRENT_CHAT_CHANNEL_ID}".`
+                  : ` Author from inside the chat you want the result delivered to and set channelId to "${CURRENT_CHAT_CHANNEL_ID}".`
           errors.push(
             `${t.location} delivers to the ${t.channelType} channel "${t.channelId}", which is not reachable: ${
               res.reason ?? 'channel check failed'
@@ -1556,21 +1579,165 @@ async function sessionCapturedDeliveryAssistant(
   context: { assistantId?: string; channelType: string; channelId: string; workspaceId?: string | null },
   resolvePrimary?: (workspaceId: string) => Promise<string | null>,
 ): Promise<string | null> {
-  if (!context.assistantId) return null
   if (resolved.channelType !== context.channelType) return null
   if (resolved.channelId !== context.channelId) return null
   const termId = terminalAssistantCallId(def)
   const termStep = termId ? def.steps.find((s) => s.id === termId) : undefined
   if (termStep?.type !== 'assistant_call') return null
-  if (termStep.target.assistantId !== 'primary') return null
+  return sessionChatAssistant(termStep.target.assistantId, context, resolvePrimary)
+}
+
+/**
+ * The retarget rule shared by every session-captured destination (the
+ * `trigger.delivery` sugar and the `"current"` chat reference): a step still on
+ * the blind `'primary'` default moves to the session assistant, the only one
+ * provably routed to the authoring chat. An explicitly named assistant is never
+ * overridden, and the durable sentinel is kept when the session assistant IS
+ * the primary. `null` = keep the step's target as authored.
+ */
+async function sessionChatAssistant(
+  stepAssistantTarget: unknown,
+  context: { assistantId?: string; workspaceId?: string | null },
+  resolvePrimary?: (workspaceId: string) => Promise<string | null>,
+): Promise<string | null> {
+  if (!context.assistantId) return null
+  if (stepAssistantTarget !== 'primary') return null
   if (context.workspaceId && resolvePrimary) {
     try {
       if ((await resolvePrimary(context.workspaceId)) === context.assistantId) return null
     } catch (err) {
-      console.warn('[workflow/sessionCapturedDeliveryAssistant] resolvePrimary threw:', err)
+      console.warn('[workflow/sessionChatAssistant] resolvePrimary threw:', err)
     }
   }
   return context.assistantId
+}
+
+/** `resolveCurrentChatDeliveries` over a legacy direct-write tool input. */
+async function resolveLegacyCurrentChat(
+  input: unknown,
+  context: { assistantId?: string; channelType: string; channelId: string; workspaceId?: string | null },
+  resolvePrimary?: (workspaceId: string) => Promise<string | null>,
+): Promise<{ input: unknown; errors: string[] }> {
+  if (!isRecord(input) || !isRecord(input.definition)) return { input, errors: [] }
+  const resolved = await resolveCurrentChatDeliveries(input.definition, context, resolvePrimary)
+  return { input: { ...input, definition: resolved.definition }, errors: resolved.errors }
+}
+
+/** Delivery channel types whose ids are platform chat ids, never Use Brian UUIDs. */
+const PLATFORM_CHAT_ID_CHANNELS = new Set(['telegram', 'slack', 'whatsapp', 'feishu'])
+/** Channel types a `"current"` reference can resolve against (messaging sessions). */
+const CURRENT_CHAT_CHANNELS = new Set(['telegram', 'slack', 'whatsapp', 'feishu', 'msteams', 'custom'])
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/**
+ * Resolve `channelId: "current"` (CURRENT_CHAT_CHANNEL_ID) on every step
+ * `deliver` and on `failureDelivery` to the authoring session's own chat,
+ * BEFORE the definition is schema-parsed - so the validated, receipted and
+ * persisted definition carries the concrete id, and probe and persist agree.
+ *
+ * "Deliver to this chat" used to exist only as the schedule trigger's
+ * `trigger.delivery` sugar. A webhook / event / manual workflow needed a raw
+ * platform chat id that nothing exposes to the model (`listChannels` returns
+ * Use Brian UUIDs), so a Telegram-group request for a webhook alert workflow
+ * guessed its way through five rejected proposals - no id, the channel-row
+ * UUID, the integration UUID, the word "current" - and gave up (2026-10-03).
+ *
+ * Also turns the adjacent malformed shapes into specific errors: a messaging
+ * `deliver` with no `channelId` (otherwise the schema's opaque union
+ * "Invalid input"), and a UUID where a platform chat id belongs (otherwise a
+ * provider "chat not found" that blames the chat). A step on the blind
+ * `'primary'` default is retargeted to the session assistant by the same rule
+ * as the sugar (`sessionChatAssistant`). `failureDelivery` is not retargeted:
+ * the executor always sends it as the workspace primary.
+ *
+ * See docs/architecture/features/workflow.md → "Authoring validation".
+ */
+async function resolveCurrentChatDeliveries(
+  definition: Record<string, unknown>,
+  context: { assistantId?: string; channelType: string; channelId: string; workspaceId?: string | null },
+  resolvePrimary?: (workspaceId: string) => Promise<string | null>,
+): Promise<{ definition: Record<string, unknown>; errors: string[] }> {
+  const errors: string[] = []
+  const sessionIsChat = CURRENT_CHAT_CHANNELS.has(context.channelType) && !!context.channelId
+  const thisChat = sessionIsChat
+    ? `the ${context.channelType} chat this workflow is being authored from`
+    : null
+
+  // Returns the resolved deliver, or null when it was rejected.
+  const resolveOne = (deliver: Record<string, unknown>, location: string): Record<string, unknown> | null => {
+    const channelType = deliver.channelType
+    if (typeof channelType !== 'string' || channelType === 'web' || deliver.replyToTrigger !== undefined) return deliver
+    const channelId = deliver.channelId
+    if (channelId === undefined) {
+      errors.push(
+        `${location} delivers to ${channelType} but has no channelId. ` +
+          (thisChat && channelType === context.channelType
+            ? `To deliver to ${thisChat}, set channelId to "${CURRENT_CHAT_CHANNEL_ID}"; otherwise set the target's concrete ${channelType} chat id.`
+            : `Set the target's concrete ${channelType} chat id${channelType === 'slack' ? ' (a C… / G… id from listSlackChannels)' : ''}.`),
+      )
+      return null
+    }
+    if (channelId === CURRENT_CHAT_CHANNEL_ID) {
+      if (!thisChat) {
+        errors.push(
+          `${location} uses channelId "${CURRENT_CHAT_CHANNEL_ID}", which means the chat the workflow is being authored from, but this session (${context.channelType}) is not a messaging chat. ` +
+            `Author the workflow from inside the chat that should receive it, or set its concrete ${channelType} chat id.`,
+        )
+        return null
+      }
+      if (channelType !== context.channelType) {
+        errors.push(
+          `${location} uses channelId "${CURRENT_CHAT_CHANNEL_ID}" with channelType "${channelType}", but this session is a ${context.channelType} chat. ` +
+            `Set channelType to "${context.channelType}" to deliver here, or set a concrete ${channelType} chat id${channelType === 'slack' ? ' (from listSlackChannels)' : ''}.`,
+        )
+        return null
+      }
+      return { ...deliver, channelId: context.channelId }
+    }
+    if (typeof channelId === 'string' && PLATFORM_CHAT_ID_CHANNELS.has(channelType) && UUID_SHAPE.test(channelId)) {
+      errors.push(
+        `${location} delivers to ${channelType} channelId "${channelId}", which is an internal Use Brian id (from listChannels), not a ${channelType} chat id. ` +
+          (thisChat && channelType === context.channelType
+            ? `To deliver to ${thisChat}, set channelId to "${CURRENT_CHAT_CHANNEL_ID}".`
+            : channelType === 'slack'
+              ? 'Call listSlackChannels for the real C… / G… id.'
+              : `Use the chat's own ${channelType} id, or author the workflow from inside that chat and set channelId to "${CURRENT_CHAT_CHANNEL_ID}".`),
+      )
+      return null
+    }
+    return deliver
+  }
+
+  let out: Record<string, unknown> = definition
+  if (Array.isArray(definition.steps)) {
+    const steps: unknown[] = []
+    for (const step of definition.steps) {
+      if (!isRecord(step) || step.type !== 'assistant_call' || !isRecord(step.deliver)) {
+        steps.push(step)
+        continue
+      }
+      const wasCurrent = step.deliver.channelId === CURRENT_CHAT_CHANNEL_ID
+      const deliver = resolveOne(step.deliver, `Step "${String(step.id)}"`)
+      if (!deliver) {
+        steps.push(step)
+        continue
+      }
+      let next: Record<string, unknown> = { ...step, deliver }
+      if (wasCurrent && isRecord(step.target)) {
+        const retarget = await sessionChatAssistant(step.target.assistantId, context, resolvePrimary)
+        if (retarget) next = { ...next, target: { ...step.target, assistantId: retarget } }
+      }
+      steps.push(next)
+    }
+    out = { ...out, steps }
+  }
+  if (isRecord(definition.failureDelivery)) {
+    const failureDelivery = resolveOne(definition.failureDelivery, 'Workflow failureDelivery')
+    if (failureDelivery) out = { ...out, failureDelivery }
+  }
+  return { definition: out, errors }
 }
 
 /**
@@ -1905,7 +2072,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.` +
       `\n\nSkills: when a step should follow a saved brain skill, ATTACH it on the step — NEVER just name the skill in the prompt (a workflow callee has no skill surface unless the step attaches one, so a prose-only reference silently does nothing on every run). \`enforcedSkills: ["<slug>"]\` force-loads the skill's instructions every run (the usual choice for workflows); \`skills: ["<slug>"]\` offers it via useSkill and the callee chooses. Use exact skill slugs; an attached slug that matches no workspace skill or built-in id is rejected. ` +
       `For structured output, an assistant_call research step may also set \`blueprintId: "<workspace skill slug | page-template id>"\` together with a \`page\` anchor to fill that blueprint instead of free-form authoring — blueprints themselves are created in the web app (Brain → Blueprints) or minted from a skill's extraction spec; they cannot be created from chat, so never claim otherwise.` +
-      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a static messaging destination. For a WhatsApp channel-event workflow that must answer the customer who triggered this run, use exactly \`deliver: { channelType: "whatsapp", replyToTrigger: true }\`; never add a channelId or phone number. This variant is valid only when every event source is a WhatsApp channel integration. To post a THREAD - one parent message with replies under it - use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack, telegram, and feishu). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
+      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a static messaging destination. To deliver to THIS chat (the one you are authoring from), on any trigger kind, set \`channelId: "${CURRENT_CHAT_CHANNEL_ID}"\` with this chat's channelType; the server substitutes the real chat id (and topic) and shows it in the proposal. The same works for \`failureDelivery\`. Never put an id from listChannels in \`deliver\`: those are internal Use Brian ids, not platform chat ids. For a WhatsApp channel-event workflow that must answer the customer who triggered this run, use exactly \`deliver: { channelType: "whatsapp", replyToTrigger: true }\`; never add a channelId or phone number. This variant is valid only when every event source is a WhatsApp channel integration. To post a THREAD - one parent message with replies under it - use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack, telegram, and feishu). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
       `Set definition-level \`failureDelivery\` to the same destination shape when one best-effort notification must be attempted if the run terminates failed or timed out; the executor owns that boundary, so do not model it as a final graph step. ` +
       `To MENTION people in a Slack delivery, first call \`listSlackMembers\` and embed the literal \`<@MEMBER_ID>\` ids in the step prompt — plain @name renders as text and notifies nobody.`,
     inputSchema: z.object({
@@ -2016,7 +2183,15 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         }
       }
 
-      const parsed = WorkflowDefinitionSchema.safeParse(definitionInput)
+      // `channelId: "current"` → this chat, before the schema sees it.
+      const current = await resolveCurrentChatDeliveries(definitionInput, context, deps.resolvePrimary)
+      if (current.errors.length > 0) {
+        return {
+          data: { ok: false, errors: current.errors, stepTypes: STEP_TYPE_VALUES },
+          isError: true,
+        }
+      }
+      const parsed = WorkflowDefinitionSchema.safeParse(current.definition)
       if (!parsed.success) {
         return {
           data: {
@@ -2128,13 +2303,17 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         }
       }
 
-      const knownRuntimeTools = await runtimeKnownToolNames(definition, context, deps)
       let authoringAuthority: AuthoringAuthority
       try {
         authoringAuthority = pinToolAuthoringAuthority(context)
       } catch {
         return { data: 'Workflow authoring permissions are unavailable in this turn. Start a new workspace conversation and propose it again.', isError: true }
       }
+
+      const knownRuntimeTools = await runtimeKnownToolNames(definition, context, deps, authoringAuthority, {
+        contextGroupId: existingWorkflow ? existingWorkflow.contextGroupId ?? null : context.activeGroupId ?? null,
+        contextProjectId: existingWorkflow ? existingWorkflow.contextProjectId ?? null : context.activeProjectId ?? null,
+      })
 
       const proposalReceipt = input.workflowId
         ? encodeProposalReceipt({
@@ -2265,7 +2444,13 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
             isError: true,
           }
         }
-        const legacy = createProposalInputSchema.safeParse(input)
+        // A receipt already carries the resolved chat id; a legacy direct
+        // write may still say "current" (see resolveCurrentChatDeliveries).
+        const current = await resolveLegacyCurrentChat(input, context, deps.resolvePrimary)
+        if (current.errors.length > 0) {
+          return { data: { ok: false, errors: current.errors, stepTypes: STEP_TYPE_VALUES }, isError: true }
+        }
+        const legacy = createProposalInputSchema.safeParse(current.input)
         if (!legacy.success) {
           // Same tail proposeWorkflow ships: a `steps[].type` issue is
           // unfixable without the closed set of valid types.
@@ -2470,7 +2655,13 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
             isError: true,
           }
         }
-        const legacy = updateProposalInputSchema.safeParse(input)
+        // A receipt already carries the resolved chat id; a legacy direct
+        // write may still say "current" (see resolveCurrentChatDeliveries).
+        const current = await resolveLegacyCurrentChat(input, context, deps.resolvePrimary)
+        if (current.errors.length > 0) {
+          return { data: { ok: false, errors: current.errors, stepTypes: STEP_TYPE_VALUES }, isError: true }
+        }
+        const legacy = updateProposalInputSchema.safeParse(current.input)
         if (!legacy.success) {
           return { data: { ok: false, errors: legacy.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`), stepTypes: STEP_TYPE_VALUES }, isError: true }
         }

@@ -1,5 +1,8 @@
+import { admitMemorySuccessor } from '../workspace-access/memory-successor-admission.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { beginBrainAdmission, admitBrainCreate } from '../workspace-access/brain-create-admission.js'
 import { captureMemoryVersions, type CaptureOpts } from './brain-row-versions.js'
-import { deriveResourceScope, type AccessContext, type EntityLinksStore, type Sensitivity, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/core'
+import { deriveResourceScope, deriveWriteScope, type AccessContext, type ResourceScope, type EntityLinksStore, type Sensitivity, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/core'
 import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
 import { currentAgentAccess } from './agent-access-context.js'
@@ -8,7 +11,7 @@ import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getPool, query } from './client.js'
 import { emitMentionedEdges } from './edge-hooks.js'
 import { excludeExternalPrincipalsSql } from './external-principal.js'
-import { validateDerivedMemoryInputs, recordDerivedResource } from './derived-scope-store.js'
+import { validateDerivedMemoryInputs, validateDerivedWriteInputs, recordDerivedResource } from './derived-scope-store.js'
 
 export type { AccessContext }
 
@@ -165,30 +168,64 @@ export async function createMemory(
 ): Promise<Memory> {
   assertAuthorshipPresent('createMemory', params.createdByUserId)
   if (params.derivationTarget && !params.derivation) throw new Error('scope_evidence_missing')
-  if (params.derivation && !transactionClient) {
+  if (!transactionClient) {
     const client = await getPool().connect()
     try {
       await client.query('BEGIN')
       const memory = await createMemory(params, undefined, client)
       await client.query('COMMIT')
+      emitCreatedMemoryEdges(memory, params, entityLinks)
       return memory
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
       throw error
     } finally { client.release() }
   }
-  // Derived writes preserve actual source visibility, including a primary's
-  // assistant partition, instead of applying fresh-intake normalization.
+  // Workspace precedes source locks. The initial assistant lookup is unlocked;
+  // recheck after serialization so a concurrent transfer cannot change scope.
+  let assistant = (await transactionClient!.query<{ workspaceId: string; kind: string }>(
+    'SELECT workspace_id AS "workspaceId",kind FROM assistants WHERE id=$1', [params.assistantId],
+  )).rows[0]
+  const workspaceId = params.workspaceId ?? assistant?.workspaceId
+  if (!workspaceId || params.derivation?.sources.some(source => source.workspaceId !== workspaceId)) throw new Error('scope_workspace_mismatch')
+  const admissionReady = await beginBrainAdmission(transactionClient!, workspaceId)
+  if (admissionReady) {
+    assistant = (await transactionClient!.query<{ workspaceId: string; kind: string }>('SELECT workspace_id AS "workspaceId",kind FROM assistants WHERE id=$1 FOR SHARE', [params.assistantId])).rows[0]
+    if (!assistant || assistant.workspaceId !== workspaceId) throw new Error('scope_workspace_mismatch')
+    // A source identifier alone is provenance, not a validated lineage envelope.
+    if ((params.sourceEpisodeId || params.sourceSessionId || params.shadow) && !params.derivation) throw new Error('scope_evidence_missing')
+  }
+  // A model-driven save names its own target (`derivationTarget`: a team
+  // save is user-less, a primary's save is assistant-less). It keeps that
+  // visibility and carries the label floor of everything read (decision D3).
+  // Without a target (extraction, consolidation) a derived write preserves
+  // the sources' single envelope, as before.
   const floor = params.derivation
-    ? await validateDerivedMemoryInputs(transactionClient!, params.derivation)
+    ? params.derivationTarget
+      ? await validateDerivedWriteInputs(transactionClient!, params.derivation)
+      : await validateDerivedMemoryInputs(transactionClient!, params.derivation)
     : null
-  const derived = floor && params.derivation ? deriveResourceScope(params.derivation, {
-    ...floor,
-    ...(params.derivationTarget ?? {}),
+  const requestedLabels = {
     sensitivity: params.sensitivity,
     compartments: params.compartments ?? [],
     projectIds: params.projectIds ?? [],
-  }) : null
+  }
+  const derived = floor && params.derivation
+    ? params.derivationTarget
+      ? deriveWriteScope(params.derivation, {
+          workspaceId: floor.workspaceId, ...params.derivationTarget, ...requestedLabels,
+        }, params.createdByUserId)
+      : deriveResourceScope(params.derivation, { ...(floor as ResourceScope), ...requestedLabels })
+    : null
+  if (admissionReady) {
+    const admitted = await admitBrainCreate(transactionClient!, workspaceId, params.createdByUserId, {
+      userId: derived ? derived.userId : params.userId,
+      assistantId: derived ? derived.assistantId : params.userId !== null && assistant.kind === 'primary' ? null : params.assistantId,
+      sensitivity: derived?.sensitivity ?? params.sensitivity,
+      compartments: params.compartments, projectIds: params.projectIds,
+    }, floor && derived ? { ...derived, ...floor } : undefined, !!derived, 'memory')
+    params = { ...params, ...admitted }
+  }
   const executing=currentAgentAccess();
   if(executing){
     if(!executing.workspaceId||!executing.userId||params.createdByUserId!==executing.userId)throw Object.assign(new Error('The operation requires the executing author.'),{code:'scope_operation_denied'});
@@ -204,7 +241,7 @@ export async function createMemory(
     assertExecutionResourceScope(candidate,derived?'read':'mutation');
   }
   if (derived && params.shadow) throw new Error('scope_evidence_missing')
-  if (derived && params.workspaceId && params.workspaceId !== derived.workspaceId) throw new Error('scope_workspace_mismatch')
+  if (derived && workspaceId !== derived.workspaceId) throw new Error('scope_workspace_mismatch')
   // `workspace_id` falls back to the row's assistant's workspace when
   // the caller omits it: every memory must be workspace-partitioned
   // (company-brain hard-isolation; migration 146 makes the column NOT
@@ -297,15 +334,20 @@ export async function createMemory(
   if (params.derivation) {
     await recordDerivedResource(transactionClient!, params.derivation, {
       ...memory, workspaceId: memory.workspaceId!, resourceKind: 'memory', resourceId: memory.id, version: memory.scopeVersion,
-    })
+    }, params.createdByUserId)
   }
 
+  emitCreatedMemoryEdges(memory, params, entityLinks)
+  return memory
+}
+
+function emitCreatedMemoryEdges(memory: Memory, params: Parameters<typeof createMemory>[0], entityLinks?: EntityLinksStore): void {
   // Fire-and-forget `mentioned` edges. Only fires when the graph store
   // is wired AND the memory carries a workspace (edges are
   // workspace-partitioned) AND at least one entity id is supplied.
   // `void` — never awaited on the caller's path, never able to throw
   // into the memory save.
-  if (!shadow && entityLinks && memory.workspaceId && params.linkedEntityIds && params.linkedEntityIds.length > 0) {
+  if (!params.shadow && entityLinks && memory.workspaceId && params.linkedEntityIds && params.linkedEntityIds.length > 0) {
     // Edge trust source mirrors the memory's: a user-authored memory
     // yields a `'user'` edge, everything else falls back to `'model'`
     // (memory `source` is a free `string`, so it is normalized here to
@@ -324,7 +366,6 @@ export async function createMemory(
       projectIds: memory.projectIds,
     })
   }
-  return memory
 }
 
 /**
@@ -375,7 +416,26 @@ export async function updateMemory(
   try {
     if (ownedClient) await client.query('BEGIN')
     try {
-      if (access && !access.clientSelfMemory) await applyRLSGucs(client, access.userId)
+      // Discover without locking, then serialize the workspace before touching
+      // the predecessor or any derivation source. Recheck locality in the lock.
+      const located = (await client.query<{ workspaceId: string }>(
+        'SELECT workspace_id AS "workspaceId" FROM memories WHERE id=$1', [id],
+      )).rows[0]
+      if (!located) {
+        if (ownedClient) await client.query('ROLLBACK')
+        return null
+      }
+      const ready = await beginBrainAdmission(client, located.workspaceId)
+      if (ready) {
+        const actor = access?.userId ?? currentAgentAccess()?.userId
+        if (!actor) throw new WorkspaceAccessError('context_not_available', 404)
+        access ??= { userId: actor, workspaceId: located.workspaceId, assistantId: '', assistantKind: 'primary' }
+        if (access.workspaceId !== located.workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
+        if (updates.workspaceId && updates.workspaceId !== located.workspaceId) throw new WorkspaceAccessError('access_mode_destination_conflict', 409)
+        if (updates.compartments === null || updates.projectIds === null) throw new WorkspaceAccessError('access_mode_destination_conflict', 409)
+      }
+      if (updates.derivation?.sources.some(source => source.workspaceId !== located.workspaceId)) throw new Error('scope_workspace_mismatch')
+      if (access && (ready || !access.clientSelfMemory)) await applyRLSGucs(client, access.userId)
       // Lock the active version. If none matches (already tombstoned, or
       // id doesn't exist), nothing to supersede — bail before the INSERT.
       //
@@ -385,13 +445,13 @@ export async function updateMemory(
       // memory the caller can't read (the write sibling of getMemoryById's
       // projection). Omitting `access` keeps the system-wide path for trusted
       // background workers. WS3 memory read/write-asymmetry fix, 2026-07-07.
-      const ap = access ? buildMemoryAccessPredicate(access, { startIdx: 2, operation:'mutation' }) : null
+      const ap = access ? buildMemoryAccessPredicate(access, { startIdx: 3, operation:'mutation' }) : null
       const lockResult = await client.query<Memory>(
         `SELECT ${MEMORY_SELECT} FROM memories
-         WHERE id = $1 AND valid_to IS NULL${ap ? ` AND ${ap.sql}` : ''}
-           ${access && !access.clientSelfMemory ? 'AND member_operation_scope_allows(workspace_id,sensitivity,compartments,true)' : ''}
+         WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL${ready ? ' AND NOT scope_held AND retracted_at IS NULL' : ''}${ap ? ` AND ${ap.sql}` : ''}
+           ${access && (ready || !access.clientSelfMemory) ? 'AND member_operation_scope_allows(workspace_id,sensitivity,compartments,true)' : ''}
          FOR UPDATE`,
-        [id, ...(ap ? ap.params : [])],
+        [id, located.workspaceId, ...(ap ? ap.params : [])],
       )
       const old = lockResult.rows[0]
       if (!old) {
@@ -408,7 +468,7 @@ export async function updateMemory(
           ...old, workspaceId: old.workspaceId!, resourceKind: 'memory', resourceId: old.id, version: old.scopeVersion,
         }],
       } : null
-      const floor = derivation ? await validateDerivedMemoryInputs(client, derivation) : null
+      const floor = derivation ? await validateDerivedWriteInputs(client, derivation) : null
 
       // Merge updates over the old row. Untouched fields carry through.
       const next = {
@@ -425,23 +485,26 @@ export async function updateMemory(
         projectIds: updates.projectIds ?? old.projectIds,
       }
       if (floor && derivation) {
-        const resolved = deriveResourceScope(derivation, {
-          ...floor, workspaceId: next.workspaceId!, sensitivity: next.sensitivity,
-          compartments: next.compartments, projectIds: next.projectIds,
-        })
+        // The superseding row keeps the memory's own visibility and carries
+        // every label its new inputs had (decision D3). New inputs private to
+        // someone other than the memory's user or the editor still refuse.
+        const resolved = deriveWriteScope(derivation, {
+          workspaceId: next.workspaceId!, userId: next.userId, assistantId: next.assistantId,
+          sensitivity: next.sensitivity, compartments: next.compartments, projectIds: next.projectIds,
+        }, access?.userId ?? null)
         next.sensitivity = resolved.sensitivity
         next.compartments = resolved.compartments
         next.projectIds = resolved.projectIds
-        // A superseding row cannot silently erase visibility from new inputs.
-        next.userId = resolved.userId
-        next.assistantId = resolved.assistantId
       }
 
-      assertExecutionResourceScope({...next,workspaceId:next.workspaceId!},'mutation',access)
-      if (access && !access.clientSelfMemory) {
+      assertExecutionResourceScope({...next,workspaceId:next.workspaceId!},ready && derivation ? 'read' : 'mutation',access)
+      if (ready && floor) assertExecutionResourceScope({ ...next, workspaceId: next.workspaceId!,
+        compartments: next.compartments.filter(key => !floor.compartments.includes(key)),
+      }, 'mutation', access)
+      if (access && (ready || !access.clientSelfMemory)) {
         const allowed = await client.query<{allowed:boolean}>(
-          'SELECT member_operation_scope_allows($1,$2,$3,true) AS allowed',
-          [next.workspaceId,next.sensitivity,next.compartments],
+          'SELECT member_operation_scope_allows($1,$2,$3,$4) AS allowed',
+          [next.workspaceId,next.sensitivity,next.compartments,!(ready && derivation)],
         )
         if (!allowed.rows[0]?.allowed) {
           if (ownedClient) await client.query('ROLLBACK')
@@ -459,8 +522,13 @@ export async function updateMemory(
         || JSON.stringify(next.compartments) !== JSON.stringify(old.compartments)
         || JSON.stringify(next.projectIds) !== JSON.stringify(old.projectIds)
       if (changed) {
-        await client.query(`SELECT hold_scope_descendants($1,'memory',$2)`, [old.workspaceId, old.id])
-        if (derivation) await validateDerivedMemoryInputs(client, derivation)
+        if (ready) {
+          await client.query('SELECT hold_memory_successor_descendants($1,$2,$3)', [old.workspaceId, old.id, old.scopeVersion])
+        } else {
+          // Preserve the existing trusted-worker contract for legacy workspaces.
+          await client.query(`SELECT hold_scope_descendants($1,'memory',$2)`, [old.workspaceId, old.id])
+        }
+        if (derivation) await validateDerivedWriteInputs(client, derivation)
       }
 
       // Insert the new version. Authorship + audit columns carry the old
@@ -473,6 +541,9 @@ export async function updateMemory(
       // these are immutable snapshots of the model's first save (mig 165),
       // so every superseded version of the row still points at the same
       // "what did the model originally claim" signal.
+      if (ready) await admitMemorySuccessor(client, access!.userId,
+        { ...old, workspaceId: old.workspaceId! }, { ...next, workspaceId: next.workspaceId! }, floor ?? undefined)
+
       const insertResult = await client.query<Memory>(
         `INSERT INTO memories (
            assistant_id, user_id, app_id, workspace_id,
@@ -500,7 +571,7 @@ export async function updateMemory(
 
       if (derivation) await recordDerivedResource(client, derivation, {
         ...newRow, workspaceId: newRow.workspaceId!, resourceKind: 'memory', resourceId: newRow.id, version: newRow.scopeVersion,
-      })
+      }, access?.userId ?? null)
 
       // Tombstone the old row, pointing OLD → NEW.
       await client.query(

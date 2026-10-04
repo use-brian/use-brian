@@ -1,6 +1,9 @@
 import express from 'express'
 import request from 'supertest'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, beforeEach } from 'vitest'
+
+vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
+import { dispatchIncomingMessageEvent } from '../../message-events.js'
 
 vi.mock('../../chat-archive/live-writer.js', () => ({
   appendOutboundChatArchive: vi.fn(async () => {}),
@@ -524,5 +527,56 @@ describe('[COMP:api/whatsapp-contact-directory] contact directory relay', () => 
     const res = await request(app).post('/internal/whatsapp/contacts').set('X-Connector-Secret', 'secret')
       .send({ channelId: 'byon-channel', contacts: [{ contactId: 'x@s.whatsapp.net', savedName: 'X' }] })
     expect(res.status).toBe(502)
+  })
+})
+
+
+describe('whatsapp BYON workflow message ingress', () => {
+  beforeEach(() => vi.clearAllMocks())
+  function eventApp(mode = '') {
+    const app = express()
+    app.use(express.json())
+    const config = mode === 'blocked'
+      ? { userAccessMode: 'blocklist', blockedUserIds: ['+1 (555) 123-4567'] }
+      : mode === 'allowlisted'
+        ? { userAccessMode: 'allowlist', allowedUserIds: ['+1 (555) 123-4567'] }
+        : mode === 'not allowlisted'
+          ? { userAccessMode: 'allowlist', allowedUserIds: [] }
+          : mode === 'group_members'
+            ? { userAccessMode: 'group_members' }
+            : {}
+    app.use('/internal/whatsapp', whatsappByonRoutes({
+      connectorSecret: 'secret',
+      integrationStore: { getByChannelForWebhook: vi.fn(async () => mode === 'unknown' ? null : ({ id: 'int-1', config })) } as never,
+      getChannel: vi.fn(async () => ({ workspaceId: 'ws-1', channelType: 'whatsapp', status: mode === 'inactive' ? 'revoked' : 'active', enabledCapabilities: [] })) as never,
+      getWorkspaceOwnerUserId: vi.fn(async () => null),
+      ingestor: { isIngestChannel: vi.fn(async () => false) } as never,
+      bot: { resolveHandler: vi.fn(async () => null) },
+    }))
+    return app
+  }
+  it.each([false, true])('emits unrouted chat-disabled messages, media=%s', async (media) => {
+    await request(eventApp()).post('/internal/whatsapp/inbound').set('X-Connector-Secret', 'secret').send({ ...payload, ...(media ? { text: '<media:image>', mediaBase64: 'YQ==', mediaMimeType: 'image/jpeg' } : {}) })
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      workspaceId: 'ws-1', integrationId: 'int-1',
+      incoming: expect.objectContaining({ channelType: 'whatsapp', userId: payload.senderJid, channelId: payload.chatJid, messageId: 'm1', timestamp: 1, text: media ? '' : 'hello', ...(media ? { mediaType: 'photo' } : {}) }),
+    }))
+  })
+  it('matches an allowlisted LID sender through the connector-resolved PN', async () => {
+    const response = await request(eventApp('allowlisted')).post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send({ ...payload, senderJid: 'opaque@lid', senderPnJid: payload.senderJid })
+    expect(response.status).toBe(200)
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+  })
+  it('allows group members in groups without requiring chat routing', async () => {
+    const response = await request(eventApp('group_members')).post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret').send({ ...payload, isGroup: true })
+    expect(response.status).toBe(200)
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+  })
+  it.each(['auth', 'self', 'blocked', 'not allowlisted', 'group_members', 'unknown', 'inactive', 'empty', 'invalid'])('excludes %s', async (mode) => {
+    await request(eventApp(mode)).post('/internal/whatsapp/inbound').set('X-Connector-Secret', mode === 'auth' ? 'wrong' : 'secret').send({ ...payload, ...(mode === 'self' ? { fromMe: true } : {}), ...(mode === 'empty' ? { text: '' } : {}), ...(mode === 'invalid' ? { messageId: '' } : {}) })
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
   })
 })

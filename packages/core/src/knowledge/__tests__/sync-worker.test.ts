@@ -52,7 +52,7 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
       await worker.tick()
 
       expect(mockApi.getRepoPermissions).toHaveBeenCalledWith('ghp_test123', 'deltadefi-protocol', 'knowledge')
-      expect(mockStore.updateSourceWriteAccess).toHaveBeenCalledWith('src1', true)
+      expect(mockStore.updateSourceWriteAccess).toHaveBeenCalledWith('src1', true, undefined)
       // The sync itself stayed a no-op — the probe is what self-heals a
       // swapped PAT without waiting for a new commit.
       expect(mockStore.upsertByPath).not.toHaveBeenCalled()
@@ -117,7 +117,7 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
       expect(secondCall.summary).toBe('Vault product')
 
       // Verify sync completed
-      expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', 'sha_head')
+      expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', 'sha_head', null, undefined)
 
       // Verify sync lifecycle events (lint findings are orthogonal; filtered out here)
       const lifecycle = (events as Array<{ type: string }>).filter(
@@ -159,9 +159,9 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
       expect(mockStore.upsertByPath).toHaveBeenCalledTimes(1)
       // 1 removed file → delete (team-scoped, not per-assistant)
       expect(mockStore.deleteByTeamAndPath).toHaveBeenCalledTimes(1)
-      expect(mockStore.deleteByTeamAndPath).toHaveBeenCalledWith('t1', 'products/old')
+      expect(mockStore.deleteByTeamAndPath).toHaveBeenCalledWith('t1', 'products/old', undefined)
       // Sync completed with new SHA
-      expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', 'sha_new')
+      expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', 'sha_new', null, undefined)
     })
   })
 
@@ -216,12 +216,12 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
 
   describe('rootPath filtering', () => {
     it('only syncs files under rootPath', async () => {
-      const source = { ...SOURCE, rootPath: 'products/' }
+      const source = { ...SOURCE, rootPath: './products//' }
       vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([source])
       vi.mocked(mockApi.getBranchHead).mockResolvedValueOnce('sha_head')
       vi.mocked(mockApi.getRepoTree).mockResolvedValueOnce([
         { path: 'products/vault.md', sha: 'a1' },
-        { path: 'README.md', sha: 'a2' },         // outside rootPath
+        { path: 'products-private/payroll.md', sha: 'a2' }, // prefix is not a directory
         { path: 'architecture/ctx.md', sha: 'a3' }, // outside rootPath
       ])
       vi.mocked(mockApi.getFileContents).mockResolvedValue({ content: '# Test' })
@@ -266,7 +266,7 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
           path: 'product',
           sourceId: 'src1',
         }))
-        expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', expect.stringMatching(/^[a-f0-9]{40}$/))
+        expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', expect.stringMatching(/^[a-f0-9]{40}$/), null, undefined)
       } finally {
         await rm(dir, { recursive: true, force: true })
       }
@@ -289,8 +289,8 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
         const worker = createKnowledgeSyncWorker({ store: mockStore, api: mockApi, credentials: mockCreds })
         await worker.tick()
 
-        expect(mockStore.deleteByTeamAndPath).toHaveBeenCalledWith('t1', 'removed')
-        expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', expect.stringMatching(/^[a-f0-9]{40}$/))
+        expect(mockStore.deleteByTeamAndPath).toHaveBeenCalledWith('t1', 'removed', undefined)
+        expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', expect.stringMatching(/^[a-f0-9]{40}$/), null, undefined)
       } finally {
         await rm(dir, { recursive: true, force: true })
       }
@@ -316,7 +316,7 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
 
         expect(mockStore.upsertByPath).not.toHaveBeenCalled()
         expect(mockStore.updateSourceSync).toHaveBeenCalledWith(
-          'src1', '', expect.stringContaining('escapes its source directory'),
+          'src1', '', expect.stringContaining('escapes its source directory'), undefined,
         )
       } finally {
         await Promise.all([
@@ -326,4 +326,46 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
       }
     })
   })
+})
+
+it('passes the same opaque authority to deletion, wikilinks, probe and checkpoint', async () => {
+  const authority = Object.freeze({})
+  const store = { ...mockStore, captureSourceSync: vi.fn(async () => authority) }
+  vi.mocked(store.getSourcesDueForSync).mockResolvedValueOnce([{ ...SOURCE, rootPath: 'docs', lastSyncedSha: 'old' }])
+  vi.mocked(mockApi.getBranchHead).mockResolvedValueOnce('new')
+  vi.mocked(mockApi.compareCommits).mockResolvedValueOnce({ headSha: 'new', files: [
+    { filename: 'docs/removed.md', status: 'removed' }, { filename: 'docs-private/payroll.md', status: 'removed' },
+  ] })
+  vi.mocked(store.listPathsSystem).mockResolvedValue(['link', 'target', 'manual'])
+  vi.mocked(store.getByPathSystem).mockImplementation(async (_, path) => ({ id: path, sourceId: path === 'manual' ? null : 'src1', metadata: { _rawRelated: ['target'] } }))
+  await createKnowledgeSyncWorker({ store, api: mockApi, credentials: mockCreds }).tick()
+  expect(store.deleteByTeamAndPath).toHaveBeenCalledExactlyOnceWith('t1', 'removed', authority)
+  expect(store.updateRelatedIds).toHaveBeenCalledWith('link', ['target'], authority)
+  expect(store.updateRelatedIds).not.toHaveBeenCalledWith('manual', expect.anything(), authority)
+  expect(store.updateSourceWriteAccess).toHaveBeenCalledWith('src1', false, authority)
+  expect(store.updateSourceSync).toHaveBeenCalledWith('src1', 'new', null, authority)
+})
+
+it('requires a claim when the capture port exists and does no provider I/O on rejection', async () => {
+  const store = { ...mockStore, captureSourceSync: vi.fn(async () => undefined) }
+  vi.mocked(store.getSourcesDueForSync).mockResolvedValueOnce([SOURCE])
+  await createKnowledgeSyncWorker({ store, api: mockApi, credentials: mockCreds }).tick()
+  expect(mockCreds.getPat).not.toHaveBeenCalled()
+  expect(store.deleteByTeamAndPath).not.toHaveBeenCalled()
+  expect(store.upsertByPath).not.toHaveBeenCalled()
+})
+
+it('releases an interrupted claim without checkpointing when reconciliation cannot fetch a file', async () => {
+  const authority = Object.freeze({})
+  const store = { ...mockStore, captureSourceSync: vi.fn(async () => authority),
+    syncRequiresFullReconciliation: vi.fn(() => true), releaseSourceSync: vi.fn(async () => {}) }
+  vi.mocked(store.getSourcesDueForSync).mockResolvedValueOnce([{ ...SOURCE, lastSyncedSha: 'same' }])
+  vi.mocked(mockApi.getBranchHead).mockResolvedValueOnce('same')
+  vi.mocked(mockApi.getRepoTree).mockResolvedValueOnce([{ path: 'page.md', sha: 'blob' }])
+  vi.mocked(mockApi.getFileContents).mockRejectedValueOnce(new Error('fetch unavailable'))
+  await createKnowledgeSyncWorker({ store, api: mockApi, credentials: mockCreds }).tick()
+  expect(mockApi.compareCommits).not.toHaveBeenCalled()
+  expect(store.updateSourceSync).toHaveBeenCalledExactlyOnceWith('src1', 'same', 'fetch unavailable', authority)
+  expect(store.releaseSourceSync).toHaveBeenCalledExactlyOnceWith(authority)
+  expect(store.deleteByTeamAndPath).not.toHaveBeenCalled()
 })

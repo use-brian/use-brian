@@ -1,5 +1,7 @@
 "use client";
 
+import { WorkspaceSearchSlot } from "@/components/workspace-search/workspace-search-provider";
+
 /**
  * Studio top bar — the doc-style chrome row for the Studio surface, mounted
  * once by `studio/layout.tsx` above every section page.
@@ -154,6 +156,7 @@ export function StudioTopbar({ workspaceId }: { workspaceId: string }) {
         id={STUDIO_TOPBAR_ACTIONS_ID}
         className="flex shrink-0 items-center gap-2 pl-2"
       />
+      <WorkspaceSearchSlot />
     </div>
   );
 }

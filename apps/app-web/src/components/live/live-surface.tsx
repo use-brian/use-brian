@@ -176,9 +176,9 @@ function LiveStatusRow({
         </span>
         <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
           {owner ? (
-            <span className="shrink-0 font-medium text-foreground/70">{owner}</span>
+            <span className="min-w-0 truncate font-medium text-foreground/70">{owner}</span>
           ) : null}
-          {owner && detail ? <span aria-hidden>·</span> : null}
+          {owner && detail ? <span className="shrink-0" aria-hidden>·</span> : null}
           {detail ? <span className="min-w-0 flex-1 truncate">{detail}</span> : <span className="flex-1" />}
           <span className="shrink-0 tabular-nums">{relativeAge(item.lastActiveAt, tl)}</span>
         </span>
@@ -274,7 +274,7 @@ function LiveStatusZone({
       ) : (
         <div
           aria-label={emptyLabel}
-          className="mt-4 flex min-h-16 flex-1 items-center gap-3 rounded-2xl border border-dashed border-current/15 px-4 text-current/25"
+          className="mt-4 flex min-h-16 flex-1 items-center gap-3 px-4 text-current/25"
         >
           <Icon className="size-4" strokeWidth={1.6} aria-hidden />
           <span className="h-px flex-1 bg-current/20" aria-hidden />

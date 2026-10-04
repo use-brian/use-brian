@@ -77,12 +77,12 @@ export function TriggerJobsList({
       </div>
       <div className="p-4 flex flex-col gap-2">
         {driftManual && (
-          <div className="text-xs rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400 px-3 py-2">
+          <div className="text-xs rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 px-3 py-2">
             {b.triggerJobsDriftManual}
           </div>
         )}
         {duplicate && (
-          <div className="text-xs rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400 px-3 py-2">
+          <div className="text-xs rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 px-3 py-2">
             {b.triggerJobsDuplicate}
           </div>
         )}

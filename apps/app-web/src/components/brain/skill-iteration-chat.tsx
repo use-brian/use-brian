@@ -72,6 +72,7 @@ import {
   registerDockRecorderChatTarget,
   useGlobalDockRecorder,
 } from "@/lib/recorder/dock-recorder-bridge";
+import { useFloatingRecorderClearance } from "@/lib/recorder/floating-recorder-slot";
 
 /** Statuses meaning "the draft engine isn't reachable" — hosts degrade
  *  (the creator shows its manual-authoring notice). */
@@ -124,6 +125,12 @@ export function SkillIterationChat({
   // screen. Rehost its persistent recorder controller instead of creating a
   // second recorder (which would reset an active capture on navigation).
   const dockRecorder = useGlobalDockRecorder();
+  // The rail's composer can sit in the bottom-right corner at `lg`+, where
+  // the floating record button rests (WorkspaceChrome's FloatingRecorderHost):
+  // register it so the button lifts above Send, and keep the inline record
+  // control for narrower widths only.
+  const composerRef = useRef<HTMLDivElement>(null);
+  useFloatingRecorderClearance(composerRef);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   useAutoGrowTextarea(textareaRef, input);
@@ -259,7 +266,9 @@ export function SkillIterationChat({
       {/* ── Transcript ─────────────────────────────────────────────── */}
       <div
         ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto"
+        // Pads by the floating recorder's reserve while it is lifted above
+        // this rail's composer, so the newest turn scrolls clear of it.
+        className="min-h-0 flex-1 overflow-y-auto pb-[var(--floating-recorder-reserve,0px)]"
         aria-live="polite"
       >
         {transcript.length === 0 && !busy ? (
@@ -312,15 +321,16 @@ export function SkillIterationChat({
 
       {dockRecorder ? (
         <>
-          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5" />
-          <DockRecorderNotice rec={dockRecorder} className="mb-1.5" />
-          <DockRecorderStrip rec={dockRecorder} className="mb-1.5" />
+          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5 lg:hidden" />
+          <DockRecorderNotice rec={dockRecorder} className="mb-1.5 lg:hidden" />
+          <DockRecorderStrip rec={dockRecorder} className="mb-1.5 lg:hidden" />
         </>
       ) : null}
 
       {/* ── Composer — the app's composer-card recipe ──────────────── */}
       <div
         {...dropProps}
+        ref={composerRef}
         className={cn(
           "relative rounded-xl border border-border bg-card shadow-xs transition-[border-color,box-shadow]",
           "focus-within:border-ring [&_:focus-visible]:shadow-none",
@@ -373,7 +383,7 @@ export function SkillIterationChat({
           >
             <Paperclip className="size-4" aria-hidden />
           </button>
-          {dockRecorder ? <DockRecorderButton rec={dockRecorder} /> : null}
+          {dockRecorder ? <DockRecorderButton rec={dockRecorder} className="lg:hidden" /> : null}
           <ComposerControls
             model={controls.model}
             onModelChange={controls.setModel}

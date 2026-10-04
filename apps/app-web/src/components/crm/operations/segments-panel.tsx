@@ -93,7 +93,7 @@ function RuleEditor({
     onChange({ ...rule, value });
   };
   return (
-    <div className="grid gap-2 rounded-lg border border-border/60 bg-background p-2 sm:grid-cols-[minmax(11rem,1.5fr)_minmax(8rem,1fr)_minmax(10rem,1.3fr)_auto]">
+    <div className="grid gap-2 sm:grid-cols-[minmax(11rem,1.5fr)_minmax(8rem,1fr)_minmax(10rem,1.3fr)_auto]">
       <Select items={fieldItems} value={field ? fieldId(field) : undefined} onValueChange={(value) => {
         if (typeof value !== "string") return;
         const next = catalog.find((item) => fieldId(item) === value);
@@ -163,7 +163,7 @@ function GroupEditor({
     if (rule && depth < 4 && group.items.length < 50) onChange({ ...group, items: [...group.items, { type: "group", combinator: "and", items: [rule] }] });
   };
   return (
-    <div className={depth > 1 ? "rounded-xl border border-border/60 bg-muted/20 p-3" : "space-y-3"}>
+    <div className={depth > 1 ? "space-y-3 border-l-2 border-border pl-3" : "space-y-3"}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted-foreground">{t.segmentMatch}</span>
         <Select value={group.combinator} onValueChange={(value) => value && onChange({ ...group, combinator: value as "and" | "or" })} disabled={disabled}>

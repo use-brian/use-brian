@@ -330,6 +330,17 @@ export async function applyRLSGucs(
   if(access?.workspaceId!==undefined)await client.query("SELECT set_config('app.agent_workspace_id', $1, true)",[access.workspaceId])
   if(access?.userId!==undefined)await client.query("SELECT set_config('app.agent_actor_id', $1, true)",[access.userId])
   if(access?.visibilityAssistantIds!==undefined)await client.query("SELECT set_config('app.agent_visibility_assistants', $1, true)",[JSON.stringify(access.visibilityAssistantIds)])
+  // Permission model v2 (migration 649): the inputs department_read_grants()
+  // computes the RLS map from. P is app.current_user_id; the map itself is
+  // derived in SQL, never handed over, so RLS stays independent of the
+  // resolver it is checked against.
+  const v2=access?.departmentRead
+  if(v2){
+    if(v2.userId!==userId)throw new Error('access_actor_mismatch')
+    await client.query(`SELECT set_config('app.v2_assistant_id',$1,true),set_config('app.v2_context_department',$2,true),
+      set_config('app.v2_binding',$3,true),set_config('app.v2_cap',$4,true)`,
+      [v2.assistantId??'',v2.contextDepartment??'',v2.binding===null?'':JSON.stringify(v2.binding),v2.cap??''])
+  }
 
 }
 

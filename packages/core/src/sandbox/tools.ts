@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto'
+import { extractPdfText } from '../files/pdf-text.js'
+import { browserFileName, BrowserDownloadsSchema, validateDownloadChunk, decodeBrowserData, MAX_BROWSER_UPLOAD, BROWSER_DOWNLOAD_CHUNK } from './browser-files.js'
 import { isProtectedFillOrigin, type ProtectedFillScope } from './protected-fill.js'
 /**
  * The computer-use tool surface (spec §3): discrete browser tools over
@@ -24,7 +27,7 @@ import { z } from 'zod'
 import { SnapshotObservationState, renderSnapshotNode, type ObservationMode } from './snapshot-observation.js'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
 import { isAutonomousToolContext } from '../tools/capability-gate.js'
-import type { Sensitivity } from '../security/sensitivity.js'
+import { minSensitivity, type Sensitivity } from '../security/sensitivity.js'
 import { estimateStringTokens } from '../compaction/compact.js'
 import {
   looksLikeCaptcha,
@@ -78,6 +81,9 @@ export type ComputerToolEvent = {
     | 'fillForm'
     | 'currentUrl'
     | 'readPage'
+    | 'listDownloads'
+    | 'readDownload'
+    | 'uploadFile'
   backend: BrowserBackendKind
   /** Resolved profile for this action. Required by the profile-scoped local relay. */
   profileId?: string | null
@@ -149,6 +155,11 @@ export type ComputerToolProfiles = {
 }
 
 export type CreateComputerToolsOptions = {
+  /** Full authority is forwarded unchanged. Implementations must use the workspace FilesApi, never local paths. */
+  files?: {
+    readBytes(context: ToolContext, fileId: string): Promise<{ bytes: Uint8Array; name: string }>
+    writeBytes(context: ToolContext, file: { path: string; name: string; mime: string; bytes: Uint8Array }): Promise<{ fileId: string; path: string }>
+  } | null
   protectedFill?: {
     scope: (context: ToolContext, profileId: string, origin: string) => Promise<ProtectedFillScope | null>
     blocked: (context: ToolContext, profileId: string | null) => boolean
@@ -237,6 +248,9 @@ const MAX_TRACKED_SESSIONS = 500
 const SNAPSHOT_MAX_LINES = 150
 
 export type ComputerTools = {
+  browserDownloads: Tool
+  browserReadDownload: Tool
+  browserUploadFile: Tool
   browserNavigate: Tool
   browserOpenTab: Tool
   browserListTabs: Tool
@@ -1193,6 +1207,135 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     },
   })
 
+  // Transfers re-authorize the active profile on every call; file callbacks get
+  // the complete acting context. No bytes or artifacts are cached across turns.
+  async function transferGate(name: string, context: ToolContext) {
+    const gate = await gates(name, context)
+    if ('error' in gate) return gate
+    const { state } = gate
+    if (opts.profiles) {
+      const profile = state.profileId ? await opts.profiles.store.get(state.profileId) : null
+      if (!profile || profile.workspaceId !== context.workspaceId || !canUseProfile(profile, {
+        userId: context.userId, workspaceId: context.workspaceId ?? '', assistantId: context.assistantId,
+        assistantClearance: minSensitivity(context.clearance ?? 'confidential', await opts.profiles.assistantClearance(context)),
+      }).ok) return { error: { data: 'ERROR: Browser profile authorization required. Navigate with an authorized profile first.', isError: true } }
+    }
+    const fused = backendFuseGate(state, state.backend)
+    return fused ? { error: fused } : gate
+  }
+
+  const browserDownloads = buildTool({
+    name: 'browserDownloads', requiresCapability: 'computer',
+    description: 'List session-scoped browser downloads (at most 20, 32 MiB each, 128 MiB total). Only completed files can be read.',
+    inputSchema: z.object({}), isReadOnly: true, isConcurrencySafe: false,
+    resolveConfirmation: policyAsk('browserDownloads'), maxResultSizeChars: 24_000,
+    async execute(_input, context) {
+      try {
+        const gate = await transferGate('browserDownloads', context)
+        if ('error' in gate) return gate.error!
+        const provider = providerFor(gate.state.backend)
+        if (!provider.listDownloads) throw new Error('Browser downloads are unsupported by this browser.')
+        const data = JSON.stringify(BrowserDownloadsSchema.parse(await provider.listDownloads(callCtx(context, gate.state))))
+        emit({ type: 'browser_action', op: 'listDownloads', backend: gate.state.backend, host: null, ok: true, ...sized(data) }, context)
+        return { data }
+      } catch (err) { return backendErrorResult(err) }
+    },
+  })
+
+  const browserReadDownload = buildTool({
+    name: 'browserReadDownload', requiresCapability: 'computer',
+    description: 'Always requires explicit interactive approval to share: saves a completed browser download (max 32 MiB) to durable workspace files under workspace permissions, potentially broader than a private browser profile. Read PDF text layers or UTF-8 text in 12000-character pages using offset (text characters, NOT byte offset). Scanned PDFs need OCR; other binary formats return a file ID without fabricated text.',
+    inputSchema: z.object({ id: z.string().min(1).max(512), offset: z.number().int().min(0).default(0) }),
+    isReadOnly: false, isConcurrencySafe: false, requiresConfirmation: true,
+    resolveConfirmation: async () => true,
+    describeConfirmation: async () => [
+      'Save this browser download to workspace files and read its contents?',
+      'The saved file uses workspace permissions, which may allow more people to access it than the private browser profile. Workspace files do not preserve owner-only browser profile access.',
+      'Approve only if you agree to share this download under workspace permissions. The saved file remains after the browser session stops.',
+    ],
+    timeoutMs: 120_000, maxResultSizeChars: 16_000,
+    async execute(input, context) {
+      try {
+        const gate = await transferGate('browserReadDownload', context)
+        if ('error' in gate) return gate.error!
+        if (isAutonomousToolContext(context)) throw new Error('Saving a browser download requires explicit interactive approval to share it under workspace permissions.')
+        if (context.abortSignal.aborted) throw new Error('Download cancelled.')
+        const provider = providerFor(gate.state.backend)
+        if (!provider.listDownloads || !provider.readDownload) throw new Error('Reading browser downloads is unsupported by this browser.')
+        if (!context.workspaceId || !opts.files) throw new Error('Workspace file storage is unavailable.')
+        const ctx = callCtx(context, gate.state)
+        const inventory = await provider.listDownloads(ctx)
+        if (context.abortSignal.aborted) throw new Error('Download cancelled.')
+        const file = BrowserDownloadsSchema.parse(inventory).downloads.find(d => d.id === input.id)
+        if (!file || file.state !== 'completed') throw new Error('Download is unavailable or not completed.')
+        const chunks: Buffer[] = []
+        let offset = 0
+        do {
+          if (context.abortSignal.aborted) throw new Error('Download cancelled.')
+          if (chunks.length >= 1024) throw new Error('Too many download chunks.')
+          const result = await provider.readDownload(ctx, input.id, offset)
+          if (context.abortSignal.aborted) throw new Error('Download cancelled.')
+          const chunk = validateDownloadChunk(result, offset)
+          if (chunk.total !== file.size) throw new Error('Download size changed during transfer.')
+          const bytes = decodeBrowserData(chunk.data, BROWSER_DOWNLOAD_CHUNK)
+          chunks.push(bytes)
+          offset += bytes.length
+        } while (offset < file.size)
+        const bytes = Buffer.concat(chunks, file.size)
+        const name = browserFileName(file.name)
+        const key = createHash('sha256').update(JSON.stringify([context.userId, context.workspaceId, context.assistantId,
+          context.sessionId, gate.state.profileId, input.id])).update(bytes).digest('hex')
+        if (context.abortSignal.aborted) throw new Error('Download cancelled.')
+        const saved = await opts.files.writeBytes(context, { path: `/browser-downloads/${key}/${name}`, name, mime: file.mime || 'application/octet-stream', bytes })
+        if (context.abortSignal.aborted) throw new Error('Download cancelled after persistence; the workspace file may already have been saved.')
+        let text = ''
+        let note = 'Binary file saved; no text extraction is available for this format.'
+        if (file.mime.split(';')[0] === 'application/pdf' || /\.pdf$/i.test(name)) {
+          try {
+            text = await extractPdfText(bytes)
+            note = text ? 'PDF text layer extracted.' : 'PDF has no extractable text layer (possibly scanned/image-only); OCR is required.'
+          } catch { note = 'PDF saved, but text extraction failed; no text is available.' }
+        } else if (/^text\/|^application\/(json|xml|csv)(;|$)/i.test(file.mime)) {
+          try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); note = text ? 'UTF-8 text.' : 'Empty text file.' }
+          catch { note = 'File saved; text is not valid UTF-8.' }
+        }
+        if (context.abortSignal.aborted) throw new Error('Download cancelled after persistence; the workspace file may already have been saved.')
+        const end = Math.min(input.offset + 12_000, text.length)
+        emit({ type: 'browser_action', op: 'readDownload', backend: gate.state.backend, host: null, ok: true }, context)
+        return { data: JSON.stringify({ ...saved, name, size: bytes.length, note, offset: input.offset,
+          totalCharacters: text.length, ...(end < text.length ? { nextOffset: end } : {}), text: text.slice(input.offset, end) }) }
+      } catch (err) { return backendErrorResult(err) }
+    },
+  })
+
+  const browserUploadFile = buildTool({
+    name: 'browserUploadFile', requiresCapability: 'computer',
+    description: 'Select a durable workspace file (max 4 MiB) in a file input from the latest observation. Selection may immediately upload/send the file to the website, so explicit user approval is ALWAYS required. No URLs or local paths.',
+    inputSchema: z.object({ ref: z.string().min(1).max(512), fileId: z.string().uuid() }),
+    isReadOnly: false, isConcurrencySafe: false, requiresConfirmation: true,
+    resolveConfirmation: async () => true, timeoutMs: 60_000,
+    async execute(input, context) {
+      try {
+        const gate = await transferGate('browserUploadFile', context)
+        if ('error' in gate) return gate.error!
+        // Never allow unattended selection: file inputs can send immediately.
+        if (isAutonomousToolContext(context)) throw new Error('File upload requires an interactive user approval.')
+        const provider = providerFor(gate.state.backend)
+        if (!provider.uploadFile) throw new Error('File upload is unsupported by this browser.')
+        if (!context.workspaceId || !opts.files) throw new Error('Workspace file access is unavailable.')
+        const ref = gate.state.observations.resolve(input.ref)
+        const file = await opts.files.readBytes(context, input.fileId)
+        if (file.bytes.byteLength > MAX_BROWSER_UPLOAD) throw new Error('Upload exceeds the 4 MiB limit.')
+        const name = browserFileName(file.name)
+        await provider.uploadFile(callCtx(context, gate.state), ref, name, Buffer.from(file.bytes).toString('base64'))
+        gate.state.observations.reset()
+        gate.state.refLabels.clear()
+        emit({ type: 'browser_action', op: 'uploadFile', backend: gate.state.backend, host: null, ok: true }, context)
+        return { data: `Selected workspace file ${input.fileId} in the browser. The website may have uploaded it automatically. Take a fresh snapshot before continuing.` }
+      } catch (err) { return backendErrorResult(err) }
+    },
+  })
+
   // ── browserType ──────────────────────────────────────────────
 
   const browserType = buildTool({
@@ -1529,6 +1672,9 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     browserCloseTab,
     browserSnapshot,
     browserClick,
+    browserDownloads,
+    browserReadDownload,
+    browserUploadFile,
     browserType,
     browserFillForm,
     browserCurrentUrl,

@@ -8,7 +8,7 @@ vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events');
   const makeSession = () => Object.assign(new EventEmitter(), {
     setPermissionRequestHandler: vi.fn(), setPermissionCheckHandler: vi.fn(), setDevicePermissionHandler: vi.fn(),
-    webRequest: { onBeforeRequest: vi.fn() },
+    webRequest: { onBeforeRequest: vi.fn(), onHeadersReceived: vi.fn() },
   });
   let nextId = 1;
   class Contents extends EventEmitter {
@@ -120,7 +120,7 @@ describe('embedded browser host isolation and native boundaries', () => {
     expect(site).not.toHaveProperty('preload');
     expect(site.session).not.toBe(toolbar().session);
   });
-  it('denies permissions, device access and downloads', () => {
+  it('denies permissions, device access and unattributed downloads', () => {
     create();
     for (const s of [electronMocks.sessions.get('persist:embedded-test'), toolbar().session]) {
       const reply = vi.fn(); s.setPermissionRequestHandler.mock.calls[0][0]({}, 'camera', reply);
@@ -130,6 +130,31 @@ describe('embedded browser host isolation and native boundaries', () => {
     }
     const download = event(); electronMocks.sessions.get('persist:embedded-test').emit('will-download', download);
     expect(download.preventDefault).toHaveBeenCalledOnce();
+  });
+  it('captures only downloads from owned site tabs, never the toolbar', async () => {
+    const h = create(); await h.createTab('https://example.com', true);
+    const capture = vi.spyOn(h.files, 'capture').mockImplementation(() => {});
+    const item = {};
+    const download = event();
+    electronMocks.sessions.get('persist:embedded-test').emit('will-download', download, item, wc());
+    expect(download.preventDefault).not.toHaveBeenCalled();
+    expect(capture).toHaveBeenCalledWith(item);
+    const blocked = event();
+    toolbar().session.emit('will-download', blocked, item, toolbar());
+    expect(blocked.preventDefault).toHaveBeenCalledOnce();
+    expect(capture).toHaveBeenCalledOnce();
+  });
+  it('captures inline PDF navigations without changing ordinary HTML or subresources', () => {
+    create();
+    const intercept = electronMocks.sessions.get('persist:embedded-test').webRequest.onHeadersReceived.mock.calls[0][0];
+    const reply = vi.fn();
+    intercept({ resourceType: 'mainFrame', responseHeaders: { 'content-type': ['application/pdf'], 'content-disposition': ['inline; filename="timetable.pdf"'] } }, reply);
+    expect(reply).toHaveBeenLastCalledWith({ responseHeaders: { 'content-type': ['application/pdf'], 'Content-Disposition': ['attachment; filename="timetable.pdf"'] } });
+    for (const [resourceType, mime] of [['mainFrame', 'text/html'], ['xhr', 'application/pdf']]) {
+      const headers = { 'content-type': [mime] };
+      intercept({ resourceType, responseHeaders: headers }, reply);
+      expect(reply).toHaveBeenLastCalledWith({ responseHeaders: headers });
+    }
   });
   it.each(['file:///etc/passwd', 'javascript:alert(1)', 'data:text/html,hello', 'about:blank', 'custom:launch', 'https://user:pass@example.com'])('blocks unsafe creation, navigation, redirect and popup %s', async url => {
     const h = create(); await expect(h.createTab(url, true)).rejects.toThrow(); expect(electronMocks.views).toHaveLength(1);

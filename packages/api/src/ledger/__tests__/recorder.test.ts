@@ -153,6 +153,7 @@ describe('[COMP:api/turn-ledger-recorder] event shapes', () => {
       systemPrompt: 's',
       messages: [{ role: 'user', content: 'first' }],
     })
+    trace.request({ turn: 0, messages: [{ role: 'user', content: 'first' }], full: false })
     trace.turn({ turn: 0, response: textResponse('a'), toolResults: [] })
     trace.request({ turn: 1, messages: [{ role: 'user', content: 'delta' }], full: false })
     trace.turn({ turn: 1, response: textResponse('b'), toolResults: [] })
@@ -162,6 +163,32 @@ describe('[COMP:api/turn-ledger-recorder] event shapes', () => {
     const refs = second.payloadRefs as string[]
     expect(refs).toContain(hashPayload(JSON.stringify({ role: 'user', content: 'first' })))
     expect(refs).toContain(hashPayload(JSON.stringify({ role: 'user', content: 'delta' })))
+  })
+
+  it('records a stateful turn\'s history once: the first delta IS the history', async () => {
+    const { store } = fakePayloads()
+    const handle = createTurnLedger({ workspaceId: 'ws1', payloads: store })
+    const history = [
+      { role: 'user' as const, content: 'earlier' },
+      { role: 'assistant' as const, content: 'reply' },
+      { role: 'user' as const, content: 'now' },
+    ]
+    const trace = handle.ledger.startTrace({ actor: 'assistant_turn', model: 'm', systemPrompt: 's', messages: history })
+    // The query loop's real order: the empty session's first send carries
+    // the full history, later sends only the delta.
+    trace.request({ turn: 0, messages: history, full: false })
+    trace.turn({ turn: 0, response: textResponse('a'), toolResults: [] })
+    trace.request({ turn: 1, messages: [{ role: 'user', content: 'delta' }], full: false })
+    trace.turn({ turn: 1, response: textResponse('b'), toolResults: [] })
+    await handle.flush()
+
+    const messageRefs = (event: unknown) => {
+      const e = event as { payloadRefs: string[]; metadata: { messageCount: number } }
+      return e.payloadRefs.slice(1, 1 + e.metadata.messageCount)
+    }
+    const h = (m: unknown) => hashPayload(JSON.stringify(m))
+    expect(messageRefs(db.events[0])).toEqual(history.map(h))
+    expect(messageRefs(db.events[1])).toEqual([...history.map(h), h({ role: 'user', content: 'delta' })])
   })
 
   it('adopts the supplied assistantMessageId for the first trace, mints for children', () => {

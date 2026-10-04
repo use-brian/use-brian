@@ -155,7 +155,7 @@ export function loadSurfaceCache<T>(
         lifecycle?.dispose?.(data);
         throw new SurfaceCacheEvictionError(new Error("cache_resource_expired"));
       }
-      const timer = ttl === undefined ? undefined : setTimeout(() => invalidateSurfaceCache(key), Math.ceil(ttl));
+      const timer = ttl === undefined ? undefined : setTimeout(() => evictSurfaceCacheKey(key), Math.ceil(ttl));
       if (timer !== undefined || lifecycle?.dispose) {
         disposals.set(key, () => {
           if (timer !== undefined) clearTimeout(timer);
@@ -206,7 +206,7 @@ export function seedSurfaceCache<T>(key: string, data: T, lifecycle?: CacheLifec
   const ttl = lifecycle?.expiresInMs?.(data);
   if (ttl !== undefined && (!Number.isFinite(ttl) || ttl <= 0)) return false;
   disposeEntry(key);
-  const timer = ttl === undefined ? undefined : setTimeout(() => invalidateSurfaceCache(key), Math.ceil(ttl));
+  const timer = ttl === undefined ? undefined : setTimeout(() => evictSurfaceCacheKey(key), Math.ceil(ttl));
   if (timer !== undefined || lifecycle?.dispose) disposals.set(key, () => {
     if (timer !== undefined) clearTimeout(timer);
     lifecycle?.dispose?.(data);
@@ -266,6 +266,38 @@ export function invalidateSurfaceCache(prefix: string): void {
   for (const key of store.keys()) {
     if (key === prefix || key.startsWith(prefix)) dropped.push(key);
   }
+  dropKeys(dropped);
+}
+
+/**
+ * Drop exactly one key, never the keys it happens to prefix. A value's OWN
+ * lifetime ending (expiry) is not an authority signal for its siblings:
+ * `workspace-access:<w>:<u>` prefixes the registry, mode and history slots,
+ * and evicting the family whenever one projection expired blanked every
+ * still-valid sibling to a skeleton.
+ *
+ * By default an in-flight load is detached too (a seed's own expiry discards
+ * the response of the request racing it). `keepInflight` drops only the VALUE
+ * and leaves the load attached, for a caller whose load result carries its own
+ * lifetime: a protected projection's deadline is measured from its request's
+ * start. Detaching there made every mounted consumer of one key start its own
+ * request on a single focus event (each consumer's listener evicted the load
+ * the previous one had just started), so N consumers sent N parallel requests
+ * for one projection - enough, on a slow endpoint, to exhaust the API's
+ * database pool.
+ */
+export function evictSurfaceCacheKey(key: string, options?: { keepInflight?: boolean }): void {
+  if (!isBrowser() || !store.has(key)) return;
+  if (!options?.keepInflight || !inflight.has(key)) {
+    dropKeys([key]);
+    return;
+  }
+  disposeEntry(key);
+  store.set(key, { ...EMPTY, revalidating: true });
+  emit(key);
+}
+
+function dropKeys(dropped: string[]): void {
   for (const key of dropped) {
     // Detach old reads: their completion must not repopulate an invalidated key.
     inflight.delete(key);

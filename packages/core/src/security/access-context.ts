@@ -1,3 +1,4 @@
+import type { DepartmentReadGrant } from './department-read.js'
 import type { Sensitivity } from './sensitivity.js'
 
 /**
@@ -48,6 +49,13 @@ export type AccessContext = {
   assistantKind: AssistantKind
   /** Additional delegated ceiling; [] permits only assistant-public rows. */
   visibilityAssistantIds?: string[] | null
+  /**
+   * The turn's audience is shared (a room, doc comment thread, Feed draft or
+   * team group), so only rows with no user owner are readable: one member's
+   * personal context never enters a reply the whole room receives (decision
+   * D4). Enforced by the universal predicate for automatic and tool reads.
+   */
+  sharedAudience?: boolean
   clearance?: Sensitivity
   compartments?: string[] | null
   /** Source mutations, independently bounded by read reach. Omission is legacy only. */
@@ -96,6 +104,12 @@ export type AccessContext = {
   clientSelfMemory?: {
     compartment: string
   }
+  /**
+   * Permission model v2 read authority, present only when the workspace's v2
+   * read flag is on. The predicate then evaluates department and tier from
+   * this grant alone (see `department-read.ts`).
+   */
+  departmentRead?: DepartmentReadGrant
 }
 
 export type AssistantKind = 'primary' | 'standard' | 'app'

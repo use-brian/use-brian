@@ -71,6 +71,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // Shopify families (`shopify:`, `shopify-drafts:`), which read an
       // EXTERNAL store no workspace event ever describes.
       return [
+        `project:${workspaceId}:`,
         `tasks:${workspaceId}`,
         `crm:${workspaceId}:`,
         `brain-graph:${workspaceId}:`,
@@ -100,6 +101,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // page carries no listener of its own and its in-flight poll stays only
       // as the degraded-SSE fallback.
       return [
+        `project:${workspaceId}:`,
         `workflow:${workspaceId}`,
         `workflow-detail:${workspaceId}:`,
         `workflow-run:${workspaceId}:`,
@@ -129,12 +131,14 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         // brand voice created from chat reaches the Feed gate too.
         `feed-workspace:${workspaceId}`,
       ];
+    case "brian:organization-changed":
+      return [`workspace-access:${workspaceId}:`, `organization:${workspaceId}:`, `scope-review:${workspaceId}:`];
     case WORKSPACE_IDENTITY_REFRESH_EVENT:
       // `workspace_config`: the workspace's name / role projection, which the
       // Feed shell's record carries (name, role, canDraft) - report E's
       // "Feed gate" row names this as its one stale trigger. The Settings
       // detail row (name, icon, purpose, roster) rides the same signal.
-      return [`feed-workspace:${workspaceId}`, `workspace-detail:${workspaceId}`, `feed-collaboration:${workspaceId}`];
+      return [`projects:${workspaceId}`, `project:${workspaceId}:`, `feed-workspace:${workspaceId}`, `workspace-detail:${workspaceId}`, `feed-collaboration:${workspaceId}`];
     case SKILL_REFRESH_EVENT:
       // `brain-skill:<wid>:` is the skill editor's row. Mark-stale only: the
       // editor body is an editable draft, and the page adopts a revalidated
@@ -149,6 +153,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       return [
         `live:${workspaceId}`,
         `chat-sessions:${workspaceId}`,
+        `project:${workspaceId}:`,
         `chat-shared:${workspaceId}`,
         `feed-collaboration:${workspaceId}`,
       ];
@@ -187,50 +192,63 @@ export const SURFACE_CACHE_SPINE_EVENTS: readonly string[] = [
   HOME_APPS_REFRESH_EVENT,
   GOAL_REFRESH_EVENT,
   WORKSPACE_IDENTITY_REFRESH_EVENT,
+  "brian:organization-changed",
 ];
 
 /**
  * Apply one domain event to the cache: mark every prefix the event feeds.
  * Exported for the listener and for tests; an event whose detail names a
- * DIFFERENT workspace is ignored (a `null` / absent workspace id is the
- * catch-up shape and applies).
+ * DIFFERENT workspace is ignored (a `null` / absent workspace id applies). A
+ * `catchUp` detail downgrades every purge below to a stale mark.
  */
 export function applySpineEventToSurfaceCache(
   event: string,
-  detail: { workspaceId?: string | null } | null | undefined,
+  detail: { workspaceId?: string | null; catchUp?: unknown } | null | undefined,
   workspaceId: string,
 ): void {
   if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
-  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) invalidateSurfaceCache(`workspace-member-directory:${workspaceId}:`);
-  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) invalidateSurfaceCache(`page-directory:${workspaceId}:`);
+  // The reconnect / tab-visible catch-up says only "something MAY have changed
+  // while the stream was down", and the stream cycles every ~5 minutes. Dropping
+  // here blanked every open access surface to a skeleton on that cadence, so a
+  // catch-up marks stale (revalidate behind the paint; a forbidden refetch still
+  // evicts, and protected projections still expire on their own deadline). A
+  // real server change keeps the purge.
+  const drop = detail?.catchUp === true ? markSurfaceCacheStale : invalidateSurfaceCache;
+  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`workspace-member-directory:${workspaceId}:`);
+  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`page-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT) {
-    invalidateSurfaceCache(`doc-media:${workspaceId}:`);
-    invalidateSurfaceCache(`file-cache-media:${workspaceId}:`);
-    invalidateSurfaceCache(`office-media:${workspaceId}:`);
-    invalidateSurfaceCache(`office-preview:${workspaceId}:`);
-    invalidateSurfaceCache(`office:${workspaceId}:`);
-    invalidateSurfaceCache(`office-templates:${workspaceId}:`);
-    invalidateSurfaceCache(`office-routing:${workspaceId}:`);
-    invalidateSurfaceCache(`office-panel:${workspaceId}:`);
-    invalidateSurfaceCache(`office-artifact:${workspaceId}:`);
-    invalidateSurfaceCache(`office-snapshot:${workspaceId}:`);
+    drop(`project:${workspaceId}:`);
+    drop(`doc-media:${workspaceId}:`);
+    drop(`file-cache-media:${workspaceId}:`);
+    drop(`office-media:${workspaceId}:`);
+    drop(`office-preview:${workspaceId}:`);
+    drop(`office:${workspaceId}:`);
+    drop(`office-templates:${workspaceId}:`);
+    drop(`office-routing:${workspaceId}:`);
+    drop(`office-panel:${workspaceId}:`);
+    drop(`office-artifact:${workspaceId}:`);
+    drop(`office-snapshot:${workspaceId}:`);
   }
-  if (event === WORKSPACE_IDENTITY_REFRESH_EVENT) {
+  if (event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed") {
     // Authority changes purge even an unmounted directory/access surface.
-    invalidateSurfaceCache(`organization:${workspaceId}:`);
-    invalidateSurfaceCache(`workspace-access:${workspaceId}:`);
-    invalidateSurfaceCache(`scope-review:${workspaceId}:`);
-    invalidateSurfaceCache(`approvals:${workspaceId}`);
-    invalidateSurfaceCache(`doc-media:${workspaceId}:`);
-    invalidateSurfaceCache(`file-cache-media:${workspaceId}:`);
-    invalidateSurfaceCache(`office-media:${workspaceId}:`);
-    invalidateSurfaceCache(`office-preview:${workspaceId}:`);
-    invalidateSurfaceCache(`office:${workspaceId}:`);
-    invalidateSurfaceCache(`office-templates:${workspaceId}:`);
-    invalidateSurfaceCache(`office-routing:${workspaceId}:`);
-    invalidateSurfaceCache(`office-panel:${workspaceId}:`);
-    invalidateSurfaceCache(`office-artifact:${workspaceId}:`);
-    invalidateSurfaceCache(`office-snapshot:${workspaceId}:`);
+    drop(`projects:${workspaceId}`);
+    drop(`project:${workspaceId}:`);
+    drop(`assistants:${workspaceId}`);
+    drop(`chat-roster:${workspaceId}`);
+    drop(`organization:${workspaceId}:`);
+    drop(`workspace-access:${workspaceId}:`);
+    drop(`scope-review:${workspaceId}:`);
+    drop(`approvals:${workspaceId}`);
+    drop(`doc-media:${workspaceId}:`);
+    drop(`file-cache-media:${workspaceId}:`);
+    drop(`office-media:${workspaceId}:`);
+    drop(`office-preview:${workspaceId}:`);
+    drop(`office:${workspaceId}:`);
+    drop(`office-templates:${workspaceId}:`);
+    drop(`office-routing:${workspaceId}:`);
+    drop(`office-panel:${workspaceId}:`);
+    drop(`office-artifact:${workspaceId}:`);
+    drop(`office-snapshot:${workspaceId}:`);
   }
   for (const prefix of staleMarksFor(event, workspaceId)) {
     markSurfaceCacheStale(prefix);

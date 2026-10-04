@@ -17,6 +17,8 @@
  */
 
 import type { Sensitivity } from '@use-brian/core'
+import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { getPool, query, queryWithRLS } from './client.js'
 
 export type Teamspace = {
@@ -118,9 +120,31 @@ export async function ensureDefaultTeamspaceSystem(workspaceId: string): Promise
  * The `addMember` seam — every joiner lands in General so the day-one
  * sidebar is never empty. Heals a missing default first.
  */
-export async function joinDefaultTeamspacesSystem(workspaceId: string, userId: string): Promise<void> {
-  await ensureDefaultTeamspaceSystem(workspaceId)
-  await query(
+export async function joinDefaultTeamspacesSystem(workspaceId: string, userId: string, client?: import('pg').PoolClient): Promise<void> {
+  if (!client) {
+    await ensureDefaultTeamspaceSystem(workspaceId)
+  } else {
+    // The caller holds the workspace lock. Heal on its transaction rather
+    // than escaping to the pool (or catching a uniqueness error mid-tx).
+    const created = await client.query<{ id: string }>(
+      `INSERT INTO teamspaces (workspace_id, name, sensitivity, is_default, created_by)
+       SELECT w.id, 'General', 'internal', true, w.owner_user_id FROM workspaces w
+       WHERE w.id = $1
+         AND NOT EXISTS (SELECT 1 FROM teamspaces WHERE workspace_id = $1 AND is_default = true)
+       ON CONFLICT DO NOTHING RETURNING id`,
+      [workspaceId],
+    )
+    if (created.rows[0]) {
+      await client.query(
+        `INSERT INTO teamspace_members (teamspace_id, user_id)
+         SELECT $1, wm.user_id FROM workspace_members wm WHERE wm.workspace_id = $2
+         ON CONFLICT DO NOTHING`,
+        [created.rows[0].id, workspaceId],
+      )
+    }
+  }
+  const execute = client ? client.query.bind(client) : query
+  await execute(
     `INSERT INTO teamspace_members (teamspace_id, user_id)
      SELECT t.id, $2 FROM teamspaces t WHERE t.workspace_id = $1 AND t.is_default = true
      ON CONFLICT DO NOTHING`,
@@ -218,6 +242,13 @@ export function createTeamspaceStore() {
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')
+        await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [params.workspaceId])
+        const policy = await readAdmissionPolicy(client, params.workspaceId)
+        // This legacy API has no reviewed department-link intent. Creating or
+        // linking a container here would silently change its audience.
+        if (policy?.setupState === 'ready') {
+          throw new WorkspaceAccessError('context_selection_required', 409)
+        }
         const result = await client.query<Teamspace>(
           `INSERT INTO teamspaces (workspace_id, name, icon, description, sensitivity, created_by, position)
            VALUES ($1, $2, $3, $4, $5, $6,

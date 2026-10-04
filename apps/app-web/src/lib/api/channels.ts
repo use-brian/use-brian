@@ -62,6 +62,8 @@ export type DeliveryAudienceBindingInput = {
   projectIds: string[];
   recipientUserId?: string | null;
   expiresAt?: string | null;
+  /** Group only: no Team/Project cap, so connected tools are available there. */
+  companyWide?: boolean;
 };
 export type DeliveryAudienceBinding = DeliveryAudienceBindingInput & {
   version: 1;

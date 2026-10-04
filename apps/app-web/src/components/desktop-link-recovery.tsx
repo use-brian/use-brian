@@ -100,7 +100,7 @@ export function DesktopLinkRecovery() {
           <p role="status" className="mt-4 text-sm leading-relaxed">{message}</p>
 
           {state.phase === "choose-account" && (
-            <div className="mt-4 rounded-xl border border-border p-1">
+            <div className="-mx-2 mt-4">
               <DesktopAccounts
                 allowedKeys={state.choices.map((choice) => choice.key)}
                 onSelect={(account) => act("choose", account.key)}
@@ -115,7 +115,7 @@ export function DesktopLinkRecovery() {
                   type="button"
                   disabled={busy}
                   onClick={() => void act("choose", choice.key)}
-                  className="min-h-11 rounded-xl border border-border px-3 py-2 text-left hover:bg-muted disabled:opacity-60"
+                  className="max-sm:min-h-11 rounded-xl border border-border px-3 py-2 text-left hover:bg-muted disabled:opacity-60"
                 >
                   <span className="block text-sm font-medium">{choice.label}</span>
                   <span className="block truncate text-xs text-muted-foreground">{choice.detail}</span>

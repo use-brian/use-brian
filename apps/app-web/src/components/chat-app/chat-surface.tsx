@@ -1,6 +1,10 @@
 "use client";
 
 
+import { useChatHandoff } from "@/lib/use-chat-handoff";
+import { readChatDrafts, writeChatDrafts, type RecoverableChatDraft } from "@/lib/chat-draft-recovery";
+import { LiveInteractionJobs, LiveInteractionQuestionControls } from "@/components/chrome/live-interaction-jobs";
+import { canonicalInteractionAdditions } from "@/lib/live-interaction/canonical";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Chat operator app — the full-page, ChatGPT-style chat surface at
@@ -147,6 +151,7 @@ import {
   registerDockRecorderChatTarget,
   useGlobalDockRecorder,
 } from "@/lib/recorder/dock-recorder-bridge";
+import { useFloatingRecorderClearance } from "@/lib/recorder/floating-recorder-slot";
 import {
   appendReasoning,
   appendStep,
@@ -167,7 +172,7 @@ import { useT, useLocale, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { isPhoneViewport } from "@/lib/viewport";
 import { Skeleton } from "@/components/skeleton";
-import { type WorkspaceAssistantSummary } from "@/lib/api/views";
+import { listWorkspaceAssistants, type WorkspaceAssistantSummary } from "@/lib/api/views";
 import {
   patchSharedChatSessions,
   readCachedTranscript,
@@ -202,6 +207,7 @@ import {
 } from "@/lib/api/sessions";
 import { getUserInfo } from "@/lib/user";
 import { markRoomSeen } from "@/lib/chat-seen";
+import {ModeAwareCreationContext,useCreationContext} from "@/components/context/mode-aware-context";
 import { ContextScopePicker } from "@/components/context/context-scope-picker";
 import { ContextScopeChips } from "@/components/context/context-scope-chips";
 import {
@@ -217,11 +223,7 @@ import {
   type ChatLocation,
   type ChatView,
 } from "@/lib/chat-last-location";
-import {
-  resolveChatHandoffAction,
-  takeChatHandoff,
-  type PendingChatHandoff,
-} from "@/lib/chat-handoff";
+import { personalChatHandoffPath } from "@/lib/chat-handoff";
 import { accelEnterLabel } from "@/lib/surface-shortcuts";
 import {
   fetchPendingSessionInput,
@@ -290,6 +292,15 @@ import {
   ChatDocumentCard,
   ChatDocumentViewer,
 } from "@/components/chat-app/chat-document-viewer";
+import { ChatPageLinkCard } from "@/components/chat-app/chat-page-link-card";
+import {
+  PAGE_WRITING_TOOLS,
+  addPageLinks,
+  collectPageWrites,
+  pageIdsFromToolResult,
+  pageLinksForRow,
+} from "@/lib/chat-page-links";
+import { docPagePath } from "@/lib/doc-page-url";
 import {
   coalesceAssistantRunMessages,
   computeTranscriptRowMeta,
@@ -340,12 +351,14 @@ type RemoteConfirmation = {
 
 export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const t = useT().chatApp;
+  const searchCopy = useT().workspaceSearch;
   const locale = useLocale();
   // The dock's chat dictionary — tool narration, activity copy, copy/stop
   // labels. Reused verbatim so the two surfaces never phrase one thing twice.
   const tChat = useT().chat;
   const tAttach = useT().attachments;
   const tRecordings = useT().recordings;
+  const interactionT = useT().liveInteraction;
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -420,14 +433,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  Reset whenever the pane returns to a fresh chat — the pick is per chat,
    *  not a sticky preference. */
   const [pickedAssistantId, setPickedAssistantId] = useState<string | null>(null);
+  const handoffAssistantRef = useRef<string | null>(null);
   const [contextTeams, setContextTeams] = useState<ContextTeam[]>([]);
   const [contextProjects, setContextProjects] = useState<ContextProject[]>([]);
   const [pickedContextGroupId, setPickedContextGroupId] = useState<string | null>(null);
   const [pickedContextProjectId, setPickedContextProjectId] = useState<string | null>(null);
-  const [pendingHandoff, setPendingHandoff] =
-    useState<PendingChatHandoff | null>(null);
-  const handoffWorkspaceRef = useRef<string | null>(null);
-  const resolvedHandoffRef = useRef<string | null>(null);
+
   const [switcherOpen, setSwitcherOpen] = useState(false);
   /** Personal rows across every assistant — resolves an open thread's binding
    *  (each row carries the `assistantId` it was fetched under). */
@@ -446,6 +457,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** The viewer's own user id — filters this client's OWN turn out of the
    *  room's bus mirror (it streams over this client's POST already). */
   const meId = getUserInfo()?.id ?? null;
+  const [recoveryDrafts,setRecoveryDrafts] = useState<RecoverableChatDraft[]>([]);
+  useEffect(() => { setRecoveryDrafts(meId ? readChatDrafts(workspaceId,meId) : []); },[workspaceId,meId]);
+  const updateRecoveryDrafts = (drafts:RecoverableChatDraft[]) => {
+    setRecoveryDrafts(drafts);
+    if(meId) writeChatDrafts(workspaceId,meId,drafts);
+  };
   /** The composer's Ask affordance (D1/T3): arms address intent for the next
    *  send in a room without typing a mention. Reset after each send. */
   const [askArmed, setAskArmed] = useState(false);
@@ -524,6 +541,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [restoring, setRestoring] = useState<ChatLocation | null>(null);
   const activeSessionId = restoring ? restoring.sessionId : urlSessionId;
   const view: ChatView = restoring ? restoring.view : urlView;
+  const creationContext=useCreationContext(activeSessionId?"existing":view==="workspace"?"new-shared":"private");
   /** The open thread is shared when it is in the workspace list. */
   const activeShared = useMemo(
     () => sharedSessions.find((r) => r.id === activeSessionId) ?? null,
@@ -719,6 +737,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // to discard, captured at `tool_start` against the tool it preceded.
   const turnNotesRef = useRef<ActivityNote[]>([]);
   const turnDocumentsRef = useRef<DocumentAttachment[]>([]);
+  // Pages the turn created or edited (live `page_created` + page-writing
+  // tool results) — linked under the reply. See lib/chat-page-links.ts.
+  const turnPageLinksRef = useRef<string[]>([]);
   const turnCitationsRef = useRef<CitationSource[]>([]);
   const turnFileAttachmentsRef = useRef<ChatFileAttachment[]>([]);
   const turnWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
@@ -744,6 +765,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     turnToolsRef.current = [];
     turnNotesRef.current = [];
     turnDocumentsRef.current = [];
+    turnPageLinksRef.current = [];
     turnCitationsRef.current = [];
     turnFileAttachmentsRef.current = [];
     turnWorkerDescriptionsRef.current = new Map();
@@ -773,6 +795,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     (assistantId: string | null): SurfaceMessage | null => {
       const finalText = turnTextRef.current.trim();
       const finalDocuments = turnDocumentsRef.current;
+      const finalPageLinks = turnPageLinksRef.current;
       const finalCitations = turnCitationsRef.current;
       const finalFileAttachments = turnFileAttachmentsRef.current;
       // Close any step the server never resolved, so the receipt shows a
@@ -784,6 +807,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         !finalText &&
         tools.length === 0 &&
         finalDocuments.length === 0 &&
+        finalPageLinks.length === 0 &&
         finalFileAttachments.length === 0
       ) {
         return null;
@@ -806,6 +830,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ...(activityNotes ? { activityNotes } : {}),
         ...(activityReasoning ? { activityReasoning } : {}),
         ...(finalDocuments.length > 0 ? { documents: finalDocuments } : {}),
+        ...(finalPageLinks.length > 0 ? { pageLinks: finalPageLinks } : {}),
         ...(activityDurationMs != null ? { activityDurationMs } : {}),
         ...(finalCitations.length > 0 ? { citations: finalCitations } : {}),
         ...(finalFileAttachments.length > 0
@@ -1151,10 +1176,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Map persisted rows into transcript messages. Assistant rows restore
    *  their `tool_use` blocks as a done-status receipt (re-narrated from each
    *  call's input, no timings — same as the dock's history restore). */
-  const mapTranscriptRows = useCallback((rows: DocSessionMessage[]): SurfaceMessage[] => {
+  const mapTranscriptRows = useCallback((rows: DocSessionMessage[], coalesce = true): SurfaceMessage[] => {
     // Each call's outcome lives on the tool_result carrier row the transcript
     // never renders — index them once so a failed call restores as `retried`.
     const outcomes = collectToolResults(rows);
+    const pageWrites = collectPageWrites(rows);
     const persistedRows: SurfaceMessage[] = rows
       .filter((r) => r.role === "user" || r.role === "assistant")
       .map((r) => {
@@ -1166,6 +1192,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             : { toolsUsed: [], activityNotes: [] };
         const documents =
           r.role === "assistant" ? extractPresentedDocuments(r.content) : [];
+        const pageLinks =
+          r.role === "assistant" ? pageLinksForRow(r.content, pageWrites) : [];
         return {
           id: r.id,
           role: r.role as "user" | "assistant",
@@ -1174,6 +1202,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           ...(toolsUsed.length > 0 ? { toolsUsed } : {}),
           ...(activityNotes.length > 0 ? { activityNotes } : {}),
           ...(documents.length > 0 ? { documents } : {}),
+          ...(pageLinks.length > 0 ? { pageLinks } : {}),
           ...(r.attachments && r.attachments.length > 0
             ? { fileAttachments: r.attachments }
             : {}),
@@ -1196,9 +1225,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           (m.toolsUsed?.length ?? 0) > 0 ||
           (m.userAttachments?.length ?? 0) > 0 ||
           (m.fileAttachments?.length ?? 0) > 0 ||
-          (m.documents?.length ?? 0) > 0,
+          (m.documents?.length ?? 0) > 0 ||
+          (m.pageLinks?.length ?? 0) > 0,
       );
-    return coalesceAssistantRunMessages(persistedRows);
+    return coalesce ? coalesceAssistantRunMessages(persistedRows) : persistedRows;
   }, [tChat.toolNarration]);
 
   /** Load a thread's persisted transcript into the reducer through the
@@ -1290,7 +1320,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setTranscriptCold(false);
       // Back on a fresh pane: the assistant pick is per chat, so it resets
       // to the primary default rather than sticking as a preference.
-      setPickedAssistantId(null);
+      setPickedAssistantId(handoffAssistantRef.current);
       return;
     }
     // Paint what the cache holds for THIS session synchronously (its own
@@ -1974,6 +2004,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    */
   const startNewWorkspaceChat = useCallback(async () => {
     if (startingShared) return;
+    if(activeSessionId||view!=="workspace"){resetPane();selectSession(null,"workspace");return;}
+    const admitted=creationContext.snapshot();
+    if(!admitted){setError(t.newWorkspaceChatFailed);return;}
     setStartingShared(true);
     try {
       // The room binds the assistant picked in the fresh pane's composer
@@ -1982,10 +2015,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         workspaceId,
         pickedAssistantId ?? undefined,
         {
-          contextGroupId: pickedContextGroupId,
-          contextProjectId: pickedContextProjectId,
+          contextGroupId: admitted.contextGroupId,
+          contextProjectId: admitted.contextProjectId,
+          expectedPolicyRevision:admitted.expectedPolicyRevision,
         },
       );
+      if(!creationContext.isCurrent())return;
       resetPane();
       patchSharedChatSessions(
         workspaceId,
@@ -2000,11 +2035,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       selectSession(created.id, "workspace");
       dispatchChatSessionsRefresh(workspaceId);
     } catch {
+      creationContext.fail();
       setError(t.newWorkspaceChatFailed);
     } finally {
       setStartingShared(false);
     }
-  }, [pickedAssistantId, pickedContextGroupId, pickedContextProjectId, resetPane, selectSession, startingShared, t, workspaceId]);
+  }, [activeSessionId, view, creationContext, pickedAssistantId, pickedContextGroupId, pickedContextProjectId, resetPane, selectSession, startingShared, t, workspaceId]);
 
   /** Stop the in-flight turn. Aborted streams fire neither onDone nor
    *  onError, so the state resets here (the dock's `handleAbort`). */
@@ -2194,12 +2230,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const send = useCallback(async (override?: {
     text?: string;
     fileIds?: string[];
+    /** Recording ids for this turn instead of the composer tray (a handoff). */
+    attachedRecordingIds?: string[];
+    /** Research mode for this turn, ahead of the toggle's state settling. */
+    researchMode?: boolean;
     truncateFromMessageId?: string;
     forceAddress?: boolean;
     /** An EDIT, not a replay: read the mentions out of the new text. A retry
      *  replays a message that already chose its responders. */
     resolveMentions?: boolean;
   }) => {
+    if(!sessionIdRef.current&&view==="workspace"&&!creationContext.snapshot()){setError(t.newWorkspaceChatFailed);return false;}
     const sendEpoch = sessionEpochRef.current;
     let owningSessionId = sessionIdRef.current;
     const ownsSend = () =>
@@ -2207,9 +2248,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const trimmed = (override?.text ?? input).trim();
     const usesComposerTray = override?.fileIds === undefined;
     const turnFileIds = override?.fileIds ?? att.fileIds();
-    const turnRecordingIds = usesComposerTray
-      ? pendingRecordings.map((recording) => recording.recordingId)
-      : [];
+    const turnRecordingIds =
+      override?.attachedRecordingIds ??
+      (usesComposerTray
+        ? pendingRecordings.map((recording) => recording.recordingId)
+        : []);
+    const turnResearchMode = override?.researchMode ?? researchMode;
     // Snapshot the interlocutor at send time — the turn belongs to it even
     // if the resolution inputs shift while the reply streams.
     const interlocutor = activeAssistant;
@@ -2278,7 +2322,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       reply?.role === "assistant" ||
       turnFileIds.length > 0 ||
       turnRecordingIds.length > 0 ||
-      researchMode ||
+      turnResearchMode ||
       override?.forceAddress === true;
     setAskArmed(false);
     mentions.reset();
@@ -2296,11 +2340,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setStartingShared(true);
       try {
         // Bind the room to the hero's picked interlocutor (default primary).
+        const admitted=creationContext.snapshot();
+        if(!admitted)return false;
         const created = await createWorkspaceSession(workspaceId, interlocutor.id, {
-          contextGroupId: pickedContextGroupId,
-          contextProjectId: pickedContextProjectId,
+          contextGroupId: admitted.contextGroupId,
+          contextProjectId: admitted.contextProjectId,
+          expectedPolicyRevision:admitted.expectedPolicyRevision,
         });
-        if (!ownsSend()) return false;
+        if (!ownsSend()||!creationContext.isCurrent()) return false;
         owningSessionId = created.id;
         sessionIdRef.current = created.id;
         hydratedRef.current = created.id;
@@ -2314,6 +2361,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         selectSession(created.id, "workspace");
         dispatchChatSessionsRefresh(workspaceId);
       } catch {
+        creationContext.fail();
         if (ownsSend()) setError(t.newWorkspaceChatFailed);
         return false;
       } finally {
@@ -2442,7 +2490,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         appOrigin: APP_ORIGIN,
         // The picked tier rides every turn; the server clamps to plan.
         model,
-        ...(researchMode ? { mode: "research" as const } : {}),
+        ...(turnResearchMode ? { mode: "research" as const } : {}),
         // The first persisted row owns the attachments. Later assistants see
         // them through room history; re-sending file ids would transcribe /
         // distil the same upload again.
@@ -2732,6 +2780,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               startedAtMs != null
                 ? Math.max(0, Math.round(performance.now() - startedAtMs))
                 : undefined;
+            const finishedTool = turnToolsRef.current.find((tool) => tool.id === id);
+            if (finishedTool && PAGE_WRITING_TOOLS.has(finishedTool.name) && output) {
+              turnPageLinksRef.current = addPageLinks(
+                turnPageLinksRef.current,
+                pageIdsFromToolResult(output, isError),
+              );
+            }
             turnToolsRef.current = turnToolsRef.current.map((tool) =>
               tool.id === id
                 ? {
@@ -2744,6 +2799,22 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 : tool,
             );
             setToolTimeline(turnToolsRef.current);
+            break;
+          }
+          case "page_created": {
+            // The assistant created a new Page. Link it under the reply and
+            // tell the hoisted sidebar provider to reload so the Page shows
+            // in the Pages tree without a refresh. No navigation: Chat stays
+            // the surface; the card is how the user opens it.
+            const newPageId =
+              typeof payload.pageId === "string" ? payload.pageId : "";
+            if (!newPageId) break;
+            turnPageLinksRef.current = addPageLinks(turnPageLinksRef.current, [newPageId]);
+            window.dispatchEvent(
+              new CustomEvent("doc:draft-created", {
+                detail: { viewId: newPageId, action: "created" },
+              }),
+            );
             break;
           }
           case "document_payload": {
@@ -3074,7 +3145,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     }
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
+  }, [creationContext, input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
 
   // While this full-page surface is mounted it IS the visible chat, so a
   // short capture's voice turn must land in the open thread here — never in
@@ -3086,8 +3157,30 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       registerDockRecorderChatTarget({
         sendVoiceClip: (fileId) => send({ text: "", fileIds: [fileId] }),
         getSessionId: () => sessionIdRef.current ?? undefined,
+        ...(!isRoomView && view === "personal" ? { ensureInteractionSession: async () => {
+          if (sessionIdRef.current) return sessionIdRef.current;
+          if (!activeAssistant) throw new Error(t.errorGeneric);
+          const epoch = sessionEpochRef.current;
+          const assistantId = activeAssistant.id;
+          const channelId = freshChannelIdRef.current ??= crypto.randomUUID();
+          const response = await authFetch(`${API_URL}/api/sessions/personal`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workspaceId, assistantId, channelId, contextGroupId: pickedContextGroupId, contextProjectId: pickedContextProjectId }),
+          });
+          if (!response.ok) throw new Error(t.errorGeneric);
+          const { session: created } = await response.json();
+          if (sessionEpochRef.current !== epoch) throw new Error("Chat changed");
+          if (sessionIdRef.current) return sessionIdRef.current;
+          sessionIdRef.current = created.id;
+          hydratedRef.current = created.id;
+          sessionAssistantRef.current.set(created.id, assistantId);
+          chat.setSession(created.id);
+          selectSession(created.id, "personal", true);
+          dispatchChatSessionsRefresh(workspaceId);
+          return created.id as string;
+        } } : {}),
       }),
-    [send],
+    [send, isRoomView, view, activeAssistant, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.setSession, selectSession, t.errorGeneric],
   );
 
   // The mid-turn flush runs inside `send`'s own `onDone`; the ref is the only
@@ -3100,53 +3193,54 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     };
   }, [send]);
 
-  // Home's compact composer opens this route with an explicit fresh Personal
-  // location and leaves the private prompt in a one-shot per-tab handoff.
-  // Strict Mode re-runs effects, so remember which workspace was consumed.
-  useEffect(() => {
-    if (!workspaceId || handoffWorkspaceRef.current === workspaceId) return;
-    handoffWorkspaceRef.current = workspaceId;
-    setPendingHandoff(takeChatHandoff(workspaceId, Date.now()));
-  }, [workspaceId]);
-
-  // Wait until BOTH roster validation and the `?assistant=` picker have
-  // resolved. A stale/removed assistant keeps the exact prompt as an editable
-  // draft; it must never auto-send to the primary fallback.
-  useEffect(() => {
-    const action = resolveChatHandoffAction({
-      handoff: pendingHandoff,
-      assistantsLoaded,
-      assistantIds: assistants.map((row) => row.id),
-      activeAssistantId: activeAssistant?.id ?? null,
-      activeSessionId,
-      view,
-    });
-    if (!pendingHandoff || action === "wait") return;
-    const handoffKey =
-      `${pendingHandoff.workspaceId}:` +
-      `${pendingHandoff.assistantId}:${pendingHandoff.ts}`;
-    if (resolvedHandoffRef.current === handoffKey) return;
-    resolvedHandoffRef.current = handoffKey;
-    if (action === "drop") {
-      setPendingHandoff(null);
-      return;
-    }
-    const text = pendingHandoff.text;
-    setPendingHandoff(null);
-    if (action === "prefill") {
-      setInput((current) => (current.trim() ? current : text));
-      return;
-    }
-    void send({ text });
-  }, [
-    activeAssistant?.id,
-    activeSessionId,
-    assistants,
-    assistantsLoaded,
-    pendingHandoff,
-    send,
-    view,
-  ]);
+  const captureComposerDraft = ():RecoverableChatDraft|null => {
+    if (!input.trim() && !att.hasReady && pendingRecordings.length===0) return null;
+    return {id:crypto.randomUUID(),text:input,sessionId:activeSessionId,assistantId:activeAssistant?.id??null,
+      contextProjectId:pickedContextProjectId,contextGroupId:pickedContextGroupId,view,attachments:att.attachments.filter(chip=>chip.status==='done'),recordings:pendingRecordings,researchMode};
+  };
+  useChatHandoff({
+    workspaceId,assistantsLoaded,blocked:att.uploading||recordingUpload.busy,
+    activeSessionId,activeAssistantId:activeAssistant?.id??null,view,
+    prepare(handoff) {
+      const draft=captureComposerDraft();if(draft)updateRecoveryDrafts([...recoveryDrafts,draft]);
+      handoffAssistantRef.current=handoff.assistantId;
+      resetPane();setPendingRecordings([]);setReplyTo(null);pendingReplyRef.current=null;setSelectionQuote(null);
+      setPickedContextGroupId(null);setPickedContextProjectId(handoff.contextProjectId??null);setResearchMode(handoff.researchMode??false);setAskArmed(false);
+      setPickedAssistantId(handoff.assistantId);seededRef.current=null;setRestoring(null);
+      router.replace(personalChatHandoffPath(workspaceId,handoff.assistantId,handoff.requestId),{scroll:false});
+    },
+    async validateAssistant(id) {
+      return (await listWorkspaceAssistants(workspaceId)).some(assistant=>assistant.id===id) && assistants.some(assistant=>assistant.id===id);
+    },
+    async send(handoff) {
+      handoffAssistantRef.current=null;
+      if(handoff.draftOnly){setInput(handoff.text);return true;}
+      return send({text:handoff.text,fileIds:handoff.fileIds??[],attachedRecordingIds:handoff.attachedRecordingIds??[],researchMode:handoff.researchMode??false});
+    },
+    preserveUnsent(handoff) {
+      if(!meId)return;
+      const drafts=readChatDrafts(workspaceId,meId),id=handoff.requestId??crypto.randomUUID();
+      if(!drafts.some(draft=>draft.id===id))writeChatDrafts(workspaceId,meId,[...drafts,{id,text:handoff.text,sessionId:null,
+        assistantId:handoff.assistantId,contextProjectId:handoff.contextProjectId,view:'personal',attachments:[],recordings:[],researchMode:!!handoff.researchMode}]);
+    },
+    prefill(handoff) {
+      if (input.trim()) {
+        updateRecoveryDrafts([...recoveryDrafts,{id:handoff.requestId??crypto.randomUUID(),text:handoff.text,sessionId:null,
+          assistantId:handoff.assistantId,contextProjectId:handoff.contextProjectId,view:'personal',attachments:[],recordings:[],researchMode:!!handoff.researchMode}]);
+      } else setInput(handoff.text);
+      setError(searchCopy.assistantUnavailable);
+    },
+  });
+  const restoreComposerDraft = (draft:RecoverableChatDraft) => {
+    if(att.uploading||recordingUpload.busy)return;
+    const current=captureComposerDraft();
+    updateRecoveryDrafts([...recoveryDrafts.filter(row=>row.id!==draft.id),...(current?[current]:[])]);
+    handoffAssistantRef.current=draft.assistantId;
+    resetPane();setPendingRecordings(draft.recordings);att.restore(draft.attachments);setInput(draft.text);
+    setResearchMode(draft.researchMode);setReplyTo(null);pendingReplyRef.current=null;setSelectionQuote(null);
+    setPickedAssistantId(draft.assistantId);selectSession(draft.sessionId,draft.view);
+    if(!draft.sessionId){setPickedContextProjectId(draft.contextProjectId??null);setPickedContextGroupId(draft.contextGroupId??null);}
+  };
 
   const retryUserMessage = useCallback(
     (messageId: string) => {
@@ -3619,7 +3713,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           "focus-within:border-ring [&_:focus-visible]:shadow-none",
         )}
       >
-        <ChatComposer
+      <ChatComposer
           value={editingText}
           onChange={setEditingText}
           onKeyDown={(event) => {
@@ -3678,6 +3772,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     chat.state.messages.length === 0 &&
     !chat.state.isStreaming &&
     !remoteActive;
+  // The docked composer bar can reach the bottom-right corner where the
+  // floating record button rests (WorkspaceChrome's FloatingRecorderHost);
+  // registering it lifts the button above Send instead of covering it.
+  const composerBarRef = useRef<HTMLDivElement>(null);
+  useFloatingRecorderClearance(composerBarRef, !heroMode);
 
   /** Interlocutor control, rendered INSIDE the composer box (bottom-left):
    *  a NEW personal chat picks its assistant here and the session sticks to
@@ -3842,14 +3941,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const composerBox = (
     <>
       {/* Live-recording chrome — the recovery banner, first-use/error notice,
-          and active recorder strip stack ABOVE the composer box, exactly as
-          they ride above the dock's composer. One node rendered in both the
-          hero and the bottom bar, so a running capture survives the swap. */}
+          and active recorder strip stack ABOVE the composer box below `lg`
+          (at `lg`+ they ride the floating cluster bottom-right). One node
+          rendered in both the hero and the bottom bar, so a running capture
+          survives the swap. */}
       {dockRecorder ? (
         <>
-          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5" />
-          <DockRecorderNotice rec={dockRecorder} className="mb-1.5" />
-          <DockRecorderStrip rec={dockRecorder} className="mb-1.5" />
+          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5 lg:hidden" />
+          <DockRecorderNotice rec={dockRecorder} className="mb-1.5 lg:hidden" />
+          <DockRecorderStrip rec={dockRecorder} className="mb-1.5 lg:hidden" />
         </>
       ) : null}
     <div
@@ -3871,6 +3971,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         commands={slashCommands}
         className="bottom-full left-2 mb-1"
       />
+      {recoveryDrafts.length>0 && <details className="border-b p-2 text-sm">
+        <summary className="min-h-8 max-md:min-h-11 cursor-pointer py-3">{searchCopy.savedDrafts}</summary>
+        {recoveryDrafts.map(draft=><button key={draft.id} type="button" disabled={att.uploading||recordingUpload.busy}
+          onClick={()=>restoreComposerDraft(draft)} className="flex min-h-8 max-md:min-h-11 w-full items-center gap-2 rounded px-2 text-left hover:bg-muted">
+          <span className="shrink-0">{searchCopy.restoreDraft}</span><span className="truncate">{draft.text||searchCopy.attachmentDraft}</span>
+        </button>)}
+      </details>}
       <ChatComposer
         value={input}
         onChange={setInput}
@@ -3917,7 +4024,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             ? () => void send({ forceAddress: true })
             : undefined
         }
-        disabled={!!pendingQuestion}
+        disabled={!!pendingQuestion||(!activeSessionId&&view==="workspace"&&!creationContext.ready)}
         // Mid-turn sends are text-only: an attachment needs the full pre-turn
         // pipeline, which belongs to a turn of its own. Staged chips stay
         // visible and ride the next turn.
@@ -4082,13 +4189,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             >
               <Paperclip className="size-[17px]" aria-hidden />
             </button>
-            {/* The record affordance, beside the paperclip exactly as in the
-                dock's expanded composer. Hides itself while a capture is
-                latched (the strip above the box owns the pill then). */}
+            {/* The record affordance below `lg`, beside the paperclip exactly
+                as in the dock's expanded composer. At `lg`+ the floating
+                button bottom-right (FloatingRecorderHost) is the one record
+                control, as on every other surface. Hides itself while a
+                capture is latched (the strip above the box owns the pill). */}
             {dockRecorder ? (
               <DockRecorderButton
                 rec={dockRecorder}
                 disabled={!!pendingQuestion || recordingUpload.busy}
+                className="lg:hidden"
               />
             ) : null}
             {interlocutorControl}
@@ -4281,7 +4391,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               </div>
             )}
             <div className="w-full rounded-xl border border-border/70 bg-muted/20 p-3">
-              <ContextScopePicker
+              {view==="workspace"?<ModeAwareCreationContext context={creationContext}/>:<ContextScopePicker
                 teams={contextTeams}
                 projects={contextProjects}
                 teamId={pickedContextGroupId}
@@ -4289,7 +4399,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 onTeamChange={setPickedContextGroupId}
                 onProjectChange={setPickedContextProjectId}
                 disabled={att.uploading}
-              />
+              />}
             </div>
             <div className="w-full">{composerBox}</div>
             {error && (
@@ -4307,7 +4417,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // The pill is anchored to a viewport rect, so scrolling would strand
           // it over the wrong text. Dismiss rather than chase.
           onScroll={selectionQuote ? () => setSelectionQuote(null) : undefined}
-          className="min-h-0 flex-1 overflow-y-auto px-4 py-6"
+          // Bottom pad grows by the floating recorder's reserve while it is
+          // lifted above the composer, so the newest message scrolls clear.
+          className="min-h-0 flex-1 overflow-y-auto px-4 pt-6 pb-[calc(1.5rem+var(--floating-recorder-reserve,0px))]"
         >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {/* In-chat pursuit: the always-visible strip while any session
@@ -4326,6 +4438,27 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 projects={contextProjects}
               />
             ) : null}
+            {dockRecorder?.interactionChatSessionId && dockRecorder.interactionChatSessionId === activeSessionId && dockRecorder.interactionStatus !== "idle" && (
+              <div className="space-y-2 rounded-lg border p-3">
+                <p role={dockRecorder.interactionStatus === "gap" ? "alert" : "status"} className="text-sm">
+                  {dockRecorder.interactionStatus === "gap" ? interactionT.error : interactionT.listening}
+                </p>
+                {dockRecorder.interactionCaptureId && <LiveInteractionQuestionControls key={dockRecorder.interactionCaptureId} captureId={dockRecorder.interactionCaptureId} />}
+                <button type="button" className="min-h-8 max-sm:min-h-11 text-sm underline" onClick={() => dockRecorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
+              </div>
+            )}
+            {!isRoomView && view === "personal" && <LiveInteractionJobs
+              workspaceId={workspaceId}
+              sessionId={activeSessionId}
+              messageIds={new Set(chat.state.messages.map((message) => message.id))}
+              onCanonical={(sid, rows, ids) => {
+                if (sessionIdRef.current !== sid) return;
+                // Per-job additions only: never hydrate over a typed stream.
+                for (const message of canonicalInteractionAdditions(chat.state.messages, mapTranscriptRows(rows, false), ids)) {
+                  chat.dispatch({ type: "message/append", message });
+                }
+              }}
+            />}
             {chat.state.messages.length === 0 &&
               !chat.state.isStreaming &&
               !remoteActive &&
@@ -4544,6 +4677,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         key={document.id}
                         document={document}
                         onOpen={setOpenDocument}
+                      />
+                    ))}
+                    {m.pageLinks?.map((pageId) => (
+                      <ChatPageLinkCard
+                        key={pageId}
+                        pageId={pageId}
+                        onOpen={(id) => router.push(docPagePath(workspaceId, id))}
                       />
                     ))}
                     {m.text
@@ -4876,7 +5016,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
         {/* Composer bar — the same composite box the hero centers, docked. */}
         <div className="shrink-0 px-4 pb-4 pt-1">
-          <div className="mx-auto w-full max-w-3xl">{composerBox}</div>
+          <div ref={composerBarRef} className="mx-auto w-full max-w-3xl">{composerBox}</div>
         </div>
       </section>
       {openDocument ? (

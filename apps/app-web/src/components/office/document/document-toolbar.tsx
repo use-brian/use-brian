@@ -230,7 +230,7 @@ function SpacingMenu({ editor, editable }: { editor: Editor | null; editable: bo
 function TextToolsPopover({ editor, editable, canFormat, fontFamily, fontSizePt, color, highlight }: { editor: Editor | null; editable: boolean; canFormat: boolean; fontFamily: string | null; fontSizePt: number | null; color: string | null; highlight: string | null }) {
   const t = useT().office;
   return <Popover>
-    <PopoverTrigger render={<button type="button" disabled={!editable} className="flex h-11 items-center gap-1 rounded px-2 text-xs hover:bg-muted disabled:opacity-40" data-document-text-tools="true"><Type className="size-4" />{t.compactTextTools}<ChevronDown className="size-3" /></button>} />
+    <PopoverTrigger render={<button type="button" disabled={!editable} className="flex h-11 md:h-8 items-center gap-1 rounded px-2 text-xs hover:bg-muted disabled:opacity-40" data-document-text-tools="true"><Type className="size-4" />{t.compactTextTools}<ChevronDown className="size-3" /></button>} />
     <PopoverContent align="end" className="w-72 max-w-[calc(100vw-1rem)]">
       <label className="text-xs font-medium">{t.fontFamily}</label>
       <Select value={fontFamily} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontFamily: value })} disabled={!canFormat}>

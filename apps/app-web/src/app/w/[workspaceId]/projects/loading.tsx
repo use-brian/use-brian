@@ -10,5 +10,5 @@
 import { SurfaceSkeletonFor } from "@/components/chrome/surface-skeleton";
 
 export default function ProjectsLoading() {
-  return <SurfaceSkeletonFor surface="p" />;
+  return <SurfaceSkeletonFor surface="projects" chrome={false} />;
 }

@@ -1,7 +1,9 @@
-import type { AccessContext } from '@use-brian/core'
-import { buildAccessPredicate } from './access-predicate.js'
+import type { ResourceScope, Sensitivity, AccessContext } from '@use-brian/core'
+import { assertExecutionResourceScope, buildCurrentMemberSourcePredicate, buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { queryWithRLS } from './client.js'
+import { queryWithRLS, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
+import { beginBrainAdmission, admitBrainCreate } from '../workspace-access/brain-create-admission.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 
 /**
  * `episodes` store. Schema spec:
@@ -30,7 +32,9 @@ import { queryWithRLS } from './client.js'
 
 export type EpisodeStatus = 'open' | 'extracting' | 'archived'
 
-export type EpisodeSensitivity = 'public' | 'internal' | 'private' | 'secret'
+/** Canonical SQL tiers plus accepted legacy ingest aliases. Ready-mode creation
+ * persists confidential for private/secret; visibility remains a separate axis. */
+export type EpisodeSensitivity = 'public' | 'internal' | 'confidential' | 'private' | 'secret'
 
 export type EpisodeRecord = {
   id: string
@@ -270,8 +274,40 @@ export async function createEpisode(
   assertAuthorshipPresent('createEpisode', input.createdByUserId)
   assertVisibilityDouble(input)
 
-  const result = await queryWithRLS<EpisodeRow>(
-    actorUserId,
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, actorUserId)
+    const ready = await beginBrainAdmission(client, input.workspaceId)
+    if (ready) {
+      if (actorUserId !== input.createdByUserId) throw new WorkspaceAccessError('context_not_available', 404)
+      const normalize = (value: EpisodeSensitivity): Sensitivity => value === 'private' || value === 'secret' ? 'confidential' : value
+      let inherited: ResourceScope | undefined
+      if (input.parentEpisodeId) {
+        const member = buildCurrentMemberSourcePredicate(actorUserId, { alias: 'e', startIdx: 3, operation: 'mutation' })
+        const parent = (await client.query<EpisodeRow>(`SELECT e.*,e.workspace_id AS "workspaceId",e.user_id AS "userId",e.assistant_id AS "assistantId",e.project_ids AS "projectIds"
+          FROM episodes e WHERE e.id=$1 AND e.workspace_id=$2 AND NOT e.scope_held AND NOT e.extraction_locked
+          AND ${member.sql} FOR SHARE OF e`, [input.parentEpisodeId, input.workspaceId, ...member.params])).rows[0]
+        if (!parent) throw new WorkspaceAccessError('context_not_available', 404)
+        inherited = { workspaceId: parent.workspaceId, userId: parent.userId, assistantId: parent.assistantId,
+          sensitivity: normalize(parent.sensitivity as EpisodeSensitivity), compartments: parent.compartments, projectIds: parent.projectIds }
+        assertExecutionResourceScope(inherited, 'read')
+        const owner = (requested: string | null, canonical: string | null) => {
+          if (requested && canonical && requested !== canonical) throw new WorkspaceAccessError('context_not_available', 404)
+          return canonical ?? requested
+        }
+        input = { ...input, userId: owner(input.userId, parent.userId), assistantId: owner(input.assistantId, parent.assistantId) }
+      }
+      const admitted = await admitBrainCreate(client, input.workspaceId, actorUserId, {
+        ...input, sensitivity: normalize(input.sensitivity ?? 'internal'),
+      }, inherited, false, 'episode')
+      // Persist the same tier that was authorized. SQL sensitivity_rank and
+      // canonical source evidence recognize confidential, not legacy aliases.
+      // This does not change user/assistant visibility or relabel historical rows.
+      input = { ...input, ...admitted, sensitivity: admitted.sensitivity }
+      assertExecutionResourceScope({ ...input, sensitivity: admitted.sensitivity, compartments: admitted.compartments, projectIds: admitted.projectIds }, 'mutation')
+    }
+    const result = await client.query<EpisodeRow>(
     `INSERT INTO episodes (
        source_kind, source_ref,
        occurred_at,
@@ -325,7 +361,9 @@ export async function createEpisode(
       input.projectIds ?? [],
     ],
   )
-  return toEpisode(result.rows[0])
+    await client.query('COMMIT')
+    return toEpisode(result.rows[0])
+  } finally { await rollbackAndRelease(client) }
 }
 
 export async function getEpisodeById(

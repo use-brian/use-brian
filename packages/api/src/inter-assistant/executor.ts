@@ -120,6 +120,7 @@ import {
   createDeliveryAudienceAuthorizer,
   type AuthorizeDeliveryAudience,
 } from '../context-scope/delivery-authority.js'
+import { createWorkflowPublicationAuthorizer, type AuthorizeWorkflowPublication } from '../workflow/publication-consent.js'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { renderCharterBlock } from '@use-brian/shared'
 import {
@@ -229,6 +230,7 @@ export type CalleeExecutorOptions = {
   integrationStore?: ChannelIntegrationStore
   /** Pre-generation and deferred-prompt destination policy. */
   authorizeDeliveryAudience?: AuthorizeDeliveryAudience
+  authorizeWorkflowPublication?: AuthorizeWorkflowPublication
   defaultTelegramBotToken?: string
   waConnectorUrl?: string
   waConnectorSecret?: string
@@ -441,6 +443,7 @@ export type CalleeQueryParams = {
    * reads on the next run. Absent for ordinary askAssistant consults.
    */
   workflowRunId?: string
+  workflowStepId?: string
   decisionContext?: {
     actorUserId: string | null
     operationId: string
@@ -645,7 +648,16 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         channelIntegrationId: params.deliverTarget.channelIntegrationId,
         scopeEvidence: inheritedEvidence ?? params.callerScopeEvidence ?? {},
       })
-      if (!destination.allowed) {
+      const publication = !destination.allowed && params.callerChannelType === 'workflow'
+        && params.workflowRunId && params.workflowStepId && !externalClient
+        ? await (options.authorizeWorkflowPublication ?? createWorkflowPublicationAuthorizer({ integrationStore: options.integrationStore }))({
+            workspaceId: calleeAssistant.workspaceId, assistantId: calleeAssistant.id, userId: calleeActorUserId,
+            channelType: params.deliverTarget.channelType, channelId: params.deliverTarget.channelId,
+            channelIntegrationId: params.deliverTarget.channelIntegrationId,
+            scopeEvidence: inheritedEvidence ?? params.callerScopeEvidence ?? {},
+            publication: { runId: params.workflowRunId, stepId: params.workflowStepId },
+          }) : null
+      if (!destination.allowed && !publication?.allowed) {
         throw Object.assign(
           new Error('The destination audience cannot receive this scoped output.'),
           { reason: 'delivery_audience_unverified', retrySafe: false },
@@ -1285,8 +1297,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
       if (unknown.length) {
         parts.push(
-          `${unknown.join(', ')}: not available to this assistant (check connector connection and exposure)`,
+          `${unknown.join(', ')}: not available to this assistant (check tool names and exposure)`,
         )
+        // Injection diagnostics describe discovery as a whole, not the cause
+        // of every unknown pin (which can also be a typo or a removed tool).
+        // Preserve these safe facts even though this path never builds a prompt.
+        if (unavailableCapabilities.length) {
+          parts.push(`Discovery diagnostics: ${unavailableCapabilities.join('; ')}`)
+        }
       }
       throw Object.assign(
         new Error(
@@ -1692,7 +1710,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       scope: turnScope,
       workspaceId: calleeAssistant.workspaceId,
       userId: session.userId,
-      assistantId: calleeAssistant.id,
     })
     const userMessageRow = await addSessionMessage({
       sessionId: session.id,
@@ -1711,6 +1728,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     if (params.sessionKey) {
       const priorRows = await getSessionMessages(session.id, {
         fromSequence: session.compactBoundarySequence,
+        excludeHeld: true,
       })
       noteAutomaticScopeEvidence(scopeAccumulator, priorRows)
       const compacted = await executeWithCurrentAuthority(() => runProactiveCompaction({

@@ -1,3 +1,7 @@
+import { triageTaskForGoal } from './db/goal-task-triage.js'
+import { createProgrammaticEpisodeTerminal } from './ingest/programmatic-terminal.js'
+import { checkPromptOnlyAuthority, executePromptOnlyGeneration } from './office/generation-publication.js'
+import { createBrowserFileBridge } from './sandbox/browser-files.js'
 import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
 import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher,setFeedLinkedInRecovery} from './content-planning/linkedin-authority.js'
 import { supportsProtectedFill } from './sandbox/relay-transport.js'
@@ -32,7 +36,7 @@ import { createFeedReviewContextLoader } from './content-planning/review-context
  * `env` option, not `getEnv()`.
  */
 
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { detectInternalLinkAliasReadiness } from './internal-link-capabilities.js'
 import { seedBuiltinPrimitiveCapabilities } from './db/capability-seed.js'
 import type http from 'node:http'
@@ -177,7 +181,7 @@ import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, 
 import { findAssistantById, findUserByAuthProvider, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from './context-scope/execution-context.js'
-import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowRunScope } from './context-scope/workflow-authority.js'
+import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowAuthoringScope, resolveWorkflowRunScope } from './context-scope/workflow-authority.js'
 import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
@@ -320,12 +324,20 @@ import {
 } from './sandbox/relay-transport.js'
 import { feedbackRoutes } from './routes/feedback.js'
 import { accountRoutes, accountAvatarPublicRoutes } from './routes/account.js'
+import type { AccountTeardownRule } from './db/account-teardown.js'
 import { memoryRoutes } from './routes/memories.js'
 import { createEntityMergeStore } from './db/entity-merge-store.js'
 import { assistantRoutes } from './routes/assistants.js'
 import { assistantConnectorGrantsRoutes } from './routes/assistant-connector-grants.js'
 import { skillRoutes } from './routes/skills.js'
 import { workspaceRoutes } from './routes/workspaces.js'
+import { externalAppCalendarRoutes } from './external-app-calendar/routes.js'
+import { externalAppRecordsRoutes } from './external-app-records/routes.js'
+import { createExternalAppRecordsStore } from './external-app-records/store.js'
+import { externalAppDocumentRoutes, authorizeDocumentHuman } from './external-app-documents/routes.js'
+import { createDocumentService } from './external-app-documents/service.js'
+import { externalAppConfiguration } from './external-app-documents/configuration.js'
+import { createCalendarCredentials } from './external-app-calendar/credentials.js'
 import { workspaceIconPublicRoutes, workspaceIconRoutes } from './routes/workspace-icon.js'
 import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
@@ -401,6 +413,8 @@ import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
 import { connectorRoutes } from './routes/connectors.js'
+import { createTransactionalConnectorSetup } from './connectors/transactional-setup.js'
+import { connectorSetupProviders } from './connectors/setup-providers.js'
 import {
   memberConnectorInstanceRoutes,
   workspaceConnectorInstanceRoutes,
@@ -484,12 +498,21 @@ import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js
 import { initLedgerRuntime } from './ledger/runtime.js'
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
 import { azureBlobOptionsFromEnv, createAzureBlobFilesClient } from './files/azure-blob-client.js'
+import { createS3FilesClient } from './files/s3-client.js'
+import { s3OptionsFromEnv } from './files/s3-env.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
 import { createMeetingTagsTool } from './recordings/meeting-tags-tool.js'
 import { recordingLiveRoutes } from './routes/recording-live.js'
+import { watchRecordingRoutes } from './routes/watch-recording.js'
+import { createWatchService, authorizeWatchDestination } from './recordings/watch-service.js'
+import { startWatchCleanup } from './recordings/watch-maintenance.js'
+import { transcribeAudio as transcribeWatchAudio } from '@use-brian/core'
+import { recordingInteractionRoutes } from './routes/recording-interaction.js'
+import { createLiveInteractionRuntime } from './recordings/live-interaction-runtime.js'
+import { createLedgerPayloadStore } from './ledger/payload-store.js'
 import { createDocGateway } from './doc/doc-gateway.js'
-import { createFilesApi, createSingletonFilesClientResolver, storageLimitBytesForPlan, workspaceFileReadRevision, type FilesClientResolver } from './files/files-api.js'
+import { createFilesApi, createSingletonFilesClientResolver, workspaceFileReadRevision, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
@@ -547,7 +570,10 @@ import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { contextScopeRoutes } from './routes/context-scopes.js'
 import { workspaceAccessRoutes } from './routes/workspace-access.js'
+import { departmentRoutes } from './routes/departments.js'
 import { createOrganizationTools, createWorkspaceAccessTools } from './workspace-access/tools.js'
+import { createDepartmentTools } from './workspace-access/department-tools.js'
+import { createWorkspaceMigrationTools } from './workspace-access/migration-tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore, isDurableOfficeArtifact } from './db/office-artifacts.js'
 import { readWorkspaceMemberDirectory } from './db/workspace-member-directory.js'
@@ -611,12 +637,12 @@ import { setMediaTokenSecret } from './media-token.js'
 import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
 import { setBrandEventDispatcher } from './brand-event-fanout.js'
+import { setMessageEventDispatcher } from './message-events.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
-import { processOpenRecording } from './recordings/process-recording.js'
+import { processOpenRecordingWithBookkeeping } from './recordings/process-recording.js'
 import { createRecordingFrameAnalyzer } from './recordings/frame-analysis.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
 import { getRecording, updateRecording } from './db/recordings-store.js'
-import { mergeEpisodeSourceRef } from './db/episodes-store.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
 import { createGenerateSynthesizer, type GenerateSynthesizeFn } from './synthesis/generate-synthesizer.js'
 import { createGenerateBlueprintTool } from './synthesis/generate-blueprint-tool.js'
@@ -628,6 +654,10 @@ import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbPageDomainStore } from './db/page-domain-store.js'
 import { createDbInternalLinkAliasStore } from './db/internal-link-alias-store.js'
 import { createInternalLinkService } from './internal-link-service.js'
+import { workspaceSearchRoutes } from './routes/workspace-search.js'
+import { createWorkspaceSearchService } from './workspace-search/service.js'
+import { createSearchAdapters, readSearchItem } from './workspace-search/adapters.js'
+import { createOfficeSearchProjector } from './workspace-search/office-projection.js'
 import { internalLinkRoutes } from './routes/internal-links.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbBlueprintRecordStore } from './db/blueprint-records-store.js'
@@ -720,6 +750,7 @@ import type { AppStoreScope } from '@use-brian/brian-app'
 import { resolveWriteTarget } from './brain-mcp/tools.js'
 import { enginesMcpRoutes, enginesMcpEnabled } from './engines-mcp/server.js'
 import { createDbOAuthClientStore } from './db/oauth-client-store.js'
+import { createDbMobileAuthStore } from './db/mobile-auth-store.js'
 import { createDbDesktopAuthStore } from './db/desktop-auth-store.js'
 import { createDbOAuthAuthorizationStore } from './db/oauth-authorization-store.js'
 import { oauthRoutes, oauthMetadataRoutes } from './brain-mcp/oauth/index.js'
@@ -900,11 +931,17 @@ export interface OpenApiEnv {
   BRIAN_MESSAGE_STORE_ALLOW_REMOTE?: string
   BRIAN_MESSAGE_STORE_HMAC_SECRET?: string
   LLM_PROVIDER_KEY_ENCRYPTION_KEY?: string
-  // Blob storage. GCS wins when set; AZURE_BLOB_CONTAINER selects an Azure Blob
-  // container (self-hosted on Azure); LOCAL_FILES_DIR enables durable
-  // self-hosted local storage; otherwise non-Cloud-Run dev falls back to /tmp.
-  // GCS and Azure together is a misconfiguration and fails boot.
+  // Blob storage. Select at most one GCS, Azure, or S3 deployment default.
+  // Otherwise LOCAL_FILES_DIR enables durable self-hosted local storage;
+  // non-Cloud-Run dev falls back to /tmp. Cloud defaults override local disk.
   GCS_FILES_BUCKET?: string
+  S3_FILES_BUCKET?: string
+  S3_REGION?: string
+  S3_ENDPOINT?: string
+  S3_FORCE_PATH_STYLE?: string
+  S3_ACCESS_KEY_ID?: string
+  S3_SECRET_ACCESS_KEY?: string
+  S3_SESSION_TOKEN?: string
   AZURE_BLOB_CONTAINER?: string
   /** Shared-key auth for Azure Blob: a connection string, or account + key. */
   AZURE_STORAGE_CONNECTION_STRING?: string
@@ -1045,6 +1082,15 @@ export interface OpenApiPorts {
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
   /** Hosted recording-duration credit quote; absent in OSS/self-hosted. */
   recordingSurchargeCredits?: (durationSeconds: number) => number
+  /**
+   * Hosted plan-tiered workspace storage quota (`getWorkspacePlan` ->
+   * `storageLimitBytesForPlan`). Absent = UNLIMITED: a self-host or Outpost
+   * install's disk or bucket is its own, and the plan table is a hosted
+   * billing construct. Until 2026-10-01 the open boot derived this from the
+   * workspace `plan` column in both editions, which put every OSS install and
+   * every Outpost on the free tier's 1 GiB.
+   */
+  storageLimitBytesFor?: (workspaceId: string) => Promise<number>
   /**
    * Hosted standalone Generate-from-Brain pricing + success charge. The open
    * route remains fully usable without it and reports zero credits in OSS.
@@ -1190,6 +1236,14 @@ export interface OpenApiPorts {
    * "Account linking".
    */
   getWhatsappOfficialNumber?: () => Promise<string | null>
+  /**
+   * Account-teardown rules for tables an edition adds on top of the open
+   * schema. The teardown fails closed on any unclassified foreign key to
+   * `users`, so an overlay that references `users` must classify its
+   * columns here. See docs/architecture/features/privacy-controls.md ->
+   * "Teardown order".
+   */
+  accountTeardownRules?: Readonly<Record<string, AccountTeardownRule>>
 
   /**
    * BYO-storage signer for the PUBLIC shared-page recording playback URL
@@ -1239,6 +1293,8 @@ export interface PublicExtraRouteDeps {
 
 export interface BootOpenApiOptions {
   env: OpenApiEnv
+  /** Shared self-host/hosted application integration configuration; no automatic grants. */
+  externalApps?: ReturnType<typeof externalAppConfiguration>
   ports?: OpenApiPorts
   /** Default true; gates the background workers (consolidation, pollers, …). */
   runWorkers?: boolean
@@ -1374,6 +1430,12 @@ export interface BootContext {
   filesResolver: FilesClientResolver | null
   /** App-default GCS/local client for legacy refs without a storageUri. */
   filesBlobClient: GcsFilesClient | null
+  /**
+   * Canonical chunked workspace-file uploads (start / PUT parts / complete).
+   * Edition-specific recording routes admit uploads through it so a recording
+   * is only ever derived from a stored file. Null when file storage is off.
+   */
+  chunkedFileUploads: ChunkedFileUploadService | null
   /** Open Pipeline B ingestor built over this boot's store graph. */
   brainEpisodeIngestor: BrainEpisodeIngestor | undefined
   /** Open recording queue operations for edition-specific routes. */
@@ -1861,6 +1923,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     nativeSlashSyncTimers.set(workspaceId, timer)
   }
   const workflowStore = createDbWorkflowStore({
+    resolveAuthoringPrimary: (workspaceId, client) => resolvePrimaryAssistantForWorkspace(workspaceId, undefined, (sql, values) => client.query(sql, values)),
     onChanged: (userId, workspaceId) => scheduleNativeSlashCommandSync(userId, workspaceId),
   })
   const workflowRunStore = createDbWorkflowRunStore()
@@ -2474,6 +2537,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             },
           }
         : undefined,
+      undefined, // default human session store
+      createDbMobileAuthStore(),
     ),
   )
 
@@ -3067,6 +3132,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         processBatch: createProgrammaticBatchProcessor({
           store: programmaticCaptureStore,
           ingest: brainEpisodeIngestor,
+          configuredIngest: createProgrammaticEpisodeTerminal({ provider, model: extractionModel ?? EXTRACTION_MODEL }),
         }),
       })
     : null
@@ -3314,6 +3380,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workflowId: request.workflowId,
         blueprintId: request.blueprintId,
         workflowRunId: request.workflowRunId,
+        workflowStepId: request.workflowStepId,
         decisionContext: request.decisionContext
           ? {
               actorUserId: request.caller.userId,
@@ -3369,8 +3436,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of interAssistantTools) allTools.set(tool.name, tool)
 
   // ── Workflow tools ──
-  async function resolvePrimaryAssistantForWorkspace(workspaceId: string): Promise<string | null> {
-    const result = await query<{ id: string }>(
+  async function resolvePrimaryAssistantForWorkspace(workspaceId: string, _userId?: string, execute: typeof query = query): Promise<string | null> {
+    const result = await execute<{ id: string }>(
       `SELECT id FROM assistants WHERE workspace_id = $1 AND kind = 'primary' LIMIT 1`,
       [workspaceId],
     )
@@ -3901,11 +3968,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })),
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
-    resolveKnownWorkflowTools: async ({ userId, workspaceId, assistantId, toolNames }) => {
+    resolveKnownWorkflowTools: async ({ userId, workspaceId, assistantId, toolNames, authoringAuthority, contextGroupId, contextProjectId }) => {
+      const turnScope = await resolveWorkflowAuthoringScope({
+        userId, workspaceId, assistantId, authoringAuthority, contextGroupId, contextProjectId,
+      })
       const registry = await workflowExecutorDeps.buildToolRegistry({
         userId,
         workspaceId,
         assistantId,
+        turnScope,
       })
       return toolNames.filter((toolName) => registry.has(toolName))
     },
@@ -4235,23 +4306,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
     }
   judgeTaskForGoal = (task, userId) => {
-      void (async () => {
-        const capabilities = await summariseWorkspaceCapabilities(userId, task.workspaceId)
-        const attrs = Object.keys(task.attributes ?? {}).length > 0 ? JSON.stringify(task.attributes) : null
-        const assistantId = (await getWorkspacePrimaryAssistant(userId, task.workspaceId))?.id
-        const brief = await taskTriageJudge({ title: task.title, description: attrs, capabilities, userId, workspaceId: task.workspaceId, assistantId })
-        if (!brief) return
-        await goalStore.create({
-          workspaceId: task.workspaceId,
-          host: { type: 'task', id: task.id },
-          outcome: brief.outcome,
-          doneWhen: { kind: 'query', query: { description: 'task complete', predicate: { hostTaskDone: true } } },
-          means: {},
-          confirmed: false, // draft — triaged on the Tasks-assignable surface
-          createdByUserId: userId,
-          brief: { verification: brief.verification, approach: brief.approach, judgeReason: brief.judgeReason },
-        })
-      })().catch((err) => console.error('[goals] task triage draft failed:', err))
+    void triageTaskForGoal(task, userId, {
+      goalStore,
+      resolveAssistantId: async (actor, workspaceId) => (await getWorkspacePrimaryAssistant(actor, workspaceId))?.id,
+      // Ready goals use only these public constants; connector metadata is legacy-only.
+      publicCoreCapabilities: CORE_CAPABILITY_LINES,
+      summariseCapabilities: summariseWorkspaceCapabilities,
+      judge: taskTriageJudge,
+    }).catch((err) => console.error('[goals] task triage draft failed:', err))
   }
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
@@ -4275,7 +4337,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
-  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools()]) allTools.set(tool.name,tool)
+  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools()]) allTools.set(tool.name,tool)
 
   for (const tool of Object.values(createInternalLinkTools(internalLinkService))) {
     allTools.set(tool.name, tool)
@@ -4351,13 +4413,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ── Workspace filesystem ──
   const configuredLocalFilesDir = env.LOCAL_FILES_DIR?.trim()
   const localFilesDir = resolveLocalFilesBaseDir(configuredLocalFilesDir)
-  // Azure Blob is the self-hosted bucket option (throws on a half-configured
-  // deployment so boot fails closed rather than landing on the temp dir).
-  const azureBlobOptions = azureBlobOptionsFromEnv(env)
-  if (azureBlobOptions && env.GCS_FILES_BUCKET) {
-    throw new Error('[files] GCS_FILES_BUCKET and AZURE_BLOB_CONTAINER are both set — pick one app-default blob store')
+  const gcsBucket = env.GCS_FILES_BUCKET?.trim()
+  if ([gcsBucket, env.AZURE_BLOB_CONTAINER?.trim(), env.S3_FILES_BUCKET?.trim()].filter(Boolean).length > 1) {
+    throw new Error('[files] GCS_FILES_BUCKET, AZURE_BLOB_CONTAINER, and S3_FILES_BUCKET are mutually exclusive — pick one app-default blob store')
   }
-  const cloudBlobConfigured = Boolean(env.GCS_FILES_BUCKET) || azureBlobOptions !== null
+  // Fail closed on incomplete cloud configuration instead of falling back to disk.
+  const azureBlobOptions = azureBlobOptionsFromEnv(env)
+  const s3Options = s3OptionsFromEnv(env)
+  const cloudBlobConfigured = Boolean(gcsBucket) || azureBlobOptions !== null || s3Options !== null
   const localFilesClient = !cloudBlobConfigured && !(process.env.K_SERVICE && !configuredLocalFilesDir)
     ? createLocalFilesClient({
         baseDir: localFilesDir,
@@ -4365,16 +4428,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         signingSecret: env.JWT_SECRET,
       })
     : null
-  const filesBlobClient = env.GCS_FILES_BUCKET
-    ? createGcsFilesClient({ bucket: env.GCS_FILES_BUCKET, projectId: process.env.GOOGLE_CLOUD_PROJECT })
+  const filesBlobClient = gcsBucket
+    ? createGcsFilesClient({ bucket: gcsBucket, projectId: process.env.GOOGLE_CLOUD_PROJECT })
     : azureBlobOptions
       ? createAzureBlobFilesClient(azureBlobOptions)
-      : localFilesClient
+      : s3Options
+        ? createS3FilesClient(s3Options)
+        : localFilesClient
   if (azureBlobOptions) {
     console.log(`[files] using Azure Blob container ${azureBlobOptions.container} for workspace files.`)
-  } else if (filesBlobClient && !env.GCS_FILES_BUCKET) {
+  } else if (s3Options) {
+    console.log(`[files] using S3 bucket ${s3Options.bucket} for workspace files.`)
+  } else if (localFilesClient) {
     const mode = configuredLocalFilesDir ? 'configured self-hosted storage' : 'ephemeral dev fallback'
-    console.warn(`[files] GCS_FILES_BUCKET unset — using local-disk file storage at ${localFilesDir} (${mode}).`)
+    console.warn(`[files] no cloud default configured — using local-disk file storage at ${localFilesDir} (${mode}).`)
   }
   // Turn ledger rides the same storage decision as workspace files —
   // injected here so lanes never re-derive the driver from env.
@@ -4395,15 +4462,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     | null = null
   let fileIngestor: unknown = null
   if (filesBlobClient) {
-    // Bring-your-own GCS storage: a workspace with an active `gcs` connector
-    // binding writes its file bytes to its OWN bucket under its OWN key; every
-    // other workspace falls through to the app default bucket (byte-identical
-    // to before). The binding lookup reads the encrypted connector_instance
-    // credential. See docs/plans/byo-google-storage.md.
+    // Workspace GCS/S3/local bindings override the deployment default.
+    // The binding lookup reads encrypted connector_instance credentials;
+    // unbound workspaces use the singleton default below.
     const defaultFilesResolver = createSingletonFilesClientResolver(
       filesBlobClient,
-      env.GCS_FILES_BUCKET ?? azureBlobOptions?.container ?? localFilesDir,
-      env.GCS_FILES_BUCKET ? undefined : azureBlobOptions ? 'az' : 'file',
+      gcsBucket || azureBlobOptions?.container || s3Options?.bucket || localFilesDir,
+      gcsBucket ? 'gs' : azureBlobOptions ? 'az' : s3Options ? 's3' : 'file',
     )
     const lookupStorageBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
       // A binding resolves only while we hold the key. Disconnect wipes the key
@@ -4442,10 +4507,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return null
     }
     filesResolver = createCachedByoFilesResolver({ lookup: lookupStorageBinding, fallback: defaultFilesResolver })
-    // One plan-derived storage cap shared by both quota gates (fileWrite /
-    // fileAppend and the chunked Work Bench uploads) so they cannot disagree.
-    const storageLimitBytesFor = async (workspaceId: string) =>
-      storageLimitBytesForPlan(await getWorkspacePlan(workspaceId))
+    // One storage cap shared by both quota gates (fileWrite / fileAppend and
+    // the chunked Work Bench uploads) so they cannot disagree. Hosted injects
+    // the plan-derived resolver; the open default is no cap at all.
+    const storageLimitBytesFor: (workspaceId: string) => Promise<number> =
+      ports.storageLimitBytesFor ?? (async () => Number.POSITIVE_INFINITY)
     filesApi = createFilesApi({
       resolver: filesResolver,
       store: workspaceFilesStore,
@@ -4870,6 +4936,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   const computerTools = createComputerTools({
+    files: filesApi ? createBrowserFileBridge(filesApi, getAssistantClearance) : null,
     protectedFill: protectedFill ? {
       blocked: (ctx, profileId) => protectedFill.isSessionLocked(ctx.userId, ctx.sessionId) ||
         Boolean(profileId && protectedFill.isLocked({ userId: ctx.userId, browserProfileId: profileId })),
@@ -4972,6 +5039,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('browserType', computerTools.browserType)
   if (protectedFill) allTools.set('browserFillReference', computerTools.browserFillReference)
   allTools.set('browserFillForm', computerTools.browserFillForm)
+  allTools.set('browserDownloads', computerTools.browserDownloads)
+  allTools.set('browserReadDownload', computerTools.browserReadDownload)
+  allTools.set('browserUploadFile', computerTools.browserUploadFile)
   allTools.set('browserCurrentUrl', computerTools.browserCurrentUrl)
   // Research read-browse (computer-use.md §12): browserReadPage is
   // deliberately NOT in allTools — interactive turns have the full flat
@@ -5833,9 +5903,38 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         : {}),
     }))
   }
+  let stopWatchCleanup: (() => Promise<void>) | undefined
+  // Dedicated opaque device credentials must mount before the broad human /api guards.
+  if (process.env.WATCH_RECORDING_ENABLED === 'true' && filesApi && filesResolver) {
+    app.use('/api/watch/v1', watchRecordingRoutes({
+      provisioningKey: env.JWT_SECRET,
+      humanAuth: requireAuth(env.JWT_SECRET), authorize: authorizeWatchDestination,
+      service: createWatchService({ pages: savedViewStore, files: filesApi,
+        ...(voiceTranscription.enabled ? { transcribe: async (buffer: Buffer) => (await transcribeWatchAudio(
+          { buffer, mime: 'audio/mp4' }, { apiKey: voiceTranscription.apiKey, backend: voiceTranscription.backend, model: voiceTranscription.model },
+        )).text } : {}),
+      }),
+    }))
+    stopWatchCleanup = startWatchCleanup()
+  }
+  // Shared by hosted and standalone: interaction answers are independent of
+  // the batch recording worker and the currently streaming chat turn.
+  const liveInteraction = filesBlobClient ? createLiveInteractionRuntime({
+    provider, model: backgroundModel, tools: allTools, embedder: sharedEmbedder,
+    savedViewStore, workspaceStore, knowledgeStore, usageStore,
+    payloads: createLedgerPayloadStore(filesBlobClient),
+    voiceTranscriptionEnabled: voiceTranscription.enabled,
+    onError: () => console.error('[live-interaction] background operation failed'),
+  }) : null
+  if (liveInteraction) {
+    app.use('/api/recordings/interaction', requireAuth(env.JWT_SECRET), recordingInteractionRoutes({ service: liveInteraction }))
+    if (runWorkers) liveInteraction.start()
+  }
+
   if (usesOpenStandaloneRoutes(profile) && filesResolver && filesBlobClient) {
     app.use('/api/recordings', requireAuth(env.JWT_SECRET), openRecordingsRoutes({
       filesResolver,
+      chunkedFileUploads,
       getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
       enqueueJob: enqueueRecordingJob,
       hasProcessed: hasCompletedRecordingJob,
@@ -5853,6 +5952,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       usageStore,
       // Window-audio persistence + the assembled-windows finalize fallback.
       filesResolver,
+      filesApi,
+      liveInteraction: liveInteraction ?? undefined,
     }))
   }
 
@@ -5871,6 +5972,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     linkCodeStore,
     getTelegramBotUsername,
     getWhatsappOfficialNumber: ports.getWhatsappOfficialNumber,
+    teardownRules: ports.accountTeardownRules,
     blobClient: filesBlobClient ?? undefined,
     filesResolver: filesResolver ?? undefined,
     workspaceMembership: getWorkspaceMembershipWithClearanceSystem,
@@ -5883,6 +5985,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // one there would shadow it. See routes/connectors.ts.
   if (usesOpenStandaloneRoutes(profile)) {
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
+      setupService: credKey ? createTransactionalConnectorSetup({
+        pool: getPool(), encryptionKey: credKey, adapters: connectorSetupProviders(),
+      }) : undefined,
+      shopifySetupRedirectUri: new URL('/api/auth/callback/shopify', env.AUTHED_APP_URL ?? env.APP_URL).toString(),
       connectorStore,
       connectorInstanceStore,
       connectorGrantStore,
@@ -5929,6 +6035,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       res.json({
         assistants: rows.map((r) => ({
           id: r.id, name: r.name, role: r.role,
+          placementDepartmentId: r.placementDepartmentId, placementDepartmentName: r.placementDepartmentName,
           description: r.systemPrompt ? r.systemPrompt.slice(0, 120) : null,
           memoryCount: r.memoryCount, iconSeed: r.iconSeed ?? 0,
           workspaceId: r.workspaceId,
@@ -6128,6 +6235,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     filesResolver: filesResolver ?? undefined,
   }))
   app.use('/api/workspaces', requireAuth(env.JWT_SECRET), workspaceRouter)
+  app.use('/api/external-app', externalAppCalendarRoutes({
+    jwtSecret: env.JWT_SECRET,
+    withCalendar: createCalendarCredentials({
+      workspaceStore,
+      instances: connectorInstanceStore,
+      listUsable: (userId, workspaceId) => listUsableWorkspaceConnectors({ connectorInstanceStore, connectorGrantStore, userId, workspaceId }),
+    }),
+  }))
+
+  const externalApps = opts.externalApps ?? externalAppConfiguration()
+  app.use('/api/external-app', externalAppRecordsRoutes({
+    jwtSecret: env.JWT_SECRET,
+    store: createExternalAppRecordsStore({ sources: externalApps.sources }),
+  }))
+  if (filesApi) app.use('/api/external-app', externalAppDocumentRoutes({
+    jwtSecret: env.JWT_SECRET,
+    service: createDocumentService({
+      ...externalApps.documents, files: filesApi, authorize: authorizeDocumentHuman,
+      locatorSecret: createHmac('sha256', env.JWT_SECRET).update('external-app-documents-v1').digest('hex'),
+    }),
+  }))
+  else app.use('/api/external-app/workspaces/:workspaceId/documents', requireAuth(env.JWT_SECRET), (_req, res) => {
+    res.status(503).json({ error: 'document_storage_unavailable' })
+  })
 
   const invitationRouter = invitationRoutes({
     invitationStore: workspaceInvitationStore,
@@ -6336,6 +6467,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   startBrainStreamFanout()
 
   app.use('/api', requireAuth(env.JWT_SECRET), workspaceAccessRoutes())
+  app.use('/api', requireAuth(env.JWT_SECRET), departmentRoutes())
   app.use('/api', requireAuth(env.JWT_SECRET), contextScopeRoutes({
     workspaceStore,
     connectorInstanceStore,
@@ -6459,7 +6591,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     jobStore,
     resolvePrimary: workflowExecutorDeps.resolvePrimary,
-    resolveAuthoringAuthority: async (params) => {
+    resolveAuthoringAuthority: async (params, captureInTransaction) => {
+      if (captureInTransaction) return captureInTransaction()
       const assistantId = await workflowExecutorDeps.resolvePrimary(params.workspaceId)
       if (!assistantId) throw new Error('workflow_authority_unavailable')
       return captureAuthoringAuthoritySystem({ ...params, assistantId })
@@ -6589,6 +6722,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : undefined,
   }))
   app.use('/api', requireAuth(env.JWT_SECRET), internalLinkRoutes(internalLinkService))
+  app.use('/api', requireAuth(env.JWT_SECRET), workspaceSearchRoutes({
+    isMember: isWorkspaceMember,
+    readItem: readSearchItem,
+    search: createWorkspaceSearchService(createSearchAdapters(), { key: Buffer.from(env.JWT_SECRET) }),
+  }))
 
   // Standalone Generate from Brain is open in both editions. Hosted injects
   // quote/gate/charge billing policy; OSS confirms the long-lived run but is
@@ -6674,6 +6812,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (snapshot.artifactId !== artifactId) throw new Error('Office version snapshot artifact mismatch')
     return { snapshot, source }
   }
+  const officeSearchProjector = createOfficeSearchProjector(async (userId, artifactId, versionId) =>
+    (await readOfficeVersionSnapshot(userId, artifactId, versionId))?.snapshot ?? null)
+  if (runWorkers) officeSearchProjector.start()
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeArtifactRoutes({
     service: officeService,
     generationAvailable: officeGenerationAvailable,
@@ -7069,6 +7210,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const createGenerationRunner = (userId: string) => createOfficeGenerationWorker({
     store: officeGenerationStore,
     workerUserId: userId,
+    async executePromptOnly(job,leaseToken) {
+      if (!filesResolver) throw new Error('Office storage unavailable')
+      await checkPromptOnlyAuthority(job,leaseToken)
+      const runtime=await resolveBackgroundRuntime(job.workspaceId)
+      await executePromptOnlyGeneration({job,leaseToken,provider:runtime?.provider ?? provider,model:runtime?.selector ?? BACKGROUND_MODEL,
+        resolver:filesResolver,storageLimitBytes:ports.storageLimitBytesFor ? await ports.storageLimitBytesFor(job.workspaceId) : Number.POSITIVE_INFINITY})
+    },
     buildPipelineDeps(job) {
       let fitPolicy: import('@use-brian/core').OfficeGenerationFitPolicy = { eligibleTargetIds: [], maxAttempts: 1 }
       const onFitPolicy = (policy: import('@use-brian/core').OfficeGenerationFitPolicy) => { fitPolicy = policy }
@@ -7906,6 +8054,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // into on create / draft update / approve / supersede, covering the Studio
   // routes, the `updateBrandDraft` chat tool, and the brain-MCP bridge.
   setBrandEventDispatcher(workflowEventDispatcher)
+  setMessageEventDispatcher(workflowEventDispatcher)
 
   const crmDomainEventWorker = createCrmDomainEventWorker({
     store: createDbCrmDomainEventOutboxStore(),
@@ -8019,6 +8168,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const run = await workflowRunStore.createRun({
         workflowId: wf.id, workspaceId: wf.workspaceId,
         triggeredBy: null, triggerKind: 'schedule', input: triggerInput,
+        ...(job.scheduleClaimId ? { scheduledJob: { id: job.id, claimId: job.scheduleClaimId } } : {}),
       })
       const outcome = await advanceWorkflowRun(workflowExecutorDeps, run.id)
       if (outcome.kind === 'failed') {
@@ -8725,7 +8875,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const googleRecordingTranscribers: RecordingTranscriber[] = []
   const dashscopeRecordingTranscribers: RecordingTranscriber[] = []
   const recordingTranscriptionModel = env.RECORDING_TRANSCRIPTION_MODEL ?? env.VOICE_TRANSCRIPTION_MODEL
-  if (vertexTx && env.GCS_FILES_BUCKET && filesBlobClient) {
+  if (vertexTx && gcsBucket && filesBlobClient) {
     googleRecordingTranscribers.push(geminiTranscriber({
       transport: vertexTx,
       ...(recordingTranscriptionModel ? { model: recordingTranscriptionModel } : {}),
@@ -8736,7 +8886,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           mime,
         })
         return {
-          fileUri: `gs://${env.GCS_FILES_BUCKET}/${key}`,
+          fileUri: `gs://${gcsBucket}/${key}`,
           cleanup: () => filesBlobClient.deleteBlob(key),
         }
       },
@@ -8801,9 +8951,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? createOpenRecordingProcessWorker({
         claim: claimNextRecordingJob,
         process: async (job) => {
-          await updateRecording(job.recordingId, { status: 'processing', lastError: null })
-          await mergeEpisodeSourceRef(job.actingUserId, job.recordingId, { status: 'processing' })
-          const result = await processOpenRecording(job, {
+          await processOpenRecordingWithBookkeeping(job, {
             filesResolver,
             fallbackStorage: filesBlobClient,
             transcriber: recordingTranscriber,
@@ -8818,13 +8966,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               backend: () => selectKeyedMediaBackend() ?? providerMediaBackend,
             }),
           })
-          await updateRecording(job.recordingId, {
-            status: 'processed',
-            truncated: result.truncated,
-            durationMs: result.durationMs,
-            lastError: null,
-          })
-          await mergeEpisodeSourceRef(job.actingUserId, job.recordingId, { status: 'processed' })
         },
         markDone: markRecordingJobDone,
         markFailed: async (id, error) => {
@@ -8833,10 +8974,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           if (job) {
             const status = result.retrying ? 'queued' : 'failed'
             await updateRecording(job.recordingId, { status, lastError: error }).catch(() => null)
-            await mergeEpisodeSourceRef(job.actingUserId, job.recordingId, {
-              status,
-              lastError: error.slice(0, 300),
-            }).catch(() => null)
           }
           return result
         },
@@ -9172,6 +9309,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     filesApi,
     filesResolver,
     filesBlobClient,
+    chunkedFileUploads,
     brainEpisodeIngestor,
     recordingJobs: {
       enqueue: enqueueRecordingJob,
@@ -9602,6 +9740,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   async function shutdown(): Promise<void> {
+    await officeSearchProjector.stop()
+    await stopWatchCleanup?.() // Watch boot lifecycle: stop and drain retention work.
     console.log('Shutting down — flushing analytics...')
     consolidationWorker.stop()
     skillReviewWorker.stop()
@@ -9634,6 +9774,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     gdriveCatalogWorker?.stop()
     linkedinImportWorker?.stop()
     recordingProcessWorker?.stop()
+    await liveInteraction?.stop()
     officeLifecycleWorker.stop()
     await codexProviderManager?.close()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)

@@ -61,7 +61,7 @@ export function StatTile({ label, value, suffix, hint, href, tone = "neutral" }:
     <p className={cn("mt-1 text-3xl font-semibold tracking-tight tabular-nums", tone === "danger" ? "text-destructive" : tone === "warning" ? "text-amber-700 dark:text-amber-300" : "")}>{value}{suffix ? <span className="text-lg text-muted-foreground">{suffix}</span> : null}</p>
     {hint ? <p className="mt-1 text-xs text-muted-foreground">{hint}</p> : null}
   </>;
-  const className = "block min-h-11 rounded-2xl border border-border bg-background p-5";
+  const className = "block min-h-8 max-sm:min-h-11 rounded-2xl border border-border bg-background p-5";
   return href ? <Link href={href} className={cn(className, "transition-colors hover:border-primary/50 focus-visible:outline-2 focus-visible:outline-ring")} data-stat-tile>{body}</Link>
     : <div className={className} data-stat-tile>{body}</div>;
 }
@@ -110,7 +110,7 @@ export function ChoiceCards<V extends string>({ label, value, options, onChange,
     <div ref={group} role="radiogroup" aria-label={label} className={cn("grid gap-2", columns === 4 ? "sm:grid-cols-4" : columns === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2")}>
       {options.map((option, index) => { const Icon = option.icon, checked = option.value === value; return <button key={option.value} type="button" role="radio" aria-checked={checked} disabled={disabled} tabIndex={checked ? 0 : -1}
         onClick={() => onChange(option.value)} onKeyDown={event => onKeyDown(event, index)}
-        className={cn("flex min-h-11 items-start gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60", checked ? "border-primary bg-primary/5" : "border-border hover:bg-accent/40")}>
+        className={cn("flex max-sm:min-h-11 items-start gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60", checked ? "border-primary bg-primary/5" : "border-border hover:bg-accent/40")}>
         {Icon ? <Icon aria-hidden className={cn("mt-0.5 size-4 shrink-0", checked ? "text-primary" : "text-muted-foreground")} /> : <span aria-hidden className={cn("mt-1 size-3 shrink-0 rounded-full border-2", checked ? "border-primary bg-primary" : "border-muted-foreground/50")} />}
         <span className="min-w-0"><span className="block font-medium">{option.label}</span>{option.hint ? <span className="block text-xs text-muted-foreground">{option.hint}</span> : null}</span>
       </button>; })}
@@ -119,7 +119,7 @@ export function ChoiceCards<V extends string>({ label, value, options, onChange,
 }
 
 export function SwitchField({ label, checked, onChange, help, disabled = false }: { label: string; checked: boolean; onChange: (checked: boolean) => void; help?: string; disabled?: boolean }) {
-  return <label className="flex min-h-11 min-w-0 items-center justify-between gap-4 rounded-xl border border-border px-3 py-2 text-sm">
+  return <label className="flex max-sm:min-h-11 min-w-0 items-center justify-between gap-4 rounded-xl border border-border px-3 py-2 text-sm">
     <span className="min-w-0"><span className="block font-medium">{label}</span>{help ? <span className="block text-xs text-muted-foreground">{help}</span> : null}</span>
     <Switch checked={checked} disabled={disabled} onCheckedChange={value => onChange(value === true)} />
   </label>;
@@ -128,7 +128,7 @@ export function SwitchField({ label, checked, onChange, help, disabled = false }
 export function FormSection({ title, description, collapsible = false, defaultOpen = false, children }: { title: string; description?: string; collapsible?: boolean; defaultOpen?: boolean; children: ReactNode }) {
   const grid = <div className="grid min-w-0 gap-4 pt-4 md:grid-cols-2">{children}</div>;
   if (collapsible) return <details open={defaultOpen || undefined} className="col-span-full min-w-0 rounded-xl border border-border px-4 pb-4">
-    <summary className="-mx-4 min-h-11 cursor-pointer list-none px-4 text-sm font-semibold content-center focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">{title}{description ? <span className="block text-xs font-normal text-muted-foreground">{description}</span> : null}</summary>{grid}
+    <summary className="-mx-4 min-h-8 max-sm:min-h-11 cursor-pointer list-none px-4 text-sm font-semibold content-center focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">{title}{description ? <span className="block text-xs font-normal text-muted-foreground">{description}</span> : null}</summary>{grid}
   </details>;
   return <section className="col-span-full min-w-0 border-t border-border pt-5 first:border-0 first:pt-0">
     <h3 className="text-sm font-semibold">{title}</h3>{description ? <p className="mt-0.5 text-xs text-muted-foreground">{description}</p> : null}{grid}

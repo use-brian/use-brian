@@ -44,12 +44,14 @@ beforeEach(() => {
 
 describe('[COMP:api/teamspace-store] create', () => {
   it('inserts the teamspace and auto-joins the creator in one transaction', async () => {
+    // The create serializes the workspace and reads its access policy first;
+    // no policy row is a legacy workspace, which this API may still write.
     const mockClient = {
-      query: vi.fn()
-        .mockResolvedValueOnce(undefined) // BEGIN
-        .mockResolvedValueOnce({ rows: [TS_ROW], rowCount: 1 }) // INSERT teamspaces
-        .mockResolvedValueOnce({ rowCount: 1 }) // INSERT teamspace_members (creator)
-        .mockResolvedValueOnce(undefined), // COMMIT
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: null }], rowCount: 1 }
+        if (sql.includes('INSERT INTO teamspaces')) return { rows: [TS_ROW], rowCount: 1 }
+        return { rows: [], rowCount: sql.includes('INSERT INTO teamspace_members') ? 1 : 0 }
+      }),
       release: vi.fn(),
     }
     mockGetPool.mockReturnValue({ connect: vi.fn().mockResolvedValue(mockClient) } as never)
@@ -62,14 +64,16 @@ describe('[COMP:api/teamspace-store] create', () => {
     })
     expect(created.id).toBe('ts-1')
 
-    const insertSql = mockClient.query.mock.calls[1][0] as string
-    expect(insertSql).toContain('INSERT INTO teamspaces')
+    const sqls = mockClient.query.mock.calls.map(([sql]) => sql as string)
+    expect(sqls[0]).toBe('BEGIN')
+    expect(sqls).toContain('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE')
+    const insertSql = sqls.find(sql => sql.includes('INSERT INTO teamspaces'))!
     // Position appends after the workspace's existing sections.
     expect(insertSql).toContain('COALESCE(MAX(position) + 1, 0)')
 
-    const joinSql = mockClient.query.mock.calls[2][0] as string
-    expect(joinSql).toContain('INSERT INTO teamspace_members')
-    expect(mockClient.query.mock.calls[3][0]).toBe('COMMIT')
+    const join = sqls.findIndex(sql => sql.includes('INSERT INTO teamspace_members'))
+    expect(join).toBeGreaterThan(sqls.indexOf(insertSql))
+    expect(sqls.at(-1)).toBe('COMMIT')
     expect(mockClient.release).toHaveBeenCalled()
   })
 })

@@ -189,7 +189,8 @@ export type GoalListRow = GoalRecord & { hostTitle?: string | null }
  *  the operational pattern from `workflow_runs`); user reads are RLS-scoped.
  *  Concrete impl: `packages/api/src/db/goals-store.ts`. */
 export type GoalStore = {
-  create(params: GoalCreateParams): Promise<GoalRecord>
+  /** taskSource is an opaque server capability, never transport/model JSON. */
+  create(params: GoalCreateParams, execution?: { taskSource: object }): Promise<GoalRecord>
   /** User-scoped read (RLS by workspace membership). */
   getById(userId: string, id: string): Promise<GoalRecord | null>
   /** System read by id (engine path; no user context). */

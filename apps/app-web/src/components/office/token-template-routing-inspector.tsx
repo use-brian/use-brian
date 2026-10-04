@@ -11,7 +11,7 @@ import type { TemplateRoutingInspectorState } from "./template-routing-inspector
 import { reconcileTokenRouting, tokenTargetLocations } from "./token-template-routing";
 
 const TYPES: OfficeTemplateField["type"][] = ["plainText", "number", "date"];
-const inputClass = "min-h-11 w-full rounded border bg-background px-2 text-base md:text-sm";
+const inputClass = "min-h-8 max-sm:min-h-11 w-full rounded border bg-background px-2 text-base md:text-sm";
 
 /** Literal DOCX/XLSX fields. The live snapshot is the binding authority. */
 export function TokenTemplateRoutingInspector({ snapshot, selectedTargetIds, initialRouting, onStateChange, saveRouting, saveConfirmed }: {
@@ -87,10 +87,10 @@ export function TokenTemplateRoutingInspector({ snapshot, selectedTargetIds, ini
           <p className="break-words text-xs text-muted-foreground">{locations.length ? locations.join(", ") : selected ? t.routingMappedToSelection : format(t.routingMappedObjects, { count: field.targetIds.length })}</p>
           <label className="block space-y-1"><span>{t.routingFieldLabel}</span><input maxLength={200} value={field.label} onChange={(event) => updateField(field.id, { label: event.target.value })} className={inputClass} /></label>
           <div className="space-y-1"><span>{t.routingFieldType}</span><Select value={field.type} onValueChange={(value) => { if (TYPES.includes(value as OfficeTemplateField["type"])) updateField(field.id, { type: value as OfficeTemplateField["type"] }); }} disabled={status === "saving"}>
-            <SelectTrigger aria-label={t.routingFieldType} className="min-h-11 w-full text-base md:text-sm">{t.routingFieldTypes[field.type]}</SelectTrigger>
-            <SelectContent>{TYPES.map((type) => <SelectItem key={type} value={type} className="min-h-11">{t.routingFieldTypes[type]}</SelectItem>)}</SelectContent>
+            <SelectTrigger aria-label={t.routingFieldType} className="max-sm:min-h-11 w-full text-base md:text-sm">{t.routingFieldTypes[field.type]}</SelectTrigger>
+            <SelectContent>{TYPES.map((type) => <SelectItem key={type} value={type} className="min-h-8 max-sm:min-h-11">{t.routingFieldTypes[type]}</SelectItem>)}</SelectContent>
           </Select></div>
-          <label className="flex min-h-11 cursor-pointer items-center gap-2"><Checkbox checked={field.required} disabled={status === "saving"} onCheckedChange={(required) => updateField(field.id, { required })} aria-label={t.routingRequired} /><span>{t.routingRequired}</span></label>
+          <label className="flex min-h-8 max-sm:min-h-11 cursor-pointer items-center gap-2"><Checkbox checked={field.required} disabled={status === "saving"} onCheckedChange={(required) => updateField(field.id, { required })} aria-label={t.routingRequired} /><span>{t.routingRequired}</span></label>
           <label className="block space-y-1"><span>{t.routingTokenMaxLength}</span><input type="number" inputMode="numeric" min={1} max={1_000_000} step={1} value={field.maxLength ?? ""} onChange={(event) => updateField(field.id, { maxLength: event.target.value === "" ? undefined : Number(event.target.value) })} className={inputClass} /><span className="block text-xs text-muted-foreground">{t.routingTokenMaxLengthHelp}</span></label>
           <label className="block space-y-1"><span>{t.routingInstruction}</span><textarea maxLength={4_000} value={field.aiInstruction} onChange={(event) => updateField(field.id, { aiInstruction: event.target.value })} className={cn(inputClass, "min-h-24 py-2")} /></label>
         </section>;
@@ -98,7 +98,7 @@ export function TokenTemplateRoutingInspector({ snapshot, selectedTargetIds, ini
     </fieldset>
     <div className="sticky bottom-0 -mx-3 space-y-2 border-t bg-background px-3 py-3">
       <p role="status" className={cn("text-xs", status === "saveFailed" ? "text-destructive" : "text-muted-foreground")}>{status === "saveFailed" ? t.routingSaveFailed : dirty ? t.routingUnsaved : status === "saved" ? t.routingSaved : t.routingTokenReview}</p>
-      <button type="button" disabled={!valid || !dirty || status === "saving"} onClick={() => void save()} className="min-h-11 w-full rounded bg-action px-3 font-medium text-action-foreground disabled:opacity-50">{status === "saving" ? t.routingSaving : t.routingSave}</button>
+      <button type="button" disabled={!valid || !dirty || status === "saving"} onClick={() => void save()} className="min-h-8 max-sm:min-h-11 w-full rounded bg-action px-3 font-medium text-action-foreground disabled:opacity-50">{status === "saving" ? t.routingSaving : t.routingSave}</button>
     </div>
   </div>;
 }

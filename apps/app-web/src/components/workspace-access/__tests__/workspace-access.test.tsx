@@ -22,6 +22,7 @@ vi.mock('@/lib/api/workspace-access',()=>({fetchWorkspaceAccess:mocks.fetch,fetc
 vi.mock('@/lib/workspace-settings-events',()=>({openWorkspaceSettings:mocks.settings}));
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:mocks.confirm}));
 vi.mock('@/components/chrome/surface-skeleton',()=>({SurfaceSkeletonFor:()=> <div data-skeleton/>}));
+vi.mock('../migration-progress',()=>({MigrationProgressPanel:()=> <div data-migration-progress/>}));
 vi.mock('../scope-review',()=>({ScopeReviewPanel:({close}:{close:()=>void})=><button data-scope-review onClick={close}>Review fixture</button>}));
 let root:Root,host:HTMLDivElement;
 const t=en.workspaceAccess;
@@ -31,6 +32,11 @@ async function click(label:string){const button=[...host.querySelectorAll<HTMLBu
 beforeEach(()=>{mocks.history.mockReset();mocks.viewer.me.id='member-fixture';mocks.fetch.mockReset().mockResolvedValue(fixture());mocks.save.mockReset().mockResolvedValue(fixture());mocks.prepare.mockReset().mockImplementation(async(_workspaceId,command)=>({id:'review-fixture',payloadHash:'a'.repeat(64),command,changes:[],expiresAt:'2030-01-01T00:00:00Z',validForMs:30000,policyRevision:'15'}));mocks.confirm.mockReset().mockResolvedValue(true);mocks.settings.mockReset();invalidateSurfaceCache('workspace-access:');host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('workspace-access:');});
 describe('[COMP:app-web/workspace-access] request and administration paths',()=>{
+  it('exposes migration progress on the actual Organization Access route only to administrators',async()=>{
+    await render({selection:{kind:'requests'}});expect(host.querySelector('[data-migration-progress]')).toBeNull();
+    const data=fixture();data.canAdminister=true;mocks.fetch.mockResolvedValue(data);await act(async()=>invalidateSurfaceCache('workspace-access:'));
+    expect(host.querySelector('[data-migration-progress]')).not.toBeNull();
+  });
   it('keeps person access scoped to the selected profile and clears it on selection changes',async()=>{
     const data=fixture();data.canAdminister=true;
     const access={clearance:'internal' as const,effectiveClearance:'internal' as const,teamScopeMode:'assigned' as const,readTeamIds:['research'],membershipTeamIds:[],hasUnlistedReadScope:false,hasUnlistedMembershipScope:false};
@@ -187,7 +193,7 @@ describe('[COMP:app-web/workspace-access] request and administration paths',()=>
     await render();await click(t.approve);expect(host.querySelector('[role="alert"]')?.textContent).toBe(t.notReady)
   });
   it('lets a member request thirty days of read-only access for themselves',async()=>{
-    await render();expect(host.textContent).not.toContain(t.configureTeams);expect(host.textContent).not.toContain(t.adminHint);
+    await render();expect(host.textContent).not.toContain(t.reviewData);expect(host.textContent).not.toContain(t.adminHint);
     await click(t.requestAccess);expect(host.textContent).toContain(t.readOnly);expect(host.querySelector('select')).toBeNull();
     const reason=host.querySelector('textarea')!;
     await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(reason,'Review launch requirements');reason.dispatchEvent(new Event('input',{bubbles:true}));});
@@ -195,9 +201,9 @@ describe('[COMP:app-web/workspace-access] request and administration paths',()=>
     expect(mocks.prepare).toHaveBeenCalledWith('workspace-fixture',{type:'access.request.create',targetTeamId:'research',beneficiaryKind:'member',beneficiaryId:'member-fixture',reason:'Review launch requirements',days:30,ongoing:false},'15',expect.any(String));
     expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({description:expect.stringContaining(t.readOnly)}));
   });
-  it('links administrators to department setup in the same home',async()=>{
+  it('gives administrators data review without repeating section navigation',async()=>{
     mocks.fetch.mockResolvedValue({...fixture(),canAdminister:true});await render();expect(host.textContent).toContain(t.adminHint);
-    expect(host.querySelector('a')?.getAttribute('href')).toBe('/w/workspace-fixture/organization?section=departments');
+    expect(host.textContent).toContain(t.reviewData);expect(host.querySelector('a[href*="section=departments"]')).toBeNull();
     await click(t.edit);expect(host.textContent).toContain(t.managerSave);expect(host.textContent).toContain(t.manageMembers);
   });
   it('submits the exact reviewed request version and policy revision, and explains stale reviews',async()=>{

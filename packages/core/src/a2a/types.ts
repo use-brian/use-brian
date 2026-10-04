@@ -307,6 +307,8 @@ export type ConsultRequest = {
    * for ordinary askAssistant consults.
    */
   workflowRunId?: string
+  /** Engine-owned step identity for destination-bound publication consent. */
+  workflowStepId?: string
   /**
    * Internal prompt-attribution context for workflow assistant calls. The
    * actor stays in `caller.userId`; this envelope carries only operation

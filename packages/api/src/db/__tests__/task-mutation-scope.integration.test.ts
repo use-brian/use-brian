@@ -8,6 +8,8 @@ import {getTaskByIdSystem,getTaskHistory} from '../tasks.js'
 import {createDbWorkspaceGroupStore} from '../workspace-group-store.js'
 import * as lifecycle from '../../task-event-fanout.js'
 
+// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
+// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
@@ -15,7 +17,7 @@ const pool=getPool()
 async function fixture(){
   const workspaceId=randomUUID(),userId=randomUUID(),otherUser=randomUUID(),assistantId=randomUUID(),projectId=randomUUID()
   for(const id of [userId,otherUser])await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Task scope fixture',$2)",[workspaceId,userId])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Task scope fixture',$2,false)",[workspaceId,userId])
   for(const id of [userId,otherUser])await pool.query('INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,$3)',[workspaceId,id,id===userId?'owner':'member'])
   await pool.query("UPDATE workspace_members SET clearance='confidential' WHERE workspace_id=$1 AND user_id=$2",[workspaceId,userId])
   await pool.query("INSERT INTO assistants(id,workspace_id,owner_user_id,name,kind) VALUES($1,$2,$3,'Task fixture assistant','standard')",[assistantId,workspaceId,userId])
@@ -138,11 +140,13 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     const saved=await runWithAgentAccess(f.execution(),()=>tools.saveTask.execute({title:'New scoped task'},context))
     expect(saved.isError).not.toBe(true)
     const row=(await f.rows()).find(row=>row.title==='New scoped task')!
-    expect(row).toMatchObject({sensitivity:'confidential',user_id:f.userId,assistant_id:f.assistantId,compartments:[f.key],project_ids:[f.projectId]})
+    // Private content keeps the task private to its user; the assistant axis is
+    // never inherited (decision D3).
+    expect(row).toMatchObject({sensitivity:'confidential',user_id:f.userId,assistant_id:null,compartments:[f.key],project_ids:[f.projectId]})
     const general=await f.create({title:'General fixture',compartments:[],projectIds:[]})
     const updated=await runWithAgentAccess(f.execution(),()=>tools.updateTask.execute({id:general.id,title:'Protected successor'},context))
     expect(updated.isError).not.toBe(true)
-    expect((await f.rows()).find(row=>row.title==='Protected successor')).toMatchObject({sensitivity:'confidential',user_id:f.userId,assistant_id:f.assistantId,compartments:[f.key],project_ids:[f.projectId]})
+    expect((await f.rows()).find(row=>row.title==='Protected successor')).toMatchObject({sensitivity:'confidential',user_id:f.userId,assistant_id:null,compartments:[f.key],project_ids:[f.projectId]})
     expect(updated.scopeEvidence?.sources?.[0].resourceKind).toBe('task')
   })
   it('retains stronger source labels and refuses incompatible inherited visibility or destination scope',async()=>{

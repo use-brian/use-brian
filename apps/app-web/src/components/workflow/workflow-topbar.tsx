@@ -1,5 +1,7 @@
 "use client";
 
+import { WorkspaceSearchSlot } from "@/components/workspace-search/workspace-search-provider";
+
 /**
  * Workflow top bar — shared doc-style chrome for every Workflow route.
  *
@@ -93,6 +95,7 @@ export function WorkflowTopbar({ workspaceId }: { workspaceId: string }) {
         </Link>
       </nav>
       <div className="min-w-0 flex-1" aria-hidden />
+      <WorkspaceSearchSlot />
     </div>
   );
 }

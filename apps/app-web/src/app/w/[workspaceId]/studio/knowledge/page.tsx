@@ -517,7 +517,7 @@ export default function StudioKnowledgePage() {
               <BackButton
                 label={copy.backToList}
                 onClick={() => setDetailOpen(false)}
-                className="min-h-11"
+                className="min-h-8 max-sm:min-h-11"
               />
             </div>
             {!sel ? (

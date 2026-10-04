@@ -102,11 +102,16 @@ const ProgrammaticAccessPage = lazy(() => import("@/app/w/[workspaceId]/studio/p
 const StudioBrandPage = lazy(() => import("@/app/w/[workspaceId]/studio/brand/page"));
 const StudioMiniAppsPage = lazy(() => import("@/app/w/[workspaceId]/studio/mini-apps/page"));
 const WorkflowPage = lazy(() => import("@/app/w/[workspaceId]/workflow/page"));
+const ProjectsPage = lazy(() => import("@/app/w/[workspaceId]/projects/page"));
+const ProjectsLayout = lazy(() => import("@/app/w/[workspaceId]/projects/layout"));
+const ProjectDetailPage = lazy(() => import("@/app/w/[workspaceId]/projects/[projectId]/page"));
 const OrganizationPage = lazy(() => import("@/app/w/[workspaceId]/organization/page"));
 const WorkflowDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id]/page"));
 const WorkflowRunDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page"));
 const OfficePage = lazy(() => import("@/app/w/[workspaceId]/office/page"));
 const NewOfficePage = lazy(() => import("@/app/w/[workspaceId]/office/new/page"));
+const WorkspaceRecordPage = lazy(() => import("@/app/w/[workspaceId]/records/[recordId]/page"));
+const RecordingDetailPage = lazy(() => import("@/app/w/[workspaceId]/recordings/[recordingId]/page"));
 const OfficeArtifactPage = lazy(() => import("@/app/w/[workspaceId]/office/[artifactId]/page"));
 const OfficeTemplatesPage = lazy(() => import("@/app/w/[workspaceId]/office/templates/page"));
 const OfficeTemplatePage = lazy(() => import("@/app/w/[workspaceId]/office/templates/[templateId]/page"));
@@ -302,9 +307,16 @@ export function App() {
                 />
               </Route>
 
+              <Route path="records/:recordId" element={<WorkspaceRecordPage />} />
+              <Route path="recordings/:recordingId" element={<RecordingDetailPage />} />
+
               {/* Workflow */}
               <Route path="workflow" element={<WorkflowPage />} />
               <Route path="organization" element={<OrganizationPage />} />
+              <Route path="projects" element={<ProjectsLayout><Outlet /></ProjectsLayout>}>
+                <Route index element={<ProjectsPage />} />
+                <Route path=":projectId" element={<ProjectDetailRoute />} />
+              </Route>
               <Route path="workflow/:id" element={<WorkflowDetailRoute />} />
               <Route
                 path="workflow/:id/runs/:runId"
@@ -875,3 +887,9 @@ const button: React.CSSProperties = {
   boxShadow:
     "inset 0 1px 0 rgba(255,255,255,0.45), 0 1px 2px rgba(4,19,28,0.18), 0 8px 20px -8px rgba(52,211,255,0.55), 0 16px 40px -16px rgba(52,211,255,0.45)",
 };
+
+function ProjectDetailRoute() {
+  const { workspaceId = "", projectId = "" } = useParams();
+  const params = useMemo(() => Promise.resolve({ workspaceId, projectId }), [workspaceId, projectId]);
+  return <ProjectDetailPage params={params} />;
+}

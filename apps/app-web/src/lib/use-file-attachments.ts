@@ -86,6 +86,8 @@ export type FileAttachmentsApi = {
    * `clear()` (revokes everything) is still the right call for an abandoned tray.
    */
   detach: () => void;
+  /** Restore already-uploaded draft chips without re-uploading or reprocessing. */
+  restore: (saved: Attachment[]) => void;
 };
 
 type UploadResponse = {
@@ -514,5 +516,12 @@ export function useFileAttachments(
   const uploading = attachments.some((a) => a.status === "uploading");
   const hasReady = attachments.some((a) => a.status === "done" && !!a.fileId);
 
-  return { attachments, uploading, hasReady, fileIds, upload, remove, clear, detach };
+  const restore = React.useCallback((saved: Attachment[]) => {
+    generation.current += 1;
+    pendingChips.current.clear();
+    setAttachments(saved.filter(chip => chip.status === "done" && !!chip.fileId)
+      .map(({ previewUrl: _preview, ...chip }) => chip));
+  }, []);
+
+  return { attachments, uploading, hasReady, fileIds, upload, remove, clear, detach, restore };
 }

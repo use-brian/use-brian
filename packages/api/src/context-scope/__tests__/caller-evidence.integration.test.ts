@@ -33,7 +33,9 @@ describe('[COMP:api/caller-scope-evidence] canonical consult evidence and memory
     await runWithAgentAccess(f.ceiling,()=>f.save.execute({summary:'Derived through consult',scope:'user',
       derivation:{sources:[]},compartments:[],projectIds:[],sensitivity:'public'},ctx))
     const row=(await pool.query("SELECT id,sensitivity,compartments,project_ids,user_id,assistant_id FROM memories WHERE workspace_id=$1 AND summary='Derived through consult'",[f.workspaceId])).rows[0]
-    expect(row).toMatchObject({sensitivity:'internal',compartments:['product'],project_ids:[f.projectId],user_id:f.userId,assistant_id:f.sourceAssistant})
+    // Labels and the user partition carry through; a primary's memory keeps its
+    // own workspace-shared visibility instead of the source assistant's (D3).
+    expect(row).toMatchObject({sensitivity:'internal',compartments:['product'],project_ids:[f.projectId],user_id:f.userId,assistant_id:null})
     expect((await pool.query('SELECT s.source_id FROM scope_derivation_sources s JOIN scope_derivations d ON d.id=s.derivation_id WHERE d.resource_id=$1',[row.id])).rows).toEqual([{source_id:f.source.id}])
     await pool.query("UPDATE memories SET summary='Changed source' WHERE id=$1",[f.source.id])
     expect((await pool.query('SELECT scope_held FROM memories WHERE id=$1',[row.id])).rows[0].scope_held).toBe(true)
@@ -63,12 +65,15 @@ describe('[COMP:api/caller-scope-evidence] canonical consult evidence and memory
       derivation:{producer:'fixture',sources:[f.snapshot]},derivationTarget:{userId:randomUUID(),assistantId:null}})).rejects.toThrow('scope_visibility_incompatible')
     expect((await pool.query("SELECT id FROM memories WHERE workspace_id=$1 AND summary='Refused target'",[f.workspaceId])).rows).toEqual([])
   })
-  it.each(['edit','hold','delete'])('refuses %s sources before context use and at canonical persistence',async change=>{
+  it.each(['edit','hold','delete'])('judges %s sources by current labels in context and refuses them at canonical persistence',async change=>{
     const f=await fixture(),validated=await validateCallerScopeEvidence(f.evidence,f.ceiling)
     if(change==='edit')await pool.query("UPDATE memories SET summary='Updated' WHERE id=$1",[f.source.id])
     if(change==='hold')await pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[f.source.id])
     if(change==='delete')await pool.query('DELETE FROM memories WHERE id=$1',[f.source.id])
-    await expect(validateCallerScopeEvidence(validated,f.ceiling)).rejects.toMatchObject({reason:'caller_evidence_unavailable'})
+    // Context use (decision D1): an edit or delete alone never blocks; a hold does.
+    if(change==='hold')await expect(validateCallerScopeEvidence(validated,f.ceiling)).rejects.toMatchObject({reason:'caller_evidence_unavailable',diagnostic:'source_held'})
+    else await expect(validateCallerScopeEvidence(validated,f.ceiling)).resolves.toMatchObject({sensitivity:'internal'})
+    // Lineage for a derived WRITE stays exact-version.
     await expect(runWithAgentAccess(f.ceiling,()=>f.save.execute({summary:'Refused output',scope:'user'},f.context(validated)))).rejects.toThrow('scope_source_changed')
     expect((await pool.query("SELECT id FROM memories WHERE workspace_id=$1 AND summary='Refused output'",[f.workspaceId])).rows).toEqual([])
   })
@@ -96,7 +101,9 @@ describe('[COMP:api/caller-scope-evidence] canonical consult evidence and memory
   it('keeps known label floors while refusing malformed source metadata without leaking it',async()=>{
     const f=await fixture()
     expect(await validateCallerScopeEvidence({sensitivity:'internal',compartments:['product'],projectIds:[]},f.ceiling)).toEqual({sensitivity:'internal',compartments:['product'],projectIds:[]})
-    for(const evidence of [{sources:[{...f.snapshot,version:'stale-private-detail'}]},{sources:[{...f.snapshot,workspaceId:undefined}]},{compartments:'product'},{sources:{}},{sensitivity:'unknown'}]) {
+    // A stale version is an edited source: judged by current labels (D1), not refused.
+    await expect(validateCallerScopeEvidence({sources:[{...f.snapshot,version:'stale-private-detail'}]},f.ceiling)).resolves.toMatchObject({sensitivity:'internal'})
+    for(const evidence of [{sources:[{...f.snapshot,workspaceId:undefined}]},{compartments:'product'},{sources:{}},{sensitivity:'unknown'}]) {
       await expect(validateCallerScopeEvidence(evidence as ScopeEvidence,f.ceiling)).rejects.toMatchObject({reason:'caller_evidence_unavailable'})
       await expect(validateCallerScopeEvidence(evidence as ScopeEvidence,f.ceiling)).rejects.not.toThrow('stale-private-detail')
     }

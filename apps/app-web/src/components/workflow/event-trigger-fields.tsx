@@ -622,7 +622,9 @@ function ChannelPicker({
     );
   }
   // `items` lets base-ui render the selected channel's NAME on the trigger
-  // (otherwise it shows the raw channel_integrations id until the dropdown opens).
+  // (otherwise it shows the raw integration/session id until the dropdown opens).
+  // Web options are authorized chats (including workflow/assistant surfaces):
+  // preserve their session UUID and `web` channel exactly like installed bots.
   const items = options.map((o) => ({
     value: o.id,
     label: `${o.displayName} (${o.channelType})`,

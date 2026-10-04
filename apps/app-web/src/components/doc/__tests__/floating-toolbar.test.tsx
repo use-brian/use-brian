@@ -154,7 +154,7 @@ describe("[COMP:app-web/floating-toolbar] ToolbarButtons render", () => {
     expect(html).toMatch(/aria-label="Bold"/);
     expect(html).toMatch(/aria-label="Italic"/);
     expect(html).toMatch(/aria-label="Code"/);
-    expect(html).toMatch(/aria-label="Link"/);
+    expect(html).toMatch(/aria-label="Link \(⌘\/Ctrl\+Shift\+K\)"/);
   });
 
   it("leads with the Turn-into block-conversion control", () => {
@@ -179,7 +179,7 @@ describe("[COMP:app-web/floating-toolbar] ToolbarButtons render", () => {
     expect(html).toMatch(/aria-label="Bold" aria-pressed="true"/);
     expect(html).toMatch(/aria-label="Code" aria-pressed="true"/);
     expect(html).toMatch(/aria-label="Italic" aria-pressed="false"/);
-    expect(html).toMatch(/aria-label="Link" aria-pressed="false"/);
+    expect(html).toMatch(/aria-label="Link \(⌘\/Ctrl\+Shift\+K\)" aria-pressed="false"/);
   });
 
   it("does not render the link input until the link button is opened", () => {

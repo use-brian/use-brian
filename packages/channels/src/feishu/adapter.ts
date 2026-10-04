@@ -172,7 +172,7 @@ export function createFeishuAdapter(options: FeishuAdapterOptions): ChannelAdapt
 
     async sendMessage(channelId, response, opts) {
       response = denormalizeActions(response)
-      if (!response.text.trim() && !response.documents?.length && !response.images?.length) {
+      if (!response.text.trim() && !response.documents?.length && !response.images?.length && !response.actions?.length) {
         return ''
       }
       const apiOpts = sendOptions(opts?.threadTs)
@@ -195,7 +195,6 @@ export function createFeishuAdapter(options: FeishuAdapterOptions): ChannelAdapt
         const input = response.format === 'markdown' ? { markdown: chunk } : { text: chunk }
         lastMessageId = (await options.api.send(channelId, input, apiOpts)).messageId
       }
-
       for (const image of response.images ?? []) {
         try {
           lastMessageId = (
@@ -245,16 +244,18 @@ export function createFeishuAdapter(options: FeishuAdapterOptions): ChannelAdapt
         }
         return
       }
-      if (response.format === 'markdown') {
-        throw new Error('Feishu Markdown messages must be sent as rich-text posts, not text edits')
-      }
       const chunks = chunkText(response.text, FEISHU_MAX_MESSAGE_LENGTH)
         .filter((chunk) => chunk.trim())
       if (chunks.length === 0) return
-      await options.api.editMessage(messageId, chunks[0])
+      if (response.format === 'markdown') {
+        await options.api.editPost(messageId, chunks[0])
+      } else {
+        await options.api.editMessage(messageId, chunks[0])
+      }
       const apiOpts = sendOptions(opts?.threadTs)
       for (const chunk of chunks.slice(1)) {
-        await options.api.send(channelId, { text: chunk }, apiOpts)
+        await options.api.send(channelId,
+          response.format === 'markdown' ? { markdown: chunk } : { text: chunk }, apiOpts)
       }
     },
 
@@ -264,12 +265,8 @@ export function createFeishuAdapter(options: FeishuAdapterOptions): ChannelAdapt
     },
 
     async sendStatus(channelId, status, opts) {
-      const result = await options.api.send(channelId, { text: status }, sendOptions(opts?.threadTs))
+      const result = await options.api.send(channelId, { markdown: status }, sendOptions(opts?.threadTs))
       return result.messageId
-    },
-
-    async clearStatus(_channelId, opts) {
-      if (opts?.messageId) await options.api.recallMessage(opts.messageId)
     },
 
     async reactToMessage(_channelId, messageId, emoji) {

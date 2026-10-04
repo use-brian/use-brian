@@ -107,6 +107,13 @@ async function choose(label: string) {
 }
 
 describe("[COMP:app-web/settings-modal] mobile section navigation", () => {
+  it("redirects legacy Projects settings to the workspace Projects browser", async () => {
+    await render(true, "ws-projects");
+    expect(navigation.push).toHaveBeenCalledWith("/w/workspace-1/projects");
+    expect(onClose).toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it.each([
     ['ws-organization', '/w/workspace-1/organization'],
     ['ws-teams', '/w/workspace-1/organization?section=departments'],

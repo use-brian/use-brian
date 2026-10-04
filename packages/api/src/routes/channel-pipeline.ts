@@ -424,6 +424,14 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    */
   externalGuest?: boolean
   /**
+   * The sender reached Brian through their own verified linked account for
+   * this provider (the same Telegram account connected to their Brian
+   * account), not a shadow, merged-guest or allowlist identity. Only such a
+   * workspace member receives their personal context in an approved group.
+   * See scoped-context.md -> "Personal context in approved groups".
+   */
+  senderLinkedIdentity?: boolean
+  /**
    * Explicit owner opt-in for an external guest to use the connected tools
    * enabled for this assistant. Does not relax memory, workspace-file, skill,
    * private-context, or long-term-persistence boundaries.
@@ -1084,14 +1092,21 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     userId,
     channelType,
     channelId,
+    sessionChannelId,
     channelIntegrationId: params.channelIntegrationId,
     recipientType: isGroupChat ? 'group' as const : 'individual' as const,
+    // A DM from a non-member goes back to that same guest, judged as the
+    // guest the turn ran as - never as a member lookup that cannot succeed.
+    recipientMode: memberMode === 'external' ? 'external' as const : 'member' as const,
+    // The verified sender of this group message gets their own personal
+    // context here; see `groupSpeakerCeiling`.
+    groupSpeaker: isGroupChat && senderIsWorkspaceMember && params.senderLinkedIdentity === true,
   }
   const audienceEnvelope = isGroupChat && assistant.workspaceId
     ? await resolveDeliveryAudienceEnvelope(audienceInput)
     : null
   if (audienceEnvelope && !audienceEnvelope.allowed) {
-    throw new DeliveryAudienceUnverifiedError()
+    throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail, audienceEnvelope.diagnostic)
   }
   const publicAudienceTurn = audienceEnvelope?.allowed === true
     && audienceEnvelope.source === 'public'
@@ -1127,6 +1142,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       session,
       memberMode,
       ignoreSessionBinding: isGroupChat,
+      // A group reads only rows the whole group may see (decision D4),
+      // unless the envelope names the speaker: a linked member speaking in
+      // an approved group also reads their own personal rows.
+      sharedAudience: isGroupChat && !(audienceEnvelope?.allowed && audienceEnvelope.ceiling.userId),
       identity: senderIsWorkspaceMember
         ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
         : {
@@ -1182,7 +1201,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     scope: dataTurnScope,
     workspaceId: assistant.workspaceId,
     userId,
-    assistantId: assistant.id,
     sharedAudience: isGroupChat,
   })
   const currentTurnWrite = () => turnOutputWrite({
@@ -1197,7 +1215,49 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
     })
-    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
+    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
+    // Current labels of a source that changed since it was read join the floor.
+    scopeAccumulator.note({
+      sensitivity: decision.evidence.sensitivity,
+      compartments: decision.evidence.compartments,
+      projectIds: decision.evidence.projectIds,
+    })
+  }
+  /**
+   * Every pre-generation audience check refuses the same way: one analytics
+   * row and a reply to the person waiting. A refusal that escapes instead
+   * unwinds into the channel route's detached catch and the person hears
+   * nothing at all (the compaction-time check did exactly that until
+   * 2026-10-03). Returns false when the turn must stop.
+   */
+  const deliveryAudienceAdmitsTurn = async (): Promise<boolean> => {
+    try {
+      await assertDeliveryAudience()
+      return true
+    } catch (err) {
+      if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
+      console.warn(`[${channelType}] channel turn refused before generation:`, (err as Error).name,
+        isDeliveryAudienceUnverifiedError(err) ? err.diagnostic ?? '' : '')
+      // A refusal that ends the turn before any reply is exactly the one that
+      // must leave a row: without it the only trace is a console line, and the
+      // incident is invisible to the id-keyed SQL triage path.
+      analytics?.logEvent({
+        userId, assistantId: assistant.id, sessionId: session.id,
+        eventName: 'chat_route_error', channelType,
+        metadata: {
+          error_type: sanitizeAnalytics((err as Error).name),
+          stage: sanitizeAnalytics('pre_generation'),
+          ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
+            ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
+            : {}),
+        },
+      })
+      if (isDeliveryAudienceUnverifiedError(err)) {
+        await hooks.sendError(err)
+      }
+      await hooks.onCleanup?.()
+      return false
+    }
   }
 
   const filterHistoryForAudience = async <T extends {
@@ -1287,7 +1347,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // isolated current sentence (2026-08-09 Snapio incident on web; channels
   // share the same classifier contract).
   const preExistingDbMessages = await filterHistoryForAudience(
-    await getSessionMessages(session.id),
+    await getSessionMessages(session.id, { excludeHeld: true }),
   )
   const adaptiveRecentConversation = preExistingDbMessages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -1606,6 +1666,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // `fromSequence` skips rows already compacted into the most recent
   // boundary; null (never compacted) loads full history.
   const dbMessages = await filterHistoryForAudience(await getSessionMessages(session.id, {
+    excludeHeld: true,
     // A public audience cannot trust the durable summary because it has no
     // per-source audience evidence. Rebuild from filtered provider history.
     fromSequence: isolatedAudience ? null : session.compactBoundarySequence,
@@ -1621,7 +1682,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
   // runProactiveCompaction owns stamping + tool-result pairing + summary
   // prepending internally. See docs/architecture/context-engine/compaction.md.
-  await assertDeliveryAudience()
+  if (!(await deliveryAudienceAdmitsTurn())) return
   const compactionResult = await runProactiveCompaction({
     sessionMessages: dbMessages,
     timezone: userTimezone,
@@ -1776,6 +1837,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           clearance,
           compartments,
           projectIds: dataTurnScope.effectiveProjectIds,
+          sharedAudience: dataTurnScope.access.sharedAudience,
         },
         PER_TURN_FILES_INDEX_CAP,
       )
@@ -2237,17 +2299,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
 
   // ── Processing start ──
-  try {
-    await assertDeliveryAudience()
-  } catch (err) {
-    if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
-    console.warn(`[${channelType}] channel turn refused before generation:`, (err as Error).name)
-    if (isDeliveryAudienceUnverifiedError(err)) {
-      await hooks.sendError(err)
-    }
-    await hooks.onCleanup?.()
-    return
-  }
+  if (!(await deliveryAudienceAdmitsTurn())) return
   await hooks.onProcessingStart?.()
 
   await updateSessionStatus(session.id, 'running')
@@ -2513,6 +2565,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         compartments: execution.security.access.compartments,
         mutationCompartments: execution.security.access.mutationCompartments,
         projectIds: execution.security.access.projectIds,
+        sharedAudience: execution.security.access.sharedAudience,
       }),
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
@@ -3067,6 +3120,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         metadata: {
           error_type: sanitizeAnalytics((err as Error).name),
           stage: sanitizeAnalytics('live_authority'),
+          ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
+            ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
+            : {}),
         },
       })
       if (isDeliveryAudienceUnverifiedError(err)) {

@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 /**
  * WeChat internal route — iLink long-poll connector seam.
@@ -38,6 +39,8 @@ import {
   downloadWechatMediaItem,
   findWechatMediaItem,
   WeixinItemType,
+  WeixinMessageType,
+  WeixinMessageState,
   type WeixinMessage,
 } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
@@ -97,7 +100,7 @@ export type WechatRouteOptions = {
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
    *  ride content blocks with no reference, as before. */
   fileStore?: import('@use-brian/core').FileStore
-  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   workflowStore?: import('@use-brian/core').WorkflowStore
@@ -299,9 +302,9 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
     const peerId = incoming.channelId
 
     try {
-      // 1. Channel must be active and chat-enabled.
+      // 1. Workflow ingress requires an active channel, not chat capability.
       const channel = await getChannelForWebhook(channelId)
-      if (!channel || channel.status !== 'active' || !channel.enabledCapabilities.includes('chat')) {
+      if (!channel || channel.channelType !== 'wechat' || channel.status !== 'active') {
         console.warn(`[wechat] channel ${channelId} not accepting chat — ignoring inbound`)
         return
       }
@@ -327,6 +330,25 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
         const blocked = cfg.blockedUserIds ?? []
         if (blocked.includes(incoming.userId)) return
       }
+
+      // The connector forwards normalized iLink messages (timestamps in ms).
+      // Defensively exclude echoes and streaming intermediates at this seam too.
+      const eventRaw = incoming.raw as WeixinMessage | undefined
+      if (incoming.userId === creds.ilink_bot_id
+        || (eventRaw?.message_type != null && eventRaw.message_type !== WeixinMessageType.USER)
+        || (eventRaw?.message_state != null && eventRaw.message_state !== WeixinMessageState.FINISH)) return
+      if (incoming.text.trim() || incoming.mediaType || findWechatMediaItem(eventRaw?.item_list)) {
+        const eventIncoming: IncomingMessage & { channelType: string } = {
+          ...incoming, channelType: 'wechat', timestamp: (incoming.timestamp ?? Date.now()) / 1000,
+        }
+        await dispatchIncomingMessageEvent({
+          workspaceId: channel.workspaceId,
+          integrationId: integration.id,
+          providerAccountId: creds.ilink_bot_id,
+          incoming: eventIncoming,
+        })
+      }
+      if (!channel.enabledCapabilities.includes('chat')) return
 
       // 2c. Persist the per-contact context token — every outbound send to
       //     this peer must echo the latest one (iLink protocol requirement).

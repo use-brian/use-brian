@@ -16,6 +16,8 @@ vi.mock('../client.js', () => ({
   query: vi.fn(),
   queryWithRLS: vi.fn(),
   getPool: vi.fn(),
+  getAppPool: vi.fn(),
+  rollbackAndRelease: vi.fn(),
   applyRLSGucs: vi.fn(),
 }))
 
@@ -26,8 +28,20 @@ import {
   findEventTriggeredWorkflowsSystem,
   getWorkflowCreatorSystem,
 } from '../workflow-store.js'
-import { query, queryWithRLS, getPool, applyRLSGucs } from '../client.js'
+import { query, queryWithRLS, getPool, getAppPool, applyRLSGucs } from '../client.js'
 
+vi.mock('../../workspace-access/operational-admission.js', () => ({
+  admitOperationalAuthoring: vi.fn(async (_client, input) => input),
+  lockOperationalPolicy: vi.fn(async () => undefined),
+}))
+const insertQuery = vi.fn()
+const transactionQuery = vi.fn(async (sql: string, values?: unknown[]) =>
+  sql.includes('INSERT INTO workflows') ? insertQuery(sql, values)
+    : sql.startsWith('SELECT workspace_id') ? { rows: [{ workspaceId: 'ws-1' }], rowCount: 1 }
+    // The update's schedule-edit guard reads the current row first: a manual, unpinned workflow.
+    : sql.startsWith('SELECT to_jsonb(w) AS row') ? { rows: [{ row: { trigger: { kind: 'manual' }, schedule_authoring_pinned: false } }], rowCount: 1 }
+    : sql.startsWith('UPDATE workflows') || sql.startsWith('DELETE FROM workflows') || /FROM workflows WHERE id = \$1\s*$/.test(sql.trim()) ? queryWithRLS('u-1', sql, values)
+    : { rows: [], rowCount: 0 })
 const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)
 const wf = createDbWorkflowStore()
@@ -101,6 +115,9 @@ function stepRow(over: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 beforeEach(() => {
+  insertQuery.mockReset()
+  transactionQuery.mockClear()
+  vi.mocked(getAppPool).mockReturnValue({ connect: async () => ({ query: transactionQuery }) } as never)
   mockQuery.mockReset()
   mockRls.mockReset()
 })
@@ -119,7 +136,7 @@ describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
   })
 
   it('create inserts with the definition JSON-encoded', async () => {
-    mockRls.mockResolvedValueOnce({ rows: [workflowRow()], rowCount: 1 } as never)
+    insertQuery.mockResolvedValueOnce({ rows: [workflowRow()], rowCount: 1 })
     const out = await wf.create({
       userId: 'u-1',
       workspaceId: 'ws-1',
@@ -128,8 +145,9 @@ describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
       authoringAuthority: AUTHORING_AUTHORITY,
     } as unknown as Parameters<typeof wf.create>[0])
     expect(out.id).toBe('wf-1')
-    const [userId, sql, params] = mockRls.mock.calls[0]
-    expect(userId).toBe('u-1')
+    const [sql, params] = insertQuery.mock.calls[0]
+    expect(applyRLSGucs).toHaveBeenCalledWith(expect.anything(), 'u-1')
+    expect(transactionQuery.mock.calls.at(-1)?.[0]).toBe('COMMIT')
     expect(sql).toContain('INSERT INTO workflows')
     expect(params?.[4]).toBe(JSON.stringify({ steps: [] }))
     expect(params?.[14]).toBe(JSON.stringify(AUTHORING_AUTHORITY))
@@ -138,7 +156,7 @@ describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
   it('fires the command-roster hook after a workflow write', async () => {
     const onChanged = vi.fn()
     const hooked = createDbWorkflowStore({ onChanged })
-    mockRls.mockResolvedValueOnce({ rows: [workflowRow()], rowCount: 1 } as never)
+    insertQuery.mockResolvedValueOnce({ rows: [workflowRow()], rowCount: 1 })
     await hooked.create({
       userId: 'u-1',
       workspaceId: 'ws-1',

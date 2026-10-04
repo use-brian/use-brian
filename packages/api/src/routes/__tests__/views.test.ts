@@ -155,6 +155,7 @@ function fakeWorkspaceDirectory(): Stores['workspaceDirectory'] {
 
 function makeApp(opts: {
   userId: string | null
+  authSessionId?: string
   /** Use undefined to default to 'member'; pass `null` explicitly to test the not-a-member case. */
   role?: 'owner' | 'admin' | 'member' | null
   stores?: Partial<Stores>
@@ -183,6 +184,7 @@ function makeApp(opts: {
   app.use((req, _res, next) => {
     if (opts.userId) {
       ;(req as unknown as { userId: string }).userId = opts.userId
+      req.authSessionId = opts.authSessionId
     }
     next()
   })
@@ -1642,6 +1644,22 @@ describe('[COMP:api/views-routes] reparent (page tree)', () => {
 })
 
 describe('[COMP:api/views-routes] create draft', () => {
+  it('only supplies trusted provenance for a session-authenticated source-free draft', async () => {
+    for (const test of [
+      { session: true, body: {}, proven: true },
+      { session: false, body: { provenance: { kind: 'human-authored', actorId: USER_ID } }, proven: false },
+      { session: true, body: { blocks: [] }, proven: false },
+      { session: true, body: { binding: { entity: 'tasks', viewType: 'table' } }, proven: false },
+    ]) {
+      const { app, stores } = makeApp({ userId: USER_ID, authSessionId: test.session ? WORKSPACE_ID : undefined })
+      stores.savedViewStore.createDraft.mockResolvedValueOnce(savedViewFixture())
+      const response = await request(app).post(`/api/workspaces/${WORKSPACE_ID}/views/draft`).send(test.body)
+      expect(response.status).toBe(201)
+      expect(stores.savedViewStore.createDraft.mock.calls[0]?.[1]).toEqual(test.proven
+        ? { provenance: { kind: 'human-authored', actorId: USER_ID } } : undefined)
+    }
+  })
+
   it('POST /workspaces/:wid/views/draft requires workspace membership', async () => {
     const { app } = makeApp({ userId: USER_ID, role: null })
     const res = await request(app).post(`/api/workspaces/${WORKSPACE_ID}/views/draft`).send({})

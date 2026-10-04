@@ -398,7 +398,7 @@ export function KbChatPanel({
         </div>
 
         {error && (
-          <div className="mt-3 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+          <div className="mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
             {error}
           </div>
         )}

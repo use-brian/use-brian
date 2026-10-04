@@ -6,7 +6,7 @@ import { HOME_APP_TOOL_CONFIG, homeAppToolSetCapability } from "@use-brian/share
 import { authFetch } from "@/lib/auth-fetch";
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 import { useT } from "@/lib/i18n/client";
-import { AssociationModuleControls } from "@/components/association/module-controls";
+import { AssociationModuleNote } from "@/components/association/module-controls";
 
 type Grant = { capability: string; enabled: boolean };
 
@@ -74,7 +74,6 @@ export function HomeAppToolSettings({ assistantId, workspaceId }: { assistantId:
 
   return <section className="space-y-3">
     <p className="text-sm text-muted-foreground">{t.desc}</p>
-    {workspaceId && <AssociationModuleControls workspaceId={workspaceId} readOnly />}
     {HOME_APP_TOOL_CONFIG.map((app) => <div key={app.id} className="rounded-xl border border-border overflow-hidden">
       <div className="flex items-center justify-between gap-4 px-4 py-3">
         <h3 className="text-sm font-medium">{t[app.id]}</h3>
@@ -92,6 +91,7 @@ export function HomeAppToolSettings({ assistantId, workspaceId }: { assistantId:
           </div>;
         })}
         {!enabled(app.capability) && <p className="text-xs text-muted-foreground">{t.disabled}</p>}
+        {app.id === "association" && workspaceId && <AssociationModuleNote workspaceId={workspaceId} />}
         {saveError === app.capability && <p role="alert" className="text-xs text-destructive">{t.save}</p>}
       </div>
     </div>)}

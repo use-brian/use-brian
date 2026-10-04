@@ -2,59 +2,133 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
     <style>
-      body { font: 13px/1.45 -apple-system, system-ui, sans-serif; width: 320px; margin: 0; padding: 14px; color: #111; }
-      h1 { font-size: 14px; margin: 0 0 10px; }
-      .row { margin-bottom: 8px; }
-      label { display: block; font-weight: 600; margin-bottom: 3px; }
-      input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
-      input:not([type="checkbox"]):focus-visible { outline: none; border-color: #2563eb; box-shadow: none; }
-      input[type="checkbox"] { width: 16px; height: 16px; margin: 1px 0 0; accent-color: #111; }
-      button { padding: 6px 12px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; font-size: 12px; }
-      button.primary { background: #111; color: #fff; border-color: #111; }
-      button.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
-      .status { padding: 6px 8px; border-radius: 6px; background: #f1f5f9; margin-bottom: 10px; }
-      .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 4px; margin-right: 6px; background: #94a3b8; }
-      .status.ready .dot { background: #16a34a; }
-      .actions { display: flex; gap: 6px; margin-top: 10px; }
-      .hint { color: #64748b; font-size: 11px; margin-top: 8px; }
-      .warn { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; border-radius: 6px; padding: 7px 9px; font-size: 12px; margin-top: 8px; }
-      .build { color: #94a3b8; font-size: 10px; margin-top: 10px; font-variant-numeric: tabular-nums; }
-      .toggle { display: flex; align-items: flex-start; gap: 9px; padding: 9px; border: 1px solid #cbd5e1; border-radius: 7px; }
-      .toggle label { margin: 0; }
-      .toggle small { display: block; color: #64748b; font-size: 11px; font-weight: 400; margin-top: 2px; }
+      /* Mirrors apps/app-web's default (Notion) palette so the extension reads
+         as part of the product: warm-black ink, warm-grey surfaces, a neutral
+         filled action, and the app's blue reserved for focus. */
+      :root {
+        color-scheme: light dark;
+        --bg: #FFFFFF;
+        --fg: #37352F;
+        --muted: #787774;
+        --faint: #A5A4A0;
+        --surface: #F7F7F5;
+        --hover: #EFEFEE;
+        --border: #E9E9E7;
+        --input: #E3E2E0;
+        --ring: #2383E2;
+        --action: #37352F;
+        --action-fg: #FFFFFF;
+        --danger: #EB5757;
+        --danger-fg: #FFFFFF;
+        --danger-soft: #FDEBEC;
+        --ok: #0F7B6C;
+        --warn-bg: #FBF3DB;
+        --warn-border: #F1E0A9;
+        --warn-fg: #6E5413;
+        --radius: 10px;
+        --radius-sm: 7px;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #191919;
+          --fg: #D4D4D4;
+          --muted: #979797;
+          --faint: #6F6F6F;
+          --surface: #202020;
+          --hover: #2A2A2A;
+          --border: #2F2F2F;
+          --input: #3A3A3A;
+          --ring: #529CCA;
+          --action: #D4D4D4;
+          --action-fg: #191919;
+          --danger: #E06B6B;
+          --danger-fg: #191919;
+          --danger-soft: #3A2224;
+          --ok: #4DAB9A;
+          --warn-bg: #3A3222;
+          --warn-border: #574A2C;
+          --warn-fg: #E8D3A2;
+        }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang TC", sans-serif; -webkit-font-smoothing: antialiased; }
+      button { font: inherit; font-size: 12.5px; font-weight: 500; padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--input); background: var(--bg); color: var(--fg); cursor: pointer; transition: background-color 120ms, border-color 120ms, opacity 120ms; }
+      button:hover { background: var(--hover); }
+      button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+      button:disabled { opacity: 0.45; cursor: default; }
+      button.primary { background: var(--action); border-color: var(--action); color: var(--action-fg); }
+      button.primary:hover { opacity: 0.88; background: var(--action); }
+      button.danger { background: var(--danger); border-color: var(--danger); color: var(--danger-fg); }
+      button.danger:hover { opacity: 0.9; background: var(--danger); }
+      body { width: 340px; padding: 14px 14px 12px; }
+      .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+      .mark { width: 28px; height: 28px; border-radius: 7px; image-rendering: pixelated; flex: none; }
+      .title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; }
+      .sub { color: var(--muted); font-size: 11.5px; line-height: 1.3; }
+      .status { display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); margin-bottom: 12px; }
+      .status .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--faint); }
+      .status.ready .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+      .row { margin-bottom: 10px; }
+      label { display: block; font-size: 12px; font-weight: 500; color: var(--fg); margin-bottom: 4px; }
+      input:not([type="checkbox"]) { width: 100%; padding: 7px 10px; border: 1px solid var(--input); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font: inherit; font-size: 12.5px; transition: border-color 120ms; }
+      input:not([type="checkbox"])::placeholder { color: var(--faint); }
+      input:not([type="checkbox"]):focus-visible { outline: none; border-color: var(--ring); box-shadow: none; }
+      input[type="checkbox"] { width: 15px; height: 15px; margin: 2px 0 0; accent-color: var(--action); flex: none; }
+      /* The pre-approval setting is an on/off preference, so it reads as a switch. */
+      input[type="checkbox"].switch { appearance: none; -webkit-appearance: none; position: relative; width: 30px; height: 18px; margin: 1px 0 0; border-radius: 999px; background: var(--input); cursor: pointer; transition: background-color 150ms; }
+      input[type="checkbox"].switch::before { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #FFFFFF; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); transition: transform 150ms; }
+      input[type="checkbox"].switch:checked { background: var(--action); }
+      input[type="checkbox"].switch:checked::before { transform: translateX(12px); background: var(--action-fg); }
+      input[type="checkbox"].switch:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+      input[type="checkbox"].switch:disabled { opacity: 0.5; cursor: default; }
+      .toggle { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 11px; border: 1px solid var(--border); border-radius: var(--radius); }
+      .toggle label { margin: 0; cursor: pointer; }
+      .toggle small { display: block; color: var(--muted); font-size: 11.5px; font-weight: 400; line-height: 1.45; margin-top: 2px; }
+      .actions { display: flex; gap: 6px; margin-top: 12px; }
+      .actions .primary { flex: 1; }
+      .actions .danger-quiet { margin-left: auto; }
+      button.danger-quiet { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--input)); }
+      button.danger-quiet:hover { background: var(--danger-soft); }
+      .hint { color: var(--muted); font-size: 11.5px; line-height: 1.5; margin: 10px 0 0; }
+      .warn { background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-fg); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 12px; margin: 0 0 10px; }
+      .divider { height: 1px; background: var(--border); border: 0; margin: 12px -14px; }
+      .build { color: var(--faint); font-size: 10.5px; margin: 0; font-variant-numeric: tabular-nums; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+      /* Protected fill is rare and wordy: collapsed until it needs the user
+         (popup.ts opens it when a disclosure, lock or recovery is pending). */
+      .panel { border: 1px solid var(--border); border-radius: var(--radius); margin-top: 12px; }
+      .panel.attention { border-color: var(--warn-border); }
+      .panel > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 9px 11px; font-size: 12.5px; font-weight: 500; border-radius: var(--radius); }
+      .panel > summary::-webkit-details-marker { display: none; }
+      .panel > summary::after { content: ""; margin-left: auto; width: 6px; height: 6px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform 150ms; }
+      .panel[open] > summary::after { transform: rotate(45deg); }
+      .panel > summary:hover { background: var(--hover); }
+      .panel > summary:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+      .panel-body { padding: 2px 11px 11px; font-size: 12px; color: var(--muted); }
+      .panel-body p { margin: 0 0 8px; }
+      .panel-body p#protected-status { color: var(--fg); font-weight: 500; }
+      .panel-body .warn { color: var(--warn-fg); }
+      .panel-body .btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+      .panel-body .btns:not(:has(button:not([hidden]))) { display: none; }
+      .panel-body .warn p { margin: 6px 0; }
+      .panel-body .warn label { display: flex; gap: 7px; font-weight: 500; color: inherit; margin: 6px 0 8px; }
+      .panel-body .field { margin-top: 4px; }
+      .panel-body .field input { margin-bottom: 6px; }
     </style>
   </head>
   <body>
-    <h1>Use Brian Browser Agent</h1>
+    <header class="head">
+      <img class="mark" src="icon-32.png" alt="" />
+      <div>
+        <div class="title">Use Brian</div>
+        <div class="sub">Browser agent</div>
+      </div>
+    </header>
     <div id="status" class="status"><span class="dot"></span><span id="status-text">Checking...</span></div>
     <!-- Separate from the status line, not folded into it: a stale build still
          connects and still holds consent, so both statements are true at once. -->
     <div id="build-warning" class="warn" hidden></div>
-    <section id="protected-fill">
-      <h1>Protected fill</h1>
-      <p id="protected-status">Checking disclosure status…</p>
-      <p id="protected-details"></p>
-      <p id="protected-setup" class="warn">Setup required: enter your deployment's API origin below (not the app or relay URL). Ask your administrator for the API_URL used by your app. Local development commonly uses http://localhost:4000. The API must enable protected fill and allow this extension ID in its extension-origin CORS list.</p>
-      <p id="protected-renewal" class="warn" hidden>Pairing expired. Generate a new pairing token in Settings → Browser extension for the SAME account, workspace and browser profile, paste it below, and Connect. Then retry cleanup. Re-pairing does not unlock the task or change its API origin.</p>
-      <p>Approval shares the selected private source fields with the exact destination below, in the listed text fields. The page receives those values. No automatic submit. Finish in the browser yourself.</p>
-      <p>All controlled task tabs, including pre-existing full-browser tabs, will be closed by cleanup. All assistant commands stay blocked until you clean up.</p>
-      <button id="protected-approve" hidden>Approve disclosure</button>
-      <button id="protected-deny" hidden>Deny</button>
-      <p id="protected-server-help">Browser actions blocked but no local task shown? Recover the server reservation below. Unresolved references will be invalidated and cancelled. If resolution may have occurred, a separate warned cleanup of ALL accessible browser tabs is required; this button never closes tabs.</p>
-      <button id="protected-recover-server">Recover server reservation</button>
-      <button id="protected-complete" hidden>Finished — close controlled tabs and unlock</button>
-      <div id="protected-session-recovery" class="warn" hidden>
-        <strong>Browser session changed or cannot be verified.</strong>
-        <p>Restored protected tabs cannot be identified safely. Ordinary cleanup is blocked; no old tab IDs will be used.</p>
-        <p>Recovery closes ALL tabs accessible to this extension in this Chrome profile, across ALL windows, including unrelated, pinned, pre-existing and other extension tabs. Unsaved work may be lost. Only a new, empty extension cleanup window will remain. Save your work first. This does not affect other browser profiles.</p>
-        <label><input id="protected-recovery-consent" type="checkbox" /> I approve closing ALL those tabs, not just the task tabs.</label>
-        <button id="protected-recover-all" class="danger" disabled>Close ALL browser tabs and complete cleanup</button>
-      </div>
-      <label for="protected-api">Trusted API origin (from your deployment administrator)</label>
-      <input id="protected-api" placeholder="https://api.example.com" />
-      <button id="protected-save">Save trusted API origin</button>
-    </section>
     <div class="row">
       <label for="relay-url">Relay URL</label>
       <input id="relay-url" placeholder="wss://relay.usebrian.ai/ext" />
@@ -64,18 +138,51 @@
       <input id="pairing-token" placeholder="Paste from Settings > Browser extension" />
     </div>
     <div class="row toggle">
-      <input id="preapprove-tab-control" type="checkbox" />
       <label for="preapprove-tab-control">
         Pre-approve tab control
         <small>Skip the Allow popup for eligible tabs. Stop still requires a fresh manual Allow.</small>
       </label>
+      <input id="preapprove-tab-control" class="switch" type="checkbox" role="switch" />
     </div>
     <div class="actions">
       <button id="connect" class="primary">Connect</button>
       <button id="disconnect">Disconnect</button>
-      <button id="stop" class="danger">Stop task</button>
+      <button id="stop" class="danger-quiet">Stop task</button>
     </div>
     <p class="hint">The assistant only acts within this browser profile's configured tab scope. Chrome labels active browser control as "debugging this browser." Cancel in that banner or Stop here ends the current task.</p>
+    <details id="protected-fill" class="panel">
+      <summary>Protected fill</summary>
+      <div class="panel-body">
+        <p id="protected-status">Checking disclosure status…</p>
+        <p id="protected-details"></p>
+        <p id="protected-setup" class="warn">Setup required: enter your deployment's API origin below (not the app or relay URL). Ask your administrator for the API_URL used by your app. Local development commonly uses http://localhost:4000. The API must enable protected fill and allow this extension ID in its extension-origin CORS list.</p>
+        <p id="protected-renewal" class="warn" hidden>Pairing expired. Generate a new pairing token in Settings → Browser extension for the SAME account, workspace and browser profile, paste it below, and Connect. Then retry cleanup. Re-pairing does not unlock the task or change its API origin.</p>
+        <p>Approval shares the selected private source fields with the exact destination below, in the listed text fields. The page receives those values. No automatic submit. Finish in the browser yourself.</p>
+        <p>All controlled task tabs, including pre-existing full-browser tabs, will be closed by cleanup. All assistant commands stay blocked until you clean up.</p>
+        <div class="btns">
+          <button id="protected-approve" class="primary" hidden>Approve disclosure</button>
+          <button id="protected-deny" hidden>Deny</button>
+        </div>
+        <p id="protected-server-help">Browser actions blocked but no local task shown? Recover the server reservation below. Unresolved references will be invalidated and cancelled. If resolution may have occurred, a separate warned cleanup of ALL accessible browser tabs is required; this button never closes tabs.</p>
+        <div class="btns">
+          <button id="protected-recover-server">Recover server reservation</button>
+          <button id="protected-complete" class="primary" hidden>Finished — close controlled tabs and unlock</button>
+        </div>
+        <div id="protected-session-recovery" class="warn" hidden>
+          <strong>Browser session changed or cannot be verified.</strong>
+          <p>Restored protected tabs cannot be identified safely. Ordinary cleanup is blocked; no old tab IDs will be used.</p>
+          <p>Recovery closes ALL tabs accessible to this extension in this Chrome profile, across ALL windows, including unrelated, pinned, pre-existing and other extension tabs. Unsaved work may be lost. Only a new, empty extension cleanup window will remain. Save your work first. This does not affect other browser profiles.</p>
+          <label><input id="protected-recovery-consent" type="checkbox" /> I approve closing ALL those tabs, not just the task tabs.</label>
+          <button id="protected-recover-all" class="danger" disabled>Close ALL browser tabs and complete cleanup</button>
+        </div>
+        <div class="field">
+          <label for="protected-api">Trusted API origin (from your deployment administrator)</label>
+          <input id="protected-api" placeholder="https://api.example.com" />
+          <button id="protected-save">Save trusted API origin</button>
+        </div>
+      </div>
+    </details>
+    <hr class="divider" />
     <!-- Which build is loaded. Answering this once cost a SHA256 of the folder
          path Chrome derived the extension id from. -->
     <p class="build" id="build-line"></p>

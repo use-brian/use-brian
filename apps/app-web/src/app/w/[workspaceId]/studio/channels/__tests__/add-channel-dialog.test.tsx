@@ -2,6 +2,7 @@
 /**
  * [COMP:app-web/studio-channels] "+ Add channel" renders as a modal dialog
  * (`AddChannelDialog`), not an inline card above the master-detail split.
+ * The same form, locked to one platform, is the rail's inline Available panel.
  */
 
 import { act, type ReactNode } from "react";
@@ -9,7 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
-import { AddChannelDialog } from "../page-client";
+import { AddChannelDialog, AddChannelForm } from "../page-client";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -80,5 +81,32 @@ describe("[COMP:app-web/studio-channels] Add channel dialog", () => {
     expect(close).not.toBeNull();
     await act(async () => close?.click());
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens on the requested platform and hides the tab strip when locked (the inline Available panel)", async () => {
+    await act(async () => {
+      root.render(
+        localized(
+          <AddChannelForm
+            workspaceId="workspace_1"
+            assistants={[{ id: "assistant_1", name: "Brian" } as never]}
+            onCreated={vi.fn()}
+            onClose={vi.fn()}
+            initialPlatform="telegram"
+            lockPlatform
+          />,
+        ),
+      );
+    });
+    const labels = [...host.querySelectorAll("button")].map(
+      (b) => b.textContent?.trim() ?? "",
+    );
+    // No platform tabs: neither the other platforms nor the open one render as a tab.
+    for (const label of ["Slack", "Discord", "WeChat", "Telegram"]) {
+      expect(labels.some((text) => text.endsWith(label))).toBe(false);
+    }
+    // The Telegram connect fields render without picking a tab.
+    expect(host.querySelector("input")).not.toBeNull();
+    expect(host.textContent).toContain("BotFather");
   });
 });

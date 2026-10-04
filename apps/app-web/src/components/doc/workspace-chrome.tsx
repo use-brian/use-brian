@@ -30,7 +30,9 @@
  * [COMP:app-web/views-shell]
  */
 
+import { WorkspaceSearchProvider, WorkspaceSearchFallback } from "@/components/workspace-search/workspace-search-provider";
 import { DesktopBrowserCoordinator } from "@/components/computer/desktop-browser-coordinator";
+import { DesktopUpdateChip } from "@/components/chrome/desktop-update-chip";
 import {
   createContext,
   useCallback,
@@ -86,9 +88,10 @@ import {
   desktopTitlebarInsetCssPx,
   resolveDesktopZoomFactor,
 } from "@/lib/desktop-titlebar";
-import { DocSidebar } from "./doc-sidebar";
+import { DocSidebar, WORKSPACE_STATUS_ROW_HEIGHT_CLASS } from "./doc-sidebar";
 import { InboxPanel } from "./inbox-panel";
 import { WorkspaceFileDropBoundary } from "./workspace-file-drop";
+import { BrainIntakeTray } from "@/components/chrome/brain-intake-tray";
 import { useSidebarData } from "./doc-sidebar-data";
 import {
   TeamspaceCreateDialog,
@@ -96,6 +99,7 @@ import {
   type TeamspaceSettingsTab,
 } from "./teamspace-settings-modal";
 import { FloatingChat } from "@/components/chrome/floating-chat";
+import { FloatingRecorderHost } from "@/components/chrome/dock-recorder";
 import { MobileChatDrawer } from "./mobile-chat-drawer";
 
 /**
@@ -621,6 +625,7 @@ export function WorkspaceChrome({
     : offlineState.offline ? t.offlineBannerBody : "";
 
   return (
+    <WorkspaceSearchProvider workspaceId={workspaceId}>
     <WorkspaceFileDropBoundary
       workspaceId={workspaceId}
       assistantId={chatAssistantId}
@@ -784,6 +789,7 @@ export function WorkspaceChrome({
             doc shell and its Yjs socket survive every switch. */}
         <ActiveOperatorAppContext.Provider value={activeOperatorApp}>
           <SurfaceTransition className="relative flex h-full min-w-0 flex-1 flex-col">
+            <WorkspaceSearchFallback />
             {children}
           </SurfaceTransition>
         </ActiveOperatorAppContext.Provider>
@@ -844,27 +850,59 @@ export function WorkspaceChrome({
             />
           </div>
         )}
+        {/* The record button outlives the dock: a surface that hides the dock
+            (Chat app, Feed, Skill creator) still gets the same floating
+            button bottom-right. Brian Nearby owns capture in its own window. */}
+        {dockSuppressed && !brianNearby ? <FloatingRecorderHost /> : null}
       </div>
-      {/* Reserved app chrome: sync changes never cover or resize the editor. */}
+      {/* Workspace status row. Contained in the LEFT SIDEBAR, not a full-width
+          bar: this overlay is pinned to the bottom-left corner at the sidebar's
+          width and paints nothing of its own, so over the slot the sidebar
+          reserves (`data-doc-sidebar-status-slot`) it reads as the sidebar's
+          last row, and once the sidebar collapses (or the phone drawer closes)
+          the same label floats over the surface with no background. One node
+          for every sidebar state: it never moves or remounts, so the intake
+          tray keeps its state and the live region is not re-announced. Only
+          its children take pointer events. The brain-intake chip + tray share
+          the row but sit OUTSIDE the sync live region, so an upload tick never
+          re-announces the sync sentence. */}
       <div
-        data-workspace-sync-status
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        title={syncDescription || syncTitle}
+        data-workspace-footer
         className={cn(
-          "flex h-[calc(1.75rem+env(safe-area-inset-bottom))] shrink-0 items-center gap-2 border-t border-sidebar-border bg-sidebar py-0 pl-3 pr-20 pb-[env(safe-area-inset-bottom)] text-[11px]",
-          hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
+          "pointer-events-none absolute bottom-0 left-0 flex w-64 max-w-full items-center gap-2 py-0 pl-3 pr-2 pb-[env(safe-area-inset-bottom)] text-[11px] [&>*]:pointer-events-auto",
+          WORKSPACE_STATUS_ROW_HEIGHT_CLASS,
+          // The sidebar wrapper is a `z-40` layer in BOTH layouts: a fixed drawer
+          // on a phone, and a flex item on desktop (flex items honor z-index
+          // even when `static`). Rise above it whenever the sidebar is showing,
+          // or its surface paints over the label. While the label floats, stay
+          // unlayered, below the fixed phone toolbars and the chat button.
+          sidebarOpen && "z-40",
+          !sidebarCollapsed && "md:z-40",
         )}
       >
-        {offlineState.reconnecting && !offlineState.offline && offlineState.paused === 0 ? (
-          <RefreshCw aria-hidden className="size-3 shrink-0 animate-spin" />
-        ) : (
-          <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
-        )}
-        <span className="shrink-0 font-medium">{syncTitle}</span>
-        {syncDescription ? <span className="sr-only min-w-0 opacity-80 md:not-sr-only md:truncate">{syncDescription}</span> : null}
+        <div
+          data-workspace-sync-status
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          title={syncDescription || syncTitle}
+          className={cn(
+            "relative z-10 flex min-w-0 shrink items-center gap-2",
+            hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
+          )}
+        >
+          {offlineState.reconnecting && !offlineState.offline && offlineState.paused === 0 ? (
+            <RefreshCw aria-hidden className="size-3 shrink-0 animate-spin" />
+          ) : (
+            <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
+          )}
+          <span className="min-w-0 truncate font-medium">{syncTitle}</span>
+          {syncDescription ? <span className="sr-only">{syncDescription}</span> : null}
+        </div>
+        <DesktopUpdateChip />
+        <BrainIntakeTray workspaceId={workspaceId} />
       </div>
     </WorkspaceFileDropBoundary>
+    </WorkspaceSearchProvider>
   );
 }

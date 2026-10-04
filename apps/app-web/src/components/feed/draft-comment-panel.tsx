@@ -47,7 +47,7 @@ export function DraftCommentPanel(props: FeedCommentPanelProps) {
     {props.composer ? <CommentComposer key={`${props.composer.parentId ?? ''}:${props.composer.threadId ?? ''}:${JSON.stringify(props.composer.anchor.target)}`} {...props} composer={props.composer} /> : null}
     {!visible.length && props.snapshot ? <p className="text-sm text-muted-foreground">{t.noComments}</p> : null}
     {visible.map(thread => <article key={thread.id} data-feed-comment-id={thread.id} className={`space-y-3 ${props.focused ? '' : 'border-b border-border pb-4'}`}>
-      <button type="button" aria-expanded={active?.id === thread.id} className="w-full min-h-11 rounded-md text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => props.onThread(thread.id)}>
+      <button type="button" aria-expanded={active?.id === thread.id} className="w-full min-h-8 max-sm:min-h-11 rounded-md text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => props.onThread(thread.id)}>
         <span className="font-medium">{thread.authorKind === 'assistant' ? t.brian : (thread.authorName ?? `${t.author} ${thread.authorUserId.slice(0, 8)}`)}</span>
         <blockquote className="mt-2 line-clamp-3 whitespace-pre-wrap border-l-2 pl-2">{thread.anchor.quote || t.post}</blockquote>
       </button>
@@ -118,8 +118,8 @@ function Suggestion(props: FeedCommentPanelProps & { suggestion: FeedDraftSugges
   const blocked = props.readOnly || props.pending; const proposed = ['proposed', 'deferred'].includes(suggestion.status);
   return <article className="space-y-3 rounded-lg border p-3" data-feed-suggestion={suggestion.id}>
     <p className="text-sm font-medium">{suggestion.authorKind === 'assistant' ? t.brian : t.author}</p>
-    <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm"><p className="mb-1 text-xs font-semibold text-muted-foreground">{t.before}</p><p className="whitespace-pre-wrap break-words">{before}</p></div>
-    <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/40 p-3 text-sm dark:border-emerald-900 dark:bg-emerald-950/20"><p className="mb-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">{t.after}</p><p className="whitespace-pre-wrap break-words">{after}</p></div>
+    <div className="rounded-lg bg-muted/40 p-3 text-sm"><p className="mb-1 text-xs font-semibold text-muted-foreground">{t.before}</p><p className="whitespace-pre-wrap break-words">{before}</p></div>
+    <div className="rounded-lg bg-emerald-50/60 p-3 text-sm dark:bg-emerald-950/25"><p className="mb-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">{t.after}</p><p className="whitespace-pre-wrap break-words">{after}</p></div>
     {suggestion.sourceProposal?.imageBrief ? <div className="text-sm"><p className="font-medium">{t.imageBrief}</p><p className="whitespace-pre-wrap">{suggestion.sourceProposal.imageBrief}</p></div> : null}
     {suggestion.rationale ? <p className="text-sm whitespace-pre-wrap">{suggestion.rationale}</p> : null}
     <div className="flex flex-wrap gap-2">

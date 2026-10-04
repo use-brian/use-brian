@@ -95,19 +95,18 @@ export function createJobExecutor(options: JobExecutorOptions): JobExecutor {
     // user replies, returning the row to its normal schedule cadence.
     if (job.nagIntervalMins != null) {
       const todayCycleDate = formatCycleDate(new Date(), job.timezone)
-      await jobStore.setState(job.id, {
-        activeNag: {
-          openedAt: new Date().toISOString(),
-          cycleDate: todayCycleDate,
-        },
-      })
-
-      // Re-fire at +nagIntervalMins (runtime-only "next nag" advancement).
-      // We write this on the parent itself; `markCompleted` later detects
-      // the open activeNag and preserves this value instead of overwriting
-      // with `computeNextRun(schedule, timezone)`.
+      const activeNag = { openedAt: new Date().toISOString(), cycleDate: todayCycleDate }
       const nagNextRunAt = new Date(Date.now() + job.nagIntervalMins * 60 * 1000)
-      await jobStore.update(job.id, { nextRunAt: nagNextRunAt })
+      if (job.requiresScheduleClaim || job.scheduleClaimId) {
+        // Never let a stale worker fall back to job-ID-only runtime writes.
+        if (!job.scheduleClaimId || !jobStore.advanceScheduleClaimNag ||
+          !await jobStore.advanceScheduleClaimNag(job.id, job.scheduleClaimId, activeNag, nagNextRunAt)) {
+          throw Object.assign(new Error('workflow_schedule_claim_unavailable'), { code: 'workflow_schedule_claim_unavailable' })
+        }
+      } else {
+        await jobStore.setState(job.id, { activeNag })
+        await jobStore.update(job.id, { nextRunAt: nagNextRunAt })
+      }
     }
 
     // ── Delegate execution to the workflow path ─────────────────────

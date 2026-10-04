@@ -95,8 +95,12 @@ import {
   INITIAL_UPDATE_STATE,
   UPDATE_CHECK_INTERVAL_MS,
   UPDATE_INITIAL_CHECK_DELAY_MS,
+  UPDATE_AUTO_INSTALL_PROBE_MS,
   describeUpdateState,
   reduceUpdateState,
+  rendererUpdateStatus,
+  shouldAutoInstall,
+  shouldCheckOnOpen,
   shouldCheckInState,
   shouldEnableAutoUpdate,
   type UpdateEvent,
@@ -147,6 +151,7 @@ import {
   isTrustedCaptureOrigin,
   selectPrimaryDisplaySource,
 } from "./system-audio-policy.js";
+import { windowsAppUserModelId } from "./app-identity.js";
 import { buildAppMenu } from "./menu.js";
 import {
   buildUninstallScript,
@@ -965,7 +970,8 @@ function messageBrian(opts: { forceOpen?: boolean; useBrian?: boolean } = {}): v
   positionDesktopChat();
   publishCompanionState({ phase: "loading" });
   win.setAlwaysOnTop(true, "floating");
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Keep the app's foreground process type (Dock icon and native menus).
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
 
   win.once("ready-to-show", () => {
     if (win.isDestroyed()) return;
@@ -1128,7 +1134,8 @@ function showBrianPet(): void {
   brianPetWindow = win;
   positionBrianPet();
   win.setAlwaysOnTop(true, "floating");
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // A floating companion must not transform the entire macOS app into a UIElement.
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   win.webContents.on("will-navigate", (event) => event.preventDefault());
   win.once("ready-to-show", () => win.showInactive());
@@ -1257,7 +1264,8 @@ function showRecorderOverlay(): void {
   // "floating" keeps it above normal windows without fighting the OS for
   // system-level surfaces; visible on all Spaces incl. fullscreen apps.
   win.setAlwaysOnTop(true, "floating");
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Preserve the main app's Dock presence and native menu activation.
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   // The same security spine as the main window, minimally: the overlay loads
   // ONE app-origin page and must never become a browsing surface — no child
   // windows, no off-origin navigation.
@@ -3679,6 +3687,10 @@ let updateState: UpdateState = INITIAL_UPDATE_STATE;
 let autoUpdateActive = false;
 /** Whether the in-flight check came from the menu item (gates result dialogs). */
 let manualCheckInFlight = false;
+/** Wall-clock of the last check start, for the app-open throttle. */
+let lastUpdateCheckAt: number | null = null;
+/** A dock live recording is latched; auto-install must never cut it. */
+let recordingActive = false;
 
 /** The update menu/tray item state, or null to omit it (gate disabled). */
 function updateMenuItem(): { label: string; enabled: boolean } | null {
@@ -3691,15 +3703,44 @@ function dispatchUpdateEvent(event: UpdateEvent): void {
   updateState = reduceUpdateState(updateState, event);
   refreshAppMenu();
   refreshTrayMenu();
+  publishUpdateStatus();
+}
+
+/** Push the footer chip state to the app windows (main + dedicated chat). */
+function publishUpdateStatus(): void {
+  const status = autoUpdateActive ? rendererUpdateStatus(updateState) : null;
+  for (const win of [mainWindow, desktopChatWindow]) {
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+      win.webContents.send("Use Brian:update-status", status);
+    }
+  }
+}
+
+/** Apply the staged update now (relaunches into the new version). */
+function installStagedUpdate(): void {
+  if (updateState.phase !== "ready") return;
+  // Quit from outside any click/IPC callback. quitAndInstall tears the app
+  // down itself; the tray-resident `window-all-closed` no-op does not block it.
+  setImmediate(() => autoUpdater.quitAndInstall(true, true));
+}
+
+/** An "app opened" signal (launch, activate, focus, wake): check, throttled. */
+function checkForUpdatesOnOpen(): void {
+  if (!autoUpdateActive) return;
+  if (shouldCheckOnOpen(updateState, lastUpdateCheckAt, Date.now())) void checkForUpdates();
+}
+
+function appWindowVisible(): boolean {
+  return [mainWindow, desktopChatWindow].some(
+    (win) => !!win && !win.isDestroyed() && win.isVisible() && !win.isMinimized(),
+  );
 }
 
 /** The single update item's click: check from idle/error, restart when ready. */
 function handleUpdateMenuClick(): void {
   const { action } = describeUpdateState(updateState);
   if (action === "restart") {
-    // Quit from outside the menu-click callback. quitAndInstall tears the app
-    // down itself; the tray-resident `window-all-closed` no-op does not block it.
-    setImmediate(() => autoUpdater.quitAndInstall());
+    installStagedUpdate();
   } else if (action === "check") {
     manualCheckInFlight = true;
     void checkForUpdates();
@@ -3707,6 +3748,7 @@ function handleUpdateMenuClick(): void {
 }
 
 async function checkForUpdates(): Promise<void> {
+  lastUpdateCheckAt = Date.now();
   try {
     await autoUpdater.checkForUpdates();
   } catch (err) {
@@ -3717,6 +3759,14 @@ async function checkForUpdates(): Promise<void> {
 }
 
 function startAutoUpdate(): void {
+  // Registered regardless of the gate: a disabled updater answers null.
+  ipcMain.handle("Use Brian:get-update-status", (event) =>
+    trustedTokenSender(event) && autoUpdateActive ? rendererUpdateStatus(updateState) : null,
+  );
+  ipcMain.on("Use Brian:install-update", (event) => {
+    if (event.senderFrame !== event.sender.mainFrame || !isCurrentAccountSender(event.sender.id)) return;
+    installStagedUpdate();
+  });
   const gate = shouldEnableAutoUpdate({ isPackaged: app.isPackaged, autoUpdate: cfg.autoUpdate });
   if (!gate.enabled) {
     console.log(`Auto-update off: ${gate.reason}`);
@@ -3768,13 +3818,35 @@ function startAutoUpdate(): void {
     }
   });
 
-  // First check shortly after launch (never during it), then on a slow cadence.
-  // `shouldCheckInState` skips while electron-updater is busy and once an
-  // update is ready (restart applies it; re-checking would re-download it).
+  // Check shortly after launch, again whenever the user opens the app (activate,
+  // window focus, wake from sleep; throttled), and hourly while it stays
+  // resident. `shouldCheckInState` skips only while electron-updater is busy:
+  // a staged update still checks, so a newer release supersedes it instead of
+  // waiting for a restart into the stale one.
   setTimeout(() => void checkForUpdates(), UPDATE_INITIAL_CHECK_DELAY_MS);
   setInterval(() => {
     if (shouldCheckInState(updateState)) void checkForUpdates();
   }, UPDATE_CHECK_INTERVAL_MS);
+  app.on("activate", checkForUpdatesOnOpen);
+  app.on("browser-window-focus", checkForUpdatesOnOpen);
+  powerMonitor.on("resume", checkForUpdatesOnOpen);
+
+  // Auto-install: apply a staged update by itself once nobody is using the app
+  // (no visible window, no live recording, machine idle). An active user gets
+  // the footer button + menu item instead, and install-on-quit covers the rest.
+  setInterval(() => {
+    if (
+      shouldAutoInstall({
+        state: updateState,
+        windowVisible: appWindowVisible(),
+        recording: recordingActive,
+        systemIdleSeconds: powerMonitor.getSystemIdleTime(),
+      })
+    ) {
+      console.log("Auto-installing staged update (app idle)");
+      installStagedUpdate();
+    }
+  }, UPDATE_AUTO_INSTALL_PROBE_MS);
 }
 
 // ── Deep links + auth callback ─────────────────────────────────
@@ -4008,8 +4080,8 @@ function createTray(): Tray {
   // absent during early development.
   const isMac = process.platform === "darwin";
   const iconPath = isMac
-    ? join(__dirname, "..", "build", "trayTemplate.png")
-    : join(__dirname, "..", "build", "icon.png");
+    ? join(__dirname, "tray", "trayTemplate.png")
+    : join(__dirname, "tray", "icon.png");
   let icon = existsSync(iconPath)
     ? nativeImage.createFromPath(iconPath)
     : nativeImage.createEmpty();
@@ -4027,6 +4099,12 @@ function createTray(): Tray {
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────
+
+// Windows: claim the installer shortcuts' AppUserModelID before any window
+// exists, so the taskbar groups this process with its own pin however it was
+// launched (only a launch through the shortcut inherits the id on its own).
+const appUserModelId = windowsAppUserModelId(process.platform, app.isPackaged);
+if (appUserModelId) app.setAppUserModelId(appUserModelId);
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -4212,6 +4290,7 @@ if (!gotLock) {
   );
   // Dock live recording: show/close the floating overlay with the capture.
   ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {
+    recordingActive = on === true;
     if (on === true) showRecorderOverlay();
     else destroyRecorderOverlay();
   });

@@ -97,7 +97,7 @@ const requireMentionOverrideSchema = z.object({
   topicId: z.union([z.number().int().min(1), z.null()]).optional(),
 }).strict()
 
-const deliveryAudienceBindingInputSchema = z.object({
+export const deliveryAudienceBindingInputSchema = z.object({
   channelId: z.string().min(1).max(256),
   audienceType: z.enum(['individual', 'group']),
   clearance: z.enum(['public', 'internal', 'confidential']),
@@ -105,7 +105,16 @@ const deliveryAudienceBindingInputSchema = z.object({
   projectIds: z.array(z.string().uuid()).max(100),
   recipientUserId: z.string().uuid().nullable().optional(),
   expiresAt: z.string().datetime().nullable().optional(),
-}).strict()
+  companyWide: z.boolean().optional(),
+}).strict().refine(
+  // Company-wide replaces the Team/Project lists; carrying both would make
+  // the stored cap ambiguous. A private destination is already its
+  // recipient's own access, so company-wide applies to groups only.
+  (binding) => binding.companyWide !== true
+    || (binding.compartments.length === 0 && binding.projectIds.length === 0
+      && binding.audienceType === 'group' && !binding.recipientUserId),
+  { message: 'companyWide requires a group binding with no Teams or Projects', path: ['companyWide'] },
+)
 
 export const channelConfigSchema = z.object({
   replyInThread: z.boolean().optional(),
@@ -1119,6 +1128,7 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
             projectIds: [...new Set(binding.projectIds)].sort(),
             recipientUserId: binding.recipientUserId ?? null,
             expiresAt: binding.expiresAt ?? null,
+            ...(binding.companyWide === true ? { companyWide: true } : {}),
             approvedByUserId: userId,
             approvedAt,
           }
@@ -1131,6 +1141,7 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
             && old.audienceType === next.audienceType && old.clearance === next.clearance
             && (old.recipientUserId ?? null) === next.recipientUserId
             && (old.expiresAt ?? null) === next.expiresAt
+            && (old.companyWide === true) === (next.companyWide === true)
             && JSON.stringify([...new Set(old.compartments)].sort()) === JSON.stringify(next.compartments)
             && JSON.stringify([...new Set(old.projectIds)].sort()) === JSON.stringify(next.projectIds),
           )

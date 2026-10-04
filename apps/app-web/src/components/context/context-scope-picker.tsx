@@ -16,6 +16,7 @@ export function ContextScopePicker({
   onProjectChange,
   disabled,
   teamDisabled,
+  hideTeam=false,
   projectDisabled,
 }: {
   teams: ContextTeam[];
@@ -26,12 +27,13 @@ export function ContextScopePicker({
   onProjectChange: (id: string | null) => void;
   disabled?: boolean;
   teamDisabled?: boolean;
+  hideTeam?: boolean;
   projectDisabled?: boolean;
 }) {
   const t = useT().contextScope;
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+      {!hideTeam?<label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
         {t.team}
         <SearchableSelect
           value={teamId ?? GENERAL}
@@ -45,7 +47,7 @@ export function ContextScopePicker({
           aria-label={t.team}
           disabled={disabled || teamDisabled}
         />
-      </label>
+      </label>:null}
       <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
         {t.project}
         <SearchableSelect

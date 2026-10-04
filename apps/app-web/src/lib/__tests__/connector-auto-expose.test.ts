@@ -19,7 +19,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  isConnectorPost,
   resolveAutoExpose,
+  withConnectWorkspace,
+  workspaceIdFromPath,
   type AutoExposeConnector,
   type AutoExposeInput,
 } from "../connector-auto-expose";
@@ -188,5 +191,36 @@ describe("[COMP:app-web/connector-auto-expose] resolveAutoExpose", () => {
     expect(connectorsPage).toContain(
       "setJustConnected({ slug: id, instanceId: options.connectorInstanceId })",
     );
+  });
+});
+
+describe("[COMP:app-web/connector-auto-expose] connect workspace tagging", () => {
+  const WS = "11111111-1111-4111-8111-111111111111";
+
+  it("tags connector POSTs with the workspace, preserving existing query", () => {
+    expect(withConnectWorkspace("/api/connectors/gcal/store-credentials", WS))
+      .toBe(`/api/connectors/gcal/store-credentials?workspaceId=${WS}`);
+    expect(withConnectWorkspace("/api/connectors/custom?x=1", WS))
+      .toBe(`/api/connectors/custom?x=1&workspaceId=${WS}`);
+  });
+
+  it("never overrides an explicit workspaceId and ignores a missing or malformed one", () => {
+    const tagged = `/api/connectors/custom?workspaceId=${WS}`;
+    expect(withConnectWorkspace(tagged, "22222222-2222-4222-8222-222222222222")).toBe(tagged);
+    expect(withConnectWorkspace("/api/connectors/custom", null)).toBe("/api/connectors/custom");
+    expect(withConnectWorkspace("/api/connectors/custom", "teams")).toBe("/api/connectors/custom");
+  });
+
+  it("reads the workspace from a /w/<id>/ path only", () => {
+    expect(workspaceIdFromPath(`/w/${WS}/studio/connectors`)).toBe(WS);
+    expect(workspaceIdFromPath(`/w/${WS}`)).toBe(WS);
+    expect(workspaceIdFromPath("/teams")).toBeNull();
+  });
+
+  it("matches connector POSTs only", () => {
+    expect(isConnectorPost("https://api.example.com/api/connectors/gcal/store-credentials", "POST")).toBe(true);
+    expect(isConnectorPost("/api/connectors?scope=user", "post")).toBe(true);
+    expect(isConnectorPost("/api/connectors/gcal/tools", undefined)).toBe(false);
+    expect(isConnectorPost("/api/connector-instances/x/grants", "POST")).toBe(false);
   });
 });

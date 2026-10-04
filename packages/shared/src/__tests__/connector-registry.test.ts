@@ -264,3 +264,10 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
     })
   })
 })
+
+it('requires sharing approval by default for durable browser downloads', () => {
+  expect(OFFICIAL_CONNECTOR_TOOLS.computer.find(tool => tool.name === 'browserReadDownload')).toMatchObject({
+    classification: 'write', defaultPolicy: 'ask', description: expect.stringContaining('workspace permissions'),
+  })
+  expect(BOOT_INJECTED_BUILTIN_TOOLS.computer).toContain('browserReadDownload')
+})

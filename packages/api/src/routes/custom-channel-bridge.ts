@@ -1,3 +1,4 @@
+import { dispatchIncomingMessageEvent } from '../message-events.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 /**
  * Custom channel bridge route — the API-side half of the bridge protocol (v1).
@@ -121,7 +122,7 @@ export type CustomChannelBridgeRouteOptions = {
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   /** Transient upload cache (`file_cache`) — see routes/channel-file-cache.ts. */
   fileStore?: import('@use-brian/core').FileStore
-  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   workflowStore?: import('@use-brian/core').WorkflowStore
@@ -594,6 +595,23 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     const incoming = adapter.parseIncoming(msg)
 
     try {
+      // Workflow subscriptions are independent of chat/mention/routing gates.
+      // Media upgrades update an existing message; they are not new messages.
+      const accessModeForEvent = config.userAccessMode ?? 'allow_all'
+      const authorizedForEvent = accessModeForEvent === 'allowlist'
+        ? !(config.allowedUserIds?.length) || config.allowedUserIds.includes(msg.senderId)
+        : accessModeForEvent !== 'blocklist' || !config.blockedUserIds?.includes(msg.senderId)
+      if (incoming && !msg.isSelf && !parsed.data.mediaUpgrade && authorizedForEvent) {
+        const eventIncoming: IncomingMessage & { channelType: string } = {
+          ...incoming, channelType: 'custom', timestamp: incoming.timestamp / 1000,
+        }
+        await dispatchIncomingMessageEvent({
+          workspaceId: channel.workspaceId,
+          integrationId: integration.id,
+          incoming: eventIncoming,
+        })
+      }
+
       // 1. Chat capability (the auth middleware already proved active).
       if (!channel.enabledCapabilities.includes('chat')) {
         console.warn(`[custom-channel] channel ${channelId} not accepting chat — dropping inbound`)

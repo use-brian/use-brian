@@ -776,7 +776,6 @@ export async function executePublicTurn(
     scope: turnScope,
     workspaceId: assistant.workspaceId,
     userId: user.id,
-    assistantId: assistant.id,
   })
   const currentTurnWrite = () => turnOutputWrite({
     producer: 'turn:public-api',
@@ -795,9 +794,20 @@ export async function executePublicTurn(
       channelId,
       sessionId: session.id,
       recipientType: 'individual',
+      // The recipient is the principal this turn resolved: the published
+      // assistant scope on a full-scope link, an external guest when the
+      // principal is one, otherwise the real member it resolved to (an
+      // external lane can resolve a claimed identity to a member).
+      recipientMode: fullScope ? 'assistant' : externalPrincipal ? 'external' : 'member',
       scopeEvidence: scopeAccumulator.evidence,
     })
-    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError()
+    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
+    // Current labels of a source that changed since it was read join the floor.
+    scopeAccumulator.note({
+      sensitivity: decision.evidence.sensitivity,
+      compartments: decision.evidence.compartments,
+      projectIds: decision.evidence.projectIds,
+    })
   }
 
   // ── 5b. Retry/edit — destroy-and-regenerate ─────────────
@@ -892,6 +902,14 @@ export async function executePublicTurn(
     : null
   const turnProvider = customLlmRuntime?.provider ?? deps.provider
 
+  // Deliberately do NOT publish to the workspace incoming-message dispatcher.
+  // Its workflow/goal subscribers do not carry this turn's authority, public
+  // floor, client compartments, or tool policy. Publishing even after saving
+  // would let a public visitor trigger workspace-authority automation and
+  // expose client-isolated text. This applies to all public pipeline lanes,
+  // including internal-member keys, until dispatch supports scoped authority.
+  // Any future opt-in must use session.id, never the external sessionId or
+  // externalUserId, for source integration/channel identity.
   // ── 7. Persist user message ──────────────────────────────
   const userContent: ContentBlock[] = [{ type: 'text', text: body.message }]
   const storedUserMsg = await addSessionMessage({
@@ -1316,6 +1334,7 @@ export async function executePublicTurn(
   // EMPTY_RETRY_PLAN comments.
   const dbMessages = await getSessionMessages(session.id, {
     fromSequence: session.compactBoundarySequence,
+    excludeHeld: true,
   })
   noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
   await assertDeliveryAudience()
@@ -1706,7 +1725,7 @@ export async function handlePublicHistory(
     return
   }
 
-  const rows = await getSessionMessages(session.id, { limit: input.limit })
+  const rows = await getSessionMessages(session.id, { limit: input.limit, excludeHeld: true })
   const messages = rows
     .map((row) => ({
       id: row.id,

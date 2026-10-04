@@ -27,7 +27,7 @@ vi.mock("@/lib/api/crm", () => ({ fetchCrmConfig: vi.fn() }));
 vi.mock("@/lib/api/tasks", () => ({ fetchWorkspaceTasks: vi.fn() }));
 vi.mock("@/lib/api/workflow", () => ({ listWorkflows: vi.fn() }));
 vi.mock("@/lib/api/views", () => ({ getView: vi.fn(), listWorkspaceAssistants: vi.fn() }));
-import { chatRosterCacheKey } from "@/lib/surface-prefetch";
+import { connectorReconnectCacheKey, chatRosterCacheKey } from "@/lib/surface-prefetch";
 
 import {
   associationModuleCacheKey,
@@ -201,6 +201,7 @@ describe("[COMP:app-web/surface-prefetch] Surface prefetch keys", () => {
 describe("[COMP:app-web/surface-prefetch] every warm key is a key its surface reads", () => {
   const src = (rel: string) => readFileSync(resolve(process.cwd(), "src", rel), "utf8");
   const SURFACES: Record<WarmableSurface, { source: string; builder: string }> = {
+    projects: { source: "components/projects/projects-browser.tsx", builder: 'surfaceDataKey("projects", workspaceId)' },
     association: {
       source: "components/association/module-controls.tsx",
       builder: "associationModuleCacheKey(workspaceId)",
@@ -615,4 +616,11 @@ describe("[COMP:app-web/shopify-surface-cache] Shopify cache keys", () => {
     expect(surface).not.toMatch(/addEventListener\(/);
     expect(panel).not.toMatch(/addEventListener\(/);
   });
+});
+
+describe('[COMP:app-web/shopify-setup] reconnect canonical key',()=>{
+ it('isolates saved reconnect metadata by workspace, viewer and instance',()=>{
+  expect(connectorReconnectCacheKey('w1','u1','i1')).toBe('workspace-access:w1:u1:connector-reconnect:i1');
+  expect(new Set([connectorReconnectCacheKey('w1','u1','i1'),connectorReconnectCacheKey('w2','u1','i1'),connectorReconnectCacheKey('w1','u2','i1'),connectorReconnectCacheKey('w1','u1','i2')]).size).toBe(4);
+ });
 });

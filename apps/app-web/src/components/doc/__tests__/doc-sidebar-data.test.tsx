@@ -183,7 +183,7 @@ describe("[COMP:app-web/sidebar-data] paints the dock and the tree from the cach
   it("settles an unseeded config read failure onto the normalized default", async () => {
     getWorkspaceHomeApps.mockRejectedValueOnce(new Error("offline"));
     await mount("w1");
-    expect(text("home-apps")).toBe("page,office,chat");
+    expect(text("home-apps")).toBe("chat,page,browsers");
   });
 
   it("first paint comes from the warmed keys with both fetches still pending", async () => {

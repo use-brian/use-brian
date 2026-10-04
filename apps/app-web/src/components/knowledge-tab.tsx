@@ -527,7 +527,7 @@ export function KnowledgeTab({
                           </button>
                         </div>
                         {isExpanded && expandedContent && (
-                          <div className="ml-8 mr-3 mb-2 p-3 rounded-lg bg-muted/20 border border-border/50">
+                          <div className="ml-8 mr-3 mb-2 p-3 rounded-lg bg-muted/30">
                             <pre className="text-[12px] text-foreground/80 whitespace-pre-wrap font-mono leading-relaxed max-h-96 overflow-y-auto">{expandedContent}</pre>
                           </div>
                         )}

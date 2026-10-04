@@ -12,7 +12,7 @@ function ChannelsLink({ workspaceId }: { workspaceId?: string }) {
   const t = useT();
   if (!id) return null;
   return (
-    <Link className="inline-flex min-h-11 items-center text-primary underline" href={`/w/${encodeURIComponent(id)}/studio/channels`}>
+    <Link className="inline-flex min-h-8 max-sm:min-h-11 items-center text-primary underline" href={`/w/${encodeURIComponent(id)}/studio/channels`}>
       {t.workflowPage.builder.deliveryFeedback.settings}
     </Link>
   );
@@ -45,15 +45,19 @@ export function DeliveryOutcomeFeedback({ output, workspaceId }: { output: unkno
   );
   const status = valid ? outcome.status as "delivered" | "skipped" | "failed" : "unknown";
   const unverified = valid && status === "skipped" && outcome.reason === "delivery_audience_unverified";
+  // Only known, coarse policy codes select copy. Never render raw server detail.
+  const audienceMessage = unverified && outcome.detail === "unbound" ? copy.unbound
+    : unverified && outcome.detail === "evidence_exceeds_audience" ? copy.evidenceExceedsAudience
+      : copy.unverified;
   return (
-    <div className={cn("rounded-md border p-3 text-sm", {
-      "border-green-500/40 bg-green-500/5": status === "delivered",
-      "border-amber-500/40 bg-amber-500/5": status === "skipped" || status === "unknown",
-      "border-red-500/40 bg-red-500/5": status === "failed",
+    <div className={cn("rounded-md p-3 text-sm", {
+      "bg-green-500/10": status === "delivered",
+      "bg-amber-500/10": status === "skipped" || status === "unknown",
+      "bg-red-500/10": status === "failed",
     })}>
       <p className="font-semibold">{copy[status]}</p>
       <p>{copy.generationNote}</p>
-      {unverified && <><p>{copy.unverified}</p><ChannelsLink workspaceId={workspaceId} /></>}
+      {unverified && <><p>{audienceMessage}</p><ChannelsLink workspaceId={workspaceId} /></>}
     </div>
   );
 }

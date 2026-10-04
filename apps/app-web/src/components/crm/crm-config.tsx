@@ -372,7 +372,7 @@ function PipelineConfigRow({ workspaceId, pipeline, livePipelines, busy, onMutat
         )}
       </div>
       {!pipeline.archivedAt ? (
-        <div className="mt-2 space-y-2">
+        <div className="mt-2 divide-y divide-border">
           {pipeline.stages.map((stage) => (
             <StageConfigRow
               key={stage.id}
@@ -423,7 +423,7 @@ function StageConfigRow({ workspaceId, pipelineId, stage, liveStages, busy, onMu
     || Number(probability) !== stage.probability
     || requiredFields !== stage.requiredFields.join(", ");
   return (
-    <div className={stage.archivedAt ? "grid gap-2 rounded-lg border border-dashed border-border p-2 opacity-75 sm:grid-cols-[minmax(0,1fr)_120px_80px_minmax(0,1fr)_auto]" : "grid gap-2 rounded-lg border border-border p-2 sm:grid-cols-[minmax(0,1fr)_120px_80px_minmax(0,1fr)_auto]"}>
+    <div className={stage.archivedAt ? "grid gap-2 py-2 opacity-75 sm:grid-cols-[minmax(0,1fr)_120px_80px_minmax(0,1fr)_auto]" : "grid gap-2 py-2 sm:grid-cols-[minmax(0,1fr)_120px_80px_minmax(0,1fr)_auto]"}>
       <input value={name} disabled={busy || Boolean(stage.archivedAt)} aria-label={t.stageName} onChange={(event) => setName(event.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-[16px] md:h-8 md:text-xs" />
       <Select value={category} disabled={busy || Boolean(stage.archivedAt)} onValueChange={(value) => setCategory(value as CrmStageCategory)}><SelectTrigger className="h-8"><SelectValue /></SelectTrigger><SelectContent>{(["open", "won", "lost"] as const).map((value) => <SelectItem key={value} value={value}>{t.stageCategories[value]}</SelectItem>)}</SelectContent></Select>
       <input type="number" min={0} max={100} value={probability} disabled={busy || Boolean(stage.archivedAt)} aria-label={t.stageProbability} onChange={(event) => setProbability(event.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-[16px] md:h-8 md:text-xs" />

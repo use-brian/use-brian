@@ -22,6 +22,9 @@ import { createHash } from 'node:crypto'
 // ── Types ──────────────────────────────────────────────────────
 
 export type SyncSource = {
+  bindingVersion?: string
+  configuredByUserId?: string | null
+  bindingHeld?: boolean
   id: string
   workspaceId: string
   sourceType: 'github' | 'local'
@@ -57,6 +60,9 @@ export type SyncGitHubApi = {
 }
 
 export type SyncStore = {
+  captureSourceSync?(source: SyncSource): Promise<object | undefined>
+  releaseSourceSync?(authority: object): Promise<void>
+  syncRequiresFullReconciliation?(authority: object): boolean
   upsertByPath(params: {
     workspaceId: string; path: string; title: string
     summary?: string | null; content: string; tags?: string[]; relatedIds?: string[]
@@ -66,8 +72,8 @@ export type SyncStore = {
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
     metadata?: Record<string, unknown>; sourceId?: string | null; sourceSha?: string | null
-  }): Promise<{ id: string; path: string }>
-  deleteByTeamAndPath(workspaceId: string, path: string): Promise<boolean>
+  }, syncAuthority?: object): Promise<{ id: string; path: string }>
+  deleteByTeamAndPath(workspaceId: string, path: string, syncAuthority?: object): Promise<boolean>
   // System-level reads — sync is a privileged-service caller (no
   // per-viewer projection). See permissions.md § Privileged-service
   // exception and packages/api/src/db/knowledge-store.ts.
@@ -77,10 +83,10 @@ export type SyncStore = {
     sourceId?: string | null
     metadata?: Record<string, unknown>
   } | null>
-  updateRelatedIds(id: string, relatedIds: string[]): Promise<void>
-  updateSourceSync(id: string, sha: string, error?: string | null): Promise<void>
+  updateRelatedIds(id: string, relatedIds: string[], syncAuthority?: object): Promise<void>
+  updateSourceSync(id: string, sha: string, error?: string | null, syncAuthority?: object): Promise<void>
   /** Persist the per-tick PAT write-capability probe (migration 310). */
-  updateSourceWriteAccess(id: string, writeAccess: boolean): Promise<void>
+  updateSourceWriteAccess(id: string, writeAccess: boolean, syncAuthority?: object): Promise<void>
   getSourcesDueForSync(): Promise<SyncSource[]>
 }
 
@@ -118,6 +124,9 @@ export function createKnowledgeSyncWorker(options: {
 }): { start(): void; stop(): void; tick(): Promise<void> } {
   const { store, api, credentials, intervalMs = 15 * 60 * 1000, onEvent } = options
 
+  const upsertSynced = (params: Parameters<SyncStore['upsertByPath']>[0], authority?: object) =>
+    authority ? store.upsertByPath(params, authority) : store.upsertByPath(params)
+
   let timer: ReturnType<typeof setInterval> | null = null
   let running = false
 
@@ -135,18 +144,24 @@ export function createKnowledgeSyncWorker(options: {
       const sources = await store.getSourcesDueForSync()
 
       for (const source of sources) {
+        let authority: object | undefined
         try {
-          await syncSource(source)
+          authority = await store.captureSourceSync?.(source)
+          if (store.captureSourceSync && !authority) throw new Error('knowledge_sync_authority_required')
+          const reconcile = authority && store.syncRequiresFullReconciliation?.(authority)
+          await syncSource(reconcile ? { ...source, lastSyncedSha: null } : source, authority)
         } catch (err) {
           const errorMsg = describeSyncError(err)
           console.error(`[knowledge-sync] source ${source.repo} failed:`, errorMsg, err)
-          await store.updateSourceSync(source.id, source.lastSyncedSha ?? '', errorMsg)
+          try { await store.updateSourceSync(source.id, source.lastSyncedSha ?? '', errorMsg, authority) } catch { /* stale runs cannot publish status */ }
           onEvent?.({
             type: 'sync_error',
             sourceId: source.id,
             repo: source.repo,
             error: errorMsg,
           })
+        } finally {
+          if (authority) await store.releaseSourceSync?.(authority).catch(() => {})
         }
       }
     } finally {
@@ -157,12 +172,13 @@ export function createKnowledgeSyncWorker(options: {
     }
   }
 
-  async function syncSource(source: SyncSource) {
+  async function syncSource(source: SyncSource, syncAuthority?: object) {
     if (source.sourceType === 'local') {
-      await syncLocalSource(source)
+      await syncLocalSource(source, syncAuthority)
       return
     }
 
+    source = { ...source, rootPath: normalizeKnowledgeRoot(source.rootPath) }
     const [owner, repo] = source.repo.split('/')
     if (!owner || !repo) throw new Error(`Invalid repo format: ${source.repo}`)
 
@@ -175,7 +191,7 @@ export function createKnowledgeSyncWorker(options: {
     // (the cached value simply stays as-is).
     try {
       const perms = await api.getRepoPermissions(pat, owner, repo)
-      await store.updateSourceWriteAccess(source.id, perms.push)
+      await store.updateSourceWriteAccess(source.id, perms.push, syncAuthority)
     } catch (err) {
       console.warn(
         `[knowledge-sync] write-access probe failed for ${source.repo}:`,
@@ -187,7 +203,10 @@ export function createKnowledgeSyncWorker(options: {
     const headSha = await api.getBranchHead(pat, owner, repo, source.branch)
 
     // Skip if nothing changed
-    if (headSha === source.lastSyncedSha) return
+    if (headSha === source.lastSyncedSha) {
+      if (syncAuthority) await store.updateSourceSync(source.id, headSha, null, syncAuthority)
+      return
+    }
 
     onEvent?.({ type: 'sync_started', sourceId: source.id, repo: source.repo })
 
@@ -201,7 +220,7 @@ export function createKnowledgeSyncWorker(options: {
       const mdFiles = tree.filter((f) => {
         const p = f.path
         if (!p.endsWith('.md')) return false
-        if (source.rootPath && !p.startsWith(source.rootPath)) return false
+        if (source.rootPath && !p.startsWith(source.rootPath + "/")) return false
         return true
       })
 
@@ -213,7 +232,6 @@ export function createKnowledgeSyncWorker(options: {
           : file.path
 
         const content = await fetchFileContent(pat, owner, repo, file.path, headSha)
-        if (!content) continue
 
         const parsed = parseMarkdownFile(relativePath, content)
         lintInputs.push({
@@ -222,7 +240,7 @@ export function createKnowledgeSyncWorker(options: {
           rawContent: content,
         })
 
-        await store.upsertByPath({
+        await upsertSynced({
           workspaceId: source.workspaceId,
           path: parsed.path,
           title: parsed.title,
@@ -234,12 +252,19 @@ export function createKnowledgeSyncWorker(options: {
           metadata: { ...parsed.metadata, _rawRelated: parsed.related },
           sourceId: source.id,
           sourceSha: headSha,
-        })
+        }, syncAuthority)
         created++
       }
 
+      const retained = new Set(mdFiles.map(file => parseMarkdownFile(source.rootPath ? file.path.slice(source.rootPath.length + 1) : file.path, '').path))
+      for (const path of await store.listPathsSystem(source.workspaceId)) {
+        if (retained.has(path)) continue
+        const entry = await store.getByPathSystem(source.workspaceId, path)
+        if (entry?.sourceId === source.id && await store.deleteByTeamAndPath(source.workspaceId, path, syncAuthority)) deleted++
+      }
+
       // Pass 2: resolve wikilinks
-      await resolveAllWikilinks(source, store)
+      await resolveAllWikilinks(source, store, syncAuthority)
 
       // Lint pass — only on full sync (incremental lacks unchanged-file context)
       runLintPass(source, lintInputs)
@@ -249,7 +274,7 @@ export function createKnowledgeSyncWorker(options: {
 
       const relevantFiles = diff.files.filter((f) => {
         if (!f.filename.endsWith('.md')) return false
-        if (source.rootPath && !f.filename.startsWith(source.rootPath)) return false
+        if (source.rootPath && !f.filename.startsWith(source.rootPath + "/")) return false
         return true
       })
 
@@ -260,18 +285,17 @@ export function createKnowledgeSyncWorker(options: {
 
         if (file.status === 'removed') {
           const parsed = parseMarkdownFile(relativePath, '')
-          const wasDeleted = await store.deleteByTeamAndPath(source.workspaceId, parsed.path)
+          const wasDeleted = await store.deleteByTeamAndPath(source.workspaceId, parsed.path, syncAuthority)
           if (wasDeleted) deleted++
           continue
         }
 
         // added or modified
         const content = await fetchFileContent(pat, owner, repo, file.filename, headSha)
-        if (!content) continue
 
         const parsed = parseMarkdownFile(relativePath, content)
 
-        await store.upsertByPath({
+        await upsertSynced({
           workspaceId: source.workspaceId,
           path: parsed.path,
           title: parsed.title,
@@ -283,7 +307,7 @@ export function createKnowledgeSyncWorker(options: {
           metadata: { ...parsed.metadata, _rawRelated: parsed.related },
           sourceId: source.id,
           sourceSha: headSha,
-        })
+        }, syncAuthority)
 
         if (file.status === 'added') created++
         else updated++
@@ -291,11 +315,11 @@ export function createKnowledgeSyncWorker(options: {
 
       // Resolve wikilinks for changed entries
       if (relevantFiles.length > 0) {
-        await resolveAllWikilinks(source, store)
+        await resolveAllWikilinks(source, store, syncAuthority)
       }
     }
 
-    await store.updateSourceSync(source.id, headSha)
+    await store.updateSourceSync(source.id, headSha, null, syncAuthority)
 
     onEvent?.({
       type: 'sync_completed',
@@ -311,7 +335,7 @@ export function createKnowledgeSyncWorker(options: {
     )
   }
 
-  async function syncLocalSource(source: SyncSource) {
+  async function syncLocalSource(source: SyncSource, syncAuthority?: object) {
     const baseDir = await fs.realpath(nodePath.resolve(source.repo))
     const root = await fs.realpath(nodePath.resolve(baseDir, source.rootPath || '.'))
     const relativeRoot = nodePath.relative(baseDir, root)
@@ -324,7 +348,10 @@ export function createKnowledgeSyncWorker(options: {
 
     const mdFiles = await walkMarkdownFiles(root)
     const headSha = await computeDirHash(root, mdFiles)
-    if (headSha === source.lastSyncedSha) return
+    if (headSha === source.lastSyncedSha) {
+      if (syncAuthority) await store.updateSourceSync(source.id, headSha, null, syncAuthority)
+      return
+    }
 
     onEvent?.({ type: 'sync_started', sourceId: source.id, repo: source.repo })
 
@@ -345,7 +372,7 @@ export function createKnowledgeSyncWorker(options: {
       })
 
       const existing = await store.getByPathSystem(source.workspaceId, parsed.path)
-      await store.upsertByPath({
+      await upsertSynced({
         workspaceId: source.workspaceId,
         path: parsed.path,
         title: parsed.title,
@@ -357,7 +384,7 @@ export function createKnowledgeSyncWorker(options: {
         metadata: { ...parsed.metadata, _rawRelated: parsed.related },
         sourceId: source.id,
         sourceSha: headSha,
-      })
+      }, syncAuthority)
       if (existing) updated++
       else created++
     }
@@ -371,13 +398,13 @@ export function createKnowledgeSyncWorker(options: {
       const entry = await store.getByPathSystem(source.workspaceId, p)
       if (!entry) continue
       if (entry.sourceId !== source.id) continue
-      const wasDeleted = await store.deleteByTeamAndPath(source.workspaceId, p)
+      const wasDeleted = await store.deleteByTeamAndPath(source.workspaceId, p, syncAuthority)
       if (wasDeleted) deleted++
     }
 
-    await resolveAllWikilinks(source, store)
+    await resolveAllWikilinks(source, store, syncAuthority)
     runLintPass(source, lintInputs)
-    await store.updateSourceSync(source.id, headSha)
+    await store.updateSourceSync(source.id, headSha, null, syncAuthority)
 
     onEvent?.({
       type: 'sync_completed',
@@ -399,14 +426,10 @@ export function createKnowledgeSyncWorker(options: {
     repo: string,
     path: string,
     ref: string,
-  ): Promise<string | null> {
-    try {
-      const data = await api.getFileContents(pat, owner, repo, path, ref)
-      if (Array.isArray(data)) return null // directory listing, skip
-      return (data as { content?: string }).content ?? null
-    } catch {
-      return null
-    }
+  ): Promise<string> {
+    const data = await api.getFileContents(pat, owner, repo, path, ref)
+    if (Array.isArray(data) || typeof data.content !== 'string') throw new Error(`Knowledge file unavailable: ${path}`)
+    return data.content
   }
 
   function runLintPass(source: SyncSource, inputs: LintInputEntry[]) {
@@ -439,7 +462,7 @@ export function createKnowledgeSyncWorker(options: {
     }
   }
 
-  async function resolveAllWikilinks(source: SyncSource, syncStore: SyncStore) {
+  async function resolveAllWikilinks(source: SyncSource, syncStore: SyncStore, syncAuthority?: object) {
     const allPaths = await syncStore.listPathsSystem(source.workspaceId)
     const pathIndex = buildPathIndex(allPaths)
 
@@ -448,11 +471,11 @@ export function createKnowledgeSyncWorker(options: {
     let resolved = 0
     for (const entryPath of allPaths) {
       const entry = await syncStore.getByPathSystem(source.workspaceId, entryPath)
-      if (!entry) continue
+      if (!entry || entry.sourceId !== source.id) continue
 
       const metadata = (entry as any).metadata as Record<string, unknown> | undefined
       const rawRelated = metadata?._rawRelated as string[] | undefined
-      if (!rawRelated || rawRelated.length === 0) continue
+      if (!Array.isArray(rawRelated)) continue
 
       // Resolve each raw ref to a path
       const resolvedIds: string[] = []
@@ -467,12 +490,10 @@ export function createKnowledgeSyncWorker(options: {
         }
       }
 
-      if (resolvedIds.length > 0) {
-        // Deduplicate
-        const unique = [...new Set(resolvedIds)]
-        await syncStore.updateRelatedIds((entry as any).id as string, unique)
-        resolved++
-      }
+      // Empty results must clear stale edges left by an interrupted run too.
+      const unique = [...new Set(resolvedIds)]
+      await syncStore.updateRelatedIds((entry as any).id as string, unique, syncAuthority)
+      resolved++
     }
 
     if (resolved > 0) {
@@ -554,4 +575,11 @@ async function computeDirHash(root: string, files: string[]): Promise<string> {
     hash.update(`${rel}:${content}\n`)
   }
   return hash.digest('hex').slice(0, 40)
+}
+
+// Repository roots are directories, never string prefixes.
+export function normalizeKnowledgeRoot(root: string): string {
+  const parts = root.trim().replace(/\\/g, '/').split('/').filter(p => p && p !== '.')
+  if (parts.includes('..')) throw new Error('Invalid knowledge root')
+  return parts.join('/')
 }

@@ -28,6 +28,7 @@ export type OrganizationCommand =
   | { type: 'org.placement.remove'; id: string; expectedVersion: string }
 
 export type DepartmentAccessCommand =
+  | {type:'workspace.default_department.set';teamId:string}
   | {type:'workspace.classification.set';mode:'strict';expectedPolicyRevision:string;expectedInventoryRevision:string}
   | {type:'assistant.clearance.set';assistantId:string;clearance:'public'|'internal'|'confidential'}
   | {type:'member.access.set';userId:string;clearance:'public'|'internal'|'confidential';teamScopeMode:'legacy'|'assigned';expectedPolicyRevision:string}
@@ -90,7 +91,7 @@ export type ScopeReviewKind =
   | 'session_message'|'feedback_event'|'workspace_skill_revision'
   | 'file_cache'|'file_segment'|'recording'|'transcript_segment'
   | 'entity_instance'|'blueprint_record'|'office_artifact'
-export type ScopeReviewAction = 'confirm_general'|'assign_team'|'hold'
+export type ScopeReviewAction = 'confirm_general'|'assign_team'|'consolidate_default'|'hold'
 export type ScopeReviewCommand =
   | {type:'scope.review.preview';resourceKind:ScopeReviewKind;resourceIds:string[];action:ScopeReviewAction;targetTeamId:string|null;reason:string}
   | {type:'scope.review.apply'|'scope.review.cancel';reviewId:string;expectedVersion:string;payloadHash:string}
@@ -103,15 +104,26 @@ export type ScopeReviewContent = {title:string;text:string}
 export type ScopeReviewSummary = {
   id:string;workspaceId:string;resourceKind:ScopeReviewKind;action:ScopeReviewAction;targetTeamId:string|null
   targetCompartment:string|null;reason:string;payloadHash:string;selectionRevision:string;policyRevision:string;version:string
+  expiresAt?:string|null
   status:'preview'|'running'|'complete'|'stale'|'cancelled'
 }
 export type ScopeReview = ScopeReviewSummary & {
   completeCoverage:boolean;validForMs:number
   items:Array<{resourceId:string;resourceVersion:string;source:ScopeReviewSource;content:ScopeReviewContent|null;impact:ScopeReviewImpact|null;status:'pending'|'applied'|'stale'|'cancelled';resultVersion:string|null;errorCode:string|null}>
 }
+export type ScopeReviewConsolidation = {
+  version:1
+  sourceFloor?:{version:1;nodes:ScopeReviewSource[];edges:Record<string,unknown>[]}
+  before:ScopeReviewSource
+  after:ScopeReviewSource
+  visibility:Record<string,unknown>
+  // Department scope matches, not resource authorization or assistant invocation rights.
+  audiences:Array<{userId:string;assistantId:string|null;readBefore:boolean;readAfter:boolean;editBefore:boolean;editAfter:boolean}>
+  futureDefaultMembersWarning:string
+}
 export type ScopeReviewImpact =
   | {version:1;descendants:Array<{resourceId:string;version:string;held:boolean}>}
-  | {version:2;descendants:Array<{resourceKind:ScopeReviewKind;resourceId:string;version:string;held:boolean}>;dependents:Record<string,string>}
+  | {version:2;descendants:Array<{resourceKind:ScopeReviewKind;resourceId:string;version:string;held:boolean}>;dependents:Record<string,string>;consolidation?:ScopeReviewConsolidation}
 export type ScopeReviewCoverageFamily = {
   family:string;category:'source'|'impact'|'binding'|'job';total:string;unresolved:string;held:string
 }

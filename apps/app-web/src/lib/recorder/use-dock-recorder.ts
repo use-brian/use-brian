@@ -1,4 +1,5 @@
 "use client";
+import { InteractionSessionUnavailable } from "./dock-recorder-bridge";
 
 /**
  * Dock live-recording hook — the one recorder instance `FloatingChat` owns
@@ -30,6 +31,8 @@
  * does not re-trigger.
  */
 
+import { interactionRequest } from "@/lib/live-interaction/api";
+import { startInteractionCapture } from "@/lib/live-interaction/capture";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PAUSE_AUTO_STOP_MS,
@@ -346,6 +349,12 @@ export type DockRecorderApi = {
   /** Changes the next-capture source choice; ignored while recording. */
   setIncludeComputerAudio: (include: boolean) => void;
   /** Opt-in live page path for the next capture. */
+  interactionAvailable: boolean | null;
+  interactionEnabled: boolean;
+  setInteractionEnabled: (enabled: boolean) => void;
+  interactionStatus: "idle" | "listening" | "gap" | "unavailable";
+  interactionCaptureId?: string | null;
+  interactionChatSessionId?: string | null;
   livePageEnabled: boolean;
   setLivePageEnabled: (enabled: boolean) => void;
   /** Visible trust signal for desktop remote-call capture. */
@@ -380,6 +389,7 @@ export function useDockRecorder(opts: {
   sendVoiceClip: (fileId: string) => Promise<boolean>;
   /** Session id accessor for the voice-clip cache upload (best-effort). */
   getSessionId?: () => string | undefined;
+  ensureInteractionSession?: () => Promise<string>;
   /**
    * Long-lane hand-off: the recording ingestion flow (`useRecordingUpload.run`).
    * The outcome forks retention + the notice (`handOffVerdict`); a caller
@@ -388,10 +398,10 @@ export function useDockRecorder(opts: {
    */
   onMeetingCapture: (
     file: File,
-    live?: { pageId: string; sessionId?: string },
+    live?: { pageId: string; sessionId?: string; liveWindowsDone?: Promise<void> },
   ) => Promise<MeetingCaptureOutcome>;
   /** Pre-flight confirm + destination creation; null means the user cancelled. */
-  prepareLivePage?: () => Promise<LiveRecordingPage | null>;
+  prepareLivePage?: (navigate?: boolean) => Promise<LiveRecordingPage | null>;
   /** Desktop screen/window chooser; null means the user cancelled. */
   prepareCaptureSource?: (
     initialSource: Exclude<RecorderCaptureSource, "mic">,
@@ -419,6 +429,40 @@ export function useDockRecorder(opts: {
   const [capturePickerAvailable, setCapturePickerAvailable] = useState(false);
   const [captureSource, setCaptureSourceState] = useState<RecorderCaptureSource>("mic");
   const captureSourceRef = useRef<RecorderCaptureSource>("mic");
+  const [interactionAvailable, setInteractionAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void interactionRequest<{ available: boolean }>("/settings").then(({ available }) => {
+      if (!cancelled) setInteractionAvailable(available);
+    }).catch(() => { if (!cancelled) setInteractionAvailable(false); });
+    return () => { cancelled = true; };
+  }, []);
+  const [interactionEnabled, setInteractionEnabledState] = useState(false);
+  const interactionEnabledRef = useRef(false);
+  const [interactionStatus, setInteractionStatus] = useState<"idle" | "listening" | "gap" | "unavailable">("idle");
+  const [interactionCaptureId, setInteractionCaptureId] = useState<string | null>(null);
+  const [interactionChatSessionId, setInteractionChatSessionId] = useState<string | null>(null);
+  const interactionAbortRef = useRef<AbortController | null>(null);
+  const interactionRef = useRef<ReturnType<typeof startInteractionCapture> | null>(null);
+  const stopInteraction = useCallback((drain?: Promise<void>) => {
+    if (!drain) interactionAbortRef.current?.abort();
+    interactionAbortRef.current = null;
+    const pending = interactionRef.current;
+    interactionRef.current = null;
+    setInteractionCaptureId(null);
+    setInteractionChatSessionId(null);
+    // Full-file upload no longer consumes this promise when interaction is off.
+    // Observe failures even when no interaction session needs closing.
+    void drain?.catch(() => {});
+    if (pending) void (async () => {
+      try { await drain; } catch { /* Still close this capture after a failed drain. */ }
+      const capture = await pending;
+      await capture.stop();
+    })().catch(() => {});
+    setInteractionStatus("idle");
+  }, []);
+  const ensureInteractionSessionRef = useRef(opts.ensureInteractionSession);
+  ensureInteractionSessionRef.current = opts.ensureInteractionSession;
   const [livePageEnabled, setLivePageEnabledState] = useState(false);
   const livePageEnabledRef = useRef(false);
   const livePageRef = useRef<LiveRecordingPage | null>(null);
@@ -549,7 +593,7 @@ export function useDockRecorder(opts: {
       blob: Blob,
       mime: string,
       durationMs: number,
-      recoveredLive?: { pageId?: string; sessionId?: string },
+      recoveredLive?: { pageId?: string; sessionId?: string; liveWindowsDone?: Promise<void> },
     ): Promise<boolean> => {
       // Never consult the current capture here: an older save may be queued
       // behind another upload while a different live page is recording.
@@ -578,7 +622,8 @@ export function useDockRecorder(opts: {
       const { notice: verdict, safeToDrop } = handOffVerdict(
         await onMeetingCapture(
           file,
-          livePageId ? { pageId: livePageId, ...(liveSessionId ? { sessionId: liveSessionId } : {}) } : undefined,
+          livePageId ? { pageId: livePageId, ...(liveSessionId ? { sessionId: liveSessionId } : {}),
+            ...(recoveredLive?.liveWindowsDone ? { liveWindowsDone: recoveredLive.liveWindowsDone } : {}) } : undefined,
         ),
       );
       setNotice(verdict);
@@ -595,13 +640,29 @@ export function useDockRecorder(opts: {
           void (async () => {
             const attempt = ++armAttemptRef.current;
             try {
+              // Resolve the ORIGINAL destination before opening the page picker.
+              let interactionChatId: string | undefined;
+              if (interactionEnabledRef.current) {
+                try {
+                  interactionChatId = await ensureInteractionSessionRef.current?.();
+                  if (!interactionChatId) throw new InteractionSessionUnavailable();
+                }
+                catch (error) {
+                  setInteractionStatus(error instanceof InteractionSessionUnavailable ? "unavailable" : "gap");
+                  dispatchRef.current({ type: "arm-failed" });
+                  return;
+                }
+              }
               let livePage: LiveRecordingPage | null = null;
               if (livePageEnabledRef.current) {
-                livePage = livePageRef.current ?? (await prepareLivePage?.()) ?? null;
+                livePage = livePageRef.current ?? (await prepareLivePage?.(!interactionEnabledRef.current)) ?? null;
                 if (!livePage) {
                   dispatchRef.current({ type: "arm-failed" });
                   return;
                 }
+                // Rollover may reuse a destination, never its mutable interaction
+                // binding: old final windows can still be draining in parallel.
+                livePage = { ...livePage, interactionCaptureId: undefined, onInteractionGap: undefined };
                 livePageRef.current = livePage;
               }
               // A new desktop shell resolves every video source BEFORE the
@@ -646,7 +707,10 @@ export function useDockRecorder(opts: {
               // The user may slide away while the destination modal or API is
               // open. Never proceed to microphone access for a cancelled arm.
               if (attempt !== armAttemptRef.current || phaseRef.current.kind !== "arming") return;
+              let interactionPending: ReturnType<typeof startInteractionCapture> | null = null;
               const armedEngine = await createRecorderEngine({
+                interactionEnabled: interactionEnabledRef.current,
+                onInteractionGap: () => livePage?.onInteractionGap?.(),
                 // New macOS/Windows shells advertise this capability, but
                 // the device-local split-button choice owns whether THIS
                 // capture uses it. OFF bypasses getDisplayMedia completely.
@@ -662,7 +726,10 @@ export function useDockRecorder(opts: {
                 opportunisticDisplayAudio:
                   source !== "mic" && desktopBridge()?.systemAudioCapture !== true,
                 ...(livePage && streamLiveWindow
-                  ? { onLiveWindow: (window: LiveWindow) => streamLiveWindow(window, livePage) }
+                  ? { onLiveWindow: async (window: LiveWindow) => {
+                      await interactionPending?.catch(() => {});
+                      await streamLiveWindow(window, livePage);
+                    } }
                   : {}),
                 // The capture died underneath us (mic unplugged / input
                 // switched / system stream ended / recorder error). Finalize
@@ -686,6 +753,27 @@ export function useDockRecorder(opts: {
                 return;
               }
               engineRef.current = armedEngine;
+              if (interactionEnabledRef.current && interactionChatId && livePage) {
+                const abort = new AbortController();
+                interactionAbortRef.current = abort;
+                setInteractionChatSessionId(interactionChatId);
+                setInteractionStatus("listening");
+                livePage.onInteractionGap = () => {
+                  if (mountedRef.current && interactionAbortRef.current === abort && !abort.signal.aborted) setInteractionStatus("gap");
+                };
+                interactionPending = interactionRef.current = startInteractionCapture(
+                  { workspaceId, assistantId, pageId: livePage.pageId, chatSessionId: interactionChatId },
+                  livePage.onInteractionGap,
+                  abort.signal,
+                  (captureId) => {
+                    if (!abort.signal.aborted) {
+                      livePage.interactionCaptureId = captureId;
+                      if (interactionAbortRef.current === abort) setInteractionCaptureId(captureId);
+                    }
+                  },
+                );
+                void interactionRef.current.catch(() => livePage.onInteractionGap?.());
+              }
               dispatchRef.current({ type: "armed" });
             } catch (err) {
               // A dismissed screen picker is a changed mind, not a failure —
@@ -732,12 +820,14 @@ export function useDockRecorder(opts: {
         case "cancel-with-hint":
           armAttemptRef.current += 1;
           setNotice({ kind: "micHint" });
+          stopInteraction();
           engine?.cancel();
           engineRef.current = null;
           return;
         case "cancel-capture": {
           armAttemptRef.current += 1;
           const sessionId = engine?.spoolSessionId() ?? null;
+          stopInteraction();
           engine?.cancel();
           engineRef.current = null;
           void dropSpoolSession(sessionId);
@@ -760,15 +850,21 @@ export function useDockRecorder(opts: {
             const skipHandOff = skipHandOffRef.current;
             skipHandOffRef.current = false;
             try {
-              const capture = await eng.stop();
+              const stopping = eng.stop();
+              // Detach now so a newer capture owns the UI, but keep this server
+              // session alive until its final queued /live/chunk request settles.
+              stopInteraction(stopping.then((capture) => capture.liveWindowsDone));
+              const capture = await stopping;
               engineRef.current = null;
               const save = async () => {
                 let safeToDrop = false;
                 try {
                   if (!skipHandOff) {
-                    await capture.liveWindowsDone;
                     if (mountedRef.current) {
-                      safeToDrop = await handOff(capture.blob, capture.mime, capture.durationMs, live ?? undefined);
+                      // Full-file upload is independent of provisional ASR/notes.
+                      // Only window-based fallback needs to await the final window.
+                      safeToDrop = await handOff(capture.blob, capture.mime, capture.durationMs,
+                        live ? { ...live, liveWindowsDone: capture.liveWindowsDone } : undefined);
                     }
                   }
                 } catch {
@@ -1006,6 +1102,7 @@ export function useDockRecorder(opts: {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      stopInteraction();
       engineRef.current?.cancel();
       engineRef.current = null;
     };
@@ -1053,6 +1150,7 @@ export function useDockRecorder(opts: {
 
   const setLivePageEnabled = useCallback((next: boolean) => {
     if (phaseRef.current.kind !== "idle") return;
+    if (!next && interactionEnabledRef.current) return;
     livePageEnabledRef.current = next;
     setLivePageEnabledState(next);
   }, []);
@@ -1118,6 +1216,22 @@ export function useDockRecorder(opts: {
     computerAudioAvailable,
     includeComputerAudio,
     setIncludeComputerAudio,
+    interactionAvailable,
+    interactionEnabled,
+    interactionStatus,
+    interactionCaptureId,
+    interactionChatSessionId,
+    setInteractionEnabled: (next: boolean) => {
+      if (next && (phaseRef.current.kind !== "idle" || !interactionAvailable)) return;
+      interactionEnabledRef.current = next;
+      setInteractionEnabledState(next);
+      if (next) { livePageEnabledRef.current = true; setLivePageEnabledState(true); }
+      else {
+        if (livePageRef.current) delete livePageRef.current.interactionCaptureId;
+        engineRef.current?.setInteractionEnabled(false);
+        stopInteraction();
+      }
+    },
     livePageEnabled,
     setLivePageEnabled,
     includesSystemAudio: useCallback(

@@ -25,7 +25,7 @@
  * [COMP:app-web/dock-recorder]
  */
 
-import { createElement, useEffect, useId, useRef, useState } from "react";
+import { createElement, useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import { AppWindow, Check, ChevronDown, Monitor, Pause, Play, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
@@ -38,6 +38,14 @@ import { RecordingUploadStatus } from "@/components/recordings/recording-upload-
 import { captureLabelLane, formatElapsed } from "@/lib/recorder/recorder-gesture";
 import type { DockRecorderApi, RecorderCaptureSource } from "@/lib/recorder/use-dock-recorder";
 import { useGlobalDockRecorder } from "@/lib/recorder/dock-recorder-bridge";
+import {
+  FLOATING_RECORDER_RESERVE_VAR,
+  floatingRecorderLift,
+  floatingRecorderReserve,
+  getFloatingRecorderClearances,
+  useFloatingRecorderClaimed,
+  useFloatingRecorderClearanceVersion,
+} from "@/lib/recorder/floating-recorder-slot";
 import { desktopBridge } from "@/lib/desktop-auth-source";
 import type { SpoolSessionMeta } from "@/lib/recorder/recorder-spool";
 import { useRecordingSummary } from "@/lib/recordings/use-recording-summary";
@@ -308,6 +316,8 @@ export function DockRecorderButton({
   const outsideRef = useRef(false);
   const computerAudioId = useId();
   const livePageId = useId();
+  const interactionId = useId();
+  const interactionT = useT().liveInteraction;
 
   // While a press-gesture is unresolved, resolve release from ANYWHERE in
   // the document — a finger sliding off the button must still stop.
@@ -465,11 +475,19 @@ export function DockRecorderButton({
                 </label>
                 <Switch
                   id={livePageId}
+                  disabled={rec.interactionEnabled}
                   checked={rec.livePageEnabled}
                   onCheckedChange={rec.setLivePageEnabled}
                   aria-label={t.streamToPage}
                 />
               </div>
+              <div className="flex items-center justify-between gap-4">
+                <label htmlFor={interactionId} className="text-sm">{interactionT.title}</label>
+                <Switch id={interactionId} disabled={!rec.interactionAvailable} checked={rec.interactionEnabled} onCheckedChange={rec.setInteractionEnabled} aria-label={interactionT.title} />
+              </div>
+              <p className="text-xs text-muted-foreground">{interactionT.description}</p>
+              {rec.interactionStatus === "unavailable" && <p role="alert" className="text-xs">{interactionT.personalOnly}</p>}
+              {rec.interactionAvailable === false && <p role="status" className="text-xs">{interactionT.unavailable}</p>}
             </div>
           </PopoverContent>
         </Popover>
@@ -803,22 +821,29 @@ export function DockRecorderRecovery({ rec, className }: { rec: DockRecorderApi;
 }
 
 /**
- * Sticky fallback cluster for surfaces that hide the chat dock WITHOUT
- * rehosting the recorder in their own chrome (currently the Office editor).
- * Renders the full recorder stack (recovery banner, notice, live strip,
- * floating record button) bottom-right off the ONE controller the hidden
- * dock still owns, so hiding the dock can never cost the workspace its
- * record affordance. Surfaces with replacement chat chrome (Feed, the Skill
- * iteration rail, the Chat app composer) integrate the same pieces inline
- * instead and must NOT also mount this. Renders nothing until the dock
- * publishes its controller. Every chat-dock suppression holder is held to
- * one of the two options by `dock-recorder-coverage.test.ts`.
+ * Sticky floating cluster: the full recorder stack (recovery banner, notice,
+ * live strip, floating record button) bottom-right off the ONE controller
+ * the hidden dock still owns, so hiding the dock can never cost the
+ * workspace its record affordance. Mounted by `FloatingRecorderHost`
+ * (WorkspaceChrome, for every dock-hiding surface) and directly by the
+ * Office editor. Renders nothing until the dock publishes its controller.
  */
-export function DockRecorderFallback({ className }: { className?: string }) {
+export function DockRecorderFallback({
+  className,
+  style,
+  rootRef,
+}: {
+  className?: string;
+  style?: CSSProperties;
+  rootRef?: (el: HTMLDivElement | null) => void;
+}) {
   const rec = useGlobalDockRecorder();
   if (!rec) return null;
   return (
     <div
+      ref={rootRef}
+      data-floating-recorder
+      style={style}
       className={cn(
         "fixed right-4 bottom-4 z-50 flex flex-col items-end gap-2",
         className,
@@ -829,5 +854,77 @@ export function DockRecorderFallback({ className }: { className?: string }) {
       <DockRecorderStrip rec={rec} />
       <DockRecorderButton rec={rec} variant="floating" />
     </div>
+  );
+}
+
+/**
+ * The floating recorder for surfaces that hide the global chat dock, mounted
+ * by `WorkspaceChrome` (desktop widths; below `lg` those surfaces keep the
+ * record button in their own composer). Stands down while a surface claims
+ * the floating slot, and lifts above any registered bottom-right composer so
+ * it never covers Send. While lifted it publishes the reserve those
+ * composers' message lists pad with, so it never covers the newest message
+ * either. See `lib/recorder/floating-recorder-slot.ts`.
+ */
+export function FloatingRecorderHost() {
+  const claimed = useFloatingRecorderClaimed();
+  const version = useFloatingRecorderClearanceVersion();
+  const [lift, setLift] = useState<number | null>(null);
+
+  useEffect(() => {
+    const elements = getFloatingRecorderClearances();
+    const measure = () => {
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      let next: number | null = null;
+      for (const el of elements) {
+        const value = floatingRecorderLift(el.getBoundingClientRect(), viewport);
+        if (value !== null) next = Math.max(next ?? 0, value);
+      }
+      setLift(next);
+    };
+    measure();
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    for (const el of elements) observer?.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [version]);
+
+  // The cluster's rendered height (0 while display:none below `lg`, or
+  // unmounted while claimed); a live strip or notice makes it taller.
+  const [cluster, setCluster] = useState<HTMLDivElement | null>(null);
+  const [clusterHeight, setClusterHeight] = useState(0);
+  useEffect(() => {
+    if (!cluster) {
+      setClusterHeight(0);
+      return;
+    }
+    const measure = () => setClusterHeight(cluster.getBoundingClientRect().height);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(cluster);
+    return () => observer.disconnect();
+  }, [cluster]);
+
+  const reserve = claimed ? 0 : floatingRecorderReserve(lift, clusterHeight);
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty(FLOATING_RECORDER_RESERVE_VAR, `${reserve}px`);
+    return () => {
+      root.style.removeProperty(FLOATING_RECORDER_RESERVE_VAR);
+    };
+  }, [reserve]);
+
+  if (claimed) return null;
+  return (
+    <DockRecorderFallback
+      rootRef={setCluster}
+      className="max-lg:hidden transition-[bottom] duration-200 ease-out"
+      style={lift === null ? undefined : { bottom: lift }}
+    />
   );
 }

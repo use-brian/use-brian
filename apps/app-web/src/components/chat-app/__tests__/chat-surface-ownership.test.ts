@@ -337,3 +337,28 @@ describe("[COMP:app-web/chat-sessions-cache] follow-stream ownership", () => {
     cleanup();
   });
 });
+
+
+describe("main chat live interaction ownership", () => {
+  it("appends two canonical job pairs without replacing the typed stream or accepting another session", async () => {
+    const { canonicalInteractionAdditions } = await import("@/lib/live-interaction/canonical");
+    const { chatReducer, initialChatState } = await import("../../../../../../packages/chat-ui/src/chat-reducer");
+    const attribute = find((node) => ts.isJsxAttribute(node) && node.name.getText(tree) === "onCanonical") as ts.JsxAttribute;
+    const expression = (attribute.initializer as ts.JsxExpression).expression!;
+    const message = (id: string, role: "user" | "assistant") => ({ id, role, text: id, timestamp: new Date() });
+    let state = { ...initialChatState, messages: [message("typed", "user")], isStreaming: true, streamingText: "typed partial answer" };
+    const chat = { get state() { return state; }, dispatch: vi.fn((action) => { state = chatReducer(state, action); }) };
+    const mapTranscriptRows = vi.fn((rows) => rows);
+    const onCanonical = evaluate(expression.getText(tree), { chat, sessionIdRef: { current: "main" }, mapTranscriptRows, canonicalInteractionAdditions });
+    const rows = [message("q1", "user"), message("q2", "user"), message("a2", "assistant"), message("a1", "assistant")];
+    const ids = new Set(["q1", "a1", "q2", "a2"]);
+    onCanonical("other", rows, ids);
+    expect(chat.dispatch).not.toHaveBeenCalled();
+    onCanonical("main", rows, ids);
+    expect(state.messages.map((m) => m.id)).toEqual(["typed", "q1", "a1", "q2", "a2"]);
+    expect(state.streamingText).toBe("typed partial answer"); expect(state.isStreaming).toBe(true);
+    expect(mapTranscriptRows).toHaveBeenCalledWith(rows, false); // no cross-job assistant coalescing
+    onCanonical("main", rows, ids);
+    expect(chat.dispatch).toHaveBeenCalledTimes(4);
+  });
+});

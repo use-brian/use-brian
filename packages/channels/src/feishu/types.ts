@@ -87,6 +87,7 @@ export type FeishuSendOptions = {
 export type FeishuApi = {
   send(to: string, input: FeishuSendInput, opts?: FeishuSendOptions): Promise<{ messageId: string }>
   editMessage(messageId: string, text: string): Promise<void>
+  editPost(messageId: string, markdown: string): Promise<void>
   updateCard(messageId: string, card: object): Promise<void>
   recallMessage(messageId: string): Promise<void>
   addReaction(messageId: string, emojiType: string): Promise<string>

@@ -66,9 +66,9 @@ export function AssociationCatalogPicker({ workspaceId, resource, selected, onCh
   const options = rows.data?.items.map(row => ({ id: usePlanKeys && "planKey" in row ? row.planKey : row.id, name: "title" in row ? row.title : row.name })) ?? [];
   for (const row of options) names.current[row.id] = row.name;
   const awaitingEvent = resource === "tickets" && !eventId;
-  return <div className="col-span-full min-w-0 space-y-3 rounded-xl border border-border bg-background p-4">
+  return <div className="col-span-full min-w-0 space-y-3">
     <div className="flex items-center gap-2"><Search aria-hidden className="size-4 shrink-0 text-muted-foreground" /><div className="min-w-0 flex-1"><AssociationField label={t.ux.searchPage} value={search} onChange={setSearch} /></div></div>
-    {selected.length > 0 && <div className="flex flex-wrap items-center gap-2" aria-label={t.ux.selected}>{selected.map(id => <Button key={id} type="button" variant="secondary" className="min-h-11 max-w-full whitespace-normal break-words text-left" onClick={() => onChange(selected.filter(value => value !== id))} aria-label={`${t.ux.remove}: ${names.current[id] ?? id}`}>
+    {selected.length > 0 && <div className="flex flex-wrap items-center gap-2" aria-label={t.ux.selected}>{selected.map(id => <Button key={id} type="button" variant="secondary" className="max-sm:min-h-11 max-w-full whitespace-normal break-words text-left" onClick={() => onChange(selected.filter(value => value !== id))} aria-label={`${t.ux.remove}: ${names.current[id] ?? id}`}>
       {names.current[id] ?? `${t.ux.retainedSelection} · ${id.slice(0, 8)}`}<X aria-hidden className="size-3 shrink-0" /></Button>)}</div>}
     {awaitingEvent ? <p className="text-sm text-muted-foreground">{t.ux.chooseEvent}</p> : <AssociationListState {...rows}><div className="max-h-56 space-y-1 overflow-y-auto">
       {options.filter(row => row.name.toLocaleLowerCase().includes(search.toLocaleLowerCase())).map(row => <div key={row.id} className="rounded-lg px-2 hover:bg-accent/50"><AssociationToggle label={row.name} checked={selected.includes(row.id)} disabled={!!rows.error} onChange={checked => onChange(checked ? single ? [row.id] : [...selected, row.id] : selected.filter(id => id !== row.id))} /></div>)}

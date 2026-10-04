@@ -5,17 +5,20 @@ import {useT} from '@/lib/i18n/client';
 import {useWorkspaceContext} from '@/lib/workspace-context';
 import {confirmDialog} from '@/components/ui/confirm-dialog';
 import {ORGANIZATION_CHANGED_EVENT} from '@/lib/api/workspace-access';
-import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
+import {WORKSPACE_IDENTITY_REFRESH_EVENT,isCatchUpRefresh} from '@/lib/workspace-identity-events';
 import {invalidateSurfaceCache} from '@/lib/surface-cache';
 
 type Review = {id:string;payloadHash:string;validForMs:number};
-type Pending<C,V> = { command:C; description:string; review:V; confirmed: boolean };
+/** A bare string is the dialog description; an object also names the action the user is confirming. */
+export type ReviewCopy = string | { title: string; description: string; confirmLabel?: string };
+type Pending<C,V> = { command:C; description:ReviewCopy; review:V; confirmed: boolean };
 
 export function useReviewedCommand<C,V extends Review,R>(options:{
   workspaceId:string;contextKey?:string;cachePrefix:string;
   prepare:(command:C,version:string|undefined,signal:AbortSignal)=>Promise<V|null>;
   apply:(review:V)=>Promise<R>;renderReview:(review:V)=>ReactNode;
   onApplied?:(result:R,isCurrent:()=>boolean)=>void|Promise<void>;
+  errorMessage?:(code:string)=>string|undefined;
   labels?:{loadError:string;saveError:string;stale:string;confirmTitle:string};
 }) {
   const {workspaceId,contextKey='',onApplied}=options;
@@ -32,6 +35,9 @@ export function useReviewedCommand<C,V extends Review,R>(options:{
     pending.current = null; setRetryAvailable(false); setError('');
     const invalidate = (event: Event) => {
       const detail = (event as CustomEvent<{ workspaceId?: string }>).detail;
+      // A reconnect catch-up is not an authority change; focus / visible still
+      // cancel through their own listeners, and apply rechecks the revision.
+      if (isCatchUpRefresh(event)) return;
       if (!detail?.workspaceId || detail.workspaceId === workspaceId) cancelReview();
     };
     const visible = () => { if (document.visibilityState === 'visible') cancelReview(); };
@@ -49,7 +55,7 @@ export function useReviewedCommand<C,V extends Review,R>(options:{
     };
   }, [workspaceId, me.id, contextKey, cancelReview]);
 
-  async function save(command:C, description: string, policyRevision?: string): Promise<R|null> {
+  async function save(command:C, description: ReviewCopy, policyRevision?: string): Promise<R|null> {
     if (running.current) return null;
     if (pending.current && JSON.stringify(pending.current.command) !== JSON.stringify(command)) { setError(t.pendingChange); return null; }
     running.current = true; setBusy(true); setError('');
@@ -71,7 +77,8 @@ export function useReviewedCommand<C,V extends Review,R>(options:{
       }
       const active = pending.current;
       if (!active.confirmed) {
-        const confirmed = await confirmDialog({ signal: controller.signal, title: t.confirmTitle, description: active.description, content: options.renderReview(active.review), confirmLabel: t.confirm, cancelLabel: t.cancel });
+        const copy = typeof active.description === 'string' ? { title: t.confirmTitle, description: active.description, confirmLabel: t.confirm } : { ...active.description, confirmLabel: active.description.confirmLabel ?? t.confirm };
+        const confirmed = await confirmDialog({ signal: controller.signal, title: copy.title, description: copy.description, content: options.renderReview(active.review), confirmLabel: copy.confirmLabel, cancelLabel: t.cancel });
         if (!isCurrent()) return null;
         if (!confirmed || controller.signal.aborted) { pending.current = null; return null; }
         active.confirmed = true;
@@ -86,9 +93,9 @@ export function useReviewedCommand<C,V extends Review,R>(options:{
     } catch (cause) {
       if (!isCurrent()) return null;
       const code = cause instanceof Error ? cause.message : '';
-      if (['organization_conflict', 'access_policy_conflict', 'access_review_expired', 'access_review_changed', 'not_found', 'unauthorized'].includes(code)) pending.current = null;
+      if (['organization_conflict', 'access_policy_conflict', 'access_review_expired', 'access_review_changed', 'not_found', 'unauthorized', 'migration_expired', 'migration_not_active', 'migration_actor_required', 'migration_item_applied'].includes(code)) pending.current = null;
       setRetryAvailable(Boolean(pending.current?.confirmed));
-      setError(['organization_conflict', 'request_review_stale', 'access_policy_conflict'].includes(code) ? t.stale : code === 'access_review_expired' ? t.reviewExpired : code === 'departmental_enforcement_incomplete' ? t.notReady : t.saveError);
+      setError(options.errorMessage?.(code) ?? (['organization_conflict', 'request_review_stale', 'access_policy_conflict'].includes(code) ? t.stale : code === 'access_review_expired' ? t.reviewExpired : code === 'access_busy' ? t.reviewBusy : code === 'departmental_enforcement_incomplete' ? t.notReady : t.saveError));
       return null;
     } finally {
       clearTimeout(expiry);
@@ -97,6 +104,8 @@ export function useReviewedCommand<C,V extends Review,R>(options:{
     }
   }
   async function retry() { const active = pending.current; return active ? save(active.command, active.description) : null; }
-  return { save, retry, busy, error, retryAvailable, cancelReview, clearError: () => setError('') };
+  // Explicit lifecycle changes may revoke an outstanding migration review.
+  const discardReview = () => { cancelReview(); pending.current = null; setRetryAvailable(false); setError(''); };
+  return { save, retry, busy, error, retryAvailable, cancelReview, discardReview, clearError: () => setError('') };
 }
 
