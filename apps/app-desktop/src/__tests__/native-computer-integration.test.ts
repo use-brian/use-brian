@@ -464,6 +464,45 @@ describe('trusted main native computer setup', () => {
       expect(detail).not.toContain('5 seconds'); expect(vi.getTimerCount()).toBe(0)
     } finally { vi.useRealTimers() }
   })
+  it.each([[true, true], [true, false], [false, true], [false, false]])('consent for control=%s capture=%s discloses capture-only support and model use accurately', async (allowControl, allowCapture) => {
+    await discover()
+    controller().start.mockImplementation(async (grant: NativeGrant) => {
+      expect(await controller().options.approveGrant(grant, new AbortController().signal)).toBe(true)
+      controller().grant = grant; controller().state = 'active'
+    })
+    const result = await integration.handle({ ...selection, allowControl, allowCapture })
+    if (!allowControl && allowCapture) {
+      expect(result).toMatchObject({ ok: false })
+      expect(controller().start).not.toHaveBeenCalled()
+      expect(dialog.showMessageBox).not.toHaveBeenCalled()
+      return
+    }
+    expect(result).toMatchObject({ ok: true })
+    expect(controller().start.mock.calls[0][0]).toMatchObject({ allowControl, allowCapture })
+    const detail = vi.mocked(dialog.showMessageBox).mock.calls.at(-1)![0].detail!
+    if (allowControl && allowCapture) {
+      expect(detail).toContain('Screenshot support: selected-window safe fixture canvas capture only.')
+      expect(detail).toContain('Coordinate clicks and screenshot-to-action fallback are unavailable.')
+    } else {
+      expect(detail).toContain('No screenshot capture.')
+      expect(detail).not.toContain('Screenshot support:')
+    }
+    expect(detail).not.toMatch(/Screenshot fallback:|one click per grant|fresh completion readback/i)
+    expect(detail).not.toContain('approved images are sent')
+    if (allowControl) {
+      expect(detail).toContain('Accessibility text is sent to your configured model provider. Local execution is not local inference.')
+      expect(detail).not.toContain('No model task')
+      if (allowCapture) {
+        expect(detail).toContain('Images may be sent to that provider only after separate image-upload approval and model-policy checks; capture consent alone is not sufficient.')
+      } else {
+        expect(detail).not.toMatch(/images|image-upload/i)
+      }
+    } else {
+      expect(detail).toContain('AX inspector: one read of the selected window is shown locally, then the session ends automatically. No model task or screenshot capture.')
+      expect(detail).not.toContain('sent to your configured model provider')
+      expect(detail).not.toMatch(/images|image-upload/i)
+    }
+  })
   it('Mac read-only consent explicitly promises no activation, raising or editing', async () => {
     await controller().options.approveGrant({ requester: 'User', identity: { workspaceId: 'w', deploymentId: 'd' },
       goal: 'Read', allowControl: false, allowCapture: false, targets: [target], expiresAt: Date.now() + 60000 }, new AbortController().signal)

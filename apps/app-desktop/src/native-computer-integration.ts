@@ -206,9 +206,11 @@ export class NativeComputerIntegration {
         `Requester: ${JSON.stringify(grant.requester)}`, `Workspace: ${JSON.stringify(grant.identity.workspaceId)}`, `Deployment: ${JSON.stringify(grant.identity.deploymentId)}`,
         `Task: ${JSON.stringify(grant.goal)}`, `Selected windows (data): ${JSON.stringify(grant.targets.map(target => ({ displayName: this.selection.find(item => sameTarget(item, target))?.displayName, appId: target.appId, windowId: target.windowId })))}`,
         grant.allowControl ? 'Initial semantic scope: TextEdit and supported fixtures only. Every action requires your local approval; unavailable capabilities are not substituted.' : 'Observation only. No input.',
-        grant.allowCapture ? 'Screenshot fallback: safe fixture canvas only, at most one click per grant, followed by fresh completion readback.' : 'No screenshot capture.',
+        grant.allowCapture ? 'Screenshot support: selected-window safe fixture canvas capture only. Coordinate clicks and screenshot-to-action fallback are unavailable.' : 'No screenshot capture.',
         grant.allowControl || process.platform !== 'darwin' ? this.foregroundNotice() : 'Read-only inspection: Brian will not activate, raise or edit the selected window.',
-        grant.allowControl ? 'Accessibility text and approved images are sent to your configured model provider. Local execution is not local inference.' : 'AX inspector: one read of the selected window is shown locally, then the session ends automatically. No model task or screenshot capture.',
+        grant.allowControl
+          ? 'Accessibility text is sent to your configured model provider. Local execution is not local inference.' + (grant.allowCapture ? ' Images may be sent to that provider only after separate image-upload approval and model-policy checks; capture consent alone is not sufficient.' : '')
+          : 'AX inspector: one read of the selected window is shown locally, then the session ends automatically. No model task or screenshot capture.',
         `Expires: ${new Date(grant.expiresAt).toLocaleTimeString()}. Stop: ${this.stopShortcut.label}.`,
       ].join('\n\n'), signal),
       approveAction: (command, signal, context) => this.approveAction(command, signal, context),
