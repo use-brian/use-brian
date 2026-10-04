@@ -7,6 +7,7 @@ import { applyRLSGucs, getAppPool, query, queryGated, queryWithRLS, rollbackAndR
 import { emitDependsOnEdges, emitMentionedEdges } from './edge-hooks.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
 import { currentAgentAccess } from './agent-access-context.js'
+import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 
 const FULL_SELECT = `
@@ -285,6 +286,8 @@ export async function createTask(
   },
   entityLinks?: EntityLinksStore,
   transactionClient?: pg.PoolClient,
+  /** Trusted setup writer only; never accepted from task/model input. */
+  effects?: { automation: false },
 ): Promise<TaskRecord> {
   // WU-4.5 — authorship NOT NULL enforcement at the store layer. The
   // `userId` argument is both the RLS actor and the row author; without
@@ -331,7 +334,7 @@ export async function createTask(
   // Workflow task-event emit — fire-and-forget after the committed insert
   // (single-statement autocommit above). The late-bound fanout is a no-op
   // until bootOpenApi binds the dispatcher. [COMP:api/task-event-fanout]
-  if (!transactionClient) publishTaskLifecycle({
+  if (!transactionClient && effects?.automation !== false) publishTaskLifecycle({
     workspaceId: task.workspaceId,
     taskId: task.id,
     kind: 'created',
@@ -348,6 +351,12 @@ export async function createTask(
     actorId: userId,
     writtenBy: params.writtenBy,
   })
+
+  // Setup still commits an ordinary task and wakes read-side caches, but
+  // must not dispatch workflows or resume waiting goals through the event bus.
+  if (!transactionClient && effects?.automation === false) {
+    notifyBrainInboxChange(task.workspaceId, 'task', task.id, 'create')
+  }
 
   // Fire-and-forget `mentioned` edges — `void`, never awaited, never
   // able to throw into the task save.

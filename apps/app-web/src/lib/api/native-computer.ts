@@ -9,3 +9,14 @@ export async function fetchNativeContextTasks(workspaceId: string, assistantId: 
   const body = await res.json() as { tasks: NativeContextTask[] };
   return body.tasks;
 }
+
+/** Normal task creation only. No device, native session or grant is involved. */
+export async function createNativeContextTask(workspaceId: string, assistantId: string, conversationId: string, title: string): Promise<NativeContextTask> {
+  const res = await authFetch(`${publicRuntimeConfig().apiUrl ?? "http://localhost:4000"}/api/native-computer/context-tasks`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId, assistantId, conversationId, title }),
+  });
+  if (!res.ok) throw new Error("Native task creation unavailable");
+  const body = await res.json() as { task: NativeContextTask };
+  return body.task;
+}

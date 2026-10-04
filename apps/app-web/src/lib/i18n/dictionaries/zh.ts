@@ -2,6 +2,10 @@ import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
   nativeComputer: {
+    createTask: "建立任務",
+    createTaskHelp: "使用所選對話，為你與此助理建立私人任務。這不會啟動電腦存取。",
+    createTaskFailed: "無法建立或重新載入任務。請確認存取權限並重新整理清單後再試。",
+
     checkReadiness: "檢查 Mac 輔助程式就緒狀態",
     cleanupPending: "尚未確認清理完成。清理完成前無法使用原生電腦存取。仍可使用停止。",
     readinessPassed: "封裝輔助程式准入檢查已通過。這不會啟用控制，也不會驗證 AX 任務。",

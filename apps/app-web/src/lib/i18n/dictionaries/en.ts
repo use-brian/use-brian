@@ -15,6 +15,10 @@ import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
   nativeComputer: {
+    createTask: "Create task",
+    createTaskHelp: "Create a private task for you and this assistant using the selected conversation. This does not start computer access.",
+    createTaskFailed: "Could not create or reload the task. Check task access and refresh the list before trying again.",
+
     checkReadiness: "Check Mac helper readiness",
     cleanupPending: "Cleanup is not yet confirmed. Native computer access remains unavailable until cleanup completes. Stop remains available.",
     readinessPassed: "Packaged helper admission passed. This does not enable control or verify AX tasks.",

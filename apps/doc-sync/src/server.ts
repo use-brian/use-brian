@@ -828,7 +828,8 @@ httpServer.on('upgrade', (request, socket, head) => {
   })
 })
 
-httpServer.listen(PORT, () => {
+// Unset HOST preserves Node's normal wildcard binding.
+httpServer.listen({ port: PORT, host: process.env.HOST }, () => {
   console.log(`[doc-sync] listening on :${PORT}`)
   // One-time signal so a silent auto-ingest is diagnosable: env unset here means
   // the enqueue never fires (distinct from a per-page toggle being off).

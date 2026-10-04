@@ -30,12 +30,14 @@ import { createTask, findRecentDuplicateTask, findTasksByExternalRefSystem, getT
  */
 export function createDbTaskStore(
   deps: {
+    /** Explicit setup: retain cache notification, skip creation automation. */
+    creationAutomation?: false
     entityLinks?: EntityLinksStore
     onTaskTerminal?: (host: { type: 'task'; id: string }) => void
     onTaskCreate?: (task: TaskRecord, userId: string) => void
   } = {},
 ): TaskStore {
-  const { entityLinks, onTaskTerminal, onTaskCreate } = deps
+  const { entityLinks, onTaskTerminal, onTaskCreate, creationAutomation } = deps
   return {
     async create({ userId, ...params }) {
       // Create idempotency: a retry / double-fire of the same logical create
@@ -53,10 +55,10 @@ export function createDbTaskStore(
       // yet (a follow-up type widening) — read it via a permissive
       // cast and thread it into `createTask` for the `mentioned` edge.
       const extras = params as typeof params & { linkedEntityIds?: readonly string[] }
-      const record = await createTask(userId, { ...params, linkedEntityIds: extras.linkedEntityIds }, entityLinks)
+      const record = await createTask(userId, { ...params, linkedEntityIds: extras.linkedEntityIds }, entityLinks, undefined, creationAutomation === false ? { automation: false } : undefined)
       // Autopilot: a top-level task auto-drafts a bound goal. Fire-and-forget —
       // drafting a goal must never fail or block the task write.
-      if (onTaskCreate && record.parentId === null) onTaskCreate(record, userId)
+      if (creationAutomation !== false && onTaskCreate && record.parentId === null) onTaskCreate(record, userId)
       return record
     },
     getById(ctx, id) {

@@ -1,14 +1,15 @@
 "use client";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
 import { desktopBridge } from "@/lib/desktop-auth-source";
 import { nativeComputer, type DiscoveredTarget, isNativeTarget, nativeTargetKey } from "@/lib/native-computer";
 import { useChatSessionsData } from "@/lib/chat-surface-data";
-import { fetchNativeContextTasks } from "@/lib/api/native-computer";
-import { useCachedResource } from "@/lib/surface-cache";
+import { createNativeContextTask, fetchNativeContextTasks } from "@/lib/api/native-computer";
+import { invalidateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { nativeContextTasksCacheKey } from "@/lib/surface-prefetch";
 import { ListSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
+import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
@@ -25,10 +26,10 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   const t = copy.nativeComputer;
   const supported = !!desktopBridge()?.computerControl;
   const state = useSyncExternalStore(nativeComputer.subscribe, nativeComputer.snapshot, nativeComputer.serverSnapshot);
-  const chat = useChatSessionsData(supported ? workspaceId : null);
+  const chat = useChatSessionsData(workspaceId);
   const [assistantId, setAssistant] = useState("");
   const [conversationId, setConversation] = useState("");
-  const contextKey = supported && !state.cleanupPending && assistantId && conversationId
+  const contextKey = !state.cleanupPending && assistantId && conversationId
     ? nativeContextTasksCacheKey(workspaceId, assistantId, conversationId) : null;
   const tasks = useCachedResource(contextKey, () => fetchNativeContextTasks(workspaceId, assistantId, conversationId));
   const [taskSelection, setTaskSelection] = useState<{ key: string | null; id: string } | null>(null);
@@ -37,6 +38,41 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => { setTaskSelection(null); }, [contextKey]);
   const eligibleTasks = contextKey && !tasks.error ? tasks.data ?? [] : [];
+  const creation = useRef<{ key: string | null; revision: number }>({ key: contextKey, revision: 0 });
+  if (creation.current.key !== contextKey) creation.current = { key: contextKey, revision: creation.current.revision + 1 };
+  const promptAbort = useRef<AbortController | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [createFailed, setCreateFailed] = useState(false);
+  useEffect(() => {
+    setCreating(false); setCreateFailed(false);
+    return () => { creation.current.revision++; promptAbort.current?.abort(); };
+  }, [contextKey]);
+  async function createTask() {
+    if (!contextKey || creating) return;
+    const revision = creation.current.revision;
+    const current = () => creation.current.key === contextKey && creation.current.revision === revision
+      && nativeContextTasksCacheKey(workspaceId, assistantId, conversationId) === contextKey
+      && !nativeComputer.snapshot().cleanupPending;
+    const abort = new AbortController(); promptAbort.current = abort;
+    setCreating(true); setCreateFailed(false);
+    try {
+      const title = await promptDialog({ title: t.createTask, description: t.createTaskHelp, confirmLabel: t.createTask, signal: abort.signal });
+      if (!current() || title === null) return;
+      if (!title.trim() || title.trim().length > 512) { setCreateFailed(true); return; }
+      const task = await createNativeContextTask(workspaceId, assistantId, conversationId, title.trim());
+      if (!current()) return;
+      // Re-read through the existing permission-filtered picker. A successful
+      // write does not authorize displaying/selecting a now-inaccessible task.
+      // Detach any pre-mutation read; refresh alone would join its stale
+      // promise. The cache also discards that old response if it arrives late.
+      invalidateSurfaceCache(contextKey);
+      const rows = await tasks.refresh();
+      if (!current()) return;
+      if (rows?.some(row => row.id === task.id)) setTaskSelection({ key: contextKey, id: task.id });
+      else setCreateFailed(true);
+    } catch { if (current()) setCreateFailed(true); }
+    finally { if (current()) setCreating(false); }
+  }
 
   const [goal, setGoal] = useState("");
   const [targets, setTargets] = useState<DiscoveredTarget[]>([]);
@@ -68,7 +104,7 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
   }, [allowControl, allowCapture, canControl, canCapture]);
   // Discovery is read-only and must never interrupt a live grant/approval.
   useEffect(() => {
-    if (active || busy || state.inspection) return;
+    if (!supported || active || busy || state.inspection) return;
     let live = true;
     const refresh = async () => {
       try {
@@ -82,7 +118,7 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
     window.addEventListener("focus", refresh);
     const timer = setInterval(refresh, 5000);
     return () => { live = false; clearInterval(timer); window.removeEventListener("focus", refresh); };
-  }, [workspaceId, active, busy, state.inspection]);
+  }, [workspaceId, supported, active, busy, state.inspection]);
   const resumable = phase === "paused_for_user" || phase === "stopped";
   const ready = phase === "ready" || phase === "ended" || resumable;
   const valid = !state.inspection && ready && !!target && !!goal.trim() && chat.assistants.some(a => a.id === assistantId) && conversations.some(c => c.id === conversationId) && eligibleTasks.some(row => row.id === taskId);
@@ -137,15 +173,21 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
       {copy.tasksPage.loadFailed}{" "}<Button variant="outline" className="min-h-11" disabled={tasks.revalidating} onClick={() => void tasks.refresh()}>{copy.tasksPage.retry}</Button>
     </div> : null}
     {failed ? <p role="alert" className="text-destructive">{t.error}</p> : null}
-    {supported && (!chat.assistantsLoaded || contextKey && !tasks.data && !tasks.error) ? <ListSurfaceSkeleton /> : null}
-    {supported && !state.cleanupPending ? <>
+    {(!chat.assistantsLoaded || contextKey && !tasks.data && !tasks.error) ? <ListSurfaceSkeleton /> : null}
+    {!state.cleanupPending ? <>
       <p className="text-sm">{t.contextHelp} <Link className="underline" href={`/w/${workspaceId}/tasks`}>{t.tasks}</Link>{" · "}<Link className="underline" href={`/w/${workspaceId}/chat`}>{t.chat}</Link></p>
       <div className="grid gap-4 md:grid-cols-2">
         <Picker label={t.assistant} value={assistantId} disabled={busy || active} options={chat.assistants.map(a => ({ id: a.id, name: a.name }))} onChange={id => { setAssistant(id); setConversation(""); setTask(""); }} />
         <Picker label={t.conversation} value={conversationId} disabled={busy || active} options={conversations.map(c => ({ id: c.id, name: c.title || t.untitled }))} onChange={id => { setConversation(id); setTask(""); }} />
         <Picker label={t.task} value={taskId} disabled={busy || active} options={eligibleTasks.map(row => ({ id: row.id, name: row.title }))} onChange={setTask} />
-        <Picker label={t.target} value={targetKey} disabled={busy || active} options={targets.map(item => ({ id: nativeTargetKey(item), name: `${item.displayName ? `${item.displayName} · ` : ""}${item.appId} · ${item.windowId}` }))} onChange={setTarget} />
+        {supported ? <Picker label={t.target} value={targetKey} disabled={busy || active} options={targets.map(item => ({ id: nativeTargetKey(item), name: `${item.displayName ? `${item.displayName} · ` : ""}${item.appId} · ${item.windowId}` }))} onChange={setTarget} /> : null}
       </div>
+      <div className="space-y-2">
+        <Button variant="outline" className="min-h-11" disabled={!contextKey || creating || busy || active} onClick={() => void createTask()}>{t.createTask}</Button>
+        <p className="text-sm text-muted-foreground">{t.createTaskHelp}</p>
+        {createFailed ? <p role="alert" className="text-destructive">{t.createTaskFailed}</p> : null}
+      </div>
+      {supported ? <>
       {!targets.length ? <p className="text-sm">{t.noTargets}</p> : null}
       <label className="block space-y-1"><span>{t.goal}</span><textarea className="min-h-28 w-full rounded-md border bg-background p-3 text-base" maxLength={2000} value={goal} disabled={busy || active} onChange={e => setGoal(e.target.value)} /></label>
       <p className="text-sm">{allowControl ? t.observe : t.inspectorHelp}</p>
@@ -153,6 +195,7 @@ export function NativeComputerPage({ workspaceId }: { workspaceId: string }) {
       <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowCapture} onCheckedChange={setCapture} disabled={busy || active || !allowControl || !canCapture} />{t.capture}</label>
       <p className="text-sm text-muted-foreground">{t.consent}</p>
       <Button className="min-h-11" disabled={!valid || busy || active} onClick={() => void start()}>{resumable ? t.resume : t.start}</Button>
+      </> : null}
     </> : null}
   </div></section>;
 }

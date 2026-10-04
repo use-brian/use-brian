@@ -3,14 +3,17 @@ import type { NativeAccountingCapability } from './accounting.js'
 import { z } from 'zod'
 import type { NativeScope, NativeComputerService } from './service.js'
 
-export const ReadinessContextSchema = z.object({
+const ReadinessScopeSchema = z.object({
   workspaceId: z.string().uuid(), assistantId: z.string().uuid(),
   conversationId: z.string().uuid(), taskId: z.string().uuid(),
-  deviceId: z.string().min(1).max(256),
-}).strict()
+})
+export const ReadinessContextSchema = z.union([
+  ReadinessScopeSchema.extend({ deviceId: z.string().min(1).max(256) }).strict(),
+  ReadinessScopeSchema.extend({ backendOnly: z.literal(true) }).strict(),
+])
 export const ReadinessCodeSchema = z.enum([
   'native_disabled', 'configuration_invalid', 'schema_unavailable', 'auth_session_denied',
-  'scope_denied', 'policy_denied', 'device_busy', 'relay_unavailable', 'relay_disabled',
+  'scope_denied', 'policy_denied', 'device_not_checked', 'device_busy', 'relay_unavailable', 'relay_disabled',
   'accounting_unavailable', 'runtime_not_checked', 'model_unavailable', 'credits_blocked',
   'budget_invalid', 'provider_unsupported', 'check_failed',
 ])
@@ -52,18 +55,24 @@ export function safeReadinessUrl(raw: string): URL {
   return url
 }
 export async function nativeReadiness(service: NativeComputerService | null,
-  scope: NativeScope, authSessionId: string, deviceId: string, options?: ReadinessOptions) {
+  scope: NativeScope, authSessionId: string, deviceId: string | undefined, options?: ReadinessOptions) {
   const blockers: ReadinessCode[] = service ? [...await service.readiness(scope, authSessionId, deviceId)] : ['native_disabled']
   let modelWarnings: z.infer<typeof ReadinessWarningSchema>[] = ['vision_not_checked']
   if (!options?.accountingAvailable) blockers.push('accounting_unavailable')
   if (!options?.checkModel) blockers.push('runtime_not_checked')
-  else if (!blockers.length) {
+  // Backend-only can inspect model configuration despite a conversation lease
+  // or relay outage, but never past failed schema/auth/scope/policy/accounting.
+  else if (!blockers.length || (deviceId === undefined && blockers.every(code =>
+    ['device_busy', 'relay_unavailable', 'relay_disabled'].includes(code)))) {
     try {
       const result = ReadinessModelReportSchema.parse(await options.checkModel(scope))
       blockers.push(...result.blockers); modelWarnings = result.warnings
     }
     catch { blockers.push('check_failed') }
   }
+  // Missing device identity must never imply device-fence readiness. Append
+  // after backend/model inspection so this blocker alone does not skip it.
+  if (deviceId === undefined) blockers.push('device_not_checked')
   return ReadinessReportSchema.parse({ protocol: 'native-computer-v1', ready: blockers.length === 0,
     blockers: [...new Set(blockers)], warnings: [...new Set(['jwt_compatibility_unverified', 'live_model_unverified',
       'mac_verification_pending', ...modelWarnings])] })

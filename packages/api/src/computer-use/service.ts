@@ -1,11 +1,11 @@
 import { safeReadinessUrl, type ReadinessCode } from './readiness.js'
 import { z } from 'zod'
-import { NativeModelIdSchema, type Tool, type ToolContext } from '@use-brian/core'
+import { NativeModelIdSchema, type TaskStore, type Tool, type ToolContext } from '@use-brian/core'
 import { randomUUID, createHash } from 'node:crypto'
 import { CommandSchema, GrantSchema, StatusSchema, NATIVE_PROTOCOL, sameIdentity, type NativeCommand, type NativeGrant, ReceiptSchema, MAX_MESSAGE_BYTES, sameTarget } from '@use-brian/computer-control/protocol.js'
 import { query, queryWithRLS } from '../db/client.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
-import { buildAccessPredicate } from '../db/access-predicate.js'
+import { assertExecutionResourceScope, buildAccessPredicate } from '../db/access-predicate.js'
 import { signNativeToken } from '../auth/native-computer-token.js'
 export type NativeScope = { userId: string; workspaceId: string; assistantId: string; conversationId: string; taskId: string }
 // Explicit allowlist: never persist provider URLs, exceptions, AX, goals or frames.
@@ -103,7 +103,8 @@ export class NativeComputerService {
   private readonly runContexts = new WeakSet<ToolContext>()
   constructor(private config: { relayUrl: string; relaySecret: string; jwtSecret: string; deploymentId: string }) {}
   /** SELECT-only preflight. Never creates grants, expires sessions or clears unknown fences. */
-  async readiness(scope: NativeScope, authSessionId: string, deviceId: string): Promise<ReadinessCode[]> {
+  async readiness(scope: NativeScope, authSessionId: string, deviceId: string | undefined): Promise<ReadinessCode[]> {
+    const blockers: ReadinessCode[] = []
     try {
       safeReadinessUrl(this.config.relayUrl)
       if (!GrantSchema.shape.identity.shape.deploymentId.safeParse(this.config.deploymentId).success
@@ -125,22 +126,27 @@ export class NativeComputerService {
       if (!auth.rows.length) return ['auth_session_denied']
       if (!await this.authorized(scope)) return ['scope_denied']
       try { await this.assertPolicy(scope) } catch { return ['policy_denied'] }
-      const busy = await query(`SELECT 1 FROM native_computer_sessions WHERE deployment_id=$1 AND device_id=$2
-        AND (state='execution_unknown' OR run_state IN ('running','execution_unknown')
-          OR (revoked_at IS NULL AND expires_at>now())) LIMIT 1`, [this.config.deploymentId, deviceId])
-      if (busy.rows.length) return ['device_busy']
+      if (deviceId !== undefined) {
+        const busy = await query(`SELECT 1 FROM native_computer_sessions WHERE deployment_id=$1 AND device_id=$2
+          AND (state='execution_unknown' OR run_state IN ('running','execution_unknown')
+            OR (revoked_at IS NULL AND expires_at>now())) LIMIT 1`, [this.config.deploymentId, deviceId])
+        if (busy.rows.length) return ['device_busy']
+      }
       // Exact native_computer_conversation_lease predicate: global across devices
       // and deployments, including expired but not-yet-revoked rows. No cleanup here.
       const conversationBusy = await query(`SELECT 1 FROM native_computer_sessions
         WHERE user_id=$1 AND conversation_id=$2 AND revoked_at IS NULL LIMIT 1`,
       [scope.userId, scope.conversationId])
-      if (conversationBusy.rows.length) return ['device_busy']
+      if (conversationBusy.rows.length) {
+        if (deviceId !== undefined) return ['device_busy']
+        blockers.push('device_busy')
+      }
     } catch { return ['check_failed'] }
     try {
       const response = await fetch(`${this.config.relayUrl.replace(/\/$/,'')}/internal/native-computer/readiness`, {
         headers: { 'x-relay-secret': this.config.relaySecret }, redirect: 'error', signal: AbortSignal.timeout(5000),
       })
-      if (!response.ok || !response.body) { await response.body?.cancel(); return ['relay_unavailable'] }
+      if (!response.ok || !response.body) { await response.body?.cancel(); return [...blockers, 'relay_unavailable'] }
       const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0
       try {
         while (true) { const { done, value } = await reader.read(); if (done) break
@@ -148,8 +154,8 @@ export class NativeComputerService {
       } finally { await reader.cancel() }
       const parsed = z.object({ enabled: z.boolean(), protocol: z.literal('native-computer-v1') }).strict()
         .parse(JSON.parse(Buffer.concat(chunks).toString()))
-      return parsed.enabled ? [] : ['relay_disabled']
-    } catch { return ['relay_unavailable'] }
+      return parsed.enabled ? blockers : [...blockers, 'relay_disabled']
+    } catch { return [...blockers, 'relay_unavailable'] }
   }
   async relay(path: string, method = 'GET', body?: unknown): Promise<unknown> {
     const response = await fetch(`${this.config.relayUrl.replace(/\/$/,'')}/internal/native-computer${path}`, { method, headers: { 'x-relay-secret': this.config.relaySecret, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(35_000) })
@@ -176,6 +182,31 @@ export class NativeComputerService {
       AND ${access.sql}
       ORDER BY t.id LIMIT 500`, [s.userId,s.workspaceId,s.assistantId,s.conversationId,...access.params])
     return r.rows.map(({ id, title }) => ({ id, title }))
+  }
+  /** Explicit user-authored task, not a model execution or a native grant. */
+  async createContextTask(s: Omit<NativeScope, 'taskId'>, title: string, tasks: Pick<TaskStore, 'create'>) {
+    const denied = () => Object.assign(new Error('Native context denied'), { code: 'native_context_denied' })
+    // Do not let the viewpoint's stale-assistant fallback authorize a different
+    // assistant. Require the exact owned conversation and explicit capability.
+    const binding = await queryWithRLS(s.userId, `SELECT s.id FROM sessions s
+      JOIN assistants a ON a.id=s.assistant_id
+      JOIN workspace_members m ON m.workspace_id=a.workspace_id AND m.user_id=$1
+      JOIN assistant_capabilities c ON c.assistant_id=a.id AND c.capability='native_computer' AND c.revoked_at IS NULL
+      WHERE s.id=$4 AND s.user_id=$1 AND a.id=$3 AND a.workspace_id=$2`,
+    [s.userId, s.workspaceId, s.assistantId, s.conversationId])
+    if (!binding.rows.length) throw denied()
+    const access = await resolveWorkspaceViewpoint(s.userId, s.workspaceId, s.assistantId)
+    if (!access || access.assistantId !== s.assistantId) throw denied()
+    // This is newly entered text, not derived conversation content. Use the
+    // ordinary manual-task internal classification, never downgrade to public.
+    const visibility = { userId: s.userId, assistantId: s.assistantId }
+    const scope = { workspaceId: s.workspaceId, ...visibility, sensitivity: 'internal' as const, compartments: [], projectIds: [] }
+    assertExecutionResourceScope(scope, 'mutation', access)
+    assertExecutionResourceScope(scope, 'read', access)
+    const task = await tasks.create({ userId: s.userId, workspaceId: s.workspaceId,
+      title, status: 'todo', visibility, access, sensitivity: 'internal',
+      source: 'user', sourceSessionId: s.conversationId, writtenBy: 'user' })
+    return { id: task.id, title: task.title.slice(0, 256) }
   }
   async authorized(s: NativeScope): Promise<boolean> {
     if (!s.userId || !s.workspaceId || !s.assistantId || !s.conversationId || !s.taskId) return false

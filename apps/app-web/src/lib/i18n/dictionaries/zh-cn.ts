@@ -13,6 +13,10 @@ import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
   nativeComputer: {
+    createTask: "创建任务",
+    createTaskHelp: "使用所选对话，为你与此助手创建私人任务。这不会启动电脑访问。",
+    createTaskFailed: "无法创建或重新加载任务。请确认访问权限并刷新列表后重试。",
+
     checkReadiness: "检查 Mac 辅助程序就绪状态",
     cleanupPending: "尚未确认清理完成。清理完成前无法使用原生电脑访问。仍可使用停止。",
     readinessPassed: "打包辅助程序准入检查已通过。这不会启用控制，也不会验证 AX 任务。",

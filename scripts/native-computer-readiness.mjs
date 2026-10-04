@@ -3,7 +3,7 @@ import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 
-const codes = new Set(['native_disabled','configuration_invalid','schema_unavailable','auth_session_denied','scope_denied','policy_denied','device_busy','relay_unavailable','relay_disabled','accounting_unavailable','runtime_not_checked','model_unavailable','credits_blocked','budget_invalid','provider_unsupported','check_failed'])
+const codes = new Set(['native_disabled','configuration_invalid','schema_unavailable','auth_session_denied','scope_denied','policy_denied','device_not_checked','device_busy','relay_unavailable','relay_disabled','accounting_unavailable','runtime_not_checked','model_unavailable','credits_blocked','budget_invalid','provider_unsupported','check_failed'])
 const warnings = new Set(['jwt_compatibility_unverified','live_model_unverified','mac_verification_pending','vision_not_checked','vision_image_unsupported','vision_approval_unaccepted','vision_approval_mismatch','vision_budget_insufficient','native_strict_adapter_unverified'])
 const fail = () => { throw new Error('Readiness check failed') }
 export function parseArguments(args) {
@@ -11,7 +11,7 @@ export function parseArguments(args) {
   for (let i = 0; i < args.length; i++) {
     const key = args[i]
     if (Object.hasOwn(values, key)) fail()
-    if (key === '--non-production') values[key] = true
+    if (key === '--non-production' || key === '--backend-only') values[key] = true
     else if (['--api','--token-file','--workspace-id','--assistant-id','--conversation-id','--task-id','--device-id'].includes(key) && args[i+1] && !args[i+1].startsWith('--')) values[key] = args[++i]
     else fail()
   }
@@ -25,8 +25,13 @@ export function parseArguments(args) {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value ?? '')) fail()
     context[field] = value
   }
-  context.deviceId = values['--device-id']
-  if (typeof context.deviceId !== 'string' || !context.deviceId.length || context.deviceId.length > 256 || /[\x00-\x1f\x7f]/.test(context.deviceId)) fail()
+  if (values['--backend-only']) {
+    if (Object.hasOwn(values, '--device-id')) fail()
+    context.backendOnly = true
+  } else {
+    context.deviceId = values['--device-id']
+    if (typeof context.deviceId !== 'string' || !context.deviceId.length || context.deviceId.length > 256 || /[\x00-\x1f\x7f]/.test(context.deviceId)) fail()
+  }
   return { endpoint: new URL('/api/native-computer/readiness', url), tokenFile: values['--token-file'], context }
 }
 export async function readToken(file, stdin = process.stdin) {
@@ -70,7 +75,10 @@ export async function checkReadiness(config, token, fetchImpl = fetch) {
   try { while (true) { const { done, value } = await reader.read(); if (done) break
     size += value.byteLength; if (size > 8192) fail(); chunks.push(value) }
   } finally { await reader.cancel() }
-  return validateReport(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+  const report = validateReport(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+  // Never accept a server that silently treats backend-only as full readiness.
+  if (config.context.backendOnly === true && !report.blockers.includes('device_not_checked')) fail()
+  return report
 }
 export async function main(args) {
   try {

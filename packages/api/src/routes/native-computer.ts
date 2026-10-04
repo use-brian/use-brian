@@ -2,7 +2,7 @@ import { requireAuth, requireAuthWithoutTouch } from '../auth/middleware.js'
 import type { AuthSessionStore } from '../db/auth-session-store.js'
 import type { RequestHandler } from 'express'
 import { nativeReadiness, ReadinessContextSchema, type ReadinessOptions } from '../computer-use/readiness.js'
-import type { Tool } from '@use-brian/core'
+import type { TaskStore, Tool } from '@use-brian/core'
 import { Router } from 'express'
 import { z } from 'zod'
 import { ExecutionCheckSchema, type NativeComputerService } from '../computer-use/service.js'
@@ -21,7 +21,7 @@ export function nativeComputerAuth(jwtSecret: string, sessions?: Pick<AuthSessio
 
 /** PKCE verifier must be generated/retained in Electron main, never exposed via preload.
  * Origin absence is defense in depth, not a main-process identity assertion. */
-export function nativeComputerRoutes(service: NativeComputerService | null, tool?: Tool, readiness?: ReadinessOptions): Router {
+export function nativeComputerRoutes(service: NativeComputerService | null, tool?: Tool, readiness?: ReadinessOptions, tasks?: Pick<TaskStore, 'create'>): Router {
   const router=Router()
   router.post('/readiness', async (req,res) => {
     res.setHeader('Cache-Control','no-store')
@@ -31,7 +31,7 @@ export function nativeComputerRoutes(service: NativeComputerService | null, tool
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const report = await Promise.race([
-        nativeReadiness(service, { ...parsed.data, userId: req.userId }, req.authSessionId, parsed.data.deviceId, readiness),
+        nativeReadiness(service, { ...parsed.data, userId: req.userId }, req.authSessionId, 'deviceId' in parsed.data ? parsed.data.deviceId : undefined, readiness),
         new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Readiness timeout')), 8000) }),
       ])
       res.json(report)
@@ -45,6 +45,22 @@ export function nativeComputerRoutes(service: NativeComputerService | null, tool
     if (!parsed.success) { res.sendStatus(400); return }
     try { res.json({ tasks: await service!.contextTasks({ ...parsed.data, userId: req.userId }) }) }
     catch { res.status(503).json({ error: 'Native context unavailable' }) }
+  })
+  router.post('/context-tasks', async (req,res) => {
+    if (!req.userId || !req.authSessionId) { res.sendStatus(403); return }
+    const parsed = Context.extend({ title: z.string().trim().min(1).max(512) }).strict().safeParse(req.body)
+    if (!parsed.success) { res.sendStatus(400); return }
+    if (!tasks) { res.sendStatus(503); return }
+    try {
+      const { title, ...context } = parsed.data
+      res.status(201).json({ task: await service!.createContextTask({ ...context, userId: req.userId }, title, tasks) })
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      if (code === 'native_context_denied' || code === 'scope_operation_denied') {
+        res.status(403).json({ error: 'Native context denied' }); return
+      }
+      res.status(503).json({ error: 'Native task creation unavailable' })
+    }
   })
   router.post('/sessions',async(req,res)=>{
     if (!req.authSessionId) { res.sendStatus(403); return }

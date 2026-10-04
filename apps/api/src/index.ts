@@ -109,6 +109,7 @@ const env: OpenApiEnv = {
     (process.env.BRIAN_SUPPORT_DIAGNOSTICS_ENABLED ?? '').trim().toLowerCase(),
   ),
   PORT: process.env.PORT,
+  API_HOST: process.env.API_HOST,
   // Default ON, matching the hosted `boolFlag(true)` and the documented
   // default in docs/architecture/media/transcription.md. This is an OPS KILL
   // SWITCH, never an opt-in: until 2026-07-29 the open entry spelled it

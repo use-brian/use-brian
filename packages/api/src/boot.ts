@@ -836,6 +836,8 @@ export interface OpenApiEnv {
   SUPPORT_DIAGNOSTICS_ENABLED?: boolean
   /** Optional Cloud Run injected port; falls back to API_URL port / 4000. */
   PORT?: string
+  /** Optional listener address; unset preserves Node's default wildcard binding. */
+  API_HOST?: string
   // Voice transcription reuses GEMINI_API_KEY; these toggle/model it.
   VOICE_TRANSCRIPTION_ENABLED?: boolean
   VOICE_TRANSCRIPTION_MODEL?: string
@@ -6299,7 +6301,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   }))
 
-  app.use('/api/native-computer', nativeComputerAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask'), nativeComputerReadiness))
+  // Explicit setup commits a normal task and notifies read-side caches, but
+  // neither triages it with an LLM nor dispatches workflows / waiting goals.
+  const nativeContextTaskStore = createDbTaskStore({ creationAutomation: false })
+  app.use('/api/native-computer', nativeComputerAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask'), nativeComputerReadiness, nativeContextTaskStore))
 
   app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
     jwtSecret: env.JWT_SECRET,
@@ -9687,7 +9692,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   async function start(): Promise<{ server: http.Server; port: number }> {
     return new Promise((resolve) => {
-      server = app.listen(port, () => {
+      server = app.listen({ port, host: env.API_HOST }, () => {
         console.log(`Use Brian api running on port ${port}`)
         console.log(`Tools loaded: ${allTools.size}`)
         resolve({ server: server!, port })

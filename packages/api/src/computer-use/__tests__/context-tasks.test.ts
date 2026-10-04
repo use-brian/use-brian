@@ -1,3 +1,4 @@
+import type { TaskStore } from '@use-brian/core'
 import { expect, it, vi } from 'vitest'
 import { PGlite } from '@electric-sql/pglite'
 import { readFile } from 'node:fs/promises'
@@ -8,7 +9,7 @@ import { query, queryWithRLS } from '../../db/client.js'
 import { NativeComputerService } from '../service.js'
 import { nativeComputerRoutes } from '../../routes/native-computer.js'
 
-it('context tasks intersects the exact current native scope and returns bounded metadata only', async () => {
+it('context tasks reads and explicit creation intersect exact native ownership and normal task access', async () => {
   const db = new PGlite()
   const id = '00000000-0000-4000-8000-000000000001'
   const other = '00000000-0000-4000-8000-000000000002'
@@ -66,11 +67,36 @@ it('context tasks intersects the exact current native scope and returns bounded 
     const relay = vi.spyOn(service, 'relay')
     let userId: string | undefined = id
     let authSessionId: string | undefined = id
+    const create = vi.fn<TaskStore['create']>().mockResolvedValue({ id, title: 'Created task' } as Awaited<ReturnType<TaskStore['create']>>)
     const app = express()
+    app.use(express.json())
     app.use((req, _res, next) => { req.userId = userId; req.authSessionId = authSessionId; next() })
-    app.use(nativeComputerRoutes(service))
+    app.use(nativeComputerRoutes(service, undefined, undefined, { create }))
     const context = { workspaceId: id, assistantId: id, conversationId: id }
     const get = (params = context) => request(app).get('/context-tasks').query(params)
+    const post = (body: unknown = { ...context, title: '  Created task  ' }) => request(app).post('/context-tasks').send(body as object)
+    expect((await post()).status).toBe(201)
+    expect(create).toHaveBeenLastCalledWith(expect.objectContaining({
+      userId: id, workspaceId: id, title: 'Created task', status: 'todo',
+      visibility: { userId: id, assistantId: id }, sensitivity: 'internal',
+      source: 'user', sourceSessionId: id, writtenBy: 'user',
+      access: expect.objectContaining({ userId: id, workspaceId: id, assistantId: id, clearance: 'confidential' }),
+    }))
+    for (const field of ['workspaceId', 'assistantId', 'conversationId']) {
+      create.mockClear()
+      expect((await post({ ...context, title: 'Task', [field]: other })).status).toBe(403)
+      expect(create).not.toHaveBeenCalled()
+    }
+    for (const title of ['', '   ', 'x'.repeat(513)]) expect((await post({ ...context, title })).status).toBe(400)
+    for (const field of ['userId', 'visibility', 'deviceId', 'grant', 'sensitivity']) {
+      expect((await post({ ...context, title: 'Task', [field]: other })).status).toBe(400)
+    }
+    create.mockRejectedValueOnce(new Error('private database detail'))
+    const failed = await post()
+    expect(failed.status).toBe(503)
+    expect(failed.body).toEqual({ error: 'Native task creation unavailable' })
+    create.mockRejectedValueOnce(Object.assign(new Error('private scope detail'), { code: 'scope_operation_denied' }))
+    expect((await post()).status).toBe(403)
     const response = await get()
     expect(response.status).toBe(200)
     expect(response.headers['cache-control']).toBe('no-store')
@@ -91,6 +117,11 @@ it('context tasks intersects the exact current native scope and returns bounded 
       await db.exec(`BEGIN; UPDATE ${table} SET ${column}=${value}`)
       expect((await get()).body, `${table}.${column}`).toEqual({ tasks: [] })
       expect(await service.authorized({ ...context, userId: id, taskId: id })).toBe(false)
+      if (table !== 'tasks') {
+        create.mockClear()
+        expect((await post()).status, `${table}.${column} create`).toBe(403)
+        expect(create).not.toHaveBeenCalled()
+      }
       await db.exec('ROLLBACK')
     }
     // Native ownership is deliberately unchanged by read-scope reductions.
@@ -105,6 +136,11 @@ it('context tasks intersects the exact current native scope and returns bounded 
       await db.exec(`BEGIN; ${sql}`)
       expect(await service.authorized({ ...context, userId: id, taskId: id })).toBe(true)
       expect((await get()).body, sql).toEqual({ tasks: [] })
+      if (!sql.startsWith('UPDATE tasks')) {
+        create.mockClear()
+        expect((await post()).status).toBe(403)
+        expect(create).not.toHaveBeenCalled()
+      }
       await db.exec('ROLLBACK')
     }
     // The app-role floor also catches a reduction after viewpoint resolution;
@@ -131,9 +167,9 @@ it('context tasks intersects the exact current native scope and returns bounded 
     expect((await get()).body).toEqual({ tasks: [] })
     await db.exec('ROLLBACK')
     expect(queryWithRLS).toHaveBeenCalledWith(id, expect.stringContaining('sensitivity_rank(t.sensitivity)'), expect.any(Array))
-    userId = other; expect((await get()).body).toEqual({ tasks: [] })
-    userId = undefined; expect((await get()).status).toBe(403)
-    userId = id; authSessionId = undefined; expect((await get()).status).toBe(403)
+    userId = other; expect((await get()).body).toEqual({ tasks: [] }); expect((await post()).status).toBe(403)
+    userId = undefined; expect((await get()).status).toBe(403); expect((await post()).status).toBe(403)
+    userId = id; authSessionId = undefined; expect((await get()).status).toBe(403); expect((await post()).status).toBe(403)
     authSessionId = id
     expect((await get({ ...context, assistantId: 'bad' })).status).toBe(400)
     expect((await request(app).get('/context-tasks').query({ ...context, userId: other })).status).toBe(400)

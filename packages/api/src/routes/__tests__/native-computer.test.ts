@@ -89,6 +89,11 @@ it('read-only native authentication never touches aged sessions; ordinary native
   expect(dbQuery.mock.calls[0]?.[0].trim()).toMatch(/^SELECT /)
  }
  expect((await request(a).get('/api/native-computer/context-tasks')).status).toBe(401)
+ expect((await request(a).post('/api/native-computer/context-tasks').send({})).status).toBe(401)
+ dbQuery.mockClear()
+ expect((await request(a).post('/api/native-computer/context-tasks').set('Authorization',`Bearer ${token}`).send({})).status).toBe(400)
+ expect(dbQuery).toHaveBeenCalledTimes(2)
+ expect(dbQuery.mock.calls[1]?.[0]).toContain('UPDATE auth_sessions')
  dbQuery.mockClear()
  expect((await request(a).post('/api/native-computer/sessions?readOnly=true').set('Authorization',`Bearer ${token}`).set('X-Read-Only','true').send({})).status).toBe(400)
  expect(dbQuery).toHaveBeenCalledTimes(2)

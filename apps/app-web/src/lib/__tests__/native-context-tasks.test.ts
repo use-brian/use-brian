@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { fetchNativeContextTasks } from "@/lib/api/native-computer";
+import { createNativeContextTask, fetchNativeContextTasks } from "@/lib/api/native-computer";
 import { authFetch } from "@/lib/auth-fetch";
 import { nativeContextTasksCacheKey, surfaceDataKey } from "@/lib/surface-prefetch";
 const viewer = vi.hoisted(() => ({ id: "one" }));
@@ -24,4 +24,14 @@ it("[COMP:app-web/native-computer] fetches only native context metadata and fail
   expect(options).toEqual({ cache: "no-store" });
   vi.mocked(authFetch).mockResolvedValueOnce(new Response("", { status: 403 }));
   await expect(fetchNativeContextTasks("w", "a", "c")).rejects.toThrow("Native context unavailable");
+});
+
+it("[COMP:app-web/native-computer] creates only an explicit normal task context, without native authority", async () => {
+  vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({ task: { id: "t", title: "Task" } }), { status: 201 }));
+  expect(await createNativeContextTask("w", "a", "c", "Task")).toEqual({ id: "t", title: "Task" });
+  const [url, options] = vi.mocked(authFetch).mock.calls.at(-1)!;
+  expect(String(url)).toMatch(/\/api\/native-computer\/context-tasks$/);
+  expect(options).toEqual({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspaceId: "w", assistantId: "a", conversationId: "c", title: "Task" }) });
+  vi.mocked(authFetch).mockResolvedValueOnce(new Response("private error", { status: 403 }));
+  await expect(createNativeContextTask("w", "a", "c", "Task")).rejects.toThrow("Native task creation unavailable");
 });

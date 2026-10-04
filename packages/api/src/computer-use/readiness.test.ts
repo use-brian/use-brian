@@ -78,7 +78,7 @@ it('production boot shares the runtime options and actual accounting at the auth
   const boot = await readFile(new URL('../boot.ts', import.meta.url), 'utf8')
   expect(boot).toContain('createNativeComputerBootRuntimeFactory(nativeModelOptions)')
   expect(boot).toContain('createNativeComputerReadinessOptions(nativeAccounting, nativeModelOptions, !!ports.nativeComputerRuntimeFactory)')
-  expect(boot).toContain("nativeComputerAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask'), nativeComputerReadiness)")
+  expect(boot).toContain("nativeComputerAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask'), nativeComputerReadiness, nativeContextTaskStore)")
   expect(boot).toContain('imageApproval: { accepted: visionAccepted, model: visionModel }')
 })
 
@@ -135,7 +135,7 @@ it('does not resolve models for missing accounting or an opaque runtime override
   expect(f.options.getWorkspacePlan).not.toHaveBeenCalled()
 })
 
-it('serves production inspection metadata through the authenticated HTTP route without making a grant or model call', async () => {
+it.each([false, true])('serves production inspection metadata without grant/model calls (backend-only=%s)', async backendOnly => {
   const { default: express } = await import('express')
   const { default: request } = await import('supertest')
   const { nativeComputerRoutes } = await import('../routes/native-computer.js')
@@ -144,10 +144,11 @@ it('serves production inspection metadata through the authenticated HTTP route w
   const create=vi.spyOn(s,'create'), dispatch=vi.spyOn(s,'dispatch'), run=vi.spyOn(s,'run')
   const a=express();a.use(express.json());a.use((req,_res,next)=>{req.userId='authenticated';req.authSessionId='current-auth';next()})
   a.use('/api/native-computer',nativeComputerRoutes(s,undefined,createNativeComputerReadinessOptions(f.accounting,f.options)))
-  const response=await request(a).post('/api/native-computer/readiness').send({workspaceId:id,assistantId:id,conversationId:id,taskId:id,deviceId:'device'})
+  const response=await request(a).post('/api/native-computer/readiness').send({workspaceId:id,assistantId:id,conversationId:id,taskId:id,...(backendOnly ? {backendOnly:true} : {deviceId:'device'})})
   expect(response.status).toBe(200)
   expect(response.headers['cache-control']).toBe('no-store')
-  expect(response.body).toEqual({protocol:'native-computer-v1',ready:true,blockers:[],warnings:[
+  expect(s.readiness).toHaveBeenCalledWith(expect.objectContaining({workspaceId:id,taskId:id}), 'current-auth', backendOnly ? undefined : 'device')
+  expect(response.body).toEqual({protocol:'native-computer-v1',ready:!backendOnly,blockers:backendOnly ? ['device_not_checked'] : [],warnings:[
     'jwt_compatibility_unverified','live_model_unverified','mac_verification_pending','native_strict_adapter_unverified']})
   expect(f.options.resolveWorkspaceCustomLlm).toHaveBeenCalledTimes(1)
   expect(f.options.resolveWorkspaceCustomLlm).toHaveBeenCalledWith(expect.objectContaining({workspaceId:id,allowFailureFallback:false}))
@@ -188,4 +189,65 @@ it('refuses an exact managed Anthropic route when only Gemini is configured', as
   expect(f.provider.createSession).not.toHaveBeenCalled()
   expect(f.options.decisionRuntime.run).not.toHaveBeenCalled()
   for (const method of ['admit', 'prepare', 'reconcile', 'reconcileBatch'] as const) expect(f.accounting[method]).not.toHaveBeenCalled()
+})
+
+it('backend-only checks the backend without inventing a device or reporting ready', async () => {
+  dbReady()
+  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ enabled:true, protocol:'native-computer-v1' })))
+  vi.stubGlobal('fetch', fetch)
+  const checkModel = vi.fn().mockResolvedValue({ blockers:[], warnings:[] })
+  const report = await nativeReadiness(service(), scope, 'auth', undefined, { accountingAvailable:true, checkModel })
+  expect(report).toMatchObject({ ready:false, blockers:['device_not_checked'] })
+  expect(checkModel).toHaveBeenCalledWith(scope)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  const sql = vi.mocked(query).mock.calls.map(([sql]) => sql)
+  expect(sql.some(sql => sql.includes('public._migrations'))).toBe(true)
+  expect(sql.some(sql => sql.includes('FROM auth_sessions'))).toBe(true)
+  expect(sql.some(sql => sql.includes('FROM sessions s'))).toBe(true)
+  expect(sql.some(sql => sql.includes('mcp_tool_settings'))).toBe(true)
+  expect(sql.some(sql => sql.includes('conversation_id=$2 AND revoked_at IS NULL'))).toBe(true)
+  expect(sql.some(sql => sql.includes('deployment_id=$1 AND device_id=$2'))).toBe(false)
+})
+
+it('backend-only retains the conversation fence and still inspects relay and model configuration', async () => {
+  dbReady()
+  const original = vi.mocked(query).getMockImplementation()!
+  vi.mocked(query).mockImplementation((...args) => args[0].includes('conversation_id=$2 AND revoked_at IS NULL')
+    ? Promise.resolve({ rows:[{}] } as never) : original(...args))
+  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ enabled:false, protocol:'native-computer-v1' })))
+  vi.stubGlobal('fetch', fetch)
+  const checkModel = vi.fn().mockResolvedValue({ blockers:['model_unavailable'], warnings:[] })
+  const report = await nativeReadiness(service(), scope, 'auth', undefined, { accountingAvailable:true, checkModel })
+  expect(report).toMatchObject({ ready:false, blockers:['device_busy','relay_disabled','model_unavailable','device_not_checked'] })
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(checkModel).toHaveBeenCalledTimes(1)
+})
+
+it.each(['schema_unavailable','auth_session_denied','scope_denied','policy_denied'] as const)(
+  'backend-only preserves %s admission and always discloses missing device checks', async code => {
+    const s = service(); vi.spyOn(s, 'readiness').mockResolvedValue([code])
+    const checkModel = vi.fn()
+    expect(await nativeReadiness(s, scope, 'auth', undefined, { accountingAvailable:true, checkModel }))
+      .toMatchObject({ ready:false, blockers:[code,'device_not_checked'] })
+    expect(checkModel).not.toHaveBeenCalled()
+  })
+
+it('backend-only cannot hide missing service/accounting configuration', async () => {
+  const checkModel = vi.fn()
+  expect(await nativeReadiness(null, scope, 'auth', undefined, { accountingAvailable:false, checkModel }))
+    .toMatchObject({ ready:false, blockers:['native_disabled','accounting_unavailable','device_not_checked'] })
+  expect(checkModel).not.toHaveBeenCalled()
+})
+
+it('readiness schema accepts only exclusive full or explicit backend-only contexts', async () => {
+  const { ReadinessContextSchema } = await import('./readiness.js')
+  const id='00000000-0000-4000-8000-000000000000'
+  const context={workspaceId:id,assistantId:id,conversationId:id,taskId:id}
+  expect(ReadinessContextSchema.safeParse({...context,deviceId:'device'}).success).toBe(true)
+  expect(ReadinessContextSchema.safeParse({...context,backendOnly:true}).success).toBe(true)
+  for (const body of [context,{...context,backendOnly:false},{...context,backendOnly:'true'},
+    {...context,backendOnly:true,deviceId:'device'},{...context,backendOnly:true,deviceId:null},
+    {...context,backendOnly:true,taskId:undefined},{...context,backendOnly:true,extra:true}]) {
+    expect(ReadinessContextSchema.safeParse(body).success).toBe(false)
+  }
 })

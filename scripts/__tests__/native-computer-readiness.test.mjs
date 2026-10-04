@@ -76,3 +76,29 @@ test('accepts bounded precise image/adapter warnings but not identifiers or lega
  }
  assert.throws(()=>validateReport({...report,warnings:Array(9).fill('live_model_unverified')}))
 })
+
+test('backend-only explicitly excludes a device and still requires every real context field',()=>{
+ const backend=[...args.slice(0,-2),'--backend-only']
+ const context=parseArguments(backend).context
+ assert.deepEqual(context,{workspaceId:id,assistantId:id,conversationId:id,taskId:id,backendOnly:true})
+ for(const bad of [args.slice(0,-2),[...args,'--backend-only'],[...backend,'--backend-only'],[...backend,'false']]) {
+  assert.throws(()=>parseArguments(bad))
+ }
+ for(const field of ['workspace','assistant','conversation','task']) {
+  const missing=[...backend], index=missing.indexOf(`--${field}-id`);missing.splice(index,2)
+  assert.throws(()=>parseArguments(missing))
+ }
+})
+
+test('backend-only sends no invented device and cannot accept a ready or unchecked server report',async()=>{
+ const config=parseArguments([...args.slice(0,-2),'--backend-only'])
+ const blocked={...report,blockers:['device_not_checked']}
+ assert.deepEqual(await checkReadiness(config,'synthetic.token',async(_url,options)=>{
+  const body=JSON.parse(options.body)
+  assert.equal(body.backendOnly,true);assert.equal(Object.hasOwn(body,'deviceId'),false)
+  return new Response(JSON.stringify(blocked))
+ }),blocked)
+ for(const invalid of [report,{...report,ready:true,blockers:[]}]) {
+  await assert.rejects(checkReadiness(config,'synthetic.token',async()=>new Response(JSON.stringify(invalid))))
+ }
+})

@@ -2,6 +2,10 @@ import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
   nativeComputer: {
+    createTask: "タスクを作成",
+    createTaskHelp: "選択した会話で、自分とこのアシスタント用の非公開タスクを作成します。コンピューターへのアクセスは開始されません。",
+    createTaskFailed: "タスクの作成または再読み込みができませんでした。アクセス権を確認し、一覧を更新してから再試行してください。",
+
     checkReadiness: "Mac ヘルパーの準備状況を確認",
     cleanupPending: "終了処理はまだ確認されていません。完了するまでコンピューター操作は利用できません。停止は引き続き利用できます。",
     readinessPassed: "パッケージ内ヘルパーの受け入れ確認に成功しました。操作を有効にするものではなく、AX タスクの検証でもありません。",
