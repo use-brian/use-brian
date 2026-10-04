@@ -172,6 +172,7 @@ export const FEISHU_PERMISSION_IMPORT = JSON.stringify(
         "im:message:send_as_bot",
         "im:message:readonly",
         "im:message:update",
+        "cardkit:card:write",
         "im:message:recall",
         "im:message.reactions:write_only",
         "im:resource",

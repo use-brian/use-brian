@@ -1,3 +1,4 @@
+import type { FeishuApi } from '@use-brian/channels'
 import { channelQuestions } from '../channel-questions.js'
 import { channelConfirmations } from '../channel-interactions.js'
 import express from 'express'
@@ -6,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   api: {
+    streamingCards: undefined as FeishuApi['streamingCards'],
     send: vi.fn(),
     editMessage: vi.fn(),
     editPost: vi.fn(),
@@ -164,6 +166,7 @@ function setup(over: {
 describe('[COMP:api/feishu-route] bridge route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.api.streamingCards = undefined
     mocks.claimChannelEvent.mockResolvedValue(true)
     mocks.getChannelForWebhook.mockResolvedValue({
       id: CHANNEL_ROW_ID,
@@ -195,6 +198,134 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       data: new Uint8Array([1, 2, 3]),
       contentType: 'image/png',
     })
+  })
+
+  it('delivers a finalized streaming card in the current thread without exposing raw model deltas', async () => {
+    const cards = {
+      open: vi.fn(async () => ({ cardId: 'card_1', messageId: 'om_card' })),
+      update: vi.fn(async () => {}), finish: vi.fn(async () => {}),
+    }
+    mocks.api.streamingCards = cards
+    let delivered: unknown
+    mocks.processChannelMessage.mockImplementation(async ({ hooks }) => {
+      expect(hooks.onTextDelta).toBeUndefined()
+      await hooks.onProcessingStart()
+      await hooks.onToolStart('t1', 'saveTask')
+      await hooks.onToolResult([{ type: 'tool_result', toolUseId: 't1', isError: false }])
+      delivered = await hooks.sendResponse('**Task saved**')
+      await hooks.onCleanup()
+    })
+    const { app } = setup({ config: { replyInThread: false } })
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage({ messageId: 'om_current', threadId: 'omt_topic' }) }).expect(202)
+    await vi.waitFor(() => expect(delivered).toEqual({ channelMessageId: 'om_card' }))
+    expect(cards.open).toHaveBeenCalledWith('oc_chat', 'Thinking...', { replyTo: 'om_current', replyInThread: false })
+    expect(cards.finish).toHaveBeenCalledExactlyOnceWith('card_1', '**Task saved**', 2)
+    expect(mocks.api.send).not.toHaveBeenCalled()
+    expect(mocks.api.recallMessage).not.toHaveBeenCalled()
+  })
+
+  it('falls back to a complete rich-text reply when terminal card update fails', async () => {
+    const cards = {
+      open: vi.fn(async () => ({ cardId: 'card_1', messageId: 'om_card' })),
+      update: vi.fn(async () => {}), finish: vi.fn().mockRejectedValueOnce(new Error('unavailable')).mockResolvedValue(undefined),
+    }
+    mocks.api.streamingCards = cards
+    let delivered: unknown
+    mocks.processChannelMessage.mockImplementation(async ({ hooks }) => {
+      await hooks.onProcessingStart()
+      delivered = await hooks.sendResponse('**Complete answer**')
+      await hooks.onCleanup()
+    })
+    const { app } = setup()
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
+    await vi.waitFor(() => expect(delivered).toEqual({ channelMessageId: 'om_status' }))
+    expect(mocks.api.send).toHaveBeenCalledExactlyOnceWith('oc_chat', { markdown: '**Complete answer**' }, expect.objectContaining({ replyTo: 'om_1' }))
+    expect(cards.finish).toHaveBeenLastCalledWith('card_1', 'Response sent below.', 4)
+  })
+
+  it('keeps long answers complete through chunked post fallback', async () => {
+    const cards = {
+      open: vi.fn(async () => ({ cardId: 'card_1', messageId: 'om_card' })),
+      update: vi.fn(async () => {}), finish: vi.fn(async () => {}),
+    }
+    mocks.api.streamingCards = cards
+    const answer = 'a'.repeat(8200)
+    let complete = false
+    mocks.processChannelMessage.mockImplementation(async ({ hooks }) => {
+      await hooks.onProcessingStart()
+      await hooks.sendResponse(answer)
+      await hooks.onCleanup()
+      complete = true
+    })
+    const { app } = setup()
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
+    await vi.waitFor(() => expect(complete).toBe(true))
+    expect(mocks.api.send.mock.calls.map((call) => call[1].markdown).join('')).toBe(answer)
+    expect(cards.finish).toHaveBeenCalledExactlyOnceWith('card_1', 'Response follows below.', 2)
+  })
+
+  it('finalizes abandoned progress on cleanup with an explicit error', async () => {
+    const cards = {
+      open: vi.fn(async () => ({ cardId: 'card_1', messageId: 'om_card' })),
+      update: vi.fn(async () => {}), finish: vi.fn(async () => {}),
+    }
+    mocks.api.streamingCards = cards
+    mocks.processChannelMessage.mockImplementation(async ({ hooks }) => {
+      await hooks.onProcessingStart()
+      await hooks.onToolStart('t1', 'saveTask')
+      await hooks.onCleanup()
+    })
+    const { app } = setup()
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
+    await vi.waitFor(() => expect(cards.finish).toHaveBeenCalledWith('card_1', "I couldn't complete this reply. Please try again.", 2))
+  })
+
+  it('closes the streaming card while awaiting confirmation and starts a new card on resumption', async () => {
+    const cards = {
+      open: vi.fn().mockResolvedValueOnce({ cardId: 'card_1', messageId: 'om_card1' }).mockResolvedValueOnce({ cardId: 'card_2', messageId: 'om_card2' }),
+      update: vi.fn(async () => {}), finish: vi.fn(async () => {}),
+    }
+    mocks.api.streamingCards = cards
+    let complete = false
+    mocks.processChannelMessage.mockImplementation(async ({ hooks }) => {
+      await hooks.onProcessingStart()
+      await hooks.onConfirmationRequired({ toolCallId: 'card-tool', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' })
+      await hooks.onToolStart('card-tool', 'saveTask')
+      await hooks.sendResponse('Approved action completed')
+      await hooks.onCleanup()
+      complete = true
+    })
+    const { app } = setup()
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
+    await vi.waitFor(() => expect(complete).toBe(true))
+    expect(cards.open).toHaveBeenCalledTimes(2)
+    expect(cards.finish.mock.calls).toEqual([
+      ['card_1', 'Waiting for your decision below.', 2],
+      ['card_2', 'Approved action completed', 2],
+    ])
+    expect(mocks.api.send).toHaveBeenCalledTimes(1)
+  })
+
+  it('finalizes progress even when the pipeline unexpectedly throws outside its cleanup hook', async () => {
+    const cards = {
+      open: vi.fn(async () => ({ cardId: 'card_1', messageId: 'om_card' })),
+      update: vi.fn(async () => {}), finish: vi.fn(async () => {}),
+    }
+    mocks.api.streamingCards = cards
+    mocks.processChannelMessage.mockImplementation(async ({ hooks }) => {
+      await hooks.onProcessingStart()
+      await hooks.onToolStart('t1', 'saveTask')
+      throw new Error('unexpected failure')
+    })
+    const { app } = setup()
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
+    await vi.waitFor(() => expect(cards.finish).toHaveBeenCalledWith('card_1', "I couldn't complete this reply. Please try again.", 2))
   })
 
   it('records an added Feishu reaction as linked-account feedback', async () => {

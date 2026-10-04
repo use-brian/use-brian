@@ -1,3 +1,4 @@
+import { FeishuTurnCard } from '../feishu/turn-card.js'
 import { dispatchIncomingMessageEvent } from '../message-events.js'
 import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
 import { resolveChannelQuestion } from './channel-questions.js'
@@ -828,6 +829,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       const targetSession = (answer?.kind === 'answer' ? answer.binding.sessionId : undefined)
         ?? (questionSource ? resolveFeishuThreadScope(questionSource, replyInThread).sessionChannelId : sessionChannelId)
       const run = () => runTurn({
+        replyInThread: config.replyInThread ?? true,
         scope: { ...scope, sessionId: targetSession },
         questionIntegrationId: integration.id,
         workflowCallback,
@@ -901,6 +903,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
   }
 
   async function runTurn(params: {
+    replyInThread: boolean
     scope: ChannelInteractionScope
     questionIntegrationId: string
     workflowCallback?: { data: string; messageId: string }
@@ -1075,26 +1078,35 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     // a valid substitute for the current inbound messageId. replyInThread is
     // carried by the adapter so replies still land in the existing topic.
     const replyTarget = incoming.messageId
+    let turnCard: FeishuTurnCard | undefined
+    let cardAttempted = false
+    let statusClosed = false
     let statusMessageId: string | undefined
     let fallbackReplySent = false
     let pendingConfirmation = false
     let lastStatusUpdate = 0
-    const timeline: Array<{ id: string; name: string; description?: string; done: boolean }> = []
+    const timeline: Array<{ id: string; name: string; description?: string; done: boolean; failed?: boolean }> = []
 
     function statusText(): string {
-      const active = timeline.filter((entry) => !entry.done)
-      if (active.length > 0) {
-        const current = active[active.length - 1]
-        return current.description ?? humanizeToolName(current.name)
-      }
-      if (timeline.length > 0) {
-        const last = timeline[timeline.length - 1]
-        return `Done: ${last.description ?? humanizeToolName(last.name)}`
-      }
-      return 'Thinking...'
+      if (!timeline.length) return 'Thinking...'
+      return timeline.slice(-6).map((entry) => {
+        const label = entry.description ?? humanizeToolName(entry.name)
+        return `${entry.failed ? '✗' : entry.done ? '✓' : '⏳'} ${label}`
+      }).join('\n\n')
     }
 
     async function setStatus(text: string, force = false): Promise<void> {
+      if (statusClosed) return
+      if (!cardAttempted && !statusMessageId && !turnCard) {
+        cardAttempted = true
+        turnCard = await FeishuTurnCard.open(api, incoming.channelId, text, {
+          replyTo: replyTarget, replyInThread: params.replyInThread,
+        })
+      }
+      if (turnCard) {
+        turnCard.status(text)
+        return
+      }
       const now = Date.now()
       if (!force && now - lastStatusUpdate < STATUS_THROTTLE_MS) return
       lastStatusUpdate = now
@@ -1117,6 +1129,12 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     }
 
     async function replaceStatus(text: string): Promise<string | undefined> {
+      if (turnCard) {
+        const messageId = await turnCard.finish(text)
+        turnCard = undefined
+        statusClosed = true
+        return messageId
+      }
       if (!statusMessageId) return undefined
       const messageId = statusMessageId
       await adapter.editMessage(incoming.channelId, messageId, {
@@ -1124,6 +1142,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
         format: 'markdown',
       }, replyTarget ? { threadTs: replyTarget } : undefined)
       statusMessageId = undefined
+      statusClosed = true
       return messageId
     }
 
@@ -1194,7 +1213,12 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       crmEmailDraftStore: options.crmEmailDraftStore,
       capabilityStore: options.capabilityStore,
       hooks: {
-        async onProcessingStart() { await setStatus('Thinking...', true) },
+        async onProcessingStart() {
+          statusClosed = false
+          cardAttempted = false
+          pendingConfirmation = false
+          await setStatus('Thinking...', true)
+        },
         async onStatus(message) { await setStatus(message, true) },
         async onToolStart(id, name) {
           timeline.push({ id, name, done: false })
@@ -1210,7 +1234,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           for (const block of results) {
             if (block.type !== 'tool_result') continue
             const entry = timeline.find((item) => item.id === block.toolUseId)
-            if (entry) entry.done = true
+            if (entry) { entry.done = true; entry.failed = block.isError ?? false }
           }
           await setStatus(statusText())
         },
@@ -1225,12 +1249,9 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           const messageId = await adapter.sendMessage(incoming.channelId, confirmationMessage(request), replyTarget ? { threadTs: replyTarget } : undefined)
           channelConfirmations.bindMessage(params.scope, request.toolCallId, messageId)
           pendingConfirmation = true
-          if (statusMessageId) {
-            await adapter.editMessage(incoming.channelId, statusMessageId, {
-              text: 'Waiting for your decision below.',
-              format: 'markdown',
-            }).catch(() => {})
-          }
+          await replaceStatus('Waiting for your decision below.').catch(() => {})
+          cardAttempted = false
+          statusClosed = false
         },
         async sendResponse(text, documents, _question, actions) {
           const reply = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
@@ -1240,9 +1261,10 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             ? 'Choose an option below.'
             : 'Attachments follow below.')
           let editedMessageId: string | undefined
-          if (statusMessageId) {
-            // Status was sent as a rich-text post, so the first answer can
-            // replace it without leaving Feishu's recalled-message tombstone.
+          if (turnCard && statusAnswer.length > 4000) {
+            await replaceStatus('Response follows below.').catch(() => {})
+          } else if (turnCard || statusMessageId) {
+            // Finalize the card, or replace the rich-text fallback in place.
             editedMessageId = await replaceStatus(statusAnswer).catch(() => undefined)
           }
           if (editedMessageId) {
@@ -1280,7 +1302,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           fallbackReplySent = true
         },
         async onCleanup() {
-          if (statusMessageId) {
+          if (turnCard || statusMessageId) {
             const text = pendingConfirmation
               ? 'Waiting for your decision below.'
               : fallbackReplySent
@@ -1290,6 +1312,13 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           }
         },
       },
+    }).finally(async () => {
+      if (turnCard) {
+        const notice = fallbackReplySent ? 'Response sent below.'
+          : pendingConfirmation ? 'Waiting for your decision below.'
+            : "I couldn't complete this reply. Please try again."
+        await replaceStatus(notice).catch(() => {})
+      }
     })
   }
 
