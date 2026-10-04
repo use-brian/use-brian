@@ -82,6 +82,8 @@ export type CrmOperationsReadPort = {
     status?: 'draft' | 'published' | 'cancelled' | 'completed'
     /** `upcoming`: still running or ahead (ends now or later); `past`: already ended. */
     when?: 'upcoming' | 'past'
+    /** Website catalogue visibility, applied before pagination. */
+    website?: 'visible' | 'drafts'
     /** One event by id (deep links). */
     id?: string
     /** One event by its reference (assistant preview links). */

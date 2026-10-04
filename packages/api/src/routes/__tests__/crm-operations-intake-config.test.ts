@@ -2,7 +2,7 @@ import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 import { CrmOperationsError } from '@use-brian/core'
-import { crmOperationsRoutes } from '../crm-operations.js'
+import { crmOperationsRoutes, EventsQuery } from '../crm-operations.js'
 
 const WORKSPACE_ID = '11111111-1111-4111-8111-111111111111'
 const USER_ID = '22222222-2222-4222-8222-222222222222'
@@ -342,5 +342,14 @@ describe('[COMP:api/crm-operations-route] intake configuration REST adapter', ()
       })
     expect(response.status).toBe(400)
     expect(member.service.execute).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('[COMP:api/crm-operations-route] event website filters', () => {
+  it('accepts only canonical website visibility values', () => {
+    expect(EventsQuery.parse({ website: 'visible' })).toMatchObject({ website: 'visible', limit: 50 })
+    expect(EventsQuery.parse({ website: 'drafts' })).toMatchObject({ website: 'drafts' })
+    expect(EventsQuery.safeParse({ website: 'other' }).success).toBe(false)
   })
 })
