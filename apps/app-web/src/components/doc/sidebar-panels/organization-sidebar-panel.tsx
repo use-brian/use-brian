@@ -19,7 +19,6 @@ import { useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import {
-  ORGANIZATION_SECTIONS,
   organizationHref,
   organizationSection,
 } from "@/lib/organization-navigation";
@@ -36,9 +35,7 @@ export function OrganizationSidebarPanel({ workspaceId }: { workspaceId: string 
   const active = organizationSection(useSearchParams()?.get("section") ?? null);
 
   return (
-    // Nested under the full-width Organization row above it: the guide line
-    // sits beneath that row's icon, so the sections read as its children.
-    <nav aria-label={t.sectionsAriaLabel} className="ml-5 flex flex-col gap-0.5 border-l border-sidebar-border pl-2 pr-1">
+    <nav aria-label={t.sectionsAriaLabel} className="flex flex-col gap-1">
 
       {sections.map((section) => {
         const Icon = ORGANIZATION_SECTION_ICON[section];
@@ -50,13 +47,13 @@ export function OrganizationSidebarPanel({ workspaceId }: { workspaceId: string 
             aria-current={current ? "page" : undefined}
             title={copy[section].summary}
             className={cn(
-              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors max-md:min-h-11",
+              "flex w-full items-center min-h-10 gap-2.5 rounded-md px-3 py-2 text-left text-sm transition-colors max-md:min-h-11",
               current
                 ? "doc-nav-active font-medium text-sidebar-accent-foreground"
                 : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
             )}
           >
-            <Icon className="size-4 shrink-0 text-sidebar-foreground/60" aria-hidden />
+            <Icon className="size-[18px] shrink-0 text-sidebar-foreground/60" aria-hidden />
             <span className="min-w-0 truncate">{copy[section].label}</span>
           </Link>
         );

@@ -57,13 +57,15 @@ vi.mock('../../db/users.js', () => ({
   findOrCreateUser: vi.fn(),
   getDefaultAssistant: vi.fn(),
   getUserAssistant: vi.fn(async (_userId: string, assistantId: string) =>
-    assistantId === 'a-sales'
-      ? { id: 'a-sales', workspaceId: 'ws-1', name: 'Sales', clearance: 'internal' }
-      : assistantId === 'a-foreign'
-        ? { id: 'a-foreign', workspaceId: 'ws-OTHER', name: 'Elsewhere', clearance: 'internal' }
-        : assistantId === 'a-secret'
-          ? { id: 'a-secret', workspaceId: 'ws-1', name: 'Cap Table', clearance: 'confidential' }
-          : null,
+    assistantId === 'a-1'
+      ? { id: 'a-1', workspaceId: 'ws-1', name: 'General', clearance: 'internal' }
+      : assistantId === 'a-sales'
+        ? { id: 'a-sales', workspaceId: 'ws-1', name: 'Sales', clearance: 'internal' }
+        : assistantId === 'a-foreign'
+          ? { id: 'a-foreign', workspaceId: 'ws-OTHER', name: 'Elsewhere', clearance: 'internal' }
+          : assistantId === 'a-secret'
+            ? { id: 'a-secret', workspaceId: 'ws-1', name: 'Cap Table', clearance: 'confidential' }
+            : null,
   ),
   getUserProfilesByIds: vi.fn(async () => new Map()),
   getWorkspacePrimaryAssistant: vi.fn(async () => ({ id: 'a-primary', workspaceId: 'ws-1', name: 'Gm' })),
@@ -130,6 +132,7 @@ vi.mock('../../db/sessions.js', async (importOriginal) => {
 })
 
 import { sessionRoutes } from '../sessions.js'
+import { getUserAssistant } from '../../db/users.js'
 import {
   addSessionMessage,
   createWorkspaceChatSession,
@@ -227,6 +230,14 @@ function storedPost(over: Record<string, unknown> = {}) {
 }
 
 describe('[COMP:api/room-mechanics] POST /api/sessions/:id/messages (T2)', () => {
+  it('refuses posting when the member can no longer access the room assistant', async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    vi.mocked(getUserAssistant).mockResolvedValueOnce(null)
+    const res = await request(makeApp()).post('/api/sessions/s-room/messages').send({ message: 'hello' })
+    expect(res.status).toBe(403)
+    expect(mockAddMessage).not.toHaveBeenCalled()
+  })
+
   it('persists one attributed user row, emits on the bus, and runs no turn', async () => {
     const published: SessionEvent[] = []
     mockFindSession.mockResolvedValue(roomSession())

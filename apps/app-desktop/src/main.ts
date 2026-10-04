@@ -4080,8 +4080,8 @@ function createTray(): Tray {
   // absent during early development.
   const isMac = process.platform === "darwin";
   const iconPath = isMac
-    ? join(__dirname, "..", "build", "trayTemplate.png")
-    : join(__dirname, "..", "build", "icon.png");
+    ? join(__dirname, "tray", "trayTemplate.png")
+    : join(__dirname, "tray", "icon.png");
   let icon = existsSync(iconPath)
     ? nativeImage.createFromPath(iconPath)
     : nativeImage.createEmpty();

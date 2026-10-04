@@ -8,9 +8,8 @@
  *
  * The center names the active section while the sidebar is open (the sidebar
  * panel is the switcher then). When the sidebar is unavailable it becomes the
- * switcher: a compact section menu on phones, where the section's actions need
- * the width (the CRM fallback pattern), and an inline row of section links
- * beside a collapsed desktop sidebar. Sections fill the right slot through
+ * switcher: a compact section menu on phones and beside a collapsed desktop sidebar,
+ * preserving space for the section actions. Sections fill the right slot through
  * `OrganizationTopbarActions`.
  *
  * Spec: docs/architecture/features/organization-chart.md → "User experience".
@@ -18,15 +17,14 @@
  */
 import {useWorkspaceAccessMode} from "@/components/context/mode-aware-context";
 import {visibleOrganizationSections} from "@/lib/organization-navigation";
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ChevronDown, Users } from 'lucide-react';
+import { Check, ChevronDown, Users } from 'lucide-react';
 import { OperatorTopbar } from '@/components/operator/operator-topbar';
 import { useSidebarData } from '@/components/doc/doc-sidebar-data';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { useT } from '@/lib/i18n/client';
 import { cn } from '@/lib/utils';
-import { ORGANIZATION_SECTIONS, organizationHref, type OrganizationSection } from '@/lib/organization-navigation';
+import { organizationHref, type OrganizationSection } from '@/lib/organization-navigation';
 import { ORGANIZATION_SECTION_ICON, organizationSectionCopy } from './organization-chrome';
 
 export function OrganizationTopbar({ workspaceId, section, slotRef }: {
@@ -46,7 +44,7 @@ export function OrganizationTopbar({ workspaceId, section, slotRef }: {
     center={<>
       <DropdownMenu>
         <DropdownMenuTrigger aria-label={t.sectionsAriaLabel} data-organization-section-menu
-          className="inline-flex h-11 max-w-44 shrink-0 items-center gap-1.5 rounded-md bg-sidebar-accent/60 px-2.5 text-[13px] font-medium text-sidebar-accent-foreground md:hidden">
+          className={cn("inline-flex h-11 min-w-0 max-w-44 items-center gap-1.5 rounded-md bg-sidebar-accent/60 px-2.5 text-[13px] font-medium text-sidebar-accent-foreground md:h-7", !sidebarCollapsed && "md:hidden")}>
           <ActiveIcon className="size-3.5 shrink-0" aria-hidden />
           <span className="truncate">{copy[section].label}</span>
           <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
@@ -55,24 +53,15 @@ export function OrganizationTopbar({ workspaceId, section, slotRef }: {
           {sections.map(item => {
             const Icon = ORGANIZATION_SECTION_ICON[item];
             return <DropdownMenuItem key={item} className={cn('min-h-8 max-sm:min-h-11', item === section && 'font-medium')} onClick={() => router.push(organizationHref(workspaceId, item))}>
-              <Icon className="size-3.5" aria-hidden /><span className="min-w-32 flex-1">{copy[item].label}</span>
+              <Icon className="size-3.5" aria-hidden /><span className="min-w-32 flex-1">{copy[item].label}</span>{item===section?<Check className="size-3.5" aria-hidden />:null}
             </DropdownMenuItem>;
           })}
         </DropdownMenuContent>
       </DropdownMenu>
-      {sidebarCollapsed ? <nav aria-label={t.sectionsAriaLabel} data-organization-switcher className="hidden shrink-0 items-center gap-0.5 md:flex">
-        {sections.map(item => {
-          const Icon = ORGANIZATION_SECTION_ICON[item], active = item === section;
-          return <Link key={item} href={organizationHref(workspaceId, item)} aria-current={active ? 'page' : undefined}
-            className={cn('inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] transition-colors',
-              active ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground' : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground')}>
-            <Icon className="size-3.5 shrink-0" aria-hidden />{copy[item].label}
-          </Link>;
-        })}
-      </nav> : <p data-organization-section-title className="hidden min-w-0 truncate text-[13px] md:block">
+      {!sidebarCollapsed ? <p data-organization-section-title className="hidden min-w-0 truncate text-[13px] md:block">
         <span className="font-medium text-sidebar-foreground">{copy[section].label}</span>
         <span className="text-sidebar-foreground/55"> · {copy[section].summary}</span>
-      </p>}
+      </p> : null}
     </>}
     right={<div ref={slotRef} data-organization-actions className="flex items-center gap-1" />}
   />;

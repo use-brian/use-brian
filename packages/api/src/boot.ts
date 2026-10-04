@@ -6035,6 +6035,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       res.json({
         assistants: rows.map((r) => ({
           id: r.id, name: r.name, role: r.role,
+          placementDepartmentId: r.placementDepartmentId, placementDepartmentName: r.placementDepartmentName,
           description: r.systemPrompt ? r.systemPrompt.slice(0, 120) : null,
           memoryCount: r.memoryCount, iconSeed: r.iconSeed ?? 0,
           workspaceId: r.workspaceId,

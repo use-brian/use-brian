@@ -201,6 +201,7 @@ describe("[COMP:app-web/surface-prefetch] Surface prefetch keys", () => {
 describe("[COMP:app-web/surface-prefetch] every warm key is a key its surface reads", () => {
   const src = (rel: string) => readFileSync(resolve(process.cwd(), "src", rel), "utf8");
   const SURFACES: Record<WarmableSurface, { source: string; builder: string }> = {
+    projects: { source: "components/projects/projects-browser.tsx", builder: 'surfaceDataKey("projects", workspaceId)' },
     association: {
       source: "components/association/module-controls.tsx",
       builder: "associationModuleCacheKey(workspaceId)",

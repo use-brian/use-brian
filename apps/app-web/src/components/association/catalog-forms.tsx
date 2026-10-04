@@ -1,14 +1,14 @@
 "use client";
 
 /** Native editors over the canonical generic catalogs and vertical tickets. [COMP:app-web/association] */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n/client";
 import { saveAssociationPlan,saveAssociationEvent,saveAssociationTicket,saveAssociationPromotion,type AssociationPlan,type AssociationEvent,type AssociationTicket,type AssociationPromotion,type AssociationPlanSave,type AssociationPromotionSave } from "@/lib/api/association";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { AssociationField as Field,AssociationChoice as Choice,useAssociationAction,associationInstant,associationLocalTime } from "./operator-controls";
 import { AssociationMoneyField as Money, AssociationCatalogPicker } from "./workspace-ui";
-import { ChoiceCards, FormFooter, FormSection as Group, InlineNotice, Segmented, StatusPill, SwitchField } from "./ui";
+import { ChoiceCards, FormFooter, FormSection as Group, InlineNotice, Segmented, SwitchField } from "./ui";
 
 function catalogKey(name:string) { return name.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,54) || `item-${crypto.randomUUID().slice(0,8)}`; }
 const COMMON_CURRENCIES=["HKD","USD","CNY","JPY","SGD","EUR","GBP","AUD","TWD","MOP"];
@@ -49,15 +49,17 @@ export function AssociationPlanForm({workspaceId,plan,disabled,onSaved,currencie
   </form>;
 }
 
-export function AssociationEventForm({workspaceId,event,disabled,onSaved}:{workspaceId:string;event?:AssociationEvent;disabled:boolean;onSaved:()=>void}) {
-  const u=useT().associationPage.ux,t=useT().associationPage.manage,action=useAssociationAction(workspaceId);
+export function AssociationEventForm({workspaceId,event,disabled,onSaved,onDirtyChange}:{workspaceId:string;event?:AssociationEvent;disabled:boolean;onSaved:(record:AssociationEvent)=>void;onDirtyChange?:(dirty:boolean)=>void}) {
+  const copy=useT().associationPage,u=copy.ux,t=copy.manage,action=useAssociationAction(workspaceId);
   const [form,setForm]=useState<Omit<AssociationEvent,"id">>(()=>({slug:event?.slug ?? "",title:event?.title ?? "",description:event?.description ?? "",startsAt:associationLocalTime(event?.startsAt),endsAt:associationLocalTime(event?.endsAt),timezone:event?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,mode:event?.mode ?? "venue",venue:event?.venue ?? null,onlineUrl:event?.onlineUrl ?? null,registrationOpensAt:associationLocalTime(event?.registrationOpensAt),registrationClosesAt:associationLocalTime(event?.registrationClosesAt),capacity:event?.capacity ?? null,status:event?.status ?? "draft",canonicalUrl:event?.canonicalUrl ?? null,programmeKey:event?.programmeKey ?? null,metadata:event?.metadata ?? {}}));
+  const [baseline,setBaseline]=useState(form);
+  const dirty=JSON.stringify(form)!==JSON.stringify(baseline);
+  useEffect(()=>{onDirtyChange?.(dirty);},[dirty,onDirtyChange]);
   const [customKey,setCustomKey]=useState(!!event),[customEnd,setCustomEnd]=useState(!!event);
   const [validation,setValidation]=useState("");
   const set=<K extends keyof typeof form>(key:K,value:(typeof form)[K])=>setForm(old=>({...old,[key]:value}));
   const zones=timezones();
-  const publishable=form.status==="draft"||form.status==="published";
-  return <form className="space-y-5" onSubmit={e=>{e.preventDefault();if(disabled||!e.currentTarget.checkValidity())return;if(!form.startsAt||!form.endsAt||form.endsAt<=form.startsAt||(form.registrationOpensAt&&form.registrationClosesAt&&form.registrationClosesAt<=form.registrationOpensAt)){setValidation(u.dateInvalid);return;}setValidation("");void action.run(`${t.save}: ${form.title}`,async()=>{await saveAssociationEvent(workspaceId,{...form,startsAt:associationInstant(form.startsAt)!,endsAt:associationInstant(form.endsAt)!,registrationOpensAt:associationInstant(form.registrationOpensAt ?? ""),registrationClosesAt:associationInstant(form.registrationClosesAt ?? ""),venue:form.mode==="online"?null:form.venue||null,onlineUrl:form.mode==="venue"?null:form.onlineUrl||null,canonicalUrl:form.canonicalUrl||null,programmeKey:form.programmeKey||null});onSaved();},false);}}>
+  return <form className="space-y-5" onSubmit={e=>{e.preventDefault();if(disabled||!e.currentTarget.checkValidity())return;if(!form.startsAt||!form.endsAt||form.endsAt<=form.startsAt||(form.registrationOpensAt&&form.registrationClosesAt&&form.registrationClosesAt<=form.registrationOpensAt)){setValidation(u.dateInvalid);return;}setValidation("");void action.run(`${t.save}: ${form.title}`,async()=>{const result=await saveAssociationEvent(workspaceId,{...form,status:event?.status ?? "draft",startsAt:associationInstant(form.startsAt)!,endsAt:associationInstant(form.endsAt)!,registrationOpensAt:associationInstant(form.registrationOpensAt ?? ""),registrationClosesAt:associationInstant(form.registrationClosesAt ?? ""),venue:form.mode==="online"?null:form.venue||null,onlineUrl:form.mode==="venue"?null:form.onlineUrl||null,canonicalUrl:form.canonicalUrl||null,programmeKey:form.programmeKey||null});setBaseline(form);onSaved(result.record);},false);}}>
     <h3 className="sr-only">{event?t.edit:t.newEvent}</h3><fieldset disabled={disabled||action.pending} className="grid min-w-0 gap-6">
       <Group title={u.basics}>
         <div className="col-span-full"><Field label={u.title} value={form.title} onChange={v=>setForm(old=>({...old,title:v,...(!customKey?{slug:catalogKey(v)}:{})}))} required maxLength={300}/></div>
@@ -68,9 +70,7 @@ export function AssociationEventForm({workspaceId,event,disabled,onSaved}:{works
         {form.mode!=="venue"?<Field label={u.meetingLink} type="url" value={form.onlineUrl ?? ""} onChange={v=>set("onlineUrl",v)} maxLength={2000}/>:null}
         <Field label={u.capacity} type="number" min={1} max={1000000} value={form.capacity===null?"":String(form.capacity)} onChange={v=>set("capacity",v?Number(v):null)} help={u.capacityHelp}/>
         <div className="col-span-full"><Field label={t.description} multiline value={form.description} onChange={v=>set("description",v)} maxLength={50000}/></div>
-        <div className="col-span-full">{publishable
-          ?<SwitchField label={u.publishedSwitch} help={u.publishedHelp} checked={form.status==="published"} onChange={v=>set("status",v?"published":"draft")}/>
-          :<InlineNotice tone="neutral"><span className="inline-flex items-center gap-2">{t.status}: <StatusPill status={form.status}/></span></InlineNotice>}</div>
+
       </Group>
       <Group title={u.moreOptions} collapsible>
         <Field label={t.opens} type="datetime-local" value={form.registrationOpensAt ?? ""} onChange={v=>set("registrationOpensAt",v)}/>
@@ -83,18 +83,21 @@ export function AssociationEventForm({workspaceId,event,disabled,onSaved}:{works
       </Group>
     </fieldset>
     {validation?<p role="alert" className="text-sm text-destructive">{validation}</p>:null}{action.feedback}
-    <FormFooter><Button type="submit" className="min-h-11 md:min-h-9" disabled={disabled||action.pending}>{t.save}</Button></FormFooter>
+    <FormFooter><Button type="submit" className="min-h-11 md:min-h-9" disabled={disabled||action.pending}>{event?t.save:copy.eventPage.saveDraft}</Button></FormFooter>
   </form>;
 }
 
-export function AssociationTicketForm({workspaceId,eventId,ticket,disabled,onSaved,currencies=[]}:{workspaceId:string;eventId:string;ticket?:AssociationTicket;disabled:boolean;onSaved:()=>void;currencies?:readonly string[]}) {
+export function AssociationTicketForm({workspaceId,eventId,ticket,disabled,onSaved,currencies=[],onDirtyChange}:{workspaceId:string;eventId:string;ticket?:AssociationTicket;disabled:boolean;onSaved:()=>void;currencies?:readonly string[];onDirtyChange?:(dirty:boolean)=>void}) {
   const u=useT().associationPage.ux,t=useT().associationPage.manage,action=useAssociationAction(workspaceId);
   const [form,setForm]=useState(()=>({key:ticket?.key ?? "",name:ticket?.name ?? "",currency:ticket?.currency ?? currencies[0] ?? "",priceMinor:Number(ticket?.priceMinor ?? 0),memberPriceMinor:ticket?.memberPriceMinor===null||ticket?.memberPriceMinor===undefined?null:Number(ticket.memberPriceMinor),eligiblePlanKeys:ticket?.eligiblePlanKeys ?? [],eligibilityRequired:ticket?.eligibilityRequired ?? false,eligibilityScope:ticket?.eligibilityScope ?? "buyer" as AssociationTicket["eligibilityScope"],capacity:ticket?.capacity ?? null,perOrderLimit:ticket?.perOrderLimit ?? 10,saleStartsAt:associationLocalTime(ticket?.saleStartsAt),saleEndsAt:associationLocalTime(ticket?.saleEndsAt),status:ticket?.status ?? "draft"}));
+  const [baseline,setBaseline]=useState(form);
+  const dirty=JSON.stringify(form)!==JSON.stringify(baseline);
+  useEffect(()=>{onDirtyChange?.(dirty);},[dirty,onDirtyChange]);
   const [customKey,setCustomKey]=useState(!!ticket);
   const [validation,setValidation]=useState("");
   const set=<K extends keyof typeof form>(key:K,value:(typeof form)[K])=>setForm(old=>({...old,[key]:value}));
   const statuses:AssociationTicket["status"][]=["draft","on_sale","closed",...(form.status==="sold_out"?["sold_out" as const]:[])];
-  return <form className="space-y-5" onSubmit={e=>{e.preventDefault();if(disabled||!e.currentTarget.checkValidity())return;if(!Number.isSafeInteger(form.priceMinor)||form.priceMinor<0||(form.memberPriceMinor!==null&&(!Number.isSafeInteger(form.memberPriceMinor)||form.memberPriceMinor<0))){setValidation(u.moneyInvalid);return;}if(form.saleStartsAt&&form.saleEndsAt&&form.saleEndsAt<=form.saleStartsAt){setValidation(u.dateInvalid);return;}setValidation("");void action.run(`${t.save}: ${form.name}`,async()=>{await saveAssociationTicket(workspaceId,eventId,{...form,eligiblePlanKeys:form.eligiblePlanKeys.map(v=>v.trim()).filter(Boolean),saleStartsAt:associationInstant(form.saleStartsAt),saleEndsAt:associationInstant(form.saleEndsAt)});onSaved();},false);}}>
+  return <form className="space-y-5" onSubmit={e=>{e.preventDefault();if(disabled||!e.currentTarget.checkValidity())return;if(!Number.isSafeInteger(form.priceMinor)||form.priceMinor<0||(form.memberPriceMinor!==null&&(!Number.isSafeInteger(form.memberPriceMinor)||form.memberPriceMinor<0))){setValidation(u.moneyInvalid);return;}if(form.saleStartsAt&&form.saleEndsAt&&form.saleEndsAt<=form.saleStartsAt){setValidation(u.dateInvalid);return;}setValidation("");void action.run(`${t.save}: ${form.name}`,async()=>{await saveAssociationTicket(workspaceId,eventId,{...form,eligiblePlanKeys:form.eligiblePlanKeys.map(v=>v.trim()).filter(Boolean),saleStartsAt:associationInstant(form.saleStartsAt),saleEndsAt:associationInstant(form.saleEndsAt)});setBaseline(form);onSaved();},false);}}>
     <h3 className="sr-only">{ticket?t.edit:t.newTicket}</h3><fieldset disabled={disabled||action.pending} className="grid min-w-0 gap-6">
       <Group title={u.basics}>
         <div className="col-span-full"><Field label={t.name} value={form.name} onChange={v=>setForm(old=>({...old,name:v,...(!customKey?{key:catalogKey(v)}:{})}))} required maxLength={200}/></div>

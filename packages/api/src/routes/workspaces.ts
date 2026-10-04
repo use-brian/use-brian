@@ -1305,8 +1305,9 @@ export function workspaceRoutes({
     const role = await requireWorkspaceRole(req as any, res, 'admin')
     if (!role) return
 
-    const { name, kind, appType, clearance, charter } = req.body as {
+    const { name, kind, appType, clearance, charter, placementDepartmentId } = req.body as {
       name?: string
+      placementDepartmentId?: string | null
       kind?: 'standard' | 'app' | 'primary'
       appType?: AppType | null
       clearance?: 'public' | 'internal' | 'confidential'
@@ -1315,6 +1316,10 @@ export function workspaceRoutes({
       charter?: Record<string, unknown> | null
     }
     const assistantName = (name && typeof name === 'string' && name.trim()) || 'Team Assistant'
+    if (placementDepartmentId != null && (!z.string().uuid().safeParse(placementDepartmentId).success || (kind !== undefined && kind !== 'standard'))) {
+      res.status(400).json({ error: 'Invalid assistant placement' })
+      return
+    }
 
     let initialCharter: AssistantCharter | null = null
     if (charter !== undefined && charter !== null) {
@@ -1404,7 +1409,12 @@ export function workspaceRoutes({
       // See docs/architecture/integrations/mcp.md and
       // docs/architecture/feed/assistant-kind-app.md.
       const iconSeed = Math.floor(Math.random() * 1000000)
-      const result = await query<{ id: string }>(
+      const result = placementDepartmentId
+        ? await queryWithRLS<{ id: string }>(userId,
+          'SELECT public.create_department_assistant($1,$2,$3,$4,$5,$6::jsonb) AS id',
+          [workspaceId, placementDepartmentId, assistantName, iconSeed, finalClearance,
+            initialCharter ? JSON.stringify(initialCharter) : null])
+        : await query<{ id: string }>(
         `INSERT INTO assistants (name, owner_user_id, workspace_id, icon_seed, clearance, kind, app_type, charter)
          VALUES ($1, NULL, $2, $3, $4, $5, $6, $7::jsonb) RETURNING id`,
         [
@@ -1465,7 +1475,7 @@ export function workspaceRoutes({
       // the roster on a `[workspaceId]` effect, so without this signal a new
       // assistant stays invisible in every open tab until a full app restart.
       // Fire-and-forget — the write already committed.
-      notifyWorkspaceChange(workspaceId, 'assistant', 'create', assistantId)
+      notifyWorkspaceChange(workspaceId, 'assistant', 'create', placementDepartmentId ? undefined : assistantId)
 
       res.status(201).json({
         id: assistantId,
@@ -1475,8 +1485,13 @@ export function workspaceRoutes({
         kind: finalKind,
         appType: finalAppType,
         clearance: finalClearance,
+        placementDepartmentId: placementDepartmentId ?? null,
       })
     } catch (err) {
+      if (err instanceof Error && ['assistant_placement_unavailable', 'department_not_found', 'department_owner_required', 'department_clearance_above_own'].includes(err.message)) {
+        res.status(403).json({ error: 'assistant_placement_unavailable', message: 'That department is no longer available for assistant placement. Refresh and choose again.' })
+        return
+      }
       console.error('[workspaces] create assistant failed:', err)
       res.status(500).json({ error: 'Failed to create assistant' })
     }

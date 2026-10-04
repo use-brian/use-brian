@@ -116,7 +116,8 @@ export function createDepartmentStore() {
                  clearance, expires_at AS "expiresAt", origin
             FROM department_edges
            WHERE department_id = $1 AND (expires_at IS NULL OR expires_at > clock_timestamp())
-           ORDER BY principal_kind, coalesce(user_id, assistant_id)`, [departmentId])).rows
+             AND (assistant_id IS NULL OR public.assistant_placement_visible($2,assistant_id))
+           ORDER BY principal_kind, coalesce(user_id, assistant_id)`, [departmentId, actor])).rows
         .map(row => ({ departmentId: row.departmentId, principal: { kind: row.kind, id: row.id },
           clearance: row.clearance, expiresAt: row.expiresAt, origin: row.origin })))
     },

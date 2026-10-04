@@ -52,6 +52,7 @@ import { fetchLiveRoster } from "@/lib/api/live";
  * Studio icon warms the connectors list that section reads on mount.
  */
 export type WarmableSurface =
+  | "projects"
   | "tasks"
   | "crm"
   | "association"
@@ -109,6 +110,8 @@ export function surfaceDataKey(
 ): string | null {
   if (!workspaceId) return null;
   switch (surface) {
+    case "projects":
+      return `projects:${workspaceId}${viewerSuffix()}`;
     case "tasks":
       return `tasks:${workspaceId}${viewerSuffix()}`;
     case "crm":
@@ -816,6 +819,11 @@ export function warmTargetFor(
   workspaceId: string,
 ): WarmTarget {
   switch (surface) {
+    case "projects":
+      return {
+        key: surfaceDataKey("projects", workspaceId) as string,
+        fetch: () => import("@/lib/api/context-scopes").then(m => m.listContextProjects(workspaceId, true)),
+      };
     case "tasks":
       return {
         key: surfaceDataKey("tasks", workspaceId) as string,
@@ -893,6 +901,7 @@ export function warmTargetFor(
 }
 
 const WARMABLE: ReadonlySet<string> = new Set<WarmableSurface>([
+  "projects",
   "tasks",
   "crm",
   "association",
@@ -1052,3 +1061,7 @@ export function workspaceCreationContextCacheKey(workspaceId:string,userId:strin
 export function connectorSetupCacheKey(workspaceId:string,userId:string,setupId:string):string{return `${workspaceAccessCacheKey(workspaceId,userId)}:connector-setup:${setupId}`;}
 
 export function connectorReconnectCacheKey(workspaceId:string,userId:string,instanceId:string):string{return `${workspaceAccessCacheKey(workspaceId,userId)}:connector-reconnect:${instanceId}`;}
+
+export function projectContentCacheKey(workspaceId: string, projectId: string, view: string, query: string, offset: number): string {
+  return `${projectDetailCacheKey(workspaceId, projectId)}:content:${JSON.stringify([view, query, offset])}`;
+}

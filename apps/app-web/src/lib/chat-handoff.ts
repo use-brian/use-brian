@@ -20,6 +20,8 @@ export const CHAT_HANDOFF_EVENT = "sidan:chat-handoff";
 
 export type PendingChatHandoff = {
   requestId?: string;
+  contextProjectId?: string;
+  draftOnly?: boolean;
   workspaceId: string;
   assistantId: string;
   /** May be empty when the turn carries attachments. */
@@ -84,6 +86,8 @@ export function parsePendingChatHandoff(
   }
   return {
     ...(typeof value.requestId === "string" && value.requestId ? { requestId: value.requestId } : {}),
+    ...(typeof value.contextProjectId === "string" && value.contextProjectId ? {contextProjectId: value.contextProjectId} : {}),
+    ...(value.draftOnly === true ? {draftOnly: true} : {}),
     workspaceId: value.workspaceId,
     assistantId: value.assistantId,
     text,

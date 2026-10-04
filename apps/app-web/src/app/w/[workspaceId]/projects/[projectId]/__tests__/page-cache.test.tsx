@@ -28,6 +28,8 @@ vi.mock("@/lib/api/context-scopes", () => ({
   setContextProjectMember: vi.fn(),
   setContextProjectAssistant: vi.fn(),
 }));
+// The content panel has its own cache/router tests; this suite exercises the page bundle.
+vi.mock("@/components/projects/project-content", () => ({ ProjectContent: () => <section data-testid="project-content" /> }));
 vi.mock("@/lib/api/studio", () => ({
   listAssistants: (...args: unknown[]) => api.listAssistants(...args),
 }));

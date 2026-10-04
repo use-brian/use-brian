@@ -1,60 +1,76 @@
 "use client";
 
-/** Events index: table with upcoming/past/draft views, opening the event detail page. [COMP:app-web/association] */
-import { useEffect, useState } from "react";
+/** Website event index and direct entry to the single event workspace. [COMP:app-web/association] */
+import { useState } from "react";
 import { CalendarDays, Plus } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import type { AssociationEvent } from "@/lib/api/association";
+import { getSiteContentDraft, type AssociationEvent, type EventPagesDocument } from "@/lib/api/association";
+import { useCachedResource } from "@/lib/surface-cache";
+import { associationPageCacheKey } from "@/lib/surface-prefetch";
 import { Button } from "@/components/ui/button";
 import { useAssociationModule } from "./module-controls";
 import { ReadOnlyNotice } from "./access";
-import { AssociationListState,useAssociationPage } from "./operator-controls";
+import { AssociationListState, useAssociationPage } from "./operator-controls";
 import { AssociationEventForm } from "./catalog-forms";
 import { AssociationEditor } from "./workspace-ui";
 import { AssociationEventDetail } from "./event-detail";
+import { sameEventPage } from "./events/event-page-editor";
 import { EmptyState, InlineNotice, PageHeader, ResponsiveTable, Segmented, StatusPill, associationDate } from "./ui";
 
-type EventView="upcoming"|"past"|"drafts"|"all";
-export function eventWhere(event:AssociationEvent,labels:{venue:string;online:string;hybrid:string}):string {
-  if(event.mode==="online")return event.onlineUrl?labels.online:labels.online;
-  return event.venue||labels[event.mode];
+type EventView = "website" | "drafts" | "all";
+export function eventWhere(event: AssociationEvent, labels: { venue: string; online: string; hybrid: string }): string {
+  return event.mode === "online" ? labels.online : event.venue || labels[event.mode];
 }
 
-export function AssociationEventsPanel({workspaceId,initialEventId="",initialEventSlug="",initialNew=false}:{workspaceId:string;initialEventId?:string;initialEventSlug?:string;initialNew?:boolean}) {
-  const [view,setView]=useState<EventView>("upcoming");
-  // Each view asks the server for its own rows; pages are oldest-first, so filtering one page client-side hides newer events.
-  const t=useT().associationPage,u=t.ux,m=t.manage,rows=useAssociationPage(workspaceId,"events",view==="upcoming"?{when:"upcoming"}:view==="past"?{when:"past"}:view==="drafts"?{status:"draft"}:{}),module=useAssociationModule(workspaceId);
-  const [selectedId,setSelectedId]=useState<string|null>(initialEventId||null),[editing,setEditing]=useState<AssociationEvent|"new"|null>(initialNew?"new":null),[saved,setSaved]=useState(false);
-  const configure=!!module.data?.canManage&&!module.error,enabled=module.data?.module.state==="enabled"&&!module.error;
-  // A deep link reads its event directly (by id, or by reference from an assistant's preview link): it may be on any page of any view.
-  const direct=useAssociationPage(workspaceId,"events",initialEventId?{id:initialEventId}:{slug:initialEventSlug},!!(initialEventId||initialEventSlug));
-  const linked=initialEventId||direct.data?.items.find(row=>row.slug===initialEventSlug)?.id||"";
-  useEffect(()=>{if(linked&&!initialEventId)setSelectedId(current=>current??linked);},[linked,initialEventId]);
-  const selected=selectedId?rows.data?.items.find(row=>row.id===selectedId) ?? direct.data?.items.find(row=>row.id===selectedId) ?? null:null;
-  const now=Date.now();
-  const visible=(rows.data?.items ?? []).filter(event=>view==="all"?true:view==="drafts"?event.status==="draft":view==="past"?Date.parse(event.endsAt)<now||event.status==="completed"||event.status==="cancelled":Date.parse(event.endsAt)>=now&&event.status!=="cancelled"&&event.status!=="completed");
-  if(editing)return <AssociationEditor title={editing==="new"?m.newEvent:editing.title} onClose={()=>setEditing(null)}><AssociationEventForm key={editing==="new"?"new":editing.id} workspaceId={workspaceId} event={editing==="new"?undefined:editing} disabled={!configure||!!rows.error} onSaved={()=>{setEditing(null);setSaved(true);void rows.refresh();}}/></AssociationEditor>;
-  const resolvingLink=!!initialEventSlug&&!initialEventId&&!direct.data&&!direct.error;
-  if(resolvingLink||(selectedId&&((!rows.data&&!rows.error)||(selectedId===linked&&!direct.data&&!direct.error))))return <AssociationListState {...rows}><span/></AssociationListState>;
-  if(selected)return <AssociationEventDetail key={selected.id} workspaceId={workspaceId} event={selected} enabled={enabled} canManage={configure} loadFailed={!!rows.error}
-    onBack={()=>setSelectedId(null)} onEdit={()=>setEditing(selected)} onChanged={()=>void rows.refresh()}/>;
+export function AssociationEventsPanel({ workspaceId, initialEventId = "", initialEventSlug = "", initialNew = false }: { workspaceId: string; initialEventId?: string; initialEventSlug?: string; initialNew?: boolean }) {
+  const t = useT().associationPage, u = t.ux, m = t.manage, e = t.eventPage;
+  const [view, setView] = useState<EventView>("website");
+  // Visibility is filtered before cursor pagination, including past/cancelled public archives.
+  const rows = useAssociationPage(workspaceId, "events", view === "website" ? { website: "visible" } : view === "drafts" ? { website: "drafts" } : {});
+  const access = useAssociationModule(workspaceId);
+  const configure = !!access.data?.canManage && !access.error, enabled = access.data?.module.state === "enabled" && !access.error;
+  const pages = useCachedResource(configure ? associationPageCacheKey(workspaceId, "site-content:event-pages") : null, () => getSiteContentDraft(workspaceId, "event-pages"));
+  const [selectedId, setSelectedId] = useState<string | null>(initialEventId || null);
+  const [dismissedLink, setDismissedLink] = useState(false);
+  const [created, setCreated] = useState<AssociationEvent | null>(null);
+  const [creating, setCreating] = useState(initialNew);
+  // Resolve every selection directly, including newly created drafts outside the current list.
+  const direct = useAssociationPage(workspaceId, "events", selectedId ? { id: selectedId } : { slug: initialEventSlug }, !!(selectedId || (!dismissedLink && initialEventSlug)));
+  const selected = selectedId
+    ? direct.data?.items.find(row => row.id === selectedId) ?? rows.data?.items.find(row => row.id === selectedId) ?? (created?.id === selectedId ? created : null)
+    : !dismissedLink && initialEventSlug ? direct.data?.items.find(row => row.slug === initialEventSlug) ?? null : null;
+  function pageChanged(event: AssociationEvent) {
+    const saved = (pages.data?.document as EventPagesDocument | null)?.pages.find(page => page.event === event.slug);
+    const published = (pages.data?.published as EventPagesDocument | null)?.pages.find(page => page.event === event.slug);
+    return !sameEventPage(saved ?? null, published ?? null);
+  }
+  if (creating) return <AssociationEditor title={m.newEvent} onClose={() => setCreating(false)}>
+    <InlineNotice tone="neutral">{e.createHelp}</InlineNotice>
+    <AssociationEventForm workspaceId={workspaceId} disabled={!configure || !!rows.error} onSaved={record => {
+      setCreated(record); setSelectedId(record.id); setCreating(false); void rows.refresh();
+    }} />
+  </AssociationEditor>;
+  if (selected) return <AssociationEventDetail key={selected.id} workspaceId={workspaceId} event={selected} enabled={enabled} canManage={configure} loadFailed={!!direct.error}
+    onBack={() => { setSelectedId(null); setDismissedLink(true); }} onChanged={() => { void rows.refresh(); void direct.refresh(); }} />;
+  if ((selectedId || (!dismissedLink && initialEventSlug)) && !direct.data && !direct.error) return <AssociationListState {...direct}><span /></AssociationListState>;
   return <section className="space-y-5">
-    <PageHeader title={u.eventsNav} description={u.eventsHelp} actions={configure?<Button type="button" className="min-h-11 md:min-h-9" disabled={!!rows.error} onClick={()=>{setSaved(false);setEditing("new");}}><Plus aria-hidden className="size-4"/>{m.newEvent}</Button>:undefined}>
-      <Segmented label={u.filters} value={view} onChange={setView} options={[{value:"upcoming",label:u.upcoming},{value:"past",label:u.past},{value:"drafts",label:u.drafts},{value:"all",label:u.all}]}/>
+    <PageHeader title={u.eventsNav} description={configure ? e.indexHelp : u.eventsHelp} actions={configure ? <Button type="button" className="min-h-11 md:min-h-9" disabled={!!rows.error} onClick={() => setCreating(true)}><Plus aria-hidden className="size-4" />{m.newEvent}</Button> : undefined}>
+      <Segmented label={u.filters} value={view} onChange={setView} options={[{ value: "website", label: e.onWebsite }, { value: "drafts", label: u.drafts }, { value: "all", label: e.allEvents }]} />
+      <p className="text-sm text-muted-foreground">{view === "drafts" ? e.draftsHelp : e.websiteHelp}</p>
     </PageHeader>
-    {saved?<InlineNotice tone="success">{u.saved}</InlineNotice>:null}
-    {module.data&&!configure?<ReadOnlyNotice/>:null}
-    {module.data&&module.data.module.state!=="enabled"?<InlineNotice tone="warning">{t.stateDescriptions[module.data.module.state]}</InlineNotice>:null}
+    {direct.error ? <InlineNotice tone="danger">{m.loadFailed}</InlineNotice> : null}
+    {pages.error ? <InlineNotice tone="warning">{e.statusUnavailable}</InlineNotice> : null}
+    {access.data && !configure ? <ReadOnlyNotice /> : null}
+    {access.data && access.data.module.state !== "enabled" ? <InlineNotice tone="warning">{t.stateDescriptions[access.data.module.state]}</InlineNotice> : null}
     <AssociationListState {...rows}>
-      <ResponsiveTable rows={visible} rowKey={row=>row.id} rowData={row=>({"data-event-row":row.id})} onRowClick={row=>setSelectedId(row.id)}
-        empty={<EmptyState icon={CalendarDays} title={rows.data?.items.length?u.noMatches:u.emptyEvents}/>}
+      <ResponsiveTable rows={rows.data?.items ?? []} rowKey={row => row.id} rowData={row => ({ "data-event-row": row.id })} onRowClick={row => { setCreated(row); setSelectedId(row.id); }}
+        empty={<EmptyState icon={CalendarDays} title={view === "drafts" ? e.emptyDrafts : u.emptyEvents} description={configure ? e.createHelp : undefined} />}
         columns={[
-          {key:"title",label:u.title,primary:true,cell:row=>row.title},
-          {key:"when",label:u.when,cell:row=><span>{associationDate(row.startsAt)}<span className="block text-xs text-muted-foreground">{row.timezone}</span></span>},
-          {key:"where",label:u.where,hideBelowMd:true,cell:row=>eventWhere(row,m.options)},
-          {key:"status",label:m.status,cell:row=><StatusPill status={row.status}/>},
-        ]}
-        actions={row=><><Button type="button" size="sm" variant="outline" className="min-h-11 md:min-h-8" onClick={()=>setSelectedId(row.id)}>{u.eventWorkspace}</Button>{configure?<Button type="button" size="sm" variant="ghost" className="min-h-11 md:min-h-8" disabled={!!rows.error} onClick={()=>setEditing(row)}>{m.edit}</Button>:null}</>}/>
+          { key: "title", label: u.title, primary: true, cell: row => <span>{row.title}{configure && pages.data && pageChanged(row) ? <span className="mt-1 block text-xs font-normal text-amber-700 dark:text-amber-300">{e.pageChanges}</span> : null}</span> },
+          { key: "when", label: u.when, cell: row => <span>{associationDate(row.startsAt)}<span className="block text-xs text-muted-foreground">{row.timezone}</span></span> },
+          { key: "where", label: u.where, hideBelowMd: true, cell: row => eventWhere(row, m.options) },
+          { key: "status", label: m.status, cell: row => <span className="flex flex-wrap gap-1"><StatusPill status={row.status === "draft" ? "draft" : "published"} label={row.status === "draft" ? e.hiddenDraft : e.onWebsite} />{row.status === "cancelled" || row.status === "completed" ? <StatusPill status={row.status} /> : null}</span> },
+        ]} />
     </AssociationListState>
   </section>;
 }

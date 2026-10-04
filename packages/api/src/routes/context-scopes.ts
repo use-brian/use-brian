@@ -11,7 +11,7 @@ import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import { scopeGrantContains, type ScopeGrant } from '@use-brian/core'
-import { buildAccessPredicate } from '../db/access-predicate.js'
+import { projectAggregates, projectContent } from '../db/project-aggregates.js'
 import {
   createDbContextScopeStore,
   type ContextScopeStore,
@@ -30,7 +30,6 @@ import {
 import { query, queryWithRLS } from '../db/client.js'
 import { departmentClearancesForUserSystem } from '../db/department-store.js'
 import {
-  getWorkspaceMembershipWithClearanceSystem,
   type WorkspaceStore,
 } from '../db/workspace-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
@@ -192,81 +191,6 @@ async function loadAssistant(
     [workspaceId, assistantId ?? null],
   )
   return result.rows[0] ?? null
-}
-
-async function projectAggregates(
-  userId: string,
-  workspaceId: string,
-  projectId: string,
-): Promise<Record<string, number>> {
-  const [membership, grant] = await Promise.all([
-    getWorkspaceMembershipWithClearanceSystem(userId, workspaceId),
-    query<{ compartments: ScopeGrant }>(
-      'SELECT effective_member_team_compartments($1, $2) AS compartments',
-      [userId, workspaceId],
-    ),
-  ])
-  if (!membership) return {}
-  const principal = {
-    role: membership.role,
-    clearance: membership.role === 'owner' || membership.role === 'admin'
-      ? 'confidential' as const
-      : membership.clearance,
-    compartments: grant.rows[0]?.compartments ?? [],
-  }
-  const access = {
-    workspaceId,
-    userId,
-    assistantId: '',
-    assistantKind: 'primary' as const,
-    clearance: principal.clearance,
-    compartments: principal.compartments,
-    projectIds: [projectId],
-  }
-  const tables = {
-    memories: 'memories',
-    tasks: 'tasks',
-    files: 'workspace_files',
-    entities: 'entities',
-    knowledge: 'knowledge_entries',
-    recordings: 'recordings',
-    office: 'office_artifacts',
-    episodes: 'episodes',
-  } as const
-  const counts: Record<string, number> = {}
-  for (const [label, table] of Object.entries(tables)) {
-    const predicate = buildAccessPredicate(access, { alias: 'r' })
-    const result = await query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM ${table} r WHERE ${predicate.sql}`,
-      predicate.params,
-    )
-    counts[label] = Number(result.rows[0]?.count ?? '0')
-  }
-  const pages = await queryWithRLS<{ count: string }>(
-    userId,
-    `SELECT count(*)::text AS count
-       FROM saved_views
-      WHERE workspace_id = $1 AND project_id = $2`,
-    [workspaceId, projectId],
-  )
-  counts.pages = Number(pages.rows[0]?.count ?? '0')
-  const operational = await query<{ workflows: string; goals: string }>(
-    `SELECT
-       (SELECT count(*)::text
-          FROM workflows w
-          LEFT JOIN workspace_groups g ON g.id = w.context_group_id
-         WHERE w.workspace_id = $1 AND w.context_project_id = $2
-           AND (w.context_group_id IS NULL OR $3::text[] IS NULL OR g.compartment_key = ANY($3::text[]))) AS workflows,
-       (SELECT count(*)::text
-          FROM goals o
-          LEFT JOIN workspace_groups g ON g.id = o.context_group_id
-         WHERE o.workspace_id = $1 AND o.context_project_id = $2
-           AND (o.context_group_id IS NULL OR $3::text[] IS NULL OR g.compartment_key = ANY($3::text[]))) AS goals`,
-    [workspaceId, projectId, principal.compartments],
-  )
-  counts.workflows = Number(operational.rows[0]?.workflows ?? '0')
-  counts.goals = Number(operational.rows[0]?.goals ?? '0')
-  return counts
 }
 
 export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
@@ -452,6 +376,21 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     if (!project) return void res.status(404).json({ error: 'not_found' })
     const aggregates = await projectAggregates(access.userId, access.workspaceId, project.id)
     res.json({ project: { ...project, aggregates } })
+  })
+
+  router.get('/workspaces/:workspaceId/projects/:projectId/content', async (req, res) => {
+    const access = await gate(req, res)
+    if (!access) return
+    const parsed = z.object({
+      view: z.enum(['work','knowledge','recent']).default('work'),
+      q: z.string().max(200).default(''),
+      offset: z.coerce.number().int().min(0).max(100000).default(0),
+    }).safeParse(req.query)
+    if (!parsed.success) return invalid(res, parsed)
+    const project = await contextStore.getProjectDetail(access.userId, access.workspaceId, req.params.projectId)
+    if (!project) return void res.status(404).json({ error: 'not_found' })
+    res.json(await projectContent(access.userId, access.workspaceId, project.id,
+      parsed.data.view, parsed.data.q.trim(), parsed.data.offset))
   })
 
   router.patch('/workspaces/:workspaceId/projects/:projectId', async (req, res) => {

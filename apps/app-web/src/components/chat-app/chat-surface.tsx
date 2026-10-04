@@ -3196,7 +3196,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const captureComposerDraft = ():RecoverableChatDraft|null => {
     if (!input.trim() && !att.hasReady && pendingRecordings.length===0) return null;
     return {id:crypto.randomUUID(),text:input,sessionId:activeSessionId,assistantId:activeAssistant?.id??null,
-      view,attachments:att.attachments.filter(chip=>chip.status==='done'),recordings:pendingRecordings,researchMode};
+      contextProjectId:pickedContextProjectId,contextGroupId:pickedContextGroupId,view,attachments:att.attachments.filter(chip=>chip.status==='done'),recordings:pendingRecordings,researchMode};
   };
   useChatHandoff({
     workspaceId,assistantsLoaded,blocked:att.uploading||recordingUpload.busy,
@@ -3205,7 +3205,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       const draft=captureComposerDraft();if(draft)updateRecoveryDrafts([...recoveryDrafts,draft]);
       handoffAssistantRef.current=handoff.assistantId;
       resetPane();setPendingRecordings([]);setReplyTo(null);pendingReplyRef.current=null;setSelectionQuote(null);
-      setPickedContextGroupId(null);setPickedContextProjectId(null);setResearchMode(handoff.researchMode??false);setAskArmed(false);
+      setPickedContextGroupId(null);setPickedContextProjectId(handoff.contextProjectId??null);setResearchMode(handoff.researchMode??false);setAskArmed(false);
       setPickedAssistantId(handoff.assistantId);seededRef.current=null;setRestoring(null);
       router.replace(personalChatHandoffPath(workspaceId,handoff.assistantId,handoff.requestId),{scroll:false});
     },
@@ -3214,18 +3214,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     },
     async send(handoff) {
       handoffAssistantRef.current=null;
+      if(handoff.draftOnly){setInput(handoff.text);return true;}
       return send({text:handoff.text,fileIds:handoff.fileIds??[],attachedRecordingIds:handoff.attachedRecordingIds??[],researchMode:handoff.researchMode??false});
     },
     preserveUnsent(handoff) {
       if(!meId)return;
       const drafts=readChatDrafts(workspaceId,meId),id=handoff.requestId??crypto.randomUUID();
       if(!drafts.some(draft=>draft.id===id))writeChatDrafts(workspaceId,meId,[...drafts,{id,text:handoff.text,sessionId:null,
-        assistantId:handoff.assistantId,view:'personal',attachments:[],recordings:[],researchMode:!!handoff.researchMode}]);
+        assistantId:handoff.assistantId,contextProjectId:handoff.contextProjectId,view:'personal',attachments:[],recordings:[],researchMode:!!handoff.researchMode}]);
     },
     prefill(handoff) {
       if (input.trim()) {
         updateRecoveryDrafts([...recoveryDrafts,{id:handoff.requestId??crypto.randomUUID(),text:handoff.text,sessionId:null,
-          assistantId:handoff.assistantId,view:'personal',attachments:[],recordings:[],researchMode:!!handoff.researchMode}]);
+          assistantId:handoff.assistantId,contextProjectId:handoff.contextProjectId,view:'personal',attachments:[],recordings:[],researchMode:!!handoff.researchMode}]);
       } else setInput(handoff.text);
       setError(searchCopy.assistantUnavailable);
     },
@@ -3238,6 +3239,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     resetPane();setPendingRecordings(draft.recordings);att.restore(draft.attachments);setInput(draft.text);
     setResearchMode(draft.researchMode);setReplyTo(null);pendingReplyRef.current=null;setSelectionQuote(null);
     setPickedAssistantId(draft.assistantId);selectSession(draft.sessionId,draft.view);
+    if(!draft.sessionId){setPickedContextProjectId(draft.contextProjectId??null);setPickedContextGroupId(draft.contextGroupId??null);}
   };
 
   const retryUserMessage = useCallback(

@@ -3,6 +3,7 @@ import type { StagedRecording } from './recordings/use-recording-upload'
 
 export type RecoverableChatDraft = {
   id:string; text:string; sessionId:string|null; assistantId:string|null; view:'personal'|'workspace';
+  contextProjectId?:string|null; contextGroupId?:string|null;
   attachments:Attachment[]; recordings:StagedRecording[]; researchMode:boolean;
 }
 const memory=new Map<string,RecoverableChatDraft[]>()

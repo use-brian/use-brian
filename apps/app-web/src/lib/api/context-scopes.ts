@@ -244,3 +244,15 @@ export async function updateConnectorContext(
     { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(context) },
   );
 }
+
+
+export type ProjectContentView = "work" | "knowledge" | "recent";
+export type ProjectContentPage = {
+  items: Array<{ key: string; id: string; title: string; snippet: string; kind: string;
+    target: import("@use-brian/shared").WorkspaceSearchTarget; status: string | null; updatedAt: string | null }>;
+  nextOffset: number | null;
+};
+export function getProjectContent(workspaceId: string, projectId: string, view: ProjectContentView, q: string, offset: number) {
+  const query = new URLSearchParams({view,q,offset:String(offset)});
+  return json<ProjectContentPage>(`/api/workspaces/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}/content?${query}`);
+}

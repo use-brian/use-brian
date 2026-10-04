@@ -2,18 +2,17 @@
 
 
 import type { DepartmentAccessCommand } from "@use-brian/shared";
-/** Workspace Team/Project registry and readiness UI. [COMP:app-web/context-scope] */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+/** Workspace department registry UI. [COMP:app-web/context-scope] */
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { isPhoneViewport } from "@/lib/viewport";
 import Link from "next/link";
-import { Archive, Building2, Check, Crown, Lock, Network, Plus, ShieldAlert, ShieldCheck, SlidersHorizontal, UsersRound } from "lucide-react";
+import { Archive, Building2, Check, Crown, Lock, Network, Plus, ShieldCheck, SlidersHorizontal, UsersRound } from "lucide-react";
 import { AvatarStack, Chip, ClearanceBar, ClearancePill, InfoNote, ORG_TONES, SegmentedTabs, departmentTone, tabPanelProps, toneFill, toneSolid, type OrgTone } from "@/components/organization/org-visuals";
 import { clearanceCounts, useDepartmentReaders } from "@/components/organization/department-access-panel";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DepartmentChangeFeedback, useDepartmentChange } from "@/components/workspace-access/use-department-change";
 import type { ReviewCopy } from "@/components/workspace-access/use-reviewed-command";
-import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { useT } from "@/lib/i18n/client";
 import { fetchWorkspaceDepartmentRegistry, ORGANIZATION_CHANGED_EVENT } from "@/lib/api/workspace-access";
@@ -24,15 +23,7 @@ import { isCatchUpRefresh, WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/worksp
 import { SurfaceSkeletonFor } from "@/components/chrome/surface-skeleton";
 import { organizationHref } from "@/lib/organization-navigation";
 import { format } from "@/lib/i18n";
-import {
-  archiveContextProject,
-  createContextProject,
-  getContextReadiness,
-  listContextProjects,
-  updateContextProject,
-  type ContextProject,
-  type ContextReadiness,
-} from "@/lib/api/context-scopes";
+
 
 function stableKey(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 39);
@@ -235,86 +226,6 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
           </>:details}
         </div>
       </section> : null}
-    </div>
-  );
-}
-
-export function ProjectsContextSection() {
-  const { workspaceId, role } = useWorkspaceContext();
-  const t = useT().contextScope;
-  const [projects, setProjects] = useState<ContextProject[]>([]);
-  const [readiness, setReadiness] = useState<ContextReadiness | null>(null);
-  const [name, setName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const canManage = role === "owner" || role === "admin";
-  const active = useMemo(() => projects.filter((project) => project.status === "active"), [projects]);
-
-  async function reload() {
-    const [nextProjects, nextReadiness] = await Promise.all([
-      listContextProjects(workspaceId, true),
-      canManage ? getContextReadiness(workspaceId) : Promise.resolve(null),
-    ]);
-    setProjects(nextProjects);
-    setReadiness(nextReadiness);
-  }
-  useEffect(() => { void reload().catch(() => setError(t.loadFailed)); }, [workspaceId, canManage]);
-
-  async function create() {
-    if (!name.trim()) return;
-    try {
-      await createContextProject(workspaceId, { name: name.trim() });
-      setName("");
-      await reload();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
-  }
-
-  async function archive(project: ContextProject) {
-    const confirmed = await confirmDialog({
-      title: t.archiveProjectTitle,
-      description: t.archiveProjectDescription,
-      confirmLabel: t.archiveProject,
-      cancelLabel: t.cancel,
-    });
-    if (!confirmed) return;
-    try { await archiveContextProject(workspaceId, project.id); await reload(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
-  }
-
-  async function restore(project: ContextProject) {
-    try {
-      await updateContextProject(workspaceId, project.id, { status: "active" });
-      await reload();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
-  }
-
-  return (
-    <div className="space-y-6">
-      <div><h2 className="text-lg font-semibold">{t.projectsTitle}</h2><p className="mt-1 text-sm text-muted-foreground">{t.projectsDescription}</p></div>
-      {canManage ? <div className="flex gap-2">
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t.projectNamePlaceholder}
-          className="h-9 flex-1 rounded-lg border border-border bg-background px-3 text-[16px] outline-none focus-visible:border-ring md:text-sm" />
-        <Button onClick={() => void create()} disabled={!name.trim()}><Plus className="size-4" />{t.createProject}</Button>
-      </div> : null}
-      {readiness ? (
-        <div className="rounded-xl border border-border p-4">
-          <div className="flex items-center gap-2 font-medium">
-            {readiness.readyForActivation ? <ShieldCheck className="size-4 text-emerald-500" /> : <ShieldAlert className="size-4 text-amber-500" />}
-            {readiness.readyForActivation ? t.ready : t.notReady}
-          </div>
-          <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
-            {readiness.checks.filter((check) => check.blocking).map((check) => <li key={check.id}>{check.ready ? "✓" : "○"} {check.detail}</li>)}
-          </ul>
-        </div>
-      ) : null}
-      {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      <div className="divide-y divide-border rounded-xl border border-border">
-        {projects.map((project) => <div key={project.id} className="flex items-center gap-3 px-4 py-3">
-          <div className="min-w-0 flex-1"><Link href={`/w/${workspaceId}/projects/${project.id}`} className="truncate text-sm font-medium hover:underline">{project.name}</Link><p className="text-xs text-muted-foreground">{project.status === "active" ? t.active : t.archived}</p></div>
-          {canManage && project.status === "active" ? <Button variant="ghost" size="sm" onClick={() => void archive(project)}><Archive className="size-4" />{t.archiveProject}</Button> : null}
-          {canManage && project.status === "archived" ? <Button variant="ghost" size="sm" onClick={() => void restore(project)}>{t.restoreProject}</Button> : null}
-        </div>)}
-        {active.length === 0 ? <p className="px-4 py-6 text-sm text-muted-foreground">{t.noProjects}</p> : null}
-      </div>
     </div>
   );
 }

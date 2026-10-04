@@ -5,18 +5,16 @@
  *
  * Top to bottom:
  *  - Workspace switcher (existing pill).
+ *  - Projects and Organization, always labelled in a workspace context row.
  *  - Top nav — a horizontal Notion-style icon toolbar, left to right: Home
  *    (→ the workspace's persisted operator app — Page / Tasks / Feed — via
  *    `homeHref`; the Home hub's app-bar in the content pane switches between
  *    them, see `operator-app-bar.tsx`), then the SURFACE rows Brain
  *    (→ `/w/[id]/brain`), Studio (→ `/studio`), Workflow (→ `/workflow`),
- *    then Live (the all-activity surface, occupying the former Inbox slot) and
- *    Organization. Workspace search lives in the shared top-right header. Inbox itself is nested as the first row of
+ *    then Live (the all-activity surface, occupying the former Inbox slot). Workspace search lives in the shared top-right header. Inbox itself is nested as the first row of
  *    Live's surface-aware sidebar panel with its unread-count badge.
- *    Items are icon-only with a hover/focus tooltip (name + ⌘ shortcut); exactly
- *    ONE item at a time expands into a labeled `.doc-nav-active` pill (icon +
- *    name), the way Notion emphasizes the current section. Normally that's the
- *    active surface (`activeSurface`, via `surfaceFromPathname`). Studio shows
+ *    Items are compact icons with hover/focus tooltips; the active destination
+ *    has a `.doc-nav-active` highlight. Phones show labels. Studio shows
  *    a dismissable cold-start "Set up" nudge
  *    while the workspace has no connected connector.
  *  - Teamspace sections (docs/architecture/features/teamspaces.md) — one
@@ -66,6 +64,7 @@ import {
 } from "@dnd-kit/core";
 import {
   Activity,
+  FolderKanban,
   Brain,
   ChevronRight,
   GitBranch,
@@ -128,6 +127,7 @@ import { HomeDock } from "./home-dock";
 import { SidebarTreeNode, parseDropId } from "./sidebar-tree-node";
 import { BrainSidebarPanel } from "./sidebar-panels/brain-sidebar-panel";
 import { StudioSidebarPanel } from "./sidebar-panels/studio-sidebar-panel";
+import { ProjectsSidebarPanel } from "@/components/projects/projects-navigation";
 import { OrganizationSidebarPanel } from "./sidebar-panels/organization-sidebar-panel";
 import { WorkflowSidebarPanel } from "./sidebar-panels/workflow-sidebar-panel";
 import { FeedSidebarPanel } from "./sidebar-panels/feed-sidebar-panel";
@@ -237,36 +237,23 @@ function collapseKey(workspaceId: string): string {
   return `doc:sidebar:collapsed:${workspaceId}`;
 }
 
-/**
- * Classes for a horizontal nav item. Three states:
- *  - `!active`            -> 28px icon-only square (with hover wash).
- *  - `active && labeled`  -> a `.doc-nav-active` pill (icon + name), visibly
- *                            larger, the way Notion emphasizes the current item.
- *  - `active && !labeled` -> the active background but still icon-only (the
- *                            highlighted-but-not-the-pill state).
- *
- * Callers enforce a single-pill invariant (see `surfacePill`):
- * at most one item is ever `labeled`, so the one label fits and
- * two pills can't collide and truncate. `transition-all` eases the bg/grow.
- */
-function navItemCls(active: boolean, labeled: boolean): string {
-  // Below `md` the row is a vertical, labelled list of 44px rows (responsive
-  // contract M3): a horizontal strip of 28px unlabelled icons is a desktop
-  // affordance, and tooltips never show on touch. The `md:` half is the
-  // Notion-style icon toolbar unchanged.
-  const phone =
-    "max-md:h-11 max-md:w-full max-md:justify-start max-md:gap-2.5 max-md:px-3 max-md:text-[13px]";
-  const base = `inline-flex h-7 shrink-0 items-center rounded-md text-sidebar-foreground/65 transition-all ${phone}`;
-  if (active && labeled) {
-    return `${base} doc-nav-active gap-1.5 px-2 text-[13px] font-medium text-sidebar-accent-foreground`;
-  }
-  if (active) {
-    return `${base} md:w-7 justify-center doc-nav-active text-sidebar-accent-foreground`;
-  }
-  return `${base} md:w-7 justify-center hover:bg-sidebar-accent hover:text-sidebar-accent-foreground`;
+/** Compact desktop icons; labelled 44px phone destinations. */
+function navItemCls(active: boolean): string {
+  const base = "inline-flex h-7 shrink-0 items-center justify-center rounded-md md:w-7 max-md:h-11 max-md:w-full max-md:justify-start max-md:gap-2.5 max-md:px-3 max-md:text-[13px]";
+  return active
+    ? `${base} doc-nav-active text-sidebar-accent-foreground`
+    : `${base} text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground`;
 }
 
-/** The phone-only label beside a nav icon (the pill span carries it on `md+`). */
+/** Context names stay visible; wrapping preserves long translated labels. */
+function contextNavItemCls(active: boolean): string {
+  const base = "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs max-md:min-h-11 [&>span]:break-words";
+  return active
+    ? `${base} doc-nav-active text-sidebar-accent-foreground`
+    : `${base} text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground`;
+}
+
+/** The phone-only label beside a nav icon (desktop uses a tooltip). */
 function PhoneNavLabel({ children }: { children: React.ReactNode }) {
   return <span className="whitespace-nowrap md:hidden">{children}</span>;
 }
@@ -343,11 +330,9 @@ export function DocSidebar(props: Props) {
     };
   }, [inboxKey]);
 
-  // One primary surface owns the expanded navigation pill.
+  // The current primary destination owns the navigation highlight.
   const surfaceActive = (surface: WorkspaceSurface) => props.activeSurface === surface;
-  const surfacePill = surfaceActive;
   const homeActive = activeOperatorApp !== null;
-  const homePill = homeActive;
 
   // ── Persisted expand/collapse state (per workspace) ─────────────────
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -624,18 +609,33 @@ export function DocSidebar(props: Props) {
         </button>
       </div>
 
-      {/* Top nav — horizontal icon toolbar (Notion-style). Every item is an icon
-          with a hover/focus tooltip (name + ⌘ shortcut); exactly ONE item at a
-          time expands into a labeled `.doc-nav-active` pill that spells out its
-          name (see `surfacePill` above) — the way Notion
-          emphasizes the current section. Order: Home / Brain / Studio / Workflow /
-          Live / Organization. Only the active surface expands its label. `pt-1`
-          keeps the Studio corner badge off the top edge.
-          `data-doc-chrome`: in the desktop shell this whole title-bar zone is an
-          OS window-drag handle, so the gaps between icons and the empty space to
-          the right of the icons drag the window; the icon links/buttons opt back out
-          via the `[data-doc-chrome] :is(a, button, …)` rule in globals.css. */}
-      <nav data-doc-chrome className="flex flex-col items-stretch gap-0.5 px-2 pt-1 pb-1.5 md:flex-row md:items-center">
+      {/* Workspace context stays fully labelled above main navigation. */}
+      <div data-doc-chrome data-workspace-context-nav className="mx-2 mb-1 flex shrink-0 flex-wrap items-center gap-1 border-b border-sidebar-border pb-2 pt-1">
+        <Tooltip label={copy.contextScope.projectsTitle}>
+          <Link href={`/w/${workspaceId}/projects`}
+            {...intentPrefetch(`/w/${workspaceId}/projects`)}
+            aria-label={copy.contextScope.projectsTitle}
+            aria-current={surfaceActive("projects") ? "page" : undefined}
+            className={contextNavItemCls(surfaceActive("projects"))}>
+            <FolderKanban className="size-[17px] shrink-0" aria-hidden />
+            <span>{copy.contextScope.projectsTitle}</span>
+          </Link>
+        </Tooltip>
+
+        <Tooltip label={copy.organization.title}>
+          <Link href={`/w/${workspaceId}/organization`}
+            {...intentPrefetch(`/w/${workspaceId}/organization`)}
+            aria-label={copy.organization.title}
+            aria-current={surfaceActive("organization") ? "page" : undefined}
+            className={contextNavItemCls(surfaceActive("organization"))}>
+            <Users className="size-[17px] shrink-0" aria-hidden />
+            <span>{copy.organization.title}</span>
+          </Link>
+        </Tooltip>
+      </div>
+
+      {/* Main destinations use compact desktop icons and labelled phone rows. */}
+      <nav data-doc-chrome aria-label={copy.contextScope.workspaceNavigation} className="flex shrink-0 flex-col items-stretch gap-0.5 overflow-x-auto px-2 pt-1 pb-1.5 md:flex-row md:items-center">
         {/* Home — first of the ⌘/Ctrl+1/2/3/4 surface shortcuts (wired in
             WorkspaceChrome). The chip label is browser-dependent
             (`surfaceShortcutLabel`): ⌘n on mac, ⌃n on mac Firefox (which
@@ -645,12 +645,9 @@ export function DocSidebar(props: Props) {
             href={props.homeHref}
             {...intentPrefetch(props.homeHref)}
             aria-label={t.iconHomeAria}
-            className={navItemCls(homeActive, true)}
+            className={navItemCls(homeActive)}
           >
             <Home className="size-[17px] shrink-0" />
-            {homePill ? (
-              <span className="whitespace-nowrap max-md:hidden">{t.iconHome}</span>
-            ) : null}
             <PhoneNavLabel>{t.iconHome}</PhoneNavLabel>
           </Link>
         </Tooltip>
@@ -663,12 +660,9 @@ export function DocSidebar(props: Props) {
             href={`/w/${workspaceId}/brain`}
             {...intentPrefetch(`/w/${workspaceId}/brain`)}
             aria-label={t.iconBrainAria}
-            className={navItemCls(surfaceActive("brain"), true)}
+            className={navItemCls(surfaceActive("brain"))}
           >
             <Brain className="size-[17px] shrink-0" />
-            {surfacePill("brain") ? (
-              <span className="whitespace-nowrap max-md:hidden">{t.iconBrain}</span>
-            ) : null}
             <PhoneNavLabel>{t.iconBrain}</PhoneNavLabel>
           </Link>
         </Tooltip>
@@ -680,12 +674,9 @@ export function DocSidebar(props: Props) {
             href={`/w/${workspaceId}/studio/connectors`}
             {...intentPrefetch(`/w/${workspaceId}/studio/connectors`)}
             aria-label={t.iconStudioAria}
-            className={navItemCls(surfaceActive("studio"), true) + " relative"}
+            className={navItemCls(surfaceActive("studio")) + " relative"}
           >
             <SlidersHorizontal className="size-[17px] shrink-0" />
-            {surfacePill("studio") ? (
-              <span className="whitespace-nowrap max-md:hidden">{t.iconStudio}</span>
-            ) : null}
             <PhoneNavLabel>{t.iconStudio}</PhoneNavLabel>
             {props.studioNudge ? (
               <span
@@ -700,12 +691,9 @@ export function DocSidebar(props: Props) {
             href={`/w/${workspaceId}/workflow`}
             {...intentPrefetch(`/w/${workspaceId}/workflow`)}
             aria-label={t.iconWorkflowAria}
-            className={navItemCls(surfaceActive("workflow"), true)}
+            className={navItemCls(surfaceActive("workflow"))}
           >
             <GitBranch className="size-[17px] shrink-0" />
-            {surfacePill("workflow") ? (
-              <span className="whitespace-nowrap max-md:hidden">{t.iconWorkflow}</span>
-            ) : null}
             <PhoneNavLabel>{t.iconWorkflow}</PhoneNavLabel>
           </Link>
         </Tooltip>
@@ -717,12 +705,9 @@ export function DocSidebar(props: Props) {
             href={`/w/${workspaceId}/live`}
             {...intentPrefetch(`/w/${workspaceId}/live`)}
             aria-label={liveActiveCount > 0 ? liveActiveLabel : liveTitle}
-            className={navItemCls(surfaceActive("live"), true) + " relative"}
+            className={navItemCls(surfaceActive("live")) + " relative"}
           >
             <Activity className="size-[17px] shrink-0" />
-            {surfacePill("live") ? (
-              <span className="whitespace-nowrap max-md:hidden">{liveTitle}</span>
-            ) : null}
             <PhoneNavLabel>{liveTitle}</PhoneNavLabel>
             <LiveActiveBadge
               count={liveActiveCount}
@@ -739,33 +724,10 @@ export function DocSidebar(props: Props) {
             home-dock Autopilot card + the Brain task panel are its entry
             points (docs/architecture/features/goals.md). */}
 
-        <Tooltip label={copy.organization.title}>
-          <Link href={`/w/${workspaceId}/organization`}
-            {...intentPrefetch(`/w/${workspaceId}/organization`)}
-            aria-label={copy.organization.title}
-            aria-current={surfaceActive("organization") ? "page" : undefined}
-            className={navItemCls(surfaceActive("organization"), true)}>
-            <Users className="size-[17px] shrink-0" aria-hidden />
-            {surfacePill("organization") && <span className="whitespace-nowrap max-md:hidden">{copy.organization.title}</span>}
-            <PhoneNavLabel>{copy.organization.title}</PhoneNavLabel>
-          </Link>
-        </Tooltip>
       </nav>
 
-      {/* Operator app-bar — the Home hub's second tier (Page / Tasks / CRM /
-          Feed / Browsers / Chat + the workspace's custom apps), between the
-          icon row and the surface body. WHICH apps show, and in WHAT ORDER, is
-          workspace config (`home_apps`, dragged in Studio → Mini apps).
-          Clicking an app navigates AND persists the per-workspace selection the
-          Home icon resumes.
-
-          `active` is null off the operator family (Brain / Studio / Workflow)
-          and the bar then renders NOTHING — there is nothing to switch between
-          there. It once stayed alive to carry a "My Browser" square; that moved
-          to the Browsers surface's own top bar (computer-use.md §5). The
-          consequence worth knowing: an admin configuring the strip in Studio
-          cannot see it, which is why that tab draws its own preview. See
-          operator-app-bar.tsx / lib/operator-apps.ts. */}
+      {/* Mini apps hide on Projects and Organization, leaving the view's own
+          navigation below the main row. Other surfaces retain workspace apps. */}
       <OperatorAppBar
         workspaceId={workspaceId}
         active={activeOperatorApp}
@@ -806,6 +768,8 @@ export function DocSidebar(props: Props) {
           <ChatSidebarPanel workspaceId={workspaceId} />
         ) : sidebarSurface === "shopify" ? (
           <ShopifySidebarPanel workspaceId={workspaceId} />
+        ) : sidebarSurface === "projects" ? (
+          <ProjectsSidebarPanel key={workspaceId} workspaceId={workspaceId} />
         ) : sidebarSurface === "organization" ? (
           <OrganizationSidebarPanel workspaceId={workspaceId} />
         ) : sidebarSurface === "live" ? (

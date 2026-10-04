@@ -71,6 +71,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // Shopify families (`shopify:`, `shopify-drafts:`), which read an
       // EXTERNAL store no workspace event ever describes.
       return [
+        `project:${workspaceId}:`,
         `tasks:${workspaceId}`,
         `crm:${workspaceId}:`,
         `brain-graph:${workspaceId}:`,
@@ -100,6 +101,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // page carries no listener of its own and its in-flight poll stays only
       // as the degraded-SSE fallback.
       return [
+        `project:${workspaceId}:`,
         `workflow:${workspaceId}`,
         `workflow-detail:${workspaceId}:`,
         `workflow-run:${workspaceId}:`,
@@ -136,7 +138,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // Feed shell's record carries (name, role, canDraft) - report E's
       // "Feed gate" row names this as its one stale trigger. The Settings
       // detail row (name, icon, purpose, roster) rides the same signal.
-      return [`feed-workspace:${workspaceId}`, `workspace-detail:${workspaceId}`, `feed-collaboration:${workspaceId}`];
+      return [`projects:${workspaceId}`, `project:${workspaceId}:`, `feed-workspace:${workspaceId}`, `workspace-detail:${workspaceId}`, `feed-collaboration:${workspaceId}`];
     case SKILL_REFRESH_EVENT:
       // `brain-skill:<wid>:` is the skill editor's row. Mark-stale only: the
       // editor body is an editable draft, and the page adopts a revalidated
@@ -151,6 +153,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       return [
         `live:${workspaceId}`,
         `chat-sessions:${workspaceId}`,
+        `project:${workspaceId}:`,
         `chat-shared:${workspaceId}`,
         `feed-collaboration:${workspaceId}`,
       ];
@@ -214,6 +217,7 @@ export function applySpineEventToSurfaceCache(
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`workspace-member-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`page-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT) {
+    drop(`project:${workspaceId}:`);
     drop(`doc-media:${workspaceId}:`);
     drop(`file-cache-media:${workspaceId}:`);
     drop(`office-media:${workspaceId}:`);
@@ -227,6 +231,10 @@ export function applySpineEventToSurfaceCache(
   }
   if (event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed") {
     // Authority changes purge even an unmounted directory/access surface.
+    drop(`projects:${workspaceId}`);
+    drop(`project:${workspaceId}:`);
+    drop(`assistants:${workspaceId}`);
+    drop(`chat-roster:${workspaceId}`);
     drop(`organization:${workspaceId}:`);
     drop(`workspace-access:${workspaceId}:`);
     drop(`scope-review:${workspaceId}:`);

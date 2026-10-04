@@ -43,7 +43,6 @@ import { TokenUsageSection } from "./sections/token-usage-section";
 import { BillingSection } from "./sections/billing-section";
 import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
-import { ProjectsContextSection } from "./sections/context-scopes-section";
 import {
   WorkspaceGeneralSection,
 } from "./workspace-sections";
@@ -71,7 +70,6 @@ const ACCOUNT_SECTIONS: SettingsSection[] = [
 const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-organization",
   "ws-general",
-  "ws-projects",
   // Provider connections and model routing share the Models section.
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
   // manager for published-page hostnames. Open feature, so OSS keeps it too.
@@ -89,7 +87,6 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-organization",
   "ws-general",
-  "ws-projects",
   "ws-models",
   "ws-domains",
   "ws-usage",
@@ -156,7 +153,9 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
     }
   }
 
-  const organizationDestination = organizationSettingsHref(workspaceId, section, memberTarget);
+  const organizationDestination = section === "ws-projects"
+    ? `/w/${workspaceId}/projects`
+    : organizationSettingsHref(workspaceId, section, memberTarget);
   useEffect(() => {
     if (!open || !organizationDestination) return;
     router.push(organizationDestination);
@@ -385,7 +384,7 @@ function SectionBody({
       // The modal redirects these compatibility entries to the canonical hub.
       return null;
     case "ws-projects":
-      return <ProjectsContextSection />;
+      return null;
     case "ws-llm-key":
       // Compatibility for old deep links: provider setup now lives in Models.
       return <ModelsSection />;

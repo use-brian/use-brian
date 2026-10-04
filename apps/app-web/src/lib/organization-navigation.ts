@@ -2,7 +2,7 @@
  * [COMP:app-web/organization-chart] */
 import type { SettingsMemberTarget, SettingsSection } from './workspace-settings-events';
 
-export const ORGANIZATION_SECTIONS = ['structure', 'people', 'departments', 'access'] as const;
+const ORGANIZATION_SECTIONS = ['structure', 'people', 'departments', 'access'] as const;
 export type OrganizationSection = typeof ORGANIZATION_SECTIONS[number];
 
 export function organizationSection(value: string | null): OrganizationSection {
