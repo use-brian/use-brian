@@ -1,8 +1,9 @@
 "use client";
 
+import { ProjectContent } from "@/components/projects/project-content";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
- * First-class Project aggregation page. [COMP:app-web/project-detail]
+ * Project home with canonical records and a fresh contextual chat. [COMP:app-web/project-detail]
  *
  * Paints from the surface cache (instant-navigation contract N1): the
  * project row + the workspace member roster load in parallel under
@@ -23,7 +24,7 @@ import { Skeleton } from "@/components/skeleton";
 import { useT } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 import { useWorkspaceContext } from "@/lib/workspace-context";
-import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { markSurfaceCacheStale, mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { assistantsCacheKey, projectDetailCacheKey } from "@/lib/surface-prefetch";
 import { listAssistants } from "@/lib/api/studio";
 import {
@@ -49,20 +50,6 @@ async function fetchProjectBundle(workspaceId: string, projectId: string): Promi
 }
 
 const NO_ASSISTANTS: Assistant[] = [];
-
-const AGGREGATE_LABELS = {
-  memories: "projectAggregateMemories",
-  tasks: "projectAggregateTasks",
-  files: "projectAggregateFiles",
-  entities: "projectAggregateEntities",
-  knowledge: "projectAggregateKnowledge",
-  recordings: "projectAggregateRecordings",
-  office: "projectAggregateOffice",
-  pages: "projectAggregatePages",
-  workflows: "projectAggregateWorkflows",
-  goals: "projectAggregateGoals",
-  episodes: "projectAggregateEpisodes",
-} as const;
 
 export default function ProjectDetailPage({
   params,
@@ -123,6 +110,7 @@ export default function ProjectDetailPage({
         description: editDescription.trim() || null,
         icon: editIcon.trim() || null,
       });
+      markSurfaceCacheStale(`projects:${workspaceId}`);
       // The user's own write: patch the cached row so the next visit paints
       // the post-edit name, never the pre-edit one.
       mutateSurfaceCache<ProjectBundle>(bundleKey, (previous) => ({
@@ -138,7 +126,7 @@ export default function ProjectDetailPage({
       return (
         <div aria-busy="true" data-testid="project-skeleton" className="h-full w-full overflow-y-auto px-4 py-6 md:px-6">
           <div className="mx-auto max-w-5xl space-y-6">
-            <BackButton href={`/w/${workspaceId}`} label={t.projectDetailBack} />
+            <BackButton href={`/w/${workspaceId}/projects`} label={t.projectDetailBack} />
             <div className="space-y-2">
               <Skeleton className="h-7 w-56 max-w-full" />
               <Skeleton className="h-4 w-80 max-w-full" />
@@ -155,58 +143,32 @@ export default function ProjectDetailPage({
         </div>
       );
     }
-    return <div className="p-6"><BackButton href={`/w/${workspaceId}`} label={t.projectDetailBack} /><p className="mt-8 text-sm text-muted-foreground">{t.projectDetailNotFound}</p></div>;
+    return <div className="p-6"><BackButton href={`/w/${workspaceId}/projects`} label={t.projectDetailBack} />
+      <p role={bundle.error ? "alert" : undefined} className="mt-8 text-sm text-muted-foreground">{bundle.error ? t.loadFailed : t.projectDetailNotFound}</p>
+      {bundle.error ? <Button className="mt-3" variant="outline" onClick={() => void refreshBundle()}>{t.retryProjects}</Button> : null}
+    </div>;
   }
 
   return (
     <div className="h-full w-full overflow-y-auto px-4 py-6 md:px-6">
       <div className="mx-auto max-w-5xl space-y-6">
-        <BackButton href={`/w/${workspaceId}`} label={t.projectDetailBack} />
+        <BackButton href={`/w/${workspaceId}/projects`} label={t.projectDetailBack} />
         <header>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             {project.icon ? <span className="text-2xl">{project.icon}</span> : null}
-            <h1 className="text-2xl font-semibold">{project.name}</h1>
+            <h1 className="min-w-0 break-words text-2xl font-semibold">{project.name}</h1>
             <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
               {project.status === "active" ? t.active : t.archived}
             </span>
           </div>
-          {project.description ? <p className="mt-2 text-sm text-muted-foreground">{project.description}</p> : null}
+          <div className="mt-4 rounded-xl border border-border p-4">
+            <h2 className="text-sm font-medium">{t.projectHome.brief}</h2>
+            <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{project.description || t.projectHome.noBrief}</p>
+          </div>
         </header>
 
-        {canManage && project.status === "active" ? (
-          <section className="grid gap-3 rounded-xl border border-border p-4 sm:grid-cols-2">
-            <label className="grid gap-1 text-xs text-muted-foreground">
-              {t.projectNameLabel}
-              <input value={editName} onChange={(event) => setEditName(event.target.value)}
-                className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
-            </label>
-            <label className="grid gap-1 text-xs text-muted-foreground">
-              {t.projectIconLabel}
-              <input value={editIcon} onChange={(event) => setEditIcon(event.target.value)} placeholder={t.projectIconPlaceholder}
-                className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
-            </label>
-            <label className="grid gap-1 text-xs text-muted-foreground sm:col-span-2">
-              {t.projectDescriptionLabel}
-              <input value={editDescription} onChange={(event) => setEditDescription(event.target.value)}
-                className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
-            </label>
-            <Button size="sm" className="self-start" onClick={() => void saveDetails()} disabled={!editName.trim()}>
-              {t.saveProjectDetails}
-            </Button>
-          </section>
-        ) : null}
 
-        <section>
-          <h2 className="mb-3 text-sm font-medium">{t.projectDetailOverview}</h2>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {Object.entries(AGGREGATE_LABELS).map(([key, label]) => (
-              <div key={key} className="rounded-xl border border-border p-4">
-                <p className="text-2xl font-semibold">{project.aggregates?.[key] ?? 0}</p>
-                <p className="mt-1 text-xs text-muted-foreground">{t[label]}</p>
-              </div>
-            ))}
-          </div>
-        </section>
+        <ProjectContent key={project.id} project={project} assistants={assistants} />
 
         <div className="grid gap-4 md:grid-cols-2">
           <section className="rounded-xl border border-border p-4">
@@ -234,6 +196,32 @@ export default function ProjectDetailPage({
             </div>
           </section>
         </div>
+        {canManage && project.status === "active" ? (
+          <details className="rounded-xl border border-border p-4">
+            <summary className="min-h-8 max-sm:min-h-11 cursor-pointer py-2 text-sm font-medium">{t.projectSettings}</summary>
+            <div className="grid gap-3 pt-3 sm:grid-cols-2">
+            <label className="grid gap-1 text-xs text-muted-foreground">
+              {t.projectNameLabel}
+              <input value={editName} onChange={(event) => setEditName(event.target.value)}
+                className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
+            </label>
+            <label className="grid gap-1 text-xs text-muted-foreground">
+              {t.projectIconLabel}
+              <input value={editIcon} onChange={(event) => setEditIcon(event.target.value)} placeholder={t.projectIconPlaceholder}
+                className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
+            </label>
+            <label className="grid gap-1 text-xs text-muted-foreground sm:col-span-2">
+              {t.projectDescriptionLabel}
+              <input value={editDescription} onChange={(event) => setEditDescription(event.target.value)}
+                className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
+            </label>
+            <Button size="sm" className="self-start" onClick={() => void saveDetails()} disabled={!editName.trim()}>
+              {t.saveProjectDetails}
+            </Button>
+          </div>
+          </details>
+        ) : null}
+
         {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       </div>
     </div>

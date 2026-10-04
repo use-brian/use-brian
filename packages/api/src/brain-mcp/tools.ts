@@ -2551,7 +2551,7 @@ export async function resolveWriteTarget(workspaceId: string): Promise<BrainWrit
               team_scope_mode, default_workspace_group_id,
               project_scope_mode, default_project_id
        FROM assistants
-       WHERE workspace_id = w.id
+       WHERE workspace_id = w.id AND placement_department_id IS NULL
        ORDER BY (kind = 'primary') DESC, created_at ASC
        LIMIT 1
      ) a ON true

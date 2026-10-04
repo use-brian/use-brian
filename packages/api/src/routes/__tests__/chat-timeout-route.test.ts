@@ -26,6 +26,7 @@ vi.mock('../../db/client.js', () => ({
   } }),
 }))
 vi.mock('../../db/users.js', () => ({
+  getUserAssistant: vi.fn(async () => ({ id: 'assistant-test' })),
   getDefaultAssistant: async () => ({ id: 'assistant-test', kind: 'personal', name: 'Test', soul: 'Test', userId: 'user-test', workspaceId: 'workspace-test', clearance: 'internal' }),
   findAssistantById: async () => ({ id: 'assistant-test', kind: 'personal', name: 'Test', soul: 'Test', userId: 'user-test', workspaceId: 'workspace-test', clearance: 'internal' }),
 }))

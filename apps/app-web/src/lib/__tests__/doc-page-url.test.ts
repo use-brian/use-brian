@@ -155,6 +155,8 @@ describe("[COMP:app-web/page-url] surfaceFromPathname", () => {
   });
 
   it("classifies each top-level surface segment", () => {
+    expect(surfaceFromPathname("/w/w1/projects")).toBe("projects");
+    expect(surfaceFromPathname("/w/w1/projects/p1")).toBe("projects");
     expect(surfaceFromPathname("/w/w1/brain")).toBe("brain");
     expect(surfaceFromPathname("/w/w1/brain/entity-123")).toBe("brain");
     expect(surfaceFromPathname("/w/w1/studio")).toBe("studio");

@@ -25,6 +25,14 @@ describe("[COMP:app-web/chat-handoff] Home to Personal chat handoff", () => {
     takeChatHandoff(base.workspaceId, base.ts);
   });
 
+  it("preserves a project-scoped editable draft through storage", () => {
+    const payload={...base,contextProjectId:"project-1",draftOnly:true};
+    const requestId=stashChatHandoff(payload);
+    expect(takeChatHandoff(base.workspaceId,base.ts)).toEqual({...payload,requestId});
+    expect(parsePendingChatHandoff(JSON.stringify({...payload,contextProjectId:42,draftOnly:"true"})))
+      .toEqual(base);
+  });
+
   it("parses a valid payload and trims its prompt", () => {
     expect(
       parsePendingChatHandoff(JSON.stringify({ ...base, text: "  Ask Brian  " })),

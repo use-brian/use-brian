@@ -687,6 +687,7 @@ export async function getDefaultAssistant(userId: string): Promise<UserAssistant
      FROM assistants a
      JOIN assistant_members am ON am.assistant_id = a.id
      WHERE am.user_id = $1 AND am.role = 'owner'
+       AND public.assistant_placement_visible($1,a.id)
      ORDER BY a.created_at ASC LIMIT 1`,
     [userId],
   )
@@ -804,6 +805,7 @@ export async function resolveAssistantAccess(
               am.user_id IS NOT NULL
               OR (a.workspace_id IS NOT NULL AND wm.user_id IS NOT NULL)
             )
+        AND public.assistant_placement_visible($1, a.id)
       LIMIT 1`,
     [userId, assistantId],
   )
@@ -829,6 +831,8 @@ export async function getUserAssistant(userId: string, assistantId: string): Pro
 export type AccessibleAssistant = {
   id: string
   name: string
+  placementDepartmentId: string | null
+  placementDepartmentName: string | null
   /**
    * The caller's *effective* role on this assistant: the highest-privilege
    * of their direct (`assistant_members`) and workspace (`workspace_members`)
@@ -883,6 +887,8 @@ export async function listAccessibleAssistants(
   const wsFilter = workspaceId ? ' AND a.workspace_id = $2' : ''
   const result = await query<AccessibleAssistant>(
     `SELECT a.id, a.name,
+            a.placement_department_id AS "placementDepartmentId",
+            (SELECT name FROM workspace_groups WHERE id=a.placement_department_id) AS "placementDepartmentName",
             CASE
               WHEN am.role = 'owner' OR wm.role = 'owner' THEN 'owner'
               WHEN am.role = 'admin' OR wm.role = 'admin' THEN 'admin'
@@ -907,6 +913,7 @@ export async function listAccessibleAssistants(
               am.user_id IS NOT NULL
               OR (a.workspace_id IS NOT NULL AND wm.user_id IS NOT NULL)
             )${wsFilter}
+        AND public.assistant_placement_visible($1, a.id)
       ORDER BY a.created_at ASC`,
     workspaceId ? [userId, workspaceId] : [userId],
   )

@@ -37,7 +37,7 @@ export async function loadDepartmentSnapshot(query: Query, input: DepartmentRead
   if (member) base[`user:${input.userId}`] = member.role === 'owner' || member.role === 'admin' ? 'confidential' : member.clearance
   if (input.assistantId) {
     const assistant = (await query<{ clearance: Tier }>(
-      'SELECT clearance FROM assistants WHERE id = $1 AND workspace_id = $2', [input.assistantId, input.workspaceId])).rows[0]
+      'SELECT clearance FROM assistants WHERE id = $1 AND workspace_id = $2 AND public.assistant_placement_visible($3, id)', [input.assistantId, input.workspaceId, input.userId])).rows[0]
     // An assistant outside the workspace is not a reader of it.
     if (!assistant) throw new Error('authority_unavailable')
     base[`assistant:${input.assistantId}`] = assistant.clearance

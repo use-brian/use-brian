@@ -60,6 +60,7 @@ export function surfaceSkeletonKind(
     // Live is master-detail: narrow roster rail + wide watch pane.
     case "live":
       return "rail";
+    case "projects":
     case "workflow":
     case "feed":
     case "office":

@@ -16,6 +16,7 @@ export async function authorizeWatchDestination(g: Pick<Grant, 'owner_id' | 'wor
   // audio the watch writes, or it could never see its own recording.
   const result = await query(`SELECT 1 FROM workspace_members m JOIN assistants a ON a.workspace_id=m.workspace_id
     WHERE m.user_id=$1 AND m.workspace_id=$2 AND a.id=$3
+      AND public.assistant_placement_visible($1,a.id)
       AND (a.kind='primary' OR a.clearance IN ('internal','confidential'))
       AND NOT ($1=ANY(a.blocked_user_ids))`, [g.owner_id, g.workspace_id, g.assistant_id])
   if (!result.rows.length) throw new WatchError(403, 'destination_unavailable')

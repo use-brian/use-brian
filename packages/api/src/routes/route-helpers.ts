@@ -60,7 +60,7 @@ export async function requireAssistantMember(
 ): Promise<boolean> {
   const result = await query<{ ok: number }>(
     `SELECT 1 AS ok
-     WHERE EXISTS (
+     WHERE public.assistant_placement_visible($2, $1) AND (EXISTS (
        SELECT 1 FROM assistant_members am
        WHERE am.assistant_id = $1 AND am.user_id = $2
      )
@@ -68,7 +68,7 @@ export async function requireAssistantMember(
        SELECT 1 FROM assistants a
        JOIN workspace_members tm ON tm.workspace_id = a.workspace_id
        WHERE a.id = $1 AND tm.user_id = $2
-     )`,
+     ))`,
     [assistantId, userId],
   )
   if (result.rows.length === 0) {
@@ -93,7 +93,7 @@ export async function requireAssistantOwner(
 ): Promise<boolean> {
   const result = await query<{ ok: number }>(
     `SELECT 1 AS ok
-     WHERE EXISTS (
+     WHERE public.assistant_placement_visible($2, $1) AND (EXISTS (
        SELECT 1 FROM assistant_members am
        WHERE am.assistant_id = $1 AND am.user_id = $2 AND am.role = 'owner'
      )
@@ -101,7 +101,7 @@ export async function requireAssistantOwner(
        SELECT 1 FROM assistants a
        JOIN workspace_members tm ON tm.workspace_id = a.workspace_id
        WHERE a.id = $1 AND tm.user_id = $2 AND tm.role = 'owner'
-     )`,
+     ))`,
     [assistantId, userId],
   )
   if (result.rows.length === 0) {

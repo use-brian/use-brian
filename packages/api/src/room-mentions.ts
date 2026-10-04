@@ -67,11 +67,12 @@ type RoomMentionCandidate =
  */
 export async function fetchRoomMentionRosters(
   workspaceId: string,
+  userId: string,
 ): Promise<{ assistants: RoomMentionAssistant[]; members: RoomMentionMember[] }> {
   const [assistantRows, memberRows] = await Promise.all([
     query<{ id: string; name: string | null }>(
-      `SELECT id, name FROM assistants WHERE workspace_id = $1`,
-      [workspaceId],
+      `SELECT id, name FROM assistants WHERE workspace_id = $1 AND public.assistant_placement_visible($2,id)`,
+      [workspaceId, userId],
     ),
     query<{ id: string; name: string | null; clearance: Sensitivity | null }>(
       `SELECT wm.user_id AS id, u.name AS name, wm.clearance
@@ -203,7 +204,7 @@ export async function recordRoomMentionsForMessage(params: {
   actorUserId: string
   sessionClearance: Sensitivity | null | undefined
 }): Promise<RecordRoomMentionsResult> {
-  const { assistants, members } = await fetchRoomMentionRosters(params.workspaceId)
+  const { assistants, members } = await fetchRoomMentionRosters(params.workspaceId, params.actorUserId)
   const resolved = resolveRoomMentions({
     text: params.text,
     actorUserId: params.actorUserId,
@@ -267,7 +268,7 @@ export async function reconcileRoomMentionsForEdit(params: {
   actorUserId: string
   sessionClearance: Sensitivity | null | undefined
 }): Promise<ReconcileRoomMentionsResult> {
-  const { assistants, members } = await fetchRoomMentionRosters(params.workspaceId)
+  const { assistants, members } = await fetchRoomMentionRosters(params.workspaceId, params.actorUserId)
   const resolveFor = (text: string) =>
     resolveRoomMentions({
       text,

@@ -31,10 +31,13 @@ beforeEach(()=>{
 })
 afterEach(()=>{act(()=>root.unmount());host.remove()})
 describe('[COMP:app-web/workspace-search] persistent modal behavior',()=>{
-  it('orders Organization last in primary navigation and removes the page-only search',()=>{
+  it('places labelled workspace context above main navigation and removes the page-only search',()=>{
     const source=readFileSync('src/components/doc/doc-sidebar.tsx','utf8')
     const nav=source.slice(source.indexOf('<nav data-doc-chrome'),source.indexOf('</nav>',source.indexOf('<nav data-doc-chrome')))
-    expect(nav.indexOf('/organization')).toBeGreaterThan(nav.indexOf('/live'))
+    const context=source.slice(source.indexOf('<div data-doc-chrome data-workspace-context-nav'),source.indexOf('<nav data-doc-chrome'))
+    expect(context).toContain('/projects');expect(context).toContain('/organization')
+    expect(context).not.toContain('PhoneNavLabel')
+    expect(nav).not.toContain('/organization');expect(nav).not.toContain('/projects')
     expect((source.match(/href=\{`\/w\/\$\{workspaceId\}\/organization`\}/g)??[]).length).toBe(1)
     expect(source).not.toContain('searchOpen');expect(source).not.toContain('EmptySearchResults')
     for(const header of ['brain/brain-topbar','doc/doc-topbar','operator/operator-topbar','studio/studio-topbar','workflow/workflow-topbar']) {

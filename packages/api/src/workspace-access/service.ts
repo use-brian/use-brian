@@ -28,7 +28,7 @@ async function teams(client:PoolClient,p:Principal):Promise<Team[]>{
   const result=await client.query<Team>(`SELECT g.id,g.name,g.compartment_key AS "compartmentKey",g.directory_visibility AS "directoryVisibility",g.requestable,g.read_all AS "readAll",g.status,
     ARRAY(SELECT compartment_key FROM workspace_group_compartment_grants WHERE group_id=g.id) AS bundle,
     ARRAY(SELECT gm.user_id FROM workspace_group_members gm JOIN workspace_members wm ON wm.user_id=gm.user_id AND wm.workspace_id=g.workspace_id WHERE gm.group_id=g.id) AS "memberIds",
-    ARRAY(SELECT assistant_id FROM workspace_group_assistants WHERE group_id=g.id) AS "assistantIds",
+    ARRAY(SELECT assistant_id FROM workspace_group_assistants WHERE group_id=g.id AND public.assistant_placement_visible($2,assistant_id)) AS "assistantIds",
     ARRAY(SELECT user_id FROM workspace_team_managers WHERE team_id=g.id AND workspace_id=g.workspace_id AND revoked_at IS NULL) AS "managerIds",
     coalesce((SELECT jsonb_agg(jsonb_build_object('userId',user_id,'capabilities',capabilities)) FROM workspace_team_managers WHERE team_id=g.id AND workspace_id=g.workspace_id AND revoked_at IS NULL),'[]'::jsonb) AS managers,
     coalesce((SELECT capabilities FROM workspace_team_managers WHERE team_id=g.id AND workspace_id=g.workspace_id AND user_id=$2 AND revoked_at IS NULL),ARRAY[]::text[]) AS capabilities,
@@ -209,6 +209,8 @@ export async function executeDepartmentAccessInTransaction(client:PoolClient,wor
 export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand,projection:'directory'):Promise<WorkspaceAccessDirectory&{appliedCommand?:AppliedCommand}>
 export async function executeDepartmentAccessInTransaction(client:PoolClient,workspaceId:string,userId:string,command:DepartmentAccessCommand,projection:'overview'|'directory'='overview'):Promise<WorkspaceAccessOverview|(WorkspaceAccessDirectory&{appliedCommand?:AppliedCommand})>{
     const p=await principal(client,workspaceId,userId,true),all=await teams(client,p)
+    if ('assistantId' in command && command.assistantId && !(await client.query(
+      'SELECT 1 WHERE public.assistant_placement_visible($1,$2)', [userId,command.assistantId])).rows.length) throw new WorkspaceAccessError('not_found',404)
     const before=await auditState(client,workspaceId,command)
     let subjectId:string
     if(command.type==='workspace.default_department.set') {

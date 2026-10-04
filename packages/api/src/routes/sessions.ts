@@ -83,6 +83,7 @@ export async function gateSessionRead(
   jwtUserId: string,
   session: GatedSession,
 ): Promise<{ status: number; error: string } | null> {
+  if (!(await getUserAssistant(jwtUserId, session.assistantId))) return { status: 403, error: 'Session not available' }
   if (session.mode === 'draft' && session.id && !(await query('SELECT feed_draft_audience_allowed($1) AS allowed', [session.id])).rows[0]?.allowed) return { status: 403, error: 'Draft source access required' }
   if (session.channelType === 'feed_thread') {
     const parent = session.id ? await findFeedThreadDraft(session.id) : null
@@ -369,6 +370,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
          WHERE ${workspaceScope
            ? `s.assistant_id IN (SELECT a.id FROM assistants a WHERE a.workspace_id = $1)`
            : `s.assistant_id = $1`} AND s.user_id = $2
+           AND public.assistant_placement_visible($2,s.assistant_id)
            -- Enumerations list only owner-scoped sessions. Workspace-shared
            -- rows (doc threads / drafts, migration 223) are reached by id
            -- via their surface, never by this list — the channel_type filter
@@ -1520,7 +1522,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
-      const { assistants, members } = await fetchRoomMentionRosters(workspaceId)
+      const { assistants, members } = await fetchRoomMentionRosters(workspaceId, user.id)
       const sessionClearance = (session.effectiveClearance as Sensitivity | null) ?? null
       const reachableMembers = members
         .filter((m) => !sessionClearance || canRead(m.clearance, sessionClearance))

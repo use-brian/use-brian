@@ -34,10 +34,11 @@ async function chart(client: PoolClient, workspaceId: string, userId: string, ca
     `SELECT p.id,p.unit_id AS "unitId",p.user_id AS "userId",p.assistant_id AS "assistantId",p.is_primary AS "isPrimary",
       p.reports_to_user_id AS "reportsToUserId",p.accountable_user_id AS "accountableUserId",p.version::text
      FROM workspace_org_placements p JOIN workspace_org_units u ON u.id=p.unit_id AND u.workspace_id=p.workspace_id
-     WHERE p.workspace_id=$1 AND u.archived_at IS NULL ORDER BY p.id`,[workspaceId])
+     WHERE p.workspace_id=$1 AND u.archived_at IS NULL
+       AND (p.assistant_id IS NULL OR public.assistant_placement_visible($2,p.assistant_id)) ORDER BY p.id`,[workspaceId,userId])
   const subjects = await client.query<OrganizationSubject>(
     `SELECT u.id,'member' AS kind,coalesce(nullif(u.name,''),'') AS name FROM workspace_members m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=$1
-     UNION ALL SELECT a.id,'assistant' AS kind,a.name FROM assistants a WHERE a.workspace_id=$1`,[workspaceId])
+     UNION ALL SELECT a.id,'assistant' AS kind,a.name FROM assistants a WHERE a.workspace_id=$1 AND public.assistant_placement_visible($2,a.id)`,[workspaceId,userId])
   const teams = await client.query<{id: string;name: string}>(`SELECT id,name FROM workspace_groups WHERE workspace_id=$1 AND kind='team' AND status='active' ORDER BY name`,[workspaceId])
   const state = await client.query<{revision: string}>(`SELECT revision::text FROM workspace_org_state WHERE workspace_id=$1`,[workspaceId])
   const result = projectOrganizationChart({validForMs:await projectionLifetime(client,workspaceId,userId),workspaceId,userId,canManage,revision:state.rows[0]?.revision ?? '0',units:units.rows,placements:placements.rows,subjects:subjects.rows,teams:teams.rows})
@@ -51,7 +52,8 @@ async function chart(client: PoolClient, workspaceId: string, userId: string, ca
       SELECT ga.assistant_id AS "subjectId",'assistant' AS kind,g.id AS "teamId"
       FROM workspace_group_assistants ga JOIN workspace_groups g ON g.id=ga.group_id
       JOIN assistants a ON a.id=ga.assistant_id AND a.workspace_id=g.workspace_id
-      WHERE g.workspace_id=$1 AND g.kind='team' AND g.status='active'`, [workspaceId])
+      WHERE g.workspace_id=$1 AND g.kind='team' AND g.status='active'
+        AND public.assistant_placement_visible($2,a.id)`, [workspaceId,userId])
     const candidates = new Map<string, NonNullable<OrganizationChart['initialization']>['candidates'][number]>()
     for (const assignment of assignments.rows) {
       if (placements.rows.some(p => p.isPrimary && (assignment.kind === 'member' ? p.userId : p.assistantId) === assignment.subjectId)) continue

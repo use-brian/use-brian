@@ -4,9 +4,11 @@ import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 
-const { departmentsMock } = vi.hoisted(() => ({
+const { departmentsMock, projectContentMock } = vi.hoisted(() => ({
+  projectContentMock: vi.fn(async () => ({items:[],nextOffset:null})),
   departmentsMock: vi.fn(async () => new Map<string, string>()),
 }))
+vi.mock('../../db/project-aggregates.js', () => ({ projectContent: projectContentMock, projectAggregates: vi.fn() }))
 vi.mock('../../db/department-store.js', () => ({ departmentClearancesForUserSystem: departmentsMock }))
 import type { ContextScopeStore } from '../../db/context-scope-store.js'
 import type { WorkspaceGroupStore } from '../../db/workspace-group-store.js'
@@ -63,6 +65,7 @@ function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner', opts: { de
       readAll: false,
       readBundle: [`team:${GID}`],
     }),
+    getProjectDetail: vi.fn().mockResolvedValue({id:GID,workspaceId:WID}),
     getProjectSystem: vi.fn().mockResolvedValue(null),
     updateProject: vi.fn().mockResolvedValue({
       id: '55555555-5555-4555-8555-555555555555',
@@ -189,6 +192,25 @@ describe('[COMP:api/context-scope-routes] Teams and Projects REST contract', () 
     expect(executeAccessCommand).toHaveBeenCalledWith(WID,'user-1', {
       type:'department.update',teamId:GID,name: 'Finance', description: 'Close and reporting', color: '#334455',
     },{type:'access.command.apply',reviewId:reviewHeaders['X-Brian-Access-Review-Id'],payloadHash:reviewHeaders['X-Brian-Access-Review-Hash']})
+  })
+
+  it('reads bounded project content as a member and rejects invalid query shape', async () => {
+    const {app}=makeApp('member')
+    const response=await request(app).get(`/api/workspaces/${WID}/projects/${GID}/content?view=knowledge&q=note&offset=30`)
+    expect(response.status).toBe(200)
+    expect(projectContentMock).toHaveBeenLastCalledWith('user-1',WID,GID,'knowledge','note',30)
+    for(const query of ['view=unknown','offset=-1','offset=1.5',`q=${'x'.repeat(201)}`]) {
+      expect((await request(app).get(`/api/workspaces/${WID}/projects/${GID}/content?${query}`)).status).toBe(400)
+    }
+  })
+  it('does not read content from another workspace or a missing project', async () => {
+    projectContentMock.mockClear()
+    const denied=makeApp(null)
+    expect((await request(denied.app).get(`/api/workspaces/${WID}/projects/${GID}/content`)).status).toBe(404)
+    const missing=makeApp('member')
+    vi.mocked(missing.contextStore.getProjectDetail).mockResolvedValueOnce(null)
+    expect((await request(missing.app).get(`/api/workspaces/${WID}/projects/${GID}/content`)).status).toBe(404)
+    expect(projectContentMock).not.toHaveBeenCalled()
   })
 
   it('updates Project metadata without treating Project participation as an ACL', async () => {

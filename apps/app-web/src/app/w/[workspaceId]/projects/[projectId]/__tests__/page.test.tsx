@@ -20,10 +20,11 @@ vi.mock("@/lib/api/context-scopes", () => ({
   setContextProjectMember: (...args: unknown[]) => api.setMember(...args),
   setContextProjectAssistant: (...args: unknown[]) => api.setAssistant(...args),
 }));
+vi.mock("@/components/projects/project-content", () => ({ ProjectContent: () => <section><h2>projectContent</h2></section> }));
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: (...args: unknown[]) => api.authFetch(...args) }));
 vi.mock("@/lib/workspace-context", () => ({ useWorkspaceContext: () => ({ role: "admin" }) }));
 vi.mock("@/lib/i18n/client", () => ({
-  useT: () => ({ contextScope: new Proxy({}, { get: (_target, key) => String(key) }) }),
+  useT: () => ({ contextScope: new Proxy({projectHome:{brief:"Project brief",noBrief:"No brief"}}, { get: (target, key) => key === "projectHome" ? target.projectHome : String(key) }) }),
 }));
 vi.mock("@/components/ui/back-button", () => ({ BackButton: () => <div data-testid="back" /> }));
 vi.mock("@/components/ui/checkbox", () => ({
@@ -81,9 +82,16 @@ describe("[COMP:app-web/project-detail] Project detail", () => {
     await mount();
     expect(container?.textContent).toContain("Atlas");
     expect(container?.textContent).toContain("Launch work");
-    expect(container?.textContent).toContain("4");
-    expect(container?.textContent).toContain("2");
-    expect(container?.textContent).toContain("1");
+    expect(container?.textContent).toContain("Project brief");
+    expect(container?.textContent).toContain("projectContent");
+  });
+
+  it("leads with the content overview and keeps registry configuration collapsed", async () => {
+    await mount();
+    const settings = container?.querySelector("details");
+    expect(settings?.hasAttribute("open")).toBe(false);
+    expect(settings?.querySelector("summary")?.textContent).toBe("projectSettings");
+    expect(container?.querySelector("section h2")?.textContent).toBe("projectContent");
   });
 
   it("shows participant, assistant, and editable registry controls to an admin", async () => {

@@ -26,6 +26,7 @@ vi.mock('../../db/sessions.js', () => ({
   findSessionTurnLeaseState: vi.fn(),
 }))
 vi.mock('../../db/users.js', () => ({
+  getUserAssistant: vi.fn(async () => ({ id: 'assistant-test' })),
   findAssistantById: vi.fn(),
 }))
 

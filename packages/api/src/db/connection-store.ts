@@ -109,6 +109,7 @@ export function createConnectionStore(): ConnectionStore {
           AND a.id <> p.id
          WHERE p.kind = 'primary'
            AND p.workspace_id = $1
+           AND a.placement_department_id IS NULL
          ON CONFLICT (follower_assistant_id, following_assistant_id) DO NOTHING`,
         [workspaceId],
       )

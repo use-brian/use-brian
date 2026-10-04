@@ -62,6 +62,7 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
     // The list, the editable detail (mark-stale only, never invalidate) and
     // the run drill-down all move on the one workflow event.
     expect(staleMarksFor(WORKFLOW_REFRESH_EVENT, "w1")).toEqual([
+      "project:w1:",
       "workflow:w1",
       "workflow-detail:w1:",
       "workflow-run:w1:",
@@ -79,6 +80,7 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
     expect(staleMarksFor(LIVE_REFRESH_EVENT, "w1")).toEqual([
       "live:w1",
       "chat-sessions:w1",
+      "project:w1:",
       "chat-shared:w1",
       "feed-collaboration:w1",
     ]);
@@ -314,4 +316,18 @@ describe('[COMP:app-web/shopify-setup] unmounted reconnect projections',()=>{
   applySpineEventToSurfaceCache(event,{workspaceId:'w1'},'w1');
   expect(readSurfaceCache(keys[0])?.data).toBeUndefined();expect(readSurfaceCache(keys[1])?.data).toBeUndefined();expect(readSurfaceCache(keys[2])?.data).toEqual({binding:'saved-private-scope'});
  });
+});
+
+
+it('[COMP:app-web/surface-cache-invalidation] clears project counts on access changes while catch-up preserves the painted view', async () => {
+  const key = 'project:w1:u1:p1';
+  await loadSurfaceCache(key, async () => ({ tasks: 2 }));
+  await loadSurfaceCache('projects:w1:u1', async () => ['p1']);
+  await loadSurfaceCache('project:w2:u1:p1', async () => ({ tasks: 3 }));
+  applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT, { workspaceId: 'w1', catchUp: true }, 'w1');
+  expect(readSurfaceCache(key).data).toEqual({ tasks: 2 });
+  applySpineEventToSurfaceCache('brian:organization-changed', { workspaceId: 'w1' }, 'w1');
+  expect(readSurfaceCache(key).data).toBeUndefined();
+  expect(readSurfaceCache('projects:w1:u1').data).toBeUndefined();
+  expect(readSurfaceCache('project:w2:u1:p1').data).toEqual({ tasks: 3 });
 });

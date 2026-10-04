@@ -1978,7 +1978,7 @@ export async function listSessionsForWorkspaceSystem(
   opts: { limit: number; channelType?: string },
 ): Promise<WorkspaceSessionSummary[]> {
   const limit = Math.max(1, Math.min(opts.limit, 50))
-  const conditions = ['a.workspace_id = $1']
+  const conditions = ['a.workspace_id = $1', 'a.placement_department_id IS NULL']
   const values: unknown[] = [workspaceId]
   let paramIdx = 2
 

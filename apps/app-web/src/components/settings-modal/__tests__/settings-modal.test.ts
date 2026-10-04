@@ -30,6 +30,8 @@ import {
 describe("[COMP:app-web/profile-management] settings navigation", () => {
   it("keeps Browser profiles out of Settings in both editions", () => {
     expect(workspaceSettingsSections(deploymentCapabilitiesFor("oss"))).not.toContain("ws-browser-profiles");
+    expect(workspaceSettingsSections(deploymentCapabilitiesFor("oss"))).not.toContain("ws-projects");
+    expect(workspaceSettingsSections(deploymentCapabilitiesFor("hosted"))).not.toContain("ws-projects");
     expect(workspaceSettingsSections(deploymentCapabilitiesFor("hosted"))).not.toContain("ws-browser-profiles");
   });
 

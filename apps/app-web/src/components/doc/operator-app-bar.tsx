@@ -1,45 +1,10 @@
 "use client";
 
-/**
- * Operator app-bar — the Home hub's second tier (tasks-operator-surface §2).
- *
- * Rendered by `DocSidebar` between the top icon row and the surface body
- * whenever the active surface belongs to an operator app (Page / Tasks /
- * CRM / Feed / Browsers / Chat) — the sidebar owns navigation in this design
- * language, so the app switcher lives here rather than as an extra chrome
- * band over the content pane.
- *
- * WHICH apps render is WORKSPACE CONFIG (`workspaces.home_apps`, migration
- * 385), passed down from `WorkspaceChrome` — which reads it from the
- * sidebar-data provider, the one place that owns both the fetch and the
- * `workspace_config` live repair. This component is deliberately dumb about
- * where the list came from. See docs/architecture/features/home-apps.md.
- *
- * UI/UX (founder redesign 2026-07-22, settled after four iterations): a
- * **dock-style icon strip** — ONE fixed-height row of 28px icon squares
- * speaking the same grammar as the top icon row (same square size, same
- * hover wash, same `.doc-nav-active` active square), indented under Home
- * so it reads as Home's children. The active app's icon takes
- * `text-primary` — the strip's one color accent; labels live in hover
- * tooltips (the content pane's own header already names the active
- * surface). Rejected on the way here: grey label pills (double-pill
- * stutter under Home), an equal-segment control (labels truncate at 4+
- * apps), an expanding-chip track (washy three-grey mush), and vertical
- * nav rows (grow ~28px per app — sidebar height belongs to the surface
- * body). The strip is the only shape that stays fixed-height at ANY app
- * count (~8 fit before an overflow menu is worth building).
- *
- * Clicking a row navigates to that app's route AND persists the selection
- * per workspace (`writeOperatorApp`), so the top-row Home icon and ⌘/Ctrl+1
- * resume it later.
- *
- * The top icon row stays frozen at Home / Brain / Studio / Workflow; this
- * block is where the operator-app family grows.
- *
- * [COMP:app-web/operator-app-bar]
- */
+/** Workspace-wide mini apps below primary navigation. Selecting a project
+ * does not scope these routes. [COMP:app-web/operator-app-bar] */
 
 import Link from "next/link";
+import { surfaceFromPathname } from "@/lib/doc-page-url";
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useIntentPrefetch } from "@/lib/surface-prefetch";
@@ -92,13 +57,7 @@ export function OperatorAppBar({
   customApps,
 }: {
   workspaceId: string;
-  /**
-   * The strip entry the current route belongs to — a built-in key or
-   * `custom:<id>` — or `null` off the family (Brain / Studio / Workflow),
-   * where the bar renders nothing at all. The switcher stays scoped to the
-   * family: offering Page/Tasks/CRM/Feed from Studio would claim a
-   * relationship the routes do not have.
-   */
+  /** Null outside mini apps: show workspace destinations without a selection. */
   active: HomeAppEntry | null;
   /**
    * The workspace's configured strip, in order (`workspaces.home_apps`).
@@ -117,6 +76,9 @@ export function OperatorAppBar({
   // base paths, then resolve cached locations after mount.
   const [locationsReady, setLocationsReady] = useState(false);
   useEffect(() => setLocationsReady(true), []);
+  // Context views own their sidebar; app links here would imply project scope.
+  const surface = surfaceFromPathname(pathname);
+  if (surface === "projects" || surface === "organization") return null;
   const labels: Record<OperatorAppKey, string> = {
     page: t.page,
     office: t.office,
@@ -128,7 +90,7 @@ export function OperatorAppBar({
     shopify: t.shopify,
     association: t.association,
   };
-  // Off the family the bar renders nothing (below). A `custom:<id>` entry
+  // A `custom:<id>` entry
   // survives only if its row exists AND is renderable — which is how the T3
   // drift rule reaches the strip: an app whose re-synced manifest widened its
   // scopes drops to `needs_consent` and disappears here until re-granted. A
@@ -136,24 +98,18 @@ export function OperatorAppBar({
   // neither leaves a dead square behind.
   const byId = new Map(customApps.map((a) => [a.id, a]));
   const apps: HomeAppEntry[] =
-    active === null
-      ? []
-      : homeApps.filter((entry) => {
+    homeApps.filter((entry) => {
           if (isBuiltinHomeAppKey(entry)) return isOperatorAppKey(entry);
           const id = customHomeAppId(entry);
           return Boolean(id && byId.get(id)?.renderable);
         });
-  // Off the operator family (Brain / Studio / Workflow) there is nothing to
-  // switch between, so the bar renders nothing. The browser connect/reconnect
-  // affordance that once kept an empty strip alive now lives in the Browsers
-  // surface's own top bar (computer-use.md §5).
   if (apps.length === 0) return null;
   return (
+    <div className="shrink-0 border-t border-sidebar-border/60 px-2 pt-2 pb-1.5">
+      <p className="mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-sidebar-foreground/55">{t.workspaceApps}</p>
     <nav
       aria-label={t.aria}
-      // `pl-4`: indented under the Home pill — the strip reads as Home's
-      // children, not a second toolbar.
-      className="flex flex-row flex-wrap items-center gap-0.5 pl-4 pr-2 pb-1.5"
+      className="flex flex-row flex-wrap items-center gap-0.5"
     >
       {apps.map((key) => {
         // A custom app's icon and label are WORKSPACE DATA (its manifest), not
@@ -201,5 +157,6 @@ export function OperatorAppBar({
         );
       })}
     </nav>
+    </div>
   );
 }

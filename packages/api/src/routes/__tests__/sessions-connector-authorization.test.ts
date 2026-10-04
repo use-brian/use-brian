@@ -13,7 +13,8 @@ vi.mock('../../db/sessions.js', () => ({
   findSessionTurnLeaseState: vi.fn(async () => null),
   isSharedChatSession: vi.fn(() => false),
 }))
-vi.mock('../../db/users.js', () => ({ findAssistantById: vi.fn() }))
+vi.mock('../../db/users.js', () => ({
+  getUserAssistant: vi.fn(async () => ({ id: 'assistant-test' })), findAssistantById: vi.fn() }))
 
 import { CONFIGURE_CAPABILITY } from '@use-brian/core'
 import { sessionQuestionRoutes } from '../sessions-questions.js'

@@ -87,11 +87,11 @@ describe('[COMP:app-web/organization-chart] unified organization home', () => {
     expect(host.querySelector('[data-access-kind="department"]')?.getAttribute('data-embedded')).toBe('true');
     navigation.query='section=access';await redraw();expect(host.querySelector('[data-access-kind="requests"]')).not.toBeNull();expect(host.querySelector('[data-access-kind="requests"]')?.getAttribute('data-embedded')).toBe('false');expect(host.querySelector('[data-access-kind="department"]')).toBeNull();
   });
-  it('swaps the section title for an inline switcher beside a collapsed desktop sidebar', async () => {
+  it('swaps the section title for a compact menu beside a collapsed desktop sidebar', async () => {
     navigation.query = 'section=departments'; sidebar.collapsed = true; await redraw();
-    const switcher = host.querySelector(`nav[aria-label="${en.organization.sectionsAriaLabel}"]`)!;
-    expect(switcher.querySelectorAll('a')).toHaveLength(4);
-    expect(switcher.querySelector('[aria-current="page"]')?.getAttribute('href')).toBe('/w/workspace-1/organization?section=departments');
+    const switcher = host.querySelector('[data-organization-section-menu]')!;
+    expect(switcher.textContent).toContain(en.organization.departmentsTab);
+    expect(switcher.className).not.toContain('md:hidden');
     expect(host.querySelector('[data-organization-section-title]')).toBeNull();
     sidebar.collapsed = false; await redraw();
     expect(host.querySelector('[data-organization-switcher]')).toBeNull();

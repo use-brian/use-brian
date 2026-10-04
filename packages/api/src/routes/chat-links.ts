@@ -100,6 +100,10 @@ export function chatLinkRoutes({ chatLinkStore }: ChatLinkRouteOptions): Router 
       })
       res.status(201).json({ link })
     } catch (err) {
+      if (err instanceof Error && err.message === 'department_assistant_requires_private_access') {
+        res.status(403).json({ error: 'department_assistant_requires_private_access', message: 'Department assistants are private to their members and cannot have public chat links.' })
+        return
+      }
       console.error('[chat-links] create failed:', err)
       res.status(500).json({ error: 'Failed to create chat link' })
     }
