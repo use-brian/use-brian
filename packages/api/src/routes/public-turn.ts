@@ -1,3 +1,4 @@
+import { billableTurnUsage } from '@use-brian/core'
 import { renderSystemContext } from '@use-brian/core'
 /**
  * Shared public turn pipeline — the body of the public API's message
@@ -1408,6 +1409,7 @@ export async function executePublicTurn(
   const turnOutput = createTurnOutputCollector({ format: 'compact' })
   let totalUsage: TokenUsage | null = null
   let responseModel: string | null = null
+  let ordinaryBilling: ReturnType<typeof billableTurnUsage> = null
   let assistantMessageId: string | null = null
 
   try {
@@ -1520,6 +1522,7 @@ export async function executePublicTurn(
         await assertDeliveryAudience()
         totalUsage = event.totalUsage ?? null
         responseModel = event.response.model
+        ordinaryBilling = billableTurnUsage(event)
         // Skip persisting fully empty assistant turns — same posture
         // as chat.ts (1462). queryLoop's empty-response recovery may
         // still exit empty when EMPTY_RETRY_PLAN or EMPTY_RETRY_WALL_MS
@@ -1575,21 +1578,22 @@ export async function executePublicTurn(
   // drove the turn — pass `actorUserId` so admin per-user views can
   // pivot to the shadow. See migration 100 and
   // docs/architecture/platform/analytics.md → "Actor vs billing party".
-  if (deps.usageStore && totalUsage && responseModel) {
+  if (deps.usageStore && ordinaryBilling) {
+    const { model: billableModel, usage } = ordinaryBilling
     const cost = customLlmRuntime?.providerKeySource === 'user'
       ? 0
-      : calculateCost(responseModel, totalUsage)
+      : calculateCost(billableModel, usage)
     deps.usageStore.recordUsage({
       userId: ownerId,
       actorUserId: user.id,
       assistantId: assistant.id,
       sessionId: session.id,
-      model: responseModel,
+      model: billableModel,
       modelTier: logicalTier,
-      inputTokens: totalUsage.inputTokens,
-      outputTokens: totalUsage.outputTokens,
-      cacheReadTokens: totalUsage.cacheReadTokens,
-      cacheWriteTokens: totalUsage.cacheWriteTokens,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
       actualCostUsd: cost,
       source: 'api',
       userMessageId: storedUserMsg.id,

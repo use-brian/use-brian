@@ -1,5 +1,5 @@
 import { nativeReadinessHandler } from './native-readiness.js'
-import { NativeRelay } from './native-relay.js'
+import { NativeRelay, NativeReleaseRequestSchema } from './native-relay.js'
 import { verifyNativeToken } from '@use-brian/api/auth/native-computer-token.js'
 import { GrantSchema, sameIdentity } from '@use-brian/computer-control/protocol.js'
 /**
@@ -92,7 +92,13 @@ app.post('/internal/native-computer/command', express.json({ limit: '32kb' }), a
   try { res.json(await native.dispatch(req.body)) } catch { res.sendStatus(400) }
 })
 app.get('/internal/native-computer/sessions/:id', (req, res) => { native.sweep(); res.json(native.status(req.params.id)) })
-app.delete('/internal/native-computer/sessions/:id', (req, res) => { native.revoke(req.params.id); res.json({ ok: true }) })
+app.delete('/internal/native-computer/sessions/:id', express.json({ limit: '1kb' }), (req, res) => {
+  // Only the authenticated internal API may request intentional release. Unknown
+  // bodies are ordinary revocation, never authority to preserve a connection.
+  const release = NativeReleaseRequestSchema.safeParse(req.body)
+  native.revoke(req.params.id, release.success ? release.data.reason : undefined)
+  res.json({ ok: true })
+})
 
 // ── WebSocket endpoint for extensions ─────────────────────────
 const server = createServer(app)

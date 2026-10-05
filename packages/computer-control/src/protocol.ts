@@ -12,13 +12,19 @@ export const BoundsSchema = z.object({ x: z.number().finite(), y: z.number().fin
 export const TargetSchema = z.object({ appId: id, processId: z.number().int().positive(), processInstanceId: id, windowId: id, windowInstanceId: id }).strict()
 // Local discovery only. Never use this schema for grants, actions or observations.
 export const DiscoveredTargetSchema = TargetSchema.extend({ displayName: z.string().max(256).optional() }).strict()
-export const IdentitySchema = z.object({ deploymentId: id, userId: id, workspaceId: id, deviceId: id, sessionId: id, conversationId: id, taskId: id }).strict()
-export const GrantSchema = z.object({
-  protocol: z.literal(NATIVE_PROTOCOL), identity: IdentitySchema, grantId: id,
+export const CommonIdentitySchema = z.object({ deploymentId: id, userId: id, workspaceId: id, deviceId: id, sessionId: id, conversationId: id }).strict()
+export const TaskIdentitySchema = CommonIdentitySchema.extend({ taskId: id }).strict()
+export const ProfileIdentitySchema = CommonIdentitySchema.extend({ profileId: id }).strict()
+export const IdentitySchema = z.union([TaskIdentitySchema, ProfileIdentitySchema])
+const grantFields = {
+  protocol: z.literal(NATIVE_PROTOCOL), grantId: id,
   epoch, expiresAt: timestamp, targets: z.array(TargetSchema).min(1).max(8),
   allowControl: z.boolean(), allowCapture: z.boolean(),
-  requester: z.string().min(1).max(200), goal: z.string().min(1).max(2000),
-}).strict()
+  requester: z.string().min(1).max(200),
+}
+export const TaskGrantSchema = z.object({ ...grantFields, identity: TaskIdentitySchema, goal: z.string().min(1).max(2000) }).strict()
+export const ProfileGrantSchema = z.object({ ...grantFields, identity: ProfileIdentitySchema, purpose: z.literal('chat-tools') }).strict()
+export const GrantSchema = z.union([TaskGrantSchema, ProfileGrantSchema])
 export const CapabilitiesSchema = z.object({
   protocol: z.literal(NATIVE_PROTOCOL), platform: z.enum(['darwin', 'win32', 'linux', 'unsupported']),
   axRead: z.boolean(), semanticActions: z.boolean(), windowCapture: z.boolean(), input: z.boolean(),
@@ -91,9 +97,13 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
 export const ServerMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('ready'), identity: IdentitySchema }).strict(),
   z.object({ type: z.literal('command'), command: CommandSchema }).strict(),
-  z.object({ type: z.literal('revoke') }).strict(),
+  z.object({ type: z.literal('revoke'), reason: z.literal('released').optional() }).strict(),
 ])
+export type NativeTaskIdentity = z.infer<typeof TaskIdentitySchema>
+export type NativeProfileIdentity = z.infer<typeof ProfileIdentitySchema>
 export type NativeIdentity = z.infer<typeof IdentitySchema>
+export type NativeTaskGrant = z.infer<typeof TaskGrantSchema>
+export type NativeProfileGrant = z.infer<typeof ProfileGrantSchema>
 export type DiscoveredTarget = z.infer<typeof DiscoveredTargetSchema>
 export type NativeTarget = z.infer<typeof TargetSchema>
 export type NativeGrant = z.infer<typeof GrantSchema>
@@ -107,7 +117,10 @@ export type NativeFrame = z.infer<typeof FrameSchema>
 export type NativeBounds = z.infer<typeof BoundsSchema>
 
 export function sameIdentity(a: NativeIdentity, b: NativeIdentity): boolean {
-  return (Object.keys(IdentitySchema.shape) as (keyof NativeIdentity)[]).every(key => a[key] === b[key])
+  if (!IdentitySchema.safeParse(a).success || !IdentitySchema.safeParse(b).success) return false
+  return (Object.keys(CommonIdentitySchema.shape) as (keyof typeof CommonIdentitySchema.shape)[]).every(key => a[key] === b[key]) &&
+    ('taskId' in a && 'taskId' in b ? a.taskId === b.taskId :
+      'profileId' in a && 'profileId' in b && a.profileId === b.profileId)
 }
 export function sameTarget(a: NativeTarget, b: NativeTarget): boolean {
   return (Object.keys(TargetSchema.shape) as (keyof NativeTarget)[]).every(key => a[key] === b[key])

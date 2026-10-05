@@ -1,6 +1,43 @@
 import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
+  computerProfiles: {
+    inspect: "檢查所選視窗",
+    inspectHelp: "控制已關閉：原生核准後，僅在本機檢查此視窗一次。不會將設定檔連接至聊天或擷取螢幕截圖。",
+    captureDenied: "螢幕錄製權限遭拒，無法擷取畫面。請開啟 Mac 螢幕錄製設定授權後，再檢查準備狀態。",
+
+    pendingVerification: "控制與擷取選項僅為請求。連接時會開啟原生驗證；電腦必須核准並支援要求的權限，才會授予存取權。",
+    capabilityToggle: "允許此助理使用電腦工具",
+    manageCapability: "在連接器中管理電腦工具權限",
+    capabilityError: "無法變更電腦工具權限。請檢查您的助理權限後重試。",
+
+    consent: "連接電腦會在原生對話框中要求明確核准。控制與擷取須分別同意。停止會撤銷本機存取，切換工作區會中斷連線。",
+    connectionError: "無法連接或中斷連線。請檢查輔助程式與系統權限。重試不確定的操作前請先檢查應用程式。",
+    studio: "Studio",
+
+    title: "電腦設定檔",
+    create: "建立電腦設定檔",
+    name: "設定檔名稱",
+    rename: "重新命名",
+    delete: "刪除設定檔",
+    deleteConfirm: "刪除此私人電腦設定檔？",
+    connect: "連接電腦",
+    disconnect: "停止 / 中斷連線",
+    online: "在線",
+    offline: "離線",
+    privateHelp: "設定檔在此工作區中僅供您使用。連接的是您的真實電腦，而非隔離桌面。",
+    chatHelp: "在 Studio > 工具中授權助理，然後在任何有權限的聊天中直接提出請求。",
+    browserHelp: "可在瀏覽器中管理。請使用桌面應用程式連接本機電腦。",
+    available: "允許此助理使用",
+    notes: "路由備註（選填）",
+    save: "儲存備註",
+    capabilityHelp: "助理還需要 native_computer 能力。僅授權設定檔不會啟用電腦工具。",
+    empty: "尚無電腦設定檔。",
+    error: "無法載入或更新電腦設定檔。請重試。",
+    retry: "重試",
+    select: "選擇電腦設定檔",
+    blocked: "連線受阻。請檢查輔助程式狀態與系統權限後重試。",
+  },
   nativeComputer: {
     verificationAcknowledge: "申請有人監督的 Mac 驗證",
     verificationHelp: "此為臨時驗證，不代表試行驗收或正式上線認證。請全程在場。必須由 Mac 原生對話框批准。停止、切換工作區或帳號及結束工作階段會撤銷批准；已送出的操作仍可能完成。仍需任務與目標同意。",

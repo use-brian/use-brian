@@ -6,7 +6,7 @@ import type { NativeBillingSettlement } from './accounting.js'
 import { describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { NativeRunTrace, NativeTraceEventSchema, NATIVE_NEXT_ACTION, calculateCost, type LLMProvider, type ToolContext, type NativeModelInput } from '@use-brian/core'
-import type { NativeGrant } from '@use-brian/computer-control/protocol.js'
+import type { NativeTaskGrant as NativeGrant } from '@use-brian/computer-control/protocol.js'
 import { createNativeComputerBootRuntimeFactory, createNativeConfiguredGrounderApproval, inspectNativeComputerModelReadiness, type NativeBootOptions } from './boot-runtime.js'
 
 function fixture() {

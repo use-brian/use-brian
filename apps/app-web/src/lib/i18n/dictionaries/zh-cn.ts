@@ -12,6 +12,43 @@
 import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
+  computerProfiles: {
+    inspect: "检查所选窗口",
+    inspectHelp: "控制已关闭：原生批准后，仅在本机检查此窗口一次。不会将配置连接至聊天或捕获屏幕截图。",
+    captureDenied: "屏幕录制权限被拒，无法捕获画面。请打开 Mac 屏幕录制设置授权后，再检查准备状态。",
+
+    pendingVerification: "控制与捕获选项仅为请求。连接时会打开原生验证；电脑必须批准并支持请求的权限，才会授予访问权。",
+    capabilityToggle: "允许此助手使用电脑工具",
+    manageCapability: "在连接器中管理电脑工具权限",
+    capabilityError: "无法更改电脑工具权限。请检查您的助手权限后重试。",
+
+    consent: "连接电脑会在原生对话框中要求明确批准。控制与捕获须分别同意。停止会撤销本机访问，切换工作区会断开连接。",
+    connectionError: "无法连接或断开连接。请检查辅助程序与系统权限。重试不确定的操作前请先检查应用。",
+    studio: "Studio",
+
+    title: "电脑配置",
+    create: "创建电脑配置",
+    name: "配置名称",
+    rename: "重命名",
+    delete: "删除配置",
+    deleteConfirm: "删除此私人电脑配置？",
+    connect: "连接电脑",
+    disconnect: "停止 / 断开连接",
+    online: "在线",
+    offline: "离线",
+    privateHelp: "配置在此工作区中仅供您使用。连接的是您的真实电脑，而非隔离桌面。",
+    chatHelp: "在 Studio > 工具中授权助手，然后在任何有权限的聊天中直接提出请求。",
+    browserHelp: "可在浏览器中管理。请使用桌面应用连接本机电脑。",
+    available: "允许此助手使用",
+    notes: "路由备注（可选）",
+    save: "保存备注",
+    capabilityHelp: "助手还需要 native_computer 能力。仅授权配置不会启用电脑工具。",
+    empty: "暂无电脑配置。",
+    error: "无法加载或更新电脑配置。请重试。",
+    retry: "重试",
+    select: "选择电脑配置",
+    blocked: "连接受阻。请检查辅助程序状态与系统权限后重试。",
+  },
   nativeComputer: {
     verificationAcknowledge: "申请有人监督的 Mac 验证",
     verificationHelp: "此为临时验证，不代表试行验收或正式上线认证。请全程在场。必须由 Mac 原生对话框批准。停止、切换工作区或账号及结束会话会撤销批准；已发出的操作仍可能完成。仍需任务与目标同意。",

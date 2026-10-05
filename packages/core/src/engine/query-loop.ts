@@ -1,3 +1,4 @@
+import { hasNativeImages, prepareNativeImageUpload, verifiedNativeImageStream } from './native-images.js'
 import { debugDocumentFlow, withDocumentFlowDebug } from './document-flow-debug.js'
 import { askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
@@ -206,6 +207,7 @@ export type QueryEvent =
   | {
       type: 'turn_complete'
       response: AssistantResponse
+      /** Billable remainder; native_image response usage was durably settled separately. */
       totalUsage: TokenUsage
       /**
        * Present only when the loop ended on a limit rather than on the model's
@@ -601,9 +603,13 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
     debugDocumentFlow('tool_availability', { sessionId: options.context.sessionId, phase: 'before_filter', declarations: options.tools.values() })
     const filteredTools = filterToolsByCapabilities(options.tools, toolContext.activeCapabilities ?? new Set())
     debugDocumentFlow('tool_availability', { sessionId: options.context.sessionId, phase: 'after_filter', declarations: filteredTools.values() })
+    // Stateful adapters retain raw history and cannot re-authorize each upload.
+    // Profile-enabled loops and opaque-image resume are always stateless.
+    const stateless = options.stateless || filteredTools.has('computerCapture') || hasNativeImages(options.messages)
+    toolContext.engineRuntime = Object.freeze({ provider: options.provider, model: options.model, imageUploads: !!stateless })
     const events = withDocumentFlowDebug(
       options.context.sessionId,
-      queryLoopCore({ ...options, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }),
+      queryLoopCore({ ...options, stateless, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }),
     )
     for await (const event of events) {
       await toolContext.authority?.assertCurrent()
@@ -651,6 +657,7 @@ async function* queryLoopCore(
 
   const loopDetector = createLoopDetector({ hardLimit: maxToolCalls })
   const totalUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
+  let lastBillableModel = model
   // WU-6.3 — monotonic position in this loop's tool-call sequence. Stamped
   // onto each `awaiting_approval` event so the resume worker can re-enter
   // the loop at the right step. Bumped each time a tool_use_end is seen.
@@ -819,6 +826,7 @@ async function* queryLoopCore(
 
     // ── Phase 2: API call ──────────────────────────────────────
     const accumulator = createAccumulator()
+    let nativeImageAccountingOwned = false
     const allToolResults: ContentBlock[] = []
     // Provider payloads whose terms prohibit durable raw-result storage still
     // need to reach the live next model turn. Tools mark those calls through
@@ -888,19 +896,20 @@ async function* queryLoopCore(
         ),
       )
       debugDocumentFlow('request', { sessionId: context.sessionId, model, turn, mode: session ? 'stateful_delta' : 'stateless_full', messages: session ? nextMessages : statelessHistory })
-      const modelStream = session
-        ? session.send(nextMessages, sendOpts)
-        : provider.stream({
-            model,
-            systemPrompt,
-            runtimeSystemContext,
-            messages: statelessHistory,
-            tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
-            maxTokens: options.maxTokens,
-            inputTokenLimit: options.inputTokenLimit,
-            ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
-            signal: context.abortSignal,
-          })
+      // This ephemeral request is the ONLY place native references become bytes.
+      // Ledger/debug/persistence/compaction continue to see opaque history.
+      const upload = await prepareNativeImageUpload({
+        model, systemPrompt, runtimeSystemContext,
+        messages: session ? nextMessages : statelessHistory,
+        tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
+        maxTokens: options.maxTokens, inputTokenLimit: options.inputTokenLimit,
+        ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
+        signal: context.abortSignal,
+      }, context)
+      nativeImageAccountingOwned = !!upload.attempt
+      const rawStream = session ? session.send(upload.request.messages, sendOpts) : provider.stream(upload.request)
+      const modelStream = upload.request.nativeImageChat
+        ? verifiedNativeImageStream(rawStream, model, upload.assertCurrent, upload.observed, upload.attempt!) : rawStream
       // Consumed — clear so non-retry turns revert to the provider default.
       nextThinkingLevel = undefined
 
@@ -1144,8 +1153,19 @@ async function* queryLoopCore(
     }
 
     const response = accumulator.finish()
+    // Engine-owned proof, never a marker supplied by a provider/stream chunk.
+    if (nativeImageAccountingOwned) response.usageAccounting = 'native_image'
     debugDocumentFlow('response', { sessionId: context.sessionId, model: response.model, turn, messages: [{ role: 'assistant', content: response.content }], stopReason: response.stopReason, usage: response.usage, truncated: response.stopReason === 'max_tokens' || response.stopReason === 'incomplete' })
-    addUsage(totalUsage, response.usage, response.model)
+    // Native-image accounting is durably committed before publication, even
+    // after Stop/revocation. Its validated response counters remain visible for
+    // metrics, but must not enter the terminal main_response charge a second time.
+    if (response.usageAccounting !== 'native_image') {
+      addUsage(totalUsage, response.usage, response.model)
+      lastBillableModel = response.model
+    } else {
+      totalUsage.calculatedCostUsd ??= 0
+      response.billableModel = lastBillableModel
+    }
 
     // ── Turn-boundary instruction-leak sanitiser ────────────────
     // When the WHOLE assistant text is a plan-tail meta-narration

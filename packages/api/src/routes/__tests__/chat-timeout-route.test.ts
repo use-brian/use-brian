@@ -46,7 +46,7 @@ vi.mock('../../db/sessions.js', async (original) => ({
 }))
 vi.mock('../route-helpers.js', async (original) => ({
   ...await original<any>(), resolveUser: async () => ({ id: 'user-test', name: 'Test', timezone: 'UTC' }),
-  checkUsageBudget: async () => null,
+  checkUsageBudget: async () => ({ status: 'ok' }),
 }))
 vi.mock('../../context-scope/resolve-turn-scope.js', async (original) => ({
   ...await original<any>(),
@@ -299,5 +299,28 @@ describe('[COMP:api/turn-lease] a stopped turn and its successor', () => {
     state.afterFirstEvent = stopThen(false)
     await run()
     expect(state.rows.filter((r) => r.role === 'assistant')).toHaveLength(1)
+  })
+})
+
+// Image settlement is exercised against real PostgreSQL SQL in
+// profile-image-accounting.test.ts. These HTTP tests cover the final web
+// consumer: it must neither charge that usage again nor relabel the remaining
+// ordinary chat calls with a mismatched image response's actual model.
+describe('chat terminal consumer for durably accounted image calls', () => {
+  it.each([0, 12])('records only the %s-token ordinary remainder, never the 100/20 image usage', async inputTokens => {
+    const recordUsage = vi.fn(async () => {})
+    const response = { content: [{ type: 'text', text: 'Computer image response withheld.' }], stopReason: 'end_turn',
+      model: 'observed-image-model', billableModel: 'gemini-3.8-flash', usage: { inputTokens: 100, outputTokens: 20 }, usageAccounting: 'native_image' }
+    state.events = [
+      { type: 'assistant_turn', response, toolResults: [] },
+      { type: 'turn_complete', response, totalUsage: { inputTokens, outputTokens: 0, calculatedCostUsd: inputTokens ? 0.001 : 0 } },
+    ]
+    const result = await run({ usageStore: { recordUsage } })
+    expect(result.status).toBe(200)
+    expect(frames(result.text).filter(e => e.event === 'error')).toEqual([])
+    if (inputTokens) {
+      expect(recordUsage).toHaveBeenCalledTimes(1)
+      expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ inputTokens: 12, outputTokens: 0, model: 'gemini-3.8-flash', actualCostUsd: 0.001 }))
+    } else expect(recordUsage).not.toHaveBeenCalled()
   })
 })

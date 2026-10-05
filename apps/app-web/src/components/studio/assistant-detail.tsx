@@ -29,6 +29,7 @@ import { deploymentCapabilities } from "@/lib/edition";
 import type { Dictionary } from "@/lib/i18n";
 import { format } from "@/lib/i18n";
 import { ModelTierRow, isModelAlias, type ModelAlias } from "@/components/studio/model-tier-row";
+import { ComputerProfilesPanel } from "@/components/studio/computer-profiles-panel";
 import { BrowserIdentitiesPanel } from "@/components/studio/browser-identities-panel";
 import { AssistantContextSettings } from "@/components/context/assistant-context-settings";
 
@@ -405,6 +406,7 @@ export function AssistantDetail({
         )}
         {tab === "tools" && (
           <ConnectorsTab
+            key={`${assistant.workspaceId ?? ""}:${id}`}
             assistantId={id}
             assistantClearance={assistant.clearance}
             workspaceId={assistant.workspaceId ?? null}
@@ -1409,7 +1411,7 @@ function ConnectorsTab({
   const params = useParams<{ workspaceId: string }>();
   const routeWs = params?.workspaceId ?? "";
   const studioHref = (segment: string) => `/w/${routeWs}/studio/${segment}`;
-  const [subTab, setSubTab] = useState<"home-apps" | "connectors" | "browser-identities" | "skills">("home-apps");
+  const [subTab, setSubTab] = useState<"home-apps" | "connectors" | "browser-identities" | "computer-profiles" | "skills">("home-apps");
   const [userConnectors, setUserConnectors] = useState<UserConnector[]>([]);
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState<string | null>(null);
@@ -1499,6 +1501,7 @@ function ConnectorsTab({
   }, [fetchConnectors, fetchSkills]);
 
   const allConnectors = userConnectors;
+  const nativeCapability = userConnectors.find(c => c.id === "native_computer" && c.scope === "builtin");
 
   async function toggleAssistantEnabled(id: string, enable: boolean) {
     setToggling(id);
@@ -1546,13 +1549,16 @@ function ConnectorsTab({
       // the grant is idempotent and a concurrent edit from another surface
       // would otherwise leave this tab showing a state the DB disagrees with.
       const data = (await res.json()) as { capability: string; enabled: boolean };
+      if (data.capability !== capability || typeof data.enabled !== "boolean") throw new Error("invalid grant");
       setUserConnectors((prev) =>
         prev.map((c) => (c.id === data.capability ? { ...c, enabled: data.enabled } : c))
       );
+      return true;
     } catch {
       setUserConnectors((prev) =>
         prev.map((c) => (c.id === capability ? { ...c, enabled: !enable } : c))
       );
+      return false;
     } finally {
       setToggling(null);
     }
@@ -1636,11 +1642,11 @@ function ConnectorsTab({
     <div className="space-y-6">
       {/* Sub-tab toggle: Mini apps / Connectors / Browser identities / Skills */}
       <div className="flex gap-1 overflow-x-auto border-b border-border pb-2">
-        {(["home-apps", "connectors", "browser-identities", "skills"] as const).map((sub) => (
+        {(["home-apps", "connectors", "browser-identities", "computer-profiles", "skills"] as const).map((sub) => (
           <button
             key={sub}
             onClick={() => { setSubTab(sub); if (sub === "connectors") fetchConnectors(); }}
-            className={`shrink-0 text-sm px-3 py-1.5 rounded-lg transition-colors ${
+            className={`min-h-11 shrink-0 text-sm px-3 py-1.5 rounded-lg transition-colors ${
               subTab === sub ? "bg-muted text-foreground font-medium" : "text-muted-foreground hover:text-foreground"
             }`}
           >
@@ -1648,6 +1654,8 @@ function ConnectorsTab({
               ? t.assistant.toolsTab.homeApps.title
               : sub === "skills"
               ? t.assistant.toolsTab.subTabSkills
+              : sub === "computer-profiles"
+                ? t.computerProfiles.title
               : sub === "browser-identities"
                 ? t.assistant.toolsTab.subTabBrowserIdentities
                 : t.assistant.toolsTab.subTabConnectors}
@@ -1657,6 +1665,17 @@ function ConnectorsTab({
 
       {subTab === "home-apps" ? (
         <HomeAppToolSettings key={assistantId} assistantId={assistantId} workspaceId={workspaceId} />
+      ) : subTab === "computer-profiles" ? (
+        <ComputerProfilesPanel
+          assistantId={assistantId}
+          workspaceId={workspaceId}
+          capability={nativeCapability ? {
+            enabled: nativeCapability.enabled,
+            pending: toggling === "native_computer",
+            onChange: enabled => toggleBuiltinCapability("native_computer", enabled),
+          } : undefined}
+          onManageCapability={() => { setSubTab("connectors"); fetchConnectors(); }}
+        />
       ) : subTab === "browser-identities" ? (
         <BrowserIdentitiesPanel
           assistantId={assistantId}

@@ -37,6 +37,8 @@ export interface NativeControllerOptions {
   approveAction: (command: Readonly<NativeCommand>, signal: AbortSignal, context?: NativeApprovalContext) => Promise<boolean>
   /** Main-only fresh API authority; absence fails closed for all remote commands. */
   revalidateExecution?: (command: Readonly<NativeCommand>, signal: AbortSignal) => Promise<boolean>
+  /** Private relay release notification. Main must synchronously revoke before awaiting cleanup. */
+  onReleased?: (status: NativeStatus) => Promise<void>
   onStatus?: (status: NativeStatus) => void
   /** Trusted main only: validated dispatch metadata, or null on revocation/new grant. */
   onActivity?: (activity: NativeActivity | null) => void
@@ -64,6 +66,7 @@ export class NativeComputerController {
   private abort = new AbortController()
   private tail: Promise<unknown> = Promise.resolve()
   private shutdown: Promise<void> = Promise.resolve()
+  private pendingCommands = 0
   private starting = false
   private disposed = false
   private journal = new Map<string, { digest: string; result: Promise<NativeReceipt> }>()
@@ -238,7 +241,8 @@ export class NativeComputerController {
     const signal = this.abort.signal
     this.admission(command, 'admitted')
     const trace = this.commandTrace(command)
-    const result = this.tail.then(() => this.dispatch(command, signal, trace))
+    ++this.pendingCommands
+    const result = this.tail.then(() => this.dispatch(command, signal, trace)).finally(() => { --this.pendingCommands })
     this.journal.set(command.commandId, { digest, result })
     // Retain only receipt metadata after delivery, never a session's AX text/frames.
     void result.then(value => {
@@ -422,6 +426,15 @@ export class NativeComputerController {
     this.grant = undefined
     this.approvalObservation = undefined
     return this.stop()
+  }
+  async relayReleased(): Promise<void> {
+    if (!this.options.onReleased || this.state !== 'active' || this.pendingCommands || this.starting ||
+      !this.grant || !('profileId' in this.grant.identity) || this.abort.signal.aborted ||
+      this.grant.expiresAt <= Date.now() || performance.now() >= this.monotonicExpiry) {
+      await this.identityChanged(); return
+    }
+    try { await this.options.onReleased(this.status()); this.journal.clear(); this.trace = undefined; this.inspectionClaimed = false }
+    catch { await this.identityChanged(); throw new Error('Release teardown unconfirmed') }
   }
   relayDisconnected(): void { void this.stop() }
   dispose(): Promise<void> { this.disposed = true; return this.stop() }

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { createTurnOutputCollector, type QueryEvent } from '@use-brian/core'
+import { billableTurnUsage, createTurnOutputCollector, type QueryEvent } from '@use-brian/core'
 import { formatPublicTurnReply } from '../public-turn.js'
 
 const source = readFileSync(new URL('../public-turn.ts', import.meta.url), 'utf8')
@@ -67,5 +67,32 @@ describe('[COMP:api/public-turn-output] final JSON reply', () => {
     expect(source).toMatch(/event\.type === 'text_delta'[\s\S]*?sendEvent\?\.\('text_delta'/)
     expect(source).toMatch(/await assertDeliveryAudience\(\)[\s\S]*?res\.json\(/)
     expect(source).toContain('...currentTurnWrite()')
+  })
+})
+
+
+describe('public-turn native-image billing projection', () => {
+  it.each([false, true])('separates billing from observed model and metrics (mixed=%s)', (mixed) => {
+    const event = {
+      response: {
+        ...response([{ type: 'text', text: 'Verified answer.' }]),
+        model: 'unknown-native-image-model', usageAccounting: 'native_image' as const,
+        usage: { inputTokens: 100, outputTokens: 20 },
+        ...(mixed ? { billableModel: 'gemini-flash' } : {}),
+      },
+      totalUsage: mixed ? { inputTokens: 13, outputTokens: 7 } : { inputTokens: 0, outputTokens: 0 },
+    }
+    const original = structuredClone(event)
+    expect(billableTurnUsage(event)).toEqual(mixed ? { model: 'gemini-flash', usage: event.totalUsage } : null)
+    expect(event).toEqual(original)
+    // Pin the real public consumer: only the projection reaches recordUsage;
+    // the observed model still feeds the public reply / served-model telemetry.
+    expect(source).toContain('ordinaryBilling = billableTurnUsage(event)')
+    expect(source).toContain('if (deps.usageStore && ordinaryBilling)')
+    expect(source).toContain('const { model: billableModel, usage } = ordinaryBilling')
+    expect(source).toContain('calculateCost(billableModel, usage)')
+    expect(source).toMatch(/recordUsage\(\{[\s\S]*?model: billableModel,/)
+    expect(source).toContain('responseModel = event.response.model')
+    expect(source).toContain('const finalModel = responseModel ?? model')
   })
 })

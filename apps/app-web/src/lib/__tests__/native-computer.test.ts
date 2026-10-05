@@ -296,3 +296,15 @@ it("[COMP:app-web/native-computer] visual capability is optional and requires bo
     expect(supportsNativeVisual({ ...caps, ...unsupported })).toBe(false);
   }
 });
+
+it('[COMP:app-web/native-computer] profile connect projects only selected permissions and ignores late replies after disconnect', async () => {
+  let finish!: (value: DesktopComputerControlResult) => void;
+  const control = vi.fn<ComputerControl>().mockImplementation(m => m.type === 'connect-profile' ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ ok: true, profileConnected: false }));
+  const owner = new NativeComputer(() => control);
+  await owner.enter('w');
+  const pending = owner.connectProfile({ ...input, profileId: 'profile' });
+  expect(control).toHaveBeenLastCalledWith({ type: 'connect-profile', workspaceId: 'w', profileId: 'profile', target: input.target, allowControl: false, allowCapture: false });
+  await owner.disconnectProfile();
+  finish({ ok: true, profileId: 'profile', profileConnected: true }); await pending;
+  expect(owner.snapshot().profileConnected).toBe(false);
+});

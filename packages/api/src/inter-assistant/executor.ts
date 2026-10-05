@@ -1,3 +1,4 @@
+import { billableTurnUsage } from '@use-brian/core'
 /**
  * Cross-assistant executor.
  *
@@ -2360,8 +2361,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // shadow is never the payer. Fire-and-forget: a metering
           // failure must never fail the consult. See
           // docs/architecture/channels/inter-assistant.md → "Cost Model".
-          const usage = event.totalUsage
-          if (options.usageStore && usage) {
+          const billing = billableTurnUsage(event)
+          if (options.usageStore && billing) {
+            const { model: billableModel, usage } = billing
             const triggerKey =
               params.callerChannelType === 'workflow'
                 ? 'workflow_assistant_call'
@@ -2371,7 +2373,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 userId: calleeOwnerUserId,
                 assistantId: params.calleeAssistantId,
                 sessionId: session.id,
-                model: event.response.model,
+                model: billableModel,
                 modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,
@@ -2379,7 +2381,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 cacheWriteTokens: usage.cacheWriteTokens,
                 actualCostUsd: customLlmRuntime?.providerKeySource === 'user'
                   ? 0
-                  : calculateCost(event.response.model, usage),
+                  : calculateCost(billableModel, usage),
                 source: 'included',
                 triggerKey,
                 providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',

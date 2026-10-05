@@ -51,6 +51,8 @@ type AnthropicImageBlock = {
   source: { type: 'base64'; media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'; data: string }
 }
 type AnthropicContentBlock = AnthropicTextBlock | AnthropicImageBlock
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
 
 /** The mimes Anthropic decodes. A PDF is NOT one of them — by the time a
  *  request reaches this adapter `wrapDocumentAdaptation` has already turned
@@ -75,7 +77,7 @@ type AnthropicMessage = {
  * System messages are extracted by the caller (they go on the request's
  * `system` field, not `messages`), so we drop them here as well.
  */
-function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
+function toAnthropicMessages(messages: Message[], strictImageChat = false): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
   for (const msg of messages) {
     if (msg.role === 'system') continue
@@ -87,6 +89,12 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
     const parts: AnthropicContentBlock[] = []
     let droppedTypes: Set<string> | null = null
     for (const block of msg.content) {
+      if (strictImageChat && block.type === 'tool_use') {
+        parts.push({ type: 'tool_use', id: block.id, name: block.name, input: block.input }); continue
+      }
+      if (strictImageChat && block.type === 'tool_result') {
+        parts.push({ type: 'tool_result', tool_use_id: block.toolUseId, content: block.content, is_error: block.isError }); continue
+      }
       if (block.type === 'text') {
         if (block.text.length > 0) parts.push({ type: 'text', text: block.text })
         continue
@@ -233,22 +241,37 @@ async function* streamNativeAnthropic(client: Anthropic, request: ProviderReques
   assertNativeInput(request)
   if (request.messages.some(m => typeof m.content !== 'string' && m.content.some(b => b.type === 'image' && !ANTHROPIC_IMAGE_MIMES.has(b.mimeType as AnthropicImageBlock['source']['media_type'])))) throw new Error('native_unsupported_input')
   const evidence = new NativeEvidence()
-  const stream = await client.messages.create({
+  // Per-request fetch wrapper: SDK setup/auth awaits cannot outlive consent.
+  const guardedClient = request.nativeImageChat ? client.withOptions({ fetch: async (url, init) => {
+    await request.nativeImageUploadGuard!()
+    return fetch(url, init)
+  } }) : client
+  const stream = await guardedClient.messages.create({
     model: resolveModel(request.model), max_tokens: request.maxTokens ?? 4096,
     system: buildSystem(request.systemPrompt, request.runtimeSystemContext, extractHistorySystemContext(request.messages)),
-    messages: toAnthropicMessages(request.messages), stream: true,
+    messages: toAnthropicMessages(request.messages, request.nativeImageChat), stream: true,
+    ...(request.nativeImageChat && request.tools?.length ? { tools: request.tools.map(t => ({ name: t.name, description: t.description, input_schema: t.parameters as Anthropic.Tool.InputSchema })) } : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
   }, { signal: request.signal, maxRetries: 0 })
   let raw: Record<string, unknown> = {}
   let finalOutput: unknown
   let stopReason: StopReason = 'incomplete'
   let stopped = false
+  const calls = new Map<number, string>()
   for await (const event of stream) {
     if (event.type === 'message_start') {
       evidence.observeModel(event.message.model)
       raw = { ...event.message.usage }
     } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-      throw new Error('native_unsupported_output')
+      if (!request.nativeImageChat) throw new Error('native_unsupported_output')
+      calls.set(event.index, event.content_block.id)
+      yield { type: 'tool_use_start', id: event.content_block.id, name: event.content_block.name }
+    } else if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
+      const id = calls.get(event.index)
+      if (id) yield { type: 'tool_use_delta', id, input: event.delta.partial_json }
+    } else if (event.type === 'content_block_stop' && calls.has(event.index)) {
+      yield { type: 'tool_use_end', id: calls.get(event.index)! }
+      calls.delete(event.index)
     } else if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
       yield { type: 'text_delta', text: event.delta.text }
     } else if (event.type === 'message_delta') {

@@ -9,7 +9,7 @@ const pipelineSource = readFileSync(new URL('../channel-pipeline.ts', import.met
 describe('[COMP:api/codex-provider] channel model telemetry', () => {
   it('logs the completed-turn model outside the optional usage-store branch', () => {
     expect(pipelineSource).toMatch(
-      /if \(usage\) \{[\s\S]*if \(usageStore\) \{[\s\S]*\n\s*\}\n\n\s*analytics\?\.logEvent\(\{[\s\S]*eventName: 'turn_completed'/,
+      /if \(usage\) \{[\s\S]*const cost = recordChannelTurnUsage\(\{[\s\S]*event, usageStore, channelType,[\s\S]*analytics\?\.logEvent\(\{[\s\S]*eventName: 'turn_completed'/,
     )
     expect(pipelineSource).toContain(
       'model: sanitizeAnalytics(event.response.model)',

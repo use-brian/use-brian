@@ -54,6 +54,8 @@ vi.mock('@use-brian/core', async (importOriginal) => ({
 
 import {
   buildTool,
+  calculateCost,
+  type UsageStore,
   type AccessCeiling,
   type Tool,
 } from '@use-brian/core'
@@ -311,5 +313,45 @@ describe('[COMP:api/scope-delivery-replay] persisted replay authority', () => {
     expect(mocks.addSessionMessage).toHaveBeenCalledTimes(1)
     expect(mocks.addSessionMessage).toHaveBeenCalledWith(expect.objectContaining({ role: 'system' }))
     expect(mocks.addSessionMessage).not.toHaveBeenCalledWith(expect.objectContaining({ role: 'assistant' }))
+  })
+})
+
+
+describe('session-resume native-image ordinary billing boundary', () => {
+  it.each([false, true])('bills only the ordinary remainder (mixed=%s)', async (mixed) => {
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+    const totalUsage = mixed
+      ? { inputTokens: 13, outputTokens: 7, cacheReadTokens: 2, cacheWriteTokens: 3 }
+      : { inputTokens: 0, outputTokens: 0 }
+    const response = {
+      content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn',
+      model: 'unknown-native-image-model', usageAccounting: 'native_image',
+      ...(mixed ? { billableModel: 'gemini-flash' } : {}),
+      usage: { inputTokens: 100, outputTokens: 20 },
+    }
+    const original = structuredClone(response)
+    mocks.queryLoop.mockImplementation(async function* () {
+      yield { type: 'turn_complete', response, totalUsage }
+    })
+    const run = createSessionResumeReplay({
+      provider: {} as never, resolveWorkspaceCustomLlm: null,
+      resolveWorkspaceByoGeminiKey: null, buildWorkspaceProvider: null,
+      tools: new Map(), systemPrompt: 'system',
+      usageStore: { recordUsage } as unknown as UsageStore,
+    })
+    expect(await run(params({ approvalStatus: 'rejected' }))).toBe('completed')
+    if (mixed) {
+      expect(recordUsage).toHaveBeenCalledTimes(1)
+      expect(recordUsage.mock.calls[0]?.[0]).toMatchObject({
+        userId: SESSION.userId, assistantId: ASSISTANT.id, sessionId: SESSION.id,
+        workspaceId: ASSISTANT.workspaceId, model: 'gemini-flash', ...totalUsage,
+        actualCostUsd: calculateCost('gemini-flash', totalUsage),
+        source: 'included', triggerKey: 'session_resume', providerKeySource: 'platform',
+      })
+    } else {
+      expect(recordUsage).not.toHaveBeenCalled()
+    }
+    expect(response).toEqual(original)
+    expect(mocks.addSessionMessage).toHaveBeenCalled()
   })
 })

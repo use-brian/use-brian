@@ -134,6 +134,7 @@ export async function inspectNativeComputerModelReadiness(options: NativeModelRe
 
 export function createNativeComputerBootRuntimeFactory(options: NativeBootOptions): NativeRuntimeFactory {
   return async (context, grant, trace) => {
+    if (!('goal' in grant)) return null // Legacy autonomous runtime never consumes chat profile grants.
     if (!context.workspaceId || context.userId !== grant.identity.userId || context.workspaceId !== grant.identity.workspaceId || context.sessionId !== grant.identity.conversationId) return null
     // Task admission, not merely a best-effort ledger callback. Unsupported
     // stores must not incur new native inference or expose an effectful runtime.

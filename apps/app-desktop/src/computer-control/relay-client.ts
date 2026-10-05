@@ -8,6 +8,8 @@ export class NativeRelayClient {
   private socket?: WebSocket
   private tail: Promise<void> = Promise.resolve()
   private epoch?: number
+  private pendingCommands = 0
+  private uncertain = false
   private ready = false
   private closed = false
   private heartbeat?: ReturnType<typeof setInterval>
@@ -29,7 +31,19 @@ export class NativeRelayClient {
       try {
         if (typeof event.data !== 'string' || event.data.length > MAX_MESSAGE_BYTES) throw new Error('Invalid native relay payload')
         const message = ServerMessageSchema.parse(parseMessage(event.data))
-        if (message.type === 'revoke') { this.disconnect(); return }
+        if (message.type === 'revoke') {
+          const status = this.controller.status()
+          if (message.reason === 'released' && this.ready && !this.pendingCommands && !this.uncertain &&
+            'profileId' in this.identity && status.state === 'active' && status.epoch === this.epoch &&
+            !!status.identity && sameIdentity(status.identity, this.identity)) {
+            // Detach before cleanup: the relay's expected close cannot become a
+            // second, ordinary revocation of a freshly consented replacement.
+            this.closed = true; clearTimeout(timeout); clearInterval(this.heartbeat)
+            void this.controller.relayReleased().catch(() => this.controller.relayDisconnected())
+            this.socket?.close()
+          } else this.disconnect()
+          return
+        }
         if (message.type === 'ready') {
           if (this.ready || !sameIdentity(message.identity, this.identity)) throw new Error('Wrong native identity')
           this.ready = true; clearTimeout(timeout)
@@ -39,14 +53,16 @@ export class NativeRelayClient {
           if (!this.ready || message.command.epoch !== this.epoch || !sameIdentity(message.command.identity, this.identity)) throw new Error('Unbound command')
           // Serialize through publication, not just helper execution: a later
           // approval must not overtake the status/receipt pair for this effect.
+          ++this.pendingCommands
           this.tail = this.tail.then(async () => {
             if (this.closed) return
             const current = this.controller.status()
             if (current.state !== 'active' || current.epoch !== this.epoch || !current.identity || !sameIdentity(current.identity, this.identity)) { this.disconnect(); return }
             const receipt = await this.controller.execute(message.command)
+            if (receipt.outcome === 'execution_unknown' || ['transport_error', 'helper_error', 'stopped', 'expired'].includes(receipt.code)) this.uncertain = true
             if (!this.sendStatus()) return
             this.send({ type: 'receipt', receipt })
-          }).catch(() => this.disconnect())
+          }).catch(() => this.disconnect()).finally(() => { --this.pendingCommands })
         }
       } catch { this.disconnect() }
     })

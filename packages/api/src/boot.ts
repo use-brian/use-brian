@@ -1,3 +1,6 @@
+import { createProfileImageAccounting } from './computer-use/profile-image-accounting.js'
+import { createProfileImagePolicy, trackProfileImageRoutes } from './computer-use/profile-image-policy.js'
+import { composeComputerProfileTools } from './computer-use/profile-tools.js'
 import { createNativeComputerReadinessOptions, type ReadinessOptions } from './computer-use/readiness.js'
 import { nativeAccountingFor } from './computer-use/accounting-capability.js'
 import type { NativeAccountingCapability } from './computer-use/accounting.js'
@@ -2326,11 +2329,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   const customLlmNetworkPolicy = isSelfHostedOssEnv() ? 'private-network' : 'public-only'
   const customLlmEndpointStore = createDbWorkspaceCustomLlmEndpointStore(llmProviderEncryptionKey ?? undefined)
-  const resolveWorkspaceCustomLlm = createWorkspaceCustomLlmResolver(customLlmEndpointStore, {
+  const { resolve: resolveWorkspaceCustomLlm, managedRoutes: nativeImageManagedRoutes } = trackProfileImageRoutes(createWorkspaceCustomLlmResolver(customLlmEndpointStore, {
     networkPolicy: customLlmNetworkPolicy,
     managedProvider: provider,
     documentAdaptation: { distill: documentDistill, cache: distillateCache },
-  })
+  }))
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
     workspaceId
       ? resolveWorkspaceCustomLlm({
@@ -5003,6 +5006,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   const nativeComputerService = (env.NATIVE_COMPUTER_ENABLED ?? process.env.NATIVE_COMPUTER_ENABLED) === 'true' && browserRelayUrl && env.BROWSER_RELAY_SECRET && (env.NATIVE_COMPUTER_DEPLOYMENT_ID ?? process.env.NATIVE_COMPUTER_DEPLOYMENT_ID)
     ? new NativeComputerService({ relayUrl: browserRelayUrl, relaySecret: env.BROWSER_RELAY_SECRET, jwtSecret: env.JWT_SECRET, deploymentId: (env.NATIVE_COMPUTER_DEPLOYMENT_ID ?? process.env.NATIVE_COMPUTER_DEPLOYMENT_ID)! }) : null
+  let nativeDiagnosticTool: Tool | undefined
   let nativeComputerReadiness: ReadinessOptions | undefined
   if (nativeComputerService) {
     const visionModel = process.env.NATIVE_COMPUTER_VISION_MODEL
@@ -5026,7 +5030,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     nativeComputerReadiness = createNativeComputerReadinessOptions(nativeAccounting, nativeModelOptions, !!ports.nativeComputerRuntimeFactory)
     // Even a host-supplied runtime cannot bypass unsupported-store admission.
     // The service/inspection routes remain available; only task execution closes.
-    allTools.set('nativeComputerTask', composeNativeComputerTool(nativeComputerService, nativeAccounting ? runtime : undefined, ports.nativeComputerObserverFactory))
+    nativeDiagnosticTool = composeNativeComputerTool(nativeComputerService, nativeAccounting ? runtime : undefined, ports.nativeComputerObserverFactory)
+    // Normal chat exposes profile commands only, never the legacy goal runner.
+    for (const tool of Object.values(composeComputerProfileTools(nativeComputerService, createProfileImagePolicy({ ...nativeModelOptions, managedRoutes: nativeImageManagedRoutes }), nativeAccounting ? createProfileImageAccounting(nativeComputerService, nativeAccounting) : undefined))) allTools.set(tool.name,tool)
   }
 
   allTools.set('browserNavigate', computerTools.browserNavigate)
@@ -6304,7 +6310,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Explicit setup commits a normal task and notifies read-side caches, but
   // neither triages it with an LLM nor dispatches workflows / waiting goals.
   const nativeContextTaskStore = createDbTaskStore({ creationAutomation: false })
-  app.use('/api/native-computer', nativeComputerAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask'), nativeComputerReadiness, nativeContextTaskStore))
+  app.use('/api/native-computer', nativeComputerAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, nativeDiagnosticTool, nativeComputerReadiness, nativeContextTaskStore))
 
   app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
     jwtSecret: env.JWT_SECRET,

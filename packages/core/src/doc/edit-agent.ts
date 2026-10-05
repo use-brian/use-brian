@@ -1,3 +1,4 @@
+import { billableTurnUsage } from '../engine/turn-billing.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
 /**
  * Context-clean Doc edit runner.
@@ -316,7 +317,8 @@ async function runAttempt(
         // like a finished summary ("the page is now completed"), and it must
         // not be allowed to mean that.
         if (isBudgetCutoff(event.terminalStop)) cutoff = event.terminalStop
-        await options.onUsage?.({ model: event.response.model, usage: event.totalUsage, attempt })
+        const billing = billableTurnUsage(event)
+        if (billing) await options.onUsage?.({ ...billing, attempt })
       } else if (event.type === 'error') {
         lastError = event.error.message
         if (isStalledError(event.error)) stalled = true

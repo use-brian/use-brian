@@ -43,6 +43,8 @@ it('HTTP execution checks use one real SQL authorization snapshot, exact auth se
       INSERT INTO workspace_tool_policy VALUES ('${id}','native_computer','nativeComputerTask','allow');
     `)
     await db.exec(await readFile(new URL('../../../migrations/620_native_computer_sessions.sql', import.meta.url), 'utf8'))
+    await db.exec("ALTER TABLE assistants ADD COLUMN blocked_user_ids uuid[] DEFAULT '{}'")
+    await db.exec(await readFile(new URL('../../../migrations/622_computer_profiles.sql', import.meta.url), 'utf8'))
     vi.mocked(query).mockImplementation(((sql: string, params: unknown[]) => db.query(sql, params)) as typeof query)
     const service = new NativeComputerService({ relayUrl: 'http://relay', relaySecret: 'secret', jwtSecret: 'secret', deploymentId: 'deployment' })
     const relay = vi.spyOn(service, 'relay').mockResolvedValue({})
@@ -73,7 +75,7 @@ it('HTTP execution checks use one real SQL authorization snapshot, exact auth se
       expect(response.status).toBe(status)
       expect(query).toHaveBeenCalledTimes(1)
       expect(vi.mocked(query).mock.calls[0][0]).toMatch(/^SELECT 1 FROM native_computer_sessions n/)
-      expect(vi.mocked(query).mock.calls[0][1]).toEqual([grant.identity.sessionId,id,currentAuth,id,id,id,id,'grant',1,'deployment','device'])
+      expect(vi.mocked(query).mock.calls[0][1]).toEqual([grant.identity.sessionId,id,currentAuth,id,id,id,id,'grant',1,'deployment','device',null,'nativeComputerTask'])
     }
     await validate(200); await validate(200) // Repeated exact checks while in flight are permitted.
     currentAuth = other; await validate(403); currentAuth = id // Same user, different live auth session.

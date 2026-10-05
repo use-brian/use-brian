@@ -78,7 +78,9 @@ it('production boot shares the runtime options and actual accounting at the auth
   const boot = await readFile(new URL('../boot.ts', import.meta.url), 'utf8')
   expect(boot).toContain('createNativeComputerBootRuntimeFactory(nativeModelOptions)')
   expect(boot).toContain('createNativeComputerReadinessOptions(nativeAccounting, nativeModelOptions, !!ports.nativeComputerRuntimeFactory)')
-  expect(boot).toContain("nativeComputerAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, allTools.get('nativeComputerTask'), nativeComputerReadiness, nativeContextTaskStore)")
+  expect(boot).toContain("nativeComputerAuth(env.JWT_SECRET), nativeComputerRoutes(nativeComputerService, nativeDiagnosticTool, nativeComputerReadiness, nativeContextTaskStore)")
+  expect(boot).not.toContain("allTools.set('nativeComputerTask'")
+  expect(boot).toContain('composeComputerProfileTools(nativeComputerService, createProfileImagePolicy({ ...nativeModelOptions, managedRoutes: nativeImageManagedRoutes }), nativeAccounting ? createProfileImageAccounting(nativeComputerService, nativeAccounting) : undefined)')
   expect(boot).toContain('imageApproval: { accepted: visionAccepted, model: visionModel }')
 })
 

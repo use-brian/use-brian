@@ -66,8 +66,9 @@ const nativeMetadataSchema = z.object({ actualModel: NativeModelIdSchema.nullabl
  * createNativeComputerTools and shares one orchestrator per authenticated grant.
  */
 export function createNativeComputerModelRuntimeFactory(options: NativeModelRuntimeOptions): NativeRuntimeFactory {
-  return async (context, grant) => {
-    grant = { ...grant, identity: { ...grant.identity }, targets: grant.targets.map(t => ({ ...t })) }
+  return async (context, inputGrant) => {
+    if (!('goal' in inputGrant)) return null // Profiles use normal chat, never this autonomous runtime.
+    const grant = { ...inputGrant, identity: { ...inputGrant.identity }, targets: inputGrant.targets.map(t => ({ ...t })) }
     if (context.userId !== grant.identity.userId || context.workspaceId !== grant.identity.workspaceId || context.sessionId !== grant.identity.conversationId) return null
     if (!options.localApprovalRequired || !grant.targets.every(t => supported.has(t.appId)) || forbidden.test(grant.goal)) return null
     const route = await options.resolve(context)

@@ -97,7 +97,7 @@ async function auditRows(c: NativeAccountingConnection, key: NativeAccountingKey
 }
 function sameScope(a: NativeBillingAdmission, row: Row, initial = false): boolean {
   const pairs = { user_id: a.scope.userId, workspace_id: a.scope.workspaceId, assistant_id: a.scope.assistantId,
-    conversation_id: a.scope.conversationId, task_id: a.scope.taskId }
+    conversation_id: a.scope.conversationId, task_id: a.scope.taskId, ...(a.scope.profileId ? { profile_id: a.scope.profileId } : {}) }
   // After admission, nullable identity FKs may detach on deletion. Original
   // attribution comes from the immutable admission, never a replacement owner.
   return Object.entries(pairs).every(([k, v]) => row[k] === v || (!initial && row[k] === null))
@@ -179,12 +179,13 @@ export function createOssNativeAccounting(connect: Connect = () => getPool().con
           // reconcile/ledger call. Jev's central owner must await this boundary.
           const updated = await c.query(`UPDATE native_computer_inference_attempts SET invocation_state='settled',
             model=$3,provider_kind=$4,usage=$5::jsonb,incurred_cost_usd=$6,estimated_billed_cost_usd=$7,
+            billing_state=CASE WHEN $13::boolean THEN 'unknown' ELSE billing_state END,
             duration_ms=GREATEST(duration_ms,$8),interrupted=interrupted OR $9,
             outcome=CASE WHEN invocation_state='settled' THEN outcome ELSE $10 END,
             disposition=COALESCE(disposition,$11),fallback_reason=COALESCE(fallback_reason,$12),
             diagnostic_code=CASE WHEN invocation_state='settled' THEN diagnostic_code WHEN $10='failed' THEN 'inference_failed' ELSE NULL END
             WHERE session_id=$1 AND attempt_id=$2 RETURNING id`, [...keyParams(key), a.model, a.providerKind, a.usage === null ? null : JSON.stringify(a.usage),
-            a.incurredCostUsd, a.estimatedBilledCostUsd, a.durationMs, a.interrupted, a.outcome, a.disposition, a.fallbackReason])
+            a.incurredCostUsd, a.estimatedBilledCostUsd, a.durationMs, a.interrupted, a.outcome, a.disposition, a.fallbackReason, !intent && admission.scope.taskId === null])
           if (updated.rows.length !== 1) throw new Error('Native final audit not persisted')
           if (!intent) return { status: 'not_ready' as const }
           await c.query(`UPDATE native_computer_billing_intents SET intent=$3::jsonb,intent_hash=$4,state='prepared',updated_at=now()

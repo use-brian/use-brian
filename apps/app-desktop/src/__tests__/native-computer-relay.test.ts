@@ -86,3 +86,25 @@ describe('native relay client', () => {
     expect(controller.relayDisconnected).toHaveBeenCalledOnce(); expect(controller.execute).not.toHaveBeenCalled()
   })
 })
+
+it.each(['idle', 'queued', 'unknown', 'closed', 'not-ready'] as const)('private released reason requires exact idle profile binding: %s', async mode => {
+  const profileIdentity = { deploymentId: 'd', userId: 'u', workspaceId: 'w', deviceId: 'dev', sessionId: 's', conversationId: 'c', profileId: 'p' }
+  const socket = new Socket()
+  const controller = { status: () => ({ state: 'active', epoch: 1, identity: profileIdentity }), relayReleased: vi.fn(async () => {}), relayDisconnected: vi.fn(),
+    execute: vi.fn(async () => ({ commandId: 'c', outcome: 'execution_unknown', code: 'helper_error' })) }
+  const relay = new NativeRelayClient(controller as unknown as NativeComputerController, profileIdentity, () => socket as unknown as WebSocket)
+  relay.connect('wss://relay.example/native-computer-v1', 'token')
+  if (mode !== 'not-ready') socket.message({ type: 'ready', identity: profileIdentity })
+  if (mode === 'queued' || mode === 'unknown') {
+    socket.message({ type: 'command', command: { protocol: 'native-computer-v1', identity: profileIdentity, epoch: 1, grantId: 'g', commandId: 'c', deadlineAt: Date.now() + 10000,
+      action: { kind: 'observe', target: { appId: 'fixture', processId: 1, processInstanceId: 'p', windowId: 'w', windowInstanceId: 'wi' } } } })
+    if (mode === 'unknown') await vi.waitFor(() => expect(socket.sent.some(s => JSON.parse(s).type === 'receipt')).toBe(true))
+  }
+  if (mode === 'closed') socket.close()
+  socket.message({ type: 'revoke', reason: 'released' })
+  await Promise.resolve()
+  expect(controller.relayReleased).toHaveBeenCalledTimes(mode === 'idle' ? 1 : 0)
+  expect(controller.relayDisconnected).toHaveBeenCalledTimes(mode === 'idle' ? 0 : 1)
+  if (mode === 'queued') expect(controller.execute).not.toHaveBeenCalled()
+  relay.disconnect()
+})

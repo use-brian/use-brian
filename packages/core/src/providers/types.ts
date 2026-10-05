@@ -179,6 +179,10 @@ export type ProviderSession = {
 export type ProviderRequest = {
   /** Trusted internal opt-in: single attempt, private errors, upstream evidence only. */
   nativeStrict?: true
+  /** Separate opt-in for guarded normal-chat images. Requires nativeStrict; permits tools, never documents/adaptation. */
+  nativeImageChat?: true
+  /** Ephemeral live policy guard, rechecked by the strict-image adapter at HTTP dispatch. Never persisted. */
+  nativeImageUploadGuard?: () => Promise<void>
   httpRetryWindow?: HttpRetryWindow
   model: string
   /** See `SessionOptions.allowProviderFallback`. */
@@ -237,6 +241,10 @@ export type LLMProvider = {
 // ── Assembled response (after stream completes) ────────────────
 
 export type AssistantResponse = {
+  /** Last normally billed model when this response was independently settled. */
+  billableModel?: string
+  /** Usage remains actual observed counters; query totalUsage excludes this independently settled attempt. */
+  usageAccounting?: 'native_image'
   content: ContentBlock[]
   stopReason: StopReason
   usage: TokenUsage

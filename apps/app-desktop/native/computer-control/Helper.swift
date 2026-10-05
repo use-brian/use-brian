@@ -279,7 +279,8 @@ func wireString(_ value: Any?, max: Int = 256, nonempty: Bool = true) -> String?
     return string
 }
 func validWireIdentity(_ identity: Object) -> Bool {
-    let keys = ["deploymentId", "userId", "workspaceId", "deviceId", "sessionId", "conversationId", "taskId"]
+    let keys = ["deploymentId", "userId", "workspaceId", "deviceId", "sessionId", "conversationId"] +
+        (identity["profileId"] == nil ? ["taskId"] : ["profileId"])
     return Set(identity.keys) == Set(keys) && keys.allSatisfy { wireString(identity[$0]) != nil }
 }
 func validWireTarget(_ target: Object) -> Bool {
@@ -289,13 +290,21 @@ func validWireTarget(_ target: Object) -> Bool {
         wireInteger(target["processId"], min: 1, max: Double(Int32.max)) != nil
 }
 func validWireGrant(_ candidate: Object) -> Bool {
-    guard Set(candidate.keys) == Set(["protocol", "identity", "grantId", "epoch", "expiresAt", "targets", "allowControl", "allowCapture", "requester", "goal"]),
+    let profile = (candidate["identity"] as? Object)?["profileId"] != nil
+    guard Set(candidate.keys) == Set(["protocol", "identity", "grantId", "epoch", "expiresAt", "targets", "allowControl", "allowCapture", "requester"] + (profile ? ["purpose"] : ["goal"])),
           candidate["protocol"] as? String == proto, let identity = candidate["identity"] as? Object, validWireIdentity(identity),
           wireString(candidate["grantId"]) != nil, wireInteger(candidate["epoch"]) != nil, wireInteger(candidate["expiresAt"]) != nil,
           wireBool(candidate["allowControl"]) != nil, wireBool(candidate["allowCapture"]) != nil,
-          wireString(candidate["requester"], max: 200) != nil, wireString(candidate["goal"], max: 2000) != nil,
+          wireString(candidate["requester"], max: 200) != nil,
+          (profile ? candidate["purpose"] as? String == "chat-tools" : wireString(candidate["goal"], max: 2000) != nil),
           let targets = candidate["targets"] as? [Object], !targets.isEmpty, targets.count <= 8, targets.allSatisfy(validWireTarget) else { return false }
     return true
+}
+// Only the goal restriction differs for chat profiles; renderer/privacy/approval
+// checks remain mandatory at the capture and dispatch sites.
+func publicShapesGrant(_ grant: Object?) -> Bool {
+    guard let grant = grant, validWireGrant(grant), let identity = grant["identity"] as? Object else { return false }
+    return identity["profileId"] != nil || grant["goal"] as? String == "Activate the outlined triangle; finish when Result is Triangle."
 }
 func validWireCommand(_ command: Object) -> Bool {
     guard Set(command.keys) == Set(["protocol", "identity", "grantId", "epoch", "commandId", "deadlineAt", "action"]),
@@ -1453,7 +1462,7 @@ final class Broker: ObservationBackend {
         }
     }
     private func publicShapes(_ window: Window, _ snapshot: Snapshot) -> Bool {
-        guard captureAuthority(grant), grant?["goal"] as? String == VisualPolicy.goal,
+        guard captureAuthority(grant), publicShapesGrant(grant),
               window.target["appId"] as? String == cohort, trust.visualFixtureValid(window.identity),
               liveWindow(window.target) != nil, string(window.element, kAXTitleAttribute) == VisualPolicy.title,
               string(window.element, kAXIdentifierAttribute) == VisualPolicy.identifier,

@@ -1,7 +1,9 @@
+import { z } from 'zod'
 import { ClientMessageSchema, CommandSchema, GrantSchema, sameIdentity, sameTarget, parseMessage, type NativeGrant, type NativeCommand, type NativeReceipt, type NativeStatus } from '@use-brian/computer-control/protocol.js'
 import type { NativeTokenClaims } from '@use-brian/api/auth/native-computer-token.js'
 import type { RelaySocket } from './relay.js'
-type Entry = { grant: NativeGrant; jti: string; socket?: RelaySocket; status?: NativeStatus; seen: number; used: Set<string>; pending?: { command: NativeCommand; resolve: (r: NativeReceipt) => void; timer: NodeJS.Timeout } }
+export const NativeReleaseRequestSchema = z.object({ reason: z.literal('released') }).strict()
+type Entry = { uncertain?: boolean; grant: NativeGrant; jti: string; socket?: RelaySocket; status?: NativeStatus; seen: number; used: Set<string>; pending?: { command: NativeCommand; resolve: (r: NativeReceipt) => void; timer: NodeJS.Timeout } }
 /** Single-instance registry. Registration is mandatory: signatures alone never authorize reconnect. */
 export class NativeRelay {
   private sessions = new Map<string, Entry>()
@@ -14,11 +16,16 @@ export class NativeRelay {
     this.sessions.set(grant.identity.sessionId, { grant, jti, seen: Date.now(), used: new Set() })
   }
   status(id: string) { const e = this.sessions.get(id); return { connected: !!e?.socket, active: !!e, expiresAt: e?.grant.expiresAt, status: e?.status } }
-  revoke(id: string): void {
+  revoke(id: string, reason?: 'released'): void {
     const e = this.sessions.get(id); if (!e) return
+    // API intent is necessary but not sufficient: independently prove an idle,
+    // live profile lease with an exact active desktop status and no unknown receipt.
+    const released = reason === 'released' && 'profileId' in e.grant.identity && !!e.socket && !e.pending && !e.uncertain &&
+      e.status?.state === 'active' && !!e.status.identity && sameIdentity(e.status.identity, e.grant.identity) &&
+      e.status.epoch === e.grant.epoch && e.grant.expiresAt > Date.now() && Date.now() - e.seen <= 30_000
     this.sessions.delete(id)
     if (e.pending) { clearTimeout(e.pending.timer); e.pending.resolve({ commandId: e.pending.command.commandId, outcome: 'execution_unknown', code: 'transport_error' }) }
-    try { e.socket?.send(JSON.stringify({ type: 'revoke' })); e.socket?.close(4401, 'revoked') } catch { /* closed */ }
+    try { e.socket?.send(JSON.stringify({ type: 'revoke', ...(released ? { reason: 'released' } : {}) })); e.socket?.close(4401, 'revoked') } catch { /* closed */ }
   }
   disconnect(socket: RelaySocket): void { for (const [id,e] of this.sessions) if (e.socket === socket) this.revoke(id) }
   handle(socket: RelaySocket, raw: string): void {
@@ -43,6 +50,7 @@ export class NativeRelay {
           if (!p || p.command.deadlineAt <= Date.now() || msg.receipt.commandId !== p.command.commandId) throw new Error('Wrong receipt')
           const o = msg.receipt.observation
           if (o && (!sameIdentity(o.identity,e.grant.identity) || o.epoch !== e.grant.epoch || !sameTarget(o.target,p.command.action.target))) throw new Error('Wrong observation')
+          if (msg.receipt.outcome === 'execution_unknown' || ['transport_error', 'helper_error', 'stopped', 'expired'].includes(msg.receipt.code)) e.uncertain = true
           clearTimeout(p.timer); e.pending = undefined; p.resolve(msg.receipt)
         }
       }

@@ -110,3 +110,38 @@ it('keeps bounded optional discovery labels out of every authoritative target sh
   expect(ActionSchema.safeParse({ kind: 'observe', target: discovered }).success).toBe(false)
   expect(ObservationSchema.safeParse({ ...observation, target: discovered }).success).toBe(false)
 })
+
+
+describe('chat profile scope', () => {
+  const { taskId: _, ...common } = identity
+  const profile = { ...common, profileId: 't' }
+  const { goal: __, ...base } = grant
+  const chat = { ...base, identity: profile, purpose: 'chat-tools' }
+  it('accepts goal-free profiles throughout the wire', () => {
+    expect(GrantSchema.parse(chat)).toEqual(chat)
+    for (const [schema, value] of [[CommandSchema, command], [ObservationSchema, observation], [StatusSchema, status]] as const) {
+      expect(schema.safeParse({ ...value, identity: profile }).success).toBe(true)
+    }
+    expect(sameIdentity(profile, { ...profile })).toBe(true)
+    expect(sameIdentity(identity, profile)).toBe(false)
+    expect(sameIdentity(profile, identity)).toBe(false)
+    expect(sameIdentity(profile, { ...profile, profileId: 'other' })).toBe(false)
+  })
+  it('rejects both/neither and cross-scope grant metadata', () => {
+    for (const invalid of [common, { ...identity, profileId: 't' }, { ...profile, profileId: '' }]) {
+      expect(IdentitySchema.safeParse(invalid).success).toBe(false)
+      expect(GrantSchema.safeParse({ ...chat, identity: invalid }).success).toBe(false)
+    }
+    for (const invalid of [base, { ...grant, purpose: 'chat-tools' }, { ...chat, goal: 'Read' },
+      { ...chat, purpose: undefined }, { ...chat, purpose: 'task' }, { ...grant, identity: profile },
+      { ...chat, identity }, { ...grant, goal: '' }]) expect(GrantSchema.safeParse(invalid).success).toBe(false)
+  })
+})
+
+it('allows only the private intentional-release revoke reason, never client-provided release', () => {
+  expect(ServerMessageSchema.safeParse({ type: 'revoke', reason: 'released' }).success).toBe(true)
+  expect(ServerMessageSchema.safeParse({ type: 'revoke' }).success).toBe(true)
+  for (const reason of ['stopped', 'unknown', 'release', true]) expect(ServerMessageSchema.safeParse({ type: 'revoke', reason }).success).toBe(false)
+  expect(ServerMessageSchema.safeParse({ type: 'revoke', reason: 'released', keepConnection: true }).success).toBe(false)
+  expect(ClientMessageSchema.safeParse({ type: 'revoke', reason: 'released' }).success).toBe(false)
+})

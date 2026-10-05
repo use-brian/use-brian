@@ -119,6 +119,7 @@ export class NativeComputerOrchestrator {
     try {
       if (provider === unavailableNativeComputerProvider) return result('unavailable', 'Native computer not configured')
       const grant = GrantSchema.parse(options.authority.grant)
+      if (!('goal' in grant)) throw new Error('Profile grants cannot authorize autonomous tasks')
       if (!grant.targets.some(t => sameTarget(t, options.authority.target))) throw new Error('Target denied')
       if (!options.goal.trim() || options.goal.length > 2000) throw new Error('Invalid goal')
       const command = (action: NativeAction): NativeCommand => ({ protocol: NATIVE_PROTOCOL, identity: grant.identity, grantId: grant.grantId, epoch: grant.epoch, commandId: randomUUID(), deadlineAt, action })

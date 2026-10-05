@@ -9,7 +9,7 @@ import {
   calculateCost, NativeRunTrace, NativeTraceEventSchema, DecisionAdapterRegistry, DecisionProviderError, NATIVE_NEXT_ACTION, NATIVE_VERIFY_PROGRESS, createNativeDecisionOperation, createNativeProgressOperation,
   type DecisionProvider, type LLMProvider, type NativeModelInput, type ToolContext, type UsageStore,
 } from '@use-brian/core'
-import type { NativeGrant } from '@use-brian/computer-control/protocol.js'
+import type { NativeTaskGrant as NativeGrant } from '@use-brian/computer-control/protocol.js'
 import { createDecisionAttemptUsageRecorder, createDecisionRuntime, type DecisionRuntimeAttempt } from '../decision-runtime.js'
 import { createNativeComputerBootRuntimeFactory, createNativeAttemptRecorder } from '../computer-use/boot-runtime.js'
 vi.mock('../db/client.js', () => ({ query: vi.fn() }))
@@ -277,6 +277,15 @@ async function lateFixture(lane: 'text' | 'vision' | 'fallback' | 'primary', end
   const grant = { identity: { userId: id, workspaceId: id, conversationId: id, sessionId: id, taskId: id, deploymentId: 'deployment' }, epoch: 0, grantId: 'grant', allowCapture: true, targets: [target], goal: 'private late goal' } as NativeGrant
   const context = { userId: id, workspaceActorUserId: id, workspaceId: id, sessionId: id, assistantId: id } as ToolContext
   const input = { goal: grant.goal, signal: abort.signal, deadlineAt: Date.now() + 10000, candidates: [], observation: { target, foreground: true, nodes: [], id: 'observation', frame: { width: 1, height: 1, mimeType: 'image/png', data: 'private pixels' } } } as unknown as NativeModelInput
+  // Vision accounting fixtures must satisfy the existing public-shapes capture
+  // policy; an incomplete AX/frame fixture correctly abstains before inference.
+  if (lane === 'vision') {
+    grant.allowControl = true
+    grant.goal = input.goal = 'Activate the outlined triangle; finish when Result is Triangle.'
+    Object.assign(input.observation, { captureCohort: 'public-shapes-v1', completeness: 'complete', capturedAt: Date.now(),
+      bounds: { x: 0, y: 0, width: 1, height: 1 }, displayLayoutVersion: 'layout' })
+    Object.assign(input.observation.frame!, { id: 'frame', bounds: input.observation.bounds, displayLayoutVersion: 'layout' })
+  }
   // The registry owns gpt-5.2 under openai-codex. This is a strict synthetic
   // stream/accounting fixture, not evidence that the live Codex adapter supports native use.
   const native = (await createNativeComputerBootRuntimeFactory({ provider, configuredProviders: new Set(['gemini', 'openai-codex']), getWorkspacePlan: async () => 'enterprise', resolveWorkspaceCustomLlm: async () => lane === 'vision' ? ({ provider, selector: 'gpt-5.2', routeKind: 'managed', profileId: null, fallback: { enabled: false }, inputTokenLimit: 32768, maxTokens: 2048, supportsVision: true, providerKeySource: 'user' } as never) : null, decisionRuntime, usageStore,

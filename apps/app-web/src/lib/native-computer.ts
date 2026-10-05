@@ -20,22 +20,26 @@ export type NativeState = "unavailable" | "permission_required" | "ready" | "awa
 export type NativeStatus = {
   protocol: "native-computer-v1"; state: NativeState; epoch: number;
   capabilities: { protocol: "native-computer-v1"; platform: "darwin" | "win32" | "linux" | "unsupported"; axRead: boolean; semanticActions: boolean; windowCapture: boolean; input: boolean; visualInvokeVersion?: 1; accessibilityPermission: "granted" | "denied" | "unknown"; capturePermission: "granted" | "denied" | "unknown"; limitations: string[] };
-  identity?: { deploymentId: string; userId: string; workspaceId: string; deviceId: string; sessionId: string; conversationId: string; taskId: string }; expiresAt?: number;
+  identity?: { deploymentId: string; userId: string; workspaceId: string; deviceId: string; sessionId: string; conversationId: string } & ({ taskId: string; profileId?: never } | { profileId: string; taskId?: never }); expiresAt?: number;
 };
 export function supportsNativeVisual(caps?: NativeStatus["capabilities"]) {
   return caps?.semanticActions === true && caps.windowCapture === true && caps.visualInvokeVersion === 1
     && caps.accessibilityPermission === "granted" && caps.capturePermission === "granted";
 }
-/** allowControl=false selects the one-shot local inspector, not a remote read-only model task. */
+/** allowControl=false runs a one-shot local inspector; capture must also be false. */
+export type NativeProfileConnection = { workspaceId: string; profileId: string; target: DiscoveredTarget; allowControl: boolean; allowCapture: boolean };
+/** Legacy: allowControl=false selects the one-shot local inspector. */
 export type NativeStart = { workspaceId: string; assistantId: string; conversationId: string; taskId: string; goal: string; target: DiscoveredTarget; allowControl: boolean; allowCapture: boolean };
 export type DesktopComputerControlMessage =
+  | ({ type: "connect-profile" } & NativeProfileConnection)
+  | { type: "disconnect-profile" }
   | { type: "status" | "targets" | "check-readiness" | "acknowledge-verification" | "stop" | "disconnect" }
   | { type: "permissions"; permission?: "accessibility" | "screen-recording" }
   | { type: "workspace-changed"; workspaceId: string }
   | ({ type: "start" | "resume" } & NativeStart);
 export type NativeInspection = { id: string; capturedAt: number; completeness: "complete" | "partial" | "unavailable";
   nodes: { ref: string; parentRef?: string; role: string; name: string; value?: string; enabled: boolean; sensitive: boolean }[] };
-export type DesktopComputerControlResult = { ok: boolean; verificationAvailable?: boolean; verificationConsented?: boolean; cleanupPending?: boolean; error?: string; status?: NativeStatus; targets?: DiscoveredTarget[]; deviceId?: string; inspection?: NativeInspection; readiness?: { helperAdmitted: true; capabilities: NativeStatus["capabilities"] } };
+export type DesktopComputerControlResult = { ok: boolean; profileId?: string; profileConnected?: boolean; verificationAvailable?: boolean; verificationConsented?: boolean; cleanupPending?: boolean; error?: string; status?: NativeStatus; targets?: DiscoveredTarget[]; deviceId?: string; inspection?: NativeInspection; readiness?: { helperAdmitted: true; capabilities: NativeStatus["capabilities"] } };
 export type ComputerControl = (message: DesktopComputerControlMessage) => Promise<DesktopComputerControlResult>;
 
 /** A single persistent renderer owner. No automatic start, resume, pairing or API exchange. */
@@ -56,21 +60,21 @@ export class NativeComputer {
   private publish(value: typeof this.value) { this.value = value; this.listeners.forEach(fn => fn()); }
   async send(message: DesktopComputerControlMessage) {
     if (message.type === "acknowledge-verification" && (!this.value.verificationAvailable || this.starting !== undefined)) return EMPTY;
-    if (this.value.cleanupPending && ["start", "resume", "targets", "permissions", "check-readiness", "acknowledge-verification"].includes(message.type)) return { ok: false, cleanupPending: true };
-    if (["stop", "disconnect", "workspace-changed"].includes(message.type)) ++this.consentRevision;
+    if (this.value.cleanupPending && ["connect-profile", "start", "resume", "targets", "permissions", "check-readiness", "acknowledge-verification"].includes(message.type)) return { ok: false, cleanupPending: true };
+    if (["stop", "disconnect-profile", "disconnect", "workspace-changed"].includes(message.type)) ++this.consentRevision;
     const cleanupRevision = this.cleanupRevision;
     const readiness = message.type === "check-readiness";
     const polling = message.type === "status";
     const auxiliary = readiness || polling || message.type === "permissions" || message.type === "targets";
     const acknowledgment = message.type === "acknowledge-verification";
-    const beginsStart = message.type === "start" || message.type === "resume" || acknowledgment;
+    const beginsStart = message.type === "connect-profile" || message.type === "start" || message.type === "resume" || acknowledgment;
     const generation = auxiliary ? this.generation : ++this.generation;
     const duringStart = auxiliary && this.starting === generation;
     if (beginsStart) this.starting = generation;
-    if (acknowledgment || message.type === "stop") this.publish({ ...this.value, verificationConsented: undefined });
+    if (acknowledgment || message.type === "stop") this.publish({ ...this.value, verificationConsented: undefined, ...(message.type === "stop" ? { profileId: undefined, profileConnected: false } : {}) });
     if (readiness && !duringStart) this.publish({ ...this.value, readiness: undefined, readinessFailed: false, readinessPending: true });
-    if (["disconnect", "workspace-changed"].includes(message.type)) this.publish({ ok: false, ...(this.value.cleanupPending ? { cleanupPending: true } : {}) });
-    if (["start", "resume", "disconnect", "workspace-changed", "stop"].includes(message.type)) this.publish({ ...this.value, inspection: undefined, readiness: undefined, readinessFailed: undefined, readinessPending: undefined });
+    if (["disconnect-profile", "disconnect", "workspace-changed"].includes(message.type)) this.publish({ ok: false, ...(this.value.cleanupPending ? { cleanupPending: true } : {}) });
+    if (["connect-profile", "start", "resume", "disconnect", "workspace-changed", "stop"].includes(message.type)) this.publish({ ...this.value, inspection: undefined, readiness: undefined, readinessFailed: undefined, readinessPending: undefined });
     try {
       const result = await this.bridge()?.(message) ?? EMPTY;
       if (generation !== this.generation) return EMPTY;
@@ -95,7 +99,7 @@ export class NativeComputer {
       const sameSession = result.ok && result.status?.identity && previous.status?.identity &&
         JSON.stringify(result.status.identity) === JSON.stringify(previous.status.identity) &&
         result.status.epoch === previous.status.epoch && ["active", "stopped"].includes(result.status.state);
-      const verification = !polling && !["stop", "disconnect", "workspace-changed", "start", "resume"].includes(message.type)
+      const verification = !polling && !["stop", "disconnect-profile", "disconnect", "workspace-changed", "connect-profile", "start", "resume"].includes(message.type)
         ? { verificationAvailable: previous.verificationAvailable, verificationConsented: acknowledgment ? result.ok && result.verificationConsented === true : previous.verificationConsented } : {};
       this.publish({ ...verification, ...result, readiness: previous.readiness, readinessFailed: previous.readinessFailed, readinessPending: previous.readinessPending, ...(polling && sameSession && previous.inspection ? { inspection: previous.inspection } : {}) });
       return result;
@@ -113,6 +117,12 @@ export class NativeComputer {
   check = () => this.send({ type: "status" });
   stop = () => this.send({ type: "stop" });
   leave() { this.workspaceId = ""; return this.send({ type: "disconnect" }); }
+  connectProfile(input: NativeProfileConnection) {
+    if (input.workspaceId !== this.workspaceId || !input.profileId || !isNativeTarget(input.target) || typeof input.allowControl !== "boolean" || typeof input.allowCapture !== "boolean") return Promise.resolve(EMPTY);
+    const { workspaceId, profileId, target, allowControl, allowCapture } = input;
+    return this.send({ type: "connect-profile", workspaceId, profileId, target: nativeTargetIdentity(target), allowControl, allowCapture });
+  }
+  disconnectProfile = () => this.send({ type: "disconnect-profile" });
   start(type: "start" | "resume", input: NativeStart) {
     if (input.workspaceId !== this.workspaceId || !input.assistantId || !input.conversationId || !input.taskId || !input.goal.trim() || input.goal.length > 2000 || !isNativeTarget(input.target)) return Promise.resolve(EMPTY);
     // Explicit projection keeps accidental UI metadata (or tokens) off IPC.

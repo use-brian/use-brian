@@ -1,3 +1,4 @@
+import { billableTurnUsage } from '@use-brian/core'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
 import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
 import { closeProviderError } from './chat-provider-error.js'
@@ -7883,8 +7884,9 @@ export function chatRoutes(options: WebChatOptions): Router {
                 },
               })
             }
-            const usage = event.totalUsage
-            if (options.usageStore && usage) {
+            const billing = billableTurnUsage(event)
+            if (options.usageStore && billing) {
+              const { model: billableModel, usage } = billing
               // BYO billing branch: when the turn was served by the workspace's
               // own Gemini key, the LLM/message cost is the workspace's own spend
               // with Google, not ours — charge it 0. `providerKeySource` records
@@ -7901,12 +7903,12 @@ export function chatRoutes(options: WebChatOptions): Router {
                 && (!customLlmRuntime || customLlmRuntime.providerKeySource === 'user')
               const cost = turnUsedByoKey
                 ? 0
-                : calculateCost(event.response.model, usage)
+                : calculateCost(billableModel, usage)
               options.usageStore.recordUsage({
                 userId: user.id,
                 assistantId: assistant.id,
                 sessionId: session.id,
-                model: event.response.model,
+                model: billableModel,
                 modelTier: logicalTier,
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,

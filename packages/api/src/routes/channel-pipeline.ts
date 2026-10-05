@@ -1,3 +1,4 @@
+import { billableTurnUsage } from '@use-brian/core'
 import { renderSystemContext } from '@use-brian/core'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
@@ -857,6 +858,28 @@ export function buildNonMemberSenderBlock(args: {
     `${args.channelType} account to the Use Brian account they normally use, from Settings -> Account -> Connected accounts, then re-send the message. ` +
     'Everything they say in this chat is still answerable from what they provide here.'
   )
+}
+
+/** Terminal ordinary-chat billing only. Native image receipts (including
+ * unpriced/unknown attempts) belong to the durable native ledger. Keep delivery
+ * and served-model analytics on the original event, not this projection. */
+export function recordChannelTurnUsage(input: {
+  event: Parameters<typeof billableTurnUsage>[0]
+  usageStore?: UsageStore
+  channelType: string
+  attribution: Pick<Parameters<UsageStore['recordUsage']>[0],
+    'userId' | 'actorUserId' | 'assistantId' | 'sessionId' | 'modelTier' | 'userMessageId' | 'source' | 'providerKeySource'>
+}): number | null {
+  const billing = billableTurnUsage(input.event)
+  if (!billing) return null
+  const { model, usage } = billing
+  const cost = input.attribution.providerKeySource === 'user' ? 0 : calculateCost(model, usage)
+  input.usageStore?.recordUsage({
+    ...input.attribution, model, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+    cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens,
+    actualCostUsd: cost, triggerKey: 'main_response',
+  }).catch(err => console.error(`[${input.channelType}] Usage tracking failed:`, err))
+  return cost
 }
 
 /**
@@ -2904,31 +2927,17 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             // serve, because that turn ran on platform capacity. Read it
             // here, at usage time, rather than caching it earlier.
             const turnKeySource: 'user' | 'platform' = customLlmRuntime?.providerKeySource ?? 'platform'
-            const cost = turnKeySource === 'user'
-              ? 0
-              : calculateCost(event.response.model, usage)
-            if (usageStore) {
-              usageStore.recordUsage({
+            const cost = recordChannelTurnUsage({
+              event, usageStore, channelType,
+              attribution: {
                 userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
-                model: event.response.model,
                 modelTier: logicalTier,
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                cacheReadTokens: usage.cacheReadTokens,
-                cacheWriteTokens: usage.cacheWriteTokens,
-                actualCostUsd: cost,
-                // This is the credit-bearing row. The credit derivation
-                // (getPeriodCredits → `user_message_id IS NOT NULL`) skips any
-                // main_response row missing this id, so omitting it makes every
-                // channel turn debit ZERO credits. The web route stamps it on its
-                // main_response too — keep parity. See cost-and-pricing.md →
-                // "Credit accounting".
+                // Retain the credit-bearing message identity for the ordinary remainder.
                 userMessageId: userMessageRow.id,
                 source: workspacePlan === 'free' ? 'free' : 'included',
-                triggerKey: 'main_response',
                 providerKeySource: turnKeySource,
-              }).catch((err) => console.error(`[${channelType}] Usage tracking failed:`, err))
-            }
+              },
+            })
 
             if (customLlmRuntime?.fallback.used) {
               analytics?.logEvent({
@@ -2951,7 +2960,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
                 model: sanitizeAnalytics(event.response.model),
                 input_tokens: usage.inputTokens,
                 output_tokens: usage.outputTokens,
-                cost_usd_micro: Math.round(cost * 1_000_000),
+                ...(cost === null ? { usage_accounting: sanitizeAnalytics('native_image') } : { cost_usd_micro: Math.round(cost * 1_000_000) }),
                 cache_hits: usage.cacheReadTokens ?? 0,
                 // HOW the turn ended, not just what it cost. Without this a
                 // turn that halted part-way looks identical in analytics to

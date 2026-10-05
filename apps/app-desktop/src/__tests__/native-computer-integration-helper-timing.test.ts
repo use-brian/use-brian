@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import type { HelperTimingEvent } from '@use-brian/computer-control/helper-timing.js'
 import type { NativeComputerController } from '../computer-control/controller.js'
 import type { NativeCommand, NativeGrant } from '@use-brian/computer-control/protocol.js'
-const mocks = vi.hoisted(() => ({ directory: '', packaged: false, spawn: vi.fn(), acquire: vi.fn(async () => {}), release: vi.fn(async () => {}), relay: vi.fn(), ready: vi.fn(async () => {}), consent: vi.fn(async () => ({ response: 1 })) }))
+const mocks = vi.hoisted(() => ({ directory: '', realRelay: false, packaged: false, spawn: vi.fn(), acquire: vi.fn(async () => {}), release: vi.fn(async () => {}), relay: vi.fn(), ready: vi.fn(async () => {}), consent: vi.fn(async () => ({ response: 1 })) }))
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
 vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>(), statSync: () => ({ isFile: () => true }), accessSync: () => {} }))
 vi.mock('electron', () => ({
@@ -19,10 +19,10 @@ vi.mock('electron', () => ({
   },
 }))
 // Keep the real controller and PrivatePipeHelper: only network/OS process/lease are fixtures.
-vi.mock('../computer-control/index.js', async original => ({ ...await original<typeof import('../computer-control/index.js')>(),
+vi.mock('../computer-control/index.js', async original => { const actual = await original<typeof import('../computer-control/index.js')>(); return { ...actual,
   LocalDeviceLease: class { acquire = mocks.acquire; release = mocks.release },
-  NativeRelayClient: class { constructor(controller: NativeComputerController) { mocks.relay(controller) }; connect = vi.fn(); disconnect = vi.fn(); waitUntilReady = mocks.ready },
-}))
+  NativeRelayClient: class { constructor(controller: NativeComputerController, identity: NativeGrant['identity']) { mocks.relay(controller); if (mocks.realRelay) return new actual.NativeRelayClient(controller, identity) }; connect: (url: string, token: string) => void = vi.fn(); disconnect: () => void = vi.fn(); waitUntilReady: (signal: AbortSignal) => Promise<void> = mocks.ready },
+} })
 import { NativeComputerIntegration, type NativeIntegrationOptions } from '../native-computer-integration.js'
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 const tick = () => new Promise<void>(resolve => setImmediate(resolve))
@@ -79,7 +79,7 @@ function fakeChild() {
 beforeEach(() => {
   platform = Object.getOwnPropertyDescriptor(process, 'platform')!
   resourcesPath = Object.getOwnPropertyDescriptor(process, 'resourcesPath')
-  mocks.packaged = false; holdCapabilities = false; lazyCapabilities = false; authorized = true
+  mocks.realRelay = false; mocks.packaged = false; holdCapabilities = false; lazyCapabilities = false; authorized = true
   mocks.ready.mockReset().mockResolvedValue(undefined); mocks.consent.mockReset().mockResolvedValue({ response: 1 })
   mocks.acquire.mockClear(); mocks.release.mockClear(); mocks.relay.mockClear()
   Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
@@ -148,6 +148,26 @@ describe('trusted main helper timing port with real pipe adapter', () => {
     }
   })
 
+  it('eligible pre-acceptance Mac refreshes real helper capabilities after main consent before connecting', async () => {
+    packagedMac(false)
+    await discover()
+    const before = await integration.handle({ type: 'status' })
+    expect(before).toMatchObject({ ok: true, status: { capabilities: { axRead: true, semanticActions: false } } })
+    expect(await integration.handle({ type: 'status' })).toMatchObject({ verificationAvailable: true, verificationConsented: false })
+    const beforeRequests = requests.length
+    vi.mocked(fetch).mockImplementation(async () => {
+      // Main's consent has opened the ceiling and refreshed the real controller,
+      // not merely trusted verification eligibility or renderer capability data.
+      expect((integration as any).verificationAllowed()).toBe(true)
+      expect((integration as any).controller.status().capabilities).toMatchObject({ axRead: true, semanticActions: true, accessibilityPermission: 'granted' })
+      return Response.json({ connectionId: uuid(21) })
+    })
+    expect(await integration.handle({ type: 'connect-profile', workspaceId: uuid(1), profileId: uuid(20), target, allowControl: true, allowCapture: false })).toMatchObject({ ok: true, profileConnected: true, status: { capabilities: { semanticActions: true } } })
+    expect(requests.slice(beforeRequests).filter(r => r.method === 'capabilities')).toHaveLength(3)
+    expect(mocks.consent).toHaveBeenCalledWith(expect.objectContaining({ message: 'Allow attended packaged Mac verification?' }))
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
+  })
   it('accepted Mac control waits for relay READY and retains exact action consent and API revalidation', async () => {
     packagedMac(true); await discover()
     let ready!: () => void
@@ -320,4 +340,106 @@ describe('trusted main helper timing port with real pipe adapter', () => {
     expect(requests.filter(r => r.method === 'execute')).toHaveLength(1)
     expect(paths.some(p => p.endsWith('/run'))).toBe(false)
   })
+})
+
+it('task-free profile inspector uses the real controller/helper with local-only revalidation', async () => {
+  install(); await discover()
+  const result = await integration.handle({ type: 'connect-profile', workspaceId: uuid(1), profileId: uuid(20), target, allowControl: false, allowCapture: false })
+  expect(result).toMatchObject({ ok: true, profileConnected: false, inspection: { id: 'private-snapshot' }, status: { state: 'stopped' } })
+  expect(paths).toEqual([])
+  expect(mocks.relay).not.toHaveBeenCalled()
+  expect(requests.filter(r => r.method === 'execute')).toHaveLength(1)
+  const grant = requests.find(r => r.method === 'start')!.payload.grant!
+  expect(grant).toMatchObject({ purpose: 'chat-tools', allowControl: false, allowCapture: false, identity: { profileId: uuid(20) } })
+  expect(grant).not.toHaveProperty('goal')
+  expect(grant.identity).not.toHaveProperty('taskId')
+  expect(mocks.release).toHaveBeenCalled()
+})
+
+it.each(['released', 'released-while-pairing', 'ordinary', 'unknown', 'stop-during-teardown', 'account', 'takeover', 'cleanup-failed'] as const)('real relay client + controller: chat A %s then fresh chat B, never old authority', async mode => {
+  mocks.realRelay = true
+  let chat = 3
+  let pending = true
+  let serverIdentity: NativeGrant['identity']
+  const sockets: FakeRelaySocket[] = []
+  class FakeRelaySocket extends EventTarget {
+    readyState = 1
+    constructor(_url: string) { super(); sockets.push(this); queueMicrotask(() => this.dispatchEvent(new Event('open'))) }
+    send(raw: string) {
+      if (JSON.parse(raw).type === 'hello') queueMicrotask(() => this.message({ type: 'ready', identity: serverIdentity }))
+      if (JSON.parse(raw).type === 'status' && mode === 'released-while-pairing' && chat === 3) queueMicrotask(() => this.message({ type: 'revoke', reason: 'released' }))
+    }
+    close() { this.readyState = 3; this.dispatchEvent(new Event('close')) }
+    message(value: unknown) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) })) }
+  }
+  vi.stubGlobal('WebSocket', FakeRelaySocket)
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    paths.push(new URL(url).pathname)
+    if (url.endsWith('/connect')) return Response.json({ connectionId: uuid(21) })
+    if (url.endsWith('/poll')) return Response.json({ request: pending ? { id: uuid(chat + 20), workspaceId: uuid(1), assistantId: uuid(2), conversationId: uuid(chat), requester: `Chat ${chat}` } : null })
+    if (url.endsWith('/accept')) {
+      pending = false
+      const { taskId: _task, ...common } = { deploymentId: 'deployment', userId: auth.userId, workspaceId: uuid(1), deviceId: (integration as any).deviceId, sessionId: uuid(chat + 30), conversationId: uuid(chat), taskId: '' }
+      serverIdentity = { ...common, profileId: uuid(20) }
+      return Response.json({ protocol: 'native-computer-v1', state: 'awaiting_local_consent', expiresAt: Date.now() + 60000, identity: serverIdentity })
+    }
+    if (url.endsWith('/exchange')) return Response.json({ token: 'private-token', relayUrl: 'wss://relay.example/native-computer-v1', expiresAt: Date.now() + 60000 })
+    if (init.method === 'DELETE') return new Response(null, { status: 204 })
+    return Response.json({ ok: true })
+  }))
+  install(); await discover()
+  expect(await integration.handle({ type: 'connect-profile', workspaceId: uuid(1), profileId: uuid(20), target, allowControl: true, allowCapture: false })).toMatchObject({ ok: true, profileConnected: true })
+  await (integration as any).pollProfile()
+  const first = mocks.relay.mock.calls[0][0] as NativeComputerController
+  const firstIdentity = requests.find(r => r.method === 'start')!.payload.grant!.identity
+  expect(first.status().state).toBe(mode === 'released-while-pairing' ? 'stopped' : 'active')
+  let allowDeath: (() => void) | undefined
+  if (mode === 'stop-during-teardown') {
+    const child = mocks.spawn.mock.results.at(-1)!.value as ReturnType<typeof fakeChild>
+    child.kill.mockImplementation(() => { allowDeath = () => child.emit('exit', null, 'SIGKILL'); return true })
+  }
+  if (mode === 'cleanup-failed') {
+    const forget = first.identityChanged.bind(first)
+    vi.spyOn(first, 'identityChanged').mockImplementationOnce(() => { void forget(); return Promise.reject(new Error('Unconfirmed helper death')) })
+  }
+  sockets[0].message({ type: 'revoke', ...(mode === 'ordinary' ? {} : { reason: mode === 'unknown' ? 'execution_unknown' : 'released' }) })
+  if (mode === 'account') auth = { ...auth, accountKey: 'replacement' }
+  if (mode === 'takeover') first.userTakeover()
+  expect(['stopped', 'paused_for_user']).toContain(first.status().state)
+  expect(first.status().identity).toBeUndefined() // All grants forgotten synchronously.
+  if (mode === 'stop-during-teardown') {
+    expect((integration as any).profile).toBeDefined()
+    const stopping = integration.stop(); allowDeath!(); await stopping
+  }
+  if (mode === 'cleanup-failed') {
+    await vi.waitFor(() => expect((integration as any).profile).toBeUndefined())
+    expect((integration as any).teardown.size).toBeGreaterThan(0)
+  } else await vi.waitFor(() => expect((integration as any).teardown.size).toBe(0))
+  if (mode !== 'released' && mode !== 'released-while-pairing') {
+    await vi.waitFor(() => expect((integration as any).profile).toBeUndefined())
+    expect(paths.some(path => path.endsWith('/disconnect'))).toBe(true)
+    pending = true; chat = 4
+    await (integration as any).pollProfile()
+    expect(sockets).toHaveLength(1)
+    return
+  }
+  await vi.waitFor(() => expect((integration as any).controller).not.toBe(first))
+  expect((integration as any).profile.connectionId).toBe(uuid(21))
+  expect((integration as any).session).toBeUndefined()
+  expect((integration as any).verificationConsent).toBeUndefined()
+  expect(paths.some(path => path.endsWith('/disconnect') || path.endsWith(`/sessions/${firstIdentity.sessionId}`))).toBe(false)
+  expect(mocks.release).toHaveBeenCalled()
+  const consentCount = mocks.consent.mock.calls.length
+  chat = 4; pending = true
+  await (integration as any).pollProfile()
+  const second = mocks.relay.mock.calls[1][0] as NativeComputerController
+  expect(second).not.toBe(first)
+  expect(second.status()).toMatchObject({ state: 'active', identity: { conversationId: uuid(4), profileId: uuid(20) } })
+  expect(second.status().identity?.sessionId).not.toBe(firstIdentity.sessionId)
+  expect(mocks.consent.mock.calls.length).toBe(consentCount + 2) // Fresh window selection AND grant consent.
+  expect(paths.filter(path => path.endsWith('/connect'))).toHaveLength(1)
+  expect(paths.some(path => path.endsWith('/run') || path.includes('/tasks'))).toBe(false)
+  expect(requests.filter(r => r.method === 'start')).toHaveLength(2)
+  sockets[0].message({ type: 'revoke' }); sockets[0].close()
+  expect(second.status().state).toBe('active') // Old channel close cannot kill chat B.
 })

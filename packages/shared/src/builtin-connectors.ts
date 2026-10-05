@@ -334,7 +334,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   // counts as an official (non-custom-MCP) connector via OFFICIAL_CONNECTOR_IDS;
   // the empty tool list means it surfaces no governable tools of its own.
   native_computer: [
-    { name: 'nativeComputerTask', description: 'Operate the explicitly approved local desktop task; requires separate native consent and local action approval', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'listComputerProfiles', description: 'List owner-private computer profiles enabled for this assistant', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'computerObserve', description: 'Observe the locally approved computer window in this chat', classification: 'read', defaultPolicy: 'ask' },
+    { name: 'computerAct', description: 'Perform one locally approved action on a fresh observation', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'computerCapture', description: 'Capture the approved window when image policy allows', classification: 'read', defaultPolicy: 'ask' },
+    { name: 'computerRelease', description: 'Release this chat computer lease', classification: 'write', defaultPolicy: 'allow' },
   ],
   gcs: [],
   s3: [],
@@ -655,7 +659,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'getBrand',
     'updateBrandDraft',
   ],
-  native_computer: ['nativeComputerTask'],
+  native_computer: ['listComputerProfiles', 'computerObserve', 'computerAct', 'computerCapture', 'computerRelease'],
   // Computer use (docs/architecture/engine/computer-use.md): wired at boot
   // from packages/core/src/sandbox/tools.ts, always present (a missing
   // extension/sandbox backend returns a clear tool error, never a hang).

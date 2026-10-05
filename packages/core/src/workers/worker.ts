@@ -1,3 +1,4 @@
+import { billableTurnUsage } from '../engine/turn-billing.js'
 /**
  * Worker system for parallel research delegation.
  *
@@ -713,7 +714,8 @@ export function createWorkerManager(options: WorkerOptions) {
             if (event.name === 'urlReader' || event.name === 'browserReadPage') urlReaderCalls++
             else if (event.name === 'webSearch') webSearchCalls++
           }
-          if (event.type === 'turn_complete' && ownOnUsage && ownSessionId) {
+          const billing = event.type === 'turn_complete' ? billableTurnUsage(event) : null
+          if (billing && ownOnUsage && ownSessionId) {
             // Terminal-once with accumulated usage — hand the worker's COGS to
             // the api layer under the spawning turn's billing identity (the same
             // session the worker_runs row is written under, so a goal iteration
@@ -724,10 +726,10 @@ export function createWorkerManager(options: WorkerOptions) {
               assistantId: context.assistantId,
               sessionId: ownSessionId,
               workspaceId: ownWorkspaceId,
-              model: event.response.model,
+              model: billing.model,
               modelTier: context.workerRuntime?.modelTier,
               providerKeySource: context.workerRuntime?.providerKeySource,
-              usage: event.totalUsage,
+              usage: billing.usage,
             })
           }
           // Forward events to the SPAWNING turn's sink (snapshotted at spawn),

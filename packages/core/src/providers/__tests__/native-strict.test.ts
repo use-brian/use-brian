@@ -236,3 +236,90 @@ it.each<Vendor>(['anthropic', 'gemini', 'openai'])('never replays %s after parti
   expect(chunks.some(c => c.type === 'text_delta')).toBe(true)
   expect(fetch).toHaveBeenCalledTimes(1)
 })
+
+function imageChatRequest(): ProviderRequest {
+  return { ...request, nativeImageChat: true, nativeImageUploadGuard: async () => {},
+    tools: [{ name: 'computerAct', description: 'One locally approved action', parameters: { type: 'object', properties: {} } }],
+    messages: [
+      { role: 'user', content: 'Inspect the public fixture' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'capture', name: 'computerCapture', input: {}, providerSignature: 'original-signature' }] },
+      { role: 'user', content: [{ type: 'tool_result', name: 'computerCapture', toolUseId: 'capture', content: '{"frameId":"frame"}' },
+        { type: 'image', mimeType: 'image/png', data: 'cHVibGljLWZpeHR1cmU=' }] },
+    ],
+  }
+}
+function toolFrames(vendor: Vendor): object[] {
+  if (vendor === 'anthropic') return [
+    { type: 'message_start', message: { id: 'msg', type: 'message', role: 'assistant', model: 'actual-v2', usage: { input_tokens: 3 }, content: [] } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'action', name: 'computerAct', input: {} } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"x":5}' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 2 } }, { type: 'message_stop' },
+  ]
+  if (vendor === 'gemini') return [{ modelVersion: 'actual-v2', candidates: [{ content: { parts: [{ functionCall: { id: 'action', name: 'computerAct', args: { x: 5 } }, thoughtSignature: 'signature' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 } }]
+  return [{ model: 'actual-v2', choices: [{ delta: { tool_calls: [{ index: 0, id: 'action', function: { name: 'computerAct', arguments: '{"x":5}' } }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 3, completion_tokens: 2 } }]
+}
+describe.each<Vendor>(['anthropic', 'gemini', 'openai'])('strict-image chat %s', vendor => {
+  it('carries real images, tools, original tool history and upstream evidence through the strict wrapper stack', async () => {
+    const fetch = vi.fn(async () => sse(toolFrames(vendor)))
+    vi.stubGlobal('fetch', fetch)
+    const { wrapped, fallback } = stack(provider(vendor))
+    const chunks = await collect(wrapped, imageChatRequest())
+    expect(chunks).toContainEqual({ type: 'tool_use_start', id: 'action', name: 'computerAct' })
+    expect(chunks).toContainEqual({ type: 'tool_use_delta', id: 'action', input: '{"x":5}' })
+    expect(chunks.find(c => c.type === 'tool_use_end')).toMatchObject({ id: 'action' })
+    expect(end(chunks)).toMatchObject({ stopReason: 'tool_use', nativeMetadata: { actualModel: 'actual-v2', usage: { inputTokens: 3, outputTokens: 2 } } })
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const body = String((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body)
+    for (const value of ['cHVibGljLWZpeHR1cmU=', 'computerCapture', 'computerAct', 'frameId', 'capture']) expect(body).toContain(value)
+    if (vendor === 'gemini') expect(body).toContain('original-signature')
+    expect(fallback.stream).not.toHaveBeenCalled()
+  })
+  it('requires a live HTTP-boundary guard and withholds revoked uploads through credential/wrapper awaits', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const { wrapped, fallback } = stack(provider(vendor))
+    const guard = vi.fn(async () => { throw new Error('revoked') })
+    await expect(collect(wrapped, { ...imageChatRequest(), nativeImageUploadGuard: guard })).rejects.toThrow('native_provider_failure')
+    expect(guard).toHaveBeenCalledTimes(1)
+    expect(fetch).not.toHaveBeenCalled()
+    expect(fallback.stream).not.toHaveBeenCalled()
+    await expect(collect(wrapped, { ...imageChatRequest(), nativeImageUploadGuard: undefined })).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+  it('rechecks after asynchronous credential resolution, not only at request construction', async () => {
+    let live = true
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const base = provider(vendor)
+    const pooled = wrapCredentialPoolProvider({ providerId: vendor, pool: { resolve: async () => {
+      await Promise.resolve()
+      live = false
+      return { credentialId: null, provider: vendor, secret: 'synthetic-test-key', source: 'system', recordSpend: async () => {} }
+    } }, create: () => base })
+    const guard = vi.fn(async () => { if (!live) throw new Error('revoked during credential resolution') })
+    const req = { ...imageChatRequest(), nativeImageUploadGuard: guard }
+    expect(live).toBe(true)
+    await expect(collect(pooled, req)).rejects.toThrow('native_provider_failure')
+    expect(guard).toHaveBeenCalledTimes(1)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+  it('does not relax legacy nativeStrict tool-history refusal', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    await expect(collect(provider(vendor), { ...imageChatRequest(), nativeImageChat: undefined, tools: undefined })).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+  it('never retries, falls back or adapts documents on the image-chat route', async () => {
+    const fetch = vi.fn(async () => new Response(marker, { status: 503 }))
+    vi.stubGlobal('fetch', fetch)
+    const { wrapped, fallback } = stack(provider(vendor))
+    await expect(collect(wrapped, imageChatRequest())).rejects.toThrow('native_provider_failure')
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fallback.stream).not.toHaveBeenCalled()
+    const req = imageChatRequest()
+    req.messages.push({ role: 'user', content: [{ type: 'image', mimeType: 'application/pdf', data: marker }] })
+    await expect(collect(wrapped, req)).rejects.toThrow()
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+})

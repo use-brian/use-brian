@@ -208,7 +208,8 @@ describe('trusted main native computer setup', () => {
     integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth }); integration.install()
     await discover()
     expect(await integration.handle(selection)).toMatchObject({ ok: false, error: 'Native control unavailable' })
-    expect(getAuth).not.toHaveBeenCalled()
+    expect(getAuth).toHaveBeenCalledTimes(1) // Metadata-only discovery, never task authorization.
+    expect(controller().options.observationOnly).toBe(true)
     expect(fetchMock).not.toHaveBeenCalled()
     expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
   })
@@ -226,11 +227,12 @@ describe('trusted main native computer setup', () => {
     expect(fetchMock).not.toHaveBeenCalled()
     expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
   })
-  it('declined verification cannot enable discovery or control', async () => {
+  it('declined verification leaves discovery observation-only and cannot enable control', async () => {
     await verificationSetup()
     vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({ response: 0, checkboxChecked: false })
     expect(await integration.handle({ type: 'acknowledge-verification' })).toMatchObject({ ok: false })
-    expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: false })
+    expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: true })
+    expect(controller().options.observationOnly).toBe(true)
     expect(await integration.handle(selection)).toMatchObject({ ok: false })
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -248,6 +250,33 @@ describe('trusted main native computer setup', () => {
     expect(await result).toMatchObject({ ok: false })
     expect(controller().options.observationOnly).toBe(true)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+  it('profile Connect obtains attended verification internally without replacing selected window identities', async () => {
+    await verificationSetup()
+    await integration.handle({ type: 'targets' })
+    const discovered = controller()
+    fetchMock.mockResolvedValue(Response.json({ connectionId: uuid(21) }))
+    expect(await integration.handle({ type: 'connect-profile', workspaceId: uuid(1), profileId: uuid(20), target, allowControl: true, allowCapture: false })).toMatchObject({ ok: true, profileConnected: true })
+    expect(controller()).toBe(discovered)
+    expect(controller().options.observationOnly).toBe(false)
+    expect(vi.mocked(dialog.showMessageBox).mock.calls.map(([o]) => (o as Electron.MessageBoxOptions).message)).toEqual(['Allow attended packaged Mac verification?', 'Connect this computer profile?'])
+    expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
+    await integration.stop()
+    expect(controller().options.observationOnly).toBe(true)
+  })
+  it.each(['accessibility', 'screen-recording'] as const)('verification eligibility and acknowledgment do not bypass denied %s TCC', async permission => {
+    await verificationSetup()
+    await integration.handle({ type: 'targets' })
+    const broker = controller()
+    broker.caps = { ...broker.caps, windowCapture: true,
+      accessibilityPermission: permission === 'accessibility' ? 'denied' : 'granted',
+      capturePermission: permission === 'screen-recording' ? 'denied' : 'granted' }
+    expect(await integration.handle({ type: 'status' })).toMatchObject({ verificationAvailable: true })
+    expect(await integration.handle({ type: 'connect-profile', workspaceId: uuid(1), profileId: uuid(20), target, allowControl: true, allowCapture: permission === 'screen-recording' })).toMatchObject({ ok: false, profileConnected: false, status: { state: 'permission_required' } })
+    expect(dialog.showMessageBox).toHaveBeenCalledOnce()
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: 'Allow attended packaged Mac verification?' }))
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await integration.handle({ type: 'status' })).toMatchObject({ verificationConsented: true, profileConnected: false, status: { state: 'permission_required' } })
   })
   it('valid attended verification uses normal task/session authorization and is revoked on Stop', async () => {
     await verificationSetup()
@@ -1055,5 +1084,203 @@ describe('cleanup polling fence', () => {
     expect(await integration.handle({ type: 'stop' })).toEqual({ ok: true, cleanupPending: true })
     expect(await integration.handle({ type: 'status' })).toEqual({ ok: true, cleanupPending: true })
     expect(await integration.handle({ type: 'targets' })).toEqual({ ok: false, cleanupPending: true })
+  })
+})
+
+describe('durable profile connection and fresh chat leases', () => {
+  const connect = { type: 'connect-profile', workspaceId: uuid(1), profileId: uuid(20), target, allowControl: true, allowCapture: false }
+  let chat: number
+  let scope: Record<string, unknown>
+  async function setupProfile() {
+    await discover()
+    chat = 3; scope = {}
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      const path = new URL(url).pathname; requests.push({ path, init })
+      if (path.endsWith('/connect')) return Response.json({ connectionId: uuid(21) })
+      if (path.endsWith('/poll')) return Response.json({ request: { id: uuid(22), workspaceId: uuid(1), assistantId: uuid(2), conversationId: uuid(chat), requester: 'Server requester', ...scope } })
+      if (path.endsWith('/accept')) return Response.json({ protocol: 'native-computer-v1', state: 'awaiting_local_consent', expiresAt: Date.now() + 60_000,
+        identity: { deploymentId: 'deployment', userId: auth!.userId, workspaceId: uuid(1), deviceId: (integration as any).deviceId, sessionId: uuid(30 + chat), conversationId: uuid(chat), profileId: uuid(20), ...scope } })
+      if (path.endsWith('/exchange')) return Response.json({ token: 'private-relay-token', relayUrl: 'wss://relay.example', expiresAt: Date.now() + 60000 })
+      return Response.json({ ok: true })
+    })
+    const controller = mocks.controllers.at(-1)
+    controller.start.mockImplementation(async (grant: NativeGrant) => {
+      if (!await controller.options.approveGrant(grant, (integration as any).requests.signal)) throw new Error('Denied')
+      controller.grant = grant; controller.state = 'active'
+    })
+    return controller
+  }
+  it('inspects locally without task/chat setup, server connection or relay', async () => {
+    const controller = await setupProfile()
+    const result = await integration.handle({ ...connect, allowControl: false })
+    expect(result).toMatchObject({ ok: true, profileConnected: false, inspection: { id: 'local-ax' } })
+    expect(requests).toHaveLength(0)
+    expect(mocks.relays).toHaveLength(0)
+    expect(controller.inspectSelected).toHaveBeenCalledOnce()
+    expect(controller.grant).toBeUndefined()
+    expect(dialog.showMessageBox).toHaveBeenLastCalledWith(expect.objectContaining({ detail: expect.stringContaining('One-shot local Accessibility inspection') }))
+    expect(JSON.stringify(vi.mocked(dialog.showMessageBox).mock.calls)).not.toContain('Task: undefined')
+    expect(await integration.handle({ type: 'status' })).toMatchObject({ profileConnected: false, status: { state: 'stopped' } })
+  })
+  it('rejects capture in task-free local inspector mode', async () => {
+    await setupProfile()
+    expect(await integration.handle({ ...connect, allowControl: false, allowCapture: true })).toMatchObject({ ok: false, profileConnected: false })
+    expect(requests).toHaveLength(0)
+    expect(mocks.relays).toHaveLength(0)
+  })
+  it.each([
+    ['AX denied', { accessibilityPermission: 'denied' }, false],
+    ['AX unknown', { accessibilityPermission: 'unknown' }, false],
+    ['AX read unavailable', { axRead: false }, false],
+    ['semantic actions unavailable', { semanticActions: false }, false],
+    ['Screen Recording denied', { windowCapture: true, capturePermission: 'denied' }, true],
+    ['Screen Recording unknown', { windowCapture: true, capturePermission: 'unknown' }, true],
+    ['capture unavailable', { windowCapture: false, capturePermission: 'granted' }, true],
+  ] as const)('refuses profile connection with %s and preserves authoritative permission status', async (_name, missing, allowCapture) => {
+    const controller = await setupProfile()
+    controller.caps = { ...controller.caps, ...missing }
+    expect(await integration.handle({ ...connect, allowCapture })).toMatchObject({ ok: false, profileConnected: false,
+      status: { state: 'permission_required', capabilities: missing } })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(controller.start).not.toHaveBeenCalled()
+    expect(await integration.handle({ type: 'status' })).toMatchObject({ profileConnected: false, status: { state: 'permission_required', capabilities: missing } })
+    expect(await integration.handle({ type: 'targets' })).toMatchObject({ status: { state: 'permission_required', capabilities: missing } })
+    controller.caps = { ...controller.caps, axRead: true, semanticActions: true, accessibilityPermission: 'granted', windowCapture: true, capturePermission: 'granted' }
+    expect(await integration.handle({ ...connect, allowCapture })).toMatchObject({ ok: true, profileConnected: true, status: { state: 'ready' } })
+    expect(requests.filter(r => r.path.endsWith('/connect'))).toHaveLength(1)
+  })
+  it('keeps the explicit permission settings path usable after a TCC refusal', async () => {
+    const controller = await setupProfile()
+    controller.caps.accessibilityPermission = 'denied'
+    expect(await integration.handle(connect)).toMatchObject({ status: { state: 'permission_required' } })
+    expect(await integration.handle({ type: 'permissions', permission: 'accessibility' })).toMatchObject({ ok: true })
+    expect(shell.openExternal).toHaveBeenCalledWith('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+  it('checks TCC again after connection consent before posting to the server', async () => {
+    const controller = await setupProfile()
+    vi.mocked(dialog.showMessageBox).mockImplementationOnce(async () => {
+      controller.caps.accessibilityPermission = 'denied'
+      return { response: 1, checkboxChecked: false }
+    })
+    expect(await integration.handle(connect)).toMatchObject({ ok: false, profileConnected: false, status: { state: 'permission_required' } })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+  it('read-only inspector still requires real AX permission, not semantic control or capture', async () => {
+    const controller = await setupProfile()
+    controller.caps = { ...controller.caps, semanticActions: false, accessibilityPermission: 'denied' }
+    expect(await integration.handle({ ...connect, allowControl: false })).toMatchObject({ ok: false, status: { state: 'permission_required' } })
+    expect(controller.inspectSelected).not.toHaveBeenCalled()
+    controller.caps.accessibilityPermission = 'granted'
+    expect(await integration.handle({ ...connect, allowControl: false })).toMatchObject({ ok: true, profileConnected: false, inspection: { id: 'local-ax' } })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+  it('requires real main-owned connection consent and rejects extra task authority', async () => {
+    await setupProfile()
+    expect(NativeUiRequestSchema.safeParse({ ...connect, taskId: uuid(4) }).success).toBe(false)
+    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({ response: 0, checkboxChecked: false })
+    expect(await integration.handle(connect)).toMatchObject({ ok: false })
+    expect(requests).toHaveLength(0)
+    expect(await integration.handle(connect)).toMatchObject({ ok: true, profileConnected: true, profileId: uuid(20) })
+    expect(JSON.parse(requests[0].init.body as string)).toEqual({ workspaceId: uuid(1), deviceId: (integration as any).deviceId })
+  })
+  it('uses server requester, a profile grant and fresh local consent, without tasks or /run', async () => {
+    const controller = await setupProfile()
+    await integration.handle(connect)
+    await (integration as any).pollProfile()
+    expect(controller.grant).toMatchObject({ purpose: 'chat-tools', requester: 'Server requester', identity: { profileId: uuid(20), conversationId: uuid(3) } })
+    expect(controller.grant).not.toHaveProperty('goal')
+    expect(dialog.showMessageBox).toHaveBeenLastCalledWith(expect.objectContaining({ detail: expect.stringContaining('Interactive chat tools') }))
+    expect(JSON.stringify(vi.mocked(dialog.showMessageBox).mock.calls)).not.toContain('Task: undefined')
+    expect(requests.some(r => /\/run|\/tasks/.test(r.path))).toBe(false)
+    await integration.stop()
+    await discover()
+    chat = 4
+    await integration.handle(connect)
+    const next = mocks.controllers.at(-1)
+    next.start.mockImplementation(async (grant: NativeGrant) => {
+      if (!await next.options.approveGrant(grant, (integration as any).requests.signal)) throw new Error('Denied')
+      next.grant = grant; next.state = 'active'
+    })
+    await (integration as any).pollProfile()
+    expect(next.grant.identity.conversationId).toBe(uuid(4))
+    expect(vi.mocked(dialog.showMessageBox).mock.calls.filter(([o]) => typeof o === 'object' && 'message' in o && o.message === 'Allow Brian to use this computer?')).toHaveLength(2)
+  })
+  it.each(['workspaceId', 'conversationId', 'profileId', 'deviceId'])('rejects accepted cross-scope %s before controller consent', async key => {
+    const controller = await setupProfile()
+    await integration.handle(connect)
+    const previous = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (url, init) => {
+      const response = await previous(url, init)
+      if (!url.endsWith('/accept')) return response
+      const body = await response.json(); body.identity[key] = uuid(99)
+      return Response.json(body)
+    })
+    await (integration as any).pollProfile()
+    expect(controller.start).not.toHaveBeenCalled()
+    expect((integration as any).profile).toBeUndefined()
+  })
+  it('rejects a request from another workspace without accepting it', async () => {
+    await setupProfile(); await integration.handle(connect); scope = { workspaceId: uuid(99) }
+    await (integration as any).pollProfile()
+    expect(requests.some(r => r.path.endsWith('/accept'))).toBe(false)
+    expect((integration as any).profile).toBeUndefined()
+  })
+  it.each(['connect', 'accept', 'exchange'])('late %s after Stop cannot restore authority', async stage => {
+    const controller = await setupProfile()
+    const delayed = deferred<Response>()
+    const previous = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (url, init) => url.endsWith(`/${stage}`) ? delayed.promise : previous(url, init))
+    const operation = stage === 'connect' ? integration.handle(connect) : (await integration.handle(connect), (integration as any).pollProfile())
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.endsWith(`/${stage}`))).toBe(true))
+    await integration.stop()
+    delayed.resolve(await previous(`https://api.example/api/native-computer/${stage}`, { method: 'POST' }))
+    await operation
+    expect((integration as any).profile).toBeUndefined()
+    expect((integration as any).session).toBeUndefined()
+    if (stage !== 'exchange') expect(controller.start).not.toHaveBeenCalled()
+    expect(mocks.relays).toHaveLength(0)
+  })
+  it.each(['deny', 'account', 'stop'])('pending chat consent fails closed on %s and deletes the accepted session', async change => {
+    const controller = await setupProfile(); await integration.handle(connect)
+    const approval = deferred<Electron.MessageBoxReturnValue>()
+    vi.mocked(dialog.showMessageBox).mockReturnValueOnce(approval.promise)
+    const operation = (integration as any).pollProfile()
+    await vi.waitFor(() => expect(controller.start).toHaveBeenCalledTimes(1))
+    // A pending dialog does not prevent the main-owned heartbeat or grant by itself.
+    await (integration as any).heartbeatProfile()
+    expect(controller.grant).toBeUndefined()
+    if (change === 'account') auth = { ...auth!, accountKey: 'other' }
+    if (change === 'stop') await integration.stop()
+    approval.resolve({ response: change === 'deny' ? 0 : 1, checkboxChecked: false })
+    await operation
+    expect(controller.grant).toBeUndefined()
+    expect(mocks.relays).toHaveLength(0)
+    expect(requests.some(r => r.init.method === 'DELETE')).toBe(true)
+    expect((integration as any).profile).toBeUndefined()
+  })
+  it('polls privately without renderer status calls', async () => {
+    await setupProfile()
+    vi.useFakeTimers()
+    try {
+      await integration.handle(connect)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(requests.some(r => r.path.endsWith('/poll'))).toBe(true)
+      expect(mocks.controllers.at(-1).grant?.purpose).toBe('chat-tools')
+    } finally { vi.useRealTimers() }
+  })
+  it('offline polling disconnects without automatic reconnect', async () => {
+    await setupProfile(); await integration.handle(connect)
+    fetchMock.mockRejectedValue(new Error('offline'))
+    await (integration as any).pollProfile()
+    expect((integration as any).profile).toBeUndefined()
+    expect((integration as any).profileTimer).toBeUndefined()
+  })
+  it('unknown relay termination revokes the durable association', async () => {
+    const controller = await setupProfile(); await integration.handle(connect); await (integration as any).pollProfile()
+    controller.state = 'stopped'; controller.options.onStatus(controller.status())
+    expect((integration as any).profile).toBeUndefined()
+    expect((integration as any).session).toBeUndefined()
+    expect(requests.some(r => r.path.endsWith('/disconnect'))).toBe(true)
   })
 })

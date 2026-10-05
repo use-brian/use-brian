@@ -211,7 +211,11 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   updateBrandDraft: 'Propose a brand change',
 
   // Computer use (docs/architecture/engine/computer-use.md)
-  nativeComputerTask: 'Work on this computer with local approval',
+  listComputerProfiles: 'List your computer profiles',
+  computerObserve: 'Observe the approved computer window',
+  computerAct: 'Act on your computer with local approval',
+  computerCapture: 'Capture the approved computer window',
+  computerRelease: 'Release this chat’s computer control',
   browserNavigate: 'Open a page in the browser',
   browserOpenTab: 'Open a new browser tab',
   browserListTabs: 'List browser tabs',

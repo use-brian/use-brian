@@ -14,6 +14,43 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  computerProfiles: {
+    inspect: "Inspect selected window",
+    inspectHelp: "Control is off: inspect this window once, locally, after native approval. This does not connect the profile to chat or capture screenshots.",
+    captureDenied: "Screen Recording permission is denied. Capture is unavailable. Open Mac Screen Recording settings to allow it, then check readiness again.",
+
+    pendingVerification: "Control and capture selections are requests only. Connect opens native verification; the computer must approve and support the requested permissions before access is granted.",
+    capabilityToggle: "Allow this assistant to use computer tools",
+    manageCapability: "Manage computer tool permission in Connectors",
+    capabilityError: "Could not change computer tool permission. Check your assistant permissions and try again.",
+
+    consent: "Connect computer requests explicit approval in a native dialog. Control and capture are separate opt-ins. Stop revokes local access; workspace changes disconnect.",
+    connectionError: "Could not connect or disconnect. Check helper readiness and system permissions. Inspect the app before retrying any uncertain action.",
+    studio: "Studio",
+
+    title: "Computer profiles",
+    create: "Create computer profile",
+    name: "Profile name",
+    rename: "Rename profile",
+    delete: "Delete profile",
+    deleteConfirm: "Delete this private computer profile?",
+    connect: "Connect computer",
+    disconnect: "Stop / disconnect",
+    online: "Online",
+    offline: "Offline",
+    privateHelp: "Profiles are private to you in this workspace. They connect your real computer, not an isolated desktop.",
+    chatHelp: "Grant a profile to an assistant in Studio > Tools, then ask that assistant directly in any authorized chat.",
+    browserHelp: "Manage profiles in any browser. Connect your local computer from the desktop app.",
+    available: "Available to this assistant",
+    notes: "Routing notes (optional)",
+    save: "Save notes",
+    capabilityHelp: "The assistant also needs the native_computer capability. Profile access alone does not enable computer tools.",
+    empty: "No computer profiles yet.",
+    error: "Could not load or update computer profiles. Try again.",
+    retry: "Retry",
+    select: "Select a computer profile",
+    blocked: "Connection blocked. Check helper readiness and system permissions, then try again.",
+  },
   nativeComputer: {
     verificationAcknowledge: "Request attended Mac verification",
     verificationHelp: "Verification is temporary, not pilot acceptance or production certification. Stay present. A native Mac dialog must approve this request. Stop, workspace/account changes and session end revoke approval; an action already sent may finish. Task and target consent still apply.",

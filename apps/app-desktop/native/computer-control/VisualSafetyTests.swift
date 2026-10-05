@@ -293,3 +293,75 @@ check(stopped.execute(beginPayload)["outcome"] as? String == "executed")
 check(delivered == 2)
 onDelivery = nil
 print("PASS \(checks) total production visual checks including execute/replay/Stop-after-entry; no native OS acceptance")
+
+
+// Execute the actual scope predicate, not a replacement identity comparator.
+struct ScopeTrust { func parentValid() -> Bool { true } }
+func AXIsProcessTrusted() -> Bool { true }
+final class ScopeHarness {
+    let trust = ScopeTrust()
+    var messagingReady = true
+    var grant: Object? = decodedWire(bindingGrant)
+    let lease = "lease"
+    let expiresMonotonic = 199100.0, commandDeadline = 199100.0
+    func validCommand(_ command: Object) -> Bool { validWireCommand(command) }
+    func liveWindow(_ target: Object) -> Window? { Window() }
+    // PRODUCTION SCOPE PREDICATE
+    func accepts(_ command: Object) -> Bool { scopedAuthority(command, lease) }
+}
+var profileIdentity = bindingIdentity
+profileIdentity.removeValue(forKey: "taskId"); profileIdentity["profileId"] = "t"
+var profileGrant = bindingGrant
+profileGrant["identity"] = profileIdentity
+profileGrant.removeValue(forKey: "goal"); profileGrant["purpose"] = "chat-tools"
+check(validWireGrant(decodedWire(profileGrant)))
+check(publicShapesGrant(decodedWire(profileGrant)))
+check(publicShapesGrant(decodedWire(bindingGrant)))
+var wrongGoal = bindingGrant; wrongGoal["goal"] = "different"
+check(!publicShapesGrant(decodedWire(wrongGoal)))
+var mixed = profileGrant; mixed["goal"] = "different"
+check(!publicShapesGrant(decodedWire(mixed)))
+var profileCommand = lifecycleCommand; profileCommand["identity"] = profileIdentity
+profileCommand = decodedWire(profileCommand)
+clock = 100
+let scope = ScopeHarness()
+check(scope.accepts(lifecycleCommand))
+check(!scope.accepts(profileCommand))
+scope.grant = decodedWire(profileGrant)
+check(scope.accepts(profileCommand))
+check(!scope.accepts(lifecycleCommand))
+var otherProfile = profileIdentity; otherProfile["profileId"] = "other"
+var otherCommand = profileCommand; otherCommand["identity"] = otherProfile
+check(!scope.accepts(decodedWire(otherCommand)))
+// Goal-free profiles reach the verbatim resolved approval / execute path.
+let chatExecutor = prepared(); chatExecutor.grant = decodedWire(profileGrant)
+let chatPayload: Object = ["command": profileCommand, "leaseId": "lease"]
+check(chatExecutor.beginVisualApproval(chatPayload) != nil)
+check(chatExecutor.end(["command": profileCommand, "leaseId": "lease", "bindingId": "binding", "approved": true]))
+let beforeChat = delivered
+check(chatExecutor.execute(chatPayload)["outcome"] as? String == "executed")
+check(delivered == beforeChat + 1)
+print("PASS \(checks) profile/scope production checks; Foundation only")
+
+let noApproval = prepared(); noApproval.grant = decodedWire(profileGrant)
+check(noApproval.execute(chatPayload)["outcome"] as? String == "not_executed")
+var ordinaryCommand = profileCommand
+ordinaryCommand["action"] = ["kind": "invoke", "target": bindingTarget, "observationId": "obs", "ref": "ref"]
+let ordinary = prepared(); ordinary.grant = decodedWire(profileGrant)
+check(ordinary.execute(["command": decodedWire(ordinaryCommand), "leaseId": "lease"])["outcome"] as? String == "not_executed")
+for mutate: (BindingHarness) -> Void in [
+    { $0.grant?["allowControl"] = false }, { $0.grant?["allowCapture"] = false },
+    { $0.cohort = false }, { $0.channelAlive = false },
+    { _ in permission = false }, { _ in clock = 5100 }
+] {
+    let h = prepared(); h.grant = decodedWire(profileGrant)
+    mutate(h)
+    check(h.beginVisualApproval(chatPayload) == nil)
+}
+let staleChat = prepared(); staleChat.grant = decodedWire(profileGrant)
+check(staleChat.beginVisualApproval(chatPayload) != nil)
+clock = 5100
+check(!staleChat.end(["command": profileCommand, "leaseId": "lease", "bindingId": "binding", "approved": true]))
+check(staleChat.execute(chatPayload)["outcome"] as? String == "not_executed")
+check(delivered == beforeChat + 1)
+print("PASS \(checks) profile checks including consent, cohort, age, Stop and no-approval refusals")

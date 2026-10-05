@@ -126,6 +126,23 @@ function strings(kind, base, path, max, emptyAllowed = false) {
 }
 add('identity', 'baseline identity', identity); add('target', 'baseline target', target);
 add('grant', 'baseline grant', grant); add('command', 'baseline command', command);
+const { taskId, ...commonIdentity } = identity;
+const profileIdentity = { ...commonIdentity, profileId: taskId };
+const { goal, ...commonGrant } = grant;
+const profileGrant = { ...commonGrant, identity: profileIdentity, purpose: 'chat-tools' };
+add('identity', 'profile identity', profileIdentity);
+add('grant', 'goal-free profile grant', profileGrant);
+add('command', 'profile command', { ...command, identity: profileIdentity });
+strings('identity', profileIdentity, 'profileId', 256);
+for (const bad of [commonIdentity, { ...identity, profileId: taskId }]) {
+  add('identity', 'both/neither scope', bad);
+  add('grant', 'both/neither grant scope', { ...profileGrant, identity: bad });
+  add('command', 'both/neither command scope', { ...command, identity: bad });
+}
+for (const bad of [{ ...profileGrant, goal }, { ...profileGrant, identity },
+  { ...grant, identity: profileIdentity }, { ...grant, purpose: 'chat-tools' },
+  { ...profileGrant, purpose: undefined }, { ...profileGrant, purpose: 'task' },
+  { ...grant, goal: undefined }, { ...grant, goal: '' }]) add('grant', 'scope metadata mismatch', bad);
 for (const key of Object.keys(identity)) strings('identity', identity, key, 256);
 for (const key of ['appId', 'processInstanceId', 'windowId', 'windowInstanceId']) strings('target', target, key, 256);
 strings('grant', grant, 'grantId', 256); strings('grant', grant, 'requester', 200); strings('grant', grant, 'goal', 2000);

@@ -75,3 +75,9 @@ export type {
   PreToolUseDirective,
   PostToolUseHookContext,
 } from './hooks.js'
+
+export { protectNativeImage } from './native-images.js'
+
+export type { NativeImageAttempt, NativeImageSettlement } from './native-images.js'
+
+export { billableTurnUsage } from './turn-billing.js'

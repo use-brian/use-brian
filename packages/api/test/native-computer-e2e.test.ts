@@ -16,7 +16,7 @@ import { relaySecretMatches } from '../../../apps/browser-relay/src/auth.js'
 import { NativeComputerController } from '../../../apps/app-desktop/src/computer-control/controller.js'
 import { NativeRelayClient } from '../../../apps/app-desktop/src/computer-control/relay-client.js'
 import type { NativeHelper } from '../../../apps/app-desktop/src/computer-control/helper-client.js'
-import { CommandSchema, GrantSchema, sameIdentity, type NativeCommand, type NativeGrant, type NativeObservation, type NativeReceipt } from '@use-brian/computer-control/protocol.js'
+import { CommandSchema, GrantSchema, sameIdentity, type NativeCommand, type NativeGrant, type NativeTaskGrant, type NativeObservation, type NativeReceipt } from '@use-brian/computer-control/protocol.js'
 import { verifyNativeToken } from '../src/auth/native-computer-token.js'
 import { nativeComputerRoutes } from '../src/routes/native-computer.js'
 import { NativeComputerService } from '../src/computer-use/service.js'
@@ -74,7 +74,7 @@ function memoryQuery(sql: string, p: unknown[] = []) {
   if (sql.startsWith('SELECT 1 FROM native_computer_sessions n')) {
     // Atomic execution authorization: evaluate the full bound scope and all
     // simulated revocations here, never fall through to a generic row SELECT.
-    const expected = row && [row.id,row.userId,row.authSessionId,row.workspaceId,row.assistantId,row.conversationId,row.taskId,row.grantId,row.epoch,row.deploymentId,row.deviceId]
+    const expected = row && [row.id,row.userId,row.authSessionId,row.workspaceId,row.assistantId,row.conversationId,row.taskId,row.grantId,row.epoch,row.deploymentId,row.deviceId,null,'nativeComputerTask']
     return rows(row && expected && p.length === expected.length && p.every((v,i) => v === expected[i]) &&
       row.state === 'execution_unknown' && !row.revoked && row.expiresAt.getTime() > Date.now() &&
       !revokedAuthority && row.userId === scope.userId && row.workspaceId === scope.workspaceId &&
@@ -224,7 +224,7 @@ afterEach(async () => {
   vi.restoreAllMocks()
 }, 10_000)
 
-async function pair(overrides: Partial<Pick<NativeGrant, 'targets' | 'allowCapture' | 'goal'>> = {}) {
+async function pair(overrides: Partial<Pick<NativeTaskGrant, 'targets' | 'allowCapture' | 'goal'>> = {}) {
   const verifier = 'x'.repeat(43)
   const created = await request(app).post('/sessions').send({ ...Object.fromEntries(Object.entries(scope).filter(([k]) => k !== 'userId')), deviceId: 'fake-device', challenge: createHash('sha256').update(verifier).digest('base64url') }).expect(201)
   grant = { protocol: 'native-computer-v1', identity: created.body.identity, grantId: uuid(), epoch: 1, expiresAt: Date.now() + 60_000, targets: [target], allowControl: true, allowCapture: false, requester: 'Fixture user', goal: 'Save the fixture', ...overrides }

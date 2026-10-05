@@ -294,6 +294,8 @@ async function* streamCompat(
   messages: Message[],
   options: {
     nativeStrict?: true
+    nativeImageChat?: true
+    nativeImageUploadGuard?: () => Promise<void>
     runtimeSystemContext?: string
     tools?: ToolDefinition[]
     maxTokens?: number
@@ -352,6 +354,7 @@ async function* streamCompat(
   }
 
   if (!options.nativeStrict) debugDocumentFlow('openai_wire', { model: recordedModel, messages, wire: ccMessages })
+  if (options.nativeImageChat) await options.nativeImageUploadGuard!()
   const res = await (cfg.fetchFn ?? fetch)(`${cfg.baseURL}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -432,7 +435,7 @@ async function* streamCompat(
         evidence.usage = u ? nativeUsage(u.prompt_tokens, u.completion_tokens, u.prompt_tokens_details?.cached_tokens === undefined ? 0 : u.prompt_tokens_details.cached_tokens) : null
       }
       if (event.error !== undefined) throw new Error('native_stream_failure')
-      if (event.choices?.some(choice => choice.delta?.tool_calls?.length)) throw new Error('native_unsupported_output')
+      if (!options.nativeImageChat && event.choices?.some(choice => choice.delta?.tool_calls?.length)) throw new Error('native_unsupported_output')
     }
     if (event.usage) usage = extractCCUsage(event.usage)
     // An error frame used to fall through the `if (!choice) continue` below
@@ -510,7 +513,7 @@ async function* streamCompat(
   for (const call of openCalls.values()) {
     if (call.started) yield { type: 'tool_use_end', id: call.id }
   }
-  yield { type: 'message_end', stopReason: mapCCStopReason(finishReason, sawToolCalls), usage, ...(options.nativeStrict ? { nativeMetadata: evidence.metadata() } : {}) }
+  yield { type: 'message_end', stopReason: mapCCStopReason(finishReason, options.nativeStrict ? false : sawToolCalls), usage, ...(options.nativeStrict ? { nativeMetadata: evidence.metadata() } : {}) }
 }
 
 // ── Provider ───────────────────────────────────────────────────

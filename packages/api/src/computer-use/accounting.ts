@@ -27,13 +27,16 @@ export type NativeAccountingKey = Readonly<z.infer<typeof NativeAccountingKeySch
 export const NativeBillingAdmissionSchema = z.object({
   version: z.literal(1), backend: z.literal('oss-native-v1'),
   key: NativeAccountingKeySchema,
-  scope: z.object({ userId: uuid, actorUserId: uuid, workspaceId: uuid, assistantId: uuid, conversationId: uuid, taskId: uuid,
+  scope: z.object({ userId: uuid, actorUserId: uuid, workspaceId: uuid, assistantId: uuid, conversationId: uuid, taskId: uuid.nullable(), profileId: uuid.optional(),
     grantId: identifier, deploymentId: identifier, epoch: z.number().int().nonnegative().max(2147483647) }).strict(),
   owner: z.enum(['adapter', 'central_primary']), requestedModel: NativeModelIdSchema,
   lane: NativeAttemptSchema.shape.lane, stage: NativeAttemptSchema.shape.stage,
   operation: NativeAttemptSchema.shape.operation.unwrap(), perceptionPath: NativeAttemptSchema.shape.perceptionPath,
   providerKeySource: NativeAttemptSchema.shape.providerKeySource,
 }).strict().superRefine((a, ctx) => {
+  if ((a.scope.taskId === null && !a.scope.profileId) || (a.scope.taskId !== null && a.scope.profileId !== undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'Invalid native profile accounting scope' })
+  }
   if ((a.owner === 'central_primary') !== (a.lane === 'decision') || (a.lane === 'decision') !== (a.stage === 'primary_decision')
     || (a.lane === 'vision') !== (a.perceptionPath === 'vision') || (a.lane === 'vision') !== (a.operation === 'ground')
     || (a.owner === 'central_primary' && (a.providerKeySource !== 'platform' || !['next-action', 'verify-progress'].includes(a.operation)))) {

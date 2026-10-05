@@ -692,6 +692,7 @@ describe('one-click grant followed by independent readback', () => {
   async function admittedClick() {
     const worker = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
     const descriptor = descriptorFor(), command = descriptor.command
+    if (!('taskId' in command.identity)) throw new Error('Legacy task fixture required')
     const grant: NativeGrant = { protocol: NATIVE_PROTOCOL, identity: command.identity, grantId: command.grantId,
       epoch: command.epoch, expiresAt: Date.now() + 60_000, targets: [command.action.target],
       allowControl: true, allowCapture: true, requester: 'Brian', goal: 'one click, then verify' }

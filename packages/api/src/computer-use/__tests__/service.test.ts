@@ -261,7 +261,7 @@ it.each(['auth','capability','policy','digest','epoch','grantId','commandId','de
  if(mode==='success') {
   expect(await validation).toEqual({authorized:true})
   expect(q).toHaveBeenCalledTimes(1)
-  expect(q.mock.calls[0][1]).toEqual(['session','user','auth','workspace','assistant','conversation','task','grant',7,'deployment','device'])
+  expect(q.mock.calls[0][1]).toEqual(['session','user','auth','workspace','assistant','conversation','task','grant',7,'deployment','device',null,'nativeComputerTask'])
  }
  else await expect(validation).rejects.toThrow()
  finish({commandId:wire.commandId,outcome:'not_executed',code:'denied'}); await dispatch

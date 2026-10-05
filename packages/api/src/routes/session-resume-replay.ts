@@ -1,3 +1,4 @@
+import { billableTurnUsage } from '@use-brian/core'
 /**
  * Path B durable chat resume — the replay implementation (WU-6.4).
  *
@@ -579,15 +580,16 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
               envelope: resumeEnvelope,
             }),
           }))
-          if (deps.usageStore && event.totalUsage) {
-            const usage = event.totalUsage
+          const billing = billableTurnUsage(event)
+          if (deps.usageStore && billing) {
+            const { model: billableModel, usage } = billing
             const turnKeySource: 'user' | 'platform' = customLlm?.providerKeySource ?? providerKeySource
             void deps.usageStore.recordUsage({
               userId: session.userId,
               assistantId: assistant.id,
               workspaceId: assistant.workspaceId!,
               sessionId,
-              model: event.response.model,
+              model: billableModel,
               modelTier: policy.logicalTier,
               inputTokens: usage.inputTokens,
               outputTokens: usage.outputTokens,
@@ -595,7 +597,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
               cacheWriteTokens: usage.cacheWriteTokens,
               actualCostUsd: turnKeySource === 'user'
                 ? 0
-                : calculateCost(event.response.model, usage),
+                : calculateCost(billableModel, usage),
               source: 'included',
               triggerKey: 'session_resume',
               providerKeySource: turnKeySource,

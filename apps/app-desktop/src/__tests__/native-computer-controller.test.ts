@@ -644,3 +644,27 @@ describe('visual invoke binding', () => {
     } finally { await noCapture.controller.dispose() }
   })
 })
+
+it.each(['idle', 'queued', 'task', 'expired'] as const)('controller independently admits intentional release only for idle profile: %s', async mode => {
+  const { taskId: _task, ...common } = identity
+  const base = grant()
+  const profileGrant: NativeGrant = { protocol: NATIVE_PROTOCOL, identity: { ...common, profileId: 'profile' }, grantId: base.grantId,
+    epoch: base.epoch, expiresAt: base.expiresAt, targets: base.targets, allowControl: true, allowCapture: false, requester: 'chat', purpose: 'chat-tools' }
+  const helper: NativeHelper = { beginApproval: vi.fn(async () => true), endApproval: vi.fn(async () => true), capabilities: async () => capabilities,
+    listTargets: async () => [target], start: vi.fn(async () => {}), execute: vi.fn(async (c: NativeCommand): Promise<NativeReceipt> => ({ commandId: c.commandId, outcome: 'executed', code: 'ok' })), kill: vi.fn(async () => {}) }
+  const onReleased = vi.fn(async () => { await controller.identityChanged(); await controller.dispose() })
+  const controller = new NativeComputerController({ enabled: true, platform: 'darwin', safetyControlsReady: () => true, helperFactory: () => helper,
+    lease: { acquire: async () => {}, release: async () => {} }, approveGrant: async () => true, approveAction: async () => true, revalidateExecution: async () => true, onReleased })
+  await controller.start(mode === 'task' ? base : profileGrant)
+  let queued: Promise<NativeReceipt> | undefined
+  if (mode === 'queued') queued = controller.execute({ ...command(), identity: profileGrant.identity, action: { kind: 'observe', target } })
+  if (mode === 'expired') vi.spyOn(Date, 'now').mockReturnValue(profileGrant.expiresAt + 1)
+  try {
+    await controller.relayReleased()
+    await queued
+    expect(onReleased).toHaveBeenCalledTimes(mode === 'idle' ? 1 : 0)
+    expect(controller.status().identity).toBeUndefined()
+    expect(controller.status().state).toBe('stopped')
+    expect(helper.execute).not.toHaveBeenCalled()
+  } finally { vi.restoreAllMocks(); await controller.dispose() }
+})

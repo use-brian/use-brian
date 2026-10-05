@@ -6,3 +6,5 @@ export * from './tools.js'
 export * from './context.js'
 export * from './selector.js'
 export * from './trace.js'
+
+export * from './profile-tools.js'

@@ -82,6 +82,8 @@ export type ToolContext = {
   taskAuthority?: TaskAuthorityContext
   /** Team ID when the assistant is team-owned. Used by saveMemory for team scope. */
   workspaceId?: string | null
+  /** Actual invocation route, stamped by queryLoop, never inherited from a worker/parent. */
+  engineRuntime?: Readonly<{ provider: LLMProvider; model: string; imageUploads: boolean }>
   /** Immutable provider lane captured by workers spawned from this turn. */
   workerRuntime?: {
     provider: LLMProvider
@@ -466,7 +468,8 @@ export type ToolContext = {
  */
 export type ToolResultMeta = Record<string, string | number | boolean>
 
-/** Inline base64 image a tool produces for the model to SEE (not just read as text). */
+/** Inline image for the model. Native screenshots MUST use protectNativeImage;
+ * its opaque reference survives executor/history projections without frame bytes. */
 export type ToolResultImage = { mimeType: string; data: string }
 
 export type ToolResult<T = unknown> = {
