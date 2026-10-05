@@ -118,12 +118,13 @@ export class NativeComputerService {
     } catch { return ['configuration_invalid'] }
     try {
       const schema = await query(`SELECT name FROM public._migrations WHERE name = ANY($1::text[])`,
-        [['620_native_computer_sessions.sql', '621_native_usage_receipts.sql']])
-      if (schema.rows.length !== 2) return ['schema_unavailable']
+        [['620_native_computer_sessions.sql', '621_native_usage_receipts.sql', '622_computer_profiles.sql']])
+      if (schema.rows.length !== 3) return ['schema_unavailable']
       // Verify actual queried shape, not just migration ledger entries.
-      await query(`SELECT n.auth_session_id,n.run_state,n.state,n.device_id,n.deployment_id,
-        a.requested_model,b.admission,b.receipt FROM native_computer_sessions n
-        CROSS JOIN native_computer_inference_attempts a CROSS JOIN native_computer_billing_intents b LIMIT 0`)
+      await query(`SELECT n.auth_session_id,n.run_state,n.state,n.device_id,n.deployment_id,n.profile_id,n.connection_id,
+        a.requested_model,b.admission,b.receipt,p.connection_auth_session_id,p.enabled_assistant_ids,r.connection_id
+        FROM native_computer_sessions n CROSS JOIN native_computer_inference_attempts a
+        CROSS JOIN native_computer_billing_intents b CROSS JOIN computer_profiles p CROSS JOIN computer_profile_requests r LIMIT 0`)
     } catch { return ['schema_unavailable'] }
     try {
       const auth = await query(`SELECT 1 FROM auth_sessions a JOIN users u ON u.id=a.user_id

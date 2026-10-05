@@ -9,7 +9,7 @@ beforeEach(() => { vi.resetAllMocks(); vi.unstubAllGlobals() })
 function dbReady() {
   vi.mocked(query).mockImplementation(async (sql) => {
     expect(sql.trim()).toMatch(/^SELECT /)
-    if (sql.includes('public._migrations')) return { rows:[{},{}] } as never
+    if (sql.includes('public._migrations')) return { rows:[{},{},{}] } as never
     if (sql.includes('FROM auth_sessions') || sql.includes('FROM sessions s')) return { rows:[{}] } as never
     return { rows:[] } as never
   })
@@ -35,8 +35,23 @@ it('schema and auth failures stop before relay and disclose no errors', async ()
   vi.mocked(query).mockRejectedValueOnce(new Error('secret SQL'))
   expect(await service().readiness(scope,'auth','device')).toEqual(['schema_unavailable'])
   dbReady()
-  vi.mocked(query).mockResolvedValueOnce({rows:[{},{}]} as never).mockResolvedValueOnce({rows:[]} as never).mockResolvedValueOnce({rows:[]} as never)
+  vi.mocked(query).mockResolvedValueOnce({rows:[{},{},{}]} as never).mockResolvedValueOnce({rows:[]} as never).mockResolvedValueOnce({rows:[]} as never)
   expect(await service().readiness(scope,'auth','device')).toEqual(['auth_session_denied'])
+  expect(fetch).not.toHaveBeenCalled()
+})
+it('refuses the old task-only schema and probes profile tables read-only', async () => {
+  const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+  dbReady()
+  vi.mocked(query).mockResolvedValueOnce({ rows: [{}, {}] } as never)
+  expect(await service().readiness(scope, 'auth', 'device')).toEqual(['schema_unavailable'])
+  expect(query).toHaveBeenCalledWith(expect.stringContaining('public._migrations'), [[
+    '620_native_computer_sessions.sql', '621_native_usage_receipts.sql', '622_computer_profiles.sql',
+  ]])
+  expect(fetch).not.toHaveBeenCalled()
+  dbReady()
+  vi.mocked(query).mockResolvedValueOnce({ rows: [{}, {}, {}] } as never).mockRejectedValueOnce(new Error('Missing profile tables'))
+  expect(await service().readiness(scope, 'auth', 'device')).toEqual(['schema_unavailable'])
+  expect(query).toHaveBeenLastCalledWith(expect.stringContaining('CROSS JOIN computer_profiles p CROSS JOIN computer_profile_requests r LIMIT 0'))
   expect(fetch).not.toHaveBeenCalled()
 })
 it('scope, policy and busy fences do not dispatch or reconcile', async () => {
@@ -46,7 +61,7 @@ it('scope, policy and busy fences do not dispatch or reconcile', async () => {
   vi.mocked(s.authorized).mockResolvedValue(true);vi.spyOn(s,'assertPolicy').mockRejectedValue(new Error('private'))
   expect(await s.readiness(scope,'auth','device')).toEqual(['policy_denied'])
   vi.mocked(s.assertPolicy).mockResolvedValue();
-  vi.mocked(query).mockResolvedValueOnce({rows:[{},{}]} as never).mockResolvedValueOnce({rows:[]} as never).mockResolvedValueOnce({rows:[{}]} as never).mockResolvedValueOnce({rows:[{}]} as never)
+  vi.mocked(query).mockResolvedValueOnce({rows:[{},{},{}]} as never).mockResolvedValueOnce({rows:[]} as never).mockResolvedValueOnce({rows:[{}]} as never).mockResolvedValueOnce({rows:[{}]} as never)
   expect(await s.readiness(scope,'auth','device')).toEqual(['device_busy'])
   expect(fetch).not.toHaveBeenCalled()
 })
