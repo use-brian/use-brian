@@ -3287,6 +3287,9 @@ export const en = {
       ingestAddedToBrain: "Added to brain",
       ingestAdded: "added to brain",
       ingestFailed: "Failed",
+      // A worker job's error is an operator diagnostic, never shown verbatim.
+      ingestAnalysisFailed:
+        "Uploaded, but Brian could not read it into your brain. Try adding it again.",
       // Named BEFORE any request: an oversized body is dropped at the edge,
       // so the only alternative message is a bare "Failed to fetch".
       ingestTooLarge:

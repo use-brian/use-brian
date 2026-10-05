@@ -3194,6 +3194,7 @@ export const ja: Dictionary = {
       ingestAddedToBrain: "ブレインに追加しました",
       ingestAdded: "件をブレインに追加",
       ingestFailed: "失敗",
+      ingestAnalysisFailed: "アップロードは完了しましたが、Brian がブレインに読み込めませんでした。もう一度追加してください。",
       ingestTooLarge: "ブレインに追加するには大きすぎます: {size}。1 ファイルあたりの上限は {limit} です。",
       ingestUnreachable: "アップロードがサーバーに届きませんでした。接続を確認してもう一度お試しください。",
       ingestTooManyFiles: "一度に追加できるのは {max} ファイルまでです。このファイルは次のバッチで追加してください。",

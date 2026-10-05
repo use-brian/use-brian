@@ -3181,6 +3181,7 @@ export const zh: Dictionary = {
       ingestAddedToBrain: "已加入大腦",
       ingestAdded: "項已加入大腦",
       ingestFailed: "失敗",
+      ingestAnalysisFailed: "已上傳，但 Brian 無法將它讀入你的大腦。請再加入一次。",
       ingestTooLarge: "檔案太大，無法加入大腦：{size}。每個檔案上限為 {limit}。",
       ingestUnreachable: "上傳無法連到伺服器。請檢查網路連線後再試一次。",
       ingestTooManyFiles: "一次最多 {max} 個檔案。請在下一批加入這個檔案。",

@@ -265,6 +265,17 @@ describe("[COMP:app-web/brain-intake-queue] intake queue", () => {
     expect(deps.getIngestJobStatus).toHaveBeenCalledTimes(3);
   });
 
+  it("shows a sentence, not the worker's raw error, when a queued job fails", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    deps.ingestFiles.mockResolvedValue([{ fileName: "deck.pptx", ok: true, status: "queued", jobId: "job-2" }]);
+    deps.getIngestJobStatus.mockResolvedValue({ status: "failed", error: "recording_intake_provenance_required" });
+    enqueueIntake({ workspaceId: "ws-1", assistantId: "assistant-1", files: [doc("deck.pptx")], kind: kindOf, t: en });
+    for (let i = 0; i < 6 && getIntakeItems("ws-1")[0].status !== "error"; i += 1) await flush();
+    const [row] = getIntakeItems("ws-1");
+    expect(row.status).toBe("error");
+    expect(row.error).toBe(en.docPage.suggested.ingestAnalysisFailed);
+  });
+
   /** Allocating tens of MB per case is pointless; stub `size` on a 1-byte File. */
   const sized = (name: string, bytes: number): File => {
     const file = new File([new Uint8Array(1)], name, { type: "application/pdf" });
