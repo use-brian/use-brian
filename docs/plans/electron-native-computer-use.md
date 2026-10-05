@@ -1,35 +1,35 @@
-# macOS computer use — current approved scope and status
+# Native computer use: profile + normal chat
 
-**CURRENT: source-ready for attended signed-package verification, not release-complete.** The user approved finishing accessibility-backed workflows, including screenshot-guided AX, explicitly deferred the original no-AX canvas, accepted normal best-effort Stop **including action handoff**, and approved separately consented packaged-Mac verification before pilot acceptance. These decisions supersede the older capture-intersection, atomic-dispatch and pilot-flag design blockers. No release flags have been enabled and no pilot acceptance is claimed.
+## Correct product contract
 
-## Approved implementation
+Create a **computer profile**, grant an assistant access, and use it from a normal authorized chat—like browser profiles. No separate assistant/conversation/task/goal setup is required. The old task-runner UI was the wrong interaction model and is no longer the exposed path.
 
-- TextEdit document assignment and fixture form/selection/menu workflows use the existing semantic executor, exact approval and fresh whole-goal readback.
-- Screenshot-guided AX is implemented for the reviewed, helper-pinned public renderer: adjacent signed fixture `--variant visual-invoke-v1`, exact goal **Activate the outlined triangle; finish when Result is Triangle.** Neutral AX option names require image grounding; the result is ordinary AX-readable state.
-- Optional `visualInvokeVersion: 1` and `captureCohort: 'public-shapes-v1'` advertise the narrow path, not raw input. Native resolution binds a model point to one ordinary AX press **before** exact local approval. Original frame/observation ages remain bounded to five seconds across approval; no renewal. One capture/invoke attempt per run, no uncertain replay.
-- The configured model/image policy, accounting, budgets and existing loop remain unchanged. No provider/backend setup work, alternate provider, automatic budget increase or image-policy bypass is part of this delivery. Record policy refusal honestly.
-- Main's `acknowledge-verification`, exposed by the web button, offers temporary explicit consent on packaged Mac with existing `NATIVE_COMPUTER_ENABLED=true`, even without `NATIVE_COMPUTER_PILOT_ACCEPTED`. It does not bypass signed-helper admission, normal authorization, target/action consent or separate capture consent; terminal/context changes clear it.
+- Profiles are durable, owner-private workspace resources. They represent a physical device, not an isolated desktop or browser cookie jar.
+- Assistant profile access and the `native_computer` capability are separate explicit permissions. Per-assistant grant/note changes are atomic; stale UI cannot restore another assistant's revoked access.
+- Chat tools: `listComputerProfiles`, `computerObserve`, `computerAct`, `computerCapture`, `computerRelease`. The server derives caller/chat authority; model arguments cannot supply identities, targets, grants, deadlines or tasks.
+- A connected profile advertises availability only. A chat request requires fresh main-process local consent for the exact current window, followed by private PKCE pairing. Every side effect retains exact local approval.
+- Known idle Release preserves the profile connection but clears the execution lease. The same or another authorized chat needs fresh consent. Stop/uncertainty disconnect and cannot trigger automatic reconnect/replay.
+- Profile identity uses `profileId` instead of `taskId`; grants use `purpose: 'chat-tools'` without `goal`. Legacy task contracts remain diagnostic only, never fake profile tasks.
 
-## Safety and scope
+## Build and permission defects addressed
 
-Stop remains independent of model/network/accounting: local UI, tray and shortcut revoke further work best-effort, **including the last-check-to-action-handoff interval**. macOS may finish work despite Stop. There is no atomic dispatch/cancellation guarantee. Late results cannot resume planning or trigger another action; uncertain outcomes remain fenced and are never automatically replayed. Existing clocks, watchdogs, authority checks and helper-death/lease fences remain, without deadline extensions.
+Composite TypeScript build state now lives inside each package's `dist`. Deleting emitted exports can no longer leave an external incremental cache falsely reporting a successful build. Regression tests reproduce the reported missing `computer-control/protocol.js` error before the fix.
 
-The retired mouse emitter stays removed and `input=false`; no-AX canvases, generic keys, drag, arbitrary apps and broad screenshots are unsupported/deferred, not secretly completed by the new fixture. Windows/Linux, comparative benchmarks, generalized telemetry/attestation and hosted accounting expansion remain deferred. Existing failures and measurements remain in the ledger; these are not additional current Mac release gates.
+Local Mac packaging uses a fresh output directory, preserves old artifacts, and prints success paths only after success. CI keeps its existing artifact layout but refuses stale output directories. The reported failed build did not establish a new package; launching the old ZIP was not current-source verification.
 
-## Source completion versus native acceptance
+Connect obtains attended-verification acknowledgment in native main; there is no separate acknowledgment button in the new UI. Fresh TCC/capability checks precede connection. Permission guidance remains usable. With control off, the UI performs and displays a local redacted inspection, not a phantom connection.
 
-| Area | Current status |
-| --- | --- |
-| AX task integration, scoped inspector, context/task UI | Implemented; portable regression evidence, native workflow acceptance pending |
-| Public visual cohort, signed renderer pin, typed private binding, exact approval and one-attempt loop | Implemented; source/portable verification passed, native/package/provider evidence pending |
-| Temporary explicit packaged verification admission and UI reset | Implemented; not pilot acceptance or production enablement |
-| Signed Mac, TCC, real AX effects/capture and configured live-provider outcomes | Not verified on current source here |
-| Original no-AX canvas | Explicitly deferred; refusal remains a negative regression |
+## Preserved boundaries
 
-The **only active final Mac checklist** is [the consolidated operator handoff](../native-computer-mac-handoff.md). It uses the existing normal signing workflow, which signs the fixture, stamps its CDHashes into the helper, signs the helper and seals the outer app. No operator code fixes, ad-hoc signing or acceptance flags. Engineering owns actual defects found during verification; hypothetical risks are not unwritten features.
+- Supported Mac effects remain TextEdit and reviewed fixture AX operations. Signed-helper admission, exact process/window scope, deadlines, local Stop and confirmed teardown remain.
+- Screenshot-guided AX uses only the pinned public-shapes renderer. Separate capture consent, Screen Recording permission, exact configured image-route approval and existing conservative budgets apply.
+- Screenshot bytes stay in bounded server memory. Chat/history stores opaque references; every actual upload rechecks route, scope, consent, age and budget. Strict image-chat mode does not relax the old strict task-inference contract.
+- Inference accounting survives Stop independently of output publication. Only validated counters and observed model provenance are priced; unknown evidence stays unknown. Independently settled image usage is not billed again by ordinary chat consumers.
+- Stop is **best-effort through action handoff**: an action may still reach/finish in macOS. Late results cannot restore authority, disclose revoked observations or replay uncertain effects.
+- Raw mouse input remains disabled. No-AX canvases, arbitrary apps/screenshots, generic keyboard injection and unattended control remain unsupported. No acceptance or rollout flags are enabled.
 
-Current evidence and preserved failures: [acceptance ledger](../native-computer-acceptance.md). Runtime: [native computer use](../native-computer-use.md). Implemented wire/privacy contract: [visual invoke](../native-computer-visual-invoke-contract.md). Revision-pinned earlier feasibility: [design history](../native-computer-visual-ax-design.md).
+## Delivery and verification
 
-## Completion
+Migration `622_computer_profiles.sql` must accompany the updated API. Packaging the desktop does not deploy or migrate a remote backend. No real database migration, deployment or signed-Mac acceptance is claimed here.
 
-Release completion requires actual signed-package evidence for the approved accessibility-backed scope and resolution of material failures, followed by explicit release review. Portable counts, syntax parsing, prior package admission and verification consent do not establish native or pilot acceptance. Retain default-off rollout and browser-control independence. Previously authorized feature-branch WIP commits/pushes preserve the work; they do not authorize deployment or release.
+The single short operator checklist is [Mac handoff](../native-computer-mac-handoff.md). Source/portable results and failures are recorded in [the evidence ledger](../native-computer-acceptance.md); runtime details are in [native computer use](../native-computer-use.md). Engineering owns any defect found. Feature-branch commits/pushes preserve work, not release acceptance.

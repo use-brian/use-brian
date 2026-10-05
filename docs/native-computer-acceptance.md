@@ -1,6 +1,42 @@
 # Native computer acceptance evidence
 
-## CURRENT — implemented approved visual AX; native acceptance pending
+## CURRENT — computer profiles, normal chat, clean packaging
+
+The earlier “only final Mac verification remains” claim was premature. The operator's package build failed with missing `@use-brian/computer-control/protocol.js` exports, and the task/goal setup was the wrong product model. Launching an existing ZIP after that failure was not verification of a newly built package. No native success is inferred from the IMK log line or application launch.
+
+The implementation now uses owner-private computer profiles and normal chat tools, with no task/goal setup. Assistant profile grants and native capability remain separate; local window consent, exact action approval, Stop and unknown-outcome fences remain. Main obtains verification consent during Connect and checks actual TCC before advertising a connection. Known idle Release permits fresh consent from the same or another chat without reconnecting; Stop does not.
+
+The build failure was reproduced: composite build caches outside `dist` survived deletion of emitted exports and falsely reported success. Caches now live inside `dist`. A disposable current-source snapshot passed clean and repeated all-dist-deleted renderer builds. Mac packaging reserves a fresh local output directory, preserves old artifacts and prints successful paths only after success; CI retains its established artifact layout with stale-output refusal.
+
+Implementation commits: `d2d9e41a` (build/package fix), `39d2c160` (profiles, chat tools and guarded image accounting), `d2718759` (readiness requires the profile schema).
+
+### Current portable verification
+
+Selections overlap; do not sum them or promote them to native acceptance.
+
+| Scope | Actual result |
+| --- | --- |
+| Native/build/root-script Node tests | 727 passed |
+| Desktop | 1,216 passed / 54 files, including the three preserved user-local CI tests |
+| Core computer-use, engine and strict-provider selection | 604 passed / 34 files |
+| API computer-use, profiles, metering, routes and legacy transport | 480 passed / 20 files |
+| New profile HTTP/WebSocket E2E | 1 passed: real service/SQL/relay/client/controller, synthetic auth/OS, no task or goal |
+| Web profile/inspector/assistant-grant/browser surfaces | 103 passed / 7 files |
+| Shared protocol / relay | 42 / 59 passed |
+| Foundation | 1,320 wire vectors; 2,724 dispatcher responses; 2,775 timing envelopes (952 timed); 550 semantic-policy, 1,628 lifecycle and 298 visual/profile checks |
+| Builds | Protocol/shared/core/API/desktop/relay and full desktop renderer passed; Vite retains large-chunk warnings |
+| Typechecks | Protocol/core (including scripts)/API/desktop/relay/web/desktop renderer passed |
+| Swift | arm64 Mac-target syntax parse passed; not a Mac SDK build |
+
+Parent logs: `/tmp/native-profile-final/`. Clean-build reproduction logs: `/tmp/native-final-original-{clean,stale}.log`, `/tmp/native-final-renderer-clean-dist-6g.log`, `/tmp/native-final-fixed-rebuild.log`. Full desktop rerun: `/tmp/native-packaging-full-desktop.log`.
+
+Review found and fixed late AX publication after profile revocation, single-connection pool deadlock, release disconnecting the profile, stale UI restoring revoked grants, missing inspector output, and TCC/verification gating. Screenshot review additionally reproduced invalid terminal output releasing tools, lost accounting after revocation, invalid usage entering billing and wrong-model pricing. Follow-up review verified all four fixes with 244 tests across 13 suites, including 68 SQL-backed cases. Screenshot bytes remain in bounded memory; history holds opaque references. Consumed inference settles durably before publication, and all applicable chat billing consumers exclude already-settled image calls.
+
+Initial full-suite failures were retained and corrected: packaging test fixtures needed the fresh-output helper, and legacy transport's exact SQL double needed the new profile/tool-policy parameters. Neither security assertions nor strictness were relaxed. The sandbox required a temporary Corepack executable shim for nested `pnpm` scripts; no dependency manifests were changed to install a tool. The reported ESLint circular-configuration failure remains a separate baseline issue. KB lint retains its existing 40 errors / 105 warnings / 20 info findings, with none on the updated delivery note. Both transport E2E files passed standalone TypeScript checks with repository-matching options.
+
+**Still unverified:** actual current-source signed Mac package, TCC, native effects and live-provider outcomes. The updated API and migration `622_computer_profiles.sql` must accompany the desktop; no real database migration or deployment was performed here. The [short Mac checklist](native-computer-mac-handoff.md) is the only active handoff. No rollout/pilot acceptance flags enabled. User-owned CI files and unrelated KB changes are preserved.
+
+## Historical — visual task-runner checkpoint (superseded by profiles)
 
 **Source-ready, not release-complete.** User decisions approve accessibility-backed workflows including screenshot-guided AX, defer the original no-AX canvas, accept normal best-effort Stop **including action handoff**, and allow separately consented packaged-Mac verification before pilot acceptance. The old `abdcc89f` feasibility/admission blockers below are historical and superseded for this approved cohort/Stop contract, not erased evidence. No release flags enabled; no pilot acceptance claimed.
 
