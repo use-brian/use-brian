@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
-import { homedir, tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { z } from 'zod'
@@ -242,7 +242,11 @@ export async function startCodexAppServer(
   const requestedCodexHome = resolve(codexHome)
   await mkdir(requestedCodexHome, { recursive: true, mode: 0o700 })
   const normalizedCodexHome = await realpath(requestedCodexHome)
-  const cwd = await realpath(await mkdtemp(join(tmpdir(), 'use-brian-codex-')))
+  // thread/start reuses this directory for the entire process lifetime.
+  // OS temp sweeps can unlink an idle cwd while the child is still alive.
+  const runtimeRoot = join(normalizedCodexHome, 'runtime')
+  await mkdir(runtimeRoot, { recursive: true, mode: 0o700 })
+  const cwd = await realpath(await mkdtemp(join(runtimeRoot, 'process-')))
   const stderr = createBoundedCapture(maxStderrBytes)
 
   let child: ChildProcessWithoutNullStreams | undefined

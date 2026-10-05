@@ -1,8 +1,8 @@
-import { access, mkdtemp, readdir, realpath, rm } from 'node:fs/promises'
+import { access, mkdtemp, readdir, realpath, rm, stat, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import {
   buildCodexEnvironment,
@@ -15,10 +15,43 @@ const fakeServer = fileURLToPath(new URL('./fixtures/fake-codex-app-server.mjs',
 const cleanupPaths: string[] = []
 
 afterEach(async () => {
+  vi.unstubAllEnvs()
   await Promise.all(cleanupPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })))
 })
 
 describe('[COMP:providers/codex-process] managed Codex app-server process', () => {
+  it('survives an OS temporary-directory sweep and removes only its owned cwd on close', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'codex-durable-home-test-'))
+    const sweptTemp = await mkdtemp(join(tmpdir(), 'codex-swept-temp-test-'))
+    cleanupPaths.push(codexHome, sweptTemp)
+    await writeFile(join(codexHome, 'sentinel'), 'preserve')
+    for (const name of ['TMPDIR', 'TMP', 'TEMP']) vi.stubEnv(name, sweptTemp)
+    const options = {
+      codexHome,
+      surface: 'inference' as const,
+      command: { command: process.execPath, argsPrefix: [fakeServer] },
+      shutdownTimeoutMs: 500,
+    }
+    const client = await startCodexAppServer(options)
+    let sibling: Awaited<ReturnType<typeof startCodexAppServer>> | undefined
+    try {
+      sibling = await startCodexAppServer(options)
+      await rm(sweptTemp, { recursive: true, force: true })
+      await expect(client.rpc.request('thread/start', { cwd: client.cwd }, z.object({ cwd: z.string() })))
+        .resolves.toEqual({ cwd: client.cwd })
+      expect(client.cwd).toContain(join(await realpath(codexHome), 'runtime', 'process-'))
+      expect(await readdir(client.cwd)).toEqual([])
+      if (process.platform !== 'win32') expect((await stat(client.cwd)).mode & 0o777).toBe(0o700)
+      await client.close()
+      await expect(access(client.cwd)).rejects.toThrow()
+      await expect(sibling.rpc.request('thread/start', { cwd: sibling.cwd }, z.unknown())).resolves.toEqual({ cwd: sibling.cwd })
+      expect(await readFile(join(codexHome, 'sentinel'), 'utf8')).toBe('preserve')
+    } finally {
+      await client.close()
+      await sibling?.close()
+    }
+  })
+
   it('resolves the exact pinned package entry instead of a global binary', async () => {
     const command = await resolvePinnedCodexCommand()
 
