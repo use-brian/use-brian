@@ -120,6 +120,7 @@ describe("[COMP:app-web/studio-channels] Feishu/Lark UX", () => {
         "contact:user.email:readonly",
         "im:message:send_as_bot",
         "im:message:update",
+        "cardkit:card:write",
         "im:message.reactions:write_only",
         "im:message.group_at_msg:readonly",
         "im:message.p2p_msg:readonly",

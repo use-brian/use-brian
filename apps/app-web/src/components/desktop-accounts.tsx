@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { ArrowDown, ArrowUp, Pencil, SmilePlus, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, Pencil, SmilePlus, Trash2, Upload } from "lucide-react";
 import { desktopBridge, type DesktopAccount } from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -23,6 +23,7 @@ export function DesktopAccounts(props: {
   const [editing, setEditing] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [icon, setIcon] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
   const [accounts, setAccounts] = useState<DesktopAccount[]>([]);
   const [canSwitch, setCanSwitch] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
@@ -84,6 +85,34 @@ export function DesktopAccounts(props: {
     }
   }
 
+  async function uploadIcon(file: File) {
+    if (pending || !editing) return;
+    setError(null);
+    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type) || file.size > 5 * 1024 * 1024) {
+      setError(t.accountImageError);
+      return;
+    }
+    setPending(`image:${editing}`);
+    let url: string | undefined;
+    try {
+      url = URL.createObjectURL(file);
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+      const side = Math.min(image.naturalWidth, image.naturalHeight);
+      if (!side) throw new Error("Empty image");
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 128;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas unavailable");
+      context.drawImage(image, (image.naturalWidth - side) / 2, (image.naturalHeight - side) / 2, side, side, 0, 0, 128, 128);
+      const data = canvas.toDataURL("image/png");
+      if (!data.startsWith("data:image/png;base64,") || data.length > 128 * 1024) throw new Error("Invalid image");
+      setIcon(data);
+    } catch { setError(t.accountImageError); }
+    finally { if (url) URL.revokeObjectURL(url); setPending(null); }
+  }
+
   async function customize(account: DesktopAccount, direction?: "up" | "down") {
     if (pending) return;
     setPending(`customize:${account.key}`);
@@ -120,7 +149,7 @@ export function DesktopAccounts(props: {
                 onClick={() => void select(account)}
                 className="flex min-h-8 max-sm:min-h-11 min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-muted"
               >
-                {account.icon ? <span aria-hidden className="flex size-6 shrink-0 items-center justify-center text-xl">{account.icon}</span> : <UserAvatar
+                {account.icon?.startsWith("data:image/png;base64,") ? <UserAvatar key={account.icon} size={24} name={account.name} avatarUrl={account.icon} /> : account.icon ? <span aria-hidden className="flex size-6 shrink-0 items-center justify-center text-xl">{account.icon}</span> : <UserAvatar
                   size={24}
                   name={account.name}
                   email={account.email}
@@ -175,16 +204,22 @@ export function DesktopAccounts(props: {
               <form onSubmit={(event) => { event.preventDefault(); void customize(account); }} className="mx-1 mb-1 space-y-2 rounded-lg border border-border bg-background p-2">
                 <label htmlFor={`account-name-${account.key}`} className="block text-xs font-medium text-muted-foreground">{t.accountDisplayName}</label>
                 <div className="flex items-center gap-1.5">
-                  <EmojiPicker onPick={(value) => setIcon(value ?? "")} trigger={
+                  <EmojiPicker onPick={(value) => { if (!pending) setIcon(value ?? ""); }} trigger={
                     <Button type="button" variant="outline" size="icon" disabled={pending !== null}
                       aria-label={t.accountIcon} title={t.accountIcon} className="max-sm:size-11">
-                      {icon ? <span aria-hidden className="text-base leading-none">{icon}</span> : <SmilePlus aria-hidden className="text-muted-foreground" />}
+                      {icon.startsWith("data:image/png;base64,") ? <UserAvatar key={icon} size={24} name={account.name} avatarUrl={icon} /> : icon ? <span aria-hidden className="text-base leading-none">{icon}</span> : <SmilePlus aria-hidden className="text-muted-foreground" />}
                     </Button>
                   } />
                   <input id={`account-name-${account.key}`} autoFocus value={displayName} maxLength={80} disabled={pending !== null}
                     placeholder={account.email || account.name || label} onChange={(event) => setDisplayName(event.target.value)}
                     className="h-8 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-[16px] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 max-sm:min-h-11 md:text-xs" />
                 </div>
+                <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" aria-label={t.uploadAccountImage} disabled={pending !== null}
+                  onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadIcon(file); }} />
+                <Button type="button" variant="outline" size="sm" disabled={pending !== null} onClick={() => fileInput.current?.click()} className="max-sm:min-h-11">
+                  <Upload aria-hidden className="size-3.5" />{t.uploadAccountImage}
+                </Button>
+                <p className="text-[11px] leading-snug text-muted-foreground">{t.accountImageHint}</p>
                 <p className="text-[11px] leading-snug text-muted-foreground">{t.customizeHint}</p>
                 <div className="flex items-center justify-end gap-1">
                   {icon && <Button type="button" variant="ghost" size="sm" disabled={pending !== null} onClick={() => setIcon("")} className="mr-auto text-muted-foreground">{t.resetAccountIcon}</Button>}

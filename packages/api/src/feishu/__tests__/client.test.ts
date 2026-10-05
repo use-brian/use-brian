@@ -33,6 +33,32 @@ function fakeFactory(response: unknown = {
 }
 
 describe('[COMP:channels/feishu] official SDK client', () => {
+  it('creates, streams and finalizes a CardKit entity with explicit sequences and thread identity', async () => {
+    const { factory, channel } = fakeFactory({ code: 0, data: { card_id: 'card_1' } })
+    const api = createFeishuApi({ appId: 'cli', appSecret: 's', brand: 'feishu' }, factory)
+    const result = await api.streamingCards!.open('oc_chat', 'Thinking...', { replyTo: 'om_current', replyInThread: true })
+    expect(result).toEqual({ cardId: 'card_1', messageId: 'om_sent' })
+    expect(channel.send).toHaveBeenCalledWith('oc_chat', { cardId: 'card_1' }, { replyTo: 'om_current', replyInThread: true })
+    await api.streamingCards!.update('card_1', '✓ Task saved', 1)
+    await api.streamingCards!.finish('card_1', '**Done**', 2)
+    const calls = channel.rawClient.request.mock.calls as unknown as Array<[{
+      url: string; method: string; data: Record<string, any>
+    }]>
+    expect(JSON.parse(calls[0][0].data.data).config.streaming_mode).toBe(true)
+    expect(calls[1][0]).toMatchObject({ method: 'PUT', url: '/open-apis/cardkit/v1/cards/card_1/elements/turn/content', data: { content: '✓ Task saved', sequence: 1 } })
+    const final = JSON.parse(calls[2][0].data.card.data)
+    expect(final.config).toEqual({ streaming_mode: false, summary: { content: '**Done**' } })
+    expect(final.body.elements[0].content).toBe('**Done**')
+    expect(calls[2][0].data.sequence).toBe(2)
+  })
+
+  it('rejects nonzero CardKit responses so the route can deliver its fallback', async () => {
+    const { factory } = fakeFactory({ code: 99991672, msg: 'Access denied' })
+    const api = createFeishuApi({ appId: 'cli', appSecret: 's', brand: 'lark' }, factory)
+    await expect(api.streamingCards!.open('oc_chat', 'Thinking...')).rejects.toMatchObject({ name: 'FeishuApiError', providerCode: 99991672 })
+    await expect(api.streamingCards!.finish('card_1', 'Done', 1)).rejects.toMatchObject({ name: 'FeishuApiError', operation: 'finish_streaming_card' })
+  })
+
   it('uses a closed brand-to-domain mapping', () => {
     expect(feishuDomainForBrand('feishu')).toBe('https://open.feishu.cn')
     expect(feishuDomainForBrand('lark')).toBe('https://open.larksuite.com')

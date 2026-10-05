@@ -27,8 +27,10 @@ const tokensSchema = z.object({
 });
 const presentationSchema = z.object({
   displayName: z.string().trim().max(80),
-  icon: z.string().trim().max(32).refine((value) => value === "" ||
-    (/^[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\uFE0F\u200D\u{E0020}-\u{E007F}0-9#*\u20E3]+$/u.test(value) &&
+  icon: z.string().trim().max(128 * 1024).refine((value) => value === "" ||
+    /^data:image\/png;base64,iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$/.test(value) ||
+    (value.length <= 32 &&
+      /^[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\uFE0F\u200D\u{E0020}-\u{E007F}0-9#*\u20E3]+$/u.test(value) &&
       /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20E3]/u.test(value))),
 }).strict();
 const entrySchema = z.object({ target: targetSchema, tokens: tokensSchema, presentation: presentationSchema.optional() });

@@ -70,7 +70,7 @@ query loop, and localized Settings surface:
 - A bounded, Zod-validated JSONL RPC peer owns initialization, correlation,
   notifications, server requests, cancellation, and shutdown.
 - A managed process seam starts the pinned package over stdio with an isolated
-  `CODEX_HOME`, an empty temporary working directory, and an allowlisted
+  `CODEX_HOME`, an empty private working directory under `CODEX_HOME/runtime/`, and an allowlisted
   environment that excludes OpenAI/Codex API keys and access tokens.
 - The managed P0 peer allowlists only `initialize` and `initialized`; generic
   callers cannot use it to start a thread or turn.
@@ -157,8 +157,9 @@ Add `packages/core/src/providers/codex-app-server/`:
 - `protocol.ts` — the reviewed, minimal Zod protocol fixture for the pinned
   runtime version; no generated-schema bundle is vendored.
 - `process.ts` — starts the pinned Codex binary over stdio, with
-  `CODEX_HOME=~/.usebrian/codex`, a minimal environment, an empty temporary
-  working directory, bounded stderr, shutdown, restart, and abort handling.
+  `CODEX_HOME=~/.usebrian/codex`, a minimal environment, an empty private
+  per-process working directory under `CODEX_HOME/runtime/` (outside OS temp
+  cleanup), bounded stderr, shutdown, restart, and abort handling.
 - `rpc.ts` — JSON-RPC request/response correlation and notification fan-out;
   Zod validates every message crossing the process boundary.
 - `auth.ts` — `account/read`, `account/login/start`,

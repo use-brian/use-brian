@@ -85,7 +85,10 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
         { title: format(t.createTeamReviewTitle, { name: trimmed }), description: t.createTeamReviewDescription, confirmLabel: t.createTeam });
       if (!result) return;
       setName("");setAdding(false);
-      if (result.appliedCommand?.subjectId) setSelectedId(result.appliedCommand.subjectId);
+      if (result.appliedCommand?.subjectId) {
+        setPanel("readers");
+        choose(result.appliedCommand.subjectId);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.updateFailed);
     }

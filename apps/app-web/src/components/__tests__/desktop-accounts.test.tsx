@@ -67,6 +67,58 @@ describe("[COMP:app-web/desktop-accounts] account provenance and switching", () 
     await clickText(en.workspaceSwitcher.customizeDone);
     expect(host.querySelector('[aria-label="Edit Work cloud"]')).toBeNull();
   });
+  it("previews an uploaded image, saves only on submit, and supports reset and cancel", async () => {
+    const icon = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1sAAAAASUVORK5CYII=";
+    const update = vi.fn(async (key, presentation) => ({ ok: true, accounts: rows.map(row => row.key === key ? { ...row, ...presentation } : row) }));
+    window.usebrianDesktop!.updateAccountPresentation = update;
+    window.usebrianDesktop!.moveAccount = vi.fn();
+    const revoke = vi.fn();
+    vi.stubGlobal("URL", class extends URL { static createObjectURL = vi.fn(() => "blob:test"); static revokeObjectURL = revoke; });
+    const decode = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("Image", class { src = ""; naturalWidth = 400; naturalHeight = 200; decode = decode; });
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue(icon);
+    try {
+      await render();
+      const click = async (text: string) => act(async () => [...host.querySelectorAll("button")].find(b => b.textContent === text)!.click());
+      const edit = async () => act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Edit person@example.com"]')!.click());
+      const upload = async (file: File) => {
+        const input = host.querySelector<HTMLInputElement>('input[type="file"]')!;
+        Object.defineProperty(input, "files", { configurable: true, value: [file] });
+        await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+      };
+      await click(en.workspaceSwitcher.customizeAccounts);
+      await edit();
+      await upload(new File(["image"], "avatar.png", { type: "image/png" }));
+      expect(drawImage).toHaveBeenCalledWith(expect.anything(), 100, 0, 200, 200, 0, 0, 128, 128);
+      expect(revoke).toHaveBeenCalledWith("blob:test");
+      expect(host.querySelector("form img")?.getAttribute("src")).toBe(icon);
+      expect(update).not.toHaveBeenCalled();
+      await upload(new File(["bad"], "icon.svg", { type: "image/svg+xml" }));
+      expect(host.querySelector('[role="alert"]')?.textContent).toBe(en.workspaceSwitcher.accountImageError);
+      expect(host.querySelector("form img")?.getAttribute("src")).toBe(icon);
+      await upload(new File([new Uint8Array(5 * 1024 * 1024 + 1)], "large.png", { type: "image/png" }));
+      expect(decode).toHaveBeenCalledTimes(1);
+      decode.mockRejectedValueOnce(new Error("Cannot decode"));
+      await upload(new File(["corrupt"], "broken.png", { type: "image/png" }));
+      expect(host.querySelector('[role="alert"]')?.textContent).toBe(en.workspaceSwitcher.accountImageError);
+      expect(host.querySelector("form img")?.getAttribute("src")).toBe(icon);
+      expect(host.querySelector('[aria-busy]')?.getAttribute("aria-busy")).toBe("false");
+      await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+      expect(update).toHaveBeenCalledWith("cloud:one", { displayName: "", icon });
+      expect(host.querySelector(`img[src="${icon}"]`)).not.toBeNull();
+      await edit();
+      await click(en.workspaceSwitcher.resetAccountIcon);
+      await click(en.workspaceSwitcher.addAccountDialog.cancel);
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(host.querySelector(`img[src="${icon}"]`)).not.toBeNull();
+      await edit();
+      await click(en.workspaceSwitcher.resetAccountIcon);
+      await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+      expect(host.querySelector('img[src="https://cdn.example/avatar.png"]')).not.toBeNull();
+    } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+  });
   it("keeps the name draft and existing rows on failed customization", async () => {
     window.usebrianDesktop!.updateAccountPresentation = vi.fn().mockResolvedValue({ ok: false });
     window.usebrianDesktop!.moveAccount = vi.fn().mockRejectedValue(new Error("IPC disconnected"));

@@ -60,6 +60,22 @@ describe("[COMP:app-desktop/deployment-accounts] saved sessions", () => {
     store.put(local, tokens("same"));
     expect(store.rows(local).at(-1)?.displayName).toBeUndefined();
   });
+  it("persists uploaded PNG icons through refresh and restart and resets to the profile avatar", () => {
+    const { store, reopen, bytes } = setup();
+    const icon = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1sAAAAASUVORK5CYII=";
+    store.put(local, tokens("one"));
+    const key = store.rows(local)[0].key;
+    expect(store.updatePresentation(key, { displayName: "Work", icon })).toBe(true);
+    store.put(local, tokens("one", "rotated"));
+    expect(reopen().rows(local)[0].icon).toBe(icon);
+    const before = bytes();
+    for (const invalid of ["data:image/svg+xml;base64,PHN2Zz4=", "data:image/png;base64,not-png", "data:image/png;base64,iVBORw0KGgo" + "A".repeat(128 * 1024)]) {
+      expect(store.updatePresentation(key, { displayName: "Work", icon: invalid })).toBe(false);
+      expect(bytes()).toEqual(before);
+    }
+    expect(store.updatePresentation(key, { displayName: "Work", icon: "" })).toBe(true);
+    expect(reopen().rows(local)[0]).toMatchObject({ icon: "", avatarUrl: "https://cdn.example/avatar.png" });
+  });
   it("preserves legacy stores, stable defaults, and credentials on invalid customization", () => {
     const { store, bytes } = setup();
     store.put(local, tokens("one"));

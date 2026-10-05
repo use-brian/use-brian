@@ -32,7 +32,7 @@ export type FeishuAppCredentialsInput = {
 }
 
 type SdkChannel = {
-  send(to: string, input: FeishuSendInput, opts?: FeishuSendOptions): Promise<{ messageId: string }>
+  send(to: string, input: FeishuSendInput | { cardId: string }, opts?: FeishuSendOptions): Promise<{ messageId: string }>
   editMessage(messageId: string, text: string): Promise<void>
   updateCard(messageId: string, card: object): Promise<void>
   recallMessage(messageId: string): Promise<void>
@@ -49,7 +49,7 @@ type SdkChannel = {
       path: { message_id: string }
       data: { msg_type: 'post'; content: string }
     }): Promise<{ code?: number; msg?: string; log_id?: string }> } } }
-    request(input: { url: string; method: 'GET' }): Promise<unknown>
+    request(input: { url: string; method: 'GET' | 'POST' | 'PUT'; data?: unknown }): Promise<unknown>
   }
 }
 
@@ -232,12 +232,66 @@ function makeChannel(
   })
 }
 
+/** CardKit 2.0 body used for both the streaming and finalized entity. */
+function turnCard(text: string, streaming: boolean): object {
+  return {
+    schema: '2.0',
+    config: {
+      streaming_mode: streaming,
+      summary: { content: text.replace(/\s+/g, ' ').slice(0, 100) },
+      ...(streaming ? { streaming_config: {
+        print_frequency_ms: { default: 50 },
+        print_step: { default: 2 },
+        print_strategy: 'fast',
+      } } : {}),
+    },
+    body: { elements: [{ tag: 'markdown', element_id: 'turn', content: text }] },
+  }
+}
+
 export function createFeishuApi(
   credentials: FeishuAppCredentialsInput,
   factory: FeishuChannelFactory = defaultFactory,
 ): FeishuApi {
   const channel = makeChannel(credentials, factory)
+  async function cardRequest(operation: string, endpoint: string, url: string, method: 'POST' | 'PUT', data: unknown) {
+    return callFeishuSdk(operation, endpoint, async () => {
+      const result = await channel.rawClient.request({ url, method, data }) as {
+        code?: number; msg?: string; data?: { card_id?: string }
+      }
+      if (result.code !== 0) {
+        throw new FeishuApiError({ response: { data: result } }, operation, endpoint)
+      }
+      return result.data
+    })
+  }
   return {
+    streamingCards: {
+      async open(to, text, opts) {
+        const endpoint = '/open-apis/cardkit/v1/cards'
+        const data = await cardRequest('create_streaming_card', endpoint, endpoint, 'POST', {
+          type: 'card_json', data: JSON.stringify(turnCard(text, true)),
+        })
+        if (!data?.card_id) throw new FeishuApiError(new Error('Missing card_id'), 'create_streaming_card', endpoint)
+        const sent = await callFeishuSdk('send_streaming_card',
+          opts?.replyTo ? '/open-apis/im/v1/messages/:message_id/reply' : '/open-apis/im/v1/messages',
+          () => channel.send(to, { cardId: data.card_id! }, opts))
+        return { cardId: data.card_id, messageId: sent.messageId }
+      },
+      async update(cardId, text, sequence) {
+        await cardRequest('stream_card_text', '/open-apis/cardkit/v1/cards/:card_id/elements/:element_id/content',
+          `/open-apis/cardkit/v1/cards/${encodeURIComponent(cardId)}/elements/turn/content`, 'PUT', {
+            content: text, sequence, uuid: `turn_${cardId}_${sequence}`,
+          })
+      },
+      async finish(cardId, text, sequence) {
+        await cardRequest('finish_streaming_card', '/open-apis/cardkit/v1/cards/:card_id',
+          `/open-apis/cardkit/v1/cards/${encodeURIComponent(cardId)}`, 'PUT', {
+            card: { type: 'card_json', data: JSON.stringify(turnCard(text, false)) },
+            sequence, uuid: `turn_${cardId}_${sequence}`,
+          })
+      },
+    },
     send(to, input, opts) {
       const endpoint = opts?.replyTo
         ? '/open-apis/im/v1/messages/:message_id/reply'

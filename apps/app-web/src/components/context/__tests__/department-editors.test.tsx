@@ -98,6 +98,14 @@ describe('[COMP:app-web/context-scope] reviewed Team and assistant editors',()=>
     expect(mocks.prepare).toHaveBeenCalledWith('workspace',{type:'department.create',name:'Design',key:'design'},'15',expect.any(String));
     expect(mocks.save).not.toHaveBeenCalled();expect(host.textContent).toContain('Research');
   });
+  it('opens the membership panel after creating a department from Details',async()=>{
+    await render(<TeamsContextSection renderAccessSettings={(id,panel)=><p>{panel}:{id}</p>}/>);
+    await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(tab=>tab.textContent?.includes(t.detailsTab))!.click());
+    mocks.registry.mockImplementation(async()=>{const data=registry();return {...data,teams:[...data.teams,{...data.teams[0],id:'new-team',name:'Design'}]};});
+    await click(t.createTeamTitle);await input(host.querySelector<HTMLInputElement>(`input[placeholder="${t.teamNameExample}"]`)!,'Design');await click(t.createTeam);
+    const panel=[...host.querySelectorAll<HTMLElement>('[role="tabpanel"]')].find(node=>node.textContent==='readers:new-team');
+    expect(panel).toBeDefined();expect(panel!.hidden).toBe(false);
+  });
   it('archives with one confirmation',async()=>{
     await render(<TeamsContextSection/>);
     await click(t.archiveTeam);expect(mocks.confirm).toHaveBeenCalledTimes(1);expect(mocks.prepare.mock.calls[0][1]).toEqual({type:'department.archive',teamId:'team'});expectApplied();

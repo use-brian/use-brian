@@ -2,8 +2,7 @@
 
 /**
  * Home Dock — the single "Suggested for you" entry in the sidebar, rendered
- * before the surface-specific rows of every operator mini-app (and above the
- * Page sections). Deliberately quiet: one row, a sparkle, and a "needs you"
+ * above Projects / Organization across workspace surfaces. Deliberately quiet: one row, a sparkle, and a "needs you"
  * count. The actual suggestions live at the explicit `/p?suggested=1` Page
  * content-pane route (`SuggestedView`), not here - the sidebar stays
  * Notion-calm.
@@ -31,10 +30,12 @@ export function HomeDock({ workspaceId }: { workspaceId: string }) {
   const t = useT().docPage.suggested;
   const { dock } = useSidebarData();
   const needsYou = needsYouTotal(dock);
+  if (!dock || (!dock.note?.trim() && needsYou === 0 && !dock.pickUp.length
+    && !dock.comingUp.length && dock.brain.growth7d <= 0)) return null;
   return (
     <Link
       href={suggestedPath(workspaceId)}
-      className="group mb-1.5 flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-sidebar-accent"
+      className="group mb-1.5 min-h-9 max-md:min-h-11 flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-sidebar-accent"
     >
       <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />
       <span className="flex-1 truncate text-[14px] font-medium text-sidebar-foreground">

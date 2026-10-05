@@ -600,8 +600,8 @@ export const en = {
     memberCount: "{people} people, {assistants} assistants",
 },
   departmentAccess: {
-    title: "Who reads this department",
-    summary: "Each person and assistant has their own clearance here. Only this department's owners can change it; a workspace role grants nothing.",
+    title: "Department members",
+    summary: "Choose who can access this department. New workspace members and admins do not automatically get access.",
     readOnly: "Only this department's owners can change who reads it.",
     person: "Person",
     assistant: "Assistant",
@@ -647,7 +647,11 @@ export const en = {
     assistants: "Assistants",
     noPeople: "No people read this department.",
     noAssistants: "No assistants read this department.",
-    addTitle: "Add to this department",
+    addTitle: "Add a member",
+    addHelp: "Choose someone who has already joined this workspace. After inviting a new person, return here to add them to this department.",
+    addEmpty: "No people or assistants are currently available to add.",
+    workspacePeople: "Open workspace members and invitations",
+    askWorkspaceAdmin: "To invite someone new, ask a workspace owner or admin to add them to the workspace first.",
     addWho: "Person or assistant",
     addSearch: "Search people and assistants",
     addNoMatches: "No matches",
@@ -2378,7 +2382,7 @@ export const en = {
     projectAggregateWorkflows: "Workflows",
     projectAggregateGoals: "Goals",
     projectAggregateEpisodes: "Recent episodes",
-    readersTab: "Readers",
+    readersTab: "Members",
     policyTab: "Policy",
     detailsTab: "Details",
     panelsLabel: "Department panels",
@@ -2522,6 +2526,9 @@ export const en = {
     accountIcon: "Choose icon",
     resetAccountIcon: "Reset icon",
     saveAccount: "Save",
+    uploadAccountImage: "Upload image",
+    accountImageHint: "PNG, JPG, WebP or GIF, up to 5 MB. Images are cropped to a square.",
+    accountImageError: "Choose a readable PNG, JPG, WebP or GIF image up to 5 MB.",
     customizeHint: "Only on this device. Leave the name blank to use the original.",
     customizeError: "Couldn’t save your changes. Please try again.",
     deploymentCloud: "Cloud",
@@ -3280,6 +3287,9 @@ export const en = {
       ingestAddedToBrain: "Added to brain",
       ingestAdded: "added to brain",
       ingestFailed: "Failed",
+      // A worker job's error is an operator diagnostic, never shown verbatim.
+      ingestAnalysisFailed:
+        "Uploaded, but Brian could not read it into your brain. Try adding it again.",
       // Named BEFORE any request: an oversized body is dropped at the edge,
       // so the only alternative message is a bare "Failed to fetch".
       ingestTooLarge:

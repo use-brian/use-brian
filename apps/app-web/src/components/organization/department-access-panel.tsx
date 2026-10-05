@@ -16,6 +16,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { openWorkspaceSettings } from "@/lib/workspace-settings-events";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { listWorkspaceMembers } from "@/lib/api/mentions";
 import { useWorkspaceDirectory } from "@/lib/use-workspace-directory";
@@ -161,7 +162,7 @@ const today = () => dateValue(new Date().toISOString());
 const dateInputClass = "h-8 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring max-sm:h-11 md:text-sm";
 
 export function DepartmentAccessPanel({ departmentId }: { departmentId: string }) {
-  const { workspaceId, me } = useWorkspaceContext();
+  const { workspaceId, me, role } = useWorkspaceContext();
   const dictionary = useT(), t = dictionary.departmentAccess;
   const errorCopy = useErrorCopy();
   const { data: directory, reload: reloadDirectory } = useDirectory(workspaceId);
@@ -297,26 +298,15 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
         {!wsOwnerOutside && edges.length ? <ClearanceBar counts={clearanceCounts(edges)} labels={{ public: t.clearancePublic, internal: t.clearanceInternal, confidential: t.clearanceConfidential }} /> : null}
       </div>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      {wsOwnerOutside ? (
-        <Button variant="outline" size="sm" disabled={busy} onClick={() => void (async () => {
-          const ok = await confirmDialog({ title: t.breakGlassTitle, description: t.breakGlassDescription, confirmLabel: t.breakGlass, variant: "destructive" });
-          if (!ok) return;
-          const reason = (await promptDialog({ title: t.breakGlassReason }))?.trim();
-          if (reason) await run(() => breakGlassDepartment(workspaceId, departmentId, reason));
-        })()}><ShieldAlert className="size-4" aria-hidden />{t.breakGlass}</Button>
-      ) : edges.length === 0 ? <p className="text-sm text-muted-foreground">{t.empty}</p> : (
-        <div className="grid gap-5 md:grid-cols-2">
-          {group(t.people, people, t.noPeople)}
-          {group(t.assistants, assistants, t.noAssistants)}
-        </div>
-      )}
-      {canManage && candidates.length > 0 ? (
+      {canManage ? (
         <section className="space-y-3 rounded-lg bg-muted/30 p-3">
           <h4 className="text-sm font-medium">{t.addTitle}</h4>
+          <p className="text-sm text-muted-foreground">{t.addHelp}</p>
+          {candidates.length === 0 ? <p role="status" className="text-sm text-muted-foreground">{t.addEmpty}</p> : null}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_10rem_auto_auto] lg:items-end">
             <label className="grid gap-1 text-xs text-muted-foreground">
               {t.addWho}
-              <SearchableSelect aria-label={t.addWho} value={adding} onValueChange={setAdding} disabled={busy} className="h-8 max-sm:min-h-11"
+              <SearchableSelect aria-label={t.addWho} value={adding} onValueChange={setAdding} disabled={busy || candidates.length === 0} className="h-8 max-sm:min-h-11"
                 placeholder={t.addPlaceholder} searchPlaceholder={t.addSearch} emptyMessage={t.addNoMatches}
                 items={candidates.map(p => ({ value: key(p), label: label(p), hint: p.kind === "user" ? t.person : t.assistant }))} />
             </label>
@@ -340,8 +330,25 @@ export function DepartmentAccessPanel({ departmentId }: { departmentId: string }
               })();
             }}><UserPlus className="size-4" aria-hidden />{t.add}</Button>
           </div>
+          {role === "owner" || role === "admin" ? (
+            <Button variant="link" className="h-auto whitespace-normal px-0 text-left max-sm:min-h-11" onClick={() => openWorkspaceSettings("ws-members")}>{t.workspacePeople}</Button>
+          ) : <p className="text-sm text-muted-foreground">{t.askWorkspaceAdmin}</p>}
         </section>
       ) : null}
+      {wsOwnerOutside ? (
+        <Button variant="outline" size="sm" disabled={busy} onClick={() => void (async () => {
+          const ok = await confirmDialog({ title: t.breakGlassTitle, description: t.breakGlassDescription, confirmLabel: t.breakGlass, variant: "destructive" });
+          if (!ok) return;
+          const reason = (await promptDialog({ title: t.breakGlassReason }))?.trim();
+          if (reason) await run(() => breakGlassDepartment(workspaceId, departmentId, reason));
+        })()}><ShieldAlert className="size-4" aria-hidden />{t.breakGlass}</Button>
+      ) : edges.length === 0 ? <p className="text-sm text-muted-foreground">{t.empty}</p> : (
+        <div className="grid gap-5 md:grid-cols-2">
+          {group(t.people, people, t.noPeople)}
+          {group(t.assistants, assistants, t.noAssistants)}
+        </div>
+      )}
+
     </div>
   );
 }

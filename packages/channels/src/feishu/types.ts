@@ -85,6 +85,13 @@ export type FeishuSendOptions = {
 
 /** Provider port injected into the channel adapter by packages/api. */
 export type FeishuApi = {
+  /** Optional for older integrations; the route retains rich-text fallback. */
+  streamingCards?: {
+    open(to: string, text: string, opts?: FeishuSendOptions): Promise<{ cardId: string; messageId: string }>
+    update(cardId: string, text: string, sequence: number): Promise<void>
+    finish(cardId: string, text: string, sequence: number): Promise<void>
+  }
+
   send(to: string, input: FeishuSendInput, opts?: FeishuSendOptions): Promise<{ messageId: string }>
   editMessage(messageId: string, text: string): Promise<void>
   editPost(messageId: string, markdown: string): Promise<void>
