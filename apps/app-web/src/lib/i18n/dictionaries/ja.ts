@@ -8235,6 +8235,8 @@ export const ja: Dictionary = {
     importTemplateDescription: "既存の DOCX、PPTX、XLSX をアップロードします。Brian がページ、スライド、ワークシートを編集可能な下書きに整理し、公開前に確認できます。",
     chooseTemplateFile: "DOCX、PPTX、XLSX のテンプレートファイルを選択してください。",
     importTemplateWorking: "テンプレートを分析中…",
+    retryTemplateImport: "この取り込みを再試行",
+    importDiagnostics: {"conditional_format": "未対応の条件付き書式があります。ルールを変更するか、対応後に再試行してください。", "workbook_protection": "ブック保護は保持できません。コピーの保護を解除してから取り込んでください。", "worksheet_protection": "シート保護は保持できません。コピーの保護を解除してから取り込んでください。", "unsupported_content": "未対応の機能があります。元のファイルを変更してから再試行してください。", "invalid_file": "対応するOffice文書として読み込めませんでした。元のファイルを確認してください。"},
     importTemplateFailed: "テンプレートをインポートできませんでした。もう一度試すか、別のファイルを選択してください。",
     uploadTemplateAction: "テンプレートをアップロード",
     uploadTemplateTitle: "テンプレートをアップロード",

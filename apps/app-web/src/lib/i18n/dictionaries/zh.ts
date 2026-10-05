@@ -8187,6 +8187,8 @@ export const zh: Dictionary = {
     importTemplateDescription: "上傳現有的 DOCX、PPTX 或 XLSX。Brian 會將頁面、投影片或工作表整理成可編輯草稿，供你在發佈前檢查。",
     chooseTemplateFile: "選擇 DOCX、PPTX 或 XLSX 範本檔案。",
     importTemplateWorking: "正在分析範本…",
+    retryTemplateImport: "重試此匯入",
+    importDiagnostics: {"conditional_format": "檔案包含不支援的條件格式。請修改規則，或在支援後重試。", "workbook_protection": "目前無法保留活頁簿保護。請在副本移除保護後匯入。", "worksheet_protection": "目前無法保留工作表保護。請在副本移除保護後匯入。", "unsupported_content": "檔案包含不支援的功能。請修改來源後重試。", "invalid_file": "無法將檔案讀取為支援的Office文件。請先檢查來源。"},
     importTemplateFailed: "無法匯入範本。請重試或選擇其他檔案。",
     uploadTemplateAction: "上傳範本",
     uploadTemplateTitle: "上傳範本",

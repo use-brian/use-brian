@@ -68,6 +68,14 @@ describe("[COMP:app-web/office-navigation] Office route chrome", () => {
     expect(html).toContain("Presentation");
   });
 
+  it("shows failed imports as recoverable drafts instead of an empty workbook preview", () => {
+    const html = wrap(<OfficeTemplateCard workspaceId="workspace-1" template={{ id: "failed-template", family: "spreadsheet", name: "Invoice", description: "Invoices", lifecycleState: "draft", currentVersionId: null, sensitivity: "internal", updatedAt: "2026-10-01T00:00:00Z", draftArtifactId: "draft", importState: { jobId: "job", status: "failed", fileId: "file", diagnostics: [] } }} />);
+    expect(html).toContain(en.office.importTemplateFailed);
+    expect(html).toContain(en.office.retryTemplateImport);
+    expect(html).not.toContain('data-office-card-preview-shell');
+    expect(html).not.toContain('>Use template<');
+  });
+
   it("keeps Files New inside an admitted-template creation picker", () => {
     const base = { sensitivity: "internal" as const, updatedAt: "2026-08-05T00:00:00.000Z", draftArtifactId: "template-artifact" };
     const templates = usableOfficeTemplates([

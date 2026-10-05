@@ -3,8 +3,8 @@ import type {ToolContext} from '@use-brian/core'
 import {withOfficeClassificationActor} from '../classification.js'
 import {currentAgentAccess,runWithAgentAccess} from '../../db/agent-access-context.js'
 const department={workspaceId:'workspace',userId:'viewer',assistantId:'assistant',base:'internal' as const,departments:{planning:'internal' as const},contextDepartment:null,binding:null,cap:null}
-const ceiling={workspaceId:'workspace',userId:'viewer',clearance:'internal' as const,compartments:['team:planning'],projectIds:[],departmentRead:department}
-const actor={userId:'viewer',workspaceId:'workspace',assistantId:'assistant',executionContext:{security:{ceiling}}} as unknown as ToolContext
+const ceiling={workspaceId:'workspace',userId:'viewer',clearance:'internal' as const,compartments:['team:planning'],projectIds:[]}
+const actor={userId:'viewer',workspaceId:'workspace',assistantId:'assistant',executionContext:{security:{ceiling,access:{departmentRead:department}}}} as unknown as ToolContext
 describe('[COMP:api/office-classification] assistant classification authority',()=>{
   it('refuses absent or mismatched bound assistant authority before calling the store',()=>{
     const write=vi.fn()

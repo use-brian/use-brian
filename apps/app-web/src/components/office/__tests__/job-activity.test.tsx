@@ -67,6 +67,12 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
     expect(host.textContent).toContain(en.office.brianRevisionApplied);
   });
 
+  it("shows the missing facts question while awaiting an answer", () => {
+    const html = render({...job("needs_input"),errorCode:"material_fact_missing"}, {events:[{id:"question",seq:1,code:"office.job.needs_input",params:{question:"Please provide the required fields: INVOICE_DATE, PAYMENT_TERMS"},safeNarration:null,createdAt:"2026-01-01T00:00:00Z"}]});
+    expect(html).toContain("INVOICE_DATE, PAYMENT_TERMS");
+    expect(html).toContain(en.office.eventNeedsInput);
+  });
+
   it("shows one failure alert for a failed revision", () => {
     const html = render(job("failed"), { feedback: "failed" });
     expect(html.match(/role="alert"/g)).toHaveLength(1);

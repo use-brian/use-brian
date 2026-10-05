@@ -7,9 +7,10 @@ import { Dialog } from "@base-ui/react/dialog";
 import { FileSpreadsheet, FileText, FileUp, Presentation, Sparkles, Upload, X } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { useT } from "@/lib/i18n/client";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useFileDrop } from "@/lib/use-file-drop";
-import { createOfficeTemplate, getOfficeJob, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeArtifact, type OfficeFamily, type OfficeTemplate } from "@/lib/office/api";
+import { createOfficeTemplate, getOfficeJob, retryOfficeTemplateImport, type OfficeImportDiagnostic, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeArtifact, type OfficeFamily, type OfficeTemplate } from "@/lib/office/api";
 import { invalidateSurfaceCache, markSurfaceCacheStale } from "@/lib/surface-cache";
 import { invalidateOfficeList, officeArtifactCacheKey, officeSnapshotCacheKey, officeTemplateListCacheKey } from "@/lib/surface-prefetch";
 import { useOfficeMetadataResource } from "@/lib/office/surface-cache";
@@ -38,11 +39,15 @@ export function officeTemplateFamilyFromFileName(fileName: string): OfficeFamily
   return null;
 }
 
+class TemplateImportError extends Error {
+  constructor(readonly diagnostics: OfficeImportDiagnostic[]) { super("office_template_import_failed"); }
+}
+
 async function waitForTemplateImport(jobId: string): Promise<void> {
   for (let attempt = 0; attempt < 160; attempt += 1) {
     const job = await getOfficeJob(jobId);
     if (job.status === "completed") return;
-    if (job.status === "failed" || job.status === "cancelled") throw new Error("office_template_import_failed");
+    if (job.status === "failed" || job.status === "cancelled") throw new TemplateImportError(job.importDiagnostics ?? []);
     await new Promise((resolve) => setTimeout(resolve, 750));
   }
   throw new Error("office_template_import_timeout");
@@ -87,6 +92,9 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
   const [website, setWebsite] = useState("");
   const [noWebsite, setNoWebsite] = useState(false);
   const [generateState, setGenerateState] = useState<"idle" | "working" | "failed">("idle");
+  const uploadAttempt = useRef<{ source?: { fileId: string; family: OfficeFamily }; file?: File; created?: { id: string; draftArtifactId: string }; failedJobId?: string; jobId?: string }>({});
+  const [uploadDiagnostics, setUploadDiagnostics] = useState<OfficeImportDiagnostic[]>([]);
+  const [recoveringUpload, setRecoveringUpload] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadName, setUploadName] = useState("");
@@ -231,11 +239,26 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
   }
 
   function openTemplateUpload() {
+    uploadAttempt.current = {};
+    setRecoveringUpload(false);
+    setUploadDiagnostics([]);
     setUploadFile(null);
     setUploadName("");
     setUploadGuidance("");
     setUploadState("idle");
     if (uploadInputRef.current) uploadInputRef.current.value = "";
+    setUploadOpen(true);
+  }
+
+  function openTemplateRecovery(template: OfficeTemplate) {
+    if (!template.importState || !template.draftArtifactId) return;
+    uploadAttempt.current = { source: { fileId: template.importState.fileId, family: template.family }, created: { id: template.id, draftArtifactId: template.draftArtifactId }, failedJobId: template.importState.jobId };
+    setRecoveringUpload(true);
+    setUploadFile(null);
+    setUploadName(template.name);
+    setUploadGuidance(template.description);
+    setUploadDiagnostics(template.importState.diagnostics);
+    setUploadState("failed");
     setUploadOpen(true);
   }
 
@@ -247,21 +270,45 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
   async function submitTemplateUpload(event: React.FormEvent) {
     event.preventDefault();
     const scope = creationScope.current;
-    if (!uploadFile || !scope) return;
+    if ((!uploadFile && !uploadAttempt.current.source) || !scope || uploadState === "working") return;
     setUploadState("working");
+    const attempt = uploadAttempt.current;
     try {
-      const source = await uploadOfficeSource(workspaceId, uploadFile);
+      if (uploadFile && uploadFile !== attempt.file) {
+        const source = await uploadOfficeSource(workspaceId, uploadFile);
+        if (creationScope.current !== scope) return;
+        if (attempt.created && attempt.source?.family !== source.family) throw new Error("office_template_family_mismatch");
+        attempt.source = source;
+        attempt.file = uploadFile;
+      }
+      if (!attempt.source) throw new Error("office_upload_missing");
+      if (!attempt.created) {
+        attempt.created = await createOfficeTemplate({ workspaceId, family: attempt.source.family, name: uploadName, description: uploadGuidance, creationMethod: "upload" });
+      }
       if (creationScope.current !== scope) return;
-      const created = await createOfficeTemplate({ workspaceId, family: source.family, name: uploadName, description: uploadGuidance, creationMethod: "upload" });
+      const created = attempt.created;
+      if (attempt.failedJobId) {
+        const retried = await retryOfficeTemplateImport({ templateId: created.id, workspaceId, artifactId: created.draftArtifactId, failedJobId: attempt.failedJobId, fileId: attempt.source.fileId });
+        attempt.jobId = retried.jobId;
+        attempt.failedJobId = undefined;
+      } else if (!attempt.jobId) {
+        attempt.jobId = (await importOfficeTemplateDraft({ templateId: created.id, workspaceId, draftArtifactId: created.draftArtifactId, fileId: attempt.source.fileId })).jobId;
+      }
       if (creationScope.current !== scope) return;
-      const job = await importOfficeTemplateDraft({ templateId: created.id, workspaceId, draftArtifactId: created.draftArtifactId, fileId: source.fileId });
+      await waitForTemplateImport(attempt.jobId);
       if (creationScope.current !== scope) return;
-      await waitForTemplateImport(job.jobId);
-      if (creationScope.current !== scope) return;
+      invalidateSurfaceCache(cacheKey);
       setUploadOpen(false);
       router.push(`/w/${workspaceId}/office/${created.draftArtifactId}?templateId=${created.id}`);
-    } catch {
-      if (creationScope.current === scope) setUploadState("failed");
+    } catch (cause) {
+      if (creationScope.current !== scope) return;
+      if (cause instanceof TemplateImportError) {
+        attempt.failedJobId = attempt.jobId;
+        setUploadDiagnostics(cause.diagnostics);
+      }
+      setRecoveringUpload(Boolean(attempt.created));
+      setUploadState("failed");
+      invalidateSurfaceCache(cacheKey);
     }
   }
 
@@ -285,7 +332,7 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
         <h1 className="text-2xl font-semibold">{selectedName ?? (choosingForArtifact ? t.chooseTemplateTitle : t.templateTitle)}</h1>
         <p className="mt-1 text-sm text-muted-foreground">{choosingForArtifact ? t.chooseTemplateDescription : t.templateDescription}</p>
 
-        {selected ? <div className="mt-5 space-y-3 rounded-md border p-3 text-sm"><p>{t.templateMode}</p><div className="flex flex-wrap gap-2">{selected.lifecycleState === "admitted" ? <button type="button" disabled={mutationPending} onClick={() => void transition("deprecate", "Deprecated from template library")} className="rounded border px-3 py-2">{t.deprecateTemplate}</button> : selected.lifecycleState === "deprecated" || selected.lifecycleState === "trash" || selected.lifecycleState === "retained" ? <button type="button" disabled={mutationPending} onClick={() => void transition("restore", "Restored from template library")} className="rounded border px-3 py-2">{t.restore}</button> : null}{selected.lifecycleState !== "trash" && selected.lifecycleState !== "retained" ? <button type="button" disabled={mutationPending} onClick={() => void transition("trash", "Moved to Trash from template library")} className="rounded border border-destructive px-3 py-2 text-destructive">{t.moveToTrash}</button> : null}</div>{selected.lifecycleState === "trash" || selected.lifecycleState === "retained" ? <div className="space-y-2"><input value={purgeConfirmation} onChange={(event) => setPurgeConfirmation(event.target.value)} placeholder={String(selected.name)} className="h-9 w-full rounded border px-2" /><button type="button" disabled={mutationPending || purgeConfirmation !== String(selected.name)} onClick={() => void transition("purge", "Permanent template deletion confirmed by exact name")} className="rounded bg-destructive px-3 py-2 text-destructive-foreground disabled:opacity-50">{t.deletePermanently}</button></div> : null}</div> : null}
+        {selected ? <div className="mt-5 space-y-3 rounded-md border p-3 text-sm"><p>{t.templateMode}</p>{selected.importState?.status === "failed" || selected.importState?.status === "cancelled" ? <div role="alert" className="mt-3 space-y-2"><p className="text-destructive">{t.importTemplateFailed}</p><Button onClick={() => openTemplateRecovery(selected)}>{t.retryTemplateImport}</Button></div> : null}<div className="flex flex-wrap gap-2">{selected.lifecycleState === "admitted" ? <button type="button" disabled={mutationPending} onClick={() => void transition("deprecate", "Deprecated from template library")} className="rounded border px-3 py-2">{t.deprecateTemplate}</button> : selected.lifecycleState === "deprecated" || selected.lifecycleState === "trash" || selected.lifecycleState === "retained" ? <button type="button" disabled={mutationPending} onClick={() => void transition("restore", "Restored from template library")} className="rounded border px-3 py-2">{t.restore}</button> : null}{selected.lifecycleState !== "trash" && selected.lifecycleState !== "retained" ? <button type="button" disabled={mutationPending} onClick={() => void transition("trash", "Moved to Trash from template library")} className="rounded border border-destructive px-3 py-2 text-destructive">{t.moveToTrash}</button> : null}</div>{selected.lifecycleState === "trash" || selected.lifecycleState === "retained" ? <div className="space-y-2"><input value={purgeConfirmation} onChange={(event) => setPurgeConfirmation(event.target.value)} placeholder={String(selected.name)} className="h-9 w-full rounded border px-2" /><button type="button" disabled={mutationPending || purgeConfirmation !== String(selected.name)} onClick={() => void transition("purge", "Permanent template deletion confirmed by exact name")} className="rounded bg-destructive px-3 py-2 text-destructive-foreground disabled:opacity-50">{t.deletePermanently}</button></div> : null}</div> : null}
 
         {mutationFailed ? <p role="alert" className="mt-3 text-sm text-destructive">{t.lifecycleFailed}</p> : null}
         {templates === null ? list.error ? <div className="py-16 text-center text-sm">
@@ -388,8 +435,8 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
               {uploadState === "invalid" ? <p role="alert" className="text-sm text-destructive">{t.uploadInvalidFile}</p> : null}
               <input required disabled={uploadState === "working"} value={uploadName} onChange={(event) => setUploadName(event.target.value)} placeholder={t.templateName} className="h-10 rounded-xl border bg-background px-3 text-[16px] outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 md:text-sm" />
               <textarea required disabled={uploadState === "working"} value={uploadGuidance} onChange={(event) => setUploadGuidance(event.target.value)} placeholder={t.templateInstructions} className="min-h-24 rounded-xl border bg-background p-3 text-[16px] outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 md:text-sm" />
-              {uploadState === "failed" ? <p role="alert" className="text-sm text-destructive">{t.importTemplateFailed}</p> : null}
-              <div className="mt-2 flex justify-end gap-2 border-t pt-4"><button type="button" disabled={uploadState === "working"} onClick={closeTemplateUpload} className="h-9 rounded border px-3 text-sm font-medium disabled:opacity-50">{copy.common.cancel}</button><button type="submit" disabled={!uploadFile || uploadState === "working" || !uploadName.trim() || !uploadGuidance.trim()} className="h-9 rounded bg-action px-3 text-sm font-medium text-action-foreground disabled:opacity-50">{uploadState === "working" ? t.importTemplateWorking : t.uploadTemplateAction}</button></div>
+              {uploadState === "failed" ? <div role="alert" className="text-sm text-destructive"><p>{t.importTemplateFailed}</p>{uploadDiagnostics.map((item, index) => <p key={index}>{t.importDiagnostics[item.reason]}{item.part ? ` (${item.part})` : ""}</p>)}</div> : null}
+              <div className="mt-2 flex justify-end gap-2 border-t pt-4"><button type="button" disabled={uploadState === "working"} onClick={closeTemplateUpload} className="h-9 rounded border px-3 text-sm font-medium disabled:opacity-50">{copy.common.cancel}</button><button type="submit" disabled={(!uploadFile && !recoveringUpload) || uploadState === "working" || !uploadName.trim() || !uploadGuidance.trim()} className="h-9 rounded bg-action px-3 text-sm font-medium text-action-foreground disabled:opacity-50">{uploadState === "working" ? t.importTemplateWorking : recoveringUpload ? t.retryTemplateImport : t.uploadTemplateAction}</button></div>
             </form>
           </Dialog.Popup>
         </Dialog.Portal>
@@ -404,17 +451,18 @@ export function OfficeTemplateCard({ workspaceId, template }: { workspaceId: str
   const presentation = template.family === "presentation";
   const Icon = document ? FileText : presentation ? Presentation : FileSpreadsheet;
   const previewArtifact: OfficeArtifact = { artifactId: template.draftArtifactId ?? "", family: template.family, mode: "template", title: template.name, version: template.currentVersionId ? 1 : 0, lifecycleState: "active", role: "edit" };
+  const importFailed = template.importState?.status === "failed" || template.importState?.status === "cancelled";
   const canUse = template.lifecycleState === "admitted" && Boolean(template.currentVersionId);
   const canEdit = template.lifecycleState === "draft" && Boolean(template.draftArtifactId);
 
   return (
     <article data-office-template-card={template.family} className="group overflow-hidden rounded-xl border bg-card transition-colors hover:border-foreground/30">
       <Link href={`/w/${workspaceId}/office/templates/${template.id}`} aria-label={template.name}>
-        <div className="relative"><OfficeCardPreview workspaceId={workspaceId} artifact={previewArtifact} /><span data-office-template-family={template.family} className={document ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm" : presentation ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm" : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2 py-1 text-xs font-semibold text-white shadow-sm"}><Icon className="size-3.5" aria-hidden /><span>{familyLabel(t, template.family)}</span></span></div>
+        <div className="relative">{importFailed ? <div className="flex min-h-40 items-center justify-center p-6 pt-12 text-sm text-destructive">{t.importTemplateFailed}</div> : <OfficeCardPreview workspaceId={workspaceId} artifact={previewArtifact} />}<span data-office-template-family={template.family} className={document ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm" : presentation ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm" : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2 py-1 text-xs font-semibold text-white shadow-sm"}><Icon className="size-3.5" aria-hidden /><span>{familyLabel(t, template.family)}</span></span></div>
         <div className="px-4 pt-4"><h2 className="line-clamp-2 font-medium group-hover:underline">{template.name}</h2><p className="mt-2 line-clamp-2 min-h-10 text-sm text-muted-foreground">{template.description}</p></div>
       </Link>
       <div className="p-4 pt-3">
-        {canUse ? <Link href={`/w/${workspaceId}/office/new?templateId=${encodeURIComponent(template.id)}&templateVersionId=${encodeURIComponent(String(template.currentVersionId))}`} className="inline-flex h-9 w-full items-center justify-center rounded-md bg-action px-3 text-sm font-medium text-action-foreground">{t.useTemplate}</Link> : canEdit ? <Link href={`/w/${workspaceId}/office/${template.draftArtifactId}?templateId=${template.id}`} className="inline-flex h-9 w-full items-center justify-center rounded-md border px-3 text-sm font-medium">{t.editTemplate}</Link> : <p className="text-xs text-muted-foreground">{t.templateUnavailable}</p>}
+        {canUse ? <Link href={`/w/${workspaceId}/office/new?templateId=${encodeURIComponent(template.id)}&templateVersionId=${encodeURIComponent(String(template.currentVersionId))}`} className="inline-flex h-9 w-full items-center justify-center rounded-md bg-action px-3 text-sm font-medium text-action-foreground">{t.useTemplate}</Link> : importFailed ? <Link href={`/w/${workspaceId}/office/templates/${template.id}`} className={buttonVariants({ variant: "outline", className: "w-full" })}>{t.retryTemplateImport}</Link> : canEdit ? <Link href={`/w/${workspaceId}/office/${template.draftArtifactId}?templateId=${template.id}`} className="inline-flex h-9 w-full items-center justify-center rounded-md border px-3 text-sm font-medium">{t.editTemplate}</Link> : <p className="text-xs text-muted-foreground">{t.templateUnavailable}</p>}
       </div>
     </article>
   );

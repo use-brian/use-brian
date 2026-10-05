@@ -198,6 +198,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   createOfficeArtifact: 'Create an Office artifact',
   getOfficeClassification: 'Read Office protection',
   restrictOfficeClassification: 'Add Office protection',
+  retryOfficeTemplateImport: 'Retry a template import',
   getOfficeArtifact: 'Read an Office artifact',
   reviseOfficeArtifact: 'Revise an Office artifact',
   openPdfEditingSession: 'Open a PDF editing session',

@@ -1,3 +1,4 @@
+import { OfficeMaterialFactMissing } from '@use-brian/core'
 import { officeTemplateLockedTokenNames, officeTemplateTokenDiagnostics, officeTemplateTokenTargets, type OfficeTemplateBundle, type OfficeRichTextRun } from '@use-brian/office-model'
 
 export function templateFieldGuidance(template: OfficeTemplateBundle): string {
@@ -15,19 +16,21 @@ export function validateTemplateFieldValues(template: OfficeTemplateBundle, valu
   templateFieldGuidance(template)
   const expected = officeTemplateTokenTargets(template.snapshot)
   if (!expected.size || Object.keys(values).length !== expected.size || [...expected.keys()].some((name) => !Object.hasOwn(values, name))) throw new Error('Template response fields do not match the admitted tokens')
+  const missing: string[] = []
   for (const field of template.fields) {
     const entry = values[field.name]!
     const value = typeof entry === 'string' ? entry : entry.value
     if (field.maxLength !== undefined && value !== null && String(value).length > field.maxLength) throw new Error(`Field ${field.name} exceeds maxLength ${field.maxLength}`)
     const blank = value === null || typeof value === 'string' && !value.trim()
     if (blank) {
-      if (field.required) throw new Error(`Required field ${field.name} must not be blank`)
+      if (field.required) missing.push(field.name)
       continue
     }
     if (field.type === 'plainText' && (typeof value !== 'string' || typeof entry !== 'string' && entry.valueType !== 'string')) throw new Error(`Field ${field.name} requires text`)
     if (field.type === 'number' && (typeof entry === 'string' ? !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value as string) || !Number.isFinite(Number(value)) : entry.valueType !== 'number' || typeof value !== 'number' || !Number.isFinite(value))) throw new Error(`Field ${field.name} requires a number`)
     if (field.type === 'date' && (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value.slice(0, 10) || typeof entry !== 'string' && entry.valueType !== 'date')) throw new Error(`Field ${field.name} requires an ISO date`)
   }
+  if (missing.length) throw new OfficeMaterialFactMissing(missing)
 }
 
 /** Edit token spans only. Replacement inherits the starting run, even when split. */

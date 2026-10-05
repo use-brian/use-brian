@@ -8061,6 +8061,8 @@ export const zhCN: Dictionary = {
     importTemplateDescription: "上传现有的 DOCX、PPTX 或 XLSX。Brian 会将页面、投视频或工作表整理成可编辑草稿，供你在发布前检查。",
     chooseTemplateFile: "选择 DOCX、PPTX 或 XLSX 范本文件。",
     importTemplateWorking: "正在分析范本…",
+    retryTemplateImport: "重试此导入",
+    importDiagnostics: {"conditional_format": "文件包含不支持的条件格式。请修改规则，或在支持后重试。", "workbook_protection": "目前无法保留工作簿保护。请在副本移除保护后导入。", "worksheet_protection": "目前无法保留工作表保护。请在副本移除保护后导入。", "unsupported_content": "文件包含不支持的功能。请修改来源后重试。", "invalid_file": "无法将文件读取为支持的Office文档。请先检查来源。"},
     importTemplateFailed: "无法导入范本。请重试或选择其他文件。",
     uploadTemplateAction: "上传范本",
     uploadTemplateTitle: "上传范本",

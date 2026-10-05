@@ -2,12 +2,14 @@
 import { Router } from 'express'
 import {officeMetadataRoute} from './office-metadata.js'
 import { z } from 'zod'
+import { officeImportDiagnostics } from '../db/office-generation.js'
 import type { OfficeGenerationEventRow, OfficeGenerationJobRow } from '../db/office-generation.js'
 
 export type OfficeJobsRouteDeps = {
   get(userId: string, jobId: string): Promise<OfficeGenerationJobRow | null>
   events(userId: string, jobId: string, afterSeq: number): Promise<OfficeGenerationEventRow[]>
   steer(params: { userId: string; workspaceId: string; jobId: string; instruction: string }): Promise<{ id: string }>
+  wake?(userId: string): void
   cancel(userId: string, jobId: string): Promise<boolean>
 }
 
@@ -16,7 +18,7 @@ export function officeJobRoutes(deps: OfficeJobsRouteDeps): Router {
   router.get('/jobs/:jobId', officeMetadataRoute(async (req, userId) => {
     const job = await deps.get(userId, String(req.params.jobId))
     if (!job) return {status:404,body:{ error: 'Office job not found' }}
-    return {workspaceId:job.workspaceId,body:{job}}
+    return {workspaceId:job.workspaceId,body:{job:{...job, importDiagnostics: officeImportDiagnostics(job.checkpoint)}}}
   }))
 
   router.get('/jobs/:jobId/events', officeMetadataRoute(async (req, userId) => {
@@ -35,7 +37,9 @@ export function officeJobRoutes(deps: OfficeJobsRouteDeps): Router {
     const jobId = String(req.params.jobId)
     const job = await deps.get(userId, jobId)
     if (!job || !['queued', 'running', 'needs_input'].includes(job.status)) return void res.status(409).json({ error: 'Job cannot accept steering' })
-    res.status(202).json(await deps.steer({ userId, workspaceId: job.workspaceId, jobId, instruction: body.data.instruction }))
+    const result = await deps.steer({ userId, workspaceId: job.workspaceId, jobId, instruction: body.data.instruction })
+    deps.wake?.(userId)
+    res.status(202).json(result)
   })
 
   router.post('/jobs/:jobId/cancel', async (req, res) => {

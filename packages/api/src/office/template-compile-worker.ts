@@ -3,6 +3,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   compileOfficeTemplate,
+  canRead,
+  scopeGrantContains,
   inferOfficeTemplateRouting,
   importOfficeDocument,
   importOfficePresentation,
@@ -14,7 +16,7 @@ import {
   type BrandTypographyContext,
 } from '@use-brian/core'
 import { getBrandStore } from '../db/brand-store.js'
-import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot } from '@use-brian/office-model'
+import { OfficeTemplateRoutingDraftSchema, type OfficeImportDiagnostic, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import { classifyOfficeOutput, officeFileBindingRevision, sameOfficeFileBinding, type OfficeFileBinding, type OfficeOutputScope } from './file-binding.js'
@@ -28,7 +30,7 @@ export type OfficeTemplateCompileWorkerDeps = {
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
   raiseArtifactScope(params: { userId: string; artifactId: string; sensitivity: OfficeOutputScope['sensitivity']; compartments: string[]; projectIds: string[] }): Promise<boolean>
   readSource(params: { userId: string; workspaceId: string; assistantId: string | null; fileId: string }): Promise<{ bytes: Uint8Array; binding: OfficeFileBinding }>
-  initialize(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot }): Promise<void>
+  initialize(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot; expectedSeq?: number }): Promise<void>
   saveImportedResource(params: { userId: string; workspaceId: string; assistantId: string | null; resource: ExtractedOfficeResource; sourceBinding: OfficeFileBinding; scope: OfficeOutputScope }): Promise<OfficeTemplateResourceAdmission>
   loadResourceAdmissions(params: { userId: string; workspaceId: string; resourceIds: string[] }): Promise<BoundTemplateResourceAdmission[]>
   getDraftRouting(userId: string, templateId: string): Promise<unknown | null>
@@ -36,7 +38,7 @@ export type OfficeTemplateCompileWorkerDeps = {
   saveBundle(params: { userId: string; workspaceId: string; templateId: string; hash: string; bytes: Uint8Array; scope: OfficeOutputScope }): Promise<string>
   addVersion(params: { userId: string; templateId: string; workspaceId: string; bundleFileId: string; bundleHash: string; capabilityVersion: number; locales: string[]; tags: string[]; whenToUse: string[]; whenNotToUse: string[]; exampleRequests: string[]; fieldSchema: unknown; admissionReceipt: OfficeTemplateAdmissionReceipt; provenance: unknown; resourceIds: string[]; status: 'draft' | 'admitted' }): Promise<unknown>
   appendEvent(params: { userId: string; jobId: string; workspaceId: string; code: string; values: Record<string, string | number | boolean>; actorType: 'system'; safeNarration: string }): Promise<unknown>
-  finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed'; stage: string; errorCode?: string; errorDetail?: string }): Promise<boolean>
+  finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed'; stage: string; errorCode?: string; errorDetail?: string; importDiagnostics?: OfficeImportDiagnostic[] }): Promise<boolean>
   leaseMs?: number
 }
 
@@ -85,6 +87,7 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
     const leaseToken = randomUUID()
     const job = await deps.claim({ userId, leaseToken, leaseMs: deps.leaseMs ?? 120_000, jobKinds: ['template_compile'] })
     if (!job) return false
+    let importDiagnostics: OfficeImportDiagnostic[] | undefined
     try {
       const brief = job.brief as { templateId?: unknown; source?: { kind?: unknown; fileId?: unknown } }
       if (typeof brief.templateId !== 'string') throw new Error('invalid_template_compile_brief')
@@ -97,13 +100,26 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
       if (brief.source?.kind === 'upload') {
         if (typeof brief.source.fileId !== 'string') throw new Error('invalid_template_upload_brief')
         const source = await deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.source.fileId })
+        const retryScope = (job.authorityProjection as { retryScope?: { clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null } })?.retryScope
+        if (retryScope) for (const scope of [artifact, source.binding]) {
+          if (retryScope.clearance && !canRead(retryScope.clearance,scope.sensitivity) || !scopeGrantContains(retryScope.compartmentGrant,scope.compartments) || !scopeGrantContains(retryScope.projectGrant,scope.projectIds)) throw new Error('office_template_retry_scope_denied')
+        }
         const context = { artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: null, locale: 'en-US', defaultLanguage: 'en-US', title: template.name }
         const imported = template.family === 'document'
           ? await importOfficeDocument(source.bytes, context)
           : template.family === 'presentation'
             ? await importOfficePresentation(source.bytes, context)
             : await importOfficeSpreadsheet(source.bytes, context)
-        if (!imported.ok || !imported.snapshot) throw new Error(imported.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ') || 'template_upload_import_failed')
+        if (!imported.ok || !imported.snapshot) {
+          importDiagnostics = imported.diagnostics.filter(item => item.severity === 'error').slice(0, 20).map(item => ({
+            reason: item.message.startsWith('Conditional-format rule ') ? 'conditional_format'
+              : item.message.startsWith('Workbook protection ') ? 'workbook_protection'
+              : item.message.startsWith('Worksheet protection ') ? 'worksheet_protection'
+              : item.code.startsWith('package.') ? 'unsupported_content' : 'invalid_file',
+            ...(/^[A-Za-z0-9_./-]{1,200}$/.test(item.path) ? { part: item.path } : {}),
+          }))
+          throw new Error(imported.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ') || 'template_upload_import_failed')
+        }
         const currentSource = await deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.source.fileId })
         const currentTemplate = await deps.getTemplate(userId, brief.templateId)
         const currentArtifact = await deps.getArtifact(userId, job.artifactId)
@@ -129,7 +145,7 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
         ])
         if (!sameOfficeFileBinding(source.binding, finalSource.binding) || JSON.stringify(finalTemplate) !== JSON.stringify(template) ||
           !finalArtifact || JSON.stringify(artifactOutputScope(finalArtifact)) !== JSON.stringify(scope)) throw new Error('office_source_changed')
-        await deps.initialize({ userId, artifactId: job.artifactId, snapshot })
+        await deps.initialize({ userId, artifactId: job.artifactId, snapshot, expectedSeq: 1 })
         live = { snapshot }
         const routing = inferOfficeTemplateRouting(snapshot, 'upload')
         if (!await deps.saveDraftRouting({ userId, templateId: template.id, routing })) throw new Error('template_routing_not_saved')
@@ -249,7 +265,7 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
         errorDetail,
       })
       await deps.appendEvent({ userId, jobId: job.id, workspaceId: job.workspaceId, code: 'office.job.failed', values: { code: 'template_compile_failed' }, actorType: 'system', safeNarration: 'Template admission failed' })
-      await deps.finish({ userId, jobId: job.id, leaseToken, status: 'failed', stage: 'failed', errorCode: 'template_compile_failed', errorDetail })
+      await deps.finish({ userId, jobId: job.id, leaseToken, status: 'failed', stage: 'failed', errorCode: 'template_compile_failed', errorDetail, ...(importDiagnostics ? { importDiagnostics } : {}) })
     }
     return true
   }

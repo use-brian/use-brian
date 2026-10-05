@@ -67,7 +67,7 @@ export async function restrictOfficeClassification(userId:string, raw:OfficeClas
 /** Never reinterpret an unbound assistant call as an unrestricted human write. */
 export function withOfficeClassificationActor<T>(actor:ToolContext, action:()=>Promise<T>):Promise<T> {
   const ceiling=actor.executionContext?.security.ceiling
-  const department=ceiling?.departmentRead
+  const department=actor.executionContext?.security.access?.departmentRead
   if(!ceiling || !department || department.userId!==actor.userId || department.workspaceId!==actor.workspaceId || department.assistantId!==actor.assistantId) throw denied()
-  return runWithAgentAccess(ceiling,action)
+  return runWithAgentAccess({...ceiling,departmentRead:department},action)
 }

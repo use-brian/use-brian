@@ -8462,6 +8462,8 @@ export const en = {
     importTemplateDescription: "Upload an existing DOCX, PPTX, or XLSX. Brian maps its pages, slides, or worksheets into an editable draft for your review before publishing.",
     chooseTemplateFile: "Choose a DOCX, PPTX, or XLSX template file.",
     importTemplateWorking: "Analyzing template…",
+    retryTemplateImport: "Retry this import",
+    importDiagnostics: {"conditional_format": "This file contains unsupported conditional formatting. Update the rule or retry after support is available.", "workbook_protection": "Workbook protection cannot yet be preserved. Remove it in a copy before importing.", "worksheet_protection": "Worksheet protection cannot yet be preserved. Remove it in a copy before importing.", "unsupported_content": "This file contains an unsupported feature. Update the source before retrying.", "invalid_file": "The file could not be read as a supported Office document. Check the source before retrying."},
     importTemplateFailed: "The template could not be imported. Try again or choose another file.",
     uploadTemplateAction: "Upload template",
     uploadTemplateTitle: "Upload a template",

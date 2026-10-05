@@ -161,7 +161,7 @@ function unsupportedSpreadsheetXml(path: string, xml: string): Array<{ capabilit
     if (/<(?:\w+:)?f\b[^>]*\bt="(?:array|dataTable)"/i.test(xml)) add('spreadsheetArrayFormula', 'Array and data-table formulas are not yet supported; replace them before import')
     for (const match of xml.matchAll(/<(?:\w+:)?cfRule\b([^>]*)>/gi)) {
       const type = /\btype="([^"]+)"/i.exec(match[1] ?? '')?.[1]
-      if (type && !['cellIs', 'containsText', 'expression'].includes(type)) add('conditionalFormatting', `Conditional-format rule ${type} is not yet preserved; remove it before import`)
+      if (type && !['cellIs', 'containsText', 'beginsWith', 'expression'].includes(type)) add('conditionalFormatting', `Conditional-format rule ${type} is not yet preserved; remove it before import`)
     }
   }
   if (/^xl\/(?:sharedStrings|worksheets\/[^/]+)\.xml$/i.test(path) && /<(?:\w+:)?r\b/i.test(xml)) {

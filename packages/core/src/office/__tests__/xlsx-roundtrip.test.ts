@@ -82,6 +82,27 @@ describe('[COMP:office/xlsx-engine] XLSX engine', () => {
     expect(range.br).toMatchObject({ nativeCol: 0, nativeColOff: 18 * 9_525, nativeRow: 2, nativeRowOff: 0 })
   })
 
+  it('preserves text-prefix rules through ordinary XLSX import, display and native reimport', async () => {
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('Invoice')
+    sheet.getCell('A1').value = '{{CUSTOMER}}'
+    sheet.addConditionalFormatting({ ref: 'A1:A5', rules: [{ type: 'containsText', operator: 'containsText', text: '{{', priority: 1, style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF0000' } } } }] })
+    const zip = await JSZip.loadAsync(await workbook.xlsx.writeBuffer())
+    const xml = await zip.file('xl/worksheets/sheet1.xml')!.async('string')
+    zip.file('xl/worksheets/sheet1.xml', xml.replace('type="containsText"', 'type="beginsWith" text="{{" stopIfTrue="1"').replace(/<formula>.*?<\/formula>/, '<formula>LEFT(A1,2)="{{"</formula>'))
+    const context = { artifactId: id(123), workspaceId: id(2), templateVersionId: id(3), locale: 'en-US', defaultLanguage: 'en-US', title: 'Invoice draft' }
+    const imported = await importOfficeSpreadsheet(await zip.generateAsync({ type: 'uint8array' }), context)
+    if (!imported.ok || imported.snapshot?.family !== 'spreadsheet') throw new Error(JSON.stringify(imported.diagnostics))
+    expect(imported.snapshot.worksheets[0].conditionalFormats).toEqual([expect.objectContaining({ ruleType: 'beginsWith', text: '{{', stopIfTrue: true, priority: 1, formulas: ['LEFT(A1,2)="{{"'] })])
+    const exported = await exportOfficeSpreadsheet(imported.snapshot)
+    const native = await JSZip.loadAsync(exported.bytes)
+    expect(await native.file('xl/worksheets/sheet1.xml')!.async('string')).toContain('type="beginsWith"')
+    native.remove('customXml/brian-office.json')
+    const reopened = await importOfficeSpreadsheet(await native.generateAsync({ type: 'uint8array' }), context)
+    if (!reopened.ok || reopened.snapshot?.family !== 'spreadsheet') throw new Error(JSON.stringify(reopened.diagnostics))
+    expect(reopened.snapshot.worksheets[0].conditionalFormats).toEqual(imported.snapshot.worksheets[0].conditionalFormats)
+  })
+
   it('rejects executable workbook content before parsing', async () => {
     const source = completeSpreadsheetSnapshot()
     const exported = await exportOfficeSpreadsheet(source, resolveFixtureResource)

@@ -50,22 +50,25 @@ export function createOfficeLiveStore(db: OfficeDbQuery = defaultOfficeDbQuery) 
       return { snapshot: yDocToSnapshot(decode(row.ydoc)), update: new Uint8Array(row.ydoc), stateVector: new Uint8Array(row.stateVector), seq: row.seq, baseVersion: row.baseVersion }
     },
 
-    async initialize(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot }): Promise<void> {
+    async initialize(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot; expectedSeq?: number }): Promise<void> {
       if (params.snapshot.artifactId !== params.artifactId) throw new Error('Office live snapshot artifact mismatch')
       const preflight = preflightOfficeCandidate(params.snapshot)
       if (!preflight.ok) throw new Error(`Office live snapshot failed preflight: ${preflight.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ')}`)
       const doc = snapshotToYDoc(params.snapshot)
       const bytes = encodeOfficeState(doc)
       const hash = createHash('sha256').update(JSON.stringify(params.snapshot)).digest('hex')
-      await db(params.userId, `
+      const result = await db(params.userId, `
         INSERT INTO office_collab_documents
           (artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version,seq)
-        SELECT $1,a.workspace_id,$2,$3,$4,a.head_version,1 FROM office_artifacts a WHERE a.id=$1
+        SELECT $1,a.workspace_id,$2,$3,$4,a.head_version,1 FROM office_artifacts a WHERE a.id=$1 AND ($5::int IS NULL OR a.head_version=0)
         ON CONFLICT (artifact_id) DO UPDATE SET
           ydoc=EXCLUDED.ydoc,state_vector=EXCLUDED.state_vector,
           canonical_hash=EXCLUDED.canonical_hash,base_version=EXCLUDED.base_version,
           seq=office_collab_documents.seq+1,updated_at=now()
-      `, [params.artifactId, Buffer.from(bytes), Buffer.from(officeStateVector(doc)), hash])
+        WHERE $5::int IS NULL OR (office_collab_documents.seq=$5 AND office_collab_documents.base_version=0)
+        RETURNING artifact_id
+      `, [params.artifactId, Buffer.from(bytes), Buffer.from(officeStateVector(doc)), hash, params.expectedSeq ?? null])
+      if (params.expectedSeq !== undefined && result.rows.length !== 1) throw new Error('office_import_draft_changed')
     },
 
     async initializeIfMissing(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot }): Promise<boolean> {

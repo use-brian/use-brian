@@ -78,7 +78,8 @@ export function OfficeCardPreviewCanvas({ snapshot }: { snapshot: OfficeArtifact
 function SpreadsheetCardPreview({ snapshot }: { snapshot: Extract<OfficeArtifactSnapshot, { family: "spreadsheet" }> }) {
   const page = useMemo(() => {
     const pages = layoutOfficeArtifact(snapshot).pages;
-    return pages.find((candidate) => candidate.id === snapshot.activeSheetId) ?? pages[0];
+    const printable = snapshot.worksheets.find((sheet) => sheet.visibility === 'visible' && sheet.print.printArea);
+    return pages.find((candidate) => candidate.id === printable?.id) ?? pages.find((candidate) => candidate.id === snapshot.activeSheetId) ?? pages[0] ?? { id: snapshot.artifactId, widthPt: 600, heightPt: 800, primitives: [] };
   }, [snapshot]);
   const resourceIds = useMemo(() => [...new Set(page.primitives.flatMap((primitive) => primitive.kind === "image" && primitive.resourceId ? [primitive.resourceId] : []))], [page]);
   const {urls:resourceUrls} = useOfficeResourceUrls(snapshot.artifactId,resourceIds);

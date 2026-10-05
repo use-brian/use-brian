@@ -9,6 +9,7 @@ import {
   columnIndexToName,
   parseCellAddress,
   spreadsheetCellDisplayValue,
+  spreadsheetConditionalStyle,
   type OfficeCommand,
   type SpreadsheetCell,
   type SpreadsheetCellStyle,
@@ -583,7 +584,7 @@ function WorksheetGrid({ artifactId, sheet, selection, selectedImageId, canChang
           const merge = mergeMap.get(address);
           if (merge?.covered) return null;
           const cell = cells.get(address);
-          return <WorksheetCell key={address} address={address} cell={cell} conditionalStyle={conditionalStyleFor(sheet, address, cell)} selected={!selectedImageId && addressInSpreadsheetSelection(address, selection)} active={!selectedImageId && selection.focus === address} merge={merge} row={rowIndex + 1} column={columnIndex + 1} freezeStyle={frozenGridCellStyle(sheet, rowHeights, columnWidths, rowIndex + 1, columnIndex + 1)} onSelect={onSelect} onBeginEdit={onBeginEdit} dragging={dragging} onDragStart={() => setDragging(true)} />;
+          return <WorksheetCell key={address} address={address} cell={cell} conditionalStyle={spreadsheetConditionalStyle(sheet, address, cell)} selected={!selectedImageId && addressInSpreadsheetSelection(address, selection)} active={!selectedImageId && selection.focus === address} merge={merge} row={rowIndex + 1} column={columnIndex + 1} freezeStyle={frozenGridCellStyle(sheet, rowHeights, columnWidths, rowIndex + 1, columnIndex + 1)} onSelect={onSelect} onBeginEdit={onBeginEdit} dragging={dragging} onDragStart={() => setDragging(true)} />;
         }))}
         {sheet.images.map((image) => <WorksheetImage key={image.id} imageId={image.id} artifactId={artifactId} resourceId={image.resourceId} alt={image.altText} decorative={image.decorative} selected={selectedImageId === image.id} onSelect={onSelectImage} left={ROW_HEADER_WIDTH + gridAxisOffset(columnWidths, image.from.column)} top={COLUMN_HEADER_HEIGHT + gridAxisOffset(rowHeights, image.from.row)} width={Math.max(1, gridAxisOffset(columnWidths, image.to.column) - gridAxisOffset(columnWidths, image.from.column))} height={Math.max(1, gridAxisOffset(rowHeights, image.to.row) - gridAxisOffset(rowHeights, image.from.row))} />)}
       </div>
@@ -851,27 +852,6 @@ function addressInRange(address: string, range: string): boolean {
   return Boolean(cell && from && to && cell.row >= Math.min(from.row, to.row) && cell.row <= Math.max(from.row, to.row) && cell.column >= Math.min(from.column, to.column) && cell.column <= Math.max(from.column, to.column));
 }
 
-function conditionalStyleFor(sheet: SpreadsheetWorksheet, address: string, cell: SpreadsheetCell | undefined): SpreadsheetCellStyle | undefined {
-  if (!cell) return undefined;
-  const display = spreadsheetCellDisplayValue(cell);
-  const numeric = Number(cell.formula ? cell.calculatedValue : cell.value);
-  const rules = sheet.conditionalFormats.filter((rule) => addressInRange(address, rule.range)).sort((left, right) => left.priority - right.priority);
-  for (const rule of rules) {
-    const formula = rule.formulas[0]?.replace(/^=/, "").replace(/^"|"$/g, "") ?? "";
-    if (rule.ruleType === "containsText" && display.includes(formula)) return rule.style;
-    if (rule.ruleType === "expression") {
-      const match = /^(?:[A-Z]{1,3}[1-9][0-9]{0,6})?\s*(=|<>)\s*"([^"]*)"$/.exec(formula);
-      if (match && (match[1] === "=" ? display === match[2] : display !== match[2])) return rule.style;
-    }
-    if (rule.ruleType === "cellIs" && Number.isFinite(numeric)) {
-      const expected = Number(formula);
-      const second = Number(rule.formulas[1]);
-      const matches = rule.operator === "greaterThan" ? numeric > expected : rule.operator === "lessThan" ? numeric < expected : rule.operator === "greaterThanOrEqual" ? numeric >= expected : rule.operator === "lessThanOrEqual" ? numeric <= expected : rule.operator === "notEqual" ? numeric !== expected : rule.operator === "between" ? numeric >= expected && numeric <= second : rule.operator === "notBetween" ? numeric < expected || numeric > second : numeric === expected;
-      if (matches) return rule.style;
-    }
-  }
-  return undefined;
-}
 
 function mergeCellStyles(base: SpreadsheetCellStyle | undefined, overlay: SpreadsheetCellStyle | undefined): SpreadsheetCellStyle | undefined {
   if (!overlay) return base;

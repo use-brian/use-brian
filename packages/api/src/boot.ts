@@ -1,3 +1,4 @@
+import { createTemplateImportRecovery } from './office/template-import-recovery.js'
 import { triageTaskForGoal } from './db/goal-task-triage.js'
 import { createProgrammaticEpisodeTerminal } from './ingest/programmatic-terminal.js'
 import { checkPromptOnlyAuthority, executePromptOnlyGeneration } from './office/generation-publication.js'
@@ -617,7 +618,7 @@ import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineContextRevision, officeOfflineRoutes } from './routes/office-offline.js'
 import { officeResourceRoutes } from './routes/office-resources.js'
 import { createOfficeResourceReader } from './office/resource-read.js'
-import { bindOfficeFile, classifyOfficeOutput, fileMatchesOfficeOutput, officeOutputScopeRevision, officeScopePathSegment, sameOfficeFileBinding, type OfficeOutputScope } from './office/file-binding.js'
+import { bindOfficeFile, classifyOfficeOutput, officeFileBindingRevision, fileMatchesOfficeOutput, officeOutputScopeRevision, officeScopePathSegment, sameOfficeFileBinding, type OfficeOutputScope } from './office/file-binding.js'
 import { readOfficeProjection } from './db/office-read-projection.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
 import { assertOfficeArtifactSnapshot, encodeOfficeState, officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
@@ -3052,6 +3053,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of createOfficeTools({
     port: {
       ...officeService,
+      async retryTemplateImport(input) { return retryOfficeTemplateImport(input) },
       async openPdfSession(params) {
         if (!pdfSessionToolRuntime) throw new Error('PDF editing sessions are unavailable')
         return pdfSessionToolRuntime.create({
@@ -6896,6 +6898,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     get: officeGenerationStore.get,
     events: officeGenerationStore.listEvents,
     steer: officeGenerationStore.steer,
+    wake: userId => wakeOfficeGeneration?.(userId),
     cancel: officeGenerationStore.cancel,
   }))
   const readBoundOfficeFile = filesApi ? async (params: { userId: string; workspaceId: string; assistantId?: string | null; fileId: string }) => {
@@ -7150,13 +7153,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       (storedAuthority.sensitivity === 'public' || storedAuthority.sensitivity === 'confidential'
         ? storedAuthority.sensitivity
         : 'internal')
-    await officeArtifactStore.raiseScope({
+    if (!await officeArtifactStore.raiseScope({
       userId: params.job.initiatedByUserId,
       artifactId: params.job.artifactId,
       sensitivity,
       compartments,
       projectIds,
-    })
+    })) throw new Error('Office classification could not be persisted')
     const fileContext = {
       workspaceId: params.job.workspaceId,
       userId: params.job.initiatedByUserId,
@@ -7198,12 +7201,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }
     return committed
   }
-  const readOfficeTemplateBundle = async (userId: string, workspaceId: string, versionId: string) => {
+  const readOfficeTemplateBundle = async (userId: string, workspaceId: string, versionId: string, onSource?: (scope: import('./office/file-binding.js').OfficeOutputScope, revision: string) => void, execution?: { assistantId: string; clearance: Sensitivity; compartments?: string[] | null; projectIds?: string[] | null }) => {
     if (!filesApi) return null
     const version = await officeTemplateStore.getVersion(userId, versionId)
     if (!version || version.workspaceId !== workspaceId || version.status !== 'admitted') return null
-    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, version.bundleFileId)
+    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', ...execution }, version.bundleFileId)
     if (!read.ok) throw new Error(`Office template bundle unavailable: ${read.error.kind}`)
+    const templateRoot = await officeTemplateStore.get(userId, version.templateId)
+    const root = templateRoot?.draftArtifactId ? await officeArtifactStore.get(userId, templateRoot.draftArtifactId) : null
+    if (!templateRoot || !root || root.workspaceId !== workspaceId) throw new Error('Office template source unavailable')
+    const binding = bindOfficeFile(read.value.file, read.value.bytes)
+    const sourceScope = classifyOfficeOutput(binding, root)
+    onSource?.(sourceScope, JSON.stringify([officeFileBindingRevision(binding), root.id, root.sensitivity, [...root.compartments].sort(), [...root.projectIds].sort(), templateRoot.lifecycleState]))
     const stored = JSON.parse(new TextDecoder().decode(read.value.bytes))
     return materializeOfficeTemplateBundleForGeneration(stored, { id: version.id, version: version.version, status: 'admitted' })
   }
@@ -7218,13 +7227,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         resolver:filesResolver,storageLimitBytes:ports.storageLimitBytesFor ? await ports.storageLimitBytesFor(job.workspaceId) : Number.POSITIVE_INFINITY})
     },
     buildPipelineDeps(job) {
+      let templateSource: { versionId: string; revision: string } | undefined
       let fitPolicy: import('@use-brian/core').OfficeGenerationFitPolicy = { eligibleTargetIds: [], maxAttempts: 1 }
       const onFitPolicy = (policy: import('@use-brian/core').OfficeGenerationFitPolicy) => { fitPolicy = policy }
       return {
         fitRepairPolicy: () => fitPolicy,
         async resolveAuthority() {
+          const membership = await getWorkspaceMembershipWithClearanceSystem(job.initiatedByUserId, job.workspaceId)
+          if (!membership) return null
+          const humanClearance = membership.clearance
+          const clearance = job.assistantId ? minSensitivity(humanClearance, await getAssistantClearance(job.assistantId)) : humanClearance
           const projection = job.authorityProjection as { sensitivity?: unknown; visibilityUserIds?: unknown; compartments?: unknown; projectIds?: unknown; compartmentGrant?: unknown; projectGrant?: unknown; sourceHandles?: unknown }
           return {
+            clearance,
             sensitivity: projection.sensitivity === 'public' || projection.sensitivity === 'confidential' ? projection.sensitivity : 'internal',
             visibilityUserIds: Array.isArray(projection.visibilityUserIds) ? projection.visibilityUserIds.filter((value): value is string => typeof value === 'string') : [],
             compartments: Array.isArray(projection.compartments) ? projection.compartments.filter((value): value is string => typeof value === 'string') : [],
@@ -7242,10 +7257,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             sourceHandles: Array.isArray(projection.sourceHandles) ? projection.sourceHandles.filter((value): value is string => typeof value === 'string') : [],
           }
         },
-        async selectTemplate(brief) {
+        async selectTemplate(brief, authority) {
           if (!brief.templateId) return { ambiguous: [] }
-          const template = await readOfficeTemplateBundle(job.initiatedByUserId, job.workspaceId, brief.templateId)
-          return template ? { template } : { ambiguous: [] }
+          let sourceScope: import('./office/file-binding.js').OfficeOutputScope | undefined
+          const template = await readOfficeTemplateBundle(job.initiatedByUserId, job.workspaceId, brief.templateId, (scope, revision) => {
+            sourceScope = scope
+            templateSource = { versionId: brief.templateId!, revision }
+          }, { assistantId: brief.assistantId, clearance: authority.clearance ?? authority.sensitivity, compartments: authority.compartmentGrant, projectIds: authority.projectGrant })
+          return template ? { template, sourceScope } : { ambiguous: [] }
         },
         async retrieveBrain(brief, authority) {
           const context = {
@@ -7299,7 +7318,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           const generationModel = runtime?.selector ?? BACKGROUND_MODEL
           if (brief.family === 'document') return generateDocumentFromTemplate({ onFitPolicy, provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
           if (brief.family === 'presentation') return generatePresentationFromTemplate({ onFitPolicy, provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, evidence, claims, template, brandVoice })
-          return generateSpreadsheetFromTemplate({ provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
+          return generateSpreadsheetFromTemplate({ provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, evidence, template, brandVoice })
         },
         async processMedia(snapshot) { return snapshot },
         async resolveResource(resourceId) {
@@ -7310,6 +7329,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         },
         async cancelled() { return Boolean((await officeGenerationStore.get(job.initiatedByUserId, job.id))?.cancelRequestedAt) },
         async commit(snapshot, { authority }) {
+          if (!templateSource) throw new Error('Office template source unavailable')
+          let revision: string | undefined
+          await readOfficeTemplateBundle(job.initiatedByUserId, job.workspaceId, templateSource.versionId, (_scope, value) => { revision = value })
+          if (revision !== templateSource.revision) throw new Error('Office template classification changed; start generation again')
           const committed = await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion: 0, kind: 'generation', authority })
           return { artifactId: job.artifactId, version: committed.version }
         },
@@ -7445,8 +7468,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       while (await officeTemplateCompileWorker(userId)) { /* drain eligible template compilations for this member */ }
     })().catch((error) => console.error('[office-template-compile-worker]', error))
   }
+  const retryOfficeTemplateImport = createTemplateImportRecovery({
+    getJob: officeGenerationStore.get,
+    getArtifact: officeArtifactStore.get,
+    canEdit: async (userId, artifactId) => Boolean((await resolveOfficeAccess(userId, artifactId))?.canEdit),
+    readSource: async input => readBoundOfficeFile ? readBoundOfficeFile(input) : null,
+    retry: officeGenerationStore.retryTemplateImport,
+    wake: wakeTemplateCompile,
+  })
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeTemplateRoutes({
     list: officeTemplateStore.list,
+    retryImport: retryOfficeTemplateImport,
     getTemplate: officeTemplateStore.get,
     getArtifact: officeArtifactStore.get,
     getSnapshot: officeLiveStore.get,

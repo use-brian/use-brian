@@ -363,6 +363,17 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
     api.transitionOfficeTemplateLifecycle.mockReset();
   });
 
+  it("opens failed-import recovery without navigating away and losing its state", async () => {
+    api.listOfficeTemplates.mockResolvedValue([{...template,importState:{jobId:"failed-job",status:"failed",fileId:"source-file",diagnostics:[]}}]);
+    render(<OfficeTemplateLibrary workspaceId={WORKSPACE} templateId={template.id} />);
+    await act(async () => { await settle(); });
+    await act(async () => { button(en.office.retryTemplateImport).click(); });
+    expect(navigation.replace).not.toHaveBeenCalled();
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(en.office.uploadTemplateTitle);
+    expect([...document.querySelectorAll('input')].some(input => input.value === template.name)).toBe(true);
+  });
+
   it("refreshes Trash controls and removes a permanently deleted card without remounting", async () => {
     render(<OfficeTemplateLibrary workspaceId={WORKSPACE} templateId={template.id} />);
     await act(async () => { await settle(); });

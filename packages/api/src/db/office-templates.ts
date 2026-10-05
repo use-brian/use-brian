@@ -39,7 +39,12 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
         SELECT id, family, name, description, lifecycle_state AS "lifecycleState",
                current_version_id AS "currentVersionId",
                draft_artifact_id AS "draftArtifactId", sensitivity,
-               updated_at AS "updatedAt"
+               updated_at AS "updatedAt",
+               (SELECT jsonb_build_object('jobId',j.id,'status',j.status,'fileId',j.brief->'source'->>'fileId',
+                  'diagnostics',COALESCE(j.checkpoint->'importDiagnostics','[]'::jsonb))
+                FROM office_generation_jobs j WHERE j.artifact_id=office_templates.draft_artifact_id
+                  AND j.job_kind='template_compile' AND j.brief->'source'->>'kind'='upload'
+                ORDER BY j.created_at DESC LIMIT 1) AS "importState"
           FROM office_templates
          WHERE workspace_id = $1
            AND ($2::text IS NULL OR family = $2::text)

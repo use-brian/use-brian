@@ -761,7 +761,9 @@ export const SpreadsheetWorksheetSchema = z.object({
   conditionalFormats: z.array(z.object({
     id: OfficeUuidSchema,
     range: z.string().min(1).max(255),
-    ruleType: z.enum(['cellIs', 'containsText', 'expression']),
+    ruleType: z.enum(['cellIs', 'containsText', 'beginsWith', 'expression']),
+    text: z.string().max(32_000).optional(),
+    stopIfTrue: z.boolean().optional(),
     operator: z.string().max(64).optional(),
     formulas: z.array(z.string().max(32_000)).max(3),
     style: SpreadsheetCellStyleSchema,
@@ -820,3 +822,10 @@ export type OfficeArtifactSnapshot = z.infer<typeof OfficeArtifactSnapshotSchema
 export function assertOfficeArtifactSnapshot(value: unknown): OfficeArtifactSnapshot {
   return OfficeArtifactSnapshotSchema.parse(value)
 }
+
+/** Public import diagnostics contain only classified causes, never exception text. */
+export const OfficeImportDiagnosticSchema = z.object({
+  reason: z.enum(['conditional_format', 'workbook_protection', 'worksheet_protection', 'unsupported_content', 'invalid_file']),
+  part: z.string().regex(/^[A-Za-z0-9_./-]{1,200}$/).optional(),
+}).strict()
+export type OfficeImportDiagnostic = z.infer<typeof OfficeImportDiagnosticSchema>

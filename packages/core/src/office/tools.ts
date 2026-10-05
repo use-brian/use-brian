@@ -37,16 +37,15 @@ export type OfficeArtifactToolProjection = {
   }>
   targetsTruncated?: boolean
   nextTargetOffset?: number
-  job?: { id: string; status: string; stage: string; errorCode: string | null }
+  job?: { id: string; status: string; stage: string; errorCode: string | null; importDiagnostics?: Array<{ reason: string; part?: string }> }
   /** Internal-only root evidence; the tool strips it before model delivery. */
   scopeEvidence?: ScopeEvidence
 }
 
 export type OfficeToolPort = {
-  retryTemplateImport?(input: { userId: string; workspaceId: string; artifactId: string; failedJobId: string; fileId?: string; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<{ jobId: string } | null>
+  retryTemplateImport?(input: { userId: string; workspaceId: string; artifactId: string; failedJobId: string; fileId?: string; assistantId?: string; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<{ jobId: string } | null>
   inspectClassification?(context:ToolContext, artifactId:string): Promise<unknown>;
   restrictClassification?(context:ToolContext, input:{artifactId:string;expectedRevision:string;departmentId?:string;sensitivity:'public'|'internal'|'confidential'}): Promise<unknown>;
-
 
   create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ artifactId: string; jobId: string }>
   get(params: { userId: string; artifactId: string; targetOffset?: number; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<OfficeArtifactToolProjection | null>
@@ -363,6 +362,22 @@ export function createOfficeTools(params: {
       return { data: result }
     },
   })
+
+  const recoveryTools: Tool[] = params.port.retryTemplateImport ? [buildTool({
+    name: 'retryOfficeTemplateImport',
+    requiresCapability: 'office',
+    isReadOnly: false, isConcurrencySafe: false,
+    resolveConfirmation: askGate('retryOfficeTemplateImport'),
+    description: 'Retry one explicitly selected failed template upload using its existing draft and stored source, optionally replacing the source with an accessible workspace file. Inspect getOfficeArtifact first for the failed job. Use only after the user requests recovery and the reported unsupported feature has been corrected or support has changed. Does not publish a template or overwrite an edited draft.',
+    inputSchema: z.object({ artifactId: z.string().uuid(), failedJobId: z.string().uuid(), fileId: z.string().uuid().optional() }).strict(),
+    async execute(input, context) {
+      const blocked = await blockGate('retryOfficeTemplateImport', context)
+      if (blocked) return blocked
+      if (!context.workspaceId) return { data: 'Open a workspace chat before retrying a template import.', isError: true }
+      const result = await params.port.retryTemplateImport!({ ...input, userId: context.userId, workspaceId: context.workspaceId, assistantId: context.assistantId, clearance: context.clearance, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null })
+      return result ? { data: result } : { data: 'Import recovery was blocked: the failed draft or source is unavailable, already edited, or superseded. Inspect the current draft before taking another action. Do not repeat this request.', isError: true }
+    },
+  })] : []
 
   const classificationTools:Tool[] = []
   if (params.port.inspectClassification && params.port.restrictClassification) {

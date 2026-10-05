@@ -242,7 +242,7 @@ export function OfficeJobActivityView({
     "office.job.steering_applied": t.eventSteering,
   })[code] ?? t.running;
 
-  const statusLabel = job?.status === "completed" ? t.completed : failed ? failureTitle : job?.status === "cancelled" ? t.cancelled : job?.status === "queued" ? t.queued : t.running;
+  const statusLabel = job?.status === "completed" ? t.completed : failed ? failureTitle : job?.status === "cancelled" ? t.cancelled : job?.status === "queued" ? t.queued : job?.status === "needs_input" ? t.eventNeedsInput : t.running;
 
   return <section className="flex min-h-0 flex-col" aria-label={t.editWithBrian}>
     <div className="p-3">
@@ -250,6 +250,7 @@ export function OfficeJobActivityView({
         <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600"><Sparkles className="size-4" aria-hidden /></span>
         <div><h2 className="text-sm font-semibold">{t.editWithBrian}</h2><p role={failed ? "alert" : undefined} className={failed ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>{failed ? failureBody : active || loading ? revisionActive ? t.brianRevisionQueued : t.iterationActiveHint : t.brianEditHint}</p></div>
       </div>
+      {job?.status === "needs_input" ? <p role="status" className="rounded-xl border p-3 text-sm">{String([...events].reverse().find(event => event.code === "office.job.needs_input" && typeof event.params.question === "string")?.params.question ?? t.eventNeedsInput)}</p> : null}
       {!steering ? <div className="mt-3 rounded-lg border bg-muted/40 px-2.5 py-2" data-office-brian-scope={scope.kind}>
         <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{t.brianScope}</p>
         <p className="mt-0.5 text-xs font-medium">{scopeLabel}</p>

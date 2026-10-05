@@ -1,4 +1,5 @@
 /** Durable Office job/event/steering store. [COMP:api/office-generation] */
+import { OfficeImportDiagnosticSchema, type OfficeImportDiagnostic } from '@use-brian/office-model'
 import { APP_LEVEL_ASSISTANT_ID } from '@use-brian/shared'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 
@@ -73,6 +74,31 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
       `, [params.workspaceId, params.artifactId, params.userId, params.assistantId === APP_LEVEL_ASSISTANT_ID ? null : params.assistantId, params.jobKind, JSON.stringify(params.brief), JSON.stringify(params.authorityProjection), params.templateVersionId ?? null, params.baseArtifactVersion ?? 0, params.idempotencyKey])
       if (!result.rows[0]) throw new Error('Office generation job insert returned no row')
       return result.rows[0]
+    },
+
+    async retryTemplateImport(params: import('../office/template-import-recovery.js').TemplateImportRetry): Promise<OfficeGenerationJobRow | null> {
+      const result = await db<OfficeGenerationJobRow>(params.userId, `
+        INSERT INTO office_generation_jobs
+          (workspace_id,artifact_id,initiated_by_user_id,assistant_id,job_kind,brief,authority_projection,base_artifact_version,idempotency_key)
+        SELECT j.workspace_id,j.artifact_id,$1,COALESCE($6::uuid,j.assistant_id),'template_compile',
+          jsonb_set(j.brief,'{source,fileId}',to_jsonb(COALESCE($5::text,j.brief->'source'->>'fileId'))),
+          j.authority_projection || jsonb_build_object('retryScope',$7::jsonb),j.base_artifact_version,'template-import-retry:' || j.id::text
+        FROM office_generation_jobs j
+        JOIN office_artifacts a ON a.id=j.artifact_id
+        JOIN office_templates t ON t.draft_artifact_id=a.id AND t.id::text=j.brief->>'templateId'
+        JOIN office_collab_documents d ON d.artifact_id=a.id
+        WHERE j.id=$4 AND j.workspace_id=$2 AND j.artifact_id=$3 AND j.initiated_by_user_id=$1
+          AND j.status IN ('failed','cancelled') AND j.job_kind='template_compile'
+          AND j.brief->'source'->>'kind'='upload' AND t.lifecycle_state='draft'
+          AND a.lifecycle_state='active' AND a.head_version=0 AND d.seq=1
+          AND NOT EXISTS (SELECT 1 FROM office_generation_jobs later WHERE later.artifact_id=a.id
+            AND later.created_at>j.created_at AND later.idempotency_key<>'template-import-retry:' || j.id::text)
+        ON CONFLICT (workspace_id,initiated_by_user_id,idempotency_key)
+          DO UPDATE SET updated_at=office_generation_jobs.updated_at
+          WHERE office_generation_jobs.brief=EXCLUDED.brief
+        RETURNING ${JOB_COLUMNS}
+      `, [params.userId, params.workspaceId, params.artifactId, params.failedJobId, params.fileId ?? null, params.assistantId === APP_LEVEL_ASSISTANT_ID ? null : params.assistantId ?? null, JSON.stringify({ clearance: params.clearance, compartmentGrant: params.compartmentGrant ?? null, projectGrant: params.projectGrant ?? null })])
+      return result.rows[0] ?? null
     },
 
     async get(userId: string, jobId: string): Promise<OfficeGenerationJobRow | null> {
@@ -160,7 +186,17 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
     },
 
     async steer(params: { userId: string; workspaceId: string; jobId: string; instruction: string }): Promise<{ id: string }> {
-      const result = await db<{ id: string }>(params.userId, `INSERT INTO office_generation_steering (job_id,workspace_id,sender_user_id,instruction) VALUES ($1,$2,$3,$4) RETURNING id`, [params.jobId, params.workspaceId, params.userId, params.instruction])
+      const result = await db<{ id: string }>(params.userId, `WITH resumed AS (
+        UPDATE office_generation_jobs SET status='queued',stage='queued',error_code=NULL,error_detail=NULL,
+          next_attempt_at=now(),updated_at=now(),
+          brief=jsonb_set(brief,'{additionalContext}',to_jsonb(concat_ws(E'\\n',NULLIF(brief->>'additionalContext',''),$4::text)))
+        WHERE id=$1 AND workspace_id=$2 AND initiated_by_user_id=$3 AND status='needs_input'
+          AND error_code='material_fact_missing' AND job_kind='create'
+          AND length(concat_ws(E'\\n',NULLIF(brief->>'additionalContext',''),$4::text))<=4000
+        RETURNING id
+      ) INSERT INTO office_generation_steering (job_id,workspace_id,sender_user_id,instruction)
+        SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM resumed) OR EXISTS(
+          SELECT 1 FROM office_generation_jobs WHERE id=$1 AND status IN ('queued','running')) RETURNING id`, [params.jobId, params.workspaceId, params.userId, params.instruction])
       if (!result.rows[0]) throw new Error('Office steering insert returned no row')
       return result.rows[0]
     },
@@ -179,16 +215,22 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
       return result.rows.length === 1
     },
 
-    async finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed' | 'cancelled' | 'needs_input'; stage: string; errorCode?: string; errorDetail?: string }): Promise<boolean> {
+    async finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed' | 'cancelled' | 'needs_input'; stage: string; errorCode?: string; errorDetail?: string; importDiagnostics?: OfficeImportDiagnostic[] }): Promise<boolean> {
       const result = await db<{ id: string }>(params.userId, `
         UPDATE office_generation_jobs SET status=$3,stage=$4,error_code=$5,
-          error_detail=$6,completed_at=CASE WHEN $3 IN ('completed','failed','cancelled') THEN now() END,
+          error_detail=$6,checkpoint=CASE WHEN $7::jsonb IS NULL THEN checkpoint ELSE jsonb_set(checkpoint,'{importDiagnostics}',$7::jsonb) END,completed_at=CASE WHEN $3 IN ('completed','failed','cancelled') THEN now() END,
           lease_token=NULL,lease_expires_at=NULL,updated_at=now()
         WHERE id=$1 AND ($2::uuid IS NULL OR lease_token=$2) RETURNING id
-      `, [params.jobId, params.leaseToken, params.status, params.stage, params.errorCode ?? null, params.errorDetail ?? null])
+      `, [params.jobId, params.leaseToken, params.status, params.stage, params.errorCode ?? null, params.errorDetail ?? null, params.importDiagnostics ? JSON.stringify(params.importDiagnostics.map(item => OfficeImportDiagnosticSchema.parse(item))) : null])
       return result.rows.length === 1
     },
   }
 }
 
 export const officeGenerationStore = createOfficeGenerationStore()
+
+export function officeImportDiagnostics(checkpoint: unknown): OfficeImportDiagnostic[] {
+  const value = checkpoint && typeof checkpoint === 'object' ? (checkpoint as { importDiagnostics?: unknown }).importDiagnostics : undefined
+  const parsed = OfficeImportDiagnosticSchema.array().max(20).safeParse(value)
+  return parsed.success ? parsed.data : []
+}

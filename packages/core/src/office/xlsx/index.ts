@@ -285,18 +285,18 @@ async function normalizeWorkbook(workbook: ExcelJS.Workbook, context: OfficeImpo
       if (!['list', 'whole', 'decimal', 'date', 'textLength', 'custom'].includes(validation.type)) continue
       validations.push({ id: stableOfficeUuid(`${sheetId}:validation:${cell.address}`), range: cell.address, type: validation.type as SpreadsheetWorksheet['validations'][number]['type'], operator: validation.operator as SpreadsheetWorksheet['validations'][number]['operator'], formulas: [validation.formulae?.[0], validation.formulae?.[1]].filter((value) => value !== undefined).map(String), allowBlank: validation.allowBlank ?? true, prompt: validation.prompt, error: validation.error })
     }
-    const rawConditional = ((worksheet as unknown as { conditionalFormattings?: { model?: Array<{ ref: string; rules: Array<Record<string, unknown>> }> } }).conditionalFormattings?.model ?? [])
+    const rawConditional = ((worksheet as unknown as { conditionalFormattings?: Array<{ ref: string; rules: Array<Record<string, unknown>> }> }).conditionalFormattings ?? [])
     const conditionalFormats: SpreadsheetWorksheet['conditionalFormats'] = rawConditional.flatMap((format, formatIndex) => format.rules.flatMap((rule, ruleIndex) => {
-      if (!['cellIs', 'containsText', 'expression'].includes(String(rule.type))) return []
+      if (!['cellIs', 'containsText', 'beginsWith', 'expression'].includes(String(rule.type))) return []
       const rawStyle = rule.style as Partial<ExcelJS.Style> | undefined
       const temporary = workbook.addWorksheet(`__style_${sheetIndex}_${formatIndex}_${ruleIndex}`)
       const styleCell = temporary.getCell('A1')
       if (rawStyle) styleCell.style = rawStyle
       const style = importStyle(styleCell)
       workbook.removeWorksheet(temporary.id)
-      return [{ id: stableOfficeUuid(`${sheetId}:conditional:${formatIndex}:${ruleIndex}`), range: format.ref, ruleType: rule.type as SpreadsheetWorksheet['conditionalFormats'][number]['ruleType'], operator: typeof rule.operator === 'string' ? rule.operator : undefined, formulas: Array.isArray(rule.formulae) ? rule.formulae.map(String) : [], style, priority: typeof rule.priority === 'number' ? rule.priority : ruleIndex + 1 }]
+      return [{ id: stableOfficeUuid(`${sheetId}:conditional:${formatIndex}:${ruleIndex}`), range: format.ref, ruleType: rule.type as SpreadsheetWorksheet['conditionalFormats'][number]['ruleType'], operator: rule.type === 'beginsWith' ? 'beginsWith' : typeof rule.operator === 'string' ? rule.operator : undefined, formulas: Array.isArray(rule.formulae) ? rule.formulae.map(String) : [], style, priority: typeof rule.priority === 'number' ? rule.priority : ruleIndex + 1 }]
     }))
-    const frozen = worksheet.views.find((view) => view.state === 'frozen')
+    const frozen = worksheet.views?.find((view) => view.state === 'frozen')
     const importedPrint = worksheetPrint(worksheet)
     const print = worksheet.name === 'Invoice' && importedPrint.printArea === 'A1:H48'
       ? { ...importedPrint, paperSize: 'A4' as const, orientation: 'portrait' as const, fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.35, rightIn: 0.35, topIn: 0.25, bottomIn: 0.25, headerIn: 0, footerIn: 0 }, horizontalCentered: true, verticalCentered: true, showGridLines: false, showHeadings: false }
@@ -379,7 +379,7 @@ async function buildWorkbook(snapshot: SpreadsheetSnapshot, resolveResource: Off
       exportStyle(styleCell, format.style)
       const style = styleCell.style
       workbook.removeWorksheet(temporary.id)
-      worksheet.addConditionalFormatting({ ref: format.range, rules: [{ type: format.ruleType, operator: format.operator as never, formulae: format.formulas, priority: format.priority, style } as ExcelJS.ConditionalFormattingRule] })
+      worksheet.addConditionalFormatting({ ref: format.range, rules: [{ type: format.ruleType === 'beginsWith' ? 'containsText' : format.ruleType, operator: (format.ruleType === 'beginsWith' ? 'beginsWith' : format.operator) as never, formulae: format.formulas, priority: format.priority, style } as ExcelJS.ConditionalFormattingRule] })
     }
     for (const image of sheet.images) {
       const resource = await resolveResource(image.resourceId)
@@ -406,6 +406,14 @@ async function buildWorkbook(snapshot: SpreadsheetSnapshot, resolveResource: Off
   let tableIndex = 0
   const names = new Set<string>()
   for (const [sheetIndex, sheet] of calculated.worksheets.entries()) {
+    // ExcelJS omits text and stopIfTrue, which are part of the rule's semantics.
+    const worksheetPath = `xl/worksheets/sheet${sheetIndex + 1}.xml`
+    let ruleIndex = 0
+    const worksheetXml = await zip.file(worksheetPath)!.async('string')
+    zip.file(worksheetPath, worksheetXml.replace(/<cfRule\b([^>]*)>/g, (_tag, attributes: string) => {
+      const rule = sheet.conditionalFormats[ruleIndex++]!
+      return `<cfRule${attributes}${rule.text !== undefined ? ` text="${escape(rule.text)}"` : ''}${rule.stopIfTrue !== undefined ? ` stopIfTrue="${rule.stopIfTrue ? 1 : 0}"` : ''}>`
+    }))
     const parts: string[] = []
     const relPath = `xl/worksheets/_rels/sheet${sheetIndex + 1}.xml.rels`
     let rels = await zip.file(relPath)?.async('string') ?? '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'
@@ -462,6 +470,16 @@ export async function importOfficeSpreadsheet(bytes: Uint8Array, context: Office
       const sheetPath = target.startsWith('/') ? target.slice(1) : posix.normalize(posix.join('xl', target))
       const xml = await packageResult.zip.file(sheetPath)?.async('string')
       if (!xml) throw new Error('Unsupported worksheet part mapping')
+      const rawRules = elements(xml, 'cfRule')
+      if (rawRules.length !== sheet.conditionalFormats.length) throw new Error('Conditional formatting was not completely imported')
+      rawRules.forEach((raw, index) => {
+        const rule = sheet.conditionalFormats[index]!
+        const text = raw.getAttribute('text')
+        const stop = raw.getAttribute('stopIfTrue')
+        if (text !== null) rule.text = text
+        if (stop !== null) rule.stopIfTrue = stop === '1' || stop === 'true'
+        if (rule.ruleType === 'beginsWith' && text === null) throw new Error('Text-prefix conditional formatting requires a text operand')
+      })
       const relXml = await packageResult.zip.file(posix.join(posix.dirname(sheetPath), '_rels', `${posix.basename(sheetPath)}.rels`))?.async('string')
       const rels = relXml ? Array.from((parser.parseFromString(relXml, 'text/xml') as unknown as XmlDocument).querySelectorAll('Relationship')) : []
       const parts = Array.from((parser.parseFromString(xml, 'text/xml') as unknown as XmlDocument).querySelectorAll('tablePart'))
