@@ -1,6 +1,7 @@
 import { it,expect,vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { ComputerProfilesForbiddenError } from '../../db/computer-profile-store.js'
 import { nativeComputerRoutes } from '../native-computer.js'
 import type { NativeComputerService } from '../../computer-use/service.js'
 const id='00000000-0000-4000-8000-000000000001', connectionId='00000000-0000-4000-8000-000000000002'
@@ -22,7 +23,7 @@ it('profile CRUD is authenticated, strictly owner scoped, and contains no setup 
  expect((await request(f.app).delete(`/profiles/${id}`)).body).toEqual({ok:true})
  expect(f.profiles.delete).toHaveBeenCalledWith('owner',id)
  expect((await request(fixture(false).app).get(`/profiles?workspaceId=${id}`)).status).toBe(403)
- f.profiles.update.mockRejectedValue(new Error('private profile name'))
+ f.profiles.update.mockRejectedValue(new ComputerProfilesForbiddenError('private profile name'))
  const denied=await request(f.app).patch(`/profiles/${id}`).send({name:'x'})
  expect(denied.status).toBe(403);expect(denied.text).not.toContain('private profile name')
 })
@@ -57,7 +58,27 @@ it('atomic assistant PATCH is strict, authenticated, bounded and binds only the 
  expect((await request(f.app).patch(path).send({enabled:true,routingNote:''})).status).toBe(200)
  expect((await request(f.app).patch(`/profiles/${id}/assistants/not-a-uuid`).send({enabled:true})).status).toBe(400)
  expect((await request(fixture(false).app).patch(path).send({enabled:true})).status).toBe(403)
- f.profiles.updateAssistant.mockRejectedValue(new Error('private assistant name'))
+ f.profiles.updateAssistant.mockRejectedValue(new ComputerProfilesForbiddenError('private assistant name'))
  const denied=await request(f.app).patch(path).send({enabled:true})
  expect(denied.status).toBe(403);expect(denied.text).not.toContain('private assistant name')
+})
+
+it.each(['42P01','42703','08006',undefined])('all metadata handlers classify storage failure %s without private details',async code=>{
+ const f=fixture()
+ const error=Object.assign(new Error('private SQL connection details'),{code})
+ for(const method of ['list','create','update','updateAssistant','delete'] as const) f.profiles[method].mockRejectedValue(error)
+ const results=[
+  await request(f.app).get('/profiles').query({workspaceId:id}),
+  await request(f.app).post('/profiles').send({workspaceId:id,name:'Mac'}),
+  await request(f.app).patch(`/profiles/${id}`).send({name:'Mac'}),
+  await request(f.app).patch(`/profiles/${id}/assistants/${connectionId}`).send({enabled:true}),
+  await request(f.app).delete(`/profiles/${id}`),
+ ]
+ for(const result of results) {
+  expect(result.status).toBe(503)
+  expect(result.headers['cache-control']).toBe('no-store')
+  expect(result.body).toEqual(code==='42P01' || code==='42703'
+   ? {code:'computer_profiles_schema_unavailable',error:'Computer profiles schema unavailable'}
+   : {code:'computer_profiles_unavailable',error:'Profiles unavailable'})
+ }
 })

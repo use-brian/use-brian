@@ -37,6 +37,9 @@ export function publicProfile(p: ProfileRow): ComputerProfile {
   return { id:p.id,workspaceId:p.workspaceId,name:p.name,enabledAssistantIds:p.enabledAssistantIds,
     assistantRoutingNotes:p.assistantRoutingNotes,deviceId:p.deviceId,connected:p.connected,canManage:true }
 }
+/** Expected metadata authorization/constraint denial, never a storage failure. */
+export class ComputerProfilesForbiddenError extends Error {}
+
 export class ComputerProfileStore {
   async list(userId:string, workspaceId:string) {
     const r=await query<ProfileRow>(`SELECT ${fields} FROM computer_profiles p WHERE ${own} AND p.workspace_id=$2 ORDER BY p.created_at`,[userId,workspaceId])
@@ -45,7 +48,7 @@ export class ComputerProfileStore {
   async create(userId:string, workspaceId:string,name:string) {
     const r=await query<{id:string}>(`INSERT INTO computer_profiles(owner_user_id,workspace_id,name)
       SELECT $1,$2,$3 WHERE EXISTS(SELECT 1 FROM workspace_members WHERE user_id=$1 AND workspace_id=$2) RETURNING id`,[userId,workspaceId,name])
-    if(!r.rows[0]) throw new Error('Profile unavailable')
+    if(!r.rows[0]) throw new ComputerProfilesForbiddenError('Profile unavailable')
     return (await this.list(userId,workspaceId)).find(p=>p.id===r.rows[0].id)!
   }
   /** Profile row lock serializes connection rotation, request acceptance and revocation. */
@@ -54,7 +57,7 @@ export class ComputerProfileStore {
     try {
       await c.query('BEGIN')
       const r=await c.query<ProfileRow>(`SELECT ${fields} FROM computer_profiles p WHERE ${own} AND p.id=$2 FOR UPDATE OF p`,[userId,id])
-      if(!r.rows[0]) throw new Error('Profile unavailable')
+      if(!r.rows[0]) throw new ComputerProfilesForbiddenError('Profile unavailable')
       const result=await fn(c,r.rows[0]); await c.query('COMMIT'); return result
     } catch(e) { await c.query('ROLLBACK'); throw e } finally { c.release() }
   }
@@ -73,7 +76,7 @@ export class ComputerProfileStore {
         // The profile itself remains owner-private regardless of assistant ownership.
         const r=await c.query(`SELECT id FROM assistants WHERE workspace_id=$1 AND id=ANY($2::uuid[])
           AND NOT ($3::uuid=ANY(blocked_user_ids))`,[p.workspaceId,ids,userId])
-        if(r.rows.length!==ids.length) throw new Error('Assistant unavailable')
+        if(r.rows.length!==ids.length) throw new ComputerProfilesForbiddenError('Assistant unavailable')
       }
       await this.invalidate(c,id)
       await c.query(`UPDATE computer_profiles SET name=COALESCE($2,name),enabled_assistant_ids=COALESCE($3,enabled_assistant_ids),
@@ -89,11 +92,11 @@ export class ComputerProfileStore {
       // locked() already requires the profile owner to be a current member.
       const assistant=await c.query(`SELECT id FROM assistants WHERE id=$1 AND workspace_id=$2
         AND NOT ($3::uuid=ANY(blocked_user_ids))`,[assistantId,p.workspaceId,userId])
-      if(!assistant.rows.length) throw new Error('Assistant unavailable')
+      if(!assistant.rows.length) throw new ComputerProfilesForbiddenError('Assistant unavailable')
       const enabledAssistantIds=[...p.enabledAssistantIds]
       if(patch.enabled===true && !enabledAssistantIds.includes(assistantId)) enabledAssistantIds.push(assistantId)
       const nextIds=patch.enabled===false ? enabledAssistantIds.filter(id=>id!==assistantId) : enabledAssistantIds
-      if(nextIds.length>200) throw new Error('Too many assistant grants')
+      if(nextIds.length>200) throw new ComputerProfilesForbiddenError('Too many assistant grants')
       const assistantRoutingNotes={...p.assistantRoutingNotes}
       if(patch.routingNote!==undefined) assistantRoutingNotes[assistantId]=patch.routingNote
       await this.invalidate(c,id)

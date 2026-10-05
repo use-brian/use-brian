@@ -1,7 +1,7 @@
-import { ProfilePatchSchema, ProfileAssistantPatchSchema } from '../db/computer-profile-store.js'
+import { ComputerProfileStore, ComputerProfilesForbiddenError, ProfilePatchSchema, ProfileAssistantPatchSchema } from '../db/computer-profile-store.js'
 import { requireAuth, requireAuthWithoutTouch } from '../auth/middleware.js'
 import type { AuthSessionStore } from '../db/auth-session-store.js'
-import type { RequestHandler } from 'express'
+import type { RequestHandler, Response } from 'express'
 import { nativeReadiness, ReadinessContextSchema, type ReadinessOptions } from '../computer-use/readiness.js'
 import type { TaskStore, Tool } from '@use-brian/core'
 import { Router } from 'express'
@@ -24,6 +24,23 @@ export function nativeComputerAuth(jwtSecret: string, sessions?: Pick<AuthSessio
  * Origin absence is defense in depth, not a main-process identity assertion. */
 export function nativeComputerRoutes(service: NativeComputerService | null, tool?: Tool, readiness?: ReadinessOptions, tasks?: Pick<TaskStore, 'create'>): Router {
   const router=Router()
+  // Metadata/grants do not enable native execution or require relay configuration.
+  const profiles=service?.profiles ?? new ComputerProfileStore()
+  const profileError=(res:Response,error:unknown)=>{
+    const code=error && typeof error==='object' && 'code' in error ? error.code : undefined
+    if(code==='42P01' || code==='42703') {
+      res.status(503).json({code:'computer_profiles_schema_unavailable',error:'Computer profiles schema unavailable'})
+    } else if(error instanceof ComputerProfilesForbiddenError) {
+      res.status(403).json({code:'computer_profiles_forbidden',error:'Profile unavailable'})
+    } else {
+      res.status(503).json({code:'computer_profiles_unavailable',error:'Profiles unavailable'})
+    }
+  }
+  const executionAvailable=(res:Response)=>{
+    if(service) return true
+    res.status(503).json({code:'native_execution_unavailable',error:'Native computer execution unavailable'})
+    return false
+  }
   router.post('/readiness', async (req,res) => {
     res.setHeader('Cache-Control','no-store')
     if (!req.userId || !req.authSessionId) { res.sendStatus(403); return }
@@ -39,7 +56,7 @@ export function nativeComputerRoutes(service: NativeComputerService | null, tool
     } catch { res.status(503).json({ error: 'Native readiness unavailable' }) }
     finally { clearTimeout(timer) }
   })
-  router.use((_req,res,next)=>{ res.setHeader('Cache-Control','no-store'); if(!service){res.sendStatus(404);return} next() })
+  router.use((_req,res,next)=>{ res.setHeader('Cache-Control','no-store'); next() })
   const uuid=z.string().uuid()
   const connection=z.object({connectionId:uuid}).strict()
   // Desktop metadata calls require authenticated main-process-style requests.
@@ -49,68 +66,75 @@ export function nativeComputerRoutes(service: NativeComputerService | null, tool
     next()
   }
   router.use('/profiles', (req,res,next)=>{
-    if(!req.userId || !req.authSessionId) {res.sendStatus(403);return}
+    if(!req.userId || !req.authSessionId) {res.status(403).json({code:'computer_profiles_forbidden',error:'Profile unavailable'});return}
     next()
   })
   router.get('/profiles',async(req,res)=>{
     const parsed=z.object({workspaceId:uuid}).strict().safeParse(req.query)
     if(!parsed.success){res.sendStatus(400);return}
-    try {res.json({profiles:await service!.profiles.list(req.userId!,parsed.data.workspaceId)})}
-    catch {res.status(503).json({error:'Profiles unavailable'})}
+    try {res.json({profiles:await profiles.list(req.userId!,parsed.data.workspaceId)})}
+    catch(error) {profileError(res,error)}
   })
   router.post('/profiles',async(req,res)=>{
     const parsed=z.object({workspaceId:uuid,name:z.string().trim().min(1).max(120)}).strict().safeParse(req.body)
     if(!parsed.success){res.sendStatus(400);return}
-    try {res.status(201).json({profile:await service!.profiles.create(req.userId!,parsed.data.workspaceId,parsed.data.name)})}
-    catch {res.status(403).json({error:'Profile unavailable'})}
+    try {res.status(201).json({profile:await profiles.create(req.userId!,parsed.data.workspaceId,parsed.data.name)})}
+    catch(error) {profileError(res,error)}
   })
   router.patch('/profiles/:id',async(req,res)=>{
     const parsed=ProfilePatchSchema.safeParse(req.body)
     if(!parsed.success || !uuid.safeParse(req.params.id).success){res.sendStatus(400);return}
-    try {res.json({profile:await service!.profiles.update(req.userId!,req.params.id as string,parsed.data)})}
-    catch {res.status(403).json({error:'Profile unavailable'})}
+    try {res.json({profile:await profiles.update(req.userId!,req.params.id as string,parsed.data)})}
+    catch(error) {profileError(res,error)}
   })
   router.patch('/profiles/:id/assistants/:assistantId',async(req,res)=>{
     const parsed=ProfileAssistantPatchSchema.safeParse(req.body)
     if(!parsed.success || !uuid.safeParse(req.params.id).success || !uuid.safeParse(req.params.assistantId).success){res.sendStatus(400);return}
-    try {res.json({profile:await service!.profiles.updateAssistant(req.userId!,req.params.id as string,req.params.assistantId as string,parsed.data)})}
-    catch {res.status(403).json({error:'Profile unavailable'})}
+    try {res.json({profile:await profiles.updateAssistant(req.userId!,req.params.id as string,req.params.assistantId as string,parsed.data)})}
+    catch(error) {profileError(res,error)}
   })
   router.delete('/profiles/:id',async(req,res)=>{
     if(!uuid.safeParse(req.params.id).success){res.sendStatus(400);return}
-    try {await service!.profiles.delete(req.userId!,req.params.id as string);res.json({ok:true})}
-    catch {res.status(403).json({error:'Profile unavailable'})}
+    try {await profiles.delete(req.userId!,req.params.id as string);res.json({ok:true})}
+    catch(error) {profileError(res,error)}
   })
   router.post('/profiles/:id/connect',desktop,async(req,res)=>{
     const parsed=z.object({workspaceId:uuid,deviceId:z.string().min(1).max(256)}).strict().safeParse(req.body)
     if(!parsed.success || !uuid.safeParse(req.params.id).success){res.sendStatus(400);return}
+    if(!executionAvailable(res)) return
     try {res.json(await service!.profiles.connect(req.userId!,req.authSessionId!,req.params.id as string,parsed.data.workspaceId,parsed.data.deviceId))}
     catch {res.status(403).json({error:'Connection unavailable'})}
   })
   router.post('/profiles/:id/poll',desktop,async(req,res)=>{
     const parsed=connection.safeParse(req.body)
     if(!parsed.success || !uuid.safeParse(req.params.id).success){res.sendStatus(400);return}
+    if(!executionAvailable(res)) return
     try {res.json(await service!.profiles.poll(req.userId!,req.authSessionId!,req.params.id as string,parsed.data.connectionId))}
     catch {res.status(403).json({error:'Connection unavailable'})}
   })
   router.post('/profiles/:id/disconnect',desktop,async(req,res)=>{
     const parsed=connection.safeParse(req.body)
     if(!parsed.success || !uuid.safeParse(req.params.id).success){res.sendStatus(400);return}
+    if(!executionAvailable(res)) return
     try {await service!.profiles.disconnect(req.userId!,req.authSessionId!,req.params.id as string,parsed.data.connectionId);res.json({ok:true})}
     catch {res.status(403).json({error:'Connection unavailable'})}
   })
   router.post('/profiles/:id/requests/:requestId/accept',desktop,async(req,res)=>{
     const parsed=connection.extend({challenge:z.string().regex(/^[A-Za-z0-9_-]{43}$/)}).strict().safeParse(req.body)
     if(!parsed.success || !uuid.safeParse(req.params.id).success || !uuid.safeParse(req.params.requestId).success){res.sendStatus(400);return}
+    if(!executionAvailable(res)) return
     try {res.json(await service!.acceptProfile(req.userId!,req.authSessionId!,req.params.id as string,parsed.data.connectionId,req.params.requestId as string,parsed.data.challenge))}
     catch {res.status(403).json({error:'Consent request unavailable'})}
   })
   router.post('/profiles/:id/requests/:requestId/deny',desktop,async(req,res)=>{
     const parsed=connection.safeParse(req.body)
     if(!parsed.success || !uuid.safeParse(req.params.id).success || !uuid.safeParse(req.params.requestId).success){res.sendStatus(400);return}
+    if(!executionAvailable(res)) return
     try {await service!.profiles.deny(req.userId!,req.authSessionId!,req.params.id as string,parsed.data.connectionId,req.params.requestId as string);res.json({ok:true})}
     catch {res.status(403).json({error:'Consent request unavailable'})}
   })
+  // Preserve disabled behavior for the legacy execution/context routes.
+  router.use((_req,res,next)=>{ if(!service){res.sendStatus(404);return} next() })
   router.get('/context-tasks', async (req,res) => {
     if (!req.userId || !req.authSessionId) { res.sendStatus(403); return }
     const parsed = Context.safeParse(req.query)

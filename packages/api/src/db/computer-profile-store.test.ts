@@ -464,3 +464,78 @@ it('atomic assistant update invalidates pending consent without changing connect
  expect(await service.profiles.poll(u,auth,p.id,connectionId)).toEqual({request:null})
  expect((await service.profiles.list(u,w))[0].enabledAssistantIds).toEqual([a])
 })
+
+function metadataApp(userId=u,sessionId:string|undefined=auth) {
+ const app=express();app.use(express.json())
+ app.use((req,_res,next)=>{req.userId=userId;req.authSessionId=sessionId;next()})
+ app.use(nativeComputerRoutes(null))
+ return app
+}
+it('disabled execution still supports production SQL metadata CRUD and atomic grants, without authority',async()=>{
+ const app=metadataApp()
+ const created=await request(app).post('/profiles').send({workspaceId:w,name:'Offline Mac'})
+ expect(created.status).toBe(201)
+ const p=created.body.profile
+ expect(p).toEqual({id:expect.any(String),workspaceId:w,name:'Offline Mac',enabledAssistantIds:[],assistantRoutingNotes:{},deviceId:null,connected:false,canManage:true})
+ const list=await request(app).get('/profiles').query({workspaceId:w})
+ expect(list.headers['cache-control']).toBe('no-store');expect(list.body).toEqual({profiles:[p]})
+ expect((await request(app).patch(`/profiles/${p.id}`).send({name:'Renamed'})).body.profile.name).toBe('Renamed')
+ expect((await request(app).patch(`/profiles/${p.id}/assistants/${a}`).send({enabled:true,routingNote:'Local'})).body.profile).toMatchObject({enabledAssistantIds:[a],assistantRoutingNotes:{[a]:'Local'}})
+ for(const suffix of ['connect','poll','disconnect',`requests/${chat}/accept`,`requests/${chat}/deny`]) {
+  const body=suffix==='connect'?{workspaceId:w,deviceId:'device'}:suffix.endsWith('/accept')?{connectionId:chat,challenge:'x'.repeat(43)}:{connectionId:chat}
+  const path=`/profiles/${p.id}/${suffix}`
+  for(const header of ['Origin','Sec-Fetch-Site']) expect((await request(app).post(path).set(header,'renderer').send(body)).status).toBe(403)
+  const result=await request(app).post(path).send(body)
+  expect(result.status).toBe(503);expect(result.headers['cache-control']).toBe('no-store')
+  expect(result.body).toEqual({code:'native_execution_unavailable',error:'Native computer execution unavailable'})
+ }
+ expect((await request(app).post(`/profiles/${p.id}/requests/${chat}/accept`).send({connectionId:chat,challenge:'bad'})).status).toBe(400)
+ expect((await db.query('SELECT connection_id,device_id FROM computer_profiles')).rows).toEqual([{connection_id:null,device_id:null}])
+ expect((await db.query('SELECT * FROM native_computer_sessions')).rows).toEqual([])
+ expect((await db.query('SELECT * FROM computer_profile_requests')).rows).toEqual([])
+ expect((await request(app).delete(`/profiles/${p.id}`)).body).toEqual({ok:true})
+ expect((await request(app).get('/profiles').query({workspaceId:w})).body).toEqual({profiles:[]})
+})
+it('disabled metadata denies foreign owners, assistants, workspaces and former members without leaking details',async()=>{
+ const p=await service.profiles.create(u,w,'Private')
+ for(const [app,path,body] of [
+  [metadataApp(other),`/profiles/${p.id}`,{name:'steal'}],
+  [metadataApp(),`/profiles/${p.id}/assistants/${randomUUID()}`,{enabled:true}],
+ ] as const) {
+  const result=await request(app).patch(path).send(body)
+  expect(result.status).toBe(403);expect(result.body).toEqual({code:'computer_profiles_forbidden',error:'Profile unavailable'})
+ }
+ expect((await request(metadataApp(other)).get('/profiles').query({workspaceId:w})).body).toEqual({profiles:[]})
+ const foreign=await request(metadataApp()).post('/profiles').send({workspaceId:randomUUID(),name:'Forbidden'})
+ expect(foreign.status).toBe(403);expect(foreign.body.code).toBe('computer_profiles_forbidden')
+ await db.query('DELETE FROM workspace_members WHERE user_id=$1',[u])
+ expect((await request(metadataApp()).delete(`/profiles/${p.id}`)).status).toBe(403)
+ const noSession=metadataApp(u,'')
+ expect((await request(noSession).get('/profiles').query({workspaceId:w})).body.code).toBe('computer_profiles_forbidden')
+})
+it('disabled metadata reports missing SQL migrations before permission evaluation and hides storage errors',async()=>{
+ const app=metadataApp()
+ for(const [original,renamed] of [['computer_profiles','missing_profiles'],['assistant_routing_notes','missing_notes']]) {
+  const table=original==='computer_profiles'
+  await db.exec(table?`ALTER TABLE ${original} RENAME TO ${renamed}`:`ALTER TABLE computer_profiles RENAME COLUMN ${original} TO ${renamed}`)
+  try {
+   // No matching owner/profile: schema failure must not become a permission denial.
+   const result=await request(app).patch(`/profiles/${randomUUID()}`).send({name:'x'})
+   expect(result.status).toBe(503)
+   expect(result.body).toEqual({code:'computer_profiles_schema_unavailable',error:'Computer profiles schema unavailable'})
+  } finally {
+   await db.exec(table?`ALTER TABLE ${renamed} RENAME TO ${original}`:`ALTER TABLE computer_profiles RENAME COLUMN ${renamed} TO ${original}`)
+  }
+ }
+ vi.mocked(query).mockRejectedValueOnce(new Error('SQL password=private SELECT secret'))
+ const result=await request(app).post('/profiles').send({workspaceId:w,name:'x'})
+ expect(result.status).toBe(503)
+ expect(result.body).toEqual({code:'computer_profiles_unavailable',error:'Profiles unavailable'})
+})
+it('disabled metadata grant edits still revoke existing SQL execution authority',async()=>{
+ const {p}=await paired()
+ const result=await request(metadataApp()).patch(`/profiles/${p.id}/assistants/${a}`).send({enabled:false})
+ expect(result.status).toBe(200)
+ expect((await db.query('SELECT revoked_at FROM native_computer_sessions')).rows[0]).toMatchObject({revoked_at:expect.anything()})
+ expect((await db.query('SELECT state FROM computer_profile_requests')).rows).toEqual([{state:'ended'}])
+})
