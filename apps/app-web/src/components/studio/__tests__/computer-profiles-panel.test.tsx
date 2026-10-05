@@ -13,10 +13,10 @@ vi.mock("next/link", () => ({ default: ({ children, ...props }: React.AnchorHTML
 vi.mock("@/components/ui/checkbox", () => ({ Checkbox: ({ checked, onCheckedChange, ...props }: any) => <input type="checkbox" checked={checked} onChange={e => onCheckedChange(e.target.checked)} {...props} /> }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let el: HTMLDivElement; let root: Root;
-let profile: { id: string; workspaceId: string; name: string; enabledAssistantIds: string[]; assistantRoutingNotes: Record<string, string>; connected: boolean; canManage: boolean };
+let profile: { id: string; workspaceId: string; name: string; enabledAssistantIds: string[]; assistantRoutingNotes: Record<string, string>; deviceId: string | null; connected: boolean; canManage: boolean };
 beforeEach(() => {
   el = document.createElement("div"); root = createRoot(el);
-  profile = { id: "p", workspaceId: "w", name: "My Mac", enabledAssistantIds: ["other"], assistantRoutingNotes: { other: "Preserve" }, connected: true, canManage: true };
+  profile = { id: "p", workspaceId: "w", name: "My Mac", enabledAssistantIds: ["other"], assistantRoutingNotes: { other: "Preserve" }, deviceId: null, connected: true, canManage: true };
   vi.mocked(authFetch).mockImplementation(async (_url, init) => {
     if (init?.method === "PATCH") {
       const assistantId = decodeURIComponent(String(_url).split("/assistants/")[1]);
@@ -59,7 +59,7 @@ it("[COMP:app-web/computer-profiles] failed grants stay off with a visible error
   await render(); vi.mocked(authFetch).mockResolvedValueOnce(new Response("{}", { status: 403 }));
   await act(async () => el.querySelector("input")!.click());
   expect((el.querySelector("input") as HTMLInputElement).checked).toBe(false);
-  expect(el.querySelector('[role="alert"]')?.textContent).toContain(en.computerProfiles.error);
+  expect(el.querySelector('[role="alert"]')?.textContent).toContain(en.computerProfiles.errors.computer_profiles_forbidden);
 });
 it("[COMP:app-web/computer-profiles] an old grant response cannot restore the previous workspace", async () => {
   await render();

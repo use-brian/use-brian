@@ -2,6 +2,17 @@ import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
   computerProfiles: {
+    errors: {
+      computer_profiles_schema_unavailable: "プロファイル保存にはマイグレーション622が必要です。接続先APIを更新して622を適用し、再試行してください。",
+      api_not_supported: "このデスクトップの接続先APIはコンピュータープロファイルに対応していません。APIを更新して再試行してください。",
+      sign_in_required: "再度サインインしてからプロファイル管理を再試行してください。",
+      computer_profiles_forbidden: "アクセスが拒否されました。ワークスペースとプロファイルの権限を確認して再試行してください。",
+      network_unreachable: "APIに接続できません。接続と接続先APIアドレスを確認して再試行してください。",
+      computer_profiles_duplicate: "同じ名前のプロファイルが存在します。別の名前を選んでください。",
+      computer_profiles_unavailable: "プロファイル保存を利用できません。しばらくして再試行してください。",
+      native_execution_unavailable: "ネイティブ実行を利用できません。接続先APIのネイティブ実行設定を確認して再試行してください。",
+    },
+
     inspect: "選択したウィンドウを調査",
     inspectHelp: "操作はオフです。ネイティブの承認後、このウィンドウをローカルで一度だけ調査します。チャットへの接続やスクリーンショットの取得は行いません。",
     captureDenied: "画面収録が許可されていないため、画面取得は利用できません。Mac の画面収録設定で許可し、準備状況を再確認してください。",
@@ -39,6 +50,8 @@ export const ja: Dictionary = {
     blocked: "接続できません。ヘルパーの準備状況とシステム権限を確認してください。",
   },
   nativeComputer: {
+    refreshWindows: "ウィンドウを更新",
+    windowsNotChecked: "ウィンドウは未確認です。更新して利用可能なウィンドウを確認してください。",
     verificationAcknowledge: "立ち会いでのMac検証を申請",
     verificationHelp: "これは一時的な検証であり、パイロット受け入れや本番認証ではありません。操作中は立ち会ってください。Macのネイティブダイアログで承認が必要です。停止、ワークスペース・アカウント変更、セッション終了で承認は失効します。送信済みの操作は完了する場合があります。タスクと対象の同意も必要です。",
     verificationConfirmed: "このコンテキストのMac検証が承認されました。制御と撮影は個別に有効化してください。",

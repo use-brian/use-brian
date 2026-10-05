@@ -13,6 +13,17 @@ import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
   computerProfiles: {
+    errors: {
+      computer_profiles_schema_unavailable: "配置文件存储需要迁移622。请更新连接的API并应用迁移622，然后重试。",
+      api_not_supported: "此桌面连接的API不支持电脑配置文件。请更新该API后重试。",
+      sign_in_required: "请重新登录后重试管理电脑配置文件。",
+      computer_profiles_forbidden: "访问被拒绝。请检查工作区与配置文件权限后重试。",
+      network_unreachable: "无法连接API。请检查网络与连接的API地址后重试。",
+      computer_profiles_duplicate: "已有同名配置文件。请使用其他名称。",
+      computer_profiles_unavailable: "电脑配置文件存储暂时不可用。请稍后重试。",
+      native_execution_unavailable: "原生执行不可用。请检查连接API的原生执行配置后重试。",
+    },
+
     inspect: "检查所选窗口",
     inspectHelp: "控制已关闭：原生批准后，仅在本机检查此窗口一次。不会将配置连接至聊天或捕获屏幕截图。",
     captureDenied: "屏幕录制权限被拒，无法捕获画面。请打开 Mac 屏幕录制设置授权后，再检查准备状态。",
@@ -50,6 +61,8 @@ export const zhCN: Dictionary = {
     blocked: "连接受阻。请检查辅助程序状态与系统权限后重试。",
   },
   nativeComputer: {
+    refreshWindows: "刷新窗口",
+    windowsNotChecked: "尚未检查窗口。请刷新以查找可用窗口。",
     verificationAcknowledge: "申请有人监督的 Mac 验证",
     verificationHelp: "此为临时验证，不代表试行验收或正式上线认证。请全程在场。必须由 Mac 原生对话框批准。停止、切换工作区或账号及结束会话会撤销批准；已发出的操作仍可能完成。仍需任务与目标同意。",
     verificationConfirmed: "此上下文的 Mac 验证已获批准。控制与截图仍须分别启用。",

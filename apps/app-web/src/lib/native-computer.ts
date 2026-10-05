@@ -39,7 +39,9 @@ export type DesktopComputerControlMessage =
   | ({ type: "start" | "resume" } & NativeStart);
 export type NativeInspection = { id: string; capturedAt: number; completeness: "complete" | "partial" | "unavailable";
   nodes: { ref: string; parentRef?: string; role: string; name: string; value?: string; enabled: boolean; sensitive: boolean }[] };
-export type DesktopComputerControlResult = { ok: boolean; profileId?: string; profileConnected?: boolean; verificationAvailable?: boolean; verificationConsented?: boolean; cleanupPending?: boolean; error?: string; status?: NativeStatus; targets?: DiscoveredTarget[]; deviceId?: string; inspection?: NativeInspection; readiness?: { helperAdmitted: true; capabilities: NativeStatus["capabilities"] } };
+const profileErrorCodes = ["native_execution_unavailable", "computer_profiles_schema_unavailable", "sign_in_required", "computer_profiles_forbidden", "api_not_supported", "network_unreachable", "computer_profiles_unavailable"] as const;
+export type NativeProfileErrorCode = typeof profileErrorCodes[number];
+export type DesktopComputerControlResult = { ok: boolean; profileId?: string; profileConnected?: boolean; profileErrorCode?: NativeProfileErrorCode; verificationAvailable?: boolean; verificationConsented?: boolean; cleanupPending?: boolean; error?: string; status?: NativeStatus; targets?: DiscoveredTarget[]; deviceId?: string; inspection?: NativeInspection; readiness?: { helperAdmitted: true; capabilities: NativeStatus["capabilities"] } };
 export type ComputerControl = (message: DesktopComputerControlMessage) => Promise<DesktopComputerControlResult>;
 
 /** A single persistent renderer owner. No automatic start, resume, pairing or API exchange. */
@@ -76,7 +78,11 @@ export class NativeComputer {
     if (["disconnect-profile", "disconnect", "workspace-changed"].includes(message.type)) this.publish({ ok: false, ...(this.value.cleanupPending ? { cleanupPending: true } : {}) });
     if (["connect-profile", "start", "resume", "disconnect", "workspace-changed", "stop"].includes(message.type)) this.publish({ ...this.value, inspection: undefined, readiness: undefined, readinessFailed: undefined, readinessPending: undefined });
     try {
-      const result = await this.bridge()?.(message) ?? EMPTY;
+      const { profileErrorCode, ...response } = await this.bridge()?.(message) ?? EMPTY;
+      // IPC is a runtime boundary: unknown codes must not enter state or return values.
+      const result: DesktopComputerControlResult = { ...response,
+        ...(message.type === "connect-profile" && !response.ok && profileErrorCodes.includes(profileErrorCode as NativeProfileErrorCode)
+          ? { profileErrorCode } : {}) };
       if (generation !== this.generation) return EMPTY;
       // A reply begun before observed cleanup cannot restore old status/targets,
       // even if a newer poll has already confirmed that cleanup finished.

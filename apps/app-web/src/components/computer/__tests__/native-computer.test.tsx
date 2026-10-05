@@ -71,6 +71,16 @@ it("[COMP:app-web/native-computer] connects with a fresh canonical target and ex
   expect(nativeComputer.send).toHaveBeenCalledWith({ type: "disconnect-profile" });
   expect([...el.querySelectorAll("input")].every(input => !input.checked)).toBe(true);
 });
+it("[COMP:app-web/native-computer] identifies a disabled backend instead of blaming Mac permissions", async () => {
+  desktop(); await render(); await selectConnection();
+  await act(async () => (el.querySelectorAll('input')[0] as HTMLInputElement).click());
+  vi.mocked(nativeComputer.send).mockImplementation(async message => message.type === "connect-profile"
+    ? { ok: false, profileErrorCode: "native_execution_unavailable" }
+    : { ok: true, status, targets: [target] });
+  await act(async () => primary().click());
+  expect(el.textContent).toContain(en.computerProfiles.errors.native_execution_unavailable);
+  expect(el.textContent).not.toContain(en.computerProfiles.connectionError);
+});
 it("[COMP:app-web/native-computer] rejects vanished or replaced targets at connect", async () => {
   desktop(); await render(); await selectConnection();
   vi.mocked(nativeComputer.send).mockResolvedValue({ ok: true, status, targets: [{ ...target, windowInstanceId: "replacement" }] });
@@ -120,7 +130,7 @@ it("[COMP:app-web/native-computer] renames and deletes a profile independently o
 it("[COMP:app-web/native-computer] create failure is visible and does not select a fabricated profile", async () => {
   await render(); vi.mocked(authFetch).mockResolvedValueOnce(new Response("{}", { status: 403 }));
   await act(async () => button(en.computerProfiles.create).click());
-  expect(el.querySelector('[role="alert"]')?.textContent).toContain(en.computerProfiles.error);
+  expect(el.querySelector('[role="alert"]')?.textContent).toContain(en.computerProfiles.errors.computer_profiles_forbidden);
   expect(el.querySelector("select")!.value).toBe("");
 });
 it("[COMP:app-web/native-computer] global Stop generation fences fresh discovery even before a rerender", async () => {
@@ -365,4 +375,81 @@ it("[COMP:app-web/native-computer] an idle connected profile does not trap denie
   expect(button(en.nativeComputer.screenRecordingSettings).disabled).toBe(false);
   await act(async () => button(en.nativeComputer.screenRecordingSettings).click());
   expect(nativeComputer.send).toHaveBeenCalledWith({ type: "permissions", permission: "screen-recording" });
+});
+
+it.each([
+  [503, "computer_profiles_schema_unavailable", true],
+  [404, "api_not_supported", true],
+  [401, "sign_in_required", true],
+  [403, "computer_profiles_forbidden", true],
+  [503, "computer_profiles_unavailable", false],
+] as const)("[COMP:app-web/native-computer] actionable HTTP %s error blocks create appropriately and retries", async (status, code, blocked) => {
+  const malicious = "<script>SQL password=secret</script>";
+  vi.mocked(authFetch).mockImplementation(async () => new Response(JSON.stringify({ code, error: malicious }), { status }));
+  await render();
+  expect(el.textContent).toContain(en.computerProfiles.errors[code]);
+  expect(el.textContent).not.toContain(malicious);
+  expect(button(en.computerProfiles.create).disabled).toBe(blocked);
+  vi.mocked(authFetch).mockImplementation(async () => new Response(JSON.stringify({ profiles: [profile] })));
+  await act(async () => button(en.computerProfiles.retry).click());
+  expect(el.querySelector('[role="alert"]')).toBeNull();
+  expect(button(en.computerProfiles.create).disabled).toBe(false);
+});
+it("[COMP:app-web/native-computer] stopped with failed discovery is not an empty list; explicit refresh recovers", async () => {
+  desktop();
+  vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, status: { ...status, state: "stopped" } });
+  vi.mocked(nativeComputer.send).mockResolvedValue({ ok: false });
+  await render();
+  expect(el.textContent).toContain(en.nativeComputer.windowsNotChecked);
+  expect(el.textContent).not.toContain(en.nativeComputer.noTargets);
+  vi.mocked(nativeComputer.send).mockResolvedValue({ ok: true, targets: [] });
+  await act(async () => button(en.nativeComputer.refreshWindows).click());
+  expect(el.textContent).toContain(en.nativeComputer.noTargets);
+  vi.mocked(nativeComputer.send).mockRejectedValue(new Error("private helper error"));
+  await act(async () => button(en.nativeComputer.refreshWindows).click());
+  expect(el.textContent).not.toContain(en.nativeComputer.noTargets);
+  expect(el.textContent).not.toContain("private helper error");
+  vi.mocked(nativeComputer.send).mockResolvedValue({ ok: true, targets: [target] });
+  await act(async () => button(en.nativeComputer.refreshWindows).click());
+  expect(el.querySelectorAll("select")[1].options).toHaveLength(2);
+  expect(vi.mocked(nativeComputer.send).mock.calls.every(([message]) => message.type === "targets")).toBe(true);
+});
+it.each(["workspace", "stop"])("[COMP:app-web/native-computer] explicit refresh fences stale %s replies", async change => {
+  desktop(); await render();
+  const pending = deferred<DesktopComputerControlResult>();
+  vi.mocked(nativeComputer.send).mockReturnValueOnce(pending.promise);
+  await act(async () => button(en.nativeComputer.refreshWindows).click());
+  if (change === "workspace") { vi.mocked(nativeComputer.send).mockResolvedValue({ ok: false }); await render("other"); }
+  else { vi.spyOn(nativeComputer, "setupRevision", "get").mockReturnValue(nativeComputer.setupRevision + 1); }
+  await act(async () => pending.resolve({ ok: true, targets: [] }));
+  expect(el.textContent).not.toContain(en.nativeComputer.noTargets);
+});
+it("[COMP:app-web/native-computer] pending initial discovery never claims no windows in stopped phase", async () => {
+  desktop();
+  vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, status: { ...status, state: "stopped" } });
+  const pending = deferred<DesktopComputerControlResult>();
+  vi.mocked(nativeComputer.send).mockReturnValue(pending.promise);
+  await render();
+  expect(el.textContent).toContain(en.nativeComputer.windowsNotChecked);
+  expect(el.textContent).not.toContain(en.nativeComputer.noTargets);
+  await act(async () => pending.resolve({ ok: true, targets: [] }));
+  expect(el.textContent).toContain(en.nativeComputer.noTargets);
+});
+it("[COMP:app-web/native-computer] HTML success blocks creation without leaking content", async () => {
+  vi.mocked(authFetch).mockImplementation(async () => new Response("<html>SQL password=secret</html>"));
+  await render();
+  expect(el.textContent).toContain(en.computerProfiles.errors.api_not_supported);
+  expect(el.textContent).not.toContain("password=secret");
+  expect(button(en.computerProfiles.create).disabled).toBe(true);
+});
+it("[COMP:app-web/native-computer] mutation schema errors keep actionable retry rather than a native connection error", async () => {
+  desktop(); await render();
+  vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({ code: "computer_profiles_schema_unavailable", error: "SQL password=secret" }), { status: 503 }));
+  await act(async () => button(en.computerProfiles.create).click());
+  expect(el.textContent).toContain(en.computerProfiles.errors.computer_profiles_schema_unavailable);
+  expect(el.textContent).not.toContain(en.computerProfiles.connectionError);
+  expect(el.textContent).not.toContain("password=secret");
+  expect(button(en.computerProfiles.create).disabled).toBe(true);
+  await act(async () => button(en.computerProfiles.retry).click());
+  expect(button(en.computerProfiles.create).disabled).toBe(false);
 });

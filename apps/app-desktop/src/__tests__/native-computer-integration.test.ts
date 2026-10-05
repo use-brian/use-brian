@@ -1110,6 +1110,49 @@ describe('durable profile connection and fresh chat leases', () => {
     })
     return controller
   }
+  it.each([
+    [503, 'native_execution_unavailable', 'native_execution_unavailable'],
+    [503, 'computer_profiles_schema_unavailable', 'computer_profiles_schema_unavailable'],
+    [401, 'PRIVATE_BODY', 'sign_in_required'],
+    [403, 'PRIVATE_BODY', 'computer_profiles_forbidden'],
+    [404, 'PRIVATE_BODY', 'api_not_supported'],
+    [503, 'PRIVATE_BODY', 'computer_profiles_unavailable'],
+    [500, 'native_execution_unavailable', 'computer_profiles_unavailable'],
+  ])('sanitizes backend %s/%s without blaming Mac permissions', async (status, code, expected) => {
+    await setupProfile()
+    fetchMock.mockResolvedValueOnce(Response.json({ code, error: 'PRIVATE_BODY' }, { status }))
+    const result = await integration.handle(connect)
+    expect(result).toMatchObject({ ok: false, profileConnected: false, profileErrorCode: expected })
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_BODY')
+    expect((result as any).error).not.toMatch(/permissions/i)
+    expect(controller().start).not.toHaveBeenCalled()
+    expect(shell.openExternal).not.toHaveBeenCalled()
+  })
+  it('classifies only backend fetch rejection as network failure', async () => {
+    await setupProfile()
+    fetchMock.mockRejectedValueOnce(new Error('PRIVATE_BODY'))
+    expect(await integration.handle(connect)).toMatchObject({ ok: false, profileErrorCode: 'network_unreachable' })
+  })
+  it.each(['helper', 'consent', 'TCC'] as const)('does not classify local %s failure as backend failure', async source => {
+    const local = await setupProfile()
+    if (source === 'helper') local.listTargets.mockRejectedValueOnce(new Error('network_unreachable'))
+    if (source === 'consent') vi.mocked(dialog.showMessageBox).mockRejectedValueOnce(new Error('native_execution_unavailable'))
+    if (source === 'TCC') local.caps.accessibilityPermission = 'denied'
+    const result = await integration.handle(connect)
+    expect(result).toMatchObject({ ok: false })
+    expect(result).not.toHaveProperty('profileErrorCode')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+  it('drops a late backend error after Stop without classifying cancellation', async () => {
+    await setupProfile()
+    const response = deferred<Response>()
+    fetchMock.mockImplementationOnce(() => response.promise)
+    const connecting = integration.handle(connect)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    await integration.handle({ type: 'stop' })
+    response.resolve(Response.json({ code: 'native_execution_unavailable' }, { status: 503 }))
+    expect(await connecting).not.toHaveProperty('profileErrorCode')
+  })
   it('inspects locally without task/chat setup, server connection or relay', async () => {
     const controller = await setupProfile()
     const result = await integration.handle({ ...connect, allowControl: false })

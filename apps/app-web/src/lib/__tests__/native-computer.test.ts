@@ -308,3 +308,23 @@ it('[COMP:app-web/native-computer] profile connect projects only selected permis
   finish({ ok: true, profileId: 'profile', profileConnected: true }); await pending;
   expect(owner.snapshot().profileConnected).toBe(false);
 });
+
+const profileCodes = ["native_execution_unavailable", "computer_profiles_schema_unavailable", "sign_in_required", "computer_profiles_forbidden", "api_not_supported", "network_unreachable", "computer_profiles_unavailable"] as const;
+it.each(profileCodes)("[COMP:app-web/native-computer] propagates safe profile code %s", async profileErrorCode => {
+  const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: false, profileErrorCode });
+  const owner = new NativeComputer(() => control);
+  await owner.enter("w");
+  expect(owner.snapshot()).not.toHaveProperty("profileErrorCode");
+  expect(await owner.connectProfile({ ...input, profileId: "p" })).toMatchObject({ profileErrorCode });
+  expect(owner.snapshot()).toMatchObject({ profileErrorCode });
+  await owner.check();
+  expect(owner.snapshot()).not.toHaveProperty("profileErrorCode");
+});
+it.each(["PRIVATE_BODY", "computer_profiles_duplicate", { code: "native_execution_unavailable" }, null])("[COMP:app-web/native-computer] drops unknown profile code %j", async code => {
+  const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: false, profileErrorCode: code } as DesktopComputerControlResult);
+  const owner = new NativeComputer(() => control);
+  await owner.enter("w");
+  const result = await owner.connectProfile({ ...input, profileId: "p" });
+  expect(result).not.toHaveProperty("profileErrorCode");
+  expect(owner.snapshot()).not.toHaveProperty("profileErrorCode");
+});

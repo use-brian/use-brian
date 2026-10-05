@@ -51,6 +51,12 @@ function taskNotice(raw: unknown, sessionId: string): { type: 'info' | 'warning'
   return { type: outcome === 'completed' ? 'info' : 'warning', detail: taskMessages[outcome] }
 }
 
+// Constructed only at the authenticated HTTP boundary, never from helper errors.
+export type NativeProfileErrorCode = 'native_execution_unavailable' | 'computer_profiles_schema_unavailable' | 'sign_in_required' | 'computer_profiles_forbidden' | 'api_not_supported' | 'network_unreachable' | 'computer_profiles_unavailable'
+class NativeBackendRequestError extends Error {
+  constructor(readonly code: NativeProfileErrorCode) { super(code) }
+}
+
 type Auth = { userId: string; accessToken: string; apiUrl: string; accountKey: string }
 export type NativeIntegrationOptions = {
   directory: string
@@ -654,8 +660,27 @@ export class NativeComputerIntegration {
   private async request(auth: Auth, path: string, method: string, body?: unknown, signal = this.requests.signal): Promise<unknown> {
     const base = new URL(auth.apiUrl)
     if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname))) throw new Error('Insecure native API')
-    const response = await fetch(`${auth.apiUrl.replace(/\/$/, '')}/api/native-computer${path}`, { method, redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(path.endsWith('/run') ? 130_000 : 30_000)]), headers: { authorization: `Bearer ${auth.accessToken}`, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) })
-    if (!response.ok) throw new Error('Native request denied')
+    let response: Response
+    try {
+      response = await fetch(`${auth.apiUrl.replace(/\/$/, '')}/api/native-computer${path}`, { method, redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(path.endsWith('/run') ? 130_000 : 30_000)]), headers: { authorization: `Bearer ${auth.accessToken}`, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) })
+    } catch {
+      // Stop is cancellation, not an unreachable backend.
+      if (signal.aborted) throw new Error('Native request cancelled')
+      throw new NativeBackendRequestError('network_unreachable')
+    }
+    if (!response.ok) {
+      let code: unknown
+      try {
+        const bytes = await response.arrayBuffer()
+        if (bytes.byteLength <= 64 * 1024) code = (JSON.parse(Buffer.from(bytes).toString()) as { code?: unknown } | null)?.code
+      } catch { /* Never retain or echo server text. */ }
+      if (signal.aborted) throw new Error('Native request cancelled')
+      throw new NativeBackendRequestError(response.status === 401 ? 'sign_in_required'
+        : response.status === 403 ? 'computer_profiles_forbidden'
+        : response.status === 404 ? 'api_not_supported'
+        : response.status === 503 && (code === 'native_execution_unavailable' || code === 'computer_profiles_schema_unavailable') ? code
+        : 'computer_profiles_unavailable')
+    }
     if (response.status === 204) return null
     const bytes = await response.arrayBuffer()
     if (bytes.byteLength > 64 * 1024) throw new Error('Native metadata too large')
@@ -891,10 +916,12 @@ export class NativeComputerIntegration {
         () => finishRun({ type: 'warning', detail: 'The task request failed. Its result could not be confirmed.' }),
       ).catch(() => {})
       return { ok: true, status: this.controller.status(), deviceId: this.deviceId }
-    } catch {
+    } catch (error) {
+      const profileErrorCode = input.type === 'connect-profile' && completionGeneration === this.generation &&
+        error instanceof NativeBackendRequestError ? error.code : undefined
       // A late failure from an invalidated request must not stop a newer scope.
       if (completionGeneration === this.generation) await this.stop().catch(() => {})
-      return { ok: false, ...(input.type === 'connect-profile' ? { profileConnected: false } : {}), error: input.type === 'connect-profile' ? 'Computer profile could not connect. Check permissions and select the window again.' : 'Native control could not start. Check permissions, task access, and select the window again.', status: this.redactedStatus() }
+      return { ok: false, ...(input.type === 'connect-profile' ? { profileConnected: false } : {}), ...(profileErrorCode ? { profileErrorCode } : {}), error: profileErrorCode ? 'Computer profile backend request failed.' : input.type === 'connect-profile' ? 'Computer profile could not connect. Check permissions and select the window again.' : 'Native control could not start. Check permissions, task access, and select the window again.', status: this.redactedStatus() }
     } finally { this.busy = false }
   }
 }

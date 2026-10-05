@@ -15,6 +15,17 @@ import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
   computerProfiles: {
+    errors: {
+      computer_profiles_schema_unavailable: "Profile storage needs migration 622. Update the connected API and apply migration 622, then retry.",
+      api_not_supported: "The API connected to this desktop does not support computer profiles. Update that API, then retry.",
+      sign_in_required: "Sign in again to manage computer profiles, then retry.",
+      computer_profiles_forbidden: "Access denied. Check your workspace and profile permissions, then retry.",
+      network_unreachable: "Cannot reach the API. Check your connection and connected API address, then retry.",
+      computer_profiles_duplicate: "A profile with this name already exists. Choose another name.",
+      computer_profiles_unavailable: "Computer profile storage is unavailable. Retry shortly.",
+      native_execution_unavailable: "Native execution is unavailable. Check the connected API’s native execution configuration, then retry.",
+    },
+
     inspect: "Inspect selected window",
     inspectHelp: "Control is off: inspect this window once, locally, after native approval. This does not connect the profile to chat or capture screenshots.",
     captureDenied: "Screen Recording permission is denied. Capture is unavailable. Open Mac Screen Recording settings to allow it, then check readiness again.",
@@ -52,6 +63,8 @@ export const en = {
     blocked: "Connection blocked. Check helper readiness and system permissions, then try again.",
   },
   nativeComputer: {
+    refreshWindows: "Refresh windows",
+    windowsNotChecked: "Windows have not been checked. Refresh windows to discover available windows.",
     verificationAcknowledge: "Request attended Mac verification",
     verificationHelp: "Verification is temporary, not pilot acceptance or production certification. Stay present. A native Mac dialog must approve this request. Stop, workspace/account changes and session end revoke approval; an action already sent may finish. Task and target consent still apply.",
     verificationConfirmed: "Native Mac verification approved for this context. Control and capture remain separate opt-ins.",

@@ -10,7 +10,13 @@ The build failure was reproduced: composite build caches outside `dist` survived
 
 Implementation commits: `d2d9e41a` (build/package fix), `39d2c160` (profiles, chat tools and guarded image accounting), `d2718759` (readiness requires the profile schema).
 
-### Current portable verification
+### Profile-load failure follow-up
+
+The reported screenshot proves a profile request failed, not its HTTP status or server cause. Code review found that disabled native execution incorrectly hid profile CRUD behind a 404. `717dc1cc` separates owner-private metadata/grants from execution; native connection/consent still fails closed. Missing schema, authorization and storage failures now have sanitized codes. UI and main-process connection errors distinguish those failures from local Mac permissions; window discovery has an explicit refresh and no false empty-state claim after failure.
+
+Follow-up verification: 98 API tests (including SQL-backed disabled-service CRUD/revocation and profile transport), 180 desktop integration tests, and 122 web tests passed. API build, desktop typecheck and renderer typecheck passed. ESLint remains blocked by its existing configuration-loader failure. No remote API was updated, migration applied, execution enabled or signed-Mac acceptance performed. The screenshot's exact live-server cause remains unconfirmed.
+
+### Earlier portable verification at the implementation commits above
 
 Selections overlap; do not sum them or promote them to native acceptance.
 

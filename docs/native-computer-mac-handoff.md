@@ -16,12 +16,12 @@ ditto -x -k "$zip" "$check_dir" && \
   NATIVE_COMPUTER_INSPECTOR_ENABLED=true "$check_dir/Use Brian.app/Contents/MacOS/Use Brian"
 ```
 
-The connected API must also run this branch with normal migrations, including `622_computer_profiles.sql`. A desktop rebuild does not update a remote API.
+The connected API must also run this branch with normal migrations, including `622_computer_profiles.sql`. A desktop rebuild does not update a remote API. Profile creation does not require native execution to be enabled. If loading or connecting fails, the page now distinguishes API compatibility, missing schema, sign-in/access, and execution availability; Mac permission changes do not fix those backend failures.
 
 ## Use it
 
 1. Open **This computer** and create a named profile. No assistant/chat/task/goal picker is required.
-2. Grant Accessibility if needed, select a disposable TextEdit window, enable control and click **Connect computer**. Approve the native dialog. With control off, the button performs a local read-only inspection instead.
+2. Grant Accessibility if needed, click **Refresh windows** and select a disposable TextEdit window, enable control and click **Connect computer**. Approve the native dialog. With control off, the button performs a local read-only inspection instead.
 3. In your assistant's **Tools**, enable its computer-use permission and grant it this computer profile.
 4. In a normal chat with that assistant, ask: **Use my computer profile to replace the TextEdit document with Hello team.** Approve the chat's local window grant and each proposed edit. Check the actual document.
 5. Ask it to release the computer. In another chat, request access again: expect fresh local consent, without creating a task or reconnecting the profile.

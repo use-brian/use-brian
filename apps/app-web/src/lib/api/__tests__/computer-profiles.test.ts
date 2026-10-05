@@ -34,3 +34,40 @@ it("[COMP:app-web/computer-profiles] assistant patch projects only atomic intent
   await updateComputerProfileAssistant("p", "b", { routingNote: "" });
   expect(authFetch).toHaveBeenLastCalledWith("https://api.test/api/native-computer/profiles/p/assistants/b", expect.objectContaining({ body: JSON.stringify({ routingNote: "" }) }));
 });
+
+it.each([
+  [401, "anything", "sign_in_required"],
+  [403, "computer_profiles_forbidden", "computer_profiles_forbidden"],
+  [404, "anything", "api_not_supported"],
+  [503, "computer_profiles_schema_unavailable", "computer_profiles_schema_unavailable"],
+  [503, "computer_profiles_unavailable", "computer_profiles_unavailable"],
+  [503, "native_execution_unavailable", "native_execution_unavailable"],
+  [503, "SQL password=secret", "computer_profiles_unavailable"],
+  [409, "computer_profiles_duplicate", "computer_profiles_duplicate"],
+  [409, "unknown", "computer_profiles_unavailable"],
+] as const)("[COMP:app-web/computer-profiles] sanitizes HTTP %s code %s", async (status, code, expected) => {
+  vi.mocked(authFetch).mockImplementation(async () => new Response(JSON.stringify({ code, error: "SQL password=secret" }), { status }));
+  for (const request of [() => listComputerProfiles("w"), () => createComputerProfile("w", "Mac"), () => updateComputerProfile("p", { name: "Mac" }), () => updateComputerProfileAssistant("p", "a", { enabled: true }), () => deleteComputerProfile("p")]) {
+    await expect(request()).rejects.toMatchObject({ name: "ComputerProfileError", code: expected, status, message: expected });
+  }
+});
+it.each([
+  "<html>SQL password=secret</html>", "{}", '{"profiles":{}}',
+  JSON.stringify({ profiles: [{ ...profile, enabledAssistantIds: [123] }] }),
+  JSON.stringify({ profiles: [{ ...profile, assistantRoutingNotes: { a: { sql: "secret" } } }] }),
+  JSON.stringify({ profiles: [{ ...profile, connected: "false" }] }),
+  JSON.stringify({ profiles: [{ ...profile, deviceId: undefined }] }),
+])("[COMP:app-web/computer-profiles] rejects incompatible list shape %s", async body => {
+  vi.mocked(authFetch).mockResolvedValueOnce(new Response(body));
+  await expect(listComputerProfiles("w")).rejects.toMatchObject({ code: "api_not_supported", status: 200 });
+});
+it("[COMP:app-web/computer-profiles] rejects invalid mutation success and sanitizes network errors", async () => {
+  vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({ profile: { ...profile, canManage: 1 } })));
+  await expect(createComputerProfile("w", "Mac")).rejects.toMatchObject({ code: "api_not_supported" });
+  vi.mocked(authFetch).mockRejectedValueOnce(new Error("https://secret-token@private-api"));
+  await expect(listComputerProfiles("w")).rejects.toMatchObject({ code: "network_unreachable", message: "network_unreachable" });
+});
+it("[COMP:app-web/computer-profiles] recognizes an HTML proxy response without attributing generic 503 to schema", async () => {
+  vi.mocked(authFetch).mockResolvedValueOnce(new Response("<html>private</html>", { status: 503, headers: { "Content-Type": "text/html" } }));
+  await expect(listComputerProfiles("w")).rejects.toMatchObject({ code: "computer_profiles_unavailable", status: 503 });
+});

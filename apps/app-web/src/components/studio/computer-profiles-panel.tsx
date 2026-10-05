@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
-import { type ComputerProfile, type ComputerProfileAssistantPatch, updateComputerProfileAssistant, useComputerProfiles } from "@/lib/api/computer-profiles";
+import { computerProfileErrorCode, type ComputerProfileErrorCode, type ComputerProfile, type ComputerProfileAssistantPatch, updateComputerProfileAssistant, useComputerProfiles } from "@/lib/api/computer-profiles";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ListSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
@@ -25,10 +25,10 @@ export function ComputerProfilesPanel({ workspaceId, assistantId, ...props }: Pa
 }
 function ProfileGrants({ workspaceId, assistantId, capability, onManageCapability }: PanelProps & { workspaceId: string }) {
   const t = useT().computerProfiles;
-  const { profiles, error, refresh } = useComputerProfiles(workspaceId);
+  const { profiles, error, errorCode, refresh } = useComputerProfiles(workspaceId);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<ComputerProfileErrorCode | null>(null);
   const [capabilityFailed, setCapabilityFailed] = useState(false);
   const changingCapability = useRef(false);
   async function changeCapability(enabled: boolean) {
@@ -44,11 +44,11 @@ function ProfileGrants({ workspaceId, assistantId, capability, onManageCapabilit
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   async function save(profile: ComputerProfile, patch: ComputerProfileAssistantPatch) {
     if (writing.current || !profile.canManage) return;
-    writing.current = true; setSaving(true); setFailed(false);
+    writing.current = true; setSaving(true); setFailed(null);
     try {
       await updateComputerProfileAssistant(profile.id, assistantId, patch);
       if (alive.current) { await refresh(); setDrafts(old => { const next = { ...old }; delete next[profile.id]; return next; }); }
-    } catch { if (alive.current) setFailed(true); }
+    } catch (error) { if (alive.current) setFailed(computerProfileErrorCode(error)); }
     finally { writing.current = false; if (alive.current) setSaving(false); }
   }
   return <section className="space-y-3" aria-label={t.title}>
@@ -61,7 +61,7 @@ function ProfileGrants({ workspaceId, assistantId, capability, onManageCapabilit
     {capabilityFailed ? <p role="alert" className="text-sm text-destructive">{t.capabilityError}</p> : null}
     <p className="text-sm">{t.chatHelp}</p>
     <Link className="inline-flex min-h-11 items-center text-sm underline" href={`/w/${workspaceId}/computer/native`}>{t.title}</Link>
-    {error || failed ? <p role="alert" className="text-sm text-destructive">{t.error} <Button className="min-h-11" variant="outline" onClick={() => void refresh()}>{t.retry}</Button></p> : null}
+    {error || failed ? <p role="alert" className="text-sm text-destructive">{t.errors[errorCode ?? failed ?? "computer_profiles_unavailable"]} <Button className="min-h-11" variant="outline" onClick={() => { setFailed(null); void refresh(); }}>{t.retry}</Button></p> : null}
     {!profiles && !error ? <ListSurfaceSkeleton /> : profiles?.length === 0 ? <p>{t.empty}</p> : null}
     {profiles?.map(profile => {
       const enabled = profile.enabledAssistantIds.includes(assistantId);

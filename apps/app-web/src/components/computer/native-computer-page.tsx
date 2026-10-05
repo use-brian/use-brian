@@ -1,10 +1,10 @@
 "use client";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
 import { desktopBridge } from "@/lib/desktop-auth-source";
 import { nativeComputer, type DesktopComputerControlResult, type DiscoveredTarget, isNativeTarget, nativeTargetIdentity, nativeTargetKey, supportsNativeVisual } from "@/lib/native-computer";
-import { createComputerProfile, updateComputerProfile, deleteComputerProfile, useComputerProfiles } from "@/lib/api/computer-profiles";
+import { blocksComputerProfileCreation, computerProfileErrorCode, type ComputerProfileErrorCode, createComputerProfile, updateComputerProfile, deleteComputerProfile, useComputerProfiles } from "@/lib/api/computer-profiles";
 import { ListSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 import { promptDialog } from "@/components/ui/prompt-dialog";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -42,9 +42,12 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
   const copy = useT(); const t = copy.nativeComputer; const p = copy.computerProfiles;
   const supported = !!desktopBridge()?.computerControl;
   const state = useSyncExternalStore(nativeComputer.subscribe, nativeComputer.snapshot, nativeComputer.serverSnapshot);
-  const { profiles, error, refresh } = useComputerProfiles(workspaceId);
+  const { profiles, error, errorCode, refresh } = useComputerProfiles(workspaceId);
   const [profileId, setProfile] = useState("");
   const profile = profiles?.find(row => row.id === profileId);
+  const [mutationError, setMutationError] = useState<ComputerProfileErrorCode | null>(null);
+  const [discovered, setDiscovered] = useState(false);
+  const discoveryRequest = useRef(0);
   const [targets, setTargets] = useState<DiscoveredTarget[]>([]);
   const [targetKey, setTarget] = useState("");
   const [allowControl, setControl] = useState(false);
@@ -68,7 +71,7 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
   const { verificationPending, controlSupported, captureSupported, canControl, canCapture, permissionBlocked, captureDenied, ready } = requestedScope(state);
   const inspection = !state.cleanupPending && state.status?.identity?.workspaceId === workspaceId ? state.inspection : undefined;
   const setupRevision = nativeComputer.setupRevision;
-  function reset() { ++revision.current; setControl(false); setCapture(false); setTargets([]); setTarget(""); }
+  function reset() { ++revision.current; setControl(false); setCapture(false); setTargets([]); setDiscovered(false); setTarget(""); }
   useEffect(() => { reset(); }, [profileId, setupRevision, state.cleanupPending]);
   useEffect(() => { ++revision.current; setControl(false); setCapture(false); }, [targetKey, controlSupported, captureSupported, verificationPending, permissionBlocked, captureDenied, phase]);
   useEffect(() => {
@@ -79,21 +82,30 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     if (!profilePresent || !targetPresent) { ++revision.current; setControl(false); setCapture(false); }
   }, [profilePresent, targetPresent]);
-  useEffect(() => {
+  const discover = useCallback(async () => {
     if (!supported || locked || state.inspection) return;
-    let live = true; let request = 0;
-    const discover = async () => {
-      const seq = ++request; const rev = revision.current;
+    const seq = ++discoveryRequest.current; const rev = revision.current;
+    const generation = nativeComputer.setupRevision;
+    const current = () => alive.current && seq === discoveryRequest.current && rev === revision.current && generation === nativeComputer.setupRevision;
+    try {
       const result = await nativeComputer.send({ type: "targets" });
-      if (live && seq === request && rev === revision.current) setTargets(result.ok ? (result.targets ?? []).filter(isNativeTarget) : []);
-    };
+      if (!current()) return;
+      const success = result.ok && Array.isArray(result.targets);
+      setDiscovered(success);
+      setTargets(success ? result.targets!.filter(isNativeTarget) : []);
+    } catch {
+      if (current()) { setDiscovered(false); setTargets([]); }
+    }
+  }, [supported, locked, state.inspection]);
+  useEffect(() => {
     void discover(); window.addEventListener("focus", discover);
     const timer = setInterval(discover, 5000);
-    return () => { live = false; clearInterval(timer); window.removeEventListener("focus", discover); };
-  }, [supported, locked, profileId, setupRevision, state.cleanupPending, state.inspection]);
+    return () => { ++discoveryRequest.current; clearInterval(timer); window.removeEventListener("focus", discover); };
+  }, [discover, profileId, setupRevision, state.cleanupPending]);
+  const creationBlocked = blocksComputerProfileCreation(errorCode) || blocksComputerProfileCreation(mutationError);
   async function manage(kind: "create" | "rename" | "delete") {
-    if (operation.current || (kind !== "create" && !profile)) return;
-    operation.current = true; setBusy(true); setFailed(false);
+    if (operation.current || (kind === "create" && creationBlocked) || (kind !== "create" && !profile)) return;
+    operation.current = true; setBusy(true); setFailed(false); setMutationError(null);
     const controller = new AbortController(); abort.current = controller;
     try {
       if (kind === "delete") {
@@ -108,13 +120,13 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
         if (alive.current) setProfile(saved.id);
       }
       if (alive.current) await refresh();
-    } catch { if (alive.current) setFailed(true); }
+    } catch (error) { if (alive.current) setMutationError(computerProfileErrorCode(error)); }
     finally { operation.current = false; if (alive.current) setBusy(false); }
   }
   async function connect() {
     if (locked || operation.current || state.inspection || !ready || !profile || !targetKey) return;
     const rev = revision.current; const generation = nativeComputer.setupRevision;
-    operation.current = true; setBusy(true); setFailed(false);
+    operation.current = true; setBusy(true); setFailed(false); setMutationError(null);
     try {
       // A click never trusts a previously displayed window identity. Strip labels
       // and fence discovery against Stop, context changes, and capability loss.
@@ -125,7 +137,10 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
       const scope = requestedScope(current);
       if (!target || current.cleanupPending || current.inspection || !scope.ready || allowControl && !scope.canControl || allowCapture && (!allowControl || !scope.canCapture)) { setFailed(true); reset(); return; }
       const connected = await nativeComputer.send({ type: "connect-profile", workspaceId, profileId: profile.id, target: nativeTargetIdentity(target), allowControl, allowCapture });
-      if (alive.current && generation === nativeComputer.setupRevision) { setFailed(!connected.ok); setControl(false); setCapture(false); void refresh(); }
+      if (alive.current && generation === nativeComputer.setupRevision) {
+        setMutationError(!connected.ok ? connected.profileErrorCode ?? null : null);
+        setFailed(!connected.ok && !connected.profileErrorCode); setControl(false); setCapture(false); void refresh();
+      }
     } catch { if (alive.current) setFailed(true); }
     finally { operation.current = false; if (alive.current) setBusy(false); }
   }
@@ -146,8 +161,8 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
     <h1 className="text-xl font-semibold">{p.title}</h1>
     <p className="text-sm text-muted-foreground">{p.privateHelp}</p>
     <p className="text-sm">{p.chatHelp} <Link className="inline-flex min-h-11 items-center underline" href={`/w/${workspaceId}/studio`}>{p.studio}</Link>{" · "}<Link className="inline-flex min-h-11 items-center underline" href={`/w/${workspaceId}/chat`}>{t.chat}</Link></p>
-    <Button className="min-h-11" disabled={busy} onClick={() => void manage("create")}>{p.create}</Button>
-    {error ? <p role="alert">{p.error} <Button className="min-h-11" variant="outline" onClick={() => void refresh()}>{p.retry}</Button></p> : profiles === null ? <ListSurfaceSkeleton /> : !profiles.length ? <p>{p.empty}</p> : null}
+    <Button className="min-h-11" disabled={busy || creationBlocked} onClick={() => void manage("create")}>{p.create}</Button>
+    {error || mutationError ? <p role="alert">{p.errors[mutationError ?? errorCode ?? "computer_profiles_unavailable"]} <Button className="min-h-11" variant="outline" onClick={() => { setMutationError(null); void refresh(); }}>{p.retry}</Button></p> : profiles === null ? <ListSurfaceSkeleton /> : !profiles.length ? <p>{p.empty}</p> : null}
     <Picker label={p.select} value={profileId} disabled={setupLocked} options={profiles ?? []} onChange={setProfile} />
     {profile ? <div className="space-y-2 rounded-xl border p-4"><h2 className="font-medium">{profile.name}</h2><p role="status">{profile.connected || state.profileConnected && state.profileId === profile.id ? p.online : p.offline}</p><div className="flex flex-wrap gap-2">
       <Button className="min-h-11" variant="outline" disabled={locked} onClick={() => void manage("rename")}>{p.rename}</Button>
@@ -178,7 +193,8 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
         </table></div>
       </section> : null}
       <Picker label={t.target} value={targetKey} disabled={setupLocked} options={targets.map(item => ({ id: nativeTargetKey(item), name: `${item.displayName ? `${item.displayName} · ` : ""}${item.appId} · ${item.windowId}` }))} onChange={setTarget} />
-      {!targets.length ? <p className="text-sm">{t.noTargets}</p> : null}
+      <Button className="min-h-11" variant="outline" disabled={setupLocked} onClick={() => void discover()}>{t.refreshWindows}</Button>
+      {!targets.length ? <p className="text-sm">{discovered ? t.noTargets : t.windowsNotChecked}</p> : null}
       <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowControl} onCheckedChange={value => { setControl(value); if (!value) setCapture(false); }} disabled={setupLocked || !canControl} />{t.control}</label>
       <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowCapture} onCheckedChange={setCapture} disabled={setupLocked || !allowControl || !canCapture} />{t.capture}</label>
       {!allowControl ? <p className="text-sm text-muted-foreground">{p.inspectHelp}</p> : null}

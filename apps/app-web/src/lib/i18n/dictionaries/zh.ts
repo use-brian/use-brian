@@ -2,6 +2,17 @@ import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
   computerProfiles: {
+    errors: {
+      computer_profiles_schema_unavailable: "設定檔儲存需要遷移622。請更新連線的API並套用遷移622，再重試。",
+      api_not_supported: "此桌面連線的API不支援電腦設定檔。請更新該API再重試。",
+      sign_in_required: "請重新登入後再重試管理電腦設定檔。",
+      computer_profiles_forbidden: "存取遭拒。請檢查工作區與設定檔權限再重試。",
+      network_unreachable: "無法連線至API。請檢查網路與連線的API位址再重試。",
+      computer_profiles_duplicate: "已有同名設定檔。請使用其他名稱。",
+      computer_profiles_unavailable: "電腦設定檔儲存暫時無法使用。請稍後重試。",
+      native_execution_unavailable: "原生執行無法使用。請檢查連線API的原生執行設定再重試。",
+    },
+
     inspect: "檢查所選視窗",
     inspectHelp: "控制已關閉：原生核准後，僅在本機檢查此視窗一次。不會將設定檔連接至聊天或擷取螢幕截圖。",
     captureDenied: "螢幕錄製權限遭拒，無法擷取畫面。請開啟 Mac 螢幕錄製設定授權後，再檢查準備狀態。",
@@ -39,6 +50,8 @@ export const zh: Dictionary = {
     blocked: "連線受阻。請檢查輔助程式狀態與系統權限後重試。",
   },
   nativeComputer: {
+    refreshWindows: "重新整理視窗",
+    windowsNotChecked: "尚未檢查視窗。請重新整理以尋找可用視窗。",
     verificationAcknowledge: "申請有人監督的 Mac 驗證",
     verificationHelp: "此為臨時驗證，不代表試行驗收或正式上線認證。請全程在場。必須由 Mac 原生對話框批准。停止、切換工作區或帳號及結束工作階段會撤銷批准；已送出的操作仍可能完成。仍需任務與目標同意。",
     verificationConfirmed: "此情境的 Mac 驗證已獲批准。控制與截圖仍須分別啟用。",
