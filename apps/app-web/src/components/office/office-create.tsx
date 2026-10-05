@@ -7,6 +7,7 @@ import { Dialog } from "@base-ui/react/dialog";
 import { FileSpreadsheet, FileText, Presentation, X } from "lucide-react";
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { OfficeScopePicker, type OfficeCreationScope } from "./office-scope-picker";
 import { OfficeTopbar } from "./office-topbar";
 import { OfficeCardPreview } from "./office-card-preview";
 import { useT } from "@/lib/i18n/client";
@@ -43,6 +44,7 @@ export function OfficeTemplatePicker({
   return (
     <div>
       <h1 className="text-2xl font-semibold">{t.chooseTemplateTitle}</h1>
+      <Link href={`/w/${workspaceId}/office/new?mode=prompt`} className="mt-4 inline-flex min-h-8 max-sm:min-h-11 items-center rounded-md border px-4 text-sm font-medium">{t.promptDocument}</Link>
       <p className="mt-2 text-sm text-muted-foreground">{t.chooseTemplateDescription}</p>
       {failed ? <p role="alert" className="py-16 text-center text-sm text-destructive">{t.loadFailed}</p> : templates === null ? <p className="py-16 text-center text-sm text-muted-foreground">{t.loading}</p> : templates.length === 0 ? (
         <section className="mt-6 rounded-2xl border border-dashed px-6 py-12 text-center">
@@ -81,7 +83,7 @@ function OfficeCreateForm({
   canUseTemplate,
 }: {
   workspaceId: string;
-  template: OfficeTemplate;
+  template: OfficeTemplate | null;
   onCancel: () => void;
   onChangeTemplate: () => void;
   onDirtyChange?: (dirty: boolean) => void;
@@ -90,11 +92,12 @@ function OfficeCreateForm({
   const copy = useT();
   const t = copy.office;
   const router = useRouter();
+  const [scope, setScope] = useState<OfficeCreationScope | null>(null);
   const [outcome, setOutcome] = useState("");
   const [audience, setAudience] = useState("");
   const [additionalContext, setAdditionalContext] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<"failed" | "unavailable" | null>(null);
+  const [error, setError] = useState<"failed" | "unavailable" | "provenance" | null>(null);
   const [generationAvailable, setGenerationAvailable] = useState<boolean | null>(null);
   const dirty = Boolean(outcome || audience || additionalContext);
   const alive = useRef(false);
@@ -122,7 +125,7 @@ function OfficeCreateForm({
     void getOfficeCapabilities()
       .then((capabilities) => {
         if (!active) return;
-        const available = capabilities.generationAvailable && capabilities.generationFamilies.includes(template.family);
+        const available = capabilities.generationAvailable && capabilities.generationFamilies.includes(template?.family ?? "document");
         setGenerationAvailable(available);
         if (!available) setError("unavailable");
       })
@@ -132,38 +135,40 @@ function OfficeCreateForm({
         setError("failed");
       });
     return () => { active = false; };
-  }, [template.family]);
+  }, [template?.family]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!alive.current || !canUseTemplate() || busy || generationAvailable !== true || invalidFields) return;
+    if (!alive.current || !canUseTemplate() || busy || generationAvailable !== true || invalidFields || !scope) return;
     setBusy(true);
     setError(null);
     try {
       const created = await createOfficeArtifact({
         workspaceId,
         assistantId: APP_LEVEL_ASSISTANT_ID,
-        family: template.family,
+        family: template?.family ?? "document",
+        ...scope,
         outcome,
         audience,
-        additionalContext: additionalContext.trim() || undefined,
-        templateId: String(template.currentVersionId),
+        additionalContext: template ? additionalContext.trim() || undefined : undefined,
+        templateId: template ? String(template.currentVersionId) : undefined,
         idempotencyKey: crypto.randomUUID(),
       });
       if (alive.current && canUseTemplate()) router.push(`/w/${workspaceId}/office/${created.artifactId}`);
     } catch (cause) {
       if (!alive.current) return;
-      setError(cause instanceof OfficeApiError && cause.message === "office_generation_unavailable" ? "unavailable" : "failed");
+      setError(cause instanceof OfficeApiError && cause.message === "office_generation_unavailable" ? "unavailable" : cause instanceof OfficeApiError && cause.message === "office_admission_provenance_required" ? "provenance" : "failed");
       setBusy(false);
     }
   }
 
   return <div>
-    <h1 className="text-2xl font-semibold">{format(t.createFromTemplate, { template: template.name })}</h1>
-    <p className="mt-2 text-sm text-muted-foreground">{t.templateFirstCreateDescription}</p>
-    <div className="mt-5 flex items-center gap-3 rounded-lg border bg-muted/30 p-3 text-sm"><span className="font-medium">{template.name}</span><span className="text-muted-foreground">{template.family === "document" ? t.document : template.family === "presentation" ? t.presentation : t.spreadsheet}</span><button type="button" onClick={onChangeTemplate} className="ml-auto rounded-md px-2 py-1 font-medium text-primary hover:bg-background">{t.browseTemplates}</button></div>
+    <h1 className="text-2xl font-semibold">{template ? format(t.createFromTemplate, { template: template.name }) : t.promptDocument}</h1>
+    <p className="mt-2 text-sm text-muted-foreground">{template ? t.templateFirstCreateDescription : t.promptDocumentDescription}</p>
+    {template ? <div className="mt-5 flex items-center gap-3 rounded-lg border bg-muted/30 p-3 text-sm"><span className="font-medium">{template.name}</span><span className="text-muted-foreground">{template.family === "document" ? t.document : template.family === "presentation" ? t.presentation : t.spreadsheet}</span><button type="button" onClick={onChangeTemplate} className="ml-auto rounded-md px-2 py-1 font-medium text-primary hover:bg-background">{t.browseTemplates}</button></div> : null}
     <form onSubmit={submit} className="mt-8 space-y-6">
-      {fields.map((field) => {
+      <OfficeScopePicker workspaceId={workspaceId} onChange={setScope} />
+      {fields.filter(field => template || field.id !== "office-create-context").map((field) => {
         const tooLong = field.value.length > field.limit;
         const props = { id: field.id, required: field.required, value: field.value, onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => field.setValue(event.target.value), placeholder: field.placeholder, "aria-invalid": tooLong, "aria-describedby": `${field.id}-help` };
         return <div key={field.id}>
@@ -176,17 +181,18 @@ function OfficeCreateForm({
           </p>
         </div>;
       })}
-          {error ? <p role="alert" className="text-sm text-destructive">{error === "unavailable" ? t.createUnavailable : t.createFailed}</p> : null}
+          {error ? <p role="alert" className="text-sm text-destructive">{error === "unavailable" ? t.createUnavailable : error === "provenance" ? t.departmentGenerationUnavailable : t.createFailed}</p> : null}
       <div className="flex justify-end gap-2 border-t pt-5">
         <button type="button" onClick={onCancel} className="h-10 rounded-md border px-4 text-sm font-medium">{copy.common.cancel}</button>
-        <button type="submit" disabled={generationAvailable !== true || busy || invalidFields} className="h-10 rounded-md bg-action px-5 text-sm font-medium text-action-foreground disabled:opacity-50">{busy ? t.generating : t.generate}</button>
+        <button type="submit" disabled={generationAvailable !== true || busy || invalidFields || !scope} className="h-10 rounded-md bg-action px-5 text-sm font-medium text-action-foreground disabled:opacity-50">{busy ? t.generating : t.generate}</button>
       </div>
     </form>
   </div>;
 }
 
-function useTemplateChoices(workspaceId: string): { templates: UsableOfficeTemplate[] | null; selected: UsableOfficeTemplate | null; failed: boolean; canUseTemplate: (candidate?: OfficeTemplate) => boolean } {
+function useTemplateChoices(workspaceId: string): { templates: UsableOfficeTemplate[] | null; selected: UsableOfficeTemplate | null; prompt: boolean; failed: boolean; canUseTemplate: (candidate?: OfficeTemplate) => boolean } {
   const searchParams = useSearchParams();
+  const prompt = searchParams.get("mode") === "prompt";
   const templateId = searchParams.get("templateId");
   const templateVersionId = searchParams.get("templateVersionId");
   const workspace = useOptionalWorkspaceContext();
@@ -196,11 +202,12 @@ function useTemplateChoices(workspaceId: string): { templates: UsableOfficeTempl
   const failed = read.error !== undefined && !read.data;
   const selected = templates?.find((candidate) => candidate.id === templateId && candidate.currentVersionId === templateVersionId) ?? null;
   const canUseTemplate = (candidate: OfficeTemplate | null = selected) => {
-    if (!viewerId || !candidate) return false;
+    if (!viewerId) return false;
+    if (!candidate) return prompt;
     const current = readSurfaceCache<OfficeTemplate[]>(officeTemplateListCacheKey(workspaceId, viewerId)).data;
     return officeMetadataRemaining(current, viewerId) > 0 && Boolean(current?.some(row => JSON.stringify(row) === JSON.stringify(candidate)));
   };
-  return { templates, selected, failed, canUseTemplate };
+  return { templates, selected, prompt, failed, canUseTemplate };
 }
 
 function useCreationIdentity(workspaceId: string) {
@@ -233,7 +240,7 @@ function OfficeCreateSurface({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
   const [dirty, setDirty] = useState(false);
   const base = `/w/${workspaceId}/office`;
-  const { templates, selected: template, failed, canUseTemplate } = useTemplateChoices(workspaceId);
+  const { templates, selected: template, prompt, failed, canUseTemplate } = useTemplateChoices(workspaceId);
   const navigation = useCreationNavigation(template);
   useLayoutEffect(() => { if (!template) setDirty(false); }, [template]);
 
@@ -280,8 +287,8 @@ function OfficeCreateSurface({ workspaceId }: { workspaceId: string }) {
         breadcrumbs={[{ label: t.files, href: base }, { label: t.newArtifact }]}
         right={<button type="button" onClick={() => void close()} className="inline-flex h-8 items-center rounded-md border px-2.5 text-sm font-medium">{t.files}</button>}
       />
-      <main className={template ? "mx-auto w-full max-w-2xl p-4 sm:p-8" : "mx-auto w-full max-w-5xl p-4 sm:p-8"}>
-        {template ? <OfficeCreateForm key={JSON.stringify(template)} workspaceId={workspaceId} template={template} canUseTemplate={canUseTemplate} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}
+      <main className={template || prompt ? "mx-auto w-full max-w-2xl p-4 sm:p-8" : "mx-auto w-full max-w-5xl p-4 sm:p-8"}>
+        {template || prompt ? <OfficeCreateForm key={JSON.stringify(template)} workspaceId={workspaceId} template={template} canUseTemplate={canUseTemplate} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}
       </main>
     </div>
   );
@@ -298,7 +305,7 @@ function OfficeCreateDialogSurface({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
   const [dirty, setDirty] = useState(false);
   const base = `/w/${workspaceId}/office`;
-  const { templates, selected: template, failed, canUseTemplate } = useTemplateChoices(workspaceId);
+  const { templates, selected: template, prompt, failed, canUseTemplate } = useTemplateChoices(workspaceId);
   const navigation = useCreationNavigation(template);
   useLayoutEffect(() => { if (!template) setDirty(false); }, [template]);
 
@@ -342,13 +349,13 @@ function OfficeCreateDialogSurface({ workspaceId }: { workspaceId: string }) {
     <Dialog.Root open onOpenChange={(open) => { if (!open) void close(); }}>
       <Dialog.Portal>
         <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm" />
-        <Dialog.Popup className={template ? "fixed inset-0 z-50 h-dvh w-full overflow-y-auto bg-background p-5 outline-none sm:inset-auto sm:left-1/2 sm:top-1/2 sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:max-w-2xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:p-8 sm:shadow-xl" : "fixed inset-0 z-50 h-dvh w-full overflow-y-auto bg-background p-5 outline-none sm:inset-auto sm:left-1/2 sm:top-1/2 sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:max-w-5xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:p-8 sm:shadow-xl"}>
-          <Dialog.Title className="sr-only">{template ? format(t.createFromTemplate, { template: template.name }) : t.chooseTemplateTitle}</Dialog.Title>
-          <Dialog.Description className="sr-only">{template ? t.templateFirstCreateDescription : t.chooseTemplateDescription}</Dialog.Description>
+        <Dialog.Popup className={template || prompt ? "fixed inset-0 z-50 h-dvh w-full overflow-y-auto bg-background p-5 outline-none sm:inset-auto sm:left-1/2 sm:top-1/2 sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:max-w-2xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:p-8 sm:shadow-xl" : "fixed inset-0 z-50 h-dvh w-full overflow-y-auto bg-background p-5 outline-none sm:inset-auto sm:left-1/2 sm:top-1/2 sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:max-w-5xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:p-8 sm:shadow-xl"}>
+          <Dialog.Title className="sr-only">{template ? format(t.createFromTemplate, { template: template.name }) : prompt ? t.promptDocument : t.chooseTemplateTitle}</Dialog.Title>
+          <Dialog.Description className="sr-only">{template ? t.templateFirstCreateDescription : prompt ? t.promptDocumentDescription : t.chooseTemplateDescription}</Dialog.Description>
           <button type="button" onClick={() => void close()} aria-label={t.closeCreateAria} title={t.closeCreateAria} className="absolute right-4 top-4 inline-flex size-11 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground sm:size-8">
             <X className="size-4" aria-hidden />
           </button>
-          {template ? <OfficeCreateForm key={JSON.stringify(template)} workspaceId={workspaceId} template={template} canUseTemplate={canUseTemplate} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}
+          {template || prompt ? <OfficeCreateForm key={JSON.stringify(template)} workspaceId={workspaceId} template={template} canUseTemplate={canUseTemplate} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>

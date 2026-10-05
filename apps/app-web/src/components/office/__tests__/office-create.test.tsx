@@ -9,11 +9,12 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import { attachOfficeMetadata } from "@/lib/office/metadata";
 import { resetSurfaceCache } from "@/lib/surface-cache";
 vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: "workspace", me: {id: "viewer"}})}));
-const mocks = vi.hoisted(() => ({ create: vi.fn(), push: vi.fn() }));
+const mocks = vi.hoisted(() => ({ create: vi.fn(), push: vi.fn(), query:"templateId=template&templateVersionId=version" }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.push }),
-  useSearchParams: () => new URLSearchParams("templateId=template&templateVersionId=version"),
+  useSearchParams: () => new URLSearchParams(mocks.query),
 }));
+vi.mock("@/lib/api/departments", () => ({DEPARTMENTS_CHANGED_EVENT:"brian:departments-changed",fetchDepartments:async()=>({departments:[{departmentId:"team",name:"Operations",status:"active",myClearance:"internal"}],homes:[{principal:{kind:"user",id:"viewer"},departmentId:"team"}]})}));
 vi.mock("../office-topbar", () => ({ OfficeTopbar: () => null }));
 vi.mock("@/lib/office/api", async (original) => ({
   ...await original<Record<string, unknown>>(),
@@ -24,7 +25,7 @@ vi.mock("@/lib/office/api", async (original) => ({
 import { OfficeCreate } from "../office-create";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-afterEach(() => { vi.clearAllMocks(); resetSurfaceCache(); });
+afterEach(() => { vi.clearAllMocks(); mocks.query="templateId=template&templateVersionId=version"; resetSurfaceCache(); });
 
 describe("[COMP:app-web/office-navigation] Office create validation", () => {
   it.each([
@@ -57,4 +58,24 @@ describe("[COMP:app-web/office-navigation] Office create validation", () => {
     expect(mocks.create.mock.calls[0][0][field === "context" ? "additionalContext" : field]).toHaveLength(limit);
     act(() => root.unmount());
   });
+});
+
+describe('[COMP:app-web/office-navigation] departmental prompt creation',()=>{
+  it('creates a source-free document with the selected department and sensitivity',async()=>{
+    mocks.query='mode=prompt';mocks.create.mockResolvedValue({artifactId:'created'});
+    const host=document.createElement('div'),root=createRoot(host);
+    await act(async()=>root.render(<I18nProvider locale="en" dict={en}><OfficeCreate workspaceId="workspace"/></I18nProvider>));
+    expect(host.textContent).toContain(en.office.promptDocument);
+    expect(host.querySelector('#office-create-context')).toBeNull();
+    await act(async()=>{
+      for(const [id,value] of [['outcome','Write a welcome letter'],['audience','New colleagues']]){
+        const input=host.querySelector<HTMLInputElement|HTMLTextAreaElement>(`#office-create-${id}`)!;
+        Object.getOwnPropertyDescriptor(input.tagName==='INPUT'?HTMLInputElement.prototype:HTMLTextAreaElement.prototype,'value')!.set!.call(input,value);
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+      }
+    });
+    await act(async()=>host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+    expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({family:'document',destination:{kind:'department',departmentId:'team'},sensitivity:'internal',templateId:undefined,additionalContext:undefined}));
+    act(()=>root.unmount());
+  })
 });

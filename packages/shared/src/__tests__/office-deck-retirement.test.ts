@@ -19,6 +19,8 @@ describe('[COMP:office/deck-retirement] Legacy Deck retirement', () => {
     expect(OFFICIAL_CONNECTOR_TOOLS.office.map((tool) => tool.name)).toEqual([
       'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
+      'getOfficeClassification',
+      'restrictOfficeClassification',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
       'openPdfEditingSession',
@@ -27,6 +29,8 @@ describe('[COMP:office/deck-retirement] Legacy Deck retirement', () => {
     expect(BOOT_INJECTED_BUILTIN_TOOLS.office).toEqual([
       'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
+      'getOfficeClassification',
+      'restrictOfficeClassification',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
       'openPdfEditingSession',

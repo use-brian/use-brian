@@ -323,6 +323,8 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   office: [
     { name: 'proposeOfficeEvidenceFill', description: 'Propose source-linked values for selected worksheet cells; human acceptance required', classification: 'write', defaultPolicy: 'allow' },
     { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet job', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'getOfficeClassification', description: 'Read the department and sensitivity protections of an Office artifact', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'restrictOfficeClassification', description: 'Add department protection or raise Office sensitivity after approval', classification: 'write', defaultPolicy: 'ask' },
     { name: 'getOfficeArtifact', description: 'Read an Office artifact and its current generation state', classification: 'read', defaultPolicy: 'allow' },
     { name: 'reviseOfficeArtifact', description: 'Start an undoable Office revision or proposal job', classification: 'write', defaultPolicy: 'allow' },
     { name: 'openPdfEditingSession', description: 'Open a current-turn PDF attachment as a bounded private editing session', classification: 'write', defaultPolicy: 'allow' },
@@ -662,6 +664,8 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
   office: [
     'proposeOfficeEvidenceFill',
     'createOfficeArtifact',
+    'getOfficeClassification',
+    'restrictOfficeClassification',
     'getOfficeArtifact',
     'reviseOfficeArtifact',
     'openPdfEditingSession',

@@ -14,6 +14,7 @@ const ShellSchema = z.object({
   // Do not default these arrays: omission and explicit General are distinct.
   requiredCompartments: z.array(z.string().min(1).max(255)).max(100).optional(),
   projectIds: z.array(z.string().uuid()).max(100).optional(),
+  destination: z.discriminatedUnion('kind', [z.object({kind:z.literal('department'),departmentId:z.string().uuid()}).strict(),z.object({kind:z.literal('general')}).strict()]).optional(),
   expectedPolicyRevision: z.string().regex(/^\d+$/).optional(),
 }).strict()
 
@@ -35,6 +36,7 @@ export function officeAuthoredShellRoutes(): Router {
     const options: OfficeCreateOptions = {
       provenance: { kind: 'human_authored_root', actorUserId: req.userId, workspaceId: input.workspaceId },
       expectedPolicyRevision: input.expectedPolicyRevision,
+      destination: input.destination,
     }
     try {
       const artifact = await officeArtifactStore.createShell({

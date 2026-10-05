@@ -8,7 +8,7 @@
  */
 import { z } from 'zod'
 import { canEnableOfficeCreation } from './templates/compiler.js'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '../security/context-scope.js'
 
 export type OfficeArtifactToolProjection = {
@@ -43,6 +43,11 @@ export type OfficeArtifactToolProjection = {
 }
 
 export type OfficeToolPort = {
+  retryTemplateImport?(input: { userId: string; workspaceId: string; artifactId: string; failedJobId: string; fileId?: string; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<{ jobId: string } | null>
+  inspectClassification?(context:ToolContext, artifactId:string): Promise<unknown>;
+  restrictClassification?(context:ToolContext, input:{artifactId:string;expectedRevision:string;departmentId?:string;sensitivity:'public'|'internal'|'confidential'}): Promise<unknown>;
+
+
   create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ artifactId: string; jobId: string }>
   get(params: { userId: string; artifactId: string; targetOffset?: number; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<OfficeArtifactToolProjection | null>
   revise(params: { userId: string; assistantId: string; artifactId: string; instruction: string; targetIds: string[]; expectedVersion: number; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
@@ -359,5 +364,35 @@ export function createOfficeTools(params: {
     },
   })
 
-  return [createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact, openPdfEditingSession, placePdfSignature]
+  const classificationTools:Tool[] = []
+  if (params.port.inspectClassification && params.port.restrictClassification) {
+    classificationTools.push(buildTool({
+      name: 'getOfficeClassification',
+      requiresCapability: 'office',
+      resolveConfirmation: askGate('getOfficeClassification'),
+      isReadOnly: true,
+      isConcurrencySafe: true,
+      description:'Inspect department and sensitivity protections and recent classification history of one accessible Office artifact. Read before restrictOfficeClassification to obtain the current revision. Sharing does not override these protections.',
+      inputSchema:z.object({artifactId:z.string().uuid()}).strict(),
+      async execute(input,context) {
+        const blocked=await blockGate('getOfficeClassification',context);if(blocked)return blocked
+        const data=await params.port.inspectClassification!(context,input.artifactId)
+        return data ? {data,scopeEvidence:scopeEvidenceFromRows([data])} : {data:artifactUnreachable('getOfficeClassification','read',input.artifactId),isError:true}
+      },
+    }),buildTool({
+      name: 'restrictOfficeClassification',
+      requiresCapability: 'office',
+      isReadOnly: false,
+      isConcurrencySafe: false,
+      requiresConfirmation: true,
+      description:'Add a department restriction or raise sensitivity on one Office artifact after explicit user approval. Supply the revision from getOfficeClassification. Preserves all existing source and department floors. This protection cannot be removed by Undo; broader sharing requires a reviewed derivative. Requires sharing-management and edit authority and current destination clearance.',
+      inputSchema:z.object({artifactId:z.string().uuid(),expectedRevision:z.string().regex(/^[a-f0-9]{64}$/),departmentId:z.string().uuid().optional(),sensitivity:z.enum(['public','internal','confidential'])}).strict(),
+      async execute(input,context) {
+        const blocked=await blockGate('restrictOfficeClassification',context);if(blocked)return blocked
+        const data=await params.port.restrictClassification!(context,input)
+        return {data,scopeEvidence:scopeEvidenceFromRows([data])}
+      },
+    }))
+  }
+  return [createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact, openPdfEditingSession, placePdfSignature,...classificationTools, ...recoveryTools]
 }

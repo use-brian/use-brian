@@ -333,3 +333,20 @@ describe('[COMP:office/pdf-tools] PDF session tools', () => {
     expect(String(stale.data)).toContain('pdf_signature_approval_stale')
   })
 })
+
+describe('[COMP:office/tools] classification approval and scope evidence',()=>{
+  it('shares the classified artifact command and always requires confirmation for protection changes',async()=>{
+    const inspectClassification=vi.fn(async()=>({revision:'a'.repeat(64),sensitivity:'confidential',compartments:['team:planning'],projectIds:[]}))
+    const restrictClassification=vi.fn(async()=>({artifactId:id(1),sensitivity:'confidential',compartments:['team:planning']}))
+    const port:OfficeToolPort={create:vi.fn(),get:vi.fn(),revise:vi.fn(),inspectClassification,restrictClassification}
+    const tools=createOfficeTools({port})
+    const inspect=tools.find(t=>t.name==='getOfficeClassification')!
+    const write=tools.find(t=>t.name==='restrictOfficeClassification')!
+    expect(write.requiresCapability).toBe('office');expect(write.requiresConfirmation).toBe(true)
+    const result=await inspect.execute({artifactId:id(1)},context)
+    expect(result.scopeEvidence).toMatchObject({sensitivity:'confidential',compartments:['team:planning']})
+    const command={artifactId:id(1),expectedRevision:'a'.repeat(64),sensitivity:'confidential' as const}
+    await write.execute(command,context)
+    expect(restrictClassification).toHaveBeenCalledWith(context,command)
+  })
+})

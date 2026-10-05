@@ -138,6 +138,8 @@ export async function createOfficeArtifact(input: {
   outcome: string;
   audience: string;
   additionalContext?: string;
+  sensitivity?: "public" | "internal" | "confidential";
+  destination?: {kind: "department"; departmentId: string} | {kind: "general"};
   sourceHandles?: string[];
   templateId?: string;
   idempotencyKey: string;
@@ -468,4 +470,16 @@ export async function requestOfficeOfflinePackage(artifactId: string, deviceId: 
   const started = performance.now(), viewerId = getUserInfo()?.id;
   const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-packages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, pinned: true, expectedVersion }) });
   return protectedMediaJson(response, "office_offline_package_failed", started, viewerId);
+}
+
+export type OfficeClassification = {
+  departments?:Array<{id:string;name:string}>;
+  workspaceId:string; revision:string; sensitivity:"public"|"internal"|"confidential"; compartments:string[]; canManage:boolean;
+  history:Array<{id:string;createdAt:string;metadata:{before:{sensitivity:string;compartments:string[]};after:{sensitivity:string;compartments:string[]}}}>;
+};
+export function getOfficeClassification(artifactId:string):Promise<OfficeClassification> {
+  return metadata<OfficeClassification>(`artifacts/${encodeURIComponent(artifactId)}/classification`,"office_classification_failed");
+}
+export function restrictOfficeClassification(artifactId:string,input:{expectedRevision:string;departmentId?:string;sensitivity:OfficeClassification["sensitivity"]}):Promise<OfficeClassification> {
+  return metadata<OfficeClassification>(`artifacts/${encodeURIComponent(artifactId)}/classification`,"office_classification_failed",value=>value,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(input)});
 }

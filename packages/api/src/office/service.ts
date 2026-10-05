@@ -1,3 +1,4 @@
+import { readOfficeClassification, restrictOfficeClassification, withOfficeClassificationActor } from './classification.js'
 import {
   canRead,
   scopeGrantContains,
@@ -119,6 +120,8 @@ export type OfficeService = OfficeToolPort & {
 
 export function createOfficeService(deps: OfficeServiceDeps): OfficeService {
   return {
+    inspectClassification: (actor,id) => withOfficeClassificationActor(actor,()=>readOfficeClassification(actor.userId,id)),
+    restrictClassification: (actor,input) => withOfficeClassificationActor(actor,()=>restrictOfficeClassification(actor.userId,input)),
     async createAuthenticated(input, proof) {
       if (!deps.generationAvailable(input.family)) throw new OfficeGenerationUnavailableError()
       const created = await createHumanOfficeGeneration(input, proof)

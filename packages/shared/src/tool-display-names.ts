@@ -196,6 +196,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   retryIngestApplication: 'Retry an ingest application',
 
   createOfficeArtifact: 'Create an Office artifact',
+  getOfficeClassification: 'Read Office protection',
+  restrictOfficeClassification: 'Add Office protection',
   getOfficeArtifact: 'Read an Office artifact',
   reviseOfficeArtifact: 'Revise an Office artifact',
   openPdfEditingSession: 'Open a PDF editing session',

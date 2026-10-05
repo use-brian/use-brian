@@ -1,4 +1,5 @@
 /** Bounded authenticated prompt-only request admission; not derived output admission. */
+import { APP_LEVEL_ASSISTANT_ID, type ResourceDestination } from '@use-brian/shared'
 import type { OfficeToolPort } from '@use-brian/core'
 import { getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import { createOfficeArtifactStore, type OfficeDbQuery } from './office-artifacts.js'
@@ -11,6 +12,7 @@ export type OfficeHumanGenerationOptions = {
   actorUserId: string
   workspaceId: string
   sessionId: string
+  destination?: ResourceDestination
 }
 export type OfficeGenerationRequest = Parameters<OfficeToolPort['create']>[0]
 
@@ -29,7 +31,10 @@ export async function createHumanOfficeGeneration(input: OfficeGenerationRequest
     await client.query('BEGIN')
     await applyRLSGucs(client, input.userId)
     const policy = await officeCreationPolicy(client, input.workspaceId)
-    if (!policy || policy.setupState === 'legacy') { await client.query('COMMIT'); return null }
+    if (!policy || policy.setupState === 'legacy') {
+      if (proof.destination) throw new WorkspaceAccessError('access_mode_setup_required',409)
+      await client.query('COMMIT'); return null
+    }
     if (input.family !== 'document' || input.sourceHandles.length || input.templateId || input.additionalContext
       || input.compartments.length || input.projectIds.length) {
       throw new WorkspaceAccessError('office_admission_provenance_required', 409)
@@ -40,19 +45,21 @@ export async function createHumanOfficeGeneration(input: OfficeGenerationRequest
     if (!session.rows.length) throw new WorkspaceAccessError('authenticated_session_required',401)
     // No assistant authority is inferred from this identifier. It is attribution
     // only; this job is bound to the session human and contains no assistant context.
-    const assistant = await client.query('SELECT id FROM assistants WHERE id=$1 AND workspace_id=$2 FOR SHARE',[input.assistantId,input.workspaceId])
+    const assistant = await client.query<{id:string}>(`SELECT id FROM assistants WHERE workspace_id=$2
+      AND (id=$1 OR ($1=$3 AND kind='primary')) ORDER BY id LIMIT 1 FOR SHARE`,[input.assistantId,input.workspaceId,APP_LEVEL_ASSISTANT_ID])
     if (!assistant.rows.length) throw new WorkspaceAccessError('context_not_available',404)
     const query: OfficeDbQuery = async <T>(actor: string, sql: string, params: unknown[]) => {
       if (actor !== input.userId) throw new Error('office_generation_actor_mismatch')
       return { rows: (await client.query(sql,params)).rows as T[] }
     }
-    const options: OfficeCreateOptions = {provenance:{kind:'human_authored_root',actorUserId:proof.actorUserId,workspaceId:proof.workspaceId}}
+    const assistantId = assistant.rows[0].id
+    const options: OfficeCreateOptions = {destination:proof.destination,provenance:{kind:'human_authored_root',actorUserId:proof.actorUserId,workspaceId:proof.workspaceId}}
     const admitted = await admitOfficeShell(client, {
       userId:input.userId,workspaceId:input.workspaceId,family:'document' as const,
       title:input.outcome.trim().slice(0,1000),templateVersionId:null,capabilityVersion:1,
       sensitivity:input.sensitivity,
-      // The legacy HTTP adapter's [] is not a user selection. This new bounded
-      // adapter has no destination field yet, so Departments requires selection.
+      // Raw execution labels are not a user selection; admission resolves the
+      // typed destination separately and authorizes it inside this transaction.
       requiredCompartments:undefined,projectIds:[],visibilityUserIds:[],
     }, options)
     const artifacts = createOfficeArtifactStore(query)
@@ -62,14 +69,14 @@ export async function createHumanOfficeGeneration(input: OfficeGenerationRequest
       || !same(artifact.compartments,admitted.requiredCompartments ?? []) || !same(artifact.projectIds,admitted.projectIds)) {
       throw new Error('office_admission_persistence_mismatch')
     }
-    const brief = {workspaceId:input.workspaceId,actingUserId:input.userId,assistantId:input.assistantId,
+    const brief = {workspaceId:input.workspaceId,actingUserId:input.userId,assistantId,
       family:input.family,outcome:input.outcome,audience:input.audience,sourceHandles:[],
       requestedSensitivityFloor:artifact.sensitivity,idempotencyKey:input.idempotencyKey}
     const binding = {protocol:'office_prompt_only_v1',actorUserId:input.userId,workspaceId:input.workspaceId,
       authSessionId:proof.sessionId,policyRevision:policy.revision,sources:[],
       implicitContext:'disabled',executionAdapter:'prompt_only_document_v1'}
     const job = await createOfficeGenerationStore(query).create({userId:input.userId,workspaceId:input.workspaceId,
-      artifactId:artifact.id,assistantId:input.assistantId,jobKind:'create',brief,idempotencyKey:input.idempotencyKey,
+      artifactId:artifact.id,assistantId,jobKind:'create',brief,idempotencyKey:input.idempotencyKey,
       authorityProjection:{sensitivity:artifact.sensitivity,visibilityUserIds:[],compartments:artifact.compartments,
         projectIds:artifact.projectIds,compartmentGrant:artifact.compartments,projectGrant:artifact.projectIds,
         sourceHandles:[],creationBinding:binding}})

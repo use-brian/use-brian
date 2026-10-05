@@ -1,5 +1,6 @@
 /** Authenticated Office artifact routes. [COMP:api/office-routes] */
 import { Router } from 'express'
+import { OfficeClassificationCommand, readOfficeClassification, restrictOfficeClassification } from '../office/classification.js'
 import { officeAuthoredShellRoutes } from './office-authored-shell.js'
 import {officeMetadataRoute,sendOfficeMetadata} from './office-metadata.js'
 import type {OfficeMetadataReply} from '../db/office-read-projection.js'
@@ -39,6 +40,8 @@ const CreateSchema = z.object({
   family: z.enum(['document', 'presentation', 'spreadsheet']),
   outcome: z.string().min(1).max(4_000),
   audience: z.string().min(1).max(1_000),
+  sensitivity: z.enum(['public','internal','confidential']).default('internal'),
+  destination: z.discriminatedUnion('kind', [z.object({kind:z.literal('department'),departmentId:z.string().uuid()}).strict(),z.object({kind:z.literal('general')}).strict()]).optional(),
   sourceHandles: z.array(z.string().min(1).max(1_000)).max(100).default([]),
   templateId: z.string().uuid().optional(),
   additionalContext: z.string().min(1).max(4_000).optional(),
@@ -62,6 +65,24 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     const {status:_,workspaceId,validForMs,...sharing}=result
     return {workspaceId,validForMs,body:{...sharing,canManage:access.canManageSharing}}
   }
+  const classificationReply = async (userId:string,artifactId:string):Promise<OfficeMetadataReply> => {
+    const classification=await readOfficeClassification(userId,artifactId)
+    return classification ? {workspaceId:classification.workspaceId,body:classification} : {status:404,body:{error:'context_not_available'}}
+  }
+  router.get('/artifacts/:artifactId/classification',officeMetadataRoute((req,userId)=>classificationReply(userId,String(req.params.artifactId))))
+  router.post('/artifacts/:artifactId/classification',async(req,res)=>{
+    if(!req.userId)return void res.status(401).json({error:'Unauthorized'})
+    const input=OfficeClassificationCommand.safeParse({...req.body,artifactId:String(req.params.artifactId)})
+    if(!input.success)return void res.status(400).json({error:'invalid_office_classification'})
+    try {
+      await restrictOfficeClassification(req.userId,input.data)
+      await sendOfficeMetadata(res,req.userId,()=>classificationReply(req.userId!,input.data.artifactId))
+    } catch(cause) {
+      if(cause instanceof WorkspaceAccessError)return void res.status(cause.status).json({error:cause.code})
+      throw cause
+    }
+  })
+
   router.get('/capabilities', (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
@@ -81,18 +102,18 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
     const body = CreateSchema.safeParse(req.body)
     if (!body.success) return void res.status(400).json({ error: 'Invalid Office creation request', issues: body.error.issues })
+    if (body.data.destination && (!req.authSessionId || req.authVersion === undefined || !deps.service.createAuthenticated)) return void res.status(401).json({error:'authenticated_session_required'})
     try {
       const input = {
         userId,
         ...body.data,
-        sensitivity: 'internal' as const,
         compartments: [],
         projectIds: [],
         compartmentGrant: [],
         projectGrant: null,
       }
       const admitted = req.authSessionId && req.authVersion !== undefined && deps.service.createAuthenticated
-        ? await deps.service.createAuthenticated(input, {actorUserId:userId,workspaceId:body.data.workspaceId,sessionId:req.authSessionId})
+        ? await deps.service.createAuthenticated(input, {actorUserId:userId,workspaceId:body.data.workspaceId,sessionId:req.authSessionId,destination:body.data.destination})
         : null
       const created = admitted ?? await deps.service.create(input)
       res.setHeader('Cache-Control','no-store')
