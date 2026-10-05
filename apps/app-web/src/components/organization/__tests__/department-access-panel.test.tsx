@@ -15,7 +15,7 @@ import { WORKSPACE_IDENTITY_REFRESH_EVENT } from '@/lib/workspace-identity-event
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const W = 'workspace-fixture', D = 'department-fixture';
 const mocks = vi.hoisted(() => ({
-  viewer: { workspaceId: 'workspace-fixture', me: { id: 'owner-fixture' } },
+  viewer: { workspaceId: 'workspace-fixture', role: 'owner', me: { id: 'owner-fixture' } },
   departments: vi.fn(), edges: vi.fn(), setEdge: vi.fn(), removeEdge: vi.fn(), addOwner: vi.fn(), removeOwner: vi.fn(),
   breakGlass: vi.fn(), setHome: vi.fn(), confirm: vi.fn(), prompt: vi.fn(), readDirectory: vi.fn(),
 }));
@@ -68,6 +68,7 @@ async function setDate(input: HTMLInputElement, value: string) {
 beforeEach(() => {
   resetSurfaceCache();
   mocks.viewer.me.id = 'owner-fixture';
+  mocks.viewer.role = 'owner';
   for (const m of [mocks.departments, mocks.edges, mocks.setEdge, mocks.removeEdge, mocks.addOwner, mocks.removeOwner, mocks.breakGlass, mocks.setHome, mocks.confirm, mocks.prompt, mocks.readDirectory]) m.mockReset();
   mocks.readDirectory.mockImplementation(async () => directory());
   mocks.departments.mockResolvedValue({ departments: [entry()], homes: [{ principal: { kind: 'user', id: 'owner-fixture' }, departmentId: null }] });
@@ -113,6 +114,34 @@ describe('[COMP:app-web/department-access] Organization > Departments: who reads
     expect(host.textContent).toContain('Maya Example');
     expect(host.querySelector(`[aria-label="${t.clearanceLabel.replace('{name}', 'Maya Example')}"]`)).not.toBeNull();
   });
+  it('keeps adding visible above the roster with guidance when nobody is available', async () => {
+    mocks.readDirectory.mockImplementation(async () => {
+      const data = directory();
+      return { ...data, members: data.members.filter(person => person.userId !== 'new-fixture') };
+    });
+    await render(<DepartmentAccessPanel departmentId={D} />);
+    expect(host.textContent).toContain(t.addTitle);
+    expect(host.textContent).toContain(t.addHelp);
+    expect(host.querySelector('[role="status"]')?.textContent).toBe(t.addEmpty);
+    expect(host.querySelector<HTMLButtonElement>(`button[aria-label="${t.addWho}"]`)?.disabled).toBe(true);
+    expect(host.textContent!.indexOf(t.addTitle)).toBeLessThan(host.textContent!.indexOf('Maya Example'));
+    const listener = vi.fn();
+    window.addEventListener('doc:open-settings', listener);
+    try {
+      await act(async () => { [...host.querySelectorAll('button')].find(b => b.textContent === t.workspacePeople)!.click(); });
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining({ detail: { section: 'ws-members' } }));
+    } finally { window.removeEventListener('doc:open-settings', listener); }
+    expect(mocks.setEdge).not.toHaveBeenCalled();
+  });
+
+  it('guides department owners without workspace invite authority to a workspace admin', async () => {
+    mocks.viewer.role = 'member';
+    await render(<DepartmentAccessPanel departmentId={D} />);
+    expect(host.textContent).toContain(t.addTitle);
+    expect(host.textContent).toContain(t.askWorkspaceAdmin);
+    expect(host.textContent).not.toContain(t.workspacePeople);
+  });
+
   it('removes a member from the row menu only after confirmation, binding the department revision', async () => {
     mocks.confirm.mockResolvedValue(true);
     await render(<DepartmentAccessPanel departmentId={D} />);
