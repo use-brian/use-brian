@@ -10,7 +10,7 @@
 #   ./scripts/package-desktop.sh --publish            # the above, then publish a GitHub Release
 #   ./scripts/package-desktop.sh --bump patch --publish   # bump 0.0.1 -> 0.0.2, build, publish
 #   ./scripts/package-desktop.sh --version 1.0.0 --publish # set an exact version, build, publish
-#   ./scripts/package-desktop.sh --no-build --publish # skip the build; (re)sign+notarize+upload existing release/ artifacts
+#   ./scripts/package-desktop.sh --no-build --artifacts-dir /absolute/path --publish # explicitly reuse artifacts
 #
 # --bump/--version rewrite apps/app-desktop/package.json before the build but do
 # NOT commit it — the run prints the git command to commit the bump.
@@ -20,6 +20,18 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env.desktop"
+# Covers validation/build/signing failures too; never imply an old ZIP is new.
+package_exit() {
+  local status=$?
+  if [[ "$status" != "0" ]]; then
+    echo "==> PACKAGE FAILED. No successful release from this run; previous packages are NOT results of this run." >&2
+    [[ -z "${OUTPUT_DIR:-}" ]] || echo "Run output (may be partial): $OUTPUT_DIR" >&2
+  fi
+  if declare -F desktop_keychain_cleanup >/dev/null; then desktop_keychain_cleanup; fi
+  return "$status"
+}
+trap package_exit EXIT
+cd "$REPO_ROOT"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "error: signing + notarization only run on macOS (uname is $(uname -s))." >&2
@@ -38,6 +50,7 @@ fi
 
 PUBLISH=0
 SKIP_BUILD=0
+OUTPUT_DIR=""
 NATIVE_PACKAGE_CHECK=0
 BUMP=""
 SET_VERSION=""
@@ -48,6 +61,9 @@ while [[ $# -gt 0 ]]; do
     --arm64) ARCH_ARGS=(--arm64) ;;
     --native-package-check) NATIVE_PACKAGE_CHECK=1 ;;
     --no-build|--skip-build) SKIP_BUILD=1 ;;
+    --artifacts-dir)
+      OUTPUT_DIR="${2:-}"; shift
+      [[ -n "$OUTPUT_DIR" ]] || { echo "error: --artifacts-dir needs an absolute path" >&2; exit 1; } ;;
     --bump)
       BUMP="${2:-}"; shift
       [[ -z "$BUMP" ]] && { echo "error: --bump needs a level (patch|minor|major)" >&2; exit 1; } ;;
@@ -58,13 +74,18 @@ while [[ $# -gt 0 ]]; do
     --version=*) SET_VERSION="${1#--version=}" ;;
     -h|--help)
       cat <<'USAGE'
-usage: package-desktop.sh [--bump patch|minor|major | --version X.Y.Z] [--arm64] [--publish] [--no-build] [--native-package-check]
+usage: package-desktop.sh [--bump patch|minor|major | --version X.Y.Z] [--arm64] [--publish] [--no-build --artifacts-dir /absolute/path] [--native-package-check]
   --bump LEVEL     increment apps/app-desktop/package.json (patch|minor|major) before building
   --version X.Y.Z  set apps/app-desktop/package.json to an exact version before building
   --publish        (re)sign+notarize, then upload the dmg+zip+update feed to GitHub Releases
   --arm64          pin the Apple Silicon architecture (used by automated releases)
   --native-package-check  run the R1 package-copy admission regression; forbids publish/no-build
-  --no-build       skip tsc + electron-builder; reuse existing release/ artifacts
+  --no-build       skip tsc + electron-builder; requires --artifacts-dir
+  --artifacts-dir  explicit existing output directory, only with --no-build
+Local builds use a unique release/runs/mac-* directory and leave old packages intact.
+GitHub Actions uses release/ only if absent, preserving existing CI artifact paths.
+Only a successful run prints "Done" and its artifact paths. Never install a ZIP
+from an earlier run after a failure.
 The version change is written to package.json but NOT committed; the run prints
 the git command to commit it. --bump/--version cannot combine with --no-build.
 USAGE
@@ -73,6 +94,16 @@ USAGE
   esac
   shift
 done
+
+if [[ "$SKIP_BUILD" == "1" ]]; then
+  if [[ "$OUTPUT_DIR" != /* || ! -d "$OUTPUT_DIR" ]]; then
+    echo "error: --no-build requires --artifacts-dir naming an existing absolute directory." >&2
+    exit 1
+  fi
+elif [[ -n "$OUTPUT_DIR" ]]; then
+  echo "error: --artifacts-dir is only allowed with --no-build; new builds always use a fresh directory." >&2
+  exit 1
+fi
 
 # The explicit R1 check uses private copies and the same selected signing
 # identity. It neither enables native control nor authorizes release publication.
@@ -152,21 +183,24 @@ fi
 # Own the keychain lifecycle: electron-builder 25 passes the certificate password
 # where security requires the separately generated keychain password.
 source "$REPO_ROOT/scripts/desktop-keychain.sh"
-trap desktop_keychain_cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 echo "==> Preparing the temporary release signing keychain"
 desktop_keychain_prepare
 
-DMG="$REPO_ROOT/apps/app-desktop/release/usebrian.dmg"
-ZIP="$REPO_ROOT/apps/app-desktop/release/usebrian.zip"
+if [[ "$SKIP_BUILD" != "1" ]]; then
+  OUTPUT_DIR="$(node "$REPO_ROOT/scripts/desktop-package-output.mjs" "$REPO_ROOT/apps/app-desktop")"
+fi
+echo "==> This run's artifact directory: $OUTPUT_DIR"
+DMG="$OUTPUT_DIR/usebrian.dmg"
+ZIP="$OUTPUT_DIR/usebrian.zip"
 # The electron-updater feed: existing installs resolve the latest release, read
 # latest-mac.yml, and download the zip (the blockmap enables differential
 # downloads). electron-builder emits both alongside the artifacts because
 # electron-builder.yml carries a `publish:` block.
-FEED_YML="$REPO_ROOT/apps/app-desktop/release/latest-mac.yml"
-ZIP_BLOCKMAP="$REPO_ROOT/apps/app-desktop/release/usebrian.zip.blockmap"
+FEED_YML="$OUTPUT_DIR/latest-mac.yml"
+ZIP_BLOCKMAP="$OUTPUT_DIR/usebrian.zip.blockmap"
 PKG_JSON="$REPO_ROOT/apps/app-desktop/package.json"
 
 # Apply the version change BEFORE the build so the new version is baked into the
@@ -196,7 +230,7 @@ if [[ -n "$BUMP" || -n "$SET_VERSION" ]]; then
 fi
 
 if [[ "$SKIP_BUILD" == "1" ]]; then
-  echo "==> Skipping build (--no-build); reusing existing artifacts in release/"
+  echo "==> Skipping build (--no-build); explicitly reusing artifacts in $OUTPUT_DIR"
   [[ -f "$DMG" ]] || {
     echo "error: $DMG not found — run once without --no-build to produce it." >&2
     exit 1
@@ -210,8 +244,12 @@ else
   pnpm --filter @use-brian/app-desktop run build:siri
   pnpm --filter @use-brian/app-desktop run build:native-computer
   echo "==> Packaging + signing + notarizing the app (Apple notary, a few min)"
-  BRIAN_NATIVE_PACKAGE_CHECK="$NATIVE_PACKAGE_CHECK" pnpm --filter @use-brian/app-desktop exec electron-builder --mac ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} --publish never
+  BRIAN_NATIVE_PACKAGE_CHECK="$NATIVE_PACKAGE_CHECK" pnpm --filter @use-brian/app-desktop exec electron-builder --mac ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} --publish never "--config.directories.output=$OUTPUT_DIR"
 fi
+
+for artifact in "$DMG" "$ZIP"; do
+  [[ -f "$artifact" ]] || { echo "error: missing artifact $artifact" >&2; exit 1; }
+done
 
 # electron-builder signs + notarizes + staples the .app (it submits the .zip),
 # but leaves the .dmg WRAPPER unsigned + un-notarized. For Gatekeeper to accept a
@@ -290,8 +328,8 @@ if [[ "$PUBLISH" == "1" ]]; then
 fi
 
 echo
-echo "==> Done. Artifacts in apps/app-desktop/release/:"
-ls -1 "$DMG" "$ZIP" 2>/dev/null || true
+echo "==> Done. Artifacts in $OUTPUT_DIR:"
+ls -1 "$DMG" "$ZIP"
 
 if [[ -n "$NEW_VERSION" ]]; then
   echo

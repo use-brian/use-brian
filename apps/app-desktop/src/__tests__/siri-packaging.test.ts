@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 
 const read = (path: string) =>
@@ -54,9 +57,51 @@ describe("[COMP:app-desktop/siri] App Intents packaging", () => {
     expect(packageJson.scripts["build:siri"]).toBe(
       "bash native/siri-companion/build.sh",
     );
-    expect(packageJson.scripts.package).toContain(
-      "pnpm run build:siri && electron-builder --mac",
-    );
+    const root = mkdtempSync(join(tmpdir(), "siri-package-test-"));
+    try {
+      for (const dir of ["scripts", "bin", "apps/app-desktop"]) mkdirSync(join(root, dir), { recursive: true });
+      for (const name of ["package-desktop.mjs", "desktop-package-output.mjs"]) {
+        copyFileSync(new URL(`../../../../scripts/${name}`, import.meta.url), join(root, "scripts", name));
+      }
+      const log = join(root, "calls.jsonl");
+      writeFileSync(join(root, "bin/pnpm"), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.PACKAGE_TEST_LOG, JSON.stringify(args) + '\\n');
+if (args.includes('build:siri') && process.env.FAIL_SIRI === '1') process.exit(9);
+if (args.includes('electron-builder')) {
+  const output = args.find(arg => arg.startsWith('--config.directories.output='))?.slice('--config.directories.output='.length);
+  if (!output) throw new Error('Missing output directory');
+  for (const name of ['usebrian.zip', 'usebrian.dmg']) fs.writeFileSync(require('node:path').join(output, name), 'fixture artifact');
+}
+`, { mode: 0o755 });
+      // Execute the real manifest command and wrapper, replacing only external tools.
+      const [executable, ...args] = packageJson.scripts.package.split(" ");
+      expect(executable).toBe("node");
+      const run = (failSiri: boolean) => spawnSync(process.execPath, args, {
+        cwd: join(root, "apps/app-desktop"), encoding: "utf8",
+        env: { ...process.env, GITHUB_ACTIONS: "false", PATH: `${join(root, "bin")}:${process.env.PATH}`,
+          PACKAGE_TEST_LOG: log, FAIL_SIRI: failSiri ? "1" : "0" },
+      });
+      const result = run(false);
+      expect(result.status, result.stderr).toBe(0);
+      const calls = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
+      const siri = calls.findIndex(call => call.join(" ") === "run build:siri");
+      const builder = calls.findIndex(call => call.includes("electron-builder"));
+      expect(siri).toBeGreaterThanOrEqual(0);
+      expect(builder).toBeGreaterThan(siri);
+      expect(calls[builder]).toContain("--mac");
+      const output = calls[builder].find(arg => arg.startsWith("--config.directories.output="))!.split("=")[1];
+      expect(readFileSync(join(output, "usebrian.zip"), "utf8")).toBe("fixture artifact");
+      writeFileSync(log, "");
+      const failed = run(true);
+      expect(failed.status).toBe(1);
+      expect(failed.stderr).toContain("PACKAGE FAILED");
+      expect(failed.stdout).not.toContain("Package succeeded");
+      expect(readFileSync(log, "utf8")).not.toContain("electron-builder");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
     expect(build).toContain('MARKETING_VERSION="$VERSION"');
     expect(build).toContain('CURRENT_PROJECT_VERSION="$VERSION"');
     expect(release).toContain(

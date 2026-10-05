@@ -13,7 +13,7 @@ function packageFixture(gatekeeperExit = 0, extraArgs: string[] = [], stock = { 
   dirs.push(root);
   for (const path of ["scripts", "bin", "apps/app-desktop/release"]) mkdirSync(join(root, path), { recursive: true });
   const sourceRoot = fileURLToPath(new URL("../../../../", import.meta.url));
-  for (const name of ["package-desktop.sh", "desktop-keychain.sh"]) copyFileSync(join(sourceRoot, "scripts", name), join(root, "scripts", name));
+  for (const name of ["package-desktop.sh", "desktop-keychain.sh", "desktop-package-output.mjs"]) copyFileSync(join(sourceRoot, "scripts", name), join(root, "scripts", name));
   writeFileSync(join(root, "apps/app-desktop/package.json"), JSON.stringify({ version: "0.0.12" }));
   mkdirSync(join(root, 'apps/app-desktop/scripts'), { recursive: true });
   copyFileSync(join(sourceRoot, 'apps/app-desktop/scripts/mac-asar-integrity.mjs'), join(root, 'apps/app-desktop/scripts/mac-asar-integrity.mjs'));
@@ -36,7 +36,7 @@ for (const file of ['Contents/MacOS/Electron',
   mkdirSync(join(library, "certs"), { recursive: true });
   for (const directory of [builder, library]) writeFileSync(join(directory, "package.json"), "{}");
   writeFileSync(join(library, "certs/root_certs.keychain"), "dummy-public-chain");
-  for (const file of ["usebrian.dmg", "usebrian.zip"]) writeFileSync(join(root, "apps/app-desktop/release", file), "fictional artifact");
+  for (const file of ["usebrian.dmg", "usebrian.zip"]) writeFileSync(join(root, "apps/app-desktop/release", file), "previous user artifact");
   const log = join(root, "calls.jsonl");
   for (const command of ["uname", "security", "pnpm", "codesign", "xcrun", "spctl"]) {
     writeFileSync(join(root, "bin", command), `#!/usr/bin/env node
@@ -45,15 +45,21 @@ const args = process.argv.slice(2);
 // Do not record security's credential arguments even in a disposable fixture.
 if ('${command}' === 'security') fs.appendFileSync(process.env.PACKAGE_TEST_LOG, JSON.stringify(['keychain-operation', args[0]]) + '\\n');
 if ('${command}' !== 'security') fs.appendFileSync(process.env.PACKAGE_TEST_LOG, JSON.stringify(['${command}', ...args]) + '\\n');
-if ('${command}' === 'pnpm' && args.includes('electron-builder')) fs.appendFileSync(process.env.PACKAGE_TEST_LOG, JSON.stringify(['native-package-check-mode', process.env.BRIAN_NATIVE_PACKAGE_CHECK]) + '\\n');
+if ('${command}' === 'pnpm' && args.includes('electron-builder')) {
+  fs.appendFileSync(process.env.PACKAGE_TEST_LOG, JSON.stringify(['native-package-check-mode', process.env.BRIAN_NATIVE_PACKAGE_CHECK]) + '\\n');
+  const output = args.find(arg => arg.startsWith('--config.directories.output='))?.slice('--config.directories.output='.length);
+  if (!output) throw new Error('Builder must receive an explicit output directory');
+  for (const file of ['usebrian.dmg', 'usebrian.zip']) fs.writeFileSync(require('node:path').join(output, file), 'new fictional artifact');
+}
 if ('${command}' === 'uname') console.log('Darwin');
 if ('${command}' === 'security' && args[0] === 'find-identity') console.log('1) ${"A".repeat(40)} "Developer ID Application: Example"');
 if ('${command}' === 'spctl') process.exit(${gatekeeperExit});
 `, { mode: 0o755 });
   }
-  const result = spawnSync("bash", [join(root, "scripts/package-desktop.sh"), "--version", "0.0.13", "--arm64", ...extraArgs], {
+  const result = spawnSync("bash", [join(root, "scripts/package-desktop.sh"), "--version", "0.0.13", "--arm64", ...extraArgs,
+    ...(extraArgs.includes("--no-build") ? ["--artifacts-dir", join(root, "apps/app-desktop/release")] : [])], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: root, PACKAGE_TEST_LOG: log,
+    env: { ...process.env, GITHUB_ACTIONS: "false", PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: root, PACKAGE_TEST_LOG: log,
       BRIAN_NATIVE_PACKAGE_CHECK: "1", // inherited mode must not silently opt in
       CSC_LINK: Buffer.from("fictional-certificate").toString("base64"), CSC_KEY_PASSWORD: "fixture-password",
       APPLE_ID: "release@example.com", APPLE_APP_SPECIFIC_PASSWORD: "fixture-password", APPLE_TEAM_ID: "EXAMPLETEAM" },
@@ -80,7 +86,14 @@ describe("[COMP:app-desktop/packaging] desktop packaging", () => {
     const pnpm = result.calls.filter((call) => call[0] === "pnpm");
     expect(pnpm[0]).toEqual(["pnpm", "--filter", "@use-brian/app-desktop", "run", "build:renderer"]);
     expect(pnpm.at(-1)).toContain("--arm64");
-    expect(pnpm.at(-1)?.slice(-2)).toEqual(["--publish", "never"]);
+    const builder = pnpm.at(-1)!;
+    expect(builder.slice(builder.indexOf("--publish"), builder.indexOf("--publish") + 2)).toEqual(["--publish", "never"]);
+    const output = builder.find(arg => arg.startsWith("--config.directories.output="))!.split("=")[1];
+    expect(output).toMatch(new RegExp(`${result.root}/apps/app-desktop/release/runs/mac-`));
+    for (const file of ["usebrian.dmg", "usebrian.zip"]) {
+      expect(readFileSync(join(output, file), "utf8")).toBe("new fictional artifact");
+      expect(readFileSync(join(result.root, "apps/app-desktop/release", file), "utf8")).toBe("previous user artifact");
+    }
     expect(result.calls).toContainEqual(["native-package-check-mode", "0"]);
     expect(result.calls.some(call => call[0] === 'stock-electron-install')).toBe(false);
     expect(JSON.parse(readFileSync(join(result.root, "apps/app-desktop/package.json"), "utf8")).version).toBe("0.0.13");
@@ -95,7 +108,8 @@ describe("[COMP:app-desktop/packaging] desktop packaging", () => {
     expect(install).toBeGreaterThanOrEqual(0);
     expect(install).toBeLessThan(result.calls.findIndex(call => call[0] === 'keychain-operation'));
     expect(install).toBeLessThan(result.calls.findIndex(call => call[0] === 'pnpm'));
-    expect(result.calls.find(call => call.includes("electron-builder"))?.slice(-2)).toEqual(["--publish", "never"]);
+    const builder = result.calls.find(call => call.includes("electron-builder"))!;
+    expect(builder.slice(builder.indexOf("--publish"), builder.indexOf("--publish") + 2)).toEqual(["--publish", "never"]);
   }, 30_000);
 
   it.each([{ version: '43.3.0', installerExit: 0 }, { version: '43.2.0', installerExit: 9 }])(
@@ -118,7 +132,9 @@ describe("[COMP:app-desktop/packaging] desktop packaging", () => {
 
   it("fails when Gatekeeper rejects the signed installer", () => {
     const result = packageFixture(7);
-    expect(result.status).toBe(7);
+    expect(result.status, result.stderr).toBe(7);
+    expect(result.calls.some(call => call[0] === "spctl")).toBe(true);
+    expect(result.stderr).toContain("PACKAGE FAILED");
     expect(result.stdout).not.toContain("==> Done.");
   }, 30_000);
 });
