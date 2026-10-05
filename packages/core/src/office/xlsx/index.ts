@@ -239,7 +239,9 @@ async function normalizeWorkbook(workbook: ExcelJS.Workbook, context: OfficeImpo
       for (let columnIndex = 1; columnIndex <= maxColumn; columnIndex += 1) {
         const source = row.getCell(columnIndex)
         if (source.value === null && Object.keys(source.style).length === 0) continue
-        const scalar = importScalar(source.value)
+        // ExcelJS exposes the master's value through each merged slave. Keep
+        // slave formatting, but not invisible duplicate literals or formulas.
+        const scalar = importScalar(source.isMerged && source.master.address !== source.address ? null : source.value)
         cells.push({
           id: stableOfficeUuid(`${sheetId}:cell:${source.address}`),
           address: source.address,

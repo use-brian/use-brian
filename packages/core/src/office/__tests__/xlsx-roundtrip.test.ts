@@ -1,11 +1,45 @@
 import ExcelJS from 'exceljs'
 import JSZip from 'jszip'
 import { describe, expect, it } from 'vitest'
+import { officeTemplateTokenTargets } from '@use-brian/office-model'
 import { exportOfficeSpreadsheet, importOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
 import { preflightSpreadsheetPdf } from '../xlsx/pdf.js'
 import { completeSpreadsheetSnapshot, id, resolveFixtureResource } from './fixtures.js'
 
 describe('[COMP:office/xlsx-engine] XLSX engine', () => {
+  it('imports merged content once for token edits and range calculations', async () => {
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('Draft')
+    sheet.getCell('A1').value = '{{CUSTOMER}}'
+    sheet.getCell('A1').font = { bold: true }
+    sheet.mergeCells('A1:B1')
+    sheet.getCell('A2').value = { formula: '1+1', result: 2 }
+    sheet.mergeCells('A2:B2')
+    sheet.getCell('A3').value = { formula: 'SUM(A2:B2)', result: 2 }
+    const imported = await importOfficeSpreadsheet(new Uint8Array(await workbook.xlsx.writeBuffer()), { artifactId: id(120), workspaceId: id(2), templateVersionId: null, locale: 'en-US', defaultLanguage: 'en-US', title: 'Merged draft' })
+    expect(imported.ok).toBe(true)
+    if (imported.snapshot?.family !== 'spreadsheet') throw new Error('Expected spreadsheet')
+    const cells = imported.snapshot.worksheets[0].cells
+    const master = cells.find(cell => cell.address === 'A1')!
+    expect(officeTemplateTokenTargets(imported.snapshot).get('CUSTOMER')).toEqual([master.id])
+    for (const address of ['B1', 'B2']) {
+      expect(cells.find(cell => cell.address === address)).toMatchObject({ valueType: 'blank', value: null })
+      expect(cells.find(cell => cell.address === address)?.formula).toBeUndefined()
+    }
+    expect(cells.find(cell => cell.address === 'B1')?.style?.font?.bold).toBe(true)
+    expect(cells.find(cell => cell.address === 'A3')?.calculatedValue).toBe(2)
+    master.value = '{{RECIPIENT}}'
+    expect([...officeTemplateTokenTargets(imported.snapshot)]).toEqual([['RECIPIENT', [master.id]]])
+    const exported = await exportOfficeSpreadsheet(imported.snapshot, resolveFixtureResource)
+    const zip = await JSZip.loadAsync(exported.bytes)
+    zip.remove('customXml/brian-office.json')
+    const native = await importOfficeSpreadsheet(await zip.generateAsync({ type: 'uint8array' }), { artifactId: id(120), workspaceId: id(2), templateVersionId: null, locale: 'en-US', defaultLanguage: 'en-US', title: 'Merged draft' })
+    expect(native.ok).toBe(true)
+    if (native.snapshot?.family !== 'spreadsheet') throw new Error('Expected spreadsheet')
+    expect([...officeTemplateTokenTargets(native.snapshot).keys()]).toEqual(['RECIPIENT'])
+    expect(native.snapshot.worksheets[0].cells.find(cell => cell.address === 'A3')?.calculatedValue).toBe(2)
+  })
+
   it('exports, safely reparses, and preserves canonical workbook semantics', async () => {
     const source = completeSpreadsheetSnapshot()
     const exported = await exportOfficeSpreadsheet(source, resolveFixtureResource)
