@@ -614,7 +614,7 @@ export function DocSidebar(props: Props) {
       </div>
 
       {/* Workspace context stays fully labelled above main navigation. */}
-      <div data-doc-chrome data-workspace-context-nav className="mx-2 mb-1 flex shrink-0 flex-wrap items-center gap-1 border-b border-sidebar-border pb-2 pt-1">
+      <div data-doc-chrome data-workspace-context-nav className="mx-2 mb-1 flex shrink-0 flex-wrap items-center gap-1 pb-2 pt-1">
         <Tooltip label={copy.contextScope.projectsTitle}>
           <Link href={`/w/${workspaceId}/projects`}
             {...intentPrefetch(`/w/${workspaceId}/projects`)}
