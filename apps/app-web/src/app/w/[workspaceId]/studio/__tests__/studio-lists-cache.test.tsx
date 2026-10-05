@@ -260,7 +260,7 @@ const CASES: Case[] = [
       ({
         sources: [{ instanceId: "i1", label: "Slack" } as never],
         available: [],
-        ownedPersonal: undefined,
+        ownedDefault: undefined,
       }) satisfies IngestSourcesSnapshot,
     armPending: () => {
       api.authFetch.mockImplementation(NEVER);

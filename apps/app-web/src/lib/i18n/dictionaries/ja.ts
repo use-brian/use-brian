@@ -5031,7 +5031,6 @@ export const ja: Dictionary = {
     deleteWorkspaceConfirm: "ワークスペースと、その中のアシスタント・メンバー・すべてのデータを完全に削除します。この操作は取り消せません。",
     advanced: "詳細設定",
     deleteWorkspaceDescription: "このワークスペースとその中のすべてを完全に削除します。この操作は取り消せません。",
-    deleteWorkspacePersonalBlocked: "個人ワークスペースはアカウントのホームのため、削除できません。チーム用に作成したワークスペースは削除できます。",
     deleteWorkspaceDialogTitle: "このワークスペースを削除しますか?",
     deleteWorkspaceTypePrompt: "確認のため {name} と入力してください。",
     flushDataTitle: "ワークスペースの全データを削除",
@@ -5040,6 +5039,7 @@ export const ja: Dictionary = {
     flushDataConfirm: "このワークスペースのチャット、メモリー、タスク、ページ、ファイル、ワークフロー、スケジュール済みジョブがすべて完全に削除されます。メンバー、アシスタント、コネクタ、設定は残ります。この操作は取り消せません。",
     flushDataDone: "{count} 件を削除しました。",
     flushDataFailed: "ワークスペースのデータ削除に失敗しました。もう一度お試しください。",
+    transferOwnershipNeedsMember: "先に「組織」から別のアカウントを招待し、ここでそのメンバーを選択してください。",
     transferOwnershipTitle: "オーナー権限を移譲",
     transferOwnershipDescription:
       "このワークスペースを他のメンバーに引き継ぎます。新しいオーナーが請求の責任を引き継ぎ、あなたのロールは管理者になります。",
@@ -10417,8 +10417,7 @@ export const ja: Dictionary = {
         "このソースは機密です。ワークスペースのオーナー、管理者、および機密権限を持つメンバーのみがここで確認できます。",
       personalGlobalNote:
         "オンとオフの設定は、このコネクターに対してすべてのワークスペースに適用されます。",
-      personalRoutingNote:
-        "この個人ソースのイベントは、{workspace} ではなく個人ワークスペースに取り込まれます。",
+      personalRoutingNote: "このアカウントの接続は {workspace} に取り込む設定になっていません。ここで取り込みを有効にすると、このワークスペースを選択できます。",
       personalAddSourceCta: "{workspace} 用のソースを追加",
       enableAction: "取り込みを有効化",
       disableAction: "無効化",

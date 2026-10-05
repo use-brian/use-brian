@@ -145,8 +145,6 @@ type WorkspaceDetail = {
   name: string;
   purpose: string;
   ownerUserId: string;
-  /** Auto-created Personal workspace — not user-deletable (the API 404s). */
-  isPersonal: boolean;
   role: "owner" | "admin" | "member";
   /** Echoed by the detail endpoint (spread of the full workspace row). */
   iconSeed?: number | null;
@@ -1017,17 +1015,21 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
           {advancedOpen && (
             <div className="mt-4 space-y-6">
               {/* Transfer ownership (workspaces.md → "Ownership transfer").
-                  Owner-only, non-personal, and only meaningful with another
+                  Owner-only, and only meaningful with another
                   member to hand the workspace to. Consequential rather than
                   destructive, but it still goes through the type-to-confirm
                   gate: it moves billing responsibility and cannot be undone
                   by the acting user. */}
-              {!data.isPersonal &&
-                data.members.some((m) => m.userId !== data.ownerUserId) && (
+              {(
                   <div className="space-y-3">
                     <p className="text-[13px] text-muted-foreground">
                       {t.workspaceDetailInline.transferOwnershipDescription}
                     </p>
+                    {!data.members.some((m) => m.userId !== data.ownerUserId) && (
+                      <p className="text-[13px] text-muted-foreground">
+                        {t.workspaceDetailInline.transferOwnershipNeedsMember}
+                      </p>
+                    )}
                     {/* Wraps at 390px (responsive contract M8): the Select
                         and the button stack instead of squeezing. */}
                     <div className="flex flex-wrap items-center gap-2">
@@ -1074,9 +1076,7 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
                   </div>
                 )}
 
-              {/* Flush all workspace data. Works on every workspace including
-                  the Personal one (which can never be deleted) — this is its
-                  only full-reset path. */}
+              {/* Reset content while keeping the workspace and its settings. */}
               <div className="space-y-3">
                 <p className="text-[13px] text-muted-foreground">
                   {t.workspaceDetailInline.flushDataDescription}
@@ -1102,7 +1102,7 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
                 )}
               </div>
 
-              {canDeleteWorkspace(data.role, data.isPersonal) ? (
+              {canDeleteWorkspace(data.role) && (
                 <div className="space-y-3">
                   <p className="text-[13px] text-muted-foreground">
                     {t.workspaceDetailInline.deleteWorkspaceDescription}
@@ -1115,10 +1115,6 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
                     {t.workspaceDetailInline.deleteWorkspace}
                   </button>
                 </div>
-              ) : (
-                <p className="text-[13px] text-muted-foreground">
-                  {t.workspaceDetailInline.deleteWorkspacePersonalBlocked}
-                </p>
               )}
             </div>
           )}
@@ -1718,8 +1714,7 @@ export function WorkspaceMembersSection({memberTarget,clearMember,selectMember,m
                         ? t.workspaceDetailInline.demoteToMember
                         : t.workspaceDetailInline.promoteToAdmin}
                     </DropdownMenuItem>
-                    {/* Personal workspaces are never transferable. */}
-                    {!data.isPersonal && (
+                    {(
                       <DropdownMenuItem
                         onClick={() => {
                           setTransferError(null);

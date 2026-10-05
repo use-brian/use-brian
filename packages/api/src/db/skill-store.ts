@@ -495,7 +495,7 @@ async function resolvePrimaryWorkspace(userId: string): Promise<string> {
      FROM workspace_members wm
      JOIN workspaces w ON w.id = wm.workspace_id
      WHERE wm.user_id = $1
-     ORDER BY (w.is_personal) DESC, wm.joined_at ASC
+     ORDER BY wm.joined_at ASC, w.id ASC
      LIMIT 1`,
     [userId],
   )

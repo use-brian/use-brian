@@ -438,16 +438,6 @@ describe('[COMP:api/workspaces-route] POST /:workspaceId/transfer-ownership', ()
     )
   })
 
-  it('maps personal_workspace to 400', async () => {
-    workspaceStore.getRole.mockResolvedValueOnce('owner')
-    workspaceStore.transferOwnership.mockResolvedValueOnce('personal_workspace')
-    const res = await request(app('u-1'))
-      .post('/api/workspaces/ws-personal/transfer-ownership')
-      .send({ newOwnerUserId: 'u-2' })
-    expect(res.status).toBe(400)
-    expect(res.body.error).toBe('personal_workspace_not_transferable')
-    expect(auditStore.append).not.toHaveBeenCalled()
-  })
 
   it('maps not_a_member to 400', async () => {
     workspaceStore.getRole.mockResolvedValueOnce('owner')

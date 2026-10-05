@@ -5017,7 +5017,6 @@ export const zh: Dictionary = {
     deleteWorkspaceConfirm: "這將永久刪除此工作空間，以及其中的助理、成員與所有資料，且無法復原。",
     advanced: "進階設定",
     deleteWorkspaceDescription: "永久刪除這個工作空間及其中的所有內容，此操作無法復原。",
-    deleteWorkspacePersonalBlocked: "個人工作空間是你帳號的預設空間，無法刪除；你為團隊建立的工作空間則可以刪除。",
     deleteWorkspaceDialogTitle: "刪除這個工作空間？",
     deleteWorkspaceTypePrompt: "輸入 {name} 以確認。",
     flushDataTitle: "刪除工作區所有資料",
@@ -5026,6 +5025,7 @@ export const zh: Dictionary = {
     flushDataConfirm: "這個工作區的所有對話、記憶、任務、頁面、檔案、工作流程和排程任務將被永久刪除。成員、助理、連接器和設定會保留。此操作無法復原。",
     flushDataDone: "已刪除 {count} 個項目。",
     flushDataFailed: "刪除工作區資料失敗，請再試一次。",
+    transferOwnershipNeedsMember: "請先透過「組織」邀請另一個帳戶，再於此處選擇該成員。",
     transferOwnershipTitle: "轉移擁有權",
     transferOwnershipDescription:
       "把這個工作區交給另一位成員。新擁有者將接手帳單責任，你的角色會變成管理員。",
@@ -10358,8 +10358,7 @@ export const zh: Dictionary = {
       confidentialVisibilityNote:
         "此來源為機密。只有工作空間擁有者、管理員及具有機密權限的成員才能在這裡看到它。",
       personalGlobalNote: "開啟和關閉這個連接器的設定會套用到你的所有工作空間。",
-      personalRoutingNote:
-        "這個個人來源的事件會匯入你的個人工作空間，而不是 {workspace}。",
+      personalRoutingNote: "此帳戶連線尚未設定為匯入 {workspace}。在此啟用匯入即可選擇這個工作區。",
       personalAddSourceCta: "為 {workspace} 新增來源",
       enableAction: "啟用擷取",
       disableAction: "停用",

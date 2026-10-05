@@ -42,14 +42,13 @@ async function runTransfer(
     await client.query("SELECT set_config('app.current_user_id',$1,true)", [userId])
     const discovered = (await client.query<{ source: string; destination: string }>(`
       SELECT a.workspace_id AS source, CASE WHEN $4='adopt' THEN $2::uuid ELSE
-        (SELECT pw.id FROM workspaces w JOIN workspaces pw ON pw.owner_user_id=w.owner_user_id AND pw.is_personal
-          WHERE w.id=$2) END AS destination FROM assistants a WHERE a.id=$3 AND $1::uuid IS NOT NULL`,
+        (SELECT u.default_workspace_id FROM users u JOIN workspaces w ON w.owner_user_id=u.id WHERE w.id=$2) END AS destination FROM assistants a WHERE a.id=$3 AND $1::uuid IS NOT NULL`,
     [userId, workspaceId, assistantId, operation])).rows[0]
     if (!discovered?.source || !discovered.destination || discovered.source === discovered.destination) return await deny()
     // Discovery is not authority. Lock the entire sorted workspace set before
     // assistant, memberships or resources, then revalidate everything.
-    const workspaces = (await client.query<{ id: string; owner_user_id: string; is_personal: boolean }>(
-      'SELECT id,owner_user_id,is_personal FROM workspaces WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE',
+    const workspaces = (await client.query<{ id: string; owner_user_id: string }>(
+      'SELECT id,owner_user_id FROM workspaces WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE',
       [[discovered.source, discovered.destination]],
     )).rows
     if (workspaces.length !== 2) return await deny()
@@ -67,9 +66,9 @@ async function runTransfer(
     if (!admin(destination.id)) return await deny()
     if (operation === 'adopt') {
       const owner = (await client.query("SELECT 1 FROM assistant_members WHERE assistant_id=$1 AND user_id=$2 AND role='owner'", [assistantId, userId])).rowCount
-      if (!owner || !source.is_personal || source.owner_user_id !== userId || assistant.owner_user_id !== userId) return await deny()
+      if (!owner || source.owner_user_id !== userId || assistant.owner_user_id !== userId) return await deny()
     } else if (source.id !== workspaceId || !admin(source.id) || assistant.owner_user_id !== null
-      || !destination.is_personal || destination.owner_user_id !== source.owner_user_id) return await deny()
+      || destination.owner_user_id !== source.owner_user_id) return await deny()
     const policies = (await client.query<{ workspace_id: string; access_mode: string; setup_state: string; default_department_id: string | null; revision: string }>(
       'SELECT workspace_id,access_mode,setup_state,default_department_id,revision::text FROM workspace_access_policies WHERE workspace_id=ANY($1::uuid[])',
       [[source.id, destination.id]],

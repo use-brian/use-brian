@@ -5239,7 +5239,6 @@ export const en = {
     deleteWorkspaceConfirm: "This permanently deletes the workspace and everything in it — assistants, members, and all data. This can't be undone.",
     advanced: "Advanced",
     deleteWorkspaceDescription: "Permanently delete this workspace and everything in it. This can't be undone.",
-    deleteWorkspacePersonalBlocked: "Your personal workspace is your account's home, so it can't be deleted. Workspaces you create for a team can be.",
     deleteWorkspaceDialogTitle: "Delete this workspace?",
     deleteWorkspaceTypePrompt: "Type {name} to confirm.",
     flushDataTitle: "Delete all workspace data",
@@ -5248,6 +5247,7 @@ export const en = {
     flushDataConfirm: "Every chat, memory, task, page, file, workflow, and scheduled job in this workspace is permanently deleted. Members, assistants, connectors, and settings stay. This can't be undone.",
     flushDataDone: "Deleted {count} items.",
     flushDataFailed: "Failed to delete workspace data. Please try again.",
+    transferOwnershipNeedsMember: "Invite another account through Organization first, then select that member here.",
     transferOwnershipTitle: "Transfer ownership",
     transferOwnershipDescription:
       "Hand this workspace to another member. The new owner takes over billing responsibility, and your role becomes admin.",
@@ -10660,8 +10660,7 @@ export const en = {
         "This source is confidential. Only workspace owners, admins, and members with confidential clearance can see it here.",
       personalGlobalNote:
         "On and off applies to this connector across all your workspaces.",
-      personalRoutingNote:
-        "Events from this personal source feed your Personal workspace, not {workspace}.",
+      personalRoutingNote: "This account connection is not set to feed {workspace}. Enable ingestion here to choose this workspace.",
       personalAddSourceCta: "Add a source for {workspace}",
       enableAction: "Enable ingestion",
       disableAction: "Disable",

@@ -134,12 +134,12 @@ function toRuleDto(rule: IngestRuleRow, teamIdByCompartment: ReadonlyMap<string,
 function ingestsIntoWorkspace(
   instance: ConnectorInstance,
   workspaceId: string,
-  ownedPersonal: boolean,
+  ownedDefault: boolean,
 ): boolean {
   if (!instance.ingestionEnabled) return false
   if (instance.scope === 'workspace') return instance.workspaceId === workspaceId
   if (instance.ingestWorkspaceId) return instance.ingestWorkspaceId === workspaceId
-  return ownedPersonal
+  return ownedDefault
 }
 
 function toSourceDto(
@@ -148,7 +148,7 @@ function toSourceDto(
   rules: IngestRuleRow[],
   workspaceName: string | null,
   workspaceId: string,
-  ownedPersonal: boolean,
+  ownedDefault: boolean,
   teamIdByCompartment: ReadonlyMap<string, string> = new Map(),
 ) {
   return {
@@ -162,7 +162,7 @@ function toSourceDto(
     label: instance.label,
     connectedEmail: instance.connectedEmail,
     connected: instance.connected,
-    ingestionEnabled: ingestsIntoWorkspace(instance, workspaceId, ownedPersonal),
+    ingestionEnabled: ingestsIntoWorkspace(instance, workspaceId, ownedDefault),
     ingestTargetWorkspaceId: instance.ingestWorkspaceId,
     rules: rules.map((rule) => toRuleDto(rule, teamIdByCompartment)),
   }
@@ -245,7 +245,7 @@ export function ingestRoutes(opts: Options): Router {
     try {
       const workspace = await opts.workspaceStore.get(userId, workspaceId)
       if (!workspace) return void res.status(404).json({ error: 'Workspace not found' })
-      const ownedPersonal = workspace.isPersonal === true && workspace.ownerUserId === userId
+      const ownedDefault = workspace.isOwnerDefault === true && workspace.ownerUserId === userId
       const usable = await listUsableWorkspaceConnectors({
         connectorInstanceStore: opts.connectorInstanceStore,
         connectorGrantStore: opts.connectorGrantStore,
@@ -270,7 +270,7 @@ export function ingestRoutes(opts: Options): Router {
         rulesByInstance.get(instance.id) ?? [],
         instance.scope === 'workspace' ? workspace.name : null,
         workspaceId,
-        ownedPersonal,
+        ownedDefault,
         teamIdByCompartment,
       ))
       const present = new Set(ingestible.map(({ instance }) => instance.provider))
@@ -282,7 +282,7 @@ export function ingestRoutes(opts: Options): Router {
           name: OFFICIAL_CONNECTORS.find((connector) => connector.id === provider)?.name ?? provider,
           nature: PROVIDER_NATURE[provider] ?? 'events',
         }))
-      res.json({ sources, available, ownedPersonal })
+      res.json({ sources, available, ownedDefault })
     } catch (err) {
       console.error('[ingest] list sources failed:', err)
       res.status(500).json({ error: 'Failed to load ingestion sources' })
@@ -329,7 +329,7 @@ export function ingestRoutes(opts: Options): Router {
         ...(instance.scope === 'user' ? { ingestWorkspaceId: workspaceId } : {}),
       })
       const rules = await opts.ingestRulesStore.listByConnectorInstance(userId, instanceId)
-      const ownedPersonal = workspace.isPersonal === true && workspace.ownerUserId === userId
+      const ownedDefault = workspace.isOwnerDefault === true && workspace.ownerUserId === userId
       res.json({
         source: toSourceDto(
           updated ?? instance,
@@ -337,7 +337,7 @@ export function ingestRoutes(opts: Options): Router {
           rules,
           instance.scope === 'workspace' ? workspace.name : null,
           workspaceId,
-          ownedPersonal,
+          ownedDefault,
         ),
       })
     } catch (err) {
@@ -370,7 +370,7 @@ export function ingestRoutes(opts: Options): Router {
         ...(instance.scope === 'user' ? { ingestWorkspaceId: null } : {}),
       })
       const rules = await opts.ingestRulesStore.listByConnectorInstance(userId, instanceId)
-      const ownedPersonal = workspace.isPersonal === true && workspace.ownerUserId === userId
+      const ownedDefault = workspace.isOwnerDefault === true && workspace.ownerUserId === userId
       res.json({
         source: toSourceDto(
           updated ?? instance,
@@ -378,7 +378,7 @@ export function ingestRoutes(opts: Options): Router {
           rules,
           instance.scope === 'workspace' ? workspace.name : null,
           workspaceId,
-          ownedPersonal,
+          ownedDefault,
         ),
       })
     } catch (err) {

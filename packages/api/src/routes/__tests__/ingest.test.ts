@@ -116,7 +116,7 @@ function setup(ready = true) {
       id: WORKSPACE_ID,
       name: 'Personal',
       ownerUserId: USER_ID,
-      isPersonal: true,
+      isOwnerDefault: true,
     }),
     getRole: vi.fn().mockResolvedValue('admin'),
   }

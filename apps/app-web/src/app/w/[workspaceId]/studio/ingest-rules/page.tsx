@@ -383,7 +383,7 @@ export default function StudioIngestRulesPage() {
   const connectorsHref = `/w/${workspaceId}/studio/connectors`;
   const channelsHref = `/w/${workspaceId}/studio/channels`;
 
-  // The source list (+ available providers + the ownedPersonal placement
+  // The source list (+ available providers + the ownedDefault placement
   // truth) and the WhatsApp ingest status read the workspace's cached keys in
   // parallel (instant-navigation N1 / N7): a revisit paints the rail on the
   // first frame; toggles write through the same key. WhatsApp is a bespoke
@@ -392,7 +392,7 @@ export default function StudioIngestRulesPage() {
   const {
     sources,
     available,
-    ownedPersonal,
+    ownedDefault,
     error: loadError,
     refresh: fetchSources,
     updateSources,
@@ -503,7 +503,7 @@ export default function StudioIngestRulesPage() {
   function renderSourceDetail(s: IngestSource) {
     const busy = busyId === s.instanceId;
     const showPicker = pickerId === s.instanceId && s.provider === "github";
-    const notice = ingestSourceNotice(s.scope, ownedPersonal);
+    const notice = ingestSourceNotice(s.scope, ownedDefault);
     return (
       <div key={s.instanceId} className="space-y-4">
         {/* Header — icon, name + scope badge, account/nature line, status pill. */}
@@ -579,9 +579,9 @@ export default function StudioIngestRulesPage() {
             note renders; the routing warning stays as a defensive branch for
             a stale client against an older API.
             `ingest-source-notice.ts` / docs ingest-pipeline.md. */}
-        {(notice.globalToggle || notice.routesToPersonal) && (
+        {(notice.globalToggle || notice.routesElsewhere) && (
           <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
-            {notice.routesToPersonal && (
+            {notice.routesElsewhere && (
               <p>
                 {format(copy.personalRoutingNote, { workspace: activeName })}{" "}
                 <Link

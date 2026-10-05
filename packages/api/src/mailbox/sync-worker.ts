@@ -744,7 +744,7 @@ export type MailboxSyncWorkerDeps = {
    * else the owner's OWN personal workspace. Injected because the personal-
    * workspace lookup is a workspaces-table query this module must not own.
    */
-  resolvePersonalWorkspaceId: (userId: string) => Promise<string | null>
+  resolveDefaultWorkspaceId: (userId: string) => Promise<string | null>
   /** Workspace primary assistant for extraction attribution; null is fine. */
   resolveAssistantId?: (workspaceId: string) => Promise<string | null>
   /** Brain routing deps — absent = archive-only sync (brain flow dark). */
@@ -909,7 +909,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
   async function resolveWorkspaceId(inst: ConnectorInstance): Promise<string | null> {
     if (inst.workspaceId) return inst.workspaceId
     if (inst.ingestWorkspaceId) return inst.ingestWorkspaceId
-    if (inst.userId) return deps.resolvePersonalWorkspaceId(inst.userId)
+    if (inst.userId) return deps.resolveDefaultWorkspaceId(inst.userId)
     return null
   }
 

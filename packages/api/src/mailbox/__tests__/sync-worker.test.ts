@@ -207,7 +207,7 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
   const countArchive = vi.fn(async () => ({ total: 0, byFolder: {} as Record<string, number> }))
   const worker = createMailboxSyncWorker({
     connectorInstanceStore: store,
-    resolvePersonalWorkspaceId: async () => 'ws-1',
+    resolveDefaultWorkspaceId: async () => 'ws-1',
     sessions: createMailboxSessionCache({ createClient: () => over.client }),
     // A test may override the insert (e.g. to reject one message); the returned
     // `insertMessage` stays the typed mock for `.mock` assertions in the

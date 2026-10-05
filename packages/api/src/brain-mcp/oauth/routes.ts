@@ -263,7 +263,7 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
        FROM workspaces w
        JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $1
        WHERE wm.role IN ('owner', 'admin')
-       ORDER BY w.is_personal DESC, w.created_at ASC`,
+       ORDER BY w.created_at ASC, w.id ASC`,
       [userId],
     )
     res.json({

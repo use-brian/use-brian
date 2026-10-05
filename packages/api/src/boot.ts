@@ -9063,13 +9063,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   setGlobalMailboxArchiveDeps({ ...(sharedEmbedder ? { embedder: sharedEmbedder } : {}) })
   const mailboxSyncWorker = createMailboxSyncWorker({
     connectorInstanceStore,
-    resolvePersonalWorkspaceId: async (userId) => {
-      // Ownership, never membership (the ingest pollers' resolve-workspace
-      // rule): an is_personal workspace the owner was merely invited into
-      // can belong to another user.
+    resolveDefaultWorkspaceId: async (userId) => {
+      // A default is only an ingestion target while the account still owns it.
       const r = await query<{ id: string }>(
         `SELECT id FROM workspaces
-          WHERE owner_user_id = $1 AND is_personal = true
+          WHERE owner_user_id = $1 AND id = (SELECT default_workspace_id FROM users WHERE id = $1)
           ORDER BY created_at LIMIT 1`,
         [userId],
       )

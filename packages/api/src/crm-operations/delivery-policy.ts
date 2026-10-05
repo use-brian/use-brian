@@ -41,7 +41,7 @@ const denied = (reason: string, details: Record<string,unknown> = {}) => new Crm
 
 async function member(client: PoolClient, scope: MemberMailContext, admin = false) {
   const workspaceId = scope.workspaceId ?? (await client.query<{ id: string }>(
-    `SELECT id FROM workspaces WHERE owner_user_id=$1 AND is_personal=true`,[scope.userId])).rows[0]?.id
+    `SELECT id FROM workspaces WHERE owner_user_id=$1 AND id=(SELECT default_workspace_id FROM users WHERE id=$1)`,[scope.userId])).rows[0]?.id
   if (!workspaceId) throw denied('delivery_workspace_unavailable')
   const row = (await client.query<{ role: string }>(`SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE`,[workspaceId,scope.userId])).rows[0]
   if (!row || (admin && !['owner','admin'].includes(row.role))) throw new CrmOperationsError('not_authorized','Current workspace membership is required for this mailbox operation.')

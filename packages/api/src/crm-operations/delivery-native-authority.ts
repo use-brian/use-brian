@@ -42,15 +42,15 @@ type Mailbox = {id:string;scope:string;userId:string|null;provider:string;create
 export async function lockNativeDeliveryMailbox(client:PoolClient,workspaceId:string,native:NativeDeliveryPrincipal,instanceId:string) {
   const turn={effectiveCompartments:native.ceiling.compartments,effectiveProjectIds:native.ceiling.projectIds,
     access:{mutationCompartments:native.ceiling.mutationCompartments===undefined?[]:native.ceiling.mutationCompartments}}
-  const workspace=(await client.query<{owner:string;personal:boolean}>('SELECT owner_user_id AS owner,is_personal AS personal FROM workspaces WHERE id=$1 FOR SHARE',[workspaceId])).rows[0]
+  const workspace=(await client.query<{owner:string}>('SELECT owner_user_id AS owner FROM workspaces WHERE id=$1 FOR SHARE',[workspaceId])).rows[0]
   if(!workspace) throw denied()
   const instances=(await client.query<Mailbox>(`SELECT id,scope,user_id AS "userId",provider,created_at AS "createdAt",compartments,project_ids AS "projectIds"
     FROM connector_instance WHERE connected AND health_status<>'auth_failed' AND provider IN('gmail','imap','agentmail') AND
-    (workspace_id=$1 OR (scope='user' AND ($2::boolean AND user_id=$3 OR id IN(SELECT connector_instance_id FROM connector_grant WHERE target_type='workspace' AND target_id=$1))))
-    ORDER BY created_at,id FOR SHARE`,[workspaceId,workspace.personal,workspace.owner])).rows
+    (workspace_id=$1 OR (scope='user' AND (id IN(SELECT connector_instance_id FROM connector_grant WHERE target_type='workspace' AND target_id=$1))))
+    ORDER BY created_at,id FOR SHARE`,[workspaceId])).rows
   const exposures=(await client.query<{connectorInstanceId:string;compartments:string[];projectIds:string[]}>(`SELECT connector_instance_id AS "connectorInstanceId",compartments,project_ids AS "projectIds"
     FROM connector_grant WHERE target_type='workspace' AND target_id=$1 ORDER BY connector_instance_id FOR SHARE`,[workspaceId])).rows
-  const visible=instances.filter(row=>row.scope==='workspace' || (workspace.personal && row.userId===workspace.owner)
+  const visible=instances.filter(row=>row.scope==='workspace'
     ? connectorExposureAllowed(turn,row)
     : exposures.some(grant=>grant.connectorInstanceId===row.id && connectorExposureAllowed(turn,grant)))
   const selected=visible.find(row=>row.id===instanceId)
