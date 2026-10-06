@@ -8,7 +8,7 @@ import { CapabilitiesSchema, CommandSchema, TaskIdentitySchema, ProfileIdentityS
 
 import type { NativeBrokerObserverFactory } from './computer-control/trace.js'
 import type { NativeActivity, NativeApprovalContext } from './computer-control/controller.js'
-import { supportedNativePlatform, type HelperLaunchSpec, type HelperTimingOptions } from './computer-control/helper-client.js'
+import { inputTakeoverCategory, supportedNativePlatform, type HelperLaunchSpec, type HelperTimingOptions } from './computer-control/helper-client.js'
 
 const ProfilePollSchema = z.object({ request: z.object({ id: z.string().uuid(), workspaceId: z.string().uuid(), assistantId: z.string().uuid(), conversationId: z.string().uuid(), requester: z.string().min(1).max(200) }).strict().nullable() }).strict()
 
@@ -230,18 +230,54 @@ export class NativeComputerIntegration {
   private foregroundNotice(): string {
     return 'With your consent, the helper will attempt to restore only the selected window to the foreground at session start and after the approval dialog. It freshly rechecks the target and action; if focus restoration or validation fails, it fails closed. Pointer movement is allowed. Clicks, dragging, scrolling and keyboard input stop access outside local approval prompts, including while the session is starting.'
   }
+  private async notifyHelperFailure(controller: NativeComputerController, scope: { authIdentity: string; workspaceId: string; generation: number }, failure: { category: string } | { timedOut: true; execution: boolean }): Promise<void> {
+    try {
+      await Promise.all([...this.teardown])
+      const signal = this.requests.signal
+      const current = () => !signal.aborted && !this.teardown.size && this.generation === scope.generation &&
+        this.controller === controller && this.workspaceId === scope.workspaceId && !this.profile
+      if (!current()) return
+      const fresh = await this.readAuth(AbortSignal.any([signal, AbortSignal.timeout(5000)]))
+      if (!current() || !fresh || this.authKey(fresh) !== scope.authIdentity) return
+      const input = 'category' in failure
+      await dialog.showMessageBox({ type: 'warning', title: 'This computer',
+        message: input ? 'Computer access stopped by input' : 'Computer request timed out',
+        detail: input
+          ? `The native helper detected ${failure.category} while computer access was starting or active. Brian stopped access and disconnected the profile. Reconnect and request access again. Pointer movement is allowed; clicks, dragging, scrolling and keyboard input stop access outside local approval prompts.`
+          : `The native helper did not finish its request before the deadline. Brian stopped access and disconnected the profile. ${failure.execution ? 'An action may already have happened. Review the selected application before making a new request; Brian will not replay the timed-out request.' : 'Reconnect before making a new request.'}`,
+        buttons: ['OK'], defaultId: 0, cancelId: 0, noLink: true, signal })
+    } catch { /* A notice cannot bypass cleanup or revive authority. */ }
+  }
   private makeController(): NativeComputerController {
     const integration = this
     const controller: NativeComputerController = new NativeComputerController({ enabled: this.enabled, get observationOnly() { return !integration.controlEnabled && !integration.verificationAllowed() }, observerFactory: this.options.observerFactory,
       safetyControlsReady: () => this.ready && this.helperReady(),
       helperFactory: onDeath => {
         let helper: PrivatePipeHelper | undefined
+        let stoppedScope: { authIdentity: string; workspaceId: string; generation: number } | undefined
         helper = new PrivatePipeHelper(this.helperLaunch(), reason => {
+          const profile = this.profile
+          const generation = this.generation
+          const authIdentity = profile && this.authKey(profile.auth)
           try { console.info('[native-computer] helper stopped', helper?.lifecycleDiagnostics()) } catch { /* Diagnostics cannot delay revocation. */ }
           onDeath(reason)
+          // The side pipe can close before waitpid reports exit 73. Revoke
+          // immediately, then correlate a later notice with this exact Stop.
+          if (profile && authIdentity && this.controller === controller && this.generation === generation + 1 && !this.profile) {
+            stoppedScope = { authIdentity, workspaceId: profile.workspaceId, generation: this.generation }
+          }
         }, undefined, this.helperTiming, {
           onDiscovery: metadata => { console.info('[native-computer] discovery diagnostic', metadata) },
-          onExit: metadata => { console.info('[native-computer] helper exited', metadata) },
+          onExit: metadata => {
+            console.info('[native-computer] helper exited', metadata)
+            const scope = stoppedScope; stoppedScope = undefined
+            const category = inputTakeoverCategory(metadata.exitCode)
+            if (!scope) return
+            if (category && metadata.exitSignal === null) void this.notifyHelperFailure(controller, scope, { category })
+            else if (metadata.requestTimedOut && metadata.cause === 'timeout') {
+              void this.notifyHelperFailure(controller, scope, { timedOut: true, execution: metadata.method === 'execute' })
+            }
+          },
         })
         return helper
       }, lease: new LocalDeviceLease(),

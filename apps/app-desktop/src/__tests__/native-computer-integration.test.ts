@@ -53,7 +53,7 @@ vi.mock('../computer-control/index.js', () => ({
     waitUntilReady = vi.fn((signal: AbortSignal) => mocks.ready(signal))
   },
   PrivatePipeHelper: class {
-    constructor(spec: unknown, onDeath: unknown, timeout: unknown, timing: unknown) { mocks.launches.push(spec); mocks.helperArgs.push([spec, onDeath, timeout, timing]); mocks.helpers.push(this) }
+    constructor(spec: unknown, onDeath: unknown, timeout: unknown, timing: unknown, diagnostics: unknown) { mocks.launches.push(spec); mocks.helperArgs.push([spec, onDeath, timeout, timing, diagnostics]); mocks.helpers.push(this) }
     readinessDiagnostics = vi.fn(() => ({ requestTimedOut: false, exitObserved: true, exitCode: 77, exitSignal: null, spawnFailed: false }))
     capabilities = vi.fn(async () => { if (mocks.readinessFailure) throw new Error('PRIVATE_ADMISSION_ERROR'); return mocks.readinessCaps })
     kill = vi.fn(() => mocks.readinessDeath)
@@ -1254,6 +1254,91 @@ describe('durable profile connection and fresh chat leases', () => {
     })
     return controller
   }
+  describe('[COMP:desktop/native-consent] input takeover notices', () => {
+    async function stoppedHelper() {
+      const active = await setupProfile(); await integration.handle(connect)
+      const death = deferred<void>()
+      active.identityChanged.mockImplementation(() => death.promise)
+      active.stop.mockImplementation(() => {
+        if (active.state !== 'stopped') {
+          active.state = 'stopped'; active.options.onStatus(active.status())
+        }
+        return death.promise
+      })
+      active.options.helperFactory(() => { void active.stop() })
+      const [, onDeath, , , diagnostics] = mocks.helperArgs.at(-1)!
+      vi.mocked(dialog.showMessageBox).mockClear()
+      onDeath() // Guardian EOF closes authority before the actual exit arrives.
+      const exit = (code: number | null = 73, signal: string | null = null, metadata: Record<string, unknown> = {}) => diagnostics.onExit({
+        requestTimedOut: false, exitObserved: true, exitCode: code, exitSignal: signal,
+        spawnFailed: false, cause: 'guardian', method: 'start', elapsedMs: 2899, ...metadata,
+      })
+      return { active, death, exit }
+    }
+    it('explains confirmed takeover after cleanup, without exposing content or restarting', async () => {
+      const { death, exit } = await stoppedHelper()
+      expect((integration as any).profile).toBeUndefined()
+      expect((integration as any).session).toBeUndefined()
+      exit(); expect(dialog.showMessageBox).not.toHaveBeenCalled()
+      death.resolve()
+      await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalledOnce())
+      expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ type: 'warning', message: 'Computer access stopped by input',
+        detail: expect.stringContaining('detected input while computer access was starting or active')
+      }))
+      const notice = vi.mocked(dialog.showMessageBox).mock.calls[0][0]
+      expect(notice.detail).toContain('Pointer movement is allowed')
+      expect(JSON.stringify(notice)).not.toMatch(/private-|Server requester|process-instance|window-instance/)
+      expect(mocks.relays).toHaveLength(0)
+      exit(); await Promise.resolve(); expect(dialog.showMessageBox).toHaveBeenCalledOnce()
+      await integration.handle({ type: 'stop' }); expect(notice.signal!.aborted).toBe(true)
+    })
+    it.each([[80, 'keyboard input'], [81, 'a mouse button event'], [82, 'scrolling'], [83, 'dragging'], [84, 'a modifier key event']])('identifies fixed input category %s without event contents', async (code, category) => {
+      const { death, exit } = await stoppedHelper()
+      exit(code as number); death.resolve()
+      await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalledOnce())
+      const notice = vi.mocked(dialog.showMessageBox).mock.calls[0][0]
+      expect(notice.detail).toContain(`detected ${category} while`)
+      expect((integration as any).profile).toBeUndefined()
+      expect(mocks.relays).toHaveLength(0)
+    })
+    it.each(['stop', 'workspace', 'account', 'mutated-account', 'sign-out', 'controller', 'cleanup-failed'].flatMap(change => [[change, false], [change, true]] as const))('suppresses a late helper failure notice after %s (timeout: %s)', async (change, timedOut) => {
+      const { death, exit } = await stoppedHelper()
+      if (change === 'stop') void integration.stop()
+      if (change === 'workspace') void integration.handle({ type: 'workspace-changed', workspaceId: uuid(99) })
+      if (change === 'account') auth = { ...auth!, accountKey: 'replacement' }
+      if (change === 'mutated-account') auth!.accountKey = 'replacement'
+      if (change === 'sign-out') auth = null
+      if (change === 'controller') (integration as any).controller = undefined
+      if (change === 'cleanup-failed') (integration as any).trackCleanup(() => Promise.reject(new Error('PRIVATE'))).catch(() => {})
+      if (timedOut) exit(null, 'SIGKILL', { requestTimedOut: true, cause: 'timeout', method: 'execute' })
+      else exit()
+      death.resolve()
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(dialog.showMessageBox).not.toHaveBeenCalled()
+      expect((integration as any).profile).toBeUndefined()
+    })
+    it.each(['execute', 'start', 'capabilities'])('explains a %s timeout after confirmed death without replay or private content', async method => {
+      const { death, exit } = await stoppedHelper()
+      exit(null, 'SIGKILL', { requestTimedOut: true, cause: 'timeout', method })
+      expect(dialog.showMessageBox).not.toHaveBeenCalled()
+      death.resolve()
+      await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalledOnce())
+      const notice = vi.mocked(dialog.showMessageBox).mock.calls[0][0]
+      expect(notice.message).toBe('Computer request timed out')
+      expect(notice.detail?.includes('An action may already have happened')).toBe(method === 'execute')
+      expect(JSON.stringify(notice)).not.toMatch(/private-|process-instance|window-instance/)
+      expect(mocks.relays).toHaveLength(0)
+      expect((integration as any).profile).toBeUndefined()
+      exit(null, 'SIGKILL', { requestTimedOut: true, cause: 'timeout', method })
+      await Promise.resolve(); expect(dialog.showMessageBox).toHaveBeenCalledOnce()
+    })
+    it.each([70, 71, 72, 77, null])('does not mislabel exit %s as physical input', async code => {
+      const { death, exit } = await stoppedHelper()
+      exit(code, code === null ? 'SIGKILL' : null); death.resolve()
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    })
+  })
   it.each([
     [503, 'native_execution_unavailable', 'native_execution_unavailable'],
     [503, 'computer_profiles_schema_unavailable', 'computer_profiles_schema_unavailable'],
