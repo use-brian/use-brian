@@ -475,6 +475,8 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    * sent (channel + email + userId still are). See tool-hooks.md.
    */
   actorChannelId?: string | null
+  /** Provider-resolved display label for this exact sender; not an account mutation. */
+  actorDisplayName?: string | null
   /**
    * Pin the per-turn media token to a specific recording episode. Set by the
    * WhatsApp video auto-turn to the episode it fired for, so media-fetching
@@ -998,7 +1000,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 async function processChannelMessageTurn(params: ChannelPipelineParams): Promise<void> {
   const {
     userId, ownerId, assistant, isIdentified,
-    channelType, channelId, actorChannelId, mediaEpisodeId, isGroupChat,
+    channelType, channelId, actorChannelId, actorDisplayName, mediaEpisodeId, isGroupChat,
     modelAlias, adaptiveResearchEnabled, abortController,
     provider, systemPrompt, tools, memoryStore, usageStore,
     analytics, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore,
@@ -1927,7 +1929,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // `actorChannelId` (Slack `U…`, Telegram handle/id, Feishu/Lark open id, WhatsApp number) rides
     // along so "what is my Slack id" is answered as fact, not guessed.
     speakerIdentity: isIdentified && !isolatedAudience
-      ? speakerIdentityFromUser(channelUser, { type: channelType, id: actorChannelId ?? null })
+      ? speakerIdentityFromUser(channelUser, { type: channelType, id: actorChannelId ?? null, displayName: actorDisplayName })
       : null,
     memoryContext,
     workspaceFilesContext,

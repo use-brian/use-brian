@@ -876,6 +876,52 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
       userId: 'linked-user-1',
       isIdentified: true,
+      actorDisplayName: 'Sender',
+    }))
+    expect(mocks.api.getUserProfile).not.toHaveBeenCalled()
+  })
+
+  it('enriches a linked nameless account with its exact Feishu sender profile', async () => {
+    mocks.findUserById.mockResolvedValue({ id: 'linked-user-1', name: null, email: 'alex@example.com' })
+    mocks.api.getUserProfile.mockResolvedValue({ email: 'other@example.com', displayName: 'Alex Example' })
+    const linkedAccountStore = { findByProvider: vi.fn(async () => ({ userId: 'linked-user-1', assistantId: ASSISTANT_ID })) }
+    const { app } = setup({ route: { linkedAccountStore } as never })
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage({ senderName: undefined }) }).expect(202)
+    await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledOnce())
+    expect(mocks.api.getUserProfile).toHaveBeenCalledExactlyOnceWith('ou_sender')
+    expect(mocks.resolveChannelUser).not.toHaveBeenCalled()
+    expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'linked-user-1', isIdentified: true, actorChannelId: 'ou_sender', actorDisplayName: 'Alex Example',
+    }))
+  })
+
+  it.each(['missing', 'denied'])('keeps linked identity when the provider name is %s', async failure => {
+    if (failure === 'denied') mocks.api.getUserProfile.mockRejectedValueOnce(new Error('Access denied'))
+    const linkedAccountStore = { findByProvider: vi.fn(async () => ({ userId: 'linked-user-1', assistantId: ASSISTANT_ID })) }
+    const { app } = setup({ route: { linkedAccountStore } as never })
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage({ senderName: undefined }) }).expect(202)
+    await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledOnce())
+    expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'linked-user-1', isIdentified: true, actorDisplayName: undefined,
+    }))
+    expect(mocks.resolveChannelUser).not.toHaveBeenCalled()
+  })
+
+  it('reuses the email-resolution profile for sender display-name context', async () => {
+    mocks.api.getUserProfile.mockResolvedValue({ email: 'alex@example.com', displayName: 'Alex Example' })
+    mocks.resolveChannelUser.mockImplementationOnce(async (_store, _provider, _sender, _assistant, fetchProfile) => {
+      await fetchProfile()
+      return { user: { id: 'matched-user-1' }, isIdentified: true }
+    })
+    const { app } = setup({ route: { channelUserStore: {} as never } })
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage({ senderName: undefined }) }).expect(202)
+    await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledOnce())
+    expect(mocks.api.getUserProfile).toHaveBeenCalledExactlyOnceWith('ou_sender')
+    expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'matched-user-1', actorDisplayName: 'Alex Example',
     }))
   })
 
