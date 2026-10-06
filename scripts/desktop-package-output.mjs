@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -16,7 +16,7 @@ export function allocateOutput(desktop, githubActions = process.env.GITHUB_ACTIO
   return mkdtempSync(join(runs, 'mac-'));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (process.argv[1] && existsSync(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
     if (process.argv.length !== 3) throw new Error('usage: desktop-package-output.mjs DESKTOP_DIRECTORY');
     console.log(allocateOutput(resolve(process.argv[2])));

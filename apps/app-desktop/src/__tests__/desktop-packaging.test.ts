@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-function packageFixture(gatekeeperExit = 0, extraArgs: string[] = [], stock = { version: '43.2.0', installerExit: 0 }) {
+function packageFixture(gatekeeperExit = 0, extraArgs: string[] = [], stock = { version: '43.2.0', installerExit: 0 }, appleCredentials = true) {
   const root = mkdtempSync(join(tmpdir(), "desktop-package-test-"));
   dirs.push(root);
   for (const path of ["scripts", "bin", "apps/app-desktop/release"]) mkdirSync(join(root, path), { recursive: true });
@@ -62,7 +62,7 @@ if ('${command}' === 'spctl') process.exit(${gatekeeperExit});
     env: { ...process.env, GITHUB_ACTIONS: "false", PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: root, PACKAGE_TEST_LOG: log,
       BRIAN_NATIVE_PACKAGE_CHECK: "1", // inherited mode must not silently opt in
       CSC_LINK: Buffer.from("fictional-certificate").toString("base64"), CSC_KEY_PASSWORD: "fixture-password",
-      APPLE_ID: "release@example.com", APPLE_APP_SPECIFIC_PASSWORD: "fixture-password", APPLE_TEAM_ID: "EXAMPLETEAM" },
+      APPLE_ID: appleCredentials ? "release@example.com" : "", APPLE_APP_SPECIFIC_PASSWORD: appleCredentials ? "fixture-password" : "", APPLE_TEAM_ID: appleCredentials ? "EXAMPLETEAM" : "" },
   });
   const calls = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
   return { ...result, calls, root };
@@ -99,6 +99,31 @@ describe("[COMP:app-desktop/packaging] desktop packaging", () => {
     expect(JSON.parse(readFileSync(join(result.root, "apps/app-desktop/package.json"), "utf8")).version).toBe("0.0.13");
     expect(result.stdout + result.stderr).not.toContain("fixture-password");
   }, 30_000);
+
+  it.each([false, true])('local test preserves Developer ID signing without notary operations; Apple credentials present=%s', appleCredentials => {
+    const result = packageFixture(7, ['--local-test'], undefined, appleCredentials);
+    expect(result.status, result.stderr).toBe(0);
+    const builder = result.calls.find(call => call.includes('electron-builder'))!;
+    const config = JSON.parse(readFileSync(builder[builder.indexOf('--config') + 1], 'utf8'));
+    expect(config).toEqual({ extends: join(result.root, 'apps/app-desktop/electron-builder.yml'),
+      forceCodeSigning: true, mac: { notarize: false } });
+    expect(builder.slice(builder.indexOf('--publish'), builder.indexOf('--publish') + 2)).toEqual(['--publish', 'never']);
+    expect(result.calls.some(call => call[0] === 'keychain-operation' && call[1] === 'import')).toBe(true);
+    expect(result.calls.some(call => call[0] === 'codesign' && call.includes('--sign'))).toBe(true);
+    expect(result.calls.some(call => call[0] === 'codesign' && call.includes('--verify'))).toBe(true);
+    expect(result.calls.some(call => ['xcrun', 'spctl', 'gh'].includes(call[0]))).toBe(false);
+    expect(result.stdout).toContain('NOT notarized');
+    expect(result.stdout).toContain('==> Done.');
+    expect(result.stdout + result.stderr).not.toContain('fixture-password');
+  }, 30_000);
+
+  it.each(['--publish', '--no-build'])('refuses local test combined with %s before signing, building or version mutation', flag => {
+    const result = packageFixture(0, ['--local-test', flag]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--local-test cannot combine');
+    expect(result.calls.some(call => ['pnpm', 'keychain-operation', 'codesign', 'xcrun'].includes(call[0]))).toBe(false);
+    expect(JSON.parse(readFileSync(join(result.root, 'apps/app-desktop/package.json'), 'utf8')).version).toBe('0.0.12');
+  });
 
   it("explicitly passes the package check to the existing signer without publication", () => {
     const result = packageFixture(0, ["--native-package-check"]);

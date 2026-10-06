@@ -1,12 +1,12 @@
 # Mac check: computer profiles from chat
 
-The previous package build **failed**. Do not reuse that ZIP. Pull the fixes and rebuild:
+For a local Developer ID test without notarization, rebuild the current source:
 
 ```sh
-bash scripts/package-desktop.sh --arm64
+bash scripts/package-desktop.sh --arm64 --local-test
 ```
 
-Continue only after **Done**. Quit the old Use Brian instance. Use the ZIP path printed by that run, not the old `release/usebrian.zip`:
+This preserves native signing checks but does not submit the app to Apple. It is a local test package, not a notarized distribution or native acceptance result. Use the ordinary command without `--local-test` for release verification. Continue only after **Done**. Quit the old Use Brian instance. Use the ZIP path printed by that run, not the old `release/usebrian.zip`:
 
 ```sh
 zip='/paste/the/printed/path/usebrian.zip'

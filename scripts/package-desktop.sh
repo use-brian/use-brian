@@ -7,6 +7,7 @@
 # shell history. Must run on macOS with Xcode command-line tools installed.
 #
 #   ./scripts/package-desktop.sh                      # local signed + notarized .dmg/.zip
+#   ./scripts/package-desktop.sh --local-test         # Developer ID signed, no notarization/upload
 #   ./scripts/package-desktop.sh --publish            # the above, then publish a GitHub Release
 #   ./scripts/package-desktop.sh --bump patch --publish   # bump 0.0.1 -> 0.0.2, build, publish
 #   ./scripts/package-desktop.sh --version 1.0.0 --publish # set an exact version, build, publish
@@ -50,6 +51,7 @@ fi
 
 PUBLISH=0
 SKIP_BUILD=0
+LOCAL_TEST=0
 OUTPUT_DIR=""
 NATIVE_PACKAGE_CHECK=0
 BUMP=""
@@ -58,6 +60,7 @@ ARCH_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --publish) PUBLISH=1 ;;
+    --local-test) LOCAL_TEST=1 ;;
     --arm64) ARCH_ARGS=(--arm64) ;;
     --native-package-check) NATIVE_PACKAGE_CHECK=1 ;;
     --no-build|--skip-build) SKIP_BUILD=1 ;;
@@ -74,10 +77,11 @@ while [[ $# -gt 0 ]]; do
     --version=*) SET_VERSION="${1#--version=}" ;;
     -h|--help)
       cat <<'USAGE'
-usage: package-desktop.sh [--bump patch|minor|major | --version X.Y.Z] [--arm64] [--publish] [--no-build --artifacts-dir /absolute/path] [--native-package-check]
+usage: package-desktop.sh [--bump patch|minor|major | --version X.Y.Z] [--arm64] [--publish | --local-test] [--no-build --artifacts-dir /absolute/path] [--native-package-check]
   --bump LEVEL     increment apps/app-desktop/package.json (patch|minor|major) before building
   --version X.Y.Z  set apps/app-desktop/package.json to an exact version before building
   --publish        (re)sign+notarize, then upload the dmg+zip+update feed to GitHub Releases
+  --local-test     Developer ID signed local test; no notarization, staple or publish; forbids no-build
   --arm64          pin the Apple Silicon architecture (used by automated releases)
   --native-package-check  run the R1 package-copy admission regression; forbids publish/no-build
   --no-build       skip tsc + electron-builder; requires --artifacts-dir
@@ -94,6 +98,11 @@ USAGE
   esac
   shift
 done
+
+if [[ "$LOCAL_TEST" == "1" && ( "$PUBLISH" == "1" || "$SKIP_BUILD" == "1" ) ]]; then
+  echo "error: --local-test cannot combine with --publish or --no-build." >&2
+  exit 1
+fi
 
 if [[ "$SKIP_BUILD" == "1" ]]; then
   if [[ "$OUTPUT_DIR" != /* || ! -d "$OUTPUT_DIR" ]]; then
@@ -136,7 +145,10 @@ fi
 # Validate the required secrets are present (names only, never values).
 # GH_TOKEN is deliberately NOT required: the publish step probes push access and
 # falls back to the gh keyring login when the token is absent or under-scoped.
-required=(CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID)
+required=(CSC_LINK CSC_KEY_PASSWORD)
+if [[ "$LOCAL_TEST" != "1" ]]; then
+  required+=(APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID)
+fi
 if [[ "$PUBLISH" == "1" ]]; then
   command -v gh >/dev/null 2>&1 || {
     echo "error: 'gh' (GitHub CLI) is required for --publish. Install: brew install gh" >&2
@@ -243,8 +255,21 @@ else
   echo "==> Building Siri App Intents extension"
   pnpm --filter @use-brian/app-desktop run build:siri
   pnpm --filter @use-brian/app-desktop run build:native-computer
-  echo "==> Packaging + signing + notarizing the app (Apple notary, a few min)"
-  BRIAN_NATIVE_PACKAGE_CHECK="$NATIVE_PACKAGE_CHECK" pnpm --filter @use-brian/app-desktop exec electron-builder --mac ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} --publish never "--config.directories.output=$OUTPUT_DIR"
+  BUILDER_ARGS=()
+  if [[ "$LOCAL_TEST" == "1" ]]; then
+    echo "==> Packaging Developer ID signed local test (notarization disabled)"
+    # A typed per-run override avoids CLI string/boolean ambiguity and keeps the
+    # release configuration unchanged. No credentials enter this configuration.
+    node --input-type=module - "$OUTPUT_DIR/local-test-builder.json" "$REPO_ROOT/apps/app-desktop/electron-builder.yml" <<'NODE'
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[2], JSON.stringify({ extends: process.argv[3],
+  forceCodeSigning: true, mac: { notarize: false } }, null, 2) + '\n');
+NODE
+    BUILDER_ARGS=(--config "$OUTPUT_DIR/local-test-builder.json")
+  else
+    echo "==> Packaging + signing + notarizing the app (Apple notary, a few min)"
+  fi
+  BRIAN_NATIVE_PACKAGE_CHECK="$NATIVE_PACKAGE_CHECK" pnpm --filter @use-brian/app-desktop exec electron-builder --mac ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} ${BUILDER_ARGS[@]+"${BUILDER_ARGS[@]}"} --publish never "--config.directories.output=$OUTPUT_DIR"
 fi
 
 for artifact in "$DMG" "$ZIP"; do
@@ -257,22 +282,29 @@ done
 # notarized + stapled — a staple alone assesses as "no usable signature". So do
 # the full sign -> notarize -> staple here. Idempotent: skip only if the dmg is
 # already both signed AND stapled.
-if codesign -dv "$DMG" >/dev/null 2>&1 && xcrun stapler validate "$DMG" >/dev/null 2>&1; then
-  echo "==> dmg already signed + notarized + stapled"
-else
-  echo "==> Signing the dmg with the release keychain"
+if [[ "$LOCAL_TEST" == "1" ]]; then
+  echo "==> Signing and verifying the local-test dmg"
   codesign --force --timestamp --sign "$CSC_NAME" --keychain "$CSC_KEYCHAIN" "$DMG"
-  echo "==> Notarizing the dmg (Apple notary, ~2-5 min)"
-  xcrun notarytool submit "$DMG" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
-  echo "==> Stapling the dmg"
-  xcrun stapler staple "$DMG"
+  codesign --verify --strict "$DMG"
+  echo "==> Local test only: NOT notarized; no Apple notary upload, staple or distribution assessment."
+else
+  if codesign -dv "$DMG" >/dev/null 2>&1 && xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+    echo "==> dmg already signed + notarized + stapled"
+  else
+    echo "==> Signing the dmg with the release keychain"
+    codesign --force --timestamp --sign "$CSC_NAME" --keychain "$CSC_KEYCHAIN" "$DMG"
+    echo "==> Notarizing the dmg (Apple notary, ~2-5 min)"
+    xcrun notarytool submit "$DMG" \
+      --apple-id "$APPLE_ID" \
+      --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+      --team-id "$APPLE_TEAM_ID" \
+      --wait
+    echo "==> Stapling the dmg"
+    xcrun stapler staple "$DMG"
+  fi
+  echo "==> Gatekeeper check (want: accepted / Notarized Developer ID):"
+  spctl -a -vv -t open --context context:primary-signature "$DMG"
 fi
-echo "==> Gatekeeper check (want: accepted / Notarized Developer ID):"
-spctl -a -vv -t open --context context:primary-signature "$DMG"
 
 if [[ "$PUBLISH" == "1" ]]; then
   # Upload the NOTARIZED artifacts ourselves. We can't use electron-builder
