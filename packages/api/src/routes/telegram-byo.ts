@@ -109,6 +109,10 @@ export type ChannelRecordingIngest = {
 }
 // getConnectorUserId now used inside channel-pipeline.ts
 
+const DECISION_LABELS: Record<string, string> = {
+  allow: 'Allowed', deny: 'Denied', always_allow: 'Always allowed', always_deny: 'Always denied',
+}
+
 type TelegramByoRouteOptions = {
   discussionStore?: TelegramDiscussionStore
   questionStore?: ChannelQuestionStore
@@ -666,6 +670,12 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       },
       onCallbackQuery: async (query) => {
         const parts = query.data.split(':')
+        if (parts[0] === 'mcp_decision') {
+          if (Object.hasOwn(DECISION_LABELS, parts[1])) {
+            await adapter.answerCallbackQuery(query.id, { text: DECISION_LABELS[parts[1]] })
+          }
+          return
+        }
         if (parts[0] === 'wq') {
           await adapter.answerCallbackQuery(query.id).catch(() => {})
           const callback = (req.body as { callback_query?: { from?: { id: number; username?: string } } }).callback_query
@@ -1209,9 +1219,10 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       if (workflowCallback?.data.startsWith('mcp_confirm:')) {
         const result = channelConfirmations.handle(interactionScope, { kind: 'action', data: workflowCallback.data })
         if (result.status === 'resolved') {
-          await adapter.editMessage(incoming.channelId, workflowCallback.messageId, {
-            text: `Tool action: ${result.decision}`, actions: [],
-          }).catch(() => {})
+          await adapter.setMessageActions(incoming.channelId, workflowCallback.messageId, [{
+            id: 'decision', label: DECISION_LABELS[result.decision ?? ''] ?? 'Handled',
+            data: `mcp_decision:${result.decision}`,
+          }]).catch((err) => console.error('[telegram-byo] confirmation button update failed:', err))
           return
         }
         // Preserve callback provenance for the central durable approval handler.
@@ -1863,12 +1874,16 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     const now = Date.now()
     if (now - lastStatusUpdate < STATUS_THROTTLE_MS) return
     lastStatusUpdate = now
-    const text = formatToolTimeline()
+    const latest = toolTimeline.at(-1)
+    const response = {
+      text: latest ? `${latest.done ? '✓' : '⏳'} ${humanizeToolName(latest.name)}` : 'Thinking...',
+      collapsibleDetails: latest ? `Watch more\n${formatToolTimeline()}` : undefined,
+    }
     try {
       if (statusMessageId) {
-        await adapter.editMessage(incoming.channelId, statusMessageId, { text })
+        await adapter.editMessage(incoming.channelId, statusMessageId, response)
       } else {
-        statusMessageId = await adapter.sendStatus(incoming.channelId, text)
+        statusMessageId = await adapter.sendMessage(incoming.channelId, response)
       }
     } catch {
       // Edit/send failed — non-critical
@@ -2000,7 +2015,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         await adapter.sendMessage(incoming.channelId, { text: message })
       },
       async onConfirmationRequired(req) {
-        await adapter.sendMessage(incoming.channelId, confirmationMessage(req))
+        await adapter.sendMessage(incoming.channelId, confirmationMessage(req, { compactDetails: true }))
       },
       async sendResponse(text, documents, _question, actions) {
         // Delete the tool status message, then send response as a new message

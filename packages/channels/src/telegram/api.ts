@@ -256,6 +256,13 @@ export function createTelegramApi(options: TelegramApiOptions) {
       reply_markup: opts?.replyMarkup,
     }),
 
+    editMessageReplyMarkup: (chatId: string, messageId: number, replyMarkup: unknown) =>
+      call<true | { message_id: number }>('editMessageReplyMarkup', {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: replyMarkup,
+      }),
+
     /**
      * Send a file as a Telegram document message (multipart upload).
      * Bot API bound is 50 MB for multipart uploads — the pipeline caps

@@ -105,6 +105,8 @@ export type OutgoingDocument = {
 
 export type OutgoingMessage = {
   text: string
+  /** Telegram: plain-text details in a collapsed-by-default, expandable quote. */
+  collapsibleDetails?: string
   format?: 'plain' | 'markdown'
   images?: Array<{ url: string; caption?: string }>
   /**
