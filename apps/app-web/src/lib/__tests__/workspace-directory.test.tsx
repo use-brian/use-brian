@@ -13,7 +13,7 @@ vi.mock('@/lib/auth-fetch',()=>({authFetch:(...args:unknown[])=>state.fetch(...a
 import {invalidateSurfaceCache,resetSurfaceCache,SurfaceCacheEvictionError} from '@/lib/surface-cache'
 import {fetchPages,isCurrentDirectoryPage,isCurrentDirectoryPerson,listWorkspaceMembers,readWorkspaceMemberDirectory,readWorkspacePageDirectory} from '@/lib/api/mentions'
 import {loadWorkspaceRoster} from '@/lib/api/workspace-roster'
-import {useWorkspaceDirectory} from '@/lib/use-workspace-directory'
+import {useWorkspaceDirectory,useWorkspaceMemberDirectory} from '@/lib/use-workspace-directory'
 import {pageDirectoryCacheKey,workspaceMemberDirectoryCacheKey} from '@/lib/surface-prefetch'
 
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true
@@ -37,7 +37,7 @@ beforeEach(()=>{
   resetSurfaceCache();vi.clearAllMocks();state.listeners.clear();state.viewer='viewer-a';state.fetch.mockResolvedValue(response())
   host=document.createElement('div');document.body.append(host);root=createRoot(host)
 })
-afterEach(()=>{act(()=>root.unmount());host.remove();resetSurfaceCache();vi.useRealTimers()})
+afterEach(()=>{act(()=>root.unmount());host.remove();resetSurfaceCache();vi.useRealTimers();delete (window as any).sidanclawDesktop})
 
 describe('[COMP:app-web/mention-fetchers] bounded workspace directory',()=>{
   it('shares one viewer/workspace read and filters names locally',async()=>{
@@ -122,3 +122,47 @@ describe('[COMP:app-web/mention-fetchers] bounded page directory',()=>{
     expect(isCurrentDirectoryPage('workspace-a',rows[0]!)).toBe(false)
   })
 })
+
+
+describe('[COMP:app-web/mention-fetchers] task directory recovery',()=>{
+  function TaskDirectoryProbe() {
+    const directory=useWorkspaceMemberDirectory('workspace-a');
+    return <div><span>{directory.data?.members.map(m=>m.memberId+':'+m.name).join(',')}</span>
+      {directory.unavailable&&<button onClick={()=>void directory.refresh()}>Retry</button>}
+    </div>;
+  }
+  async function renderTasks(){await act(async()=>{root.render(<TaskDirectoryProbe/>);await Promise.resolve();await Promise.resolve()})}
+
+  it('uses native identity without a display profile in older desktop shells',async()=>{
+    state.viewer='';
+    (window as any).sidanclawDesktop={getAccessToken:()=>null,getUserId:()=> 'native-viewer'};
+    state.fetch.mockResolvedValue(response('native-viewer'));
+    await renderTasks();
+    expect(state.fetch).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain('member-a:Ari Example');
+  });
+
+  it('does not substitute browser identity after native sign-out',async()=>{
+    (window as any).sidanclawDesktop={getAccessToken:()=>null,getUserId:()=>null,getCurrentUser:()=>({id:'stale-native',name:'Old account',email:'old@example.com'})};
+    await renderTasks();
+    expect(state.fetch).not.toHaveBeenCalled();
+    expect(host.textContent).not.toContain('Ari Example');
+  });
+
+  it('recovers from a failed first read without remounting',async()=>{
+    state.fetch.mockRejectedValueOnce(new Error('offline')).mockResolvedValue(response());
+    await renderTasks();
+    expect(host.textContent).toBe('Retry');
+    await act(async()=>{host.querySelector('button')!.click();await Promise.resolve();await Promise.resolve()});
+    expect(host.textContent).toContain('member-a:Ari Example');
+    expect(host.querySelector('button')).toBeNull();
+  });
+
+  it('begins reading when the viewer becomes available after mount',async()=>{
+    state.viewer='';await renderTasks();
+    expect(state.fetch).not.toHaveBeenCalled();
+    state.viewer='viewer-a';state.fetch.mockResolvedValue(response());
+    await act(async()=>{for(const listener of state.listeners)listener();await Promise.resolve();await Promise.resolve()});
+    expect(host.textContent).toContain('member-a:Ari Example');
+  });
+});

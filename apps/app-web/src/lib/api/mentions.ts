@@ -18,6 +18,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 
 import { authFetch } from "@/lib/auth-fetch";
 import {getUserInfo} from '@/lib/user';
+import {desktopBridge} from '@/lib/desktop-auth-source';
 import {loadSurfaceCache,readSurfaceCache,SurfaceCacheEvictionError} from '@/lib/surface-cache';
 import {pageDirectoryCacheKey,workspaceMemberDirectoryCacheKey} from '@/lib/surface-prefetch';
 import {protectProjection,projectionRemainingMs,type ProtectedProjection} from '@/lib/use-protected-projection';
@@ -25,6 +26,15 @@ import type {
   PageMentionItem,
   PersonMentionItem,
 } from "@/components/doc/mentions/mention-popup";
+
+/** Native authentication can be ready before the shell exposes a display profile. */
+export function getDirectoryViewerId(): string {
+  const bridge = desktopBridge();
+  if (bridge?.getAccessToken) {
+    return bridge.getUserId ? bridge.getUserId() ?? '' : bridge.getCurrentUser?.()?.id ?? '';
+  }
+  return getUserInfo()?.id ?? '';
+}
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
@@ -57,13 +67,13 @@ export async function readWorkspaceMemberDirectory(workspaceId:string,viewerId:s
     throw error;
   }
   const body=await res.json();
-  if(!viewerId||getUserInfo()?.id!==viewerId||body.viewerId!==viewerId||body.workspaceId!==workspaceId||!Array.isArray(body.members))throw new SurfaceCacheEvictionError(new Error('member_directory_owner_changed'));
+  if(!viewerId||getDirectoryViewerId()!==viewerId||body.viewerId!==viewerId||body.workspaceId!==workspaceId||!Array.isArray(body.members))throw new SurfaceCacheEvictionError(new Error('member_directory_owner_changed'));
   return protectProjection(body,started);
 }
 
 /** Filter a current projection, retaining the originating read on each person. */
 export function directoryPeople(data:WorkspaceMemberDirectory|undefined,query?:string):PersonMentionItem[] {
-  if(!data||getUserInfo()?.id!==data.viewerId||projectionRemainingMs(data)<=0)return [];
+  if(!data||getDirectoryViewerId()!==data.viewerId||projectionRemainingMs(data)<=0)return [];
   const q=query?.trim().toLowerCase();
   const all=data.members.map(member=>{
     const item:PersonMentionItem={kind:'person',id:member.userId,name:member.name||member.email||member.userId,email:member.email,avatarUrl:member.avatarUrl};
@@ -74,7 +84,7 @@ export function directoryPeople(data:WorkspaceMemberDirectory|undefined,query?:s
 }
 
 export function isCurrentDirectoryPerson(workspaceId:string,person:PersonMentionItem|string):boolean {
-  const viewerId=getUserInfo()?.id;
+  const viewerId=getDirectoryViewerId();
   if(!viewerId)return false;
   const current=readSurfaceCache<WorkspaceMemberDirectory>(workspaceMemberDirectoryCacheKey(workspaceId,viewerId)).data;
   if(!current||current.workspaceId!==workspaceId||current.viewerId!==viewerId||projectionRemainingMs(current)<=0)return false;
@@ -84,7 +94,7 @@ export function isCurrentDirectoryPerson(workspaceId:string,person:PersonMention
 
 /** Full authorized roster, using the one common cache rather than a promise map. */
 export async function listWorkspaceMembers(workspaceId:string):Promise<PersonMentionItem[]> {
-  const viewerId=getUserInfo()?.id;
+  const viewerId=getDirectoryViewerId();
   if(!viewerId)return [];
   const key=workspaceMemberDirectoryCacheKey(workspaceId,viewerId);
   let data=readSurfaceCache<WorkspaceMemberDirectory>(key).data;
@@ -110,12 +120,12 @@ export async function readWorkspacePageDirectory(workspaceId:string,viewerId:str
     throw error;
   }
   const body=await res.json();
-  if(!viewerId||getUserInfo()?.id!==viewerId||body.viewerId!==viewerId||body.workspaceId!==workspaceId||!Array.isArray(body.pages))throw new SurfaceCacheEvictionError(new Error('page_directory_owner_changed'));
+  if(!viewerId||getDirectoryViewerId()!==viewerId||body.viewerId!==viewerId||body.workspaceId!==workspaceId||!Array.isArray(body.pages))throw new SurfaceCacheEvictionError(new Error('page_directory_owner_changed'));
   return protectProjection(body,started);
 }
 
 export function directoryPages(data:WorkspacePageDirectory|undefined,query?:string):PageMentionItem[] {
-  if(!data||getUserInfo()?.id!==data.viewerId||projectionRemainingMs(data)<=0)return [];
+  if(!data||getDirectoryViewerId()!==data.viewerId||projectionRemainingMs(data)<=0)return [];
   const q=query?.trim().toLowerCase();
   const all=data.pages.map(page=>{
     const item:PageMentionItem={kind:'page',id:page.id,title:page.title};
@@ -126,7 +136,7 @@ export function directoryPages(data:WorkspacePageDirectory|undefined,query?:stri
 }
 
 export function isCurrentDirectoryPage(workspaceId:string,page:PageMentionItem|string):boolean {
-  const viewerId=getUserInfo()?.id;
+  const viewerId=getDirectoryViewerId();
   if(!viewerId)return false;
   const current=readSurfaceCache<WorkspacePageDirectory>(pageDirectoryCacheKey(workspaceId,viewerId)).data;
   if(!current||current.workspaceId!==workspaceId||current.viewerId!==viewerId||projectionRemainingMs(current)<=0)return false;
@@ -135,7 +145,7 @@ export function isCurrentDirectoryPage(workspaceId:string,page:PageMentionItem|s
 }
 
 async function listWorkspacePages(workspaceId:string):Promise<PageMentionItem[]> {
-  const viewerId=getUserInfo()?.id;
+  const viewerId=getDirectoryViewerId();
   if(!viewerId)return [];
   const key=pageDirectoryCacheKey(workspaceId,viewerId);
   let data=readSurfaceCache<WorkspacePageDirectory>(key).data;

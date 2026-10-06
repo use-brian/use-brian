@@ -12,19 +12,19 @@
  */
 
 import type { FeedWorkspaceMember } from "@/lib/api/feed";
-import { getUserInfo } from "@/lib/user";
 import { loadSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
 import { workspaceMemberDirectoryCacheKey } from "@/lib/surface-prefetch";
 import { projectionRemainingMs } from "@/lib/use-protected-projection";
 import {
   readWorkspaceMemberDirectory,
+  getDirectoryViewerId,
   type WorkspaceMemberDirectory,
 } from "@/lib/api/mentions";
 
 export async function loadWorkspaceRoster(
   workspaceId: string,
 ): Promise<FeedWorkspaceMember[]> {
-  const viewerId=getUserInfo()?.id;
+  const viewerId=getDirectoryViewerId();
   if(!viewerId)return [];
   const key=workspaceMemberDirectoryCacheKey(workspaceId,viewerId);
   let directory=readSurfaceCache<WorkspaceMemberDirectory>(key).data;

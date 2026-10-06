@@ -16,7 +16,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
-import { DueCell } from "@/components/tasks/task-cells";
+import { AssigneeCell, DueCell } from "@/components/tasks/task-cells";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -134,5 +134,30 @@ describe("[COMP:app-web/tasks-surface] Due cell quick picker", () => {
     click(byText(en.tasksPage.dueClear));
     await flush();
     expect(onCommit).toHaveBeenCalledWith(null);
+  });
+});
+
+
+describe("[COMP:app-web/tasks-surface] assignee directory", () => {
+  it("does not label a saved assignment unassigned when the member cannot resolve", () => {
+    act(() => root.render(<I18nProvider locale="en" dict={en}><AssigneeCell assigneeId="member-a" roster={null} onCommit={vi.fn()} /></I18nProvider>));
+    expect(container.textContent).toContain(en.tasksPage.memberUnavailable);
+    expect(container.textContent).not.toContain(en.tasksPage.unassignedOption);
+    expect(container.querySelector('button')!.disabled).toBe(true);
+  });
+
+  it("populates the open picker after recovery and commits the member ID", async () => {
+    const onCommit = vi.fn().mockResolvedValue({ok:true});
+    const draw = (roster: null | {id:string; userId:string; userName:string; email:string; avatarUrl:null; role:string}[]) => {
+      act(() => root.render(<I18nProvider locale="en" dict={en}><AssigneeCell assigneeId={null} roster={roster} onCommit={onCommit} /></I18nProvider>));
+    };
+    draw(null);
+    expect(container.querySelector('button')!.disabled).toBe(true);
+    draw([{id:'member-a',userId:'user-a',userName:'Ari Example',email:'ari@example.com',avatarUrl:null,role:'member'}]);
+    click(container.querySelector('button')!);
+    await flush();
+    click(buttons().find(button => button.textContent?.includes('Ari Example')));
+    await flush();
+    expect(onCommit).toHaveBeenCalledWith('member-a');
   });
 });
