@@ -33,8 +33,8 @@ function fakeChild() {
   })
   mocked.spawn.mockReturnValue(child)
   Object.defineProperty(process, 'platform', { value: 'darwin' })
-  function respond(result: unknown, wrongId = false) {
-    const body = Buffer.from(JSON.stringify({ id: wrongId ? 'foreign' : request.id, ok: true, result }))
+  function respond(result: unknown, wrongId = false, extra: Record<string, unknown> = {}) {
+    const body = Buffer.from(JSON.stringify({ id: wrongId ? 'foreign' : request.id, ok: true, result, ...extra }))
     const header = Buffer.alloc(4); header.writeUInt32BE(body.length)
     child.stdout.write(header.subarray(0, 2)); child.stdout.write(Buffer.concat([header.subarray(2), body]))
   }
@@ -87,6 +87,20 @@ describe('[COMP:desktop/native-readiness] native private pipe', () => {
     expect(peer.child.kill).toHaveBeenCalledOnce()
     expect(mocked.spawn).toHaveBeenCalledOnce()
   })
+  it('bounds Mac discovery and exposes only fixed lifecycle metadata', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const discovery = expect(helper.listTargets()).rejects.toThrow('unavailable')
+    peer.child.stderr.write('PRIVATE_WINDOW_TITLE')
+    await vi.advanceTimersByTimeAsync(14999); expect(peer.child.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1); await discovery; await helper.kill()
+    expect(helper.lifecycleDiagnostics()).toMatchObject({ method: 'listTargets', requestTimedOut: true, exitSignal: 'SIGKILL', exitObserved: true })
+    expect(Object.keys(helper.lifecycleDiagnostics()).sort()).toEqual(['cause', 'elapsedMs', 'exitCode', 'exitObserved', 'exitSignal', 'method', 'requestTimedOut', 'spawnFailed'].sort())
+    expect(helper.lifecycleDiagnostics().elapsedMs).toBeGreaterThanOrEqual(0)
+    expect(helper.lifecycleDiagnostics().elapsedMs).toBeLessThanOrEqual(60000)
+    expect(JSON.stringify(helper.lifecycleDiagnostics())).not.toContain('PRIVATE_WINDOW_TITLE')
+    expect(mocked.spawn).toHaveBeenCalledOnce()
+  })
   it('Stop still interrupts the extended Mac discovery deadline immediately', async () => {
     vi.useFakeTimers()
     const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
@@ -94,6 +108,57 @@ describe('[COMP:desktop/native-readiness] native private pipe', () => {
     await vi.advanceTimersByTimeAsync(5000); await helper.kill(); await discovery
     expect(peer.child.kill).toHaveBeenCalledOnce()
     expect(helper.readinessDiagnostics().requestTimedOut).toBe(false)
+  })
+  const discoveryMetadata = { version: 1, processes: 5, fenceRejected: 0, unsupportedProcess: 4, parentRejected: 0,
+    signatureRejected: 0, admitted: 1, windowListRejected: 1, boundsRejected: 0, scopeRejected: 0, fenceChanged: 0,
+    targets: 0, axCannotComplete: 1, axApiDisabled: 0, axInvalidElement: 0, axOtherError: 0 }
+  it('publishes detached bounded discovery metadata without exposing it in target results', async () => {
+    const peer = fakeChild(); const onDiscovery = vi.fn((_metadata: unknown) => { throw new Error('Diagnostic callback failed') })
+    const helper = new PrivatePipeHelper('/packaged/helper', () => {}, undefined, undefined, { onDiscovery })
+    const pending = helper.listTargets(); peer.respond([], false, { discoveryDiagnostics: discoveryMetadata })
+    expect(await pending).toEqual([])
+    expect(onDiscovery).not.toHaveBeenCalled()
+    await new Promise(resolve => setImmediate(resolve))
+    expect(onDiscovery).toHaveBeenCalledExactlyOnceWith(discoveryMetadata)
+    expect(Object.isFrozen(onDiscovery.mock.calls[0][0])).toBe(true)
+    expect(peer.child.kill).not.toHaveBeenCalled(); await helper.kill()
+  })
+  it.each(['extra', 'negative', 'fraction', 'oversize', 'missing', 'version', 'invalid-result', 'wrong-method'])('drops %s discovery diagnostics without changing operation outcomes', async variant => {
+    const peer = fakeChild(); const onDiscovery = vi.fn()
+    const helper = new PrivatePipeHelper('/packaged/helper', () => {}, undefined, undefined, { onDiscovery })
+    const metadata: Record<string, unknown> = { ...discoveryMetadata }
+    if (variant === 'extra') metadata.title = 'PRIVATE_WINDOW_TITLE'
+    if (variant === 'negative') metadata.admitted = -1
+    if (variant === 'fraction') metadata.admitted = 1.5
+    if (variant === 'oversize') metadata.admitted = 65536
+    if (variant === 'missing') delete metadata.admitted
+    if (variant === 'version') metadata.version = 2
+    const pending = variant === 'wrong-method' ? helper.capabilities() : helper.listTargets()
+    const outcome = variant === 'invalid-result' ? expect(pending).rejects.toThrow() : pending
+    const result = variant === 'wrong-method'
+      ? { protocol: NATIVE_PROTOCOL, platform: 'darwin', axRead: false, semanticActions: false, windowCapture: false, input: false, accessibilityPermission: 'unknown', capturePermission: 'unknown', limitations: [] }
+      : variant === 'invalid-result' ? [{}] : []
+    peer.respond(result, false, { discoveryDiagnostics: metadata }); await outcome
+    await new Promise(resolve => setImmediate(resolve))
+    expect(onDiscovery).not.toHaveBeenCalled(); expect(peer.child.kill).not.toHaveBeenCalled(); await helper.kill()
+  })
+  it('reports actual exit separately after revocation, preserving the first cause and death barrier', async () => {
+    const peer = fakeChild(); peer.child.kill.mockImplementation(() => false)
+    const onExit = vi.fn((_metadata: unknown) => { throw new Error('Diagnostic callback failed') }); const onDeath = vi.fn()
+    const helper = new PrivatePipeHelper('/packaged/helper', onDeath, undefined, undefined, { onExit })
+    const pending = expect(helper.capabilities()).rejects.toThrow('unavailable')
+    peer.child.stdin.emit('error', new Error('PRIVATE_PAYLOAD'))
+    await pending
+    expect(onDeath).toHaveBeenCalledOnce(); expect(onExit).not.toHaveBeenCalled()
+    expect(helper.lifecycleDiagnostics()).toMatchObject({ cause: 'stdin_error', exitObserved: false })
+    let complete = false; const death = helper.kill().then(() => { complete = true })
+    await Promise.resolve(); expect(complete).toBe(false)
+    peer.child.emit('exit', 72, null); await death
+    await new Promise(resolve => setImmediate(resolve))
+    expect(onExit).toHaveBeenCalledOnce()
+    expect(onExit.mock.calls[0][0]).toMatchObject({ cause: 'stdin_error', exitObserved: true, exitCode: 72, method: 'capabilities' })
+    expect(JSON.stringify(onExit.mock.calls)).not.toContain('PRIVATE_PAYLOAD')
+    expect(onDeath).toHaveBeenCalledOnce()
   })
   it('keeps explicit discovery timeout overrides', async () => {
     vi.useFakeTimers()

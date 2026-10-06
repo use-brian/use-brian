@@ -32,6 +32,8 @@ The API needs `NATIVE_COMPUTER_ENABLED=true` and a stable `NATIVE_COMPUTER_DEPLO
 4. In a normal chat with that assistant, ask: **Use my computer profile to replace the TextEdit document with Hello team.** Approve the chat's local window grant and each proposed edit. Check the actual document.
 5. Ask it to release the computer. In another chat, request access again: expect fresh local consent, without creating a task or reconnecting the profile.
 
+Only normal TextEdit document windows and the signed test fixture are discoverable. Attached dialogs/sheets are refused. Helper readiness verifies package admission, not window discovery. If Refresh windows fails, inspect the fixed `[native-computer] discovery received/completed` metadata in the launch log; a failure is distinct from a successful zero-window result. The profile remains Offline until Connect succeeds; a one-shot read-only inspection returns to Stopped.
+
 ## Check refusals
 
 - Deny an action: no edit. Stop from the page, tray or **Cmd+Shift+Escape**: no further actions or automatic reconnect. An action already in handoff may finish.

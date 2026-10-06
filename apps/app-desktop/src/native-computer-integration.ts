@@ -133,6 +133,7 @@ export class NativeComputerIntegration {
     if (typeof options.helperTimingObserver === 'function') this.helperTiming = Object.freeze({ enabled: true, onMetadata: options.helperTimingObserver })
   }
   install(): void {
+    console.info('[native-computer] setup availability', { packaged: app.isPackaged, enabled: this.enabled })
     if (!this.enabled) return
     const file = join(app.getPath('userData'), 'native-computer-device-id')
     try { this.deviceId = z.string().uuid().parse(readFileSync(file, 'utf8').trim()) }
@@ -146,6 +147,7 @@ export class NativeComputerIntegration {
     })
     // Helper independently monitors physical input, parent death and permission revocation.
     this.ready = registered
+    if (!registered) console.warn('[native-computer] stop shortcut unavailable')
     this.makeController()
   }
   private helperLaunch(): HelperLaunchSpec {
@@ -232,7 +234,17 @@ export class NativeComputerIntegration {
     const integration = this
     const controller: NativeComputerController = new NativeComputerController({ enabled: this.enabled, get observationOnly() { return !integration.controlEnabled && !integration.verificationAllowed() }, observerFactory: this.options.observerFactory,
       safetyControlsReady: () => this.ready && this.helperReady(),
-      helperFactory: onDeath => new PrivatePipeHelper(this.helperLaunch(), onDeath, undefined, this.helperTiming), lease: new LocalDeviceLease(),
+      helperFactory: onDeath => {
+        let helper: PrivatePipeHelper | undefined
+        helper = new PrivatePipeHelper(this.helperLaunch(), reason => {
+          try { console.info('[native-computer] helper stopped', helper?.lifecycleDiagnostics()) } catch { /* Diagnostics cannot delay revocation. */ }
+          onDeath(reason)
+        }, undefined, this.helperTiming, {
+          onDiscovery: metadata => { console.info('[native-computer] discovery diagnostic', metadata) },
+          onExit: metadata => { console.info('[native-computer] helper exited', metadata) },
+        })
+        return helper
+      }, lease: new LocalDeviceLease(),
       approveGrant: async (grant, signal) => {
         const generation = this.generation
         const profile = this.profile
@@ -704,7 +716,47 @@ export class NativeComputerIntegration {
     return this.controller?.status()
   }
   async handle(raw: unknown): Promise<unknown> {
+    const parsed = NativeUiRequestSchema.safeParse(raw)
+    const setup = parsed.success && ['check-readiness', 'permissions'].includes(parsed.data.type)
+    const discovery = parsed.success && parsed.data.type === 'targets'
+    if (discovery) console.info('[native-computer] discovery received', {
+      enabled: this.enabled, stopShortcutReady: this.ready, packaged: app.isPackaged,
+      helperPresent: this.helperReady(), busy: this.busy, cleanupPending: this.teardown.size > 0,
+    })
+    if (setup) console.info('[native-computer] setup received', {
+      type: parsed.data.type, enabled: this.enabled, stopShortcutReady: this.ready,
+      packaged: app.isPackaged, helperPresent: this.helperReady(), busy: this.busy,
+      cleanupPending: this.teardown.size > 0, profileConnected: !!this.profile,
+    })
     const result = await this.handleRequest(raw) as Record<string, unknown>
+    if (discovery) {
+      const status = result.status as NativeStatus | undefined
+      console.info('[native-computer] discovery completed', {
+        ok: result.ok === true, cleanupPending: this.teardown.size > 0,
+        state: status?.state ?? 'unavailable', axRead: status?.capabilities.axRead === true,
+        accessibilityPermission: status?.capabilities.accessibilityPermission ?? 'unknown',
+        targetCount: Array.isArray(result.targets) ? result.targets.length : 0,
+      })
+    }
+    if (setup) {
+      const reasons: Record<string, string> = {
+        'Readiness requires the signed macOS desktop package.': 'package_or_helper_required',
+        'Stop the current native session before checking readiness.': 'session_or_setup_busy',
+        'Native control unavailable': 'control_unavailable',
+        'Sign in required': 'sign_in_required',
+        'Native identity changed': 'identity_changed',
+        'Native setup busy': 'setup_busy',
+        'Stop the current native session before changing permissions.': 'session_active',
+        'Configure desktop accessibility locally; readiness is checked by the helper.': 'platform_unsupported',
+        'Accessibility permission requests require the signed macOS desktop package.': 'package_required',
+      }
+      console.info('[native-computer] setup completed', {
+        type: parsed.data.type, ok: result.ok === true, cleanupPending: this.teardown.size > 0,
+        reason: result.ok ? null : this.teardown.size ? 'cleanup_pending'
+          : typeof result.error === 'string' ? reasons[result.error] ?? 'unavailable' : 'cancelled_or_scope_changed',
+        ...(parsed.data.type === 'check-readiness' ? { helperAdmitted: !!result.readiness, failure: result.ok ? null : result.readinessErrorCode ?? 'unavailable' } : {}),
+      })
+    }
     // Pending cleanup is device-wide, fixed metadata, including across account changes.
     // Never send the previous task's status, targets or receipt with it.
     return this.teardown.size ? { ok: result.ok, cleanupPending: true } : { ...result, ...(result.status ? { status: this.profilePermissionStatus(result.status as NativeStatus) } : {}), ...(this.profile ? { profileConnected: true, profileId: this.profile.id } : {}), cleanupPending: false }

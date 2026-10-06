@@ -6,6 +6,7 @@ import { HelperTimingEventSchema, HelperTimingSchema, type HelperMethod, type He
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { posix, win32 } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { z } from 'zod'
 import { CapabilitiesSchema, ReceiptSchema, DiscoveredTargetSchema, MAX_MESSAGE_BYTES, type NativeVisualApproval, type NativeCapabilities, type NativeCommand, type NativeGrant, type NativeReceipt, type DiscoveredTarget } from './contracts.js'
 
 export interface NativeHelper {
@@ -30,6 +31,16 @@ export interface NativeHelper {
  * Like any in-process callback, synchronous blocking code cannot be preempted.
  */
 export type HelperTimingOptions = Readonly<{ enabled: true; onMetadata: (event: HelperTimingEvent) => void | Promise<void> }>
+const discoveryCount = z.number().int().min(0).max(65535)
+const DiscoveryDiagnosticsSchema = z.object({ version: z.literal(1), processes: discoveryCount, fenceRejected: discoveryCount,
+  unsupportedProcess: discoveryCount, parentRejected: discoveryCount, signatureRejected: discoveryCount, admitted: discoveryCount,
+  windowListRejected: discoveryCount, boundsRejected: discoveryCount, scopeRejected: discoveryCount, fenceChanged: discoveryCount,
+  targets: discoveryCount, axCannotComplete: discoveryCount, axApiDisabled: discoveryCount, axInvalidElement: discoveryCount, axOtherError: discoveryCount }).strict()
+type LifecycleCause = 'stop' | 'exit' | 'process_error' | 'stdin_error' | 'stdout_error' | 'write_error' | 'timeout' | 'invalid_response' | 'guardian'
+export type HelperDiagnosticsOptions = Readonly<{
+  onDiscovery?: (metadata: Readonly<z.infer<typeof DiscoveryDiagnosticsSchema>>) => void
+  onExit?: (metadata: ReturnType<PrivatePipeHelper['lifecycleDiagnostics']>) => void
+}>
 type Pending = { id: string; method: HelperMethod; timingRequested: boolean; correlation?: HelperTimingCorrelation; phase: string; apiPhase?: string;
   resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 
@@ -70,10 +81,18 @@ export class PrivatePipeHelper implements NativeHelper {
   private exitSignal: 'SIGKILL' | 'SIGTERM' | 'SIGABRT' | 'SIGSEGV' | 'SIGTRAP' | 'other' | null = null
   private spawnFailed = false
   private firstRequest = true
+  private lastRequestMethod: HelperMethod | null = null
+  private lastRequestStarted = 0
+  private revocationCause: LifecycleCause | null = null
   /** Lifecycle scalars only, for an explicit main-process readiness failure. */
   readinessDiagnostics() {
     return { requestTimedOut: this.requestTimedOut, exitObserved: this.exitObserved,
       exitCode: this.exitCode, exitSignal: this.exitSignal, spawnFailed: this.spawnFailed }
+  }
+  /** Fixed lifecycle metadata only; main never reads helper stderr/payloads. */
+  lifecycleDiagnostics() {
+    return { ...this.readinessDiagnostics(), cause: this.revocationCause, method: this.lastRequestMethod,
+      elapsedMs: this.lastRequestMethod ? Math.min(60_000, Math.max(0, Math.round(performance.now() - this.lastRequestStarted))) : 0 }
   }
   private readonly exited: Promise<void>
   private readonly guardian?: ClickGuardianClient
@@ -103,7 +122,7 @@ export class PrivatePipeHelper implements NativeHelper {
     this.clickSpent = true
     return { requestId: id, command: execute.command, grant: scope.grant, leaseId: scope.leaseId, descriptor }
   }
-  constructor(launch: string | HelperLaunchSpec, private readonly onDeath: (reason?: 'takeover') => void, private readonly timeoutMs?: number, timing?: HelperTimingOptions) {
+  constructor(launch: string | HelperLaunchSpec, private readonly onDeath: (reason?: 'takeover') => void, private readonly timeoutMs?: number, timing?: HelperTimingOptions, private readonly diagnostics?: HelperDiagnosticsOptions) {
     if (timing?.enabled === true && typeof timing.onMetadata === 'function') this.timingCallback = timing.onMetadata
     // Legacy string form is macOS-only. Specs are created in main, never accepted by IPC.
     const spec: HelperLaunchSpec = typeof launch === 'string' ? { platform: 'darwin', executable: launch, args: [] } : launch
@@ -117,7 +136,7 @@ export class PrivatePipeHelper implements NativeHelper {
     this.child = spawn(spec.executable, [...spec.args], { stdio: spec.platform === 'darwin' ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true,
       cwd: paths.dirname(spec.platform === 'linux' ? spec.args[1] : spec.executable), env: launchEnvironment(spec.platform) }) as ChildProcessWithoutNullStreams
     if (spec.platform === 'darwin') this.guardian = new ClickGuardianClient(spec.executable, this.child.pid,
-      this.child.stdio?.[3] as Duplex | undefined, (id, descriptor) => this.bindGuardian(id, descriptor), () => this.fail(),
+      this.child.stdio?.[3] as Duplex | undefined, (id, descriptor) => this.bindGuardian(id, descriptor), () => this.fail(undefined, 'guardian'),
       id => !this.dead && this.pending?.id === id && this.pending.method === 'execute' && this.executeSnapshot?.id === id)
     // Node assigns PID synchronously on successful spawn, before emitting
     // 'spawn'. An immediate Stop must still wait for exit in that interval.
@@ -129,24 +148,27 @@ export class PrivatePipeHelper implements NativeHelper {
         this.exitCode = Number.isInteger(code) && code! >= 0 && code! <= 255 ? code : null
         this.exitSignal = signal === null ? null : signal === 'SIGKILL' || signal === 'SIGTERM' || signal === 'SIGABRT' || signal === 'SIGSEGV' || signal === 'SIGTRAP'
           ? signal : 'other'
-        resolve(); this.fail(code === 73 ? 'takeover' : undefined)
+        resolve(); this.fail(code === 73 ? 'takeover' : undefined, 'exit')
+        const metadata = Object.freeze(this.lifecycleDiagnostics())
+        setImmediate(() => { try { this.diagnostics?.onExit?.(metadata) } catch { /* Diagnostic only. */ } })
       })
       // 'error' also covers failed kill (e.g. EPERM), not just spawn failure.
       // Keep listening: repeated errors must neither release the lease nor
       // become unhandled EventEmitter errors after the first revocation.
       this.child.on('error', () => {
         if (!spawned && this.child.pid === undefined) { this.spawnFailed = true; resolve() }
-        this.fail()
+        this.fail(undefined, 'process_error')
       })
     })
     this.child.stdout.on('data', (chunk: Buffer) => this.receive(chunk))
-    this.child.stdin.on('error', () => this.fail())
-    this.child.stdout.on('error', () => this.fail())
+    this.child.stdin.on('error', () => this.fail(undefined, 'stdin_error'))
+    this.child.stdout.on('error', () => this.fail(undefined, 'stdout_error'))
     // Never log potentially sensitive helper output; drain stderr to prevent deadlock.
     this.child.stderr.resume()
   }
-  private fail(reason?: 'takeover'): void {
+  private fail(reason?: 'takeover', cause: LifecycleCause = 'stop'): void {
     if (this.dead) return
+    this.revocationCause = cause
     this.dead = true
     this.visualApproval = undefined
     this.guardian?.revoke()
@@ -166,14 +188,14 @@ export class PrivatePipeHelper implements NativeHelper {
   }
   private receive(chunk: Buffer): void {
     if (this.dead) return
-    if (this.buffer.length + chunk.length > MAX_MESSAGE_BYTES + 4) { this.fail(); return }
+    if (this.buffer.length + chunk.length > MAX_MESSAGE_BYTES + 4) { this.fail(undefined, 'invalid_response'); return }
     this.buffer = Buffer.concat([this.buffer, chunk])
     if (this.buffer.length < 4) return
     const size = this.buffer.readUInt32BE(0)
-    if (size === 0 || size > MAX_MESSAGE_BYTES) { this.fail(); return }
+    if (size === 0 || size > MAX_MESSAGE_BYTES) { this.fail(undefined, 'invalid_response'); return }
     if (this.buffer.length < size + 4) return
     try {
-      const response = JSON.parse(this.buffer.subarray(4, size + 4).toString('utf8')) as { id?: unknown; ok?: unknown; result?: unknown; diagnostics?: unknown; diagnosticsVersion?: unknown }
+      const response = JSON.parse(this.buffer.subarray(4, size + 4).toString('utf8')) as { id?: unknown; ok?: unknown; result?: unknown; diagnostics?: unknown; diagnosticsVersion?: unknown; discoveryDiagnostics?: unknown }
       if (!this.pending || response.id !== this.pending.id || response.ok !== true || this.buffer.length !== size + 4) throw new Error('Invalid helper response')
       const pending = this.pending
       if (this.guardian && !this.guardian.acceptsWorkerResponse(pending.id)) throw new Error('Premature worker response')
@@ -193,7 +215,17 @@ export class PrivatePipeHelper implements NativeHelper {
       clearTimeout(pending.timer)
       pending.resolve(response.result)
       this.reportTiming(pending, response.diagnostics, false, response.result)
-    } catch { this.fail() }
+      // Extra private metadata can never invalidate or authorize an operation.
+      // Validate the result first; reject unknown fields and wrong method/platform.
+      if (this.platform === 'darwin' && pending.method === 'listTargets' && this.diagnostics?.onDiscovery
+        && DiscoveredTargetSchema.array().max(128).safeParse(response.result).success) {
+        const parsed = DiscoveryDiagnosticsSchema.safeParse(response.discoveryDiagnostics)
+        if (parsed.success) {
+          const metadata = Object.freeze(parsed.data)
+          setImmediate(() => { try { this.diagnostics?.onDiscovery?.(metadata) } catch { /* Diagnostic only. */ } })
+        }
+      }
+    } catch { this.fail(undefined, 'invalid_response') }
   }
   private negotiateDiagnostics(pending: Pending, result: unknown, version: unknown): void {
     if (this.diagnosticsSupport === 'invalid') return
@@ -291,12 +323,14 @@ export class PrivatePipeHelper implements NativeHelper {
     const setupRequest = method === 'listTargets' || this.firstRequest && method === 'capabilities'
     const timeoutMs = this.timeoutMs ?? (this.platform === 'darwin' && setupRequest ? 15_000 : 4000)
     this.firstRequest = false
+    this.lastRequestMethod = method
+    this.lastRequestStarted = performance.now()
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.requestTimedOut = true; this.fail() }, timeoutMs)
+      const timer = setTimeout(() => { this.requestTimedOut = true; this.fail(undefined, 'timeout') }, timeoutMs)
       this.pending = { id, method, timingRequested, correlation, phase, apiPhase, resolve, reject, timer }
       this.executeSnapshot = method === 'execute' && p.command && p.leaseId
         ? { id, command: p.command, leaseId: p.leaseId } : undefined
-      this.child.stdin.write(Buffer.concat([header, body]), error => { if (error) this.fail() })
+      this.child.stdin.write(Buffer.concat([header, body]), error => { if (error) this.fail(undefined, 'write_error') })
     })
   }
   async capabilities(): Promise<NativeCapabilities> { return CapabilitiesSchema.parse(await this.request('capabilities', {})) }

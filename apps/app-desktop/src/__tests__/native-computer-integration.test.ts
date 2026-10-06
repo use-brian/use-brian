@@ -320,6 +320,17 @@ describe('[COMP:desktop/native-permissions] trusted main native computer setup',
     expect(process.env.NATIVE_COMPUTER_PILOT_ACCEPTED).toBe('false')
   })
 
+  it('[COMP:desktop/native-readiness] logs receipt and completion even when a guard rejects before helper startup', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    expect(await integration.handle({ type: 'check-readiness' })).toMatchObject({ ok: false })
+    expect(info).toHaveBeenCalledWith('[native-computer] setup received', expect.objectContaining({ type: 'check-readiness', packaged: false, helperPresent: false }))
+    expect(info).toHaveBeenCalledWith('[native-computer] setup completed', expect.objectContaining({ ok: false, reason: 'package_or_helper_required' }))
+    expect(mocks.helpers).toHaveLength(0)
+    await packagedReadiness()
+    expect(await integration.handle({ type: 'check-readiness' })).toMatchObject({ ok: true })
+    expect(info).toHaveBeenCalledWith('[native-computer] setup completed', expect.objectContaining({ ok: true, helperAdmitted: true, reason: null }))
+  })
+
   it('readiness logs fixed lifecycle diagnostics, never raw helper or auth errors', async () => {
     await packagedReadiness()
     mocks.readinessCaps = { privateText: 'DO_NOT_LOG' }
@@ -748,10 +759,17 @@ describe('[COMP:desktop/native-permissions] trusted main native computer setup',
   })
   it('reports a revoked discovery backend as failure rather than an empty success without logging target data', async () => {
     await discover(); const current = controller()
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
     current.listTargets.mockImplementationOnce(async () => { current.state = 'stopped'; return [] })
     const result = await integration.handle({ type: 'targets' })
     expect(result).toMatchObject({ ok: false, status: { state: 'stopped' } })
     expect(result).not.toHaveProperty('targets')
+    expect(info).toHaveBeenCalledWith('[native-computer] discovery completed', {
+      ok: false, cleanupPending: false, state: 'stopped', axRead: true,
+      accessibilityPermission: 'granted', targetCount: 0,
+    })
+    expect(JSON.stringify(info.mock.calls)).not.toContain(target.windowId)
+    info.mockRestore()
   })
   it.each(['awaiting_local_consent', 'awaiting_action_approval', 'active'])('polling targets in %s never disposes or rediscovers', async state => {
     await discover(); const current = controller(); current.state = state

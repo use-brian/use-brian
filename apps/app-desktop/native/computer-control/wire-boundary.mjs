@@ -70,6 +70,16 @@ const mainSource = helper.slice(helper.indexOf('guard let trust = ProcessTrust()
 assert(mainSource.includes('let sourceClock = SourceClock()'));
 assert(mainSource.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
 assert(mainSource.indexOf('guard trust.parentValid()') < mainSource.indexOf('dispatcher.response('));
+const targetAdmission = helper.slice(helper.indexOf('    func target(_ pid:'), helper.indexOf('let canvasTitle'));
+assert(targetAdmission.indexOf('ProcessIdentity.read(pid)') < targetAdmission.indexOf('parentValid()'), 'Reject unrelated kernel process paths before repeated parent-seal validation');
+assert(targetAdmission.indexOf('parentValid()') < targetAdmission.indexOf('signedProcess(identity,'), 'Candidate admission still requires current parent trust before target signature validation');
+assert(targetAdmission.includes('anchor apple and identifier \\"com.apple.TextEdit\\"') && targetAdmission.includes('signedProcess(identity, teamRequirement(cohort))'), 'Preserve both supported target signature requirements');
+assert(!/AXUIElement|bundleIdentifier|bundleURL/.test(targetAdmission), 'Early filtering cannot query AX or use bundle metadata as target authority');
+const discoveryDiagnosticSource = helper.slice(helper.indexOf('final class DiscoveryDiagnostics'), helper.indexOf('func attr('));
+assert(discoveryDiagnosticSource.includes('min(65535, value + max(0, amount))'));
+assert(!/AXUIElementCopy|ProcessIdentity|ProcessTrust|print\(|stderr/.test(discoveryDiagnosticSource), 'Diagnostics reuse reads; no queries or raw logs');
+assert(helper.includes('if method == "listTargets", let diagnostics = backend?.discoveryDiagnostics()'));
+assert(helper.includes('response["discoveryDiagnostics"] = diagnostics'), 'Private reply only');
 const adapter = block.slice(block.indexOf('let probeOnlyLimitation'), block.indexOf('// Closed role/subrole'));
 assert(!/environment|getenv|AXIsProcessTrusted|CGPreflight|NSWorkspace|beginAPI|endAPI/.test(adapter));
 assert(adapter.includes('if backend == nil { backend = makeBackend() }'));

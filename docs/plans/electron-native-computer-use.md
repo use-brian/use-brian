@@ -19,6 +19,8 @@ Local Mac packaging uses a fresh output directory, preserves old artifacts, and 
 
 Connect obtains attended-verification acknowledgment in native main; there is no separate acknowledgment button in the new UI. Fresh TCC/capability checks precede connection. Permission guidance remains usable. With control off, the UI performs and displays a local redacted inspection, not a phantom connection.
 
+Accessibility setup explicitly requests the macOS prompt from the persistent signed Electron main process before opening settings. Existing helpers must stop first. Main revalidates scope after confirmed cleanup and requests permission once, without launching another helper or requiring rollout flags or emergency-shortcut registration. Helper admission still gates discovery and control. Explicit setup requests log receipt, rejection and completion using fixed metadata. Native helper code never prompts. Readiness and automatic window discovery stay silent, and Screen Recording setup only opens its own settings pane.
+
 ## Preserved boundaries
 
 - Supported Mac effects remain TextEdit and reviewed fixture AX operations. Signed-helper admission, exact process/window scope, deadlines, local Stop and confirmed teardown remain.

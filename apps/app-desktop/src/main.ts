@@ -4505,7 +4505,16 @@ if (!gotLock) {
   });
 
   ipcMain.handle("Use Brian:computer-control", async (event, input: unknown) => {
-    if (changingTarget || selectingAccount || removingAccount || browserIdentityChanging || !trustedTokenSender(event)) return { ok: false };
+    const trusted = trustedTokenSender(event);
+    if (changingTarget || selectingAccount || removingAccount || browserIdentityChanging || !trusted) {
+      if (input && typeof input === "object" &&
+        ["permissions", "check-readiness", "targets"].includes((input as { type?: unknown }).type as string)) {
+        console.warn("[native-computer] setup IPC rejected", {
+          changingTarget, selectingAccount, removingAccount, browserIdentityChanging, trustedSender: trusted,
+        });
+      }
+      return { ok: false };
+    }
     return nativeComputer.handle(input);
   });
 

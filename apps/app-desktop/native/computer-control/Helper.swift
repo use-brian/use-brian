@@ -243,14 +243,22 @@ final class ProcessTrust {
         // do not satisfy the exact reviewed renderer hash requirement.
         return signedProcess(identity, teamRequirement(cohort) + " and (" + hashes + ")") == team
     }
-    func target(_ pid: pid_t) -> (ProcessIdentity, String)? {
-        guard parentValid(), let identity = ProcessIdentity.read(pid), pid != getpid() else { return nil }
+    func target(_ pid: pid_t, diagnostics: DiscoveryDiagnostics? = nil) -> (ProcessIdentity, String)? {
+        // Kernel path is a refusal-only prefilter. Do not revalidate the entire
+        // parent seal for every unrelated running app. Candidate admission still
+        // requires fresh parent trust and both dynamic/static target signatures.
+        guard let identity = ProcessIdentity.read(pid), pid != getpid(),
+              identity.executable == "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit" || identity.executable == fixtureExecutable else {
+            diagnostics?.increment("unsupportedProcess"); return nil
+        }
+        guard parentValid() else { diagnostics?.increment("parentRejected"); return nil }
         if identity.executable == "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
            signedProcess(identity, "anchor apple and identifier \"com.apple.TextEdit\"") != nil {
             return (identity, "com.apple.TextEdit")
         }
         if identity.executable == fixtureExecutable,
            signedProcess(identity, teamRequirement(cohort)) == team { return (identity, cohort) }
+        diagnostics?.increment("signatureRejected")
         return nil
     }
 }
@@ -495,6 +503,7 @@ struct VisualApproval {
 protocol ObservationBackend: AnyObject {
     func capabilities() -> Object
     func listTargets() -> [Object]
+    func discoveryDiagnostics() -> Object?
     func start(_ payload: Object) -> Bool
     func beginApproval(_ payload: Object) -> Bool
     func beginVisualApproval(_ payload: Object) -> VisualApproval?
@@ -503,6 +512,7 @@ protocol ObservationBackend: AnyObject {
     func handoffClick(_ payload: Object, requestID: String) -> Object?
 }
 extension ObservationBackend {
+    func discoveryDiagnostics() -> Object? { nil }
     func beginVisualApproval(_ payload: Object) -> VisualApproval? { nil }
     // Non-native/metadata backends have no private descriptor producer.
     func handoffClick(_ payload: Object, requestID: String) -> Object? { nil }
@@ -597,7 +607,11 @@ final class ObservationDispatcher {
             }
         default: return nil
         }
-        return privateResponse(requestId: requestId, method: method, result: result, timing: timing)
+        var response = privateResponse(requestId: requestId, method: method, result: result, timing: timing)
+        if method == "listTargets", let diagnostics = backend?.discoveryDiagnostics() {
+            response["discoveryDiagnostics"] = diagnostics
+        }
+        return response
     }
 }
 // Closed role/subrole privacy policy, shared with the Foundation boundary tests.
@@ -769,9 +783,29 @@ struct VisualAttempt {
 func monotonic() -> Double { ProcessInfo.processInfo.systemUptime * 1000 }
 func id() -> String { UUID().uuidString }
 func same(_ a: Object, _ b: Object) -> Bool { NSDictionary(dictionary: a).isEqual(to: b) }
-func attr(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+// Closed counters only. No attribute values, identities, paths or titles.
+final class DiscoveryDiagnostics {
+    private var counts = Dictionary(uniqueKeysWithValues: ["processes", "fenceRejected", "unsupportedProcess", "parentRejected", "signatureRejected", "admitted", "windowListRejected", "boundsRejected", "scopeRejected", "fenceChanged", "targets", "axCannotComplete", "axApiDisabled", "axInvalidElement", "axOtherError"].map { ($0, 0) })
+    func increment(_ key: String, by amount: Int = 1) {
+        guard let value = counts[key] else { return }
+        counts[key] = min(65535, value + max(0, amount))
+    }
+    func record(_ error: AXError) {
+        guard error != .success else { return }
+        switch error {
+        case .cannotComplete: increment("axCannotComplete")
+        case .apiDisabled: increment("axApiDisabled")
+        case .invalidUIElement: increment("axInvalidElement")
+        default: increment("axOtherError")
+        }
+    }
+    var wire: Object { var result = counts as Object; result["version"] = 1; return result }
+}
+func attr(_ element: AXUIElement, _ name: String, diagnostics: DiscoveryDiagnostics? = nil) -> CFTypeRef? {
     var result: CFTypeRef?
-    return AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success ? result : nil
+    let error = AXUIElementCopyAttributeValue(element, name as CFString, &result)
+    diagnostics?.record(error)
+    return error == .success ? result : nil
 }
 func elements(_ element: AXUIElement, _ name: String) -> [AXUIElement] { attr(element, name) as? [AXUIElement] ?? [] }
 func readChildren(_ element: AXUIElement) -> ChildrenRead<AXUIElement> {
@@ -794,9 +828,11 @@ func readChildren(_ element: AXUIElement) -> ChildrenRead<AXUIElement> {
 }
 // Internal security comparisons always use the full AX string, never a prefix.
 func string(_ element: AXUIElement, _ name: String) -> String { attr(element, name) as? String ?? "" }
-func privacySubrole(_ element: AXUIElement) -> String? {
+func privacySubrole(_ element: AXUIElement, diagnostics: DiscoveryDiagnostics? = nil) -> String? {
     var value: CFTypeRef?
-    switch AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &value) {
+    let error = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &value)
+    diagnostics?.record(error)
+    switch error {
     case .success: return value as? String
     case .attributeUnsupported, .noValue: return ""
     default: return nil // Timeout, invalid element, disabled API, or failed read.
@@ -818,8 +854,8 @@ struct NodeRead {
     let complete: Bool
 }
 func bool(_ element: AXUIElement, _ name: String) -> Bool { (attr(element, name) as? Bool) ?? false }
-func bounds(_ element: AXUIElement) -> Object? {
-    guard let p = attr(element, kAXPositionAttribute), let s = attr(element, kAXSizeAttribute), CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+func bounds(_ element: AXUIElement, diagnostics: DiscoveryDiagnostics? = nil) -> Object? {
+    guard let p = attr(element, kAXPositionAttribute, diagnostics: diagnostics), let s = attr(element, kAXSizeAttribute, diagnostics: diagnostics), CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
     var point = CGPoint.zero; var size = CGSize.zero
     guard AXValueGetValue(p as! AXValue, .cgPoint, &point), AXValueGetValue(s as! AXValue, .cgSize, &size), point.x.isFinite, point.y.isFinite, size.width > 0, size.height > 0, size.width <= 32768, size.height <= 32768 else { return nil }
     return ["x": point.x, "y": point.y, "width": size.width, "height": size.height]
@@ -991,32 +1027,41 @@ final class Broker: ObservationBackend {
         }
         return result
     }
-    func listTargets() -> [Object] { discoverTargets(only: nil) }
-    private func discoverTargets(only pid: pid_t?, standingFence: ProcessEpochFence? = nil) -> [Object] {
+    private var lastDiscoveryDiagnostics: Object?
+    func discoveryDiagnostics() -> Object? { lastDiscoveryDiagnostics }
+    func listTargets() -> [Object] {
+        let diagnostics = DiscoveryDiagnostics()
+        defer { lastDiscoveryDiagnostics = diagnostics.wire }
+        return discoverTargets(only: nil, diagnostics: diagnostics)
+    }
+    private func discoverTargets(only pid: pid_t?, standingFence: ProcessEpochFence? = nil, diagnostics: DiscoveryDiagnostics? = nil) -> [Object] {
         guard messagingReady, grant == nil, AXIsProcessTrusted() else { return [] }
         let applications: [NSRunningApplication]
         if let pid = pid {
             guard let app = NSRunningApplication(processIdentifier: pid) else { return [] }
             applications = [app]
         } else { applications = NSWorkspace.shared.runningApplications }
+        diagnostics?.increment("processes", by: applications.count)
         var next: [String: Window] = [:]
         for app in applications {
             // Subscribe before ANY birth/signature/window pinning. Reuse a
             // prior admission fence, never replace a poisoned lifetime.
             let prior = windows.values.first { $0.identity.pid == app.processIdentifier }?.epochFence
             guard let epochFence = standingFence ?? prior ?? ProcessEpochFence(pid: app.processIdentifier),
-                  epochFence.pid == app.processIdentifier, epochFence.clean(),
-                  let (identity, appId) = trust.target(app.processIdentifier),
+                  epochFence.pid == app.processIdentifier, epochFence.clean() else { diagnostics?.increment("fenceRejected"); continue }
+            guard let (identity, appId) = trust.target(app.processIdentifier, diagnostics: diagnostics),
                   let launch = app.launchDate, !app.isTerminated else { continue }
+            diagnostics?.increment("admitted")
             let processKey = "\(app.processIdentifier):\(launch.timeIntervalSince1970)"
             let processInstance = processes[processKey] ?? id()
             processes[processKey] = processInstance
             let ax = AXUIElementCreateApplication(app.processIdentifier)
-            guard let applicationWindows = attr(ax, kAXWindowsAttribute) as? [AXUIElement],
-                  applicationWindows.count <= 32 else { continue }
+            guard let applicationWindows = attr(ax, kAXWindowsAttribute, diagnostics: diagnostics) as? [AXUIElement],
+                  applicationWindows.count <= 32 else { diagnostics?.increment("windowListRejected"); continue }
             for window in applicationWindows {
-                guard bounds(window) != nil else { continue }
-                if !supportedWindowScope(window) || !epochFence.clean() { continue }
+                guard bounds(window, diagnostics: diagnostics) != nil else { diagnostics?.increment("boundsRejected"); continue }
+                if !supportedWindowScope(window, diagnostics: diagnostics) { diagnostics?.increment("scopeRejected"); continue }
+                if !epochFence.clean() { diagnostics?.increment("fenceChanged"); continue }
                 let previous = windows.values.first { ($0.target["processId"] as? Int) == Int(app.processIdentifier) && $0.launch == launch && CFEqual($0.element, window) }
                 let target: Object = previous?.target ?? ["appId": appId, "processId": Int(app.processIdentifier), "processInstanceId": processInstance, "windowId": id(), "windowInstanceId": id()]
                 next[target["windowInstanceId"] as! String] = Window(target: target, element: window, application: ax, applicationWindows: applicationWindows, launch: launch, identity: identity, epochFence: epochFence)
@@ -1024,6 +1069,7 @@ final class Broker: ObservationBackend {
             }
         }
         windows = next
+        diagnostics?.increment("targets", by: next.count)
         // Stable discovery order for local inspectors; titles are not target identity.
         return next.values.sorted {
             let a = $0.target["processId"] as! Int, b = $1.target["processId"] as! Int
@@ -1191,18 +1237,18 @@ final class Broker: ObservationBackend {
         if !sensitive, [kAXRadioButtonRole, kAXCheckBoxRole, kAXScrollBarRole].contains(role), let value = attr(element, kAXValueAttribute) as? NSNumber { result["value"] = value.stringValue }
         return NodeRead(value: result, complete: complete)
     }
-    func supportedWindowScope(_ element: AXUIElement) -> Bool {
+    func supportedWindowScope(_ element: AXUIElement, diagnostics: DiscoveryDiagnostics? = nil) -> Bool {
         // The supported scope is a normal document/fixture window, never a
         // dialog/sheet/security prompt attached after discovery or approval.
-        return string(element, kAXRoleAttribute) == kAXWindowRole &&
-            privacySubrole(element) == kAXStandardWindowSubrole && hasNoSheetChildren(element)
+        return attr(element, kAXRoleAttribute, diagnostics: diagnostics) as? String == kAXWindowRole &&
+            privacySubrole(element, diagnostics: diagnostics) == kAXStandardWindowSubrole && hasNoSheetChildren(element, diagnostics: diagnostics)
     }
-    func hasNoSheetChildren(_ element: AXUIElement) -> Bool {
+    func hasNoSheetChildren(_ element: AXUIElement, diagnostics: DiscoveryDiagnostics? = nil) -> Bool {
         // Sheets are AXChildren with AXSheet role, not a separate public attribute.
         // An unavailable/malformed child list or role is not proof of absence.
-        guard let children = attr(element, kAXChildrenAttribute) as? [AXUIElement], children.count <= 500 else { return false }
+        guard let children = attr(element, kAXChildrenAttribute, diagnostics: diagnostics) as? [AXUIElement], children.count <= 500 else { return false }
         return children.allSatisfy { child in
-            guard let role = attr(child, kAXRoleAttribute) as? String, !role.isEmpty else { return false }
+            guard let role = attr(child, kAXRoleAttribute, diagnostics: diagnostics) as? String, !role.isEmpty else { return false }
             return role != kAXSheetRole
         }
     }
