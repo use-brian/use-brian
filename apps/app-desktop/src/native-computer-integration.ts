@@ -228,7 +228,7 @@ export class NativeComputerIntegration {
     return generation === this.generation ? result : { ok: false }
   }
   private foregroundNotice(): string {
-    return 'With your consent, the helper will attempt to restore only the selected window to the foreground at session start and after the approval dialog. It freshly rechecks the target and action; if focus restoration or validation fails, it fails closed.'
+    return 'With your consent, the helper will attempt to restore only the selected window to the foreground at session start and after the approval dialog. It freshly rechecks the target and action; if focus restoration or validation fails, it fails closed. Pointer movement is allowed. Clicks, dragging, scrolling and keyboard input stop access outside local approval prompts, including while the session is starting.'
   }
   private makeController(): NativeComputerController {
     const integration = this

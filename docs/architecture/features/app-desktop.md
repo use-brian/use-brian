@@ -8,6 +8,8 @@ After explicit approval, Mac helper Start has a separate setup deadline: at most
 
 Supported Mac command RPCs (observe, capture, semantic actions and visual invoke, including their approval phases) use at most 30 seconds of transport time, clipped to the existing command deadline, retained grant expiry and any shorter explicit helper timeout. The transport does not extend native deadlines, observation freshness, local approval or authority. Ordinary metadata retains four seconds; retired raw input RPCs and non-Mac requests keep their existing default. Stop remains immediate, and uncertainty never permits replay.
 
+Control consent explains that clicks, dragging, scrolling and keyboard input stop access after Allow, including during startup. Passive pointer movement alone does not revoke a semantic AX session. Meaningful takeover remains global because focus and approved actions can be affected outside the selected window; the selected target still bounds every Brian action. The raw click guardian policy is unchanged. Fixed helper exit categories (73 legacy/unknown; 80 keys, 81 buttons, 82 scrolling, 83 dragging, 84 modifiers) identify the triggering class without recording event content, position or process identity.
+
 ## Build, sign, ship (macOS)
 
 `scripts/package-desktop.sh` owns the local release build, renderer/native/Siri compilation, Developer ID signing, verification and optional publication. Each build reserves a fresh `release/runs/mac-*` output directory, leaving old artifacts untouched. The output allocator must work through macOS temporary-directory symlinks as well as canonical paths; an empty output is never a successful reservation. Failure never labels a previous ZIP as this run's result.

@@ -10,6 +10,22 @@ assert(args.includes('--foundation') && args.every(a => a === '--foundation' || 
 const helper = readFileSync(new URL('./Helper.swift', import.meta.url), 'utf8');
 const block = helper.split('// BEGIN FOUNDATION SEMANTIC SAFETY\n')[1]?.split('// END FOUNDATION SEMANTIC SAFETY')[0];
 assert(block);
+// Bind the OS callback's actual categories to the extracted policy. In
+// particular a drag must never become passive motion, and tap loss stays fatal.
+const input = helper.slice(helper.indexOf('    func input('), helper.indexOf('    var commandDeadline'));
+assert.match(input, /if type == \.tapDisabledByTimeout \|\| type == \.tapDisabledByUserInput \{ _exit\(72\) \}/);
+for (const binding of [
+  'case .mouseMoved: kind = .pointer',
+  'case .keyDown, .keyUp: kind = .key',
+  'case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp: kind = .button',
+  'case .scrollWheel: kind = .scroll',
+  'case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged: kind = .drag',
+  'case .flagsChanged: kind = .modifier', 'default: kind = .unknown',
+  'SemanticInputPolicy.exitCode(active: active, approving: approving,',
+  'parentTarget: event.getIntegerValueField(.eventTargetUnixProcessID) == Int64(getppid()), kind: kind)',
+  '_exit(code)',
+]) assert(input.includes(binding), binding);
+assert.equal(input.match(/kind = \.pointer/g)?.length, 1);
 const tests = readFileSync(new URL('./SemanticSafetyTests.swift', import.meta.url), 'utf8');
 const temporary = mkdtempSync(join(tmpdir(), 'semantic-safety-'));
 try {

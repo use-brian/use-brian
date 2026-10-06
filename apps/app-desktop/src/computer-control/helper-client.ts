@@ -44,6 +44,20 @@ export type HelperDiagnosticsOptions = Readonly<{
 type Pending = { id: string; method: HelperMethod; timingRequested: boolean; correlation?: HelperTimingCorrelation; phase: string; apiPhase?: string;
   resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 
+/** Closed native categories only: never read stderr or record event contents. */
+export function inputTakeoverCategory(code: number | null, platform: string = process.platform): string | undefined {
+  if (platform !== 'darwin' && code !== 73) return undefined
+  switch (code) {
+    case 73: return 'input'
+    case 80: return 'keyboard input'
+    case 81: return 'a mouse button event'
+    case 82: return 'scrolling'
+    case 83: return 'dragging'
+    case 84: return 'a modifier key event'
+    default: return undefined
+  }
+}
+
 export type HelperFactory = (onDeath: (reason?: 'takeover') => void) => NativeHelper
 
 export type HelperLaunchSpec = { platform: 'darwin' | 'win32' | 'linux'; executable: string; args: readonly string[] }
@@ -148,7 +162,7 @@ export class PrivatePipeHelper implements NativeHelper {
         this.exitCode = Number.isInteger(code) && code! >= 0 && code! <= 255 ? code : null
         this.exitSignal = signal === null ? null : signal === 'SIGKILL' || signal === 'SIGTERM' || signal === 'SIGABRT' || signal === 'SIGSEGV' || signal === 'SIGTRAP'
           ? signal : 'other'
-        resolve(); this.fail(code === 73 ? 'takeover' : undefined, 'exit')
+        resolve(); this.fail(inputTakeoverCategory(code, this.platform) ? 'takeover' : undefined, 'exit')
         const metadata = Object.freeze(this.lifecycleDiagnostics())
         setImmediate(() => { try { this.diagnostics?.onExit?.(metadata) } catch { /* Diagnostic only. */ } })
       })

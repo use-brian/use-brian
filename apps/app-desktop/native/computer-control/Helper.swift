@@ -693,6 +693,25 @@ struct SemanticSafety {
             wall < wallDeadline && wall < wallExpiry
     }
 }
+// Passive pointer motion has no AX effect. Meaningful input remains a global
+// revocation signal, with closed diagnostic categories and no event payload.
+enum SemanticInputKind { case pointer, key, button, scroll, drag, modifier, unknown }
+enum SemanticInputPolicy {
+    static func exitCode(active: Bool, approving: Bool, parentTarget: Bool,
+                         kind: SemanticInputKind) -> Int32? {
+        guard active else { return nil }
+        if kind == .pointer || (approving && parentTarget) { return nil }
+        switch kind {
+        case .pointer: return nil
+        case .key: return 80
+        case .button: return 81
+        case .scroll: return 82
+        case .drag: return 83
+        case .modifier: return 84
+        case .unknown: return 73
+        }
+    }
+}
 // END FOUNDATION SEMANTIC SAFETY
 // END FOUNDATION WIRE VALIDATION
 // BEGIN FOUNDATION VISUAL POLICY
@@ -970,8 +989,20 @@ final class Broker: ObservationBackend {
         // No own-PID exemption: semantic actions/capture do not inject input.
         // Only the trusted parent's LOCAL approval interaction is excepted. Main must
         // keep all non-dialog takeover hooks live; renderer input is not consent.
-        if approving && event.getIntegerValueField(.eventTargetUnixProcessID) == Int64(getppid()) { return }
-        _exit(73)
+        let kind: SemanticInputKind
+        switch type {
+        case .mouseMoved: kind = .pointer
+        case .keyDown, .keyUp: kind = .key
+        case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp: kind = .button
+        case .scrollWheel: kind = .scroll
+        case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged: kind = .drag
+        case .flagsChanged: kind = .modifier
+        default: kind = .unknown
+        }
+        if let code = SemanticInputPolicy.exitCode(active: active, approving: approving,
+            parentTarget: event.getIntegerValueField(.eventTargetUnixProcessID) == Int64(getppid()), kind: kind) {
+            _exit(code)
+        }
     }
     var commandDeadline = Double.infinity
     init(trust: ProcessTrust, guardianInvalidation: (() -> Void)? = nil) {
@@ -1021,7 +1052,7 @@ final class Broker: ObservationBackend {
         let captureReady = CGPreflightScreenCaptureAccess()
         var result: Object = ["protocol": proto, "platform": "darwin", "axRead": ready, "semanticActions": ready && !clickSpent && !semanticSafety.uncertain, "windowCapture": ready && captureReady, "input": false,
                 "accessibilityPermission": trusted ? "granted" : "denied", "capturePermission": captureReady ? "granted" : "denied",
-                "limitations": ["Consented TextEdit/fixture AX actions. Capture requires control+capture consent and a public, unoccluded fixture canvas. Coordinate mechanism retired after a deadline counterexample; input/keys/focus disabled.", "AX permission and enabled takeover monitor required. Physical input, lock/sleep and changed window scope revoke the session."]]
+                "limitations": ["Consented TextEdit/fixture AX actions. Capture requires control+capture consent and a public, unoccluded fixture canvas. Coordinate mechanism retired after a deadline counterexample; input/keys/focus disabled.", "AX permission and enabled takeover monitor required. Clicks, dragging, scrolling, keyboard/modifier input, lock/sleep and changed window scope revoke the session. Passive pointer movement alone does not."]]
         if ready && captureReady && !semanticSafety.uncertain && !clickSpent && trust.visualFixturePinReady() {
             result["visualInvokeVersion"] = 1
         }

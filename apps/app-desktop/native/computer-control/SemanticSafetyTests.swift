@@ -84,3 +84,16 @@ check(!SemanticSafety.cachedReceiptMatches(fingerprint: fingerprint, recorded: n
               lease: "lease", expectedLease: "lease", channelAlive: true))
 check(effects == 1)
 print("PASS \(checks) production semantic policy checks: immutable deadlines, blocking-read fences, uncertainty and exact metadata replay; Foundation only, not AX atomicity")
+
+// Real production takeover policy: passive movement versus meaningful input,
+// including parent input outside approval and unknown monitored events.
+for (kind, code) in [(SemanticInputKind.pointer, nil), (.key, Int32(80)),
+                     (.button, Int32(81)), (.scroll, Int32(82)), (.drag, Int32(83)),
+                     (.modifier, Int32(84)), (.unknown, Int32(73))] {
+    for parent in [false, true] {
+        check(SemanticInputPolicy.exitCode(active: false, approving: false, parentTarget: parent, kind: kind) == nil)
+        check(SemanticInputPolicy.exitCode(active: true, approving: false, parentTarget: parent, kind: kind) == code)
+        check(SemanticInputPolicy.exitCode(active: true, approving: true, parentTarget: parent, kind: kind) == (parent ? nil : code))
+    }
+}
+print("PASS production semantic input policy: passive movement only; global meaningful takeover; local approval exception")

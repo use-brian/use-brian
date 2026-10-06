@@ -4,7 +4,7 @@ import { Duplex, PassThrough, Writable } from 'node:stream'
 const mocked = vi.hoisted(() => ({ spawn: vi.fn() }))
 vi.mock('node:child_process', () => ({ spawn: mocked.spawn }))
 import type { NativeClickScope } from '../computer-control/click-guardian-client.js'
-import { PrivatePipeHelper } from '../computer-control/helper-client.js'
+import { inputTakeoverCategory, PrivatePipeHelper } from '../computer-control/helper-client.js'
 import { NativeComputerController } from '../computer-control/controller.js'
 import { NATIVE_PROTOCOL, type NativeGrant } from '../computer-control/contracts.js'
 const platform = process.platform
@@ -360,12 +360,23 @@ describe('[COMP:desktop/native-readiness] native private pipe', () => {
     expect(timedOut.readinessDiagnostics()).toEqual({ requestTimedOut: true, exitObserved: true, exitCode: null, exitSignal: 'SIGKILL', spawnFailed: false })
     expect(mocked.spawn).toHaveBeenCalledTimes(2) // explicit instances, never an automatic retry
   })
-  it('reports native physical-input exit as takeover, not an automatic reconnect', async () => {
+  it.each([73, 80, 81, 82, 83, 84])('reports native input exit %s as takeover, not an automatic reconnect', async code => {
     const { child } = fakeChild(); const death = vi.fn()
     const helper = new PrivatePipeHelper('/packaged/helper', death)
-    child.emit('exit', 73, null)
+    child.emit('exit', code, null)
     expect(death).toHaveBeenCalledWith('takeover')
     await expect(helper.listTargets()).rejects.toThrow(); await helper.kill()
+  })
+  it('recognizes only closed Mac input categories and preserves legacy cross-platform takeover', () => {
+    for (const nativePlatform of ['darwin', 'win32', 'linux']) {
+      expect(inputTakeoverCategory(73, nativePlatform)).toBe('input')
+      for (const code of [80, 81, 82, 83, 84]) {
+        expect(Boolean(inputTakeoverCategory(code, nativePlatform))).toBe(nativePlatform === 'darwin')
+      }
+      for (const code of [null, 0, 70, 71, 72, 74, 77, 79, 85, 255]) {
+        expect(inputTakeoverCategory(code, nativePlatform)).toBeUndefined()
+      }
+    }
   })
   it('kills an unresponsive helper without waiting for AX and never reconnects', async () => {
     vi.useFakeTimers()
